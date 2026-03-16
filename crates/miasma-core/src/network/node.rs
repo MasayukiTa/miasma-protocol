@@ -130,7 +130,7 @@ impl MiasmaNode {
                 debug!("Disconnected: {peer_id} ({cause:?})");
             }
             SwarmEvent::Behaviour(MiasmaBehaviourEvent::Identify(
-                identify::Event::Received { peer_id, info },
+                identify::Event::Received { peer_id, info, .. },
             )) => {
                 // Add peer's listen addresses to Kademlia.
                 for addr in info.listen_addrs {
