@@ -5,6 +5,7 @@ pub mod error;
 pub mod network;
 pub mod onion;
 pub mod pipeline;
+pub mod retrieval;
 pub mod share;
 pub mod store;
 
@@ -19,5 +20,6 @@ pub use onion::{
     CircuitId, CircuitManager, InProcessRelay, LiveOnionDhtExecutor, OnionPacketBuilder,
 };
 pub use pipeline::{dissolve, retrieve, DissolutionParams};
+pub use retrieval::{LocalShareSource, RetrievalCoordinator, ShareSource};
 pub use share::{MiasmaShare, ShareVerification};
 pub use store::LocalShareStore;
