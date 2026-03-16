@@ -1,0 +1,37 @@
+[package]
+name = "miasma-core"
+description = "Core cryptographic and networking library for the Miasma Protocol"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio.workspace = true
+blake3.workspace = true
+aes-gcm.workspace = true
+sharks.workspace = true
+reed-solomon-simd.workspace = true
+rand.workspace = true
+zeroize.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
+serde.workspace = true
+bincode.workspace = true
+bs58.workspace = true
+hex.workspace = true
+chacha20poly1305.workspace = true
+toml.workspace = true
+directories.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3"
+
+[[bench]]
+name = "crypto_bench"
+harness = false
