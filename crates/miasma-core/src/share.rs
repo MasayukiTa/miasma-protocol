@@ -30,6 +30,9 @@ pub struct MiasmaShare {
     /// Allows rejecting shares belonging to wrong content before k is reached.
     pub mid_prefix: [u8; MID_PREFIX_LEN],
 
+    /// Segment index within the full-file dissolution (0 for single-segment files).
+    pub segment_index: u32,
+
     /// Index of this shard within the Reed-Solomon encoding (0-based, 0..n-1).
     pub slot_index: u16,
 
@@ -59,6 +62,7 @@ impl MiasmaShare {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         mid: &ContentId,
+        segment_index: u32,
         slot_index: u16,
         shard_data: Vec<u8>,
         key_share: Vec<u8>,
@@ -70,6 +74,7 @@ impl MiasmaShare {
         Self {
             version: 1,
             mid_prefix: mid.prefix(),
+            segment_index,
             slot_index,
             shard_data,
             key_share,
@@ -140,7 +145,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        MiasmaShare::new(mid, slot, data, vec![0xAA; 32], [0u8; 12], 100, ts)
+        MiasmaShare::new(mid, 0, slot, data, vec![0xAA; 32], [0u8; 12], 100, ts)
     }
 
     #[test]

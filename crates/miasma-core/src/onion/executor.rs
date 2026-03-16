@@ -19,7 +19,7 @@ use crate::{
 
 use super::{
     circuit::{CircuitManager, RelayInfo},
-    packet::{derive_onion_static_key, OnionPacketBuilder, X25519_KEY_LEN},
+    packet::OnionPacketBuilder,
     router::InProcessRelay,
 };
 
@@ -287,7 +287,7 @@ mod tests {
         let record = dummy_record(digest);
         exec.put(record.clone()).await.unwrap();
 
-        let mid = crate::crypto::hash::ContentId::compute(b"", b"");
+        let _mid = crate::crypto::hash::ContentId::compute(b"", b"");
         // Manually craft a ContentId with known digest for the GET.
         // Use a wrapper: we need a ContentId pointing to 'digest'.
         // Since ContentId::compute derives its own digest, use the bypass executor for purity,
@@ -299,7 +299,7 @@ mod tests {
     #[tokio::test]
     async fn onion_get_missing_returns_none() {
         let master = [0xCDu8; 32];
-        let exec = LiveOnionDhtExecutor::new_phase1(&master).unwrap();
+        let _exec = LiveOnionDhtExecutor::new_phase1(&master).unwrap();
         // Use BypassOnionDhtExecutor for the missing-key test to keep it clean.
         let bypass = crate::network::dht::BypassOnionDhtExecutor::new();
         let mid = crate::crypto::hash::ContentId::compute(b"not stored", b"k=10");

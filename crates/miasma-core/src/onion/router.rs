@@ -20,7 +20,7 @@ use crate::MiasmaError;
 use super::{
     circuit::CircuitManager,
     packet::{
-        decrypt_response, encrypt_response, CircuitId, InnerPayload, OnionLayer,
+        encrypt_response, CircuitId, InnerPayload, OnionLayer,
         OnionLayerProcessor, OnionPacket, ReturnPath, X25519_KEY_LEN,
     },
 };

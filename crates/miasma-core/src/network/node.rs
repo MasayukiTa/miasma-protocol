@@ -7,7 +7,7 @@ use std::time::Duration;
 use futures::StreamExt as _;
 use libp2p::{
     identify,
-    identity::{self, Keypair},
+    identity::Keypair,
     kad::{self, store::MemoryStore},
     ping,
     swarm::{NetworkBehaviour, SwarmEvent},

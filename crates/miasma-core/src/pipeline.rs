@@ -20,7 +20,7 @@ use crate::{
 const PROTOCOL_VERSION: u8 = 1;
 
 /// Dissolution parameters — determine shard counts and MID computation.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct DissolutionParams {
     /// Number of data shards (k). Must collect ≥k shares to reconstruct.
     pub data_shards: usize,
@@ -95,6 +95,7 @@ pub fn dissolve(
         .map(|(i, (shard_data, key_share))| {
             MiasmaShare::new(
                 &mid,
+                0, // segment_index: non-segmented dissolution is always segment 0
                 i as u16,
                 shard_data,
                 key_share,
