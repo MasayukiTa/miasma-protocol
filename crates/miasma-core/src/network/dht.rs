@@ -79,39 +79,13 @@ impl OnionAwareDhtExecutor for BypassOnionDhtExecutor {
     }
 }
 
-// ─── Live executor stub (Phase 1 — wired in Task 4 Onion Routing) ────────────
+// ─── Live executor (Task 4 — implemented in onion::executor) ─────────────────
 
-/// Production DHT executor backed by a real libp2p-kad swarm.
+/// Production DHT executor with 2-hop onion routing.
 ///
-/// **Status**: Stub. Onion circuit integration is implemented in Task 4.
-/// For Phase 1 testing, use `BypassOnionDhtExecutor`.
-pub struct LiveOnionDhtExecutor {
-    // TODO(Task 4): hold a handle to the onion circuit manager and kad swarm.
-    _placeholder: (),
-}
-
-impl LiveOnionDhtExecutor {
-    pub fn new() -> Self {
-        Self { _placeholder: () }
-    }
-}
-
-#[async_trait::async_trait]
-impl OnionAwareDhtExecutor for LiveOnionDhtExecutor {
-    async fn put(&self, _record: DhtRecord) -> Result<(), MiasmaError> {
-        // TODO(Task 4): wrap in onion circuit, call kad.put_record()
-        Err(MiasmaError::Sss(
-            "LiveOnionDhtExecutor: onion routing not yet implemented (Task 4)".into(),
-        ))
-    }
-
-    async fn get(&self, _mid: &ContentId) -> Result<Option<DhtRecord>, MiasmaError> {
-        // TODO(Task 4): wrap in ephemeral onion circuit, call kad.get_record()
-        Err(MiasmaError::Sss(
-            "LiveOnionDhtExecutor: onion routing not yet implemented (Task 4)".into(),
-        ))
-    }
-}
+/// Re-exported from `onion::executor::LiveOnionDhtExecutor`.
+/// This type alias keeps the `network::dht` API surface stable.
+pub use crate::onion::executor::LiveOnionDhtExecutor;
 
 #[cfg(test)]
 mod tests {
