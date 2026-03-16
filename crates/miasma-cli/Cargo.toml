@@ -1,0 +1,19 @@
+[package]
+name = "miasma-cli"
+description = "Command-line interface for the Miasma Protocol"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "miasma"
+path = "src/main.rs"
+
+[dependencies]
+miasma-core = { path = "../miasma-core" }
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap = { version = "4", features = ["derive"] }

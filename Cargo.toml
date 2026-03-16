@@ -1,0 +1,67 @@
+[workspace]
+members = [
+    "crates/miasma-core",
+    "crates/miasma-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Miasma Contributors"]
+license = "AGPL-3.0"
+repository = "https://github.com/miasma-protocol/miasma"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Cryptography
+blake3 = "1"
+aes-gcm = "0.10"
+sharks = "0.5"
+reed-solomon-simd = "3"
+rand = "0.8"
+zeroize = { version = "1", features = ["derive"] }
+hkdf = "0.12"
+sha2 = "0.10"
+
+# Networking
+libp2p = { version = "0.54", features = [
+    "quic",
+    "kad",
+    "noise",
+    "yamux",
+    "relay",
+    "identify",
+    "ping",
+    "tokio",
+    "macros",
+] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+
+# Local store encryption (XChaCha20-Poly1305 — 192-bit nonce, safe for random nonce per file)
+chacha20poly1305 = "0.10"
+
+# Config
+toml = "0.8"
+
+# Platform-specific data directories (~/.miasma, etc.)
+directories = "5"
+
+# Base encoding
+bs58 = "0.5"
+hex = "0.4"
+tempfile = "3"
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
