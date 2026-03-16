@@ -113,8 +113,12 @@ impl CircuitManager {
         };
 
         // Decrypt: blob passed from R1 was encrypted with r1_init_key.
-        let plaintext =
+        let intermediate =
             super::packet::decrypt_response(&entry.return_path.r1_init_key, &encrypted_blob)?;
+
+        // Decrypt again: the inner blob was encrypted with r2_r1_key.
+        let plaintext =
+            super::packet::decrypt_response(&entry.return_path.r2_r1_key, &intermediate)?;
 
         // Deliver to the waiting caller.
         let _ = entry.response_tx.send(plaintext);
@@ -160,13 +164,12 @@ mod tests {
     async fn register_and_deliver() {
         let mgr = CircuitManager::with_default_ttl();
         let rp = dummy_return_path();
-        let key = rp.r1_init_key;
-
-        let (cid, rx) = mgr.register(rp).await;
+        let (cid, rx) = mgr.register(rp.clone()).await;
         assert_eq!(mgr.active_count().await, 1);
 
         let response_body = b"DHT result data".to_vec();
-        let blob = encrypt_response(&key, &response_body).unwrap();
+        let intermediate = encrypt_response(&rp.r2_r1_key, &response_body).unwrap();
+        let blob = encrypt_response(&rp.r1_init_key, &intermediate).unwrap();
         let delivered = mgr.deliver_response(cid, blob).await.unwrap();
         assert!(delivered);
 

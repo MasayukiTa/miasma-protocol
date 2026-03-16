@@ -15,7 +15,7 @@ use hkdf::Hkdf;
 use rand::RngCore as _;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use x25519_dalek::{EphemeralSecret, PublicKey, SharedSecret, StaticSecret};
+use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
 use crate::MiasmaError;

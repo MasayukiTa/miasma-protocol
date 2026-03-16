@@ -1,5 +1,6 @@
 use crate::MiasmaError;
 use bs58;
+use serde::{Deserialize, Serialize};
 
 /// MID prefix length used for coarse share verification (ADR-003).
 pub const MID_PREFIX_LEN: usize = 8;
@@ -11,7 +12,7 @@ pub const MID_PREFIX_LEN: usize = 8;
 /// The first 8 bytes of the raw BLAKE3 digest are used as `mid_prefix` in each
 /// `MiasmaShare` to allow early rejection of shares belonging to a different
 /// content item (before k shares are collected and K_enc can be recovered).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ContentId {
     /// Raw 32-byte BLAKE3 digest.
     digest: [u8; 32],

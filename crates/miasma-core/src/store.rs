@@ -325,6 +325,17 @@ impl LocalShareStore {
     }
 }
 
+// ─── ShareSink implementation ─────────────────────────────────────────────────
+
+/// Implement `ShareSink` so `LocalShareStore` can be used directly with
+/// `ShareDistributor` (Task 5 distribution protocol).
+#[async_trait::async_trait]
+impl crate::dissolution::ShareSink for LocalShareStore {
+    async fn store(&self, share: MiasmaShare) -> Result<String, crate::MiasmaError> {
+        self.put(&share)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,6 +350,7 @@ mod tests {
             .as_secs();
         MiasmaShare::new(
             &mid,
+            0, // segment_index
             idx,
             vec![idx as u8; 64],
             vec![0xAA; 32],
