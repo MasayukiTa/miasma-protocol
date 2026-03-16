@@ -277,6 +277,21 @@ impl LocalShareStore {
         Ok(())
     }
 
+    /// Return addresses of all shares whose `mid_prefix` matches `prefix`.
+    ///
+    /// Decrypts each stored share to check the prefix. In Phase 1 the store
+    /// is small so this is acceptable; Phase 2 will cache the prefix index.
+    pub fn search_by_mid_prefix(&self, prefix: &[u8; 8]) -> Vec<String> {
+        self.list()
+            .into_iter()
+            .filter(|addr| {
+                self.get(addr)
+                    .map(|s| s.mid_prefix == *prefix)
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
+
     /// Current total size of all stored share blobs in bytes.
     pub fn used_bytes(&self) -> u64 {
         load_index(&self.data_dir)
