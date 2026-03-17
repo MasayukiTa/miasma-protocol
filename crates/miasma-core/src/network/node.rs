@@ -1,6 +1,6 @@
 /// Miasma libp2p node — Phase 2 P2P wiring.
 ///
-/// Transport: QUIC only (ADR-001)
+/// Transport: TCP + QUIC for local loopback testing and production paths
 /// DHT: Kademlia via `DhtHandle` / `OnionAwareDhtExecutor` (ADR-002)
 /// Share exchange: `/miasma/share/1.0.0` request-response protocol
 /// NAT: AutoNAT + DCUtR + relay
@@ -20,7 +20,6 @@ use libp2p::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
-use zeroize::Zeroizing;
 
 use crate::{crypto::keyderive::NodeKeys, share::MiasmaShare, store::LocalShareStore, MiasmaError};
 
@@ -268,11 +267,11 @@ pub struct MiasmaNode {
 impl MiasmaNode {
     /// Build a node from the given master key.
     pub fn new(
-        master_key: &Zeroizing<[u8; 32]>,
+        master_key: &[u8; 32],
         node_type: NodeType,
         listen_addr: &str,
     ) -> Result<Self, MiasmaError> {
-        let node_keys = NodeKeys::derive(master_key.as_ref())?;
+        let node_keys = NodeKeys::derive(master_key)?;
 
         let mut signing_bytes: [u8; 32] = *node_keys.dht_signing_key;
         let keypair = Keypair::ed25519_from_bytes(&mut signing_bytes)
@@ -320,10 +319,19 @@ impl MiasmaNode {
         ShareExchangeHandle { tx: self.share_tx.clone() }
     }
 
-    /// Register a bootstrap peer in the Kademlia routing table.
+    /// Register a bootstrap peer in the Kademlia routing table and dial it.
+    ///
+    /// Explicitly dialing ensures the QUIC connection is established as soon
+    /// as the event loop starts, rather than waiting for Kademlia's first
+    /// outbound query to trigger the dial.
     pub fn add_bootstrap_peer(&mut self, peer_id: PeerId, addr: Multiaddr) {
         self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
-        info!("Bootstrap peer added: {peer_id} @ {addr}");
+        // Explicit dial so the QUIC connection is in flight from loop start.
+        let p2p_addr = addr.clone().with(libp2p::multiaddr::Protocol::P2p(peer_id));
+        if let Err(e) = self.swarm.dial(p2p_addr) {
+            debug!("bootstrap dial queued error (may be harmless): {e}");
+        }
+        info!("Bootstrap peer added + dial queued: {peer_id} @ {addr}");
     }
 
     /// Register a relay server for NAT traversal.
@@ -354,6 +362,38 @@ impl MiasmaNode {
     /// Clone of the shutdown sender — send `()` to stop the event loop.
     pub fn shutdown_handle(&self) -> mpsc::Sender<()> {
         self.shutdown_tx.clone()
+    }
+
+    /// Poll the swarm briefly to collect `NewListenAddr` events.
+    ///
+    /// Call this after `new()` to discover the OS-assigned port when
+    /// listening on port 0. Blocks for up to `timeout_ms` milliseconds.
+    ///
+    /// Uses `tokio::select!` rather than `tokio::time::timeout` so that
+    /// each `swarm.next()` poll completes cleanly before the deadline
+    /// check runs — avoiding the cancel-unsafety of dropping a
+    /// mid-poll swarm future inside `timeout`.
+    pub async fn collect_listen_addrs(&mut self, timeout_ms: u64) -> Vec<Multiaddr> {
+        let mut addrs = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+        let sleep = tokio::time::sleep_until(deadline);
+        tokio::pin!(sleep);
+        loop {
+            tokio::select! {
+                biased;
+                event = self.swarm.next() => {
+                    match event {
+                        Some(SwarmEvent::NewListenAddr { address, .. }) => {
+                            addrs.push(address);
+                        }
+                        Some(_) => {}
+                        None => break,
+                    }
+                }
+                _ = &mut sleep => break,
+            }
+        }
+        addrs
     }
 
     /// Run the node event loop. Blocks until shutdown or error.
@@ -415,13 +455,16 @@ impl MiasmaNode {
     fn handle_share_command(&mut self, cmd: ShareCommand) {
         let ShareCommand { peer_id, addrs, request, reply } = cmd;
 
-        // Add known addresses to routing table and dial the peer.
+        // Register addresses with both Kademlia (routing) and share_exchange
+        // (address book used by request_response when it dials the peer).
+        // Adding to share_exchange is critical: send_request emits
+        // ToSwarm::Dial{DialOpts::peer_id(peer).build()} which consults
+        // handle_pending_outbound_connection — if no address is registered
+        // there, the dial fails immediately with OutboundFailure::DialFailure.
         for addr_str in &addrs {
             if let Ok(addr) = addr_str.parse::<Multiaddr>() {
                 self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
-                // Dial with explicit /p2p/ suffix so request-response can connect.
-                let p2p_addr = addr.with(libp2p::multiaddr::Protocol::P2p(peer_id));
-                let _ = self.swarm.dial(p2p_addr);
+                self.swarm.add_peer_address(peer_id, addr.clone());
             }
         }
 
@@ -575,6 +618,12 @@ fn build_swarm(
 ) -> Result<Swarm<MiasmaBehaviour>, MiasmaError> {
     let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
         .with_tokio()
+        .with_tcp(
+            libp2p::tcp::Config::default(),
+            noise::Config::new,
+            yamux::Config::default,
+        )
+        .map_err(|e| MiasmaError::Sss(format!("TCP init failed: {e}")))?
         .with_quic()
         .with_relay_client(noise::Config::new, yamux::Config::default)
         .map_err(|e| MiasmaError::Sss(format!("relay client init failed: {e}")))?
@@ -621,6 +670,7 @@ fn build_swarm(
             })
         })
         .map_err(|e| MiasmaError::Sss(format!("behaviour init failed: {e}")))?
+        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(30)))
         .build();
 
     let addr: Multiaddr = listen_addr

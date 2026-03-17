@@ -22,7 +22,7 @@ pub use dissolution::{
 pub use error::MiasmaError;
 pub use network::{
     BypassOnionDhtExecutor, DirectDhtExecutor, DhtHandle, MiasmaCoordinator, MiasmaNode,
-    NodeType, OnionAwareDhtExecutor, ShareExchangeHandle,
+    NetworkShareFetcher, NodeType, OnionAwareDhtExecutor, ShareExchangeHandle,
 };
 pub use onion::{
     CircuitId, CircuitManager, InProcessRelay, LiveOnionDhtExecutor, LiveOnionShareFetcher,

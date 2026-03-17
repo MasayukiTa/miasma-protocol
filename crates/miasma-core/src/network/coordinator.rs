@@ -63,6 +63,24 @@ impl NetworkShareFetcher {
         }
     }
 
+    /// Variant with a pre-seeded record cache entry.
+    ///
+    /// Allows integration tests to bypass the real DHT lookup and
+    /// exercise only the share request-response transport layer.
+    pub fn with_initial_record(
+        dht_handle: DhtHandle,
+        share_handle: ShareExchangeHandle,
+        record: DhtRecord,
+    ) -> Self {
+        let mut cache = HashMap::new();
+        cache.insert(record.mid_digest, record);
+        Self {
+            dht_handle,
+            share_handle,
+            record_cache: Mutex::new(cache),
+        }
+    }
+
     async fn get_cached_record(
         &self,
         mid_digest: [u8; 32],

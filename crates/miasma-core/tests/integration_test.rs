@@ -43,6 +43,11 @@ use miasma_core::{
     LiveOnionShareFetcher,
     OnionAwareDhtExecutor,
     DEFAULT_SEGMENT_SIZE,
+    // P2P node
+    MiasmaCoordinator,
+    MiasmaNode,
+    NetworkShareFetcher,
+    NodeType,
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -511,4 +516,127 @@ async fn onion_stack_dissolution_retrieval_slo() {
         elapsed
     );
     println!("[SLO] onion stack retrieval (in-process 2-hop): {:?}", elapsed);
+}
+
+// ── Test 18: Two-node loopback P2P E2E (bypass DHT, real TCP share-exchange) ──
+//
+// Topology:  Node A (holder)  ←─ TCP/loopback ─→  Node B (retriever)
+//
+// Approach B: bypasses Kademlia PUT/GET entirely to avoid the quorum-race
+// that fires when swarm.dial() runs before the remote event loop is accepting.
+//
+// Flow:
+//   1. Both node event loops start FIRST (TCP sockets now accepting).
+//   2. Sleep 200 ms for accept() to become live.
+//   3. Dissolve content into Node A's store (local put, no network).
+//   4. Build DhtRecord manually with Node A's address + peer_id.
+//   5. Seed BypassOnionDhtExecutor with the record (enumerate shard slots).
+//   6. Seed NetworkShareFetcher cache (skips DHT GET on fetch).
+//   7. RetrievalCoordinator sends ShareFetchRequests via Node B's share handle,
+//      which dials Node A (already accepting!) over TCP.
+//   8. Node A's event loop serves each shard from store_a.
+//   9. Assert reconstructed plaintext == original.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn p2p_two_node_loopback() {
+    use std::time::Duration;
+    use miasma_core::network::types::ShardLocation;
+    use tokio::time::{sleep, timeout};
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("miasma_core=debug,libp2p_swarm=info")
+        .try_init();
+
+    let result = timeout(Duration::from_secs(30), async {
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let store_a = Arc::new(LocalShareStore::open(dir_a.path(), 100).unwrap());
+        let store_b = Arc::new(LocalShareStore::open(dir_b.path(), 100).unwrap());
+
+        let key_a = [0x11u8; 32];
+        let key_b = [0x22u8; 32];
+
+        // ── Discover OS-assigned TCP ports before starting event loops ─────────
+        let mut node_a =
+            MiasmaNode::new(&key_a, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+        let peer_id_a = node_a.local_peer_id;
+        let addrs_a = node_a.collect_listen_addrs(400).await;
+        assert!(!addrs_a.is_empty(), "Node A must have a listen address");
+        let listen_addr_a_str = addrs_a[0].to_string();
+        println!("[loopback] Node A: {peer_id_a} @ {listen_addr_a_str}");
+
+        let node_b =
+            MiasmaNode::new(&key_b, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+        // Extract Node B's handles BEFORE start() consumes node_b.
+        let dht_handle_b = node_b.dht_handle();
+        let share_handle_b = node_b.share_exchange_handle();
+
+        // ── Start both event loops (TCP sockets now accepting) ─────────────────
+        // store_a is cloned so it remains accessible below for local puts.
+        let _coord_a = MiasmaCoordinator::start(
+            node_a,
+            store_a.clone(),
+            vec![listen_addr_a_str.clone()],
+        ).await;
+        let _coord_b = MiasmaCoordinator::start(node_b, store_b, vec![]).await;
+
+        // Give both TCP stacks time to enter accept().
+        sleep(Duration::from_millis(200)).await;
+
+        // ── Dissolve content into Node A's store (no network I/O) ─────────────
+        let content = b"two-node loopback integration test payload, verify real P2P";
+        let params = DissolutionParams { data_shards: 3, total_shards: 5 };
+
+        let (mid, shares) = dissolve(content, params).unwrap();
+        for share in &shares {
+            store_a.put(share).unwrap();
+        }
+        println!("[loopback] MID: {}", mid.to_string());
+
+        // ── Build DhtRecord manually (no Kademlia PUT/GET required) ───────────
+        let peer_bytes_a = peer_id_a.to_bytes();
+        let locations: Vec<ShardLocation> = shares
+            .iter()
+            .map(|s| ShardLocation {
+                peer_id_bytes: peer_bytes_a.clone(),
+                shard_index: s.slot_index,
+                addrs: vec![listen_addr_a_str.clone()],
+            })
+            .collect();
+
+        let record = DhtRecord {
+            mid_digest: *mid.as_bytes(),
+            data_shards: params.data_shards as u8,
+            total_shards: params.total_shards as u8,
+            version: 1,
+            locations,
+            published_at: 0,
+        };
+
+        // ── Retrieval: bypass DHT + real TCP share-exchange ───────────────────
+        // BypassOnionDhtExecutor serves list_candidates() with total_shards slots.
+        let bypass_dht = BypassOnionDhtExecutor::new();
+        bypass_dht.put(record.clone()).await.unwrap();
+
+        // NetworkShareFetcher pre-seeded: skips DHT GET, uses Node B's share
+        // handle to dial Node A (already accepting) and fetch each shard via TCP.
+        let network_fetcher =
+            NetworkShareFetcher::with_initial_record(dht_handle_b, share_handle_b, record);
+
+        let source = DhtShareSource::new(bypass_dht, network_fetcher);
+        let recovered = RetrievalCoordinator::new(source)
+            .retrieve(&mid, params)
+            .await
+            .expect("retrieve failed");
+
+        assert_eq!(
+            recovered.as_slice(),
+            content as &[u8],
+            "reconstructed plaintext mismatch"
+        );
+        println!("[loopback] Round-trip OK: {} bytes", recovered.len());
+    })
+    .await;
+
+    result.expect("p2p_two_node_loopback timed out (30s)");
 }
