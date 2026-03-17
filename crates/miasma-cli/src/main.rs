@@ -5,11 +5,14 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
+use std::sync::Arc;
+
 use miasma_core::{
     config::{default_data_dir, NodeConfig},
+    crypto::hash::ContentId as MidContentId,
     dissolve, retrieve,
     store::LocalShareStore,
-    DissolutionParams, MiasmaNode, NodeType,
+    DissolutionParams, MiasmaCoordinator, MiasmaNode, NodeType,
 };
 use tracing::info;
 use zeroize::Zeroizing;
@@ -41,7 +44,7 @@ enum Commands {
         /// Outbound bandwidth quota for serving shares, in MiB/day.
         #[arg(long, default_value = "1024")]
         bandwidth_mb_day: u64,
-        /// QUIC listen multiaddr.
+        /// Listen multiaddr.
         #[arg(long, default_value = "/ip4/0.0.0.0/udp/0/quic-v1")]
         listen_addr: String,
     },
@@ -113,6 +116,42 @@ enum Commands {
         #[arg(long)]
         bootstrap: Vec<String>,
     },
+
+    /// Dissolve a file and publish it to the P2P network via Kademlia DHT.
+    ///
+    /// Shares are stored locally; run `daemon` to serve them long-term.
+    /// Prints the Miasma Content ID (MID) to stdout.
+    NetworkPublish {
+        /// Path to the file to dissolve and publish.
+        path: PathBuf,
+        /// Number of data shards (k).
+        #[arg(long, default_value = "10")]
+        data_shards: usize,
+        /// Total shards (n).
+        #[arg(long, default_value = "20")]
+        total_shards: usize,
+        /// Bootstrap peer multiaddrs (repeatable).
+        #[arg(long)]
+        bootstrap: Vec<String>,
+    },
+
+    /// Retrieve and reconstruct content from the P2P network by MID.
+    NetworkGet {
+        /// Miasma Content ID (format: `miasma:<base58>`).
+        mid: String,
+        /// Write reconstructed content to this file. If omitted, writes to stdout.
+        #[arg(long, short = 'o')]
+        output: Option<PathBuf>,
+        /// Number of data shards (k) used during dissolution.
+        #[arg(long, default_value = "10")]
+        data_shards: usize,
+        /// Total shards (n) used during dissolution.
+        #[arg(long, default_value = "20")]
+        total_shards: usize,
+        /// Bootstrap peer multiaddrs (repeatable).
+        #[arg(long)]
+        bootstrap: Vec<String>,
+    },
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
@@ -158,6 +197,21 @@ async fn main() -> Result<()> {
         Commands::Config { key, value } => cmd_config(&data_dir, key.as_deref(), value.as_deref()),
 
         Commands::Daemon { bootstrap } => cmd_daemon(&data_dir, &bootstrap).await,
+
+        Commands::NetworkPublish {
+            path,
+            data_shards,
+            total_shards,
+            bootstrap,
+        } => cmd_network_publish(&data_dir, &path, data_shards, total_shards, &bootstrap).await,
+
+        Commands::NetworkGet {
+            mid,
+            output,
+            data_shards,
+            total_shards,
+            bootstrap,
+        } => cmd_network_get(&data_dir, &mid, output.as_deref(), data_shards, total_shards, &bootstrap).await,
     }
 }
 
@@ -423,7 +477,7 @@ async fn cmd_daemon(data_dir: &std::path::Path, bootstrap_addrs: &[String]) -> R
     );
 
     let mut node = MiasmaNode::new(
-        &master_key,
+        &*master_key,
         NodeType::Full,
         &config.network.listen_addr,
     )
@@ -490,5 +544,176 @@ async fn cmd_daemon(data_dir: &std::path::Path, bootstrap_addrs: &[String]) -> R
     });
 
     node.run().await.context("node error")?;
+    Ok(())
+}
+
+// ─── Shared bootstrap helper ──────────────────────────────────────────────────
+
+/// Parse multiaddr bootstrap peers and register them with the node.
+/// Returns true if any peers were successfully added.
+fn register_bootstrap_peers(node: &mut MiasmaNode, addrs: &[&str]) -> bool {
+    use libp2p::multiaddr::Protocol;
+    let mut added = false;
+    for addr_str in addrs {
+        match addr_str.parse::<libp2p::Multiaddr>() {
+            Ok(mut addr) => {
+                let maybe_peer_id: Option<libp2p::PeerId> = addr.iter().find_map(|proto| {
+                    if let Protocol::P2p(id) = proto { Some(id) } else { None }
+                });
+                match maybe_peer_id {
+                    Some(peer_id) => {
+                        if matches!(addr.iter().last(), Some(Protocol::P2p(_))) {
+                            addr.pop();
+                        }
+                        node.add_bootstrap_peer(peer_id, addr);
+                        added = true;
+                    }
+                    None => {
+                        eprintln!("Warning: bootstrap addr '{addr_str}' missing /p2p/<peer-id> — skipping");
+                    }
+                }
+            }
+            Err(e) => eprintln!("Warning: invalid bootstrap addr '{addr_str}': {e}"),
+        }
+    }
+    added
+}
+
+// ─── network-publish ──────────────────────────────────────────────────────────
+
+async fn cmd_network_publish(
+    data_dir: &std::path::Path,
+    path: &std::path::Path,
+    data_shards: usize,
+    total_shards: usize,
+    bootstrap_addrs: &[String],
+) -> Result<()> {
+    let config = NodeConfig::load(data_dir).context("cannot load config")?;
+    let store = Arc::new(
+        LocalShareStore::open(data_dir, config.storage.quota_mb)
+            .context("cannot open share store")?,
+    );
+
+    let plaintext = std::fs::read(path)
+        .with_context(|| format!("cannot read file: {}", path.display()))?;
+    let params = DissolutionParams { data_shards, total_shards };
+
+    // Load master key.
+    let master_key_path = data_dir.join("master.key");
+    if !master_key_path.exists() {
+        bail!("Node not initialised. Run `miasma init` first.");
+    }
+    let master_bytes = std::fs::read(&master_key_path).context("cannot read master.key")?;
+    let master_key: Zeroizing<[u8; 32]> = Zeroizing::new(
+        master_bytes.try_into().map_err(|_| anyhow::anyhow!("master.key has wrong length"))?,
+    );
+
+    let mut node = MiasmaNode::new(&*master_key, NodeType::Full, &config.network.listen_addr)
+        .context("cannot create node")?;
+
+    // Discover actual listen address (port 0 → OS-assigned).
+    let listen_addrs = node.collect_listen_addrs(300).await;
+    let listen_addr_strings: Vec<String> = listen_addrs.iter().map(|a| a.to_string()).collect();
+
+    // Add bootstrap peers from CLI + config.
+    let all_bootstrap: Vec<&str> = config
+        .network.bootstrap_peers.iter().map(|s| s.as_str())
+        .chain(bootstrap_addrs.iter().map(|s| s.as_str()))
+        .collect();
+    let has_bootstrap = register_bootstrap_peers(&mut node, &all_bootstrap);
+    if has_bootstrap {
+        node.bootstrap_dht().context("DHT bootstrap failed")?;
+    }
+
+    let coord = MiasmaCoordinator::start(node, store, listen_addr_strings).await;
+
+    if has_bootstrap {
+        eprintln!("Waiting for DHT bootstrap…");
+        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+    }
+
+    eprintln!("Publishing {} ({} bytes) k={} n={} …", path.display(), plaintext.len(), data_shards, total_shards);
+
+    let mid = coord.dissolve_and_publish(&plaintext, params).await
+        .context("publish failed")?;
+
+    let mid_str = mid.to_string();
+    println!("{mid_str}");
+    eprintln!("✓ Published. Retrieve with: miasma network-get {mid_str}");
+    eprintln!("  Run `miasma daemon` to serve shares to the network.");
+
+    coord.shutdown().await;
+    Ok(())
+}
+
+// ─── network-get ─────────────────────────────────────────────────────────────
+
+async fn cmd_network_get(
+    data_dir: &std::path::Path,
+    mid_str: &str,
+    output: Option<&std::path::Path>,
+    data_shards: usize,
+    total_shards: usize,
+    bootstrap_addrs: &[String],
+) -> Result<()> {
+    let config = NodeConfig::load(data_dir).context("cannot load config")?;
+    let store = Arc::new(
+        LocalShareStore::open(data_dir, config.storage.quota_mb)
+            .context("cannot open share store")?,
+    );
+
+    let mid = MidContentId::from_str(mid_str)
+        .with_context(|| format!("invalid MID: {mid_str}"))?;
+    let params = DissolutionParams { data_shards, total_shards };
+
+    // Load master key.
+    let master_key_path = data_dir.join("master.key");
+    if !master_key_path.exists() {
+        bail!("Node not initialised. Run `miasma init` first.");
+    }
+    let master_bytes = std::fs::read(&master_key_path).context("cannot read master.key")?;
+    let master_key: Zeroizing<[u8; 32]> = Zeroizing::new(
+        master_bytes.try_into().map_err(|_| anyhow::anyhow!("master.key has wrong length"))?,
+    );
+
+    let mut node = MiasmaNode::new(&*master_key, NodeType::Full, &config.network.listen_addr)
+        .context("cannot create node")?;
+
+    let _listen_addrs = node.collect_listen_addrs(300).await;
+
+    // Add bootstrap peers from CLI + config.
+    let all_bootstrap: Vec<&str> = config
+        .network.bootstrap_peers.iter().map(|s| s.as_str())
+        .chain(bootstrap_addrs.iter().map(|s| s.as_str()))
+        .collect();
+    let has_bootstrap = register_bootstrap_peers(&mut node, &all_bootstrap);
+    if has_bootstrap {
+        node.bootstrap_dht().context("DHT bootstrap failed")?;
+    }
+
+    let coord = MiasmaCoordinator::start(node, store, vec![]).await;
+
+    if has_bootstrap {
+        eprintln!("Waiting for DHT bootstrap…");
+        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+    }
+
+    eprintln!("Retrieving {mid_str} from network…");
+
+    let plaintext = coord.retrieve_from_network(&mid, params).await
+        .context("network retrieval failed")?;
+
+    match output {
+        Some(path) => {
+            std::fs::write(path, &plaintext)
+                .with_context(|| format!("cannot write output: {}", path.display()))?;
+            eprintln!("✓ Written to {}", path.display());
+        }
+        None => {
+            io::stdout().write_all(&plaintext).context("cannot write to stdout")?;
+        }
+    }
+
+    coord.shutdown().await;
     Ok(())
 }
