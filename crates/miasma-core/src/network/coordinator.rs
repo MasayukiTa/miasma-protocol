@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use libp2p::PeerId;
+use libp2p::{Multiaddr, PeerId};
 use tokio::sync::mpsc;
 use tracing::error;
 
@@ -173,6 +173,27 @@ impl MiasmaCoordinator {
         });
 
         Self { store, dht_handle, share_handle, shutdown_tx, peer_id, listen_addrs }
+    }
+
+    /// Register a bootstrap peer and dial it from within the running event loop.
+    ///
+    /// **Must be called after `start()`.**  Dialing from inside the event loop
+    /// ensures the remote TCP socket is already accepting when the SYN arrives,
+    /// avoiding the ECONNREFUSED race seen with pre-start `add_bootstrap_peer`.
+    pub async fn add_bootstrap_peer(
+        &self,
+        peer_id: PeerId,
+        addr: Multiaddr,
+    ) -> Result<(), MiasmaError> {
+        self.dht_handle.add_bootstrap_peer(peer_id, addr).await
+    }
+
+    /// Trigger Kademlia FIND_NODE bootstrap.
+    ///
+    /// Call after `add_bootstrap_peer`; sleep ~1–3 s before issuing DHT
+    /// PUT/GET so Kademlia has time to populate both routing tables.
+    pub async fn bootstrap_dht(&self) -> Result<(), MiasmaError> {
+        self.dht_handle.bootstrap().await
     }
 
     /// Send a shutdown signal to the background node task.

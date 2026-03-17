@@ -139,6 +139,20 @@ pub enum DhtCommand {
         key: Vec<u8>,
         reply: oneshot::Sender<Result<Option<Vec<u8>>, MiasmaError>>,
     },
+    /// Register a bootstrap peer and dial from within the running event loop.
+    ///
+    /// Dialing from inside the event loop avoids the ECONNREFUSED race that
+    /// occurs when `swarm.dial()` is called before the remote node's `run()`
+    /// has started accepting connections.
+    AddBootstrapPeer {
+        peer_id: PeerId,
+        addr: Multiaddr,
+        reply: oneshot::Sender<()>,
+    },
+    /// Trigger Kademlia FIND_NODE bootstrap for this node's own key.
+    BootstrapDht {
+        reply: oneshot::Sender<Result<(), MiasmaError>>,
+    },
 }
 
 /// Sender side of the DHT command channel.
@@ -163,6 +177,36 @@ impl DhtHandle {
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
         rx.await
             .map_err(|_| MiasmaError::Network("DHT reply channel dropped".into()))?
+    }
+
+    /// Register a bootstrap peer inside the running event loop.
+    ///
+    /// Sends `AddBootstrapPeer` to the event loop so the dial happens from
+    /// within `run()`, ensuring the remote TCP socket is already accepting.
+    pub async fn add_bootstrap_peer(
+        &self,
+        peer_id: PeerId,
+        addr: Multiaddr,
+    ) -> Result<(), MiasmaError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::AddBootstrapPeer { peer_id, addr, reply: tx })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
+        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+    }
+
+    /// Trigger Kademlia FIND_NODE bootstrap.
+    ///
+    /// Call after `add_bootstrap_peer`; allow ~1–3 s for convergence before
+    /// issuing DHT PUT or GET operations.
+    pub async fn bootstrap(&self) -> Result<(), MiasmaError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::BootstrapDht { reply: tx })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
+        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))?
     }
 
     /// Retrieve a `DhtRecord` from Kademlia by raw mid-digest bytes.
@@ -448,6 +492,25 @@ impl MiasmaNode {
                     .kademlia
                     .get_record(kad::RecordKey::new(&key));
                 self.pending_gets.insert(qid, (reply, None));
+            }
+            DhtCommand::AddBootstrapPeer { peer_id, addr, reply } => {
+                self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
+                self.swarm.add_peer_address(peer_id, addr.clone());
+                let p2p_addr = addr.with(libp2p::multiaddr::Protocol::P2p(peer_id));
+                if let Err(e) = self.swarm.dial(p2p_addr) {
+                    debug!("bootstrap dial queued error (may be harmless): {e}");
+                }
+                let _ = reply.send(());
+            }
+            DhtCommand::BootstrapDht { reply } => {
+                let result = self
+                    .swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .bootstrap()
+                    .map(|_| ())
+                    .map_err(|e| MiasmaError::Sss(format!("DHT bootstrap: {e:?}")));
+                let _ = reply.send(result);
             }
         }
     }
