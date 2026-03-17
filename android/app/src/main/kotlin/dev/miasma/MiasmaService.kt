@@ -39,6 +39,9 @@ class MiasmaService : Service() {
         startForeground(NOTIF_ID, buildNotification("Starting…"))
 
         scope.launch {
+            // Ensure Android Keystore wrapping key exists.
+            try { KeystoreHelper.ensureKey() } catch (_: Exception) { }
+
             // Initialise node (idempotent).
             try {
                 initializeNode(dataDir, storageMb, bandwidthMbDay)

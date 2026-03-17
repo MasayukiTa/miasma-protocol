@@ -1,0 +1,31 @@
+[package]
+name = "miasma-bridge"
+description = "BitTorrent ↔ Miasma bridge — Task 15 (Phase 2)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "miasma-bridge"
+path = "src/main.rs"
+
+[dependencies]
+miasma-core = { path = "../miasma-core" }
+tokio       = { version = "1", features = ["full"] }
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+bs58.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+directories.workspace = true
+
+# BitTorrent — librqbit provides a fully async BT client in Rust.
+# Phase 2: uncomment when integrating.
+# librqbit = { version = "6", default-features = false, features = ["tokio"] }
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -33,6 +33,7 @@ pub trait ShareSource: Send + Sync {
 /// Lists all locally stored shares whose `mid_prefix` matches, then fetches
 /// them on demand. In Phase 2 this is replaced by DHT lookup + onion-routed
 /// remote fetch.
+#[derive(Clone)]
 pub struct LocalShareSource {
     store: Arc<LocalShareStore>,
 }

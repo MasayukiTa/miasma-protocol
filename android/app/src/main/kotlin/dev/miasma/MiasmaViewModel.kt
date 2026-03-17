@@ -1,6 +1,7 @@
 package dev.miasma
 
 import android.app.Application
+import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.miasma.uniffi.MiasmaFfiException
@@ -8,7 +9,7 @@ import dev.miasma.uniffi.NodeStatusFfi
 import dev.miasma.uniffi.dissolveBytes
 import dev.miasma.uniffi.getNodeStatus
 import dev.miasma.uniffi.retrieveBytes
-import dev.miasma.uniffi.distressWipe
+import dev.miasma.uniffi.distressWipe as ffiDistressWipe
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -84,11 +85,24 @@ class MiasmaViewModel(app: Application) : AndroidViewModel(app) {
 
     // ──── Distress wipe ──────────────────────────────────────────────────────
 
+    /**
+     * Emergency distress wipe:
+     *   1. Rust FFI — zeroes and deletes master.key (≤5s per ADR-003).
+     *   2. Android Keystore — deletes hardware-backed wrapping key so
+     *      master.key.enc is cryptographically unrecoverable.
+     *   3. Stops the background daemon.
+     *   4. Resets all UI state.
+     */
     fun distressWipe() {
         viewModelScope.launch {
             _ui.value = _ui.value.copy(isLoading = true, error = null)
+            val ctx: Context = getApplication()
             try {
-                withContext(Dispatchers.IO) { distressWipe(dataDir) }
+                withContext(Dispatchers.IO) {
+                    ffiDistressWipe(dataDir)
+                    KeystoreHelper.deleteKey()
+                }
+                MiasmaService.stopNode(ctx)
                 _ui.value = UiState() // reset all state
             } catch (e: Exception) {
                 _ui.value = _ui.value.copy(isLoading = false, error = e.message)
