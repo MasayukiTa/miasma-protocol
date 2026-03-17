@@ -1,18 +1,18 @@
 /// miasma-bridge CLI — BitTorrent ↔ Miasma bridge (Phase 2, Task 15).
 ///
 /// # Usage
-/// ```
-/// # Bridge a torrent (magnet → dissolve all files into Miasma):
+/// ```text
+/// # Dissolve a torrent's files into Miasma (DHT + peer-wire download):
 /// miasma-bridge dissolve \
 ///   --data-dir ~/.miasma \
 ///   "magnet:?xt=urn:btih:aabb...&dn=example"
 ///
-/// # Retrieve a MID and re-seed it as a torrent:
+/// # Retrieve a MID and re-seed it as a torrent (Phase 2 stub):
 /// miasma-bridge retrieve \
 ///   --data-dir ~/.miasma \
 ///   "miasma:<base58>"
 ///
-/// # Start the bridge daemon (watches for new torrents, auto-dissolves):
+/// # Start the bridge daemon (watches a directory for new files):
 /// miasma-bridge daemon \
 ///   --data-dir ~/.miasma \
 ///   --quota 100G \
@@ -20,6 +20,8 @@
 /// ```
 #[allow(dead_code)]
 mod index;
+mod bencode;
+mod bridge;
 mod pipeline;
 
 use std::path::PathBuf;
@@ -40,10 +42,10 @@ fn main() {
     }
 
     match args[1].as_str() {
-        "dissolve" => cmd_dissolve(&args[2..]),
-        "retrieve" => cmd_retrieve(&args[2..]),
-        "daemon"   => cmd_daemon(&args[2..]),
-        "--help" | "-h" => { print_usage(); }
+        "dissolve"    => cmd_dissolve(&args[2..]),
+        "retrieve"    => cmd_retrieve(&args[2..]),
+        "daemon"      => cmd_daemon(&args[2..]),
+        "--help" | "-h" => print_usage(),
         other => {
             eprintln!("Unknown command: {other}");
             print_usage();
@@ -52,36 +54,65 @@ fn main() {
     }
 }
 
+// ─── Commands ─────────────────────────────────────────────────────────────────
+
 fn cmd_dissolve(args: &[String]) {
-    let (_data_dir, rest) = parse_data_dir(args);
+    let (data_dir, rest) = parse_data_dir(args);
     if rest.is_empty() {
         eprintln!("Usage: miasma-bridge dissolve --data-dir <dir> <magnet-uri>");
         std::process::exit(1);
     }
     let magnet = &rest[0];
 
-    match pipeline::MagnetInfo::parse(magnet) {
-        Ok(info) => {
-            let ih_hex = hex::encode(info.info_hash);
-            info!("Parsed magnet: info_hash={ih_hex}, name={:?}", info.display_name);
-            // Phase 2: fetch torrent metadata via librqbit, dissolve each file.
-            println!("Phase 2 stub: would dissolve torrent {ih_hex} into Miasma.");
-        }
+    let info = match pipeline::MagnetInfo::parse(magnet) {
+        Ok(i) => i,
         Err(e) => {
             error!("Failed to parse magnet link: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let ih_hex = hex::encode(info.info_hash);
+    let name = info.display_name.as_deref().unwrap_or("unknown");
+    info!("Dissolving torrent: hash={ih_hex}, name={name}");
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+
+    let quota_mb = parse_quota_mb_from_args(args);
+
+    match rt.block_on(bridge::dissolve_torrent(
+        &info.info_hash,
+        info.display_name.as_deref(),
+        &data_dir,
+        quota_mb,
+    )) {
+        Ok(mids) => {
+            println!("Dissolved {} file(s):", mids.len());
+            for mid in &mids {
+                println!("  {mid}");
+            }
+        }
+        Err(e) => {
+            error!("Dissolution failed: {e}");
             std::process::exit(1);
         }
     }
 }
 
 fn cmd_retrieve(args: &[String]) {
-    let (_data_dir, rest) = parse_data_dir(args);
+    let (data_dir, rest) = parse_data_dir(args);
     if rest.is_empty() {
         eprintln!("Usage: miasma-bridge retrieve --data-dir <dir> <MID>");
         std::process::exit(1);
     }
     let mid = &rest[0];
-    info!("Retrieve stub: would fetch {mid} from Miasma and re-seed as torrent.");
+    info!(
+        "Retrieve stub: would fetch {mid} from Miasma and re-seed as torrent (data_dir={}).",
+        data_dir.display()
+    );
     println!("Phase 2 stub: retrieve {mid} from Miasma.");
 }
 
@@ -90,21 +121,33 @@ fn cmd_daemon(args: &[String]) {
     let watch_dir = rest.windows(2)
         .find(|w| w[0] == "--watch-dir")
         .map(|w| PathBuf::from(&w[1]));
-    let quota = rest.windows(2)
-        .find(|w| w[0] == "--quota")
-        .map(|w| w[1].clone())
-        .unwrap_or_else(|| "100G".into());
+    let quota_mb = parse_quota_mb_from_args(args);
+
+    let watch_dir = match watch_dir {
+        Some(d) => d,
+        None => {
+            eprintln!("Usage: miasma-bridge daemon --watch-dir <dir> [--quota 100G]");
+            std::process::exit(1);
+        }
+    };
 
     info!(
-        "Bridge daemon starting: data_dir={}, quota={quota}, watch={:?}",
-        data_dir.display(), watch_dir
+        "Bridge daemon: data_dir={}, quota={}M, watch={}",
+        data_dir.display(), quota_mb, watch_dir.display()
     );
-    // Phase 2: start tokio runtime, watch watch_dir for .torrent files,
-    // dissolve new files, update BtMiasmaIndex.
-    println!("Phase 2 stub: daemon would start here.");
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+
+    if let Err(e) = rt.block_on(bridge::watch_and_dissolve(&watch_dir, &data_dir, quota_mb)) {
+        error!("Daemon error: {e}");
+        std::process::exit(1);
+    }
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 fn parse_data_dir(args: &[String]) -> (PathBuf, Vec<String>) {
     let default_dir = directories::ProjectDirs::from("dev", "miasma", "miasma")
@@ -126,18 +169,40 @@ fn parse_data_dir(args: &[String]) -> (PathBuf, Vec<String>) {
     (data_dir, rest)
 }
 
+fn parse_quota_mb_from_args(args: &[String]) -> u64 {
+    args.windows(2)
+        .find(|w| w[0] == "--quota")
+        .map(|w| parse_size_mb(&w[1]))
+        .unwrap_or(102_400) // 100 GiB default
+}
+
+fn parse_size_mb(s: &str) -> u64 {
+    if let Some(g) = s.strip_suffix('G').or_else(|| s.strip_suffix("GB")) {
+        return g.parse::<u64>().unwrap_or(100) * 1024;
+    }
+    if let Some(m) = s.strip_suffix('M').or_else(|| s.strip_suffix("MB")) {
+        return m.parse::<u64>().unwrap_or(102400);
+    }
+    s.parse::<u64>().unwrap_or(102400)
+}
+
 fn print_usage() {
     println!(concat!(
-        "miasma-bridge — BitTorrent ↔ Miasma bridge (Phase 2)\n",
+        "miasma-bridge — BitTorrent ↔ Miasma bridge\n",
         "\n",
         "Commands:\n",
-        "  dissolve  Dissolve a torrent's contents into Miasma\n",
-        "  retrieve  Retrieve a MID and re-seed as torrent\n",
-        "  daemon    Run the bridge daemon\n",
+        "  dissolve  Dissolve a torrent's files into Miasma\n",
+        "            (uses DHT peer discovery + BT peer wire protocol)\n",
+        "  retrieve  Retrieve a MID and re-seed as torrent [Phase 2 stub]\n",
+        "  daemon    Watch a directory for new files and auto-dissolve them\n",
         "\n",
         "Options:\n",
-        "  --data-dir <dir>   Node data directory\n",
-        "  --quota <size>     Storage quota (e.g. 100G)\n",
-        "  --watch-dir <dir>  Directory to watch for .torrent files (daemon only)\n",
+        "  --data-dir <dir>    Node data directory\n",
+        "  --quota <size>      Storage quota (e.g. 100G, 512M)\n",
+        "  --watch-dir <dir>   Directory to watch for new files (daemon mode)\n",
+        "\n",
+        "Examples:\n",
+        "  miasma-bridge dissolve \"magnet:?xt=urn:btih:...\"\n",
+        "  miasma-bridge daemon --watch-dir C:\\\\Downloads\n",
     ));
 }
