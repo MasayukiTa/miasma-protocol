@@ -44,6 +44,7 @@ use miasma_core::{
     OnionAwareDhtExecutor,
     DEFAULT_SEGMENT_SIZE,
     // P2P node
+    Multiaddr,
     MiasmaCoordinator,
     MiasmaNode,
     NetworkShareFetcher,
@@ -639,4 +640,106 @@ async fn p2p_two_node_loopback() {
     .await;
 
     result.expect("p2p_two_node_loopback timed out (30s)");
+}
+
+// ── Test 19: Full Kademlia DHT + share-exchange round-trip ────────────────────
+//
+// Topology:  Node A (publisher/holder) ←─ TCP/loopback ─→ Node B (retriever)
+//
+// Unlike Test 18 which bypasses Kademlia, this test exercises the real DHT:
+//   1. Both nodes start; bootstrap each other from within their running loops.
+//   2. Node A dissolves + publishes via `dissolve_and_publish()` → Kademlia PUT.
+//   3. Node B retrieves via `retrieve_from_network()` → Kademlia GET + TCP
+//      share-exchange → reconstruct plaintext.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn p2p_kademlia_full_roundtrip() {
+    use std::time::Duration;
+    use tokio::time::{sleep, timeout};
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("miasma_core=debug,libp2p_swarm=info")
+        .try_init();
+
+    let result = timeout(Duration::from_secs(60), async {
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let store_a = Arc::new(LocalShareStore::open(dir_a.path(), 100).unwrap());
+        let store_b = Arc::new(LocalShareStore::open(dir_b.path(), 100).unwrap());
+
+        let key_a = [0x33u8; 32];
+        let key_b = [0x44u8; 32];
+
+        // ── Start Node A ──────────────────────────────────────────────────────
+        let mut node_a =
+            MiasmaNode::new(&key_a, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+        let addrs_a = node_a.collect_listen_addrs(400).await;
+        assert!(!addrs_a.is_empty(), "Node A must have a listen address");
+        let listen_addr_a_str = addrs_a[0].to_string();
+
+        let coord_a =
+            MiasmaCoordinator::start(node_a, store_a.clone(), vec![listen_addr_a_str.clone()])
+                .await;
+        let peer_id_a = *coord_a.peer_id();
+        println!("[kademlia] Node A: {peer_id_a} @ {listen_addr_a_str}");
+
+        // ── Start Node B ──────────────────────────────────────────────────────
+        let mut node_b =
+            MiasmaNode::new(&key_b, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+        let addrs_b = node_b.collect_listen_addrs(400).await;
+        assert!(!addrs_b.is_empty(), "Node B must have a listen address");
+        let listen_addr_b_str = addrs_b[0].to_string();
+
+        let coord_b =
+            MiasmaCoordinator::start(node_b, store_b.clone(), vec![listen_addr_b_str.clone()])
+                .await;
+        let peer_id_b = *coord_b.peer_id();
+        println!("[kademlia] Node B: {peer_id_b} @ {listen_addr_b_str}");
+
+        // ── Bootstrap: connect A↔B from within the running event loops ────────
+        let addr_a: Multiaddr = listen_addr_a_str.parse().unwrap();
+        let addr_b: Multiaddr = listen_addr_b_str.parse().unwrap();
+
+        coord_a.add_bootstrap_peer(peer_id_b, addr_b).await.unwrap();
+        coord_b.add_bootstrap_peer(peer_id_a, addr_a).await.unwrap();
+
+        coord_a.bootstrap_dht().await.unwrap();
+        coord_b.bootstrap_dht().await.unwrap();
+
+        // Wait for Kademlia routing tables to converge (~1-3 round trips).
+        eprintln!("[kademlia] Waiting for DHT convergence…");
+        sleep(Duration::from_millis(2500)).await;
+
+        // ── Publish via Node A ────────────────────────────────────────────────
+        let content = b"kademlia full round-trip: real DHT PUT + GET with TCP share-exchange";
+        let params = DissolutionParams { data_shards: 3, total_shards: 5 };
+
+        let mid = coord_a
+            .dissolve_and_publish(content, params)
+            .await
+            .expect("dissolve_and_publish failed");
+        println!("[kademlia] Published MID: {}", mid.to_string());
+
+        // Allow the PUT to replicate to the routing table.
+        sleep(Duration::from_millis(500)).await;
+
+        // ── Retrieve via Node B ───────────────────────────────────────────────
+        let recovered = coord_b
+            .retrieve_from_network(&mid, params)
+            .await
+            .expect("retrieve_from_network failed");
+
+        assert_eq!(
+            recovered.as_slice(),
+            content as &[u8],
+            "Kademlia round-trip plaintext mismatch"
+        );
+        println!("[kademlia] Round-trip OK: {} bytes", recovered.len());
+
+        coord_a.shutdown().await;
+        coord_b.shutdown().await;
+    })
+    .await;
+
+    result.expect("p2p_kademlia_full_roundtrip timed out (60s)");
 }

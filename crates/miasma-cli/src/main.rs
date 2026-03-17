@@ -549,9 +549,17 @@ async fn cmd_daemon(data_dir: &std::path::Path, bootstrap_addrs: &[String]) -> R
 
 // ─── Shared bootstrap helper ──────────────────────────────────────────────────
 
-/// Parse multiaddr bootstrap peers and register them with the node.
-/// Returns true if any peers were successfully added.
-fn register_bootstrap_peers(node: &mut MiasmaNode, addrs: &[&str]) -> bool {
+/// Parse multiaddr bootstrap peers and register them with a running coordinator.
+///
+/// Must be called AFTER `MiasmaCoordinator::start()` so that the dials are
+/// issued from inside the running event loop, avoiding the ECONNREFUSED race
+/// that occurs when dialing before the remote node's `run()` is accepting.
+///
+/// Returns `true` if at least one peer was successfully registered.
+async fn add_bootstrap_peers_to_coordinator(
+    coord: &MiasmaCoordinator,
+    addrs: &[&str],
+) -> bool {
     use libp2p::multiaddr::Protocol;
     let mut added = false;
     for addr_str in addrs {
@@ -565,11 +573,14 @@ fn register_bootstrap_peers(node: &mut MiasmaNode, addrs: &[&str]) -> bool {
                         if matches!(addr.iter().last(), Some(Protocol::P2p(_))) {
                             addr.pop();
                         }
-                        node.add_bootstrap_peer(peer_id, addr);
-                        added = true;
+                        if coord.add_bootstrap_peer(peer_id, addr).await.is_ok() {
+                            added = true;
+                        }
                     }
                     None => {
-                        eprintln!("Warning: bootstrap addr '{addr_str}' missing /p2p/<peer-id> — skipping");
+                        eprintln!(
+                            "Warning: bootstrap addr '{addr_str}' missing /p2p/<peer-id> — skipping"
+                        );
                     }
                 }
             }
@@ -615,19 +626,18 @@ async fn cmd_network_publish(
     let listen_addrs = node.collect_listen_addrs(300).await;
     let listen_addr_strings: Vec<String> = listen_addrs.iter().map(|a| a.to_string()).collect();
 
-    // Add bootstrap peers from CLI + config.
+    // Start FIRST — bootstrap peers are dialed from inside the running event
+    // loop to avoid the ECONNREFUSED race with pre-start dials.
+    let coord = MiasmaCoordinator::start(node, store, listen_addr_strings).await;
+
+    // Add bootstrap peers + trigger DHT FIND_NODE after the event loop is up.
     let all_bootstrap: Vec<&str> = config
         .network.bootstrap_peers.iter().map(|s| s.as_str())
         .chain(bootstrap_addrs.iter().map(|s| s.as_str()))
         .collect();
-    let has_bootstrap = register_bootstrap_peers(&mut node, &all_bootstrap);
+    let has_bootstrap = add_bootstrap_peers_to_coordinator(&coord, &all_bootstrap).await;
     if has_bootstrap {
-        node.bootstrap_dht().context("DHT bootstrap failed")?;
-    }
-
-    let coord = MiasmaCoordinator::start(node, store, listen_addr_strings).await;
-
-    if has_bootstrap {
+        coord.bootstrap_dht().await.context("DHT bootstrap failed")?;
         eprintln!("Waiting for DHT bootstrap…");
         tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
     }
@@ -681,19 +691,18 @@ async fn cmd_network_get(
 
     let _listen_addrs = node.collect_listen_addrs(300).await;
 
-    // Add bootstrap peers from CLI + config.
+    // Start FIRST — bootstrap peers are dialed from inside the running event
+    // loop to avoid the ECONNREFUSED race with pre-start dials.
+    let coord = MiasmaCoordinator::start(node, store, vec![]).await;
+
+    // Add bootstrap peers + trigger DHT FIND_NODE after the event loop is up.
     let all_bootstrap: Vec<&str> = config
         .network.bootstrap_peers.iter().map(|s| s.as_str())
         .chain(bootstrap_addrs.iter().map(|s| s.as_str()))
         .collect();
-    let has_bootstrap = register_bootstrap_peers(&mut node, &all_bootstrap);
+    let has_bootstrap = add_bootstrap_peers_to_coordinator(&coord, &all_bootstrap).await;
     if has_bootstrap {
-        node.bootstrap_dht().context("DHT bootstrap failed")?;
-    }
-
-    let coord = MiasmaCoordinator::start(node, store, vec![]).await;
-
-    if has_bootstrap {
+        coord.bootstrap_dht().await.context("DHT bootstrap failed")?;
         eprintln!("Waiting for DHT bootstrap…");
         tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
     }
