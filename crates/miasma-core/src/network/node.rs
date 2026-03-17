@@ -153,6 +153,10 @@ pub enum DhtCommand {
     BootstrapDht {
         reply: oneshot::Sender<Result<(), MiasmaError>>,
     },
+    /// Query the number of currently connected peers.
+    GetPeerCount {
+        reply: oneshot::Sender<usize>,
+    },
 }
 
 /// Sender side of the DHT command channel.
@@ -207,6 +211,16 @@ impl DhtHandle {
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
         rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))?
+    }
+
+    /// Return the number of currently connected peers.
+    pub async fn peer_count(&self) -> Result<usize, MiasmaError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::GetPeerCount { reply: tx })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
+        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
     }
 
     /// Retrieve a `DhtRecord` from Kademlia by raw mid-digest bytes.
@@ -306,6 +320,8 @@ pub struct MiasmaNode {
         HashMap<request_response::OutboundRequestId, oneshot::Sender<Result<Option<MiasmaShare>, MiasmaError>>>,
     /// Local share store — used to serve inbound `ShareFetchRequest`s.
     local_store: Option<Arc<LocalShareStore>>,
+    /// Optional channel to notify when a Kademlia PUT is acknowledged by remote peers.
+    replication_success_tx: Option<mpsc::Sender<[u8; 32]>>,
 }
 
 impl MiasmaNode {
@@ -345,12 +361,18 @@ impl MiasmaNode {
             pending_gets: HashMap::new(),
             pending_share_fetches: HashMap::new(),
             local_store: None,
+            replication_success_tx: None,
         })
     }
 
     /// Attach a local share store so this node can serve inbound shard requests.
     pub fn set_store(&mut self, store: Arc<LocalShareStore>) {
         self.local_store = Some(store);
+    }
+
+    /// Set a channel to receive notifications when a Kademlia PUT is acknowledged.
+    pub fn set_replication_notifier(&mut self, tx: mpsc::Sender<[u8; 32]>) {
+        self.replication_success_tx = Some(tx);
     }
 
     /// Returns a sender that drives DHT PUT/GET via the Kademlia event loop.
@@ -514,6 +536,10 @@ impl MiasmaNode {
                     .map_err(|e| MiasmaError::Sss(format!("DHT bootstrap: {e:?}")));
                 let _ = reply.send(result);
             }
+            DhtCommand::GetPeerCount { reply } => {
+                let count = self.swarm.connected_peers().count();
+                let _ = reply.send(count);
+            }
         }
     }
 
@@ -590,7 +616,16 @@ impl MiasmaNode {
     fn handle_kad_event(&mut self, ev: kad::Event) {
         match ev {
             kad::Event::OutboundQueryProgressed { id, result, step, .. } => match result {
-                kad::QueryResult::PutRecord(Ok(_)) => {
+                kad::QueryResult::PutRecord(Ok(kad::PutRecordOk { key })) => {
+                    // Notify replication tracker: network PUT acknowledged by remote peer.
+                    if let Some(tx) = &self.replication_success_tx {
+                        let key_bytes = key.as_ref();
+                        if key_bytes.len() == 32 {
+                            let mut digest = [0u8; 32];
+                            digest.copy_from_slice(key_bytes);
+                            let _ = tx.try_send(digest);
+                        }
+                    }
                     if let Some(reply) = self.pending_puts.remove(&id) {
                         let _ = reply.send(Ok(()));
                     }

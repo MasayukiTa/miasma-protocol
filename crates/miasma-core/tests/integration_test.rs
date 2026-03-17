@@ -831,3 +831,202 @@ async fn cli_smoke_loopback() {
 
     result.expect("cli_smoke_loopback timed out (30s)");
 }
+
+// ── Test 21: Daemon IPC publish → get round-trip ──────────────────────────────
+//
+// Mirrors the two-terminal CLI runbook at the API level:
+//   Daemon A starts → client publishes via IPC → client gets via daemon B IPC.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn daemon_ipc_publish_get_roundtrip() {
+    use miasma_core::daemon::DaemonServer;
+    use miasma_core::daemon::ipc::{daemon_request, ControlRequest, ControlResponse};
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("miasma_core=info")
+        .try_init();
+
+    let result = timeout(Duration::from_secs(30), async {
+        // ── Node A daemon ─────────────────────────────────────────────────────
+        let dir_a = tempfile::tempdir().unwrap();
+        let store_a = Arc::new(LocalShareStore::open(dir_a.path(), 100).unwrap());
+        let key_a = [0x88u8; 32];
+        let node_a = MiasmaNode::new(&key_a, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+
+        let server_a = DaemonServer::start(node_a, store_a, dir_a.path().to_owned())
+            .await
+            .unwrap();
+        let addr_a = format!("{}/p2p/{}", server_a.listen_addrs()[0], server_a.peer_id());
+        let shutdown_a = server_a.shutdown_handle();
+        let dir_a_path = dir_a.path().to_owned();
+        tokio::spawn(server_a.run());
+
+        // ── Publish via IPC client (network-publish behaviour) ────────────────
+        let content = b"daemon IPC round-trip test payload";
+        let req = ControlRequest::Publish {
+            data: content.to_vec(),
+            data_shards: 2,
+            total_shards: 3,
+        };
+        let mid_str = match daemon_request(&dir_a_path, req).await.unwrap() {
+            ControlResponse::Published { mid } => mid,
+            other => panic!("unexpected: {other:?}"),
+        };
+        println!("[ipc] Published MID: {mid_str}");
+
+        // After publish, network-publish EXITS — only the daemon stays alive.
+
+        // ── Node B daemon ─────────────────────────────────────────────────────
+        let dir_b = tempfile::tempdir().unwrap();
+        let store_b = Arc::new(LocalShareStore::open(dir_b.path(), 100).unwrap());
+        let key_b = [0x99u8; 32];
+        let node_b = MiasmaNode::new(&key_b, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+
+        let server_b = DaemonServer::start(node_b, store_b, dir_b.path().to_owned())
+            .await
+            .unwrap();
+        let dir_b_path = dir_b.path().to_owned();
+        let shutdown_b = server_b.shutdown_handle();
+
+        // Bootstrap B → A.
+        {
+            use libp2p::multiaddr::Protocol;
+            let mut addr: Multiaddr = addr_a.parse().unwrap();
+            let bootstrap_peer_id: libp2p::PeerId = addr.iter().find_map(|p| {
+                if let Protocol::P2p(id) = p { Some(id) } else { None }
+            }).unwrap();
+            if matches!(addr.iter().last(), Some(Protocol::P2p(_))) { addr.pop(); }
+            server_b.add_bootstrap_peer(bootstrap_peer_id, addr).await.unwrap();
+        }
+        server_b.bootstrap_dht().await.unwrap();
+        tokio::spawn(server_b.run());
+
+        // Wait for DHT convergence.
+        tokio::time::sleep(Duration::from_millis(2000)).await;
+
+        // ── Get via IPC client (network-get behaviour) ────────────────────────
+        let req = ControlRequest::Get {
+            mid: mid_str.clone(),
+            data_shards: 2,
+            total_shards: 3,
+        };
+        let retrieved = match daemon_request(&dir_b_path, req).await.unwrap() {
+            ControlResponse::Retrieved { data } => data,
+            ControlResponse::Error(e) => panic!("get error: {e}"),
+            other => panic!("unexpected: {other:?}"),
+        };
+
+        assert_eq!(retrieved.as_slice(), content as &[u8], "content mismatch");
+        println!("[ipc] Round-trip OK: {} bytes", retrieved.len());
+
+        let _ = shutdown_a.send(()).await;
+        let _ = shutdown_b.send(()).await;
+    })
+    .await;
+
+    result.expect("daemon_ipc_publish_get_roundtrip timed out");
+}
+
+// ── Test 22: Publish before peers exist → replication retries when peer joins ──
+//
+// Proves that the replication queue defers announce until a peer is available,
+// then eventually delivers the record so a later joiner can retrieve content.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn replication_retries_after_peer_join() {
+    use miasma_core::daemon::DaemonServer;
+    use miasma_core::daemon::ipc::{daemon_request, ControlRequest, ControlResponse};
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("miasma_core=info")
+        .try_init();
+
+    let result = timeout(Duration::from_secs(30), async {
+        // ── Node A: publish with no peers ─────────────────────────────────────
+        let dir_a = tempfile::tempdir().unwrap();
+        let store_a = Arc::new(LocalShareStore::open(dir_a.path(), 100).unwrap());
+        let node_a = MiasmaNode::new(&[0xAAu8; 32], NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+
+        let server_a = DaemonServer::start(node_a, store_a, dir_a.path().to_owned())
+            .await
+            .unwrap();
+        let addr_a_str = format!("{}/p2p/{}", server_a.listen_addrs()[0], server_a.peer_id());
+        let shutdown_a = server_a.shutdown_handle();
+        let dir_a_path = dir_a.path().to_owned();
+        let queue_a = server_a.queue();
+        tokio::spawn(server_a.run());
+
+        let content = b"replication-retry test: publish before peers exist";
+        let req = ControlRequest::Publish { data: content.to_vec(), data_shards: 2, total_shards: 3 };
+        let mid_str = match daemon_request(&dir_a_path, req).await.unwrap() {
+            ControlResponse::Published { mid } => mid,
+            other => panic!("unexpected: {other:?}"),
+        };
+        println!("[retry] Published MID: {mid_str} (no peers yet)");
+
+        // Immediately after publish: pending_replication = 1, replicated = 0.
+        assert_eq!(queue_a.lock().unwrap().pending_count(), 1);
+        assert_eq!(queue_a.lock().unwrap().replicated_count(), 0);
+
+        // ── Node B: join and bootstrap to A ───────────────────────────────────
+        let dir_b = tempfile::tempdir().unwrap();
+        let store_b = Arc::new(LocalShareStore::open(dir_b.path(), 100).unwrap());
+        let node_b = MiasmaNode::new(&[0xBBu8; 32], NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+
+        let server_b = DaemonServer::start(node_b, store_b, dir_b.path().to_owned())
+            .await
+            .unwrap();
+        let dir_b_path = dir_b.path().to_owned();
+        let shutdown_b = server_b.shutdown_handle();
+
+        {
+            use libp2p::multiaddr::Protocol;
+            let mut addr: Multiaddr = addr_a_str.parse().unwrap();
+            let peer_id_a: libp2p::PeerId = addr.iter().find_map(|p| {
+                if let Protocol::P2p(id) = p { Some(id) } else { None }
+            }).unwrap();
+            if matches!(addr.iter().last(), Some(Protocol::P2p(_))) { addr.pop(); }
+            server_b.add_bootstrap_peer(peer_id_a, addr).await.unwrap();
+        }
+        server_b.bootstrap_dht().await.unwrap();
+        tokio::spawn(server_b.run());
+
+        // Wait for connection to be established.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Re-read server_a via IPC: trigger replication retry now that A has a peer.
+        // In production this happens via the 5-second timer; here we just wait for it.
+        // The timer fires every 5s, so wait up to 7s for at least one retry.
+        let mut replicated = false;
+        for _ in 0..14 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let rc = queue_a.lock().unwrap().replicated_count();
+            if rc > 0 {
+                replicated = true;
+                break;
+            }
+        }
+        println!("[retry] replicated_count = {}", queue_a.lock().unwrap().replicated_count());
+        assert!(replicated, "replication was never confirmed by a remote peer");
+
+        // ── B can now retrieve content ─────────────────────────────────────────
+        let req = ControlRequest::Get { mid: mid_str.clone(), data_shards: 2, total_shards: 3 };
+        let retrieved = match daemon_request(&dir_b_path, req).await.unwrap() {
+            ControlResponse::Retrieved { data } => data,
+            ControlResponse::Error(e) => panic!("get from B failed: {e}"),
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert_eq!(retrieved.as_slice(), content as &[u8]);
+        println!("[retry] Round-trip OK after replication retry: {} bytes", retrieved.len());
+
+        let _ = shutdown_a.send(()).await;
+        let _ = shutdown_b.send(()).await;
+    })
+    .await;
+
+    result.expect("replication_retries_after_peer_join timed out");
+}
