@@ -13,6 +13,7 @@ import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -20,7 +21,6 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.res.stringResource
 import androidx.core.content.ContextCompat
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
@@ -31,6 +31,7 @@ import androidx.navigation.compose.rememberNavController
 import dev.miasma.ui.DissolveScreen
 import dev.miasma.ui.HomeScreen
 import dev.miasma.ui.RetrieveScreen
+import dev.miasma.ui.SettingsScreen
 import dev.miasma.ui.StatusScreen
 import dev.miasma.ui.theme.MiasmaTheme
 
@@ -44,8 +45,13 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Start the background daemon.
-        MiasmaService.startNode(this, filesDir.absolutePath)
+        // Start the background daemon with persisted settings.
+        MiasmaService.startNode(
+            this,
+            filesDir.absolutePath,
+            Prefs.storageMb(this),
+            Prefs.bandwidthMbDay(this),
+        )
 
         // Pre-request camera permission (QR scanner).
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
@@ -91,6 +97,7 @@ class MainActivity : ComponentActivity() {
                         composable("dissolve") { DissolveScreen(vm) }
                         composable("retrieve") { RetrieveScreen(vm) }
                         composable("status")   { StatusScreen(vm) }
+                        composable("settings") { SettingsScreen() }
                     }
                 }
             }
@@ -105,4 +112,5 @@ private val NAV_ITEMS = listOf(
     NavItem("dissolve", "Dissolve", Icons.Default.CloudUpload),
     NavItem("retrieve", "Retrieve", Icons.Default.CloudDownload),
     NavItem("status",   "Status",   Icons.Default.Info),
+    NavItem("settings", "Settings", Icons.Default.Settings),
 )

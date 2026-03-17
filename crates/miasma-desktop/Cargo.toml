@@ -1,0 +1,26 @@
+[package]
+name = "miasma-desktop"
+description = "Cross-platform desktop GUI — Phase 3 (Task 22)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "miasma-desktop"
+path = "src/main.rs"
+
+[dependencies]
+miasma-core = { path = "../miasma-core" }
+tokio       = { version = "1", features = ["full"] }
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde.workspace = true
+
+# GUI — egui (immediate-mode, cross-platform: Windows/macOS/Linux)
+# Phase 3: uncomment to build the real GUI.
+# egui    = "0.27"
+# eframe  = { version = "0.27", features = ["default_fonts"] }
+# rfd     = "0.14"  # file picker dialog

@@ -32,7 +32,9 @@
 pub mod coordinator;
 pub mod dht_source;
 pub mod source;
+pub mod streaming;
 
 pub use coordinator::RetrievalCoordinator;
 pub use dht_source::DhtShareSource;
 pub use source::{LocalShareSource, ShareSource};
+pub use streaming::StreamingRetrievalCoordinator;
