@@ -1,6 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use miasma_core::crypto::{
-    aead::{encrypt, encrypt_with_key, decrypt},
+    aead::{encrypt_with_key, decrypt},
     hash::ContentId,
     rs::{rs_encode, rs_decode, DEFAULT_DATA_SHARDS, DEFAULT_TOTAL_SHARDS},
     sss::{sss_split, sss_combine},
