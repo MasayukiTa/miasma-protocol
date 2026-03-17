@@ -743,3 +743,91 @@ async fn p2p_kademlia_full_roundtrip() {
 
     result.expect("p2p_kademlia_full_roundtrip timed out (60s)");
 }
+
+// ── Test 20: CLI smoke path — mirrors `network-publish` → `network-get` ───────
+//
+// This test is the in-process analogue of the 2-terminal CLI runbook:
+//
+//   Terminal 1:  miasma --data-dir /tmp/a init
+//                miasma --data-dir /tmp/a network-publish file.txt
+//                # stays running, prints: MID + /ip4/127.0.0.1/.../p2p/<peer_id>
+//
+//   Terminal 2:  miasma --data-dir /tmp/b init
+//                miasma --data-dir /tmp/b network-get <MID> \
+//                    --bootstrap /ip4/127.0.0.1/.../p2p/<peer_id> -o out.bin
+//
+// Kept intentionally small (k=2/n=3, tiny payload) for fast CI feedback.
+// For the full-fidelity P2P + DHT test, see `p2p_kademlia_full_roundtrip`.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cli_smoke_loopback() {
+    use std::time::Duration;
+    use tokio::time::{sleep, timeout};
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("miasma_core=info")
+        .try_init();
+
+    let result = timeout(Duration::from_secs(30), async {
+        // ── Node A: init + network-publish ────────────────────────────────────
+        let dir_a = tempfile::tempdir().unwrap();
+        let store_a = Arc::new(LocalShareStore::open(dir_a.path(), 100).unwrap());
+        let key_a = [0x55u8; 32];
+
+        let mut node_a =
+            MiasmaNode::new(&key_a, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+        let peer_id_a = node_a.local_peer_id;
+        let addrs_a = node_a.collect_listen_addrs(400).await;
+        assert!(!addrs_a.is_empty(), "Node A must have a listen address");
+        let addr_a_str = addrs_a[0].to_string();
+        // Simulate the bootstrap address printed by `network-publish`
+        let bootstrap_str = format!("{addr_a_str}/p2p/{peer_id_a}");
+        println!("[smoke] Node A bootstrap addr: {bootstrap_str}");
+
+        let coord_a =
+            MiasmaCoordinator::start(node_a, store_a, vec![addr_a_str.clone()]).await;
+
+        // Dissolve + publish (same as `miasma network-publish`)
+        let content = b"cli smoke test payload";
+        let params = DissolutionParams { data_shards: 2, total_shards: 3 };
+        let mid = coord_a.dissolve_and_publish(content, params).await.unwrap();
+        println!("[smoke] Published MID: {}", mid.to_string());
+
+        // ── Node B: init + network-get (with --bootstrap) ─────────────────────
+        let dir_b = tempfile::tempdir().unwrap();
+        let store_b = Arc::new(LocalShareStore::open(dir_b.path(), 100).unwrap());
+        let key_b = [0x66u8; 32];
+
+        let mut node_b =
+            MiasmaNode::new(&key_b, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+        let _addrs_b = node_b.collect_listen_addrs(400).await;
+        let coord_b = MiasmaCoordinator::start(node_b, store_b, vec![]).await;
+
+        // Parse bootstrap addr and register (same as CLI --bootstrap parsing)
+        use libp2p::multiaddr::Protocol;
+        let mut addr: Multiaddr = bootstrap_str.parse().unwrap();
+        let bootstrap_peer_id: libp2p::PeerId = addr.iter().find_map(|p| {
+            if let Protocol::P2p(id) = p { Some(id) } else { None }
+        }).unwrap();
+        if matches!(addr.iter().last(), Some(Protocol::P2p(_))) { addr.pop(); }
+
+        coord_b.add_bootstrap_peer(bootstrap_peer_id, addr).await.unwrap();
+        coord_b.bootstrap_dht().await.unwrap();
+
+        // Wait for DHT convergence (same as 2s sleep in `network-get`)
+        sleep(Duration::from_millis(1500)).await;
+
+        // Retrieve (same as `miasma network-get`)
+        let recovered = coord_b.retrieve_from_network(&mid, params).await
+            .expect("network-get failed");
+
+        assert_eq!(recovered.as_slice(), content as &[u8], "plaintext mismatch");
+        println!("[smoke] Round-trip OK: {} bytes", recovered.len());
+
+        coord_a.shutdown().await;
+        coord_b.shutdown().await;
+    })
+    .await;
+
+    result.expect("cli_smoke_loopback timed out (30s)");
+}

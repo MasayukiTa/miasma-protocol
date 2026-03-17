@@ -12,7 +12,7 @@ use futures::StreamExt as _;
 use libp2p::{
     autonat, dcutr, identify,
     identity::Keypair,
-    kad::{self, store::MemoryStore},
+    kad::{self, store::MemoryStore, store::RecordStore},
     noise, ping, relay, request_response, yamux,
     swarm::{NetworkBehaviour, SwarmEvent},
     Multiaddr, PeerId, StreamProtocol, Swarm,
@@ -476,14 +476,16 @@ impl MiasmaNode {
                     publisher: None,
                     expires: None,
                 };
-                match self.swarm.behaviour_mut().kademlia.put_record(record, kad::Quorum::One) {
-                    Ok(qid) => {
-                        self.pending_puts.insert(qid, reply);
-                    }
-                    Err(e) => {
-                        let _ = reply.send(Err(MiasmaError::Dht(format!("{e:?}"))));
-                    }
-                }
+                // Always store locally first so remote peers can retrieve the
+                // record via GET even if no other peers are reachable yet.
+                // This is critical for the 2-node local flow: Node A publishes
+                // before Node B connects; B's GET_VALUE query to A must find it.
+                let _ = self.swarm.behaviour_mut().kademlia.store_mut().put(record.clone());
+                // Fire-and-forget network replication: reply success immediately.
+                // Quorum failure (no remote peers) is non-fatal since local
+                // storage guarantees serving inbound GET_VALUE queries.
+                let _ = self.swarm.behaviour_mut().kademlia.put_record(record, kad::Quorum::One);
+                let _ = reply.send(Ok(()));
             }
             DhtCommand::Get { key, reply } => {
                 let qid = self
