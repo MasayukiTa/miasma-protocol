@@ -483,6 +483,17 @@ async fn cmd_daemon(data_dir: &std::path::Path, bootstrap_addrs: &[String]) -> R
     )
     .context("cannot create node")?;
 
+    // Collect actual OS-assigned listen addresses (resolves port 0).
+    let listen_addrs = node.collect_listen_addrs(400).await;
+    let peer_id = node.local_peer_id;
+    eprintln!();
+    eprintln!("Peer ID: {peer_id}");
+    eprintln!("Bootstrap addresses (pass to other nodes via --bootstrap):");
+    for addr in &listen_addrs {
+        eprintln!("  {addr}/p2p/{peer_id}");
+    }
+    eprintln!();
+
     // Add bootstrap peers from config + CLI flags.
     let all_bootstrap: Vec<&str> = config
         .network
@@ -628,7 +639,7 @@ async fn cmd_network_publish(
 
     // Start FIRST — bootstrap peers are dialed from inside the running event
     // loop to avoid the ECONNREFUSED race with pre-start dials.
-    let coord = MiasmaCoordinator::start(node, store, listen_addr_strings).await;
+    let coord = MiasmaCoordinator::start(node, store, listen_addr_strings.clone()).await;
 
     // Add bootstrap peers + trigger DHT FIND_NODE after the event loop is up.
     let all_bootstrap: Vec<&str> = config
@@ -649,9 +660,28 @@ async fn cmd_network_publish(
 
     let mid_str = mid.to_string();
     println!("{mid_str}");
-    eprintln!("✓ Published. Retrieve with: miasma network-get {mid_str}");
-    eprintln!("  Run `miasma daemon` to serve shares to the network.");
 
+    // Print the full bootstrap multiaddrs so Node B can connect.
+    let peer_id = coord.peer_id();
+    eprintln!();
+    eprintln!("✓ Published MID: {mid_str}");
+    eprintln!();
+    eprintln!("Bootstrap addresses for this node (copy one for `--bootstrap`):");
+    for addr_str in &listen_addr_strings {
+        eprintln!("  {addr_str}/p2p/{peer_id}");
+    }
+    eprintln!();
+    eprintln!("Retrieve command for Node B:");
+    eprintln!("  miasma network-get {mid_str} \\");
+    if let Some(first) = listen_addr_strings.first() {
+        eprintln!("      --bootstrap {first}/p2p/{peer_id} -o output.bin");
+    }
+    eprintln!();
+    eprintln!("Serving shares. Press Ctrl-C to stop.");
+
+    // Keep serving until Ctrl-C so Node B can actually fetch the shares.
+    tokio::signal::ctrl_c().await.ok();
+    info!("Received Ctrl-C, shutting down…");
     coord.shutdown().await;
     Ok(())
 }
