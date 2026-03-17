@@ -20,7 +20,10 @@ pub use dissolution::{
     ShareSink, SegmentMeta, DEFAULT_SEGMENT_SIZE,
 };
 pub use error::MiasmaError;
-pub use network::{BypassOnionDhtExecutor, MiasmaNode, NodeType, OnionAwareDhtExecutor};
+pub use network::{
+    BypassOnionDhtExecutor, DirectDhtExecutor, DhtHandle, MiasmaCoordinator, MiasmaNode,
+    NodeType, OnionAwareDhtExecutor, ShareExchangeHandle,
+};
 pub use onion::{
     CircuitId, CircuitManager, InProcessRelay, LiveOnionDhtExecutor, LiveOnionShareFetcher,
     OnionPacketBuilder, OnionShareFetcher,

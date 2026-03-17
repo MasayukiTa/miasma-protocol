@@ -32,6 +32,12 @@ pub enum MiasmaError {
     #[error("serialization failed: {0}")]
     Serialization(String),
 
+    #[error("DHT error: {0}")]
+    Dht(String),
+
+    #[error("network error: {0}")]
+    Network(String),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }
