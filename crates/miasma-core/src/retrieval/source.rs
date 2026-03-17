@@ -5,20 +5,24 @@
 ///          fetches from remote peers via onion-routed libp2p connections.
 use std::sync::Arc;
 
-use crate::{share::MiasmaShare, store::LocalShareStore, MiasmaError};
+use crate::{crypto::hash::ContentId, share::MiasmaShare, store::LocalShareStore, MiasmaError};
 
 /// Abstraction over share collection — allows the retrieval coordinator to
 /// work identically against local storage (Phase 1) and the P2P network
 /// (Phase 2) without changing any retrieval logic.
 #[async_trait::async_trait]
 pub trait ShareSource: Send + Sync {
-    /// Return addresses of candidate shares matching `mid_prefix`.
+    /// Return addresses of candidate shares for the given `mid`.
+    ///
+    /// - Phase 1 (`LocalShareSource`): scans local encrypted store by MID prefix.
+    /// - Phase 2 (`DhtShareSource`): queries the DHT record to enumerate shard
+    ///   locators, then returns synthetic locator strings.
     ///
     /// Implementations MAY return false positives (extra addresses); they
     /// MUST NOT return false negatives (missing addresses for valid shares).
-    async fn list_candidates(&self, mid_prefix: &[u8; 8]) -> Vec<String>;
+    async fn list_candidates(&self, mid: &ContentId) -> Vec<String>;
 
-    /// Fetch a share by its address. Returns `None` if not found.
+    /// Fetch a share by its address/locator. Returns `None` if not found.
     async fn fetch(&self, address: &str) -> Result<Option<MiasmaShare>, MiasmaError>;
 }
 
@@ -41,8 +45,9 @@ impl LocalShareSource {
 
 #[async_trait::async_trait]
 impl ShareSource for LocalShareSource {
-    async fn list_candidates(&self, mid_prefix: &[u8; 8]) -> Vec<String> {
-        self.store.search_by_mid_prefix(mid_prefix)
+    async fn list_candidates(&self, mid: &ContentId) -> Vec<String> {
+        let prefix = mid.prefix();
+        self.store.search_by_mid_prefix(&prefix)
     }
 
     async fn fetch(&self, address: &str) -> Result<Option<MiasmaShare>, MiasmaError> {
@@ -77,7 +82,7 @@ mod tests {
             store.put(s).unwrap();
         }
 
-        let candidates = src.list_candidates(&mid.prefix()).await;
+        let candidates = src.list_candidates(&mid).await;
         assert_eq!(candidates.len(), params.total_shards);
     }
 
@@ -96,7 +101,7 @@ mod tests {
         }
 
         // other_mid has a different prefix — should return no candidates.
-        let candidates = src.list_candidates(&other_mid.prefix()).await;
+        let candidates = src.list_candidates(&other_mid).await;
         assert!(candidates.is_empty());
     }
 

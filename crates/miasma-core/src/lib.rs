@@ -18,9 +18,10 @@ pub use dissolution::{
 pub use error::MiasmaError;
 pub use network::{BypassOnionDhtExecutor, MiasmaNode, NodeType, OnionAwareDhtExecutor};
 pub use onion::{
-    CircuitId, CircuitManager, InProcessRelay, LiveOnionDhtExecutor, OnionPacketBuilder,
+    CircuitId, CircuitManager, InProcessRelay, LiveOnionDhtExecutor, LiveOnionShareFetcher,
+    OnionPacketBuilder, OnionShareFetcher,
 };
 pub use pipeline::{dissolve, retrieve, DissolutionParams};
-pub use retrieval::{LocalShareSource, RetrievalCoordinator, ShareSource};
+pub use retrieval::{DhtShareSource, LocalShareSource, RetrievalCoordinator, ShareSource};
 pub use share::{MiasmaShare, ShareVerification};
 pub use store::LocalShareStore;

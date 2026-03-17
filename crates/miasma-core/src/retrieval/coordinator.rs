@@ -70,8 +70,8 @@ impl<Src: ShareSource> RetrievalCoordinator<Src> {
         &self,
         manifest: &DissolutionManifest,
     ) -> Result<Vec<u8>, MiasmaError> {
-        // Collect all candidate addresses once (same MID prefix for all segments).
-        let candidates = self.source.list_candidates(&manifest.mid.prefix()).await;
+        // Collect all candidate addresses once (same MID for all segments).
+        let candidates = self.source.list_candidates(&manifest.mid).await;
 
         let mut all_shares: Vec<MiasmaShare> = Vec::new();
 
@@ -95,7 +95,7 @@ impl<Src: ShareSource> RetrievalCoordinator<Src> {
         segment_index: u32,
         params: DissolutionParams,
     ) -> Result<Vec<MiasmaShare>, MiasmaError> {
-        let mut candidates = self.source.list_candidates(&mid.prefix()).await;
+        let mut candidates = self.source.list_candidates(mid).await;
 
         if candidates.is_empty() {
             return Err(MiasmaError::InsufficientShares {

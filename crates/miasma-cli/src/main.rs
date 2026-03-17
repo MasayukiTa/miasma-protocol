@@ -440,9 +440,31 @@ async fn cmd_daemon(data_dir: &std::path::Path, bootstrap_addrs: &[String]) -> R
 
     for addr_str in all_bootstrap {
         match addr_str.parse::<libp2p::Multiaddr>() {
-            Ok(_addr) => {
-                // TODO: extract PeerId from multiaddr and call node.add_bootstrap_peer()
-                info!("Bootstrap peer configured: {addr_str}");
+            Ok(mut addr) => {
+                use libp2p::multiaddr::Protocol;
+                // Extract PeerId from the trailing /p2p/<peer-id> component.
+                let maybe_peer_id: Option<libp2p::PeerId> = addr.iter().find_map(|proto| {
+                    if let Protocol::P2p(id) = proto {
+                        Some(id)
+                    } else {
+                        None
+                    }
+                });
+                match maybe_peer_id {
+                    Some(peer_id) => {
+                        // Remove the /p2p component — add_bootstrap_peer expects transport addr only.
+                        if matches!(addr.iter().last(), Some(Protocol::P2p(_))) {
+                            addr.pop();
+                        }
+                        node.add_bootstrap_peer(peer_id, addr);
+                        info!("Bootstrap peer added: {addr_str}");
+                    }
+                    None => {
+                        eprintln!(
+                            "Warning: bootstrap addr '{addr_str}' missing /p2p/<peer-id> — skipping"
+                        );
+                    }
+                }
             }
             Err(e) => {
                 eprintln!("Warning: invalid bootstrap addr '{}': {}", addr_str, e);

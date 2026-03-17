@@ -51,6 +51,14 @@ impl ContentId {
         Ok(Self { digest })
     }
 
+    /// Construct a `ContentId` from a raw 32-byte digest already known to the caller.
+    ///
+    /// Use only when the digest is already available (e.g. from a `DhtRecord.mid_digest`).
+    /// Prefer `ContentId::compute` when you have the raw content.
+    pub fn from_digest(digest: [u8; 32]) -> Self {
+        Self { digest }
+    }
+
     /// Raw 32-byte BLAKE3 digest.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.digest
