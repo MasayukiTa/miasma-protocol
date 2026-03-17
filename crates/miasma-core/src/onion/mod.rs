@@ -18,6 +18,7 @@ pub mod circuit;
 pub mod executor;
 pub mod packet;
 pub mod router;
+pub mod share;
 
 pub use circuit::{CircuitManager, RelayInfo};
 pub use executor::LiveOnionDhtExecutor;
@@ -26,3 +27,4 @@ pub use packet::{
     ReturnPath, derive_onion_static_key,
 };
 pub use router::{ForwardCell, InProcessRelay, OnionRelayHandler, ResponseCell};
+pub use share::{LiveOnionShareFetcher, OnionShareFetcher};

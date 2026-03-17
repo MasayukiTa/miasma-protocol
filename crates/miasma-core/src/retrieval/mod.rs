@@ -30,7 +30,9 @@
 /// - **k個受信で停止**: Collection loop breaks immediately once k valid shares
 ///   are found, minimising information exposure.
 pub mod coordinator;
+pub mod dht_source;
 pub mod source;
 
 pub use coordinator::RetrievalCoordinator;
+pub use dht_source::DhtShareSource;
 pub use source::{LocalShareSource, ShareSource};
