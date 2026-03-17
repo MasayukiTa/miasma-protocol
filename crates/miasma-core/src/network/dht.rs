@@ -79,6 +79,35 @@ impl OnionAwareDhtExecutor for BypassOnionDhtExecutor {
     }
 }
 
+// ─── DirectDhtExecutor (Phase 2) ─────────────────────────────────────────────
+
+/// Real-network DHT executor that drives Kademlia via `DhtHandle`.
+///
+/// Implements `OnionAwareDhtExecutor` without onion routing — privacy is
+/// delegated to the transport layer. Suitable for bootstrap nodes and bridge
+/// nodes where IP privacy is less critical than connectivity.
+#[derive(Clone)]
+pub struct DirectDhtExecutor {
+    handle: super::node::DhtHandle,
+}
+
+impl DirectDhtExecutor {
+    pub fn new(handle: super::node::DhtHandle) -> Self {
+        Self { handle }
+    }
+}
+
+#[async_trait::async_trait]
+impl OnionAwareDhtExecutor for DirectDhtExecutor {
+    async fn put(&self, record: DhtRecord) -> Result<(), MiasmaError> {
+        self.handle.put(record).await
+    }
+
+    async fn get(&self, mid: &ContentId) -> Result<Option<DhtRecord>, MiasmaError> {
+        self.handle.get_record(*mid.as_bytes()).await
+    }
+}
+
 // ─── Live executor (Task 4 — implemented in onion::executor) ─────────────────
 
 /// Production DHT executor with 2-hop onion routing.

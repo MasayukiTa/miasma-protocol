@@ -1,0 +1,229 @@
+/// MiasmaCoordinator — ties node, store, DHT, and share exchange together.
+///
+/// # Roles
+/// - `dissolve_and_publish`: dissolves content locally, publishes a `DhtRecord`
+///   that lists this node as the holder of all generated shards.
+/// - `retrieve_from_network`: queries the DHT for shard locations, fetches each
+///   shard from its holder via the `/miasma/share/1.0.0` request-response
+///   protocol, and reconstructs the plaintext.
+///
+/// # Wire path
+/// ```text
+/// dissolve_and_publish:
+///   plaintext → dissolve() → shares (local store) + DhtRecord (Kademlia)
+///
+/// retrieve_from_network:
+///   DhtRecord ← Kademlia GET
+///   for each shard: ShareFetchRequest →(quic)→ holder node → ShareFetchResponse
+///   shares → reconstruct() → plaintext
+/// ```
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use libp2p::PeerId;
+use tokio::sync::mpsc;
+use tracing::error;
+
+use crate::{
+    crypto::hash::ContentId,
+    network::{
+        dht::DirectDhtExecutor,
+        node::{DhtHandle, MiasmaNode, ShareExchangeHandle, ShareFetchRequest},
+        types::{DhtRecord, ShardLocation},
+    },
+    onion::share::OnionShareFetcher,
+    pipeline::{dissolve, DissolutionParams},
+    retrieval::{coordinator::RetrievalCoordinator, dht_source::DhtShareSource},
+    share::MiasmaShare,
+    store::LocalShareStore,
+    MiasmaError,
+};
+
+// ─── NetworkShareFetcher ──────────────────────────────────────────────────────
+
+/// Fetches shards from remote peers via the share-exchange request-response
+/// protocol, using the DHT to locate which peer holds each shard.
+///
+/// Caches the `DhtRecord` after the first lookup so that fetching all
+/// `total_shards` shards for the same content triggers only one DHT GET.
+pub struct NetworkShareFetcher {
+    dht_handle: DhtHandle,
+    share_handle: ShareExchangeHandle,
+    /// Cache keyed by raw mid-digest to avoid redundant DHT GETs.
+    record_cache: Mutex<HashMap<[u8; 32], DhtRecord>>,
+}
+
+impl NetworkShareFetcher {
+    pub fn new(dht_handle: DhtHandle, share_handle: ShareExchangeHandle) -> Self {
+        Self {
+            dht_handle,
+            share_handle,
+            record_cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    async fn get_cached_record(
+        &self,
+        mid_digest: [u8; 32],
+    ) -> Result<Option<DhtRecord>, MiasmaError> {
+        // Fast path: return cached record if available.
+        {
+            let cache = self.record_cache.lock().unwrap();
+            if let Some(r) = cache.get(&mid_digest) {
+                return Ok(Some(r.clone()));
+            }
+        }
+        // Slow path: DHT lookup.
+        match self.dht_handle.get_record(mid_digest).await? {
+            Some(record) => {
+                let mut cache = self.record_cache.lock().unwrap();
+                cache.insert(mid_digest, record.clone());
+                Ok(Some(record))
+            }
+            None => Ok(None),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl OnionShareFetcher for NetworkShareFetcher {
+    async fn fetch_share(
+        &self,
+        mid_digest: [u8; 32],
+        slot_index: u16,
+        segment_index: u32,
+    ) -> Result<Option<MiasmaShare>, MiasmaError> {
+        // 1. Find which peer holds this shard.
+        let record = match self.get_cached_record(mid_digest).await? {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+
+        let location = match record.locations.iter().find(|l| l.shard_index == slot_index) {
+            Some(l) => l,
+            None => return Ok(None),
+        };
+
+        // 2. Parse peer ID from location bytes.
+        let peer_id = PeerId::from_bytes(&location.peer_id_bytes)
+            .map_err(|e| MiasmaError::Network(format!("invalid peer_id in DhtRecord: {e}")))?;
+
+        // 3. Send request-response to the holder.
+        let request = ShareFetchRequest { mid_digest, slot_index, segment_index };
+        self.share_handle.fetch(peer_id, location.addrs.clone(), request).await
+    }
+}
+
+// ─── MiasmaCoordinator ────────────────────────────────────────────────────────
+
+/// High-level coordinator: owns the node handle, store, and channel handles.
+pub struct MiasmaCoordinator {
+    store: Arc<LocalShareStore>,
+    dht_handle: DhtHandle,
+    share_handle: ShareExchangeHandle,
+    shutdown_tx: mpsc::Sender<()>,
+    /// This node's libp2p PeerId, embedded in published `DhtRecord`s.
+    peer_id: PeerId,
+    /// Announced listen addresses included in `DhtRecord.locations`.
+    listen_addrs: Vec<String>,
+}
+
+impl MiasmaCoordinator {
+    /// Spawn the node's event loop and return a coordinator wrapping its handles.
+    ///
+    /// `listen_addrs` — the multiaddr strings that remote peers can use to reach
+    /// this node (e.g. `"/ip4/1.2.3.4/udp/4001/quic-v1"`). These are written into
+    /// the `DhtRecord` so that retrievers know where to send share-fetch requests.
+    pub async fn start(
+        mut node: MiasmaNode,
+        store: Arc<LocalShareStore>,
+        listen_addrs: Vec<String>,
+    ) -> Self {
+        let peer_id = node.local_peer_id;
+        let dht_handle = node.dht_handle();
+        let share_handle = node.share_exchange_handle();
+        let shutdown_tx = node.shutdown_handle();
+
+        // Give the node a reference to the store so it can serve inbound requests.
+        node.set_store(store.clone());
+
+        tokio::spawn(async move {
+            if let Err(e) = node.run().await {
+                error!("MiasmaNode event loop error: {e}");
+            }
+        });
+
+        Self { store, dht_handle, share_handle, shutdown_tx, peer_id, listen_addrs }
+    }
+
+    /// Send a shutdown signal to the background node task.
+    pub async fn shutdown(&self) {
+        let _ = self.shutdown_tx.send(()).await;
+    }
+
+    /// This node's libp2p peer ID.
+    pub fn peer_id(&self) -> &PeerId {
+        &self.peer_id
+    }
+
+    /// Dissolve `data` into shares, store them locally, and publish the
+    /// `DhtRecord` that announces this node as the shard holder.
+    pub async fn dissolve_and_publish(
+        &self,
+        data: &[u8],
+        params: DissolutionParams,
+    ) -> Result<ContentId, MiasmaError> {
+        let (mid, shares) = dissolve(data, params)?;
+
+        // Store shares in the local encrypted share store.
+        for share in &shares {
+            self.store.put(share)?;
+        }
+
+        // Build shard-location entries: this node holds all shards.
+        let peer_bytes = self.peer_id.to_bytes();
+        let locations: Vec<ShardLocation> = shares
+            .iter()
+            .map(|s| ShardLocation {
+                peer_id_bytes: peer_bytes.clone(),
+                shard_index: s.slot_index,
+                addrs: self.listen_addrs.clone(),
+            })
+            .collect();
+
+        let record = DhtRecord {
+            mid_digest: *mid.as_bytes(),
+            data_shards: params.data_shards as u8,
+            total_shards: params.total_shards as u8,
+            version: 1,
+            locations,
+            published_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        };
+
+        // Publish to the real Kademlia DHT.
+        self.dht_handle.put(record).await?;
+
+        Ok(mid)
+    }
+
+    /// Retrieve content by MID from the P2P network.
+    ///
+    /// Queries the DHT for the `DhtRecord`, then fetches `≥k` shards from the
+    /// advertised peers via `/miasma/share/1.0.0` request-response, and
+    /// reconstructs the plaintext.
+    pub async fn retrieve_from_network(
+        &self,
+        mid: &ContentId,
+        params: DissolutionParams,
+    ) -> Result<Vec<u8>, MiasmaError> {
+        let dht_exec = DirectDhtExecutor::new(self.dht_handle.clone());
+        let share_fetcher =
+            NetworkShareFetcher::new(self.dht_handle.clone(), self.share_handle.clone());
+        let source = DhtShareSource::new(dht_exec, share_fetcher);
+        RetrievalCoordinator::new(source).retrieve(mid, params).await
+    }
+}
