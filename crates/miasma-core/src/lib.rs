@@ -10,6 +10,7 @@ pub mod share;
 pub mod store;
 
 pub use config::{default_data_dir, NodeConfig};
+pub use crypto::hash::ContentId;
 pub use dissolution::{
     dissolve_file, retrieve_file, DistributionResult, DissolutionManifest, ShareDistributor,
     ShareSink, SegmentMeta, DEFAULT_SEGMENT_SIZE,
