@@ -18,9 +18,12 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde.workspace = true
+bs58.workspace = true
+hex.workspace = true
+directories.workspace = true
 
-# GUI — egui (immediate-mode, cross-platform: Windows/macOS/Linux)
-# Phase 3: uncomment to build the real GUI.
-# egui    = "0.27"
-# eframe  = { version = "0.27", features = ["default_fonts"] }
-# rfd     = "0.14"  # file picker dialog
+# GUI — egui immediate-mode, cross-platform (Windows/macOS/Linux)
+egui   = "0.27"
+eframe = { version = "0.27", features = ["default_fonts"] }
+rfd    = "0.14"   # native file-picker dialogs
+# qrcode = "0.14"  # enable in Phase 3 when network allows image crate download
