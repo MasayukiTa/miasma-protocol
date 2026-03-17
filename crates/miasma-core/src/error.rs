@@ -40,4 +40,7 @@ pub enum MiasmaError {
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("storage error: {0}")]
+    Storage(String),
 }

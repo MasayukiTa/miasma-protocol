@@ -1,6 +1,7 @@
 pub mod config;
 pub mod cover_traffic;
 pub mod crypto;
+pub mod daemon;
 pub mod dissolution;
 pub mod error;
 pub mod network;
@@ -35,3 +36,7 @@ pub use cover_traffic::{CoverTrafficConfig, CoverTrafficEngine};
 pub use transport::{PluggableTransport, TransportSelector};
 pub use share::{MiasmaShare, ShareVerification};
 pub use store::LocalShareStore;
+pub use daemon::{
+    ipc::{daemon_request, read_port_file, ControlRequest, ControlResponse, DaemonStatus},
+    DaemonServer,
+};

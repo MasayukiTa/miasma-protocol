@@ -201,6 +201,24 @@ impl MiasmaCoordinator {
         let _ = self.shutdown_tx.send(()).await;
     }
 
+    /// Return the number of currently connected peers.
+    pub async fn peer_count(&self) -> Result<usize, MiasmaError> {
+        self.dht_handle.peer_count().await
+    }
+
+    /// Publish a pre-built `DhtRecord` to Kademlia.
+    ///
+    /// Used by the daemon's replication retry loop to re-announce content
+    /// without re-dissolving it.
+    pub async fn publish_record(&self, record: DhtRecord) -> Result<(), MiasmaError> {
+        self.dht_handle.put(record).await
+    }
+
+    /// The listen addresses announced by this node (e.g. written into DhtRecords).
+    pub fn listen_addrs(&self) -> &[String] {
+        &self.listen_addrs
+    }
+
     /// This node's libp2p peer ID.
     pub fn peer_id(&self) -> &PeerId {
         &self.peer_id
