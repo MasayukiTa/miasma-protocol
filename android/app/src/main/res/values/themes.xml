@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Base theme used by the Manifest android:theme attribute.
+         Compose Material3 handles visual theming; this just suppresses the ActionBar. -->
+    <style name="Theme.Miasma" parent="Theme.Material3.DayNight.NoActionBar" />
+</resources>

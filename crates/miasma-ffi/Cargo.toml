@@ -1,0 +1,24 @@
+[package]
+name = "miasma-ffi"
+description = "UniFFI bridge — exposes miasma-core to Kotlin/Android"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+# cdylib  → .so for Android
+# staticlib → .a for iOS (Phase 2)
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+miasma-core = { path = "../miasma-core" }
+tokio    = { version = "1", features = ["rt-multi-thread"] }
+uniffi   = { version = "0.28" }
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[build-dependencies]
+uniffi = { version = "0.28", features = ["build"] }

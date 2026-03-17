@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Internal files directory — used for writing retrieved content before sharing. -->
+    <files-path name="miasma_files" path="." />
+    <!-- External cache — for file picker exports (optional). -->
+    <external-cache-path name="miasma_cache" path="." />
+</paths>
