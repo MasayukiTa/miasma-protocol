@@ -229,83 +229,296 @@ pub fn init_inbox(dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-// ─── DHT get_peers ────────────────────────────────────────────────────────────
+// ─── DHT ping (connectivity check) ──────────────────────────────────────────
 
-/// Send DHT `get_peers` to bootstrap nodes and collect peer socket addresses.
-async fn dht_get_peers(info_hash: &[u8; 20]) -> anyhow::Result<Vec<SocketAddr>> {
+/// Ping all DHT bootstrap nodes and return which ones responded.
+/// This is a pure connectivity test — no info_hash needed.
+pub async fn dht_ping() -> anyhow::Result<Vec<(String, SocketAddr, Vec<u8>)>> {
     let sock = UdpSocket::bind("0.0.0.0:0").await.context("bind UDP")?;
     let our_id = random_20_bytes();
-    let tid = b"aa";
+    let tid = b"pn";
 
     let query = bencode::encode(&Value::Dict({
         let mut d = BTreeMap::new();
         d.insert(b"t".to_vec(), Value::Bytes(tid.to_vec()));
         d.insert(b"y".to_vec(), Value::Bytes(b"q".to_vec()));
-        d.insert(b"q".to_vec(), Value::Bytes(b"get_peers".to_vec()));
+        d.insert(b"q".to_vec(), Value::Bytes(b"ping".to_vec()));
         d.insert(b"a".to_vec(), Value::Dict({
             let mut a = BTreeMap::new();
             a.insert(b"id".to_vec(), Value::Bytes(our_id.to_vec()));
-            a.insert(b"info_hash".to_vec(), Value::Bytes(info_hash.to_vec()));
             a
         }));
         d
     }));
 
-    let mut peers: Vec<SocketAddr> = Vec::new();
+    let mut results = Vec::new();
     let mut buf = vec![0u8; 4096];
 
+    for node in DHT_BOOTSTRAP {
+        let addrs: Vec<SocketAddr> = match node.to_socket_addrs() {
+            Ok(a) => a.collect(),
+            Err(e) => { info!("DNS {node}: {e}"); continue; }
+        };
+        for addr in addrs {
+            if let Err(e) = sock.send_to(&query, addr).await {
+                info!("  ping UDP send to {addr}: {e}");
+                continue;
+            }
+            match timeout(Duration::from_secs(5), sock.recv_from(&mut buf)).await {
+                Ok(Ok((n, from))) => {
+                    // Parse response to extract remote node ID.
+                    let node_id = if let Ok((v, _)) = bencode::decode(&buf[..n]) {
+                        v.dict_get(b"r")
+                            .and_then(|r| r.dict_get(b"id"))
+                            .and_then(|id| id.as_bytes())
+                            .map(|b| b.to_vec())
+                            .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                    results.push((node.to_string(), from, node_id));
+                }
+                Ok(Err(e)) => info!("  ping recv from {addr}: {e}"),
+                Err(_) => info!("  ping timeout from {addr} (5s)"),
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+// ─── DHT get_peers (iterative BEP-5 lookup) ─────────────────────────────────
+
+/// Maximum iterations for iterative DHT lookup.
+const DHT_MAX_ITERATIONS: usize = 10;
+/// Maximum nodes to query per iteration (Kademlia alpha).
+const DHT_ALPHA: usize = 8;
+/// Per-iteration response collection timeout in seconds.
+const DHT_QUERY_TIMEOUT_SECS: u64 = 4;
+
+/// A DHT node with its ID (for XOR-distance sorting).
+#[derive(Clone)]
+struct DhtNode {
+    id: [u8; 20],
+    addr: SocketAddr,
+}
+
+/// XOR distance between two 20-byte keys.
+fn xor_distance(a: &[u8; 20], b: &[u8; 20]) -> [u8; 20] {
+    let mut d = [0u8; 20];
+    for i in 0..20 {
+        d[i] = a[i] ^ b[i];
+    }
+    d
+}
+
+/// Iterative BEP-5 get_peers lookup with XOR-distance sorting.
+///
+/// 1. Query bootstrap nodes with `get_peers(info_hash)`
+/// 2. Bootstrap nodes return `nodes` (compact 26-byte entries: 20-byte id + 6-byte addr)
+/// 3. Sort discovered nodes by XOR distance to info_hash
+/// 4. Query the closest unqueried nodes
+/// 5. Repeat until we find `values` (actual torrent peers) or exhaust iterations
+async fn dht_get_peers(info_hash: &[u8; 20]) -> anyhow::Result<Vec<SocketAddr>> {
+    let sock = UdpSocket::bind("0.0.0.0:0").await.context("bind UDP")?;
+    let our_id = random_20_bytes();
+
+    let mut peers: Vec<SocketAddr> = Vec::new();
+    let mut queried: std::collections::HashSet<SocketAddr> = std::collections::HashSet::new();
+    // Candidates sorted by XOR distance to info_hash.
+    let mut candidates: Vec<DhtNode> = Vec::new();
+
+    // Seed with bootstrap nodes (unknown node ID, use zeros — they'll be
+    // queried first anyway since we have nothing better).
     for node in DHT_BOOTSTRAP {
         let addrs: Vec<SocketAddr> = match node.to_socket_addrs() {
             Ok(a) => a.collect(),
             Err(e) => { debug!("DNS {node}: {e}"); continue; }
         };
         for addr in addrs {
-            if let Err(e) = sock.send_to(&query, addr).await {
-                debug!("UDP send to {addr}: {e}");
-                continue;
-            }
-            match timeout(Duration::from_secs(5), sock.recv_from(&mut buf)).await {
-                Ok(Ok((n, _from))) => {
-                    peers.extend(parse_compact_peers(&buf[..n]));
-                }
-                Ok(Err(e)) => debug!("UDP recv from {addr}: {e}"),
-                Err(_) => debug!("DHT timeout from {addr}"),
+            candidates.push(DhtNode { id: [0u8; 20], addr });
+        }
+    }
+
+    let mut buf = vec![0u8; 4096];
+    let mut tid_counter: u16 = 0;
+
+    for iteration in 0..DHT_MAX_ITERATIONS {
+        // Sort candidates by XOR distance to info_hash (closest first).
+        candidates.sort_by(|a, b| {
+            xor_distance(&a.id, info_hash).cmp(&xor_distance(&b.id, info_hash))
+        });
+
+        // Pick up to ALPHA closest nodes we haven't queried yet.
+        let batch: Vec<DhtNode> = candidates
+            .iter()
+            .filter(|n| !queried.contains(&n.addr))
+            .take(DHT_ALPHA)
+            .cloned()
+            .collect();
+
+        if batch.is_empty() {
+            debug!("DHT iteration {iteration}: all candidates already queried");
+            break;
+        }
+
+        debug!(
+            "DHT iteration {iteration}: querying {} nodes (total queried={}, peers={}, candidates={})",
+            batch.len(),
+            queried.len(),
+            peers.len(),
+            candidates.len()
+        );
+
+        // Send get_peers to all batch nodes.
+        for node in &batch {
+            queried.insert(node.addr);
+            tid_counter = tid_counter.wrapping_add(1);
+            let tid = tid_counter.to_be_bytes();
+
+            let query = bencode::encode(&Value::Dict({
+                let mut d = BTreeMap::new();
+                d.insert(b"t".to_vec(), Value::Bytes(tid.to_vec()));
+                d.insert(b"y".to_vec(), Value::Bytes(b"q".to_vec()));
+                d.insert(b"q".to_vec(), Value::Bytes(b"get_peers".to_vec()));
+                d.insert(b"a".to_vec(), Value::Dict({
+                    let mut a = BTreeMap::new();
+                    a.insert(b"id".to_vec(), Value::Bytes(our_id.to_vec()));
+                    a.insert(b"info_hash".to_vec(), Value::Bytes(info_hash.to_vec()));
+                    a
+                }));
+                d
+            }));
+
+            if let Err(e) = sock.send_to(&query, node.addr).await {
+                debug!("  UDP send to {}: {e}", node.addr);
             }
         }
-        if peers.len() >= 20 { break; }
+
+        // Collect responses (wait for all with a deadline).
+        let deadline = tokio::time::Instant::now()
+            + Duration::from_secs(DHT_QUERY_TIMEOUT_SECS);
+        let mut responses = 0;
+
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() { break; }
+
+            match timeout(remaining, sock.recv_from(&mut buf)).await {
+                Ok(Ok((n, from))) => {
+                    responses += 1;
+                    let (found_peers, found_nodes) =
+                        parse_get_peers_response_with_ids(&buf[..n]);
+
+                    if !found_peers.is_empty() {
+                        debug!(
+                            "  got {} peers from {from}",
+                            found_peers.len()
+                        );
+                        peers.extend(&found_peers);
+                    }
+                    if !found_nodes.is_empty() {
+                        debug!(
+                            "  got {} closer nodes from {from}",
+                            found_nodes.len()
+                        );
+                        // Add new candidates (dedup by addr).
+                        for node in found_nodes {
+                            if !candidates.iter().any(|c| c.addr == node.addr) {
+                                candidates.push(node);
+                            }
+                        }
+                    }
+                }
+                Ok(Err(e)) => {
+                    // On Windows, ICMP port-unreachable triggers WSAECONNRESET
+                    // (os error 10054) on the UDP socket. This is harmless —
+                    // just means one node was unreachable. Continue collecting.
+                    debug!("  UDP recv error (continuing): {e}");
+                }
+                Err(_) => break, // deadline
+            }
+        }
+
+        info!(
+            "DHT iteration {}: {} responses, {} peers, {} candidates remaining",
+            iteration,
+            responses,
+            peers.len(),
+            candidates.iter().filter(|n| !queried.contains(&n.addr)).count()
+        );
+
+        // If we found enough peers, stop.
+        if peers.len() >= 30 {
+            break;
+        }
     }
+
+    // Deduplicate peers.
+    peers.sort();
+    peers.dedup();
 
     Ok(peers)
 }
 
-/// Parse compact peer list from a DHT `get_peers` response.
-/// Compact format: 6 bytes per peer (4 bytes IP + 2 bytes port).
-fn parse_compact_peers(data: &[u8]) -> Vec<SocketAddr> {
-    let mut out = Vec::new();
-    if let Ok((v, _)) = bencode::decode(data) {
-        // Try r.values (compact peer list) and r.nodes
-        if let Some(resp) = v.dict_get(b"r") {
-            if let Some(values) = resp.dict_get(b"values") {
-                if let Some(list) = values.as_list() {
-                    for item in list {
-                        if let Some(bytes) = item.as_bytes() {
-                            if let Some(addr) = decode_compact_6(bytes) {
-                                out.push(addr);
-                            }
-                        }
+/// Parse a DHT `get_peers` response, returning (values_peers, closer_nodes).
+///
+/// BEP-5 response contains either:
+/// - `r.values`: list of compact 6-byte peer addresses (peers with the torrent)
+/// - `r.nodes`: compact 26-byte node info (20-byte id + 6-byte addr) for closer DHT nodes
+/// A response may contain both.
+///
+/// Returns `DhtNode`s (with their 20-byte node IDs) so the caller can sort by
+/// XOR distance.
+fn parse_get_peers_response_with_ids(data: &[u8]) -> (Vec<SocketAddr>, Vec<DhtNode>) {
+    let mut peers = Vec::new();
+    let mut nodes = Vec::new();
+
+    let (v, _) = match bencode::decode(data) {
+        Ok(p) => p,
+        Err(_) => return (peers, nodes),
+    };
+
+    let resp = match v.dict_get(b"r") {
+        Some(r) => r,
+        None => return (peers, nodes),
+    };
+
+    // Parse `values` — compact 6-byte peer addrs (peers that have the torrent).
+    if let Some(values) = resp.dict_get(b"values") {
+        if let Some(list) = values.as_list() {
+            for item in list {
+                if let Some(bytes) = item.as_bytes() {
+                    if let Some(addr) = decode_compact_6(bytes) {
+                        peers.push(addr);
                     }
-                } else if let Some(bytes) = values.as_bytes() {
-                    // Sometimes encoded as one flat bytes string
-                    for chunk in bytes.chunks_exact(6) {
-                        if let Some(addr) = decode_compact_6(chunk) {
-                            out.push(addr);
-                        }
-                    }
+                }
+            }
+        } else if let Some(bytes) = values.as_bytes() {
+            for chunk in bytes.chunks_exact(6) {
+                if let Some(addr) = decode_compact_6(chunk) {
+                    peers.push(addr);
                 }
             }
         }
     }
-    out
+
+    // Parse `nodes` — compact 26-byte entries (20-byte node_id + 6-byte addr).
+    // Bootstrap nodes return `nodes`, not `values`. We recursively query these
+    // closer nodes, sorting by XOR distance to converge on the target.
+    if let Some(nodes_val) = resp.dict_get(b"nodes") {
+        if let Some(bytes) = nodes_val.as_bytes() {
+            for chunk in bytes.chunks_exact(26) {
+                let mut id = [0u8; 20];
+                id.copy_from_slice(&chunk[..20]);
+                if let Some(addr) = decode_compact_6(&chunk[20..26]) {
+                    nodes.push(DhtNode { id, addr });
+                }
+            }
+        }
+    }
+
+    (peers, nodes)
 }
 
 fn decode_compact_6(bytes: &[u8]) -> Option<SocketAddr> {
@@ -318,14 +531,19 @@ fn decode_compact_6(bytes: &[u8]) -> Option<SocketAddr> {
 
 // ─── ut_metadata fetch ────────────────────────────────────────────────────────
 
-/// Try each peer in turn until we successfully fetch the info dict.
+/// Try peers until we successfully fetch the info dict.
+///
+/// Attempts up to 30 peers sequentially (with 8s timeout each) to keep total
+/// wall-clock time reasonable while giving enough chances to hit a responsive
+/// peer.
 async fn fetch_info_dict_from_peers(
     peers: &[SocketAddr],
     info_hash: &[u8; 20],
 ) -> anyhow::Result<Vec<u8>> {
-    for &peer in peers.iter().take(10) {
+    for (i, &peer) in peers.iter().take(30).enumerate() {
+        debug!("Trying metadata from peer {}/{}: {peer}", i + 1, peers.len().min(30));
         match timeout(
-            Duration::from_secs(15),
+            Duration::from_secs(8),
             fetch_ut_metadata(peer, info_hash),
         )
         .await
@@ -338,7 +556,7 @@ async fn fetch_info_dict_from_peers(
             Err(_) => debug!("Peer {peer} metadata timeout"),
         }
     }
-    bail!("Could not fetch metadata from any peer")
+    bail!("Could not fetch metadata from any of {} peers", peers.len())
 }
 
 /// Connect to a peer, do BT handshake + extension, then fetch ut_metadata.
@@ -454,9 +672,9 @@ async fn fetch_ut_metadata(
 
         if msg_type != 1 || piece_idx >= num_pieces { continue; } // data = 1
 
-        // Data follows the dict (the raw metadata bytes for this piece).
-        let data_start = payload.len() - rest.len();
-        let piece_data = payload[1 + data_start..].to_vec();
+        // `rest` is the raw metadata bytes for this piece (everything after
+        // the bencoded dict in the extension payload).
+        let piece_data = rest.to_vec();
         pieces[piece_idx] = Some(piece_data);
 
         if pieces.iter().all(|p| p.is_some()) {
