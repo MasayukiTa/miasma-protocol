@@ -322,6 +322,8 @@ pub struct MiasmaNode {
     local_store: Option<Arc<LocalShareStore>>,
     /// Optional channel to notify when a Kademlia PUT is acknowledged by remote peers.
     replication_success_tx: Option<mpsc::Sender<[u8; 32]>>,
+    /// Optional channel to emit topology change events (peer connect/disconnect).
+    topology_tx: Option<mpsc::Sender<super::types::TopologyEvent>>,
 }
 
 impl MiasmaNode {
@@ -362,6 +364,7 @@ impl MiasmaNode {
             pending_share_fetches: HashMap::new(),
             local_store: None,
             replication_success_tx: None,
+            topology_tx: None,
         })
     }
 
@@ -373,6 +376,11 @@ impl MiasmaNode {
     /// Set a channel to receive notifications when a Kademlia PUT is acknowledged.
     pub fn set_replication_notifier(&mut self, tx: mpsc::Sender<[u8; 32]>) {
         self.replication_success_tx = Some(tx);
+    }
+
+    /// Set a channel to receive topology change events (peer connect/disconnect).
+    pub fn set_topology_notifier(&mut self, tx: mpsc::Sender<super::types::TopologyEvent>) {
+        self.topology_tx = Some(tx);
     }
 
     /// Returns a sender that drives DHT PUT/GET via the Kademlia event loop.
@@ -570,9 +578,15 @@ impl MiasmaNode {
             }
             SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                 debug!("Connected: {peer_id}");
+                if let Some(tx) = &self.topology_tx {
+                    let _ = tx.try_send(super::types::TopologyEvent::PeerConnected { peer_id });
+                }
             }
             SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
                 debug!("Disconnected: {peer_id} ({cause:?})");
+                if let Some(tx) = &self.topology_tx {
+                    let _ = tx.try_send(super::types::TopologyEvent::PeerDisconnected { peer_id });
+                }
             }
             SwarmEvent::Behaviour(MiasmaBehaviourEvent::Identify(
                 identify::Event::Received { peer_id, info, .. },
@@ -588,6 +602,10 @@ impl MiasmaNode {
                         .behaviour_mut()
                         .autonat
                         .add_server(peer_id, Some(first_addr.clone()));
+                }
+                // Peer is now in Kademlia — signal "routable" to replication engine.
+                if let Some(tx) = &self.topology_tx {
+                    let _ = tx.try_send(super::types::TopologyEvent::PeerRoutable { peer_id });
                 }
             }
             SwarmEvent::Behaviour(MiasmaBehaviourEvent::Kademlia(ev)) => {

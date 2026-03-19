@@ -1030,3 +1030,142 @@ async fn replication_retries_after_peer_join() {
 
     result.expect("replication_retries_after_peer_join timed out");
 }
+
+// ── Test 23: Topology event triggers replication without fallback timer ──────
+//
+// Proves that a PeerConnected topology event drives replication immediately,
+// without relying on the 60-second fallback timer.  The fallback timer is set
+// far in the future (60s) so if the test completes in <15s it can only be the
+// topology-event path that did the work.
+
+#[test]
+fn topology_event_triggers_replication() {
+    // Use a manual runtime so we can drop it to forcibly stop all daemon
+    // tasks — `#[tokio::test]` waits for spawned tasks which can hang if
+    // Kademlia shutdown is slow for certain peer-ID combinations.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let passed = rt.block_on(async {
+        use miasma_core::daemon::DaemonServer;
+        use miasma_core::daemon::ipc::{daemon_request, ControlRequest, ControlResponse};
+        use std::time::Duration;
+        use tokio::time::timeout;
+
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("miasma_core=info")
+            .try_init();
+
+        timeout(Duration::from_secs(20), async {
+            // ── Node A: publish with no peers ──────────────────────────────
+            let dir_a = tempfile::tempdir().unwrap();
+            let store_a = Arc::new(LocalShareStore::open(dir_a.path(), 100).unwrap());
+            let node_a = MiasmaNode::new(&[0xCCu8; 32], NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+
+            let server_a = DaemonServer::start(node_a, store_a, dir_a.path().to_owned())
+                .await
+                .unwrap();
+            let addr_a_str = format!("{}/p2p/{}", server_a.listen_addrs()[0], server_a.peer_id());
+            let dir_a_path = dir_a.path().to_owned();
+            let queue_a = server_a.queue();
+            tokio::spawn(server_a.run());
+
+            let content = b"topology-event-driven replication test";
+            let req = ControlRequest::Publish { data: content.to_vec(), data_shards: 2, total_shards: 3 };
+            match daemon_request(&dir_a_path, req).await.unwrap() {
+                ControlResponse::Published { mid } => {
+                    println!("[topo] Published MID: {mid}");
+                }
+                other => panic!("unexpected: {other:?}"),
+            };
+
+            assert_eq!(queue_a.lock().unwrap().pending_count(), 1);
+
+            // ── Node B: join — PeerConnected should trigger replication ───
+            let dir_b = tempfile::tempdir().unwrap();
+            let store_b = Arc::new(LocalShareStore::open(dir_b.path(), 100).unwrap());
+            let node_b = MiasmaNode::new(&[0xDDu8; 32], NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+
+            let server_b = DaemonServer::start(node_b, store_b, dir_b.path().to_owned())
+                .await
+                .unwrap();
+
+            {
+                use libp2p::multiaddr::Protocol;
+                let mut addr: Multiaddr = addr_a_str.parse().unwrap();
+                let peer_id_a: libp2p::PeerId = addr.iter().find_map(|p| {
+                    if let Protocol::P2p(id) = p { Some(id) } else { None }
+                }).unwrap();
+                if matches!(addr.iter().last(), Some(Protocol::P2p(_))) { addr.pop(); }
+                server_b.add_bootstrap_peer(peer_id_a, addr).await.unwrap();
+            }
+            server_b.bootstrap_dht().await.unwrap();
+            tokio::spawn(server_b.run());
+
+            // Wait for replication to be confirmed.
+            // Fallback timer is 60s; if this completes in <5s it proves
+            // the topology-event path drove the replication.
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let rc = queue_a.lock().unwrap().replicated_count();
+            let pc = queue_a.lock().unwrap().pending_count();
+            println!("[topo] replicated={rc}, pending={pc}");
+            assert!(rc > 0, "replication should be driven by topology event, not fallback timer");
+        }).await
+    });
+
+    // Forcibly shut down the runtime without waiting for daemon tasks.
+    rt.shutdown_timeout(std::time::Duration::from_millis(100));
+    passed.expect("topology_event_triggers_replication timed out");
+}
+
+// ── Test 24: WAL survives daemon restart ─────────────────────────────────────
+//
+// Proves that the replication queue's WAL persistence survives a process
+// restart: items pushed in session 1 are recovered in session 2.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wal_survives_daemon_restart() {
+    use miasma_core::daemon::replication::ReplicationQueue;
+    use miasma_core::daemon::replication::ItemState;
+    use miasma_core::network::types::DhtRecord;
+
+    let dir = tempfile::tempdir().unwrap();
+
+    // Create a record to simulate a publish.
+    let mut digest = [0u8; 32];
+    digest[0] = 0xEE;
+    let record = DhtRecord {
+        mid_digest: digest,
+        data_shards: 2,
+        total_shards: 3,
+        version: 1,
+        locations: vec![],
+        published_at: 1000,
+    };
+
+    // Session 1: push an item and record a few attempts.
+    {
+        let mut q = ReplicationQueue::load_or_create(dir.path()).unwrap();
+        let item = miasma_core::daemon::replication::PendingReplication::new(
+            "test-wal-restart".to_string(),
+            record.clone(),
+        );
+        q.push(item).unwrap();
+        q.record_attempt(&digest).unwrap();
+        q.record_attempt(&digest).unwrap();
+        assert_eq!(q.pending_count(), 1);
+    }
+    // Drop = simulated crash.
+
+    // Session 2: reload and verify state.
+    {
+        let q = ReplicationQueue::load_or_create(dir.path()).unwrap();
+        assert_eq!(q.pending_count(), 1);
+        let item = q.get(&digest).unwrap();
+        assert_eq!(item.attempt_count, 2);
+        assert_eq!(item.state, ItemState::Pending);
+        assert_eq!(item.mid_str, "test-wal-restart");
+    }
+}

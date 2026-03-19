@@ -24,7 +24,7 @@ pub use error::MiasmaError;
 pub use libp2p::{Multiaddr, PeerId};
 pub use network::{
     BypassOnionDhtExecutor, DirectDhtExecutor, DhtHandle, MiasmaCoordinator, MiasmaNode,
-    NetworkShareFetcher, NodeType, OnionAwareDhtExecutor, ShareExchangeHandle,
+    NetworkShareFetcher, NodeType, OnionAwareDhtExecutor, ShareExchangeHandle, TopologyEvent,
 };
 pub use onion::{
     CircuitId, CircuitManager, InProcessRelay, LiveOnionDhtExecutor, LiveOnionShareFetcher,
