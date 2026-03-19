@@ -114,17 +114,31 @@ fn cmd_inspect(args: &[String]) {
         info.display_name.as_deref(),
     )) {
         Ok(report) => {
-            println!("Magnet reachable on BitTorrent network");
+            println!("Torrent metadata retrieved");
             println!("  Info hash:    {}", report.info_hash_hex);
             println!(
                 "  Display name: {}",
                 report.display_name.as_deref().unwrap_or("unknown")
             );
+            println!("  Method:       {}", report.method);
             println!("  Peers found:  {}", report.peer_count);
             println!("  Files:        {}", report.files.len());
             println!("  Total bytes:  {}", report.total_bytes);
-            for (name, size) in report.files {
+            for (name, size) in &report.files {
                 println!("    {size:>10}  {name}");
+            }
+            // Show discovery strategy results
+            println!();
+            println!("Discovery attempts:");
+            println!("  DHT:          {}", report.attempts.dht);
+            println!("  HTTP tracker: {}", report.attempts.http_tracker);
+            println!("  .torrent:     {}", report.attempts.torrent_file);
+
+            // Warn if metadata was obtained without peer connectivity
+            if report.peer_count == 0 {
+                println!();
+                println!("NOTE: Metadata obtained from .torrent file, not from peers.");
+                println!("      Payload download is NOT possible without peer connectivity.");
             }
         }
         Err(e) => {

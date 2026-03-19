@@ -72,6 +72,8 @@ pub struct DaemonServer {
     data_dir: PathBuf,
     listen_addrs: Vec<String>,
     control_port: u16,
+    /// Port the WSS share server is bound to (0 if not started).
+    wss_port: u16,
     // Single-consumer resources moved into run():
     listener: Option<TcpListener>,
     rep_success_rx: Option<mpsc::Receiver<[u8; 32]>>,
@@ -119,6 +121,25 @@ impl DaemonServer {
         // 7. Load the persistent replication queue.
         let queue = Arc::new(Mutex::new(ReplicationQueue::load_or_create(&data_dir)?));
 
+        // 8. Start WSS share server (OS-assigned port for payload transport).
+        let wss_port = match crate::transport::websocket::WssShareServer::bind(
+            store.clone(),
+            0, // OS-assigned port
+        )
+        .await
+        {
+            Ok(server) => {
+                let port = server.port;
+                tokio::spawn(server.run());
+                info!(wss_port = port, "WSS share server started");
+                port
+            }
+            Err(e) => {
+                warn!("WSS share server failed to start: {e}");
+                0
+            }
+        };
+
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         info!(
@@ -137,6 +158,7 @@ impl DaemonServer {
             data_dir,
             listen_addrs: listen_addr_strings,
             control_port,
+            wss_port,
             listener: Some(listener),
             rep_success_rx: Some(rep_rx),
             topology_rx: Some(topo_rx),
@@ -158,6 +180,11 @@ impl DaemonServer {
     /// Listen addresses in multiaddr format.
     pub fn listen_addrs(&self) -> &[String] {
         &self.listen_addrs
+    }
+
+    /// Port the WSS share server is listening on (0 if not started).
+    pub fn wss_port(&self) -> u16 {
+        self.wss_port
     }
 
     /// A clone of the shutdown sender.  Send `()` to stop the daemon.
@@ -209,8 +236,9 @@ impl DaemonServer {
         let ipc_queue = queue.clone();
         let ipc_store = store.clone();
         let ipc_addrs = listen_addrs.clone();
+        let ipc_wss_port = self.wss_port;
         let ipc_handle: JoinHandle<()> = tokio::spawn(async move {
-            ipc_server_loop(listener, ipc_coord, ipc_queue, ipc_store, ipc_addrs).await;
+            ipc_server_loop(listener, ipc_coord, ipc_queue, ipc_store, ipc_addrs, ipc_wss_port).await;
         });
 
         // ── Event-driven replication engine ───────────────────────────────────
@@ -241,6 +269,7 @@ async fn ipc_server_loop(
     queue: Arc<Mutex<ReplicationQueue>>,
     store: Arc<LocalShareStore>,
     listen_addrs: Vec<String>,
+    wss_port: u16,
 ) {
     loop {
         match listener.accept().await {
@@ -250,8 +279,9 @@ async fn ipc_server_loop(
                 let q = queue.clone();
                 let s = store.clone();
                 let la = listen_addrs.clone();
+                let wp = wss_port;
                 tokio::spawn(async move {
-                    if let Err(e) = handle_ipc_client(stream, c, q, s, la).await {
+                    if let Err(e) = handle_ipc_client(stream, c, q, s, la, wp).await {
                         debug!("IPC client error: {e}");
                     }
                 });
@@ -270,9 +300,10 @@ async fn handle_ipc_client(
     queue: Arc<Mutex<ReplicationQueue>>,
     store: Arc<LocalShareStore>,
     listen_addrs: Vec<String>,
+    wss_port: u16,
 ) -> Result<()> {
     let req: ControlRequest = read_frame(&mut stream).await?;
-    let resp = process_request(req, coord, queue, store, listen_addrs).await;
+    let resp = process_request(req, coord, queue, store, listen_addrs, wss_port).await;
     write_frame(&mut stream, &resp).await?;
     Ok(())
 }
@@ -283,6 +314,7 @@ async fn process_request(
     queue: Arc<Mutex<ReplicationQueue>>,
     store: Arc<LocalShareStore>,
     listen_addrs: Vec<String>,
+    wss_port: u16,
 ) -> ControlResponse {
     match req {
         ControlRequest::Publish { data, data_shards, total_shards } => {
@@ -318,6 +350,20 @@ async fn process_request(
                 let q = queue.lock().unwrap();
                 (q.pending_count(), q.replicated_count())
             };
+            // Build transport readiness matrix from coordinator stats.
+            let transport_readiness = coord
+                .transport_stats()
+                .snapshot()
+                .into_iter()
+                .map(|r| ipc::TransportStatus {
+                    name: r.transport.to_string(),
+                    available: r.available,
+                    success_count: r.success_count,
+                    failure_count: r.failure_count,
+                    reason: r.reason,
+                })
+                .collect();
+
             ControlResponse::Status(DaemonStatus {
                 peer_id: coord.peer_id().to_string(),
                 listen_addrs,
@@ -326,6 +372,8 @@ async fn process_request(
                 storage_used_bytes,
                 pending_replication,
                 replicated_count,
+                wss_port,
+                transport_readiness,
             })
         }
 

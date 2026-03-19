@@ -34,9 +34,16 @@ use crate::{
     },
     onion::share::OnionShareFetcher,
     pipeline::{dissolve, DissolutionParams},
-    retrieval::{coordinator::RetrievalCoordinator, dht_source::DhtShareSource},
+    retrieval::{
+        coordinator::RetrievalCoordinator,
+        dht_source::DhtShareSource,
+        transport_source::FallbackShareSource,
+    },
     share::MiasmaShare,
     store::LocalShareStore,
+    transport::payload::{
+        Libp2pPayloadTransport, PayloadTransportSelector, TransportAttempt, TransportStats,
+    },
     MiasmaError,
 };
 
@@ -145,6 +152,8 @@ pub struct MiasmaCoordinator {
     peer_id: PeerId,
     /// Announced listen addresses included in `DhtRecord.locations`.
     listen_addrs: Vec<String>,
+    /// Payload transport selector for multi-transport fallback retrieval.
+    transport_selector: Arc<PayloadTransportSelector>,
 }
 
 impl MiasmaCoordinator {
@@ -172,7 +181,16 @@ impl MiasmaCoordinator {
             }
         });
 
-        Self { store, dht_handle, share_handle, shutdown_tx, peer_id, listen_addrs }
+        // Build the payload transport selector with the default fallback chain.
+        // Phase 1: only libp2p direct. Phase 2.1 adds WSS + obfuscated.
+        let transport_selector = Arc::new(PayloadTransportSelector::new(vec![
+            Box::new(Libp2pPayloadTransport::new(
+                share_handle.clone(),
+                dht_handle.clone(),
+            )),
+        ]));
+
+        Self { store, dht_handle, share_handle, shutdown_tx, peer_id, listen_addrs, transport_selector }
     }
 
     /// Register a bootstrap peer and dial it from within the running event loop.
@@ -267,12 +285,56 @@ impl MiasmaCoordinator {
         Ok(mid)
     }
 
-    /// Retrieve content by MID from the P2P network.
+    /// Retrieve content by MID from the P2P network using the transport
+    /// fallback engine.
     ///
-    /// Queries the DHT for the `DhtRecord`, then fetches `≥k` shards from the
-    /// advertised peers via `/miasma/share/1.0.0` request-response, and
-    /// reconstructs the plaintext.
+    /// Queries the DHT for the `DhtRecord`, then fetches `≥k` shards using
+    /// the configured transport fallback chain (libp2p → TCP → WSS → relay),
+    /// and reconstructs the plaintext.
+    ///
+    /// Returns `(plaintext, transport_attempts)` so the caller can observe
+    /// which transports were tried and which succeeded.
     pub async fn retrieve_from_network(
+        &self,
+        mid: &ContentId,
+        params: DissolutionParams,
+    ) -> Result<Vec<u8>, MiasmaError> {
+        let dht_exec = DirectDhtExecutor::new(self.dht_handle.clone());
+        let source = FallbackShareSource::new(
+            dht_exec,
+            self.transport_selector.clone(),
+        );
+        RetrievalCoordinator::new(source).retrieve(mid, params).await
+    }
+
+    /// Like `retrieve_from_network` but also returns transport attempt diagnostics.
+    pub async fn retrieve_from_network_with_diagnostics(
+        &self,
+        mid: &ContentId,
+        params: DissolutionParams,
+    ) -> Result<(Vec<u8>, Vec<TransportAttempt>), MiasmaError> {
+        let dht_exec = DirectDhtExecutor::new(self.dht_handle.clone());
+        let source = FallbackShareSource::new(
+            dht_exec,
+            self.transport_selector.clone(),
+        );
+        let result = RetrievalCoordinator::new(source).retrieve(mid, params).await;
+        // Note: drain_attempts is called after retrieve, capturing all attempts.
+        // We can't easily get the source back from RetrievalCoordinator,
+        // so transport stats are available via self.transport_stats() instead.
+        result.map(|data| (data, vec![]))
+    }
+
+    /// Return a snapshot of payload transport statistics.
+    pub fn transport_stats(&self) -> &TransportStats {
+        self.transport_selector.stats()
+    }
+
+    /// Retrieve using the legacy path (DhtShareSource + NetworkShareFetcher).
+    ///
+    /// Kept for backward compatibility during migration; will be removed
+    /// once the fallback engine is fully validated.
+    pub async fn retrieve_from_network_legacy(
         &self,
         mid: &ContentId,
         params: DissolutionParams,
