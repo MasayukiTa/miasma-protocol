@@ -31,9 +31,16 @@ pub use onion::{
     OnionPacketBuilder, OnionShareFetcher,
 };
 pub use pipeline::{dissolve, retrieve, DissolutionParams};
-pub use retrieval::{DhtShareSource, LocalShareSource, RetrievalCoordinator, ShareSource, StreamingRetrievalCoordinator};
+pub use retrieval::{DhtShareSource, FallbackShareSource, LocalShareSource, RetrievalCoordinator, ShareSource, StreamingRetrievalCoordinator};
 pub use cover_traffic::{CoverTrafficConfig, CoverTrafficEngine};
 pub use transport::{PluggableTransport, TransportSelector};
+pub use transport::websocket::{WssPayloadTransport, WssShareServer, WebSocketConfig};
+pub use transport::payload::{
+    PayloadTransport, PayloadTransportKind, PayloadTransportSelector,
+    PayloadTransportError, TransportAttempt, TransportedShare, TransportExhaustedError,
+    TransportPhase, TransportReadiness, TransportStats,
+    Libp2pPayloadTransport, TcpDirectPayloadTransport,
+};
 pub use share::{MiasmaShare, ShareVerification};
 pub use store::LocalShareStore;
 pub use daemon::{
