@@ -1,4 +1,5 @@
 /// Network-level type definitions.
+use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
 
 /// Node classification — determines storage and routing duties.
@@ -54,5 +55,45 @@ impl DhtRecord {
     /// DHT key used to store/retrieve this record: the raw MID digest.
     pub fn dht_key(&self) -> Vec<u8> {
         self.mid_digest.to_vec()
+    }
+}
+
+// ─── Topology events ─────────────────────────────────────────────────────────
+
+/// Signals meaningful changes in the network topology that may warrant
+/// replication work.
+///
+/// This enum is `#[non_exhaustive]` so new variants (e.g. `PeerRoutable`,
+/// `DhtRefreshComplete`) can be added without breaking downstream code.
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub enum TopologyEvent {
+    /// A new peer connection was established (raw transport level).
+    /// This fires before the peer is added to Kademlia — prefer
+    /// `PeerRoutable` for replication triggers.
+    PeerConnected { peer_id: PeerId },
+    /// The Identify protocol completed for a peer and its addresses were
+    /// added to Kademlia.  This is the right signal for "this peer can
+    /// now participate in DHT operations".
+    PeerRoutable { peer_id: PeerId },
+    /// A peer disconnected.
+    PeerDisconnected { peer_id: PeerId },
+}
+
+impl TopologyEvent {
+    /// How many degraded items should be promoted back to pending when this
+    /// event fires.  Returns 0 for events that do not warrant any promotion.
+    ///
+    /// This is intentionally conservative — a single routable peer promotes
+    /// a small batch, not the whole degraded set.  Future variants like
+    /// `DhtRefreshComplete` may return larger budgets.
+    pub fn promotion_budget(&self) -> usize {
+        match self {
+            TopologyEvent::PeerRoutable { .. } => 4,
+            TopologyEvent::PeerConnected { .. } => 0,
+            TopologyEvent::PeerDisconnected { .. } => 0,
+            #[allow(unreachable_patterns)]
+            _ => 0,
+        }
     }
 }

@@ -6,9 +6,9 @@
 //! │  DaemonServer                                       │
 //! │  ├─ MiasmaCoordinator (libp2p node + DHT + share)  │
 //! │  ├─ LocalShareStore (encrypted shard storage)       │
-//! │  ├─ ReplicationQueue (persistent retry state)       │
+//! │  ├─ ReplicationQueue (WAL-backed, per-item backoff) │
 //! │  ├─ IPC server task (TCP loopback, one conn/req)    │
-//! │  └─ Replication retry task (timer + peer-join)      │
+//! │  └─ Replication engine (event-driven + fallback)    │
 //! └─────────────────────────────────────────────────────┘
 //!         ↑ ControlRequest / ↓ ControlResponse
 //!  ┌──────────────┐   ┌──────────────┐
@@ -36,7 +36,7 @@ use crate::{
     network::{
         coordinator::MiasmaCoordinator,
         node::MiasmaNode,
-        types::{DhtRecord, ShardLocation},
+        types::{DhtRecord, ShardLocation, TopologyEvent},
     },
     pipeline::{dissolve, DissolutionParams},
     store::LocalShareStore,
@@ -56,6 +56,13 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+/// Maximum number of concurrent DHT announce operations per replication cycle.
+const MAX_CONCURRENT_ANNOUNCES: usize = 8;
+
+/// Fallback timer interval (seconds).  The primary replication driver is
+/// topology events; this timer exists only as a safety net.
+const FALLBACK_TIMER_SECS: u64 = 60;
+
 // ─── DaemonServer ────────────────────────────────────────────────────────────
 
 pub struct DaemonServer {
@@ -68,6 +75,7 @@ pub struct DaemonServer {
     // Single-consumer resources moved into run():
     listener: Option<TcpListener>,
     rep_success_rx: Option<mpsc::Receiver<[u8; 32]>>,
+    topology_rx: Option<mpsc::Receiver<TopologyEvent>>,
     shutdown_tx: mpsc::Sender<()>,
     shutdown_rx: Option<mpsc::Receiver<()>>,
 }
@@ -90,21 +98,25 @@ impl DaemonServer {
         let (rep_tx, rep_rx) = mpsc::channel(64);
         node.set_replication_notifier(rep_tx);
 
-        // 3. Bind IPC listener (OS-assigned port).
+        // 3. Wire topology-change notifications.
+        let (topo_tx, topo_rx) = mpsc::channel(64);
+        node.set_topology_notifier(topo_tx);
+
+        // 4. Bind IPC listener (OS-assigned port).
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .context("cannot bind IPC listener")?;
         let control_port = listener.local_addr()?.port();
 
-        // 4. Persist the port so CLI clients can discover the daemon.
+        // 5. Persist the port so CLI clients can discover the daemon.
         write_port_file(&data_dir, control_port)?;
 
-        // 5. Start the coordinator (spawns the libp2p event loop).
+        // 6. Start the coordinator (spawns the libp2p event loop).
         let coord = Arc::new(
             MiasmaCoordinator::start(node, store.clone(), listen_addr_strings.clone()).await,
         );
 
-        // 6. Load the persistent replication queue.
+        // 7. Load the persistent replication queue.
         let queue = Arc::new(Mutex::new(ReplicationQueue::load_or_create(&data_dir)?));
 
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
@@ -127,6 +139,7 @@ impl DaemonServer {
             control_port,
             listener: Some(listener),
             rep_success_rx: Some(rep_rx),
+            topology_rx: Some(topo_rx),
             shutdown_tx,
             shutdown_rx: Some(shutdown_rx),
         })
@@ -157,12 +170,12 @@ impl DaemonServer {
         self.queue.clone()
     }
 
-    /// Immediately retry all pending replication items.
+    /// Run due replication items (up to the concurrency cap).
     ///
-    /// Normally called by the internal timer task, but also exposed for
-    /// integration tests to trigger without waiting for the 5-second tick.
+    /// Exposed for integration tests that want to trigger without waiting
+    /// for the fallback timer or a topology event.
     pub async fn run_pending_replication(&self) {
-        retry_pending(&self.coord, &self.queue).await;
+        retry_due(&self.coord, &self.queue).await;
     }
 
     /// Register a bootstrap peer with the coordinator.
@@ -183,6 +196,7 @@ impl DaemonServer {
     pub async fn run(mut self) -> Result<()> {
         let listener = self.listener.take().expect("listener already consumed");
         let rep_success_rx = self.rep_success_rx.take().expect("rep_rx already consumed");
+        let topology_rx = self.topology_rx.take().expect("topology_rx already consumed");
         let mut shutdown_rx = self.shutdown_rx.take().expect("shutdown_rx already consumed");
 
         let coord = self.coord.clone();
@@ -199,11 +213,11 @@ impl DaemonServer {
             ipc_server_loop(listener, ipc_coord, ipc_queue, ipc_store, ipc_addrs).await;
         });
 
-        // ── Replication retry + success-notification task ─────────────────────
+        // ── Event-driven replication engine ───────────────────────────────────
         let rep_coord = coord.clone();
         let rep_queue = queue.clone();
         let rep_handle: JoinHandle<()> = tokio::spawn(async move {
-            replication_task(rep_coord, rep_queue, rep_success_rx).await;
+            replication_engine(rep_coord, rep_queue, rep_success_rx, topology_rx).await;
         });
 
         // ── Wait for shutdown ─────────────────────────────────────────────────
@@ -368,51 +382,96 @@ async fn publish_content(
     Ok(mid_str)
 }
 
-// ─── Replication retry task ──────────────────────────────────────────────────
+// ─── Event-driven replication engine ─────────────────────────────────────────
 
-async fn replication_task(
+/// Core replication loop.  Three event sources:
+///
+/// 1. **Topology events** (primary) — new peer connections trigger due-item
+///    retries and bounded promotion of degraded items.
+/// 2. **Replication success** — mark items as Replicated.
+/// 3. **Fallback timer** — safety net that sweeps due items every 60s.
+async fn replication_engine(
     coord: Arc<MiasmaCoordinator>,
     queue: Arc<Mutex<ReplicationQueue>>,
     mut rep_success_rx: mpsc::Receiver<[u8; 32]>,
+    mut topology_rx: mpsc::Receiver<TopologyEvent>,
 ) {
-    // Retry every 5 seconds.
-    let mut interval = tokio::time::interval(Duration::from_secs(5));
+    let mut interval = tokio::time::interval(Duration::from_secs(FALLBACK_TIMER_SECS));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
-            _ = interval.tick() => {
-                let peer_count = coord.peer_count().await.unwrap_or(0);
-                if peer_count > 0 {
-                    let pending = queue.lock().unwrap().pending_count();
-                    if pending > 0 {
-                        info!(peer_count, pending, "replication timer: retrying pending items");
-                        retry_pending(&coord, &queue).await;
+            // ── Primary: topology change ────────────────────────────────────
+            Some(event) = topology_rx.recv() => {
+                let budget = event.promotion_budget();
+                if budget > 0 {
+                    let (promoted, made_due, pending) = {
+                        let mut q = queue.lock().unwrap();
+                        let promoted = q.promote_degraded(budget).unwrap_or(0);
+                        // A new peer is a fresh target — make backed-off items
+                        // immediately eligible, bounded by the concurrency cap.
+                        let made_due = q.make_items_due(MAX_CONCURRENT_ANNOUNCES);
+                        (promoted, made_due, q.pending_count())
+                    };
+                    if promoted > 0 || made_due > 0 || pending > 0 {
+                        info!(
+                            ?event,
+                            promoted,
+                            made_due,
+                            pending,
+                            "topology event: running due replication"
+                        );
+                        retry_due(&coord, &queue).await;
                     }
                 }
             }
+
+            // ── Replication success ack ──────────────────────────────────────
             Some(mid_digest) = rep_success_rx.recv() => {
-                // Network PUT acknowledged by at least one remote peer.
                 let _ = queue.lock().unwrap().mark_replicated(&mid_digest);
+            }
+
+            // ── Fallback timer ──────────────────────────────────────────────
+            _ = interval.tick() => {
+                let pending = queue.lock().unwrap().pending_count();
+                if pending > 0 {
+                    let peer_count = coord.peer_count().await.unwrap_or(0);
+                    if peer_count > 0 {
+                        debug!(peer_count, pending, "fallback timer: sweeping due items");
+                        retry_due(&coord, &queue).await;
+                    }
+                }
             }
         }
     }
 }
 
-async fn retry_pending(coord: &MiasmaCoordinator, queue: &Arc<Mutex<ReplicationQueue>>) {
-    let items: Vec<PendingReplication> =
-        queue.lock().unwrap().pending().cloned().collect();
+/// Retry only items whose `next_attempt_secs` has passed, up to the
+/// concurrency cap.
+async fn retry_due(coord: &MiasmaCoordinator, queue: &Arc<Mutex<ReplicationQueue>>) {
+    let now = now_secs();
+    let items: Vec<replication::PendingReplication> = {
+        let q = queue.lock().unwrap();
+        let mut due = q.due_items(now);
+        due.truncate(MAX_CONCURRENT_ANNOUNCES);
+        due
+    };
 
     for item in items {
         let mid_digest = item.record.mid_digest;
-        info!(mid = %item.mid_str, attempt = item.attempt_count + 1, "retrying DHT announce");
+        info!(
+            mid = %item.mid_str,
+            attempt = item.attempt_count + 1,
+            "retrying DHT announce"
+        );
 
+        // Record the attempt (updates backoff schedule) *before* the network call.
         let _ = queue.lock().unwrap().record_attempt(&mid_digest);
 
         if let Err(e) = coord.publish_record(item.record).await {
             warn!(mid = %item.mid_str, "replication retry failed: {e}");
         }
-        // Note: marking as replicated happens via the rep_success_rx channel
+        // Marking as replicated happens via the rep_success_rx channel
         // when the Kademlia PutRecord(Ok) event fires in the node event loop.
     }
 }
