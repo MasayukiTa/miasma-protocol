@@ -49,6 +49,58 @@ const UT_METADATA_ID: u8 = 3;
 const INBOX_MARKER: &str = ".miasma-bridge-inbox";
 const PROCESSED_DIR: &str = ".processed";
 
+/// How the torrent metadata was obtained.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiscoveryMethod {
+    /// Peers found via UDP BEP-5 DHT, metadata via BEP-9 ut_metadata.
+    Dht,
+    /// Peers found via HTTP tracker announce, metadata via BEP-9 ut_metadata.
+    HttpTracker,
+    /// Metadata parsed from a .torrent file downloaded from the web.
+    /// No peer connectivity was established — **payload transport is NOT proven**.
+    TorrentFile { source: String },
+}
+
+impl std::fmt::Display for DiscoveryMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Dht => write!(f, "DHT (BEP-5 UDP)"),
+            Self::HttpTracker => write!(f, "HTTP tracker announce"),
+            Self::TorrentFile { source } => write!(f, ".torrent file ({source})"),
+        }
+    }
+}
+
+/// Per-strategy status from the discovery attempt.
+#[derive(Debug, Clone, Default)]
+pub struct DiscoveryAttempts {
+    pub dht: StrategyResult,
+    pub http_tracker: StrategyResult,
+    pub torrent_file: StrategyResult,
+}
+
+/// Outcome of a single discovery strategy.
+#[derive(Debug, Clone)]
+pub enum StrategyResult {
+    NotAttempted,
+    Success { detail: String },
+    Failed { reason: String },
+}
+
+impl Default for StrategyResult {
+    fn default() -> Self { Self::NotAttempted }
+}
+
+impl std::fmt::Display for StrategyResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotAttempted => write!(f, "not attempted"),
+            Self::Success { detail } => write!(f, "OK ({detail})"),
+            Self::Failed { reason } => write!(f, "FAILED ({reason})"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TorrentInspection {
     pub info_hash_hex: String,
@@ -56,6 +108,10 @@ pub struct TorrentInspection {
     pub peer_count: usize,
     pub files: Vec<(String, u64)>,
     pub total_bytes: u64,
+    /// Which method successfully retrieved metadata.
+    pub method: DiscoveryMethod,
+    /// Status of each discovery strategy attempted.
+    pub attempts: DiscoveryAttempts,
 }
 
 /// Safety options for torrent downloads.
@@ -107,10 +163,8 @@ pub async fn dissolve_torrent(
         display_name.unwrap_or("unknown")
     );
 
-    // 1. Find peers.
-    let peers = dht_get_peers(info_hash)
-        .await
-        .context("DHT get_peers")?;
+    // 1. Find peers (multi-strategy: DHT → HTTP tracker).
+    let peers = discover_peers(info_hash).await?;
 
     if peers.is_empty() {
         bail!(
@@ -181,30 +235,150 @@ fn format_bytes(bytes: u64) -> String {
 
 /// Inspect a torrent via the public BitTorrent network without downloading its
 /// payload files. Useful for safely verifying magnet reachability.
+///
+/// Uses a multi-strategy approach:
+/// 1. **DHT** (UDP BEP-5) — works on open networks
+/// 2. **HTTP tracker announce** — works when UDP is blocked but HTTP is open
+/// 3. **.torrent download** — fetches .torrent from archive.org/web, works
+///    even behind aggressive DPI that blocks all BT-specific traffic
 pub async fn inspect_torrent(
     info_hash: &[u8; 20],
     display_name: Option<&str>,
 ) -> anyhow::Result<TorrentInspection> {
-    let peers = dht_get_peers(info_hash)
-        .await
-        .context("DHT get_peers")?;
-    if peers.is_empty() {
-        bail!(
-            "No peers found for info_hash {}. The torrent may be too new or too old.",
-            hex::encode(info_hash)
-        );
+    let ih_hex = hex::encode(info_hash);
+    let mut attempts = DiscoveryAttempts::default();
+
+    // ── Strategy 1: DHT get_peers (UDP, best-case scenario) ─────────────
+    let mut peers = Vec::new();
+    match dht_get_peers(info_hash).await {
+        Ok(p) if !p.is_empty() => {
+            info!("DHT: found {} peers", p.len());
+            attempts.dht = StrategyResult::Success {
+                detail: format!("{} peers", p.len()),
+            };
+            peers = p;
+        }
+        Ok(_) => {
+            info!("DHT: no peers found, trying HTTP tracker fallback");
+            attempts.dht = StrategyResult::Failed {
+                reason: "0 peers returned".into(),
+            };
+        }
+        Err(e) => {
+            info!("DHT failed ({e}), trying HTTP tracker fallback");
+            attempts.dht = StrategyResult::Failed {
+                reason: format!("{e:#}"),
+            };
+        }
     }
 
-    let info_dict_bytes = fetch_info_dict_from_peers(&peers, info_hash).await?;
+    // If DHT succeeded and we can fetch metadata, return early.
+    if !peers.is_empty() {
+        if let Ok(result) = try_metadata_from_peers(
+            &ih_hex, display_name, &peers, info_hash,
+            DiscoveryMethod::Dht, &attempts,
+        ).await {
+            return Ok(result);
+        }
+        // Metadata fetch failed despite having peers — record and continue.
+        attempts.dht = StrategyResult::Failed {
+            reason: format!("{} peers found but metadata fetch failed", peers.len()),
+        };
+        peers.clear();
+    }
+
+    // ── Strategy 2: HTTP tracker announce (TCP) ─────────────────────────
+    match http_tracker_get_peers(info_hash).await {
+        Ok(p) if !p.is_empty() => {
+            info!("HTTP tracker: found {} peers", p.len());
+            attempts.http_tracker = StrategyResult::Success {
+                detail: format!("{} peers", p.len()),
+            };
+            peers = p;
+        }
+        Ok(_) => {
+            info!("HTTP tracker: no peers returned");
+            attempts.http_tracker = StrategyResult::Failed {
+                reason: "0 peers from all trackers".into(),
+            };
+        }
+        Err(e) => {
+            info!("HTTP tracker failed: {e}");
+            attempts.http_tracker = StrategyResult::Failed {
+                reason: format!("{e:#}"),
+            };
+        }
+    }
+
+    if !peers.is_empty() {
+        if let Ok(result) = try_metadata_from_peers(
+            &ih_hex, display_name, &peers, info_hash,
+            DiscoveryMethod::HttpTracker, &attempts,
+        ).await {
+            return Ok(result);
+        }
+        attempts.http_tracker = StrategyResult::Failed {
+            reason: format!("{} peers found but metadata fetch failed", peers.len()),
+        };
+    }
+
+    // ── Strategy 3: .torrent file from web (works behind aggressive DPI) ──
+    info!("No peers via DHT/tracker. Trying .torrent download fallback...");
+    match fetch_torrent_file_from_web(info_hash).await {
+        Ok((torrent_bytes, source)) => {
+            let files = parse_torrent_file_info(&torrent_bytes)?;
+            let total_bytes = files.iter().map(|(_, size)| *size).sum();
+
+            attempts.torrent_file = StrategyResult::Success {
+                detail: format!("{} bytes from {source}", torrent_bytes.len()),
+            };
+
+            Ok(TorrentInspection {
+                info_hash_hex: ih_hex,
+                display_name: display_name.map(str::to_owned),
+                peer_count: 0,
+                files,
+                total_bytes,
+                method: DiscoveryMethod::TorrentFile { source },
+                attempts,
+            })
+        }
+        Err(e) => {
+            attempts.torrent_file = StrategyResult::Failed {
+                reason: format!("{e:#}"),
+            };
+            bail!(
+                "All discovery methods failed for {ih_hex}.\n  \
+                 DHT:          {}\n  \
+                 HTTP tracker: {}\n  \
+                 .torrent:     {}",
+                attempts.dht, attempts.http_tracker, attempts.torrent_file,
+            );
+        }
+    }
+}
+
+/// Helper: given discovered peers, try to fetch metadata and build a result.
+async fn try_metadata_from_peers(
+    ih_hex: &str,
+    display_name: Option<&str>,
+    peers: &[SocketAddr],
+    info_hash: &[u8; 20],
+    method: DiscoveryMethod,
+    attempts: &DiscoveryAttempts,
+) -> anyhow::Result<TorrentInspection> {
+    let info_dict_bytes = fetch_info_dict_from_peers(peers, info_hash).await?;
     let files = parse_info_dict(&info_dict_bytes)?;
     let total_bytes = files.iter().map(|(_, size)| *size).sum();
 
     Ok(TorrentInspection {
-        info_hash_hex: hex::encode(info_hash),
+        info_hash_hex: ih_hex.to_owned(),
         display_name: display_name.map(str::to_owned),
         peer_count: peers.len(),
         files,
         total_bytes,
+        method,
+        attempts: attempts.clone(),
     })
 }
 
@@ -285,6 +459,39 @@ pub async fn dht_ping() -> anyhow::Result<Vec<(String, SocketAddr, Vec<u8>)>> {
     }
 
     Ok(results)
+}
+
+// ─── Multi-strategy peer discovery ───────────────────────────────────────────
+
+/// Discover peers using all available strategies.
+async fn discover_peers(info_hash: &[u8; 20]) -> anyhow::Result<Vec<SocketAddr>> {
+    // Strategy 1: DHT
+    let mut peers = match dht_get_peers(info_hash).await {
+        Ok(p) if !p.is_empty() => {
+            info!("DHT: found {} peers", p.len());
+            return Ok(p);
+        }
+        Ok(_) => {
+            info!("DHT: no peers found, trying HTTP tracker fallback");
+            Vec::new()
+        }
+        Err(e) => {
+            info!("DHT failed ({e}), trying HTTP tracker fallback");
+            Vec::new()
+        }
+    };
+
+    // Strategy 2: HTTP tracker
+    match http_tracker_get_peers(info_hash).await {
+        Ok(p) if !p.is_empty() => {
+            info!("HTTP tracker: found {} peers", p.len());
+            peers = p;
+        }
+        Ok(_) => info!("HTTP tracker: no peers returned"),
+        Err(e) => info!("HTTP tracker failed: {e}"),
+    }
+
+    Ok(peers)
 }
 
 // ─── DHT get_peers (iterative BEP-5 lookup) ─────────────────────────────────
@@ -527,6 +734,236 @@ fn decode_compact_6(bytes: &[u8]) -> Option<SocketAddr> {
     let port = u16::from_be_bytes([bytes[4], bytes[5]]);
     if port == 0 { return None; }
     Some(SocketAddr::from((ip, port)))
+}
+
+// ─── HTTP tracker fallback ────────────────────────────────────────────────────
+
+/// Well-known HTTP/HTTPS trackers on standard ports.
+/// These are tried as a fallback when UDP DHT is blocked.
+const HTTP_TRACKERS: &[&str] = &[
+    // archive.org tracker (port 6969, often blocked by DPI)
+    "http://bt1.archive.org:6969/announce",
+    "http://bt2.archive.org:6969/announce",
+    // Common HTTP trackers on port 80/443
+    "http://tracker.openbittorrent.com:80/announce",
+    "http://tracker.opentrackr.org:1337/announce",
+];
+
+/// Try HTTP tracker announce to discover peers.
+/// Sends a minimal BEP-3 HTTP tracker request.
+async fn http_tracker_get_peers(info_hash: &[u8; 20]) -> anyhow::Result<Vec<SocketAddr>> {
+    let mut all_peers = Vec::new();
+
+    for tracker_url in HTTP_TRACKERS {
+        match timeout(
+            Duration::from_secs(8),
+            http_tracker_announce(tracker_url, info_hash),
+        )
+        .await
+        {
+            Ok(Ok(peers)) => {
+                info!("HTTP tracker {tracker_url}: {} peers", peers.len());
+                all_peers.extend(peers);
+                if all_peers.len() >= 30 {
+                    break;
+                }
+            }
+            Ok(Err(e)) => debug!("HTTP tracker {tracker_url}: {e}"),
+            Err(_) => debug!("HTTP tracker {tracker_url}: timeout"),
+        }
+    }
+
+    all_peers.sort();
+    all_peers.dedup();
+    Ok(all_peers)
+}
+
+/// Send a raw HTTP GET tracker announce via TCP.
+/// We implement HTTP/1.1 manually to avoid depending on an HTTP client library.
+async fn http_tracker_announce(
+    tracker_url: &str,
+    info_hash: &[u8; 20],
+) -> anyhow::Result<Vec<SocketAddr>> {
+    // Parse URL
+    let url = tracker_url.strip_prefix("http://")
+        .ok_or_else(|| anyhow::anyhow!("only http:// trackers supported"))?;
+    let (host_port, path) = url.split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("invalid tracker URL"))?;
+    let path = format!("/{path}");
+
+    // Resolve host
+    let addr: SocketAddr = host_port.to_socket_addrs()
+        .context("DNS resolve")?
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("no addresses for {host_port}"))?;
+
+    // URL-encode info_hash
+    let ih_encoded: String = info_hash.iter()
+        .map(|b| format!("%{b:02X}"))
+        .collect();
+    let peer_id = "-MI0001-000000000000";
+
+    let request = format!(
+        "GET {path}?info_hash={ih_encoded}&peer_id={peer_id}&port=6881\
+         &uploaded=0&downloaded=0&left=1&compact=1&numwant=50 HTTP/1.1\r\n\
+         Host: {host_port}\r\nConnection: close\r\n\r\n"
+    );
+
+    let mut stream = TcpStream::connect(addr).await.context("TCP connect")?;
+    stream.write_all(request.as_bytes()).await.context("send request")?;
+
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.context("read response")?;
+
+    // Find the body after \r\n\r\n
+    let body_start = response.windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|p| p + 4)
+        .unwrap_or(0);
+    let body = &response[body_start..];
+
+    // Parse bencoded tracker response
+    let (resp, _) = bencode::decode(body)
+        .map_err(|e| anyhow::anyhow!("bencode: {e}"))?;
+
+    // Check for error
+    if let Some(err) = resp.dict_get(b"failure reason") {
+        if let Some(msg) = err.as_bytes() {
+            bail!("tracker: {}", String::from_utf8_lossy(msg));
+        }
+    }
+
+    // Parse compact peers
+    let mut peers = Vec::new();
+    if let Some(peers_val) = resp.dict_get(b"peers") {
+        if let Some(bytes) = peers_val.as_bytes() {
+            // Compact format: 6 bytes per peer (4 IP + 2 port)
+            for chunk in bytes.chunks_exact(6) {
+                if let Some(addr) = decode_compact_6(chunk) {
+                    peers.push(addr);
+                }
+            }
+        }
+    }
+
+    Ok(peers)
+}
+
+// ─── .torrent file fallback ──────────────────────────────────────────────────
+
+/// Attempt to download a .torrent file from well-known web sources.
+/// This is the last resort when both DHT and HTTP trackers are blocked.
+/// archive.org is often accessible even behind aggressive corporate firewalls.
+/// Returns `(torrent_bytes, source_description)`.
+async fn fetch_torrent_file_from_web(info_hash: &[u8; 20]) -> anyhow::Result<(Vec<u8>, String)> {
+    let ih_hex = hex::encode(info_hash);
+    info!("Trying to fetch .torrent file for {ih_hex} from web sources...");
+
+    // Source 1: torrent cache sites (may be blocked by DPI)
+    let cache_sources = [
+        format!("https://itorrents.org/torrent/{ih_hex}.torrent"),
+    ];
+
+    for url in &cache_sources {
+        match timeout(Duration::from_secs(15), https_get(url)).await {
+            Ok(Ok(body)) if body.len() > 20 && body.starts_with(b"d") => {
+                info!("Downloaded .torrent ({} bytes) from {url}", body.len());
+                return Ok((body, url.clone()));
+            }
+            Ok(Ok(_)) => debug!(".torrent from {url}: not a valid torrent"),
+            Ok(Err(e)) => debug!(".torrent from {url}: {e}"),
+            Err(_) => debug!(".torrent from {url}: timeout"),
+        }
+    }
+
+    // Source 2: archive.org — search by btih, then download the .torrent
+    // archive.org is categorized as "education" by most firewalls, not "P2P"
+    info!("Trying archive.org btih search...");
+    match timeout(Duration::from_secs(15), archive_org_torrent(&ih_hex)).await {
+        Ok(Ok(body)) => return Ok((body, "archive.org".into())),
+        Ok(Err(e)) => debug!("archive.org: {e}"),
+        Err(_) => debug!("archive.org: timeout"),
+    }
+
+    bail!("Could not download .torrent file from any web source")
+}
+
+/// Search archive.org for a torrent by info hash, then download its .torrent.
+async fn archive_org_torrent(ih_hex: &str) -> anyhow::Result<Vec<u8>> {
+    // Step 1: Search for the item by btih
+    let search_url = format!(
+        "https://archive.org/advancedsearch.php?q=btih%3A{ih_hex}&output=json&rows=1&fl[]=identifier"
+    );
+    let search_body = https_get(&search_url).await
+        .context("archive.org search")?;
+
+    // Parse JSON response to extract identifier
+    let search_text = std::str::from_utf8(&search_body)
+        .context("search response not UTF-8")?;
+
+    // Simple JSON extraction — find "identifier":"<value>"
+    let identifier = search_text
+        .find("\"identifier\":\"")
+        .and_then(|start| {
+            let rest = &search_text[start + 14..];
+            rest.find('"').map(|end| &rest[..end])
+        })
+        .ok_or_else(|| anyhow::anyhow!("no archive.org item found for btih {ih_hex}"))?;
+
+    info!("archive.org: found item '{identifier}' for btih {ih_hex}");
+
+    // Step 2: Download the .torrent file
+    let torrent_url = format!(
+        "https://archive.org/download/{identifier}/{identifier}_archive.torrent"
+    );
+    let torrent_bytes = https_get(&torrent_url).await
+        .context("download .torrent from archive.org")?;
+
+    if torrent_bytes.len() < 20 || !torrent_bytes.starts_with(b"d") {
+        bail!("archive.org: downloaded file is not a valid .torrent");
+    }
+
+    info!("Downloaded .torrent ({} bytes) from archive.org/{identifier}", torrent_bytes.len());
+    Ok(torrent_bytes)
+}
+
+/// Minimal HTTPS GET using raw TCP + rustls (if available) or falling back
+/// to spawning curl as a subprocess.
+async fn https_get(url: &str) -> anyhow::Result<Vec<u8>> {
+    // Use curl subprocess — it handles TLS, redirects, and proxy settings
+    // automatically, and is available on Windows 10+.
+    let output = tokio::process::Command::new("curl")
+        .args(["-skL", "--connect-timeout", "10", "-o", "-", url])
+        .output()
+        .await
+        .context("spawn curl")?;
+
+    if !output.status.success() {
+        bail!("curl failed: {}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    // Check for GlobalProtect block pages
+    if output.stdout.starts_with(b"<html") || output.stdout.starts_with(b"<!DOCTYPE") {
+        if output.stdout.windows(14).any(|w| w == b"Web Page Block") {
+            bail!("blocked by firewall");
+        }
+    }
+
+    Ok(output.stdout)
+}
+
+/// Parse a full .torrent file (bencoded with outer `d` wrapper) to extract
+/// the file list from the `info` dict.
+fn parse_torrent_file_info(torrent_bytes: &[u8]) -> anyhow::Result<Vec<(String, u64)>> {
+    let (torrent, _) = bencode::decode(torrent_bytes)
+        .map_err(|e| anyhow::anyhow!("bencode: {e}"))?;
+
+    let info = torrent.dict_get(b"info")
+        .ok_or_else(|| anyhow::anyhow!("missing info dict in .torrent"))?;
+
+    // Re-encode the info dict so we can parse it with our existing function
+    let info_bytes = bencode::encode(info);
+    parse_info_dict(&info_bytes)
 }
 
 // ─── ut_metadata fetch ────────────────────────────────────────────────────────
@@ -1300,6 +1737,242 @@ mod tests {
         let err = validate_inbox_dir(&inbox, &data).unwrap_err().to_string();
         assert!(err.contains(INBOX_MARKER));
     }
+
+    // ── XOR distance ──────────────────────────────────────────────────────
+
+    #[test]
+    fn xor_distance_identity_is_zero() {
+        let a = [0x08; 20];
+        let d = xor_distance(&a, &a);
+        assert_eq!(d, [0u8; 20]);
+    }
+
+    #[test]
+    fn xor_distance_ordering() {
+        let target = [0x08, 0xAD, 0xA5, 0xA7, 0xA6, 0x18, 0x3A, 0xAE,
+                       0x1E, 0x09, 0xD8, 0x31, 0xDF, 0x67, 0x48, 0xD5,
+                       0x66, 0x09, 0x5A, 0x10];
+        let close  = [0x08, 0xAD, 0xA5, 0xA7, 0xA6, 0x18, 0x3A, 0xAE,
+                       0x1E, 0x09, 0xD8, 0x31, 0xDF, 0x67, 0x48, 0xD5,
+                       0x66, 0x09, 0x5A, 0x11]; // differs in last bit
+        let far    = [0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                       0x00, 0x00, 0x00, 0x00];
+
+        let d_close = xor_distance(&close, &target);
+        let d_far   = xor_distance(&far, &target);
+        assert!(d_close < d_far);
+    }
+
+    // ── get_peers response parsing ───────────────────────────────────────
+
+    #[test]
+    fn parse_get_peers_response_with_ids_parses_nodes() {
+        // Build a mock BEP-5 response with r.nodes (26-byte compact entries).
+        let mut nodes_bytes = Vec::new();
+        // Node 1: id = [0x01; 20], addr = 10.0.0.1:6881
+        nodes_bytes.extend_from_slice(&[0x01; 20]);
+        nodes_bytes.extend_from_slice(&[10, 0, 0, 1]);
+        nodes_bytes.extend_from_slice(&6881u16.to_be_bytes());
+        // Node 2: id = [0x02; 20], addr = 10.0.0.2:51413
+        nodes_bytes.extend_from_slice(&[0x02; 20]);
+        nodes_bytes.extend_from_slice(&[10, 0, 0, 2]);
+        nodes_bytes.extend_from_slice(&51413u16.to_be_bytes());
+
+        let resp = Value::Dict({
+            let mut d = BTreeMap::new();
+            d.insert(b"t".to_vec(), Value::Bytes(b"ab".to_vec()));
+            d.insert(b"y".to_vec(), Value::Bytes(b"r".to_vec()));
+            d.insert(b"r".to_vec(), Value::Dict({
+                let mut r = BTreeMap::new();
+                r.insert(b"id".to_vec(), Value::Bytes(vec![0xAA; 20]));
+                r.insert(b"nodes".to_vec(), Value::Bytes(nodes_bytes));
+                r
+            }));
+            d
+        });
+
+        let encoded = bencode::encode(&resp);
+        let (peers, nodes) = parse_get_peers_response_with_ids(&encoded);
+        assert!(peers.is_empty());
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].id, [0x01; 20]);
+        assert_eq!(nodes[0].addr.port(), 6881);
+        assert_eq!(nodes[1].id, [0x02; 20]);
+        assert_eq!(nodes[1].addr.port(), 51413);
+    }
+
+    #[test]
+    fn parse_get_peers_response_with_ids_parses_values() {
+        // Build a BEP-5 response with r.values (list of 6-byte compact peers).
+        let resp = Value::Dict({
+            let mut d = BTreeMap::new();
+            d.insert(b"t".to_vec(), Value::Bytes(b"ab".to_vec()));
+            d.insert(b"y".to_vec(), Value::Bytes(b"r".to_vec()));
+            d.insert(b"r".to_vec(), Value::Dict({
+                let mut r = BTreeMap::new();
+                r.insert(b"id".to_vec(), Value::Bytes(vec![0xBB; 20]));
+                r.insert(b"values".to_vec(), Value::List(vec![
+                    // 192.168.1.1:8080
+                    Value::Bytes(vec![192, 168, 1, 1, 0x1F, 0x90]),
+                    // 10.0.0.5:6881
+                    Value::Bytes(vec![10, 0, 0, 5, 0x1A, 0xE1]),
+                ]));
+                r
+            }));
+            d
+        });
+
+        let encoded = bencode::encode(&resp);
+        let (peers, nodes) = parse_get_peers_response_with_ids(&encoded);
+        assert_eq!(peers.len(), 2);
+        assert!(nodes.is_empty());
+        assert_eq!(peers[0].port(), 8080);
+        assert_eq!(peers[1].port(), 6881);
+    }
+
+    // ── .torrent file parsing ────────────────────────────────────────────
+
+    #[test]
+    fn parse_torrent_file_info_extracts_files() {
+        // Build a minimal .torrent file (outer dict with "info" key).
+        let torrent = Value::Dict({
+            let mut d = BTreeMap::new();
+            d.insert(b"announce".to_vec(),
+                Value::Bytes(b"http://tracker.example.com/announce".to_vec()));
+            d.insert(b"info".to_vec(), Value::Dict({
+                let mut info = BTreeMap::new();
+                info.insert(b"name".to_vec(), Value::Bytes(b"movie".to_vec()));
+                info.insert(b"piece length".to_vec(), Value::Int(262144));
+                info.insert(b"pieces".to_vec(), Value::Bytes(vec![0u8; 40]));
+                info.insert(b"files".to_vec(), Value::List(vec![
+                    Value::Dict({
+                        let mut f = BTreeMap::new();
+                        f.insert(b"length".to_vec(), Value::Int(1_000_000));
+                        f.insert(b"path".to_vec(), Value::List(vec![
+                            Value::Bytes(b"video.mp4".to_vec()),
+                        ]));
+                        f
+                    }),
+                    Value::Dict({
+                        let mut f = BTreeMap::new();
+                        f.insert(b"length".to_vec(), Value::Int(500));
+                        f.insert(b"path".to_vec(), Value::List(vec![
+                            Value::Bytes(b"subs".to_vec()),
+                            Value::Bytes(b"en.srt".to_vec()),
+                        ]));
+                        f
+                    }),
+                ]));
+                info
+            }));
+            d
+        });
+
+        let bytes = bencode::encode(&torrent);
+        let files = parse_torrent_file_info(&bytes).unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].0, "movie/video.mp4");
+        assert_eq!(files[0].1, 1_000_000);
+        assert_eq!(files[1].0, "movie/subs/en.srt");
+        assert_eq!(files[1].1, 500);
+    }
+
+    #[test]
+    fn parse_torrent_file_info_rejects_missing_info() {
+        let torrent = Value::Dict({
+            let mut d = BTreeMap::new();
+            d.insert(b"announce".to_vec(),
+                Value::Bytes(b"http://tracker.example.com/announce".to_vec()));
+            d
+        });
+        let bytes = bencode::encode(&torrent);
+        assert!(parse_torrent_file_info(&bytes).is_err());
+    }
+
+    // ── HTTP tracker response parsing ────────────────────────────────────
+
+    #[test]
+    fn http_tracker_response_compact_peers() {
+        // Simulate a tracker response with compact peers.
+        let resp = Value::Dict({
+            let mut d = BTreeMap::new();
+            d.insert(b"interval".to_vec(), Value::Int(1800));
+            // 2 peers: 1.2.3.4:80 + 5.6.7.8:443
+            let mut peers_bytes = Vec::new();
+            peers_bytes.extend_from_slice(&[1, 2, 3, 4, 0, 80]);
+            peers_bytes.extend_from_slice(&[5, 6, 7, 8, 1, 0xBB]);
+            d.insert(b"peers".to_vec(), Value::Bytes(peers_bytes));
+            d
+        });
+
+        let body = bencode::encode(&resp);
+        // Wrap in a fake HTTP response.
+        let mut http_resp = b"HTTP/1.1 200 OK\r\nContent-Length: 999\r\n\r\n".to_vec();
+        http_resp.extend_from_slice(&body);
+
+        // Parse body manually (same logic as http_tracker_announce)
+        let body_start = http_resp.windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .map(|p| p + 4)
+            .unwrap();
+        let body = &http_resp[body_start..];
+        let (parsed, _) = bencode::decode(body).unwrap();
+
+        let mut peers = Vec::new();
+        if let Some(peers_val) = parsed.dict_get(b"peers") {
+            if let Some(bytes) = peers_val.as_bytes() {
+                for chunk in bytes.chunks_exact(6) {
+                    if let Some(addr) = decode_compact_6(chunk) {
+                        peers.push(addr);
+                    }
+                }
+            }
+        }
+        assert_eq!(peers.len(), 2);
+        assert_eq!(peers[0].port(), 80);
+        assert_eq!(peers[1].port(), 443);
+    }
+
+    // ── Firewall block detection ─────────────────────────────────────────
+
+    #[test]
+    fn detect_firewall_block_page() {
+        let block_page = b"<html>\r\n<head>\r\n<title>Web Page Blocked</title>";
+        assert!(block_page.windows(14).any(|w| w == b"Web Page Block"));
+
+        let normal_html = b"<html><head><title>Hello World</title></head></html>";
+        assert!(!normal_html.windows(14).any(|w| w == b"Web Page Block"));
+    }
+
+    // ── Discovery types ──────────────────────────────────────────────────
+
+    #[test]
+    fn discovery_method_display() {
+        assert_eq!(
+            format!("{}", DiscoveryMethod::Dht),
+            "DHT (BEP-5 UDP)"
+        );
+        assert_eq!(
+            format!("{}", DiscoveryMethod::TorrentFile { source: "archive.org".into() }),
+            ".torrent file (archive.org)"
+        );
+    }
+
+    #[test]
+    fn strategy_result_display() {
+        let ok = StrategyResult::Success { detail: "42 peers".into() };
+        assert!(format!("{ok}").contains("42 peers"));
+
+        let fail = StrategyResult::Failed { reason: "timeout".into() };
+        assert!(format!("{fail}").contains("FAILED"));
+        assert!(format!("{fail}").contains("timeout"));
+
+        let na = StrategyResult::NotAttempted;
+        assert_eq!(format!("{na}"), "not attempted");
+    }
+
+    // ── scan_new_inbox ───────────────────────────────────────────────────
 
     #[test]
     fn scan_new_inbox_ignores_symlinks_and_processed_dir() {

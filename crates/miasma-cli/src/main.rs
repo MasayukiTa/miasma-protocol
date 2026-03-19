@@ -386,6 +386,26 @@ async fn cmd_status(data_dir: &std::path::Path) -> Result<()> {
             );
             println!("  Pending replication: {}", s.pending_replication);
             println!("  Replicated items:    {}", s.replicated_count);
+            if s.wss_port > 0 {
+                println!("  WSS share server:    127.0.0.1:{}", s.wss_port);
+            }
+
+            // Payload transport readiness matrix.
+            if !s.transport_readiness.is_empty() {
+                println!();
+                println!("  Payload Transport Readiness:");
+                for t in &s.transport_readiness {
+                    let status = if t.available { "AVAILABLE" } else { "UNAVAILABLE" };
+                    print!(
+                        "    {:<20} {:<12} success={} failure={}",
+                        t.name, status, t.success_count, t.failure_count
+                    );
+                    if let Some(ref reason) = t.reason {
+                        print!("  ({reason})");
+                    }
+                    println!();
+                }
+            }
             return Ok(());
         }
     }

@@ -66,6 +66,22 @@ pub struct DaemonStatus {
     pub storage_used_bytes: u64,
     pub pending_replication: usize,
     pub replicated_count: usize,
+    /// WSS share server port (0 if not running).
+    #[serde(default)]
+    pub wss_port: u16,
+    /// Payload transport readiness matrix.
+    #[serde(default)]
+    pub transport_readiness: Vec<TransportStatus>,
+}
+
+/// Per-transport readiness info for IPC/CLI display.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransportStatus {
+    pub name: String,
+    pub available: bool,
+    pub success_count: u64,
+    pub failure_count: u64,
+    pub reason: Option<String>,
 }
 
 // ─── Frame helpers ────────────────────────────────────────────────────────────
