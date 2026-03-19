@@ -328,6 +328,16 @@ async fn process_request(
                 replicated_count,
             })
         }
+
+        ControlRequest::Wipe => {
+            match store.distress_wipe() {
+                Ok(_) => {
+                    info!("distress wipe executed via IPC");
+                    ControlResponse::Wiped
+                }
+                Err(e) => ControlResponse::Error(format!("wipe failed: {e}")),
+            }
+        }
     }
 }
 
