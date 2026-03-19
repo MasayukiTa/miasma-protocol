@@ -100,13 +100,18 @@ fn cmd_inspect(args: &[String]) {
 
 fn cmd_dissolve(args: &[String]) {
     let (data_dir, rest) = parse_data_dir(args);
-    if rest.is_empty() {
-        eprintln!("Usage: miasma-bridge dissolve --data-dir <dir> <magnet-uri>");
-        std::process::exit(1);
-    }
-    let magnet = &rest[0];
+    let magnet = rest.iter().find(|a| !a.starts_with("--"));
+    let magnet = match magnet {
+        Some(m) => m.clone(),
+        None => {
+            eprintln!(
+                "Usage: miasma-bridge dissolve [--max-total-bytes <N>] [--confirm-download] <magnet-uri>"
+            );
+            std::process::exit(1);
+        }
+    };
 
-    let info = match pipeline::MagnetInfo::parse(magnet) {
+    let info = match pipeline::MagnetInfo::parse(&magnet) {
         Ok(i) => i,
         Err(e) => {
             error!("Failed to parse magnet link: {e}");
@@ -124,12 +129,14 @@ fn cmd_dissolve(args: &[String]) {
         .expect("tokio runtime");
 
     let quota_mb = parse_quota_mb_from_args(args);
+    let safety_opts = parse_safety_opts(args);
 
     match rt.block_on(bridge::dissolve_torrent(
         &info.info_hash,
         info.display_name.as_deref(),
         &data_dir,
         quota_mb,
+        &safety_opts,
     )) {
         Ok(mids) => {
             println!("Dissolved {} file(s):", mids.len());
@@ -248,6 +255,34 @@ fn parse_quota_mb_from_args(args: &[String]) -> u64 {
         .unwrap_or(102_400)
 }
 
+fn parse_safety_opts(args: &[String]) -> bridge::DownloadSafetyOpts {
+    let mut opts = bridge::DownloadSafetyOpts::default();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--confirm-download" {
+            opts.confirm_download = true;
+        } else if args[i] == "--max-total-bytes" && i + 1 < args.len() {
+            opts.max_total_bytes = parse_size_bytes(&args[i + 1]);
+            i += 1;
+        }
+        i += 1;
+    }
+    opts
+}
+
+fn parse_size_bytes(s: &str) -> u64 {
+    if let Some(g) = s.strip_suffix('G').or_else(|| s.strip_suffix("GiB")) {
+        return g.parse::<u64>().unwrap_or(100) * 1024 * 1024 * 1024;
+    }
+    if let Some(m) = s.strip_suffix('M').or_else(|| s.strip_suffix("MiB")) {
+        return m.parse::<u64>().unwrap_or(100) * 1024 * 1024;
+    }
+    if let Some(k) = s.strip_suffix('K').or_else(|| s.strip_suffix("KiB")) {
+        return k.parse::<u64>().unwrap_or(100) * 1024;
+    }
+    s.parse::<u64>().unwrap_or(100 * 1024 * 1024)
+}
+
 fn parse_size_mb(s: &str) -> u64 {
     if let Some(g) = s.strip_suffix('G').or_else(|| s.strip_suffix("GB")) {
         return g.parse::<u64>().unwrap_or(100) * 1024;
@@ -264,19 +299,23 @@ fn print_usage() {
         "\n",
         "Commands:\n",
         "  inspect     Probe a magnet via DHT + metadata without downloading payload files\n",
-        "  dissolve    Dissolve a torrent's files into Miasma\n",
+        "  dissolve    Dissolve a torrent's files into Miasma (preflight size check)\n",
         "  init-inbox  Create a dedicated inbox approved for bridge daemon imports\n",
         "  retrieve    Retrieve a MID and re-seed as torrent [Phase 2 stub]\n",
         "  daemon      Watch a dedicated inbox for new files and auto-dissolve them\n",
         "\n",
         "Options:\n",
-        "  --data-dir <dir>    Node data directory\n",
-        "  --quota <size>      Storage quota (e.g. 100G, 512M)\n",
-        "  --inbox-dir <dir>   Dedicated inbox directory to watch for new files\n",
+        "  --data-dir <dir>           Node data directory\n",
+        "  --quota <size>             Storage quota (e.g. 100G, 512M)\n",
+        "  --inbox-dir <dir>          Dedicated inbox directory to watch for new files\n",
+        "  --max-total-bytes <size>   Safety limit for dissolve (default: 100M)\n",
+        "  --confirm-download         Proceed even if torrent exceeds safety limit\n",
         "\n",
         "Examples:\n",
         "  miasma-bridge inspect \"magnet:?xt=urn:btih:...\"\n",
         "  miasma-bridge dissolve \"magnet:?xt=urn:btih:...\"\n",
+        "  miasma-bridge dissolve --max-total-bytes 500M \"magnet:?xt=urn:btih:...\"\n",
+        "  miasma-bridge dissolve --confirm-download \"magnet:?xt=urn:btih:...\"\n",
         "  miasma-bridge init-inbox C:\\\\MiasmaInbox\n",
         "  miasma-bridge daemon --inbox-dir C:\\\\MiasmaInbox\n",
     ));

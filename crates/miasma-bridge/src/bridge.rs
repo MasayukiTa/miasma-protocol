@@ -58,14 +58,36 @@ pub struct TorrentInspection {
     pub total_bytes: u64,
 }
 
+/// Safety options for torrent downloads.
+#[derive(Debug, Clone)]
+pub struct DownloadSafetyOpts {
+    /// Hard limit in bytes.  If the torrent's total payload exceeds this,
+    /// the download is refused unless `confirm_download` is set.
+    /// Default: 100 MiB.
+    pub max_total_bytes: u64,
+    /// When true, proceed even if the torrent exceeds `max_total_bytes`.
+    pub confirm_download: bool,
+}
+
+impl Default for DownloadSafetyOpts {
+    fn default() -> Self {
+        Self {
+            max_total_bytes: 100 * 1024 * 1024, // 100 MiB
+            confirm_download: false,
+        }
+    }
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /// Dissolve a torrent identified by `info_hash` into Miasma.
 ///
 /// 1. Discover peers via DHT.
 /// 2. Fetch torrent metadata (ut_metadata extension).
-/// 3. Download each file in the torrent.
-/// 4. Dissolve each file into the local share store.
+/// 3. **Preflight**: print file list and total size; refuse if over the
+///    safety limit unless `opts.confirm_download` is set.
+/// 4. Download each file in the torrent.
+/// 5. Dissolve each file into the local share store.
 ///
 /// Returns the list of MID strings produced.
 pub async fn dissolve_torrent(
@@ -73,6 +95,7 @@ pub async fn dissolve_torrent(
     display_name: Option<&str>,
     data_dir: &std::path::Path,
     quota_mb: u64,
+    opts: &DownloadSafetyOpts,
 ) -> anyhow::Result<Vec<String>> {
     let store = Arc::new(
         LocalShareStore::open(data_dir, quota_mb).context("open share store")?,
@@ -97,12 +120,28 @@ pub async fn dissolve_torrent(
     }
     info!("Found {} peers", peers.len());
 
-    // 2. Fetch metadata from the first responsive peer.
+    // 2. Fetch metadata (preflight — no payload downloaded yet).
     let info_dict_bytes = fetch_info_dict_from_peers(&peers, info_hash).await?;
     let file_entries = parse_info_dict(&info_dict_bytes)?;
-    info!("Torrent has {} file(s)", file_entries.len());
+    let total_bytes: u64 = file_entries.iter().map(|(_, s)| *s).sum();
 
-    // 3. Download each file and dissolve it.
+    // 3. Print preflight report.
+    info!("Torrent has {} file(s), {} bytes total", file_entries.len(), total_bytes);
+    for (name, size) in &file_entries {
+        info!("  {size:>12}  {name}");
+    }
+
+    // 4. Enforce safety limit.
+    if total_bytes > opts.max_total_bytes && !opts.confirm_download {
+        bail!(
+            "Torrent total size ({}) exceeds safety limit ({} bytes).\n\
+             To proceed anyway, re-run with --confirm-download or increase --max-total-bytes.",
+            format_bytes(total_bytes),
+            opts.max_total_bytes
+        );
+    }
+
+    // 5. Download each file and dissolve it.
     let params = DissolutionParams::default();
     let mut mids = Vec::new();
 
@@ -118,7 +157,7 @@ pub async fn dissolve_torrent(
                 for share in &shares {
                     store.put(share).context("store share")?;
                 }
-                info!("    → {mid_str}");
+                info!("    -> {mid_str}");
                 mids.push(mid_str);
             }
             Err(e) => warn!("Dissolution failed for {filename}: {e}"),
@@ -126,6 +165,18 @@ pub async fn dissolve_torrent(
     }
 
     Ok(mids)
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    } else if bytes >= 1024 * 1024 {
+        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} bytes")
+    }
 }
 
 /// Inspect a torrent via the public BitTorrent network without downloading its
@@ -1003,6 +1054,21 @@ mod tests {
         init_inbox(&inbox).unwrap();
         assert!(inbox.join(INBOX_MARKER).exists());
         assert!(inbox.join(PROCESSED_DIR).is_dir());
+    }
+
+    #[test]
+    fn format_bytes_human_readable() {
+        assert_eq!(format_bytes(500), "500 bytes");
+        assert_eq!(format_bytes(2048), "2.0 KiB");
+        assert_eq!(format_bytes(5 * 1024 * 1024), "5.0 MiB");
+        assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.0 GiB");
+    }
+
+    #[test]
+    fn safety_opts_default_is_100mib() {
+        let opts = DownloadSafetyOpts::default();
+        assert_eq!(opts.max_total_bytes, 100 * 1024 * 1024);
+        assert!(!opts.confirm_download);
     }
 
     #[test]
