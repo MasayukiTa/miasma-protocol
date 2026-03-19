@@ -38,6 +38,7 @@ fn main() {
     }
 
     match args[1].as_str() {
+        "dht-ping" => cmd_dht_ping(),
         "inspect" => cmd_inspect(&args[2..]),
         "dissolve" => cmd_dissolve(&args[2..]),
         "init-inbox" => cmd_init_inbox(&args[2..]),
@@ -47,6 +48,41 @@ fn main() {
         other => {
             eprintln!("Unknown command: {other}");
             print_usage();
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_dht_ping() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+
+    println!("Pinging DHT bootstrap nodes...");
+    match rt.block_on(bridge::dht_ping()) {
+        Ok(results) => {
+            if results.is_empty() {
+                println!("No responses. UDP 6881 may be blocked.");
+                std::process::exit(1);
+            }
+            println!("{} node(s) responded:", results.len());
+            for (name, addr, node_id) in &results {
+                println!(
+                    "  {} ({}) — node_id: {}",
+                    name,
+                    addr,
+                    if node_id.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        hex::encode(node_id)
+                    }
+                );
+            }
+            println!("DHT connectivity: OK");
+        }
+        Err(e) => {
+            error!("DHT ping failed: {e}");
             std::process::exit(1);
         }
     }
@@ -298,6 +334,7 @@ fn print_usage() {
         "miasma-bridge - BitTorrent <-> Miasma bridge\n",
         "\n",
         "Commands:\n",
+        "  dht-ping    Test UDP connectivity to DHT bootstrap nodes\n",
         "  inspect     Probe a magnet via DHT + metadata without downloading payload files\n",
         "  dissolve    Dissolve a torrent's files into Miasma (preflight size check)\n",
         "  init-inbox  Create a dedicated inbox approved for bridge daemon imports\n",
