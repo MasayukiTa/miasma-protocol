@@ -1,4 +1,4 @@
-/// miasma-desktop — Cross-platform GUI (Phase 3, Task 22).
+/// miasma-desktop — Cross-platform GUI (daemon-centric IPC).
 ///
 /// # Architecture
 /// ```text
@@ -9,8 +9,8 @@
 /// │  │  [Dissolve] [Retrieve] [Status] [Settings]│   │
 /// │  └───────────────────────────────────────────┘   │
 /// │                                                  │
-/// │  worker OS thread ← miasma-core (local store)    │
-/// │      mpsc channels (WorkerCmd / WorkerResult)     │
+/// │  worker OS thread ── IPC ──► local daemon        │
+/// │      mpsc channels (WorkerCmd / WorkerResult)    │
 /// └──────────────────────────────────────────────────┘
 /// ```
 mod app;

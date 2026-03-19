@@ -189,7 +189,7 @@ async fn main() -> Result<()> {
             total_shards,
         } => cmd_get(&data_dir, &mid, output.as_deref(), data_shards, total_shards),
 
-        Commands::Status => cmd_status(&data_dir),
+        Commands::Status => cmd_status(&data_dir).await,
 
         Commands::Wipe { confirm } => cmd_wipe(&data_dir, confirm),
 
@@ -365,13 +365,12 @@ fn cmd_get(
     Ok(())
 }
 
-fn cmd_status(data_dir: &std::path::Path) -> Result<()> {
+async fn cmd_status(data_dir: &std::path::Path) -> Result<()> {
     // Try daemon IPC first; fall back to local config if daemon not running.
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    if let Ok(resp) = rt.block_on(async {
+    if let Ok(resp) = {
         use miasma_core::{daemon_request, ControlRequest};
         daemon_request(data_dir, ControlRequest::Status).await
-    }) {
+    } {
         use miasma_core::ControlResponse;
         if let ControlResponse::Status(s) = resp {
             println!("Miasma Daemon Status");

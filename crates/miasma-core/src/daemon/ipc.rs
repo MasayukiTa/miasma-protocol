@@ -41,6 +41,8 @@ pub enum ControlRequest {
     },
     /// Return daemon status metrics.
     Status,
+    /// Distress-wipe: destroy the master key so all shares become unreadable.
+    Wipe,
 }
 
 /// Response from the daemon to a CLI client.
@@ -49,6 +51,8 @@ pub enum ControlResponse {
     Published { mid: String },
     Retrieved { data: Vec<u8> },
     Status(DaemonStatus),
+    /// Distress wipe completed successfully.
+    Wiped,
     Error(String),
 }
 
@@ -107,7 +111,7 @@ pub fn read_port_file(data_dir: &Path) -> Result<u16> {
     let path = data_dir.join(PORT_FILE);
     let s = std::fs::read_to_string(&path).with_context(|| {
         format!(
-            "daemon.port not found — is `miasma daemon` running?\n  (looked in {})",
+            "daemon.port not found — is the miasma daemon running?\n  (looked in {})",
             path.display()
         )
     })?;
@@ -124,7 +128,7 @@ pub async fn daemon_request(data_dir: &Path, req: ControlRequest) -> Result<Cont
         .with_context(|| {
             format!(
                 "cannot connect to daemon on 127.0.0.1:{port} — \
-                 is `miasma daemon` still running?"
+                 is the miasma daemon still running?"
             )
         })?;
     write_frame(&mut stream, &req).await?;
