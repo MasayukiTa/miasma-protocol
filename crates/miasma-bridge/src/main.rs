@@ -1,22 +1,18 @@
-/// miasma-bridge CLI — BitTorrent ↔ Miasma bridge (Phase 2, Task 15).
+/// miasma-bridge CLI - BitTorrent <-> Miasma bridge.
 ///
-/// # Usage
+/// Usage examples:
 /// ```text
-/// # Dissolve a torrent's files into Miasma (DHT + peer-wire download):
-/// miasma-bridge dissolve \
-///   --data-dir ~/.miasma \
-///   "magnet:?xt=urn:btih:aabb...&dn=example"
+/// # Inspect a magnet via DHT + metadata only:
+/// miasma-bridge inspect --data-dir ~/.miasma "magnet:?xt=urn:btih:..."
 ///
-/// # Retrieve a MID and re-seed it as a torrent (Phase 2 stub):
-/// miasma-bridge retrieve \
-///   --data-dir ~/.miasma \
-///   "miasma:<base58>"
+/// # Dissolve a torrent's files into Miasma:
+/// miasma-bridge dissolve --data-dir ~/.miasma "magnet:?xt=urn:btih:..."
 ///
-/// # Start the bridge daemon (watches a directory for new files):
-/// miasma-bridge daemon \
-///   --data-dir ~/.miasma \
-///   --quota 100G \
-///   --watch-dir ~/Downloads
+/// # Create a dedicated inbox approved for bridge daemon imports:
+/// miasma-bridge init-inbox C:\MiasmaInbox
+///
+/// # Start the bridge daemon against that inbox:
+/// miasma-bridge daemon --data-dir ~/.miasma --inbox-dir C:\MiasmaInbox
 /// ```
 #[allow(dead_code)]
 mod index;
@@ -26,7 +22,7 @@ mod pipeline;
 
 use std::path::PathBuf;
 
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 fn main() {
     tracing_subscriber::fmt()
@@ -42,9 +38,11 @@ fn main() {
     }
 
     match args[1].as_str() {
-        "dissolve"    => cmd_dissolve(&args[2..]),
-        "retrieve"    => cmd_retrieve(&args[2..]),
-        "daemon"      => cmd_daemon(&args[2..]),
+        "inspect" => cmd_inspect(&args[2..]),
+        "dissolve" => cmd_dissolve(&args[2..]),
+        "init-inbox" => cmd_init_inbox(&args[2..]),
+        "retrieve" => cmd_retrieve(&args[2..]),
+        "daemon" => cmd_daemon(&args[2..]),
         "--help" | "-h" => print_usage(),
         other => {
             eprintln!("Unknown command: {other}");
@@ -54,7 +52,51 @@ fn main() {
     }
 }
 
-// ─── Commands ─────────────────────────────────────────────────────────────────
+fn cmd_inspect(args: &[String]) {
+    let (_data_dir, rest) = parse_data_dir(args);
+    if rest.is_empty() {
+        eprintln!("Usage: miasma-bridge inspect --data-dir <dir> <magnet-uri>");
+        std::process::exit(1);
+    }
+    let magnet = &rest[0];
+
+    let info = match pipeline::MagnetInfo::parse(magnet) {
+        Ok(i) => i,
+        Err(e) => {
+            error!("Failed to parse magnet link: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+
+    match rt.block_on(bridge::inspect_torrent(
+        &info.info_hash,
+        info.display_name.as_deref(),
+    )) {
+        Ok(report) => {
+            println!("Magnet reachable on BitTorrent network");
+            println!("  Info hash:    {}", report.info_hash_hex);
+            println!(
+                "  Display name: {}",
+                report.display_name.as_deref().unwrap_or("unknown")
+            );
+            println!("  Peers found:  {}", report.peer_count);
+            println!("  Files:        {}", report.files.len());
+            println!("  Total bytes:  {}", report.total_bytes);
+            for (name, size) in report.files {
+                println!("    {size:>10}  {name}");
+            }
+        }
+        Err(e) => {
+            error!("Inspect failed: {e}");
+            std::process::exit(1);
+        }
+    }
+}
 
 fn cmd_dissolve(args: &[String]) {
     let (data_dir, rest) = parse_data_dir(args);
@@ -102,6 +144,23 @@ fn cmd_dissolve(args: &[String]) {
     }
 }
 
+fn cmd_init_inbox(args: &[String]) {
+    if args.is_empty() {
+        eprintln!("Usage: miasma-bridge init-inbox <dir>");
+        std::process::exit(1);
+    }
+
+    let dir = PathBuf::from(&args[0]);
+    if let Err(e) = bridge::init_inbox(&dir) {
+        error!("Failed to initialize inbox: {e}");
+        std::process::exit(1);
+    }
+
+    println!("Initialized bridge inbox:");
+    println!("  {}", dir.display());
+    println!("Only files dropped into this directory will be auto-imported.");
+}
+
 fn cmd_retrieve(args: &[String]) {
     let (data_dir, rest) = parse_data_dir(args);
     if rest.is_empty() {
@@ -118,22 +177,22 @@ fn cmd_retrieve(args: &[String]) {
 
 fn cmd_daemon(args: &[String]) {
     let (data_dir, rest) = parse_data_dir(args);
-    let watch_dir = rest.windows(2)
-        .find(|w| w[0] == "--watch-dir")
-        .map(|w| PathBuf::from(&w[1]));
+    let inbox_dir = parse_inbox_dir(&rest);
     let quota_mb = parse_quota_mb_from_args(args);
 
-    let watch_dir = match watch_dir {
-        Some(d) => d,
+    let inbox_dir = match inbox_dir {
+        Some(dir) => dir,
         None => {
-            eprintln!("Usage: miasma-bridge daemon --watch-dir <dir> [--quota 100G]");
+            eprintln!("Usage: miasma-bridge daemon --inbox-dir <dir> [--quota 100G]");
             std::process::exit(1);
         }
     };
 
     info!(
-        "Bridge daemon: data_dir={}, quota={}M, watch={}",
-        data_dir.display(), quota_mb, watch_dir.display()
+        "Bridge daemon: data_dir={}, quota={}M, inbox={}",
+        data_dir.display(),
+        quota_mb,
+        inbox_dir.display()
     );
 
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -141,13 +200,11 @@ fn cmd_daemon(args: &[String]) {
         .build()
         .expect("tokio runtime");
 
-    if let Err(e) = rt.block_on(bridge::watch_and_dissolve(&watch_dir, &data_dir, quota_mb)) {
+    if let Err(e) = rt.block_on(bridge::watch_and_dissolve(&inbox_dir, &data_dir, quota_mb)) {
         error!("Daemon error: {e}");
         std::process::exit(1);
     }
 }
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 fn parse_data_dir(args: &[String]) -> (PathBuf, Vec<String>) {
     let default_dir = directories::ProjectDirs::from("dev", "miasma", "miasma")
@@ -169,11 +226,26 @@ fn parse_data_dir(args: &[String]) -> (PathBuf, Vec<String>) {
     (data_dir, rest)
 }
 
+fn parse_inbox_dir(args: &[String]) -> Option<PathBuf> {
+    let mut i = 0;
+    while i + 1 < args.len() {
+        if args[i] == "--inbox-dir" {
+            return Some(PathBuf::from(&args[i + 1]));
+        }
+        if args[i] == "--watch-dir" {
+            warn!("--watch-dir is deprecated; use --inbox-dir for a dedicated safe inbox");
+            return Some(PathBuf::from(&args[i + 1]));
+        }
+        i += 1;
+    }
+    None
+}
+
 fn parse_quota_mb_from_args(args: &[String]) -> u64 {
     args.windows(2)
         .find(|w| w[0] == "--quota")
         .map(|w| parse_size_mb(&w[1]))
-        .unwrap_or(102_400) // 100 GiB default
+        .unwrap_or(102_400)
 }
 
 fn parse_size_mb(s: &str) -> u64 {
@@ -181,28 +253,31 @@ fn parse_size_mb(s: &str) -> u64 {
         return g.parse::<u64>().unwrap_or(100) * 1024;
     }
     if let Some(m) = s.strip_suffix('M').or_else(|| s.strip_suffix("MB")) {
-        return m.parse::<u64>().unwrap_or(102400);
+        return m.parse::<u64>().unwrap_or(102_400);
     }
-    s.parse::<u64>().unwrap_or(102400)
+    s.parse::<u64>().unwrap_or(102_400)
 }
 
 fn print_usage() {
     println!(concat!(
-        "miasma-bridge — BitTorrent ↔ Miasma bridge\n",
+        "miasma-bridge - BitTorrent <-> Miasma bridge\n",
         "\n",
         "Commands:\n",
-        "  dissolve  Dissolve a torrent's files into Miasma\n",
-        "            (uses DHT peer discovery + BT peer wire protocol)\n",
-        "  retrieve  Retrieve a MID and re-seed as torrent [Phase 2 stub]\n",
-        "  daemon    Watch a directory for new files and auto-dissolve them\n",
+        "  inspect     Probe a magnet via DHT + metadata without downloading payload files\n",
+        "  dissolve    Dissolve a torrent's files into Miasma\n",
+        "  init-inbox  Create a dedicated inbox approved for bridge daemon imports\n",
+        "  retrieve    Retrieve a MID and re-seed as torrent [Phase 2 stub]\n",
+        "  daemon      Watch a dedicated inbox for new files and auto-dissolve them\n",
         "\n",
         "Options:\n",
         "  --data-dir <dir>    Node data directory\n",
         "  --quota <size>      Storage quota (e.g. 100G, 512M)\n",
-        "  --watch-dir <dir>   Directory to watch for new files (daemon mode)\n",
+        "  --inbox-dir <dir>   Dedicated inbox directory to watch for new files\n",
         "\n",
         "Examples:\n",
+        "  miasma-bridge inspect \"magnet:?xt=urn:btih:...\"\n",
         "  miasma-bridge dissolve \"magnet:?xt=urn:btih:...\"\n",
-        "  miasma-bridge daemon --watch-dir C:\\\\Downloads\n",
+        "  miasma-bridge init-inbox C:\\\\MiasmaInbox\n",
+        "  miasma-bridge daemon --inbox-dir C:\\\\MiasmaInbox\n",
     ));
 }

@@ -20,10 +20,11 @@
 /// ```
 use std::collections::BTreeMap;
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{bail, Context};
+use directories::UserDirs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::time::{timeout, Duration};
@@ -45,6 +46,17 @@ const DHT_BOOTSTRAP: &[&str] = &[
 const EXT_FLAG: u8 = 0x10;
 // ut_metadata extension ID we advertise.
 const UT_METADATA_ID: u8 = 3;
+const INBOX_MARKER: &str = ".miasma-bridge-inbox";
+const PROCESSED_DIR: &str = ".processed";
+
+#[derive(Debug, Clone)]
+pub struct TorrentInspection {
+    pub info_hash_hex: String,
+    pub display_name: Option<String>,
+    pub peer_count: usize,
+    pub files: Vec<(String, u64)>,
+    pub total_bytes: u64,
+}
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
@@ -114,6 +126,56 @@ pub async fn dissolve_torrent(
     }
 
     Ok(mids)
+}
+
+/// Inspect a torrent via the public BitTorrent network without downloading its
+/// payload files. Useful for safely verifying magnet reachability.
+pub async fn inspect_torrent(
+    info_hash: &[u8; 20],
+    display_name: Option<&str>,
+) -> anyhow::Result<TorrentInspection> {
+    let peers = dht_get_peers(info_hash)
+        .await
+        .context("DHT get_peers")?;
+    if peers.is_empty() {
+        bail!(
+            "No peers found for info_hash {}. The torrent may be too new or too old.",
+            hex::encode(info_hash)
+        );
+    }
+
+    let info_dict_bytes = fetch_info_dict_from_peers(&peers, info_hash).await?;
+    let files = parse_info_dict(&info_dict_bytes)?;
+    let total_bytes = files.iter().map(|(_, size)| *size).sum();
+
+    Ok(TorrentInspection {
+        info_hash_hex: hex::encode(info_hash),
+        display_name: display_name.map(str::to_owned),
+        peer_count: peers.len(),
+        files,
+        total_bytes,
+    })
+}
+
+/// Initialize a dedicated bridge inbox directory with an explicit marker file.
+pub fn init_inbox(dir: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("create inbox dir {}", dir.display()))?;
+    let marker_path = dir.join(INBOX_MARKER);
+    if !marker_path.exists() {
+        std::fs::write(
+            &marker_path,
+            concat!(
+                "This directory is explicitly approved as a miasma-bridge inbox.\n",
+                "Only drop files here that you want the bridge daemon to import.\n",
+                "Do not point the bridge at Downloads/Desktop/Documents directly.\n",
+            ),
+        )
+        .with_context(|| format!("write inbox marker {}", marker_path.display()))?;
+    }
+    std::fs::create_dir_all(dir.join(PROCESSED_DIR))
+        .with_context(|| format!("create processed dir {}", dir.display()))?;
+    Ok(())
 }
 
 // ─── DHT get_peers ────────────────────────────────────────────────────────────
@@ -675,8 +737,9 @@ pub async fn watch_and_dissolve(
     data_dir: &std::path::Path,
     quota_mb: u64,
 ) -> anyhow::Result<()> {
-    use std::collections::HashSet;
     use tokio::time::sleep;
+
+    validate_inbox_dir(watch_dir, data_dir)?;
 
     let store = Arc::new(
         LocalShareStore::open(data_dir, quota_mb).context("open share store")?,
@@ -684,43 +747,180 @@ pub async fn watch_and_dissolve(
     let params = DissolutionParams::default();
 
     info!("Bridge daemon watching {} for new files…", watch_dir.display());
-    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut seen = seed_seen_files(watch_dir)?;
 
     loop {
-        let entries = std::fs::read_dir(watch_dir).context("read watch_dir")?;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() && !seen.contains(&path) {
-                seen.insert(path.clone());
-                // Small delay to avoid dissolving a partially-written file.
-                sleep(Duration::from_secs(2)).await;
-                match std::fs::read(&path) {
-                    Ok(data) => match dissolve(&data, params) {
-                        Ok((mid, shares)) => {
-                            for share in &shares {
-                                let _ = store.put(share);
-                            }
-                            info!(
-                                "Dissolved {} → {}",
-                                path.file_name()
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or("?"),
-                                mid.to_string()
-                            );
+        for path in scan_new_inbox_files(watch_dir, &mut seen)? {
+            // Small delay to avoid dissolving a partially-written file.
+            sleep(Duration::from_secs(2)).await;
+            match std::fs::read(&path) {
+                Ok(data) => match dissolve(&data, params) {
+                    Ok((mid, shares)) => {
+                        for share in &shares {
+                            let _ = store.put(share);
                         }
-                        Err(e) => warn!("Dissolution failed for {}: {e}", path.display()),
-                    },
-                    Err(e) => warn!("Read failed for {}: {e}", path.display()),
-                }
+                        archive_imported_file(watch_dir, &path)?;
+                        info!(
+                            "Dissolved {} → {}",
+                            path.file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("?"),
+                            mid.to_string()
+                        );
+                    }
+                    Err(e) => warn!("Dissolution failed for {}: {e}", path.display()),
+                },
+                Err(e) => warn!("Read failed for {}: {e}", path.display()),
             }
         }
         sleep(Duration::from_secs(10)).await;
     }
 }
 
+fn validate_inbox_dir(watch_dir: &Path, data_dir: &Path) -> anyhow::Result<()> {
+    let watch_dir = std::fs::canonicalize(watch_dir)
+        .with_context(|| format!("canonicalize inbox dir {}", watch_dir.display()))?;
+    let data_dir = std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
+
+    if !watch_dir.is_dir() {
+        bail!("inbox path is not a directory: {}", watch_dir.display());
+    }
+    if watch_dir == data_dir || watch_dir.starts_with(&data_dir) || data_dir.starts_with(&watch_dir)
+    {
+        bail!(
+            "refusing unsafe inbox path {} because it overlaps the Miasma data directory {}",
+            watch_dir.display(),
+            data_dir.display()
+        );
+    }
+    if watch_dir.parent().is_none() {
+        bail!("refusing filesystem root as inbox: {}", watch_dir.display());
+    }
+
+    if let Some(user_dirs) = UserDirs::new() {
+        let dangerous_dirs = [
+            Some(user_dirs.home_dir()),
+            user_dirs.desktop_dir(),
+            user_dirs.document_dir(),
+            user_dirs.download_dir(),
+            user_dirs.audio_dir(),
+            user_dirs.picture_dir(),
+            user_dirs.public_dir(),
+            user_dirs.video_dir(),
+        ];
+        for dangerous in dangerous_dirs.into_iter().flatten() {
+            if let Ok(canon) = std::fs::canonicalize(dangerous) {
+                if canon == watch_dir {
+                    bail!(
+                        "refusing unsafe inbox path {}. Create a dedicated inbox with `miasma-bridge init-inbox <dir>` instead",
+                        watch_dir.display()
+                    );
+                }
+            }
+        }
+    }
+
+    let marker = watch_dir.join(INBOX_MARKER);
+    if !marker.exists() {
+        bail!(
+            "inbox {} is missing {}. Run `miasma-bridge init-inbox <dir>` first",
+            watch_dir.display(),
+            INBOX_MARKER
+        );
+    }
+
+    Ok(())
+}
+
+fn seed_seen_files(watch_dir: &Path) -> anyhow::Result<std::collections::HashSet<PathBuf>> {
+    let mut seen = std::collections::HashSet::new();
+    let entries = std::fs::read_dir(watch_dir).context("read inbox dir")?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if is_importable_file(&path)? {
+            seen.insert(path);
+        }
+    }
+    Ok(seen)
+}
+
+fn scan_new_inbox_files(
+    watch_dir: &Path,
+    seen: &mut std::collections::HashSet<PathBuf>,
+) -> anyhow::Result<Vec<PathBuf>> {
+    let mut new_files = Vec::new();
+    let entries = std::fs::read_dir(watch_dir).context("read inbox dir")?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if is_importable_file(&path)? && !seen.contains(&path) {
+            seen.insert(path.clone());
+            new_files.push(path);
+        }
+    }
+    Ok(new_files)
+}
+
+fn is_importable_file(path: &Path) -> anyhow::Result<bool> {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    if name == INBOX_MARKER || name == PROCESSED_DIR {
+        return Ok(false);
+    }
+
+    let meta = std::fs::symlink_metadata(path)
+        .with_context(|| format!("read metadata for {}", path.display()))?;
+    let file_type = meta.file_type();
+    if file_type.is_symlink() {
+        return Ok(false);
+    }
+    Ok(file_type.is_file())
+}
+
+fn archive_imported_file(inbox_dir: &Path, path: &Path) -> anyhow::Result<()> {
+    let processed_dir = inbox_dir.join(PROCESSED_DIR);
+    std::fs::create_dir_all(&processed_dir)
+        .with_context(|| format!("create processed dir {}", processed_dir.display()))?;
+
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("imported path has no filename: {}", path.display()))?;
+    let mut dest = processed_dir.join(file_name);
+    if dest.exists() {
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("imported");
+        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+        let suffix = format!(
+            "-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        );
+        let unique = if ext.is_empty() {
+            format!("{stem}{suffix}")
+        } else {
+            format!("{stem}{suffix}.{ext}")
+        };
+        dest = processed_dir.join(unique);
+    }
+
+    std::fs::rename(path, &dest).or_else(|_| {
+        std::fs::copy(path, &dest)?;
+        std::fs::remove_file(path)
+    })
+    .with_context(|| {
+        format!(
+            "move imported file {} to {}",
+            path.display(),
+            dest.display()
+        )
+    })?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn sha1_empty() {
@@ -794,5 +994,53 @@ mod tests {
         assert_eq!(files.len(), 2);
         assert_eq!(files[0].0, "album/track1.flac");
         assert_eq!(files[1].1, 768);
+    }
+
+    #[test]
+    fn init_inbox_creates_marker_and_processed_dir() {
+        let dir = tempdir().unwrap();
+        let inbox = dir.path().join("inbox");
+        init_inbox(&inbox).unwrap();
+        assert!(inbox.join(INBOX_MARKER).exists());
+        assert!(inbox.join(PROCESSED_DIR).is_dir());
+    }
+
+    #[test]
+    fn validate_inbox_rejects_missing_marker() {
+        let root = tempdir().unwrap();
+        let inbox = root.path().join("inbox");
+        let data = root.path().join("data");
+        std::fs::create_dir_all(&inbox).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+
+        let err = validate_inbox_dir(&inbox, &data).unwrap_err().to_string();
+        assert!(err.contains(INBOX_MARKER));
+    }
+
+    #[test]
+    fn scan_new_inbox_ignores_symlinks_and_processed_dir() {
+        let root = tempdir().unwrap();
+        let inbox = root.path().join("inbox");
+        init_inbox(&inbox).unwrap();
+        let file = inbox.join("hello.txt");
+        std::fs::write(&file, b"hello").unwrap();
+        std::fs::create_dir_all(inbox.join("nested")).unwrap();
+
+        #[cfg(windows)]
+        {
+            let _ = std::os::windows::fs::symlink_file(&file, inbox.join("hello-link.txt"));
+        }
+        #[cfg(unix)]
+        {
+            let _ = std::os::unix::fs::symlink(&file, inbox.join("hello-link.txt"));
+        }
+
+        let mut seen = seed_seen_files(&inbox).unwrap();
+        assert!(seen.contains(&file));
+
+        let later = inbox.join("later.bin");
+        std::fs::write(&later, b"world").unwrap();
+        let new_files = scan_new_inbox_files(&inbox, &mut seen).unwrap();
+        assert_eq!(new_files, vec![later]);
     }
 }
