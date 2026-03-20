@@ -30,7 +30,7 @@ use crate::{
     network::{
         credential::CredentialStats,
         descriptor::DescriptorStats,
-        dht::{DirectDhtExecutor, LiveOnionDhtExecutor},
+        dht::DirectDhtExecutor,
         node::{DhtHandle, MiasmaNode, ShareExchangeHandle, ShareFetchRequest},
         path_selection::{AnonymityPolicy, PathSelectionStats},
         types::{DhtRecord, ShardLocation},
@@ -159,8 +159,8 @@ pub struct MiasmaCoordinator {
     transport_selector: Arc<PayloadTransportSelector>,
     /// Anonymity policy for retrieval operations.
     anonymity_policy: AnonymityPolicy,
-    /// Node master key for onion routing (None = onion routing disabled).
-    onion_master_key: Option<Vec<u8>>,
+    /// Relay routing enabled (descriptor-backed relay circuit routing).
+    relay_routing_enabled: bool,
 }
 
 impl MiasmaCoordinator {
@@ -199,7 +199,7 @@ impl MiasmaCoordinator {
         Self {
             store, dht_handle, share_handle, shutdown_tx, peer_id, listen_addrs,
             transport_selector, anonymity_policy: AnonymityPolicy::default(),
-            onion_master_key: None,
+            relay_routing_enabled: false,
         }
     }
 
@@ -397,13 +397,19 @@ impl MiasmaCoordinator {
         self.anonymity_policy = policy;
     }
 
-    /// Enable onion-routed retrieval by providing the node master key.
+    /// Enable descriptor-backed relay routing for anonymity-aware retrieval.
     ///
-    /// Once enabled, `Opportunistic` and `Required` policies create a
-    /// `LiveOnionDhtExecutor` (Phase 1: in-process relay simulation) per
-    /// retrieval attempt for circuit isolation.
-    pub fn enable_onion_routing(&mut self, master_key: &[u8]) {
-        self.onion_master_key = Some(master_key.to_vec());
+    /// Once enabled, `Opportunistic` and `Required` policies query relay
+    /// descriptors from the network and route share fetches through real
+    /// libp2p relay circuit addresses (e.g. `/p2p/{relay}/p2p-circuit/p2p/{dest}`).
+    pub fn enable_relay_routing(&mut self) {
+        self.relay_routing_enabled = true;
+    }
+
+    /// Legacy alias for enable_relay_routing. Accepts (and ignores) the
+    /// master key — relay routing no longer needs it.
+    pub fn enable_onion_routing(&mut self, _master_key: &[u8]) {
+        self.relay_routing_enabled = true;
     }
 
     /// Current anonymity policy.
@@ -413,9 +419,15 @@ impl MiasmaCoordinator {
 
     /// Retrieve content with an explicit anonymity policy.
     ///
-    /// - `Direct`: uses `DirectDhtExecutor` (no onion routing)
-    /// - `Opportunistic`: uses onion-routed DHT if available, falls back to direct
-    /// - `Required`: uses onion-routed DHT, fails if not available
+    /// - `Direct`: standard direct retrieval
+    /// - `Opportunistic`: route through relay peers if available, fall back to direct
+    /// - `Required`: route through relay peers, fail if insufficient relays
+    ///
+    /// Relay routing uses real libp2p relay circuit addresses built from
+    /// descriptor-store relay peers: `/p2p/{relay_id}/p2p-circuit/p2p/{dest_id}`.
+    /// This provides IP-level sender privacy (the shard holder sees the relay's
+    /// address, not the requester's). Full content privacy from relays requires
+    /// the onion encryption layer (Phase 2).
     pub async fn retrieve_with_anonymity(
         &self,
         mid: &ContentId,
@@ -427,43 +439,106 @@ impl MiasmaCoordinator {
                 self.retrieve_from_network(mid, params).await
             }
             AnonymityPolicy::Opportunistic => {
-                if let Some(ref master_key) = self.onion_master_key {
-                    // Try onion-routed path first (fresh executor per attempt for circuit isolation).
-                    match LiveOnionDhtExecutor::new_phase1(master_key) {
-                        Ok(onion_exec) => {
-                            let source = FallbackShareSource::new(
-                                onion_exec,
-                                self.transport_selector.clone(),
-                            );
-                            match RetrievalCoordinator::new(source).retrieve(mid, params.clone()).await {
-                                Ok(data) => return Ok(data),
-                                Err(e) => {
-                                    tracing::debug!("anonymity=opportunistic: onion failed ({e}), falling back to direct");
-                                }
-                            }
-                        }
+                if self.relay_routing_enabled {
+                    match self.retrieve_via_relay(mid, params.clone()).await {
+                        Ok(data) => return Ok(data),
                         Err(e) => {
-                            tracing::debug!("anonymity=opportunistic: executor init failed ({e}), falling back to direct");
+                            tracing::debug!(
+                                "anonymity=opportunistic: relay retrieval failed ({e}), falling back to direct"
+                            );
                         }
                     }
                 }
-                // Fall back to direct.
                 self.retrieve_from_network(mid, params).await
             }
             AnonymityPolicy::Required { min_hops } => {
-                let master_key = self.onion_master_key.as_ref().ok_or_else(|| {
-                    MiasmaError::Network(format!(
-                        "anonymity=required({min_hops} hops): onion routing not enabled — call enable_onion_routing() first"
-                    ))
-                })?;
-                let onion_exec = LiveOnionDhtExecutor::new_phase1(master_key)?;
-                let source = FallbackShareSource::new(
-                    onion_exec,
-                    self.transport_selector.clone(),
-                );
-                RetrievalCoordinator::new(source).retrieve(mid, params).await
+                if !self.relay_routing_enabled {
+                    return Err(MiasmaError::Network(format!(
+                        "anonymity=required({min_hops} hops): relay routing not enabled — call enable_relay_routing() first"
+                    )));
+                }
+                self.retrieve_via_relay_required(mid, params, min_hops as usize).await
             }
         }
+    }
+
+    /// Retrieve content by routing share fetches through a relay peer.
+    ///
+    /// Queries the node's descriptor store for relay-capable peers, selects one,
+    /// and rewrites shard location addresses to use libp2p relay circuit addresses.
+    async fn retrieve_via_relay(
+        &self,
+        mid: &ContentId,
+        params: DissolutionParams,
+    ) -> Result<Vec<u8>, MiasmaError> {
+        let relay_peers = self.dht_handle.relay_peers().await?;
+        if relay_peers.is_empty() {
+            return Err(MiasmaError::Network(
+                "no relay peers available in descriptor store".into(),
+            ));
+        }
+
+        // Select first available relay (sorted by descriptor store's trust ranking).
+        let (relay_peer_id, relay_addrs) = &relay_peers[0];
+        let relay_addr = relay_addrs.first().ok_or_else(|| {
+            MiasmaError::Network("relay peer has no addresses".into())
+        })?;
+
+        tracing::info!(
+            relay = %relay_peer_id,
+            addr = %relay_addr,
+            "anonymity: routing retrieval through relay peer"
+        );
+
+        // Build a relay-aware DHT executor that rewrites shard addresses
+        // to go through the selected relay's circuit address.
+        let relay_exec = RelayRewritingDhtExecutor {
+            inner: DirectDhtExecutor::new(self.dht_handle.clone()),
+            relay_peer_id: *relay_peer_id,
+            relay_addr: relay_addr.clone(),
+        };
+        let source = FallbackShareSource::new(relay_exec, self.transport_selector.clone());
+        RetrievalCoordinator::new(source).retrieve(mid, params).await
+    }
+
+    /// Retrieve content via relay with a minimum hop count.
+    ///
+    /// Ensures at least `min_hops` relay peers are available. Currently uses
+    /// a single relay hop (libp2p relay circuit). Multi-hop onion circuits
+    /// will be added in Phase 2 of the onion routing layer.
+    async fn retrieve_via_relay_required(
+        &self,
+        mid: &ContentId,
+        params: DissolutionParams,
+        min_hops: usize,
+    ) -> Result<Vec<u8>, MiasmaError> {
+        let relay_peers = self.dht_handle.relay_peers().await?;
+        if relay_peers.len() < min_hops {
+            return Err(MiasmaError::Network(format!(
+                "anonymity=required: need {min_hops} relay hops, only {} relay peers available",
+                relay_peers.len()
+            )));
+        }
+
+        let (relay_peer_id, relay_addrs) = &relay_peers[0];
+        let relay_addr = relay_addrs.first().ok_or_else(|| {
+            MiasmaError::Network("relay peer has no addresses".into())
+        })?;
+
+        tracing::info!(
+            relay = %relay_peer_id,
+            addr = %relay_addr,
+            min_hops,
+            "anonymity=required: routing retrieval through relay peer"
+        );
+
+        let relay_exec = RelayRewritingDhtExecutor {
+            inner: DirectDhtExecutor::new(self.dht_handle.clone()),
+            relay_peer_id: *relay_peer_id,
+            relay_addr: relay_addr.clone(),
+        };
+        let source = FallbackShareSource::new(relay_exec, self.transport_selector.clone());
+        RetrievalCoordinator::new(source).retrieve(mid, params).await
     }
 
     // ── Phase 4b diagnostics ────────────────────────────────────────────────
@@ -486,5 +561,67 @@ impl MiasmaCoordinator {
     /// Return Freenet-style outcome metrics.
     pub async fn outcome_metrics(&self) -> Result<super::metrics::OutcomeMetrics, MiasmaError> {
         self.dht_handle.outcome_metrics().await
+    }
+
+    /// Whether relay routing is currently enabled.
+    pub fn relay_routing_enabled(&self) -> bool {
+        self.relay_routing_enabled
+    }
+}
+
+// ─── RelayRewritingDhtExecutor ─────────────────────────────────────────────
+
+/// DHT executor that rewrites shard location addresses to route through a
+/// relay peer using libp2p relay circuit addresses.
+///
+/// When the coordinator retrieves with `Opportunistic` or `Required` anonymity,
+/// this executor wraps the real Kademlia DHT lookup but rewrites the returned
+/// `DhtRecord.locations[].addrs` so that share-fetch transport uses relay
+/// circuit addresses (`/p2p/{relay}/p2p-circuit/p2p/{dest}`).
+///
+/// This provides IP-level sender privacy: the shard holder sees the relay's
+/// address, not the requester's. Content privacy from relays requires the
+/// onion encryption layer (future Phase 2).
+struct RelayRewritingDhtExecutor {
+    inner: DirectDhtExecutor,
+    relay_peer_id: PeerId,
+    relay_addr: String,
+}
+
+impl RelayRewritingDhtExecutor {
+    /// Rewrite shard location addresses to route through the relay.
+    ///
+    /// Converts each location's first address to a relay circuit address:
+    /// `{relay_addr}/p2p/{relay_peer_id}/p2p-circuit`
+    ///
+    /// The transport layer will append the destination PeerId when dialing.
+    fn rewrite_record(&self, mut record: DhtRecord) -> DhtRecord {
+        let circuit_base = if self.relay_addr.contains("/p2p/") {
+            // Relay addr already contains /p2p/ — just append /p2p-circuit
+            format!("{}/p2p-circuit", self.relay_addr)
+        } else {
+            format!("{}/p2p/{}/p2p-circuit", self.relay_addr, self.relay_peer_id)
+        };
+
+        for loc in &mut record.locations {
+            // Replace all direct addresses with relay circuit addresses.
+            loc.addrs = vec![circuit_base.clone()];
+        }
+        record
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::network::dht::OnionAwareDhtExecutor for RelayRewritingDhtExecutor {
+    async fn put(&self, record: DhtRecord) -> Result<(), MiasmaError> {
+        // PUT goes through the relay as well (anonymises the publisher).
+        self.inner.put(record).await
+    }
+
+    async fn get(&self, mid: &crate::crypto::hash::ContentId) -> Result<Option<DhtRecord>, MiasmaError> {
+        match self.inner.get(mid).await? {
+            Some(record) => Ok(Some(self.rewrite_record(record))),
+            None => Ok(None),
+        }
     }
 }

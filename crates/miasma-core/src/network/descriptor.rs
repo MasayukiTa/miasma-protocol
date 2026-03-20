@@ -34,6 +34,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
 
+use super::bbs_credential::BbsProof;
 use super::credential::{CredentialPresentation, CredentialTier};
 
 // ─── Descriptor types ───────────────────────────────────────────────────────
@@ -126,6 +127,11 @@ pub struct PeerDescriptor {
     pub version: u64,
     /// Ed25519 public key of the descriptor signer (for self-verification).
     pub signing_pubkey: [u8; 32],
+    /// Optional BBS+ proof of credential possession (privacy-preserving trust signal).
+    /// Verifiers can extract the tier from disclosed attributes without linking
+    /// multiple descriptors to the same holder.
+    #[serde(default)]
+    pub bbs_proof: Option<BbsProof>,
     /// Ed25519 signature over the descriptor body (by the descriptor owner).
     /// For pseudonymous descriptors, this is signed by the ephemeral key.
     pub signature: Vec<u8>,
@@ -140,6 +146,24 @@ impl PeerDescriptor {
         capabilities: PeerCapabilities,
         resource_profile: ResourceProfile,
         credential: Option<CredentialPresentation>,
+        version: u64,
+        signing_key: &ed25519_dalek::SigningKey,
+    ) -> Self {
+        Self::new_signed_with_bbs(
+            pseudonym, reachability, addresses, capabilities, resource_profile,
+            credential, None, version, signing_key,
+        )
+    }
+
+    /// Create a signed descriptor with an optional BBS+ proof attached.
+    pub fn new_signed_with_bbs(
+        pseudonym: [u8; 32],
+        reachability: ReachabilityKind,
+        addresses: Vec<String>,
+        capabilities: PeerCapabilities,
+        resource_profile: ResourceProfile,
+        credential: Option<CredentialPresentation>,
+        bbs_proof: Option<BbsProof>,
         version: u64,
         signing_key: &ed25519_dalek::SigningKey,
     ) -> Self {
@@ -160,6 +184,7 @@ impl PeerDescriptor {
             published_at,
             version,
             signing_pubkey: signing_key.verifying_key().to_bytes(),
+            bbs_proof,
             signature: Vec::new(),
         };
 
@@ -184,6 +209,10 @@ impl PeerDescriptor {
         body.extend_from_slice(&self.published_at.to_le_bytes());
         body.extend_from_slice(&self.version.to_le_bytes());
         body.extend_from_slice(&self.signing_pubkey);
+        // Include BBS+ proof bytes so tampering/removal is detected by signature.
+        if let Some(ref proof) = self.bbs_proof {
+            body.extend_from_slice(&bincode::serialize(proof).unwrap_or_default());
+        }
         body
     }
 
@@ -237,6 +266,22 @@ impl PeerDescriptor {
             .map(|c| c.credential.body.tier >= min_tier)
             .unwrap_or(false)
     }
+
+    /// Extract the credential tier from the BBS+ proof's disclosed attributes, if present.
+    ///
+    /// Returns `None` if no BBS+ proof is attached or if tier (index 1) is not disclosed.
+    pub fn bbs_tier(&self) -> Option<CredentialTier> {
+        let proof = self.bbs_proof.as_ref()?;
+        let tier_val = proof.disclosed.iter()
+            .find(|&&(idx, _)| idx == 1)
+            .map(|&(_, val)| val)?;
+        match tier_val {
+            1 => Some(CredentialTier::Observed),
+            2 => Some(CredentialTier::Verified),
+            3 => Some(CredentialTier::Endorsed),
+            _ => None,
+        }
+    }
 }
 
 // ─── Descriptor store ───────────────────────────────────────────────────────
@@ -250,12 +295,20 @@ const MAX_DESCRIPTORS: usize = 10_000;
 /// In-memory store for peer descriptors.
 ///
 /// Indexed by pseudonym (holder_tag). Supports staleness pruning,
-/// capacity limits, and capability-based queries.
+/// capacity limits, capability-based queries, and pseudonym churn tracking.
 pub struct DescriptorStore {
     /// Descriptors keyed by pseudonym.
     descriptors: HashMap<[u8; 32], PeerDescriptor>,
     /// Optional mapping from PeerId to pseudonym (for legacy/transition).
     peer_to_pseudonym: HashMap<PeerId, [u8; 32]>,
+    /// Reverse mapping: pseudonym → PeerId (for relay circuit address construction).
+    pseudonym_to_peer: HashMap<[u8; 32], PeerId>,
+    /// Pseudonym churn tracker: pseudonyms seen in the previous epoch.
+    prev_epoch_pseudonyms: std::collections::HashSet<[u8; 32]>,
+    /// Current epoch being tracked (matches credential epoch).
+    tracked_epoch: u64,
+    /// Count of pseudonyms first seen in the current epoch (new arrivals).
+    new_pseudonyms_this_epoch: usize,
 }
 
 impl DescriptorStore {
@@ -263,6 +316,10 @@ impl DescriptorStore {
         Self {
             descriptors: HashMap::new(),
             peer_to_pseudonym: HashMap::new(),
+            pseudonym_to_peer: HashMap::new(),
+            prev_epoch_pseudonyms: std::collections::HashSet::new(),
+            tracked_epoch: 0,
+            new_pseudonyms_this_epoch: 0,
         }
     }
 
@@ -302,13 +359,38 @@ impl DescriptorStore {
             }
         }
 
+        // Track pseudonym churn before inserting.
+        if !self.descriptors.contains_key(&pseudonym) {
+            self.track_pseudonym(pseudonym);
+        }
+
         self.descriptors.insert(pseudonym, desc);
         true
     }
 
-    /// Register a PeerId→pseudonym mapping (for transition from address-based routing).
+    /// Register a PeerId↔pseudonym mapping (for transition from address-based routing).
     pub fn register_peer_pseudonym(&mut self, peer_id: PeerId, pseudonym: [u8; 32]) {
         self.peer_to_pseudonym.insert(peer_id, pseudonym);
+        self.pseudonym_to_peer.insert(pseudonym, peer_id);
+    }
+
+    /// Look up the PeerId associated with a pseudonym.
+    pub fn peer_for_pseudonym(&self, pseudonym: &[u8; 32]) -> Option<&PeerId> {
+        self.pseudonym_to_peer.get(pseudonym)
+    }
+
+    /// Return relay-capable peer info for the coordinator's relay routing.
+    ///
+    /// Returns `(PeerId, addresses)` for each relay-capable descriptor that
+    /// has a known PeerId mapping. Used to construct libp2p relay circuit addresses.
+    pub fn relay_peer_info(&self) -> Vec<(PeerId, Vec<String>)> {
+        self.descriptors.values()
+            .filter(|d| d.is_relay() && d.age_secs() < MAX_DESCRIPTOR_AGE_SECS)
+            .filter_map(|d| {
+                self.pseudonym_to_peer.get(&d.pseudonym)
+                    .map(|pid| (*pid, d.addresses.clone()))
+            })
+            .collect()
     }
 
     /// Look up a descriptor by pseudonym.
@@ -349,12 +431,49 @@ impl DescriptorStore {
         self.descriptors.retain(|_, d| d.age_secs() < MAX_DESCRIPTOR_AGE_SECS);
         // Also clean up peer mappings that no longer have descriptors.
         self.peer_to_pseudonym.retain(|_, p| self.descriptors.contains_key(p));
+        self.pseudonym_to_peer.retain(|p, _| self.descriptors.contains_key(p));
         before - self.descriptors.len()
     }
 
     /// Total descriptors stored.
     pub fn len(&self) -> usize {
         self.descriptors.len()
+    }
+
+    /// Notify the store of an epoch transition for pseudonym churn tracking.
+    ///
+    /// Call this when the credential epoch rotates. The store snapshots the
+    /// current pseudonym set as "previous" and starts counting new arrivals.
+    pub fn on_epoch_rotate(&mut self, new_epoch: u64) {
+        if new_epoch <= self.tracked_epoch && self.tracked_epoch > 0 {
+            return; // already tracking this epoch or a later one
+        }
+        // Snapshot current pseudonyms as the previous epoch's set.
+        self.prev_epoch_pseudonyms = self.descriptors.keys().copied().collect();
+        self.tracked_epoch = new_epoch;
+        self.new_pseudonyms_this_epoch = 0;
+    }
+
+    /// Record a pseudonym as newly observed (for churn tracking).
+    fn track_pseudonym(&mut self, pseudonym: [u8; 32]) {
+        if self.tracked_epoch > 0 && !self.prev_epoch_pseudonyms.contains(&pseudonym) {
+            self.new_pseudonyms_this_epoch += 1;
+        }
+    }
+
+    /// Compute the pseudonym churn rate: fraction of current pseudonyms that
+    /// are new (not present in the previous epoch).
+    ///
+    /// Returns 0.0 if no epoch tracking data is available yet.
+    pub fn churn_rate(&self) -> f64 {
+        if self.tracked_epoch == 0 || self.descriptors.is_empty() {
+            return 0.0;
+        }
+        let total = self.descriptors.len();
+        let new_count = self.descriptors.keys()
+            .filter(|ps| !self.prev_epoch_pseudonyms.contains(*ps))
+            .count();
+        new_count as f64 / total as f64
     }
 
     /// Diagnostics snapshot.
@@ -365,16 +484,24 @@ impl DescriptorStore {
         let credentialed = self.descriptors.values()
             .filter(|d| d.credential.is_some())
             .count();
+        let bbs_credentialed = self.descriptors.values()
+            .filter(|d| d.bbs_proof.is_some())
+            .count();
         let stale = self.descriptors.values()
             .filter(|d| d.age_secs() >= MAX_DESCRIPTOR_AGE_SECS)
             .count();
+
+        let relay_peers_routable = self.relay_peer_info().len();
 
         DescriptorStats {
             total_descriptors: total,
             relay_descriptors: relay_count,
             relayed_descriptors: relayed_count,
             credentialed_descriptors: credentialed,
+            bbs_credentialed_descriptors: bbs_credentialed,
             stale_descriptors: stale,
+            pseudonym_churn_rate: self.churn_rate(),
+            relay_peers_routable,
         }
     }
 }
@@ -386,7 +513,12 @@ pub struct DescriptorStats {
     pub relay_descriptors: usize,
     pub relayed_descriptors: usize,
     pub credentialed_descriptors: usize,
+    pub bbs_credentialed_descriptors: usize,
     pub stale_descriptors: usize,
+    /// Pseudonym churn rate: fraction of current pseudonyms not seen last epoch.
+    pub pseudonym_churn_rate: f64,
+    /// Number of relay peers with known PeerId mappings (usable for circuit routing).
+    pub relay_peers_routable: usize,
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────

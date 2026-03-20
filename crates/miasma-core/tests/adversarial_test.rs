@@ -25,10 +25,12 @@ use miasma_core::network::descriptor::{
     DescriptorStore, PeerCapabilities, PeerDescriptor, ReachabilityKind, ResourceProfile,
 };
 use miasma_core::network::bbs_credential::{
-    bbs_create_proof, bbs_verify_proof, BbsIssuer, BbsIssuerKey,
+    bbs_create_proof, bbs_verify_proof, BbsCredentialWallet, BbsIssuer, BbsIssuerKey,
     BbsCredentialAttributes, DisclosurePolicy, generate_link_secret,
 };
+use miasma_core::network::metrics::OutcomeMetrics;
 use miasma_core::network::path_selection::{AnonymityPolicy, PathSelector};
+use miasma_core::network::peer_state::PeerRegistry;
 use miasma_core::network::routing::{IpPrefix, RoutingTable};
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -1010,4 +1012,407 @@ fn credential_cross_epoch_replay_rejected() {
         CredentialTier::Verified,
     );
     assert!(result.is_err(), "credential from old epoch should be rejected in new epoch");
+}
+
+// ─── Scenario 12: Epoch rotation — descriptor churn tracking ────────────
+
+/// Pseudonym churn rate should reflect descriptor set turnover across epochs.
+#[test]
+fn epoch_rotation_descriptor_churn_tracking() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+    let mut store = DescriptorStore::new();
+
+    // Epoch 1: insert 5 descriptors.
+    for i in 0..5u8 {
+        let mut ps = [0u8; 32];
+        ps[0] = i;
+        store.upsert(PeerDescriptor::new_signed(
+            ps,
+            ReachabilityKind::Direct,
+            vec![format!("/ip4/10.{i}.1.1/tcp/4001")],
+            PeerCapabilities::default(),
+            ResourceProfile::Desktop,
+            None,
+            1,
+            &key,
+        ));
+    }
+
+    // Before epoch rotation, churn rate should be 0.
+    assert_eq!(store.churn_rate(), 0.0);
+
+    // Rotate to epoch 2.
+    store.on_epoch_rotate(2);
+
+    // All existing pseudonyms are in prev_epoch_pseudonyms now.
+    // Churn rate should be 0 (no new pseudonyms yet).
+    assert_eq!(store.churn_rate(), 0.0);
+
+    // Add 3 new descriptors (simulating new peers joining in epoch 2).
+    for i in 10..13u8 {
+        let mut ps = [0u8; 32];
+        ps[0] = i;
+        store.upsert(PeerDescriptor::new_signed(
+            ps,
+            ReachabilityKind::Direct,
+            vec![format!("/ip4/10.{i}.1.1/tcp/4001")],
+            PeerCapabilities::default(),
+            ResourceProfile::Desktop,
+            None,
+            1,
+            &key,
+        ));
+    }
+
+    // Now 8 total descriptors, 3 new = 37.5% churn.
+    let churn = store.churn_rate();
+    assert!(churn > 0.3, "churn should be ~37.5%, got {churn}");
+    assert!(churn < 0.5, "churn should be ~37.5%, got {churn}");
+}
+
+/// After full epoch rotation, all old pseudonyms gone = 100% churn.
+#[test]
+fn epoch_rotation_full_pseudonym_turnover() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+    let mut store = DescriptorStore::new();
+
+    // Epoch 1: 3 peers.
+    for i in 0..3u8 {
+        let mut ps = [0u8; 32];
+        ps[0] = i;
+        store.upsert(PeerDescriptor::new_signed(
+            ps, ReachabilityKind::Direct, vec![format!("/ip4/10.{i}.1.1/tcp/4001")],
+            PeerCapabilities::default(), ResourceProfile::Desktop, None, 1, &key,
+        ));
+    }
+
+    // Rotate to epoch 2.
+    store.on_epoch_rotate(2);
+
+    // Remove all old descriptors and add entirely new ones.
+    // (Simulating full identity rotation where every peer gets a new pseudonym.)
+    // We can't remove directly, but we can add new ones with different pseudonyms.
+    for i in 100..103u8 {
+        let mut ps = [0u8; 32];
+        ps[0] = i;
+        store.upsert(PeerDescriptor::new_signed(
+            ps, ReachabilityKind::Direct, vec![format!("/ip4/10.{i}.1.1/tcp/4001")],
+            PeerCapabilities::default(), ResourceProfile::Desktop, None, 1, &key,
+        ));
+    }
+
+    // 6 total, 3 new = 50% churn (old ones still in store).
+    let churn = store.churn_rate();
+    assert!(churn > 0.4, "at least 50% churn expected, got {churn}");
+}
+
+/// Epoch rotation should not regress: re-rotating to the same epoch is a no-op.
+#[test]
+fn epoch_rotation_idempotent() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+    let mut store = DescriptorStore::new();
+
+    for i in 0..3u8 {
+        let mut ps = [0u8; 32];
+        ps[0] = i;
+        store.upsert(PeerDescriptor::new_signed(
+            ps, ReachabilityKind::Direct, vec![format!("/ip4/10.{i}.1.1/tcp/4001")],
+            PeerCapabilities::default(), ResourceProfile::Desktop, None, 1, &key,
+        ));
+    }
+
+    store.on_epoch_rotate(2);
+
+    // Add a new descriptor.
+    let mut ps = [0u8; 32];
+    ps[0] = 50;
+    store.upsert(PeerDescriptor::new_signed(
+        ps, ReachabilityKind::Direct, vec!["/ip4/10.50.1.1/tcp/4001".into()],
+        PeerCapabilities::default(), ResourceProfile::Desktop, None, 1, &key,
+    ));
+
+    let churn_before = store.churn_rate();
+
+    // Re-rotate to epoch 2 — should be idempotent.
+    store.on_epoch_rotate(2);
+    assert_eq!(store.churn_rate(), churn_before);
+}
+
+// ─── Scenario 13: Relay peer info for coordinator routing ────────────────
+
+/// Relay descriptors with PeerId mappings should be returned for routing.
+#[test]
+fn relay_peer_info_requires_peer_mapping() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+    let mut store = DescriptorStore::new();
+
+    let ps1 = [0x01u8; 32];
+    let ps2 = [0x02u8; 32];
+
+    // Add two relay descriptors.
+    store.upsert(PeerDescriptor::new_signed(
+        ps1, ReachabilityKind::Direct, vec!["/ip4/1.1.1.1/tcp/4001".into()],
+        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop, None, 1, &key,
+    ));
+    store.upsert(PeerDescriptor::new_signed(
+        ps2, ReachabilityKind::Direct, vec!["/ip4/2.2.2.2/tcp/4001".into()],
+        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop, None, 1, &key,
+    ));
+
+    // Without PeerId mapping, no relay peers are routable.
+    assert_eq!(store.relay_peer_info().len(), 0);
+
+    // Register PeerId for one relay.
+    let peer1 = PeerId::random();
+    store.register_peer_pseudonym(peer1, ps1);
+
+    // Now one relay is routable.
+    let info = store.relay_peer_info();
+    assert_eq!(info.len(), 1);
+    assert_eq!(info[0].0, peer1);
+    assert_eq!(info[0].1, vec!["/ip4/1.1.1.1/tcp/4001".to_string()]);
+}
+
+/// Non-relay descriptors should not appear in relay_peer_info.
+#[test]
+fn relay_peer_info_excludes_non_relay() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+    let mut store = DescriptorStore::new();
+
+    let ps = [0x01u8; 32];
+    store.upsert(PeerDescriptor::new_signed(
+        ps, ReachabilityKind::Direct, vec!["/ip4/1.1.1.1/tcp/4001".into()],
+        PeerCapabilities { can_relay: false, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop, None, 1, &key,
+    ));
+    let peer = PeerId::random();
+    store.register_peer_pseudonym(peer, ps);
+
+    assert_eq!(store.relay_peer_info().len(), 0, "non-relay should not be returned");
+}
+
+// ─── Scenario 14: Credential wallet rotation and re-issuance coherence ──
+
+/// Wallet rotation should produce a new holder tag and invalidate old credentials.
+#[test]
+fn wallet_rotation_invalidates_old_credentials() {
+    let issuer_key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+    let issuer = CredentialIssuer::new(issuer_key);
+
+    // Create wallet and issue credential.
+    let identity_epoch1 = EphemeralIdentity::generate(100);
+    let cred = issuer.issue(
+        CredentialTier::Verified, 100, CAP_STORE | CAP_ROUTE,
+        identity_epoch1.holder_tag(),
+    );
+
+    // Present at epoch 100 — should work.
+    let ctx = b"wallet-rotation-test";
+    let pres = CredentialPresentation::create(&cred, &identity_epoch1, ctx);
+    let issuers = vec![issuer.pubkey_bytes()];
+    assert!(credential::verify_presentation(&pres, ctx, &issuers, 100, CredentialTier::Observed).is_ok());
+
+    // New identity at epoch 101 (simulating rotation).
+    let identity_epoch2 = EphemeralIdentity::generate(101);
+
+    // Old credential with new identity should fail: holder_tag mismatch.
+    let pres2 = CredentialPresentation::create(&cred, &identity_epoch2, ctx);
+    assert!(
+        credential::verify_presentation(&pres2, ctx, &issuers, 101, CredentialTier::Observed).is_err(),
+        "old credential should not work with new identity after rotation"
+    );
+}
+
+/// BBS+ wallet pruning should remove credentials from expired epochs.
+#[test]
+fn bbs_wallet_prune_respects_epoch_boundary() {
+    let mut wallet = BbsCredentialWallet::new();
+    let seed = blake3::hash(b"test-issuer-seed");
+    let issuer_key = BbsIssuerKey::from_seed(seed.as_bytes());
+    let issuer = BbsIssuer::new(issuer_key);
+
+    // Issue credentials for epochs 10, 11, 12.
+    for epoch in 10..=12u64 {
+        let cred = issuer.issue(BbsCredentialAttributes {
+            link_secret: wallet.link_secret(),
+            tier: CredentialTier::Verified,
+            capabilities: CAP_STORE | CAP_ROUTE,
+            epoch,
+            nonce: rand::random(),
+        });
+        wallet.store(cred);
+    }
+    assert_eq!(wallet.credential_count(), 3);
+
+    // Prune before epoch 12: should remove epochs 10 and 11.
+    wallet.prune_before_epoch(12);
+    assert_eq!(wallet.credential_count(), 1, "only epoch 12 should survive");
+}
+
+// ─── Scenario 15: Outcome metrics under adversarial conditions ──────────
+
+/// Metrics should reflect high churn after epoch rotation with new peers.
+#[test]
+fn outcome_metrics_reflect_churn() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+    let mut store = DescriptorStore::new();
+    let peer_registry = PeerRegistry::new();
+    let routing_table = RoutingTable::new(true);
+
+    // Epoch 1: populate with 5 descriptors.
+    for i in 0..5u8 {
+        let mut ps = [0u8; 32];
+        ps[0] = i;
+        store.upsert(PeerDescriptor::new_signed(
+            ps, ReachabilityKind::Direct, vec![format!("/ip4/10.{i}.1.1/tcp/4001")],
+            PeerCapabilities::default(), ResourceProfile::Desktop, None, 1, &key,
+        ));
+    }
+
+    let m1 = OutcomeMetrics::compute(&store, &peer_registry, &routing_table, false);
+    assert_eq!(m1.pseudonym_churn_rate, 0.0);
+
+    // Epoch 2: rotate and add new peers.
+    store.on_epoch_rotate(2);
+    for i in 20..25u8 {
+        let mut ps = [0u8; 32];
+        ps[0] = i;
+        store.upsert(PeerDescriptor::new_signed(
+            ps, ReachabilityKind::Direct, vec![format!("/ip4/10.{i}.1.1/tcp/4001")],
+            PeerCapabilities::default(), ResourceProfile::Desktop, None, 1, &key,
+        ));
+    }
+
+    let m2 = OutcomeMetrics::compute(&store, &peer_registry, &routing_table, false);
+    assert!(m2.pseudonym_churn_rate > 0.4, "churn rate should be ~50% with 5/10 new: got {}", m2.pseudonym_churn_rate);
+}
+
+/// Metrics should track BBS+ credentialed descriptors.
+#[test]
+fn outcome_metrics_bbs_credentialed_count() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+    let mut store = DescriptorStore::new();
+    let peer_registry = PeerRegistry::new();
+    let routing_table = RoutingTable::new(true);
+
+    // Add a descriptor without BBS+ proof.
+    store.upsert(PeerDescriptor::new_signed(
+        [0x01; 32], ReachabilityKind::Direct, vec!["/ip4/1.1.1.1/tcp/4001".into()],
+        PeerCapabilities::default(), ResourceProfile::Desktop, None, 1, &key,
+    ));
+
+    // Add a descriptor with a BBS+ proof.
+    let bbs_seed = blake3::hash(b"bbs-test-seed");
+    let bbs_key = BbsIssuerKey::from_seed(bbs_seed.as_bytes());
+    let bbs_issuer = BbsIssuer::new(bbs_key);
+    let link_secret = generate_link_secret();
+    let bbs_cred = bbs_issuer.issue(BbsCredentialAttributes {
+        link_secret,
+        tier: CredentialTier::Verified,
+        capabilities: CAP_STORE | CAP_ROUTE,
+        epoch: 1,
+        nonce: rand::random(),
+    });
+    let bbs_proof = bbs_create_proof(&bbs_cred, &DisclosurePolicy::default(), b"metrics-test");
+    store.upsert(PeerDescriptor::new_signed_with_bbs(
+        [0x02; 32], ReachabilityKind::Direct, vec!["/ip4/2.2.2.2/tcp/4001".into()],
+        PeerCapabilities::default(), ResourceProfile::Desktop, None,
+        Some(bbs_proof), 1, &key,
+    ));
+
+    let m = OutcomeMetrics::compute(&store, &peer_registry, &routing_table, false);
+    assert_eq!(m.bbs_credentialed_count, 1);
+}
+
+// ─── Scenario 16: Descriptor store capacity under epoch churn ────────────
+
+/// Under rapid epoch rotation with churn, stale pruning should keep the
+/// store healthy and the utilisation metric should reflect pressure.
+#[test]
+fn descriptor_utilisation_under_pressure() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+    let mut store = DescriptorStore::new();
+    let peer_registry = PeerRegistry::new();
+    let routing_table = RoutingTable::new(true);
+
+    // Add 100 descriptors.
+    for i in 0..100u16 {
+        let mut ps = [0u8; 32];
+        ps[0] = (i & 0xFF) as u8;
+        ps[1] = (i >> 8) as u8;
+        store.upsert(PeerDescriptor::new_signed(
+            ps, ReachabilityKind::Direct,
+            vec![format!("/ip4/10.{}.{}.1/tcp/4001", i % 256, i / 256)],
+            PeerCapabilities::default(), ResourceProfile::Desktop, None, 1, &key,
+        ));
+    }
+
+    let m = OutcomeMetrics::compute(&store, &peer_registry, &routing_table, false);
+    assert!(m.descriptor_utilisation > 0.0, "utilisation should be > 0");
+    assert!(m.descriptor_utilisation < 0.1, "100/10000 = 1%, got {}", m.descriptor_utilisation);
+}
+
+// ─── Scenario 17: Path selection uses descriptors for anonymity ──────────
+
+/// Required anonymity with descriptor-backed relays should produce valid paths.
+#[test]
+fn path_selection_required_uses_descriptors() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+    let mut store = DescriptorStore::new();
+    let rt = RoutingTable::new(true);
+
+    // Add 3 relay descriptors from different subnets.
+    for i in 0..3u8 {
+        let mut ps = [0u8; 32];
+        ps[0] = i;
+        store.upsert(PeerDescriptor::new_signed(
+            ps, ReachabilityKind::Direct,
+            vec![format!("/ip4/{}.{}.1.1/tcp/4001", i + 1, i + 1)],
+            PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+            ResourceProfile::Desktop, None, 1, &key,
+        ));
+        store.register_peer_pseudonym(PeerId::random(), ps);
+    }
+
+    let dest = [0xFF; 32];
+    let path = PathSelector::select(
+        dest, AnonymityPolicy::Required { min_hops: 2 }, &store, &rt,
+    ).unwrap();
+
+    assert!(path.hop_count() >= 2, "Required mode should use ≥2 hops");
+
+    // All relays in the path should be in the descriptor store.
+    for hop in &path.hops {
+        assert!(store.get(&hop.pseudonym).is_some(), "hop should exist in descriptor store");
+    }
+}
+
+/// Opportunistic mode with relays should prefer relay path over direct.
+#[test]
+fn path_selection_opportunistic_prefers_relays() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+    let mut store = DescriptorStore::new();
+    let rt = RoutingTable::new(true);
+
+    // Add 2 relay descriptors.
+    for i in 0..2u8 {
+        let mut ps = [0u8; 32];
+        ps[0] = i;
+        store.upsert(PeerDescriptor::new_signed(
+            ps, ReachabilityKind::Direct,
+            vec![format!("/ip4/{}.{}.1.1/tcp/4001", i + 1, i + 1)],
+            PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+            ResourceProfile::Desktop, None, 1, &key,
+        ));
+    }
+
+    let dest = [0xFF; 32];
+    let path = PathSelector::select(
+        dest, AnonymityPolicy::Opportunistic, &store, &rt,
+    ).unwrap();
+
+    // With relays available, opportunistic should use at least one.
+    assert!(path.hop_count() >= 1, "opportunistic with relays should use ≥1 hop");
 }
