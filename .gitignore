@@ -6,4 +6,5 @@ Cargo.lock
 *.pdb
 *.md
 !readme.md
+/task.md
 *.txt

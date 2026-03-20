@@ -23,14 +23,13 @@
 /// 4. **Dynamic PoW difficulty** — adjusts required difficulty based on
 ///    observed network size and peer churn.
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Instant;
 
 use libp2p::{Multiaddr, PeerId};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, warn};
+use tracing::info;
 
-use super::address::{AddressClass, AddressTrust, classify_multiaddr};
+use super::address::AddressTrust;
 use super::sybil;
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -346,7 +345,7 @@ impl RoutingTable {
                 // Penalty for unreliable peers.
                 let penalty = if state.is_unreliable() { 200 } else { 0 };
 
-                let total = trust_score + reliability_score + diversity_score - penalty;
+                let total = (trust_score + reliability_score + diversity_score).saturating_sub(penalty);
                 Some((*peer_id, total))
             })
             .collect();
@@ -532,7 +531,7 @@ mod tests {
         let prefix = IpPrefix::V4Slash16([8, 8]);
 
         // Fill to the limit.
-        for i in 0..MAX_PEERS_PER_IPV4_SLASH16 {
+        for _ in 0..MAX_PEERS_PER_IPV4_SLASH16 {
             let peer = PeerId::random();
             rt.add_peer(peer, prefix);
         }
