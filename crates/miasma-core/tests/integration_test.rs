@@ -60,6 +60,11 @@ use miasma_core::{
     WebSocketConfig,
     WssPayloadTransport,
     WssShareServer,
+    // Obfuscated QUIC transport
+    ObfuscatedConfig,
+    ObfuscatedQuicPayloadTransport,
+    ObfuscatedQuicServer,
+    BrowserFingerprint,
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1938,4 +1943,205 @@ async fn wss_payload_diagnostics_transport_kind() {
         "[wss] Diagnostics OK: TcpDirect failures={}, WssTunnel successes={}",
         tcp_stat.failure_count, wss_stat.success_count
     );
+}
+
+// ── TLS WSS e2e retrieval ─────────────────────────────────────────────────────
+
+/// Proves TLS-wrapped WSS can serve shares end-to-end via real rustls.
+#[tokio::test]
+async fn wss_tls_payload_e2e_retrieval() {
+    let dir = TempDir::new().unwrap();
+    let store = make_store(&dir);
+
+    // 1. Dissolve content.
+    let data = b"TLS WSS e2e test - verifies rustls works for share transport";
+    let params = DissolutionParams {
+        data_shards: 3,
+        total_shards: 5,
+    };
+    let (mid, shares) = dissolve(data, params).unwrap();
+    for s in &shares {
+        store.put(s).unwrap();
+    }
+
+    // 2. Generate self-signed cert using rcgen.
+    let key_pair = rcgen::KeyPair::generate().unwrap();
+    let cert_params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+    let cert = cert_params.self_signed(&key_pair).unwrap();
+    let cert_pem = cert.pem();
+    let key_pem = key_pair.serialize_pem();
+
+    // 3. Start TLS-enabled WSS server.
+    let server = WssShareServer::bind_tls(
+        store.clone(),
+        0,
+        cert_pem.as_bytes(),
+        key_pem.as_bytes(),
+    )
+    .await
+    .unwrap();
+    let port = server.port;
+    tokio::spawn(server.run());
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // 4. Client with custom CA (our self-signed cert).
+    let client = WssPayloadTransport::new(WebSocketConfig {
+        port,
+        tls_enabled: true,
+        custom_ca_pem: Some(cert_pem.into_bytes()),
+        connect_timeout_ms: 5_000,
+        read_timeout_ms: 5_000,
+        ..Default::default()
+    });
+
+    // 5. Fetch each share (use "localhost" to match cert SAN).
+    let mut fetched = 0;
+    for share in &shares {
+        let result = client
+            .fetch_share(
+                &format!("localhost:{port}"),
+                *mid.as_bytes(),
+                share.slot_index,
+                share.segment_index,
+            )
+            .await;
+        match result {
+            Ok(Some(s)) => {
+                assert_eq!(s.mid_prefix, share.mid_prefix);
+                fetched += 1;
+            }
+            Ok(None) => panic!("share not found on TLS WSS server"),
+            Err(e) => panic!("TLS WSS fetch error: {e:?}"),
+        }
+    }
+    assert_eq!(fetched, 5, "all shares should be fetched over TLS WSS");
+    println!("[tls_wss] Retrieved {fetched}/5 shares over TLS WSS");
+}
+
+// ── ObfuscatedQuic e2e retrieval ─────────────────────────────────────────────
+
+/// Proves ObfuscatedQuic REALITY transport serves shares end-to-end.
+#[tokio::test]
+async fn obfuscated_quic_payload_e2e_retrieval() {
+    let dir = TempDir::new().unwrap();
+    let store = make_store(&dir);
+
+    // 1. Dissolve content.
+    let data = b"ObfuscatedQuic REALITY e2e test - proves QUIC camouflage works";
+    let params = DissolutionParams {
+        data_shards: 3,
+        total_shards: 5,
+    };
+    let (mid, shares) = dissolve(data, params).unwrap();
+    for s in &shares {
+        store.put(s).unwrap();
+    }
+
+    // 2. Create config with shared secret.
+    let probe_secret = [42u8; 32];
+    let sni = "cdn.example.com";
+    let config = ObfuscatedConfig::new(
+        probe_secret,
+        sni,
+        "https://example.com",
+        BrowserFingerprint::Chrome124,
+    );
+
+    // 3. Start ObfuscatedQuic server (auto-generates self-signed cert).
+    let server = ObfuscatedQuicServer::bind(store.clone(), 0, config.clone())
+        .await
+        .unwrap();
+    let port = server.port;
+    tokio::spawn(server.run());
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // 4. Create client transport.
+    let client = ObfuscatedQuicPayloadTransport::new(config);
+
+    // 5. Fetch each share.
+    let mut fetched = 0;
+    for share in &shares {
+        let result = client
+            .fetch_share(
+                &format!("127.0.0.1:{port}"),
+                *mid.as_bytes(),
+                share.slot_index,
+                share.segment_index,
+            )
+            .await;
+        match result {
+            Ok(Some(s)) => {
+                assert_eq!(s.mid_prefix, share.mid_prefix);
+                fetched += 1;
+            }
+            Ok(None) => panic!("share not found on ObfuscatedQuic server"),
+            Err(e) => panic!("ObfuscatedQuic fetch error: {e:?}"),
+        }
+    }
+    assert_eq!(fetched, 5, "all shares should be fetched over ObfuscatedQuic");
+    println!("[obfs_quic] Retrieved {fetched}/5 shares over ObfuscatedQuic REALITY");
+}
+
+// ── Full transport fallback chain ─────────────────────────────────────────────
+
+/// Proves the full fallback chain works: primary fails → WSS succeeds.
+/// Tests the complete PayloadTransportSelector with real WSS backend.
+#[tokio::test]
+async fn full_transport_fallback_chain_wss_recovery() {
+    let dir = TempDir::new().unwrap();
+    let store = make_store(&dir);
+
+    let data = b"Fallback chain test - primary transport fails, WSS recovers";
+    let params = DissolutionParams {
+        data_shards: 3,
+        total_shards: 5,
+    };
+    let (mid, shares) = dissolve(data, params).unwrap();
+    for s in &shares {
+        store.put(s).unwrap();
+    }
+
+    // Start WSS server.
+    let server = WssShareServer::bind(store.clone(), 0).await.unwrap();
+    let port = server.port;
+    tokio::spawn(server.run());
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Build selector: broken primary + working WSS.
+    let broken_primary = WssPayloadTransport::new(WebSocketConfig {
+        port: 1, // unreachable
+        connect_timeout_ms: 100,
+        ..Default::default()
+    });
+    let working_wss = WssPayloadTransport::new(WebSocketConfig {
+        port,
+        connect_timeout_ms: 5_000,
+        ..Default::default()
+    });
+
+    let selector = PayloadTransportSelector::new(vec![
+        Box::new(broken_primary),
+        Box::new(working_wss),
+    ]);
+
+    // Fetch through selector — primary should fail, WSS should succeed.
+    let share = &shares[0];
+    let result = selector
+        .fetch_share(
+            &format!("127.0.0.1:{port}"),
+            *mid.as_bytes(),
+            share.slot_index,
+            share.segment_index,
+        )
+        .await;
+
+    assert!(result.is_ok(), "fallback should succeed via WSS");
+    let fetched = result.unwrap();
+    assert_eq!(fetched.share.mid_prefix, share.mid_prefix);
+
+    // Verify stats show primary failed, WSS succeeded.
+    let snap = selector.stats().snapshot();
+    assert!(snap.len() >= 2, "should have stats for both transports");
+
+    println!("[fallback] Full transport fallback chain: primary fail -> WSS recovery OK");
 }

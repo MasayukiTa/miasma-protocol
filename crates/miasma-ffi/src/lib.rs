@@ -139,6 +139,7 @@ pub fn initialize_node(
             listen_addr: "/ip4/0.0.0.0/udp/0/quic-v1".into(),
             bootstrap_peers: vec![],
         },
+        transport: Default::default(),
     };
     config
         .save(&path)

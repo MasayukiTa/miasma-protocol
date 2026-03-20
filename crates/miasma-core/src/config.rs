@@ -11,6 +11,8 @@ pub struct NodeConfig {
     pub storage: StorageConfig,
     #[serde(default)]
     pub network: NetworkConfig,
+    #[serde(default)]
+    pub transport: TransportConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +29,47 @@ pub struct NetworkConfig {
     pub listen_addr: String,
     /// Bootstrap peer multiaddrs.
     pub bootstrap_peers: Vec<String>,
+}
+
+/// Transport-layer configuration for restrictive networks.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TransportConfig {
+    /// Enable TLS on the WSS share server and client connections.
+    #[serde(default)]
+    pub wss_tls_enabled: bool,
+    /// SNI hostname for WSS TLS (should look like a CDN domain).
+    #[serde(default)]
+    pub wss_sni: Option<String>,
+    /// Path to PEM-encoded server certificate for WSS TLS.
+    #[serde(default)]
+    pub wss_cert_pem_path: Option<String>,
+    /// Path to PEM-encoded server private key for WSS TLS.
+    #[serde(default)]
+    pub wss_key_pem_path: Option<String>,
+    /// Outbound proxy type: "socks5" or "http-connect".
+    #[serde(default)]
+    pub proxy_type: Option<String>,
+    /// Outbound proxy address (e.g. "127.0.0.1:1080").
+    #[serde(default)]
+    pub proxy_addr: Option<String>,
+    /// Proxy username (optional).
+    #[serde(default)]
+    pub proxy_username: Option<String>,
+    /// Proxy password (optional).
+    #[serde(default)]
+    pub proxy_password: Option<String>,
+    /// Enable ObfuscatedQuic REALITY transport.
+    #[serde(default)]
+    pub obfuscated_quic_enabled: bool,
+    /// SNI for ObfuscatedQuic (e.g. "cdn.cloudflare.com").
+    #[serde(default)]
+    pub obfuscated_quic_sni: Option<String>,
+    /// Hex-encoded 32-byte probe secret for ObfuscatedQuic.
+    #[serde(default)]
+    pub obfuscated_quic_secret: Option<String>,
+    /// Fallback URL for ObfuscatedQuic active-probe resistance.
+    #[serde(default)]
+    pub obfuscated_quic_fallback_url: Option<String>,
 }
 
 impl Default for StorageConfig {
@@ -52,6 +95,7 @@ impl Default for NodeConfig {
         Self {
             storage: StorageConfig::default(),
             network: NetworkConfig::default(),
+            transport: TransportConfig::default(),
         }
     }
 }

@@ -237,6 +237,7 @@ fn cmd_init(
             listen_addr: listen_addr.into(),
             bootstrap_peers: vec![],
         },
+        transport: Default::default(),
     };
     config.save(data_dir).context("cannot save config")?;
 
@@ -387,7 +388,14 @@ async fn cmd_status(data_dir: &std::path::Path) -> Result<()> {
             println!("  Pending replication: {}", s.pending_replication);
             println!("  Replicated items:    {}", s.replicated_count);
             if s.wss_port > 0 {
-                println!("  WSS share server:    127.0.0.1:{}", s.wss_port);
+                let tls_tag = if s.wss_tls_enabled { " (TLS)" } else { " (plain WS)" };
+                println!("  WSS share server:    127.0.0.1:{}{}", s.wss_port, tls_tag);
+            }
+            if s.obfs_quic_port > 0 {
+                println!("  ObfuscatedQuic:      127.0.0.1:{}", s.obfs_quic_port);
+            }
+            if s.proxy_configured {
+                println!("  Outbound proxy:      {} (configured)", s.proxy_type.as_deref().unwrap_or("unknown"));
             }
 
             // Payload transport readiness matrix.
@@ -395,11 +403,16 @@ async fn cmd_status(data_dir: &std::path::Path) -> Result<()> {
                 println!();
                 println!("  Payload Transport Readiness:");
                 for t in &s.transport_readiness {
-                    let status = if t.available { "AVAILABLE" } else { "UNAVAILABLE" };
+                    let status = if t.available { "AVAILABLE" } else { "UNAVAIL " };
+                    let sel = if t.selected { " [SELECTED]" } else { "" };
                     print!(
-                        "    {:<20} {:<12} success={} failure={}",
-                        t.name, status, t.success_count, t.failure_count
+                        "    {:<20} {:<9} success={:<4} fail={:<4} (session={} data={}){sel}",
+                        t.name, status, t.success_count, t.failure_count,
+                        t.session_failures, t.data_failures,
                     );
+                    if let Some(ref err) = t.last_error {
+                        print!("  last: {err}");
+                    }
                     if let Some(ref reason) = t.reason {
                         print!("  ({reason})");
                     }
@@ -469,6 +482,12 @@ fn cmd_config(
                 "storage.quota_mb" => println!("{}", config.storage.quota_mb),
                 "storage.bandwidth_mb_day" => println!("{}", config.storage.bandwidth_mb_day),
                 "network.listen_addr" => println!("{}", config.network.listen_addr),
+                "transport.wss_tls_enabled" => println!("{}", config.transport.wss_tls_enabled),
+                "transport.wss_sni" => println!("{}", config.transport.wss_sni.as_deref().unwrap_or("")),
+                "transport.proxy_type" => println!("{}", config.transport.proxy_type.as_deref().unwrap_or("")),
+                "transport.proxy_addr" => println!("{}", config.transport.proxy_addr.as_deref().unwrap_or("")),
+                "transport.obfuscated_quic_enabled" => println!("{}", config.transport.obfuscated_quic_enabled),
+                "transport.obfuscated_quic_sni" => println!("{}", config.transport.obfuscated_quic_sni.as_deref().unwrap_or("")),
                 _ => bail!("unknown config key: {k}"),
             }
         }
@@ -483,6 +502,33 @@ fn cmd_config(
                 }
                 "network.listen_addr" => {
                     config.network.listen_addr = v.into();
+                }
+                "transport.wss_tls_enabled" => {
+                    config.transport.wss_tls_enabled = v.parse().context("expected bool")?;
+                }
+                "transport.wss_sni" => {
+                    config.transport.wss_sni = if v.is_empty() { None } else { Some(v.into()) };
+                }
+                "transport.proxy_type" => {
+                    config.transport.proxy_type = if v.is_empty() { None } else { Some(v.into()) };
+                }
+                "transport.proxy_addr" => {
+                    config.transport.proxy_addr = if v.is_empty() { None } else { Some(v.into()) };
+                }
+                "transport.proxy_username" => {
+                    config.transport.proxy_username = if v.is_empty() { None } else { Some(v.into()) };
+                }
+                "transport.proxy_password" => {
+                    config.transport.proxy_password = if v.is_empty() { None } else { Some(v.into()) };
+                }
+                "transport.obfuscated_quic_enabled" => {
+                    config.transport.obfuscated_quic_enabled = v.parse().context("expected bool")?;
+                }
+                "transport.obfuscated_quic_sni" => {
+                    config.transport.obfuscated_quic_sni = if v.is_empty() { None } else { Some(v.into()) };
+                }
+                "transport.obfuscated_quic_secret" => {
+                    config.transport.obfuscated_quic_secret = if v.is_empty() { None } else { Some(v.into()) };
                 }
                 _ => bail!("unknown config key: {k}"),
             }
@@ -517,7 +563,9 @@ async fn cmd_daemon(data_dir: &std::path::Path, bootstrap_addrs: &[String]) -> R
     let node = MiasmaNode::new(&*master_key, NodeType::Full, &config.network.listen_addr)
         .context("cannot create node")?;
 
-    let server = DaemonServer::start(node, store, data_dir.to_owned())
+    let server = DaemonServer::start_with_transport(
+        node, store, data_dir.to_owned(), config.transport.clone(),
+    )
         .await
         .context("daemon start failed")?;
 

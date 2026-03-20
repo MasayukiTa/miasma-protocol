@@ -31,6 +31,7 @@
 ///   proxies the connection to a legitimate CDN, defeating active probing.
 pub mod obfuscated;
 pub mod payload;
+pub mod proxy;
 pub mod websocket;
 
 use async_trait::async_trait;

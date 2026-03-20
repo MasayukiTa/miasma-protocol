@@ -33,6 +33,7 @@ use tokio::{net::TcpListener, sync::mpsc, task::JoinHandle, time::Duration};
 use tracing::{debug, info, warn};
 
 use crate::{
+    config::TransportConfig,
     network::{
         coordinator::MiasmaCoordinator,
         node::MiasmaNode,
@@ -40,6 +41,7 @@ use crate::{
     },
     pipeline::{dissolve, DissolutionParams},
     store::LocalShareStore,
+    transport::payload::PayloadTransport,
     MiasmaError,
 };
 
@@ -74,6 +76,14 @@ pub struct DaemonServer {
     control_port: u16,
     /// Port the WSS share server is bound to (0 if not started).
     wss_port: u16,
+    /// Whether WSS TLS is enabled.
+    wss_tls_enabled: bool,
+    /// Whether a proxy is configured.
+    proxy_configured: bool,
+    /// Proxy type string (e.g. "socks5", "http_connect").
+    proxy_type: Option<String>,
+    /// Port the ObfuscatedQuic server is bound to (0 if not started).
+    obfs_quic_port: u16,
     // Single-consumer resources moved into run():
     listener: Option<TcpListener>,
     rep_success_rx: Option<mpsc::Receiver<[u8; 32]>>,
@@ -88,9 +98,19 @@ impl DaemonServer {
     /// After this returns the IPC port file exists, so CLI clients can
     /// connect immediately. Call `run()` to start accepting requests.
     pub async fn start(
+        node: MiasmaNode,
+        store: Arc<LocalShareStore>,
+        data_dir: PathBuf,
+    ) -> Result<Self> {
+        Self::start_with_transport(node, store, data_dir, TransportConfig::default()).await
+    }
+
+    /// Build and bind the daemon with explicit transport configuration.
+    pub async fn start_with_transport(
         mut node: MiasmaNode,
         store: Arc<LocalShareStore>,
         data_dir: PathBuf,
+        transport_config: TransportConfig,
     ) -> Result<Self> {
         // 1. Collect actual OS-assigned listen addresses.
         let addrs = node.collect_listen_addrs(400).await;
@@ -113,32 +133,156 @@ impl DaemonServer {
         // 5. Persist the port so CLI clients can discover the daemon.
         write_port_file(&data_dir, control_port)?;
 
-        // 6. Start the coordinator (spawns the libp2p event loop).
-        let coord = Arc::new(
-            MiasmaCoordinator::start(node, store.clone(), listen_addr_strings.clone()).await,
-        );
+        // 6. Build extra transports based on config.
+        let mut extra_transports: Vec<Box<dyn PayloadTransport>> = Vec::new();
 
-        // 7. Load the persistent replication queue.
-        let queue = Arc::new(Mutex::new(ReplicationQueue::load_or_create(&data_dir)?));
-
-        // 8. Start WSS share server (OS-assigned port for payload transport).
-        let wss_port = match crate::transport::websocket::WssShareServer::bind(
-            store.clone(),
-            0, // OS-assigned port
-        )
-        .await
-        {
-            Ok(server) => {
-                let port = server.port;
-                tokio::spawn(server.run());
-                info!(wss_port = port, "WSS share server started");
-                port
+        // 6a. WSS share server.
+        let wss_tls_enabled = transport_config.wss_tls_enabled;
+        let mut wss_config = crate::transport::websocket::WebSocketConfig {
+            tls_enabled: wss_tls_enabled,
+            ..Default::default()
+        };
+        // Load TLS cert/key from config paths.
+        if wss_tls_enabled {
+            if let Some(ref cert_path) = transport_config.wss_cert_pem_path {
+                wss_config.tls_cert_pem = Some(std::fs::read(cert_path).context("reading WSS TLS cert")?);
             }
-            Err(e) => {
-                warn!("WSS share server failed to start: {e}");
-                0
+            if let Some(ref key_path) = transport_config.wss_key_pem_path {
+                wss_config.tls_key_pem = Some(std::fs::read(key_path).context("reading WSS TLS key")?);
+            }
+            if let Some(ref sni) = transport_config.wss_sni {
+                wss_config.sni_override = Some(sni.clone());
+            }
+        }
+        // Configure proxy if present.
+        let proxy_configured = transport_config.proxy_type.is_some();
+        let proxy_type = transport_config.proxy_type.clone();
+        if let Some(ref pt) = transport_config.proxy_type {
+            if let Some(ref addr) = transport_config.proxy_addr {
+                use crate::transport::websocket::{ProxyConfig as WssProxyConfig, ProxyKind};
+                let kind = match pt.as_str() {
+                    "socks5" => ProxyKind::Socks5,
+                    _ => ProxyKind::Socks5, // default to socks5
+                };
+                wss_config.proxy = Some(WssProxyConfig {
+                    addr: addr.clone(),
+                    kind,
+                });
+            }
+        }
+
+        let wss_port = if wss_tls_enabled {
+            // Bind TLS-enabled WSS server.
+            match crate::transport::websocket::WssShareServer::bind_tls(
+                store.clone(),
+                0,
+                &wss_config.tls_cert_pem.clone().unwrap_or_default(),
+                &wss_config.tls_key_pem.clone().unwrap_or_default(),
+            )
+            .await
+            {
+                Ok(server) => {
+                    let port = server.port;
+                    tokio::spawn(server.run());
+                    info!(wss_port = port, tls = true, "WSS share server started (TLS)");
+                    // Add WSS transport to fallback chain.
+                    let mut client_config = wss_config.clone();
+                    client_config.port = port;
+                    extra_transports.push(Box::new(
+                        crate::transport::websocket::WssPayloadTransport::new(client_config),
+                    ));
+                    port
+                }
+                Err(e) => {
+                    warn!("WSS TLS share server failed to start: {e}");
+                    0
+                }
+            }
+        } else {
+            // Plain WSS server (no TLS).
+            match crate::transport::websocket::WssShareServer::bind(store.clone(), 0).await {
+                Ok(server) => {
+                    let port = server.port;
+                    tokio::spawn(server.run());
+                    info!(wss_port = port, "WSS share server started");
+                    let mut client_config = wss_config.clone();
+                    client_config.port = port;
+                    extra_transports.push(Box::new(
+                        crate::transport::websocket::WssPayloadTransport::new(client_config),
+                    ));
+                    port
+                }
+                Err(e) => {
+                    warn!("WSS share server failed to start: {e}");
+                    0
+                }
             }
         };
+
+        // 6b. ObfuscatedQuic server.
+        let mut obfs_quic_port = 0u16;
+        if transport_config.obfuscated_quic_enabled {
+            // Parse hex-encoded probe secret (32 bytes = 64 hex chars).
+            let probe_secret = {
+                let hex_str = transport_config
+                    .obfuscated_quic_secret
+                    .as_deref()
+                    .unwrap_or("0000000000000000000000000000000000000000000000000000000000000000");
+                let bytes = hex::decode(hex_str).unwrap_or_else(|_| vec![0u8; 32]);
+                let mut arr = [0u8; 32];
+                let len = bytes.len().min(32);
+                arr[..len].copy_from_slice(&bytes[..len]);
+                arr
+            };
+            let obfs_config = crate::transport::obfuscated::ObfuscatedConfig::new(
+                probe_secret,
+                transport_config
+                    .obfuscated_quic_sni
+                    .as_deref()
+                    .unwrap_or("cdn.example.com"),
+                transport_config
+                    .obfuscated_quic_fallback_url
+                    .as_deref()
+                    .unwrap_or("https://cdn.example.com"),
+                crate::transport::obfuscated::BrowserFingerprint::Chrome124,
+            );
+            match crate::transport::obfuscated::ObfuscatedQuicServer::bind(
+                store.clone(),
+                0,
+                obfs_config.clone(),
+            )
+            .await
+            {
+                Ok(server) => {
+                    obfs_quic_port = server.port;
+                    tokio::spawn(server.run());
+                    info!(port = obfs_quic_port, "ObfuscatedQuic server started");
+                    // Add to fallback chain.
+                    extra_transports.push(Box::new(
+                        crate::transport::obfuscated::ObfuscatedQuicPayloadTransport::new(
+                            obfs_config,
+                        ),
+                    ));
+                }
+                Err(e) => {
+                    warn!("ObfuscatedQuic server failed to start: {e}");
+                }
+            }
+        }
+
+        // 7. Start the coordinator with all transports.
+        let coord = Arc::new(
+            MiasmaCoordinator::start_with_transports(
+                node,
+                store.clone(),
+                listen_addr_strings.clone(),
+                extra_transports,
+            )
+            .await,
+        );
+
+        // 8. Load the persistent replication queue.
+        let queue = Arc::new(Mutex::new(ReplicationQueue::load_or_create(&data_dir)?));
 
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
@@ -159,6 +303,10 @@ impl DaemonServer {
             listen_addrs: listen_addr_strings,
             control_port,
             wss_port,
+            wss_tls_enabled,
+            proxy_configured,
+            proxy_type,
+            obfs_quic_port,
             listener: Some(listener),
             rep_success_rx: Some(rep_rx),
             topology_rx: Some(topo_rx),
@@ -237,8 +385,15 @@ impl DaemonServer {
         let ipc_store = store.clone();
         let ipc_addrs = listen_addrs.clone();
         let ipc_wss_port = self.wss_port;
+        let ipc_wss_tls = self.wss_tls_enabled;
+        let ipc_proxy = self.proxy_configured;
+        let ipc_proxy_type = self.proxy_type.clone();
+        let ipc_obfs = self.obfs_quic_port;
         let ipc_handle: JoinHandle<()> = tokio::spawn(async move {
-            ipc_server_loop(listener, ipc_coord, ipc_queue, ipc_store, ipc_addrs, ipc_wss_port).await;
+            ipc_server_loop(
+                listener, ipc_coord, ipc_queue, ipc_store, ipc_addrs,
+                ipc_wss_port, ipc_wss_tls, ipc_proxy, ipc_proxy_type, ipc_obfs,
+            ).await;
         });
 
         // ── Event-driven replication engine ───────────────────────────────────
@@ -270,6 +425,10 @@ async fn ipc_server_loop(
     store: Arc<LocalShareStore>,
     listen_addrs: Vec<String>,
     wss_port: u16,
+    wss_tls_enabled: bool,
+    proxy_configured: bool,
+    proxy_type: Option<String>,
+    obfs_quic_port: u16,
 ) {
     loop {
         match listener.accept().await {
@@ -280,8 +439,12 @@ async fn ipc_server_loop(
                 let s = store.clone();
                 let la = listen_addrs.clone();
                 let wp = wss_port;
+                let wt = wss_tls_enabled;
+                let pc = proxy_configured;
+                let pt = proxy_type.clone();
+                let oq = obfs_quic_port;
                 tokio::spawn(async move {
-                    if let Err(e) = handle_ipc_client(stream, c, q, s, la, wp).await {
+                    if let Err(e) = handle_ipc_client(stream, c, q, s, la, wp, wt, pc, pt, oq).await {
                         debug!("IPC client error: {e}");
                     }
                 });
@@ -301,9 +464,16 @@ async fn handle_ipc_client(
     store: Arc<LocalShareStore>,
     listen_addrs: Vec<String>,
     wss_port: u16,
+    wss_tls_enabled: bool,
+    proxy_configured: bool,
+    proxy_type: Option<String>,
+    obfs_quic_port: u16,
 ) -> Result<()> {
     let req: ControlRequest = read_frame(&mut stream).await?;
-    let resp = process_request(req, coord, queue, store, listen_addrs, wss_port).await;
+    let resp = process_request(
+        req, coord, queue, store, listen_addrs,
+        wss_port, wss_tls_enabled, proxy_configured, proxy_type, obfs_quic_port,
+    ).await;
     write_frame(&mut stream, &resp).await?;
     Ok(())
 }
@@ -315,6 +485,10 @@ async fn process_request(
     store: Arc<LocalShareStore>,
     listen_addrs: Vec<String>,
     wss_port: u16,
+    wss_tls_enabled: bool,
+    proxy_configured: bool,
+    proxy_type: Option<String>,
+    obfs_quic_port: u16,
 ) -> ControlResponse {
     match req {
         ControlRequest::Publish { data, data_shards, total_shards } => {
@@ -358,8 +532,12 @@ async fn process_request(
                 .map(|r| ipc::TransportStatus {
                     name: r.transport.to_string(),
                     available: r.available,
+                    selected: r.selected,
                     success_count: r.success_count,
                     failure_count: r.failure_count,
+                    session_failures: r.session_failures,
+                    data_failures: r.data_failures,
+                    last_error: r.last_error,
                     reason: r.reason,
                 })
                 .collect();
@@ -373,6 +551,10 @@ async fn process_request(
                 pending_replication,
                 replicated_count,
                 wss_port,
+                wss_tls_enabled,
+                proxy_configured,
+                proxy_type: proxy_type.clone(),
+                obfs_quic_port,
                 transport_readiness,
             })
         }

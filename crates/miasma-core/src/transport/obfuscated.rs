@@ -9,27 +9,50 @@
 /// REALITY was designed for Xray/V2Ray; Miasma adopts the core idea:
 ///
 /// 1. **Shared secret** (`probe_secret`): a 32-byte key known only to
-///    authorised clients.  Embedded in the TLS ClientHello as a custom
-///    extension (or derived from the SNI random nonce).
+///    authorised clients.  A BLAKE3-MAC token derived from a random nonce
+///    is sent as the first 64 bytes on the QUIC stream. The server verifies
+///    this token before serving any share data.
 ///
 /// 2. **Fingerprint template** (`browser_fingerprint`): the TLS handshake
-///    (ClientHello cipher suites, extensions, elliptic curves) is copied
-///    from a real browser (e.g. Chrome 124).  DPI sees a plausible browser
-///    handshake.
+///    (ALPN values) is set to match a real browser. DPI sees plausible
+///    browser-like QUIC traffic.
 ///
 /// 3. **Fallback proxy**: if a connection does NOT contain a valid
-///    `probe_secret`, the server acts as a reverse proxy to a real CDN URL
-///    (`fallback_url`).  The active prober receives a real HTTPS response
-///    and cannot distinguish the node from a CDN origin.
+///    `probe_secret`, the server closes the connection. (Phase 2.1: proxy
+///    to `fallback_url` for full active-probing resistance.)
 ///
-/// # Phase 2 implementation plan
-/// - Integrate with `rustls` custom `ClientHello` builder.
-/// - The QUIC `initial_packet` carries the `probe_secret` encrypted under
-///   the server's static X25519 public key (from `NodeKeys`).
-/// - Server decrypts and checks; on failure, proxies to `fallback_url`.
-use crate::MiasmaError;
-use async_trait::async_trait;
+/// # Wire protocol
+/// ```text
+///   Client → Server (first frame on bidi stream):
+///     [32 bytes: random nonce] [32 bytes: blake3_keyed_hash(probe_secret, nonce)]
+///     [bincode: ShareFetchRequest]
+///
+///   Server → Client:
+///     [bincode: ShareFetchResponse]
+/// ```
+///
+/// # Transport layer
+/// Uses `quinn` (QUIC) with `rustls` 0.23 for TLS 1.3.
+/// - Server uses a self-signed certificate (generated at bind time or
+///   supplied via `ObfuscatedConfig`).
+/// - Client skips certificate verification (authentication is via
+///   `probe_secret`, not PKI).
+use std::net::SocketAddr;
+use std::sync::Arc;
 
+use async_trait::async_trait;
+use quinn::Endpoint;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use tracing::{debug, info, warn};
+
+use crate::{
+    network::node::{ShareFetchRequest, ShareFetchResponse},
+    share::MiasmaShare,
+    store::LocalShareStore,
+    MiasmaError,
+};
+
+use super::payload::{PayloadTransport, PayloadTransportError, PayloadTransportKind, TransportPhase};
 use super::{PluggableTransport, TransportStream};
 
 // ─── Browser fingerprint ──────────────────────────────────────────────────────
@@ -52,6 +75,11 @@ impl BrowserFingerprint {
             Self::Chrome124 | Self::Firefox125 => &["h2", "http/1.1"],
             Self::Safari17 => &["h2"],
         }
+    }
+
+    /// ALPN values as byte vectors (for rustls config).
+    pub fn alpn_bytes(&self) -> Vec<Vec<u8>> {
+        self.alpn_values().iter().map(|s| s.as_bytes().to_vec()).collect()
     }
 
     /// User-Agent string (used in WebSocket fallback SNI).
@@ -83,6 +111,13 @@ pub struct ObfuscatedConfig {
     /// SNI hostname advertised in the TLS ClientHello.
     /// Should match the `fallback_url` domain.
     pub sni: String,
+
+    /// DER-encoded server certificate. If `None`, a self-signed cert is
+    /// generated at bind time (requires `rcgen` — available in dev-deps).
+    pub server_cert_der: Option<Vec<u8>>,
+
+    /// DER-encoded private key (PKCS#8). If `None`, generated with the cert.
+    pub server_key_der: Option<Vec<u8>>,
 }
 
 impl ObfuscatedConfig {
@@ -108,11 +143,447 @@ impl ObfuscatedConfig {
             fingerprint,
             fallback_url: fallback_url.into(),
             sni: sni.into(),
+            server_cert_der: None,
+            server_key_der: None,
         }
     }
 }
 
-// ─── Transport ────────────────────────────────────────────────────────────────
+// ─── BLAKE3-MAC authentication ────────────────────────────────────────────────
+
+/// Size of the authentication nonce and token (bytes).
+const AUTH_NONCE_LEN: usize = 32;
+const AUTH_TOKEN_LEN: usize = 32;
+const AUTH_HEADER_LEN: usize = AUTH_NONCE_LEN + AUTH_TOKEN_LEN;
+
+/// Compute the BLAKE3-MAC token for the given nonce and probe_secret.
+fn compute_auth_token(probe_secret: &[u8; 32], nonce: &[u8; 32]) -> [u8; 32] {
+    *blake3::keyed_hash(probe_secret, nonce).as_bytes()
+}
+
+/// Verify the BLAKE3-MAC token.
+fn verify_auth_token(probe_secret: &[u8; 32], nonce: &[u8; 32], token: &[u8; 32]) -> bool {
+    let expected = compute_auth_token(probe_secret, nonce);
+    // Constant-time comparison
+    use subtle_comparison::ct_eq;
+    ct_eq(&expected, token)
+}
+
+/// Constant-time byte comparison (avoids timing side-channels).
+mod subtle_comparison {
+    pub fn ct_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
+        let mut acc: u8 = 0;
+        for (x, y) in a.iter().zip(b.iter()) {
+            acc |= x ^ y;
+        }
+        acc == 0
+    }
+}
+
+/// Generate a self-signed certificate for the given SNI domain.
+fn generate_self_signed_cert(
+    sni: &str,
+) -> Result<(CertificateDer<'static>, PrivateKeyDer<'static>), MiasmaError> {
+    let mut params = rcgen::CertificateParams::new(vec![sni.to_string()])
+        .map_err(|e| MiasmaError::Sss(format!("cert params: {e}")))?;
+    params.distinguished_name = rcgen::DistinguishedName::new();
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, sni);
+    let key_pair = rcgen::KeyPair::generate()
+        .map_err(|e| MiasmaError::Sss(format!("keygen: {e}")))?;
+    let cert = params
+        .self_signed(&key_pair)
+        .map_err(|e| MiasmaError::Sss(format!("self-sign: {e}")))?;
+    let cert_der = CertificateDer::from(cert.der().to_vec());
+    let key_der = PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+        key_pair.serialize_der(),
+    ));
+    Ok((cert_der, key_der))
+}
+
+// ─── Custom cert verifier (accept any — auth is via probe_secret) ────────────
+
+/// A TLS certificate verifier that accepts any server certificate.
+///
+/// This is safe in Miasma's threat model because authentication is provided
+/// by the BLAKE3-MAC probe_secret, not by TLS PKI. The self-signed cert
+/// exists only to satisfy the QUIC/TLS handshake requirement.
+#[derive(Debug)]
+struct AcceptAnyCert;
+
+impl rustls::client::danger::ServerCertVerifier for AcceptAnyCert {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        // Support all schemes that rustls knows about
+        vec![
+            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+            rustls::SignatureScheme::ECDSA_NISTP521_SHA512,
+            rustls::SignatureScheme::ED25519,
+            rustls::SignatureScheme::RSA_PSS_SHA256,
+            rustls::SignatureScheme::RSA_PSS_SHA384,
+            rustls::SignatureScheme::RSA_PSS_SHA512,
+            rustls::SignatureScheme::RSA_PKCS1_SHA256,
+            rustls::SignatureScheme::RSA_PKCS1_SHA384,
+            rustls::SignatureScheme::RSA_PKCS1_SHA512,
+        ]
+    }
+}
+
+// ─── Server ──────────────────────────────────────────────────────────────────
+
+/// Obfuscated QUIC server — accepts connections, verifies probe_secret,
+/// serves share requests.
+pub struct ObfuscatedQuicServer {
+    endpoint: Endpoint,
+    store: Arc<LocalShareStore>,
+    /// The port the server is actually bound to (useful when binding to port 0).
+    pub port: u16,
+    config: ObfuscatedConfig,
+}
+
+impl ObfuscatedQuicServer {
+    /// Bind the obfuscated QUIC server with explicit cert/key.
+    pub async fn bind_with_cert(
+        store: Arc<LocalShareStore>,
+        port: u16,
+        config: ObfuscatedConfig,
+        cert_der: CertificateDer<'static>,
+        key_der: PrivateKeyDer<'static>,
+    ) -> Result<Self, MiasmaError> {
+        // Build rustls server config (explicit ring provider)
+        let mut tls_config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .map_err(|e| MiasmaError::Sss(format!("TLS protocol versions: {e}")))?
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_der], key_der)
+        .map_err(|e| MiasmaError::Sss(format!("TLS server config: {e}")))?;
+
+        tls_config.alpn_protocols = config.fingerprint.alpn_bytes();
+
+        let server_config =
+            quinn::ServerConfig::with_crypto(Arc::new(
+                quinn::crypto::rustls::QuicServerConfig::try_from(tls_config)
+                    .map_err(|e| MiasmaError::Sss(format!("QUIC server config: {e}")))?,
+            ));
+
+        let addr: SocketAddr = ([0, 0, 0, 0], port).into();
+        let endpoint = Endpoint::server(server_config, addr)
+            .map_err(|e| MiasmaError::Sss(format!("QUIC bind {addr}: {e}")))?;
+
+        let actual_port = endpoint
+            .local_addr()
+            .map_err(|e| MiasmaError::Sss(format!("local_addr: {e}")))?
+            .port();
+
+        info!(port = actual_port, "ObfuscatedQuicServer bound");
+
+        Ok(Self {
+            endpoint,
+            store,
+            port: actual_port,
+            config,
+        })
+    }
+
+    /// Bind with an auto-generated self-signed certificate (uses rcgen).
+    /// Useful for production when no external CA is needed (auth is via probe_secret).
+    pub async fn bind(
+        store: Arc<LocalShareStore>,
+        port: u16,
+        config: ObfuscatedConfig,
+    ) -> Result<Self, MiasmaError> {
+        let sni = config.sni.clone();
+        let (cert_der, key_der) = generate_self_signed_cert(&sni)?;
+        Self::bind_with_cert(store, port, config, cert_der, key_der).await
+    }
+
+    /// Run the server loop. Accepts connections and handles each one.
+    /// Call via `tokio::spawn(server.run())`.
+    pub async fn run(self) {
+        let probe_secret = self.config.probe_secret;
+        let store = self.store;
+
+        while let Some(incoming) = self.endpoint.accept().await {
+            let store = store.clone();
+            tokio::spawn(async move {
+                match incoming.await {
+                    Ok(conn) => {
+                        if let Err(e) =
+                            handle_obfuscated_connection(conn, &probe_secret, store).await
+                        {
+                            debug!("ObfuscatedQuic connection error: {e}");
+                        }
+                    }
+                    Err(e) => {
+                        debug!("ObfuscatedQuic accept error: {e}");
+                    }
+                }
+            });
+        }
+    }
+}
+
+/// Handle a single obfuscated QUIC connection.
+async fn handle_obfuscated_connection(
+    conn: quinn::Connection,
+    probe_secret: &[u8; 32],
+    store: Arc<LocalShareStore>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let (mut send, mut recv) = conn.accept_bi().await?;
+
+    // 1. Read auth header: 32-byte nonce + 32-byte token
+    let mut auth_buf = [0u8; AUTH_HEADER_LEN];
+    recv.read_exact(&mut auth_buf).await?;
+
+    let nonce: [u8; 32] = auth_buf[..AUTH_NONCE_LEN].try_into().unwrap();
+    let token: [u8; 32] = auth_buf[AUTH_NONCE_LEN..].try_into().unwrap();
+
+    if !verify_auth_token(probe_secret, &nonce, &token) {
+        debug!("ObfuscatedQuic: invalid probe_secret — closing connection");
+        conn.close(quinn::VarInt::from_u32(1), b"unauthorized");
+        return Ok(());
+    }
+
+    // 2. Read bincode ShareFetchRequest (length-prefixed: 4 bytes LE + body)
+    let mut len_buf = [0u8; 4];
+    recv.read_exact(&mut len_buf).await?;
+    let req_len = u32::from_le_bytes(len_buf) as usize;
+    if req_len > 1024 * 1024 {
+        warn!("ObfuscatedQuic: request too large ({req_len} bytes)");
+        conn.close(quinn::VarInt::from_u32(2), b"request too large");
+        return Ok(());
+    }
+
+    let mut req_buf = vec![0u8; req_len];
+    recv.read_exact(&mut req_buf).await?;
+
+    let request: ShareFetchRequest = bincode::deserialize(&req_buf)?;
+
+    // 3. Look up the share
+    let prefix: [u8; 8] = request.mid_digest[..8].try_into().unwrap();
+    let candidates = store.search_by_mid_prefix(&prefix);
+    let share: Option<MiasmaShare> = candidates.iter().find_map(|addr| {
+        store.get(addr).ok().and_then(|s| {
+            if s.slot_index == request.slot_index && s.segment_index == request.segment_index {
+                Some(s)
+            } else {
+                None
+            }
+        })
+    });
+
+    // 4. Send response: 4-byte LE length + bincode(ShareFetchResponse)
+    let response = ShareFetchResponse { share };
+    let body = bincode::serialize(&response)?;
+    let len = (body.len() as u32).to_le_bytes();
+    send.write_all(&len).await?;
+    send.write_all(&body).await?;
+    send.finish()?;
+
+    // Wait until the peer has received all data (or the stream is reset).
+    // Without this, dropping the handler may close the connection before
+    // the response is fully delivered.
+    let _ = send.stopped().await;
+
+    Ok(())
+}
+
+// ─── Client (PayloadTransport) ───────────────────────────────────────────────
+
+/// Obfuscated QUIC payload transport — implements `PayloadTransport`.
+///
+/// Connects to an `ObfuscatedQuicServer`, authenticates via probe_secret,
+/// and fetches a share.
+pub struct ObfuscatedQuicPayloadTransport {
+    config: ObfuscatedConfig,
+}
+
+impl ObfuscatedQuicPayloadTransport {
+    pub fn new(config: ObfuscatedConfig) -> Self {
+        Self { config }
+    }
+
+    /// Build a quinn client endpoint with the accept-any-cert verifier.
+    fn make_client_config(&self) -> Result<quinn::ClientConfig, PayloadTransportError> {
+        let mut tls_config = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .map_err(|e| PayloadTransportError {
+            phase: TransportPhase::Session,
+            message: format!("TLS protocol versions: {e}"),
+        })?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
+        .with_no_client_auth();
+
+        tls_config.alpn_protocols = self.config.fingerprint.alpn_bytes();
+
+        let client_config = quinn::ClientConfig::new(Arc::new(
+            quinn::crypto::rustls::QuicClientConfig::try_from(tls_config).map_err(|e| {
+                PayloadTransportError {
+                    phase: TransportPhase::Session,
+                    message: format!("QUIC client config: {e}"),
+                }
+            })?,
+        ));
+
+        Ok(client_config)
+    }
+}
+
+#[async_trait]
+impl PayloadTransport for ObfuscatedQuicPayloadTransport {
+    fn kind(&self) -> PayloadTransportKind {
+        PayloadTransportKind::ObfuscatedQuic
+    }
+
+    async fn fetch_share(
+        &self,
+        peer_addr: &str,
+        mid_digest: [u8; 32],
+        slot_index: u16,
+        segment_index: u32,
+    ) -> Result<Option<MiasmaShare>, PayloadTransportError> {
+        let client_config = self.make_client_config()?;
+
+        // Parse peer address
+        let addr: SocketAddr = peer_addr.parse().map_err(|e| PayloadTransportError {
+            phase: TransportPhase::Session,
+            message: format!("invalid peer address '{peer_addr}': {e}"),
+        })?;
+
+        // Create client endpoint on ephemeral port
+        let mut endpoint =
+            Endpoint::client("0.0.0.0:0".parse().unwrap()).map_err(|e| PayloadTransportError {
+                phase: TransportPhase::Session,
+                message: format!("QUIC client endpoint: {e}"),
+            })?;
+        endpoint.set_default_client_config(client_config);
+
+        // Connect with SNI
+        let conn = endpoint
+            .connect(addr, &self.config.sni)
+            .map_err(|e| PayloadTransportError {
+                phase: TransportPhase::Session,
+                message: format!("QUIC connect to {addr}: {e}"),
+            })?
+            .await
+            .map_err(|e| PayloadTransportError {
+                phase: TransportPhase::Session,
+                message: format!("QUIC handshake with {addr}: {e}"),
+            })?;
+
+        // Open bidirectional stream
+        let (mut send, mut recv) = conn.open_bi().await.map_err(|e| PayloadTransportError {
+            phase: TransportPhase::Session,
+            message: format!("open bidi stream: {e}"),
+        })?;
+
+        // 1. Send auth header: random nonce + BLAKE3-MAC token
+        let mut nonce = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce);
+        let token = compute_auth_token(&self.config.probe_secret, &nonce);
+
+        send.write_all(&nonce).await.map_err(|e| PayloadTransportError {
+            phase: TransportPhase::Data,
+            message: format!("write auth nonce: {e}"),
+        })?;
+        send.write_all(&token).await.map_err(|e| PayloadTransportError {
+            phase: TransportPhase::Data,
+            message: format!("write auth token: {e}"),
+        })?;
+
+        // 2. Send ShareFetchRequest (length-prefixed bincode)
+        let request = ShareFetchRequest {
+            mid_digest,
+            slot_index,
+            segment_index,
+        };
+        let body = bincode::serialize(&request).map_err(|e| PayloadTransportError {
+            phase: TransportPhase::Data,
+            message: format!("serialize request: {e}"),
+        })?;
+        let len = (body.len() as u32).to_le_bytes();
+        send.write_all(&len).await.map_err(|e| PayloadTransportError {
+            phase: TransportPhase::Data,
+            message: format!("write request len: {e}"),
+        })?;
+        send.write_all(&body).await.map_err(|e| PayloadTransportError {
+            phase: TransportPhase::Data,
+            message: format!("write request body: {e}"),
+        })?;
+        send.finish().map_err(|e| PayloadTransportError {
+            phase: TransportPhase::Data,
+            message: format!("finish send: {e}"),
+        })?;
+
+        // 3. Read response (length-prefixed bincode)
+        let mut len_buf = [0u8; 4];
+        recv.read_exact(&mut len_buf).await.map_err(|e| PayloadTransportError {
+            phase: TransportPhase::Data,
+            message: format!("read response length: {e}"),
+        })?;
+        let resp_len = u32::from_le_bytes(len_buf) as usize;
+        if resp_len > 64 * 1024 * 1024 {
+            return Err(PayloadTransportError {
+                phase: TransportPhase::Data,
+                message: format!("response too large: {resp_len} bytes"),
+            });
+        }
+        let mut resp_buf = vec![0u8; resp_len];
+        recv.read_exact(&mut resp_buf).await.map_err(|e| PayloadTransportError {
+            phase: TransportPhase::Data,
+            message: format!("read response body: {e}"),
+        })?;
+
+        let response: ShareFetchResponse =
+            bincode::deserialize(&resp_buf).map_err(|e| PayloadTransportError {
+                phase: TransportPhase::Data,
+                message: format!("deserialize response: {e}"),
+            })?;
+
+        // Clean up
+        conn.close(quinn::VarInt::from_u32(0), b"done");
+        endpoint.wait_idle().await;
+
+        Ok(response.share)
+    }
+}
+
+// ─── Legacy PluggableTransport (kept for backward compatibility) ─────────────
 
 pub struct ObfuscatedQuicTransport {
     config: ObfuscatedConfig,
@@ -141,22 +612,24 @@ impl PluggableTransport for ObfuscatedQuicTransport {
             addr,
             sni = self.config.sni,
             fingerprint = ?self.config.fingerprint,
-            "ObfuscatedQuic dial (stub — Phase 2)"
+            "ObfuscatedQuic dial (legacy PluggableTransport — use ObfuscatedQuicPayloadTransport instead)"
         );
-        // Phase 2: construct a QUIC initial packet with probe_secret,
-        // apply browser fingerprint to TLS ClientHello, dial addr.
-        Err(MiasmaError::Sss("ObfuscatedQuic transport not yet implemented (Phase 2)".into()))
+        Err(MiasmaError::Sss("ObfuscatedQuic legacy transport: use ObfuscatedQuicPayloadTransport".into()))
     }
 
     async fn listen(&self, addr: &str) -> Result<(), MiasmaError> {
-        tracing::debug!(addr, "ObfuscatedQuic listen (stub — Phase 2)");
-        Err(MiasmaError::Sss("ObfuscatedQuic listen not yet implemented (Phase 2)".into()))
+        tracing::debug!(addr, "ObfuscatedQuic listen (legacy PluggableTransport — use ObfuscatedQuicServer instead)");
+        Err(MiasmaError::Sss("ObfuscatedQuic legacy transport: use ObfuscatedQuicServer".into()))
     }
 }
+
+// ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- Existing tests (preserved) ---
 
     #[test]
     fn fingerprint_alpn_chrome() {
@@ -182,5 +655,171 @@ mod tests {
             [0u8; 32], "", "https://x.com", BrowserFingerprint::Chrome124,
         ));
         assert_eq!(t.name(), "obfuscated-quic-reality");
+    }
+
+    // --- New tests ---
+
+    fn generate_test_cert(sni: &str) -> (CertificateDer<'static>, PrivateKeyDer<'static>) {
+        generate_self_signed_cert(sni).unwrap()
+    }
+
+    #[test]
+    fn auth_token_roundtrip() {
+        let secret = [42u8; 32];
+        let nonce = [7u8; 32];
+        let token = compute_auth_token(&secret, &nonce);
+        assert!(verify_auth_token(&secret, &nonce, &token));
+    }
+
+    #[test]
+    fn auth_token_wrong_secret_rejected() {
+        let secret_a = [42u8; 32];
+        let secret_b = [99u8; 32];
+        let nonce = [7u8; 32];
+        let token = compute_auth_token(&secret_a, &nonce);
+        assert!(!verify_auth_token(&secret_b, &nonce, &token));
+    }
+
+    #[test]
+    fn obfuscated_quic_fingerprint_alpn() {
+        let chrome = BrowserFingerprint::Chrome124;
+        let alpn = chrome.alpn_bytes();
+        assert_eq!(alpn, vec![b"h2".to_vec(), b"http/1.1".to_vec()]);
+
+        let safari = BrowserFingerprint::Safari17;
+        let alpn = safari.alpn_bytes();
+        assert_eq!(alpn, vec![b"h2".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn obfuscated_quic_roundtrip() {
+        // 1. Create a temp store and put a share in it
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(LocalShareStore::open(tmp.path(), 100).unwrap());
+
+        let share = MiasmaShare {
+            version: 1,
+            mid_prefix: [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08],
+            segment_index: 0,
+            slot_index: 3,
+            shard_data: vec![0xDE, 0xAD, 0xBE, 0xEF],
+            key_share: vec![0x11, 0x22],
+            shard_hash: [0xCC; 32],
+            nonce: [0; 12],
+            original_len: 4,
+            timestamp: 12345,
+        };
+        store.put(&share).unwrap();
+
+        // 2. Generate cert and config
+        let probe_secret = [0x42u8; 32];
+        let sni = "test.example.com";
+        let (cert_der, key_der) = generate_test_cert(sni);
+
+        let config = ObfuscatedConfig::new(
+            probe_secret,
+            sni,
+            "https://example.com",
+            BrowserFingerprint::Chrome124,
+        );
+
+        // 3. Start server
+        let server = ObfuscatedQuicServer::bind_with_cert(
+            store.clone(),
+            0, // ephemeral port
+            config.clone(),
+            cert_der,
+            key_der,
+        )
+        .await
+        .unwrap();
+        let port = server.port;
+        tokio::spawn(server.run());
+
+        // Give the server a moment to be ready
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // 4. Create client and fetch the share
+        let client = ObfuscatedQuicPayloadTransport::new(config);
+        let peer_addr = format!("127.0.0.1:{port}");
+
+        // Build the mid_digest from the share's mid_prefix (pad with zeros)
+        let mut mid_digest = [0u8; 32];
+        mid_digest[..8].copy_from_slice(&share.mid_prefix);
+
+        let result = client
+            .fetch_share(&peer_addr, mid_digest, 3, 0)
+            .await
+            .expect("fetch_share should succeed");
+
+        let fetched = result.unwrap();
+        assert_eq!(fetched.slot_index, 3);
+        assert_eq!(fetched.segment_index, 0);
+        assert_eq!(fetched.shard_data, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        assert_eq!(fetched.timestamp, 12345);
+    }
+
+    #[tokio::test]
+    async fn obfuscated_quic_wrong_secret_rejected() {
+        // 1. Create a temp store
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(LocalShareStore::open(tmp.path(), 100).unwrap());
+
+        // 2. Server uses secret A
+        let secret_a = [0x42u8; 32];
+        let sni = "test.example.com";
+        let (cert_der, key_der) = generate_test_cert(sni);
+
+        let server_config = ObfuscatedConfig::new(
+            secret_a,
+            sni,
+            "https://example.com",
+            BrowserFingerprint::Chrome124,
+        );
+
+        let server = ObfuscatedQuicServer::bind_with_cert(
+            store.clone(),
+            0,
+            server_config,
+            cert_der,
+            key_der,
+        )
+        .await
+        .unwrap();
+        let port = server.port;
+        tokio::spawn(server.run());
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // 3. Client uses secret B (different!)
+        let secret_b = [0x99u8; 32];
+        let client_config = ObfuscatedConfig::new(
+            secret_b,
+            sni,
+            "https://example.com",
+            BrowserFingerprint::Chrome124,
+        );
+
+        let client = ObfuscatedQuicPayloadTransport::new(client_config);
+        let peer_addr = format!("127.0.0.1:{port}");
+
+        let result = client
+            .fetch_share(&peer_addr, [0u8; 32], 0, 0)
+            .await;
+
+        // Should fail — server closes connection after auth failure
+        assert!(result.is_err(), "expected error with wrong probe_secret");
+        let err = result.unwrap_err();
+        // The error could be session or data phase depending on timing,
+        // but it should definitely be an error.
+        assert!(
+            err.message.contains("reset")
+                || err.message.contains("closed")
+                || err.message.contains("connection")
+                || err.message.contains("read")
+                || err.message.contains("Application"),
+            "unexpected error message: {}",
+            err.message
+        );
     }
 }
