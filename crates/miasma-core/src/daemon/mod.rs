@@ -518,6 +518,24 @@ async fn process_request(
 
         ControlRequest::Status => {
             let peer_count = coord.peer_count().await.unwrap_or(0);
+            let admission = coord.admission_stats().await.unwrap_or(
+                crate::network::peer_state::AdmissionStats {
+                    verified_peers: 0,
+                    observed_peers: 0,
+                    claimed_peers: 0,
+                    total_rejections: 0,
+                },
+            );
+            let routing = coord.routing_stats().await.unwrap_or(
+                crate::network::routing::RoutingStats {
+                    total_peers: 0,
+                    unreliable_peers: 0,
+                    unique_prefixes: 0,
+                    max_prefix_concentration: 0,
+                    diversity_rejections: 0,
+                    current_difficulty: 8,
+                },
+            );
             let share_count = store.list().len();
             let storage_used_bytes = store.used_bytes();
             let (pending_replication, replicated_count) = {
@@ -556,6 +574,15 @@ async fn process_request(
                 proxy_type: proxy_type.clone(),
                 obfs_quic_port,
                 transport_readiness,
+                verified_peers: admission.verified_peers,
+                observed_peers: admission.observed_peers,
+                admission_rejections: admission.total_rejections,
+                routing_peers: routing.total_peers,
+                routing_unreliable: routing.unreliable_peers,
+                routing_unique_prefixes: routing.unique_prefixes,
+                routing_max_prefix_concentration: routing.max_prefix_concentration,
+                routing_diversity_rejections: routing.diversity_rejections,
+                routing_pow_difficulty: routing.current_difficulty,
             })
         }
 

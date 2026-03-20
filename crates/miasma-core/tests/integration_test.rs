@@ -24,6 +24,8 @@
 use std::sync::Arc;
 use tempfile::TempDir;
 
+use ed25519_dalek;
+
 use miasma_core::{
     network::types::DhtRecord,
     // Core pipeline
@@ -2153,4 +2155,209 @@ async fn full_transport_fallback_chain_wss_recovery() {
     assert!(snap.len() >= 2, "should have stats for both transports");
 
     println!("[fallback] Full transport fallback chain: primary fail -> WSS recovery OK");
+}
+
+// ─── Phase 3b: Admission and trust-tier tests ────────────────────────────────
+
+use miasma_core::network::sybil::{self, NodeIdPoW, SignedDhtRecord};
+use miasma_core::network::address::{AddressClass, AddressTrust, PeerAddress, classify_multiaddr};
+use miasma_core::network::peer_state::{PeerRegistry, RejectionReason, AdmissionStats};
+
+/// Verify that the peer registry correctly tracks trust-tier promotions
+/// through the full pipeline: Connected → Observed → Verified.
+#[test]
+fn trust_tier_promotion_pipeline() {
+    let mut reg = PeerRegistry::new();
+    let peer = libp2p::PeerId::random();
+    let pow = sybil::mine_pow([0xAB; 32], 8);
+
+    // Stage 1: Connected → Claimed.
+    reg.on_connected(peer);
+    assert_eq!(reg.trust_of(&peer), Some(AddressTrust::Claimed));
+
+    // Stage 2: Identify → Observed.
+    reg.on_identify(peer);
+    assert_eq!(reg.trust_of(&peer), Some(AddressTrust::Observed));
+
+    // Stage 3: Admission verified → Verified.
+    reg.on_admission_verified(peer, pow);
+    assert_eq!(reg.trust_of(&peer), Some(AddressTrust::Verified));
+    assert!(reg.is_verified(&peer));
+
+    // Stats reflect the single verified peer.
+    let stats = reg.stats();
+    assert_eq!(stats.verified_peers, 1);
+    assert_eq!(stats.observed_peers, 0);
+    assert_eq!(stats.claimed_peers, 0);
+}
+
+/// Verify that invalid PoW is correctly detected and rejected.
+#[test]
+fn pow_rejection_cases() {
+    // Case 1: No PoW.
+    let result = sybil::check_peer_admission(None, 8);
+    assert_eq!(result, sybil::AdmissionResult::RejectedNoPoW);
+
+    // Case 2: PoW with insufficient difficulty (mined at 4, required 8).
+    let pubkey = [0xAB; 32];
+    let weak_pow = sybil::mine_pow(pubkey, 4);
+    let result = sybil::check_peer_admission(Some(&weak_pow), 8);
+    assert_eq!(result, sybil::AdmissionResult::RejectedLowDifficulty);
+
+    // Case 3: Tampered hash.
+    let pow = sybil::mine_pow(pubkey, 8);
+    let tampered = NodeIdPoW {
+        hash: [0xFF; 32],
+        ..pow
+    };
+    assert!(!sybil::verify_pow(&tampered, 8));
+
+    // Case 4: Valid PoW passes.
+    let valid_pow = sybil::mine_pow(pubkey, 8);
+    let result = sybil::check_peer_admission(Some(&valid_pow), 8);
+    assert_eq!(result, sybil::AdmissionResult::Admitted);
+}
+
+/// Verify that signed DHT records are validated end-to-end:
+/// valid signatures pass, tampered records are rejected.
+#[test]
+fn signed_dht_record_validation_e2e() {
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+
+    // Sign a real DhtRecord.
+    let dht_record = DhtRecord {
+        mid_digest: [0xAA; 32],
+        data_shards: 2,
+        total_shards: 3,
+        version: 1,
+        locations: vec![],
+        published_at: 1000,
+    };
+    let key = dht_record.mid_digest.to_vec();
+    let value = bincode::serialize(&dht_record).unwrap();
+
+    let signed = SignedDhtRecord::sign(key.clone(), value.clone(), &signing_key);
+
+    // Valid signature passes.
+    assert!(signed.verify_signature(), "valid signed record must verify");
+
+    // Tampered value fails.
+    let mut tampered = signed.clone();
+    tampered.value = bincode::serialize(&DhtRecord {
+        mid_digest: [0xBB; 32],
+        ..dht_record.clone()
+    }).unwrap();
+    assert!(!tampered.verify_signature(), "tampered record must fail");
+
+    // Tampered key fails.
+    let mut key_tampered = signed.clone();
+    key_tampered.key = vec![0xFF; 32];
+    assert!(!key_tampered.verify_signature(), "tampered key must fail");
+
+    // Wrong signer pubkey fails.
+    let mut wrong_signer = signed.clone();
+    wrong_signer.signer_pubkey = [0x99; 32];
+    assert!(!wrong_signer.verify_signature(), "wrong signer must fail");
+
+    // Deserialization roundtrip works.
+    let serialized = bincode::serialize(&signed).unwrap();
+    let deserialized: SignedDhtRecord = bincode::deserialize(&serialized).unwrap();
+    assert!(deserialized.verify_signature(), "deserialized record must verify");
+}
+
+/// Verify that the address filtering correctly classifies and filters
+/// addresses in the routing admission path.
+#[test]
+fn address_filtering_in_admission_path() {
+    let peer_id = libp2p::PeerId::random();
+
+    // Build a mixed set of addresses.
+    let addrs: Vec<Multiaddr> = vec![
+        "/ip4/127.0.0.1/tcp/4001".parse().unwrap(),  // loopback
+        "/ip4/10.0.0.1/tcp/4001".parse().unwrap(),    // private
+        "/ip4/8.8.8.8/tcp/4001".parse().unwrap(),     // global
+        "/ip4/169.254.0.1/tcp/4001".parse().unwrap(), // link-local
+        "/ip4/1.2.3.4/tcp/4001".parse().unwrap(),     // global
+    ];
+
+    let filtered = miasma_core::network::address::filter_peer_addresses(&peer_id, &addrs);
+
+    // Only global unicast addresses should pass.
+    assert_eq!(filtered.len(), 2);
+    assert_eq!(filtered[0].to_string(), "/ip4/8.8.8.8/tcp/4001");
+    assert_eq!(filtered[1].to_string(), "/ip4/1.2.3.4/tcp/4001");
+
+    // Verify classification.
+    assert_eq!(classify_multiaddr(&addrs[0]), AddressClass::Loopback);
+    assert_eq!(classify_multiaddr(&addrs[1]), AddressClass::Private);
+    assert_eq!(classify_multiaddr(&addrs[2]), AddressClass::GlobalUnicast);
+    assert_eq!(classify_multiaddr(&addrs[3]), AddressClass::LinkLocal);
+}
+
+/// Verify that peer stays in lower trust tier when only partially validated.
+#[test]
+fn partial_validation_stays_in_lower_tier() {
+    let mut reg = PeerRegistry::new();
+    let peer = libp2p::PeerId::random();
+
+    // Connect but no Identify → stays Claimed.
+    reg.on_connected(peer);
+    assert_eq!(reg.trust_of(&peer), Some(AddressTrust::Claimed));
+    assert!(!reg.is_verified(&peer));
+
+    // Verify that Identify alone gives Observed, NOT Verified.
+    reg.on_identify(peer);
+    assert_eq!(reg.trust_of(&peer), Some(AddressTrust::Observed));
+    assert!(!reg.is_verified(&peer));
+
+    // Verified peers list should be empty.
+    assert!(reg.verified_peers().is_empty());
+}
+
+/// Verify the rejection counter tracks admission failures.
+#[test]
+fn rejection_counter_tracks_failures() {
+    let mut reg = PeerRegistry::new();
+    assert_eq!(reg.stats().total_rejections, 0);
+
+    reg.record_rejection();
+    reg.record_rejection();
+    reg.record_rejection();
+
+    assert_eq!(reg.stats().total_rejections, 3);
+}
+
+/// Verify that PoW serialization roundtrips correctly (needed for wire protocol).
+#[test]
+fn pow_serialization_roundtrip() {
+    let pubkey = [0xAB; 32];
+    let pow = sybil::mine_pow(pubkey, 8);
+
+    let serialized = bincode::serialize(&pow).unwrap();
+    let deserialized: NodeIdPoW = bincode::deserialize(&serialized).unwrap();
+
+    assert_eq!(deserialized.pubkey, pow.pubkey);
+    assert_eq!(deserialized.nonce, pow.nonce);
+    assert_eq!(deserialized.hash, pow.hash);
+    assert!(sybil::verify_pow(&deserialized, 8));
+}
+
+/// Verify that SignedDhtRecord serialization roundtrips correctly.
+#[test]
+fn signed_record_serialization_roundtrip() {
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+    let record = SignedDhtRecord::sign(
+        b"test-key".to_vec(),
+        b"test-value".to_vec(),
+        &signing_key,
+    );
+
+    let serialized = bincode::serialize(&record).unwrap();
+    let deserialized: SignedDhtRecord = bincode::deserialize(&serialized).unwrap();
+
+    assert!(deserialized.verify_signature());
+    assert_eq!(deserialized.key, record.key);
+    assert_eq!(deserialized.value, record.value);
+    assert_eq!(deserialized.signer_pubkey, record.signer_pubkey);
+    assert_eq!(deserialized.signature, record.signature);
 }

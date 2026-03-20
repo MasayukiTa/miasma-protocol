@@ -357,7 +357,13 @@ where
     };
 
     // Look up the share.
-    let prefix: [u8; 8] = request.mid_digest[..8].try_into().unwrap();
+    let prefix: [u8; 8] = match request.mid_digest[..8].try_into() {
+        Ok(p) => p,
+        Err(_) => {
+            error!("WSS: invalid mid_digest length in request");
+            return Ok(());
+        }
+    };
     let candidates = store.search_by_mid_prefix(&prefix);
     let share: Option<MiasmaShare> = candidates.iter().find_map(|addr| {
         store.get(addr).ok().and_then(|s| {

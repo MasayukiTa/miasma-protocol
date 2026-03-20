@@ -163,21 +163,9 @@ fn compute_auth_token(probe_secret: &[u8; 32], nonce: &[u8; 32]) -> [u8; 32] {
 
 /// Verify the BLAKE3-MAC token.
 fn verify_auth_token(probe_secret: &[u8; 32], nonce: &[u8; 32], token: &[u8; 32]) -> bool {
+    use subtle::ConstantTimeEq;
     let expected = compute_auth_token(probe_secret, nonce);
-    // Constant-time comparison
-    use subtle_comparison::ct_eq;
-    ct_eq(&expected, token)
-}
-
-/// Constant-time byte comparison (avoids timing side-channels).
-mod subtle_comparison {
-    pub fn ct_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
-        let mut acc: u8 = 0;
-        for (x, y) in a.iter().zip(b.iter()) {
-            acc |= x ^ y;
-        }
-        acc == 0
-    }
+    expected.ct_eq(token).into()
 }
 
 /// Generate a self-signed certificate for the given SNI domain.
@@ -367,8 +355,10 @@ async fn handle_obfuscated_connection(
     let mut auth_buf = [0u8; AUTH_HEADER_LEN];
     recv.read_exact(&mut auth_buf).await?;
 
-    let nonce: [u8; 32] = auth_buf[..AUTH_NONCE_LEN].try_into().unwrap();
-    let token: [u8; 32] = auth_buf[AUTH_NONCE_LEN..].try_into().unwrap();
+    let nonce: [u8; 32] = auth_buf[..AUTH_NONCE_LEN].try_into()
+        .map_err(|_| "auth nonce slice mismatch")?;
+    let token: [u8; 32] = auth_buf[AUTH_NONCE_LEN..].try_into()
+        .map_err(|_| "auth token slice mismatch")?;
 
     if !verify_auth_token(probe_secret, &nonce, &token) {
         debug!("ObfuscatedQuic: invalid probe_secret — closing connection");
@@ -392,7 +382,14 @@ async fn handle_obfuscated_connection(
     let request: ShareFetchRequest = bincode::deserialize(&req_buf)?;
 
     // 3. Look up the share
-    let prefix: [u8; 8] = request.mid_digest[..8].try_into().unwrap();
+    let prefix: [u8; 8] = match request.mid_digest[..8].try_into() {
+        Ok(p) => p,
+        Err(_) => {
+            warn!("ObfuscatedQuic: invalid mid_digest in request");
+            conn.close(quinn::VarInt::from_u32(3), b"bad request");
+            return Ok(());
+        }
+    };
     let candidates = store.search_by_mid_prefix(&prefix);
     let share: Option<MiasmaShare> = candidates.iter().find_map(|addr| {
         store.get(addr).ok().and_then(|s| {

@@ -247,6 +247,16 @@ impl MiasmaCoordinator {
         self.dht_handle.peer_count().await
     }
 
+    /// Return admission statistics (verified/observed/claimed peers, rejections).
+    pub async fn admission_stats(&self) -> Result<super::peer_state::AdmissionStats, MiasmaError> {
+        self.dht_handle.admission_stats().await
+    }
+
+    /// Return routing overlay statistics (diversity, reliability, difficulty).
+    pub async fn routing_stats(&self) -> Result<super::routing::RoutingStats, MiasmaError> {
+        self.dht_handle.routing_stats().await
+    }
+
     /// Publish a pre-built `DhtRecord` to Kademlia.
     ///
     /// Used by the daemon's replication retry loop to re-announce content

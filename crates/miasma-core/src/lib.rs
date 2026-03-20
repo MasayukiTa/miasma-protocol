@@ -23,8 +23,9 @@ pub use dissolution::{
 pub use error::MiasmaError;
 pub use libp2p::{Multiaddr, PeerId};
 pub use network::{
-    BypassOnionDhtExecutor, DirectDhtExecutor, DhtHandle, MiasmaCoordinator, MiasmaNode,
-    NetworkShareFetcher, NodeType, OnionAwareDhtExecutor, ShareExchangeHandle, TopologyEvent,
+    AdmissionStats, BypassOnionDhtExecutor, DirectDhtExecutor, DhtHandle, MiasmaCoordinator,
+    MiasmaNode, NetworkShareFetcher, NodeType, OnionAwareDhtExecutor, PeerRegistry,
+    RejectionReason, ShareExchangeHandle, TopologyEvent,
 };
 pub use onion::{
     CircuitId, CircuitManager, InProcessRelay, LiveOnionDhtExecutor, LiveOnionShareFetcher,

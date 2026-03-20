@@ -142,13 +142,20 @@ impl ProxyConfig {
                     })?;
 
                 // Read response until we see the header terminator `\r\n\r\n`.
+                use tokio::time::{timeout, Duration};
                 let mut buf = Vec::with_capacity(512);
                 loop {
                     let mut byte = [0u8; 1];
-                    let n = stream.read(&mut byte).await.map_err(|e| ProxyError {
-                        phase: TransportPhase::Session,
-                        message: format!("read CONNECT response: {e}"),
-                    })?;
+                    let n = timeout(Duration::from_secs(30), stream.read(&mut byte))
+                        .await
+                        .map_err(|_| ProxyError {
+                            phase: TransportPhase::Session,
+                            message: "proxy CONNECT response timed out after 30s".into(),
+                        })?
+                        .map_err(|e| ProxyError {
+                            phase: TransportPhase::Session,
+                            message: format!("read CONNECT response: {e}"),
+                        })?;
                     if n == 0 {
                         return Err(ProxyError {
                             phase: TransportPhase::Session,
