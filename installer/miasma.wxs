@@ -1,24 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  WiX v4 installer manifest for Miasma Protocol (Windows x64).
-
-  Build prerequisites:
-    - WiX Toolset v4: https://wixtoolset.org/docs/intro/
-    - Install via: dotnet tool install --global wix
-
-  Build:
-    wix build installer\miasma.wxs -o dist\miasma-0.1.0-windows-x64.msi ^
-        -d Version=0.1.0 ^
-        -d BinDir=dist
-
-  The MSI:
-    - Installs to Program Files\Miasma Protocol
-    - Creates Start Menu shortcuts (Desktop GUI + CLI prompt)
-    - Preserves user data in %APPDATA%\miasma on uninstall
-    - Supports silent install: msiexec /i miasma.msi /qn
-    - Supports per-machine install (requires elevation)
+  WiX installer manifest for Miasma Protocol (Windows x64).
+  See scripts/build-installer.ps1 for build instructions.
 -->
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
 
   <!-- Version is injected at build time via -d Version=x.y.z -->
   <?define ProductVersion = "!(bind.property.Version)" ?>
@@ -29,12 +15,25 @@
     Version="$(var.Version)"
     UpgradeCode="E8A3F0C1-7B2D-4E56-9A1F-3C8D5E7F0B12"
     Scope="perMachine"
+    InstallerVersion="500"
     Language="1033"
     Codepage="1252">
 
     <SummaryInformation
       Description="Miasma Protocol — content-addressed encrypted storage with P2P distribution"
       Manufacturer="Miasma Contributors" />
+
+    <!-- Embed cabinet into MSI for single-file distribution. -->
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <!-- Runtime prerequisite check: MSVC 2015-2022 redistributable (vcruntime140.dll). -->
+    <Launch Condition="Installed OR VCRUNTIME140"
+            Message="Miasma requires the Microsoft Visual C++ 2015-2022 Redistributable (x64). Download it from: https://aka.ms/vs/17/release/vc_redist.x64.exe" />
+    <Property Id="VCRUNTIME140">
+      <DirectorySearch Id="VCRuntimeSearch" Path="[SystemFolder]">
+        <FileSearch Name="vcruntime140.dll" />
+      </DirectorySearch>
+    </Property>
 
     <!-- Major upgrade: remove older versions automatically. -->
     <MajorUpgrade
@@ -49,10 +48,9 @@
       <ComponentRef Id="PathEnvComponent" />
     </Feature>
 
-    <!-- UI: minimal built-in dialogs (license + install dir). -->
+    <!-- UI: WiX built-in install dir dialog with license. -->
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
     <WixVariable Id="WixUILicenseRtf" Value="installer\license.rtf" />
-    <UIRef Id="WixUI_InstallDir" />
-    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
 
     <!-- ── Directory layout ──────────────────────────────────────── -->
 
@@ -69,19 +67,19 @@
     <!-- ── Binaries ──────────────────────────────────────────────── -->
 
     <ComponentGroup Id="Binaries" Directory="INSTALLFOLDER">
-      <Component Id="MiasmaDesktopExe" Guid="A1B2C3D4-0001-4000-8000-000000000001">
+      <Component Id="MiasmaDesktopExe" Bitness="always64" Guid="A1B2C3D4-0001-4000-8000-000000000001">
         <File Id="miasma_desktop.exe"
               Source="$(var.BinDir)\miasma-desktop.exe"
               KeyPath="yes" />
       </Component>
 
-      <Component Id="MiasmaCliExe" Guid="A1B2C3D4-0001-4000-8000-000000000002">
+      <Component Id="MiasmaCliExe" Bitness="always64" Guid="A1B2C3D4-0001-4000-8000-000000000002">
         <File Id="miasma.exe"
               Source="$(var.BinDir)\miasma.exe"
               KeyPath="yes" />
       </Component>
 
-      <Component Id="MiasmaBridgeExe" Guid="A1B2C3D4-0001-4000-8000-000000000003">
+      <Component Id="MiasmaBridgeExe" Bitness="always64" Guid="A1B2C3D4-0001-4000-8000-000000000003">
         <File Id="miasma_bridge.exe"
               Source="$(var.BinDir)\miasma-bridge.exe"
               KeyPath="yes" />
@@ -91,13 +89,14 @@
     <!-- ── Documentation ─────────────────────────────────────────── -->
 
     <ComponentGroup Id="Docs" Directory="DocsFolder">
-      <Component Id="ReadmeTxt" Guid="A1B2C3D4-0001-4000-8000-000000000010">
+      <Component Id="ReadmeTxt" Bitness="always64" Guid="A1B2C3D4-0001-4000-8000-000000000010">
         <File Id="README.txt"
+              Name="README.txt"
               Source="installer\README-installed.txt"
               KeyPath="yes" />
       </Component>
 
-      <Component Id="ReleaseNotes" Guid="A1B2C3D4-0001-4000-8000-000000000011">
+      <Component Id="ReleaseNotes" Bitness="always64" Guid="A1B2C3D4-0001-4000-8000-000000000011">
         <File Id="RELEASE_NOTES.md"
               Source="RELEASE-NOTES.md"
               KeyPath="yes" />
@@ -141,7 +140,7 @@
     <!-- ── PATH environment variable ────────────────────────────── -->
 
     <Component Id="PathEnvComponent" Directory="INSTALLFOLDER"
-               Guid="A1B2C3D4-0001-4000-8000-000000000030">
+               Bitness="always64" Guid="A1B2C3D4-0001-4000-8000-000000000030">
       <Environment Id="MiasmaPath"
                    Name="PATH"
                    Value="[INSTALLFOLDER]"
