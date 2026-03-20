@@ -28,7 +28,7 @@ pub use network::{
     CredentialStats, CredentialTier, CredentialWallet, DescriptorStats, DescriptorStore,
     DirectDhtExecutor, DisclosurePolicy, DiversityViolation, DhtHandle, Ed25519Scheme,
     HybridAdmissionPolicy, IssuerRegistry, MiasmaCoordinator, MiasmaNode, NetworkShareFetcher,
-    NodeType, OnionAwareDhtExecutor, PathSelectionStats, PeerCapabilities, PeerDescriptor,
+    NodeType, OnionAwareDhtExecutor, OutcomeMetrics, PathSelectionStats, PeerCapabilities, PeerDescriptor,
     PeerRegistry, ReachabilityKind, RejectionReason, ResourceProfile, RoutingStats,
     ShareExchangeHandle, TopologyEvent,
 };

@@ -124,6 +124,8 @@ pub struct PeerDescriptor {
     pub published_at: u64,
     /// Descriptor version (monotonically increasing per pseudonym).
     pub version: u64,
+    /// Ed25519 public key of the descriptor signer (for self-verification).
+    pub signing_pubkey: [u8; 32],
     /// Ed25519 signature over the descriptor body (by the descriptor owner).
     /// For pseudonymous descriptors, this is signed by the ephemeral key.
     pub signature: Vec<u8>,
@@ -157,6 +159,7 @@ impl PeerDescriptor {
             credential,
             published_at,
             version,
+            signing_pubkey: signing_key.verifying_key().to_bytes(),
             signature: Vec::new(),
         };
 
@@ -180,10 +183,22 @@ impl PeerDescriptor {
         body.extend_from_slice(&bincode::serialize(&self.resource_profile).unwrap_or_default());
         body.extend_from_slice(&self.published_at.to_le_bytes());
         body.extend_from_slice(&self.version.to_le_bytes());
+        body.extend_from_slice(&self.signing_pubkey);
         body
     }
 
-    /// Verify the descriptor signature.
+    /// Verify the descriptor signature using the embedded public key.
+    ///
+    /// Returns `true` if the signature is valid for the embedded `signing_pubkey`.
+    /// This makes the descriptor self-authenticating.
+    pub fn verify_self(&self) -> bool {
+        let Ok(pubkey) = ed25519_dalek::VerifyingKey::from_bytes(&self.signing_pubkey) else {
+            return false;
+        };
+        self.verify_signature(&pubkey)
+    }
+
+    /// Verify the descriptor signature against a specific public key.
     pub fn verify_signature(&self, pubkey: &ed25519_dalek::VerifyingKey) -> bool {
         use ed25519_dalek::Verifier;
         let body_bytes = self.body_bytes();
@@ -229,10 +244,13 @@ impl PeerDescriptor {
 /// Maximum descriptor age before it's considered stale (1 hour).
 const MAX_DESCRIPTOR_AGE_SECS: u64 = 3600;
 
+/// Maximum number of descriptors stored (prevents flooding).
+const MAX_DESCRIPTORS: usize = 10_000;
+
 /// In-memory store for peer descriptors.
 ///
-/// Indexed by pseudonym (holder_tag). Supports staleness pruning and
-/// capability-based queries.
+/// Indexed by pseudonym (holder_tag). Supports staleness pruning,
+/// capacity limits, and capability-based queries.
 pub struct DescriptorStore {
     /// Descriptors keyed by pseudonym.
     descriptors: HashMap<[u8; 32], PeerDescriptor>,
@@ -249,13 +267,41 @@ impl DescriptorStore {
     }
 
     /// Insert or update a descriptor. Newer version wins.
+    ///
+    /// Rejects descriptors that are already stale on arrival or that would
+    /// exceed the store capacity limit (evicting oldest stale entries first).
     pub fn upsert(&mut self, desc: PeerDescriptor) -> bool {
+        // Reject descriptors that arrive already stale.
+        if desc.age_secs() >= MAX_DESCRIPTOR_AGE_SECS {
+            return false;
+        }
+
         let pseudonym = desc.pseudonym;
         if let Some(existing) = self.descriptors.get(&pseudonym) {
             if desc.version <= existing.version {
                 return false; // stale or duplicate
             }
         }
+
+        // Enforce capacity: if at limit and this is a new pseudonym, evict stalest.
+        if !self.descriptors.contains_key(&pseudonym)
+            && self.descriptors.len() >= MAX_DESCRIPTORS
+        {
+            // Prune stale first; if still over limit, evict the oldest descriptor.
+            self.prune_stale();
+            if self.descriptors.len() >= MAX_DESCRIPTORS {
+                if let Some(oldest_key) = self
+                    .descriptors
+                    .iter()
+                    .max_by_key(|(_, d)| d.age_secs())
+                    .map(|(k, _)| *k)
+                {
+                    self.descriptors.remove(&oldest_key);
+                    self.peer_to_pseudonym.retain(|_, p| *p != oldest_key);
+                }
+            }
+        }
+
         self.descriptors.insert(pseudonym, desc);
         true
     }
@@ -368,6 +414,7 @@ mod tests {
         let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
         let desc = test_descriptor([0x01; 32], 1);
         assert!(desc.verify_signature(&key.verifying_key()));
+        assert!(desc.verify_self());
     }
 
     #[test]
@@ -376,6 +423,16 @@ mod tests {
         let mut desc = test_descriptor([0x01; 32], 1);
         desc.addresses.push("/ip4/1.2.3.4/tcp/9999".to_string()); // tamper
         assert!(!desc.verify_signature(&key.verifying_key()));
+        assert!(!desc.verify_self());
+    }
+
+    #[test]
+    fn descriptor_verify_self_rejects_wrong_pubkey() {
+        let mut desc = test_descriptor([0x01; 32], 1);
+        // Replace pubkey with a different key — signature won't match.
+        let other_key = ed25519_dalek::SigningKey::from_bytes(&[0x99u8; 32]);
+        desc.signing_pubkey = other_key.verifying_key().to_bytes();
+        assert!(!desc.verify_self());
     }
 
     #[test]
