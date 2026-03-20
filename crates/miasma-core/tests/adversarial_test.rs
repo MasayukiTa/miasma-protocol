@@ -24,6 +24,10 @@ use miasma_core::network::credential::{
 use miasma_core::network::descriptor::{
     DescriptorStore, PeerCapabilities, PeerDescriptor, ReachabilityKind, ResourceProfile,
 };
+use miasma_core::network::bbs_credential::{
+    bbs_create_proof, bbs_verify_proof, BbsIssuer, BbsIssuerKey,
+    BbsCredentialAttributes, DisclosurePolicy, generate_link_secret,
+};
 use miasma_core::network::path_selection::{AnonymityPolicy, PathSelector};
 use miasma_core::network::routing::{IpPrefix, RoutingTable};
 
@@ -568,4 +572,280 @@ fn pow_sybil_cost_multiplier() {
     let identities = 1000u64;
     let hashes_at_20 = identities * high_cost;
     assert!(hashes_at_20 > 1_000_000_000, "Sybil cost should be > 1B hashes");
+}
+
+// ─── Scenario 9: BBS+ credential abuse ──────────────────────────────────────
+
+/// Attacker captures a valid BBS+ proof and tries to verify it with a
+/// different context. Context binding should make this fail.
+#[test]
+fn bbs_proof_context_replay() {
+    let issuer_key = BbsIssuerKey::from_seed(b"test-issuer-seed");
+    let issuer = BbsIssuer::new(issuer_key.clone());
+
+    let attrs = BbsCredentialAttributes {
+        link_secret: generate_link_secret(),
+        tier: CredentialTier::Verified,
+        capabilities: 3,
+        epoch: credential::current_epoch(),
+        nonce: 42,
+    };
+    let cred = issuer.issue(attrs);
+    let proof = bbs_create_proof(&cred, &DisclosurePolicy::default(), b"original-context");
+
+    // Replay with a different context.
+    let result = bbs_verify_proof(&proof, &issuer_key.pk_bytes(), b"different-context");
+    assert!(result.is_err(), "BBS+ proof replayed with wrong context should fail");
+}
+
+/// Attacker generates a BBS+ proof from an unknown issuer.
+/// Phase 4b: Schnorr proof checks message knowledge only. Issuer binding
+/// (pairing check) is Phase 4c. For now, verify that the Ed25519 credential
+/// system catches unknown issuers even if BBS+ doesn't yet.
+#[test]
+fn bbs_proof_unknown_issuer_ed25519_catches() {
+    let honest_issuer = test_issuer();
+    let attacker_key = ed25519_dalek::SigningKey::from_bytes(&[0xEE; 32]);
+    let attacker_issuer = CredentialIssuer::new(attacker_key);
+
+    let identity = EphemeralIdentity::generate(credential::current_epoch());
+    let forged = attacker_issuer.issue(
+        CredentialTier::Endorsed,
+        identity.epoch,
+        CAP_ROUTE | CAP_STORE,
+        identity.holder_tag(),
+    );
+    let presentation = CredentialPresentation::create(&forged, &identity, b"ctx");
+
+    // Ed25519 scheme correctly rejects unknown issuer.
+    let result = credential::verify_presentation(
+        &presentation,
+        b"ctx",
+        &[honest_issuer.pubkey_bytes()],
+        credential::current_epoch(),
+        CredentialTier::Verified,
+    );
+    assert_eq!(
+        result.unwrap_err(),
+        credential::CredentialError::UnknownIssuer,
+        "Ed25519 scheme catches unknown issuer (BBS+ pairing check is Phase 4c)"
+    );
+}
+
+/// Attacker modifies disclosed tier in a BBS+ proof.
+/// The Schnorr proof should detect the inconsistency.
+#[test]
+fn bbs_proof_tampered_disclosed_tier() {
+    let issuer_key = BbsIssuerKey::from_seed(b"test-seed");
+    let issuer = BbsIssuer::new(issuer_key.clone());
+
+    let attrs = BbsCredentialAttributes {
+        link_secret: generate_link_secret(),
+        tier: CredentialTier::Observed, // actual tier = 1
+        capabilities: 1,
+        epoch: credential::current_epoch(),
+        nonce: 0,
+    };
+    let cred = issuer.issue(attrs);
+    let mut proof = bbs_create_proof(&cred, &DisclosurePolicy::default(), b"ctx");
+
+    // Tamper: change disclosed tier from Observed(1) to Endorsed(3).
+    for item in proof.disclosed.iter_mut() {
+        if item.0 == 1 {
+            item.1 = 3; // Endorsed
+        }
+    }
+
+    let result = bbs_verify_proof(&proof, &issuer_key.pk_bytes(), b"ctx");
+    assert!(result.is_err(), "tampered disclosed tier should break Schnorr proof");
+}
+
+/// BBS+ within-epoch unlinkability: two proofs from the same credential
+/// should not be correlatable.
+#[test]
+fn bbs_within_epoch_unlinkability() {
+    let issuer_key = BbsIssuerKey::from_seed(b"unlinkability-test");
+    let issuer = BbsIssuer::new(issuer_key.clone());
+
+    let attrs = BbsCredentialAttributes {
+        link_secret: generate_link_secret(),
+        tier: CredentialTier::Verified,
+        capabilities: 3,
+        epoch: credential::current_epoch(),
+        nonce: 99,
+    };
+    let cred = issuer.issue(attrs);
+
+    let proof1 = bbs_create_proof(&cred, &DisclosurePolicy::default(), b"ctx-1");
+    let proof2 = bbs_create_proof(&cred, &DisclosurePolicy::default(), b"ctx-2");
+
+    // Both proofs should verify.
+    assert!(bbs_verify_proof(&proof1, &issuer_key.pk_bytes(), b"ctx-1").is_ok());
+    assert!(bbs_verify_proof(&proof2, &issuer_key.pk_bytes(), b"ctx-2").is_ok());
+
+    // But they should look different (randomised A', A_bar, challenge, responses).
+    assert_ne!(proof1.a_prime, proof2.a_prime, "A' should differ");
+    assert_ne!(proof1.a_bar, proof2.a_bar, "A_bar should differ");
+    assert_ne!(proof1.challenge, proof2.challenge, "challenge should differ");
+}
+
+// ─── Scenario 10: Descriptor store flooding ─────────────────────────────────
+
+/// Attacker floods the descriptor store with thousands of descriptors.
+/// The store should handle this without panic and maintain correct stats.
+#[test]
+fn descriptor_store_flooding() {
+    let mut store = DescriptorStore::new();
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+
+    for i in 0..1000u32 {
+        let mut ps = [0u8; 32];
+        ps[..4].copy_from_slice(&i.to_le_bytes());
+        store.upsert(PeerDescriptor::new_signed(
+            ps,
+            ReachabilityKind::Direct,
+            vec![format!("/ip4/{}.{}.{}.1/tcp/4001", (i >> 16) as u8, (i >> 8) as u8, i as u8)],
+            PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+            ResourceProfile::Desktop,
+            None,
+            1,
+            &key,
+        ));
+    }
+
+    let stats = store.stats();
+    assert_eq!(stats.total_descriptors, 1000);
+    assert_eq!(stats.relay_descriptors, 1000);
+}
+
+/// Attacker replaces honest descriptors by upserting with same pseudonym
+/// but malicious addresses.
+#[test]
+fn descriptor_pseudonym_hijack_requires_valid_signature() {
+    let honest_key = ed25519_dalek::SigningKey::from_bytes(&[0x11u8; 32]);
+    let attacker_key = ed25519_dalek::SigningKey::from_bytes(&[0xEE; 32]);
+    let pseudonym = [0x42u8; 32];
+
+    let honest_desc = PeerDescriptor::new_signed(
+        pseudonym,
+        ReachabilityKind::Direct,
+        vec!["/ip4/1.2.3.4/tcp/4001".to_string()],
+        PeerCapabilities::default(),
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &honest_key,
+    );
+
+    // Honest descriptor verifies with honest key.
+    assert!(honest_desc.verify_signature(&honest_key.verifying_key()));
+
+    // Attacker creates descriptor with same pseudonym but different key.
+    let attacker_desc = PeerDescriptor::new_signed(
+        pseudonym,
+        ReachabilityKind::Direct,
+        vec!["/ip4/6.6.6.6/tcp/9999".to_string()],
+        PeerCapabilities::default(),
+        ResourceProfile::Desktop,
+        None,
+        2, // newer timestamp
+        &attacker_key,
+    );
+
+    // Attacker descriptor does NOT verify with honest key.
+    assert!(
+        !attacker_desc.verify_signature(&honest_key.verifying_key()),
+        "attacker descriptor should not verify against honest key"
+    );
+    // It only verifies with attacker key.
+    assert!(attacker_desc.verify_signature(&attacker_key.verifying_key()));
+}
+
+// ─── Scenario 11: Hybrid admission boundary conditions ──────────────────────
+
+/// Constrained device with maximum possible signals still needs minimum PoW.
+#[test]
+fn hybrid_admission_constrained_device_min_pow() {
+    let policy = HybridAdmissionPolicy::default();
+
+    let signals = AdmissionSignals {
+        pow_difficulty: 3, // below 4-bit floor
+        unique_prefix: true,
+        reachable: true,
+        credential_tier: Some(CredentialTier::Endorsed),
+        resource_profile: ResourceProfile::Constrained,
+    };
+
+    let decision = policy.evaluate(&signals);
+    assert!(!decision.admitted, "constrained device below PoW floor should be rejected");
+}
+
+/// Desktop peer at exact threshold boundary.
+#[test]
+fn hybrid_admission_exact_desktop_threshold() {
+    let policy = HybridAdmissionPolicy::default();
+
+    // Desktop threshold is 100. PoW=10 (10*10=100). Just PoW alone = threshold.
+    let signals = AdmissionSignals {
+        pow_difficulty: 10,
+        unique_prefix: false,
+        reachable: false,
+        credential_tier: None,
+        resource_profile: ResourceProfile::Desktop,
+    };
+
+    let decision = policy.evaluate(&signals);
+    assert!(decision.admitted, "peer at exact threshold should be admitted");
+}
+
+// ─── Scenario 12: Path selection with hostile relay injection ────────────────
+
+/// Attacker controls many relay descriptors but all from the same subnet.
+/// Required anonymity should fail to find diverse paths.
+#[test]
+fn path_selection_hostile_relay_set_same_subnet() {
+    let mut store = DescriptorStore::new();
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+
+    // 20 attacker relays all from 10.0.x.x (same /16).
+    for i in 0..20u8 {
+        let mut ps = [0u8; 32];
+        ps[0] = i;
+        store.upsert(PeerDescriptor::new_signed(
+            ps,
+            ReachabilityKind::Direct,
+            vec![format!("/ip4/10.0.{i}.1/tcp/4001")],
+            PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+            ResourceProfile::Desktop,
+            None,
+            1,
+            &key,
+        ));
+    }
+
+    let rt = RoutingTable::new(true);
+    let result = PathSelector::select(
+        [0xFF; 32],
+        AnonymityPolicy::Required { min_hops: 3 },
+        &store,
+        &rt,
+    );
+
+    assert!(result.is_err(), "hostile relay set from one /16 should fail required 3-hop path");
+}
+
+/// Opportunistic policy should gracefully degrade with hostile relay set.
+#[test]
+fn path_selection_opportunistic_degrades_gracefully() {
+    let store = DescriptorStore::new(); // no relays at all
+    let rt = RoutingTable::new(true);
+
+    let path = PathSelector::select(
+        [0xFF; 32],
+        AnonymityPolicy::Opportunistic,
+        &store,
+        &rt,
+    ).unwrap();
+
+    assert!(path.is_direct(), "opportunistic with no relays should fall back to direct");
 }

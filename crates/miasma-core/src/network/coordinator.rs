@@ -28,8 +28,11 @@ use tracing::error;
 use crate::{
     crypto::hash::ContentId,
     network::{
+        credential::CredentialStats,
+        descriptor::DescriptorStats,
         dht::DirectDhtExecutor,
         node::{DhtHandle, MiasmaNode, ShareExchangeHandle, ShareFetchRequest},
+        path_selection::{AnonymityPolicy, PathSelectionStats},
         types::{DhtRecord, ShardLocation},
     },
     onion::share::OnionShareFetcher,
@@ -154,6 +157,8 @@ pub struct MiasmaCoordinator {
     listen_addrs: Vec<String>,
     /// Payload transport selector for multi-transport fallback retrieval.
     transport_selector: Arc<PayloadTransportSelector>,
+    /// Anonymity policy for retrieval operations.
+    anonymity_policy: AnonymityPolicy,
 }
 
 impl MiasmaCoordinator {
@@ -189,7 +194,10 @@ impl MiasmaCoordinator {
             )),
         ]));
 
-        Self { store, dht_handle, share_handle, shutdown_tx, peer_id, listen_addrs, transport_selector }
+        Self {
+            store, dht_handle, share_handle, shutdown_tx, peer_id, listen_addrs,
+            transport_selector, anonymity_policy: AnonymityPolicy::default(),
+        }
     }
 
     /// Like `start`, but appends additional payload transports to the fallback
@@ -377,5 +385,68 @@ impl MiasmaCoordinator {
             NetworkShareFetcher::new(self.dht_handle.clone(), self.share_handle.clone());
         let source = DhtShareSource::new(dht_exec, share_fetcher);
         RetrievalCoordinator::new(source).retrieve(mid, params).await
+    }
+
+    // ── Anonymity policy ────────────────────────────────────────────────────
+
+    /// Set the anonymity policy for future retrieval operations.
+    pub fn set_anonymity_policy(&mut self, policy: AnonymityPolicy) {
+        self.anonymity_policy = policy;
+    }
+
+    /// Current anonymity policy.
+    pub fn anonymity_policy(&self) -> AnonymityPolicy {
+        self.anonymity_policy
+    }
+
+    /// Retrieve content with an explicit anonymity policy.
+    ///
+    /// - `Direct`: uses `DirectDhtExecutor` (no onion routing)
+    /// - `Opportunistic`: uses onion-routed DHT if circuits available, falls back to direct
+    /// - `Required`: fails if onion circuit manager is not available
+    ///
+    /// Note: full onion-routed retrieval requires a `LiveOnionDhtExecutor` which
+    /// needs the node master key. Until the circuit manager is wired end-to-end
+    /// (Phase 4c), Opportunistic falls back to Direct and Required returns an error
+    /// explaining that onion circuits are not yet available.
+    pub async fn retrieve_with_anonymity(
+        &self,
+        mid: &ContentId,
+        params: DissolutionParams,
+        policy: AnonymityPolicy,
+    ) -> Result<Vec<u8>, MiasmaError> {
+        match policy {
+            AnonymityPolicy::Direct => {
+                self.retrieve_from_network(mid, params).await
+            }
+            AnonymityPolicy::Opportunistic => {
+                // Phase 4c will try onion-routed path first.
+                // For now, fall back to direct.
+                tracing::debug!("anonymity=opportunistic: onion circuits not yet wired, using direct");
+                self.retrieve_from_network(mid, params).await
+            }
+            AnonymityPolicy::Required { min_hops } => {
+                Err(MiasmaError::Network(format!(
+                    "anonymity=required({min_hops} hops): onion circuit manager not yet available (Phase 4c)"
+                )))
+            }
+        }
+    }
+
+    // ── Phase 4b diagnostics ────────────────────────────────────────────────
+
+    /// Return credential wallet/issuer statistics.
+    pub async fn credential_stats(&self) -> Result<CredentialStats, MiasmaError> {
+        self.dht_handle.credential_stats().await
+    }
+
+    /// Return descriptor store statistics.
+    pub async fn descriptor_stats(&self) -> Result<DescriptorStats, MiasmaError> {
+        self.dht_handle.descriptor_stats().await
+    }
+
+    /// Return path selection statistics.
+    pub async fn path_selection_stats(&self) -> Result<PathSelectionStats, MiasmaError> {
+        self.dht_handle.path_selection_stats().await
     }
 }
