@@ -109,6 +109,17 @@ fn load_or_create_master_key(data_dir: &Path) -> Result<Zeroizing<[u8; 32]>, Mia
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
         }
+        // On Windows, remove inherited ACEs and restrict to current user via icacls.
+        // This is best-effort: if icacls fails the key is still created.
+        #[cfg(windows)]
+        {
+            if let Ok(username) = std::env::var("USERNAME") {
+                let path_str = key_path.display().to_string();
+                let _ = std::process::Command::new("icacls")
+                    .args([&path_str, "/inheritance:r", "/grant:r", &format!("{username}:F")])
+                    .output();
+            }
+        }
         Ok(arr)
     }
 }

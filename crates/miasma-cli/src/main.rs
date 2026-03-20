@@ -134,6 +134,16 @@ enum Commands {
         bootstrap: Vec<String>,
     },
 
+    /// Export a full diagnostic report for troubleshooting.
+    ///
+    /// Collects node config, daemon status, transport readiness, storage,
+    /// and recent errors into a single text or JSON report.
+    Diagnostics {
+        /// Output as JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Retrieve and reconstruct content from the P2P network by MID.
     NetworkGet {
         /// Miasma Content ID (format: `miasma:<base58>`).
@@ -196,6 +206,8 @@ async fn main() -> Result<()> {
         Commands::Config { key, value } => cmd_config(&data_dir, key.as_deref(), value.as_deref()),
 
         Commands::Daemon { bootstrap } => cmd_daemon(&data_dir, &bootstrap).await,
+
+        Commands::Diagnostics { json } => cmd_diagnostics(&data_dir, json).await,
 
         Commands::NetworkPublish {
             path,
@@ -434,6 +446,136 @@ async fn cmd_status(data_dir: &std::path::Path) -> Result<()> {
         store.used_bytes() as f64 / 1024.0 / 1024.0,
         config.storage.quota_mb
     );
+    Ok(())
+}
+
+async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<()> {
+    use miasma_core::{daemon_request, ControlRequest, ControlResponse};
+
+    let version = env!("CARGO_PKG_VERSION");
+    let config_ok = NodeConfig::load(data_dir);
+    let has_config = config_ok.is_ok();
+    let key_path = data_dir.join("master.key");
+    let key_exists = key_path.exists();
+
+    // Store info.
+    let (share_count, storage_used) = if let Ok(ref config) = config_ok {
+        if let Ok(store) = LocalShareStore::open(data_dir, config.storage.quota_mb) {
+            (store.list().len(), store.used_bytes())
+        } else {
+            (0, 0)
+        }
+    } else {
+        (0, 0)
+    };
+
+    // Daemon IPC.
+    let daemon_resp = daemon_request(data_dir, ControlRequest::Status).await;
+    let daemon_status = match daemon_resp {
+        Ok(ControlResponse::Status(s)) => Some(s),
+        _ => None,
+    };
+
+    if json_out {
+        let mut report = serde_json::Map::new();
+        report.insert("version".into(), serde_json::json!(version));
+        report.insert("data_dir".into(), serde_json::json!(data_dir.display().to_string()));
+        report.insert("config_exists".into(), serde_json::json!(has_config));
+        report.insert("master_key_exists".into(), serde_json::json!(key_exists));
+        report.insert("share_count".into(), serde_json::json!(share_count));
+        report.insert("storage_used_bytes".into(), serde_json::json!(storage_used));
+
+        if let Ok(ref config) = config_ok {
+            report.insert("storage_quota_mb".into(), serde_json::json!(config.storage.quota_mb));
+            report.insert("listen_addr".into(), serde_json::json!(config.network.listen_addr));
+        }
+
+        report.insert("daemon_running".into(), serde_json::json!(daemon_status.is_some()));
+
+        if let Some(ref s) = daemon_status {
+            report.insert("peer_id".into(), serde_json::json!(s.peer_id));
+            report.insert("peer_count".into(), serde_json::json!(s.peer_count));
+            report.insert("listen_addrs".into(), serde_json::json!(s.listen_addrs));
+            report.insert("pending_replication".into(), serde_json::json!(s.pending_replication));
+            report.insert("replicated_count".into(), serde_json::json!(s.replicated_count));
+            report.insert("wss_port".into(), serde_json::json!(s.wss_port));
+            report.insert("wss_tls_enabled".into(), serde_json::json!(s.wss_tls_enabled));
+            report.insert("obfs_quic_port".into(), serde_json::json!(s.obfs_quic_port));
+            report.insert("proxy_configured".into(), serde_json::json!(s.proxy_configured));
+            report.insert("proxy_type".into(), serde_json::json!(s.proxy_type));
+
+            let transports: Vec<serde_json::Value> = s.transport_readiness.iter().map(|t| {
+                serde_json::json!({
+                    "name": t.name,
+                    "available": t.available,
+                    "selected": t.selected,
+                    "success_count": t.success_count,
+                    "failure_count": t.failure_count,
+                    "session_failures": t.session_failures,
+                    "data_failures": t.data_failures,
+                    "last_error": t.last_error,
+                    "reason": t.reason,
+                })
+            }).collect();
+            report.insert("transport_readiness".into(), serde_json::json!(transports));
+        }
+
+        let obj = serde_json::Value::Object(report);
+        println!("{}", serde_json::to_string_pretty(&obj).unwrap());
+    } else {
+        println!("Miasma Diagnostics Report");
+        println!("=========================");
+        println!("Version:         {version}");
+        println!("Data dir:        {}", data_dir.display());
+        println!("Config exists:   {has_config}");
+        println!("Master key:      {}", if key_exists { "present" } else { "MISSING" });
+
+        if let Ok(ref config) = config_ok {
+            println!("Storage quota:   {} MiB", config.storage.quota_mb);
+            println!("Listen addr:     {}", config.network.listen_addr);
+        }
+
+        println!("Shares stored:   {share_count}");
+        println!("Storage used:    {:.1} MiB", storage_used as f64 / 1024.0 / 1024.0);
+
+        println!();
+        let daemon_running = daemon_status.is_some();
+        println!("Daemon:          {}", if daemon_running { "RUNNING" } else { "NOT RUNNING" });
+
+        if let Some(ref s) = daemon_status {
+            println!("Peer ID:         {}", s.peer_id);
+            println!("Connected peers: {}", s.peer_count);
+            println!("Replication:     {} done, {} pending", s.replicated_count, s.pending_replication);
+            if s.wss_port > 0 {
+                let tls_tag = if s.wss_tls_enabled { " (TLS)" } else { "" };
+                println!("WSS server:      :{}{tls_tag}", s.wss_port);
+            }
+            if s.obfs_quic_port > 0 {
+                println!("ObfuscatedQuic:  :{}", s.obfs_quic_port);
+            }
+            if s.proxy_configured {
+                println!("Proxy:           {}", s.proxy_type.as_deref().unwrap_or("?"));
+            }
+
+            if !s.transport_readiness.is_empty() {
+                println!();
+                println!("Transport Readiness:");
+                for t in &s.transport_readiness {
+                    let status = if t.available { "AVAIL" } else { "UNAVL" };
+                    let sel_tag = if t.selected { " [SELECTED]" } else { "" };
+                    print!("  {:<20} {status} ok={} fail={}{sel_tag}", t.name, t.success_count, t.failure_count);
+                    if let Some(ref err) = t.last_error {
+                        print!("  last_err: {err}");
+                    }
+                    println!();
+                }
+            }
+        }
+
+        println!();
+        println!("(Copy this output for troubleshooting. Use --json for machine-readable format.)");
+    }
+
     Ok(())
 }
 
