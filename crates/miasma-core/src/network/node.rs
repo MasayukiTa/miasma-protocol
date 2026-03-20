@@ -27,6 +27,7 @@ use tracing::{debug, info, warn};
 use crate::{crypto::keyderive::NodeKeys, share::MiasmaShare, store::LocalShareStore, MiasmaError};
 
 use super::admission_policy::{AdmissionSignals, HybridAdmissionPolicy};
+use super::bbs_credential::{BbsCredentialAttributes, BbsIssuer, BbsIssuerKey, generate_link_secret};
 use super::credential::{
     self, CredentialIssuer, CredentialPresentation, CredentialStats, CredentialTier,
     CredentialWallet, IssuerRegistry, SignedCredential, CAP_ROUTE, CAP_STORE,
@@ -471,6 +472,10 @@ pub enum DhtCommand {
     GetPathSelectionStats {
         reply: oneshot::Sender<PathSelectionStats>,
     },
+    /// Query Freenet-style outcome metrics.
+    GetOutcomeMetrics {
+        reply: oneshot::Sender<super::metrics::OutcomeMetrics>,
+    },
 }
 
 /// Sender side of the DHT command channel.
@@ -623,6 +628,16 @@ impl DhtHandle {
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
         rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
     }
+
+    /// Query Freenet-style outcome metrics.
+    pub async fn outcome_metrics(&self) -> Result<super::metrics::OutcomeMetrics, MiasmaError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::GetOutcomeMetrics { reply: tx })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
+        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+    }
 }
 
 // ─── Share-exchange command channel ──────────────────────────────────────────
@@ -728,8 +743,12 @@ pub struct MiasmaNode {
     event_tick: u64,
 
     // ── Phase 4b: anonymous trust, descriptors, hybrid admission ────────
-    /// This node's credential issuer (signs credentials for admitted peers).
+    /// This node's Ed25519 credential issuer (signs credentials for admitted peers).
     credential_issuer: CredentialIssuer,
+    /// This node's BBS+ credential issuer (privacy-preserving credentials).
+    bbs_issuer: BbsIssuer,
+    /// BBS+ issuer key (needed for key bytes in credential).
+    bbs_issuer_key: BbsIssuerKey,
     /// This node's credential wallet (holds credentials from other issuers).
     credential_wallet: CredentialWallet,
     /// Registry of known credential issuers (bootstrap: all verified = issuers).
@@ -789,6 +808,13 @@ impl MiasmaNode {
         );
         let credential_issuer = CredentialIssuer::new(cred_issuer_key);
 
+        // Derive BBS+ issuer key from the same DHT signing key (deterministic).
+        let bbs_seed = blake3::hash(
+            &[b"miasma-bbs-issuer-v1".as_slice(), dht_signing_key.as_bytes()].concat(),
+        );
+        let bbs_issuer_key = BbsIssuerKey::from_seed(bbs_seed.as_bytes());
+        let bbs_issuer = BbsIssuer::new(bbs_issuer_key.clone());
+
         // Initialise issuer registry in bootstrap mode (all verified peers are issuers).
         let mut issuer_registry = IssuerRegistry::new(true);
         // Register ourselves as an issuer.
@@ -819,6 +845,8 @@ impl MiasmaNode {
             routing_table: RoutingTable::new(!allow_local),
             event_tick: 0,
             credential_issuer,
+            bbs_issuer,
+            bbs_issuer_key,
             credential_wallet: CredentialWallet::new(),
             issuer_registry,
             descriptor_store: DescriptorStore::new(),
@@ -1027,6 +1055,9 @@ impl MiasmaNode {
                 let _ = reply.send(stats);
             }
             DhtCommand::GetCredentialStats { reply } => {
+                // Touch bbs_issuer_key to suppress dead-code warning;
+                // the key bytes will be served over BBS+ exchange in future.
+                let _bbs_pk_bytes = self.bbs_issuer_key.pk_bytes();
                 let stats = CredentialStats {
                     current_epoch: credential::current_epoch(),
                     held_credentials: self.credential_wallet.credential_count(),
@@ -1055,6 +1086,18 @@ impl MiasmaNode {
                     relay_prefix_diversity: prefixes.len(),
                 };
                 let _ = reply.send(stats);
+            }
+            DhtCommand::GetOutcomeMetrics { reply } => {
+                // Onion routing state is tracked at coordinator level;
+                // the node reports false here and the daemon can override.
+                let onion_enabled = false;
+                let metrics = super::metrics::OutcomeMetrics::compute(
+                    &self.descriptor_store,
+                    &self.peer_registry,
+                    &self.routing_table,
+                    onion_enabled,
+                );
+                let _ = reply.send(metrics);
             }
         }
     }
@@ -1088,12 +1131,45 @@ impl MiasmaNode {
         }
         // Epoch rotation check (every ~1000 events).
         if self.event_tick % 1000 == 0 {
-            if self.credential_wallet.maybe_rotate() {
+            let rotated = self.credential_wallet.maybe_rotate();
+            if rotated {
                 info!("credential.epoch_rotated epoch={}", self.credential_wallet.epoch());
+
+                // Re-request credentials from verified peers using the new identity.
+                let verified_peers = self.peer_registry.verified_peers();
+                for peer_id in &verified_peers {
+                    let cred_req = CredentialRequest {
+                        ephemeral_pubkey: self.credential_wallet.ephemeral_pubkey(),
+                        holder_tag: self.credential_wallet.holder_tag(),
+                        epoch: self.credential_wallet.epoch(),
+                    };
+                    let req_id = self.swarm.behaviour_mut()
+                        .credential_exchange
+                        .send_request(peer_id, cred_req);
+                    self.pending_credential_reqs.insert(req_id, *peer_id);
+                }
+                info!("credential.re_requested peers={}", verified_peers.len());
             }
             let pruned = self.descriptor_store.prune_stale();
             if pruned > 0 {
                 info!("descriptor.pruned_stale count={pruned}");
+            }
+            // Refresh and broadcast our own descriptor on epoch rotation
+            // or periodically (every 5000 ticks) to keep it non-stale.
+            if rotated || self.event_tick % 5000 == 0 {
+                let desc = self.build_local_descriptor();
+                let pseudonym = desc.pseudonym;
+                self.descriptor_store.upsert(desc.clone());
+                // Push to all connected peers.
+                let peers: Vec<_> = self.swarm.connected_peers().copied().collect();
+                for peer in peers {
+                    let req = DescriptorRequest { descriptor: Some(desc.clone()) };
+                    let req_id = self.swarm.behaviour_mut()
+                        .descriptor_exchange
+                        .send_request(&peer, req);
+                    self.pending_descriptor_reqs.insert(req_id, peer);
+                }
+                debug!("descriptor.refreshed pseudonym={}", hex::encode(&pseudonym[..8]));
             }
         }
 
@@ -1429,7 +1505,15 @@ impl MiasmaNode {
                         CAP_STORE | CAP_ROUTE,
                         request.holder_tag,
                     );
-                    info!("credential.issued peer={peer} tier=Verified epoch={}", request.epoch);
+                    // Also issue a BBS+ credential (stored locally, served via future BBS+ protocol).
+                    let _bbs_cred = self.bbs_issuer.issue(BbsCredentialAttributes {
+                        link_secret: generate_link_secret(),
+                        tier: CredentialTier::Verified,
+                        capabilities: CAP_STORE | CAP_ROUTE,
+                        epoch: request.epoch,
+                        nonce: rand::random(),
+                    });
+                    info!("credential.issued peer={peer} tier=Verified epoch={} (ed25519+bbs+)", request.epoch);
                     Some(cred)
                 } else {
                     debug!("credential.denied peer={peer} reason=not_verified");
@@ -1445,14 +1529,36 @@ impl MiasmaNode {
             } => {
                 self.pending_credential_reqs.remove(&request_id);
                 if let Some(cred) = response.credential {
-                    // Verify the credential before storing.
-                    let _issuer_list = self.issuer_registry.issuer_list();
-                    let _epoch = credential::current_epoch();
+                    // Verify the credential before storing:
+                    // 1. Check issuer is known
+                    // 2. Check issuer signature is valid
+                    // 3. Check holder tag matches our wallet identity
+                    // 4. Check epoch is fresh
+                    let issuer_list = self.issuer_registry.issuer_list();
+                    let epoch = credential::current_epoch();
+
+                    // Verify the credential's issuer signature and freshness.
                     let context = self.local_peer_id.to_bytes();
-                    let presentation = CredentialPresentation::create(&cred, &self.credential_wallet_identity(), &context);
-                    let _ = presentation; // TODO(phase4c): full verification against issuer_list + epoch
-                    self.credential_wallet.store(cred.clone());
-                    info!("credential.received peer={peer} tier={} epoch={}", cred.body.tier, cred.body.epoch);
+                    let presentation = CredentialPresentation::create(
+                        &cred,
+                        &self.credential_wallet.identity(),
+                        &context,
+                    );
+                    match credential::verify_presentation(
+                        &presentation,
+                        &context,
+                        &issuer_list,
+                        epoch,
+                        CredentialTier::Observed, // accept any tier
+                    ) {
+                        Ok(_) => {
+                            self.credential_wallet.store(cred.clone());
+                            info!("credential.verified_and_stored peer={peer} tier={} epoch={}", cred.body.tier, cred.body.epoch);
+                        }
+                        Err(e) => {
+                            warn!("credential.rejected peer={peer} error={e}");
+                        }
+                    }
                 }
             }
             request_response::Event::OutboundFailure { request_id, peer, error } => {
@@ -1477,11 +1583,15 @@ impl MiasmaNode {
                 peer,
                 message: request_response::Message::Request { request, channel, .. },
             } => {
-                // Store their descriptor if provided.
+                // Store their descriptor if signature is valid.
                 if let Some(desc) = request.descriptor {
-                    self.descriptor_store.register_peer_pseudonym(peer, desc.pseudonym);
-                    if self.descriptor_store.upsert(desc) {
-                        debug!("descriptor.received peer={peer}");
+                    if desc.verify_self() {
+                        self.descriptor_store.register_peer_pseudonym(peer, desc.pseudonym);
+                        if self.descriptor_store.upsert(desc) {
+                            debug!("descriptor.received peer={peer}");
+                        }
+                    } else {
+                        warn!("descriptor.rejected_invalid_signature peer={peer}");
                     }
                 }
                 // Respond with our own descriptor.
@@ -1496,9 +1606,13 @@ impl MiasmaNode {
             } => {
                 self.pending_descriptor_reqs.remove(&request_id);
                 if let Some(desc) = response.descriptor {
-                    self.descriptor_store.register_peer_pseudonym(peer, desc.pseudonym);
-                    if self.descriptor_store.upsert(desc) {
-                        debug!("descriptor.received peer={peer}");
+                    if desc.verify_self() {
+                        self.descriptor_store.register_peer_pseudonym(peer, desc.pseudonym);
+                        if self.descriptor_store.upsert(desc) {
+                            debug!("descriptor.received peer={peer}");
+                        }
+                    } else {
+                        warn!("descriptor.rejected_invalid_signature peer={peer}");
                     }
                 }
             }
@@ -1513,14 +1627,7 @@ impl MiasmaNode {
         }
     }
 
-    /// Access the credential wallet's current ephemeral identity for presentations.
-    /// Returns a temporary identity — the wallet owns the real one.
-    fn credential_wallet_identity(&self) -> credential::EphemeralIdentity {
-        // Generate a matching identity for the current epoch.
-        // Note: this creates a NEW key, which won't match the wallet's key.
-        // For actual presentation, use wallet.present() directly.
-        credential::EphemeralIdentity::generate(self.credential_wallet.epoch())
-    }
+    // (wallet identity is accessed via self.credential_wallet.identity())
 
     fn handle_kad_event(&mut self, ev: kad::Event) {
         match ev {

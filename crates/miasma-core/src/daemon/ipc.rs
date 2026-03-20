@@ -138,6 +138,30 @@ pub struct DaemonStatus {
     /// Default anonymity policy name.
     #[serde(default)]
     pub anonymity_policy: String,
+
+    // ── Phase 4b: outcome metrics ────────────────────────────────────────
+
+    /// Relay infrastructure diversity (unique /16 prefixes).
+    #[serde(default)]
+    pub metric_relay_prefix_diversity: usize,
+    /// Fraction of peers with valid credentials.
+    #[serde(default)]
+    pub metric_credentialed_fraction: f64,
+    /// Fraction of peers using pseudonymous descriptors.
+    #[serde(default)]
+    pub metric_pseudonymous_fraction: f64,
+    /// Multi-path content retrievability estimate (0.0–1.0).
+    #[serde(default)]
+    pub metric_multi_path_retrievability: f64,
+    /// Current PoW difficulty (bits).
+    #[serde(default)]
+    pub metric_pow_difficulty: u8,
+    /// Peer verification ratio (verified / total).
+    #[serde(default)]
+    pub metric_verification_ratio: f64,
+    /// Admission rejection rate.
+    #[serde(default)]
+    pub metric_rejection_rate: f64,
 }
 
 /// Per-transport readiness info for IPC/CLI display.

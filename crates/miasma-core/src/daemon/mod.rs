@@ -586,6 +586,7 @@ async fn process_request(
                     relay_prefix_diversity: 0,
                 },
             );
+            let outcome = coord.outcome_metrics().await.unwrap_or_default();
 
             ControlResponse::Status(DaemonStatus {
                 peer_id: coord.peer_id().to_string(),
@@ -618,6 +619,13 @@ async fn process_request(
                 path_available_relays: path_stats.available_relays,
                 path_relay_prefix_diversity: path_stats.relay_prefix_diversity,
                 anonymity_policy: coord.anonymity_policy().to_string(),
+                metric_relay_prefix_diversity: outcome.relay_prefix_diversity,
+                metric_credentialed_fraction: outcome.credentialed_peer_fraction,
+                metric_pseudonymous_fraction: outcome.pseudonymous_fraction,
+                metric_multi_path_retrievability: outcome.multi_path_retrievability,
+                metric_pow_difficulty: outcome.current_pow_difficulty,
+                metric_verification_ratio: outcome.verification_ratio,
+                metric_rejection_rate: outcome.admission_rejection_rate,
             })
         }
 

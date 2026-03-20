@@ -628,7 +628,34 @@ fn bbs_proof_unknown_issuer_ed25519_catches() {
     assert_eq!(
         result.unwrap_err(),
         credential::CredentialError::UnknownIssuer,
-        "Ed25519 scheme catches unknown issuer (BBS+ pairing check is Phase 4c)"
+        "Ed25519 scheme catches unknown issuer"
+    );
+}
+
+/// BBS+ pairing check catches credential from wrong issuer.
+/// The pairing equation e(A', W) != e(A_bar, G2) when W is wrong.
+#[test]
+fn bbs_pairing_catches_wrong_issuer() {
+    let real_issuer_key = BbsIssuerKey::from_seed(b"real-issuer");
+    let attacker_issuer_key = BbsIssuerKey::from_seed(b"attacker-issuer");
+    let attacker = BbsIssuer::new(attacker_issuer_key);
+
+    let attrs = BbsCredentialAttributes {
+        link_secret: generate_link_secret(),
+        tier: CredentialTier::Endorsed,
+        capabilities: 0xFF,
+        epoch: credential::current_epoch(),
+        nonce: 1,
+    };
+    let cred = attacker.issue(attrs);
+    let proof = bbs_create_proof(&cred, &DisclosurePolicy::default(), b"ctx");
+
+    // Verify against the REAL issuer key — pairing check must fail.
+    let result = bbs_verify_proof(&proof, &real_issuer_key.pk_bytes(), b"ctx");
+    assert!(result.is_err(), "BBS+ pairing should catch wrong issuer");
+    assert_eq!(
+        result.unwrap_err(),
+        miasma_core::network::bbs_credential::BbsError::IssuerBindingFailed,
     );
 }
 
@@ -848,4 +875,139 @@ fn path_selection_opportunistic_degrades_gracefully() {
     ).unwrap();
 
     assert!(path.is_direct(), "opportunistic with no relays should fall back to direct");
+}
+
+// ── Descriptor self-verification adversarial tests ──────────────────────
+
+/// Tampered descriptor with altered addresses must fail self-verification.
+#[test]
+fn descriptor_tampered_addresses_rejected() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+    let mut desc = PeerDescriptor::new_signed(
+        [0x01; 32],
+        ReachabilityKind::Direct,
+        vec!["/ip4/8.8.8.8/tcp/4001".to_string()],
+        PeerCapabilities::default(),
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &key,
+    );
+    // Attacker injects a rogue address.
+    desc.addresses.push("/ip4/6.6.6.6/tcp/9999".to_string());
+    assert!(!desc.verify_self(), "tampered descriptor should fail self-verification");
+}
+
+/// Descriptor with swapped signing_pubkey (attacker tries to claim another's descriptor).
+#[test]
+fn descriptor_pubkey_swap_rejected() {
+    let honest_key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+    let attacker_key = ed25519_dalek::SigningKey::from_bytes(&[0x99u8; 32]);
+
+    let mut desc = PeerDescriptor::new_signed(
+        [0x01; 32],
+        ReachabilityKind::Direct,
+        vec!["/ip4/8.8.8.8/tcp/4001".to_string()],
+        PeerCapabilities::default(),
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &honest_key,
+    );
+    // Attacker replaces pubkey to claim the signature.
+    desc.signing_pubkey = attacker_key.verifying_key().to_bytes();
+    assert!(!desc.verify_self(), "pubkey-swapped descriptor should fail verification");
+}
+
+/// Descriptor store rejects already-stale descriptors at insertion time.
+#[test]
+fn descriptor_store_rejects_stale_on_insert() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let mut store = DescriptorStore::new();
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let mut desc = PeerDescriptor::new_signed(
+        [0x01; 32],
+        ReachabilityKind::Direct,
+        vec!["/ip4/8.8.8.8/tcp/4001".to_string()],
+        PeerCapabilities::default(),
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &key,
+    );
+    // Backdate the descriptor to 2 hours ago (stale).
+    desc.published_at = now - 7200;
+    assert!(!store.upsert(desc), "stale descriptor should be rejected on insert");
+    assert_eq!(store.len(), 0);
+}
+
+/// Descriptor store enforces capacity limit under flooding attack.
+#[test]
+fn descriptor_store_capacity_limit_under_flood() {
+    let mut store = DescriptorStore::new();
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+
+    // Insert 10,001 descriptors — store should cap at 10,000.
+    for i in 0u32..10_001 {
+        let mut ps = [0u8; 32];
+        ps[..4].copy_from_slice(&i.to_le_bytes());
+        store.upsert(PeerDescriptor::new_signed(
+            ps,
+            ReachabilityKind::Direct,
+            vec![format!("/ip4/10.{}.{}.{}/tcp/4001", (i >> 16) & 0xFF, (i >> 8) & 0xFF, i & 0xFF)],
+            PeerCapabilities::default(),
+            ResourceProfile::Desktop,
+            None,
+            1,
+            &key,
+        ));
+    }
+
+    assert!(store.len() <= 10_000, "store should enforce capacity limit: got {}", store.len());
+}
+
+/// Credential from a previous epoch should not be accepted after rotation.
+#[test]
+fn credential_cross_epoch_replay_rejected() {
+    let issuer_key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+    let issuer = CredentialIssuer::new(issuer_key);
+
+    let old_epoch = 100;
+    let new_epoch = 102; // gap of 2 exceeds EPOCH_GRACE(1)
+
+    let identity = EphemeralIdentity::generate(old_epoch);
+
+    // Issue credential for old epoch.
+    let cred = issuer.issue(
+        CredentialTier::Verified,
+        old_epoch,
+        CAP_STORE | CAP_ROUTE,
+        identity.holder_tag(),
+    );
+
+    // Create presentation with old identity.
+    let context = b"test-context-replay";
+    let presentation = CredentialPresentation::create(
+        &cred,
+        &identity,
+        context,
+    );
+
+    // Verify against new epoch — should fail.
+    let issuers = vec![issuer.pubkey_bytes()];
+    let result = credential::verify_presentation(
+        &presentation,
+        context,
+        &issuers,
+        new_epoch,
+        CredentialTier::Verified,
+    );
+    assert!(result.is_err(), "credential from old epoch should be rejected in new epoch");
 }
