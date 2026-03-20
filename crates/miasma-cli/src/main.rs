@@ -169,15 +169,41 @@ enum Commands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Logging: MIASMA_LOG or default to info.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("MIASMA_LOG")
-                .unwrap_or_else(|_| "miasma=info,miasma_core=info".parse().unwrap()),
-        )
-        .init();
-
     let data_dir = cli.data_dir.unwrap_or_else(default_data_dir);
+
+    // Logging: MIASMA_LOG or default to info.
+    // Daemon mode logs to both stderr and a file in the data directory.
+    let filter = tracing_subscriber::EnvFilter::try_from_env("MIASMA_LOG")
+        .unwrap_or_else(|_| "miasma=info,miasma_core=info".parse().unwrap());
+
+    let is_daemon = matches!(cli.command, Commands::Daemon { .. });
+    if is_daemon {
+        let log_dir = data_dir.clone();
+        let _ = std::fs::create_dir_all(&log_dir);
+        let file_appender = tracing_appender::rolling::daily(&log_dir, "daemon.log");
+        // Truncate old logs: keep recent file only (daily roller creates new files).
+        cleanup_old_logs(&log_dir, "daemon.log", 3);
+        let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+        let stderr_layer = tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stderr);
+        let file_layer = tracing_subscriber::fmt::layer()
+            .with_writer(non_blocking)
+            .with_ansi(false);
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(stderr_layer)
+            .with(file_layer)
+            .init();
+        // Keep _guard alive for the duration of main by leaking it.
+        // This is intentional: the guard must outlive all tracing calls.
+        std::mem::forget(_guard);
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .init();
+    }
 
     match cli.command {
         Commands::Init {
@@ -482,6 +508,9 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
         report.insert("data_dir".into(), serde_json::json!(data_dir.display().to_string()));
         report.insert("config_exists".into(), serde_json::json!(has_config));
         report.insert("master_key_exists".into(), serde_json::json!(key_exists));
+        // Log file location.
+        let log_glob = data_dir.join("daemon.log.*");
+        report.insert("log_file".into(), serde_json::json!(log_glob.display().to_string()));
         report.insert("share_count".into(), serde_json::json!(share_count));
         report.insert("storage_used_bytes".into(), serde_json::json!(storage_used));
 
@@ -529,6 +558,7 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
         println!("Data dir:        {}", data_dir.display());
         println!("Config exists:   {has_config}");
         println!("Master key:      {}", if key_exists { "present" } else { "MISSING" });
+        println!("Daemon log:      {}/daemon.log.*", data_dir.display());
 
         if let Ok(ref config) = config_ok {
             println!("Storage quota:   {} MiB", config.storage.quota_mb);
@@ -718,6 +748,7 @@ async fn cmd_daemon(data_dir: &std::path::Path, bootstrap_addrs: &[String]) -> R
         eprintln!("  {addr}/p2p/{}", server.peer_id());
     }
     eprintln!("IPC control port: {}", server.control_port());
+    eprintln!("Log file: {}/daemon.log.*", data_dir.display());
     eprintln!();
 
     // Add bootstrap peers from CLI flags and config.
@@ -857,5 +888,35 @@ async fn cmd_network_get(
         }
         ControlResponse::Error(e) => bail!("daemon error: {e}"),
         other => bail!("unexpected response: {other:?}"),
+    }
+}
+
+// ─── Log file cleanup ───────────────────────────────────────────────────────
+
+/// Remove old log files beyond `keep` count. Matches files starting with `prefix`.
+fn cleanup_old_logs(dir: &std::path::Path, prefix: &str, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut logs: Vec<(std::path::PathBuf, std::time::SystemTime)> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .map(|n| n.starts_with(prefix))
+                .unwrap_or(false)
+        })
+        .filter_map(|e| {
+            let meta = e.metadata().ok()?;
+            Some((e.path(), meta.modified().unwrap_or(std::time::UNIX_EPOCH)))
+        })
+        .collect();
+
+    if logs.len() <= keep {
+        return;
+    }
+
+    // Sort newest-first, then remove the oldest.
+    logs.sort_by(|a, b| b.1.cmp(&a.1));
+    for (path, _) in logs.into_iter().skip(keep) {
+        let _ = std::fs::remove_file(path);
     }
 }

@@ -668,6 +668,15 @@ async fn p2p_two_node_loopback() {
 //   3. Node B retrieves via `retrieve_from_network()` → Kademlia GET + TCP
 //      share-exchange → reconstruct plaintext.
 
+/// **Quarantined** — flaky due to DHT convergence timing on CI.
+///
+/// Manual validation: `cargo test p2p_kademlia_full_roundtrip -- --ignored`
+/// Expected: passes ~80% of the time locally; DHT convergence may take 5-15s.
+/// The equivalent scenario is also covered by `scripts/smoke-loopback.ps1`
+/// which runs the same flow via CLI and is more reliable (longer convergence window).
+///
+/// Known risk: if this test fails, DHT publish/get is not broken — the convergence
+/// timeout (60s) is sometimes insufficient on loaded CI runners.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "flaky: DHT convergence timing sensitive — run manually with --ignored"]
 async fn p2p_kademlia_full_roundtrip() {

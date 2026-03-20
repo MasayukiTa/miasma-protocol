@@ -10,8 +10,10 @@
     4. Diagnostics command works (text + JSON)
     5. Dissolve + get round-trip
     6. Wipe removes master.key and makes shares unreadable
-    7. Daemon restart recovery (init → daemon → stop → daemon)
-    8. Bridge safety defaults (--help output, flag parsing)
+    7. Daemon restart recovery (re-init + daemon + dissolve/get)
+    8. Stale port-file recovery
+    9. Bridge safety defaults (--help output, flag parsing)
+    10. Daemon log file creation
 
 .NOTES
     Run from the repository root:
@@ -290,6 +292,31 @@ if (Test-Path $BRIDGE) {
     }
 } else {
     Write-Host "[9] Bridge not built — skipping"
+}
+
+# ── Test 10: Daemon log file creation ────────────────────────────────────────
+
+Write-Host "[10] Daemon log file creation"
+# Re-init and start daemon briefly to check log file is created.
+& $CLI --data-dir $DATA_DIR init 2>$null | Out-Null
+$script:procDaemon = Start-Process -FilePath $CLI `
+    -ArgumentList "--data-dir `"$DATA_DIR`" daemon" `
+    -PassThru `
+    -RedirectStandardOutput (Join-Path $DATA_DIR "stdout4.log") `
+    -RedirectStandardError  (Join-Path $DATA_DIR "stderr4.log")
+
+$deadline = (Get-Date).AddSeconds(15)
+while (-not (Test-Path $portFile) -and (Get-Date) -lt $deadline) {
+    Start-Sleep -Milliseconds 500
+}
+Start-Sleep -Seconds 2
+StopDaemon
+
+$logFiles = Get-ChildItem -Path $DATA_DIR -Filter "daemon.log.*" -ErrorAction SilentlyContinue
+if ($logFiles -and $logFiles.Count -gt 0) {
+    Pass "daemon creates log file in data dir"
+} else {
+    Fail "log file" "no daemon.log.* found in $DATA_DIR"
 }
 
 # ── Summary ──────────────────────────────────────────────────────────────────
