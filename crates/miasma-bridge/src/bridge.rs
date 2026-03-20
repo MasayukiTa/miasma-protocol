@@ -33,6 +33,7 @@ use tracing::{debug, info, warn};
 use miasma_core::{pipeline::dissolve, pipeline::DissolutionParams, LocalShareStore};
 
 use crate::bencode::{self, Value};
+use crate::torrent::{MiasmaSession, TorrentConfig};
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -138,12 +139,12 @@ impl Default for DownloadSafetyOpts {
 
 /// Dissolve a torrent identified by `info_hash` into Miasma.
 ///
-/// 1. Discover peers via DHT.
-/// 2. Fetch torrent metadata (ut_metadata extension).
-/// 3. **Preflight**: print file list and total size; refuse if over the
-///    safety limit unless `opts.confirm_download` is set.
-/// 4. Download each file in the torrent.
-/// 5. Dissolve each file into the local share store.
+/// Uses librqbit for full BT protocol download (multi-peer, choking, piece
+/// selection), then dissolves each downloaded file into the local share store.
+///
+/// 1. Create librqbit session with safety limits.
+/// 2. Download the torrent from the existing BT swarm.
+/// 3. Dissolve each downloaded file into the local share store.
 ///
 /// Returns the list of MID strings produced.
 pub async fn dissolve_torrent(
@@ -157,53 +158,62 @@ pub async fn dissolve_torrent(
         LocalShareStore::open(data_dir, quota_mb).context("open share store")?,
     );
 
+    let ih_hex = hex::encode(info_hash);
+    let name = display_name.unwrap_or("unknown");
+    info!("Dissolving torrent {ih_hex} ({name}) via librqbit");
+
+    // Build magnet URI from info_hash + display_name.
+    let mut magnet = format!("magnet:?xt=urn:btih:{ih_hex}");
+    if let Some(dn) = display_name {
+        magnet.push_str("&dn=");
+        magnet.push_str(&urlencoded(dn));
+    }
+
+    // Configure librqbit session with safety limits.
+    let torrent_config = TorrentConfig {
+        output_dir: data_dir.join("bridge-downloads"),
+        seed_enabled: false,
+        max_total_bytes: if opts.confirm_download { 0 } else { opts.max_total_bytes },
+        ..Default::default()
+    };
+
+    let session = MiasmaSession::new(torrent_config)
+        .await
+        .context("create librqbit session")?;
+
+    // Download with progress logging.
+    let result = session
+        .download_magnet(&magnet, Some(|progress: crate::torrent::DownloadProgress| {
+            if progress.total_bytes > 0 {
+                let pct = (progress.downloaded_bytes as f64 / progress.total_bytes as f64) * 100.0;
+                info!(
+                    "  {:.1}% ({}/{} bytes) peers={} speed={:.2} Mbps",
+                    pct,
+                    progress.downloaded_bytes,
+                    progress.total_bytes,
+                    progress.peers,
+                    progress.download_speed_mbps,
+                );
+            }
+        }))
+        .await
+        .context("librqbit download")?;
+
     info!(
-        "Dissolving torrent {} ({})",
-        hex::encode(info_hash),
-        display_name.unwrap_or("unknown")
+        "Downloaded {} file(s), {} bytes total",
+        result.files.len(),
+        result.total_bytes
     );
 
-    // 1. Find peers (multi-strategy: DHT → HTTP tracker).
-    let peers = discover_peers(info_hash).await?;
-
-    if peers.is_empty() {
-        bail!(
-            "No peers found for info_hash {}. The torrent may be too new or too old.",
-            hex::encode(info_hash)
-        );
-    }
-    info!("Found {} peers", peers.len());
-
-    // 2. Fetch metadata (preflight — no payload downloaded yet).
-    let info_dict_bytes = fetch_info_dict_from_peers(&peers, info_hash).await?;
-    let file_entries = parse_info_dict(&info_dict_bytes)?;
-    let total_bytes: u64 = file_entries.iter().map(|(_, s)| *s).sum();
-
-    // 3. Print preflight report.
-    info!("Torrent has {} file(s), {} bytes total", file_entries.len(), total_bytes);
-    for (name, size) in &file_entries {
-        info!("  {size:>12}  {name}");
-    }
-
-    // 4. Enforce safety limit.
-    if total_bytes > opts.max_total_bytes && !opts.confirm_download {
-        bail!(
-            "Torrent total size ({}) exceeds safety limit ({} bytes).\n\
-             To proceed anyway, re-run with --confirm-download or increase --max-total-bytes.",
-            format_bytes(total_bytes),
-            opts.max_total_bytes
-        );
-    }
-
-    // 5. Download each file and dissolve it.
+    // Dissolve each downloaded file.
     let params = DissolutionParams::default();
     let mut mids = Vec::new();
 
-    for (filename, size) in &file_entries {
-        info!("  Fetching {} ({} bytes)…", filename, size);
-        let data = download_file(&peers, info_hash, filename, *size, &info_dict_bytes)
+    for file in &result.files {
+        info!("  Dissolving {} ({} bytes)…", file.path, file.size);
+        let data = tokio::fs::read(&file.disk_path)
             .await
-            .with_context(|| format!("download {filename}"))?;
+            .with_context(|| format!("read downloaded file {}", file.disk_path.display()))?;
 
         match dissolve(&data, params) {
             Ok((mid, shares)) => {
@@ -214,13 +224,33 @@ pub async fn dissolve_torrent(
                 info!("    -> {mid_str}");
                 mids.push(mid_str);
             }
-            Err(e) => warn!("Dissolution failed for {filename}: {e}"),
+            Err(e) => warn!("Dissolution failed for {}: {e}", file.path),
         }
     }
+
+    // Clean up session (stop seeding, release resources).
+    session.shutdown().await;
 
     Ok(mids)
 }
 
+/// Simple URL encoding for display name in magnet URIs.
+fn urlencoded(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                out.push_str(&format!("%{b:02X}"));
+            }
+        }
+    }
+    out
+}
+
+#[allow(dead_code)]
 fn format_bytes(bytes: u64) -> String {
     if bytes >= 1024 * 1024 * 1024 {
         format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
@@ -464,6 +494,7 @@ pub async fn dht_ping() -> anyhow::Result<Vec<(String, SocketAddr, Vec<u8>)>> {
 // ─── Multi-strategy peer discovery ───────────────────────────────────────────
 
 /// Discover peers using all available strategies.
+#[allow(dead_code)]
 async fn discover_peers(info_hash: &[u8; 20]) -> anyhow::Result<Vec<SocketAddr>> {
     // Strategy 1: DHT
     let mut peers = match dht_get_peers(info_hash).await {
@@ -1186,8 +1217,9 @@ fn parse_info_dict(info_bytes: &[u8]) -> anyhow::Result<Vec<(String, u64)>> {
     Ok(files)
 }
 
-// ─── File download ────────────────────────────────────────────────────────────
+// ─── File download (legacy, superseded by librqbit) ──────────────────────────
 
+#[allow(dead_code)]
 /// Download a specific file from peers using the BT piece protocol.
 ///
 /// For Phase 2: this is a simplified implementation that requests pieces
@@ -1237,6 +1269,7 @@ async fn download_file(
     bail!("Could not download file from any peer")
 }
 
+#[allow(dead_code)]
 async fn download_from_peer(
     peer: SocketAddr,
     info_hash: &[u8; 20],
@@ -1309,6 +1342,7 @@ async fn download_from_peer(
     Ok(data)
 }
 
+#[allow(dead_code)]
 /// Verify pieces using SHA1 hashes from the info dict.
 fn verify_pieces(data: &[u8], pieces_hash: &[u8], piece_length: usize) -> bool {
     if pieces_hash.len() % 20 != 0 { return false; }
@@ -1327,6 +1361,7 @@ fn verify_pieces(data: &[u8], pieces_hash: &[u8], piece_length: usize) -> bool {
     true
 }
 
+#[allow(dead_code)]
 fn sha1_of(data: &[u8]) -> [u8; 20] {
     // Minimal SHA1 — use the SHA-2 crate which is already a workspace dep.
     // SHA1 is NOT in sha2, so we implement a tiny wrapper here.
@@ -1335,6 +1370,7 @@ fn sha1_of(data: &[u8]) -> [u8; 20] {
 }
 
 /// Minimal SHA1 (FIPS 180-4) — used only for BT piece verification.
+#[allow(dead_code)]
 fn sha1_compress(data: &[u8]) -> [u8; 20] {
     let mut h: [u32; 5] = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0];
 

@@ -24,8 +24,7 @@ serde_json.workspace = true
 directories.workspace = true
 
 # BitTorrent — librqbit provides a fully async BT client in Rust.
-# Phase 2: uncomment when integrating.
-# librqbit = { version = "6", default-features = false, features = ["tokio"] }
+librqbit = { version = "8.1", default-features = false, features = ["rust-tls"] }
 
 [dev-dependencies]
 tempfile.workspace = true
