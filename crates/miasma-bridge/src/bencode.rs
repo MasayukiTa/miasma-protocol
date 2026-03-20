@@ -30,16 +30,25 @@ impl Value {
     }
 }
 
+const MAX_DEPTH: usize = 64;
+
 /// Decode one bencoded value from the beginning of `data`.
 /// Returns `(value, remaining_bytes)`.
 pub fn decode(data: &[u8]) -> Result<(Value, &[u8]), String> {
+    decode_inner(data, MAX_DEPTH)
+}
+
+fn decode_inner(data: &[u8], depth: usize) -> Result<(Value, &[u8]), String> {
+    if depth == 0 {
+        return Err("bencode nesting depth exceeded".into());
+    }
     if data.is_empty() {
         return Err("empty input".into());
     }
     match data[0] {
         b'i' => decode_int(&data[1..]),
-        b'l' => decode_list(&data[1..]),
-        b'd' => decode_dict(&data[1..]),
+        b'l' => decode_list(&data[1..], depth),
+        b'd' => decode_dict(&data[1..], depth),
         b'0'..=b'9' => decode_bytes(data),
         c => Err(format!("unexpected byte 0x{c:02x}")),
     }
@@ -93,11 +102,11 @@ fn decode_bytes(data: &[u8]) -> Result<(Value, &[u8]), String> {
     Ok((Value::Bytes(data[start..end].to_vec()), &data[end..]))
 }
 
-fn decode_list(data: &[u8]) -> Result<(Value, &[u8]), String> {
+fn decode_list(data: &[u8], depth: usize) -> Result<(Value, &[u8]), String> {
     let mut items = Vec::new();
     let mut rest = data;
     while !rest.is_empty() && rest[0] != b'e' {
-        let (v, r) = decode(rest)?;
+        let (v, r) = decode_inner(rest, depth - 1)?;
         items.push(v);
         rest = r;
     }
@@ -105,13 +114,13 @@ fn decode_list(data: &[u8]) -> Result<(Value, &[u8]), String> {
     Ok((Value::List(items), &rest[1..]))
 }
 
-fn decode_dict(data: &[u8]) -> Result<(Value, &[u8]), String> {
+fn decode_dict(data: &[u8], depth: usize) -> Result<(Value, &[u8]), String> {
     let mut map = BTreeMap::new();
     let mut rest = data;
     while !rest.is_empty() && rest[0] != b'e' {
         let (k, r) = decode_bytes(rest)?;
         let key = match k { Value::Bytes(b) => b, _ => unreachable!() };
-        let (v, r2) = decode(r)?;
+        let (v, r2) = decode_inner(r, depth - 1)?;
         map.insert(key, v);
         rest = r2;
     }
