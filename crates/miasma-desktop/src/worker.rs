@@ -51,11 +51,29 @@ pub enum WorkerResult {
         pending_replication: usize,
         replicated_count: usize,
         listen_addrs: Vec<String>,
+        wss_port: u16,
+        wss_tls_enabled: bool,
+        proxy_configured: bool,
+        proxy_type: Option<String>,
+        transport_statuses: Vec<TransportStatusInfo>,
     },
     /// Distress wipe complete.
     Wiped,
     /// Any error.
     Err(String),
+}
+
+/// Transport readiness info for desktop display.
+#[derive(Debug, Clone)]
+pub struct TransportStatusInfo {
+    pub name: String,
+    pub available: bool,
+    pub selected: bool,
+    pub success_count: u64,
+    pub failure_count: u64,
+    pub session_failures: u64,
+    pub data_failures: u64,
+    pub last_error: Option<String>,
 }
 
 // ─── Handle ───────────────────────────────────────────────────────────────────
@@ -171,6 +189,24 @@ async fn get_status(data_dir: &PathBuf) -> WorkerResult {
             pending_replication: s.pending_replication,
             replicated_count: s.replicated_count,
             listen_addrs: s.listen_addrs,
+            wss_port: s.wss_port,
+            wss_tls_enabled: s.wss_tls_enabled,
+            proxy_configured: s.proxy_configured,
+            proxy_type: s.proxy_type,
+            transport_statuses: s
+                .transport_readiness
+                .into_iter()
+                .map(|t| TransportStatusInfo {
+                    name: t.name,
+                    available: t.available,
+                    selected: t.selected,
+                    success_count: t.success_count,
+                    failure_count: t.failure_count,
+                    session_failures: t.session_failures,
+                    data_failures: t.data_failures,
+                    last_error: t.last_error,
+                })
+                .collect(),
         },
         Ok(ControlResponse::Error(e)) => WorkerResult::Err(e),
         Ok(other) => WorkerResult::Err(format!("Unexpected response: {other:?}")),

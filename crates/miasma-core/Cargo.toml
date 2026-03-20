@@ -32,6 +32,13 @@ async-trait = "0.1"
 serde_json.workspace = true
 tracing.workspace = true
 tokio-tungstenite.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+webpki-roots.workspace = true
+rustls-pemfile.workspace = true
+tokio-socks.workspace = true
+quinn.workspace = true
+rcgen = "0.13"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

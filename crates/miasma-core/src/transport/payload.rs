@@ -272,14 +272,16 @@ impl PayloadTransportSelector {
                 }
                 Err(e) => {
                     let duration = start.elapsed();
+                    let phase = e.phase;
+                    let msg = e.message;
                     attempts.push(TransportAttempt {
                         transport: kind,
                         succeeded: false,
-                        phase: e.phase,
-                        error: Some(e.message),
+                        phase,
+                        error: Some(msg.clone()),
                         duration,
                     });
-                    self.stats.record_failure(kind);
+                    self.stats.record_failure(kind, phase, &msg);
                     // Try next transport.
                 }
             }
@@ -296,81 +298,83 @@ impl PayloadTransportSelector {
 
 // ─── Transport statistics ────────────────────────────────────────────────────
 
+/// Per-transport atomic counters for success, failure, and phase breakdown.
+#[derive(Debug, Default)]
+struct KindCounters {
+    success: AtomicU64,
+    failure: AtomicU64,
+    session_failures: AtomicU64,
+    data_failures: AtomicU64,
+}
+
 /// Running counters for payload transport usage.
 #[derive(Debug, Default)]
 pub struct TransportStats {
-    pub libp2p_success: AtomicU64,
-    pub libp2p_failure: AtomicU64,
-    pub tcp_success: AtomicU64,
-    pub tcp_failure: AtomicU64,
-    pub wss_success: AtomicU64,
-    pub wss_failure: AtomicU64,
-    pub relay_success: AtomicU64,
-    pub relay_failure: AtomicU64,
-    pub obfuscated_success: AtomicU64,
-    pub obfuscated_failure: AtomicU64,
+    libp2p: KindCounters,
+    tcp: KindCounters,
+    wss: KindCounters,
+    relay: KindCounters,
+    obfuscated: KindCounters,
+    /// Most recent error per transport kind.
+    last_errors: Mutex<std::collections::HashMap<PayloadTransportKind, String>>,
+    /// The transport kind that most recently succeeded (if any).
+    last_selected: Mutex<Option<PayloadTransportKind>>,
 }
 
 impl TransportStats {
-    fn record_success(&self, kind: PayloadTransportKind) {
+    fn counters(&self, kind: PayloadTransportKind) -> &KindCounters {
         match kind {
-            PayloadTransportKind::DirectLibp2p => self.libp2p_success.fetch_add(1, Ordering::Relaxed),
-            PayloadTransportKind::TcpDirect => self.tcp_success.fetch_add(1, Ordering::Relaxed),
-            PayloadTransportKind::WssTunnel => self.wss_success.fetch_add(1, Ordering::Relaxed),
-            PayloadTransportKind::RelayHop => self.relay_success.fetch_add(1, Ordering::Relaxed),
-            PayloadTransportKind::ObfuscatedQuic => self.obfuscated_success.fetch_add(1, Ordering::Relaxed),
-        };
+            PayloadTransportKind::DirectLibp2p => &self.libp2p,
+            PayloadTransportKind::TcpDirect => &self.tcp,
+            PayloadTransportKind::WssTunnel => &self.wss,
+            PayloadTransportKind::RelayHop => &self.relay,
+            PayloadTransportKind::ObfuscatedQuic => &self.obfuscated,
+        }
     }
 
-    fn record_failure(&self, kind: PayloadTransportKind) {
-        match kind {
-            PayloadTransportKind::DirectLibp2p => self.libp2p_failure.fetch_add(1, Ordering::Relaxed),
-            PayloadTransportKind::TcpDirect => self.tcp_failure.fetch_add(1, Ordering::Relaxed),
-            PayloadTransportKind::WssTunnel => self.wss_failure.fetch_add(1, Ordering::Relaxed),
-            PayloadTransportKind::RelayHop => self.relay_failure.fetch_add(1, Ordering::Relaxed),
-            PayloadTransportKind::ObfuscatedQuic => self.obfuscated_failure.fetch_add(1, Ordering::Relaxed),
+    fn record_success(&self, kind: PayloadTransportKind) {
+        self.counters(kind).success.fetch_add(1, Ordering::Relaxed);
+        *self.last_selected.lock().unwrap() = Some(kind);
+    }
+
+    fn record_failure(&self, kind: PayloadTransportKind, phase: TransportPhase, message: &str) {
+        let c = self.counters(kind);
+        c.failure.fetch_add(1, Ordering::Relaxed);
+        match phase {
+            TransportPhase::Session => c.session_failures.fetch_add(1, Ordering::Relaxed),
+            TransportPhase::Data => c.data_failures.fetch_add(1, Ordering::Relaxed),
         };
+        self.last_errors.lock().unwrap().insert(kind, message.to_string());
     }
 
     /// Snapshot for diagnostics display.
     pub fn snapshot(&self) -> Vec<TransportReadiness> {
-        vec![
-            TransportReadiness {
-                transport: PayloadTransportKind::DirectLibp2p,
-                available: true, // Always available (built-in)
-                success_count: self.libp2p_success.load(Ordering::Relaxed),
-                failure_count: self.libp2p_failure.load(Ordering::Relaxed),
-                reason: None,
-            },
-            TransportReadiness {
-                transport: PayloadTransportKind::TcpDirect,
-                available: true,
-                success_count: self.tcp_success.load(Ordering::Relaxed),
-                failure_count: self.tcp_failure.load(Ordering::Relaxed),
-                reason: None,
-            },
-            TransportReadiness {
-                transport: PayloadTransportKind::WssTunnel,
-                available: true,
-                success_count: self.wss_success.load(Ordering::Relaxed),
-                failure_count: self.wss_failure.load(Ordering::Relaxed),
-                reason: Some("plain WS implemented; TLS wrapping pending".into()),
-            },
-            TransportReadiness {
-                transport: PayloadTransportKind::RelayHop,
-                available: true,
-                success_count: self.relay_success.load(Ordering::Relaxed),
-                failure_count: self.relay_failure.load(Ordering::Relaxed),
-                reason: None,
-            },
-            TransportReadiness {
-                transport: PayloadTransportKind::ObfuscatedQuic,
-                available: false,
-                success_count: self.obfuscated_success.load(Ordering::Relaxed),
-                failure_count: self.obfuscated_failure.load(Ordering::Relaxed),
-                reason: Some("not yet implemented (Phase 2.1)".into()),
-            },
-        ]
+        let errors = self.last_errors.lock().unwrap();
+        let selected = *self.last_selected.lock().unwrap();
+        let kinds = [
+            PayloadTransportKind::DirectLibp2p,
+            PayloadTransportKind::TcpDirect,
+            PayloadTransportKind::WssTunnel,
+            PayloadTransportKind::RelayHop,
+            PayloadTransportKind::ObfuscatedQuic,
+        ];
+        kinds
+            .iter()
+            .map(|&kind| {
+                let c = self.counters(kind);
+                TransportReadiness {
+                    transport: kind,
+                    available: true,
+                    selected: selected == Some(kind),
+                    success_count: c.success.load(Ordering::Relaxed),
+                    failure_count: c.failure.load(Ordering::Relaxed),
+                    session_failures: c.session_failures.load(Ordering::Relaxed),
+                    data_failures: c.data_failures.load(Ordering::Relaxed),
+                    last_error: errors.get(&kind).cloned(),
+                    reason: None,
+                }
+            })
+            .collect()
     }
 }
 
@@ -381,22 +385,37 @@ impl TransportStats {
 pub struct TransportReadiness {
     pub transport: PayloadTransportKind,
     pub available: bool,
+    /// Was this the transport used for the most recent successful fetch?
+    pub selected: bool,
     pub success_count: u64,
     pub failure_count: u64,
+    /// Number of failures at session phase (connection refused, timeout, etc.)
+    pub session_failures: u64,
+    /// Number of failures at data phase (connected but transfer failed).
+    pub data_failures: u64,
+    /// Most recent error message for this transport.
+    pub last_error: Option<String>,
     pub reason: Option<String>,
 }
 
 impl fmt::Display for TransportReadiness {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let status = if self.available { "AVAILABLE" } else { "UNAVAILABLE" };
+        let sel = if self.selected { " [SELECTED]" } else { "" };
         write!(
             f,
-            "{:<20} {:<12} success={} failure={}",
+            "{:<20} {:<12} success={} failure={} (session={} data={}){}",
             self.transport.to_string(),
             status,
             self.success_count,
             self.failure_count,
+            self.session_failures,
+            self.data_failures,
+            sel,
         )?;
+        if let Some(ref err) = self.last_error {
+            write!(f, "  last_err={err}")?;
+        }
         if let Some(ref reason) = self.reason {
             write!(f, "  ({reason})")?;
         }
@@ -681,13 +700,20 @@ mod tests {
         let r = TransportReadiness {
             transport: PayloadTransportKind::WssTunnel,
             available: false,
+            selected: false,
             success_count: 0,
             failure_count: 3,
+            session_failures: 2,
+            data_failures: 1,
+            last_error: Some("connection refused".into()),
             reason: Some("not yet implemented".into()),
         };
         let s = r.to_string();
         assert!(s.contains("wss-tunnel"));
         assert!(s.contains("UNAVAILABLE"));
+        assert!(s.contains("session=2"));
+        assert!(s.contains("data=1"));
+        assert!(s.contains("connection refused"));
         assert!(s.contains("not yet implemented"));
     }
 
@@ -696,7 +722,7 @@ mod tests {
         let stats = TransportStats::default();
         stats.record_success(PayloadTransportKind::DirectLibp2p);
         stats.record_success(PayloadTransportKind::DirectLibp2p);
-        stats.record_failure(PayloadTransportKind::TcpDirect);
+        stats.record_failure(PayloadTransportKind::TcpDirect, TransportPhase::Session, "test");
 
         let snap = stats.snapshot();
         let libp2p = snap.iter().find(|r| r.transport == PayloadTransportKind::DirectLibp2p).unwrap();

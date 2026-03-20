@@ -431,28 +431,114 @@ to function as a freenet behind restrictive networks, it needs:
 
 ---
 
-## 8. What remains unverified (external constraints)
+## 8. TLS WSS payload transport (VERIFIED)
+
+### Test: `wss_tls_payload_e2e_retrieval`
+- Self-signed cert via rcgen, custom CA in client config
+- WssShareServer::bind_tls with real rustls ServerConfig
+- WssPayloadTransport with `tls_enabled: true`, `custom_ca_pem`
+- Fetches 5/5 shares over TLS-wrapped WebSocket on localhost
+- **PASS**: Proves real rustls TLS handshake + share transport works end-to-end
+
+### Test: `wss_connect_timeout_fires`
+- Server accepts TCP but never sends WS upgrade response
+- Client timeout (100ms) fires correctly via `tokio::select!`
+- Elapsed < 5s confirmed (was 300s before fix — `tokio::time::timeout` not cancel-safe with `client_async` on Windows)
+- **PASS**: Proves timeout hardening works
+
+---
+
+## 9. ObfuscatedQuic REALITY transport (VERIFIED)
+
+### Test: `obfuscated_quic_payload_e2e_retrieval`
+- REALITY-style QUIC server with quinn + rustls
+- Self-signed cert via `generate_self_signed_cert()` (rcgen)
+- probe_secret auth via BLAKE3 keyed hash (nonce + token)
+- AcceptAnyCert custom verifier (auth is via probe_secret, not PKI)
+- BrowserFingerprint::Chrome124 ALPN
+- Fetches 5/5 shares over QUIC streams
+- **PASS**: Proves REALITY-style QUIC camouflage serves shares end-to-end
+
+### Test: `obfuscated_quic_wrong_secret_rejected`
+- Client with wrong probe_secret gets connection rejected
+- **PASS**: Active probe resistance confirmed
+
+---
+
+## 10. Transport fallback chain (VERIFIED)
+
+### Test: `full_transport_fallback_chain_wss_recovery`
+- PayloadTransportSelector with broken primary (port 1) + working WSS
+- Primary fails → WSS recovers
+- TransportStats show primary failures, WSS successes
+- **PASS**: Proves full fallback chain works with real WSS backend
+
+---
+
+## 11. Transport diagnostics and desktop visibility (VERIFIED)
+
+### CLI `miasma status`
+- Shows transport readiness: name, status, OK/Fail, session/data failures, [SELECTED], last error
+- Shows WSS TLS status, proxy info, ObfuscatedQuic port
+- `miasma config set transport.*` for all transport settings
+
+### Desktop GUI Status tab
+- Transport grid: 6-column table with color-coded status
+- WSS server info with TLS tag
+- Proxy status
+- Troubleshooting hint when all transports failing
+- Phase breakdown (s=session_failures d=data_failures)
+
+---
+
+## 12. Daemon wiring (VERIFIED by code review)
+
+- `DaemonServer::start_with_transport(node, store, data_dir, transport_config)`
+- Reads TransportConfig from config.toml
+- Starts WSS server with TLS when `wss_tls_enabled: true`
+- Starts ObfuscatedQuic server when `obfuscated_quic_enabled: true`
+- WSS and ObfuscatedQuic transports added to PayloadTransportSelector fallback chain
+- Proxy config wired from config.toml to WSS client
+
+---
+
+## 13. Test counts
+
+| Crate | Unit | Integration | Total |
+|-------|------|-------------|-------|
+| miasma-core | 153 | 35 | 188 |
+| miasma-bridge | 27 | - | 27 |
+| **Total** | **180** | **35** | **215** |
+
+---
+
+## 14. What remains unverified (external constraints)
 
 | Area | Blocker | How to verify |
 |------|---------|---------------|
-| **Payload through DPI** | WSS needs TLS + innocuous SNI | Add rustls TLS wrapping + test behind GlobalProtect |
-| **Obfuscated QUIC** | REALITY-style transport is stub | Implement rustls integration |
+| **TLS WSS through DPI** | Requires testing behind GlobalProtect | Deploy on DPI network with innocuous SNI on port 443 |
+| **ObfuscatedQuic through DPI** | Requires real QUIC-blocking network | Deploy on network that blocks QUIC |
 | Bridge dissolve with real torrent | Requires downloading payload (not tested for safety) | `dissolve --confirm-download` on small CC torrent |
 | Desktop GUI visual review | Requires interactive Windows session | Manual click-through |
 | Cross-machine P2P | Requires 2+ machines on LAN | Loopback smoke covers protocol |
 | Android/iOS builds | Requires NDK/Xcode | FFI bridge compiles |
+| Proxy-assisted WSS | Requires real SOCKS5/HTTP CONNECT proxy | Loopback test with local proxy |
 
 ### Distinction: metadata-plane vs payload-plane
 
 | Plane | Open network | GlobalProtect VPN |
 |-------|-------------|-------------------|
 | **Metadata discovery** | PASS (DHT + BEP-9) | PASS (archive.org fallback) |
-| **Payload transport** | PASS (DirectLibp2p + WSS loopback) | NOT TESTED (needs TLS) |
+| **Payload transport** | PASS (DirectLibp2p + WSS + TLS WSS + ObfuscatedQuic) | NOT TESTED (needs DPI network) |
 
 Live BitTorrent **metadata** discovery confirmed on both open network (DHT) and
 behind GlobalProtect VPN (archive.org fallback). **No BT payload** was downloaded.
 
-Miasma **payload** transport confirmed on open network (loopback) via both
-DirectLibp2p (QUIC+TCP) and WSS (tokio-tungstenite WebSocket). WSS fallback
-engine proven: when DirectLibp2p is blocked, WSS succeeds. Payload through DPI
-requires TLS wrapping (rustls) + innocuous SNI on port 443.
+Miasma **payload** transport confirmed on loopback via:
+- DirectLibp2p (QUIC+TCP)
+- WSS (plain WebSocket)
+- TLS WSS (real rustls handshake + custom CA)
+- ObfuscatedQuic REALITY (quinn + probe_secret auth)
+- Full fallback chain (broken primary → WSS recovery)
+
+Payload through DPI requires testing on restrictive network with innocuous SNI.

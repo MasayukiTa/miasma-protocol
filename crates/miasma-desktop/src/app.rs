@@ -42,6 +42,11 @@ pub struct MiasmaApp {
     pending_replication: usize,
     replicated_count: usize,
     listen_addrs: Vec<String>,
+    wss_port: u16,
+    wss_tls_enabled: bool,
+    proxy_configured: bool,
+    proxy_type: Option<String>,
+    transport_statuses: Vec<crate::worker::TransportStatusInfo>,
 
     // Settings
     data_dir_display: String,
@@ -75,6 +80,11 @@ impl MiasmaApp {
             pending_replication: 0,
             replicated_count: 0,
             listen_addrs: Vec::new(),
+            wss_port: 0,
+            wss_tls_enabled: false,
+            proxy_configured: false,
+            proxy_type: None,
+            transport_statuses: Vec::new(),
             data_dir_display: data_dir.to_string_lossy().into_owned(),
             busy: false,
             status_msg: None,
@@ -108,6 +118,11 @@ impl MiasmaApp {
                     pending_replication,
                     replicated_count,
                     listen_addrs,
+                    wss_port,
+                    wss_tls_enabled,
+                    proxy_configured,
+                    proxy_type,
+                    transport_statuses,
                 } => {
                     self.peer_id = peer_id;
                     self.peer_count = peer_count;
@@ -116,6 +131,11 @@ impl MiasmaApp {
                     self.pending_replication = pending_replication;
                     self.replicated_count = replicated_count;
                     self.listen_addrs = listen_addrs;
+                    self.wss_port = wss_port;
+                    self.wss_tls_enabled = wss_tls_enabled;
+                    self.proxy_configured = proxy_configured;
+                    self.proxy_type = proxy_type;
+                    self.transport_statuses = transport_statuses;
                 }
                 WorkerResult::Wiped => {
                     self.last_mid = None;
@@ -297,6 +317,73 @@ impl MiasmaApp {
                 ui.label(&self.data_dir_display);
                 ui.end_row();
             });
+
+        // ── Transport status ───────────────────────────────────────────────
+        if !self.transport_statuses.is_empty() {
+            ui.separator();
+            ui.heading("Payload Transport");
+
+            if self.wss_port > 0 {
+                let tls = if self.wss_tls_enabled { "TLS" } else { "plain" };
+                ui.label(format!("WSS server: 127.0.0.1:{} ({})", self.wss_port, tls));
+            }
+            if self.proxy_configured {
+                ui.label(format!("Proxy: {}", self.proxy_type.as_deref().unwrap_or("configured")));
+            }
+
+            egui::Grid::new("transport_grid")
+                .num_columns(6)
+                .striped(true)
+                .min_col_width(60.0)
+                .show(ui, |ui| {
+                    ui.strong("Transport");
+                    ui.strong("Status");
+                    ui.strong("OK");
+                    ui.strong("Fail");
+                    ui.strong("Phase");
+                    ui.strong("Last Error");
+                    ui.end_row();
+
+                    for t in &self.transport_statuses {
+                        ui.label(&t.name);
+                        if t.selected {
+                            ui.colored_label(egui::Color32::from_rgb(0, 200, 120), "SELECTED");
+                        } else if t.available && t.failure_count == 0 {
+                            ui.colored_label(egui::Color32::from_rgb(100, 180, 100), "ready");
+                        } else if t.available && t.success_count > 0 {
+                            ui.colored_label(egui::Color32::YELLOW, "degraded");
+                        } else if t.failure_count > 0 {
+                            ui.colored_label(egui::Color32::from_rgb(220, 80, 80), "failing");
+                        } else {
+                            ui.colored_label(egui::Color32::GRAY, "idle");
+                        }
+                        ui.label(t.success_count.to_string());
+                        ui.label(t.failure_count.to_string());
+                        ui.label(format!("s={} d={}", t.session_failures, t.data_failures));
+                        if let Some(ref err) = t.last_error {
+                            let short = if err.len() > 40 { &err[..40] } else { err };
+                            ui.label(short);
+                        } else {
+                            ui.colored_label(egui::Color32::GRAY, "-");
+                        }
+                        ui.end_row();
+                    }
+                });
+
+            // Troubleshooting hint when all transports are failing.
+            let all_failing = self.transport_statuses.iter().all(|t| {
+                t.failure_count > 0 && t.success_count == 0
+            });
+            if all_failing && !self.transport_statuses.is_empty()
+                && self.transport_statuses.iter().any(|t| t.failure_count > 0)
+            {
+                ui.separator();
+                ui.colored_label(egui::Color32::YELLOW, "All transports failing. Troubleshooting:");
+                ui.label("  1. Configure a SOCKS5 or HTTP CONNECT proxy in config.toml");
+                ui.label("  2. Enable WSS-over-TLS with an innocuous SNI");
+                ui.label("  3. Try ObfuscatedQuic if QUIC is not blocked");
+            }
+        }
 
         ui.separator();
         ui.separator();

@@ -42,7 +42,7 @@ use crate::{
     share::MiasmaShare,
     store::LocalShareStore,
     transport::payload::{
-        Libp2pPayloadTransport, PayloadTransportSelector, TransportAttempt, TransportStats,
+        Libp2pPayloadTransport, PayloadTransport, PayloadTransportSelector, TransportAttempt, TransportStats,
     },
     MiasmaError,
 };
@@ -182,7 +182,6 @@ impl MiasmaCoordinator {
         });
 
         // Build the payload transport selector with the default fallback chain.
-        // Phase 1: only libp2p direct. Phase 2.1 adds WSS + obfuscated.
         let transport_selector = Arc::new(PayloadTransportSelector::new(vec![
             Box::new(Libp2pPayloadTransport::new(
                 share_handle.clone(),
@@ -191,6 +190,30 @@ impl MiasmaCoordinator {
         ]));
 
         Self { store, dht_handle, share_handle, shutdown_tx, peer_id, listen_addrs, transport_selector }
+    }
+
+    /// Like `start`, but appends additional payload transports to the fallback
+    /// chain (after the default libp2p transport).
+    pub async fn start_with_transports(
+        node: MiasmaNode,
+        store: Arc<LocalShareStore>,
+        listen_addrs: Vec<String>,
+        extra_transports: Vec<Box<dyn PayloadTransport>>,
+    ) -> Self {
+        let mut coord = Self::start(node, store, listen_addrs).await;
+
+        // Rebuild the selector with extra transports appended.
+        if !extra_transports.is_empty() {
+            let mut all: Vec<Box<dyn PayloadTransport>> = vec![
+                Box::new(Libp2pPayloadTransport::new(
+                    coord.share_handle.clone(),
+                    coord.dht_handle.clone(),
+                )),
+            ];
+            all.extend(extra_transports);
+            coord.transport_selector = Arc::new(PayloadTransportSelector::new(all));
+        }
+        coord
     }
 
     /// Register a bootstrap peer and dial it from within the running event loop.
