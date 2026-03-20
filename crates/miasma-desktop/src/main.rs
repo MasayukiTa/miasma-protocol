@@ -17,11 +17,27 @@ mod app;
 mod worker;
 
 fn main() -> eframe::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "miasma_desktop=info".into()),
-        )
-        .init();
+    // Logging: stderr + file in data dir.
+    let data_dir = miasma_core::default_data_dir();
+    let _ = std::fs::create_dir_all(&data_dir);
+    let file_appender = tracing_appender::rolling::daily(&data_dir, "desktop.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+    {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+        let filter = tracing_subscriber::EnvFilter::try_from_env("RUST_LOG")
+            .unwrap_or_else(|_| "miasma_desktop=info,miasma_core=info".parse().unwrap());
+        let stderr_layer = tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stderr);
+        let file_layer = tracing_subscriber::fmt::layer()
+            .with_writer(non_blocking)
+            .with_ansi(false);
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(stderr_layer)
+            .with(file_layer)
+            .init();
+    }
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

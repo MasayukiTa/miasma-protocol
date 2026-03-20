@@ -26,13 +26,39 @@ use std::path::PathBuf;
 use tracing::{error, info, warn};
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "miasma_bridge=info".into()),
-        )
-        .init();
-
     let args: Vec<String> = std::env::args().collect();
+    let is_daemon = args.get(1).map(|s| s.as_str()) == Some("daemon");
+
+    // For daemon mode, set up file logging. For short-lived commands, stderr only.
+    if is_daemon {
+        let (data_dir, _) = parse_data_dir(if args.len() > 2 { &args[2..] } else { &[] });
+        let _ = std::fs::create_dir_all(&data_dir);
+        let file_appender = tracing_appender::rolling::daily(&data_dir, "bridge.log");
+        let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+        {
+            use tracing_subscriber::layer::SubscriberExt;
+            use tracing_subscriber::util::SubscriberInitExt;
+            let filter = tracing_subscriber::EnvFilter::try_from_env("RUST_LOG")
+                .unwrap_or_else(|_| "miasma_bridge=info".parse().unwrap());
+            let stderr_layer = tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr);
+            let file_layer = tracing_subscriber::fmt::layer()
+                .with_writer(non_blocking)
+                .with_ansi(false);
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(stderr_layer)
+                .with(file_layer)
+                .init();
+        }
+        std::mem::forget(_guard);
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                std::env::var("RUST_LOG").unwrap_or_else(|_| "miasma_bridge=info".into()),
+            )
+            .init();
+    }
     if args.len() < 2 {
         print_usage();
         std::process::exit(1);
@@ -151,9 +177,9 @@ fn cmd_inspect(args: &[String]) {
 
 fn cmd_dissolve(args: &[String]) {
     let (data_dir, rest) = parse_data_dir(args);
-    let magnet = rest.iter().find(|a| !a.starts_with("--"));
+    let magnet = find_dissolve_magnet_arg(&rest);
     let magnet = match magnet {
-        Some(m) => m.clone(),
+        Some(m) => m.to_owned(),
         None => {
             eprintln!(
                 "Usage: miasma-bridge dissolve [options] <magnet-uri>\n\
@@ -296,6 +322,7 @@ fn cmd_daemon(args: &[String]) {
         quota_mb,
         inbox_dir.display()
     );
+    info!("Log file: {}/bridge.log.*", data_dir.display());
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -387,6 +414,23 @@ fn parse_safety_opts(args: &[String]) -> bridge::DownloadSafetyOpts {
     opts
 }
 
+fn find_dissolve_magnet_arg<'a>(args: &'a [String]) -> Option<&'a str> {
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--confirm-download" | "--seed" | "--no-seed" => {
+                i += 1;
+            }
+            "--max-total-bytes" | "--proxy" | "--upload-limit" | "--download-limit" => {
+                i += 2;
+            }
+            other if !other.starts_with("--") => return Some(other),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
 fn format_bytes_human(bytes: u64) -> String {
     if bytes >= 1024 * 1024 * 1024 {
         format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
@@ -453,5 +497,53 @@ fn print_usage() {
         "  miasma-bridge dissolve --download-limit 5M --no-seed \"magnet:?xt=urn:btih:...\"\n",
         "  miasma-bridge init-inbox C:\\\\MiasmaInbox\n",
         "  miasma-bridge daemon --inbox-dir C:\\\\MiasmaInbox\n",
+        "\n",
+        "Safe defaults:\n",
+        "  - Seeding is DISABLED by default (--no-seed). No data is uploaded.\n",
+        "  - Download size limit: 100 MiB. Override with --max-total-bytes or --confirm-download.\n",
+        "  - No proxy by default. Use --proxy for SOCKS5.\n",
+        "  - Upload rate capped at 1 bps when seeding disabled (effectively zero upload).\n",
+        "\n",
+        "Validation with a small legal torrent:\n",
+        "  1. Find a small (<10 MiB) Creative Commons torrent\n",
+        "  2. miasma-bridge dissolve --max-total-bytes 10M \"magnet:?xt=urn:btih:<hash>\"\n",
+        "  3. Verify: preflight shows size limit, download completes, MIDs printed\n",
+        "  4. miasma get <MID> -o retrieved.file  (verify content matches)\n",
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_dissolve_magnet_arg;
+
+    #[test]
+    fn dissolve_magnet_arg_skips_flag_values() {
+        let args = vec![
+            "--max-total-bytes".to_string(),
+            "500M".to_string(),
+            "--proxy".to_string(),
+            "socks5://127.0.0.1:9050".to_string(),
+            "--seed".to_string(),
+            "magnet:?xt=urn:btih:abcdef0123456789abcdef0123456789abcdef01".to_string(),
+        ];
+
+        let magnet = find_dissolve_magnet_arg(&args);
+        assert_eq!(
+            magnet,
+            Some("magnet:?xt=urn:btih:abcdef0123456789abcdef0123456789abcdef01")
+        );
+    }
+
+    #[test]
+    fn dissolve_magnet_arg_returns_none_when_only_flags_are_present() {
+        let args = vec![
+            "--max-total-bytes".to_string(),
+            "500M".to_string(),
+            "--no-seed".to_string(),
+            "--download-limit".to_string(),
+            "1M".to_string(),
+        ];
+
+        assert_eq!(find_dissolve_magnet_arg(&args), None);
+    }
 }
