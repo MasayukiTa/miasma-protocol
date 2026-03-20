@@ -106,12 +106,13 @@ $msiPath = Join-Path $InputDir $msiName
 
 Write-Host "Building MSI..."
 
-# WiX v4 build command.
+# WiX build command (x64 target).
 & wix build $wxsPath `
     -o $msiPath `
     -d "Version=$Version" `
     -d "BinDir=$InputDir" `
-    -ext WixToolset.UI.wixext
+    -ext WixToolset.UI.wixext `
+    -arch x64
 
 if ($LASTEXITCODE -ne 0) {
     Write-Error "WiX build failed."

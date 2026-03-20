@@ -143,11 +143,20 @@ if (Test-Path (Join-Path $docsDir "README.txt")) {
 # ── Test 2: PATH availability ───────────────────────────────────────────────
 
 Write-Host "[2] PATH availability"
+# Check the current process PATH first, then the persisted system PATH.
+# A new shell session may be required for process PATH to reflect MSI changes.
 $pathMiasma = Get-Command miasma.exe -ErrorAction SilentlyContinue
 if ($pathMiasma) {
     Pass "miasma.exe found on PATH: $($pathMiasma.Source)"
 } else {
-    Fail "PATH" "miasma.exe not found on PATH (expected after MSI install)"
+    # Fall back: check if the install dir is in the persisted system PATH
+    # (current shell may not reflect changes from MSI install).
+    $systemPath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
+    if ($systemPath -and $systemPath -match [regex]::Escape($InstallDir)) {
+        Pass "miasma install dir registered in system PATH (new shell required to take effect)"
+    } else {
+        Fail "PATH" "miasma.exe not found on PATH and install dir not in system PATH"
+    }
 }
 
 # ── Test 3: Init ─────────────────────────────────────────────────────────────
