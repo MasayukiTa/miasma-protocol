@@ -1,16 +1,22 @@
 <#
 .SYNOPSIS
-    Build the Miasma Windows MSI installer.
+    Build the Miasma Windows installer (MSI and bootstrapper EXE).
 
 .DESCRIPTION
-    Builds the WiX v4 MSI installer from the release binaries in .\dist\.
-    Requires WiX Toolset v4 (install: dotnet tool install --global wix).
+    Builds the WiX v6 MSI installer and optional bootstrapper bundle from
+    release binaries in .\dist\.
+
+    Requires:
+      - WiX Toolset v6 (install: dotnet tool install --global wix)
+      - WiX extensions: WixToolset.UI.wixext, WixToolset.Bal.wixext, WixToolset.Util.wixext
 
     Pipeline:
       1. Verify binaries exist in dist/
       2. Auto-detect version from Cargo metadata
       3. Build MSI with wix build
-      4. Optionally sign the MSI with signtool
+      4. Build bootstrapper EXE (bundles MSI + VC++ Redistributable)
+      5. Generate SHA-256 checksums
+      6. Optionally sign with signtool
 
 .PARAMETER InputDir
     Directory containing release binaries. Default: .\dist
@@ -19,17 +25,27 @@
     Override version string. Auto-detected from Cargo.toml if not provided.
 
 .PARAMETER CertThumbprint
-    Optional Authenticode certificate thumbprint to sign the MSI.
+    Optional Authenticode certificate thumbprint to sign the installer.
+
+.PARAMETER SkipBundle
+    Skip building the bootstrapper EXE (build MSI only).
+
+.PARAMETER VCRedistPath
+    Path to vc_redist.x64.exe. If not provided and not in InputDir, it will
+    be downloaded automatically.
 
 .EXAMPLE
     .\scripts\build-installer.ps1
-    .\scripts\build-installer.ps1 -Version "0.1.0" -CertThumbprint "A1B2..."
+    .\scripts\build-installer.ps1 -Version "0.1.0" -SkipBundle
+    .\scripts\build-installer.ps1 -CertThumbprint "A1B2..."
 #>
 
 param(
     [string]$InputDir = ".\dist",
     [string]$Version = "",
-    [string]$CertThumbprint = ""
+    [string]$CertThumbprint = "",
+    [switch]$SkipBundle,
+    [string]$VCRedistPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -43,13 +59,15 @@ if (-not [System.IO.Path]::IsPathRooted($InputDir)) {
 
 $wix = Get-Command wix -ErrorAction SilentlyContinue
 if (-not $wix) {
-    Write-Host "ERROR: WiX Toolset v4 not found." -ForegroundColor Red
+    Write-Host "ERROR: WiX Toolset v6 not found." -ForegroundColor Red
     Write-Host ""
-    Write-Host "Install WiX v4:" -ForegroundColor Yellow
+    Write-Host "Install WiX v6:" -ForegroundColor Yellow
     Write-Host "  dotnet tool install --global wix"
     Write-Host ""
-    Write-Host "Then install the WiX UI extension:"
+    Write-Host "Then install the required extensions:"
     Write-Host "  wix extension add WixToolset.UI.wixext"
+    Write-Host "  wix extension add WixToolset.Bal.wixext"
+    Write-Host "  wix extension add WixToolset.Util.wixext"
     Write-Host ""
     Write-Host "See: https://wixtoolset.org/docs/intro/"
     exit 1
@@ -88,9 +106,9 @@ Write-Host ""
 # ── Verify installer source files ────────────────────────────────────────────
 
 $wxsPath = Join-Path $REPO "installer\miasma.wxs"
+$bundleWxsPath = Join-Path $REPO "installer\bundle.wxs"
 $readmePath = Join-Path $REPO "installer\README-installed.txt"
 $licensePath = Join-Path $REPO "installer\license.rtf"
-$releaseNotesPath = Join-Path $REPO "RELEASE-NOTES.md"
 
 foreach ($f in @($wxsPath, $readmePath, $licensePath)) {
     if (-not (Test-Path $f)) {
@@ -106,7 +124,6 @@ $msiPath = Join-Path $InputDir $msiName
 
 Write-Host "Building MSI..."
 
-# WiX build command (x64 target).
 & wix build $wxsPath `
     -o $msiPath `
     -d "Version=$Version" `
@@ -115,14 +132,65 @@ Write-Host "Building MSI..."
     -arch x64
 
 if ($LASTEXITCODE -ne 0) {
-    Write-Error "WiX build failed."
+    Write-Error "WiX MSI build failed."
     exit 1
 }
 
 $msiSize = (Get-Item $msiPath).Length / 1MB
-Write-Host ("Created: $msiPath ({0:N1} MB)" -f $msiSize) -ForegroundColor Green
+Write-Host ("Created: $msiName ({0:N1} MB)" -f $msiSize) -ForegroundColor Green
+Write-Host ""
 
-# ── Optional: sign MSI ───────────────────────────────────────────────────────
+# ── Build Bootstrapper EXE ───────────────────────────────────────────────────
+
+if (-not $SkipBundle) {
+    if (-not (Test-Path $bundleWxsPath)) {
+        Write-Warning "Bundle manifest not found at $bundleWxsPath — skipping bootstrapper."
+    } else {
+        # Locate or download VC++ Redistributable.
+        if (-not $VCRedistPath) {
+            $VCRedistPath = Join-Path $InputDir "vc_redist.x64.exe"
+        }
+        if (-not (Test-Path $VCRedistPath)) {
+            Write-Host "Downloading VC++ 2015-2022 Redistributable (x64)..."
+            $downloadUrl = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+            Invoke-WebRequest -Uri $downloadUrl -OutFile $VCRedistPath -UseBasicParsing
+            if (-not (Test-Path $VCRedistPath)) {
+                Write-Warning "Failed to download VC++ Redistributable. Skipping bootstrapper."
+                $SkipBundle = $true
+            } else {
+                $vcSize = (Get-Item $VCRedistPath).Length / 1MB
+                Write-Host ("Downloaded: vc_redist.x64.exe ({0:N1} MB)" -f $vcSize)
+            }
+        }
+
+        if (-not $SkipBundle) {
+            $bundleName = "MiasmaSetup-$Version-x64.exe"
+            $bundlePath = Join-Path $InputDir $bundleName
+
+            Write-Host "Building bootstrapper EXE..."
+
+            & wix build $bundleWxsPath `
+                -o $bundlePath `
+                -d "Version=$Version" `
+                -d "MsiPath=$msiPath" `
+                -d "VCRedistPath=$VCRedistPath" `
+                -ext WixToolset.Bal.wixext `
+                -ext WixToolset.Util.wixext `
+                -arch x64
+
+            if ($LASTEXITCODE -ne 0) {
+                Write-Error "WiX Bundle build failed."
+                exit 1
+            }
+
+            $bundleSize = (Get-Item $bundlePath).Length / 1MB
+            Write-Host ("Created: $bundleName ({0:N1} MB)" -f $bundleSize) -ForegroundColor Green
+            Write-Host ""
+        }
+    }
+}
+
+# ── Optional: sign installer artifacts ────────────────────────────────────────
 
 if ($CertThumbprint) {
     $signtool = $null
@@ -136,29 +204,52 @@ if ($CertThumbprint) {
     }
 
     if ($signtool) {
-        Write-Host "Signing MSI..."
-        & $signtool sign /fd SHA256 /sha1 $CertThumbprint /tr http://timestamp.digicert.com /td SHA256 $msiPath
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "MSI signed successfully." -ForegroundColor Green
-        } else {
-            Write-Warning "MSI signing failed. Unsigned MSI still available."
+        $toSign = @($msiPath)
+        if (-not $SkipBundle -and (Test-Path $bundlePath)) { $toSign += $bundlePath }
+
+        foreach ($artifact in $toSign) {
+            $leaf = Split-Path -Leaf $artifact
+            Write-Host "Signing $leaf..."
+            & $signtool sign /fd SHA256 /sha1 $CertThumbprint /tr http://timestamp.digicert.com /td SHA256 $artifact
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "  Signed." -ForegroundColor Green
+            } else {
+                Write-Warning "  Signing failed for $leaf. Unsigned artifact still available."
+            }
         }
     } else {
-        Write-Warning "signtool.exe not found. MSI is unsigned."
+        Write-Warning "signtool.exe not found. Artifacts are unsigned."
     }
 }
 
-# ── Checksum ─────────────────────────────────────────────────────────────────
+# ── Checksums ─────────────────────────────────────────────────────────────────
 
-$hash = (Get-FileHash $msiPath -Algorithm SHA256).Hash
-$checksumFile = "$msiPath.sha256"
-"$hash  $msiName" | Set-Content $checksumFile
-Write-Host "SHA-256: $hash"
-Write-Host "Written: $checksumFile"
+Write-Host "Generating checksums..."
+
+$artifacts = @($msiPath)
+if (-not $SkipBundle -and (Test-Path $bundlePath)) { $artifacts += $bundlePath }
+
+foreach ($artifact in $artifacts) {
+    $leaf = Split-Path -Leaf $artifact
+    $hash = (Get-FileHash $artifact -Algorithm SHA256).Hash
+    $checksumFile = "$artifact.sha256"
+    "$hash  $leaf" | Set-Content $checksumFile
+    Write-Host "  $leaf  SHA-256: $hash"
+}
+
+# ── Summary ──────────────────────────────────────────────────────────────────
 
 Write-Host ""
 Write-Host "=== Installer Build Complete ===" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "Install (interactive):  msiexec /i $msiPath"
-Write-Host "Install (silent):       msiexec /i $msiPath /qn"
-Write-Host "Uninstall:              msiexec /x $msiPath /qn"
+Write-Host "Artifacts in $InputDir :"
+
+Write-Host "  MSI (advanced):       $msiName"
+if (-not $SkipBundle -and (Test-Path $bundlePath)) {
+    Write-Host "  Setup EXE (primary):  $bundleName  [recommended for distribution]"
+}
+Write-Host ""
+Write-Host "Install (Setup EXE):    .\$bundleName"
+Write-Host "Install (MSI only):     msiexec /i $msiName"
+Write-Host "Silent install (MSI):   msiexec /i $msiName /qn"
+Write-Host "Uninstall (MSI):        msiexec /x $msiName /qn"

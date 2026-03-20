@@ -1,5 +1,7 @@
 ﻿
 /target
+/dist/
+/.wix/
 Cargo.lock
 *.pdb
 *.md
