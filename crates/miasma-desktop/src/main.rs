@@ -39,11 +39,15 @@ fn main() -> eframe::Result<()> {
             .init();
     }
 
+    // Stamp version for future upgrade detection.
+    miasma_core::config::stamp_version(&data_dir, env!("CARGO_PKG_VERSION"));
+
+    let version = env!("CARGO_PKG_VERSION");
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([960.0, 680.0])
             .with_min_inner_size([600.0, 400.0])
-            .with_title("Miasma"),
+            .with_title(format!("Miasma v{version}")),
         ..Default::default()
     };
 

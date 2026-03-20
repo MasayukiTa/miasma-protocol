@@ -368,8 +368,9 @@ fn auto_launch_daemon(
 
     let miasma_exe = find_miasma_exe()
         .ok_or_else(|| anyhow::anyhow!(
-            "Cannot find miasma.exe. Place it next to miasma-desktop.exe \
-             or add it to PATH."
+            "Cannot find miasma.exe.\n\
+             If installed: check that the installation is intact (reinstall if needed).\n\
+             If portable: place miasma.exe next to miasma-desktop.exe."
         ))?;
 
     info!("Auto-launching daemon: {} daemon", miasma_exe.display());
@@ -495,7 +496,15 @@ async fn do_wipe(data_dir: &Path) -> WorkerResult {
 fn daemon_error(e: &anyhow::Error) -> String {
     let msg = format!("{e:#}");
     if is_daemon_down(&msg) {
-        "Daemon not running. Click 'Start Daemon' or run: miasma daemon".to_string()
+        "Daemon not running. Click 'Start Daemon' above to restart it.".to_string()
+    } else if msg.contains("Cannot find miasma.exe") {
+        msg // Already user-friendly from find_miasma_exe.
+    } else if msg.contains("spawn daemon") {
+        format!(
+            "Could not start the daemon process.\n\
+             Check that miasma.exe is not blocked by antivirus or SmartScreen.\n\
+             Detail: {msg}"
+        )
     } else {
         msg
     }

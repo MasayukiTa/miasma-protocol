@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WiX v4 installer manifest for Miasma Protocol (Windows x64).
+
+  Build prerequisites:
+    - WiX Toolset v4: https://wixtoolset.org/docs/intro/
+    - Install via: dotnet tool install --global wix
+
+  Build:
+    wix build installer\miasma.wxs -o dist\miasma-0.1.0-windows-x64.msi ^
+        -d Version=0.1.0 ^
+        -d BinDir=dist
+
+  The MSI:
+    - Installs to Program Files\Miasma Protocol
+    - Creates Start Menu shortcuts (Desktop GUI + CLI prompt)
+    - Preserves user data in %APPDATA%\miasma on uninstall
+    - Supports silent install: msiexec /i miasma.msi /qn
+    - Supports per-machine install (requires elevation)
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <!-- Version is injected at build time via -d Version=x.y.z -->
+  <?define ProductVersion = "!(bind.property.Version)" ?>
+
+  <Package
+    Name="Miasma Protocol"
+    Manufacturer="Miasma Contributors"
+    Version="$(var.Version)"
+    UpgradeCode="E8A3F0C1-7B2D-4E56-9A1F-3C8D5E7F0B12"
+    Scope="perMachine"
+    Language="1033"
+    Codepage="1252">
+
+    <SummaryInformation
+      Description="Miasma Protocol — content-addressed encrypted storage with P2P distribution"
+      Manufacturer="Miasma Contributors" />
+
+    <!-- Major upgrade: remove older versions automatically. -->
+    <MajorUpgrade
+      DowngradeErrorMessage="A newer version of Miasma is already installed."
+      Schedule="afterInstallInitialize" />
+
+    <!-- Single feature: all binaries + docs. -->
+    <Feature Id="MainFeature" Title="Miasma Protocol" Level="1">
+      <ComponentGroupRef Id="Binaries" />
+      <ComponentGroupRef Id="Docs" />
+      <ComponentGroupRef Id="Shortcuts" />
+      <ComponentRef Id="PathEnvComponent" />
+    </Feature>
+
+    <!-- UI: minimal built-in dialogs (license + install dir). -->
+    <WixVariable Id="WixUILicenseRtf" Value="installer\license.rtf" />
+    <UIRef Id="WixUI_InstallDir" />
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+
+    <!-- ── Directory layout ──────────────────────────────────────── -->
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Miasma Protocol">
+        <Directory Id="DocsFolder" Name="docs" />
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="MiasmaMenuFolder" Name="Miasma Protocol" />
+    </StandardDirectory>
+
+    <!-- ── Binaries ──────────────────────────────────────────────── -->
+
+    <ComponentGroup Id="Binaries" Directory="INSTALLFOLDER">
+      <Component Id="MiasmaDesktopExe" Guid="A1B2C3D4-0001-4000-8000-000000000001">
+        <File Id="miasma_desktop.exe"
+              Source="$(var.BinDir)\miasma-desktop.exe"
+              KeyPath="yes" />
+      </Component>
+
+      <Component Id="MiasmaCliExe" Guid="A1B2C3D4-0001-4000-8000-000000000002">
+        <File Id="miasma.exe"
+              Source="$(var.BinDir)\miasma.exe"
+              KeyPath="yes" />
+      </Component>
+
+      <Component Id="MiasmaBridgeExe" Guid="A1B2C3D4-0001-4000-8000-000000000003">
+        <File Id="miasma_bridge.exe"
+              Source="$(var.BinDir)\miasma-bridge.exe"
+              KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- ── Documentation ─────────────────────────────────────────── -->
+
+    <ComponentGroup Id="Docs" Directory="DocsFolder">
+      <Component Id="ReadmeTxt" Guid="A1B2C3D4-0001-4000-8000-000000000010">
+        <File Id="README.txt"
+              Source="installer\README-installed.txt"
+              KeyPath="yes" />
+      </Component>
+
+      <Component Id="ReleaseNotes" Guid="A1B2C3D4-0001-4000-8000-000000000011">
+        <File Id="RELEASE_NOTES.md"
+              Source="RELEASE-NOTES.md"
+              KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- ── Start Menu shortcuts ──────────────────────────────────── -->
+
+    <ComponentGroup Id="Shortcuts" Directory="MiasmaMenuFolder">
+      <Component Id="DesktopShortcut" Guid="A1B2C3D4-0001-4000-8000-000000000020">
+        <Shortcut Id="MiasmaDesktopShortcut"
+                  Name="Miasma Desktop"
+                  Description="Miasma Protocol desktop application"
+                  Target="[INSTALLFOLDER]miasma-desktop.exe"
+                  WorkingDirectory="INSTALLFOLDER" />
+        <RemoveFolder Id="RemoveMiasmaMenuFolder" On="uninstall" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\Miasma Protocol"
+                       Name="MenuInstalled"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+
+      <Component Id="CliShortcut" Guid="A1B2C3D4-0001-4000-8000-000000000021">
+        <Shortcut Id="MiasmaCliShortcut"
+                  Name="Miasma CLI"
+                  Description="Open a command prompt with Miasma on PATH"
+                  Target="[SystemFolder]cmd.exe"
+                  Arguments='/k "set PATH=[INSTALLFOLDER];%PATH% &amp; echo Miasma CLI ready. Type: miasma --help"'
+                  WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\Miasma Protocol"
+                       Name="CliMenuInstalled"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- ── PATH environment variable ────────────────────────────── -->
+
+    <Component Id="PathEnvComponent" Directory="INSTALLFOLDER"
+               Guid="A1B2C3D4-0001-4000-8000-000000000030">
+      <Environment Id="MiasmaPath"
+                   Name="PATH"
+                   Value="[INSTALLFOLDER]"
+                   Permanent="no"
+                   Part="last"
+                   Action="set"
+                   System="yes" />
+      <RegistryValue Root="HKLM"
+                     Key="Software\Miasma Protocol"
+                     Name="PathSet"
+                     Type="integer"
+                     Value="1"
+                     KeyPath="yes" />
+    </Component>
+
+  </Package>
+</Wix>

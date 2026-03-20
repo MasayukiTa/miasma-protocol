@@ -129,3 +129,20 @@ pub fn default_data_dir() -> PathBuf {
         .map(|d| d.data_local_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from(".miasma"))
 }
+
+/// Stamp the data directory with the running binary version.
+///
+/// Written on every startup to support future upgrade detection.
+/// The file is a simple text file containing the version string.
+pub fn stamp_version(data_dir: &Path, version: &str) {
+    let path = data_dir.join("version");
+    let _ = std::fs::write(path, version);
+}
+
+/// Read the last-stamped version from the data directory.
+pub fn read_stamped_version(data_dir: &Path) -> Option<String> {
+    std::fs::read_to_string(data_dir.join("version"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
