@@ -111,6 +111,33 @@ pub struct DaemonStatus {
     /// Routing overlay: current PoW difficulty in bits.
     #[serde(default)]
     pub routing_pow_difficulty: u8,
+
+    // ── Phase 4b: credential / descriptor / path selection ─────────────
+
+    /// Current trust epoch number.
+    #[serde(default)]
+    pub credential_epoch: u64,
+    /// Number of credentials held in the local wallet.
+    #[serde(default)]
+    pub credential_held: usize,
+    /// Number of known credential issuers.
+    #[serde(default)]
+    pub credential_issuers: usize,
+    /// Total peer descriptors stored.
+    #[serde(default)]
+    pub descriptor_total: usize,
+    /// Relay-capable descriptors stored.
+    #[serde(default)]
+    pub descriptor_relays: usize,
+    /// Number of relay descriptors available for path selection.
+    #[serde(default)]
+    pub path_available_relays: usize,
+    /// Number of unique relay IP prefixes (diversity).
+    #[serde(default)]
+    pub path_relay_prefix_diversity: usize,
+    /// Default anonymity policy name.
+    #[serde(default)]
+    pub anonymity_policy: String,
 }
 
 /// Per-transport readiness info for IPC/CLI display.

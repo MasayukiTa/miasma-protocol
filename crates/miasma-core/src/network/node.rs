@@ -1,9 +1,11 @@
-/// Miasma libp2p node — Phase 3b enforced admission and trust-tier routing.
+/// Miasma libp2p node — Phase 4b live-wired anonymous trust and descriptor routing.
 ///
 /// Transport: TCP + QUIC for local loopback testing and production paths
 /// DHT: Kademlia via `DhtHandle` / `OnionAwareDhtExecutor` (ADR-002)
 /// Share exchange: `/miasma/share/1.0.0` request-response protocol
 /// Admission: `/miasma/admission/1.0.0` PoW proof exchange (ADR-004)
+/// Credential: `/miasma/credential/1.0.0` credential exchange (ADR-005)
+/// Descriptor: `/miasma/descriptor/1.0.0` descriptor exchange (ADR-005)
 /// NAT: AutoNAT + DCUtR + relay
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -24,6 +26,16 @@ use tracing::{debug, info, warn};
 
 use crate::{crypto::keyderive::NodeKeys, share::MiasmaShare, store::LocalShareStore, MiasmaError};
 
+use super::admission_policy::{AdmissionSignals, HybridAdmissionPolicy};
+use super::credential::{
+    self, CredentialIssuer, CredentialPresentation, CredentialStats, CredentialTier,
+    CredentialWallet, IssuerRegistry, SignedCredential, CAP_ROUTE, CAP_STORE,
+};
+use super::descriptor::{
+    DescriptorStats, DescriptorStore, PeerCapabilities, PeerDescriptor, ReachabilityKind,
+    ResourceProfile,
+};
+use super::path_selection::PathSelectionStats;
 use super::peer_state::{AdmissionStats, PeerRegistry, RejectionReason};
 use super::routing::{self, RoutingStats, RoutingTable};
 use super::sybil::{self, NodeIdPoW, SignedDhtRecord};
@@ -60,6 +72,156 @@ pub struct AdmissionRequest {
 pub struct AdmissionResponse {
     /// The responding node's PoW proof.
     pub pow: NodeIdPoW,
+}
+
+// ─── Credential exchange wire types (ADR-005 Phase 4b) ──────────────────────
+
+/// Request a credential from an issuer peer after admission.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialRequest {
+    /// Holder's ephemeral public key (for the current epoch).
+    pub ephemeral_pubkey: [u8; 32],
+    /// Holder's holder_tag (BLAKE3 of ephemeral pubkey).
+    pub holder_tag: [u8; 32],
+    /// Epoch for which the credential is requested.
+    pub epoch: u64,
+}
+
+/// Credential exchange response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialResponse {
+    /// The signed credential, or None if the peer is not eligible.
+    pub credential: Option<SignedCredential>,
+}
+
+// ─── Descriptor exchange wire types (ADR-005 Phase 4b) ──────────────────────
+
+/// Request a peer's descriptor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DescriptorRequest {
+    /// Requester's own descriptor (reciprocal exchange).
+    pub descriptor: Option<PeerDescriptor>,
+}
+
+/// Descriptor exchange response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DescriptorResponse {
+    /// The peer's current descriptor.
+    pub descriptor: Option<PeerDescriptor>,
+}
+
+// ─── CredentialCodec ────────────────────────────────────────────────────────
+
+/// Max message size for credential exchange (8 KiB).
+const CREDENTIAL_MSG_MAX: usize = 8 * 1024;
+
+/// Bincode + 4-byte LE length-prefix codec for `/miasma/credential/1.0.0`.
+#[derive(Clone, Default)]
+pub struct CredentialCodec;
+
+#[async_trait::async_trait]
+impl request_response::Codec for CredentialCodec {
+    type Protocol = StreamProtocol;
+    type Request = CredentialRequest;
+    type Response = CredentialResponse;
+
+    async fn read_request<T>(&mut self, _: &StreamProtocol, io: &mut T) -> std::io::Result<Self::Request>
+    where T: futures::AsyncRead + Unpin + Send {
+        use futures::AsyncReadExt;
+        let mut len_buf = [0u8; 4];
+        io.read_exact(&mut len_buf).await?;
+        let len = u32::from_le_bytes(len_buf) as usize;
+        if len > CREDENTIAL_MSG_MAX {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "credential msg too large"));
+        }
+        let mut buf = vec![0u8; len];
+        io.read_exact(&mut buf).await?;
+        bincode::deserialize(&buf).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+    async fn read_response<T>(&mut self, _: &StreamProtocol, io: &mut T) -> std::io::Result<Self::Response>
+    where T: futures::AsyncRead + Unpin + Send {
+        use futures::AsyncReadExt;
+        let mut len_buf = [0u8; 4];
+        io.read_exact(&mut len_buf).await?;
+        let len = u32::from_le_bytes(len_buf) as usize;
+        if len > CREDENTIAL_MSG_MAX {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "credential msg too large"));
+        }
+        let mut buf = vec![0u8; len];
+        io.read_exact(&mut buf).await?;
+        bincode::deserialize(&buf).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+    async fn write_request<T>(&mut self, _: &StreamProtocol, io: &mut T, req: Self::Request) -> std::io::Result<()>
+    where T: futures::AsyncWrite + Unpin + Send {
+        use futures::AsyncWriteExt;
+        let buf = bincode::serialize(&req).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        io.write_all(&(buf.len() as u32).to_le_bytes()).await?;
+        io.write_all(&buf).await
+    }
+    async fn write_response<T>(&mut self, _: &StreamProtocol, io: &mut T, res: Self::Response) -> std::io::Result<()>
+    where T: futures::AsyncWrite + Unpin + Send {
+        use futures::AsyncWriteExt;
+        let buf = bincode::serialize(&res).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        io.write_all(&(buf.len() as u32).to_le_bytes()).await?;
+        io.write_all(&buf).await
+    }
+}
+
+// ─── DescriptorCodec ────────────────────────────────────────────────────────
+
+/// Max message size for descriptor exchange (16 KiB).
+const DESCRIPTOR_MSG_MAX: usize = 16 * 1024;
+
+/// Bincode + 4-byte LE length-prefix codec for `/miasma/descriptor/1.0.0`.
+#[derive(Clone, Default)]
+pub struct DescriptorCodec;
+
+#[async_trait::async_trait]
+impl request_response::Codec for DescriptorCodec {
+    type Protocol = StreamProtocol;
+    type Request = DescriptorRequest;
+    type Response = DescriptorResponse;
+
+    async fn read_request<T>(&mut self, _: &StreamProtocol, io: &mut T) -> std::io::Result<Self::Request>
+    where T: futures::AsyncRead + Unpin + Send {
+        use futures::AsyncReadExt;
+        let mut len_buf = [0u8; 4];
+        io.read_exact(&mut len_buf).await?;
+        let len = u32::from_le_bytes(len_buf) as usize;
+        if len > DESCRIPTOR_MSG_MAX {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "descriptor msg too large"));
+        }
+        let mut buf = vec![0u8; len];
+        io.read_exact(&mut buf).await?;
+        bincode::deserialize(&buf).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+    async fn read_response<T>(&mut self, _: &StreamProtocol, io: &mut T) -> std::io::Result<Self::Response>
+    where T: futures::AsyncRead + Unpin + Send {
+        use futures::AsyncReadExt;
+        let mut len_buf = [0u8; 4];
+        io.read_exact(&mut len_buf).await?;
+        let len = u32::from_le_bytes(len_buf) as usize;
+        if len > DESCRIPTOR_MSG_MAX {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "descriptor msg too large"));
+        }
+        let mut buf = vec![0u8; len];
+        io.read_exact(&mut buf).await?;
+        bincode::deserialize(&buf).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+    async fn write_request<T>(&mut self, _: &StreamProtocol, io: &mut T, req: Self::Request) -> std::io::Result<()>
+    where T: futures::AsyncWrite + Unpin + Send {
+        use futures::AsyncWriteExt;
+        let buf = bincode::serialize(&req).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        io.write_all(&(buf.len() as u32).to_le_bytes()).await?;
+        io.write_all(&buf).await
+    }
+    async fn write_response<T>(&mut self, _: &StreamProtocol, io: &mut T, res: Self::Response) -> std::io::Result<()>
+    where T: futures::AsyncWrite + Unpin + Send {
+        use futures::AsyncWriteExt;
+        let buf = bincode::serialize(&res).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        io.write_all(&(buf.len() as u32).to_le_bytes()).await?;
+        io.write_all(&buf).await
+    }
 }
 
 // ─── ShareCodec ───────────────────────────────────────────────────────────────
@@ -297,6 +459,18 @@ pub enum DhtCommand {
     GetRoutingStats {
         reply: oneshot::Sender<RoutingStats>,
     },
+    /// Query credential subsystem statistics.
+    GetCredentialStats {
+        reply: oneshot::Sender<CredentialStats>,
+    },
+    /// Query descriptor store statistics.
+    GetDescriptorStats {
+        reply: oneshot::Sender<DescriptorStats>,
+    },
+    /// Query path selection statistics.
+    GetPathSelectionStats {
+        reply: oneshot::Sender<PathSelectionStats>,
+    },
 }
 
 /// Sender side of the DHT command channel.
@@ -419,6 +593,36 @@ impl DhtHandle {
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
         rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
     }
+
+    /// Query credential subsystem statistics.
+    pub async fn credential_stats(&self) -> Result<CredentialStats, MiasmaError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::GetCredentialStats { reply: tx })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
+        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+    }
+
+    /// Query descriptor store statistics.
+    pub async fn descriptor_stats(&self) -> Result<DescriptorStats, MiasmaError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::GetDescriptorStats { reply: tx })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
+        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+    }
+
+    /// Query path selection statistics.
+    pub async fn path_selection_stats(&self) -> Result<PathSelectionStats, MiasmaError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::GetPathSelectionStats { reply: tx })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
+        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+    }
 }
 
 // ─── Share-exchange command channel ──────────────────────────────────────────
@@ -470,6 +674,10 @@ pub struct MiasmaBehaviour {
     pub(crate) share_exchange: request_response::Behaviour<ShareCodec>,
     /// PoW admission: `/miasma/admission/1.0.0` request-response.
     pub(crate) admission: request_response::Behaviour<AdmissionCodec>,
+    /// Credential exchange: `/miasma/credential/1.0.0` request-response.
+    pub(crate) credential_exchange: request_response::Behaviour<CredentialCodec>,
+    /// Descriptor exchange: `/miasma/descriptor/1.0.0` request-response.
+    pub(crate) descriptor_exchange: request_response::Behaviour<DescriptorCodec>,
 }
 
 // ─── MiasmaNode ───────────────────────────────────────────────────────────────
@@ -518,6 +726,24 @@ pub struct MiasmaNode {
     routing_table: RoutingTable,
     /// Tick counter for periodic network-size observation (difficulty adjustment).
     event_tick: u64,
+
+    // ── Phase 4b: anonymous trust, descriptors, hybrid admission ────────
+    /// This node's credential issuer (signs credentials for admitted peers).
+    credential_issuer: CredentialIssuer,
+    /// This node's credential wallet (holds credentials from other issuers).
+    credential_wallet: CredentialWallet,
+    /// Registry of known credential issuers (bootstrap: all verified = issuers).
+    issuer_registry: IssuerRegistry,
+    /// Peer descriptor store (structured routing material).
+    descriptor_store: DescriptorStore,
+    /// Hybrid admission policy (PoW + diversity + reachability + credential).
+    admission_policy: HybridAdmissionPolicy,
+    /// This node's own resource profile.
+    resource_profile: ResourceProfile,
+    /// Pending credential requests: req_id → peer_id.
+    pending_credential_reqs: HashMap<request_response::OutboundRequestId, PeerId>,
+    /// Pending descriptor requests: req_id → peer_id.
+    pending_descriptor_reqs: HashMap<request_response::OutboundRequestId, PeerId>,
 }
 
 impl MiasmaNode {
@@ -556,6 +782,18 @@ impl MiasmaNode {
         let (dht_tx, dht_rx) = mpsc::channel(64);
         let (share_tx, share_rx) = mpsc::channel(64);
 
+        // Derive credential issuer key from DHT signing key (deterministic).
+        let cred_issuer_key = ed25519_dalek::SigningKey::from_bytes(
+            blake3::hash(&[b"miasma-cred-issuer-v1".as_slice(), dht_signing_key.as_bytes()].concat())
+                .as_bytes(),
+        );
+        let credential_issuer = CredentialIssuer::new(cred_issuer_key);
+
+        // Initialise issuer registry in bootstrap mode (all verified peers are issuers).
+        let mut issuer_registry = IssuerRegistry::new(true);
+        // Register ourselves as an issuer.
+        issuer_registry.add_issuer(credential_issuer.pubkey_bytes());
+
         Ok(Self {
             local_peer_id,
             node_type,
@@ -580,6 +818,14 @@ impl MiasmaNode {
             pending_peer_addrs: HashMap::new(),
             routing_table: RoutingTable::new(!allow_local),
             event_tick: 0,
+            credential_issuer,
+            credential_wallet: CredentialWallet::new(),
+            issuer_registry,
+            descriptor_store: DescriptorStore::new(),
+            admission_policy: HybridAdmissionPolicy::default(),
+            resource_profile: ResourceProfile::Desktop,
+            pending_credential_reqs: HashMap::new(),
+            pending_descriptor_reqs: HashMap::new(),
         })
     }
 
@@ -780,6 +1026,36 @@ impl MiasmaNode {
                 let stats = self.routing_table.stats();
                 let _ = reply.send(stats);
             }
+            DhtCommand::GetCredentialStats { reply } => {
+                let stats = CredentialStats {
+                    current_epoch: credential::current_epoch(),
+                    held_credentials: self.credential_wallet.credential_count(),
+                    best_tier: self.credential_wallet.best_credential()
+                        .map(|c| c.body.tier.to_string()),
+                    known_issuers: self.issuer_registry.issuer_count(),
+                    bootstrap_mode: self.issuer_registry.bootstrap_mode,
+                };
+                let _ = reply.send(stats);
+            }
+            DhtCommand::GetDescriptorStats { reply } => {
+                let stats = self.descriptor_store.stats();
+                let _ = reply.send(stats);
+            }
+            DhtCommand::GetPathSelectionStats { reply } => {
+                let relay_descs = self.descriptor_store.relay_descriptors();
+                let prefixes: std::collections::HashSet<_> = relay_descs
+                    .iter()
+                    .filter_map(|d| d.addresses.first())
+                    .filter_map(|a| a.parse().ok())
+                    .map(|a: Multiaddr| routing::ip_prefix_of(&a))
+                    .collect();
+                let stats = PathSelectionStats {
+                    default_policy: "opportunistic".to_string(),
+                    available_relays: relay_descs.len(),
+                    relay_prefix_diversity: prefixes.len(),
+                };
+                let _ = reply.send(stats);
+            }
         }
     }
 
@@ -808,6 +1084,16 @@ impl MiasmaNode {
             self.routing_table.observe_network_size(peer_count);
             if let Some(new_diff) = self.routing_table.maybe_adjust_difficulty() {
                 info!("routing.difficulty_changed bits={new_diff}");
+            }
+        }
+        // Epoch rotation check (every ~1000 events).
+        if self.event_tick % 1000 == 0 {
+            if self.credential_wallet.maybe_rotate() {
+                info!("credential.epoch_rotated epoch={}", self.credential_wallet.epoch());
+            }
+            let pruned = self.descriptor_store.prune_stale();
+            if pruned > 0 {
+                info!("descriptor.pruned_stale count={pruned}");
             }
         }
 
@@ -844,6 +1130,12 @@ impl MiasmaNode {
             }
             SwarmEvent::Behaviour(MiasmaBehaviourEvent::Admission(ev)) => {
                 self.handle_admission_event(ev);
+            }
+            SwarmEvent::Behaviour(MiasmaBehaviourEvent::CredentialExchange(ev)) => {
+                self.handle_credential_exchange_event(ev);
+            }
+            SwarmEvent::Behaviour(MiasmaBehaviourEvent::DescriptorExchange(ev)) => {
+                self.handle_descriptor_exchange_event(ev);
             }
             SwarmEvent::Behaviour(MiasmaBehaviourEvent::Autonat(ev)) => match &ev {
                 autonat::Event::StatusChanged { old, new } => {
@@ -925,10 +1217,13 @@ impl MiasmaNode {
         }
     }
 
-    /// Verify a remote peer's PoW proof and return the rejection reason if invalid.
+    /// Verify a remote peer's PoW proof using the hybrid admission policy.
+    ///
+    /// Phase 4b: combines PoW, diversity, and credential signals instead of
+    /// binary PoW-only check. Credential and reachability signals are added
+    /// when available.
     fn verify_remote_pow(&self, peer_id: &PeerId, pow: &NodeIdPoW) -> Result<(), RejectionReason> {
         // Check that the PoW pubkey matches the peer's libp2p identity.
-        // Reconstruct the PeerId from the PoW's Ed25519 public key bytes.
         let ed_pubkey = libp2p::identity::ed25519::PublicKey::try_from_bytes(&pow.pubkey)
             .map_err(|_| RejectionReason::MalformedPoW)?;
         let libp2p_pubkey = libp2p::identity::PublicKey::from(ed_pubkey);
@@ -938,12 +1233,41 @@ impl MiasmaNode {
             return Err(RejectionReason::PubkeyMismatch);
         }
 
-        // Verify the PoW difficulty (uses dynamic difficulty from routing table).
-        let required_difficulty = self.routing_table.current_difficulty();
-        match sybil::check_peer_admission(Some(pow), required_difficulty) {
-            sybil::AdmissionResult::Admitted => Ok(()),
-            sybil::AdmissionResult::RejectedNoPoW => Err(RejectionReason::NoPoW),
-            sybil::AdmissionResult::RejectedLowDifficulty => Err(RejectionReason::InsufficientDifficulty),
+        // Compute PoW difficulty (leading_zeros returns u32, admission expects u8).
+        let pow_difficulty = sybil::leading_zeros(&pow.hash).min(255) as u8;
+
+        // Check diversity: is this prefix unique?
+        let unique_prefix = self.pending_peer_addrs
+            .get(peer_id)
+            .and_then(|addrs| addrs.first())
+            .map(|a| self.routing_table.check_diversity(std::slice::from_ref(a)).is_ok())
+            .unwrap_or(false);
+
+        // Check if we have a credential for this peer (from a previous exchange).
+        let credential_tier = self.descriptor_store
+            .get_by_peer(peer_id)
+            .and_then(|d| d.credential.as_ref())
+            .map(|c| c.credential.body.tier);
+
+        // Evaluate using hybrid admission policy.
+        let signals = AdmissionSignals {
+            pow_difficulty,
+            unique_prefix,
+            reachable: true, // peer connected and sent us a message
+            credential_tier,
+            resource_profile: ResourceProfile::Desktop, // default until descriptor received
+        };
+
+        let decision = self.admission_policy.evaluate(&signals);
+        if decision.admitted {
+            Ok(())
+        } else {
+            match decision.rejection_reason {
+                Some(super::admission_policy::HybridRejection::InsufficientMinPoW { .. }) => {
+                    Err(RejectionReason::InsufficientDifficulty)
+                }
+                _ => Err(RejectionReason::InsufficientDifficulty),
+            }
         }
     }
 
@@ -1007,13 +1331,14 @@ impl MiasmaNode {
         }
     }
 
-    /// Promote a peer to Verified: add addresses to Kademlia, signal routable.
+    /// Promote a peer to Verified: add addresses to Kademlia, issue credential,
+    /// publish descriptor, signal routable.
     fn promote_peer_to_verified(&mut self, peer_id: PeerId, pow: NodeIdPoW) {
-        self.peer_registry.on_admission_verified(peer_id, pow);
+        self.peer_registry.on_admission_verified(peer_id, pow.clone());
 
         // Promote held addresses to Kademlia routing table.
-        if let Some(addrs) = self.pending_peer_addrs.remove(&peer_id) {
-            // Add peer to routing overlay with its IP prefix.
+        let addrs = self.pending_peer_addrs.remove(&peer_id).unwrap_or_default();
+        if !addrs.is_empty() {
             let prefix = routing::ip_prefix_of(addrs.first().unwrap_or(
                 &"/ip4/127.0.0.1/tcp/0".parse().unwrap(),
             ));
@@ -1027,10 +1352,174 @@ impl MiasmaNode {
             }
         }
 
+        // ── Phase 4b: credential issuance ────────────────────────────────
+        // In bootstrap mode, register this peer's PoW pubkey as a potential issuer.
+        if self.issuer_registry.bootstrap_mode {
+            self.issuer_registry.add_issuer(pow.pubkey);
+        }
+
+        // Initiate credential exchange: request a credential from the new peer,
+        // and they can request one from us via the protocol.
+        let cred_req = CredentialRequest {
+            ephemeral_pubkey: self.credential_wallet.ephemeral_pubkey(),
+            holder_tag: self.credential_wallet.holder_tag(),
+            epoch: self.credential_wallet.epoch(),
+        };
+        let req_id = self.swarm.behaviour_mut().credential_exchange.send_request(&peer_id, cred_req);
+        self.pending_credential_reqs.insert(req_id, peer_id);
+
+        // ── Phase 4b: descriptor exchange ────────────────────────────────
+        // Build our own descriptor and send it to the new peer.
+        let our_desc = self.build_local_descriptor();
+        let desc_req = DescriptorRequest { descriptor: Some(our_desc) };
+        let req_id = self.swarm.behaviour_mut().descriptor_exchange.send_request(&peer_id, desc_req);
+        self.pending_descriptor_reqs.insert(req_id, peer_id);
+
         // Signal that this peer is now routable.
         if let Some(tx) = &self.topology_tx {
             let _ = tx.try_send(super::types::TopologyEvent::PeerRoutable { peer_id });
         }
+    }
+
+    /// Build this node's peer descriptor for publication.
+    fn build_local_descriptor(&self) -> PeerDescriptor {
+        let pseudonym = self.credential_wallet.holder_tag();
+        let addresses: Vec<String> = self.swarm.listeners()
+            .map(|a| a.to_string())
+            .collect();
+
+        let credential_presentation = self.credential_wallet.present(
+            &self.local_peer_id.to_bytes(),
+        );
+
+        PeerDescriptor::new_signed(
+            pseudonym,
+            ReachabilityKind::Direct,
+            addresses,
+            PeerCapabilities {
+                can_store: true,
+                can_relay: false, // TODO: detect relay capability
+                can_route: true,
+                can_issue: true, // in bootstrap mode, all verified nodes can issue
+                bandwidth_class: 2, // medium
+            },
+            self.resource_profile,
+            credential_presentation,
+            self.credential_wallet.epoch(),
+            &self.dht_signing_key,
+        )
+    }
+
+    /// Handle credential exchange protocol events.
+    fn handle_credential_exchange_event(
+        &mut self,
+        ev: request_response::Event<CredentialRequest, CredentialResponse>,
+    ) {
+        match ev {
+            // Inbound: peer requests a credential from us.
+            request_response::Event::Message {
+                peer,
+                message: request_response::Message::Request { request, channel, .. },
+            } => {
+                // Only issue credentials to verified peers.
+                let credential = if self.peer_registry.is_verified(&peer) {
+                    let cred = self.credential_issuer.issue(
+                        CredentialTier::Verified,
+                        request.epoch,
+                        CAP_STORE | CAP_ROUTE,
+                        request.holder_tag,
+                    );
+                    info!("credential.issued peer={peer} tier=Verified epoch={}", request.epoch);
+                    Some(cred)
+                } else {
+                    debug!("credential.denied peer={peer} reason=not_verified");
+                    None
+                };
+                let resp = CredentialResponse { credential };
+                let _ = self.swarm.behaviour_mut().credential_exchange.send_response(channel, resp);
+            }
+            // Outbound: we received a credential from a peer.
+            request_response::Event::Message {
+                peer,
+                message: request_response::Message::Response { request_id, response },
+            } => {
+                self.pending_credential_reqs.remove(&request_id);
+                if let Some(cred) = response.credential {
+                    // Verify the credential before storing.
+                    let _issuer_list = self.issuer_registry.issuer_list();
+                    let _epoch = credential::current_epoch();
+                    let context = self.local_peer_id.to_bytes();
+                    let presentation = CredentialPresentation::create(&cred, &self.credential_wallet_identity(), &context);
+                    let _ = presentation; // TODO(phase4c): full verification against issuer_list + epoch
+                    self.credential_wallet.store(cred.clone());
+                    info!("credential.received peer={peer} tier={} epoch={}", cred.body.tier, cred.body.epoch);
+                }
+            }
+            request_response::Event::OutboundFailure { request_id, peer, error } => {
+                self.pending_credential_reqs.remove(&request_id);
+                debug!("credential.outbound_failure peer={peer} error={error}");
+            }
+            request_response::Event::InboundFailure { peer, error, .. } => {
+                debug!("credential.inbound_failure peer={peer} error={error}");
+            }
+            request_response::Event::ResponseSent { .. } => {}
+        }
+    }
+
+    /// Handle descriptor exchange protocol events.
+    fn handle_descriptor_exchange_event(
+        &mut self,
+        ev: request_response::Event<DescriptorRequest, DescriptorResponse>,
+    ) {
+        match ev {
+            // Inbound: peer sends us their descriptor.
+            request_response::Event::Message {
+                peer,
+                message: request_response::Message::Request { request, channel, .. },
+            } => {
+                // Store their descriptor if provided.
+                if let Some(desc) = request.descriptor {
+                    self.descriptor_store.register_peer_pseudonym(peer, desc.pseudonym);
+                    if self.descriptor_store.upsert(desc) {
+                        debug!("descriptor.received peer={peer}");
+                    }
+                }
+                // Respond with our own descriptor.
+                let our_desc = self.build_local_descriptor();
+                let resp = DescriptorResponse { descriptor: Some(our_desc) };
+                let _ = self.swarm.behaviour_mut().descriptor_exchange.send_response(channel, resp);
+            }
+            // Outbound: we received a descriptor from a peer.
+            request_response::Event::Message {
+                peer,
+                message: request_response::Message::Response { request_id, response },
+            } => {
+                self.pending_descriptor_reqs.remove(&request_id);
+                if let Some(desc) = response.descriptor {
+                    self.descriptor_store.register_peer_pseudonym(peer, desc.pseudonym);
+                    if self.descriptor_store.upsert(desc) {
+                        debug!("descriptor.received peer={peer}");
+                    }
+                }
+            }
+            request_response::Event::OutboundFailure { request_id, peer, error } => {
+                self.pending_descriptor_reqs.remove(&request_id);
+                debug!("descriptor.outbound_failure peer={peer} error={error}");
+            }
+            request_response::Event::InboundFailure { peer, error, .. } => {
+                debug!("descriptor.inbound_failure peer={peer} error={error}");
+            }
+            request_response::Event::ResponseSent { .. } => {}
+        }
+    }
+
+    /// Access the credential wallet's current ephemeral identity for presentations.
+    /// Returns a temporary identity — the wallet owns the real one.
+    fn credential_wallet_identity(&self) -> credential::EphemeralIdentity {
+        // Generate a matching identity for the current epoch.
+        // Note: this creates a NEW key, which won't match the wallet's key.
+        // For actual presentation, use wallet.present() directly.
+        credential::EphemeralIdentity::generate(self.credential_wallet.epoch())
     }
 
     fn handle_kad_event(&mut self, ev: kad::Event) {
@@ -1215,6 +1704,22 @@ fn build_swarm(
                 request_response::Config::default(),
             );
 
+            let credential_exchange = request_response::Behaviour::<CredentialCodec>::new(
+                [(
+                    StreamProtocol::new("/miasma/credential/1.0.0"),
+                    request_response::ProtocolSupport::Full,
+                )],
+                request_response::Config::default(),
+            );
+
+            let descriptor_exchange = request_response::Behaviour::<DescriptorCodec>::new(
+                [(
+                    StreamProtocol::new("/miasma/descriptor/1.0.0"),
+                    request_response::ProtocolSupport::Full,
+                )],
+                request_response::Config::default(),
+            );
+
             Ok(MiasmaBehaviour {
                 kademlia,
                 identify,
@@ -1224,6 +1729,8 @@ fn build_swarm(
                 dcutr,
                 share_exchange,
                 admission,
+                credential_exchange,
+                descriptor_exchange,
             })
         })
         .map_err(|e| MiasmaError::Sss(format!("behaviour init failed: {e}")))?

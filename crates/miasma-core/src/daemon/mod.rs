@@ -560,6 +560,33 @@ async fn process_request(
                 })
                 .collect();
 
+            // Phase 4b stats.
+            let cred_stats = coord.credential_stats().await.unwrap_or(
+                crate::network::credential::CredentialStats {
+                    current_epoch: 0,
+                    held_credentials: 0,
+                    best_tier: None,
+                    known_issuers: 0,
+                    bootstrap_mode: true,
+                },
+            );
+            let desc_stats = coord.descriptor_stats().await.unwrap_or(
+                crate::network::descriptor::DescriptorStats {
+                    total_descriptors: 0,
+                    relay_descriptors: 0,
+                    relayed_descriptors: 0,
+                    credentialed_descriptors: 0,
+                    stale_descriptors: 0,
+                },
+            );
+            let path_stats = coord.path_selection_stats().await.unwrap_or(
+                crate::network::path_selection::PathSelectionStats {
+                    default_policy: "unknown".to_string(),
+                    available_relays: 0,
+                    relay_prefix_diversity: 0,
+                },
+            );
+
             ControlResponse::Status(DaemonStatus {
                 peer_id: coord.peer_id().to_string(),
                 listen_addrs,
@@ -583,6 +610,14 @@ async fn process_request(
                 routing_max_prefix_concentration: routing.max_prefix_concentration,
                 routing_diversity_rejections: routing.diversity_rejections,
                 routing_pow_difficulty: routing.current_difficulty,
+                credential_epoch: cred_stats.current_epoch,
+                credential_held: cred_stats.held_credentials,
+                credential_issuers: cred_stats.known_issuers,
+                descriptor_total: desc_stats.total_descriptors,
+                descriptor_relays: desc_stats.relay_descriptors,
+                path_available_relays: path_stats.available_relays,
+                path_relay_prefix_diversity: path_stats.relay_prefix_diversity,
+                anonymity_policy: coord.anonymity_policy().to_string(),
             })
         }
 

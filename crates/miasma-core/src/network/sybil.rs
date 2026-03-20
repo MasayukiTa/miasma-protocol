@@ -82,7 +82,7 @@ pub fn mine_pow(pubkey: [u8; 32], difficulty_bits: u8) -> NodeIdPoW {
 }
 
 /// Count leading zero bits in a byte array.
-fn leading_zeros(bytes: &[u8; 32]) -> u32 {
+pub fn leading_zeros(bytes: &[u8; 32]) -> u32 {
     let full_zero_bytes = bytes.iter().take_while(|&&b| b == 0).count() as u32;
     let partial = bytes
         .iter()
