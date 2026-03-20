@@ -622,12 +622,17 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
             println!();
             println!("Network Health Metrics:");
             println!("  Relay diversity:       {} /16 prefixes", s.metric_relay_prefix_diversity);
+            println!("  Relay peers routable:  {}", s.metric_relay_peers_routable);
             println!("  Multi-path score:      {:.1}%", s.metric_multi_path_retrievability * 100.0);
             println!("  Credentialed peers:    {:.1}%", s.metric_credentialed_fraction * 100.0);
+            println!("  BBS+ credentialed:     {}", s.metric_bbs_credentialed);
             println!("  Pseudonymous peers:    {:.1}%", s.metric_pseudonymous_fraction * 100.0);
+            println!("  Pseudonym churn:       {:.1}%", s.metric_pseudonym_churn_rate * 100.0);
             println!("  Verification ratio:    {:.1}%", s.metric_verification_ratio * 100.0);
             println!("  PoW difficulty:        {} bits", s.metric_pow_difficulty);
             println!("  Rejection rate:        {:.1}%", s.metric_rejection_rate * 100.0);
+            println!("  Stale descriptors:     {}", s.metric_stale_descriptors);
+            println!("  Descriptor store:      {:.1}% full", s.metric_descriptor_utilisation * 100.0);
         }
 
         println!();

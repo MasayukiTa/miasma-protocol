@@ -32,17 +32,23 @@ pub struct OutcomeMetrics {
     /// A healthy network has ≥10% relay nodes.
     pub relay_fraction: f64,
 
+    /// Number of relay peers routable for circuit construction (have PeerId mapping).
+    pub relay_peers_routable: usize,
+
     // ── Identification difficulty ────────────────────────────────────────
     /// Fraction of peers using pseudonymous descriptors (non-direct reachability
     /// or credentialed without raw PeerId binding).
     pub pseudonymous_fraction: f64,
 
-    /// Average number of unique pseudonyms per epoch observed in descriptors.
-    /// Higher churn = harder to build long-term profiles.
+    /// Pseudonym churn rate: fraction of current pseudonyms not seen in
+    /// the previous epoch. Higher churn = harder to build long-term profiles.
     pub pseudonym_churn_rate: f64,
 
-    /// Whether anonymous retrieval (onion routing) is available.
+    /// Whether anonymous retrieval (relay routing) is available.
     pub onion_routing_available: bool,
+
+    /// Number of BBS+-credentialed descriptors (within-epoch unlinkability).
+    pub bbs_credentialed_count: usize,
 
     // ── Trust health ────────────────────────────────────────────────────
     /// Fraction of connected peers that hold a valid credential at ≥ Observed tier.
@@ -57,6 +63,13 @@ pub struct OutcomeMetrics {
     /// Admission rejection rate (recent rejections / total admission attempts).
     pub admission_rejection_rate: f64,
 
+    // ── Retention / churn ───────────────────────────────────────────────
+    /// Number of stale descriptors (age ≥ 1 hour) still in store.
+    pub stale_descriptor_count: usize,
+
+    /// Descriptor store utilisation (total / capacity limit).
+    pub descriptor_utilisation: f64,
+
     /// Timestamp when these metrics were computed (Unix seconds).
     pub computed_at: u64,
 }
@@ -67,13 +80,17 @@ impl Default for OutcomeMetrics {
             multi_path_retrievability: 0.0,
             relay_prefix_diversity: 0,
             relay_fraction: 0.0,
+            relay_peers_routable: 0,
             pseudonymous_fraction: 0.0,
             pseudonym_churn_rate: 0.0,
             onion_routing_available: false,
+            bbs_credentialed_count: 0,
             credentialed_peer_fraction: 0.0,
             current_pow_difficulty: 8,
             verification_ratio: 0.0,
             admission_rejection_rate: 0.0,
+            stale_descriptor_count: 0,
+            descriptor_utilisation: 0.0,
             computed_at: 0,
         }
     }
@@ -167,17 +184,29 @@ impl OutcomeMetrics {
 
         let current_difficulty = routing_table.current_difficulty();
 
+        // BBS+ credentialed count.
+        let bbs_credentialed = active.iter()
+            .filter(|d| d.bbs_proof.is_some())
+            .count();
+
+        // Stale descriptor count and utilisation.
+        let desc_stats = descriptor_store.stats();
+
         Self {
             multi_path_retrievability: multi_path,
             relay_prefix_diversity: relay_prefixes.len(),
             relay_fraction,
+            relay_peers_routable: desc_stats.relay_peers_routable,
             pseudonymous_fraction,
-            pseudonym_churn_rate: 0.0, // requires historical tracking; will be populated in Phase 4c
+            pseudonym_churn_rate: descriptor_store.churn_rate(),
             onion_routing_available: onion_enabled,
+            bbs_credentialed_count: bbs_credentialed,
             credentialed_peer_fraction,
             current_pow_difficulty: current_difficulty,
             verification_ratio,
             admission_rejection_rate: rejection_rate,
+            stale_descriptor_count: desc_stats.stale_descriptors,
+            descriptor_utilisation: total_descriptors as f64 / 10_000.0,
             computed_at: now,
         }
     }

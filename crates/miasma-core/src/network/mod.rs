@@ -15,7 +15,7 @@ pub mod types;
 
 pub use admission_policy::{AdmissionPolicyStats, HybridAdmissionPolicy};
 pub use bbs_credential::{
-    BbsCredential, BbsError, BbsIssuer, BbsIssuerKey, BbsProof, BbsPlusScheme,
+    BbsCredential, BbsCredentialWallet, BbsError, BbsIssuer, BbsIssuerKey, BbsProof, BbsPlusScheme,
     CredentialScheme, DisclosurePolicy, Ed25519Scheme,
 };
 pub use coordinator::{MiasmaCoordinator, NetworkShareFetcher};
