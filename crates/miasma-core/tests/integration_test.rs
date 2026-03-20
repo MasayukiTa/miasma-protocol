@@ -2160,8 +2160,8 @@ async fn full_transport_fallback_chain_wss_recovery() {
 // ─── Phase 3b: Admission and trust-tier tests ────────────────────────────────
 
 use miasma_core::network::sybil::{self, NodeIdPoW, SignedDhtRecord};
-use miasma_core::network::address::{AddressClass, AddressTrust, PeerAddress, classify_multiaddr};
-use miasma_core::network::peer_state::{PeerRegistry, RejectionReason, AdmissionStats};
+use miasma_core::network::address::{AddressClass, AddressTrust, classify_multiaddr};
+use miasma_core::network::peer_state::PeerRegistry;
 
 /// Verify that the peer registry correctly tracks trust-tier promotions
 /// through the full pipeline: Connected → Observed → Verified.
@@ -2360,4 +2360,191 @@ fn signed_record_serialization_roundtrip() {
     assert_eq!(deserialized.value, record.value);
     assert_eq!(deserialized.signer_pubkey, record.signer_pubkey);
     assert_eq!(deserialized.signature, record.signature);
+}
+
+// ─── Phase 3c: Routing overlay, diversity, and difficulty tests ──────────────
+
+use miasma_core::network::routing::{
+    self, DiversityViolation, IpPrefix, RoutingStats, RoutingTable,
+};
+
+/// Verify that routing overlay correctly enforces IP prefix diversity:
+/// once 3 peers from the same /16 are admitted, a 4th is rejected.
+#[test]
+fn routing_diversity_blocks_eclipse_cluster() {
+    let mut rt = RoutingTable::new(true);
+    let prefix = IpPrefix::V4Slash16([10, 0]);
+
+    // Admit 3 peers from 10.0.x.x — at the limit.
+    for _ in 0..3 {
+        let peer = libp2p::PeerId::random();
+        let addrs = vec!["/ip4/10.0.1.1/tcp/4001".parse().unwrap()];
+        assert!(rt.check_diversity(&addrs).is_ok());
+        rt.add_peer(peer, prefix);
+    }
+
+    // 4th peer from 10.0.x.x should be rejected.
+    let addrs = vec!["/ip4/10.0.99.99/tcp/4001".parse().unwrap()];
+    let result = rt.check_diversity(&addrs);
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        DiversityViolation::Ipv4SubnetSaturated { count, limit, .. } => {
+            assert_eq!(count, 3);
+            assert_eq!(limit, 3);
+        }
+        other => panic!("expected Ipv4SubnetSaturated, got: {other:?}"),
+    }
+
+    // But a peer from a *different* /16 is fine.
+    let addrs = vec!["/ip4/192.168.1.1/tcp/4001".parse().unwrap()];
+    assert!(rt.check_diversity(&addrs).is_ok());
+}
+
+/// Verify that rank_peers prefers verified peers over observed peers,
+/// and that unreliable peers are deprioritised.
+#[test]
+fn routing_rank_peers_trust_and_reliability() {
+    let mut rt = RoutingTable::new(true);
+    let verified_reliable = libp2p::PeerId::random();
+    let verified_unreliable = libp2p::PeerId::random();
+    let observed_reliable = libp2p::PeerId::random();
+
+    rt.add_peer(verified_reliable, IpPrefix::V4Slash16([1, 1]));
+    rt.add_peer(verified_unreliable, IpPrefix::V4Slash16([2, 2]));
+    rt.add_peer(observed_reliable, IpPrefix::V4Slash16([3, 3]));
+
+    // Make verified_unreliable fail a lot.
+    for _ in 0..20 {
+        rt.record_failure(&verified_unreliable);
+    }
+    // Give verified_reliable some successes.
+    for _ in 0..5 {
+        rt.record_success(&verified_reliable);
+    }
+
+    let candidates = vec![observed_reliable, verified_unreliable, verified_reliable];
+    let ranked = rt.rank_peers(&candidates, |id| {
+        if *id == observed_reliable {
+            AddressTrust::Observed
+        } else {
+            AddressTrust::Verified
+        }
+    });
+
+    // verified_reliable should be first (Verified + reliable).
+    assert_eq!(ranked[0], verified_reliable, "verified+reliable should rank first");
+    // observed_reliable should beat verified_unreliable (unreliable penalty).
+    assert_eq!(ranked[1], observed_reliable, "observed+reliable should beat verified+unreliable");
+    assert_eq!(ranked[2], verified_unreliable, "unreliable should rank last");
+}
+
+/// Verify dynamic PoW difficulty adjustment based on observed network size.
+#[test]
+fn routing_dynamic_difficulty_adjustment() {
+    let mut rt = RoutingTable::new(true);
+    assert_eq!(rt.current_difficulty(), 8, "initial difficulty should be 8");
+
+    // Simulate bootstrap: small network stays at 8.
+    for _ in 0..10 {
+        rt.observe_network_size(5);
+    }
+    assert_eq!(rt.maybe_adjust_difficulty(), None);
+
+    // Simulate growth: 50 peers → difficulty 16.
+    rt = RoutingTable::new(true);
+    for _ in 0..10 {
+        rt.observe_network_size(100);
+    }
+    assert_eq!(rt.maybe_adjust_difficulty(), Some(16));
+    assert_eq!(rt.current_difficulty(), 16);
+
+    // Further growth: 500 peers → difficulty 20.
+    for _ in 0..20 {
+        rt.observe_network_size(500);
+    }
+    assert_eq!(rt.maybe_adjust_difficulty(), Some(20));
+}
+
+/// Verify routing stats snapshot reflects the overlay state.
+#[test]
+fn routing_stats_snapshot_reflects_state() {
+    let mut rt = RoutingTable::new(true);
+    let p1 = libp2p::PeerId::random();
+    let p2 = libp2p::PeerId::random();
+    let p3 = libp2p::PeerId::random();
+
+    rt.add_peer(p1, IpPrefix::V4Slash16([8, 8]));
+    rt.add_peer(p2, IpPrefix::V4Slash16([8, 8]));
+    rt.add_peer(p3, IpPrefix::V4Slash16([1, 1]));
+
+    // Make p2 unreliable.
+    for _ in 0..15 {
+        rt.record_failure(&p2);
+    }
+
+    rt.record_diversity_rejection();
+    rt.record_diversity_rejection();
+
+    let stats = rt.stats();
+    assert_eq!(stats.total_peers, 3);
+    assert_eq!(stats.unreliable_peers, 1);
+    assert_eq!(stats.unique_prefixes, 2);
+    assert_eq!(stats.max_prefix_concentration, 2);
+    assert_eq!(stats.diversity_rejections, 2);
+    assert_eq!(stats.current_difficulty, 8);
+}
+
+/// Verify that removing a peer correctly frees its IP prefix slot,
+/// allowing a new peer from the same prefix to be admitted.
+#[test]
+fn routing_peer_removal_frees_diversity_slot() {
+    let mut rt = RoutingTable::new(true);
+    let prefix = IpPrefix::V4Slash16([10, 0]);
+    let peers: Vec<_> = (0..3).map(|_| libp2p::PeerId::random()).collect();
+
+    // Fill prefix slots.
+    for &p in &peers {
+        rt.add_peer(p, prefix);
+    }
+
+    // Saturated — can't add more.
+    let addrs = vec!["/ip4/10.0.5.5/tcp/4001".parse().unwrap()];
+    assert!(rt.check_diversity(&addrs).is_err());
+
+    // Remove one peer → slot opens.
+    rt.remove_peer(&peers[0]);
+    assert!(rt.check_diversity(&addrs).is_ok());
+}
+
+/// Verify IP prefix extraction from multiaddrs.
+#[test]
+fn routing_ip_prefix_extraction() {
+    let v4: libp2p::Multiaddr = "/ip4/203.0.113.5/tcp/4001".parse().unwrap();
+    assert_eq!(routing::ip_prefix_of(&v4), IpPrefix::V4Slash16([203, 0]));
+
+    let v6: libp2p::Multiaddr = "/ip6/2001:db8:85a3::1/tcp/4001".parse().unwrap();
+    assert_eq!(routing::ip_prefix_of(&v6), IpPrefix::V6Slash48([0x2001, 0x0db8, 0x85a3]));
+
+    let loopback: libp2p::Multiaddr = "/ip4/127.0.0.1/tcp/4001".parse().unwrap();
+    assert_eq!(routing::ip_prefix_of(&loopback), IpPrefix::Local);
+}
+
+/// Verify that RoutingStats serialization roundtrips correctly (used by DaemonStatus).
+#[test]
+fn routing_stats_serde_roundtrip() {
+    let stats = RoutingStats {
+        total_peers: 42,
+        unreliable_peers: 3,
+        unique_prefixes: 15,
+        max_prefix_concentration: 3,
+        diversity_rejections: 7,
+        current_difficulty: 16,
+    };
+
+    let json = serde_json::to_string(&stats).unwrap();
+    let deserialized: RoutingStats = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(deserialized.total_peers, 42);
+    assert_eq!(deserialized.current_difficulty, 16);
+    assert_eq!(deserialized.diversity_rejections, 7);
 }

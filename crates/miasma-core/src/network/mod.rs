@@ -1,15 +1,22 @@
 pub mod address;
+pub mod admission_policy;
 pub mod coordinator;
+pub mod credential;
+pub mod descriptor;
 pub mod dht;
 pub mod node;
+pub mod path_selection;
 pub mod peer_state;
 pub mod routing;
 pub mod sybil;
 pub mod types;
 
 pub use coordinator::{MiasmaCoordinator, NetworkShareFetcher};
+pub use credential::{CredentialStats, CredentialTier, CredentialWallet, IssuerRegistry};
+pub use descriptor::{DescriptorStats, DescriptorStore, PeerDescriptor};
 pub use dht::{BypassOnionDhtExecutor, DirectDhtExecutor, LiveOnionDhtExecutor, OnionAwareDhtExecutor};
 pub use node::{DhtHandle, MiasmaNode, ShareExchangeHandle};
+pub use path_selection::{AnonymityPolicy, PathSelectionStats};
 pub use peer_state::{AdmissionStats, PeerRegistry, RejectionReason};
 pub use routing::{DiversityViolation, RoutingStats};
 pub use types::{DhtRecord, NodeType, ShardLocation, TopologyEvent};
