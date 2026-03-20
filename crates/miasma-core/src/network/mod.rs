@@ -1,5 +1,6 @@
 pub mod address;
 pub mod admission_policy;
+pub mod bbs_credential;
 pub mod coordinator;
 pub mod credential;
 pub mod descriptor;
@@ -11,9 +12,14 @@ pub mod routing;
 pub mod sybil;
 pub mod types;
 
+pub use admission_policy::{AdmissionPolicyStats, HybridAdmissionPolicy};
+pub use bbs_credential::{
+    BbsCredential, BbsError, BbsIssuer, BbsIssuerKey, BbsProof, BbsPlusScheme,
+    CredentialScheme, DisclosurePolicy, Ed25519Scheme,
+};
 pub use coordinator::{MiasmaCoordinator, NetworkShareFetcher};
 pub use credential::{CredentialStats, CredentialTier, CredentialWallet, IssuerRegistry};
-pub use descriptor::{DescriptorStats, DescriptorStore, PeerDescriptor};
+pub use descriptor::{DescriptorStats, DescriptorStore, PeerDescriptor, PeerCapabilities, ReachabilityKind, ResourceProfile};
 pub use dht::{BypassOnionDhtExecutor, DirectDhtExecutor, LiveOnionDhtExecutor, OnionAwareDhtExecutor};
 pub use node::{DhtHandle, MiasmaNode, ShareExchangeHandle};
 pub use path_selection::{AnonymityPolicy, PathSelectionStats};
