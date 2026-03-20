@@ -752,11 +752,10 @@ impl MiasmaApp {
                 );
                 ui.end_row();
 
-                ui.label(egui::RichText::new("Log output:").color(DIM));
+                ui.label(egui::RichText::new("Desktop log:").color(DIM));
                 ui.label(
-                    egui::RichText::new("Set RUST_LOG=miasma_desktop=debug for verbose logging")
-                        .color(DIM)
-                        .small(),
+                    egui::RichText::new(format!("{}{}desktop.log.*", &self.data_dir_display, std::path::MAIN_SEPARATOR))
+                        .font(egui::FontId::monospace(11.0)),
                 );
                 ui.end_row();
             });
@@ -836,6 +835,8 @@ impl MiasmaApp {
         d.push_str(&format!("Desktop version: {} (beta)\n", env!("CARGO_PKG_VERSION")));
         d.push_str(&format!("Timestamp:       {}\n", epoch_timestamp()));
         d.push_str(&format!("Data directory:  {}\n", self.data_dir_display));
+        d.push_str(&format!("Desktop log:     {}{}desktop.log.*\n", self.data_dir_display, std::path::MAIN_SEPARATOR));
+        d.push_str(&format!("Daemon log:      {}{}daemon.log.*\n", self.data_dir_display, std::path::MAIN_SEPARATOR));
         d.push_str(&format!(
             "Daemon state:    {}\n",
             match self.daemon_state {
