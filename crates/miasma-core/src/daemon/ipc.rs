@@ -69,6 +69,18 @@ pub struct DaemonStatus {
     /// WSS share server port (0 if not running).
     #[serde(default)]
     pub wss_port: u16,
+    /// Whether WSS TLS is enabled.
+    #[serde(default)]
+    pub wss_tls_enabled: bool,
+    /// Whether an outbound proxy is configured.
+    #[serde(default)]
+    pub proxy_configured: bool,
+    /// Proxy type string if configured ("socks5" | "http-connect").
+    #[serde(default)]
+    pub proxy_type: Option<String>,
+    /// ObfuscatedQuic server port (0 if not running).
+    #[serde(default)]
+    pub obfs_quic_port: u16,
     /// Payload transport readiness matrix.
     #[serde(default)]
     pub transport_readiness: Vec<TransportStatus>,
@@ -79,8 +91,20 @@ pub struct DaemonStatus {
 pub struct TransportStatus {
     pub name: String,
     pub available: bool,
+    /// Was this transport used for the most recent successful fetch?
+    #[serde(default)]
+    pub selected: bool,
     pub success_count: u64,
     pub failure_count: u64,
+    /// Session-phase failures (connection refused, timeout, TLS handshake).
+    #[serde(default)]
+    pub session_failures: u64,
+    /// Data-phase failures (connected but transfer failed).
+    #[serde(default)]
+    pub data_failures: u64,
+    /// Most recent error message for this transport.
+    #[serde(default)]
+    pub last_error: Option<String>,
     pub reason: Option<String>,
 }
 

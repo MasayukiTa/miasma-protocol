@@ -14,7 +14,7 @@ pub mod share;
 pub mod store;
 pub mod transport;
 
-pub use config::{default_data_dir, NodeConfig};
+pub use config::{default_data_dir, NodeConfig, TransportConfig};
 pub use crypto::hash::ContentId;
 pub use dissolution::{
     dissolve_file, retrieve_file, DistributionResult, DissolutionManifest, ShareDistributor,
@@ -40,6 +40,11 @@ pub use transport::payload::{
     PayloadTransportError, TransportAttempt, TransportedShare, TransportExhaustedError,
     TransportPhase, TransportReadiness, TransportStats,
     Libp2pPayloadTransport, TcpDirectPayloadTransport,
+};
+pub use transport::proxy::ProxyConfig;
+pub use transport::obfuscated::{
+    ObfuscatedConfig, ObfuscatedQuicPayloadTransport, ObfuscatedQuicServer,
+    BrowserFingerprint,
 };
 pub use share::{MiasmaShare, ShareVerification};
 pub use store::LocalShareStore;
