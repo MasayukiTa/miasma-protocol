@@ -19,6 +19,7 @@ mod index;
 mod bencode;
 mod bridge;
 mod pipeline;
+mod torrent;
 
 use std::path::PathBuf;
 
