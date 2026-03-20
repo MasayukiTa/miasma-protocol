@@ -16,8 +16,8 @@ use tokio::{
     net::TcpStream,
 };
 
-/// Maximum JSON frame body size (256 MiB).
-const FRAME_MAX: usize = 256 * 1_024 * 1_024;
+/// Maximum JSON frame body size (16 MiB).
+const FRAME_MAX: usize = 16 * 1_024 * 1_024;
 
 /// Filename inside the data directory containing the control port number.
 pub const PORT_FILE: &str = "daemon.port";
@@ -84,6 +84,33 @@ pub struct DaemonStatus {
     /// Payload transport readiness matrix.
     #[serde(default)]
     pub transport_readiness: Vec<TransportStatus>,
+    /// Number of peers that passed PoW admission (Verified tier).
+    #[serde(default)]
+    pub verified_peers: usize,
+    /// Number of peers that completed Identify but not PoW (Observed tier).
+    #[serde(default)]
+    pub observed_peers: usize,
+    /// Cumulative count of peers rejected at any admission stage.
+    #[serde(default)]
+    pub admission_rejections: u64,
+    /// Routing overlay: total peers tracked.
+    #[serde(default)]
+    pub routing_peers: usize,
+    /// Routing overlay: peers flagged as unreliable.
+    #[serde(default)]
+    pub routing_unreliable: usize,
+    /// Routing overlay: unique IP prefixes observed.
+    #[serde(default)]
+    pub routing_unique_prefixes: usize,
+    /// Routing overlay: max peers from a single IP prefix.
+    #[serde(default)]
+    pub routing_max_prefix_concentration: usize,
+    /// Routing overlay: cumulative diversity-based rejections.
+    #[serde(default)]
+    pub routing_diversity_rejections: u64,
+    /// Routing overlay: current PoW difficulty in bits.
+    #[serde(default)]
+    pub routing_pow_difficulty: u8,
 }
 
 /// Per-transport readiness info for IPC/CLI display.

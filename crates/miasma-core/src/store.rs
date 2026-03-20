@@ -110,14 +110,20 @@ fn load_or_create_master_key(data_dir: &Path) -> Result<Zeroizing<[u8; 32]>, Mia
             std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
         }
         // On Windows, remove inherited ACEs and restrict to current user via icacls.
-        // This is best-effort: if icacls fails the key is still created.
         #[cfg(windows)]
         {
-            if let Ok(username) = std::env::var("USERNAME") {
-                let path_str = key_path.display().to_string();
-                let _ = std::process::Command::new("icacls")
-                    .args([&path_str, "/inheritance:r", "/grant:r", &format!("{username}:F")])
-                    .output();
+            let username = std::env::var("USERNAME")
+                .map_err(|_| MiasmaError::KeyDerivation("cannot determine USERNAME for key ACL".into()))?;
+            let path_str = key_path.display().to_string();
+            let output = std::process::Command::new("icacls")
+                .args([&path_str, "/inheritance:r", "/grant:r", &format!("{username}:F")])
+                .output()
+                .map_err(|e| MiasmaError::KeyDerivation(format!("icacls failed to execute: {e}")))?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(MiasmaError::KeyDerivation(format!(
+                    "icacls failed to set master.key ACL: {stderr}"
+                )));
             }
         }
         Ok(arr)

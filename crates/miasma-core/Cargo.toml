@@ -22,6 +22,7 @@ bs58.workspace = true
 hex.workspace = true
 chacha20poly1305.workspace = true
 x25519-dalek.workspace = true
+ed25519-dalek.workspace = true
 toml.workspace = true
 directories.workspace = true
 thiserror.workspace = true
@@ -39,6 +40,7 @@ rustls-pemfile.workspace = true
 tokio-socks.workspace = true
 quinn.workspace = true
 rcgen = "0.13"
+subtle = "2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
