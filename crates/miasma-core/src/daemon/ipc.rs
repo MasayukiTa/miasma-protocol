@@ -129,6 +129,9 @@ pub struct DaemonStatus {
     /// Relay-capable descriptors stored.
     #[serde(default)]
     pub descriptor_relays: usize,
+    /// Descriptors carrying a BBS+ proof.
+    #[serde(default)]
+    pub descriptor_bbs_credentialed: usize,
     /// Number of relay descriptors available for path selection.
     #[serde(default)]
     pub path_available_relays: usize,
@@ -162,6 +165,21 @@ pub struct DaemonStatus {
     /// Admission rejection rate.
     #[serde(default)]
     pub metric_rejection_rate: f64,
+    /// Pseudonym churn rate (fraction of pseudonyms new this epoch).
+    #[serde(default)]
+    pub metric_pseudonym_churn_rate: f64,
+    /// Relay peers routable for circuit construction.
+    #[serde(default)]
+    pub metric_relay_peers_routable: usize,
+    /// BBS+-credentialed descriptors (within-epoch unlinkability).
+    #[serde(default)]
+    pub metric_bbs_credentialed: usize,
+    /// Stale descriptors in store.
+    #[serde(default)]
+    pub metric_stale_descriptors: usize,
+    /// Descriptor store utilisation (0.0–1.0).
+    #[serde(default)]
+    pub metric_descriptor_utilisation: f64,
 }
 
 /// Per-transport readiness info for IPC/CLI display.

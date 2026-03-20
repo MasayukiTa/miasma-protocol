@@ -578,6 +578,116 @@ pub fn generate_link_secret() -> [u8; 32] {
     secret
 }
 
+// ─── BBS+ Credential Wallet ──────────────────────────────────────────────
+
+/// Maximum BBS+ credentials stored per wallet (prevents flooding).
+const MAX_BBS_CREDENTIALS: usize = 100;
+
+/// Stores BBS+ credentials held by this node.
+///
+/// Unlike the Ed25519 wallet, BBS+ credentials don't require a matching
+/// ephemeral identity — the link secret is the binding factor, not a public key.
+pub struct BbsCredentialWallet {
+    /// This node's persistent link secret (survives epoch rotation).
+    link_secret: [u8; 32],
+    /// Credentials keyed by (issuer_pk_bytes_prefix, epoch).
+    /// We use the first 32 bytes of the 96-byte issuer pk as key prefix.
+    credentials: std::collections::HashMap<([u8; 32], u64), BbsCredential>,
+}
+
+impl BbsCredentialWallet {
+    /// Create a new wallet with a fresh link secret.
+    pub fn new() -> Self {
+        Self {
+            link_secret: generate_link_secret(),
+            credentials: std::collections::HashMap::new(),
+        }
+    }
+
+    /// This wallet's link secret (needed when requesting BBS+ credentials).
+    pub fn link_secret(&self) -> [u8; 32] {
+        self.link_secret
+    }
+
+    /// Store a BBS+ credential after verification.
+    pub fn store(&mut self, credential: BbsCredential) {
+        let mut pk_prefix = [0u8; 32];
+        pk_prefix.copy_from_slice(&credential.issuer_pk[..32.min(credential.issuer_pk.len())]);
+        let key = (pk_prefix, credential.attributes.epoch);
+        self.credentials.insert(key, credential);
+
+        // Enforce capacity: evict oldest-epoch entries.
+        while self.credentials.len() > MAX_BBS_CREDENTIALS {
+            if let Some(oldest_key) = self
+                .credentials
+                .iter()
+                .min_by_key(|(_, c)| c.attributes.epoch)
+                .map(|(k, _)| *k)
+            {
+                self.credentials.remove(&oldest_key);
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Get the best (highest-tier) BBS+ credential from any issuer.
+    pub fn best_credential(&self) -> Option<&BbsCredential> {
+        self.credentials.values()
+            .max_by_key(|c| c.attributes.tier)
+    }
+
+    /// Create a proof from the best available BBS+ credential.
+    pub fn present(&self, policy: &DisclosurePolicy, context: &[u8]) -> Option<BbsProof> {
+        let cred = self.best_credential()?;
+        Some(bbs_create_proof(cred, policy, context))
+    }
+
+    /// Number of stored credentials.
+    pub fn credential_count(&self) -> usize {
+        self.credentials.len()
+    }
+
+    /// Prune credentials from epochs older than the given minimum.
+    pub fn prune_before_epoch(&mut self, min_epoch: u64) {
+        self.credentials.retain(|&(_, epoch), _| epoch >= min_epoch);
+    }
+}
+
+/// Registry of known BBS+ issuer public keys (G2 points, 96 bytes each).
+pub struct BbsIssuerRegistry {
+    /// Known issuer G2 public keys (compressed, 96 bytes).
+    issuers: Vec<[u8; 96]>,
+}
+
+impl BbsIssuerRegistry {
+    pub fn new() -> Self {
+        Self { issuers: Vec::new() }
+    }
+
+    /// Register a BBS+ issuer public key.
+    pub fn add_issuer(&mut self, pk_bytes: [u8; 96]) {
+        if !self.issuers.contains(&pk_bytes) {
+            self.issuers.push(pk_bytes);
+        }
+    }
+
+    /// Check whether a given issuer pk is known.
+    pub fn is_known(&self, pk_bytes: &[u8; 96]) -> bool {
+        self.issuers.contains(pk_bytes)
+    }
+
+    /// Number of known BBS+ issuers.
+    pub fn len(&self) -> usize {
+        self.issuers.len()
+    }
+
+    /// List all known issuer public keys.
+    pub fn issuer_list(&self) -> &[[u8; 96]] {
+        &self.issuers
+    }
+}
+
 // ─── Trait boundary ─────────────────────────────────────────────────────────
 
 /// Abstraction over credential schemes (Ed25519-based vs BBS+).
