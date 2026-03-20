@@ -156,7 +156,9 @@ fn cmd_dissolve(args: &[String]) {
         Some(m) => m.clone(),
         None => {
             eprintln!(
-                "Usage: miasma-bridge dissolve [--max-total-bytes <N>] [--confirm-download] <magnet-uri>"
+                "Usage: miasma-bridge dissolve [options] <magnet-uri>\n\
+                 Options: --max-total-bytes <N> --confirm-download --proxy <url>\n\
+                 \x20        --seed/--no-seed --upload-limit <bps> --download-limit <bps>"
             );
             std::process::exit(1);
         }
@@ -172,7 +174,6 @@ fn cmd_dissolve(args: &[String]) {
 
     let ih_hex = hex::encode(info.info_hash);
     let name = info.display_name.as_deref().unwrap_or("unknown");
-    info!("Dissolving torrent: hash={ih_hex}, name={name}");
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -182,6 +183,38 @@ fn cmd_dissolve(args: &[String]) {
     let quota_mb = parse_quota_mb_from_args(args);
     let safety_opts = parse_safety_opts(args);
 
+    // ── Stage 1: Preflight ──────────────────────────────────────────────
+    println!("[1/3] Preflight check");
+    println!("      Info hash:    {ih_hex}");
+    println!("      Display name: {name}");
+    println!("      Data dir:     {}", data_dir.display());
+    println!("      Size limit:   {}", if safety_opts.confirm_download {
+        "unlimited (--confirm-download)".to_string()
+    } else {
+        format_bytes_human(safety_opts.max_total_bytes)
+    });
+    if let Some(ref proxy) = safety_opts.proxy_url {
+        println!("      Proxy:        {proxy}");
+    } else {
+        println!("      Proxy:        none (direct connection)");
+    }
+    println!("      Seeding:      {}", if safety_opts.seed_enabled {
+        "ENABLED — you will upload to peers after download"
+    } else {
+        "disabled (default)"
+    });
+    if safety_opts.upload_rate_limit_bps > 0 {
+        println!("      Upload limit: {}", format_bytes_human(safety_opts.upload_rate_limit_bps as u64));
+    }
+    if safety_opts.download_rate_limit_bps > 0 {
+        println!("      Down limit:   {}", format_bytes_human(safety_opts.download_rate_limit_bps as u64));
+    }
+    println!();
+
+    // ── Stage 2: Download ────────────────────────────────────────────────
+    println!("[2/3] Downloading torrent...");
+    info!("Dissolving torrent: hash={ih_hex}, name={name}");
+
     match rt.block_on(bridge::dissolve_torrent(
         &info.info_hash,
         info.display_name.as_deref(),
@@ -190,13 +223,24 @@ fn cmd_dissolve(args: &[String]) {
         &safety_opts,
     )) {
         Ok(mids) => {
-            println!("Dissolved {} file(s):", mids.len());
+            // ── Stage 3: Result ──────────────────────────────────────────
+            println!();
+            println!("[3/3] Dissolved {} file(s) into Miasma:", mids.len());
             for mid in &mids {
-                println!("  {mid}");
+                println!("      {mid}");
             }
+            println!();
+            println!("Done. Use 'miasma get <MID>' to retrieve content.");
         }
         Err(e) => {
-            error!("Dissolution failed: {e}");
+            println!();
+            eprintln!("[3/3] FAILED: {e}");
+            if format!("{e}").contains("too large") {
+                eprintln!();
+                eprintln!("The torrent exceeds the safety size limit.");
+                eprintln!("To override, re-run with --confirm-download");
+                eprintln!("or increase with --max-total-bytes <size>");
+            }
             std::process::exit(1);
         }
     }
@@ -310,15 +354,49 @@ fn parse_safety_opts(args: &[String]) -> bridge::DownloadSafetyOpts {
     let mut opts = bridge::DownloadSafetyOpts::default();
     let mut i = 0;
     while i < args.len() {
-        if args[i] == "--confirm-download" {
-            opts.confirm_download = true;
-        } else if args[i] == "--max-total-bytes" && i + 1 < args.len() {
-            opts.max_total_bytes = parse_size_bytes(&args[i + 1]);
-            i += 1;
+        match args[i].as_str() {
+            "--confirm-download" => {
+                opts.confirm_download = true;
+            }
+            "--max-total-bytes" if i + 1 < args.len() => {
+                opts.max_total_bytes = parse_size_bytes(&args[i + 1]);
+                i += 1;
+            }
+            "--proxy" if i + 1 < args.len() => {
+                opts.proxy_url = Some(args[i + 1].clone());
+                i += 1;
+            }
+            "--seed" => {
+                opts.seed_enabled = true;
+            }
+            "--no-seed" => {
+                opts.seed_enabled = false;
+            }
+            "--upload-limit" if i + 1 < args.len() => {
+                opts.upload_rate_limit_bps = parse_size_bytes(&args[i + 1]) as u32;
+                i += 1;
+            }
+            "--download-limit" if i + 1 < args.len() => {
+                opts.download_rate_limit_bps = parse_size_bytes(&args[i + 1]) as u32;
+                i += 1;
+            }
+            _ => {}
         }
         i += 1;
     }
     opts
+}
+
+fn format_bytes_human(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    } else if bytes >= 1024 * 1024 {
+        format!("{:.1} MiB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 fn parse_size_bytes(s: &str) -> u64 {
@@ -362,12 +440,17 @@ fn print_usage() {
         "  --inbox-dir <dir>          Dedicated inbox directory to watch for new files\n",
         "  --max-total-bytes <size>   Safety limit for dissolve (default: 100M)\n",
         "  --confirm-download         Proceed even if torrent exceeds safety limit\n",
+        "  --proxy <url>              SOCKS5 proxy for BT connections (e.g. socks5://127.0.0.1:9050)\n",
+        "  --seed / --no-seed         Enable/disable seeding after download (default: no-seed)\n",
+        "  --upload-limit <bps>       Upload rate limit (e.g. 1M, 500K). 0 = unlimited\n",
+        "  --download-limit <bps>     Download rate limit (e.g. 10M, 1M). 0 = unlimited\n",
         "\n",
         "Examples:\n",
         "  miasma-bridge inspect \"magnet:?xt=urn:btih:...\"\n",
         "  miasma-bridge dissolve \"magnet:?xt=urn:btih:...\"\n",
         "  miasma-bridge dissolve --max-total-bytes 500M \"magnet:?xt=urn:btih:...\"\n",
-        "  miasma-bridge dissolve --confirm-download \"magnet:?xt=urn:btih:...\"\n",
+        "  miasma-bridge dissolve --proxy socks5://127.0.0.1:9050 \"magnet:?xt=urn:btih:...\"\n",
+        "  miasma-bridge dissolve --download-limit 5M --no-seed \"magnet:?xt=urn:btih:...\"\n",
         "  miasma-bridge init-inbox C:\\\\MiasmaInbox\n",
         "  miasma-bridge daemon --inbox-dir C:\\\\MiasmaInbox\n",
     ));

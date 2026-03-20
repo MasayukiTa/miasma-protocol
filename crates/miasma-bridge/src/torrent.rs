@@ -67,6 +67,7 @@ pub struct DownloadedFile {
 
 /// Result of a torrent download operation.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct TorrentDownloadResult {
     /// Info-hash hex string.
     pub info_hash_hex: String,
@@ -171,6 +172,7 @@ impl MiasmaSession {
     }
 
     /// Download a torrent from a .torrent file path.
+    #[allow(dead_code)]
     pub async fn download_torrent_file<F>(
         &self,
         torrent_path: &Path,
