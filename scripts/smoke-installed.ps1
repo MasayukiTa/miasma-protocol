@@ -6,7 +6,7 @@
     Validates the installed-app experience end-to-end:
       1. Binaries exist in the expected install location
       2. miasma.exe is on PATH
-      3. First-run init creates data in %APPDATA%\miasma
+      3. First-run init creates data in %LOCALAPPDATA%\miasma
       4. Daemon starts and writes port file
       5. IPC status returns peer ID
       6. Dissolve + get round-trip
@@ -22,7 +22,7 @@
     Miasma install directory. Default: auto-detected from PATH or Program Files.
 
 .PARAMETER UseRealDataDir
-    If set, uses the real %APPDATA%\miasma directory instead of a temp directory.
+    If set, uses the real %LOCALAPPDATA%\miasma directory instead of a temp directory.
     WARNING: This will modify your actual Miasma data.
 
 .EXAMPLE
@@ -102,7 +102,7 @@ Write-Host ""
 
 # Set up data directory.
 if ($UseRealDataDir) {
-    $DATA_DIR = Join-Path $env:APPDATA "miasma"
+    $DATA_DIR = Join-Path $env:LOCALAPPDATA "miasma"
     Write-Host "Data dir: $DATA_DIR (REAL)" -ForegroundColor Yellow
 } else {
     $script:TMP_ROOT = Join-Path $env:TEMP "miasma-install-smoke-$(Get-Random)"
