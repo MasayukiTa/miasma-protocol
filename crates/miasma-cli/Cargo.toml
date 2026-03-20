@@ -20,3 +20,4 @@ clap = { version = "4", features = ["derive", "env"] }
 zeroize.workspace = true
 toml.workspace = true
 libp2p.workspace = true
+serde_json.workspace = true

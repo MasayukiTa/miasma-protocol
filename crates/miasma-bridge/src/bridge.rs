@@ -115,7 +115,7 @@ pub struct TorrentInspection {
     pub attempts: DiscoveryAttempts,
 }
 
-/// Safety options for torrent downloads.
+/// Safety and transport options for torrent downloads.
 #[derive(Debug, Clone)]
 pub struct DownloadSafetyOpts {
     /// Hard limit in bytes.  If the torrent's total payload exceeds this,
@@ -124,6 +124,14 @@ pub struct DownloadSafetyOpts {
     pub max_total_bytes: u64,
     /// When true, proceed even if the torrent exceeds `max_total_bytes`.
     pub confirm_download: bool,
+    /// SOCKS5 proxy URL for all BT connections (e.g. "socks5://127.0.0.1:9050").
+    pub proxy_url: Option<String>,
+    /// Enable seeding after download completes. Default: false.
+    pub seed_enabled: bool,
+    /// Upload rate limit in bits/sec. 0 = unlimited.
+    pub upload_rate_limit_bps: u32,
+    /// Download rate limit in bits/sec. 0 = unlimited.
+    pub download_rate_limit_bps: u32,
 }
 
 impl Default for DownloadSafetyOpts {
@@ -131,6 +139,10 @@ impl Default for DownloadSafetyOpts {
         Self {
             max_total_bytes: 100 * 1024 * 1024, // 100 MiB
             confirm_download: false,
+            proxy_url: None,
+            seed_enabled: false,
+            upload_rate_limit_bps: 0,
+            download_rate_limit_bps: 0,
         }
     }
 }
@@ -169,10 +181,13 @@ pub async fn dissolve_torrent(
         magnet.push_str(&urlencoded(dn));
     }
 
-    // Configure librqbit session with safety limits.
+    // Configure librqbit session with safety limits and transport options.
     let torrent_config = TorrentConfig {
         output_dir: data_dir.join("bridge-downloads"),
-        seed_enabled: false,
+        seed_enabled: opts.seed_enabled,
+        upload_rate_limit_bps: opts.upload_rate_limit_bps,
+        download_rate_limit_bps: opts.download_rate_limit_bps,
+        proxy_url: opts.proxy_url.clone(),
         max_total_bytes: if opts.confirm_download { 0 } else { opts.max_total_bytes },
         ..Default::default()
     };
