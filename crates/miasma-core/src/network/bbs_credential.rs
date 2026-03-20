@@ -45,7 +45,9 @@
 /// Uses BLS12-381 curve. The implementation is self-contained using the
 /// `bls12_381` crate for group operations, avoiding external BBS+ libraries
 /// that may have unstable APIs.
-use bls12_381::{G1Affine, G1Projective, G2Affine, G2Projective, Scalar};
+use bls12_381::{
+    multi_miller_loop, G1Affine, G1Projective, G2Affine, G2Prepared, G2Projective, Scalar,
+};
 use ff::Field;
 use serde::{Deserialize, Serialize};
 
@@ -339,8 +341,11 @@ pub fn bbs_create_proof(
     let a_point = deserialize_g1(&credential.signature.a);
     let a_prime = a_point * r1;
 
+    // A_bar = r1 * B - e * A'
+    // This satisfies e(A', W) = e(A_bar, G2) because A_bar = A' * sk
+    // (proof: A_bar = r1*B - e*r1*A = r1*(B - e*A) = r1*A*(sk+e-e) = r1*A*sk = A'*sk)
     let e_scalar = deserialize_scalar(&credential.signature.e);
-    let a_bar = a_prime * e_scalar;
+    let a_bar = b_point * r1 - a_prime * e_scalar;
 
     // Commitment phase: random blindings for s and hidden attributes.
     let blind_s = Scalar::random(&mut rand::thread_rng());
@@ -442,7 +447,7 @@ pub fn bbs_verify_proof(
     if bool::from(pk_affine.is_none()) {
         return Err(BbsError::InvalidIssuerKey);
     }
-    let _pk = G2Projective::from(pk_affine.unwrap());
+    let pk = pk_affine.unwrap();
 
     // Parse proof points.
     if proof.a_prime.len() != 48 || proof.a_bar.len() != 48
@@ -509,10 +514,32 @@ pub fn bbs_verify_proof(
         return Err(BbsError::ProofVerificationFailed);
     }
 
-    // Note: full BBS+ verification also checks the pairing equation
-    // e(A', pk + e*G2) == e(B, G2). The Schnorr proof over hidden
-    // messages provides knowledge-soundness; full pairing verification
-    // adds issuer-binding. Marked for Phase 4c.
+    // ── Pairing check: issuer binding ──────────────────────────────────
+    //
+    // Verify e(A', W) == e(A_bar, G2).
+    //
+    // A_bar was computed as r1*B - e*A', which equals A'*sk when the
+    // signature is valid. This pairing check proves the credential was
+    // signed by the issuer with public key W, binding the Schnorr proof
+    // (message knowledge) to the issuer's identity.
+
+    // Reject trivial proof: A' must not be the identity point.
+    if bool::from(G1Affine::from(a_prime).is_identity()) {
+        return Err(BbsError::InvalidProof);
+    }
+
+    // e(A', W) == e(A_bar, G2)  ⟺  e(A', W) * e(-A_bar, G2) == 1
+    let neg_a_bar = -a_bar;
+    let pairing_result = multi_miller_loop(&[
+        (&G1Affine::from(a_prime), &G2Prepared::from(pk)),
+        (&G1Affine::from(neg_a_bar), &G2Prepared::from(G2Affine::generator())),
+    ])
+    .final_exponentiation();
+
+    use bls12_381::Gt;
+    if pairing_result != Gt::identity() {
+        return Err(BbsError::IssuerBindingFailed);
+    }
 
     Ok(proof.disclosed.clone())
 }
@@ -524,6 +551,8 @@ pub enum BbsError {
     InvalidIssuerKey,
     InvalidProof,
     ProofVerificationFailed,
+    /// Pairing check failed: credential was not signed by the claimed issuer.
+    IssuerBindingFailed,
     LinkSecretDisclosed,
 }
 
@@ -533,6 +562,7 @@ impl std::fmt::Display for BbsError {
             BbsError::InvalidIssuerKey => write!(f, "invalid BBS+ issuer public key"),
             BbsError::InvalidProof => write!(f, "invalid BBS+ proof structure"),
             BbsError::ProofVerificationFailed => write!(f, "BBS+ proof verification failed"),
+            BbsError::IssuerBindingFailed => write!(f, "BBS+ pairing check failed: wrong issuer"),
             BbsError::LinkSecretDisclosed => write!(f, "link secret must not be disclosed"),
         }
     }
@@ -717,16 +747,11 @@ mod tests {
         let context = b"wrong-key-ctx";
         let proof = bbs_create_proof(&credential, &policy, context);
 
-        // Verification with the wrong key should fail because the proof
-        // was created against the correct issuer's credential structure.
-        // Note: without full pairing verification, this test shows the
-        // proof is context-bound and issuer-bound via the challenge.
+        // Verification with the wrong key must fail: pairing check
+        // e(A', W) != e(A_bar, G2) when W is the wrong issuer key.
         let result = bbs_verify_proof(&proof, &wrong_key.pk_bytes(), context);
-        // The proof still passes the Schnorr check since it doesn't use
-        // the issuer PK directly in the challenge. This is expected —
-        // full pairing verification is needed for issuer binding.
-        // For now, this test documents the limitation.
-        let _ = result;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), BbsError::IssuerBindingFailed);
     }
 
     #[test]

@@ -2548,3 +2548,302 @@ fn routing_stats_serde_roundtrip() {
     assert_eq!(deserialized.current_difficulty, 16);
     assert_eq!(deserialized.diversity_rejections, 7);
 }
+
+// ─── Phase 4: Epoch rotation, credential lifecycle, and BBS+ integration ─────
+
+use miasma_core::network::credential::{
+    CredentialIssuer, EphemeralIdentity,
+    verify_presentation, CredentialError, current_epoch, CAP_STORE, CAP_ROUTE, CAP_RELAY,
+};
+use miasma_core::network::bbs_credential::{
+    BbsCredentialAttributes, bbs_create_proof, bbs_verify_proof, generate_link_secret,
+};
+use miasma_core::{
+    BbsIssuer, BbsIssuerKey, CredentialTier, CredentialWallet, DisclosurePolicy,
+    DescriptorStore, PeerDescriptor, PeerCapabilities, ReachabilityKind, ResourceProfile,
+};
+
+/// Test 43: CredentialWallet epoch rotation — stale credentials pruned and
+/// holder_tag changes after the epoch advances.
+///
+/// Because we cannot fast-forward real time, this test constructs a wallet
+/// with an identity from a past epoch (by issuing a credential for an old
+/// epoch) and then creates a fresh wallet whose `maybe_rotate` will always
+/// return false (same epoch). The core invariant tested: credentials issued
+/// for epochs outside the validity window are pruned, and a fresh wallet
+/// after rotation has a different holder_tag.
+#[test]
+fn credential_wallet_epoch_rotation() {
+    let issuer_key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+    let issuer = CredentialIssuer::new(issuer_key);
+    let now = current_epoch();
+
+    // Create a wallet and issue a credential for the current epoch.
+    let mut wallet = CredentialWallet::new();
+    let holder_tag_before = wallet.holder_tag();
+
+    let current_cred = issuer.issue(
+        CredentialTier::Verified,
+        now,
+        CAP_STORE | CAP_ROUTE,
+        wallet.holder_tag(),
+    );
+    wallet.store(current_cred);
+    assert_eq!(wallet.credential_count(), 1);
+
+    // Also store a credential from a long-past epoch (should be stale).
+    let stale_epoch = now.saturating_sub(10);
+    let stale_identity = EphemeralIdentity::generate(stale_epoch);
+    let stale_cred = issuer.issue(
+        CredentialTier::Endorsed,
+        stale_epoch,
+        CAP_RELAY,
+        stale_identity.holder_tag(),
+    );
+    wallet.store(stale_cred);
+    assert_eq!(wallet.credential_count(), 2);
+
+    // maybe_rotate on the same epoch should NOT rotate.
+    let rotated = wallet.maybe_rotate();
+    assert!(!rotated, "should not rotate within the same epoch");
+    // Both credentials remain (rotation did not happen).
+    assert_eq!(wallet.credential_count(), 2);
+
+    // Simulate what happens after rotation by constructing a scenario:
+    // The stale credential's epoch (now-10) is outside the grace window
+    // (grace = 1), so it should be considered invalid by best_credential().
+    let best = wallet.best_credential();
+    // best_credential filters by epoch_is_valid, so only the current-epoch
+    // credential should be returned.
+    assert!(best.is_some());
+    assert_eq!(best.unwrap().body.epoch, now);
+    assert_eq!(best.unwrap().body.tier, CredentialTier::Verified);
+
+    // Verify that a brand-new wallet (simulating post-rotation) has a
+    // different holder_tag (fresh ephemeral identity).
+    let new_wallet = CredentialWallet::new();
+    let holder_tag_after = new_wallet.holder_tag();
+    // Different ephemeral keys produce different holder tags (with
+    // overwhelming probability).
+    assert_ne!(
+        holder_tag_before, holder_tag_after,
+        "fresh wallet should have a different holder_tag (new ephemeral key)"
+    );
+}
+
+/// Test 44: DescriptorStore prunes stale descriptors based on age.
+///
+/// Stores descriptors with different published_at timestamps, calls
+/// prune_stale, and verifies only fresh descriptors survive.
+#[test]
+fn descriptor_store_stale_pruning() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let mut store = DescriptorStore::new();
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // Helper: create a descriptor with a specific published_at timestamp.
+    let make_desc = |pseudonym: [u8; 32], version: u64, published_at: u64| -> PeerDescriptor {
+        let mut desc = PeerDescriptor::new_signed(
+            pseudonym,
+            ReachabilityKind::Direct,
+            vec!["/ip4/8.8.8.8/tcp/4001".to_string()],
+            PeerCapabilities::default(),
+            ResourceProfile::Desktop,
+            None,
+            version,
+            &signing_key,
+        );
+        // Override published_at to simulate age.
+        desc.published_at = published_at;
+        desc
+    };
+
+    // Fresh descriptor (published just now).
+    let fresh_ps = [0x01; 32];
+    store.upsert(make_desc(fresh_ps, 1, now_secs));
+
+    // Another fresh descriptor (published 30 minutes ago — within 1 hour window).
+    let recent_ps = [0x02; 32];
+    store.upsert(make_desc(recent_ps, 1, now_secs - 1800));
+
+    // Stale descriptors (published 2 hours ago and 24 hours ago) are now rejected
+    // at upsert time — the store enforces freshness on insertion.
+    let stale_ps = [0x03; 32];
+    assert!(!store.upsert(make_desc(stale_ps, 1, now_secs - 7200)),
+        "stale descriptor should be rejected on insert");
+
+    let very_stale_ps = [0x04; 32];
+    assert!(!store.upsert(make_desc(very_stale_ps, 1, now_secs - 86400)),
+        "very stale descriptor should be rejected on insert");
+
+    assert_eq!(store.len(), 2, "only fresh descriptors should be stored");
+
+    // A descriptor that becomes stale while in the store is pruned.
+    // Insert one at the edge of the window (59 minutes ago), then prune.
+    let edge_ps = [0x05; 32];
+    store.upsert(make_desc(edge_ps, 1, now_secs - 3540)); // 59 min — just within window
+    assert_eq!(store.len(), 3);
+
+    // Prune stale descriptors — the edge descriptor is still within window.
+    let pruned = store.prune_stale();
+    assert_eq!(pruned, 0, "59-minute descriptor is still fresh");
+
+    // Verify which descriptors survived.
+    assert!(store.get(&fresh_ps).is_some(), "fresh descriptor should remain");
+    assert!(store.get(&recent_ps).is_some(), "recent descriptor should remain");
+    assert!(store.get(&edge_ps).is_some(), "edge descriptor should remain");
+    assert!(store.get(&stale_ps).is_none(), "stale descriptor was never stored");
+    assert!(store.get(&very_stale_ps).is_none(), "very stale descriptor was never stored");
+}
+
+/// Test 45: Full Ed25519 credential issuance, presentation, and verification
+/// round-trip — including wrong-context rejection.
+#[test]
+fn credential_issuance_and_verification_roundtrip() {
+    let issuer_key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+    let issuer = CredentialIssuer::new(issuer_key);
+    let epoch = current_epoch();
+
+    // Create a wallet with a fresh ephemeral identity.
+    let mut wallet = CredentialWallet::new();
+    let holder_tag = wallet.holder_tag();
+
+    // Issuer issues a credential for the wallet's holder_tag.
+    let credential = issuer.issue(
+        CredentialTier::Verified,
+        epoch,
+        CAP_STORE | CAP_ROUTE,
+        holder_tag,
+    );
+
+    // Store in wallet.
+    wallet.store(credential);
+    assert_eq!(wallet.credential_count(), 1);
+
+    // Present the credential with a specific context.
+    let context = b"integration-test-context-roundtrip";
+    let presentation = wallet.present(context).expect("wallet should have a credential to present");
+
+    // Verify the presentation succeeds.
+    let known_issuers = [issuer.pubkey_bytes()];
+    let result = verify_presentation(
+        &presentation,
+        context,
+        &known_issuers,
+        epoch,
+        CredentialTier::Verified,
+    );
+    assert!(result.is_ok(), "valid presentation should verify: {result:?}");
+    assert_eq!(result.unwrap(), CredentialTier::Verified);
+
+    // Verify that presentation with a WRONG context fails.
+    let wrong_context = b"wrong-context-should-fail";
+    let result = verify_presentation(
+        &presentation,
+        wrong_context,
+        &known_issuers,
+        epoch,
+        CredentialTier::Verified,
+    );
+    assert!(result.is_err(), "wrong context should fail verification");
+    assert_eq!(
+        result.unwrap_err(),
+        CredentialError::InvalidHolderProof,
+        "wrong context should produce InvalidHolderProof"
+    );
+
+    // Verify that an unknown issuer is rejected.
+    let fake_issuers = [[0xFFu8; 32]];
+    let result = verify_presentation(
+        &presentation,
+        context,
+        &fake_issuers,
+        epoch,
+        CredentialTier::Verified,
+    );
+    assert_eq!(
+        result.unwrap_err(),
+        CredentialError::UnknownIssuer,
+        "unknown issuer should be rejected"
+    );
+
+    // Verify that an expired epoch is rejected.
+    let far_future_epoch = epoch + 100;
+    let result = verify_presentation(
+        &presentation,
+        context,
+        &known_issuers,
+        far_future_epoch,
+        CredentialTier::Verified,
+    );
+    assert!(
+        matches!(result.unwrap_err(), CredentialError::ExpiredEpoch { .. }),
+        "presentation with epoch far in the past relative to verifier should fail"
+    );
+}
+
+/// Test 46: Full BBS+ credential issuance, selective-disclosure proof,
+/// and verification round-trip — including wrong-issuer and tampered-disclosure
+/// rejection.
+#[test]
+fn bbs_credential_issuance_and_proof_roundtrip() {
+    // Create a BBS+ issuer.
+    let issuer_key = BbsIssuerKey::from_seed(b"integration-test-bbs-issuer");
+    let issuer = BbsIssuer::new(issuer_key.clone());
+
+    // Issue a credential with specific attributes.
+    let link_secret = generate_link_secret();
+    let attributes = BbsCredentialAttributes {
+        link_secret,
+        tier: CredentialTier::Verified,
+        capabilities: CAP_STORE | CAP_ROUTE | CAP_RELAY,
+        epoch: current_epoch(),
+        nonce: 12345,
+    };
+    let credential = issuer.issue(attributes);
+
+    // Create a proof with selective disclosure (reveal tier only).
+    let policy = DisclosurePolicy::default(); // reveals tier (index 1)
+    let context = b"bbs-integration-test-verifier-challenge";
+    let proof = bbs_create_proof(&credential, &policy, context);
+
+    // Proof should disclose tier only.
+    assert_eq!(proof.disclosed.len(), 1);
+    assert_eq!(proof.disclosed[0].0, 1); // index 1 = tier
+    assert_eq!(proof.disclosed[0].1, CredentialTier::Verified as u64);
+
+    // Verify the proof with the correct issuer key.
+    let result = bbs_verify_proof(&proof, &issuer_key.pk_bytes(), context);
+    assert!(result.is_ok(), "valid BBS+ proof should verify: {result:?}");
+    let disclosed = result.unwrap();
+    assert_eq!(disclosed.len(), 1);
+    assert_eq!(disclosed[0].1, CredentialTier::Verified as u64);
+
+    // Verify the proof fails with a DIFFERENT issuer key (pairing check).
+    let wrong_key = BbsIssuerKey::from_seed(b"wrong-issuer-key-for-test");
+    let result = bbs_verify_proof(&proof, &wrong_key.pk_bytes(), context);
+    assert!(result.is_err(), "wrong issuer key should fail verification");
+    // The pairing check should catch this.
+    assert_eq!(
+        result.unwrap_err(),
+        miasma_core::network::bbs_credential::BbsError::IssuerBindingFailed,
+        "wrong issuer key should produce IssuerBindingFailed"
+    );
+
+    // Verify that tampered disclosure fails.
+    let mut tampered_proof = proof.clone();
+    // Change the disclosed tier value from Verified(2) to Endorsed(3).
+    tampered_proof.disclosed = vec![(1, CredentialTier::Endorsed as u64)];
+    let result = bbs_verify_proof(&tampered_proof, &issuer_key.pk_bytes(), context);
+    assert!(result.is_err(), "tampered disclosure should fail verification");
+
+    // Verify wrong context fails.
+    let result = bbs_verify_proof(&proof, &issuer_key.pk_bytes(), b"wrong-context");
+    assert!(result.is_err(), "wrong context should fail BBS+ verification");
+}

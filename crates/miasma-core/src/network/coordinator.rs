@@ -30,7 +30,7 @@ use crate::{
     network::{
         credential::CredentialStats,
         descriptor::DescriptorStats,
-        dht::DirectDhtExecutor,
+        dht::{DirectDhtExecutor, LiveOnionDhtExecutor},
         node::{DhtHandle, MiasmaNode, ShareExchangeHandle, ShareFetchRequest},
         path_selection::{AnonymityPolicy, PathSelectionStats},
         types::{DhtRecord, ShardLocation},
@@ -159,6 +159,8 @@ pub struct MiasmaCoordinator {
     transport_selector: Arc<PayloadTransportSelector>,
     /// Anonymity policy for retrieval operations.
     anonymity_policy: AnonymityPolicy,
+    /// Node master key for onion routing (None = onion routing disabled).
+    onion_master_key: Option<Vec<u8>>,
 }
 
 impl MiasmaCoordinator {
@@ -197,6 +199,7 @@ impl MiasmaCoordinator {
         Self {
             store, dht_handle, share_handle, shutdown_tx, peer_id, listen_addrs,
             transport_selector, anonymity_policy: AnonymityPolicy::default(),
+            onion_master_key: None,
         }
     }
 
@@ -394,6 +397,15 @@ impl MiasmaCoordinator {
         self.anonymity_policy = policy;
     }
 
+    /// Enable onion-routed retrieval by providing the node master key.
+    ///
+    /// Once enabled, `Opportunistic` and `Required` policies create a
+    /// `LiveOnionDhtExecutor` (Phase 1: in-process relay simulation) per
+    /// retrieval attempt for circuit isolation.
+    pub fn enable_onion_routing(&mut self, master_key: &[u8]) {
+        self.onion_master_key = Some(master_key.to_vec());
+    }
+
     /// Current anonymity policy.
     pub fn anonymity_policy(&self) -> AnonymityPolicy {
         self.anonymity_policy
@@ -402,13 +414,8 @@ impl MiasmaCoordinator {
     /// Retrieve content with an explicit anonymity policy.
     ///
     /// - `Direct`: uses `DirectDhtExecutor` (no onion routing)
-    /// - `Opportunistic`: uses onion-routed DHT if circuits available, falls back to direct
-    /// - `Required`: fails if onion circuit manager is not available
-    ///
-    /// Note: full onion-routed retrieval requires a `LiveOnionDhtExecutor` which
-    /// needs the node master key. Until the circuit manager is wired end-to-end
-    /// (Phase 4c), Opportunistic falls back to Direct and Required returns an error
-    /// explaining that onion circuits are not yet available.
+    /// - `Opportunistic`: uses onion-routed DHT if available, falls back to direct
+    /// - `Required`: uses onion-routed DHT, fails if not available
     pub async fn retrieve_with_anonymity(
         &self,
         mid: &ContentId,
@@ -420,15 +427,41 @@ impl MiasmaCoordinator {
                 self.retrieve_from_network(mid, params).await
             }
             AnonymityPolicy::Opportunistic => {
-                // Phase 4c will try onion-routed path first.
-                // For now, fall back to direct.
-                tracing::debug!("anonymity=opportunistic: onion circuits not yet wired, using direct");
+                if let Some(ref master_key) = self.onion_master_key {
+                    // Try onion-routed path first (fresh executor per attempt for circuit isolation).
+                    match LiveOnionDhtExecutor::new_phase1(master_key) {
+                        Ok(onion_exec) => {
+                            let source = FallbackShareSource::new(
+                                onion_exec,
+                                self.transport_selector.clone(),
+                            );
+                            match RetrievalCoordinator::new(source).retrieve(mid, params.clone()).await {
+                                Ok(data) => return Ok(data),
+                                Err(e) => {
+                                    tracing::debug!("anonymity=opportunistic: onion failed ({e}), falling back to direct");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!("anonymity=opportunistic: executor init failed ({e}), falling back to direct");
+                        }
+                    }
+                }
+                // Fall back to direct.
                 self.retrieve_from_network(mid, params).await
             }
             AnonymityPolicy::Required { min_hops } => {
-                Err(MiasmaError::Network(format!(
-                    "anonymity=required({min_hops} hops): onion circuit manager not yet available (Phase 4c)"
-                )))
+                let master_key = self.onion_master_key.as_ref().ok_or_else(|| {
+                    MiasmaError::Network(format!(
+                        "anonymity=required({min_hops} hops): onion routing not enabled — call enable_onion_routing() first"
+                    ))
+                })?;
+                let onion_exec = LiveOnionDhtExecutor::new_phase1(master_key)?;
+                let source = FallbackShareSource::new(
+                    onion_exec,
+                    self.transport_selector.clone(),
+                );
+                RetrievalCoordinator::new(source).retrieve(mid, params).await
             }
         }
     }
@@ -448,5 +481,10 @@ impl MiasmaCoordinator {
     /// Return path selection statistics.
     pub async fn path_selection_stats(&self) -> Result<PathSelectionStats, MiasmaError> {
         self.dht_handle.path_selection_stats().await
+    }
+
+    /// Return Freenet-style outcome metrics.
+    pub async fn outcome_metrics(&self) -> Result<super::metrics::OutcomeMetrics, MiasmaError> {
+        self.dht_handle.outcome_metrics().await
     }
 }

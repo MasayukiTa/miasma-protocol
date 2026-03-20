@@ -437,6 +437,11 @@ impl CredentialWallet {
         self.identity.epoch
     }
 
+    /// Access the wallet's current ephemeral identity (for presentations).
+    pub fn identity(&self) -> &EphemeralIdentity {
+        &self.identity
+    }
+
     /// Store a credential received from an issuer.
     pub fn store(&mut self, credential: SignedCredential) {
         let key = (credential.issuer_pubkey, credential.body.epoch);
