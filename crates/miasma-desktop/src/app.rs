@@ -214,23 +214,37 @@ impl MiasmaApp {
                     ui.vertical(|ui| {
                         ui.label(
                             egui::RichText::new("Welcome to Miasma")
-                                .size(16.0)
+                                .size(18.0)
                                 .strong(),
                         );
+                        ui.add_space(6.0);
+                        ui.label("Store, encrypt, and share content over a peer-to-peer network.");
                         ui.add_space(4.0);
-                        ui.label("Set up your node to start storing and sharing content.");
-                        ui.label("This creates a local data directory and encryption key.");
-                        ui.add_space(8.0);
+                        ui.label(
+                            egui::RichText::new(
+                                "Click below to create your node identity. \
+                                 This generates an encryption key and starts the \
+                                 background daemon automatically."
+                            ).color(DIM)
+                        );
+                        ui.add_space(10.0);
                         ui.add_enabled_ui(!self.busy, |ui| {
                             let btn = egui::Button::new(
-                                egui::RichText::new("Set Up Node").strong(),
+                                egui::RichText::new("Set Up Node").strong().size(14.0),
                             );
-                            if ui.add_sized([160.0, 32.0], btn).clicked() {
+                            if ui.add_sized([180.0, 36.0], btn).clicked() {
                                 let _ = self.worker.tx.try_send(WorkerCmd::Init);
                                 self.busy = true;
                                 self.set_msg(MsgKind::Info, "Setting up node...");
                             }
                         });
+                        if self.busy {
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(egui::RichText::new("Creating identity and starting daemon...").color(DIM));
+                            });
+                        }
                     });
                 });
                 ui.add_space(4.0);
@@ -248,6 +262,14 @@ impl MiasmaApp {
                         if let Some(ref err) = self.last_error {
                             ui.label(egui::RichText::new(err).color(DIM).small());
                             ui.add_space(4.0);
+                        } else {
+                            ui.label(
+                                egui::RichText::new(
+                                    "The background daemon has stopped. \
+                                     Click below to restart it."
+                                ).color(DIM).small()
+                            );
+                            ui.add_space(4.0);
                         }
                         ui.horizontal(|ui| {
                             ui.add_enabled_ui(!self.busy, |ui| {
@@ -264,11 +286,6 @@ impl MiasmaApp {
                                     self.set_msg(MsgKind::Info, "Starting daemon...");
                                 }
                             });
-                            ui.label(
-                                egui::RichText::new("or run:  miasma daemon")
-                                    .color(DIM)
-                                    .small(),
-                            );
                         });
                     });
                 });
@@ -760,18 +777,40 @@ impl MiasmaApp {
                 ui.end_row();
             });
 
+        // Install location (show where the binaries live).
+        ui.add_space(2.0);
+        egui::Grid::new("install_grid")
+            .num_columns(2)
+            .spacing([16.0, 4.0])
+            .show(ui, |ui| {
+                ui.label(egui::RichText::new("Install location:").color(DIM));
+                if let Ok(exe) = std::env::current_exe() {
+                    if let Some(dir) = exe.parent() {
+                        ui.label(
+                            egui::RichText::new(dir.to_string_lossy())
+                                .font(egui::FontId::monospace(11.0)),
+                        );
+                    }
+                }
+                ui.end_row();
+            });
+
         ui.add_space(16.0);
 
         // ── How it works ──────────────────────────────────────────────
         ui.label(egui::RichText::new("How it works").strong());
         ui.add_space(2.0);
-        ui.label("The desktop app connects to a local Miasma daemon over IPC.");
-        ui.label("The daemon is started automatically when the app launches.");
-        ui.label("You can also start the daemon manually:");
-        ui.add_space(2.0);
+        ui.label("The desktop app manages a background daemon that handles storage and networking.");
+        ui.label("The daemon starts automatically when you launch the app, and stops when you close it.");
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("Your data is stored in:").color(DIM));
         ui.label(
-            egui::RichText::new("  miasma daemon")
-                .font(egui::FontId::monospace(12.0)),
+            egui::RichText::new(&self.data_dir_display)
+                .font(egui::FontId::monospace(11.0)),
+        );
+        ui.label(
+            egui::RichText::new("This directory is preserved if you uninstall the app.")
+                .color(DIM).small(),
         );
 
         ui.add_space(16.0);

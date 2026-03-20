@@ -205,6 +205,11 @@ async fn main() -> Result<()> {
             .init();
     }
 
+    // Stamp version for future upgrade detection.
+    if data_dir.join("config.toml").exists() {
+        miasma_core::config::stamp_version(&data_dir, env!("CARGO_PKG_VERSION"));
+    }
+
     match cli.command {
         Commands::Init {
             storage_mb,
