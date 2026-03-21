@@ -622,6 +622,11 @@ impl DescriptorStore {
             .filter(|d| d.is_relay() && is_fresh(d))
             .filter_map(|d| {
                 let onion_pubkey = d.onion_pubkey?;
+                // Reject all-zero pubkeys — using them would produce trivially
+                // decryptable onion packets (VULN-001).
+                if onion_pubkey.iter().all(|&b| b == 0) {
+                    return None;
+                }
                 let peer_id = self.pseudonym_to_peer.get(&d.pseudonym)?;
                 let tier = self.relay_tier(&d.pseudonym);
                 Some((tier, crate::onion::circuit::RelayInfo {
@@ -638,10 +643,12 @@ impl DescriptorStore {
     }
 
     /// Look up a peer's onion X25519 public key from their descriptor.
+    /// Returns `None` for all-zero keys (VULN-001 defence).
     pub fn onion_pubkey_for_peer(&self, peer_id: &PeerId) -> Option<[u8; 32]> {
         self.peer_to_pseudonym.get(peer_id)
             .and_then(|ps| self.descriptors.get(ps))
             .and_then(|d| d.onion_pubkey)
+            .filter(|k| !k.iter().all(|&b| b == 0))
     }
 
     /// Look up a descriptor by pseudonym.

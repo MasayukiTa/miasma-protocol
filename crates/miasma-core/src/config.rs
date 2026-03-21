@@ -115,8 +115,35 @@ impl NodeConfig {
         let path = data_dir.join("config.toml");
         let raw = toml::to_string_pretty(self)
             .map_err(|e| MiasmaError::Serialization(e.to_string()))?;
-        std::fs::write(path, raw)?;
+        std::fs::write(&path, raw)?;
+
+        // If proxy credentials are present, restrict config.toml permissions
+        // to prevent co-resident users from reading plaintext credentials.
+        if self.transport.proxy_username.is_some() || self.transport.proxy_password.is_some() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            }
+            #[cfg(windows)]
+            {
+                if let Ok(username) = std::env::var("USERNAME") {
+                    let path_str = path.display().to_string();
+                    let _ = std::process::Command::new("icacls")
+                        .args([&path_str, "/inheritance:r", "/grant:r", &format!("{username}:F")])
+                        .output();
+                }
+            }
+        }
         Ok(())
+    }
+
+    /// Scrub credential fields (proxy username/password) from this config,
+    /// then save the scrubbed version back to disk.
+    pub fn scrub_credentials(&mut self, data_dir: &Path) -> Result<(), MiasmaError> {
+        self.transport.proxy_username = None;
+        self.transport.proxy_password = None;
+        self.save(data_dir)
     }
 }
 
