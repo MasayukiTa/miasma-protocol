@@ -103,48 +103,14 @@ fn load_or_create_master_key(data_dir: &Path) -> Result<Zeroizing<[u8; 32]>, Mia
         arr.as_mut().copy_from_slice(&key);
         std::fs::create_dir_all(data_dir)?;
 
-        // Write the key to a temp file, restrict permissions, then rename
-        // into place. This eliminates the race window where the key file
-        // exists at the final path with permissive inherited ACLs.
-        let tmp_path = key_path.with_extension("key.tmp");
-        {
-            let mut f = std::fs::File::create(&tmp_path)?;
-            f.write_all(arr.as_ref())?;
-            f.flush()?;
-        }
-
-        // Restrict permissions on Unix.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
-        }
-        // On Windows, remove inherited ACEs and restrict to current user via icacls.
-        // Applied to the temp file BEFORE rename so the key is never world-readable.
-        #[cfg(windows)]
-        {
-            let username = std::env::var("USERNAME")
-                .map_err(|_| MiasmaError::KeyDerivation("cannot determine USERNAME for key ACL".into()))?;
-            let path_str = tmp_path.display().to_string();
-            let output = std::process::Command::new("icacls")
-                .args([&path_str, "/inheritance:r", "/grant:r", &format!("{username}:F")])
-                .output()
-                .map_err(|e| MiasmaError::KeyDerivation(format!("icacls failed to execute: {e}")))?;
-            if !output.status.success() {
-                // Clean up temp file on failure.
-                let _ = std::fs::remove_file(&tmp_path);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(MiasmaError::KeyDerivation(format!(
-                    "icacls failed to set master.key ACL: {stderr}"
-                )));
-            }
-        }
-
-        // Rename into final path — ACL is already restricted.
-        std::fs::rename(&tmp_path, &key_path).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp_path);
-            MiasmaError::KeyDerivation(format!("failed to rename master.key into place: {e}"))
-        })?;
+        // Write the key via atomic_write_restricted: the file is created
+        // with a restrictive DACL/mode from the start (Win32 CreateFileW
+        // with SECURITY_ATTRIBUTES on Windows, open() with 0o600 on Unix).
+        // At no point does the key exist on disk with permissive permissions.
+        crate::secure_file::atomic_write_restricted(&key_path, arr.as_ref())
+            .map_err(|e| MiasmaError::KeyDerivation(format!(
+                "failed to write master.key with restricted permissions: {e}"
+            )))?;
 
         Ok(arr)
     }
