@@ -654,24 +654,51 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
             if total_retrievals > 0 {
                 println!();
                 println!("Retrieval Tracking:");
-                println!("  Direct:       {}/{} succeeded",
+                println!("  Direct:        {}/{} succeeded",
                     s.retrieval_direct_successes, s.retrieval_direct_attempts);
-                println!("  Opportunistic: {}/{} (relay: {}, direct fallback: {})",
-                    s.retrieval_opportunistic_relay_successes + s.retrieval_opportunistic_direct_fallbacks,
-                    s.retrieval_opportunistic_attempts,
-                    s.retrieval_opportunistic_relay_successes,
+                println!("  Opportunistic: {}/{} attempts", {
+                    let opp_total = s.retrieval_opportunistic_onion_rendezvous_successes
+                        + s.retrieval_opportunistic_onion_successes
+                        + s.retrieval_opportunistic_rendezvous_successes
+                        + s.retrieval_opportunistic_relay_successes
+                        + s.retrieval_opportunistic_direct_fallbacks;
+                    opp_total
+                }, s.retrieval_opportunistic_attempts);
+                println!("    onion+rendezvous (content-blind+NAT): {}",
+                    s.retrieval_opportunistic_onion_rendezvous_successes);
+                println!("    onion (content-blind):                {}",
+                    s.retrieval_opportunistic_onion_successes);
+                println!("    rendezvous relay (IP-only+NAT):       {}",
+                    s.retrieval_opportunistic_rendezvous_successes);
+                println!("    relay circuit (IP-only):              {}",
+                    s.retrieval_opportunistic_relay_successes);
+                println!("    direct fallback:                      {}",
                     s.retrieval_opportunistic_direct_fallbacks);
-                println!("  Required:     {}/{} (onion: {}, relay: {}, failed: {})",
+                println!("  Required:      {}/{} (onion: {}, relay: {}, failed: {})",
                     s.retrieval_required_onion_successes + s.retrieval_required_relay_successes,
                     s.retrieval_required_attempts,
                     s.retrieval_required_onion_successes,
                     s.retrieval_required_relay_successes,
                     s.retrieval_required_failures);
-                println!("  Rendezvous:   {}/{} (failed: {}, direct fallback: {})",
+                println!("  Rendezvous:    {}/{} (failed: {}, direct fallback: {})",
                     s.retrieval_rendezvous_successes,
                     s.retrieval_rendezvous_attempts,
                     s.retrieval_rendezvous_failures,
                     s.retrieval_rendezvous_direct_fallbacks);
+                if s.retrieval_rendezvous_onion_attempts > 0 {
+                    println!("  Rendezvous+Onion (content-blind): {}/{} (failed: {})",
+                        s.retrieval_rendezvous_onion_successes,
+                        s.retrieval_rendezvous_onion_attempts,
+                        s.retrieval_rendezvous_onion_failures);
+                }
+            }
+
+            // Active relay probe stats.
+            if s.relay_probes_sent > 0 {
+                println!();
+                println!("Relay Probes:");
+                println!("  Sent: {}  Succeeded: {}  Failed: {}",
+                    s.relay_probes_sent, s.relay_probes_succeeded, s.relay_probes_failed);
             }
         }
 
