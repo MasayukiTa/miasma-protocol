@@ -560,8 +560,19 @@ impl MiasmaCoordinator {
         let relay_onion_info = self.dht_handle.relay_onion_info().await?;
         let has_rendezvous = self.has_rendezvous_holders(mid).await;
 
-        // 1. Onion + rendezvous (content-blind + NAT).
-        if has_rendezvous && !relay_onion_info.is_empty() {
+        // Hop counts provided by each path:
+        //   1. Onion + rendezvous: 2 hops (R1 → R2/intro → target)
+        //   2. Standard onion:     2 hops (R1 → R2 → target)
+        //   3. Rendezvous relay:   1 hop  (intro → target)
+        //   4. Relay circuit:      1 hop  (relay → target)
+        //
+        // Each step is skipped if it cannot satisfy min_relay_hops.
+        const ONION_HOPS: usize = 2;
+        const RENDEZVOUS_RELAY_HOPS: usize = 1;
+        const RELAY_CIRCUIT_HOPS: usize = 1;
+
+        // 1. Onion + rendezvous (content-blind + NAT) — provides 2 hops.
+        if min_relay_hops <= ONION_HOPS && has_rendezvous && !relay_onion_info.is_empty() {
             tracing::info!(
                 onion_relays = relay_onion_info.len(),
                 mode,
@@ -583,8 +594,8 @@ impl MiasmaCoordinator {
             }
         }
 
-        // 2. Standard onion (content-blind, direct-reachable holders).
-        if relay_onion_info.len() >= 2 {
+        // 2. Standard onion (content-blind, direct-reachable holders) — provides 2 hops.
+        if min_relay_hops <= ONION_HOPS && relay_onion_info.len() >= 2 {
             tracing::info!(
                 relays = relay_onion_info.len(),
                 mode,
@@ -606,8 +617,8 @@ impl MiasmaCoordinator {
             }
         }
 
-        // 3. Rendezvous relay (IP-only + NAT).
-        if has_rendezvous {
+        // 3. Rendezvous relay (IP-only + NAT) — provides 1 hop.
+        if min_relay_hops <= RENDEZVOUS_RELAY_HOPS && has_rendezvous {
             if let Ok(Some(record)) = self.dht_handle.get_record(*mid.as_bytes()).await {
                 for loc in &record.locations {
                     if let Ok(peer_id) = PeerId::from_bytes(&loc.peer_id_bytes) {
@@ -641,7 +652,13 @@ impl MiasmaCoordinator {
             }
         }
 
-        // 4. Relay circuit (IP-only privacy).
+        // 4. Relay circuit (IP-only privacy) — provides 1 hop.
+        if min_relay_hops > RELAY_CIRCUIT_HOPS {
+            return Err(MiasmaError::Network(format!(
+                "{mode}: min_hops={min_relay_hops} but no path type provides more than {ONION_HOPS} hops; \
+                 all eligible paths exhausted"
+            )));
+        }
         let relay_peers = self.dht_handle.relay_peers().await?;
         if relay_peers.len() < min_relay_hops {
             return Err(MiasmaError::Network(format!(
@@ -858,8 +875,18 @@ impl MiasmaCoordinator {
 
             // Look up target's onion pubkey from descriptor store.
             let target_pubkey = if target_peer_id == self.peer_id {
-                // Self-fetch: use our own onion key.
-                self.dht_handle.onion_pubkey().await.unwrap_or([0u8; 32])
+                // Self-fetch: use our own onion key — fail if unavailable
+                // (never fall back to a zero key, which would be trivially decryptable).
+                match self.dht_handle.onion_pubkey().await {
+                    Ok(key) => key,
+                    Err(_) => {
+                        tracing::warn!(
+                            shard = location.shard_index,
+                            "onion: own onion pubkey unavailable, skipping shard"
+                        );
+                        continue;
+                    }
+                }
             } else {
                 // Query the descriptor store for this specific peer's key.
                 match self.dht_handle.peer_onion_pubkey(target_peer_id).await {
@@ -1046,9 +1073,18 @@ impl MiasmaCoordinator {
                 Err(_) => continue,
             };
 
-            // Look up target's onion pubkey.
+            // Look up target's onion pubkey — never fall back to zero key.
             let target_pubkey = if target_peer_id == self.peer_id {
-                self.dht_handle.onion_pubkey().await.unwrap_or([0u8; 32])
+                match self.dht_handle.onion_pubkey().await {
+                    Ok(key) => key,
+                    Err(_) => {
+                        tracing::warn!(
+                            shard = location.shard_index,
+                            "onion+rendezvous: own onion pubkey unavailable, skipping shard"
+                        );
+                        continue;
+                    }
+                }
             } else {
                 match self.dht_handle.peer_onion_pubkey(target_peer_id).await {
                     Ok(Some(key)) => key,
@@ -1107,11 +1143,20 @@ impl MiasmaCoordinator {
                 }
             };
 
-            // Pick R1 — must differ from R2.
+            // Pick R1 — MUST differ from R2. If no distinct relay exists,
+            // skip this shard rather than collapsing to a single relay
+            // (which would let one node see both initiator and target).
             let r2_peer_id_bytes = &r2_info.peer_id;
-            let r1 = relays.iter()
-                .find(|r| r.peer_id != *r2_peer_id_bytes)
-                .unwrap_or(&relays[0]);
+            let r1 = match relays.iter().find(|r| r.peer_id != *r2_peer_id_bytes) {
+                Some(r) => r,
+                None => {
+                    tracing::warn!(
+                        shard = location.shard_index,
+                        "onion+rendezvous: no relay distinct from R2, skipping shard (R1≠R2 invariant)"
+                    );
+                    continue;
+                }
+            };
 
             let r1_peer_id = match PeerId::from_bytes(&r1.peer_id) {
                 Ok(p) => p,
