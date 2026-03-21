@@ -10,6 +10,7 @@ pub mod pipeline;
 pub mod repair;
 pub mod reputation;
 pub mod retrieval;
+pub mod secure_file;
 pub mod share;
 pub mod store;
 pub mod transport;
