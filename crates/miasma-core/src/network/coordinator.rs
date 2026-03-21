@@ -183,6 +183,12 @@ pub struct RetrievalStats {
     pub relay_probes_sent: u64,
     pub relay_probes_succeeded: u64,
     pub relay_probes_failed: u64,
+    /// Forwarding verification counters (circuit-routed probes).
+    pub forwarding_probes_sent: u64,
+    pub forwarding_probes_succeeded: u64,
+    pub forwarding_probes_failed: u64,
+    /// How many times pre-retrieval probe sweep was executed.
+    pub pre_retrieval_probes_run: u64,
 }
 
 pub struct MiasmaCoordinator {
@@ -523,18 +529,34 @@ impl MiasmaCoordinator {
         }
     }
 
-    /// Retrieve content via the strongest available privacy path (Opportunistic).
+    // ── Path hierarchy constants ───────────────────────────────────────────
+
+    /// Probe results older than this are considered stale and re-probed.
+    const PROBE_FRESHNESS_SECS: u64 = 300;
+    /// Maximum probes to run before a single retrieval to bound latency.
+    const MAX_PRE_RETRIEVAL_PROBES: usize = 3;
+
+    /// Shared retrieval path hierarchy used by both Opportunistic and Required.
     ///
     /// # Path hierarchy (strongest first, falls through on failure)
     /// 1. Onion + rendezvous — content-blind, NAT-capable
-    /// 2. Standard onion   — content-blind, direct-reachable holders
-    /// 3. Rendezvous relay — IP-only privacy, NAT-capable
-    /// 4. Relay circuit    — IP-only privacy
-    async fn retrieve_via_relay(
+    /// 2. Standard onion     — content-blind, direct-reachable holders
+    /// 3. Rendezvous relay   — IP-only privacy, NAT-capable
+    /// 4. Relay circuit      — IP-only privacy
+    ///
+    /// `mode` is `"opportunistic"` or `"required"` — determines which stats
+    /// counters to increment. `min_relay_hops` is 1 for Opportunistic, passed
+    /// through for Required.
+    async fn try_relay_paths(
         &self,
         mid: &ContentId,
         params: DissolutionParams,
+        mode: &str,
+        min_relay_hops: usize,
     ) -> Result<Vec<u8>, MiasmaError> {
+        // Pre-retrieval: probe stale relay candidates to improve path decisions.
+        self.probe_stale_relay_candidates().await;
+
         let relay_onion_info = self.dht_handle.relay_onion_info().await?;
         let has_rendezvous = self.has_rendezvous_holders(mid).await;
 
@@ -542,17 +564,21 @@ impl MiasmaCoordinator {
         if has_rendezvous && !relay_onion_info.is_empty() {
             tracing::info!(
                 onion_relays = relay_onion_info.len(),
-                "opportunistic: attempting onion+rendezvous retrieval"
+                mode,
+                "attempting onion+rendezvous retrieval"
             );
             match self.retrieve_via_onion_rendezvous(mid, params.clone()).await {
                 Ok(data) => {
                     if let Ok(mut s) = self.retrieval_stats.lock() {
-                        s.opportunistic_onion_rendezvous_successes += 1;
+                        match mode {
+                            "opportunistic" => s.opportunistic_onion_rendezvous_successes += 1,
+                            _ => s.required_onion_successes += 1,
+                        }
                     }
                     return Ok(data);
                 }
                 Err(e) => {
-                    tracing::debug!("opportunistic: onion+rendezvous failed ({e}), trying standard onion");
+                    tracing::debug!("{mode}: onion+rendezvous failed ({e}), trying standard onion");
                 }
             }
         }
@@ -561,22 +587,26 @@ impl MiasmaCoordinator {
         if relay_onion_info.len() >= 2 {
             tracing::info!(
                 relays = relay_onion_info.len(),
-                "opportunistic: attempting onion-encrypted retrieval"
+                mode,
+                "attempting onion-encrypted retrieval"
             );
             match self.retrieve_via_onion(mid, params.clone()).await {
                 Ok(data) => {
                     if let Ok(mut s) = self.retrieval_stats.lock() {
-                        s.opportunistic_onion_successes += 1;
+                        match mode {
+                            "opportunistic" => s.opportunistic_onion_successes += 1,
+                            _ => s.required_onion_successes += 1,
+                        }
                     }
                     return Ok(data);
                 }
                 Err(e) => {
-                    tracing::debug!("opportunistic: standard onion failed ({e}), trying relay circuit");
+                    tracing::debug!("{mode}: standard onion failed ({e}), trying rendezvous/relay");
                 }
             }
         }
 
-        // 3. Rendezvous relay (IP-only + NAT) — check DHT record for rendezvous holders.
+        // 3. Rendezvous relay (IP-only + NAT).
         if has_rendezvous {
             if let Ok(Some(record)) = self.dht_handle.get_record(*mid.as_bytes()).await {
                 for loc in &record.locations {
@@ -586,17 +616,21 @@ impl MiasmaCoordinator {
                                 tracing::info!(
                                     holder = %peer_id,
                                     intro_points = intro_points.len(),
-                                    "opportunistic: routing via rendezvous introduction points"
+                                    mode,
+                                    "routing via rendezvous introduction points"
                                 );
                                 match self.retrieve_via_rendezvous(mid, params.clone(), intro_points).await {
                                     Ok(data) => {
                                         if let Ok(mut s) = self.retrieval_stats.lock() {
-                                            s.opportunistic_rendezvous_successes += 1;
+                                            match mode {
+                                                "opportunistic" => s.opportunistic_rendezvous_successes += 1,
+                                                _ => s.required_relay_successes += 1,
+                                            }
                                         }
                                         return Ok(data);
                                     }
                                     Err(e) => {
-                                        tracing::debug!("opportunistic: rendezvous failed ({e}), trying relay circuit");
+                                        tracing::debug!("{mode}: rendezvous failed ({e}), trying relay circuit");
                                     }
                                 }
                                 break;
@@ -609,10 +643,11 @@ impl MiasmaCoordinator {
 
         // 4. Relay circuit (IP-only privacy).
         let relay_peers = self.dht_handle.relay_peers().await?;
-        if relay_peers.is_empty() {
-            return Err(MiasmaError::Network(
-                "no relay peers available in descriptor store".into(),
-            ));
+        if relay_peers.len() < min_relay_hops {
+            return Err(MiasmaError::Network(format!(
+                "{mode}: need {min_relay_hops} relay hops, only {} relay peers available",
+                relay_peers.len()
+            )));
         }
 
         let (relay_peer_id, relay_addrs) = &relay_peers[0];
@@ -623,7 +658,8 @@ impl MiasmaCoordinator {
         tracing::info!(
             relay = %relay_peer_id,
             addr = %relay_addr,
-            "opportunistic: fallback to relay circuit rewriting"
+            mode,
+            "fallback to relay circuit rewriting"
         );
 
         let relay_exec = RelayRewritingDhtExecutor {
@@ -639,100 +675,104 @@ impl MiasmaCoordinator {
         }
 
         if result.is_ok() {
-            if let Ok(mut s) = self.retrieval_stats.lock() { s.opportunistic_relay_successes += 1; }
+            if let Ok(mut s) = self.retrieval_stats.lock() {
+                match mode {
+                    "opportunistic" => s.opportunistic_relay_successes += 1,
+                    _ => s.required_relay_successes += 1,
+                }
+            }
         }
 
         result
     }
 
-    /// Retrieve content via relay with a minimum hop count.
-    ///
-    /// Uses 2-hop onion-encrypted retrieval when relay nodes with onion pubkeys
-    /// are available. For rendezvous (NAT'd) shard holders, composes onion
-    /// encryption with introduction-point routing so the retrieval is
-    /// content-blind even when the holder is behind NAT.
-    ///
-    /// # Path hierarchy (strongest first)
-    /// 1. Onion + rendezvous: content-blind, intro-point-mediated (NAT'd holders)
-    /// 2. Onion direct: content-blind, direct target addressing
-    /// 3. Relay circuit: IP privacy only, content visible to relay
+    /// Opportunistic: try strongest path, fall back to direct.
+    async fn retrieve_via_relay(
+        &self,
+        mid: &ContentId,
+        params: DissolutionParams,
+    ) -> Result<Vec<u8>, MiasmaError> {
+        self.try_relay_paths(mid, params, "opportunistic", 1).await
+    }
+
+    /// Required: try strongest path, fail if no relay path works.
     async fn retrieve_via_relay_required(
         &self,
         mid: &ContentId,
         params: DissolutionParams,
         min_hops: usize,
     ) -> Result<Vec<u8>, MiasmaError> {
-        let relay_onion_info = self.dht_handle.relay_onion_info().await?;
+        self.try_relay_paths(mid, params, "required", min_hops).await
+    }
 
-        // Check if any shard holder is rendezvous-reachable.
-        let has_rendezvous = self.has_rendezvous_holders(mid).await;
+    // ── Pre-retrieval relay probing ─────────────────────────────────────────
 
-        // 1. Onion + rendezvous: for NAT'd shard holders with onion-capable intro points.
-        if has_rendezvous && !relay_onion_info.is_empty() {
-            tracing::info!(
-                onion_relays = relay_onion_info.len(),
-                min_hops,
-                "anonymity=required: attempting onion+rendezvous retrieval"
-            );
-            match self.retrieve_via_onion_rendezvous(mid, params.clone()).await {
-                Ok(data) => {
-                    if let Ok(mut s) = self.retrieval_stats.lock() {
-                        s.required_onion_successes += 1;
-                    }
-                    return Ok(data);
-                }
-                Err(e) => {
-                    tracing::debug!("onion+rendezvous failed ({e}), trying standard onion");
+    /// Probe relay candidates without fresh evidence before retrieval.
+    ///
+    /// # Policy
+    /// - Gets relay peers (sorted by trust tier: Verified first)
+    /// - For each, checks if probe evidence is within `PROBE_FRESHNESS_SECS`
+    /// - Probes up to `MAX_PRE_RETRIEVAL_PROBES` stale candidates
+    /// - Optionally runs one forwarding verification for top candidate
+    /// - All outcomes are recorded in relay observations (trust tier updates)
+    /// - Bounded: max 3 probes to avoid pathological latency
+    async fn probe_stale_relay_candidates(&self) {
+        let relay_peers = match self.dht_handle.relay_peers().await {
+            Ok(rp) => rp,
+            Err(_) => return,
+        };
+
+        if let Ok(mut s) = self.retrieval_stats.lock() { s.pre_retrieval_probes_run += 1; }
+
+        let mut stale_candidates = Vec::new();
+        for (peer_id, addrs) in &relay_peers {
+            if stale_candidates.len() >= Self::MAX_PRE_RETRIEVAL_PROBES {
+                break;
+            }
+            if let Ok(Some(ps)) = self.dht_handle.peer_pseudonym(*peer_id).await {
+                let fresh = self.dht_handle
+                    .has_fresh_probe(ps, Self::PROBE_FRESHNESS_SECS)
+                    .await
+                    .unwrap_or(false);
+                if !fresh {
+                    stale_candidates.push((*peer_id, addrs.iter().map(|a| a.to_string()).collect::<Vec<_>>(), ps));
                 }
             }
         }
 
-        // 2. Standard onion (content + path privacy, direct-reachable holders).
-        if relay_onion_info.len() >= 2 {
-            tracing::info!(
-                relays = relay_onion_info.len(),
-                min_hops,
-                "anonymity=required: attempting onion-encrypted retrieval"
-            );
-            let result = self.retrieve_via_onion(mid, params).await;
-            if result.is_ok() {
-                if let Ok(mut s) = self.retrieval_stats.lock() { s.required_onion_successes += 1; }
-            }
-            return result;
+        if stale_candidates.is_empty() {
+            return;
         }
 
-        // 3. Relay circuit fallback (IP privacy only, no content privacy).
-        let relay_peers = self.dht_handle.relay_peers().await?;
-        if relay_peers.len() < min_hops {
-            return Err(MiasmaError::Network(format!(
-                "anonymity=required: need {min_hops} relay hops, only {} relay peers available",
-                relay_peers.len()
-            )));
-        }
-
-        let (relay_peer_id, relay_addrs) = &relay_peers[0];
-        let relay_addr = relay_addrs.first().ok_or_else(|| {
-            MiasmaError::Network("relay peer has no addresses".into())
-        })?;
-
-        tracing::info!(
-            relay = %relay_peer_id,
-            addr = %relay_addr,
-            min_hops,
-            "anonymity=required: fallback to relay circuit rewriting (no onion keys available)"
+        tracing::debug!(
+            stale = stale_candidates.len(),
+            "pre-retrieval: probing stale relay candidates"
         );
 
-        let relay_exec = RelayRewritingDhtExecutor {
-            inner: DirectDhtExecutor::new(self.dht_handle.clone()),
-            relay_peer_id: *relay_peer_id,
-            relay_addr: relay_addr.clone(),
-        };
-        let source = FallbackShareSource::new(relay_exec, self.transport_selector.clone());
-        let result = RetrievalCoordinator::new(source).retrieve(mid, params).await;
-        if result.is_ok() {
-            if let Ok(mut s) = self.retrieval_stats.lock() { s.required_relay_successes += 1; }
+        for (peer_id, addrs, ps) in &stale_candidates {
+            let success = self.probe_relay(*peer_id, addrs.clone()).await;
+            if success {
+                let _ = self.dht_handle.record_probe_success(*ps).await;
+            }
         }
-        result
+
+        // Attempt one forwarding verification for the top relay (best trust tier)
+        // if it has a fresh probe but no forwarding verification.
+        if relay_peers.len() >= 2 {
+            let (r1_id, r1_addrs) = &relay_peers[0];
+            let (r2_id, _) = &relay_peers[1];
+            if let Ok(Some(r1_ps)) = self.dht_handle.peer_pseudonym(*r1_id).await {
+                if let Ok(Some(obs)) = self.dht_handle.relay_observation(r1_ps).await {
+                    if obs.has_fresh_probe(Self::PROBE_FRESHNESS_SECS) && obs.forwarding_verified_at.is_none() {
+                        let _ = self.verify_relay_forwarding(
+                            *r1_id,
+                            r1_addrs.iter().map(|a| a.to_string()).collect(),
+                            *r2_id,
+                        ).await;
+                    }
+                }
+            }
+        }
     }
 
     /// Check if any shard holder in the DHT record is rendezvous-reachable.
@@ -1274,6 +1314,55 @@ impl MiasmaCoordinator {
         }
 
         tracing::info!(peer = %peer_id, success, "relay probe completed");
+        success
+    }
+
+    /// Verify that a relay (R1) actually forwards traffic to another peer (R2).
+    ///
+    /// Sends a relay probe to R2 through R1's relay circuit address:
+    /// `/p2p/{R1}/p2p-circuit/p2p/{R2}`. If R2 echoes the nonce, R1
+    /// demonstrably forwarded the request.
+    ///
+    /// Records forwarding verification in R1's relay observation, which
+    /// fast-tracks R1 toward Verified trust tier.
+    pub async fn verify_relay_forwarding(
+        &self,
+        r1_peer_id: PeerId,
+        _r1_addrs: Vec<String>,
+        r2_peer_id: PeerId,
+    ) -> bool {
+        if let Ok(mut s) = self.retrieval_stats.lock() { s.forwarding_probes_sent += 1; }
+
+        // Build circuit address: route to R2 through R1.
+        let circuit_addr = format!("/p2p/{}/p2p-circuit/p2p/{}", r1_peer_id, r2_peer_id);
+
+        // First ensure R1 is dialable by probing it directly if needed.
+        // Then send the circuit-routed probe to R2 via R1.
+        let success = self.dht_handle.probe_relay(r2_peer_id, vec![circuit_addr]).await.unwrap_or(false);
+
+        if let Ok(Some(r1_ps)) = self.dht_handle.peer_pseudonym(r1_peer_id).await {
+            if success {
+                let _ = self.dht_handle.record_forwarding_verification(r1_ps).await;
+                let _ = self.dht_handle.record_relay_outcome(r1_ps, true).await;
+            } else {
+                let _ = self.dht_handle.record_relay_outcome(r1_ps, false).await;
+            }
+        }
+
+        if let Ok(mut s) = self.retrieval_stats.lock() {
+            if success {
+                s.forwarding_probes_succeeded += 1;
+            } else {
+                s.forwarding_probes_failed += 1;
+            }
+        }
+
+        tracing::info!(
+            r1 = %r1_peer_id,
+            r2 = %r2_peer_id,
+            success,
+            "forwarding verification completed"
+        );
         success
     }
 }

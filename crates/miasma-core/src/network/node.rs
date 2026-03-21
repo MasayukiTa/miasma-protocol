@@ -555,6 +555,25 @@ pub enum DhtCommand {
         nonce: [u8; 32],
         reply: oneshot::Sender<Option<super::relay_probe::ProbeResponse>>,
     },
+    /// Record a successful active probe for a pseudonym.
+    RecordProbeSuccess {
+        pseudonym: [u8; 32],
+    },
+    /// Record a successful forwarding verification for a pseudonym.
+    RecordForwardingVerification {
+        pseudonym: [u8; 32],
+    },
+    /// Check if a pseudonym has a fresh probe result.
+    HasFreshProbe {
+        pseudonym: [u8; 32],
+        freshness_secs: u64,
+        reply: oneshot::Sender<bool>,
+    },
+    /// Get relay observation details for a pseudonym.
+    GetRelayObservation {
+        pseudonym: [u8; 32],
+        reply: oneshot::Sender<Option<super::descriptor::RelayObservation>>,
+    },
 }
 
 /// Sender side of the DHT command channel.
@@ -861,6 +880,42 @@ impl DhtHandle {
             Ok(None) => Ok(false),
             Err(_) => Err(MiasmaError::Network("probe reply dropped".into())),
         }
+    }
+
+    /// Record a successful active probe for a pseudonym (fire-and-forget).
+    pub async fn record_probe_success(&self, pseudonym: [u8; 32]) -> Result<(), MiasmaError> {
+        self.tx
+            .send(DhtCommand::RecordProbeSuccess { pseudonym })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))
+    }
+
+    /// Record a successful forwarding verification for a pseudonym (fire-and-forget).
+    pub async fn record_forwarding_verification(&self, pseudonym: [u8; 32]) -> Result<(), MiasmaError> {
+        self.tx
+            .send(DhtCommand::RecordForwardingVerification { pseudonym })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))
+    }
+
+    /// Check if a pseudonym has a fresh probe result within `freshness_secs`.
+    pub async fn has_fresh_probe(&self, pseudonym: [u8; 32], freshness_secs: u64) -> Result<bool, MiasmaError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::HasFreshProbe { pseudonym, freshness_secs, reply: tx })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
+        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+    }
+
+    /// Get relay observation details for a pseudonym.
+    pub async fn relay_observation(&self, pseudonym: [u8; 32]) -> Result<Option<super::descriptor::RelayObservation>, MiasmaError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::GetRelayObservation { pseudonym, reply: tx })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
+        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
     }
 }
 
@@ -1443,6 +1498,20 @@ impl MiasmaNode {
                 let req = super::relay_probe::ProbeRequest { nonce };
                 let req_id = self.swarm.behaviour_mut().relay_probe.send_request(&peer_id, req);
                 self.pending_probe_replies.insert(req_id, reply);
+            }
+            DhtCommand::RecordProbeSuccess { pseudonym } => {
+                self.descriptor_store.record_probe_success(&pseudonym);
+            }
+            DhtCommand::RecordForwardingVerification { pseudonym } => {
+                self.descriptor_store.record_forwarding_verification(&pseudonym);
+            }
+            DhtCommand::HasFreshProbe { pseudonym, freshness_secs, reply } => {
+                let fresh = self.descriptor_store.has_fresh_probe(&pseudonym, freshness_secs);
+                let _ = reply.send(fresh);
+            }
+            DhtCommand::GetRelayObservation { pseudonym, reply } => {
+                let obs = self.descriptor_store.relay_observation(&pseudonym).cloned();
+                let _ = reply.send(obs);
             }
         }
     }

@@ -646,6 +646,8 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
             println!("  Rendezvous peers:      {}", s.rendezvous_peers);
             println!("  Relay trust tiers:     claimed={} observed={} verified={}",
                 s.relay_tier_claimed, s.relay_tier_observed, s.relay_tier_verified);
+            println!("  Relay trust evidence:  {} probed (fresh), {} forwarding-verified",
+                s.probe_cache_fresh, s.forwarding_verified_relays);
 
             let total_retrievals = s.retrieval_direct_attempts
                 + s.retrieval_opportunistic_attempts
@@ -693,12 +695,15 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
                 }
             }
 
-            // Active relay probe stats.
-            if s.relay_probes_sent > 0 {
+            // Active relay probe and forwarding verification stats.
+            if s.relay_probes_sent > 0 || s.forwarding_probes_sent > 0 {
                 println!();
-                println!("Relay Probes:");
-                println!("  Sent: {}  Succeeded: {}  Failed: {}",
+                println!("Relay Verification:");
+                println!("  Reachability probes:   {} sent, {} ok, {} fail",
                     s.relay_probes_sent, s.relay_probes_succeeded, s.relay_probes_failed);
+                println!("  Forwarding probes:     {} sent, {} ok, {} fail",
+                    s.forwarding_probes_sent, s.forwarding_probes_succeeded, s.forwarding_probes_failed);
+                println!("  Pre-retrieval sweeps:  {}", s.pre_retrieval_probes_run);
             }
         }
 
