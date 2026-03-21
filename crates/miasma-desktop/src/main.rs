@@ -1,19 +1,25 @@
-/// miasma-desktop — Cross-platform GUI (daemon-centric IPC).
-///
-/// # Architecture
-/// ```text
-/// ┌──────────────────────────────────────────────────┐
-/// │  eframe window (egui immediate-mode)             │
-/// │  ┌───────────────────────────────────────────┐   │
-/// │  │  MiasmaApp                                │   │
-/// │  │  [Dissolve] [Retrieve] [Status] [Settings]│   │
-/// │  └───────────────────────────────────────────┘   │
-/// │                                                  │
-/// │  worker OS thread ── IPC ──► local daemon        │
-/// │      mpsc channels (WorkerCmd / WorkerResult)    │
-/// └──────────────────────────────────────────────────┘
-/// ```
+// Prevent console window on Windows when launched as a GUI app.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
+//! miasma-desktop — Cross-platform GUI (daemon-centric IPC).
+//!
+//! # Architecture
+//! ```text
+//! ┌──────────────────────────────────────────────────┐
+//! │  eframe window (egui immediate-mode)             │
+//! │  ┌───────────────────────────────────────────┐   │
+//! │  │  MiasmaApp                                │   │
+//! │  │  [Store] [Retrieve] [Status] [Settings]   │   │
+//! │  └───────────────────────────────────────────┘   │
+//! │                                                  │
+//! │  worker OS thread ── IPC ──► local daemon        │
+//! │      mpsc channels (WorkerCmd / WorkerResult)    │
+//! └──────────────────────────────────────────────────┘
+//! ```
+
 mod app;
+pub mod locale;
+pub mod variant;
 mod worker;
 
 fn main() -> eframe::Result<()> {
@@ -42,18 +48,25 @@ fn main() -> eframe::Result<()> {
     // Stamp version for future upgrade detection.
     miasma_core::config::stamp_version(&data_dir, env!("CARGO_PKG_VERSION"));
 
+    // Detect product mode.
+    let mode = variant::ProductMode::detect();
+
     let version = env!("CARGO_PKG_VERSION");
+    let title = match mode {
+        variant::ProductMode::Technical => format!("Miasma v{version} (Technical Beta)"),
+        variant::ProductMode::Easy => format!("Miasma v{version}"),
+    };
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([960.0, 680.0])
             .with_min_inner_size([600.0, 400.0])
-            .with_title(format!("Miasma v{version}")),
+            .with_title(title),
         ..Default::default()
     };
 
     eframe::run_native(
         "Miasma",
         native_options,
-        Box::new(|cc| Box::new(app::MiasmaApp::new(cc))),
+        Box::new(move |cc| Box::new(app::MiasmaApp::new(cc, mode))),
     )
 }
