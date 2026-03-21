@@ -8,10 +8,10 @@
 #   $OutputDir\miasma-desktop.exe — Desktop GUI
 #   $OutputDir\miasma-bridge.exe  — BitTorrent bridge
 #
-# Variant controls the default product mode baked into the desktop binary:
-#   technical — MIASMA_MODE=technical (full diagnostics, "Technical Beta" title)
-#   easy      — MIASMA_MODE=easy     (simplified UX, product-like title)
-#   both      — builds once, copies desktop binary twice with variant suffix
+# The -Variant parameter is passed through to package-release.ps1 and controls
+# which launchers and README are included in the release package.
+# The compiled binary is identical for all variants — mode is selected at
+# runtime via launcher scripts, persisted settings, or --mode argument.
 
 param(
     [ValidateSet("release", "debug")]
@@ -36,16 +36,10 @@ if ($Target -eq "release") {
     $cargoArgs += "--release"
 }
 
-# Variant sets the default mode the desktop binary will use when no
-# MIASMA_MODE env var is set at runtime.  The detection logic in
-# variant.rs reads MIASMA_MODE at startup, so we set it at build-time
-# only as documentation — the runtime env var always wins.
-# For "both" we build once (mode is runtime-selectable anyway).
-if ($Variant -eq "technical") {
-    $env:MIASMA_MODE = "technical"
-} elseif ($Variant -eq "easy") {
-    $env:MIASMA_MODE = "easy"
-}
+# Mode selection is entirely runtime — the same binary serves both variants.
+# The -Variant parameter controls packaging (which launchers and READMEs
+# are included), not the compiled binary itself.
+# Build once; variant distinction comes from launcher scripts and persisted prefs.
 
 # Build all workspace binaries.
 & cargo @cargoArgs --workspace
@@ -53,9 +47,6 @@ if ($LASTEXITCODE -ne 0) {
     Write-Error "Cargo build failed."
     exit 1
 }
-
-# Clear build-time env var.
-Remove-Item Env:\MIASMA_MODE -ErrorAction SilentlyContinue
 
 $profile = if ($Target -eq "release") { "release" } else { "debug" }
 $targetDir = "target\$profile"
@@ -76,22 +67,22 @@ foreach ($bin in $shared) {
     }
 }
 
-# Copy desktop binary — variant naming.
+# Copy desktop binary (same binary for all variants — mode is runtime).
 $desktopSrc = "$targetDir\miasma-desktop.exe"
 if (Test-Path $desktopSrc) {
-    if ($Variant -eq "both") {
-        # Both variants: same binary, two copies for packaging convenience.
-        Copy-Item $desktopSrc -Destination "$OutputDir\miasma-desktop.exe" -Force
-        $size = (Get-Item "$OutputDir\miasma-desktop.exe").Length / 1MB
-        Write-Host ("  {0,-25} {1:N1} MB" -f "miasma-desktop.exe", $size)
-        Write-Host "  (Runtime mode selection: set MIASMA_MODE=technical or easy)"
-    } else {
-        Copy-Item $desktopSrc -Destination "$OutputDir\miasma-desktop.exe" -Force
-        $size = (Get-Item "$OutputDir\miasma-desktop.exe").Length / 1MB
-        Write-Host ("  {0,-25} {1:N1} MB  [default: $Variant]" -f "miasma-desktop.exe", $size)
-    }
+    Copy-Item $desktopSrc -Destination "$OutputDir\miasma-desktop.exe" -Force
+    $size = (Get-Item "$OutputDir\miasma-desktop.exe").Length / 1MB
+    Write-Host ("  {0,-25} {1:N1} MB" -f "miasma-desktop.exe", $size)
 } else {
     Write-Warning "miasma-desktop.exe not found at $desktopSrc"
+}
+
+# Copy variant launcher scripts.
+$launcherDir = Join-Path $PSScriptRoot "launchers"
+if (Test-Path $launcherDir) {
+    Copy-Item (Join-Path $launcherDir "Miasma.cmd") -Destination $OutputDir -Force
+    Copy-Item (Join-Path $launcherDir "Miasma Technical.cmd") -Destination $OutputDir -Force
+    Write-Host "  Launchers:              Miasma.cmd, Miasma Technical.cmd"
 }
 
 Write-Host ""
