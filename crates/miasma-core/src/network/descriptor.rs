@@ -180,9 +180,22 @@ impl RelayObservation {
     /// 3. ≥3 passive successes at ≥75% rate → Verified (original rule)
     /// 4. ≥1 passive success OR probe success → Observed
     /// 5. Otherwise → Claimed
+    ///
+    /// **Anti-gaming**: consecutive failures (≥2 with rate < 50%) force
+    /// demotion to Claimed regardless of probes, preventing a relay that
+    /// passes probes but selectively drops real traffic from maintaining
+    /// trust.
     fn recompute_tier(&mut self) {
         let total = self.successes + self.failures;
         let rate = if total > 0 { self.successes as f64 / total as f64 } else { 0.0 };
+
+        // Anti-gaming: if failures dominate recent observations, force demotion.
+        // A relay that passes probes but drops ≥50% of real traffic cannot
+        // remain trusted.
+        if self.failures >= 2 && rate < 0.5 {
+            self.tier = RelayTrustTier::Claimed;
+            return;
+        }
 
         // Forwarding-verified fast-track: strongest possible evidence.
         if self.forwarding_verified_at.is_some() && self.successes >= 1 {
@@ -589,8 +602,16 @@ impl DescriptorStore {
     }
 
     /// Look up the PeerId associated with a pseudonym.
-    pub fn peer_for_pseudonym(&self, pseudonym: &[u8; 32]) -> Option<&PeerId> {
-        self.pseudonym_to_peer.get(pseudonym)
+    pub fn peer_for_pseudonym(&self, pseudonym: &[u8; 32]) -> Option<PeerId> {
+        self.pseudonym_to_peer.get(pseudonym).copied()
+    }
+
+    /// Return pseudonyms of all relay-capable, fresh descriptors.
+    pub fn relay_pseudonyms(&self) -> Vec<[u8; 32]> {
+        self.descriptors.values()
+            .filter(|d| d.is_relay() && is_fresh(d))
+            .map(|d| d.pseudonym)
+            .collect()
     }
 
     /// Return relay-capable peer info for the coordinator's relay routing.
