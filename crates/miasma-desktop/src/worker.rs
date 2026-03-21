@@ -194,11 +194,27 @@ fn worker_thread(
                 let status = rt.block_on(get_status(&data_dir));
                 // Update connection state based on result.
                 if matches!(&status, WorkerResult::Err(e) if is_daemon_down(e)) {
-                    let _ = tx.send(WorkerResult::StateChanged(DaemonState::Stopped));
+                    // Auto-reconnect: try one relaunch before reporting Stopped.
+                    info!("Daemon unreachable — attempting auto-relaunch");
+                    let _ = tx.send(WorkerResult::StateChanged(DaemonState::Starting));
+                    match auto_launch_daemon(&data_dir, &rt) {
+                        Ok(child) => {
+                            owned_daemon = Some(child);
+                            let _ = tx.send(WorkerResult::StateChanged(DaemonState::Connected));
+                            rt.block_on(get_status(&data_dir))
+                        }
+                        Err(e) => {
+                            warn!("Auto-relaunch failed: {e}");
+                            let _ = tx.send(WorkerResult::StateChanged(DaemonState::Stopped));
+                            status
+                        }
+                    }
                 } else if matches!(&status, WorkerResult::Status { .. }) {
                     let _ = tx.send(WorkerResult::StateChanged(DaemonState::Connected));
+                    status
+                } else {
+                    status
                 }
-                status
             }
             WorkerCmd::Init => {
                 match do_init(&data_dir) {
@@ -375,14 +391,23 @@ fn auto_launch_daemon(
 
     info!("Auto-launching daemon: {} daemon", miasma_exe.display());
 
-    let child = std::process::Command::new(&miasma_exe)
-        .arg("daemon")
+    let mut cmd = std::process::Command::new(&miasma_exe);
+    cmd.arg("daemon")
         .arg("--data-dir")
         .arg(data_dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
+        .stderr(std::process::Stdio::null());
+
+    // On Windows, prevent the daemon from opening a console window.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let child = cmd.spawn()
         .map_err(|e| anyhow::anyhow!("spawn daemon: {e}"))?;
 
     // Wait for daemon to become reachable (port file appears + IPC responds).

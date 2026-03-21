@@ -1,14 +1,23 @@
 # package-release.ps1 — Package Miasma release binaries into a distributable zip.
 #
 # Usage:
-#   .\scripts\package-release.ps1 [-InputDir .\dist] [-Version "0.2.0"]
+#   .\scripts\package-release.ps1 [-InputDir .\dist] [-Version "0.2.0"] [-Variant both]
 #
 # Produces:
-#   miasma-<version>-windows-x64.zip
+#   miasma-<version>-windows-x64.zip                     (Variant=both or technical)
+#   miasma-<version>-windows-x64-easy.zip                (Variant=both or easy)
+#
+# Variant:
+#   technical — package for technical beta users (default README)
+#   easy      — package for non-technical trial users (simplified README)
+#   both      — produce two zip files, one for each variant
 
 param(
     [string]$InputDir = ".\dist",
-    [string]$Version = ""
+    [string]$Version = "",
+
+    [ValidateSet("technical", "easy", "both")]
+    [string]$Variant = "both"
 )
 
 $ErrorActionPreference = "Stop"
@@ -32,28 +41,79 @@ if (-not $Version) {
     if (-not $Version) { $Version = "0.0.0" }
 }
 
-$zipName = "miasma-$Version-windows-x64.zip"
-$stagingDir = Join-Path $REPO "dist\staging\miasma-$Version"
+Write-Host "Packaging Miasma v$Version (variant=$Variant) ..."
 
-Write-Host "Packaging Miasma v$Version ..."
-
-# Stage files.
-New-Item -ItemType Directory -Force -Path $stagingDir | Out-Null
-
-$files = @("miasma.exe", "miasma-desktop.exe", "miasma-bridge.exe")
-foreach ($f in $files) {
-    $src = Join-Path $InputDir $f
-    if (Test-Path $src) {
-        Copy-Item $src -Destination $stagingDir -Force
-    } else {
-        Write-Warning "Missing: $f"
-    }
+# ── Variant list ──────────────────────────────────────────────────────────────
+$variants = @()
+if ($Variant -eq "both") {
+    $variants = @("technical", "easy")
+} else {
+    $variants = @($Variant)
 }
 
-# Include public-beta-facing README.
-@"
-Miasma Protocol v$Version — Public Beta (Windows)
-===================================================
+foreach ($v in $variants) {
+    $suffix = if ($v -eq "easy") { "-easy" } else { "" }
+    $zipName = "miasma-$Version-windows-x64$suffix.zip"
+    $stagingDir = Join-Path $REPO "dist\staging\miasma-$Version"
+
+    New-Item -ItemType Directory -Force -Path $stagingDir | Out-Null
+
+    # Copy binaries.
+    $files = @("miasma.exe", "miasma-desktop.exe", "miasma-bridge.exe")
+    foreach ($f in $files) {
+        $src = Join-Path $InputDir $f
+        if (Test-Path $src) {
+            Copy-Item $src -Destination $stagingDir -Force
+        } else {
+            Write-Warning "Missing: $f"
+        }
+    }
+
+    # Variant-appropriate README.
+    if ($v -eq "easy") {
+        $readmeContent = @"
+Miasma v$Version — Trial Build (Windows)
+=========================================
+
+WHAT'S INCLUDED
+
+  miasma-desktop.exe   Desktop app (start here)
+  miasma.exe           Background service (used automatically)
+  miasma-bridge.exe    Advanced tool (optional)
+
+GETTING STARTED
+
+  1. Place all files in a single folder (e.g. C:\Miasma).
+  2. Double-click miasma-desktop.exe.
+  3. Click "Get Started" on the welcome screen.
+  4. That's it. You can now save and retrieve content.
+
+  NOTE: This app is not code-signed yet. Windows may show a warning
+  on first launch. Click "More info" > "Run anyway".
+
+LANGUAGE
+
+  Go to Settings to switch between English, Japanese, and Chinese.
+
+SAVING AND RETRIEVING
+
+  Save:     Go to the "Save" tab, type or choose a file, click "Save".
+            You will receive a Content ID — keep it safe.
+  Get Back: Go to the "Get Back" tab, paste the Content ID, click "Get Back".
+            Save the result to a file.
+
+TROUBLESHOOTING
+
+  - "Not running": Ensure miasma.exe is in the same folder.
+  - SmartScreen warning: Click "More info" > "Run anyway".
+  - Go to Status tab and click "Copy Diagnostics" to report issues.
+
+For more: Settings tab shows data location and app details.
+"@
+    } else {
+        $readmeContent = @"
+Miasma Protocol v$Version — Technical Beta (Windows)
+=====================================================
 
 WHAT'S INCLUDED
 
@@ -125,23 +185,29 @@ VERIFYING YOUR DOWNLOAD
   See RELEASE-NOTES.md for full release notes and changelog.
 
 For help: miasma --help | miasma-bridge --help
-"@ | Set-Content (Join-Path $stagingDir "README.txt")
+"@
+    }
 
-# Include release notes if available.
-$releaseNotesPath = Join-Path $REPO "RELEASE-NOTES.md"
-if (Test-Path $releaseNotesPath) {
-    Copy-Item $releaseNotesPath -Destination $stagingDir -Force
+    $readmeContent | Set-Content (Join-Path $stagingDir "README.txt")
+
+    # Include release notes if available.
+    $releaseNotesPath = Join-Path $REPO "RELEASE-NOTES.md"
+    if (Test-Path $releaseNotesPath) {
+        Copy-Item $releaseNotesPath -Destination $stagingDir -Force
+    }
+
+    # Create zip.
+    $zipPath = Join-Path $InputDir $zipName
+    if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+    Compress-Archive -Path "$stagingDir\*" -DestinationPath $zipPath -Force
+
+    # Cleanup staging.
+    Remove-Item -Recurse -Force (Join-Path $REPO "dist\staging")
+
+    $zipSize = (Get-Item $zipPath).Length / 1MB
+    Write-Host ("  Created: $zipPath ({0:N1} MB)" -f $zipSize)
 }
 
-# Create zip.
-$zipPath = Join-Path $InputDir $zipName
-if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
-Compress-Archive -Path "$stagingDir\*" -DestinationPath $zipPath -Force
-
-# Cleanup staging.
-Remove-Item -Recurse -Force (Join-Path $REPO "dist\staging")
-
-$zipSize = (Get-Item $zipPath).Length / 1MB
-Write-Host ("Created: $zipPath ({0:N1} MB)" -f $zipSize)
 Write-Host ""
-Write-Host "Next: .\scripts\sign-release.ps1 $zipPath (optional)"
+Write-Host "Packaging complete."
+Write-Host "Next: .\scripts\sign-release.ps1 <zip-path> (optional)"

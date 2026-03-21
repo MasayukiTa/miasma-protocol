@@ -28,3 +28,6 @@ egui   = "0.27"
 eframe = { version = "0.27", features = ["default_fonts"] }
 rfd    = "0.14"   # native file-picker dialogs
 # qrcode = "0.14"  # enable in Phase 3 when network allows image crate download
+
+[dev-dependencies]
+serde_json.workspace = true
