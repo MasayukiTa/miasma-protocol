@@ -29,7 +29,7 @@ use crate::{
     crypto::hash::ContentId,
     network::{
         credential::CredentialStats,
-        descriptor::DescriptorStats,
+        descriptor::{DescriptorStats, PeerDescriptor, ReachabilityKind},
         dht::DirectDhtExecutor,
         node::{DhtHandle, MiasmaNode, ShareExchangeHandle, ShareFetchRequest, ShareFetchResponse},
         onion_relay::{OnionRelayRequest, OnionRelayResponse},
@@ -165,6 +165,12 @@ pub struct RetrievalStats {
     pub required_onion_successes: u64,
     pub required_relay_successes: u64,
     pub required_failures: u64,
+    /// Rendezvous (introduction-point) retrieval counters.
+    pub rendezvous_attempts: u64,
+    pub rendezvous_successes: u64,
+    pub rendezvous_failures: u64,
+    /// Rendezvous fallback to direct (intro points unavailable).
+    pub rendezvous_direct_fallbacks: u64,
 }
 
 pub struct MiasmaCoordinator {
@@ -507,13 +513,33 @@ impl MiasmaCoordinator {
 
     /// Retrieve content by routing share fetches through a relay peer.
     ///
-    /// Queries the node's descriptor store for relay-capable peers, selects one,
-    /// and rewrites shard location addresses to use libp2p relay circuit addresses.
+    /// First checks if any shard holder is rendezvous-reachable; if so,
+    /// resolves their introduction points and routes through them.
+    /// Otherwise, uses the standard relay circuit address rewriting.
     async fn retrieve_via_relay(
         &self,
         mid: &ContentId,
         params: DissolutionParams,
     ) -> Result<Vec<u8>, MiasmaError> {
+        // Check DHT record for rendezvous shard holders.
+        if let Ok(Some(record)) = self.dht_handle.get_record(*mid.as_bytes()).await {
+            for loc in &record.locations {
+                if let Ok(peer_id) = PeerId::from_bytes(&loc.peer_id_bytes) {
+                    if let Ok(Some(desc)) = self.dht_handle.peer_descriptor(peer_id).await {
+                        if let ReachabilityKind::Rendezvous { ref intro_points } = desc.reachability {
+                            tracing::info!(
+                                holder = %peer_id,
+                                intro_points = intro_points.len(),
+                                "rendezvous shard holder detected, routing via introduction points"
+                            );
+                            return self.retrieve_via_rendezvous(mid, params, intro_points).await;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Standard relay circuit path.
         let relay_peers = self.dht_handle.relay_peers().await?;
         if relay_peers.is_empty() {
             return Err(MiasmaError::Network(
@@ -521,7 +547,7 @@ impl MiasmaCoordinator {
             ));
         }
 
-        // Select first available relay (sorted by descriptor store's trust ranking).
+        // Select first available relay (sorted by trust tier: Verified first).
         let (relay_peer_id, relay_addrs) = &relay_peers[0];
         let relay_addr = relay_addrs.first().ok_or_else(|| {
             MiasmaError::Network("relay peer has no addresses".into())
@@ -533,15 +559,20 @@ impl MiasmaCoordinator {
             "anonymity: routing retrieval through relay peer"
         );
 
-        // Build a relay-aware DHT executor that rewrites shard addresses
-        // to go through the selected relay's circuit address.
         let relay_exec = RelayRewritingDhtExecutor {
             inner: DirectDhtExecutor::new(self.dht_handle.clone()),
             relay_peer_id: *relay_peer_id,
             relay_addr: relay_addr.clone(),
         };
         let source = FallbackShareSource::new(relay_exec, self.transport_selector.clone());
-        RetrievalCoordinator::new(source).retrieve(mid, params).await
+        let result = RetrievalCoordinator::new(source).retrieve(mid, params).await;
+
+        // Record relay outcome for trust tier tracking.
+        if let Ok(Some(ps)) = self.dht_handle.peer_pseudonym(*relay_peer_id).await {
+            let _ = self.dht_handle.record_relay_outcome(ps, result.is_ok()).await;
+        }
+
+        result
     }
 
     /// Retrieve content via relay with a minimum hop count.
@@ -818,6 +849,99 @@ impl MiasmaCoordinator {
     /// Return a snapshot of per-anonymity-mode retrieval counters.
     pub fn retrieval_stats(&self) -> RetrievalStats {
         self.retrieval_stats.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    /// Look up a peer's descriptor (reachability, capabilities, etc).
+    pub async fn peer_descriptor(
+        &self,
+        peer_id: PeerId,
+    ) -> Result<Option<PeerDescriptor>, MiasmaError> {
+        self.dht_handle.peer_descriptor(peer_id).await
+    }
+
+    /// Record a relay success/failure for trust tier tracking.
+    pub async fn record_relay_outcome(&self, pseudonym: [u8; 32], success: bool) {
+        let _ = self.dht_handle.record_relay_outcome(pseudonym, success).await;
+    }
+
+    /// Resolve rendezvous introduction points for a peer.
+    pub async fn resolve_intro_points(
+        &self,
+        intro_pseudonyms: Vec<[u8; 32]>,
+    ) -> Result<Vec<super::descriptor::ResolvedIntroPoint>, MiasmaError> {
+        self.dht_handle.resolve_intro_points(intro_pseudonyms).await
+    }
+
+    /// Retrieve content via a rendezvous peer's introduction points.
+    ///
+    /// Used when the shard holder's descriptor has `ReachabilityKind::Rendezvous`.
+    /// Resolves intro points, selects the best one (preferring Verified/onion-capable),
+    /// and routes the retrieval through that relay.
+    ///
+    /// # Failure modes (tracked distinctly)
+    /// - No intro points resolved → rendezvous failure
+    /// - Intro point stale/missing → rendezvous failure, try next
+    /// - Intro point reachable but relay fails → rendezvous failure + relay outcome recorded
+    /// - All intro points fail → falls back per anonymity mode
+    async fn retrieve_via_rendezvous(
+        &self,
+        mid: &ContentId,
+        params: DissolutionParams,
+        intro_pseudonyms: &[[u8; 32]],
+    ) -> Result<Vec<u8>, MiasmaError> {
+        if let Ok(mut s) = self.retrieval_stats.lock() { s.rendezvous_attempts += 1; }
+
+        let resolved = self.dht_handle.resolve_intro_points(intro_pseudonyms.to_vec()).await?;
+        if resolved.is_empty() {
+            if let Ok(mut s) = self.retrieval_stats.lock() { s.rendezvous_failures += 1; }
+            return Err(MiasmaError::Network(
+                "rendezvous: no intro points could be resolved (all stale, missing, or non-relay)".into(),
+            ));
+        }
+
+        // Try each resolved intro point in trust-tier order (Verified first).
+        for intro in &resolved {
+            let relay_addr = match intro.addresses.first() {
+                Some(a) => a.clone(),
+                None => continue,
+            };
+
+            tracing::info!(
+                intro_peer = %intro.peer_id,
+                relay_tier = ?intro.relay_tier,
+                onion = intro.onion_pubkey.is_some(),
+                "rendezvous: routing through introduction point"
+            );
+
+            let relay_exec = RelayRewritingDhtExecutor {
+                inner: DirectDhtExecutor::new(self.dht_handle.clone()),
+                relay_peer_id: intro.peer_id,
+                relay_addr,
+            };
+            let source = FallbackShareSource::new(relay_exec, self.transport_selector.clone());
+            match RetrievalCoordinator::new(source).retrieve(mid, params.clone()).await {
+                Ok(data) => {
+                    // Record relay success for this intro point.
+                    let _ = self.dht_handle.record_relay_outcome(intro.pseudonym, true).await;
+                    if let Ok(mut s) = self.retrieval_stats.lock() { s.rendezvous_successes += 1; }
+                    return Ok(data);
+                }
+                Err(e) => {
+                    // Record relay failure — may demote this intro point's trust tier.
+                    let _ = self.dht_handle.record_relay_outcome(intro.pseudonym, false).await;
+                    tracing::debug!(
+                        intro_peer = %intro.peer_id,
+                        "rendezvous: intro point failed ({e}), trying next"
+                    );
+                }
+            }
+        }
+
+        if let Ok(mut s) = self.retrieval_stats.lock() { s.rendezvous_failures += 1; }
+        Err(MiasmaError::Network(format!(
+            "rendezvous: all {} intro points failed",
+            resolved.len()
+        )))
     }
 }
 

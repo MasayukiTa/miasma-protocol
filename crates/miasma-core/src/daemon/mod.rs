@@ -575,11 +575,15 @@ async fn process_request(
                     total_descriptors: 0,
                     relay_descriptors: 0,
                     relayed_descriptors: 0,
+                    rendezvous_descriptors: 0,
                     credentialed_descriptors: 0,
                     bbs_credentialed_descriptors: 0,
                     stale_descriptors: 0,
                     pseudonym_churn_rate: 0.0,
                     relay_peers_routable: 0,
+                    relay_claimed: 0,
+                    relay_observed: 0,
+                    relay_verified: 0,
                 },
             );
             let path_stats = coord.path_selection_stats().await.unwrap_or(
@@ -647,6 +651,14 @@ async fn process_request(
                 retrieval_required_onion_successes: ret_stats.required_onion_successes,
                 retrieval_required_relay_successes: ret_stats.required_relay_successes,
                 retrieval_required_failures: ret_stats.required_failures,
+                retrieval_rendezvous_attempts: ret_stats.rendezvous_attempts,
+                retrieval_rendezvous_successes: ret_stats.rendezvous_successes,
+                retrieval_rendezvous_failures: ret_stats.rendezvous_failures,
+                retrieval_rendezvous_direct_fallbacks: ret_stats.rendezvous_direct_fallbacks,
+                rendezvous_peers: desc_stats.rendezvous_descriptors,
+                relay_tier_claimed: desc_stats.relay_claimed,
+                relay_tier_observed: desc_stats.relay_observed,
+                relay_tier_verified: desc_stats.relay_verified,
             })
         }
 

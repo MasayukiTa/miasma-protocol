@@ -21,7 +21,7 @@ pub use bbs_credential::{
 };
 pub use coordinator::{MiasmaCoordinator, NetworkShareFetcher, RetrievalStats};
 pub use credential::{CredentialStats, CredentialTier, CredentialWallet, IssuerRegistry};
-pub use descriptor::{DescriptorStats, DescriptorStore, PeerDescriptor, PeerCapabilities, ReachabilityKind, ResourceProfile};
+pub use descriptor::{DescriptorStats, DescriptorStore, PeerDescriptor, PeerCapabilities, ReachabilityKind, RelayObservation, RelayTrustTier, ResolvedIntroPoint, ResourceProfile};
 pub use dht::{BypassOnionDhtExecutor, DirectDhtExecutor, LiveOnionDhtExecutor, OnionAwareDhtExecutor};
 pub use node::{DhtHandle, MiasmaNode, ShareExchangeHandle};
 pub use path_selection::{AnonymityPolicy, PathSelectionStats};

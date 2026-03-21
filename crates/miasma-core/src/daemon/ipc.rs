@@ -216,6 +216,33 @@ pub struct DaemonStatus {
     /// Required anonymity failures.
     #[serde(default)]
     pub retrieval_required_failures: u64,
+    /// Rendezvous retrieval attempts.
+    #[serde(default)]
+    pub retrieval_rendezvous_attempts: u64,
+    /// Rendezvous retrieval successes.
+    #[serde(default)]
+    pub retrieval_rendezvous_successes: u64,
+    /// Rendezvous retrieval failures.
+    #[serde(default)]
+    pub retrieval_rendezvous_failures: u64,
+    /// Rendezvous fallbacks to direct (no intro points).
+    #[serde(default)]
+    pub retrieval_rendezvous_direct_fallbacks: u64,
+
+    // ── Rendezvous and relay trust ──────────────────────────────────────
+
+    /// Number of peers with Rendezvous reachability descriptors.
+    #[serde(default)]
+    pub rendezvous_peers: usize,
+    /// Relay peers at Claimed trust tier.
+    #[serde(default)]
+    pub relay_tier_claimed: usize,
+    /// Relay peers at Observed trust tier.
+    #[serde(default)]
+    pub relay_tier_observed: usize,
+    /// Relay peers at Verified trust tier.
+    #[serde(default)]
+    pub relay_tier_verified: usize,
 }
 
 /// Per-transport readiness info for IPC/CLI display.

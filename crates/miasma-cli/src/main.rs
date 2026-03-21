@@ -642,9 +642,15 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
                 if s.nat_publicly_reachable { "yes" } else { "no" }
             );
 
+            // Rendezvous and relay trust
+            println!("  Rendezvous peers:      {}", s.rendezvous_peers);
+            println!("  Relay trust tiers:     claimed={} observed={} verified={}",
+                s.relay_tier_claimed, s.relay_tier_observed, s.relay_tier_verified);
+
             let total_retrievals = s.retrieval_direct_attempts
                 + s.retrieval_opportunistic_attempts
-                + s.retrieval_required_attempts;
+                + s.retrieval_required_attempts
+                + s.retrieval_rendezvous_attempts;
             if total_retrievals > 0 {
                 println!();
                 println!("Retrieval Tracking:");
@@ -661,6 +667,11 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
                     s.retrieval_required_onion_successes,
                     s.retrieval_required_relay_successes,
                     s.retrieval_required_failures);
+                println!("  Rendezvous:   {}/{} (failed: {}, direct fallback: {})",
+                    s.retrieval_rendezvous_successes,
+                    s.retrieval_rendezvous_attempts,
+                    s.retrieval_rendezvous_failures,
+                    s.retrieval_rendezvous_direct_fallbacks);
             }
         }
 
