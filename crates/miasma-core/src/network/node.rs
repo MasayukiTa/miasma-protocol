@@ -543,6 +543,18 @@ pub enum DhtCommand {
         peer_id: PeerId,
         reply: oneshot::Sender<Option<PeerDescriptor>>,
     },
+    /// Look up a peer's X25519 onion pubkey from the descriptor store.
+    GetPeerOnionPubkey {
+        peer_id: PeerId,
+        reply: oneshot::Sender<Option<[u8; 32]>>,
+    },
+    /// Send a relay probe to a peer and return the response.
+    SendRelayProbe {
+        peer_id: PeerId,
+        addrs: Vec<String>,
+        nonce: [u8; 32],
+        reply: oneshot::Sender<Option<super::relay_probe::ProbeResponse>>,
+    },
 }
 
 /// Sender side of the DHT command channel.
@@ -821,6 +833,35 @@ impl DhtHandle {
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
         rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
     }
+
+    /// Look up a peer's X25519 onion pubkey from the descriptor store.
+    pub async fn peer_onion_pubkey(&self, peer_id: PeerId) -> Result<Option<[u8; 32]>, MiasmaError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::GetPeerOnionPubkey { peer_id, reply: tx })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
+        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+    }
+
+    /// Send a relay probe to verify a peer runs the relay-probe protocol.
+    ///
+    /// Returns `Ok(true)` if the probe succeeded (nonce matched), `Ok(false)`
+    /// if the peer responded with wrong nonce, and `Err` if unreachable.
+    pub async fn probe_relay(&self, peer_id: PeerId, addrs: Vec<String>) -> Result<bool, MiasmaError> {
+        let mut nonce = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::SendRelayProbe { peer_id, addrs, nonce, reply: tx })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
+        match rx.await {
+            Ok(Some(resp)) => Ok(resp.nonce == nonce),
+            Ok(None) => Ok(false),
+            Err(_) => Err(MiasmaError::Network("probe reply dropped".into())),
+        }
+    }
 }
 
 // ─── Share-exchange command channel ──────────────────────────────────────────
@@ -878,6 +919,8 @@ pub struct MiasmaBehaviour {
     pub(crate) descriptor_exchange: request_response::Behaviour<DescriptorCodec>,
     /// Onion relay: `/miasma/onion/1.0.0` request-response.
     pub(crate) onion_relay: request_response::Behaviour<OnionRelayCodec>,
+    /// Relay probe: `/miasma/relay-probe/1.0.0` request-response.
+    pub(crate) relay_probe: request_response::Behaviour<super::relay_probe::RelayProbeCodec>,
 }
 
 // ─── MiasmaNode ───────────────────────────────────────────────────────────────
@@ -968,6 +1011,11 @@ pub struct MiasmaNode {
     pending_onion_inbound_channels: HashMap<
         request_response::OutboundRequestId,
         request_response::ResponseChannel<OnionRelayResponse>,
+    >,
+    /// Pending relay probe reply channels.
+    pending_probe_replies: HashMap<
+        request_response::OutboundRequestId,
+        oneshot::Sender<Option<super::relay_probe::ProbeResponse>>,
     >,
 }
 
@@ -1080,6 +1128,7 @@ impl MiasmaNode {
             pending_onion_relays: HashMap::new(),
             pending_onion_replies: HashMap::new(),
             pending_onion_inbound_channels: HashMap::new(),
+            pending_probe_replies: HashMap::new(),
         })
     }
 
@@ -1379,6 +1428,22 @@ impl MiasmaNode {
                 let desc = self.descriptor_store.get_by_peer(&peer_id).cloned();
                 let _ = reply.send(desc);
             }
+            DhtCommand::GetPeerOnionPubkey { peer_id, reply } => {
+                let pubkey = self.descriptor_store.onion_pubkey_for_peer(&peer_id);
+                let _ = reply.send(pubkey);
+            }
+            DhtCommand::SendRelayProbe { peer_id, addrs, nonce, reply } => {
+                // Register addresses so libp2p can dial the peer.
+                for addr_str in &addrs {
+                    if let Ok(addr) = addr_str.parse::<Multiaddr>() {
+                        self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
+                        self.swarm.add_peer_address(peer_id, addr.clone());
+                    }
+                }
+                let req = super::relay_probe::ProbeRequest { nonce };
+                let req_id = self.swarm.behaviour_mut().relay_probe.send_request(&peer_id, req);
+                self.pending_probe_replies.insert(req_id, reply);
+            }
         }
     }
 
@@ -1503,6 +1568,9 @@ impl MiasmaNode {
             }
             SwarmEvent::Behaviour(MiasmaBehaviourEvent::OnionRelay(ev)) => {
                 self.handle_onion_relay_event(ev);
+            }
+            SwarmEvent::Behaviour(MiasmaBehaviourEvent::RelayProbe(ev)) => {
+                self.handle_relay_probe_event(ev);
             }
             SwarmEvent::Behaviour(MiasmaBehaviourEvent::Autonat(ev)) => match &ev {
                 autonat::Event::StatusChanged { old, new } => {
@@ -2148,6 +2216,46 @@ impl MiasmaNode {
         }
     }
 
+    /// Handle relay probe protocol events.
+    ///
+    /// Inbound: echo the nonce back (proves we run the protocol).
+    /// Outbound: responses delivered to pending probe channels.
+    fn handle_relay_probe_event(
+        &mut self,
+        ev: request_response::Event<super::relay_probe::ProbeRequest, super::relay_probe::ProbeResponse>,
+    ) {
+        use super::relay_probe::{ProbeResponse};
+        match ev {
+            request_response::Event::Message {
+                message: request_response::Message::Request { request, channel, .. },
+                ..
+            } => {
+                // Inbound: echo the nonce.
+                let _ = self.swarm.behaviour_mut().relay_probe
+                    .send_response(channel, ProbeResponse { nonce: request.nonce });
+            }
+            request_response::Event::Message {
+                message: request_response::Message::Response { request_id, response },
+                ..
+            } => {
+                // Outbound: deliver to pending probe channel.
+                if let Some(reply) = self.pending_probe_replies.remove(&request_id) {
+                    let _ = reply.send(Some(response));
+                }
+            }
+            request_response::Event::OutboundFailure { request_id, error, .. } => {
+                if let Some(reply) = self.pending_probe_replies.remove(&request_id) {
+                    let _ = reply.send(None);
+                }
+                tracing::debug!("relay probe outbound failure: {error}");
+            }
+            request_response::Event::InboundFailure { error, .. } => {
+                tracing::debug!("relay probe inbound failure: {error}");
+            }
+            _ => {}
+        }
+    }
+
     /// Handle an onion delivery at the target node.
     ///
     /// The body format is: `session_key(32) || e2e_encrypted_layer(OnionLayer)`.
@@ -2439,6 +2547,14 @@ fn build_swarm(
                 request_response::Config::default(),
             );
 
+            let relay_probe = request_response::Behaviour::<super::relay_probe::RelayProbeCodec>::new(
+                [(
+                    StreamProtocol::new("/miasma/relay-probe/1.0.0"),
+                    request_response::ProtocolSupport::Full,
+                )],
+                request_response::Config::default(),
+            );
+
             Ok(MiasmaBehaviour {
                 kademlia,
                 identify,
@@ -2451,6 +2567,7 @@ fn build_swarm(
                 credential_exchange,
                 descriptor_exchange,
                 onion_relay,
+                relay_probe,
             })
         })
         .map_err(|e| MiasmaError::Sss(format!("behaviour init failed: {e}")))?

@@ -160,6 +160,10 @@ pub struct RetrievalStats {
     pub opportunistic_attempts: u64,
     pub opportunistic_relay_successes: u64,
     pub opportunistic_direct_fallbacks: u64,
+    /// Opportunistic: strongest-path successes.
+    pub opportunistic_onion_successes: u64,
+    pub opportunistic_onion_rendezvous_successes: u64,
+    pub opportunistic_rendezvous_successes: u64,
     /// Required anonymity retrieval attempts.
     pub required_attempts: u64,
     pub required_onion_successes: u64,
@@ -171,6 +175,14 @@ pub struct RetrievalStats {
     pub rendezvous_failures: u64,
     /// Rendezvous fallback to direct (intro points unavailable).
     pub rendezvous_direct_fallbacks: u64,
+    /// Rendezvous + onion combined: content-blind retrieval from NAT'd holders.
+    pub rendezvous_onion_attempts: u64,
+    pub rendezvous_onion_successes: u64,
+    pub rendezvous_onion_failures: u64,
+    /// Active relay probe counters.
+    pub relay_probes_sent: u64,
+    pub relay_probes_succeeded: u64,
+    pub relay_probes_failed: u64,
 }
 
 pub struct MiasmaCoordinator {
@@ -511,35 +523,91 @@ impl MiasmaCoordinator {
         }
     }
 
-    /// Retrieve content by routing share fetches through a relay peer.
+    /// Retrieve content via the strongest available privacy path (Opportunistic).
     ///
-    /// First checks if any shard holder is rendezvous-reachable; if so,
-    /// resolves their introduction points and routes through them.
-    /// Otherwise, uses the standard relay circuit address rewriting.
+    /// # Path hierarchy (strongest first, falls through on failure)
+    /// 1. Onion + rendezvous — content-blind, NAT-capable
+    /// 2. Standard onion   — content-blind, direct-reachable holders
+    /// 3. Rendezvous relay — IP-only privacy, NAT-capable
+    /// 4. Relay circuit    — IP-only privacy
     async fn retrieve_via_relay(
         &self,
         mid: &ContentId,
         params: DissolutionParams,
     ) -> Result<Vec<u8>, MiasmaError> {
-        // Check DHT record for rendezvous shard holders.
-        if let Ok(Some(record)) = self.dht_handle.get_record(*mid.as_bytes()).await {
-            for loc in &record.locations {
-                if let Ok(peer_id) = PeerId::from_bytes(&loc.peer_id_bytes) {
-                    if let Ok(Some(desc)) = self.dht_handle.peer_descriptor(peer_id).await {
-                        if let ReachabilityKind::Rendezvous { ref intro_points } = desc.reachability {
-                            tracing::info!(
-                                holder = %peer_id,
-                                intro_points = intro_points.len(),
-                                "rendezvous shard holder detected, routing via introduction points"
-                            );
-                            return self.retrieve_via_rendezvous(mid, params, intro_points).await;
+        let relay_onion_info = self.dht_handle.relay_onion_info().await?;
+        let has_rendezvous = self.has_rendezvous_holders(mid).await;
+
+        // 1. Onion + rendezvous (content-blind + NAT).
+        if has_rendezvous && !relay_onion_info.is_empty() {
+            tracing::info!(
+                onion_relays = relay_onion_info.len(),
+                "opportunistic: attempting onion+rendezvous retrieval"
+            );
+            match self.retrieve_via_onion_rendezvous(mid, params.clone()).await {
+                Ok(data) => {
+                    if let Ok(mut s) = self.retrieval_stats.lock() {
+                        s.opportunistic_onion_rendezvous_successes += 1;
+                    }
+                    return Ok(data);
+                }
+                Err(e) => {
+                    tracing::debug!("opportunistic: onion+rendezvous failed ({e}), trying standard onion");
+                }
+            }
+        }
+
+        // 2. Standard onion (content-blind, direct-reachable holders).
+        if relay_onion_info.len() >= 2 {
+            tracing::info!(
+                relays = relay_onion_info.len(),
+                "opportunistic: attempting onion-encrypted retrieval"
+            );
+            match self.retrieve_via_onion(mid, params.clone()).await {
+                Ok(data) => {
+                    if let Ok(mut s) = self.retrieval_stats.lock() {
+                        s.opportunistic_onion_successes += 1;
+                    }
+                    return Ok(data);
+                }
+                Err(e) => {
+                    tracing::debug!("opportunistic: standard onion failed ({e}), trying relay circuit");
+                }
+            }
+        }
+
+        // 3. Rendezvous relay (IP-only + NAT) — check DHT record for rendezvous holders.
+        if has_rendezvous {
+            if let Ok(Some(record)) = self.dht_handle.get_record(*mid.as_bytes()).await {
+                for loc in &record.locations {
+                    if let Ok(peer_id) = PeerId::from_bytes(&loc.peer_id_bytes) {
+                        if let Ok(Some(desc)) = self.dht_handle.peer_descriptor(peer_id).await {
+                            if let ReachabilityKind::Rendezvous { ref intro_points } = desc.reachability {
+                                tracing::info!(
+                                    holder = %peer_id,
+                                    intro_points = intro_points.len(),
+                                    "opportunistic: routing via rendezvous introduction points"
+                                );
+                                match self.retrieve_via_rendezvous(mid, params.clone(), intro_points).await {
+                                    Ok(data) => {
+                                        if let Ok(mut s) = self.retrieval_stats.lock() {
+                                            s.opportunistic_rendezvous_successes += 1;
+                                        }
+                                        return Ok(data);
+                                    }
+                                    Err(e) => {
+                                        tracing::debug!("opportunistic: rendezvous failed ({e}), trying relay circuit");
+                                    }
+                                }
+                                break;
+                            }
                         }
                     }
                 }
             }
         }
 
-        // Standard relay circuit path.
+        // 4. Relay circuit (IP-only privacy).
         let relay_peers = self.dht_handle.relay_peers().await?;
         if relay_peers.is_empty() {
             return Err(MiasmaError::Network(
@@ -547,7 +615,6 @@ impl MiasmaCoordinator {
             ));
         }
 
-        // Select first available relay (sorted by trust tier: Verified first).
         let (relay_peer_id, relay_addrs) = &relay_peers[0];
         let relay_addr = relay_addrs.first().ok_or_else(|| {
             MiasmaError::Network("relay peer has no addresses".into())
@@ -556,7 +623,7 @@ impl MiasmaCoordinator {
         tracing::info!(
             relay = %relay_peer_id,
             addr = %relay_addr,
-            "anonymity: routing retrieval through relay peer"
+            "opportunistic: fallback to relay circuit rewriting"
         );
 
         let relay_exec = RelayRewritingDhtExecutor {
@@ -567,9 +634,12 @@ impl MiasmaCoordinator {
         let source = FallbackShareSource::new(relay_exec, self.transport_selector.clone());
         let result = RetrievalCoordinator::new(source).retrieve(mid, params).await;
 
-        // Record relay outcome for trust tier tracking.
         if let Ok(Some(ps)) = self.dht_handle.peer_pseudonym(*relay_peer_id).await {
             let _ = self.dht_handle.record_relay_outcome(ps, result.is_ok()).await;
+        }
+
+        if result.is_ok() {
+            if let Ok(mut s) = self.retrieval_stats.lock() { s.opportunistic_relay_successes += 1; }
         }
 
         result
@@ -578,16 +648,46 @@ impl MiasmaCoordinator {
     /// Retrieve content via relay with a minimum hop count.
     ///
     /// Uses 2-hop onion-encrypted retrieval when relay nodes with onion pubkeys
-    /// are available. Falls back to relay circuit address rewriting (IP privacy
-    /// only, no content privacy) when onion keys are unavailable.
+    /// are available. For rendezvous (NAT'd) shard holders, composes onion
+    /// encryption with introduction-point routing so the retrieval is
+    /// content-blind even when the holder is behind NAT.
+    ///
+    /// # Path hierarchy (strongest first)
+    /// 1. Onion + rendezvous: content-blind, intro-point-mediated (NAT'd holders)
+    /// 2. Onion direct: content-blind, direct target addressing
+    /// 3. Relay circuit: IP privacy only, content visible to relay
     async fn retrieve_via_relay_required(
         &self,
         mid: &ContentId,
         params: DissolutionParams,
         min_hops: usize,
     ) -> Result<Vec<u8>, MiasmaError> {
-        // Try onion-encrypted retrieval first (content + path privacy).
         let relay_onion_info = self.dht_handle.relay_onion_info().await?;
+
+        // Check if any shard holder is rendezvous-reachable.
+        let has_rendezvous = self.has_rendezvous_holders(mid).await;
+
+        // 1. Onion + rendezvous: for NAT'd shard holders with onion-capable intro points.
+        if has_rendezvous && !relay_onion_info.is_empty() {
+            tracing::info!(
+                onion_relays = relay_onion_info.len(),
+                min_hops,
+                "anonymity=required: attempting onion+rendezvous retrieval"
+            );
+            match self.retrieve_via_onion_rendezvous(mid, params.clone()).await {
+                Ok(data) => {
+                    if let Ok(mut s) = self.retrieval_stats.lock() {
+                        s.required_onion_successes += 1;
+                    }
+                    return Ok(data);
+                }
+                Err(e) => {
+                    tracing::debug!("onion+rendezvous failed ({e}), trying standard onion");
+                }
+            }
+        }
+
+        // 2. Standard onion (content + path privacy, direct-reachable holders).
         if relay_onion_info.len() >= 2 {
             tracing::info!(
                 relays = relay_onion_info.len(),
@@ -601,7 +701,7 @@ impl MiasmaCoordinator {
             return result;
         }
 
-        // Fallback to relay circuit address rewriting (IP privacy only).
+        // 3. Relay circuit fallback (IP privacy only, no content privacy).
         let relay_peers = self.dht_handle.relay_peers().await?;
         if relay_peers.len() < min_hops {
             return Err(MiasmaError::Network(format!(
@@ -633,6 +733,22 @@ impl MiasmaCoordinator {
             if let Ok(mut s) = self.retrieval_stats.lock() { s.required_relay_successes += 1; }
         }
         result
+    }
+
+    /// Check if any shard holder in the DHT record is rendezvous-reachable.
+    async fn has_rendezvous_holders(&self, mid: &ContentId) -> bool {
+        if let Ok(Some(record)) = self.dht_handle.get_record(*mid.as_bytes()).await {
+            for loc in &record.locations {
+                if let Ok(peer_id) = PeerId::from_bytes(&loc.peer_id_bytes) {
+                    if let Ok(Some(desc)) = self.dht_handle.peer_descriptor(peer_id).await {
+                        if desc.is_rendezvous() {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// Retrieve content using 2-hop onion-encrypted share fetching.
@@ -701,30 +817,21 @@ impl MiasmaCoordinator {
                 .map_err(|e| MiasmaError::Network(format!("invalid target peer_id: {e}")))?;
 
             // Look up target's onion pubkey from descriptor store.
-            // If the target doesn't have an onion pubkey, we can't do e2e encryption.
-            let target_onion_pubkey = self.dht_handle.onion_pubkey().await
-                .unwrap_or([0u8; 32]); // fallback: use our own key for self-fetch
-
-            // For the target, we need their actual onion pubkey.
-            // In a real deployment, we'd look this up from the descriptor store.
-            // For now, if the target is us, use our own key.
             let target_pubkey = if target_peer_id == self.peer_id {
-                target_onion_pubkey
+                // Self-fetch: use our own onion key.
+                self.dht_handle.onion_pubkey().await.unwrap_or([0u8; 32])
             } else {
-                // Query the descriptor store for the target's onion pubkey.
-                // This goes through the node's descriptor store.
-                // If unavailable, skip this shard.
-                match self.dht_handle.relay_onion_info().await {
-                    Ok(all_info) => {
-                        // The relay_onion_info only returns relay-capable peers.
-                        // We need a way to look up any peer's onion key.
-                        // For now, use the target as an implicit relay key holder.
-                        all_info.iter()
-                            .find(|info| info.peer_id == target_peer_id_bytes.as_slice())
-                            .map(|info| info.onion_pubkey)
-                            .unwrap_or(target_onion_pubkey)
+                // Query the descriptor store for this specific peer's key.
+                match self.dht_handle.peer_onion_pubkey(target_peer_id).await {
+                    Ok(Some(key)) => key,
+                    _ => {
+                        tracing::debug!(
+                            target = %target_peer_id,
+                            shard = location.shard_index,
+                            "onion: target has no onion pubkey, skipping shard"
+                        );
+                        continue;
                     }
-                    Err(_) => target_onion_pubkey,
                 }
             };
 
@@ -764,37 +871,12 @@ impl MiasmaCoordinator {
                 return_path.r1_init_key,
             ).await?;
 
-            // Process response: decrypt through return path keys.
+            // Decrypt 3-layer response and parse share.
             match response {
                 OnionRelayResponse::Data(encrypted) => {
-                    // Decrypt R1's return-key layer.
-                    let after_r1 = crate::onion::packet::decrypt_response(
-                        &return_path.r1_init_key,
-                        &encrypted,
-                    )?;
-
-                    // Decrypt R2's return-key layer.
-                    let after_r2 = crate::onion::packet::decrypt_response(
-                        &return_path.r2_r1_key,
-                        &after_r1,
-                    )?;
-
-                    // Decrypt e2e session key layer.
-                    let plaintext = crate::onion::packet::decrypt_response(
-                        &session_key,
-                        &after_r2,
-                    )?;
-
-                    // Parse share response.
-                    if plaintext.first() != Some(&0x11) {
-                        tracing::warn!("onion: unexpected share response tag");
-                        continue;
-                    }
-                    let resp: ShareFetchResponse = bincode::deserialize(&plaintext[1..])
-                        .map_err(|e| MiasmaError::Serialization(e.to_string()))?;
-
-                    if let Some(share) = resp.share {
-                        shares.push(share);
+                    match self.decrypt_onion_response(&return_path, &session_key, &encrypted) {
+                        Some(share) => shares.push(share),
+                        None => continue,
                     }
                 }
                 OnionRelayResponse::Error(e) => {
@@ -872,6 +954,231 @@ impl MiasmaCoordinator {
         self.dht_handle.resolve_intro_points(intro_pseudonyms).await
     }
 
+    /// Retrieve content using onion encryption composed with rendezvous routing.
+    ///
+    /// For NAT'd shard holders with `ReachabilityKind::Rendezvous`, uses an
+    /// onion-capable introduction point as R2 in the 2-hop onion circuit.
+    /// This provides both content blindness (e2e encryption) and IP privacy
+    /// (initiator hidden behind R1) even when the target is behind NAT.
+    ///
+    /// # Path: Initiator → R1 → R2(intro point) → Target(via relay circuit)
+    ///
+    /// - R1: random onion-capable relay from pool
+    /// - R2: onion-capable introduction point for the NAT'd holder
+    /// - Target: reachable via relay circuit through R2
+    ///
+    /// For non-rendezvous shard holders in the same record, falls back to
+    /// standard onion routing with R2 from the relay pool.
+    async fn retrieve_via_onion_rendezvous(
+        &self,
+        mid: &ContentId,
+        params: DissolutionParams,
+    ) -> Result<Vec<u8>, MiasmaError> {
+        if let Ok(mut s) = self.retrieval_stats.lock() { s.rendezvous_onion_attempts += 1; }
+
+        // Get all onion-capable relays for R1 selection.
+        let relays = self.dht_handle.relay_onion_info().await?;
+        if relays.is_empty() {
+            if let Ok(mut s) = self.retrieval_stats.lock() { s.rendezvous_onion_failures += 1; }
+            return Err(MiasmaError::Network(
+                "onion+rendezvous: no onion-capable relays available for R1".into(),
+            ));
+        }
+
+        // DHT lookup.
+        let record = self.dht_handle.get_record(*mid.as_bytes()).await?
+            .ok_or_else(|| MiasmaError::Sss(format!(
+                "onion+rendezvous: DhtRecord not found for MID {}",
+                hex::encode(&mid.as_bytes()[..8])
+            )))?;
+
+        let k = params.data_shards;
+        let mut shares: Vec<MiasmaShare> = Vec::with_capacity(k);
+
+        for location in &record.locations {
+            if shares.len() >= k {
+                break;
+            }
+
+            let target_peer_id_bytes = &location.peer_id_bytes;
+            let target_peer_id = match PeerId::from_bytes(target_peer_id_bytes) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            // Look up target's onion pubkey.
+            let target_pubkey = if target_peer_id == self.peer_id {
+                self.dht_handle.onion_pubkey().await.unwrap_or([0u8; 32])
+            } else {
+                match self.dht_handle.peer_onion_pubkey(target_peer_id).await {
+                    Ok(Some(key)) => key,
+                    _ => {
+                        tracing::debug!(
+                            target = %target_peer_id,
+                            "onion+rendezvous: target has no onion pubkey, skipping shard"
+                        );
+                        continue;
+                    }
+                }
+            };
+
+            // Determine R2 based on reachability kind.
+            let (r2_info, r2_pseudonym) = match self.dht_handle.peer_descriptor(target_peer_id).await {
+                Ok(Some(desc)) if desc.is_rendezvous() => {
+                    // NAT'd holder: use an onion-capable intro point as R2.
+                    if let ReachabilityKind::Rendezvous { ref intro_points } = desc.reachability {
+                        let resolved = self.dht_handle.resolve_intro_points(intro_points.clone()).await?;
+                        // Find the first onion-capable intro point.
+                        let onion_intro = resolved.iter()
+                            .find(|ip| ip.onion_pubkey.is_some());
+                        match onion_intro {
+                            Some(intro) => {
+                                let pubkey = intro.onion_pubkey.unwrap();
+                                let addr = match intro.addresses.first() {
+                                    Some(a) => a.as_bytes().to_vec(),
+                                    None => continue,
+                                };
+                                let info = crate::onion::circuit::RelayInfo {
+                                    peer_id: intro.peer_id.to_bytes(),
+                                    onion_pubkey: pubkey,
+                                    addr,
+                                };
+                                (info, Some(intro.pseudonym))
+                            }
+                            None => {
+                                tracing::debug!(
+                                    target = %target_peer_id,
+                                    "onion+rendezvous: no onion-capable intro points, skipping shard"
+                                );
+                                continue;
+                            }
+                        }
+                    } else {
+                        continue;
+                    }
+                }
+                _ => {
+                    // Direct/Relayed holder: use standard R2 from relay pool.
+                    if relays.len() < 2 {
+                        tracing::debug!("onion+rendezvous: need ≥2 relays for non-rendezvous holder");
+                        continue;
+                    }
+                    (relays[1].clone(), None)
+                }
+            };
+
+            // Pick R1 — must differ from R2.
+            let r2_peer_id_bytes = &r2_info.peer_id;
+            let r1 = relays.iter()
+                .find(|r| r.peer_id != *r2_peer_id_bytes)
+                .unwrap_or(&relays[0]);
+
+            let r1_peer_id = match PeerId::from_bytes(&r1.peer_id) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            let r1_addrs = vec![String::from_utf8_lossy(&r1.addr).to_string()];
+
+            // Build share request.
+            let req = ShareFetchRequest {
+                mid_digest: record.mid_digest,
+                slot_index: location.shard_index,
+                segment_index: 0,
+            };
+            let mut req_body = vec![0x10u8];
+            req_body.extend(
+                bincode::serialize(&req)
+                    .map_err(|e| MiasmaError::Serialization(e.to_string()))?,
+            );
+
+            // Build e2e onion packet: R1 → R2(intro) → Target.
+            let (packet, return_path, session_key) = OnionPacketBuilder::build_e2e(
+                &r1.onion_pubkey,
+                &r2_info.onion_pubkey,
+                &target_pubkey,
+                r2_info.peer_id.clone(),
+                target_peer_id_bytes.clone(),
+                r2_info.addr.clone(),
+                req_body,
+            )?;
+
+            let onion_req = OnionRelayRequest::Packet {
+                circuit_id: packet.circuit_id,
+                layer: packet.layer,
+            };
+
+            let response = self.dht_handle.send_onion_request(
+                r1_peer_id,
+                r1_addrs,
+                onion_req,
+                return_path.r1_init_key,
+            ).await;
+
+            // Record relay outcome for intro point used as R2.
+            if let Some(ps) = r2_pseudonym {
+                let _ = self.dht_handle.record_relay_outcome(ps, response.is_ok()).await;
+            }
+
+            match response {
+                Ok(OnionRelayResponse::Data(encrypted)) => {
+                    // 3-layer response decryption: R1 → R2 → session key.
+                    match self.decrypt_onion_response(&return_path, &session_key, &encrypted) {
+                        Some(share) => shares.push(share),
+                        None => continue,
+                    }
+                }
+                Ok(OnionRelayResponse::Error(e)) => {
+                    tracing::warn!(
+                        shard = location.shard_index,
+                        "onion+rendezvous: relay error: {e}"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        shard = location.shard_index,
+                        "onion+rendezvous: request error: {e}"
+                    );
+                }
+            }
+        }
+
+        if shares.len() < k {
+            if let Ok(mut s) = self.retrieval_stats.lock() { s.rendezvous_onion_failures += 1; }
+            return Err(MiasmaError::Sss(format!(
+                "onion+rendezvous: got {}/{} shards",
+                shares.len(), k
+            )));
+        }
+
+        if let Ok(mut s) = self.retrieval_stats.lock() { s.rendezvous_onion_successes += 1; }
+        crate::pipeline::retrieve(mid, &shares, params)
+    }
+
+    /// Decrypt a 3-layer onion response (r1_key → r2_key → session_key) and parse share.
+    fn decrypt_onion_response(
+        &self,
+        return_path: &crate::onion::packet::ReturnPath,
+        session_key: &[u8; 32],
+        encrypted: &[u8],
+    ) -> Option<MiasmaShare> {
+        let after_r1 = crate::onion::packet::decrypt_response(
+            &return_path.r1_init_key, encrypted,
+        ).ok()?;
+        let after_r2 = crate::onion::packet::decrypt_response(
+            &return_path.r2_r1_key, &after_r1,
+        ).ok()?;
+        let plaintext = crate::onion::packet::decrypt_response(
+            session_key, &after_r2,
+        ).ok()?;
+
+        if plaintext.first() != Some(&0x11) {
+            tracing::warn!("onion: unexpected share response tag");
+            return None;
+        }
+        let resp: ShareFetchResponse = bincode::deserialize(&plaintext[1..]).ok()?;
+        resp.share
+    }
+
     /// Retrieve content via a rendezvous peer's introduction points.
     ///
     /// Used when the shard holder's descriptor has `ReachabilityKind::Rendezvous`.
@@ -942,6 +1249,32 @@ impl MiasmaCoordinator {
             "rendezvous: all {} intro points failed",
             resolved.len()
         )))
+    }
+
+    /// Send an active relay probe to a peer and record the outcome.
+    ///
+    /// Uses the `/miasma/relay-probe/1.0.0` protocol: random nonce echo.
+    /// Records a relay observation (success promotes trust tier, failure demotes).
+    pub async fn probe_relay(&self, peer_id: PeerId, addrs: Vec<String>) -> bool {
+        if let Ok(mut s) = self.retrieval_stats.lock() { s.relay_probes_sent += 1; }
+
+        let success = self.dht_handle.probe_relay(peer_id, addrs).await.unwrap_or(false);
+
+        // Record relay observation for trust tier tracking.
+        if let Ok(Some(ps)) = self.dht_handle.peer_pseudonym(peer_id).await {
+            let _ = self.dht_handle.record_relay_outcome(ps, success).await;
+        }
+
+        if let Ok(mut s) = self.retrieval_stats.lock() {
+            if success {
+                s.relay_probes_succeeded += 1;
+            } else {
+                s.relay_probes_failed += 1;
+            }
+        }
+
+        tracing::info!(peer = %peer_id, success, "relay probe completed");
+        success
     }
 }
 

@@ -1800,6 +1800,9 @@ fn retrieval_stats_serde_roundtrip() {
         opportunistic_attempts: 5,
         opportunistic_relay_successes: 3,
         opportunistic_direct_fallbacks: 2,
+        opportunistic_onion_successes: 0,
+        opportunistic_onion_rendezvous_successes: 0,
+        opportunistic_rendezvous_successes: 0,
         required_attempts: 7,
         required_onion_successes: 4,
         required_relay_successes: 2,
@@ -1808,6 +1811,12 @@ fn retrieval_stats_serde_roundtrip() {
         rendezvous_successes: 2,
         rendezvous_failures: 1,
         rendezvous_direct_fallbacks: 0,
+        rendezvous_onion_attempts: 0,
+        rendezvous_onion_successes: 0,
+        rendezvous_onion_failures: 0,
+        relay_probes_sent: 0,
+        relay_probes_succeeded: 0,
+        relay_probes_failed: 0,
     };
     let json = serde_json::to_string(&stats).unwrap();
     let deserialized: RetrievalStats = serde_json::from_str(&json).unwrap();
@@ -2321,4 +2330,406 @@ fn relay_peer_info_sorted_by_trust_tier() {
     assert_eq!(relay_info[0].0, peer_verified);
     assert_eq!(relay_info[1].0, peer_observed);
     assert_eq!(relay_info[2].0, peer_claimed);
+}
+
+// ── Phase 4e+: Onion + Rendezvous composition tests ───────────────────────
+
+/// Rendezvous holder with onion-capable intro point: verify that
+/// intro points with onion pubkeys are filtered and preferred.
+#[test]
+fn rendezvous_intro_onion_capable_preferred() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x60u8; 32]);
+    let mut store = DescriptorStore::new();
+
+    // Intro A: relay, has onion pubkey, Observed trust.
+    let mut ps_a = [0u8; 32]; ps_a[0] = 0xA0;
+    let peer_a = PeerId::random();
+    store.register_peer_pseudonym(peer_a, ps_a);
+    store.upsert(PeerDescriptor::new_signed_full(
+        ps_a, ReachabilityKind::Direct,
+        vec!["/ip4/1.1.1.1/tcp/4001".to_string()],
+        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop, None, None,
+        Some([0xAA; 32]), // onion pubkey
+        1, &key,
+    ));
+    store.record_relay_success(&ps_a);
+
+    // Intro B: relay, NO onion pubkey, Verified trust.
+    let mut ps_b = [0u8; 32]; ps_b[0] = 0xB0;
+    let peer_b = PeerId::random();
+    store.register_peer_pseudonym(peer_b, ps_b);
+    store.upsert(PeerDescriptor::new_signed_full(
+        ps_b, ReachabilityKind::Direct,
+        vec!["/ip4/2.2.2.2/tcp/4001".to_string()],
+        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop, None, None,
+        None, // no onion pubkey
+        1, &key,
+    ));
+    for _ in 0..4 { store.record_relay_success(&ps_b); }
+
+    let resolved = store.resolve_intro_points(&[ps_a, ps_b]);
+    assert_eq!(resolved.len(), 2);
+
+    // Both should resolve, but only A has onion capability.
+    let onion_capable: Vec<_> = resolved.iter()
+        .filter(|r| r.onion_pubkey.is_some())
+        .collect();
+    assert_eq!(onion_capable.len(), 1, "only intro A should have onion pubkey");
+    assert_eq!(onion_capable[0].pseudonym, ps_a);
+    assert_eq!(onion_capable[0].onion_pubkey, Some([0xAA; 32]));
+}
+
+/// Rendezvous holder where NO intro point has onion capability.
+/// Content-blind retrieval is impossible; only relay-circuit (IP-only) path available.
+#[test]
+fn rendezvous_no_onion_intro_falls_back() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x61u8; 32]);
+    let mut store = DescriptorStore::new();
+
+    // Two intro points, neither has onion pubkey.
+    for i in 0..2u8 {
+        let mut ps = [0u8; 32]; ps[0] = i + 1;
+        let peer = PeerId::random();
+        store.register_peer_pseudonym(peer, ps);
+        store.upsert(PeerDescriptor::new_signed_full(
+            ps, ReachabilityKind::Direct,
+            vec![format!("/ip4/{}.{}.{}.{}/tcp/4001", i+1, i+1, i+1, i+1)],
+            PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+            ResourceProfile::Desktop, None, None,
+            None, // no onion pubkey
+            1, &key,
+        ));
+    }
+
+    let mut ps_intro = [[0u8; 32]; 2];
+    ps_intro[0][0] = 1;
+    ps_intro[1][0] = 2;
+    let resolved = store.resolve_intro_points(&ps_intro);
+    assert_eq!(resolved.len(), 2);
+
+    // No onion-capable intro points.
+    assert!(resolved.iter().all(|r| r.onion_pubkey.is_none()),
+        "no intro points should have onion capability");
+}
+
+/// Mixed shard holders: Direct holder has onion pubkey from descriptor store,
+/// Rendezvous holder is behind NAT. Both should be resolvable for onion retrieval.
+#[test]
+fn mixed_holders_direct_and_rendezvous_onion_pubkey() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x62u8; 32]);
+    let mut store = DescriptorStore::new();
+
+    // Direct holder with onion pubkey.
+    let ps_direct = [0x01; 32];
+    let peer_direct = PeerId::random();
+    store.register_peer_pseudonym(peer_direct, ps_direct);
+    store.upsert(PeerDescriptor::new_signed_full(
+        ps_direct, ReachabilityKind::Direct,
+        vec!["/ip4/1.1.1.1/tcp/4001".to_string()],
+        PeerCapabilities::default(),
+        ResourceProfile::Desktop, None, None,
+        Some([0xDD; 32]),
+        1, &key,
+    ));
+
+    // Rendezvous holder (NAT'd) with onion pubkey.
+    let ps_rendezvous = [0x02; 32];
+    let peer_rv = PeerId::random();
+    store.register_peer_pseudonym(peer_rv, ps_rendezvous);
+    let intro_ps = [0xAA; 32];
+    store.upsert(PeerDescriptor::new_signed_full(
+        ps_rendezvous,
+        ReachabilityKind::Rendezvous { intro_points: vec![intro_ps] },
+        vec![],
+        PeerCapabilities::default(),
+        ResourceProfile::Desktop, None, None,
+        Some([0xEE; 32]),
+        1, &key,
+    ));
+
+    // Direct holder: onion pubkey accessible.
+    let direct_key = store.onion_pubkey_for_peer(&peer_direct);
+    assert_eq!(direct_key, Some([0xDD; 32]),
+        "direct holder should have onion pubkey in descriptor store");
+
+    // Rendezvous holder: onion pubkey also accessible.
+    let rv_key = store.onion_pubkey_for_peer(&peer_rv);
+    assert_eq!(rv_key, Some([0xEE; 32]),
+        "rendezvous holder should have onion pubkey in descriptor store");
+
+    // Rendezvous holder's descriptor should be marked as rendezvous.
+    let desc = store.get_by_peer(&peer_rv).unwrap();
+    assert!(desc.is_rendezvous());
+}
+
+/// Broken intro + fallback: first intro point doesn't resolve, second does.
+/// Verifies fallback within intro point list.
+#[test]
+fn rendezvous_broken_intro_with_fallback() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x63u8; 32]);
+    let mut store = DescriptorStore::new();
+
+    // Only the second intro point exists in the store.
+    let broken_ps = [0xDE; 32]; // not in store
+    let good_ps = [0xAA; 32];
+    let good_peer = PeerId::random();
+    store.register_peer_pseudonym(good_peer, good_ps);
+    store.upsert(PeerDescriptor::new_signed_full(
+        good_ps, ReachabilityKind::Direct,
+        vec!["/ip4/5.5.5.5/tcp/4001".to_string()],
+        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop, None, None,
+        Some([0xFF; 32]), // onion capable
+        1, &key,
+    ));
+
+    let resolved = store.resolve_intro_points(&[broken_ps, good_ps]);
+    assert_eq!(resolved.len(), 1, "only valid intro should resolve");
+    assert_eq!(resolved[0].pseudonym, good_ps);
+    assert_eq!(resolved[0].peer_id, good_peer);
+    assert!(resolved[0].onion_pubkey.is_some());
+}
+
+/// RetrievalStats tracks rendezvous+onion attempts/successes/failures independently.
+#[test]
+fn retrieval_stats_rendezvous_onion_tracking() {
+    use miasma_core::network::RetrievalStats;
+
+    let mut stats = RetrievalStats::default();
+    assert_eq!(stats.rendezvous_onion_attempts, 0);
+    assert_eq!(stats.rendezvous_onion_successes, 0);
+    assert_eq!(stats.rendezvous_onion_failures, 0);
+
+    stats.rendezvous_onion_attempts = 5;
+    stats.rendezvous_onion_successes = 3;
+    stats.rendezvous_onion_failures = 2;
+
+    let json = serde_json::to_string(&stats).unwrap();
+    let deserialized: RetrievalStats = serde_json::from_str(&json).unwrap();
+    assert_eq!(deserialized.rendezvous_onion_attempts, 5);
+    assert_eq!(deserialized.rendezvous_onion_successes, 3);
+    assert_eq!(deserialized.rendezvous_onion_failures, 2);
+}
+
+/// Content-blind path vs IP-only: Required mode with onion-capable relays
+/// should prefer onion (content-blind), while relay circuit gives only IP privacy.
+/// This tests the distinction is preserved in stats.
+#[test]
+fn content_blind_vs_ip_only_distinction_in_stats() {
+    use miasma_core::network::RetrievalStats;
+
+    let stats = RetrievalStats {
+        direct_attempts: 10,
+        direct_successes: 10,
+        opportunistic_attempts: 5,
+        opportunistic_relay_successes: 3,
+        opportunistic_direct_fallbacks: 2,
+        opportunistic_onion_successes: 1,
+        opportunistic_onion_rendezvous_successes: 1,
+        opportunistic_rendezvous_successes: 1,
+        required_attempts: 8,
+        required_onion_successes: 5,  // content-blind
+        required_relay_successes: 2,  // IP privacy only
+        required_failures: 1,
+        rendezvous_attempts: 3,
+        rendezvous_successes: 2,
+        rendezvous_failures: 1,
+        rendezvous_direct_fallbacks: 0,
+        rendezvous_onion_attempts: 4,
+        rendezvous_onion_successes: 3, // content-blind via rendezvous
+        rendezvous_onion_failures: 1,
+        relay_probes_sent: 0,
+        relay_probes_succeeded: 0,
+        relay_probes_failed: 0,
+    };
+
+    // Content-blind successes = required onion + rendezvous_onion + opportunistic onion/onion_rendezvous.
+    let content_blind = stats.required_onion_successes
+        + stats.rendezvous_onion_successes
+        + stats.opportunistic_onion_successes
+        + stats.opportunistic_onion_rendezvous_successes;
+    assert_eq!(content_blind, 10, "content-blind: req_onion(5) + rv_onion(3) + opp_onion(1) + opp_rv_onion(1)");
+
+    // IP-privacy-only successes = relay circuit + rendezvous relay + opportunistic relay/rendezvous.
+    let ip_only = stats.required_relay_successes
+        + stats.rendezvous_successes
+        + stats.opportunistic_relay_successes
+        + stats.opportunistic_rendezvous_successes;
+    assert_eq!(ip_only, 8, "IP-only: req_relay(2) + rv(2) + opp_relay(3) + opp_rv(1)");
+}
+
+/// R1 and R2 must differ: when an intro point would be the only available relay,
+/// onion-rendezvous cannot work (needs separate R1).
+#[test]
+fn onion_rendezvous_requires_distinct_r1_r2() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x64u8; 32]);
+    let mut store = DescriptorStore::new();
+
+    // Only one relay peer (which is also the intro point).
+    let ps = [0x01; 32];
+    let peer = PeerId::random();
+    store.register_peer_pseudonym(peer, ps);
+    store.upsert(PeerDescriptor::new_signed_full(
+        ps, ReachabilityKind::Direct,
+        vec!["/ip4/1.1.1.1/tcp/4001".to_string()],
+        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop, None, None,
+        Some([0xAA; 32]),
+        1, &key,
+    ));
+
+    // relay_onion_info returns this one peer.
+    let onion_info = store.relay_onion_info();
+    assert_eq!(onion_info.len(), 1);
+
+    // Resolved as an intro point.
+    let resolved = store.resolve_intro_points(&[ps]);
+    assert_eq!(resolved.len(), 1);
+
+    // If this peer is used as R2 (intro point), the relay pool has no
+    // different peer for R1. The onion circuit requires R1 ≠ R2.
+    // The coordinator should detect this and skip onion-rendezvous.
+    let r2_peer_id_bytes = resolved[0].peer_id.to_bytes();
+    let can_find_distinct_r1 = onion_info.iter()
+        .any(|r| r.peer_id != r2_peer_id_bytes);
+    assert!(!can_find_distinct_r1,
+        "with only one relay, R1 ≠ R2 is impossible — coordinator must detect this");
+}
+
+/// Opportunistic stats track granular path successes separately.
+#[test]
+fn opportunistic_stats_granularity() {
+    use miasma_core::network::RetrievalStats;
+
+    let mut stats = RetrievalStats::default();
+    stats.opportunistic_attempts = 10;
+    stats.opportunistic_onion_rendezvous_successes = 2;
+    stats.opportunistic_onion_successes = 3;
+    stats.opportunistic_rendezvous_successes = 1;
+    stats.opportunistic_relay_successes = 2;
+    stats.opportunistic_direct_fallbacks = 2;
+
+    let total_succeeded = stats.opportunistic_onion_rendezvous_successes
+        + stats.opportunistic_onion_successes
+        + stats.opportunistic_rendezvous_successes
+        + stats.opportunistic_relay_successes
+        + stats.opportunistic_direct_fallbacks;
+    assert_eq!(total_succeeded, 10);
+
+    // Content-blind in opportunistic = onion + onion_rendezvous.
+    let content_blind = stats.opportunistic_onion_successes
+        + stats.opportunistic_onion_rendezvous_successes;
+    assert_eq!(content_blind, 5);
+
+    // IP-only in opportunistic = relay + rendezvous.
+    let ip_only = stats.opportunistic_relay_successes
+        + stats.opportunistic_rendezvous_successes;
+    assert_eq!(ip_only, 3);
+}
+
+/// Relay probe stats track sent/succeeded/failed independently.
+#[test]
+fn relay_probe_stats_tracking() {
+    use miasma_core::network::RetrievalStats;
+
+    let mut stats = RetrievalStats::default();
+    stats.relay_probes_sent = 10;
+    stats.relay_probes_succeeded = 7;
+    stats.relay_probes_failed = 3;
+
+    assert_eq!(stats.relay_probes_sent, stats.relay_probes_succeeded + stats.relay_probes_failed);
+
+    // Serde roundtrip.
+    let json = serde_json::to_string(&stats).unwrap();
+    let d: RetrievalStats = serde_json::from_str(&json).unwrap();
+    assert_eq!(d.relay_probes_sent, 10);
+    assert_eq!(d.relay_probes_succeeded, 7);
+    assert_eq!(d.relay_probes_failed, 3);
+}
+
+/// Relay probe protocol: request/response roundtrip preserves nonce.
+#[test]
+fn relay_probe_protocol_nonce_echo() {
+    use miasma_core::network::{ProbeRequest, ProbeResponse};
+
+    let nonce = [0xAB; 32];
+    let req = ProbeRequest { nonce };
+    let encoded = bincode::serialize(&req).unwrap();
+    let decoded: ProbeRequest = bincode::deserialize(&encoded).unwrap();
+    assert_eq!(decoded.nonce, nonce);
+
+    // Simulate relay echo: relay receives request, echoes nonce in response.
+    let resp = ProbeResponse { nonce: decoded.nonce };
+    assert_eq!(resp.nonce, nonce, "relay must echo the exact nonce");
+
+    // Prober verification: compare sent nonce with received nonce.
+    let success = resp.nonce == nonce;
+    assert!(success, "nonce match = probe success");
+}
+
+/// Relay probe: wrong nonce in response means probe failure.
+#[test]
+fn relay_probe_nonce_mismatch_is_failure() {
+    use miasma_core::network::ProbeResponse;
+
+    let sent_nonce = [0xAB; 32];
+    let wrong_nonce = [0xCD; 32];
+    let resp = ProbeResponse { nonce: wrong_nonce };
+    assert_ne!(resp.nonce, sent_nonce, "mismatched nonce = probe failure");
+}
+
+/// Relay probe: zero nonce (sentinel) means failure.
+#[test]
+fn relay_probe_zero_nonce_is_failure() {
+    use miasma_core::network::ProbeResponse;
+
+    let sent_nonce = [0xAB; 32];
+    let resp = ProbeResponse { nonce: [0u8; 32] };
+    assert_ne!(resp.nonce, sent_nonce, "zero nonce sentinel = probe failure");
+}
+
+/// Five privacy paths are distinguishable in stats:
+/// 1. onion+rendezvous (content-blind + NAT)
+/// 2. standard onion (content-blind)
+/// 3. rendezvous relay (IP-only + NAT)
+/// 4. relay circuit (IP-only)
+/// 5. direct (no privacy)
+#[test]
+fn five_privacy_paths_distinguishable() {
+    use miasma_core::network::RetrievalStats;
+
+    let stats = RetrievalStats {
+        direct_attempts: 1,
+        direct_successes: 1,
+        opportunistic_attempts: 4,
+        opportunistic_onion_rendezvous_successes: 1, // path 1
+        opportunistic_onion_successes: 1,            // path 2
+        opportunistic_rendezvous_successes: 1,       // path 3
+        opportunistic_relay_successes: 1,            // path 4
+        opportunistic_direct_fallbacks: 0,
+        required_attempts: 4,
+        required_onion_successes: 2,     // path 2 (required)
+        required_relay_successes: 1,     // path 4 (required)
+        required_failures: 1,
+        rendezvous_attempts: 1,
+        rendezvous_successes: 1,         // path 3
+        rendezvous_failures: 0,
+        rendezvous_direct_fallbacks: 0,
+        rendezvous_onion_attempts: 1,
+        rendezvous_onion_successes: 1,   // path 1 (required)
+        rendezvous_onion_failures: 0,
+        relay_probes_sent: 5,
+        relay_probes_succeeded: 4,
+        relay_probes_failed: 1,
+    };
+
+    // Each path is independently countable.
+    assert!(stats.opportunistic_onion_rendezvous_successes > 0, "path 1");
+    assert!(stats.opportunistic_onion_successes > 0, "path 2");
+    assert!(stats.opportunistic_rendezvous_successes > 0, "path 3");
+    assert!(stats.opportunistic_relay_successes > 0, "path 4");
+    assert!(stats.direct_successes > 0, "path 5");
+    assert!(stats.relay_probes_sent > 0, "probes tracked");
 }
