@@ -28,10 +28,20 @@ Both variants share all backend code: storage, protocol, encryption, daemon IPC,
 | Window title | Miasma v0.2.0 (Technical Beta) | Miasma v0.2.0 |
 | Tab labels | Store / Retrieve | Save / Get Back |
 | Welcome flow | Mentions encryption key, daemon | "We'll set everything up for you" |
-| Status panel | Full: Connection, Storage, Transport grid, Diagnostics | Simplified: Ready/Not Ready, items, storage |
+| Status panel | Full: Connection, Storage, Transport grid, Diagnostics (card-grouped) | Simplified: Ready/Not Ready with status dot, items, storage, next-step hint |
 | Stopped state | "Daemon not running" / "Start Daemon" | "Not running" / "Start" |
 | Settings footer | "Miasma Technical Beta v0.2.0" | "Miasma v0.2.0" |
 | Settings mode description | "Full diagnostics, transport details, protocol visibility" | "Simplified interface, less technical detail" |
+
+## Visual design
+
+Both variants share a dark-themed card-based design language:
+
+- **Dark theme**: dark panel/card backgrounds with subtle borders
+- **Card grouping**: all content sections (store input, retrieve input, status, settings) wrapped in rounded cards
+- **Color system**: green (ready/success), yellow (warning), red (error/wipe), blue (accent/action), dim gray (secondary text)
+- **Easy mode**: larger accent-colored action buttons, not-connected hints, next-step guidance text, status dot indicator
+- **Technical mode**: same card system with ACCENT-colored section headings, full diagnostics grid, transport table
 
 ## Mode selection precedence
 
@@ -143,10 +153,21 @@ Both ZIPs contain the same binaries plus variant-appropriate launcher scripts an
 - [ ] Settings: can switch to Technical mode, change persists
 - [ ] No console window visible during any operation
 
+## Font and rendering system
+
+CJK rendering uses Windows system fonts loaded at startup:
+
+- **Proportional**: Segoe UI → Yu Gothic → Microsoft YaHei → egui default
+- **Monospace**: Consolas → Yu Gothic → Microsoft YaHei → egui default
+
+All three fonts ship with Windows 10+ and are loaded from `C:\Windows\Fonts`. If a font file is missing, it is skipped and the fallback chain continues. On non-Windows platforms, egui's built-in fonts handle Latin text but CJK will show as tofu.
+
+Validated rendering: English, Japanese, and Simplified Chinese all render correctly in the running Windows app — no tofu boxes, no mojibake, in both Easy and Technical modes.
+
 ## Honest limitations
 
 - Mode is runtime, not compile-time: both variants are the same binary with different launch arguments
 - The `MIASMA_MODE` env var still works as a developer override (this is intentional, not a gap)
-- CJK font rendering depends on egui's default_fonts feature — tested on Windows but glyph coverage depends on system fonts
+- CJK font rendering loads Windows system fonts (Yu Gothic, Microsoft YaHei) — these ship with Windows 10+ but may not be present on older Windows or non-Windows platforms
 - Installer does not yet prompt the user to choose a variant during install — both shortcuts are created
 - No automatic locale detection from OS settings — defaults to English
