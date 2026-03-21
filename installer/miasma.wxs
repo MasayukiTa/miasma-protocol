@@ -106,11 +106,13 @@
     <!-- ── Start Menu shortcuts ──────────────────────────────────── -->
 
     <ComponentGroup Id="Shortcuts" Directory="MiasmaMenuFolder">
+      <!-- Primary shortcut: Easy mode (for non-technical users) -->
       <Component Id="DesktopShortcut" Guid="A1B2C3D4-0001-4000-8000-000000000020">
         <Shortcut Id="MiasmaDesktopShortcut"
-                  Name="Miasma Desktop"
-                  Description="Miasma Protocol desktop application"
+                  Name="Miasma"
+                  Description="Miasma — save and retrieve content securely"
                   Target="[INSTALLFOLDER]miasma-desktop.exe"
+                  Arguments="--mode easy"
                   WorkingDirectory="INSTALLFOLDER" />
         <RemoveFolder Id="RemoveMiasmaMenuFolder" On="uninstall" />
         <RegistryValue Root="HKCU"
@@ -121,6 +123,23 @@
                        KeyPath="yes" />
       </Component>
 
+      <!-- Technical shortcut: full diagnostics (for developers/testers) -->
+      <Component Id="TechnicalShortcut" Guid="A1B2C3D4-0001-4000-8000-000000000022">
+        <Shortcut Id="MiasmaTechnicalShortcut"
+                  Name="Miasma Technical"
+                  Description="Miasma Technical Beta — full diagnostics and protocol visibility"
+                  Target="[INSTALLFOLDER]miasma-desktop.exe"
+                  Arguments="--mode technical"
+                  WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\Miasma Protocol"
+                       Name="TechnicalMenuInstalled"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+
+      <!-- CLI shortcut: command prompt with Miasma on PATH -->
       <Component Id="CliShortcut" Guid="A1B2C3D4-0001-4000-8000-000000000021">
         <Shortcut Id="MiasmaCliShortcut"
                   Name="Miasma CLI"

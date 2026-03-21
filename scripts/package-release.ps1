@@ -69,6 +69,11 @@ foreach ($v in $variants) {
         }
     }
 
+    # Copy variant-specific launchers.
+    $launcherDir = Join-Path $REPO "scripts\launchers"
+    Copy-Item (Join-Path $launcherDir "Miasma.cmd") -Destination $stagingDir -Force
+    Copy-Item (Join-Path $launcherDir "Miasma Technical.cmd") -Destination $stagingDir -Force
+
     # Variant-appropriate README.
     if ($v -eq "easy") {
         $readmeContent = @"
@@ -77,14 +82,16 @@ Miasma v$Version — Trial Build (Windows)
 
 WHAT'S INCLUDED
 
-  miasma-desktop.exe   Desktop app (start here)
-  miasma.exe           Background service (used automatically)
-  miasma-bridge.exe    Advanced tool (optional)
+  Miasma.cmd             Start here — launches the app
+  Miasma Technical.cmd   Advanced mode (for developers/testers)
+  miasma-desktop.exe     Desktop app (used by the launchers above)
+  miasma.exe             Background service (used automatically)
+  miasma-bridge.exe      Advanced tool (optional)
 
 GETTING STARTED
 
   1. Place all files in a single folder (e.g. C:\Miasma).
-  2. Double-click miasma-desktop.exe.
+  2. Double-click "Miasma.cmd".
   3. Click "Get Started" on the welcome screen.
   4. That's it. You can now save and retrieve content.
 
@@ -102,6 +109,17 @@ SAVING AND RETRIEVING
   Get Back: Go to the "Get Back" tab, paste the Content ID, click "Get Back".
             Save the result to a file.
 
+TWO MODES
+
+  Easy mode (default):      Simplified interface for everyday use.
+  Technical mode:           Full diagnostics for developers and testers.
+
+  Switch between modes in Settings, or use the launcher scripts:
+    Miasma.cmd              — starts in Easy mode
+    Miasma Technical.cmd    — starts in Technical mode
+
+  Your choice is saved and persists across restarts.
+
 TROUBLESHOOTING
 
   - "Not running": Ensure miasma.exe is in the same folder.
@@ -117,14 +135,16 @@ Miasma Protocol v$Version — Technical Beta (Windows)
 
 WHAT'S INCLUDED
 
-  miasma.exe         CLI tool and background daemon
-  miasma-desktop.exe Desktop GUI (recommended for first-time users)
-  miasma-bridge.exe  BitTorrent-to-Miasma bridge (advanced)
+  Miasma Technical.cmd   Start here — launches in Technical mode
+  Miasma.cmd             Easy mode launcher (for non-technical users)
+  miasma.exe             CLI tool and background daemon
+  miasma-desktop.exe     Desktop GUI
+  miasma-bridge.exe      BitTorrent-to-Miasma bridge (advanced)
 
 GETTING STARTED
 
-  1. Place all .exe files in a single folder (e.g. C:\Miasma).
-  2. Double-click miasma-desktop.exe.
+  1. Place all files in a single folder (e.g. C:\Miasma).
+  2. Double-click "Miasma Technical.cmd".
   3. Click "Set Up Node" on the welcome screen.
   4. The daemon starts automatically. You're ready to store and retrieve content.
 
