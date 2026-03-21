@@ -183,6 +183,39 @@ pub struct DaemonStatus {
     /// Number of relay peers with onion pubkeys (enables per-hop encrypted retrieval).
     #[serde(default)]
     pub metric_onion_relay_peers: usize,
+    /// Whether this node is publicly reachable (AutoNAT).
+    #[serde(default)]
+    pub nat_publicly_reachable: bool,
+
+    // ── Retrieval tracking ──────────────────────────────────────────────
+
+    /// Direct retrieval attempts.
+    #[serde(default)]
+    pub retrieval_direct_attempts: u64,
+    /// Direct retrieval successes.
+    #[serde(default)]
+    pub retrieval_direct_successes: u64,
+    /// Opportunistic retrieval attempts.
+    #[serde(default)]
+    pub retrieval_opportunistic_attempts: u64,
+    /// Opportunistic relay successes (relay path worked).
+    #[serde(default)]
+    pub retrieval_opportunistic_relay_successes: u64,
+    /// Opportunistic direct fallbacks (relay failed, direct worked).
+    #[serde(default)]
+    pub retrieval_opportunistic_direct_fallbacks: u64,
+    /// Required anonymity retrieval attempts.
+    #[serde(default)]
+    pub retrieval_required_attempts: u64,
+    /// Required anonymity onion successes.
+    #[serde(default)]
+    pub retrieval_required_onion_successes: u64,
+    /// Required anonymity relay (non-onion) successes.
+    #[serde(default)]
+    pub retrieval_required_relay_successes: u64,
+    /// Required anonymity failures.
+    #[serde(default)]
+    pub retrieval_required_failures: u64,
 }
 
 /// Per-transport readiness info for IPC/CLI display.
