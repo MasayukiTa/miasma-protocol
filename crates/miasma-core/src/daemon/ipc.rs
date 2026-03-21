@@ -180,6 +180,9 @@ pub struct DaemonStatus {
     /// Descriptor store utilisation (0.0–1.0).
     #[serde(default)]
     pub metric_descriptor_utilisation: f64,
+    /// Number of relay peers with onion pubkeys (enables per-hop encrypted retrieval).
+    #[serde(default)]
+    pub metric_onion_relay_peers: usize,
 }
 
 /// Per-transport readiness info for IPC/CLI display.

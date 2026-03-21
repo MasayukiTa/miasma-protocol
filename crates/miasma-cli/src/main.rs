@@ -633,6 +633,10 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
             println!("  Rejection rate:        {:.1}%", s.metric_rejection_rate * 100.0);
             println!("  Stale descriptors:     {}", s.metric_stale_descriptors);
             println!("  Descriptor store:      {:.1}% full", s.metric_descriptor_utilisation * 100.0);
+            println!("  Onion relay peers:     {} (content-blind retrieval {})",
+                s.metric_onion_relay_peers,
+                if s.metric_onion_relay_peers >= 2 { "available" } else { "unavailable" }
+            );
         }
 
         println!();

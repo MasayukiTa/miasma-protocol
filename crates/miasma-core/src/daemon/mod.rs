@@ -635,6 +635,7 @@ async fn process_request(
                 metric_bbs_credentialed: outcome.bbs_credentialed_count,
                 metric_stale_descriptors: outcome.stale_descriptor_count,
                 metric_descriptor_utilisation: outcome.descriptor_utilisation,
+                metric_onion_relay_peers: desc_stats.relay_peers_routable, // peers with onion keys and PeerId mapping
             })
         }
 
