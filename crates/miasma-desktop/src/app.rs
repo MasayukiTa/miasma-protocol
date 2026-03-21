@@ -35,9 +35,10 @@ pub struct MiasmaApp {
     worker: WorkerHandle,
     tab: Tab,
 
-    // Product mode and locale
+    // Product mode and locale (persisted to desktop-prefs.toml)
     mode: ProductMode,
     locale: Locale,
+    data_dir: std::path::PathBuf,
 
     // Connection state
     daemon_state: DaemonState,
@@ -83,7 +84,7 @@ enum MsgKind {
 }
 
 impl MiasmaApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>, mode: ProductMode) -> Self {
+    pub fn new(_cc: &eframe::CreationContext<'_>, mode: ProductMode, locale: Locale) -> Self {
         let data_dir = miasma_core::default_data_dir();
         let worker = WorkerHandle::spawn(data_dir.clone());
 
@@ -91,7 +92,8 @@ impl MiasmaApp {
             worker,
             tab: Tab::Store,
             mode,
-            locale: Locale::default(),
+            locale,
+            data_dir: data_dir.clone(),
             daemon_state: DaemonState::Stopped,
             last_error: None,
             dissolve_text: String::new(),
@@ -127,6 +129,15 @@ impl MiasmaApp {
 
     fn set_msg(&mut self, kind: MsgKind, msg: impl Into<String>) {
         self.status_msg = Some((msg.into(), kind));
+    }
+
+    /// Persist current mode and locale to desktop-prefs.toml.
+    fn save_prefs(&self) {
+        let prefs = crate::variant::DesktopPrefs {
+            mode: self.mode,
+            locale: self.locale,
+        };
+        prefs.save(&self.data_dir);
     }
 
     // ── Poll worker ──────────────────────────────────────────────────────
@@ -837,6 +848,7 @@ impl MiasmaApp {
                 let selected = self.locale == lang;
                 if ui.selectable_label(selected, lang.display_name()).clicked() {
                     self.locale = lang;
+                    self.save_prefs();
                 }
             }
         });
@@ -850,9 +862,11 @@ impl MiasmaApp {
             let is_easy = self.mode.is_easy();
             if ui.selectable_label(is_easy, s.settings_mode_easy).clicked() {
                 self.mode = ProductMode::Easy;
+                self.save_prefs();
             }
             if ui.selectable_label(!is_easy, s.settings_mode_technical).clicked() {
                 self.mode = ProductMode::Technical;
+                self.save_prefs();
             }
         });
         ui.add_space(2.0);
@@ -976,9 +990,10 @@ impl MiasmaApp {
         ui.separator();
         ui.add_space(4.0);
 
+        let variant_label = if easy { "" } else { " Technical Beta" };
         ui.label(
             egui::RichText::new(format!(
-                "Miasma Desktop v{}  (beta)",
+                "Miasma{variant_label} v{}",
                 env!("CARGO_PKG_VERSION")
             ))
             .color(DIM)

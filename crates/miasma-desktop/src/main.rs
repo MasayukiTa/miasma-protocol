@@ -48,8 +48,11 @@ fn main() -> eframe::Result<()> {
     // Stamp version for future upgrade detection.
     miasma_core::config::stamp_version(&data_dir, env!("CARGO_PKG_VERSION"));
 
-    // Detect product mode.
-    let mode = variant::ProductMode::detect();
+    // Resolve product mode: CLI arg > env var > persisted prefs > default.
+    let prefs = variant::DesktopPrefs::load(&data_dir);
+    let cli_mode = variant::parse_cli_mode();
+    let mode = variant::resolve_mode(cli_mode, &prefs);
+    let locale = prefs.locale;
 
     let version = env!("CARGO_PKG_VERSION");
     let title = match mode {
@@ -67,6 +70,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Miasma",
         native_options,
-        Box::new(move |cc| Box::new(app::MiasmaApp::new(cc, mode))),
+        Box::new(move |cc| Box::new(app::MiasmaApp::new(cc, mode, locale))),
     )
 }
