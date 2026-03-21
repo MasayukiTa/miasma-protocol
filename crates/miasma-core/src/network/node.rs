@@ -39,6 +39,9 @@ use super::descriptor::{
     DescriptorStats, DescriptorStore, PeerCapabilities, PeerDescriptor, ReachabilityKind,
     ResourceProfile,
 };
+use super::onion_relay::{
+    OnionRelayCodec, OnionRelayRequest, OnionRelayResponse,
+};
 use super::path_selection::PathSelectionStats;
 use super::peer_state::{AdmissionStats, PeerRegistry, RejectionReason};
 use super::routing::{self, RoutingStats, RoutingTable};
@@ -491,6 +494,25 @@ pub enum DhtCommand {
     GetRelayPeers {
         reply: oneshot::Sender<Vec<(PeerId, Vec<String>)>>,
     },
+    /// Query relay peers with onion X25519 public keys for onion-encrypted retrieval.
+    GetRelayOnionInfo {
+        reply: oneshot::Sender<Vec<crate::onion::circuit::RelayInfo>>,
+    },
+    /// Send an onion relay request to a specific peer.
+    /// Used by the coordinator to initiate onion-encrypted share fetches.
+    SendOnionRequest {
+        peer_id: PeerId,
+        addrs: Vec<String>,
+        request: OnionRelayRequest,
+        /// Return key that the relay should use to encrypt the response.
+        /// Stored so the node can match the outbound request to the key.
+        return_key: [u8; 32],
+        reply: oneshot::Sender<Result<OnionRelayResponse, MiasmaError>>,
+    },
+    /// Query this node's onion static public key.
+    GetOnionPubkey {
+        reply: oneshot::Sender<[u8; 32]>,
+    },
 }
 
 /// Sender side of the DHT command channel.
@@ -667,6 +689,43 @@ impl DhtHandle {
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
         rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
     }
+
+    /// Query relay peers with onion X25519 public keys.
+    pub async fn relay_onion_info(&self) -> Result<Vec<crate::onion::circuit::RelayInfo>, MiasmaError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::GetRelayOnionInfo { reply: tx })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
+        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+    }
+
+    /// Send an onion relay request to a peer and await the response.
+    pub async fn send_onion_request(
+        &self,
+        peer_id: PeerId,
+        addrs: Vec<String>,
+        request: OnionRelayRequest,
+        return_key: [u8; 32],
+    ) -> Result<OnionRelayResponse, MiasmaError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::SendOnionRequest { peer_id, addrs, request, return_key, reply: tx })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
+        rx.await
+            .map_err(|_| MiasmaError::Network("onion relay reply dropped".into()))?
+    }
+
+    /// Query this node's onion X25519 static public key.
+    pub async fn onion_pubkey(&self) -> Result<[u8; 32], MiasmaError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::GetOnionPubkey { reply: tx })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
+        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+    }
 }
 
 // ─── Share-exchange command channel ──────────────────────────────────────────
@@ -722,6 +781,8 @@ pub struct MiasmaBehaviour {
     pub(crate) credential_exchange: request_response::Behaviour<CredentialCodec>,
     /// Descriptor exchange: `/miasma/descriptor/1.0.0` request-response.
     pub(crate) descriptor_exchange: request_response::Behaviour<DescriptorCodec>,
+    /// Onion relay: `/miasma/onion/1.0.0` request-response.
+    pub(crate) onion_relay: request_response::Behaviour<OnionRelayCodec>,
 }
 
 // ─── MiasmaNode ───────────────────────────────────────────────────────────────
@@ -796,6 +857,21 @@ pub struct MiasmaNode {
     pending_credential_reqs: HashMap<request_response::OutboundRequestId, PeerId>,
     /// Pending descriptor requests: req_id → peer_id.
     pending_descriptor_reqs: HashMap<request_response::OutboundRequestId, PeerId>,
+    /// This node's X25519 static key for onion layer encryption/decryption.
+    onion_static_secret: [u8; 32],
+    /// X25519 public key derived from onion_static_secret (published in descriptors).
+    onion_static_pubkey: [u8; 32],
+    /// Pending onion relay requests: req_id → relay return key (for response encryption).
+    pending_onion_relays: HashMap<request_response::OutboundRequestId, [u8; 32]>,
+    /// Pending onion relay reply channels: req_id → reply sender.
+    pending_onion_replies: HashMap<request_response::OutboundRequestId, oneshot::Sender<Result<OnionRelayResponse, MiasmaError>>>,
+    /// Inbound onion relay response channels: req_id → inbound channel.
+    /// When we're a relay and make a sub-request (R1→R2 or R2→Target),
+    /// we store the inbound channel here so we can relay the response back.
+    pending_onion_inbound_channels: HashMap<
+        request_response::OutboundRequestId,
+        request_response::ResponseChannel<OnionRelayResponse>,
+    >,
 }
 
 impl MiasmaNode {
@@ -848,6 +924,18 @@ impl MiasmaNode {
         let bbs_issuer_key = BbsIssuerKey::from_seed(bbs_seed.as_bytes());
         let bbs_issuer = BbsIssuer::new(bbs_issuer_key.clone());
 
+        // Derive X25519 onion static key from the DHT signing key.
+        let onion_static_secret = {
+            let derived = crate::onion::packet::derive_onion_static_key(
+                dht_signing_key.as_bytes(),
+            ).map_err(|e| MiasmaError::KeyDerivation(format!("onion key: {e}")))?;
+            *derived
+        };
+        let onion_static_pubkey = {
+            let secret = x25519_dalek::StaticSecret::from(onion_static_secret);
+            *x25519_dalek::PublicKey::from(&secret).as_bytes()
+        };
+
         // Initialise issuer registry in bootstrap mode (all verified peers are issuers).
         let mut issuer_registry = IssuerRegistry::new(true);
         // Register ourselves as an issuer.
@@ -889,6 +977,11 @@ impl MiasmaNode {
             resource_profile: ResourceProfile::Desktop,
             pending_credential_reqs: HashMap::new(),
             pending_descriptor_reqs: HashMap::new(),
+            onion_static_secret,
+            onion_static_pubkey,
+            pending_onion_relays: HashMap::new(),
+            pending_onion_replies: HashMap::new(),
+            pending_onion_inbound_channels: HashMap::new(),
         })
     }
 
@@ -1138,6 +1231,29 @@ impl MiasmaNode {
                 let relays = self.descriptor_store.relay_peer_info();
                 let _ = reply.send(relays);
             }
+            DhtCommand::GetRelayOnionInfo { reply } => {
+                let relays = self.descriptor_store.relay_onion_info();
+                let _ = reply.send(relays);
+            }
+            DhtCommand::SendOnionRequest { peer_id, addrs, request, return_key, reply } => {
+                // Register addresses so libp2p can dial the peer.
+                for addr_str in &addrs {
+                    if let Ok(addr) = addr_str.parse::<Multiaddr>() {
+                        self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
+                        self.swarm.add_peer_address(peer_id, addr.clone());
+                    }
+                }
+                let req_id = self.swarm.behaviour_mut().onion_relay.send_request(&peer_id, request);
+                // Store both the return_key and the reply channel.
+                // We use pending_onion_relays for the return_key;
+                // store the reply sender in a separate map keyed by req_id.
+                self.pending_onion_relays.insert(req_id, return_key);
+                // We need to store the reply sender too — let's use the pending_onion_replies map.
+                self.pending_onion_replies.insert(req_id, reply);
+            }
+            DhtCommand::GetOnionPubkey { reply } => {
+                let _ = reply.send(self.onion_static_pubkey);
+            }
         }
     }
 
@@ -1259,6 +1375,9 @@ impl MiasmaNode {
             }
             SwarmEvent::Behaviour(MiasmaBehaviourEvent::DescriptorExchange(ev)) => {
                 self.handle_descriptor_exchange_event(ev);
+            }
+            SwarmEvent::Behaviour(MiasmaBehaviourEvent::OnionRelay(ev)) => {
+                self.handle_onion_relay_event(ev);
             }
             SwarmEvent::Behaviour(MiasmaBehaviourEvent::Autonat(ev)) => match &ev {
                 autonat::Event::StatusChanged { old, new } => {
@@ -1533,7 +1652,7 @@ impl MiasmaNode {
             &self.local_peer_id.to_bytes(),
         );
 
-        PeerDescriptor::new_signed_with_bbs(
+        PeerDescriptor::new_signed_full(
             pseudonym,
             ReachabilityKind::Direct,
             addresses,
@@ -1547,6 +1666,7 @@ impl MiasmaNode {
             self.resource_profile,
             credential_presentation,
             bbs_proof,
+            Some(self.onion_static_pubkey),
             self.credential_wallet.epoch(),
             &self.dht_signing_key,
         )
@@ -1721,6 +1841,246 @@ impl MiasmaNode {
             }
             request_response::Event::ResponseSent { .. } => {}
         }
+    }
+
+    /// Handle onion relay protocol events.
+    ///
+    /// Three roles a node can play:
+    /// 1. **R1 (outer relay)**: receives OnionPacket, peels outer layer, forwards inner to R2
+    /// 2. **R2 (inner relay)**: receives Forward cell, peels inner layer, delivers body to Target
+    /// 3. **Target**: receives Deliver, decrypts e2e body, processes share request, responds
+    ///
+    /// On the outbound side, handles responses from relay sub-requests.
+    fn handle_onion_relay_event(
+        &mut self,
+        ev: request_response::Event<OnionRelayRequest, OnionRelayResponse>,
+    ) {
+        match ev {
+            request_response::Event::Message {
+                peer,
+                message: request_response::Message::Request { request, channel, .. },
+            } => {
+                debug!("onion_relay.inbound from={peer} variant={}", match &request {
+                    OnionRelayRequest::Packet { .. } => "Packet",
+                    OnionRelayRequest::Forward { .. } => "Forward",
+                    OnionRelayRequest::Deliver { .. } => "Deliver",
+                });
+                match request {
+                    OnionRelayRequest::Packet { circuit_id, layer }
+                    | OnionRelayRequest::Forward { circuit_id, layer } => {
+                        // Peel one onion layer using our static key.
+                        match super::onion_relay::process_onion_layer(
+                            &self.onion_static_secret,
+                            circuit_id,
+                            &layer,
+                        ) {
+                            Ok(super::onion_relay::OnionRelayAction::ForwardToNext {
+                                next_hop_peer_id,
+                                circuit_id,
+                                inner_layer,
+                                return_key,
+                            }) => {
+                                // R1 role: forward to R2.
+                                let next_peer = match PeerId::from_bytes(&next_hop_peer_id) {
+                                    Ok(p) => p,
+                                    Err(e) => {
+                                        warn!("onion_relay: invalid next_hop peer_id: {e}");
+                                        let _ = self.swarm.behaviour_mut().onion_relay
+                                            .send_response(channel, OnionRelayResponse::Error(
+                                                "invalid next_hop peer_id".into(),
+                                            ));
+                                        return;
+                                    }
+                                };
+                                // Send forward cell to R2.
+                                let fwd_req = OnionRelayRequest::Forward {
+                                    circuit_id,
+                                    layer: inner_layer,
+                                };
+                                let req_id = self.swarm.behaviour_mut()
+                                    .onion_relay.send_request(&next_peer, fwd_req);
+                                // Store the return_key so we can encrypt the response,
+                                // and store the inbound channel so we can relay the response back.
+                                self.pending_onion_relays.insert(req_id, return_key);
+                                // Store the inbound response channel for this relay request.
+                                self.pending_onion_inbound_channels.insert(req_id, channel);
+                            }
+                            Ok(super::onion_relay::OnionRelayAction::DeliverToTarget {
+                                target_peer_id,
+                                circuit_id,
+                                body,
+                                return_key,
+                            }) => {
+                                // R2 role: deliver to target.
+                                let target = match PeerId::from_bytes(&target_peer_id) {
+                                    Ok(p) => p,
+                                    Err(e) => {
+                                        warn!("onion_relay: invalid target peer_id: {e}");
+                                        let _ = self.swarm.behaviour_mut().onion_relay
+                                            .send_response(channel, OnionRelayResponse::Error(
+                                                "invalid target peer_id".into(),
+                                            ));
+                                        return;
+                                    }
+                                };
+                                let deliver_req = OnionRelayRequest::Deliver {
+                                    circuit_id,
+                                    body,
+                                };
+                                let req_id = self.swarm.behaviour_mut()
+                                    .onion_relay.send_request(&target, deliver_req);
+                                self.pending_onion_relays.insert(req_id, return_key);
+                                self.pending_onion_inbound_channels.insert(req_id, channel);
+                            }
+                            Err(e) => {
+                                warn!("onion_relay: peel failed: {e}");
+                                let _ = self.swarm.behaviour_mut().onion_relay
+                                    .send_response(channel, OnionRelayResponse::Error(
+                                        format!("onion peel failed: {e}"),
+                                    ));
+                            }
+                        }
+                    }
+                    OnionRelayRequest::Deliver { body, .. } => {
+                        // Target role: decrypt e2e body and process share request.
+                        let response = self.handle_onion_delivery(&body);
+                        let _ = self.swarm.behaviour_mut().onion_relay
+                            .send_response(channel, response);
+                    }
+                }
+            }
+            request_response::Event::Message {
+                message: request_response::Message::Response { request_id, response },
+                ..
+            } => {
+                // Response from a sub-request (R1→R2 or R2→Target).
+                if let Some(return_key) = self.pending_onion_relays.remove(&request_id) {
+                    if let Some(inbound_channel) = self.pending_onion_inbound_channels.remove(&request_id) {
+                        // We're a relay: encrypt the response with our return_key and forward back.
+                        let relay_response = match response {
+                            OnionRelayResponse::Data(data) => {
+                                match super::onion_relay::encrypt_relay_response(&return_key, &data) {
+                                    Ok(encrypted) => OnionRelayResponse::Data(encrypted),
+                                    Err(e) => OnionRelayResponse::Error(format!("relay encrypt failed: {e}")),
+                                }
+                            }
+                            OnionRelayResponse::Error(e) => OnionRelayResponse::Error(e),
+                        };
+                        let _ = self.swarm.behaviour_mut().onion_relay
+                            .send_response(inbound_channel, relay_response);
+                    } else if let Some(reply) = self.pending_onion_replies.remove(&request_id) {
+                        // We're the initiator: return the response to the coordinator.
+                        let _ = reply.send(Ok(response));
+                    }
+                } else if let Some(reply) = self.pending_onion_replies.remove(&request_id) {
+                    // Initiator path: no return_key stored (direct delivery response).
+                    let _ = reply.send(Ok(response));
+                }
+            }
+            request_response::Event::OutboundFailure { request_id, peer, error } => {
+                warn!("onion_relay.outbound_failure peer={peer} error={error}");
+                // Clean up and propagate error.
+                self.pending_onion_relays.remove(&request_id);
+                if let Some(channel) = self.pending_onion_inbound_channels.remove(&request_id) {
+                    let _ = self.swarm.behaviour_mut().onion_relay
+                        .send_response(channel, OnionRelayResponse::Error(
+                            format!("relay outbound failure: {error}"),
+                        ));
+                }
+                if let Some(reply) = self.pending_onion_replies.remove(&request_id) {
+                    let _ = reply.send(Err(MiasmaError::Network(format!(
+                        "onion relay outbound failure: {error}"
+                    ))));
+                }
+            }
+            request_response::Event::InboundFailure { peer, error, .. } => {
+                debug!("onion_relay.inbound_failure peer={peer} error={error}");
+            }
+            request_response::Event::ResponseSent { .. } => {}
+        }
+    }
+
+    /// Handle an onion delivery at the target node.
+    ///
+    /// The body format is: `session_key(32) || e2e_encrypted_layer(OnionLayer)`.
+    /// The target decrypts the e2e layer with its onion static key to get the
+    /// share request, processes it, and returns the response encrypted with
+    /// the session key.
+    fn handle_onion_delivery(&self, body: &[u8]) -> OnionRelayResponse {
+        if body.len() <= 32 {
+            return OnionRelayResponse::Error("delivery body too short".into());
+        }
+
+        let session_key: [u8; 32] = match body[..32].try_into() {
+            Ok(k) => k,
+            Err(_) => return OnionRelayResponse::Error("invalid session key".into()),
+        };
+
+        // Deserialize the e2e OnionLayer.
+        let e2e_layer: crate::onion::packet::OnionLayer = match bincode::deserialize(&body[32..]) {
+            Ok(l) => l,
+            Err(e) => return OnionRelayResponse::Error(format!("bad e2e layer: {e}")),
+        };
+
+        // Decrypt with our onion static key.
+        let payload = match crate::onion::packet::OnionLayerProcessor::peel(
+            &self.onion_static_secret,
+            &e2e_layer,
+        ) {
+            Ok(p) => p,
+            Err(e) => return OnionRelayResponse::Error(format!("e2e decrypt failed: {e}")),
+        };
+
+        // payload.data is the share request body (tag byte + bincode ShareFetchRequest).
+        let share_response = match self.process_onion_share_request(&payload.data) {
+            Ok(resp) => resp,
+            Err(e) => return OnionRelayResponse::Error(format!("share request failed: {e}")),
+        };
+
+        // Encrypt the response with the session key for e2e return privacy.
+        match crate::onion::packet::encrypt_response(&session_key, &share_response) {
+            Ok(encrypted) => OnionRelayResponse::Data(encrypted),
+            Err(e) => OnionRelayResponse::Error(format!("response encrypt failed: {e}")),
+        }
+    }
+
+    /// Process a share request received via onion delivery.
+    ///
+    /// Wire format: `0x10` tag + bincode(ShareFetchRequest) → bincode(ShareFetchResponse)
+    fn process_onion_share_request(&self, data: &[u8]) -> Result<Vec<u8>, MiasmaError> {
+        if data.is_empty() {
+            return Err(MiasmaError::Sss("empty onion share request".into()));
+        }
+        if data[0] != 0x10 {
+            return Err(MiasmaError::Sss(format!("unexpected onion share tag: {}", data[0])));
+        }
+
+        let req: ShareFetchRequest = bincode::deserialize(&data[1..])
+            .map_err(|e| MiasmaError::Serialization(e.to_string()))?;
+
+        let share = if let Some(store) = &self.local_store {
+            let prefix: [u8; 8] = req.mid_digest[..8].try_into().unwrap();
+            let candidates = store.search_by_mid_prefix(&prefix);
+            candidates.iter().find_map(|addr| {
+                store.get(addr).ok().and_then(|s| {
+                    if s.slot_index == req.slot_index && s.segment_index == req.segment_index {
+                        Some(s)
+                    } else {
+                        None
+                    }
+                })
+            })
+        } else {
+            None
+        };
+
+        let resp = ShareFetchResponse { share };
+        let mut out = vec![0x11u8];
+        out.extend(
+            bincode::serialize(&resp)
+                .map_err(|e| MiasmaError::Serialization(e.to_string()))?,
+        );
+        Ok(out)
     }
 
     // (wallet identity is accessed via self.credential_wallet.identity())
@@ -1923,6 +2283,14 @@ fn build_swarm(
                 request_response::Config::default(),
             );
 
+            let onion_relay = request_response::Behaviour::<OnionRelayCodec>::new(
+                [(
+                    StreamProtocol::new("/miasma/onion/1.0.0"),
+                    request_response::ProtocolSupport::Full,
+                )],
+                request_response::Config::default(),
+            );
+
             Ok(MiasmaBehaviour {
                 kademlia,
                 identify,
@@ -1934,6 +2302,7 @@ fn build_swarm(
                 admission,
                 credential_exchange,
                 descriptor_exchange,
+                onion_relay,
             })
         })
         .map_err(|e| MiasmaError::Sss(format!("behaviour init failed: {e}")))?

@@ -1416,3 +1416,276 @@ fn path_selection_opportunistic_prefers_relays() {
     // With relays available, opportunistic should use at least one.
     assert!(path.hop_count() >= 1, "opportunistic with relays should use ≥1 hop");
 }
+
+// ─── Scenario: Onion-encrypted relay delivery ──────────────────────────────
+
+/// Per-hop onion encryption: R1 peels outer layer, R2 peels inner layer,
+/// target receives e2e-encrypted payload that neither relay can read.
+#[test]
+fn onion_relay_per_hop_content_blindness() {
+    use miasma_core::network::onion_relay::{
+        process_onion_layer, encrypt_relay_response, OnionRelayAction,
+    };
+    use miasma_core::onion::packet::{
+        OnionPacketBuilder, OnionLayerProcessor, decrypt_response,
+    };
+    use x25519_dalek::{PublicKey, StaticSecret};
+
+    let make_key = || {
+        let sec = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let pub_ = PublicKey::from(&sec);
+        (sec.to_bytes(), pub_.to_bytes())
+    };
+
+    let (r1_sec, r1_pub) = make_key();
+    let (r2_sec, r2_pub) = make_key();
+    let (target_sec, target_pub) = make_key();
+
+    let share_request = b"GET share mid=abc123 slot=0".to_vec();
+
+    // Build e2e encrypted onion packet.
+    let (packet, _return_path, session_key) = OnionPacketBuilder::build_e2e(
+        &r1_pub, &r2_pub, &target_pub,
+        b"r2_peer".to_vec(), b"target".to_vec(), b"r2_addr".to_vec(),
+        share_request.clone(),
+    ).unwrap();
+
+    // R1 peels — cannot see share request (encrypted for R2 and Target).
+    let action1 = process_onion_layer(&r1_sec, packet.circuit_id, &packet.layer).unwrap();
+    let (inner_layer, r1_return_key) = match action1 {
+        OnionRelayAction::ForwardToNext { inner_layer, return_key, .. } => (inner_layer, return_key),
+        _ => panic!("R1 should forward"),
+    };
+
+    // R2 peels — gets body but it's session_key || e2e_blob. Cannot read share request.
+    let action2 = process_onion_layer(&r2_sec, packet.circuit_id, &inner_layer).unwrap();
+    let (delivered_body, r2_return_key) = match action2 {
+        OnionRelayAction::DeliverToTarget { body, return_key, .. } => (body, return_key),
+        _ => panic!("R2 should deliver"),
+    };
+
+    // Verify R2 cannot read the actual share request.
+    // The body starts with 32-byte session key followed by encrypted blob.
+    assert!(delivered_body.len() > 32);
+    // Try to deserialize as plaintext ShareFetchRequest — should fail.
+    assert!(
+        String::from_utf8(delivered_body[32..].to_vec()).is_err()
+            || !String::from_utf8_lossy(&delivered_body[32..]).contains("share"),
+        "R2 should not see plaintext share request"
+    );
+
+    // Target decrypts e2e layer.
+    let session_key_recv: [u8; 32] = delivered_body[..32].try_into().unwrap();
+    let e2e_layer: miasma_core::onion::packet::OnionLayer =
+        bincode::deserialize(&delivered_body[32..]).unwrap();
+    let e2e_payload = OnionLayerProcessor::peel(&target_sec, &e2e_layer).unwrap();
+    assert_eq!(e2e_payload.data, share_request);
+
+    // Target responds with encrypted share data.
+    let response = b"share data payload".to_vec();
+    let e2e_response = miasma_core::onion::packet::encrypt_response(
+        &session_key_recv, &response,
+    ).unwrap();
+
+    // R2 encrypts response with r2_return_key.
+    let r2_encrypted = encrypt_relay_response(&r2_return_key, &e2e_response).unwrap();
+
+    // R1 encrypts with r1_return_key.
+    let r1_encrypted = encrypt_relay_response(&r1_return_key, &r2_encrypted).unwrap();
+
+    // Initiator decrypts: r1_return_key → r2_return_key → session_key.
+    let after_r1 = decrypt_response(&r1_return_key, &r1_encrypted).unwrap();
+    let after_r2 = decrypt_response(&r2_return_key, &after_r1).unwrap();
+    let plaintext = decrypt_response(&*session_key, &after_r2).unwrap();
+
+    assert_eq!(plaintext, response);
+}
+
+/// Hostile relay with wrong key cannot peel the onion layer.
+#[test]
+fn onion_hostile_relay_wrong_key_rejected() {
+    use miasma_core::network::onion_relay::process_onion_layer;
+    use miasma_core::onion::packet::OnionPacketBuilder;
+    use x25519_dalek::{PublicKey, StaticSecret};
+
+    let make_key = || {
+        let sec = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let pub_ = PublicKey::from(&sec);
+        (sec.to_bytes(), pub_.to_bytes())
+    };
+
+    let (_r1_sec, r1_pub) = make_key();
+    let (_r2_sec, r2_pub) = make_key();
+    let (attacker_sec, _attacker_pub) = make_key();
+
+    let (packet, _rp) = OnionPacketBuilder::build(
+        &r1_pub, &r2_pub,
+        b"r2".to_vec(), b"target".to_vec(), b"addr".to_vec(),
+        b"secret".to_vec(),
+    ).unwrap();
+
+    // Attacker tries to peel with wrong key — must fail.
+    let result = process_onion_layer(&attacker_sec, packet.circuit_id, &packet.layer);
+    assert!(result.is_err(), "wrong key should fail to peel");
+}
+
+/// Return-path keys are unique per hop — R1 and R2 get different keys.
+#[test]
+fn onion_return_keys_per_hop_uniqueness() {
+    use miasma_core::network::onion_relay::{process_onion_layer, OnionRelayAction};
+    use miasma_core::onion::packet::OnionPacketBuilder;
+    use x25519_dalek::{PublicKey, StaticSecret};
+
+    let make_key = || {
+        let sec = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let pub_ = PublicKey::from(&sec);
+        (sec.to_bytes(), pub_.to_bytes())
+    };
+
+    let (r1_sec, r1_pub) = make_key();
+    let (r2_sec, r2_pub) = make_key();
+
+    let (packet, _rp) = OnionPacketBuilder::build(
+        &r1_pub, &r2_pub,
+        b"r2".to_vec(), b"target".to_vec(), b"addr".to_vec(),
+        b"payload".to_vec(),
+    ).unwrap();
+
+    let action1 = process_onion_layer(&r1_sec, packet.circuit_id, &packet.layer).unwrap();
+    let (inner_layer, r1_key) = match action1 {
+        OnionRelayAction::ForwardToNext { inner_layer, return_key, .. } => (inner_layer, return_key),
+        _ => panic!("expected ForwardToNext"),
+    };
+
+    let action2 = process_onion_layer(&r2_sec, packet.circuit_id, &inner_layer).unwrap();
+    let r2_key = match action2 {
+        OnionRelayAction::DeliverToTarget { return_key, .. } => return_key,
+        _ => panic!("expected DeliverToTarget"),
+    };
+
+    assert_ne!(r1_key, r2_key, "each hop must have a distinct return key");
+    assert_ne!(r1_key, [0u8; 32], "return key should not be zero");
+    assert_ne!(r2_key, [0u8; 32], "return key should not be zero");
+}
+
+/// Descriptor with onion_pubkey is signature-covered — tampering detected.
+#[test]
+fn descriptor_onion_pubkey_tamper_detection() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+    let desc = PeerDescriptor::new_signed_full(
+        [0x01; 32],
+        ReachabilityKind::Direct,
+        vec!["/ip4/1.2.3.4/tcp/4001".to_string()],
+        PeerCapabilities::default(),
+        ResourceProfile::Desktop,
+        None,
+        None,
+        Some([0xAA; 32]), // onion pubkey
+        1,
+        &key,
+    );
+
+    // Valid descriptor passes verification.
+    assert!(desc.verify_self());
+
+    // Tamper with onion_pubkey — signature must fail.
+    let mut tampered = desc.clone();
+    tampered.onion_pubkey = Some([0xBB; 32]);
+    assert!(!tampered.verify_self(), "tampered onion_pubkey should fail verification");
+
+    // Remove onion_pubkey — signature must fail.
+    let mut removed = desc;
+    removed.onion_pubkey = None;
+    assert!(!removed.verify_self(), "removed onion_pubkey should fail verification");
+}
+
+/// Descriptor store returns relay onion info only for relays with onion pubkeys.
+#[test]
+fn descriptor_store_relay_onion_info_filtering() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+    let mut store = DescriptorStore::new();
+
+    // Relay with onion pubkey.
+    let ps1 = [0x01; 32];
+    store.upsert(PeerDescriptor::new_signed_full(
+        ps1, ReachabilityKind::Direct,
+        vec!["/ip4/1.1.1.1/tcp/4001".to_string()],
+        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop, None, None,
+        Some([0xAA; 32]),
+        1, &key,
+    ));
+    let peer1 = PeerId::random();
+    store.register_peer_pseudonym(peer1, ps1);
+
+    // Relay without onion pubkey.
+    let ps2 = [0x02; 32];
+    store.upsert(PeerDescriptor::new_signed_full(
+        ps2, ReachabilityKind::Direct,
+        vec!["/ip4/2.2.2.2/tcp/4001".to_string()],
+        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop, None, None,
+        None, // no onion pubkey
+        1, &key,
+    ));
+    let peer2 = PeerId::random();
+    store.register_peer_pseudonym(peer2, ps2);
+
+    // Non-relay with onion pubkey.
+    let ps3 = [0x03; 32];
+    store.upsert(PeerDescriptor::new_signed_full(
+        ps3, ReachabilityKind::Direct,
+        vec!["/ip4/3.3.3.3/tcp/4001".to_string()],
+        PeerCapabilities { can_relay: false, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop, None, None,
+        Some([0xCC; 32]),
+        1, &key,
+    ));
+    let peer3 = PeerId::random();
+    store.register_peer_pseudonym(peer3, ps3);
+
+    let onion_info = store.relay_onion_info();
+    assert_eq!(onion_info.len(), 1, "only relay peers with onion pubkeys should be returned");
+    assert_eq!(onion_info[0].onion_pubkey, [0xAA; 32]);
+}
+
+/// Cross-circuit return key isolation — two circuits get different return keys.
+#[test]
+fn onion_cross_circuit_return_key_isolation() {
+    use miasma_core::network::onion_relay::{process_onion_layer, OnionRelayAction};
+    use miasma_core::onion::packet::OnionPacketBuilder;
+    use x25519_dalek::{PublicKey, StaticSecret};
+
+    let make_key = || {
+        let sec = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let pub_ = PublicKey::from(&sec);
+        (sec.to_bytes(), pub_.to_bytes())
+    };
+
+    let (r1_sec, r1_pub) = make_key();
+    let (_r2_sec, r2_pub) = make_key();
+
+    // Build two separate circuits.
+    let (pkt1, _rp1) = OnionPacketBuilder::build(
+        &r1_pub, &r2_pub,
+        b"r2".to_vec(), b"t1".to_vec(), b"addr".to_vec(),
+        b"body1".to_vec(),
+    ).unwrap();
+
+    let (pkt2, _rp2) = OnionPacketBuilder::build(
+        &r1_pub, &r2_pub,
+        b"r2".to_vec(), b"t2".to_vec(), b"addr".to_vec(),
+        b"body2".to_vec(),
+    ).unwrap();
+
+    let key1 = match process_onion_layer(&r1_sec, pkt1.circuit_id, &pkt1.layer).unwrap() {
+        OnionRelayAction::ForwardToNext { return_key, .. } => return_key,
+        _ => panic!("expected ForwardToNext"),
+    };
+    let key2 = match process_onion_layer(&r1_sec, pkt2.circuit_id, &pkt2.layer).unwrap() {
+        OnionRelayAction::ForwardToNext { return_key, .. } => return_key,
+        _ => panic!("expected ForwardToNext"),
+    };
+
+    assert_ne!(key1, key2, "different circuits must have different return keys");
+}
