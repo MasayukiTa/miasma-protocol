@@ -9,7 +9,7 @@
          Start Menu shortcuts, docs present
       3. Functional test — init, daemon start, dissolve/get round-trip,
          desktop launches
-      4. Upgrade — build v0.1.1 MSI+bundle, install over v0.1.0,
+      4. Upgrade — build v0.2.1 MSI+bundle, install over v0.2.0,
          verify data preserved
       5. Uninstall via bootstrapper (silent)
       6. Verify uninstall — binaries gone, PATH entry removed,
@@ -20,19 +20,19 @@
 
 .PARAMETER SetupExe
     Path to MiasmaSetup bootstrapper EXE.
-    Default: .\dist\MiasmaSetup-0.1.0-x64.exe
+    Default: .\dist\MiasmaSetup-0.2.0-x64.exe
 
 .PARAMETER SkipUpgrade
     Switch to skip the upgrade test (step 4).
 
 .EXAMPLE
     .\scripts\validate-installer.ps1
-    .\scripts\validate-installer.ps1 -SetupExe .\dist\MiasmaSetup-0.1.0-x64.exe
+    .\scripts\validate-installer.ps1 -SetupExe .\dist\MiasmaSetup-0.2.0-x64.exe
     .\scripts\validate-installer.ps1 -SkipUpgrade
 #>
 
 param(
-    [string]$SetupExe = ".\dist\MiasmaSetup-0.1.0-x64.exe",
+    [string]$SetupExe = ".\dist\MiasmaSetup-0.2.0-x64.exe",
     [switch]$SkipUpgrade
 )
 
@@ -366,7 +366,7 @@ if (-not $SkipUpgrade) {
     Write-Host ""
     Write-Host "=== Step 4: Upgrade Test ===" -ForegroundColor Cyan
 
-    # Build a v0.1.1 installer for upgrade testing.
+    # Build a v0.2.1 installer for upgrade testing.
     $upgradeDir = Join-Path $script:TMP_ROOT "upgrade-dist"
     New-Item -ItemType Directory -Force -Path $upgradeDir | Out-Null
 
@@ -379,33 +379,33 @@ if (-not $SkipUpgrade) {
         }
     }
 
-    # Build v0.1.1 MSI.
-    Write-Host "  Building v0.1.1 MSI for upgrade test..."
+    # Build v0.2.1 MSI.
+    Write-Host "  Building v0.2.1 MSI for upgrade test..."
     $wix = Get-Command wix -ErrorAction SilentlyContinue
     $wxsPath = Join-Path $REPO "installer\miasma.wxs"
-    $upgradeMsi = Join-Path $upgradeDir "miasma-0.1.1-windows-x64.msi"
+    $upgradeMsi = Join-Path $upgradeDir "miasma-0.2.1-windows-x64.msi"
 
     if ($wix -and (Test-Path $wxsPath)) {
         & wix build $wxsPath `
             -o $upgradeMsi `
-            -d "Version=0.1.1" `
+            -d "Version=0.2.1" `
             -d "BinDir=$upgradeDir" `
             -ext WixToolset.UI.wixext `
             -arch x64 2>$null
 
         if ($LASTEXITCODE -eq 0 -and (Test-Path $upgradeMsi)) {
-            Pass "4" "v0.1.1 MSI built successfully"
+            Pass "4" "v0.2.1 MSI built successfully"
 
-            # Build v0.1.1 bootstrapper bundle.
+            # Build v0.2.1 bootstrapper bundle.
             $bundleWxsPath = Join-Path $REPO "installer\bundle.wxs"
             $vcRedist = Join-Path (Split-Path $SetupExe) "vc_redist.x64.exe"
-            $upgradeExe = Join-Path $upgradeDir "MiasmaSetup-0.1.1-x64.exe"
+            $upgradeExe = Join-Path $upgradeDir "MiasmaSetup-0.2.1-x64.exe"
 
             $builtBundle = $false
             if ((Test-Path $bundleWxsPath) -and (Test-Path $vcRedist)) {
                 & wix build $bundleWxsPath `
                     -o $upgradeExe `
-                    -d "Version=0.1.1" `
+                    -d "Version=0.2.1" `
                     -d "MsiPath=$upgradeMsi" `
                     -d "VCRedistPath=$vcRedist" `
                     -ext WixToolset.Bal.wixext `
@@ -414,13 +414,13 @@ if (-not $SkipUpgrade) {
 
                 if ($LASTEXITCODE -eq 0 -and (Test-Path $upgradeExe)) {
                     $builtBundle = $true
-                    Pass "4" "v0.1.1 bootstrapper built successfully"
+                    Pass "4" "v0.2.1 bootstrapper built successfully"
                 }
             }
 
             # Install the upgrade.
             if ($builtBundle) {
-                Write-Host "  Installing v0.1.1 over v0.1.0 (silent)..."
+                Write-Host "  Installing v0.2.1 over v0.2.0 (silent)..."
                 $upgradeProc = Start-Process -FilePath $upgradeExe `
                     -ArgumentList "/install /quiet" `
                     -Verb RunAs -Wait -PassThru
@@ -433,7 +433,7 @@ if (-not $SkipUpgrade) {
                 }
             } else {
                 # Fall back to MSI-only upgrade.
-                Write-Host "  Installing v0.1.1 MSI over v0.1.0 (silent)..."
+                Write-Host "  Installing v0.2.1 MSI over v0.2.0 (silent)..."
                 $msiProc = Start-Process -FilePath "msiexec.exe" `
                     -ArgumentList "/i `"$upgradeMsi`" /qn" `
                     -Verb RunAs -Wait -PassThru
