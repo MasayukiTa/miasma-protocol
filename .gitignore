@@ -6,3 +6,9 @@ Cargo.lock
 *.pdb
 /task.md
 *.txt
+
+# Local planning / internal working docs
+/miasma-prd.md
+/Research-backed_Master_Design_Doc.md
+/scripts/RELEASE-CHECKLIST.md
+/docs/security/
