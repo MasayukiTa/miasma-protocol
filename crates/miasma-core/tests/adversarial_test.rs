@@ -1817,6 +1817,10 @@ fn retrieval_stats_serde_roundtrip() {
         relay_probes_sent: 0,
         relay_probes_succeeded: 0,
         relay_probes_failed: 0,
+        forwarding_probes_sent: 0,
+        forwarding_probes_succeeded: 0,
+        forwarding_probes_failed: 0,
+        pre_retrieval_probes_run: 0,
     };
     let json = serde_json::to_string(&stats).unwrap();
     let deserialized: RetrievalStats = serde_json::from_str(&json).unwrap();
@@ -2543,6 +2547,10 @@ fn content_blind_vs_ip_only_distinction_in_stats() {
         relay_probes_sent: 0,
         relay_probes_succeeded: 0,
         relay_probes_failed: 0,
+        forwarding_probes_sent: 0,
+        forwarding_probes_succeeded: 0,
+        forwarding_probes_failed: 0,
+        pre_retrieval_probes_run: 0,
     };
 
     // Content-blind successes = required onion + rendezvous_onion + opportunistic onion/onion_rendezvous.
@@ -2723,6 +2731,10 @@ fn five_privacy_paths_distinguishable() {
         relay_probes_sent: 5,
         relay_probes_succeeded: 4,
         relay_probes_failed: 1,
+        forwarding_probes_sent: 2,
+        forwarding_probes_succeeded: 1,
+        forwarding_probes_failed: 1,
+        pre_retrieval_probes_run: 3,
     };
 
     // Each path is independently countable.
@@ -2731,5 +2743,243 @@ fn five_privacy_paths_distinguishable() {
     assert!(stats.opportunistic_rendezvous_successes > 0, "path 3");
     assert!(stats.opportunistic_relay_successes > 0, "path 4");
     assert!(stats.direct_successes > 0, "path 5");
-    assert!(stats.relay_probes_sent > 0, "probes tracked");
+    assert!(stats.relay_probes_sent > 0, "reachability probes tracked");
+    assert!(stats.forwarding_probes_sent > 0, "forwarding probes tracked");
+    assert!(stats.pre_retrieval_probes_run > 0, "pre-retrieval sweeps tracked");
+}
+
+/// Probe freshness: `has_fresh_probe` returns true within freshness window,
+/// false when expired.
+#[test]
+fn probe_cache_freshness_and_expiry() {
+    use miasma_core::network::descriptor::RelayObservation;
+
+    let mut obs = RelayObservation {
+        tier: RelayTrustTier::Claimed,
+        successes: 0,
+        failures: 0,
+        last_success_at: 0,
+        last_failure_at: 0,
+        probe_succeeded_at: None,
+        forwarding_verified_at: None,
+    };
+
+    // No probe → not fresh.
+    assert!(!obs.has_fresh_probe(300));
+
+    // Record probe → fresh.
+    obs.record_probe_success();
+    assert!(obs.has_fresh_probe(300));
+    assert!(obs.probe_succeeded_at.is_some());
+
+    // Also promotes to Observed (probe alone counts).
+    assert_eq!(obs.tier, RelayTrustTier::Observed);
+
+    // Manually expire by setting timestamp in the past.
+    obs.probe_succeeded_at = Some(0); // epoch 0 is definitely stale
+    assert!(!obs.has_fresh_probe(300));
+}
+
+/// Forwarding verification fast-tracks to Verified when combined with
+/// at least 1 passive success.
+#[test]
+fn trust_tier_fast_track_via_forwarding() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+    let mut store = DescriptorStore::new();
+
+    let ps = [0xF5; 32];
+    let peer = PeerId::random();
+    store.register_peer_pseudonym(peer, ps);
+    store.upsert(PeerDescriptor::new_signed(
+        ps, ReachabilityKind::Direct,
+        vec!["/ip4/5.5.5.5/tcp/4001".to_string()],
+        PeerCapabilities { can_relay: true, can_store: true, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop, None, 1, &key,
+    ));
+
+    // Record 1 passive success → Observed.
+    store.record_relay_success(&ps);
+    assert_eq!(store.relay_tier(&ps), RelayTrustTier::Observed);
+
+    // Record forwarding verification → fast-tracks to Verified.
+    store.record_forwarding_verification(&ps);
+    assert_eq!(store.relay_tier(&ps), RelayTrustTier::Verified);
+}
+
+/// Probe success + 2 passive successes at ≥66% rate → Verified.
+/// Without probe: same evidence only gives Observed.
+#[test]
+fn trust_tier_mixed_evidence_probe_plus_passive() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+    let mut store = DescriptorStore::new();
+
+    let ps = [0xF6; 32];
+    let peer = PeerId::random();
+    store.register_peer_pseudonym(peer, ps);
+    store.upsert(PeerDescriptor::new_signed(
+        ps, ReachabilityKind::Direct,
+        vec!["/ip4/6.6.6.6/tcp/4001".to_string()],
+        PeerCapabilities { can_relay: true, can_store: true, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop, None, 1, &key,
+    ));
+
+    // 2 passive successes + 1 failure = Observed (66% < 75% threshold).
+    store.record_relay_success(&ps);
+    store.record_relay_success(&ps);
+    store.record_relay_failure(&ps);
+    assert_eq!(store.relay_tier(&ps), RelayTrustTier::Observed,
+        "2 successes at 66% without probe should be Observed");
+
+    // Add probe success → Verified (probe + 2 successes at 66% meets relaxed threshold).
+    store.record_probe_success(&ps);
+    assert_eq!(store.relay_tier(&ps), RelayTrustTier::Verified,
+        "probe + 2 successes at 66% should be Verified");
+}
+
+/// Forwarding verification timestamps survive epoch decay.
+#[test]
+fn forwarding_verified_not_cleared_by_decay() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+    let mut store = DescriptorStore::new();
+
+    let ps = [0xF7; 32];
+    let peer = PeerId::random();
+    store.register_peer_pseudonym(peer, ps);
+    store.upsert(PeerDescriptor::new_signed(
+        ps, ReachabilityKind::Direct,
+        vec!["/ip4/7.7.7.7/tcp/4001".to_string()],
+        PeerCapabilities { can_relay: true, can_store: true, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop, None, 1, &key,
+    ));
+
+    // Build up evidence: 4 successes + forwarding + probe → Verified.
+    for _ in 0..4 {
+        store.record_relay_success(&ps);
+    }
+    store.record_probe_success(&ps);
+    store.record_forwarding_verification(&ps);
+    assert_eq!(store.relay_tier(&ps), RelayTrustTier::Verified);
+    assert_eq!(store.forwarding_verified_count(), 1);
+
+    // Simulate epoch decay — halves passive counters but preserves timestamps.
+    store.decay_relay_observations();
+
+    // After decay, passive successes halved (4→2), but forwarding evidence remains.
+    // Forwarding + ≥1 success → still Verified.
+    assert_eq!(store.relay_tier(&ps), RelayTrustTier::Verified,
+        "forwarding evidence survives decay");
+    assert_eq!(store.forwarding_verified_count(), 1,
+        "forwarding verification count survives decay");
+}
+
+/// DescriptorStore tracks probe freshness per pseudonym.
+#[test]
+fn descriptor_store_probe_freshness() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+    let mut store = DescriptorStore::new();
+
+    let mut ps_a = [0u8; 32];
+    ps_a[0] = 0xA1;
+    let peer_a = PeerId::random();
+    store.register_peer_pseudonym(peer_a, ps_a);
+    store.upsert(PeerDescriptor::new_signed(
+        ps_a, ReachabilityKind::Direct,
+        vec!["/ip4/1.1.1.1/tcp/4001".to_string()],
+        PeerCapabilities { can_relay: true, can_store: true, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop, None, 1, &key,
+    ));
+
+    let mut ps_b = [0u8; 32];
+    ps_b[0] = 0xB1;
+    let peer_b = PeerId::random();
+    store.register_peer_pseudonym(peer_b, ps_b);
+    store.upsert(PeerDescriptor::new_signed(
+        ps_b, ReachabilityKind::Direct,
+        vec!["/ip4/2.2.2.2/tcp/4001".to_string()],
+        PeerCapabilities { can_relay: true, can_store: true, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop, None, 1, &key,
+    ));
+
+    // Initially no fresh probes.
+    assert_eq!(store.probed_fresh_count(300), 0);
+    assert!(!store.has_fresh_probe(&ps_a, 300));
+
+    // Probe peer A.
+    store.record_probe_success(&ps_a);
+    assert!(store.has_fresh_probe(&ps_a, 300));
+    assert!(!store.has_fresh_probe(&ps_b, 300));
+    assert_eq!(store.probed_fresh_count(300), 1);
+
+    // Probe peer B.
+    store.record_probe_success(&ps_b);
+    assert_eq!(store.probed_fresh_count(300), 2);
+}
+
+/// DescriptorStore forwarding verification tracking.
+#[test]
+fn descriptor_store_forwarding_verification() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+    let mut store = DescriptorStore::new();
+
+    let ps = [0xF1; 32];
+    let peer = PeerId::random();
+    store.register_peer_pseudonym(peer, ps);
+    store.upsert(PeerDescriptor::new_signed(
+        ps, ReachabilityKind::Direct,
+        vec!["/ip4/3.3.3.3/tcp/4001".to_string()],
+        PeerCapabilities { can_relay: true, can_store: true, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop, None, 1, &key,
+    ));
+
+    // Initially no forwarding verification.
+    assert_eq!(store.forwarding_verified_count(), 0);
+
+    // Record a passive success first (needed for Verified).
+    store.record_relay_success(&ps);
+
+    // Record forwarding verification.
+    store.record_forwarding_verification(&ps);
+    assert_eq!(store.forwarding_verified_count(), 1);
+
+    // Should be Verified tier (forwarding + 1 success).
+    assert_eq!(store.relay_tier(&ps), RelayTrustTier::Verified);
+}
+
+/// Forwarding verification circuit address format is correct.
+#[test]
+fn forwarding_circuit_address_format() {
+    // The circuit address built in verify_relay_forwarding is:
+    // /p2p/{R1}/p2p-circuit/p2p/{R2}
+    let r1 = PeerId::random();
+    let r2 = PeerId::random();
+    let addr = format!("/p2p/{}/p2p-circuit/p2p/{}", r1, r2);
+
+    // Must contain both peer IDs and p2p-circuit.
+    assert!(addr.contains(&r1.to_string()));
+    assert!(addr.contains(&r2.to_string()));
+    assert!(addr.contains("p2p-circuit"));
+
+    // Must be parseable as a multiaddr.
+    let parsed: Result<libp2p::Multiaddr, _> = addr.parse();
+    assert!(parsed.is_ok(), "circuit address must be a valid multiaddr: {addr}");
+}
+
+/// RetrievalStats: forwarding probe fields round-trip through serde.
+#[test]
+fn forwarding_probe_stats_serde() {
+    use miasma_core::network::RetrievalStats;
+
+    let stats = RetrievalStats {
+        forwarding_probes_sent: 5,
+        forwarding_probes_succeeded: 3,
+        forwarding_probes_failed: 2,
+        pre_retrieval_probes_run: 10,
+        ..RetrievalStats::default()
+    };
+    let json = serde_json::to_string(&stats).unwrap();
+    let d: RetrievalStats = serde_json::from_str(&json).unwrap();
+    assert_eq!(d.forwarding_probes_sent, 5);
+    assert_eq!(d.forwarding_probes_succeeded, 3);
+    assert_eq!(d.forwarding_probes_failed, 2);
+    assert_eq!(d.pre_retrieval_probes_run, 10);
 }
