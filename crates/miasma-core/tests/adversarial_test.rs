@@ -22,7 +22,8 @@ use miasma_core::network::credential::{
     EphemeralIdentity, CAP_ROUTE, CAP_STORE,
 };
 use miasma_core::network::descriptor::{
-    DescriptorStore, PeerCapabilities, PeerDescriptor, ReachabilityKind, ResourceProfile,
+    DescriptorStore, PeerCapabilities, PeerDescriptor, ReachabilityKind,
+    RelayTrustTier, ResourceProfile,
 };
 use miasma_core::network::bbs_credential::{
     bbs_create_proof, bbs_verify_proof, BbsCredentialWallet, BbsIssuer, BbsIssuerKey,
@@ -1803,6 +1804,10 @@ fn retrieval_stats_serde_roundtrip() {
         required_onion_successes: 4,
         required_relay_successes: 2,
         required_failures: 1,
+        rendezvous_attempts: 3,
+        rendezvous_successes: 2,
+        rendezvous_failures: 1,
+        rendezvous_direct_fallbacks: 0,
     };
     let json = serde_json::to_string(&stats).unwrap();
     let deserialized: RetrievalStats = serde_json::from_str(&json).unwrap();
@@ -1916,4 +1921,404 @@ fn nat_transition_updates_relay_capability() {
     assert_eq!(store.stats().relay_descriptors, 0);
     store.upsert(desc_public);
     assert_eq!(store.stats().relay_descriptors, 1, "upsert must update relay capability");
+}
+
+// ─── Scenario 20: Relay trust tier promotion / demotion ─────────────────────
+
+/// A relay starts at Claimed, gets promoted to Observed on first success,
+/// and to Verified after ≥3 successes with ≥75% success rate.
+#[test]
+fn relay_trust_tier_promotion_on_success() {
+    let mut store = DescriptorStore::new();
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+    let ps = [0xBB; 32];
+    let peer = PeerId::random();
+    store.register_peer_pseudonym(peer, ps);
+    store.upsert(PeerDescriptor::new_signed(
+        ps,
+        ReachabilityKind::Direct,
+        vec!["/ip4/1.2.3.4/tcp/4001".to_string()],
+        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &key,
+    ));
+
+    // Initially Claimed (no observations).
+    assert_eq!(store.relay_tier(&ps), RelayTrustTier::Claimed);
+
+    // 1 success → Observed.
+    store.record_relay_success(&ps);
+    assert_eq!(store.relay_tier(&ps), RelayTrustTier::Observed);
+
+    // 2 more successes (3 total, 0 failures) → Verified.
+    store.record_relay_success(&ps);
+    store.record_relay_success(&ps);
+    assert_eq!(store.relay_tier(&ps), RelayTrustTier::Verified);
+}
+
+/// Relay trust demotion: high failure rate demotes from Verified to Observed.
+#[test]
+fn relay_trust_tier_demotion_on_failure() {
+    let mut store = DescriptorStore::new();
+    let ps = [0xCC; 32];
+
+    // Promote to Verified first: 4 successes.
+    for _ in 0..4 {
+        store.record_relay_success(&ps);
+    }
+    assert_eq!(store.relay_tier(&ps), RelayTrustTier::Verified);
+
+    // Add failures to push success rate below 75%: 4 succ, 3 fail = 57%.
+    for _ in 0..3 {
+        store.record_relay_failure(&ps);
+    }
+    // 4/(4+3) = 57% < 75%, so should demote to Observed.
+    assert_eq!(store.relay_tier(&ps), RelayTrustTier::Observed);
+}
+
+/// False relay claim never promotes past Claimed without real observations.
+#[test]
+fn false_relay_claim_stays_claimed_without_observation() {
+    let mut store = DescriptorStore::new();
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+
+    // Create 5 peers claiming can_relay=true but no relay observations.
+    for i in 0..5u8 {
+        let mut ps = [0u8; 32];
+        ps[0] = i;
+        let peer = PeerId::random();
+        store.register_peer_pseudonym(peer, ps);
+        store.upsert(PeerDescriptor::new_signed(
+            ps,
+            ReachabilityKind::Direct,
+            vec![format!("/ip4/1.2.3.{i}/tcp/4001")],
+            PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+            ResourceProfile::Desktop,
+            None,
+            1,
+            &key,
+        ));
+        // All should be Claimed — no real relay participation observed.
+        assert_eq!(store.relay_tier(&ps), RelayTrustTier::Claimed,
+            "peer {i} should be Claimed without observations");
+    }
+
+    let (claimed, observed, verified) = store.relay_tier_counts();
+    assert_eq!(claimed, 5);
+    assert_eq!(observed, 0);
+    assert_eq!(verified, 0);
+}
+
+/// Relay observation decay on epoch rotation halves counters.
+#[test]
+fn relay_observation_decay_on_epoch_rotation() {
+    let mut store = DescriptorStore::new();
+    let ps = [0xDD; 32];
+
+    // Build up to Verified: 6 successes.
+    for _ in 0..6 {
+        store.record_relay_success(&ps);
+    }
+    assert_eq!(store.relay_tier(&ps), RelayTrustTier::Verified);
+
+    // Epoch rotation decays counters: 6/2 = 3 successes, still Verified.
+    store.on_epoch_rotate(1);
+    assert_eq!(store.relay_tier(&ps), RelayTrustTier::Verified);
+
+    // Another epoch: 3/2 = 1 success → Observed.
+    store.on_epoch_rotate(2);
+    assert_eq!(store.relay_tier(&ps), RelayTrustTier::Observed);
+
+    // Another epoch: 1/2 = 0 successes → Claimed.
+    store.on_epoch_rotate(3);
+    assert_eq!(store.relay_tier(&ps), RelayTrustTier::Claimed);
+}
+
+// ─── Scenario 21: Rendezvous descriptor creation and resolution ─────────────
+
+/// A NAT'd node creates a Rendezvous descriptor with intro points
+/// selected from verified relay peers in the descriptor store.
+#[test]
+fn rendezvous_descriptor_with_intro_points() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+    let mut store = DescriptorStore::new();
+
+    // Create relay peers as potential intro points.
+    for i in 0..3u8 {
+        let mut ps = [0u8; 32];
+        ps[0] = i + 1;
+        let peer = PeerId::random();
+        store.register_peer_pseudonym(peer, ps);
+        store.upsert(PeerDescriptor::new_signed(
+            ps,
+            ReachabilityKind::Direct,
+            vec![format!("/ip4/10.0.{i}.1/tcp/4001")],
+            PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+            ResourceProfile::Desktop,
+            None,
+            1,
+            &key,
+        ));
+        // Promote relay 0 to Verified.
+        if i == 0 {
+            for _ in 0..4 { store.record_relay_success(&ps); }
+        }
+    }
+
+    // Select intro points for our own pseudonym.
+    let own_ps = [0xFF; 32];
+    let intro_points = store.select_intro_points(&own_ps, 3);
+    assert_eq!(intro_points.len(), 3, "should select 3 intro points");
+
+    // Verified relay should be first (highest trust tier).
+    let mut first_ps = [0u8; 32];
+    first_ps[0] = 1; // relay 0 is Verified
+    assert_eq!(intro_points[0], first_ps, "Verified relay should be preferred");
+
+    // Create a rendezvous descriptor.
+    let desc = PeerDescriptor::new_signed(
+        own_ps,
+        ReachabilityKind::Rendezvous { intro_points: intro_points.clone() },
+        vec![], // no direct addresses for rendezvous peers
+        PeerCapabilities::default(),
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &key,
+    );
+    assert!(desc.is_rendezvous());
+    assert!(!desc.is_relayed());
+    assert!(desc.verify_self());
+
+    // Store the rendezvous descriptor.
+    store.upsert(desc);
+    assert_eq!(store.stats().rendezvous_descriptors, 1);
+}
+
+/// Intro point resolution returns only fresh, relay-capable peers
+/// with PeerId mappings, sorted by trust tier.
+#[test]
+fn intro_point_resolution_filters_and_sorts() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+    let mut store = DescriptorStore::new();
+
+    // Peer A: relay, registered, Observed.
+    let mut ps_a = [0u8; 32]; ps_a[0] = 0xA0;
+    let peer_a = PeerId::random();
+    store.register_peer_pseudonym(peer_a, ps_a);
+    store.upsert(PeerDescriptor::new_signed(
+        ps_a, ReachabilityKind::Direct,
+        vec!["/ip4/1.1.1.1/tcp/4001".to_string()],
+        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop, None, 1, &key,
+    ));
+    store.record_relay_success(&ps_a);
+
+    // Peer B: relay, registered, Claimed (no observations).
+    let mut ps_b = [0u8; 32]; ps_b[0] = 0xB0;
+    let peer_b = PeerId::random();
+    store.register_peer_pseudonym(peer_b, ps_b);
+    store.upsert(PeerDescriptor::new_signed(
+        ps_b, ReachabilityKind::Direct,
+        vec!["/ip4/2.2.2.2/tcp/4001".to_string()],
+        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop, None, 1, &key,
+    ));
+
+    // Peer C: NOT a relay (can_relay=false) — should be filtered out.
+    let mut ps_c = [0u8; 32]; ps_c[0] = 0xC0;
+    let peer_c = PeerId::random();
+    store.register_peer_pseudonym(peer_c, ps_c);
+    store.upsert(PeerDescriptor::new_signed(
+        ps_c, ReachabilityKind::Direct,
+        vec!["/ip4/3.3.3.3/tcp/4001".to_string()],
+        PeerCapabilities { can_relay: false, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop, None, 1, &key,
+    ));
+
+    // Peer D: relay but NO PeerId mapping — should be filtered out.
+    let mut ps_d = [0u8; 32]; ps_d[0] = 0xD0;
+    store.upsert(PeerDescriptor::new_signed(
+        ps_d, ReachabilityKind::Direct,
+        vec!["/ip4/4.4.4.4/tcp/4001".to_string()],
+        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop, None, 1, &key,
+    ));
+
+    let resolved = store.resolve_intro_points(&[ps_a, ps_b, ps_c, ps_d]);
+    assert_eq!(resolved.len(), 2, "only relay peers with PeerId mappings should resolve");
+    // Observed (A) should come before Claimed (B).
+    assert_eq!(resolved[0].pseudonym, ps_a);
+    assert_eq!(resolved[0].relay_tier, RelayTrustTier::Observed);
+    assert_eq!(resolved[1].pseudonym, ps_b);
+    assert_eq!(resolved[1].relay_tier, RelayTrustTier::Claimed);
+}
+
+/// Broken rendezvous descriptor with all-invalid intro points resolves to empty.
+#[test]
+fn broken_rendezvous_all_invalid_intro_points() {
+    let store = DescriptorStore::new();
+    // Try to resolve pseudonyms that don't exist in the store.
+    let fake_intro = [[0xDE; 32], [0xAD; 32], [0xBE; 32]];
+    let resolved = store.resolve_intro_points(&fake_intro);
+    assert!(resolved.is_empty(), "non-existent intro points should resolve to empty");
+}
+
+/// Rendezvous descriptor reachability is distinct from Relayed.
+#[test]
+fn rendezvous_vs_relayed_distinction() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+
+    let rendezvous = PeerDescriptor::new_signed(
+        [0x01; 32],
+        ReachabilityKind::Rendezvous { intro_points: vec![[0xAA; 32], [0xBB; 32]] },
+        vec![],
+        PeerCapabilities::default(),
+        ResourceProfile::Desktop,
+        None, 1, &key,
+    );
+    let relayed = PeerDescriptor::new_signed(
+        [0x02; 32],
+        ReachabilityKind::Relayed {
+            relay_peer: "12D3KooW...".to_string(),
+            relay_addr: "/ip4/1.2.3.4/tcp/4001".to_string(),
+        },
+        vec![],
+        PeerCapabilities::default(),
+        ResourceProfile::Mobile,
+        None, 1, &key,
+    );
+    let direct = PeerDescriptor::new_signed(
+        [0x03; 32],
+        ReachabilityKind::Direct,
+        vec!["/ip4/5.6.7.8/tcp/4001".to_string()],
+        PeerCapabilities::default(),
+        ResourceProfile::Desktop,
+        None, 1, &key,
+    );
+
+    // All three are distinct reachability kinds.
+    assert!(rendezvous.is_rendezvous());
+    assert!(!rendezvous.is_relayed());
+    assert!(relayed.is_relayed());
+    assert!(!relayed.is_rendezvous());
+    assert!(!direct.is_rendezvous());
+    assert!(!direct.is_relayed());
+
+    // Signatures all valid.
+    assert!(rendezvous.verify_self());
+    assert!(relayed.verify_self());
+    assert!(direct.verify_self());
+}
+
+/// Descriptor store stats track rendezvous and relay tiers correctly.
+#[test]
+fn descriptor_stats_rendezvous_and_relay_tiers() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+    let mut store = DescriptorStore::new();
+
+    // Direct peer.
+    store.upsert(PeerDescriptor::new_signed(
+        [0x01; 32], ReachabilityKind::Direct,
+        vec!["/ip4/1.1.1.1/tcp/4001".to_string()],
+        PeerCapabilities::default(), ResourceProfile::Desktop,
+        None, 1, &key,
+    ));
+
+    // Rendezvous peer.
+    store.upsert(PeerDescriptor::new_signed(
+        [0x02; 32],
+        ReachabilityKind::Rendezvous { intro_points: vec![[0xAA; 32]] },
+        vec![], PeerCapabilities::default(), ResourceProfile::Desktop,
+        None, 1, &key,
+    ));
+
+    // Relay peer (Claimed).
+    let ps_relay = [0x03; 32];
+    let relay_peer = PeerId::random();
+    store.register_peer_pseudonym(relay_peer, ps_relay);
+    store.upsert(PeerDescriptor::new_signed(
+        ps_relay, ReachabilityKind::Direct,
+        vec!["/ip4/2.2.2.2/tcp/4001".to_string()],
+        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop, None, 1, &key,
+    ));
+    // Promote to Observed.
+    store.record_relay_success(&ps_relay);
+
+    let stats = store.stats();
+    assert_eq!(stats.total_descriptors, 3);
+    assert_eq!(stats.rendezvous_descriptors, 1);
+    assert_eq!(stats.relay_descriptors, 1);
+    assert_eq!(stats.relay_claimed, 0);
+    assert_eq!(stats.relay_observed, 1);
+    assert_eq!(stats.relay_verified, 0);
+}
+
+/// Retrieval stats include rendezvous fields and round-trip through serde.
+#[test]
+fn retrieval_stats_rendezvous_serde() {
+    use miasma_core::network::RetrievalStats;
+    let stats = RetrievalStats {
+        rendezvous_attempts: 5,
+        rendezvous_successes: 3,
+        rendezvous_failures: 1,
+        rendezvous_direct_fallbacks: 1,
+        ..RetrievalStats::default()
+    };
+    let json = serde_json::to_string(&stats).unwrap();
+    let d: RetrievalStats = serde_json::from_str(&json).unwrap();
+    assert_eq!(d.rendezvous_attempts, 5);
+    assert_eq!(d.rendezvous_successes, 3);
+    assert_eq!(d.rendezvous_failures, 1);
+    assert_eq!(d.rendezvous_direct_fallbacks, 1);
+}
+
+/// Relay peer selection prefers Verified over Observed over Claimed.
+#[test]
+fn relay_peer_info_sorted_by_trust_tier() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+    let mut store = DescriptorStore::new();
+
+    // Create 3 relays at different trust tiers.
+    let mut ps_claimed = [0u8; 32]; ps_claimed[0] = 1;
+    let peer_claimed = PeerId::random();
+    store.register_peer_pseudonym(peer_claimed, ps_claimed);
+    store.upsert(PeerDescriptor::new_signed(
+        ps_claimed, ReachabilityKind::Direct,
+        vec!["/ip4/1.1.1.1/tcp/4001".to_string()],
+        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop, None, 1, &key,
+    ));
+
+    let mut ps_verified = [0u8; 32]; ps_verified[0] = 2;
+    let peer_verified = PeerId::random();
+    store.register_peer_pseudonym(peer_verified, ps_verified);
+    store.upsert(PeerDescriptor::new_signed(
+        ps_verified, ReachabilityKind::Direct,
+        vec!["/ip4/2.2.2.2/tcp/4001".to_string()],
+        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop, None, 1, &key,
+    ));
+    for _ in 0..4 { store.record_relay_success(&ps_verified); }
+
+    let mut ps_observed = [0u8; 32]; ps_observed[0] = 3;
+    let peer_observed = PeerId::random();
+    store.register_peer_pseudonym(peer_observed, ps_observed);
+    store.upsert(PeerDescriptor::new_signed(
+        ps_observed, ReachabilityKind::Direct,
+        vec!["/ip4/3.3.3.3/tcp/4001".to_string()],
+        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop, None, 1, &key,
+    ));
+    store.record_relay_success(&ps_observed);
+
+    let relay_info = store.relay_peer_info();
+    assert_eq!(relay_info.len(), 3);
+    // Verified first, then Observed, then Claimed.
+    assert_eq!(relay_info[0].0, peer_verified);
+    assert_eq!(relay_info[1].0, peer_observed);
+    assert_eq!(relay_info[2].0, peer_claimed);
 }

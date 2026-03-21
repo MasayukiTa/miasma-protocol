@@ -51,11 +51,105 @@ pub enum ReachabilityKind {
         /// Address of the relay node.
         relay_addr: String,
     },
-    /// Peer publishes a rendezvous point (future: onion-based).
+    /// Peer is reachable only via introduction points.
+    ///
+    /// Unlike `Relayed` (which names a specific relay+addr), a rendezvous
+    /// descriptor stores pseudonyms of introduction-point peers. The
+    /// requester resolves each pseudonym through the descriptor store to
+    /// discover the intro point's PeerId and addresses, then routes
+    /// through that relay to reach the hidden peer.
+    ///
+    /// This separates **discovery** (the rendezvous descriptor) from
+    /// **introduction** (the intro-point pseudonym) from **transport**
+    /// (the relay circuit the requester builds).
     Rendezvous {
-        /// Identifier for the rendezvous point.
-        rendezvous_id: [u8; 32],
+        /// Pseudonyms of introduction-point relay peers.
+        /// Resolved via `DescriptorStore::peer_for_pseudonym()`.
+        intro_points: Vec<[u8; 32]>,
     },
+}
+
+// ─── Relay trust tiers ──────────────────────────────────────────────────────
+
+/// Trust tier for a peer's relay capability, driven by observed behavior.
+///
+/// Promotion requires real successful relay participation — descriptor
+/// claims alone only reach `Claimed`. Demotion happens on failure or
+/// inactivity so stale trust does not linger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash)]
+pub enum RelayTrustTier {
+    /// Descriptor says `can_relay` but we have no observation.
+    Claimed,
+    /// At least one successful relay operation observed.
+    Observed,
+    /// Consistent relay behavior: ≥3 successes AND success rate ≥75%.
+    Verified,
+}
+
+impl Default for RelayTrustTier {
+    fn default() -> Self {
+        Self::Claimed
+    }
+}
+
+/// Accumulated relay behavior observations for a single peer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayObservation {
+    pub tier: RelayTrustTier,
+    pub successes: u32,
+    pub failures: u32,
+    /// Unix timestamp of last successful relay.
+    pub last_success_at: u64,
+    /// Unix timestamp of last failed relay.
+    pub last_failure_at: u64,
+}
+
+impl RelayObservation {
+    fn new() -> Self {
+        Self {
+            tier: RelayTrustTier::Claimed,
+            successes: 0,
+            failures: 0,
+            last_success_at: 0,
+            last_failure_at: 0,
+        }
+    }
+
+    fn record_success(&mut self) {
+        self.successes += 1;
+        self.last_success_at = now_secs();
+        self.recompute_tier();
+    }
+
+    fn record_failure(&mut self) {
+        self.failures += 1;
+        self.last_failure_at = now_secs();
+        self.recompute_tier();
+    }
+
+    /// Halve counters (epoch decay) so stale trust decays.
+    fn decay(&mut self) {
+        self.successes /= 2;
+        self.failures /= 2;
+        self.recompute_tier();
+    }
+
+    fn recompute_tier(&mut self) {
+        let total = self.successes + self.failures;
+        if self.successes >= 3 && total > 0 && (self.successes as f64 / total as f64) >= 0.75 {
+            self.tier = RelayTrustTier::Verified;
+        } else if self.successes >= 1 {
+            self.tier = RelayTrustTier::Observed;
+        } else {
+            self.tier = RelayTrustTier::Claimed;
+        }
+    }
+
+    #[allow(dead_code)]
+    fn success_rate(&self) -> f64 {
+        let total = self.successes + self.failures;
+        if total == 0 { 0.0 } else { self.successes as f64 / total as f64 }
+    }
 }
 
 /// Capabilities that a peer advertises via its descriptor.
@@ -279,6 +373,11 @@ impl PeerDescriptor {
         matches!(self.reachability, ReachabilityKind::Relayed { .. })
     }
 
+    /// Whether this descriptor uses rendezvous (introduction points).
+    pub fn is_rendezvous(&self) -> bool {
+        matches!(self.reachability, ReachabilityKind::Rendezvous { .. })
+    }
+
     /// Age of this descriptor in seconds.
     pub fn age_secs(&self) -> u64 {
         let now = SystemTime::now()
@@ -315,16 +414,42 @@ impl PeerDescriptor {
 
 // ─── Descriptor store ───────────────────────────────────────────────────────
 
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 /// Maximum descriptor age before it's considered stale (1 hour).
 const MAX_DESCRIPTOR_AGE_SECS: u64 = 3600;
+
+/// Rendezvous descriptors expire faster (20 minutes) because intro points
+/// change more frequently under churn and NAT re-binding.
+const MAX_RENDEZVOUS_AGE_SECS: u64 = 1200;
 
 /// Maximum number of descriptors stored (prevents flooding).
 const MAX_DESCRIPTORS: usize = 10_000;
 
+/// Per-kind max age: rendezvous descriptors expire faster.
+fn max_age_for(desc: &PeerDescriptor) -> u64 {
+    if desc.is_rendezvous() {
+        MAX_RENDEZVOUS_AGE_SECS
+    } else {
+        MAX_DESCRIPTOR_AGE_SECS
+    }
+}
+
+/// Whether a descriptor is still fresh (not stale) given its kind.
+fn is_fresh(desc: &PeerDescriptor) -> bool {
+    desc.age_secs() < max_age_for(desc)
+}
+
 /// In-memory store for peer descriptors.
 ///
 /// Indexed by pseudonym (holder_tag). Supports staleness pruning,
-/// capacity limits, capability-based queries, and pseudonym churn tracking.
+/// capacity limits, capability-based queries, pseudonym churn tracking,
+/// and per-peer relay trust observation.
 pub struct DescriptorStore {
     /// Descriptors keyed by pseudonym.
     descriptors: HashMap<[u8; 32], PeerDescriptor>,
@@ -338,6 +463,8 @@ pub struct DescriptorStore {
     tracked_epoch: u64,
     /// Count of pseudonyms first seen in the current epoch (new arrivals).
     new_pseudonyms_this_epoch: usize,
+    /// Relay behavior observations keyed by pseudonym.
+    relay_observations: HashMap<[u8; 32], RelayObservation>,
 }
 
 impl DescriptorStore {
@@ -349,6 +476,7 @@ impl DescriptorStore {
             prev_epoch_pseudonyms: std::collections::HashSet::new(),
             tracked_epoch: 0,
             new_pseudonyms_this_epoch: 0,
+            relay_observations: HashMap::new(),
         }
     }
 
@@ -357,8 +485,8 @@ impl DescriptorStore {
     /// Rejects descriptors that are already stale on arrival or that would
     /// exceed the store capacity limit (evicting oldest stale entries first).
     pub fn upsert(&mut self, desc: PeerDescriptor) -> bool {
-        // Reject descriptors that arrive already stale.
-        if desc.age_secs() >= MAX_DESCRIPTOR_AGE_SECS {
+        // Reject descriptors that arrive already stale (per-kind max age).
+        if desc.age_secs() >= max_age_for(&desc) {
             return false;
         }
 
@@ -412,35 +540,44 @@ impl DescriptorStore {
     ///
     /// Returns `(PeerId, addresses)` for each relay-capable descriptor that
     /// has a known PeerId mapping. Used to construct libp2p relay circuit addresses.
+    /// Return relay-capable peer info, sorted by relay trust tier (Verified first).
     pub fn relay_peer_info(&self) -> Vec<(PeerId, Vec<String>)> {
-        self.descriptors.values()
-            .filter(|d| d.is_relay() && d.age_secs() < MAX_DESCRIPTOR_AGE_SECS)
+        let mut relays: Vec<_> = self.descriptors.values()
+            .filter(|d| d.is_relay() && is_fresh(d))
             .filter_map(|d| {
-                self.pseudonym_to_peer.get(&d.pseudonym)
-                    .map(|pid| (*pid, d.addresses.clone()))
+                let pid = self.pseudonym_to_peer.get(&d.pseudonym)?;
+                let tier = self.relay_tier(&d.pseudonym);
+                Some((tier, *pid, d.addresses.clone()))
             })
-            .collect()
+            .collect();
+        // Sort by tier descending (Verified > Observed > Claimed).
+        relays.sort_by(|a, b| b.0.cmp(&a.0));
+        relays.into_iter().map(|(_, pid, addrs)| (pid, addrs)).collect()
     }
 
     /// Return relay-capable peers with their onion X25519 public keys.
     ///
     /// Used by the onion encryption layer to build per-hop encrypted packets.
     /// Only returns relays that have published an `onion_pubkey`.
+    /// Return relay peers with onion keys, sorted by relay trust tier (Verified first).
     pub fn relay_onion_info(&self) -> Vec<crate::onion::circuit::RelayInfo> {
-        self.descriptors.values()
-            .filter(|d| d.is_relay() && d.age_secs() < MAX_DESCRIPTOR_AGE_SECS)
+        let mut relays: Vec<_> = self.descriptors.values()
+            .filter(|d| d.is_relay() && is_fresh(d))
             .filter_map(|d| {
                 let onion_pubkey = d.onion_pubkey?;
                 let peer_id = self.pseudonym_to_peer.get(&d.pseudonym)?;
-                Some(crate::onion::circuit::RelayInfo {
+                let tier = self.relay_tier(&d.pseudonym);
+                Some((tier, crate::onion::circuit::RelayInfo {
                     peer_id: peer_id.to_bytes(),
                     onion_pubkey,
                     addr: d.addresses.first()
                         .map(|a| a.as_bytes().to_vec())
                         .unwrap_or_default(),
-                })
+                }))
             })
-            .collect()
+            .collect();
+        relays.sort_by(|a, b| b.0.cmp(&a.0));
+        relays.into_iter().map(|(_, info)| info).collect()
     }
 
     /// Look up a peer's onion X25519 public key from their descriptor.
@@ -464,32 +601,158 @@ impl DescriptorStore {
     /// Return all descriptors that advertise relay capability.
     pub fn relay_descriptors(&self) -> Vec<&PeerDescriptor> {
         self.descriptors.values()
-            .filter(|d| d.is_relay() && d.age_secs() < MAX_DESCRIPTOR_AGE_SECS)
+            .filter(|d| d.is_relay() && is_fresh(d))
             .collect()
     }
 
     /// Return all descriptors meeting a minimum tier.
     pub fn descriptors_at_tier(&self, min_tier: CredentialTier) -> Vec<&PeerDescriptor> {
         self.descriptors.values()
-            .filter(|d| d.meets_tier(min_tier) && d.age_secs() < MAX_DESCRIPTOR_AGE_SECS)
+            .filter(|d| d.meets_tier(min_tier) && is_fresh(d))
             .collect()
     }
 
     /// Return all non-stale descriptors.
     pub fn active_descriptors(&self) -> Vec<&PeerDescriptor> {
         self.descriptors.values()
-            .filter(|d| d.age_secs() < MAX_DESCRIPTOR_AGE_SECS)
+            .filter(|d| is_fresh(d))
             .collect()
     }
 
-    /// Prune stale descriptors. Returns number removed.
+    /// Prune stale descriptors (per-kind age limits). Returns number removed.
     pub fn prune_stale(&mut self) -> usize {
         let before = self.descriptors.len();
-        self.descriptors.retain(|_, d| d.age_secs() < MAX_DESCRIPTOR_AGE_SECS);
-        // Also clean up peer mappings that no longer have descriptors.
+        self.descriptors.retain(|_, d| is_fresh(d));
+        // Also clean up peer mappings and relay observations for removed descriptors.
         self.peer_to_pseudonym.retain(|_, p| self.descriptors.contains_key(p));
         self.pseudonym_to_peer.retain(|p, _| self.descriptors.contains_key(p));
+        self.relay_observations.retain(|p, _| self.descriptors.contains_key(p));
         before - self.descriptors.len()
+    }
+
+    // ── Relay trust observation ─────────────────────────────────────────────
+
+    /// Record a successful relay operation for a pseudonym.
+    /// Promotes the relay's trust tier based on accumulated evidence.
+    pub fn record_relay_success(&mut self, pseudonym: &[u8; 32]) {
+        self.relay_observations
+            .entry(*pseudonym)
+            .or_insert_with(RelayObservation::new)
+            .record_success();
+    }
+
+    /// Record a failed relay operation for a pseudonym.
+    /// Demotes the relay's trust tier if failure rate is too high.
+    pub fn record_relay_failure(&mut self, pseudonym: &[u8; 32]) {
+        self.relay_observations
+            .entry(*pseudonym)
+            .or_insert_with(RelayObservation::new)
+            .record_failure();
+    }
+
+    /// Current relay trust tier for a pseudonym.
+    pub fn relay_tier(&self, pseudonym: &[u8; 32]) -> RelayTrustTier {
+        self.relay_observations
+            .get(pseudonym)
+            .map(|o| o.tier)
+            .unwrap_or(RelayTrustTier::Claimed)
+    }
+
+    /// Get relay observation details for a pseudonym.
+    pub fn relay_observation(&self, pseudonym: &[u8; 32]) -> Option<&RelayObservation> {
+        self.relay_observations.get(pseudonym)
+    }
+
+    /// Decay all relay observations (call on epoch rotation).
+    /// Halves success/failure counters so stale trust does not linger.
+    pub fn decay_relay_observations(&mut self) {
+        for obs in self.relay_observations.values_mut() {
+            obs.decay();
+        }
+    }
+
+    /// Count relay peers by trust tier.
+    pub fn relay_tier_counts(&self) -> (usize, usize, usize) {
+        let mut claimed = 0usize;
+        let mut observed = 0usize;
+        let mut verified = 0usize;
+        for d in self.descriptors.values() {
+            if d.is_relay() && is_fresh(d) {
+                match self.relay_tier(&d.pseudonym) {
+                    RelayTrustTier::Claimed => claimed += 1,
+                    RelayTrustTier::Observed => observed += 1,
+                    RelayTrustTier::Verified => verified += 1,
+                }
+            }
+        }
+        (claimed, observed, verified)
+    }
+
+    // ── Rendezvous / introduction-point resolution ────────────────────────
+
+    /// Resolve introduction-point pseudonyms to (PeerId, addresses, relay_trust_tier).
+    ///
+    /// Returns only intro points that:
+    /// 1. Have a fresh descriptor in the store
+    /// 2. Have a known PeerId mapping
+    /// 3. Advertise `can_relay: true`
+    ///
+    /// Results are sorted by relay trust tier (Verified first).
+    pub fn resolve_intro_points(
+        &self,
+        intro_pseudonyms: &[[u8; 32]],
+    ) -> Vec<ResolvedIntroPoint> {
+        let mut resolved: Vec<ResolvedIntroPoint> = intro_pseudonyms.iter()
+            .filter_map(|ps| {
+                let desc = self.descriptors.get(ps)?;
+                if !is_fresh(desc) || !desc.is_relay() {
+                    return None;
+                }
+                let peer_id = self.pseudonym_to_peer.get(ps)?;
+                let tier = self.relay_tier(ps);
+                let onion_pubkey = desc.onion_pubkey;
+                Some(ResolvedIntroPoint {
+                    pseudonym: *ps,
+                    peer_id: *peer_id,
+                    addresses: desc.addresses.clone(),
+                    relay_tier: tier,
+                    onion_pubkey,
+                })
+            })
+            .collect();
+        resolved.sort_by(|a, b| b.relay_tier.cmp(&a.relay_tier));
+        resolved
+    }
+
+    /// Select introduction points for a NAT'd node to publish in a
+    /// Rendezvous descriptor.
+    ///
+    /// Prefers relay peers with higher trust tiers. Returns up to `count`
+    /// pseudonyms, excluding the node's own pseudonym.
+    pub fn select_intro_points(
+        &self,
+        own_pseudonym: &[u8; 32],
+        count: usize,
+    ) -> Vec<[u8; 32]> {
+        let mut candidates: Vec<_> = self.descriptors.values()
+            .filter(|d| {
+                d.is_relay()
+                    && is_fresh(d)
+                    && &d.pseudonym != own_pseudonym
+                    && self.pseudonym_to_peer.contains_key(&d.pseudonym)
+            })
+            .map(|d| (self.relay_tier(&d.pseudonym), d.pseudonym))
+            .collect();
+        // Sort by trust tier descending (Verified first).
+        candidates.sort_by(|a, b| b.0.cmp(&a.0));
+        candidates.into_iter().take(count).map(|(_, ps)| ps).collect()
+    }
+
+    /// Count rendezvous-capable peers (those with Rendezvous reachability).
+    pub fn rendezvous_peer_count(&self) -> usize {
+        self.descriptors.values()
+            .filter(|d| d.is_rendezvous() && is_fresh(d))
+            .count()
     }
 
     /// Total descriptors stored.
@@ -509,6 +772,8 @@ impl DescriptorStore {
         self.prev_epoch_pseudonyms = self.descriptors.keys().copied().collect();
         self.tracked_epoch = new_epoch;
         self.new_pseudonyms_this_epoch = 0;
+        // Decay relay observations so stale trust doesn't linger.
+        self.decay_relay_observations();
     }
 
     /// Record a pseudonym as newly observed (for churn tracking).
@@ -545,22 +810,41 @@ impl DescriptorStore {
             .filter(|d| d.bbs_proof.is_some())
             .count();
         let stale = self.descriptors.values()
-            .filter(|d| d.age_secs() >= MAX_DESCRIPTOR_AGE_SECS)
+            .filter(|d| !is_fresh(d))
+            .count();
+        let rendezvous_count = self.descriptors.values()
+            .filter(|d| d.is_rendezvous() && is_fresh(d))
             .count();
 
         let relay_peers_routable = self.relay_peer_info().len();
+        let (relay_claimed, relay_observed, relay_verified) = self.relay_tier_counts();
 
         DescriptorStats {
             total_descriptors: total,
             relay_descriptors: relay_count,
             relayed_descriptors: relayed_count,
+            rendezvous_descriptors: rendezvous_count,
             credentialed_descriptors: credentialed,
             bbs_credentialed_descriptors: bbs_credentialed,
             stale_descriptors: stale,
             pseudonym_churn_rate: self.churn_rate(),
             relay_peers_routable,
+            relay_claimed,
+            relay_observed,
+            relay_verified,
         }
     }
+}
+
+/// A resolved introduction point with all information needed for routing.
+#[derive(Debug, Clone)]
+pub struct ResolvedIntroPoint {
+    pub pseudonym: [u8; 32],
+    pub peer_id: PeerId,
+    pub addresses: Vec<String>,
+    pub relay_tier: RelayTrustTier,
+    /// X25519 onion pubkey if available (enables content-blind routing).
+    pub onion_pubkey: Option<[u8; 32]>,
 }
 
 /// Diagnostics for the descriptor store.
@@ -569,6 +853,7 @@ pub struct DescriptorStats {
     pub total_descriptors: usize,
     pub relay_descriptors: usize,
     pub relayed_descriptors: usize,
+    pub rendezvous_descriptors: usize,
     pub credentialed_descriptors: usize,
     pub bbs_credentialed_descriptors: usize,
     pub stale_descriptors: usize,
@@ -576,6 +861,12 @@ pub struct DescriptorStats {
     pub pseudonym_churn_rate: f64,
     /// Number of relay peers with known PeerId mappings (usable for circuit routing).
     pub relay_peers_routable: usize,
+    /// Relay peers at Claimed trust tier (descriptor claim only, untested).
+    pub relay_claimed: usize,
+    /// Relay peers at Observed trust tier (≥1 successful relay operation).
+    pub relay_observed: usize,
+    /// Relay peers at Verified trust tier (≥3 successes, ≥75% success rate).
+    pub relay_verified: usize,
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
