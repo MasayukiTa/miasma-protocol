@@ -11,13 +11,157 @@ use crate::locale::{self, Locale, Strings};
 use crate::variant::ProductMode;
 use crate::worker::{DaemonState, WorkerCmd, WorkerHandle, WorkerResult};
 
+// ─── Font system ────────────────────────────────────────────────────────────
+
+/// Configure fonts: load system CJK fonts for Japanese and Chinese rendering.
+///
+/// Font priority (per family):
+///   Proportional: Segoe UI → Yu Gothic UI → Microsoft YaHei UI → egui default
+///   Monospace:    Consolas → egui default monospace
+///
+/// On non-Windows or if system fonts are missing, falls back to egui's built-in
+/// fonts (which cover Latin but not CJK — CJK will show as tofu).
+fn configure_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+
+    // Try to load Windows system fonts for CJK coverage.
+    let font_dir = std::path::PathBuf::from(r"C:\Windows\Fonts");
+
+    // Helper: try to load a font file and register it.
+    let mut load_font = |name: &str, file: &str| -> bool {
+        let path = font_dir.join(file);
+        match std::fs::read(&path) {
+            Ok(data) => {
+                fonts.font_data.insert(
+                    name.to_owned(),
+                    egui::FontData::from_owned(data),
+                );
+                true
+            }
+            Err(_) => {
+                tracing::debug!("Font not found: {}", path.display());
+                false
+            }
+        }
+    };
+
+    // Load system fonts (all ship with Windows 10+).
+    let has_segoe = load_font("Segoe UI", "segoeui.ttf");
+    let has_segoe_bold = load_font("Segoe UI Bold", "segoeuib.ttf");
+    let has_yu_gothic = load_font("Yu Gothic", "YuGothR.ttc");
+    let has_msyh = load_font("Microsoft YaHei", "msyh.ttc");
+    let has_consolas = load_font("Consolas", "consola.ttf");
+
+    // Build proportional fallback chain.
+    {
+        let proportional = fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default();
+
+        // Insert system fonts at the front (before egui defaults).
+        let mut insert_pos = 0;
+        if has_segoe {
+            proportional.insert(insert_pos, "Segoe UI".to_owned());
+            insert_pos += 1;
+        }
+        if has_segoe_bold {
+            // Bold variant registered but not in the chain — used explicitly where needed.
+        }
+        if has_yu_gothic {
+            proportional.insert(insert_pos, "Yu Gothic".to_owned());
+            insert_pos += 1;
+        }
+        if has_msyh {
+            proportional.insert(insert_pos, "Microsoft YaHei".to_owned());
+            // insert_pos += 1; // not needed, last insert
+        }
+        // egui defaults remain at the end as final fallback.
+    }
+
+    // Build monospace fallback chain.
+    {
+        let monospace = fonts
+            .families
+            .entry(egui::FontFamily::Monospace)
+            .or_default();
+
+        if has_consolas {
+            monospace.insert(0, "Consolas".to_owned());
+        }
+        // Add CJK fallback to monospace too (for diagnostics with CJK paths).
+        if has_yu_gothic {
+            // Insert after Consolas / default mono but before other fallbacks.
+            let pos = if has_consolas { 1 } else { 0 };
+            monospace.insert(pos, "Yu Gothic".to_owned());
+        }
+        if has_msyh {
+            let pos = monospace.len().saturating_sub(1).max(1);
+            monospace.insert(pos, "Microsoft YaHei".to_owned());
+        }
+    }
+
+    ctx.set_fonts(fonts);
+
+    // Dark theme with product feel.
+    ctx.set_visuals(egui::Visuals::dark());
+
+    let mut style = (*ctx.style()).clone();
+    style.text_styles.insert(
+        egui::TextStyle::Body,
+        egui::FontId::proportional(14.0),
+    );
+    style.text_styles.insert(
+        egui::TextStyle::Button,
+        egui::FontId::proportional(13.5),
+    );
+    style.text_styles.insert(
+        egui::TextStyle::Heading,
+        egui::FontId::proportional(20.0),
+    );
+    style.text_styles.insert(
+        egui::TextStyle::Small,
+        egui::FontId::proportional(11.5),
+    );
+    style.text_styles.insert(
+        egui::TextStyle::Monospace,
+        egui::FontId::monospace(12.5),
+    );
+    style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+    style.spacing.button_padding = egui::vec2(12.0, 5.0);
+    style.spacing.window_margin = egui::Margin::same(12.0);
+
+    // Softer window/panel backgrounds.
+    style.visuals.window_fill = PANEL_BG;
+    style.visuals.panel_fill = egui::Color32::from_rgb(20, 22, 26);
+    style.visuals.widgets.noninteractive.bg_fill = CARD_BG;
+    style.visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(40, 44, 52);
+    style.visuals.widgets.inactive.weak_bg_fill = egui::Color32::from_rgb(40, 44, 52);
+    style.visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(50, 55, 65);
+    style.visuals.widgets.active.bg_fill = egui::Color32::from_rgb(60, 65, 78);
+    style.visuals.selection.bg_fill = ACCENT.linear_multiply(0.3);
+    style.visuals.selection.stroke = egui::Stroke::new(1.0, ACCENT);
+
+    // Rounder buttons.
+    style.visuals.widgets.inactive.rounding = egui::Rounding::same(6.0);
+    style.visuals.widgets.hovered.rounding = egui::Rounding::same(6.0);
+    style.visuals.widgets.active.rounding = egui::Rounding::same(6.0);
+    style.visuals.widgets.noninteractive.rounding = egui::Rounding::same(4.0);
+    style.visuals.window_rounding = egui::Rounding::same(8.0);
+
+    ctx.set_style(style);
+}
+
 // ─── Color palette ──────────────────────────────────────────────────────────
 
 const GREEN: egui::Color32 = egui::Color32::from_rgb(46, 184, 106);
 const YELLOW: egui::Color32 = egui::Color32::from_rgb(240, 180, 50);
 const RED: egui::Color32 = egui::Color32::from_rgb(220, 70, 70);
 const BLUE: egui::Color32 = egui::Color32::from_rgb(80, 160, 240);
-const DIM: egui::Color32 = egui::Color32::from_rgb(140, 140, 140);
+const DIM: egui::Color32 = egui::Color32::from_rgb(150, 150, 160);
+const ACCENT: egui::Color32 = egui::Color32::from_rgb(90, 140, 220);
+const CARD_BG: egui::Color32 = egui::Color32::from_rgb(32, 34, 40);
+const PANEL_BG: egui::Color32 = egui::Color32::from_rgb(24, 26, 30);
 
 // ─── Tab enum ───────────────────────────────────────────────────────────────
 
@@ -84,7 +228,9 @@ enum MsgKind {
 }
 
 impl MiasmaApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>, mode: ProductMode, locale: Locale) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, mode: ProductMode, locale: Locale) -> Self {
+        configure_fonts(&cc.egui_ctx);
+
         let data_dir = miasma_core::default_data_dir();
         let worker = WorkerHandle::spawn(data_dir.clone());
 
@@ -222,8 +368,8 @@ impl MiasmaApp {
         let s = self.s();
         let easy = self.mode.is_easy();
         let frame = egui::Frame::none()
-            .inner_margin(egui::Margin::symmetric(12.0, 10.0))
-            .rounding(6.0);
+            .inner_margin(egui::Margin::symmetric(16.0, 14.0))
+            .rounding(8.0);
 
         match self.daemon_state {
             DaemonState::Connected => {
@@ -336,85 +482,104 @@ impl MiasmaApp {
 
         let heading = if easy { s.store_heading_easy } else { s.store_heading };
         section_heading(ui, heading);
-        ui.add_space(2.0);
+        ui.add_space(4.0);
         let desc = if easy { s.store_desc_easy } else { s.store_desc };
         ui.label(egui::RichText::new(desc).color(DIM));
-        ui.add_space(8.0);
+        ui.add_space(10.0);
 
-        // Text input.
-        ui.label(s.store_text_label);
-        ui.add_enabled(
-            connected,
-            egui::TextEdit::multiline(&mut self.dissolve_text)
-                .hint_text(s.store_text_hint)
-                .desired_rows(5)
-                .desired_width(f32::INFINITY),
-        );
-
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.add_enabled_ui(connected && !self.busy, |ui| {
-                if ui
-                    .add_sized([120.0, 28.0], egui::Button::new(s.store_choose_file))
-                    .clicked()
-                {
-                    if let Some(path) = rfd::FileDialog::new().pick_file() {
-                        let _ = self.worker.tx.try_send(WorkerCmd::DissolveFile(path));
-                        self.busy = true;
-                        self.set_msg(MsgKind::Info, s.store_busy);
-                    }
-                }
+        // Not-connected hint for Easy mode.
+        if easy && !connected {
+            card_frame().show(ui, |ui| {
+                ui.colored_label(YELLOW, s.store_not_connected_hint);
             });
+            ui.add_space(8.0);
+        }
 
-            ui.add_enabled_ui(
-                connected && !self.dissolve_text.is_empty() && !self.busy,
-                |ui| {
+        // Text input card.
+        card_frame().show(ui, |ui| {
+            ui.label(s.store_text_label);
+            ui.add_space(2.0);
+            ui.add_enabled(
+                connected,
+                egui::TextEdit::multiline(&mut self.dissolve_text)
+                    .hint_text(s.store_text_hint)
+                    .desired_rows(if easy { 6 } else { 5 })
+                    .desired_width(f32::INFINITY),
+            );
+
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                // Primary action button — accent for Easy, normal for Technical.
+                ui.add_enabled_ui(
+                    connected && !self.dissolve_text.is_empty() && !self.busy,
+                    |ui| {
+                        let btn = if easy {
+                            egui::Button::new(
+                                egui::RichText::new(s.store_button).strong().size(14.0),
+                            ).fill(ACCENT)
+                        } else {
+                            egui::Button::new(s.store_button)
+                        };
+                        let size = if easy { [140.0, 34.0] } else { [120.0, 28.0] };
+                        if ui.add_sized(size, btn).clicked() {
+                            let _ = self
+                                .worker
+                                .tx
+                                .try_send(WorkerCmd::DissolveText(self.dissolve_text.clone()));
+                            self.busy = true;
+                            self.set_msg(MsgKind::Info, s.store_busy);
+                        }
+                    },
+                );
+
+                ui.add_enabled_ui(connected && !self.busy, |ui| {
                     if ui
-                        .add_sized([120.0, 28.0], egui::Button::new(s.store_button))
+                        .add_sized([130.0, if easy { 34.0 } else { 28.0 }], egui::Button::new(s.store_choose_file))
                         .clicked()
                     {
-                        let _ = self
-                            .worker
-                            .tx
-                            .try_send(WorkerCmd::DissolveText(self.dissolve_text.clone()));
-                        self.busy = true;
-                        self.set_msg(MsgKind::Info, s.store_busy);
+                        if let Some(path) = rfd::FileDialog::new().pick_file() {
+                            let _ = self.worker.tx.try_send(WorkerCmd::DissolveFile(path));
+                            self.busy = true;
+                            self.set_msg(MsgKind::Info, s.store_busy);
+                        }
                     }
-                },
-            );
+                });
 
-            if self.busy {
-                ui.spinner();
-            }
-        });
-
-        // MID result.
-        if let Some(ref mid) = self.last_mid.clone() {
-            ui.add_space(12.0);
-            let mid_label = if easy { s.store_mid_label_easy } else { s.store_mid_label };
-            ui.label(egui::RichText::new(mid_label).strong());
-            ui.add_space(2.0);
-
-            ui.horizontal(|ui| {
-                let mut display = mid.clone();
-                ui.add(
-                    egui::TextEdit::singleline(&mut display)
-                        .desired_width(ui.available_width() - 80.0)
-                        .font(egui::TextStyle::Monospace),
-                );
-                if ui.add_sized([70.0, 24.0], egui::Button::new(s.store_copy)).clicked() {
-                    ui.output_mut(|o| o.copied_text = mid.clone());
-                    self.set_msg(MsgKind::Info, s.store_copied);
+                if self.busy {
+                    ui.spinner();
                 }
             });
+        });
 
-            ui.add_space(2.0);
-            let hint = if easy { s.store_share_hint_easy } else { s.store_share_hint };
-            ui.label(
-                egui::RichText::new(hint)
-                    .color(DIM)
-                    .small(),
-            );
+        // MID result card.
+        if let Some(ref mid) = self.last_mid.clone() {
+            ui.add_space(8.0);
+            card_frame().show(ui, |ui| {
+                let mid_label = if easy { s.store_mid_label_easy } else { s.store_mid_label };
+                ui.label(egui::RichText::new(mid_label).strong().color(GREEN));
+                ui.add_space(4.0);
+
+                ui.horizontal(|ui| {
+                    let mut display = mid.clone();
+                    ui.add(
+                        egui::TextEdit::singleline(&mut display)
+                            .desired_width(ui.available_width() - 80.0)
+                            .font(egui::TextStyle::Monospace),
+                    );
+                    if ui.add_sized([70.0, 26.0], egui::Button::new(s.store_copy)).clicked() {
+                        ui.output_mut(|o| o.copied_text = mid.clone());
+                        self.set_msg(MsgKind::Info, s.store_copied);
+                    }
+                });
+
+                ui.add_space(4.0);
+                let hint = if easy { s.store_share_hint_easy } else { s.store_share_hint };
+                ui.label(
+                    egui::RichText::new(hint)
+                        .color(DIM)
+                        .small(),
+                );
+            });
         }
     }
 
@@ -427,79 +592,103 @@ impl MiasmaApp {
 
         let heading = if easy { s.retrieve_heading_easy } else { s.retrieve_heading };
         section_heading(ui, heading);
-        ui.add_space(2.0);
-        let desc = if easy { s.retrieve_desc_easy } else { s.retrieve_desc };
-        ui.label(
-            egui::RichText::new(desc).color(DIM),
-        );
-        ui.add_space(8.0);
-
-        let mid_label = if easy { s.retrieve_mid_label_easy } else { s.retrieve_mid_label };
-        ui.label(mid_label);
-        ui.add_enabled(
-            connected,
-            egui::TextEdit::singleline(&mut self.mid_input)
-                .hint_text("miasma:...")
-                .desired_width(f32::INFINITY)
-                .font(egui::TextStyle::Monospace),
-        );
-
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.add_enabled_ui(
-                connected && !self.mid_input.is_empty() && !self.busy,
-                |ui| {
-                    let btn = if easy { s.retrieve_button_easy } else { s.retrieve_button };
-                    if ui
-                        .add_sized([120.0, 28.0], egui::Button::new(btn))
-                        .clicked()
-                    {
-                        let _ = self
-                            .worker
-                            .tx
-                            .try_send(WorkerCmd::Retrieve(self.mid_input.clone()));
-                        self.busy = true;
-                        self.set_msg(MsgKind::Info, s.retrieve_busy);
-                    }
-                },
+        let desc = if easy { s.retrieve_desc_easy } else { s.retrieve_desc };
+        ui.label(egui::RichText::new(desc).color(DIM));
+        ui.add_space(10.0);
+
+        // Not-connected hint for Easy mode.
+        if easy && !connected {
+            card_frame().show(ui, |ui| {
+                ui.colored_label(YELLOW, s.retrieve_not_connected_hint);
+            });
+            ui.add_space(8.0);
+        }
+
+        // Input card.
+        card_frame().show(ui, |ui| {
+            let mid_label = if easy { s.retrieve_mid_label_easy } else { s.retrieve_mid_label };
+            ui.label(mid_label);
+            ui.add_space(2.0);
+            ui.add_enabled(
+                connected,
+                egui::TextEdit::singleline(&mut self.mid_input)
+                    .hint_text("miasma:...")
+                    .desired_width(f32::INFINITY)
+                    .font(egui::TextStyle::Monospace),
             );
 
-            if self.busy {
-                ui.spinner();
-            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.add_enabled_ui(
+                    connected && !self.mid_input.is_empty() && !self.busy,
+                    |ui| {
+                        let label = if easy { s.retrieve_button_easy } else { s.retrieve_button };
+                        let btn = if easy {
+                            egui::Button::new(
+                                egui::RichText::new(label).strong().size(14.0),
+                            ).fill(ACCENT)
+                        } else {
+                            egui::Button::new(label)
+                        };
+                        let size = if easy { [140.0, 34.0] } else { [120.0, 28.0] };
+                        if ui.add_sized(size, btn).clicked() {
+                            let _ = self
+                                .worker
+                                .tx
+                                .try_send(WorkerCmd::Retrieve(self.mid_input.clone()));
+                            self.busy = true;
+                            self.set_msg(MsgKind::Info, s.retrieve_busy);
+                        }
+                    },
+                );
+
+                if self.busy {
+                    ui.spinner();
+                }
+            });
         });
 
-        if let Some(ref summary) = self.retrieved_summary {
-            ui.add_space(12.0);
-            ui.label(egui::RichText::new(s.retrieve_result_label).strong());
-            ui.label(summary);
-            ui.add_space(4.0);
+        // Result card.
+        if let Some(summary) = self.retrieved_summary.clone() {
+            ui.add_space(8.0);
+            card_frame().show(ui, |ui| {
+                ui.label(egui::RichText::new(s.retrieve_result_label).strong().color(GREEN));
+                ui.add_space(2.0);
+                ui.label(&summary);
+                ui.add_space(6.0);
 
-            if self.save_data.is_some() {
-                if ui
-                    .add_sized([140.0, 28.0], egui::Button::new(s.retrieve_save_button))
-                    .clicked()
-                {
-                    if let Some(path) = rfd::FileDialog::new()
-                        .set_file_name("retrieved.bin")
-                        .save_file()
-                    {
-                        if let Some(data) = &self.save_data {
-                            match std::fs::write(&path, data) {
-                                Ok(_) => {
-                                    self.set_msg(
-                                        MsgKind::Success,
-                                        format!("{} {}", s.retrieve_saved, path.display()),
-                                    );
-                                }
-                                Err(e) => {
-                                    self.set_msg(MsgKind::Error, format!("{} {e}", s.retrieve_save_failed));
+                if self.save_data.is_some() {
+                    let save_btn = if easy {
+                        egui::Button::new(
+                            egui::RichText::new(s.retrieve_save_button).strong().size(14.0),
+                        ).fill(ACCENT)
+                    } else {
+                        egui::Button::new(s.retrieve_save_button)
+                    };
+                    let size = if easy { [160.0, 34.0] } else { [140.0, 28.0] };
+                    if ui.add_sized(size, save_btn).clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_file_name("retrieved.bin")
+                            .save_file()
+                        {
+                            if let Some(data) = &self.save_data {
+                                match std::fs::write(&path, data) {
+                                    Ok(_) => {
+                                        self.set_msg(
+                                            MsgKind::Success,
+                                            format!("{} {}", s.retrieve_saved, path.display()),
+                                        );
+                                    }
+                                    Err(e) => {
+                                        self.set_msg(MsgKind::Error, format!("{} {e}", s.retrieve_save_failed));
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
+            });
         }
     }
 
@@ -507,121 +696,154 @@ impl MiasmaApp {
 
     fn status_panel(&mut self, ui: &mut egui::Ui) {
         let s = self.s();
+        let easy = self.mode.is_easy();
 
         section_heading(ui, s.status_heading);
         ui.add_space(4.0);
 
-        // Action buttons.
+        // Action buttons — smaller row for Easy, full row for Technical.
         ui.horizontal(|ui| {
             if ui.add_sized([90.0, 26.0], egui::Button::new(s.status_refresh)).clicked() {
                 let _ = self.worker.tx.try_send(WorkerCmd::GetStatus);
             }
-            if ui
-                .add_sized([140.0, 26.0], egui::Button::new(s.status_copy_diag))
-                .clicked()
-            {
-                let diag = self.build_diagnostics();
-                ui.output_mut(|o| o.copied_text = diag);
-                self.set_msg(MsgKind::Info, s.status_diag_copied);
+            if !easy {
+                if ui
+                    .add_sized([160.0, 26.0], egui::Button::new(s.status_copy_diag))
+                    .clicked()
+                {
+                    let diag = self.build_diagnostics();
+                    ui.output_mut(|o| o.copied_text = diag);
+                    self.set_msg(MsgKind::Info, s.status_diag_copied);
+                }
             }
         });
 
         ui.add_space(8.0);
 
-        if self.mode.is_easy() {
+        if easy {
             self.status_panel_easy(ui);
         } else {
             self.status_panel_technical(ui);
         }
 
-        // ── Emergency wipe (both modes) ──────────────────────────────
-        ui.add_space(20.0);
-        ui.separator();
-        ui.add_space(4.0);
+        // ── Emergency wipe ──────────────────────────────────────────
+        ui.add_space(12.0);
 
-        ui.add_enabled_ui(self.daemon_state == DaemonState::Connected, |ui| {
+        card_frame().show(ui, |ui| {
+            ui.add_enabled_ui(self.daemon_state == DaemonState::Connected, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(s.wipe_label).color(RED).strong());
+                    ui.label(
+                        egui::RichText::new(s.wipe_desc)
+                            .color(DIM)
+                            .small(),
+                    );
+                });
+                ui.add_space(4.0);
+                if ui
+                    .add_sized(
+                        [160.0, 28.0],
+                        egui::Button::new(
+                            egui::RichText::new(s.wipe_button).color(RED),
+                        ),
+                    )
+                    .clicked()
+                {
+                    self.show_wipe_confirm = true;
+                }
+            });
+        });
+    }
+
+    /// Easy-mode status: simplified view — big status indicator + key numbers + next step.
+    fn status_panel_easy(&self, ui: &mut egui::Ui) {
+        let s = self.s();
+
+        // Big status card.
+        let (status_color, status_text, hint) = if self.daemon_state == DaemonState::Connected {
+            if self.peer_count > 0 {
+                (GREEN, s.status_ready, s.status_hint_ready)
+            } else {
+                (YELLOW, s.status_state_connected, s.status_hint_no_peers)
+            }
+        } else {
+            (RED, s.status_not_ready, s.status_hint_not_ready)
+        };
+
+        card_frame().show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(s.wipe_label).color(RED).strong());
+                // Status dot.
+                let dot_rect = ui.allocate_space(egui::vec2(14.0, 14.0));
+                ui.painter().circle_filled(
+                    dot_rect.1.center(),
+                    6.0,
+                    status_color,
+                );
+                ui.add_space(4.0);
                 ui.label(
-                    egui::RichText::new(s.wipe_desc)
-                        .color(DIM)
-                        .small(),
+                    egui::RichText::new(status_text)
+                        .size(18.0)
+                        .strong()
+                        .color(status_color),
                 );
             });
+
             ui.add_space(4.0);
-            if ui
-                .add_sized(
-                    [160.0, 28.0],
-                    egui::Button::new(
-                        egui::RichText::new(s.wipe_button).color(RED),
-                    ),
-                )
-                .clicked()
-            {
-                self.show_wipe_confirm = true;
+            ui.label(egui::RichText::new(hint).color(DIM));
+
+            if self.daemon_state == DaemonState::Connected {
+                ui.add_space(10.0);
+
+                egui::Grid::new("easy_status_grid")
+                    .num_columns(2)
+                    .spacing([16.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new(s.status_items_stored).color(DIM));
+                        ui.label(
+                            egui::RichText::new(self.share_count.to_string())
+                                .size(15.0)
+                                .strong(),
+                        );
+                        ui.end_row();
+
+                        ui.label(egui::RichText::new(s.status_peers).color(DIM));
+                        let peer_text = self.peer_count.to_string();
+                        if self.peer_count > 0 {
+                            ui.label(
+                                egui::RichText::new(peer_text).size(15.0).color(GREEN),
+                            );
+                        } else {
+                            ui.label(egui::RichText::new(peer_text).size(15.0));
+                        }
+                        ui.end_row();
+
+                        if self.quota_mb > 0 {
+                            ui.label(egui::RichText::new(s.status_used).color(DIM));
+                            let pct = (self.used_mb / self.quota_mb as f64) * 100.0;
+                            let used_text = format!(
+                                "{:.1} / {} MiB  ({:.0}%)",
+                                self.used_mb, self.quota_mb, pct
+                            );
+                            if pct > 90.0 {
+                                ui.colored_label(YELLOW, used_text);
+                            } else {
+                                ui.label(used_text);
+                            }
+                            ui.end_row();
+                        }
+                    });
             }
         });
     }
 
-    /// Easy-mode status: simplified view — ready/not ready, items, storage.
-    fn status_panel_easy(&self, ui: &mut egui::Ui) {
-        let s = self.s();
-
-        egui::Grid::new("easy_status_grid")
-            .num_columns(2)
-            .spacing([16.0, 6.0])
-            .show(ui, |ui| {
-                ui.label(egui::RichText::new(s.status_state).color(DIM));
-                if self.daemon_state == DaemonState::Connected {
-                    if self.peer_count > 0 {
-                        ui.colored_label(GREEN, s.status_ready);
-                    } else {
-                        ui.colored_label(YELLOW, s.status_state_connected);
-                    }
-                } else {
-                    ui.colored_label(RED, s.status_not_ready);
-                }
-                ui.end_row();
-
-                if self.daemon_state == DaemonState::Connected {
-                    ui.label(egui::RichText::new(s.status_peers).color(DIM));
-                    let peer_text = self.peer_count.to_string();
-                    if self.peer_count > 0 {
-                        ui.colored_label(GREEN, peer_text);
-                    } else {
-                        ui.label(peer_text);
-                    }
-                    ui.end_row();
-
-                    ui.label(egui::RichText::new(s.status_items_stored).color(DIM));
-                    ui.label(self.share_count.to_string());
-                    ui.end_row();
-
-                    if self.quota_mb > 0 {
-                        ui.label(egui::RichText::new(s.status_used).color(DIM));
-                        let pct = (self.used_mb / self.quota_mb as f64) * 100.0;
-                        let used_text = format!(
-                            "{:.1} / {} MiB  ({:.0}%)",
-                            self.used_mb, self.quota_mb, pct
-                        );
-                        if pct > 90.0 {
-                            ui.colored_label(YELLOW, used_text);
-                        } else {
-                            ui.label(used_text);
-                        }
-                        ui.end_row();
-                    }
-                }
-            });
-    }
-
-    /// Technical-mode status: full diagnostics.
+    /// Technical-mode status: full diagnostics with card grouping.
     fn status_panel_technical(&self, ui: &mut egui::Ui) {
         let s = self.s();
 
         // ── Connection & identity ─────────────────────────────────────
-        ui.label(egui::RichText::new(s.status_connection).strong());
-        ui.add_space(2.0);
+        card_frame().show(ui, |ui| {
+        ui.label(egui::RichText::new(s.status_connection).strong().color(ACCENT));
+        ui.add_space(4.0);
 
         egui::Grid::new("conn_grid")
             .num_columns(2)
@@ -680,12 +902,14 @@ impl MiasmaApp {
                     ui.end_row();
                 }
             });
+        }); // end connection card
 
-        ui.add_space(12.0);
+        ui.add_space(8.0);
 
         // ── Storage & replication ─────────────────────────────────────
-        ui.label(egui::RichText::new(s.status_storage).strong());
-        ui.add_space(2.0);
+        card_frame().show(ui, |ui| {
+        ui.label(egui::RichText::new(s.status_storage).strong().color(ACCENT));
+        ui.add_space(4.0);
 
         egui::Grid::new("storage_grid")
             .num_columns(2)
@@ -731,6 +955,7 @@ impl MiasmaApp {
                 }
                 ui.end_row();
             });
+        }); // end storage card
 
         // ── Transport ─────────────────────────────────────────────────
         if !self.transport_statuses.is_empty()
@@ -738,9 +963,10 @@ impl MiasmaApp {
             || self.obfs_quic_port > 0
             || self.proxy_configured
         {
-            ui.add_space(12.0);
-            ui.label(egui::RichText::new(s.status_transport).strong());
-            ui.add_space(2.0);
+            ui.add_space(8.0);
+            card_frame().show(ui, |ui| {
+            ui.label(egui::RichText::new(s.status_transport).strong().color(ACCENT));
+            ui.add_space(4.0);
 
             // Summary line: active services.
             ui.horizontal_wrapped(|ui| {
@@ -828,6 +1054,7 @@ impl MiasmaApp {
                     });
                 }
             }
+            }); // end transport card
         }
     }
 
@@ -840,155 +1067,153 @@ impl MiasmaApp {
         section_heading(ui, s.settings_heading);
         ui.add_space(8.0);
 
-        // ── Language selector ──────────────────────────────────────────
-        ui.label(egui::RichText::new(s.settings_language).strong());
-        ui.add_space(2.0);
-        ui.horizontal(|ui| {
-            for lang in Locale::ALL {
-                let selected = self.locale == lang;
-                if ui.selectable_label(selected, lang.display_name()).clicked() {
-                    self.locale = lang;
+        // ── Preferences card (Language + Mode) ───────────────────────
+        card_frame().show(ui, |ui| {
+            ui.label(egui::RichText::new(s.settings_language).strong().color(ACCENT));
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                for lang in Locale::ALL {
+                    let selected = self.locale == lang;
+                    if ui.selectable_label(selected, lang.display_name()).clicked() {
+                        self.locale = lang;
+                        self.save_prefs();
+                    }
+                }
+            });
+
+            ui.add_space(12.0);
+
+            ui.label(egui::RichText::new(s.settings_mode).strong().color(ACCENT));
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let is_easy = self.mode.is_easy();
+                if ui.selectable_label(is_easy, s.settings_mode_easy).clicked() {
+                    self.mode = ProductMode::Easy;
                     self.save_prefs();
                 }
-            }
+                if ui.selectable_label(!is_easy, s.settings_mode_technical).clicked() {
+                    self.mode = ProductMode::Technical;
+                    self.save_prefs();
+                }
+            });
+            ui.add_space(2.0);
+            let mode_desc = if easy { s.settings_mode_desc_easy } else { s.settings_mode_desc_technical };
+            ui.label(egui::RichText::new(mode_desc).color(DIM).small());
+        });
+
+        ui.add_space(8.0);
+
+        // ── Paths card ───────────────────────────────────────────────
+        card_frame().show(ui, |ui| {
+            ui.label(egui::RichText::new(s.settings_paths).strong().color(ACCENT));
+            ui.add_space(4.0);
+
+            egui::Grid::new("paths_grid")
+                .num_columns(2)
+                .spacing([16.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new(s.settings_data_dir).color(DIM));
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(&self.data_dir_display)
+                                .font(egui::FontId::monospace(11.0)),
+                        );
+                        if ui.small_button(s.copy).clicked() {
+                            ui.output_mut(|o| o.copied_text = self.data_dir_display.clone());
+                            self.set_msg(MsgKind::Info, s.settings_path_copied);
+                        }
+                    });
+                    ui.end_row();
+
+                    ui.label(egui::RichText::new(s.settings_config_file).color(DIM));
+                    ui.label(
+                        egui::RichText::new(format!("{}{}config.toml", &self.data_dir_display, std::path::MAIN_SEPARATOR))
+                            .font(egui::FontId::monospace(11.0)),
+                    );
+                    ui.end_row();
+
+                    ui.label(egui::RichText::new(s.settings_log).color(DIM));
+                    ui.label(
+                        egui::RichText::new(format!("{}{}desktop.log.*", &self.data_dir_display, std::path::MAIN_SEPARATOR))
+                            .font(egui::FontId::monospace(11.0)),
+                    );
+                    ui.end_row();
+
+                    ui.label(egui::RichText::new(s.settings_install).color(DIM));
+                    if let Ok(exe) = std::env::current_exe() {
+                        if let Some(dir) = exe.parent() {
+                            ui.label(
+                                egui::RichText::new(dir.to_string_lossy())
+                                    .font(egui::FontId::monospace(11.0)),
+                            );
+                        }
+                    }
+                    ui.end_row();
+                });
+        });
+
+        ui.add_space(8.0);
+
+        // ── About card (How it works) ────────────────────────────────
+        card_frame().show(ui, |ui| {
+            ui.label(egui::RichText::new(s.settings_how).strong().color(ACCENT));
+            ui.add_space(4.0);
+            let line1 = if easy { s.settings_how_line1_easy } else { s.settings_how_line1 };
+            ui.label(line1);
+            let line2 = if easy { s.settings_how_line2_easy } else { s.settings_how_line2 };
+            ui.label(line2);
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new(s.settings_stored_in).color(DIM));
+            ui.label(
+                egui::RichText::new(&self.data_dir_display)
+                    .font(egui::FontId::monospace(11.0)),
+            );
+            ui.label(
+                egui::RichText::new(s.settings_preserved)
+                    .color(DIM).small(),
+            );
+        });
+
+        ui.add_space(8.0);
+
+        // ── Actions card ─────────────────────────────────────────────
+        card_frame().show(ui, |ui| {
+            ui.label(egui::RichText::new(s.settings_actions).strong().color(ACCENT));
+            ui.add_space(4.0);
+
+            ui.horizontal(|ui| {
+                if ui
+                    .add_sized([160.0, 30.0], egui::Button::new(s.status_copy_diag))
+                    .clicked()
+                {
+                    let diag = self.build_diagnostics();
+                    ui.output_mut(|o| o.copied_text = diag);
+                    self.set_msg(MsgKind::Info, s.status_diag_copied);
+                }
+
+                #[cfg(windows)]
+                if ui
+                    .add_sized([160.0, 30.0], egui::Button::new(s.settings_open_folder))
+                    .clicked()
+                {
+                    let _ = std::process::Command::new("explorer")
+                        .arg(&self.data_dir_display)
+                        .spawn();
+                }
+
+                #[cfg(not(windows))]
+                if ui
+                    .add_sized([160.0, 30.0], egui::Button::new(s.settings_open_folder))
+                    .clicked()
+                {
+                    let _ = std::process::Command::new("xdg-open")
+                        .arg(&self.data_dir_display)
+                        .spawn();
+                }
+            });
         });
 
         ui.add_space(12.0);
-
-        // ── Mode switcher ──────────────────────────────────────────────
-        ui.label(egui::RichText::new(s.settings_mode).strong());
-        ui.add_space(2.0);
-        ui.horizontal(|ui| {
-            let is_easy = self.mode.is_easy();
-            if ui.selectable_label(is_easy, s.settings_mode_easy).clicked() {
-                self.mode = ProductMode::Easy;
-                self.save_prefs();
-            }
-            if ui.selectable_label(!is_easy, s.settings_mode_technical).clicked() {
-                self.mode = ProductMode::Technical;
-                self.save_prefs();
-            }
-        });
-        ui.add_space(2.0);
-        let mode_desc = if easy { s.settings_mode_desc_easy } else { s.settings_mode_desc_technical };
-        ui.label(egui::RichText::new(mode_desc).color(DIM).small());
-
-        ui.add_space(16.0);
-
-        // ── Paths ─────────────────────────────────────────────────────
-        ui.label(egui::RichText::new(s.settings_paths).strong());
-        ui.add_space(2.0);
-
-        egui::Grid::new("paths_grid")
-            .num_columns(2)
-            .spacing([16.0, 4.0])
-            .show(ui, |ui| {
-                ui.label(egui::RichText::new(s.settings_data_dir).color(DIM));
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(&self.data_dir_display)
-                            .font(egui::FontId::monospace(11.0)),
-                    );
-                    if ui.small_button(s.copy).clicked() {
-                        ui.output_mut(|o| o.copied_text = self.data_dir_display.clone());
-                        self.set_msg(MsgKind::Info, s.settings_path_copied);
-                    }
-                });
-                ui.end_row();
-
-                ui.label(egui::RichText::new(s.settings_config_file).color(DIM));
-                ui.label(
-                    egui::RichText::new(format!("{}{}config.toml", &self.data_dir_display, std::path::MAIN_SEPARATOR))
-                        .font(egui::FontId::monospace(11.0)),
-                );
-                ui.end_row();
-
-                ui.label(egui::RichText::new(s.settings_log).color(DIM));
-                ui.label(
-                    egui::RichText::new(format!("{}{}desktop.log.*", &self.data_dir_display, std::path::MAIN_SEPARATOR))
-                        .font(egui::FontId::monospace(11.0)),
-                );
-                ui.end_row();
-            });
-
-        // Install location (show where the binaries live).
-        ui.add_space(2.0);
-        egui::Grid::new("install_grid")
-            .num_columns(2)
-            .spacing([16.0, 4.0])
-            .show(ui, |ui| {
-                ui.label(egui::RichText::new(s.settings_install).color(DIM));
-                if let Ok(exe) = std::env::current_exe() {
-                    if let Some(dir) = exe.parent() {
-                        ui.label(
-                            egui::RichText::new(dir.to_string_lossy())
-                                .font(egui::FontId::monospace(11.0)),
-                        );
-                    }
-                }
-                ui.end_row();
-            });
-
-        ui.add_space(16.0);
-
-        // ── How it works ──────────────────────────────────────────────
-        ui.label(egui::RichText::new(s.settings_how).strong());
-        ui.add_space(2.0);
-        let line1 = if easy { s.settings_how_line1_easy } else { s.settings_how_line1 };
-        ui.label(line1);
-        let line2 = if easy { s.settings_how_line2_easy } else { s.settings_how_line2 };
-        ui.label(line2);
-        ui.add_space(4.0);
-        ui.label(egui::RichText::new(s.settings_stored_in).color(DIM));
-        ui.label(
-            egui::RichText::new(&self.data_dir_display)
-                .font(egui::FontId::monospace(11.0)),
-        );
-        ui.label(
-            egui::RichText::new(s.settings_preserved)
-                .color(DIM).small(),
-        );
-
-        ui.add_space(16.0);
-
-        // ── Actions ───────────────────────────────────────────────────
-        ui.label(egui::RichText::new(s.settings_actions).strong());
-        ui.add_space(4.0);
-
-        ui.horizontal(|ui| {
-            if ui
-                .add_sized([140.0, 26.0], egui::Button::new(s.status_copy_diag))
-                .clicked()
-            {
-                let diag = self.build_diagnostics();
-                ui.output_mut(|o| o.copied_text = diag);
-                self.set_msg(MsgKind::Info, s.status_diag_copied);
-            }
-
-            #[cfg(windows)]
-            if ui
-                .add_sized([140.0, 26.0], egui::Button::new(s.settings_open_folder))
-                .clicked()
-            {
-                let _ = std::process::Command::new("explorer")
-                    .arg(&self.data_dir_display)
-                    .spawn();
-            }
-
-            #[cfg(not(windows))]
-            if ui
-                .add_sized([140.0, 26.0], egui::Button::new(s.settings_open_folder))
-                .clicked()
-            {
-                let _ = std::process::Command::new("xdg-open")
-                    .arg(&self.data_dir_display)
-                    .spawn();
-            }
-        });
-
-        ui.add_space(20.0);
-        ui.separator();
-        ui.add_space(4.0);
 
         let variant_label = if easy { "" } else { " Technical Beta" };
         ui.label(
@@ -1098,7 +1323,16 @@ impl MiasmaApp {
 // ─── UI helpers ─────────────────────────────────────────────────────────────
 
 fn section_heading(ui: &mut egui::Ui, text: &str) {
-    ui.label(egui::RichText::new(text).size(18.0).strong());
+    ui.label(egui::RichText::new(text).size(18.0).strong().color(egui::Color32::from_rgb(220, 225, 235)));
+}
+
+/// Wrap content in a subtle card frame for visual grouping.
+fn card_frame() -> egui::Frame {
+    egui::Frame::none()
+        .inner_margin(egui::Margin::same(14.0))
+        .rounding(8.0)
+        .fill(CARD_BG)
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(45, 48, 56)))
 }
 
 fn tag_label(ui: &mut egui::Ui, color: egui::Color32, text: &str) {
@@ -1147,7 +1381,11 @@ impl eframe::App for MiasmaApp {
         let easy = self.mode.is_easy();
 
         // ── Top navigation bar ────────────────────────────────────────
-        egui::TopBottomPanel::top("nav_bar").show(ctx, |ui| {
+        egui::TopBottomPanel::top("nav_bar")
+            .frame(egui::Frame::none()
+                .fill(egui::Color32::from_rgb(28, 30, 36))
+                .inner_margin(egui::Margin::symmetric(12.0, 6.0)))
+            .show(ctx, |ui| {
             ui.add_space(2.0);
             ui.horizontal(|ui| {
                 let store_label = if easy { s.tab_store_easy } else { s.tab_store };

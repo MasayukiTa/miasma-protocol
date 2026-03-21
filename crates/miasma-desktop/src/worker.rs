@@ -319,10 +319,14 @@ fn detect_state(data_dir: &Path, rt: &tokio::runtime::Runtime) -> DaemonState {
     };
 
     // Port file exists — try to connect to verify it's not stale.
-    match rt.block_on(tokio::time::timeout(
-        std::time::Duration::from_secs(3),
-        daemon_request(data_dir, ControlRequest::Status),
-    )) {
+    // The timeout must be constructed inside the async block so it has
+    // access to the Tokio runtime context (required for timer registration).
+    match rt.block_on(async {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            daemon_request(data_dir, ControlRequest::Status),
+        ).await
+    }) {
         Ok(Ok(_)) => DaemonState::Connected,
         _ => {
             // Port file is stale — remove it.
@@ -372,10 +376,12 @@ fn auto_launch_daemon(
 ) -> anyhow::Result<Child> {
     // Safety: check if daemon is already running (avoid duplicates).
     if let Ok(port) = read_port_file(data_dir) {
-        if rt.block_on(tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            daemon_request(data_dir, ControlRequest::Status),
-        )).is_ok() {
+        if rt.block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                daemon_request(data_dir, ControlRequest::Status),
+            ).await
+        }).is_ok() {
             anyhow::bail!("daemon already running on port {port}");
         }
         // Stale port file — remove it.
@@ -422,10 +428,12 @@ fn auto_launch_daemon(
             continue; // Port file not yet written.
         }
         // Port file exists — try IPC.
-        if let Ok(Ok(_)) = rt.block_on(tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            daemon_request(data_dir, ControlRequest::Status),
-        )) {
+        if let Ok(Ok(_)) = rt.block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                daemon_request(data_dir, ControlRequest::Status),
+            ).await
+        }) {
             info!("Daemon is ready");
             return Ok(child);
         }
