@@ -513,6 +513,10 @@ pub enum DhtCommand {
     GetOnionPubkey {
         reply: oneshot::Sender<[u8; 32]>,
     },
+    /// Query this node's current NAT reachability status.
+    GetNatStatus {
+        reply: oneshot::Sender<bool>,
+    },
 }
 
 /// Sender side of the DHT command channel.
@@ -726,6 +730,16 @@ impl DhtHandle {
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
         rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
     }
+
+    /// Query whether this node is publicly reachable (AutoNAT).
+    pub async fn nat_publicly_reachable(&self) -> Result<bool, MiasmaError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::GetNatStatus { reply: tx })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
+        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+    }
 }
 
 // ─── Share-exchange command channel ──────────────────────────────────────────
@@ -857,6 +871,8 @@ pub struct MiasmaNode {
     pending_credential_reqs: HashMap<request_response::OutboundRequestId, PeerId>,
     /// Pending descriptor requests: req_id → peer_id.
     pending_descriptor_reqs: HashMap<request_response::OutboundRequestId, PeerId>,
+    /// Current AutoNAT status: true if publicly reachable (can relay for others).
+    nat_publicly_reachable: bool,
     /// This node's X25519 static key for onion layer encryption/decryption.
     onion_static_secret: [u8; 32],
     /// X25519 public key derived from onion_static_secret (published in descriptors).
@@ -975,6 +991,7 @@ impl MiasmaNode {
             descriptor_store: DescriptorStore::new(),
             admission_policy: HybridAdmissionPolicy::default(),
             resource_profile: ResourceProfile::Desktop,
+            nat_publicly_reachable: false,
             pending_credential_reqs: HashMap::new(),
             pending_descriptor_reqs: HashMap::new(),
             onion_static_secret,
@@ -1254,6 +1271,9 @@ impl MiasmaNode {
             DhtCommand::GetOnionPubkey { reply } => {
                 let _ = reply.send(self.onion_static_pubkey);
             }
+            DhtCommand::GetNatStatus { reply } => {
+                let _ = reply.send(self.nat_publicly_reachable);
+            }
         }
     }
 
@@ -1382,6 +1402,8 @@ impl MiasmaNode {
             SwarmEvent::Behaviour(MiasmaBehaviourEvent::Autonat(ev)) => match &ev {
                 autonat::Event::StatusChanged { old, new } => {
                     info!("AutoNAT: {old:?} → {new:?}");
+                    // Track whether we're publicly reachable — drives can_relay in descriptors.
+                    self.nat_publicly_reachable = matches!(new, autonat::NatStatus::Public(_));
                 }
                 _ => debug!("AutoNAT: {ev:?}"),
             },
@@ -1658,7 +1680,7 @@ impl MiasmaNode {
             addresses,
             PeerCapabilities {
                 can_store: true,
-                can_relay: false, // TODO: detect relay capability
+                can_relay: self.nat_publicly_reachable,
                 can_route: true,
                 can_issue: true, // in bootstrap mode, all verified nodes can issue
                 bandwidth_class: 2, // medium

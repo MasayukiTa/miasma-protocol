@@ -590,6 +590,7 @@ async fn process_request(
                 },
             );
             let outcome = coord.outcome_metrics().await.unwrap_or_default();
+            let ret_stats = coord.retrieval_stats();
 
             ControlResponse::Status(DaemonStatus {
                 peer_id: coord.peer_id().to_string(),
@@ -636,6 +637,16 @@ async fn process_request(
                 metric_stale_descriptors: outcome.stale_descriptor_count,
                 metric_descriptor_utilisation: outcome.descriptor_utilisation,
                 metric_onion_relay_peers: desc_stats.relay_peers_routable, // peers with onion keys and PeerId mapping
+                nat_publicly_reachable: coord.nat_publicly_reachable().await.unwrap_or(false),
+                retrieval_direct_attempts: ret_stats.direct_attempts,
+                retrieval_direct_successes: ret_stats.direct_successes,
+                retrieval_opportunistic_attempts: ret_stats.opportunistic_attempts,
+                retrieval_opportunistic_relay_successes: ret_stats.opportunistic_relay_successes,
+                retrieval_opportunistic_direct_fallbacks: ret_stats.opportunistic_direct_fallbacks,
+                retrieval_required_attempts: ret_stats.required_attempts,
+                retrieval_required_onion_successes: ret_stats.required_onion_successes,
+                retrieval_required_relay_successes: ret_stats.required_relay_successes,
+                retrieval_required_failures: ret_stats.required_failures,
             })
         }
 

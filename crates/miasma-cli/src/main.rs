@@ -637,6 +637,31 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
                 s.metric_onion_relay_peers,
                 if s.metric_onion_relay_peers >= 2 { "available" } else { "unavailable" }
             );
+            println!("  NAT status:            {} (can_relay: {})",
+                if s.nat_publicly_reachable { "public" } else { "private/unknown" },
+                if s.nat_publicly_reachable { "yes" } else { "no" }
+            );
+
+            let total_retrievals = s.retrieval_direct_attempts
+                + s.retrieval_opportunistic_attempts
+                + s.retrieval_required_attempts;
+            if total_retrievals > 0 {
+                println!();
+                println!("Retrieval Tracking:");
+                println!("  Direct:       {}/{} succeeded",
+                    s.retrieval_direct_successes, s.retrieval_direct_attempts);
+                println!("  Opportunistic: {}/{} (relay: {}, direct fallback: {})",
+                    s.retrieval_opportunistic_relay_successes + s.retrieval_opportunistic_direct_fallbacks,
+                    s.retrieval_opportunistic_attempts,
+                    s.retrieval_opportunistic_relay_successes,
+                    s.retrieval_opportunistic_direct_fallbacks);
+                println!("  Required:     {}/{} (onion: {}, relay: {}, failed: {})",
+                    s.retrieval_required_onion_successes + s.retrieval_required_relay_successes,
+                    s.retrieval_required_attempts,
+                    s.retrieval_required_onion_successes,
+                    s.retrieval_required_relay_successes,
+                    s.retrieval_required_failures);
+            }
         }
 
         println!();

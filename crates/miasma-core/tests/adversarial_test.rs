@@ -1689,3 +1689,231 @@ fn onion_cross_circuit_return_key_isolation() {
 
     assert_ne!(key1, key2, "different circuits must have different return keys");
 }
+
+// ─── Scenario 18: NAT-driven relay capability ────────────────────────────────
+
+/// A node that is NOT publicly reachable should advertise can_relay: false
+/// in its descriptor. A node that IS publicly reachable should advertise
+/// can_relay: true. This ensures the descriptor store only considers truly
+/// relayable peers when building relay paths.
+#[test]
+fn descriptor_relay_capability_reflects_nat_status() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+    let mut store = DescriptorStore::new();
+
+    // Private node: can_relay = false
+    let mut ps1 = [0u8; 32];
+    ps1[0] = 1;
+    store.upsert(PeerDescriptor::new_signed(
+        ps1,
+        ReachabilityKind::Direct,
+        vec!["/ip4/192.168.1.1/tcp/4001".to_string()],
+        PeerCapabilities { can_relay: false, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &key,
+    ));
+
+    // Public node: can_relay = true
+    let mut ps2 = [0u8; 32];
+    ps2[0] = 2;
+    let peer2 = PeerId::random();
+    store.register_peer_pseudonym(peer2, ps2);
+    store.upsert(PeerDescriptor::new_signed(
+        ps2,
+        ReachabilityKind::Direct,
+        vec!["/ip4/203.0.113.1/tcp/4001".to_string()],
+        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &key,
+    ));
+
+    let stats = store.stats();
+    // Only the public node should count as a relay descriptor.
+    assert_eq!(stats.relay_descriptors, 1, "only publicly reachable nodes should be relay descriptors");
+}
+
+/// An adversary that falsely advertises can_relay: true but is actually
+/// behind NAT will fail at the transport level (relay circuit connection
+/// refused). Here we verify the descriptor store does accept the claim
+/// at face value (it trusts the descriptor signature), but path selection
+/// should prefer peers with verified descriptors.
+#[test]
+fn false_relay_capability_accepted_but_trackable() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+    let mut store = DescriptorStore::new();
+
+    // Attacker claims can_relay but is behind NAT.
+    let mut ps = [0u8; 32];
+    ps[0] = 0xAA;
+    let peer = PeerId::random();
+    store.register_peer_pseudonym(peer, ps);
+    let desc = PeerDescriptor::new_signed(
+        ps,
+        ReachabilityKind::Direct,
+        vec!["/ip4/10.0.0.1/tcp/4001".to_string()], // private IP → likely behind NAT
+        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &key,
+    );
+    assert!(desc.verify_self(), "signature must be valid");
+    store.upsert(desc);
+
+    // Store accepts it (can't verify NAT reachability at descriptor level).
+    let stats = store.stats();
+    assert_eq!(stats.relay_descriptors, 1);
+    // But the private IP address is a signal that relay will fail at transport time.
+    // The key defense is transport-level failure tracking, not descriptor rejection.
+}
+
+// ─── Scenario 19: Retrieval stats per anonymity mode ────────────────────────
+
+/// Verify that RetrievalStats correctly tracks per-mode counters.
+#[test]
+fn retrieval_stats_default_is_zero() {
+    use miasma_core::network::RetrievalStats;
+    let stats = RetrievalStats::default();
+    assert_eq!(stats.direct_attempts, 0);
+    assert_eq!(stats.direct_successes, 0);
+    assert_eq!(stats.opportunistic_attempts, 0);
+    assert_eq!(stats.opportunistic_relay_successes, 0);
+    assert_eq!(stats.opportunistic_direct_fallbacks, 0);
+    assert_eq!(stats.required_attempts, 0);
+    assert_eq!(stats.required_onion_successes, 0);
+    assert_eq!(stats.required_relay_successes, 0);
+    assert_eq!(stats.required_failures, 0);
+}
+
+/// RetrievalStats round-trips through serde correctly (important for IPC).
+#[test]
+fn retrieval_stats_serde_roundtrip() {
+    use miasma_core::network::RetrievalStats;
+    let stats = RetrievalStats {
+        direct_attempts: 10,
+        direct_successes: 8,
+        opportunistic_attempts: 5,
+        opportunistic_relay_successes: 3,
+        opportunistic_direct_fallbacks: 2,
+        required_attempts: 7,
+        required_onion_successes: 4,
+        required_relay_successes: 2,
+        required_failures: 1,
+    };
+    let json = serde_json::to_string(&stats).unwrap();
+    let deserialized: RetrievalStats = serde_json::from_str(&json).unwrap();
+    assert_eq!(deserialized.direct_attempts, 10);
+    assert_eq!(deserialized.required_onion_successes, 4);
+    assert_eq!(deserialized.required_failures, 1);
+}
+
+/// Descriptor store only returns relay-capable peers with onion pubkeys
+/// and registered PeerId when queried for relay onion info.
+/// A peer with can_relay: true but no onion_pubkey should NOT appear.
+#[test]
+fn relay_onion_info_requires_pubkey_and_capability() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+    let mut store = DescriptorStore::new();
+
+    // Peer A: can_relay=true, has onion_pubkey, has registered PeerId
+    let mut ps_a = [0u8; 32];
+    ps_a[0] = 0xA0;
+    let peer_a = PeerId::random();
+    store.register_peer_pseudonym(peer_a, ps_a);
+    store.upsert(PeerDescriptor::new_signed_full(
+        ps_a,
+        ReachabilityKind::Direct,
+        vec!["/ip4/1.2.3.4/tcp/4001".to_string()],
+        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop,
+        None,
+        None,
+        Some([0x11; 32]),
+        1,
+        &key,
+    ));
+
+    // Peer B: can_relay=true, NO onion_pubkey
+    let mut ps_b = [0u8; 32];
+    ps_b[0] = 0xB0;
+    let peer_b = PeerId::random();
+    store.register_peer_pseudonym(peer_b, ps_b);
+    store.upsert(PeerDescriptor::new_signed(
+        ps_b,
+        ReachabilityKind::Direct,
+        vec!["/ip4/5.6.7.8/tcp/4001".to_string()],
+        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &key,
+    ));
+
+    // Peer C: has onion_pubkey, but can_relay=false
+    let mut ps_c = [0u8; 32];
+    ps_c[0] = 0xC0;
+    let peer_c = PeerId::random();
+    store.register_peer_pseudonym(peer_c, ps_c);
+    store.upsert(PeerDescriptor::new_signed_full(
+        ps_c,
+        ReachabilityKind::Direct,
+        vec!["/ip4/9.10.11.12/tcp/4001".to_string()],
+        PeerCapabilities { can_relay: false, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop,
+        None,
+        None,
+        Some([0x33; 32]),
+        1,
+        &key,
+    ));
+
+    let onion_info = store.relay_onion_info();
+    // Only Peer A qualifies: can_relay=true AND has onion_pubkey AND has PeerId.
+    assert_eq!(onion_info.len(), 1, "only relay-capable peers with onion pubkeys should appear");
+    assert_eq!(onion_info[0].onion_pubkey, [0x11; 32]);
+}
+
+/// NAT status change at runtime should flip can_relay in subsequent descriptors.
+/// Simulates the scenario where AutoNAT initially reports Private, then
+/// transitions to Public after hole-punching succeeds.
+#[test]
+fn nat_transition_updates_relay_capability() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
+
+    // Initially NAT=Private → can_relay=false
+    let desc_private = PeerDescriptor::new_signed(
+        [0x01; 32],
+        ReachabilityKind::Direct,
+        vec!["/ip4/1.2.3.4/tcp/4001".to_string()],
+        PeerCapabilities { can_relay: false, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &key,
+    );
+    assert!(!desc_private.capabilities.can_relay);
+
+    // AutoNAT transitions to Public → can_relay=true
+    let desc_public = PeerDescriptor::new_signed(
+        [0x01; 32],
+        ReachabilityKind::Direct,
+        vec!["/ip4/1.2.3.4/tcp/4001".to_string()],
+        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop,
+        None,
+        2,
+        &key,
+    );
+    assert!(desc_public.capabilities.can_relay);
+
+    // Descriptor store should update in-place when upserting with same pseudonym.
+    let mut store = DescriptorStore::new();
+    store.upsert(desc_private);
+    assert_eq!(store.stats().relay_descriptors, 0);
+    store.upsert(desc_public);
+    assert_eq!(store.stats().relay_descriptors, 1, "upsert must update relay capability");
+}

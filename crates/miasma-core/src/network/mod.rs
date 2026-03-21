@@ -19,7 +19,7 @@ pub use bbs_credential::{
     BbsCredential, BbsCredentialWallet, BbsError, BbsIssuer, BbsIssuerKey, BbsProof, BbsPlusScheme,
     CredentialScheme, DisclosurePolicy, Ed25519Scheme,
 };
-pub use coordinator::{MiasmaCoordinator, NetworkShareFetcher};
+pub use coordinator::{MiasmaCoordinator, NetworkShareFetcher, RetrievalStats};
 pub use credential::{CredentialStats, CredentialTier, CredentialWallet, IssuerRegistry};
 pub use descriptor::{DescriptorStats, DescriptorStore, PeerDescriptor, PeerCapabilities, ReachabilityKind, ResourceProfile};
 pub use dht::{BypassOnionDhtExecutor, DirectDhtExecutor, LiveOnionDhtExecutor, OnionAwareDhtExecutor};

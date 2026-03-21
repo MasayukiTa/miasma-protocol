@@ -150,6 +150,23 @@ impl OnionShareFetcher for NetworkShareFetcher {
 // ─── MiasmaCoordinator ────────────────────────────────────────────────────────
 
 /// High-level coordinator: owns the node handle, store, and channel handles.
+/// Per-anonymity-mode retrieval success/failure counters.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct RetrievalStats {
+    /// Direct (no anonymity) retrieval attempts.
+    pub direct_attempts: u64,
+    pub direct_successes: u64,
+    /// Opportunistic relay retrieval attempts.
+    pub opportunistic_attempts: u64,
+    pub opportunistic_relay_successes: u64,
+    pub opportunistic_direct_fallbacks: u64,
+    /// Required anonymity retrieval attempts.
+    pub required_attempts: u64,
+    pub required_onion_successes: u64,
+    pub required_relay_successes: u64,
+    pub required_failures: u64,
+}
+
 pub struct MiasmaCoordinator {
     store: Arc<LocalShareStore>,
     dht_handle: DhtHandle,
@@ -165,6 +182,8 @@ pub struct MiasmaCoordinator {
     anonymity_policy: AnonymityPolicy,
     /// Relay routing enabled (descriptor-backed relay circuit routing).
     relay_routing_enabled: bool,
+    /// Per-anonymity-mode retrieval tracking.
+    retrieval_stats: Arc<Mutex<RetrievalStats>>,
 }
 
 impl MiasmaCoordinator {
@@ -204,6 +223,7 @@ impl MiasmaCoordinator {
             store, dht_handle, share_handle, shutdown_tx, peer_id, listen_addrs,
             transport_selector, anonymity_policy: AnonymityPolicy::default(),
             relay_routing_enabled: false,
+            retrieval_stats: Arc::new(Mutex::new(RetrievalStats::default())),
         }
     }
 
@@ -440,12 +460,21 @@ impl MiasmaCoordinator {
     ) -> Result<Vec<u8>, MiasmaError> {
         match policy {
             AnonymityPolicy::Direct => {
-                self.retrieve_from_network(mid, params).await
+                if let Ok(mut s) = self.retrieval_stats.lock() { s.direct_attempts += 1; }
+                let result = self.retrieve_from_network(mid, params).await;
+                if result.is_ok() {
+                    if let Ok(mut s) = self.retrieval_stats.lock() { s.direct_successes += 1; }
+                }
+                result
             }
             AnonymityPolicy::Opportunistic => {
+                if let Ok(mut s) = self.retrieval_stats.lock() { s.opportunistic_attempts += 1; }
                 if self.relay_routing_enabled {
                     match self.retrieve_via_relay(mid, params.clone()).await {
-                        Ok(data) => return Ok(data),
+                        Ok(data) => {
+                            if let Ok(mut s) = self.retrieval_stats.lock() { s.opportunistic_relay_successes += 1; }
+                            return Ok(data);
+                        }
                         Err(e) => {
                             tracing::debug!(
                                 "anonymity=opportunistic: relay retrieval failed ({e}), falling back to direct"
@@ -453,15 +482,25 @@ impl MiasmaCoordinator {
                         }
                     }
                 }
-                self.retrieve_from_network(mid, params).await
+                let result = self.retrieve_from_network(mid, params).await;
+                if result.is_ok() {
+                    if let Ok(mut s) = self.retrieval_stats.lock() { s.opportunistic_direct_fallbacks += 1; }
+                }
+                result
             }
             AnonymityPolicy::Required { min_hops } => {
+                if let Ok(mut s) = self.retrieval_stats.lock() { s.required_attempts += 1; }
                 if !self.relay_routing_enabled {
+                    if let Ok(mut s) = self.retrieval_stats.lock() { s.required_failures += 1; }
                     return Err(MiasmaError::Network(format!(
                         "anonymity=required({min_hops} hops): relay routing not enabled — call enable_relay_routing() first"
                     )));
                 }
-                self.retrieve_via_relay_required(mid, params, min_hops as usize).await
+                let result = self.retrieve_via_relay_required(mid, params, min_hops as usize).await;
+                if result.is_err() {
+                    if let Ok(mut s) = self.retrieval_stats.lock() { s.required_failures += 1; }
+                }
+                result
             }
         }
     }
@@ -524,7 +563,11 @@ impl MiasmaCoordinator {
                 min_hops,
                 "anonymity=required: attempting onion-encrypted retrieval"
             );
-            return self.retrieve_via_onion(mid, params).await;
+            let result = self.retrieve_via_onion(mid, params).await;
+            if result.is_ok() {
+                if let Ok(mut s) = self.retrieval_stats.lock() { s.required_onion_successes += 1; }
+            }
+            return result;
         }
 
         // Fallback to relay circuit address rewriting (IP privacy only).
@@ -554,7 +597,11 @@ impl MiasmaCoordinator {
             relay_addr: relay_addr.clone(),
         };
         let source = FallbackShareSource::new(relay_exec, self.transport_selector.clone());
-        RetrievalCoordinator::new(source).retrieve(mid, params).await
+        let result = RetrievalCoordinator::new(source).retrieve(mid, params).await;
+        if result.is_ok() {
+            if let Ok(mut s) = self.retrieval_stats.lock() { s.required_relay_successes += 1; }
+        }
+        result
     }
 
     /// Retrieve content using 2-hop onion-encrypted share fetching.
@@ -761,6 +808,16 @@ impl MiasmaCoordinator {
     /// Whether relay routing is currently enabled.
     pub fn relay_routing_enabled(&self) -> bool {
         self.relay_routing_enabled
+    }
+
+    /// Query whether this node is publicly reachable (AutoNAT).
+    pub async fn nat_publicly_reachable(&self) -> Result<bool, MiasmaError> {
+        self.dht_handle.nat_publicly_reachable().await
+    }
+
+    /// Return a snapshot of per-anonymity-mode retrieval counters.
+    pub fn retrieval_stats(&self) -> RetrievalStats {
+        self.retrieval_stats.lock().map(|s| s.clone()).unwrap_or_default()
     }
 }
 
