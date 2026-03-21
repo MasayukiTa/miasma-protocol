@@ -228,6 +228,33 @@ pub struct DaemonStatus {
     /// Rendezvous fallbacks to direct (no intro points).
     #[serde(default)]
     pub retrieval_rendezvous_direct_fallbacks: u64,
+    /// Rendezvous + onion (content-blind) attempts.
+    #[serde(default)]
+    pub retrieval_rendezvous_onion_attempts: u64,
+    /// Rendezvous + onion successes.
+    #[serde(default)]
+    pub retrieval_rendezvous_onion_successes: u64,
+    /// Rendezvous + onion failures.
+    #[serde(default)]
+    pub retrieval_rendezvous_onion_failures: u64,
+    /// Opportunistic: onion-encrypted successes.
+    #[serde(default)]
+    pub retrieval_opportunistic_onion_successes: u64,
+    /// Opportunistic: onion+rendezvous successes.
+    #[serde(default)]
+    pub retrieval_opportunistic_onion_rendezvous_successes: u64,
+    /// Opportunistic: rendezvous-relay successes.
+    #[serde(default)]
+    pub retrieval_opportunistic_rendezvous_successes: u64,
+    /// Active relay probes sent.
+    #[serde(default)]
+    pub relay_probes_sent: u64,
+    /// Active relay probes succeeded (nonce matched).
+    #[serde(default)]
+    pub relay_probes_succeeded: u64,
+    /// Active relay probes failed.
+    #[serde(default)]
+    pub relay_probes_failed: u64,
 
     // ── Rendezvous and relay trust ──────────────────────────────────────
 
