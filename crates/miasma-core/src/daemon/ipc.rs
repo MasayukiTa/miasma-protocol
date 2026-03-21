@@ -255,6 +255,18 @@ pub struct DaemonStatus {
     /// Active relay probes failed.
     #[serde(default)]
     pub relay_probes_failed: u64,
+    /// Forwarding verification probes sent.
+    #[serde(default)]
+    pub forwarding_probes_sent: u64,
+    /// Forwarding verification probes succeeded.
+    #[serde(default)]
+    pub forwarding_probes_succeeded: u64,
+    /// Forwarding verification probes failed.
+    #[serde(default)]
+    pub forwarding_probes_failed: u64,
+    /// Pre-retrieval probe sweeps executed.
+    #[serde(default)]
+    pub pre_retrieval_probes_run: u64,
 
     // ── Rendezvous and relay trust ──────────────────────────────────────
 
@@ -270,6 +282,12 @@ pub struct DaemonStatus {
     /// Relay peers at Verified trust tier.
     #[serde(default)]
     pub relay_tier_verified: usize,
+    /// Relays with fresh (within 300s) probe evidence.
+    #[serde(default)]
+    pub probe_cache_fresh: usize,
+    /// Relays with forwarding verification evidence.
+    #[serde(default)]
+    pub forwarding_verified_relays: usize,
 }
 
 /// Per-transport readiness info for IPC/CLI display.

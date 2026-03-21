@@ -102,6 +102,13 @@ pub struct RelayObservation {
     pub last_success_at: u64,
     /// Unix timestamp of last failed relay.
     pub last_failure_at: u64,
+    /// Unix timestamp of last successful active probe (nonce echo).
+    #[serde(default)]
+    pub probe_succeeded_at: Option<u64>,
+    /// Unix timestamp of last successful forwarding verification
+    /// (probe sent through R1's relay circuit to R2).
+    #[serde(default)]
+    pub forwarding_verified_at: Option<u64>,
 }
 
 impl RelayObservation {
@@ -112,6 +119,8 @@ impl RelayObservation {
             failures: 0,
             last_success_at: 0,
             last_failure_at: 0,
+            probe_succeeded_at: None,
+            forwarding_verified_at: None,
         }
     }
 
@@ -127,18 +136,66 @@ impl RelayObservation {
         self.recompute_tier();
     }
 
+    /// Record a successful active probe (nonce echo verification).
+    pub fn record_probe_success(&mut self) {
+        self.probe_succeeded_at = Some(now_secs());
+        self.recompute_tier();
+    }
+
+    /// Record a successful forwarding verification (circuit-routed probe).
+    pub fn record_forwarding_verification(&mut self) {
+        self.forwarding_verified_at = Some(now_secs());
+        self.recompute_tier();
+    }
+
+    /// Whether this relay has a probe result within `freshness_secs`.
+    pub fn has_fresh_probe(&self, freshness_secs: u64) -> bool {
+        match self.probe_succeeded_at {
+            Some(t) => now_secs().saturating_sub(t) < freshness_secs,
+            None => false,
+        }
+    }
+
+    /// Whether this relay has a forwarding verification within `freshness_secs`.
+    pub fn has_fresh_forwarding(&self, freshness_secs: u64) -> bool {
+        match self.forwarding_verified_at {
+            Some(t) => now_secs().saturating_sub(t) < freshness_secs,
+            None => false,
+        }
+    }
+
     /// Halve counters (epoch decay) so stale trust decays.
+    /// Probe/forwarding timestamps are NOT cleared — they have their own
+    /// time-based freshness and represent stronger evidence.
     fn decay(&mut self) {
         self.successes /= 2;
         self.failures /= 2;
         self.recompute_tier();
     }
 
+    /// Unified tier computation using all available evidence:
+    ///
+    /// 1. Forwarding-verified + ≥1 passive success → Verified (strongest)
+    /// 2. Probe-verified + ≥2 passive successes at ≥66% rate → Verified
+    /// 3. ≥3 passive successes at ≥75% rate → Verified (original rule)
+    /// 4. ≥1 passive success OR probe success → Observed
+    /// 5. Otherwise → Claimed
     fn recompute_tier(&mut self) {
         let total = self.successes + self.failures;
-        if self.successes >= 3 && total > 0 && (self.successes as f64 / total as f64) >= 0.75 {
+        let rate = if total > 0 { self.successes as f64 / total as f64 } else { 0.0 };
+
+        // Forwarding-verified fast-track: strongest possible evidence.
+        if self.forwarding_verified_at.is_some() && self.successes >= 1 {
             self.tier = RelayTrustTier::Verified;
-        } else if self.successes >= 1 {
+        }
+        // Probe-verified with corroborating passive evidence.
+        else if self.probe_succeeded_at.is_some() && self.successes >= 2 && rate >= 0.66 {
+            self.tier = RelayTrustTier::Verified;
+        }
+        // Original passive-only rule.
+        else if self.successes >= 3 && total > 0 && rate >= 0.75 {
+            self.tier = RelayTrustTier::Verified;
+        } else if self.successes >= 1 || self.probe_succeeded_at.is_some() {
             self.tier = RelayTrustTier::Observed;
         } else {
             self.tier = RelayTrustTier::Claimed;
@@ -663,6 +720,44 @@ impl DescriptorStore {
         self.relay_observations.get(pseudonym)
     }
 
+    /// Record a successful active probe for a pseudonym.
+    pub fn record_probe_success(&mut self, pseudonym: &[u8; 32]) {
+        self.relay_observations
+            .entry(*pseudonym)
+            .or_insert_with(RelayObservation::new)
+            .record_probe_success();
+    }
+
+    /// Record a successful forwarding verification for a pseudonym.
+    pub fn record_forwarding_verification(&mut self, pseudonym: &[u8; 32]) {
+        self.relay_observations
+            .entry(*pseudonym)
+            .or_insert_with(RelayObservation::new)
+            .record_forwarding_verification();
+    }
+
+    /// Check if a pseudonym has a fresh probe result.
+    pub fn has_fresh_probe(&self, pseudonym: &[u8; 32], freshness_secs: u64) -> bool {
+        self.relay_observations
+            .get(pseudonym)
+            .map(|o| o.has_fresh_probe(freshness_secs))
+            .unwrap_or(false)
+    }
+
+    /// Count relay observations with fresh probe evidence.
+    pub fn probed_fresh_count(&self, freshness_secs: u64) -> usize {
+        self.relay_observations.values()
+            .filter(|o| o.has_fresh_probe(freshness_secs))
+            .count()
+    }
+
+    /// Count relay observations with forwarding verification evidence.
+    pub fn forwarding_verified_count(&self) -> usize {
+        self.relay_observations.values()
+            .filter(|o| o.forwarding_verified_at.is_some())
+            .count()
+    }
+
     /// Decay all relay observations (call on epoch rotation).
     /// Halves success/failure counters so stale trust does not linger.
     pub fn decay_relay_observations(&mut self) {
@@ -832,6 +927,8 @@ impl DescriptorStore {
             relay_claimed,
             relay_observed,
             relay_verified,
+            probed_fresh: self.probed_fresh_count(300),
+            forwarding_verified_count: self.forwarding_verified_count(),
         }
     }
 }
@@ -867,6 +964,10 @@ pub struct DescriptorStats {
     pub relay_observed: usize,
     /// Relay peers at Verified trust tier (≥3 successes, ≥75% success rate).
     pub relay_verified: usize,
+    /// Number of relays with fresh (within 300s) active probe evidence.
+    pub probed_fresh: usize,
+    /// Number of relays with forwarding verification evidence.
+    pub forwarding_verified_count: usize,
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
