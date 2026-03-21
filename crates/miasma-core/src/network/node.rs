@@ -517,6 +517,32 @@ pub enum DhtCommand {
     GetNatStatus {
         reply: oneshot::Sender<bool>,
     },
+    /// Record a successful or failed relay operation for a peer pseudonym.
+    RecordRelayOutcome {
+        pseudonym: [u8; 32],
+        success: bool,
+    },
+    /// Resolve rendezvous introduction point pseudonyms to routable info.
+    ResolveIntroPoints {
+        intro_pseudonyms: Vec<[u8; 32]>,
+        reply: oneshot::Sender<Vec<super::descriptor::ResolvedIntroPoint>>,
+    },
+    /// Select introduction points for this node's rendezvous descriptor.
+    SelectIntroPoints {
+        own_pseudonym: [u8; 32],
+        count: usize,
+        reply: oneshot::Sender<Vec<[u8; 32]>>,
+    },
+    /// Look up a peer's pseudonym from the descriptor store.
+    GetPeerPseudonym {
+        peer_id: PeerId,
+        reply: oneshot::Sender<Option<[u8; 32]>>,
+    },
+    /// Look up a peer's full descriptor from the descriptor store.
+    GetPeerDescriptor {
+        peer_id: PeerId,
+        reply: oneshot::Sender<Option<PeerDescriptor>>,
+    },
 }
 
 /// Sender side of the DHT command channel.
@@ -736,6 +762,61 @@ impl DhtHandle {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(DhtCommand::GetNatStatus { reply: tx })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
+        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+    }
+
+    /// Record a relay success/failure for trust tier tracking.
+    pub async fn record_relay_outcome(&self, pseudonym: [u8; 32], success: bool) -> Result<(), MiasmaError> {
+        self.tx
+            .send(DhtCommand::RecordRelayOutcome { pseudonym, success })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))
+    }
+
+    /// Resolve rendezvous introduction point pseudonyms.
+    pub async fn resolve_intro_points(
+        &self,
+        intro_pseudonyms: Vec<[u8; 32]>,
+    ) -> Result<Vec<super::descriptor::ResolvedIntroPoint>, MiasmaError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::ResolveIntroPoints { intro_pseudonyms, reply: tx })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
+        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+    }
+
+    /// Select introduction points for a rendezvous descriptor.
+    pub async fn select_intro_points(
+        &self,
+        own_pseudonym: [u8; 32],
+        count: usize,
+    ) -> Result<Vec<[u8; 32]>, MiasmaError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::SelectIntroPoints { own_pseudonym, count, reply: tx })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
+        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+    }
+
+    /// Look up a peer's pseudonym from the descriptor store.
+    pub async fn peer_pseudonym(&self, peer_id: PeerId) -> Result<Option<[u8; 32]>, MiasmaError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::GetPeerPseudonym { peer_id, reply: tx })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
+        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+    }
+
+    /// Look up a peer's full descriptor from the descriptor store.
+    pub async fn peer_descriptor(&self, peer_id: PeerId) -> Result<Option<PeerDescriptor>, MiasmaError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::GetPeerDescriptor { peer_id, reply: tx })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
         rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
@@ -1274,6 +1355,30 @@ impl MiasmaNode {
             DhtCommand::GetNatStatus { reply } => {
                 let _ = reply.send(self.nat_publicly_reachable);
             }
+            DhtCommand::RecordRelayOutcome { pseudonym, success } => {
+                if success {
+                    self.descriptor_store.record_relay_success(&pseudonym);
+                } else {
+                    self.descriptor_store.record_relay_failure(&pseudonym);
+                }
+            }
+            DhtCommand::ResolveIntroPoints { intro_pseudonyms, reply } => {
+                let resolved = self.descriptor_store.resolve_intro_points(&intro_pseudonyms);
+                let _ = reply.send(resolved);
+            }
+            DhtCommand::SelectIntroPoints { own_pseudonym, count, reply } => {
+                let selected = self.descriptor_store.select_intro_points(&own_pseudonym, count);
+                let _ = reply.send(selected);
+            }
+            DhtCommand::GetPeerPseudonym { peer_id, reply } => {
+                let ps = self.descriptor_store.get_by_peer(&peer_id)
+                    .map(|d| d.pseudonym);
+                let _ = reply.send(ps);
+            }
+            DhtCommand::GetPeerDescriptor { peer_id, reply } => {
+                let desc = self.descriptor_store.get_by_peer(&peer_id).cloned();
+                let _ = reply.send(desc);
+            }
         }
     }
 
@@ -1674,9 +1779,30 @@ impl MiasmaNode {
             &self.local_peer_id.to_bytes(),
         );
 
+        // Determine reachability kind based on NAT status.
+        // Public nodes use Direct; NAT'd nodes select introduction points
+        // from the descriptor store and publish Rendezvous descriptors.
+        let reachability = if self.nat_publicly_reachable || self.allow_local_addresses {
+            ReachabilityKind::Direct
+        } else {
+            let intro_points = self.descriptor_store.select_intro_points(&pseudonym, 3);
+            if intro_points.is_empty() {
+                // No relay peers available yet — fall back to Direct.
+                // The descriptor will be refreshed periodically and will
+                // switch to Rendezvous once relay peers are discovered.
+                ReachabilityKind::Direct
+            } else {
+                debug!(
+                    "descriptor.rendezvous intro_points={}",
+                    intro_points.len()
+                );
+                ReachabilityKind::Rendezvous { intro_points }
+            }
+        };
+
         PeerDescriptor::new_signed_full(
             pseudonym,
-            ReachabilityKind::Direct,
+            reachability,
             addresses,
             PeerCapabilities {
                 can_store: true,
