@@ -1,7 +1,7 @@
 # package-release.ps1 — Package Miasma release binaries into a distributable zip.
 #
 # Usage:
-#   .\scripts\package-release.ps1 [-InputDir .\dist] [-Version "0.1.0"]
+#   .\scripts\package-release.ps1 [-InputDir .\dist] [-Version "0.2.0"]
 #
 # Produces:
 #   miasma-<version>-windows-x64.zip

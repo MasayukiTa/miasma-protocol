@@ -58,24 +58,31 @@ The realistic first target is a retrieval-focused client with selective particip
 - local encrypted share storage
 - daemon, CLI, desktop, bridge, and Windows installer flow
 - WSS and proxy-aware transport work
-- routing security phases 3a-3c:
+- routing-security and admission stack:
   - real Ed25519 DHT record verification
-  - PoW-gated peer admission
-  - trust tiers
-  - address-class separation
-  - prefix diversity and first eclipse-resistance logic
-  - routing and admission diagnostics
+  - PoW-gated and hybrid peer admission
+  - trust tiers and address-class separation
+  - prefix diversity, relay trust, and eclipse-resistance logic
+  - routing, admission, and retrieval diagnostics
+- anonymous trust and reachability stack:
+  - credential lifecycle and descriptor exchange
+  - BBS+ credential path
+  - onion retrieval
+  - rendezvous retrieval
+  - onion plus rendezvous retrieval
+  - active relay probing and forwarding verification slice
+  - outcome metrics for privacy and retrieval behavior
 - Windows beta prerelease with installer-first distribution
 
-### Landed in code, but not fully wired into the live network path yet
+### Still not finished
 
-- anonymous credential layer
-- descriptor-based routing layer
-- onion-aware path selection
-- hybrid mobile-friendly admission policy
-- adversarial simulation harness
+- external security audit
+- code signing / SmartScreen-friendly distribution
+- large-scale real-Internet validation under churn and hostile conditions
+- production-grade traffic-analysis resistance
+- mobile runtime and operational work on Android/iOS
 
-These are important because they are part of the real Freenet-like direction, but they are not yet fully driving the live end-to-end network behavior.
+This means the current release is a serious technical beta, not a finished anonymity network.
 
 ## Freenet-Style Goals: Where We Actually Are
 
@@ -89,15 +96,17 @@ The real goals are harder than that.
 What exists:
 
 - routing trust model
-- admission cost via PoW
+- admission cost via PoW and hybrid admission signals
 - signature-validated DHT records
-- prefix-diversity and first eclipse-resistance controls
+- descriptor and rendezvous-backed reachability
+- relay trust, relay probing, and forwarding verification slice
+- prefix-diversity and eclipse-resistance controls
 
 What is still missing:
 
-- descriptor-first live routing
-- stronger relay and rendezvous integration
 - larger real-world adversarial validation
+- stronger anti-traffic-analysis hardening
+- longer-duration churn and retention proof
 
 ### 2. Difficulty of identifying participants and flows
 
@@ -106,16 +115,16 @@ What is still missing:
 What exists:
 
 - encrypted storage pipeline
-- transport experimentation
-- onion-oriented design direction
-- anonymous credential groundwork
+- onion retrieval and onion plus rendezvous retrieval
+- descriptor-based reachability and relay mediation
+- anonymous credential exchange
+- BBS+ credential path
 
 What is still missing:
 
-- live anonymous trust exchange
-- stronger onion-native retrieval path
-- stronger unlinkability than epoch-scoped pseudonyms
-- BBS+ or equivalent upgrade for better within-epoch privacy
+- stronger protection against global passive traffic analysis
+- packet padding and replay-hardening maturity
+- stronger unlinkability beyond the current operational model
 
 ### 3. Content retention
 
@@ -133,12 +142,14 @@ What exists:
 - loopback and local validation
 - Windows beta flows
 - installer and diagnostics
+- retrieval-path metrics by privacy mode
+- relay/descriptor/rendezvous-backed retrieval paths
 
 What is still missing:
 
 - larger multi-node internet validation
-- churn-heavy success-rate measurement
-- long-lived relay/descriptor-backed retrieval behavior
+- longer-running churn-heavy success-rate measurement
+- wider hostile-network validation
 
 ### 5. Safety as the network grows
 
@@ -167,7 +178,7 @@ The honest position is:
 
 ## Current Beta Release
 
-The current public release is a **Windows beta prerelease**.
+The current public release is **v0.2.0-beta.1**, a Windows beta prerelease.
 
 - Release page: [GitHub Releases](https://github.com/MasayukiTa/miasma-protocol/releases)
 - Recommended artifact: `MiasmaSetup-<version>-x64.exe`
@@ -181,14 +192,13 @@ Important:
 
 ## Near-Term Protocol Milestones
 
-The next core milestones are focused on turning the new foundations into live behavior:
+The next core milestones are focused on hardening and scaling what is now live:
 
-- credential issuance and exchange in the live admission path
-- descriptor publication and retrieval in the real network path
-- onion-aware path selection feeding real retrieval
-- hybrid admission replacing simple binary PoW checks
-- stronger relay and rendezvous integration
-- adversarial simulations that exercise real end-to-end network behavior
+- packet padding and replay protection for onion traffic
+- stronger anti-gaming trust adjustments for relays
+- broader real-network and adversarial validation
+- release hardening such as code signing and operational polish
+- mobile runtime and operational implementation
 
 ## Repository Structure
 
