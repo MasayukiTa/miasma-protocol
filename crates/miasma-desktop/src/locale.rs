@@ -87,6 +87,7 @@ pub struct Strings {
     pub store_share_hint: &'static str,
     pub store_share_hint_easy: &'static str,
     pub store_busy: &'static str,
+    pub store_not_connected_hint: &'static str,
 
     // ── Retrieve panel ──
     pub retrieve_heading: &'static str,
@@ -103,6 +104,7 @@ pub struct Strings {
     pub retrieve_saved: &'static str,
     pub retrieve_save_failed: &'static str,
     pub retrieve_result_label: &'static str,
+    pub retrieve_not_connected_hint: &'static str,
 
     // ── Status panel ──
     pub status_heading: &'static str,
@@ -133,6 +135,9 @@ pub struct Strings {
     pub status_ready: &'static str,
     pub status_not_ready: &'static str,
     pub status_items_stored: &'static str,
+    pub status_hint_ready: &'static str,
+    pub status_hint_not_ready: &'static str,
+    pub status_hint_no_peers: &'static str,
 
     // ── Emergency wipe ──
     pub wipe_label: &'static str,
@@ -233,6 +238,7 @@ static EN: Strings = Strings {
     store_share_hint: "Share this ID to let others retrieve the content.",
     store_share_hint_easy: "Save this ID — you'll need it to get your content back.",
     store_busy: "Storing file...",
+    store_not_connected_hint: "Start the app first to save content.",
 
     retrieve_heading: "Retrieve Content",
     retrieve_heading_easy: "Get Content Back",
@@ -248,6 +254,7 @@ static EN: Strings = Strings {
     retrieve_saved: "Saved to",
     retrieve_save_failed: "Save failed:",
     retrieve_result_label: "Retrieved:",
+    retrieve_not_connected_hint: "Start the app first to get content back.",
 
     status_heading: "Node Status",
     status_refresh: "Refresh",
@@ -276,6 +283,9 @@ static EN: Strings = Strings {
     status_ready: "Ready",
     status_not_ready: "Not ready",
     status_items_stored: "Items stored:",
+    status_hint_ready: "You can save and retrieve content.",
+    status_hint_not_ready: "The app is not running yet. Go to the Save tab to get started.",
+    status_hint_no_peers: "Connected, but no peers found yet. Content may not replicate until peers appear.",
 
     wipe_label: "Emergency Wipe",
     wipe_desc: "— permanently destroys all stored content",
@@ -365,6 +375,7 @@ static JA: Strings = Strings {
     store_share_hint: "このIDを共有すると、他の人がコンテンツを取得できます。",
     store_share_hint_easy: "このIDを保存してください。取り出すときに必要です。",
     store_busy: "保存中...",
+    store_not_connected_hint: "保存するにはアプリを起動してください。",
 
     retrieve_heading: "コンテンツ取得",
     retrieve_heading_easy: "取り出す",
@@ -380,6 +391,7 @@ static JA: Strings = Strings {
     retrieve_saved: "保存しました:",
     retrieve_save_failed: "保存に失敗:",
     retrieve_result_label: "取得結果:",
+    retrieve_not_connected_hint: "取り出すにはアプリを起動してください。",
 
     status_heading: "ノードステータス",
     status_refresh: "更新",
@@ -408,6 +420,9 @@ static JA: Strings = Strings {
     status_ready: "準備完了",
     status_not_ready: "準備中",
     status_items_stored: "保存済み:",
+    status_hint_ready: "コンテンツの保存と取り出しができます。",
+    status_hint_not_ready: "アプリがまだ起動していません。「保存」タブから始めましょう。",
+    status_hint_no_peers: "接続済みですが、ピアが見つかりません。ピアが見つかるまでレプリケーションは保留されます。",
 
     wipe_label: "緊急消去",
     wipe_desc: "— 保存されたすべてのコンテンツを完全に破棄します",
@@ -497,6 +512,7 @@ static ZH_CN: Strings = Strings {
     store_share_hint: "分享此ID，其他人就能检索该内容。",
     store_share_hint_easy: "请保存此ID，取回内容时需要使用。",
     store_busy: "正在保存...",
+    store_not_connected_hint: "请先启动应用再保存内容。",
 
     retrieve_heading: "检索内容",
     retrieve_heading_easy: "取回内容",
@@ -512,6 +528,7 @@ static ZH_CN: Strings = Strings {
     retrieve_saved: "已保存到",
     retrieve_save_failed: "保存失败：",
     retrieve_result_label: "检索结果：",
+    retrieve_not_connected_hint: "请先启动应用再取回内容。",
 
     status_heading: "节点状态",
     status_refresh: "刷新",
@@ -540,6 +557,9 @@ static ZH_CN: Strings = Strings {
     status_ready: "就绪",
     status_not_ready: "未就绪",
     status_items_stored: "已保存：",
+    status_hint_ready: "您可以保存和取回内容。",
+    status_hint_not_ready: "应用尚未启动。请前往「保存」标签页开始使用。",
+    status_hint_no_peers: "已连接，但尚未找到节点。在找到节点之前内容可能不会复制。",
 
     wipe_label: "紧急擦除",
     wipe_desc: "— 永久销毁所有已保存的内容",
