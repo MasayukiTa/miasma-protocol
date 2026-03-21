@@ -1,220 +1,143 @@
 # Miasma Protocol
 
-Miasma is a mobile-first, Freenet-inspired storage and retrieval protocol.
-The current public beta is on Windows because Windows is the fastest place to validate the protocol, routing, installer flow, and operational UX before we harden the mobile product.
+Miasma is a censorship-resistant content storage and retrieval protocol inspired by Freenet. The long-term vision is mobile-first, but the current release ships on Windows as a validation testbed for the protocol stack, routing trust model, and operational UX.
 
-This repository is not claiming "finished anonymous file sharing" yet.
-It is building toward that goal in explicit phases.
+This project is not claiming "finished anonymous file sharing." It is building toward that goal in explicit, documented phases.
 
-## Project Status
+## v0.2.0-beta.1
 
-Miasma is still in the validation stage.
+The current public release is **v0.2.0-beta.1**, a Windows beta prerelease for technical users and protocol testers.
 
-- The current **shipping beta** is a Windows beta prerelease.
-- The **product direction** is still mobile-first.
-- Windows exists first so we can validate the protocol stack, routing trust model, installer flow, diagnostics, and adversarial behavior on a platform that is easier to iterate on quickly.
+- Release page: [GitHub Releases](https://github.com/MasayukiTa/miasma-protocol/releases)
+- Recommended artifact: `MiasmaSetup-0.2.0-x64.exe`
 
-In other words:
+### What ships in this release
 
-- **Windows** is the current validation platform and operator testbed.
-- **Android** is the intended first-class mobile node target.
-- **iOS** should be treated as a retrieval-focused client first, not as an always-on equal full node from day one.
+- **Encrypted dissolution and retrieval** -- erasure coding + encryption with content-addressed storage
+- **P2P DHT-based content routing** via libp2p Kademlia with signed DHT records
+- **5-level privacy hierarchy** for retrieval:
+  1. Direct -- baseline DHT lookup
+  2. Relay circuit -- IP-hiding via relay peer (`/p2p-circuit`)
+  3. Rendezvous -- NAT'd nodes reachable through introduction points
+  4. Onion -- content-blind 3-hop encryption (X25519 + XChaCha20-Poly1305 per hop)
+  5. Onion + rendezvous -- content-blind retrieval from NAT'd holders
+- **BBS+ anonymous credentials** with within-epoch unlinkability (BLS12-381 pairing-based, selective disclosure, link-secret non-transferability)
+- **Pseudonymous peer descriptors** with epoch rotation and churn tracking
+- **Active relay trust verification** -- relay probing (`/miasma/relay-probe/1.0.0`), forwarding verification through circuit addresses, evidence-based trust tiers (Claimed / Observed / Verified)
+- **Transport obfuscation**: WSS+TLS, ObfuscatedQuic+REALITY, SOCKS5 proxy support
+- **Windows daemon + CLI + desktop GUI + BitTorrent bridge**
+- **Secure key storage** with Win32 API-based restricted file creation (ACL-enforced `master.key`)
+- **Distress wipe** -- immediate key material destruction
+- **WiX MSI installer** with bootstrapper EXE (VC++ runtime bundled)
+
+### What this beta does well
+
+- Local encrypted storage with distress wipe
+- Multi-transport payload delivery across network conditions
+- Layered anonymity with content-blind onion routing
+- Pseudonymous trust without identity linkability across epochs
+- Relay verification with passive observation, active probing, and forwarding verification
+- Operational diagnostics (CLI, desktop, JSON export)
+
+### What it does NOT claim to solve
+
+- **No protection against a strong global passive adversary.** A network-level observer who can see all traffic can correlate flows.
+- **Onion padding is fixed-size, not constant-rate.** Packets are padded to 8 KiB to prevent size correlation, but traffic timing analysis is still possible.
+- **Small relay pool in early deployment.** Anonymity set is limited by the number of participating relay nodes.
+- **No automatic peer discovery.** Bootstrap peers must be configured manually.
+- **No code signing certificate.** Windows SmartScreen will warn on install.
+- **Not audited.** No external security review has been performed.
+- **Mobile not yet operational.** Android and iOS runtime work is pending.
+- **Bootstrap trust is self-referential.** Early nodes credential each other; the trust bootstrapping problem is real.
+
+## Threat Model Boundaries
+
+Be explicit about what this system resists and what it does not.
+
+**Resists:**
+
+- Casual observation of network traffic (transport obfuscation, encrypted payloads)
+- Non-targeted surveillance (pseudonymous descriptors, epoch rotation, unlinkable credentials)
+- Content seizure via single node compromise (erasure coding distributes shards, encryption at rest)
+
+**Does not resist:**
+
+- Targeted adversary with network-level visibility (traffic correlation, timing analysis)
+- ISP-level deep packet inspection correlation (GlobalProtect/Zscaler-class MITM can fingerprint despite REALITY)
+- Traffic analysis via timing (fixed-size padding prevents size correlation, but no constant-rate cover traffic)
+- Sybil attacks at scale (PoW admission raises cost but does not eliminate it)
+- Bootstrap trust circular dependency (first nodes in a deployment credential each other)
 
 ## Platform Strategy
 
 ### Windows
 
-Windows is where we currently prove:
+Windows is the current validation platform. It proves:
 
-- installer and upgrade flow
-- desktop and daemon UX
-- routing, trust, and transport behavior
-- local and loopback retrieval
-- operational diagnostics and release process
+- Installer and upgrade flow (MSI + bootstrapper EXE)
+- Desktop and daemon UX (auto-start, crash recovery, stale detection)
+- Routing, trust, and transport behavior
+- Local and loopback retrieval
+- Operational diagnostics and release process
 
 ### Android
 
-Android remains the main mobile target for meaningful peer participation.
-The hard problems we still need to solve there are the real ones:
+Android is the intended first-class mobile node target. Hard problems still to solve:
 
-- battery cost
-- background execution limits
+- Battery cost and background execution limits
 - NAT traversal and reconnect behavior
-- storage pressure
-- bandwidth caps
-- quota enforcement
-- long-running reliability under mobile network churn
+- Storage pressure and bandwidth caps
+- Long-running reliability under mobile network churn
 
 ### iOS
 
-iOS should not be designed around the fantasy of a permanently available equal full node.
-The realistic first target is a retrieval-focused client with selective participation, while heavier storage, relay, and long-lived routing duties stay on stronger peers.
-
-## What Exists Today
-
-### Live, implemented foundations
-
-- encrypted content-addressed dissolution and retrieval pipeline
-- local encrypted share storage
-- daemon, CLI, desktop, bridge, and Windows installer flow
-- WSS and proxy-aware transport work
-- routing-security and admission stack:
-  - real Ed25519 DHT record verification
-  - PoW-gated and hybrid peer admission
-  - trust tiers and address-class separation
-  - prefix diversity, relay trust, and eclipse-resistance logic
-  - routing, admission, and retrieval diagnostics
-- anonymous trust and reachability stack:
-  - credential lifecycle and descriptor exchange
-  - BBS+ credential path
-  - onion retrieval
-  - rendezvous retrieval
-  - onion plus rendezvous retrieval
-  - active relay probing and forwarding verification slice
-  - outcome metrics for privacy and retrieval behavior
-- Windows beta prerelease with installer-first distribution
-
-### Still not finished
-
-- external security audit
-- code signing / SmartScreen-friendly distribution
-- large-scale real-Internet validation under churn and hostile conditions
-- production-grade traffic-analysis resistance
-- mobile runtime and operational work on Android/iOS
-
-This means the current release is a serious technical beta, not a finished anonymity network.
-
-## Freenet-Style Goals: Where We Actually Are
-
-The point of Miasma is not only "can it get through a network."
-The real goals are harder than that.
-
-### 1. Censorship resistance
-
-**Status:** partial, real progress
-
-What exists:
-
-- routing trust model
-- admission cost via PoW and hybrid admission signals
-- signature-validated DHT records
-- descriptor and rendezvous-backed reachability
-- relay trust, relay probing, and forwarding verification slice
-- prefix-diversity and eclipse-resistance controls
-
-What is still missing:
-
-- larger real-world adversarial validation
-- stronger anti-traffic-analysis hardening
-- longer-duration churn and retention proof
-
-### 2. Difficulty of identifying participants and flows
-
-**Status:** partial, not solved
-
-What exists:
-
-- encrypted storage pipeline
-- onion retrieval and onion plus rendezvous retrieval
-- descriptor-based reachability and relay mediation
-- anonymous credential exchange
-- BBS+ credential path
-
-What is still missing:
-
-- stronger protection against global passive traffic analysis
-- packet padding and replay-hardening maturity
-- stronger unlinkability beyond the current operational model
-
-### 3. Content retention
-
-**Status:** limited / experimental
-
-Miasma is currently closer to a controlled replicated store than a proven long-lived global content-retention network.
-Retention policy, replication behavior, and real-world durability under churn still need much stronger validation.
-
-### 4. Retrieval success rate
-
-**Status:** promising locally, not yet proven at internet scale
-
-What exists:
-
-- loopback and local validation
-- Windows beta flows
-- installer and diagnostics
-- retrieval-path metrics by privacy mode
-- relay/descriptor/rendezvous-backed retrieval paths
-
-What is still missing:
-
-- larger multi-node internet validation
-- longer-running churn-heavy success-rate measurement
-- wider hostile-network validation
-
-### 5. Safety as the network grows
-
-**Status:** early but improving
-
-Routing-security foundations are now much stronger than before, but large-scale node growth, churn, and adversarial pressure are not yet fully characterized.
-This is one of the main reasons the project should still be described as beta and validation-stage.
-
-### 6. Practical speed
-
-**Status:** not yet a solved story
-
-Local and controlled-path behavior is workable.
-Real practical speed under mobile constraints, multiple hops, relay use, and adversarial-safe routing remains an open engineering problem.
-
-## Why This README Is Being Explicit
-
-Miasma should not overclaim.
-If the project says "mobile-first" while only shipping Windows artifacts, that has to be explained clearly.
-
-The honest position is:
-
-- Windows ships first to validate the protocol and operator experience
-- mobile remains the actual destination
-- the most important unfinished work is still protocol-core and mobile systems work, not cosmetic platform parity
-
-## Current Beta Release
-
-The current public release is **v0.2.0-beta.1**, a Windows beta prerelease.
-
-- Release page: [GitHub Releases](https://github.com/MasayukiTa/miasma-protocol/releases)
-- Recommended artifact: `MiasmaSetup-<version>-x64.exe`
-- Audience: technical beta users and protocol testers
-
-Important:
-
-- no external security audit yet
-- no Authenticode code signing yet
-- no claim of production anonymity or production-grade censorship resistance yet
-
-## Near-Term Protocol Milestones
-
-The next core milestones are focused on hardening and scaling what is now live:
-
-- packet padding and replay protection for onion traffic
-- stronger anti-gaming trust adjustments for relays
-- broader real-network and adversarial validation
-- release hardening such as code signing and operational polish
-- mobile runtime and operational implementation
+iOS should be treated as a retrieval-focused client first, not as an always-on full node. Heavier storage, relay, and long-lived routing duties stay on stronger peers.
 
 ## Repository Structure
 
-- `crates/miasma-core` - protocol, storage, routing, trust, transport
-- `crates/miasma-cli` - CLI and daemon entry points
-- `crates/miasma-desktop` - Windows desktop app
-- `crates/miasma-bridge` - BitTorrent bridge
-- `docs/adr/` - architecture decisions and protocol design notes
+```
+crates/miasma-core     Protocol, storage, routing, trust, transport, credentials
+crates/miasma-cli      CLI and daemon entry points
+crates/miasma-desktop  Windows desktop GUI (native Win32)
+crates/miasma-bridge   BitTorrent bridge (librqbit-based ingestion)
+crates/miasma-ffi      FFI bindings (future mobile use)
+docs/adr/              Architecture decision records
+scripts/               Build, package, sign, smoke test, soak test scripts
+```
+
+## Building
+
+Requires Rust toolchain (stable) and a Windows environment for the desktop and installer targets.
+
+```
+cargo build --release
+cargo test --workspace
+```
+
+The test suite includes 464 tests (268 core unit + 112 adversarial + 53 integration + 31 bridge), with 0 failures.
+
+One test (`p2p_kademlia_full_roundtrip`) is quarantined with `#[ignore]` due to timing sensitivity. It can be run manually and is also covered by `scripts/smoke-loopback.ps1`.
 
 ## Security Note
 
-This project now contains meaningful routing-security and admission work, but it is still a beta-stage networked system.
-Unknown peers, hostile environments, adversarial routing pressure, and long-term retention behavior all require more validation.
+This is a beta-stage networked system. It has not been externally audited.
+
+The protocol contains meaningful security work: Ed25519 DHT record verification, PoW admission, BBS+ credentials, onion encryption, relay trust verification, ACL-enforced key storage, and a completed security hotfix sprint (VULN-001 through VULN-005). But unknown peers, hostile environments, adversarial routing pressure, and long-term retention behavior all require more validation.
 
 Treat the current release as:
 
-- serious engineering progress
-- suitable for technical beta testing
-- not yet a finished, production-hardened anonymity network
+- Serious engineering progress toward censorship-resistant storage
+- Suitable for technical beta testing and protocol evaluation
+- Not a finished, production-hardened anonymity network
+
+## Near-Term Roadmap
+
+- Constant-rate traffic shaping (timing-analysis resistance beyond fixed-size padding)
+- Android runtime implementation
+- Code signing certificate (Authenticode)
+- Broader real-network adversarial validation
+- External security audit
+
+## License
+
+See [LICENSE](LICENSE) for details.
