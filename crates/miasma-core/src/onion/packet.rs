@@ -66,6 +66,12 @@ pub struct LayerPayload {
     /// The next onion layer bytes (if `next_hop` is `Some`),
     /// or the final query/response payload.
     pub data: Vec<u8>,
+    /// Per-hop symmetric key for response encryption.
+    /// Each relay stores this and encrypts the response with it before
+    /// forwarding back to the previous hop. This ensures each relay adds
+    /// a layer of encryption that only the initiator can remove.
+    #[serde(default)]
+    pub return_key: Option<[u8; 32]>,
 }
 
 /// A 2-hop onion-wrapped packet ready to send to Relay1.
@@ -159,6 +165,7 @@ impl OnionPacketBuilder {
             LayerPayload {
                 next_hop: Some(target_peer_id),
                 data: inner_bytes,
+                return_key: Some(*r2_r1_key),
             },
         )?;
 
@@ -171,6 +178,7 @@ impl OnionPacketBuilder {
             LayerPayload {
                 next_hop: Some(r2_peer_id),
                 data: layer2_bytes,
+                return_key: Some(*r1_init_key),
             },
         )?;
 
@@ -181,6 +189,65 @@ impl OnionPacketBuilder {
             },
             return_path,
         ))
+    }
+
+    /// Build a 2-hop `OnionPacket` with end-to-end encryption to the target.
+    ///
+    /// Like `build()`, but additionally wraps `body` in a target-addressed
+    /// encryption layer using `target_static_pubkey`. This ensures neither
+    /// relay can read the payload, even though R2 peels the inner onion layer.
+    ///
+    /// Returns `(packet, return_path, e2e_session_key)`.
+    /// The `e2e_session_key` is needed to decrypt the target's response.
+    pub fn build_e2e(
+        r1_static_pubkey: &[u8; X25519_KEY_LEN],
+        r2_static_pubkey: &[u8; X25519_KEY_LEN],
+        target_static_pubkey: &[u8; X25519_KEY_LEN],
+        r2_peer_id: Vec<u8>,
+        target_peer_id: Vec<u8>,
+        r2_addr: Vec<u8>,
+        body: Vec<u8>,
+    ) -> Result<(OnionPacket, ReturnPath, Zeroizing<[u8; 32]>), MiasmaError> {
+        // End-to-end encrypt the body for the target.
+        let e2e_layer = Self::encrypt_layer(
+            target_static_pubkey,
+            LayerPayload {
+                next_hop: None, // target is the final destination
+                data: body,
+                return_key: None,
+            },
+        )?;
+        let e2e_bytes = bincode::serialize(&e2e_layer)
+            .map_err(|e| MiasmaError::Serialization(e.to_string()))?;
+
+        // Derive the same session key the target will derive, for response decryption.
+        // We need the shared secret from the e2e ECDH. Since encrypt_layer consumed
+        // the ephemeral secret, we derive the session key from the e2e layer's
+        // ephemeral pubkey and the target's static key. But the initiator doesn't
+        // have the target's static secret. Instead, we derive a deterministic
+        // session key from the e2e ephemeral pubkey bytes as a session identifier.
+        //
+        // For response decryption, we embed a session key in the e2e payload.
+        // Generate a random session key and include it in the onion body.
+        let mut session_key = Zeroizing::new([0u8; 32]);
+        rand::rngs::OsRng.fill_bytes(session_key.as_mut());
+
+        // Wrap: session_key || e2e_encrypted_body
+        let mut wrapped_body = Vec::with_capacity(32 + e2e_bytes.len());
+        wrapped_body.extend_from_slice(session_key.as_ref());
+        wrapped_body.extend_from_slice(&e2e_bytes);
+
+        // Build the standard 2-hop onion packet with the wrapped body.
+        let (packet, return_path) = Self::build(
+            r1_static_pubkey,
+            r2_static_pubkey,
+            r2_peer_id,
+            target_peer_id,
+            r2_addr,
+            wrapped_body,
+        )?;
+
+        Ok((packet, return_path, session_key))
     }
 
     /// Encrypt one onion layer using ECDH + XChaCha20-Poly1305.

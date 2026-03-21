@@ -132,6 +132,11 @@ pub struct PeerDescriptor {
     /// multiple descriptors to the same holder.
     #[serde(default)]
     pub bbs_proof: Option<BbsProof>,
+    /// X25519 static public key for onion-layer encryption.
+    /// Relay-capable and target nodes publish this so initiators can build
+    /// per-hop encrypted onion packets.
+    #[serde(default)]
+    pub onion_pubkey: Option<[u8; 32]>,
     /// Ed25519 signature over the descriptor body (by the descriptor owner).
     /// For pseudonymous descriptors, this is signed by the ephemeral key.
     pub signature: Vec<u8>,
@@ -167,6 +172,25 @@ impl PeerDescriptor {
         version: u64,
         signing_key: &ed25519_dalek::SigningKey,
     ) -> Self {
+        Self::new_signed_full(
+            pseudonym, reachability, addresses, capabilities, resource_profile,
+            credential, bbs_proof, None, version, signing_key,
+        )
+    }
+
+    /// Create a signed descriptor with all optional fields.
+    pub fn new_signed_full(
+        pseudonym: [u8; 32],
+        reachability: ReachabilityKind,
+        addresses: Vec<String>,
+        capabilities: PeerCapabilities,
+        resource_profile: ResourceProfile,
+        credential: Option<CredentialPresentation>,
+        bbs_proof: Option<BbsProof>,
+        onion_pubkey: Option<[u8; 32]>,
+        version: u64,
+        signing_key: &ed25519_dalek::SigningKey,
+    ) -> Self {
         use ed25519_dalek::Signer;
 
         let published_at = SystemTime::now()
@@ -185,6 +209,7 @@ impl PeerDescriptor {
             version,
             signing_pubkey: signing_key.verifying_key().to_bytes(),
             bbs_proof,
+            onion_pubkey,
             signature: Vec::new(),
         };
 
@@ -212,6 +237,10 @@ impl PeerDescriptor {
         // Include BBS+ proof bytes so tampering/removal is detected by signature.
         if let Some(ref proof) = self.bbs_proof {
             body.extend_from_slice(&bincode::serialize(proof).unwrap_or_default());
+        }
+        // Include onion pubkey so tampering/removal is detected by signature.
+        if let Some(ref opk) = self.onion_pubkey {
+            body.extend_from_slice(opk);
         }
         body
     }
@@ -391,6 +420,34 @@ impl DescriptorStore {
                     .map(|pid| (*pid, d.addresses.clone()))
             })
             .collect()
+    }
+
+    /// Return relay-capable peers with their onion X25519 public keys.
+    ///
+    /// Used by the onion encryption layer to build per-hop encrypted packets.
+    /// Only returns relays that have published an `onion_pubkey`.
+    pub fn relay_onion_info(&self) -> Vec<crate::onion::circuit::RelayInfo> {
+        self.descriptors.values()
+            .filter(|d| d.is_relay() && d.age_secs() < MAX_DESCRIPTOR_AGE_SECS)
+            .filter_map(|d| {
+                let onion_pubkey = d.onion_pubkey?;
+                let peer_id = self.pseudonym_to_peer.get(&d.pseudonym)?;
+                Some(crate::onion::circuit::RelayInfo {
+                    peer_id: peer_id.to_bytes(),
+                    onion_pubkey,
+                    addr: d.addresses.first()
+                        .map(|a| a.as_bytes().to_vec())
+                        .unwrap_or_default(),
+                })
+            })
+            .collect()
+    }
+
+    /// Look up a peer's onion X25519 public key from their descriptor.
+    pub fn onion_pubkey_for_peer(&self, peer_id: &PeerId) -> Option<[u8; 32]> {
+        self.peer_to_pseudonym.get(peer_id)
+            .and_then(|ps| self.descriptors.get(ps))
+            .and_then(|d| d.onion_pubkey)
     }
 
     /// Look up a descriptor by pseudonym.
