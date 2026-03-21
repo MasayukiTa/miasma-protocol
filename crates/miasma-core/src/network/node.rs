@@ -585,7 +585,40 @@ pub struct DhtHandle {
     pub(crate) tx: mpsc::Sender<DhtCommand>,
 }
 
+/// Timeout for request-reply DHT commands.  30 s is generous — if the node
+/// event loop cannot process a command in this window something is stuck.
+const DHT_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 impl DhtHandle {
+    /// Create a DhtHandle from a raw channel sender (for testing).
+    pub fn from_sender(tx: mpsc::Sender<DhtCommand>) -> Self {
+        Self { tx }
+    }
+
+    /// Await a oneshot reply with a bounded timeout.
+    async fn recv_reply<T>(&self, rx: oneshot::Receiver<T>, label: &str) -> Result<T, MiasmaError> {
+        match tokio::time::timeout(DHT_REPLY_TIMEOUT, rx).await {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(_)) => Err(MiasmaError::Network(format!("DHT reply dropped ({label})"))),
+            Err(_) => Err(MiasmaError::Network(format!("DHT command timed out ({label})"))),
+        }
+    }
+
+    /// Best-effort send for fire-and-forget commands.  Returns `Ok` even if
+    /// the channel is full (the command is dropped with a warning).
+    fn fire_and_forget(&self, cmd: DhtCommand) -> Result<(), MiasmaError> {
+        match self.tx.try_send(cmd) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                warn!("DHT command channel full, dropping fire-and-forget command");
+                Ok(())
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                Err(MiasmaError::Network("DHT command channel closed".into()))
+            }
+        }
+    }
+
     /// Publish a `DhtRecord` to Kademlia.
     pub async fn put(&self, record: DhtRecord) -> Result<(), MiasmaError> {
         let key = record.mid_digest.to_vec();
@@ -596,8 +629,7 @@ impl DhtHandle {
             .send(DhtCommand::Put { key, value, reply: tx })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
-        rx.await
-            .map_err(|_| MiasmaError::Network("DHT reply channel dropped".into()))?
+        self.recv_reply(rx, "put").await?
     }
 
     /// Register a bootstrap peer inside the running event loop.
@@ -614,7 +646,7 @@ impl DhtHandle {
             .send(DhtCommand::AddBootstrapPeer { peer_id, addr, reply: tx })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
-        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+        self.recv_reply(rx, "add_bootstrap_peer").await
     }
 
     /// Trigger Kademlia FIND_NODE bootstrap.
@@ -627,7 +659,7 @@ impl DhtHandle {
             .send(DhtCommand::BootstrapDht { reply: tx })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
-        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))?
+        self.recv_reply(rx, "bootstrap").await?
     }
 
     /// Return the number of currently connected peers.
@@ -637,7 +669,7 @@ impl DhtHandle {
             .send(DhtCommand::GetPeerCount { reply: tx })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
-        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+        self.recv_reply(rx, "peer_count").await
     }
 
     /// Retrieve a `DhtRecord` from Kademlia by raw mid-digest bytes.
@@ -650,9 +682,7 @@ impl DhtHandle {
             .send(DhtCommand::Get { key: mid_digest.to_vec(), reply: tx })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
-        let raw_opt = rx
-            .await
-            .map_err(|_| MiasmaError::Network("DHT reply channel dropped".into()))??;
+        let raw_opt = self.recv_reply(rx, "get_record").await??;
         match raw_opt {
             Some(bytes) => {
                 // Try to unwrap SignedDhtRecord envelope first, fall back to plain DhtRecord.
@@ -684,7 +714,7 @@ impl DhtHandle {
             .send(DhtCommand::GetAdmissionStats { reply: tx })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
-        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+        self.recv_reply(rx, "admission_stats").await
     }
 
     /// Query routing overlay statistics from the node.
@@ -694,7 +724,7 @@ impl DhtHandle {
             .send(DhtCommand::GetRoutingStats { reply: tx })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
-        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+        self.recv_reply(rx, "routing_stats").await
     }
 
     /// Query credential subsystem statistics.
@@ -704,7 +734,7 @@ impl DhtHandle {
             .send(DhtCommand::GetCredentialStats { reply: tx })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
-        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+        self.recv_reply(rx, "credential_stats").await
     }
 
     /// Query descriptor store statistics.
@@ -714,7 +744,7 @@ impl DhtHandle {
             .send(DhtCommand::GetDescriptorStats { reply: tx })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
-        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+        self.recv_reply(rx, "descriptor_stats").await
     }
 
     /// Query path selection statistics.
@@ -724,7 +754,7 @@ impl DhtHandle {
             .send(DhtCommand::GetPathSelectionStats { reply: tx })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
-        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+        self.recv_reply(rx, "path_selection_stats").await
     }
 
     /// Query Freenet-style outcome metrics.
@@ -734,7 +764,7 @@ impl DhtHandle {
             .send(DhtCommand::GetOutcomeMetrics { reply: tx })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
-        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+        self.recv_reply(rx, "outcome_metrics").await
     }
 
     /// Query relay peer info for relay circuit address construction.
@@ -748,7 +778,7 @@ impl DhtHandle {
             .send(DhtCommand::GetRelayPeers { reply: tx })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
-        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+        self.recv_reply(rx, "relay_peers").await
     }
 
     /// Query relay peers with onion X25519 public keys.
@@ -758,7 +788,7 @@ impl DhtHandle {
             .send(DhtCommand::GetRelayOnionInfo { reply: tx })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
-        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+        self.recv_reply(rx, "relay_onion_info").await
     }
 
     /// Send an onion relay request to a peer and await the response.
@@ -774,8 +804,7 @@ impl DhtHandle {
             .send(DhtCommand::SendOnionRequest { peer_id, addrs, request, return_key, reply: tx })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
-        rx.await
-            .map_err(|_| MiasmaError::Network("onion relay reply dropped".into()))?
+        self.recv_reply(rx, "send_onion_request").await?
     }
 
     /// Query this node's onion X25519 static public key.
@@ -785,7 +814,7 @@ impl DhtHandle {
             .send(DhtCommand::GetOnionPubkey { reply: tx })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
-        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+        self.recv_reply(rx, "onion_pubkey").await
     }
 
     /// Query whether this node is publicly reachable (AutoNAT).
@@ -795,15 +824,12 @@ impl DhtHandle {
             .send(DhtCommand::GetNatStatus { reply: tx })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
-        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+        self.recv_reply(rx, "nat_status").await
     }
 
-    /// Record a relay success/failure for trust tier tracking.
+    /// Record a relay success/failure for trust tier tracking (fire-and-forget).
     pub async fn record_relay_outcome(&self, pseudonym: [u8; 32], success: bool) -> Result<(), MiasmaError> {
-        self.tx
-            .send(DhtCommand::RecordRelayOutcome { pseudonym, success })
-            .await
-            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))
+        self.fire_and_forget(DhtCommand::RecordRelayOutcome { pseudonym, success })
     }
 
     /// Resolve rendezvous introduction point pseudonyms.
@@ -816,7 +842,7 @@ impl DhtHandle {
             .send(DhtCommand::ResolveIntroPoints { intro_pseudonyms, reply: tx })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
-        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+        self.recv_reply(rx, "resolve_intro_points").await
     }
 
     /// Select introduction points for a rendezvous descriptor.
@@ -830,7 +856,7 @@ impl DhtHandle {
             .send(DhtCommand::SelectIntroPoints { own_pseudonym, count, reply: tx })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
-        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+        self.recv_reply(rx, "select_intro_points").await
     }
 
     /// Look up a peer's pseudonym from the descriptor store.
@@ -840,7 +866,7 @@ impl DhtHandle {
             .send(DhtCommand::GetPeerPseudonym { peer_id, reply: tx })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
-        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+        self.recv_reply(rx, "peer_pseudonym").await
     }
 
     /// Look up a peer's full descriptor from the descriptor store.
@@ -850,7 +876,7 @@ impl DhtHandle {
             .send(DhtCommand::GetPeerDescriptor { peer_id, reply: tx })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
-        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+        self.recv_reply(rx, "peer_descriptor").await
     }
 
     /// Look up a peer's X25519 onion pubkey from the descriptor store.
@@ -860,7 +886,7 @@ impl DhtHandle {
             .send(DhtCommand::GetPeerOnionPubkey { peer_id, reply: tx })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
-        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+        self.recv_reply(rx, "peer_onion_pubkey").await
     }
 
     /// Send a relay probe to verify a peer runs the relay-probe protocol.
@@ -875,27 +901,21 @@ impl DhtHandle {
             .send(DhtCommand::SendRelayProbe { peer_id, addrs, nonce, reply: tx })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
-        match rx.await {
+        match self.recv_reply(rx, "probe_relay").await {
             Ok(Some(resp)) => Ok(resp.nonce == nonce),
             Ok(None) => Ok(false),
-            Err(_) => Err(MiasmaError::Network("probe reply dropped".into())),
+            Err(e) => Err(e),
         }
     }
 
     /// Record a successful active probe for a pseudonym (fire-and-forget).
     pub async fn record_probe_success(&self, pseudonym: [u8; 32]) -> Result<(), MiasmaError> {
-        self.tx
-            .send(DhtCommand::RecordProbeSuccess { pseudonym })
-            .await
-            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))
+        self.fire_and_forget(DhtCommand::RecordProbeSuccess { pseudonym })
     }
 
     /// Record a successful forwarding verification for a pseudonym (fire-and-forget).
     pub async fn record_forwarding_verification(&self, pseudonym: [u8; 32]) -> Result<(), MiasmaError> {
-        self.tx
-            .send(DhtCommand::RecordForwardingVerification { pseudonym })
-            .await
-            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))
+        self.fire_and_forget(DhtCommand::RecordForwardingVerification { pseudonym })
     }
 
     /// Check if a pseudonym has a fresh probe result within `freshness_secs`.
@@ -905,7 +925,7 @@ impl DhtHandle {
             .send(DhtCommand::HasFreshProbe { pseudonym, freshness_secs, reply: tx })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
-        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+        self.recv_reply(rx, "has_fresh_probe").await
     }
 
     /// Get relay observation details for a pseudonym.
@@ -915,7 +935,7 @@ impl DhtHandle {
             .send(DhtCommand::GetRelayObservation { pseudonym, reply: tx })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
-        rx.await.map_err(|_| MiasmaError::Network("DHT reply dropped".into()))
+        self.recv_reply(rx, "relay_observation").await
     }
 }
 
@@ -1072,6 +1092,11 @@ pub struct MiasmaNode {
         request_response::OutboundRequestId,
         oneshot::Sender<Option<super::relay_probe::ProbeResponse>>,
     >,
+    /// Bounded replay cache for onion packets.
+    /// Stores BLAKE3 hashes of recently seen (circuit_id || ephemeral_pubkey)
+    /// tuples. Prevents an attacker from replaying captured onion packets
+    /// to confirm circuit endpoints.
+    onion_replay_cache: std::collections::VecDeque<[u8; 32]>,
 }
 
 impl MiasmaNode {
@@ -1184,7 +1209,33 @@ impl MiasmaNode {
             pending_onion_replies: HashMap::new(),
             pending_onion_inbound_channels: HashMap::new(),
             pending_probe_replies: HashMap::new(),
+            onion_replay_cache: std::collections::VecDeque::with_capacity(
+                Self::ONION_REPLAY_CACHE_SIZE,
+            ),
         })
+    }
+
+    /// Maximum number of onion packet fingerprints to remember for replay protection.
+    /// At ~32 bytes each, 4096 entries = ~128 KiB.
+    const ONION_REPLAY_CACHE_SIZE: usize = 4096;
+
+    /// Check if an onion packet is a replay.  Returns `true` if the packet
+    /// has been seen before (and should be rejected).  Otherwise records it
+    /// and returns `false`.
+    fn onion_is_replay(&mut self, circuit_id: &[u8], ephemeral_pubkey: &[u8; 32]) -> bool {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(circuit_id);
+        hasher.update(ephemeral_pubkey);
+        let fp: [u8; 32] = *hasher.finalize().as_bytes();
+
+        if self.onion_replay_cache.contains(&fp) {
+            return true;
+        }
+        if self.onion_replay_cache.len() >= Self::ONION_REPLAY_CACHE_SIZE {
+            self.onion_replay_cache.pop_front();
+        }
+        self.onion_replay_cache.push_back(fp);
+        false
     }
 
     /// Attach a local share store so this node can serve inbound shard requests.
@@ -1592,6 +1643,39 @@ impl MiasmaNode {
                     self.pending_descriptor_reqs.insert(req_id, peer);
                 }
                 debug!("descriptor.refreshed pseudonym={}", hex::encode(&pseudonym[..8]));
+            }
+
+            // Background relay probing: every 5000 ticks, probe one relay
+            // peer that lacks a fresh probe result. This builds trust
+            // evidence during idle periods (no retrieval needed to trigger).
+            if self.event_tick % 5000 == 0 {
+                let freshness_secs = 300u64;
+                let stale_candidate = self.descriptor_store.relay_pseudonyms()
+                    .into_iter()
+                    .find(|ps| !self.descriptor_store.has_fresh_probe(ps, freshness_secs));
+                if let Some(ps) = stale_candidate {
+                    if let Some(desc) = self.descriptor_store.get(&ps) {
+                        if let Some(peer_id) = self.descriptor_store.peer_for_pseudonym(&ps) {
+                            let addrs: Vec<String> = desc.addresses.clone();
+                            // Generate nonce and send probe.
+                            let mut nonce = [0u8; 32];
+                            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
+                            let req = super::relay_probe::ProbeRequest { nonce };
+                            for addr_str in &addrs {
+                                if let Ok(addr) = addr_str.parse::<Multiaddr>() {
+                                    self.swarm.behaviour_mut().kademlia
+                                        .add_address(&peer_id, addr.clone());
+                                    self.swarm.add_peer_address(peer_id, addr.clone());
+                                }
+                            }
+                            let _req_id = self.swarm.behaviour_mut()
+                                .relay_probe.send_request(&peer_id, req);
+                            // We don't track the response for background probes;
+                            // the probe response handler records success anyway.
+                            debug!("background_probe.sent peer={peer_id}");
+                        }
+                    }
+                }
             }
         }
 
@@ -2153,6 +2237,16 @@ impl MiasmaNode {
                 match request {
                     OnionRelayRequest::Packet { circuit_id, layer }
                     | OnionRelayRequest::Forward { circuit_id, layer } => {
+                        // Replay protection: reject packets we've already processed.
+                        if self.onion_is_replay(&circuit_id.0, &layer.ephemeral_pubkey) {
+                            warn!("onion_relay: replayed packet detected, rejecting");
+                            let _ = self.swarm.behaviour_mut().onion_relay
+                                .send_response(channel, OnionRelayResponse::Error(
+                                    "replayed onion packet".into(),
+                                ));
+                            return;
+                        }
+
                         // Peel one onion layer using our static key.
                         match super::onion_relay::process_onion_layer(
                             &self.onion_static_secret,

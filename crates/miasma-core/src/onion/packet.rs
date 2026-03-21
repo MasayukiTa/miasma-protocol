@@ -24,6 +24,20 @@ pub const CIRCUIT_ID_LEN: usize = 16;
 pub const X25519_KEY_LEN: usize = 32;
 const ONION_ENC_LABEL: &[u8] = b"miasma-onion-enc-v1";
 
+/// Fixed size (in bytes) that every onion `LayerPayload.data` field is padded
+/// to before encryption.  This prevents packet-size correlation across hops.
+///
+/// 8 KiB is chosen because:
+/// - Typical share data (4 KiB default segment) fits comfortably
+/// - InnerPayload with ReturnPath + body serialises to ~200–4200 bytes
+/// - The outer-layer data (inner OnionLayer ciphertext) is ~4300–4500 bytes
+/// - 8 KiB provides comfortable headroom with constant wire size
+///
+/// After 3-layer encryption, overhead is ~200 bytes per layer, so the
+/// final on-wire packet is roughly 8 KiB + 600 bytes — well within the
+/// 64 KiB onion message limit.
+pub const ONION_PAD_TARGET: usize = 8 * 1024;
+
 // ─── CircuitId ────────────────────────────────────────────────────────────────
 
 /// Ephemeral, unique-per-circuit identifier.
@@ -251,10 +265,17 @@ impl OnionPacketBuilder {
     }
 
     /// Encrypt one onion layer using ECDH + XChaCha20-Poly1305.
+    ///
+    /// The `data` field within the payload is padded to `ONION_PAD_TARGET`
+    /// bytes before encryption so that all onion packets have a uniform
+    /// ciphertext size, preventing packet-size correlation across hops.
     fn encrypt_layer(
         recipient_static_pubkey: &[u8; X25519_KEY_LEN],
-        payload: LayerPayload,
+        mut payload: LayerPayload,
     ) -> Result<OnionLayer, MiasmaError> {
+        // Pad the data field to a fixed size to prevent traffic analysis.
+        payload.data = pad_to_fixed_size(&payload.data, ONION_PAD_TARGET);
+
         // Generate ephemeral X25519 keypair for this hop.
         let ephemeral_secret = EphemeralSecret::random_from_rng(rand::rngs::OsRng);
         let ephemeral_pubkey = PublicKey::from(&ephemeral_secret);
@@ -305,8 +326,13 @@ impl OnionLayerProcessor {
         // Decrypt.
         let plaintext = xchacha20_decrypt(&enc_key, &layer.nonce, &layer.ciphertext)?;
 
-        bincode::deserialize(&plaintext)
-            .map_err(|e| MiasmaError::Serialization(e.to_string()))
+        let mut payload: LayerPayload = bincode::deserialize(&plaintext)
+            .map_err(|e| MiasmaError::Serialization(e.to_string()))?;
+
+        // Remove padding added during encryption.
+        payload.data = unpad_fixed_size(&payload.data)?;
+
+        Ok(payload)
     }
 }
 
@@ -332,6 +358,46 @@ pub fn decrypt_response(key: &[u8; 32], blob: &[u8]) -> Result<Vec<u8>, MiasmaEr
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Pad `data` to exactly `target_size` bytes using a 4-byte LE length prefix
+/// followed by the original data and random padding bytes.
+///
+/// Format: `[4-byte LE original_len] [original data] [random padding]`
+///
+/// Total output is always `max(target_size, 4 + data.len())`.
+fn pad_to_fixed_size(data: &[u8], target_size: usize) -> Vec<u8> {
+    let header_len = 4; // 4-byte LE length prefix
+    let min_size = header_len + data.len();
+    let padded_size = min_size.max(target_size);
+    let mut out = Vec::with_capacity(padded_size);
+    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    out.extend_from_slice(data);
+    // Fill remaining bytes with random padding.
+    if out.len() < padded_size {
+        let pad_len = padded_size - out.len();
+        let mut pad = vec![0u8; pad_len];
+        rand::rngs::OsRng.fill_bytes(&mut pad);
+        out.extend_from_slice(&pad);
+    }
+    out
+}
+
+/// Remove padding added by `pad_to_fixed_size`.
+///
+/// Reads the 4-byte LE length prefix and returns only the original data.
+pub fn unpad_fixed_size(padded: &[u8]) -> Result<Vec<u8>, MiasmaError> {
+    if padded.len() < 4 {
+        return Err(MiasmaError::Decryption("padded data too short for length prefix".into()));
+    }
+    let original_len = u32::from_le_bytes([padded[0], padded[1], padded[2], padded[3]]) as usize;
+    if 4 + original_len > padded.len() {
+        return Err(MiasmaError::Decryption(format!(
+            "padded data claims length {original_len} but buffer is only {} bytes",
+            padded.len()
+        )));
+    }
+    Ok(padded[4..4 + original_len].to_vec())
+}
 
 fn derive_enc_key(shared_secret: &[u8]) -> Result<Zeroizing<[u8; 32]>, MiasmaError> {
     let hk = Hkdf::<Sha256>::new(None, shared_secret);

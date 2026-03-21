@@ -3339,3 +3339,240 @@ fn secure_file_atomic_no_temp_residue() {
     assert!(!path.with_extension("sec.tmp").exists(),
         "temp file must not remain after successful atomic write");
 }
+
+// ─── v0.2.0-beta.1 hardening tests ──────────────────────────────────────────
+
+/// Onion packet padding: packets of different payload sizes produce the
+/// same encrypted ciphertext length, preventing size-based correlation.
+#[test]
+fn onion_padding_uniform_ciphertext_size() {
+    use miasma_core::onion::OnionPacketBuilder;
+    use x25519_dalek::{PublicKey, StaticSecret};
+
+    let r1_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
+    let r1_pub = PublicKey::from(&r1_secret).to_bytes();
+    let r2_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
+    let r2_pub = PublicKey::from(&r2_secret).to_bytes();
+
+    // Build two packets with very different payload sizes.
+    let (pkt_small, _) = OnionPacketBuilder::build(
+        &r1_pub, &r2_pub,
+        b"r2".to_vec(), b"target".to_vec(), b"addr".to_vec(),
+        b"tiny".to_vec(),  // 4 bytes
+    ).unwrap();
+
+    let (pkt_large, _) = OnionPacketBuilder::build(
+        &r1_pub, &r2_pub,
+        b"r2".to_vec(), b"target".to_vec(), b"addr".to_vec(),
+        vec![0xAA; 4000],  // 4000 bytes
+    ).unwrap();
+
+    // Ciphertext sizes must be equal (padding normalises them).
+    assert_eq!(
+        pkt_small.layer.ciphertext.len(),
+        pkt_large.layer.ciphertext.len(),
+        "onion packets of different payload sizes must have equal ciphertext length"
+    );
+}
+
+/// Onion padding round-trip: padded packet can be peeled and yields
+/// the original payload.
+#[test]
+fn onion_padding_roundtrip() {
+    use miasma_core::onion::{OnionPacketBuilder, packet::{OnionLayerProcessor, InnerPayload}};
+    use x25519_dalek::{PublicKey, StaticSecret};
+
+    let r1_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
+    let r1_pub = PublicKey::from(&r1_secret).to_bytes();
+    let r2_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
+    let r2_pub = PublicKey::from(&r2_secret).to_bytes();
+
+    let body = b"original content".to_vec();
+    let (pkt, _) = OnionPacketBuilder::build(
+        &r1_pub, &r2_pub,
+        b"r2".to_vec(), b"target".to_vec(), b"addr".to_vec(),
+        body.clone(),
+    ).unwrap();
+
+    // Peel layer 1 (R1).
+    let payload1 = OnionLayerProcessor::peel(&r1_secret.to_bytes(), &pkt.layer).unwrap();
+    assert_eq!(payload1.next_hop.as_deref(), Some(b"r2".as_ref()));
+
+    // Peel layer 2 (R2).
+    let inner_layer: miasma_core::onion::packet::OnionLayer =
+        bincode::deserialize(&payload1.data).unwrap();
+    let payload2 = OnionLayerProcessor::peel(&r2_secret.to_bytes(), &inner_layer).unwrap();
+
+    // Final payload matches original.
+    let inner: InnerPayload = bincode::deserialize(&payload2.data).unwrap();
+    assert_eq!(inner.body, body, "padded onion packet must round-trip correctly");
+}
+
+/// Onion pad/unpad: basic correctness.
+#[test]
+fn onion_pad_unpad_roundtrip() {
+    use miasma_core::onion::packet::{unpad_fixed_size, ONION_PAD_TARGET};
+
+    let data = b"hello world";
+    // Manually pad.
+    let mut padded = Vec::new();
+    padded.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    padded.extend_from_slice(data);
+    padded.resize(ONION_PAD_TARGET, 0xFF);
+
+    let unpadded = unpad_fixed_size(&padded).unwrap();
+    assert_eq!(unpadded, data);
+}
+
+/// Anti-gaming: a relay with ≥2 failures and <50% success rate is demoted
+/// to Claimed regardless of probes.
+#[test]
+fn anti_gaming_demotion_on_failure_dominance() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x80u8; 32]);
+    let mut store = DescriptorStore::new();
+
+    let ps = [0xD1; 32];
+    let peer = PeerId::random();
+    store.register_peer_pseudonym(peer, ps);
+    store.upsert(PeerDescriptor::new_signed_full(
+        ps, ReachabilityKind::Direct,
+        vec!["/ip4/9.9.9.9/tcp/4001".to_string()],
+        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop, None, None,
+        Some([0xEE; 32]),
+        1, &key,
+    ));
+
+    // Give it 1 success → Observed.
+    store.record_relay_success(&ps);
+    assert_eq!(store.relay_tier(&ps), RelayTrustTier::Observed);
+
+    // Record a probe success → Observed (probe + 1 success, need 2 for Verified).
+    store.record_probe_success(&ps);
+    assert_eq!(store.relay_tier(&ps), RelayTrustTier::Observed);
+
+    // 2 failures → rate = 1/3 < 50%, failures=2 → anti-gaming demotion.
+    store.record_relay_failure(&ps);
+    store.record_relay_failure(&ps);
+    assert_eq!(store.relay_tier(&ps), RelayTrustTier::Claimed,
+        "relay with ≥2 failures and <50% rate must be demoted to Claimed despite probes");
+}
+
+/// Anti-gaming: a relay with many successes but a few failures stays trusted.
+#[test]
+fn anti_gaming_does_not_demote_mostly_successful_relay() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x81u8; 32]);
+    let mut store = DescriptorStore::new();
+
+    let ps = [0xD2; 32];
+    let peer = PeerId::random();
+    store.register_peer_pseudonym(peer, ps);
+    store.upsert(PeerDescriptor::new_signed_full(
+        ps, ReachabilityKind::Direct,
+        vec!["/ip4/8.8.8.8/tcp/4001".to_string()],
+        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop, None, None,
+        Some([0xFF; 32]),
+        1, &key,
+    ));
+
+    // 5 successes, 2 failures → rate = 5/7 ≈ 71% > 50% → no anti-gaming demotion.
+    for _ in 0..5 { store.record_relay_success(&ps); }
+    for _ in 0..2 { store.record_relay_failure(&ps); }
+
+    // 5 successes at 71% → should be Verified (≥3 successes at ≥75% fails,
+    // but 71% < 75% so it should be Observed).
+    let tier = store.relay_tier(&ps);
+    assert!(tier >= RelayTrustTier::Observed,
+        "relay with 71% success rate and 5 successes should be at least Observed, got {:?}", tier);
+}
+
+/// Replay cache: same fingerprint is detected as a replay.
+#[test]
+fn onion_replay_detection_basic() {
+    // Simulate the replay cache logic.
+    use std::collections::VecDeque;
+
+    let cache_size = 4096usize;
+    let mut cache: VecDeque<[u8; 32]> = VecDeque::with_capacity(cache_size);
+
+    let circuit_id = [0x01u8; 16];
+    let ephemeral_pubkey = [0xAA; 32];
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&circuit_id);
+    hasher.update(&ephemeral_pubkey);
+    let fp: [u8; 32] = *hasher.finalize().as_bytes();
+
+    // First time: not a replay.
+    assert!(!cache.contains(&fp));
+    cache.push_back(fp);
+
+    // Second time: detected as replay.
+    assert!(cache.contains(&fp), "replayed packet must be detected");
+}
+
+/// DescriptorStore relay_pseudonyms returns relay-capable descriptors.
+#[test]
+fn descriptor_store_relay_pseudonyms() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x82u8; 32]);
+    let mut store = DescriptorStore::new();
+
+    // One relay.
+    let ps_relay = [0xE1; 32];
+    let peer_relay = PeerId::random();
+    store.register_peer_pseudonym(peer_relay, ps_relay);
+    store.upsert(PeerDescriptor::new_signed_full(
+        ps_relay, ReachabilityKind::Direct,
+        vec!["/ip4/1.1.1.1/tcp/4001".to_string()],
+        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop, None, None, None,
+        1, &key,
+    ));
+
+    // One non-relay.
+    let ps_store = [0xE2; 32];
+    let peer_store = PeerId::random();
+    store.register_peer_pseudonym(peer_store, ps_store);
+    store.upsert(PeerDescriptor::new_signed_full(
+        ps_store, ReachabilityKind::Direct,
+        vec!["/ip4/2.2.2.2/tcp/4001".to_string()],
+        PeerCapabilities { can_store: true, ..PeerCapabilities::default() },
+        ResourceProfile::Desktop, None, None, None,
+        1, &key,
+    ));
+
+    let relay_ps = store.relay_pseudonyms();
+    assert_eq!(relay_ps.len(), 1);
+    assert_eq!(relay_ps[0], ps_relay);
+}
+
+/// DhtHandle fire-and-forget commands must not block when channel is full.
+/// They use try_send and silently drop on backpressure.
+#[tokio::test]
+async fn dht_fire_and_forget_backpressure() {
+    use tokio::sync::mpsc;
+    use miasma_core::network::node::DhtHandle;
+
+    // Create a channel with capacity 1 so it saturates immediately.
+    let (tx, _rx) = mpsc::channel(1);
+    let handle = DhtHandle::from_sender(tx);
+
+    let pseudonym = [0xAA; 32];
+
+    // Fill the channel with one fire-and-forget command.
+    let r1 = handle.record_relay_outcome(pseudonym, true).await;
+    assert!(r1.is_ok());
+
+    // Second send should NOT block — it drops the command and returns Ok.
+    let r2 = handle.record_relay_outcome(pseudonym, false).await;
+    assert!(r2.is_ok(), "fire-and-forget must not block on full channel");
+
+    // Same for probe success.
+    let r3 = handle.record_probe_success(pseudonym).await;
+    assert!(r3.is_ok(), "probe success must not block on full channel");
+
+    // Same for forwarding verification.
+    let r4 = handle.record_forwarding_verification(pseudonym).await;
+    assert!(r4.is_ok(), "forwarding verification must not block on full channel");
+}
