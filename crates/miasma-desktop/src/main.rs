@@ -78,8 +78,7 @@ fn main() -> eframe::Result<()> {
         use tracing_subscriber::util::SubscriberInitExt;
         let filter = tracing_subscriber::EnvFilter::try_from_env("RUST_LOG")
             .unwrap_or_else(|_| "miasma_desktop=info,miasma_core=info".parse().unwrap());
-        let stderr_layer = tracing_subscriber::fmt::layer()
-            .with_writer(std::io::stderr);
+        let stderr_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
         let file_layer = tracing_subscriber::fmt::layer()
             .with_writer(non_blocking)
             .with_ansi(false);

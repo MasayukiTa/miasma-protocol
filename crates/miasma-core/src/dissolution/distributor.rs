@@ -21,7 +21,9 @@
 /// during the commit window. This is incompatible with a mobile-first design
 /// where nodes churn frequently. Best-effort + repair achieves equivalent
 /// eventual durability without coordinator assumptions (PRD §10).
-use crate::{crypto::hash::ContentId, pipeline::DissolutionParams, share::MiasmaShare, MiasmaError};
+use crate::{
+    crypto::hash::ContentId, pipeline::DissolutionParams, share::MiasmaShare, MiasmaError,
+};
 
 use super::segment::dissolve_segment;
 
@@ -131,8 +133,7 @@ impl<S: ShareSink> ShareDistributor<S> {
         offset_bytes: u64,
         params: DissolutionParams,
     ) -> Result<DistributionResult, MiasmaError> {
-        let (_, shares) =
-            dissolve_segment(segment_data, mid, segment_index, offset_bytes, params)?;
+        let (_, shares) = dissolve_segment(segment_data, mid, segment_index, offset_bytes, params)?;
         Ok(self.distribute_segment(shares).await)
     }
 }
@@ -151,7 +152,12 @@ mod tests {
     impl AlwaysOkSink {
         fn new() -> (Self, Arc<Mutex<Vec<MiasmaShare>>>) {
             let stored = Arc::new(Mutex::new(Vec::new()));
-            (Self { stored: stored.clone() }, stored)
+            (
+                Self {
+                    stored: stored.clone(),
+                },
+                stored,
+            )
         }
     }
 
@@ -174,7 +180,10 @@ mod tests {
         fn new(fail_slots: Vec<u16>) -> (Self, Arc<Mutex<Vec<MiasmaShare>>>) {
             let stored = Arc::new(Mutex::new(Vec::new()));
             (
-                Self { fail_slots, stored: stored.clone() },
+                Self {
+                    fail_slots,
+                    stored: stored.clone(),
+                },
                 stored,
             )
         }
@@ -197,8 +206,7 @@ mod tests {
         let data = b"test content for distribution";
         let mid = ContentId::compute(data, b"k=10,n=20,v=1");
         let params = DissolutionParams::default();
-        let (_meta, shares) =
-            super::dissolve_segment(data, &mid, 0, 0, params).unwrap();
+        let (_meta, shares) = super::dissolve_segment(data, &mid, 0, 0, params).unwrap();
 
         let (sink, stored) = AlwaysOkSink::new();
         let dist = ShareDistributor::new(sink, params.data_shards);

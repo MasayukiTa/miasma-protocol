@@ -23,8 +23,8 @@ pub mod share;
 pub use circuit::{CircuitManager, RelayInfo};
 pub use executor::LiveOnionDhtExecutor;
 pub use packet::{
-    CircuitId, InnerPayload, OnionLayer, OnionLayerProcessor, OnionPacket, OnionPacketBuilder,
-    ReturnPath, derive_onion_static_key,
+    derive_onion_static_key, CircuitId, InnerPayload, OnionLayer, OnionLayerProcessor, OnionPacket,
+    OnionPacketBuilder, ReturnPath,
 };
 pub use router::{ForwardCell, InProcessRelay, OnionRelayHandler, ResponseCell};
 pub use share::{LiveOnionShareFetcher, OnionShareFetcher};

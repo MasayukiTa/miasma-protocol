@@ -89,7 +89,9 @@ pub enum StrategyResult {
 }
 
 impl Default for StrategyResult {
-    fn default() -> Self { Self::NotAttempted }
+    fn default() -> Self {
+        Self::NotAttempted
+    }
 }
 
 impl std::fmt::Display for StrategyResult {
@@ -166,9 +168,7 @@ pub async fn dissolve_torrent(
     quota_mb: u64,
     opts: &DownloadSafetyOpts,
 ) -> anyhow::Result<Vec<String>> {
-    let store = Arc::new(
-        LocalShareStore::open(data_dir, quota_mb).context("open share store")?,
-    );
+    let store = Arc::new(LocalShareStore::open(data_dir, quota_mb).context("open share store")?);
 
     let ih_hex = hex::encode(info_hash);
     let name = display_name.unwrap_or("unknown");
@@ -188,7 +188,11 @@ pub async fn dissolve_torrent(
         upload_rate_limit_bps: opts.upload_rate_limit_bps,
         download_rate_limit_bps: opts.download_rate_limit_bps,
         proxy_url: opts.proxy_url.clone(),
-        max_total_bytes: if opts.confirm_download { 0 } else { opts.max_total_bytes },
+        max_total_bytes: if opts.confirm_download {
+            0
+        } else {
+            opts.max_total_bytes
+        },
         ..Default::default()
     };
 
@@ -198,19 +202,23 @@ pub async fn dissolve_torrent(
 
     // Download with progress logging.
     let result = session
-        .download_magnet(&magnet, Some(|progress: crate::torrent::DownloadProgress| {
-            if progress.total_bytes > 0 {
-                let pct = (progress.downloaded_bytes as f64 / progress.total_bytes as f64) * 100.0;
-                info!(
-                    "  {:.1}% ({}/{} bytes) peers={} speed={:.2} Mbps",
-                    pct,
-                    progress.downloaded_bytes,
-                    progress.total_bytes,
-                    progress.peers,
-                    progress.download_speed_mbps,
-                );
-            }
-        }))
+        .download_magnet(
+            &magnet,
+            Some(|progress: crate::torrent::DownloadProgress| {
+                if progress.total_bytes > 0 {
+                    let pct =
+                        (progress.downloaded_bytes as f64 / progress.total_bytes as f64) * 100.0;
+                    info!(
+                        "  {:.1}% ({}/{} bytes) peers={} speed={:.2} Mbps",
+                        pct,
+                        progress.downloaded_bytes,
+                        progress.total_bytes,
+                        progress.peers,
+                        progress.download_speed_mbps,
+                    );
+                }
+            }),
+        )
         .await
         .context("librqbit download")?;
 
@@ -320,9 +328,15 @@ pub async fn inspect_torrent(
     // If DHT succeeded and we can fetch metadata, return early.
     if !peers.is_empty() {
         if let Ok(result) = try_metadata_from_peers(
-            &ih_hex, display_name, &peers, info_hash,
-            DiscoveryMethod::Dht, &attempts,
-        ).await {
+            &ih_hex,
+            display_name,
+            &peers,
+            info_hash,
+            DiscoveryMethod::Dht,
+            &attempts,
+        )
+        .await
+        {
             return Ok(result);
         }
         // Metadata fetch failed despite having peers — record and continue.
@@ -357,9 +371,15 @@ pub async fn inspect_torrent(
 
     if !peers.is_empty() {
         if let Ok(result) = try_metadata_from_peers(
-            &ih_hex, display_name, &peers, info_hash,
-            DiscoveryMethod::HttpTracker, &attempts,
-        ).await {
+            &ih_hex,
+            display_name,
+            &peers,
+            info_hash,
+            DiscoveryMethod::HttpTracker,
+            &attempts,
+        )
+        .await
+        {
             return Ok(result);
         }
         attempts.http_tracker = StrategyResult::Failed {
@@ -397,7 +417,9 @@ pub async fn inspect_torrent(
                  DHT:          {}\n  \
                  HTTP tracker: {}\n  \
                  .torrent:     {}",
-                attempts.dht, attempts.http_tracker, attempts.torrent_file,
+                attempts.dht,
+                attempts.http_tracker,
+                attempts.torrent_file,
             );
         }
     }
@@ -429,8 +451,7 @@ async fn try_metadata_from_peers(
 
 /// Initialize a dedicated bridge inbox directory with an explicit marker file.
 pub fn init_inbox(dir: &Path) -> anyhow::Result<()> {
-    std::fs::create_dir_all(dir)
-        .with_context(|| format!("create inbox dir {}", dir.display()))?;
+    std::fs::create_dir_all(dir).with_context(|| format!("create inbox dir {}", dir.display()))?;
     let marker_path = dir.join(INBOX_MARKER);
     if !marker_path.exists() {
         std::fs::write(
@@ -462,11 +483,14 @@ pub async fn dht_ping() -> anyhow::Result<Vec<(String, SocketAddr, Vec<u8>)>> {
         d.insert(b"t".to_vec(), Value::Bytes(tid.to_vec()));
         d.insert(b"y".to_vec(), Value::Bytes(b"q".to_vec()));
         d.insert(b"q".to_vec(), Value::Bytes(b"ping".to_vec()));
-        d.insert(b"a".to_vec(), Value::Dict({
-            let mut a = BTreeMap::new();
-            a.insert(b"id".to_vec(), Value::Bytes(our_id.to_vec()));
-            a
-        }));
+        d.insert(
+            b"a".to_vec(),
+            Value::Dict({
+                let mut a = BTreeMap::new();
+                a.insert(b"id".to_vec(), Value::Bytes(our_id.to_vec()));
+                a
+            }),
+        );
         d
     }));
 
@@ -476,7 +500,10 @@ pub async fn dht_ping() -> anyhow::Result<Vec<(String, SocketAddr, Vec<u8>)>> {
     for node in DHT_BOOTSTRAP {
         let addrs: Vec<SocketAddr> = match node.to_socket_addrs() {
             Ok(a) => a.collect(),
-            Err(e) => { info!("DNS {node}: {e}"); continue; }
+            Err(e) => {
+                info!("DNS {node}: {e}");
+                continue;
+            }
         };
         for addr in addrs {
             if let Err(e) = sock.send_to(&query, addr).await {
@@ -586,10 +613,16 @@ async fn dht_get_peers(info_hash: &[u8; 20]) -> anyhow::Result<Vec<SocketAddr>> 
     for node in DHT_BOOTSTRAP {
         let addrs: Vec<SocketAddr> = match node.to_socket_addrs() {
             Ok(a) => a.collect(),
-            Err(e) => { debug!("DNS {node}: {e}"); continue; }
+            Err(e) => {
+                debug!("DNS {node}: {e}");
+                continue;
+            }
         };
         for addr in addrs {
-            candidates.push(DhtNode { id: [0u8; 20], addr });
+            candidates.push(DhtNode {
+                id: [0u8; 20],
+                addr,
+            });
         }
     }
 
@@ -598,9 +631,8 @@ async fn dht_get_peers(info_hash: &[u8; 20]) -> anyhow::Result<Vec<SocketAddr>> 
 
     for iteration in 0..DHT_MAX_ITERATIONS {
         // Sort candidates by XOR distance to info_hash (closest first).
-        candidates.sort_by(|a, b| {
-            xor_distance(&a.id, info_hash).cmp(&xor_distance(&b.id, info_hash))
-        });
+        candidates
+            .sort_by(|a, b| xor_distance(&a.id, info_hash).cmp(&xor_distance(&b.id, info_hash)));
 
         // Pick up to ALPHA closest nodes we haven't queried yet.
         let batch: Vec<DhtNode> = candidates
@@ -634,12 +666,15 @@ async fn dht_get_peers(info_hash: &[u8; 20]) -> anyhow::Result<Vec<SocketAddr>> 
                 d.insert(b"t".to_vec(), Value::Bytes(tid.to_vec()));
                 d.insert(b"y".to_vec(), Value::Bytes(b"q".to_vec()));
                 d.insert(b"q".to_vec(), Value::Bytes(b"get_peers".to_vec()));
-                d.insert(b"a".to_vec(), Value::Dict({
-                    let mut a = BTreeMap::new();
-                    a.insert(b"id".to_vec(), Value::Bytes(our_id.to_vec()));
-                    a.insert(b"info_hash".to_vec(), Value::Bytes(info_hash.to_vec()));
-                    a
-                }));
+                d.insert(
+                    b"a".to_vec(),
+                    Value::Dict({
+                        let mut a = BTreeMap::new();
+                        a.insert(b"id".to_vec(), Value::Bytes(our_id.to_vec()));
+                        a.insert(b"info_hash".to_vec(), Value::Bytes(info_hash.to_vec()));
+                        a
+                    }),
+                );
                 d
             }));
 
@@ -649,32 +684,26 @@ async fn dht_get_peers(info_hash: &[u8; 20]) -> anyhow::Result<Vec<SocketAddr>> 
         }
 
         // Collect responses (wait for all with a deadline).
-        let deadline = tokio::time::Instant::now()
-            + Duration::from_secs(DHT_QUERY_TIMEOUT_SECS);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(DHT_QUERY_TIMEOUT_SECS);
         let mut responses = 0;
 
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() { break; }
+            if remaining.is_zero() {
+                break;
+            }
 
             match timeout(remaining, sock.recv_from(&mut buf)).await {
                 Ok(Ok((n, from))) => {
                     responses += 1;
-                    let (found_peers, found_nodes) =
-                        parse_get_peers_response_with_ids(&buf[..n]);
+                    let (found_peers, found_nodes) = parse_get_peers_response_with_ids(&buf[..n]);
 
                     if !found_peers.is_empty() {
-                        debug!(
-                            "  got {} peers from {from}",
-                            found_peers.len()
-                        );
+                        debug!("  got {} peers from {from}", found_peers.len());
                         peers.extend(&found_peers);
                     }
                     if !found_nodes.is_empty() {
-                        debug!(
-                            "  got {} closer nodes from {from}",
-                            found_nodes.len()
-                        );
+                        debug!("  got {} closer nodes from {from}", found_nodes.len());
                         // Add new candidates (dedup by addr).
                         for node in found_nodes {
                             if !candidates.iter().any(|c| c.addr == node.addr) {
@@ -698,7 +727,10 @@ async fn dht_get_peers(info_hash: &[u8; 20]) -> anyhow::Result<Vec<SocketAddr>> 
             iteration,
             responses,
             peers.len(),
-            candidates.iter().filter(|n| !queried.contains(&n.addr)).count()
+            candidates
+                .iter()
+                .filter(|n| !queried.contains(&n.addr))
+                .count()
         );
 
         // If we found enough peers, stop.
@@ -775,10 +807,14 @@ fn parse_get_peers_response_with_ids(data: &[u8]) -> (Vec<SocketAddr>, Vec<DhtNo
 }
 
 fn decode_compact_6(bytes: &[u8]) -> Option<SocketAddr> {
-    if bytes.len() < 6 { return None; }
+    if bytes.len() < 6 {
+        return None;
+    }
     let ip = std::net::Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]);
     let port = u16::from_be_bytes([bytes[4], bytes[5]]);
-    if port == 0 { return None; }
+    if port == 0 {
+        return None;
+    }
     Some(SocketAddr::from((ip, port)))
 }
 
@@ -831,22 +867,23 @@ async fn http_tracker_announce(
     info_hash: &[u8; 20],
 ) -> anyhow::Result<Vec<SocketAddr>> {
     // Parse URL
-    let url = tracker_url.strip_prefix("http://")
+    let url = tracker_url
+        .strip_prefix("http://")
         .ok_or_else(|| anyhow::anyhow!("only http:// trackers supported"))?;
-    let (host_port, path) = url.split_once('/')
+    let (host_port, path) = url
+        .split_once('/')
         .ok_or_else(|| anyhow::anyhow!("invalid tracker URL"))?;
     let path = format!("/{path}");
 
     // Resolve host
-    let addr: SocketAddr = host_port.to_socket_addrs()
+    let addr: SocketAddr = host_port
+        .to_socket_addrs()
         .context("DNS resolve")?
         .next()
         .ok_or_else(|| anyhow::anyhow!("no addresses for {host_port}"))?;
 
     // URL-encode info_hash
-    let ih_encoded: String = info_hash.iter()
-        .map(|b| format!("%{b:02X}"))
-        .collect();
+    let ih_encoded: String = info_hash.iter().map(|b| format!("%{b:02X}")).collect();
     let peer_id = "-MI0001-000000000000";
 
     let request = format!(
@@ -856,21 +893,27 @@ async fn http_tracker_announce(
     );
 
     let mut stream = TcpStream::connect(addr).await.context("TCP connect")?;
-    stream.write_all(request.as_bytes()).await.context("send request")?;
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .context("send request")?;
 
     let mut response = Vec::new();
-    stream.read_to_end(&mut response).await.context("read response")?;
+    stream
+        .read_to_end(&mut response)
+        .await
+        .context("read response")?;
 
     // Find the body after \r\n\r\n
-    let body_start = response.windows(4)
+    let body_start = response
+        .windows(4)
         .position(|w| w == b"\r\n\r\n")
         .map(|p| p + 4)
         .unwrap_or(0);
     let body = &response[body_start..];
 
     // Parse bencoded tracker response
-    let (resp, _) = bencode::decode(body)
-        .map_err(|e| anyhow::anyhow!("bencode: {e}"))?;
+    let (resp, _) = bencode::decode(body).map_err(|e| anyhow::anyhow!("bencode: {e}"))?;
 
     // Check for error
     if let Some(err) = resp.dict_get(b"failure reason") {
@@ -906,9 +949,7 @@ async fn fetch_torrent_file_from_web(info_hash: &[u8; 20]) -> anyhow::Result<(Ve
     info!("Trying to fetch .torrent file for {ih_hex} from web sources...");
 
     // Source 1: torrent cache sites (may be blocked by DPI)
-    let cache_sources = [
-        format!("https://itorrents.org/torrent/{ih_hex}.torrent"),
-    ];
+    let cache_sources = [format!("https://itorrents.org/torrent/{ih_hex}.torrent")];
 
     for url in &cache_sources {
         match timeout(Duration::from_secs(15), https_get(url)).await {
@@ -940,12 +981,10 @@ async fn archive_org_torrent(ih_hex: &str) -> anyhow::Result<Vec<u8>> {
     let search_url = format!(
         "https://archive.org/advancedsearch.php?q=btih%3A{ih_hex}&output=json&rows=1&fl[]=identifier"
     );
-    let search_body = https_get(&search_url).await
-        .context("archive.org search")?;
+    let search_body = https_get(&search_url).await.context("archive.org search")?;
 
     // Parse JSON response to extract identifier
-    let search_text = std::str::from_utf8(&search_body)
-        .context("search response not UTF-8")?;
+    let search_text = std::str::from_utf8(&search_body).context("search response not UTF-8")?;
 
     // Simple JSON extraction — find "identifier":"<value>"
     let identifier = search_text
@@ -959,17 +998,20 @@ async fn archive_org_torrent(ih_hex: &str) -> anyhow::Result<Vec<u8>> {
     info!("archive.org: found item '{identifier}' for btih {ih_hex}");
 
     // Step 2: Download the .torrent file
-    let torrent_url = format!(
-        "https://archive.org/download/{identifier}/{identifier}_archive.torrent"
-    );
-    let torrent_bytes = https_get(&torrent_url).await
+    let torrent_url =
+        format!("https://archive.org/download/{identifier}/{identifier}_archive.torrent");
+    let torrent_bytes = https_get(&torrent_url)
+        .await
         .context("download .torrent from archive.org")?;
 
     if torrent_bytes.len() < 20 || !torrent_bytes.starts_with(b"d") {
         bail!("archive.org: downloaded file is not a valid .torrent");
     }
 
-    info!("Downloaded .torrent ({} bytes) from archive.org/{identifier}", torrent_bytes.len());
+    info!(
+        "Downloaded .torrent ({} bytes) from archive.org/{identifier}",
+        torrent_bytes.len()
+    );
     Ok(torrent_bytes)
 }
 
@@ -1001,10 +1043,11 @@ async fn https_get(url: &str) -> anyhow::Result<Vec<u8>> {
 /// Parse a full .torrent file (bencoded with outer `d` wrapper) to extract
 /// the file list from the `info` dict.
 fn parse_torrent_file_info(torrent_bytes: &[u8]) -> anyhow::Result<Vec<(String, u64)>> {
-    let (torrent, _) = bencode::decode(torrent_bytes)
-        .map_err(|e| anyhow::anyhow!("bencode: {e}"))?;
+    let (torrent, _) =
+        bencode::decode(torrent_bytes).map_err(|e| anyhow::anyhow!("bencode: {e}"))?;
 
-    let info = torrent.dict_get(b"info")
+    let info = torrent
+        .dict_get(b"info")
         .ok_or_else(|| anyhow::anyhow!("missing info dict in .torrent"))?;
 
     // Re-encode the info dict so we can parse it with our existing function
@@ -1024,13 +1067,12 @@ async fn fetch_info_dict_from_peers(
     info_hash: &[u8; 20],
 ) -> anyhow::Result<Vec<u8>> {
     for (i, &peer) in peers.iter().take(30).enumerate() {
-        debug!("Trying metadata from peer {}/{}: {peer}", i + 1, peers.len().min(30));
-        match timeout(
-            Duration::from_secs(8),
-            fetch_ut_metadata(peer, info_hash),
-        )
-        .await
-        {
+        debug!(
+            "Trying metadata from peer {}/{}: {peer}",
+            i + 1,
+            peers.len().min(30)
+        );
+        match timeout(Duration::from_secs(8), fetch_ut_metadata(peer, info_hash)).await {
             Ok(Ok(bytes)) => {
                 info!("Got metadata ({} bytes) from {peer}", bytes.len());
                 return Ok(bytes);
@@ -1043,10 +1085,7 @@ async fn fetch_info_dict_from_peers(
 }
 
 /// Connect to a peer, do BT handshake + extension, then fetch ut_metadata.
-async fn fetch_ut_metadata(
-    peer: SocketAddr,
-    info_hash: &[u8; 20],
-) -> anyhow::Result<Vec<u8>> {
+async fn fetch_ut_metadata(peer: SocketAddr, info_hash: &[u8; 20]) -> anyhow::Result<Vec<u8>> {
     let mut stream = timeout(Duration::from_secs(10), TcpStream::connect(peer))
         .await
         .context("connect timeout")?
@@ -1064,7 +1103,10 @@ async fn fetch_ut_metadata(
     handshake.extend_from_slice(info_hash);
     handshake.extend_from_slice(&our_id);
 
-    stream.write_all(&handshake).await.context("send handshake")?;
+    stream
+        .write_all(&handshake)
+        .await
+        .context("send handshake")?;
 
     // Read remote handshake (68 bytes)
     let mut rbuf = [0u8; 68];
@@ -1085,11 +1127,14 @@ async fn fetch_ut_metadata(
     // ── Extension handshake (BEP-10) ────────────────────────────────────────
     let ext_hs_payload = bencode::encode(&Value::Dict({
         let mut d = BTreeMap::new();
-        d.insert(b"m".to_vec(), Value::Dict({
-            let mut m = BTreeMap::new();
-            m.insert(b"ut_metadata".to_vec(), Value::Int(UT_METADATA_ID as i64));
-            m
-        }));
+        d.insert(
+            b"m".to_vec(),
+            Value::Dict({
+                let mut m = BTreeMap::new();
+                m.insert(b"ut_metadata".to_vec(), Value::Int(UT_METADATA_ID as i64));
+                m
+            }),
+        );
         d
     }));
 
@@ -1101,15 +1146,18 @@ async fn fetch_ut_metadata(
         bail!("Expected ext handshake (20), got {msg_id}");
     }
     // payload[0] = 0 (handshake ext_id), rest is bencoded dict
-    if payload.is_empty() { bail!("Empty ext handshake"); }
+    if payload.is_empty() {
+        bail!("Empty ext handshake");
+    }
 
-    let (hs_dict, _) = bencode::decode(&payload[1..])
-        .map_err(|e| anyhow::anyhow!("parse ext hs: {e}"))?;
+    let (hs_dict, _) =
+        bencode::decode(&payload[1..]).map_err(|e| anyhow::anyhow!("parse ext hs: {e}"))?;
     let peer_ut_meta_id = hs_dict
         .dict_get(b"m")
         .and_then(|m: &Value| m.dict_get(b"ut_metadata"))
         .and_then(|v: &Value| v.as_int())
-        .ok_or_else(|| anyhow::anyhow!("Peer does not advertise ut_metadata"))? as u8;
+        .ok_or_else(|| anyhow::anyhow!("Peer does not advertise ut_metadata"))?
+        as u8;
 
     let metadata_size = hs_dict
         .dict_get(b"metadata_size")
@@ -1141,8 +1189,12 @@ async fn fetch_ut_metadata(
             Ok(p) => p,
             Err(_) => break,
         };
-        if msg_id != 20 || payload.is_empty() { continue; }
-        if payload[0] != peer_ut_meta_id { continue; }
+        if msg_id != 20 || payload.is_empty() {
+            continue;
+        }
+        if payload[0] != peer_ut_meta_id {
+            continue;
+        }
 
         // Decode the dict prefix to find piece index and data offset.
         let (dict, rest) = match bencode::decode(&payload[1..]) {
@@ -1150,10 +1202,18 @@ async fn fetch_ut_metadata(
             Err(_) => continue,
         };
 
-        let msg_type = dict.dict_get(b"msg_type").and_then(|v| v.as_int()).unwrap_or(-1);
-        let piece_idx = dict.dict_get(b"piece").and_then(|v| v.as_int()).unwrap_or(-1) as usize;
+        let msg_type = dict
+            .dict_get(b"msg_type")
+            .and_then(|v| v.as_int())
+            .unwrap_or(-1);
+        let piece_idx = dict
+            .dict_get(b"piece")
+            .and_then(|v| v.as_int())
+            .unwrap_or(-1) as usize;
 
-        if msg_type != 1 || piece_idx >= num_pieces { continue; } // data = 1
+        if msg_type != 1 || piece_idx >= num_pieces {
+            continue;
+        } // data = 1
 
         // `rest` is the raw metadata bytes for this piece (everything after
         // the bencoded dict in the extension payload).
@@ -1194,11 +1254,15 @@ fn parse_info_dict(info_bytes: &[u8]) -> anyhow::Result<Vec<(String, u64)>> {
             .and_then(|b| std::str::from_utf8(b).ok())
             .unwrap_or("torrent");
 
-        for entry in f.as_list().ok_or_else(|| anyhow::anyhow!("files not a list"))? {
+        for entry in f
+            .as_list()
+            .ok_or_else(|| anyhow::anyhow!("files not a list"))?
+        {
             let size = entry
                 .dict_get(b"length")
                 .and_then(|v| v.as_int())
-                .ok_or_else(|| anyhow::anyhow!("file missing length"))? as u64;
+                .ok_or_else(|| anyhow::anyhow!("file missing length"))?
+                as u64;
 
             let path_parts = entry
                 .dict_get(b"path")
@@ -1222,10 +1286,10 @@ fn parse_info_dict(info_bytes: &[u8]) -> anyhow::Result<Vec<(String, u64)>> {
             .and_then(|b| std::str::from_utf8(b).ok())
             .unwrap_or("file")
             .to_owned();
-        let size = info
-            .dict_get(b"length")
-            .and_then(|v| v.as_int())
-            .ok_or_else(|| anyhow::anyhow!("missing length in info dict"))? as u64;
+        let size =
+            info.dict_get(b"length")
+                .and_then(|v| v.as_int())
+                .ok_or_else(|| anyhow::anyhow!("missing length in info dict"))? as u64;
         files.push((name, size));
     }
 
@@ -1256,7 +1320,8 @@ async fn download_file(
     let pieces_hash = info
         .dict_get(b"pieces")
         .and_then(|v| v.as_bytes())
-        .ok_or_else(|| anyhow::anyhow!("missing pieces"))?.to_owned();
+        .ok_or_else(|| anyhow::anyhow!("missing pieces"))?
+        .to_owned();
 
     let num_pieces = (size as usize + piece_length - 1) / piece_length;
 
@@ -1307,15 +1372,21 @@ async fn download_from_peer(
 
     let mut rbuf = [0u8; 68];
     stream.read_exact(&mut rbuf).await?;
-    if &rbuf[1..20] != b"BitTorrent protocol" { bail!("Not a BT peer"); }
+    if &rbuf[1..20] != b"BitTorrent protocol" {
+        bail!("Not a BT peer");
+    }
 
     // Send interested + unchoke.
     send_msg(&mut stream, 2, &[], &[]).await?; // interested
-    // Wait for unchoke (msg_id 1) or bitfield.
+                                               // Wait for unchoke (msg_id 1) or bitfield.
     for _ in 0..10 {
         let (msg_id, _) = recv_msg(&mut stream).await?;
-        if msg_id == 1 { break; } // unchoke
-        if msg_id == 5 { continue; } // bitfield — wait for unchoke
+        if msg_id == 1 {
+            break;
+        } // unchoke
+        if msg_id == 5 {
+            continue;
+        } // bitfield — wait for unchoke
     }
 
     // Download pieces.
@@ -1339,11 +1410,17 @@ async fn download_from_peer(
 
             loop {
                 let (msg_id, payload) = recv_msg(&mut stream).await?;
-                if msg_id != 7 { continue; } // piece = 7
-                if payload.len() < 8 { continue; }
+                if msg_id != 7 {
+                    continue;
+                } // piece = 7
+                if payload.len() < 8 {
+                    continue;
+                }
                 let recv_piece = u32::from_be_bytes(payload[0..4].try_into().unwrap()) as usize;
                 let recv_begin = u32::from_be_bytes(payload[4..8].try_into().unwrap()) as usize;
-                if recv_piece != piece_idx || recv_begin != offset { continue; }
+                if recv_piece != piece_idx || recv_begin != offset {
+                    continue;
+                }
                 let block_data = &payload[8..];
                 let dst_start = piece_begin + offset;
                 let dst_end = (dst_start + block_data.len()).min(total_size);
@@ -1360,13 +1437,17 @@ async fn download_from_peer(
 #[allow(dead_code)]
 /// Verify pieces using SHA1 hashes from the info dict.
 fn verify_pieces(data: &[u8], pieces_hash: &[u8], piece_length: usize) -> bool {
-    if pieces_hash.len() % 20 != 0 { return false; }
+    if pieces_hash.len() % 20 != 0 {
+        return false;
+    }
     let num_pieces = pieces_hash.len() / 20;
 
     for (i, expected) in pieces_hash.chunks(20).enumerate() {
         let start = i * piece_length;
         let end = (start + piece_length).min(data.len());
-        if start >= data.len() { break; }
+        if start >= data.len() {
+            break;
+        }
         let actual = sha1_of(&data[start..end]);
         if actual != expected {
             return false;
@@ -1393,37 +1474,49 @@ fn sha1_compress(data: &[u8]) -> [u8; 20] {
     let mut msg = data.to_vec();
     let bit_len = (data.len() as u64) * 8;
     msg.push(0x80);
-    while msg.len() % 64 != 56 { msg.push(0); }
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
     msg.extend_from_slice(&bit_len.to_be_bytes());
 
     for chunk in msg.chunks(64) {
         let mut w = [0u32; 80];
         for i in 0..16 {
-            w[i] = u32::from_be_bytes(chunk[i*4..i*4+4].try_into().unwrap());
+            w[i] = u32::from_be_bytes(chunk[i * 4..i * 4 + 4].try_into().unwrap());
         }
         for i in 16..80 {
-            w[i] = (w[i-3] ^ w[i-8] ^ w[i-14] ^ w[i-16]).rotate_left(1);
+            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
         }
         let (mut a, mut b, mut c, mut d, mut e) = (h[0], h[1], h[2], h[3], h[4]);
         for i in 0..80 {
             let (f, k) = match i {
-                0..=19  => ((b & c) | ((!b) & d),   0x5A827999u32),
-                20..=39 => (b ^ c ^ d,               0x6ED9EBA1u32),
+                0..=19 => ((b & c) | ((!b) & d), 0x5A827999u32),
+                20..=39 => (b ^ c ^ d, 0x6ED9EBA1u32),
                 40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1BBCDC),
-                _       => (b ^ c ^ d,               0xCA62C1D6u32),
+                _ => (b ^ c ^ d, 0xCA62C1D6u32),
             };
-            let temp = a.rotate_left(5).wrapping_add(f).wrapping_add(e)
-                         .wrapping_add(k).wrapping_add(w[i]);
-            e = d; d = c; c = b.rotate_left(30); b = a; a = temp;
+            let temp = a
+                .rotate_left(5)
+                .wrapping_add(f)
+                .wrapping_add(e)
+                .wrapping_add(k)
+                .wrapping_add(w[i]);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = temp;
         }
-        h[0] = h[0].wrapping_add(a); h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c); h[3] = h[3].wrapping_add(d);
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
         h[4] = h[4].wrapping_add(e);
     }
 
     let mut out = [0u8; 20];
     for (i, &val) in h.iter().enumerate() {
-        out[i*4..i*4+4].copy_from_slice(&val.to_be_bytes());
+        out[i * 4..i * 4 + 4].copy_from_slice(&val.to_be_bytes());
     }
     out
 }
@@ -1455,8 +1548,12 @@ async fn recv_msg(stream: &mut TcpStream) -> anyhow::Result<(u8, Vec<u8>)> {
         .context("recv len")?;
 
     let len = u32::from_be_bytes(len_buf) as usize;
-    if len == 0 { return Ok((0, vec![])); } // keep-alive
-    if len > 10 * 1024 * 1024 { bail!("Message too large: {len}"); }
+    if len == 0 {
+        return Ok((0, vec![]));
+    } // keep-alive
+    if len > 10 * 1024 * 1024 {
+        bail!("Message too large: {len}");
+    }
 
     let mut payload = vec![0u8; len];
     timeout(Duration::from_secs(30), stream.read_exact(&mut payload))
@@ -1498,12 +1595,13 @@ pub async fn watch_and_dissolve(
 
     validate_inbox_dir(watch_dir, data_dir)?;
 
-    let store = Arc::new(
-        LocalShareStore::open(data_dir, quota_mb).context("open share store")?,
-    );
+    let store = Arc::new(LocalShareStore::open(data_dir, quota_mb).context("open share store")?);
     let params = DissolutionParams::default();
 
-    info!("Bridge daemon watching {} for new files…", watch_dir.display());
+    info!(
+        "Bridge daemon watching {} for new files…",
+        watch_dir.display()
+    );
     let mut seen = seed_seen_files(watch_dir)?;
 
     loop {
@@ -1519,9 +1617,7 @@ pub async fn watch_and_dissolve(
                         archive_imported_file(watch_dir, &path)?;
                         info!(
                             "Dissolved {} → {}",
-                            path.file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("?"),
+                            path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
                             mid.to_string()
                         );
                     }
@@ -1618,7 +1714,10 @@ fn scan_new_inbox_files(
 }
 
 fn is_importable_file(path: &Path) -> anyhow::Result<bool> {
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
     if name == INBOX_MARKER || name == PROCESSED_DIR {
         return Ok(false);
     }
@@ -1642,7 +1741,10 @@ fn archive_imported_file(inbox_dir: &Path, path: &Path) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("imported path has no filename: {}", path.display()))?;
     let mut dest = processed_dir.join(file_name);
     if dest.exists() {
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("imported");
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("imported");
         let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
         let suffix = format!(
             "-{}",
@@ -1659,17 +1761,18 @@ fn archive_imported_file(inbox_dir: &Path, path: &Path) -> anyhow::Result<()> {
         dest = processed_dir.join(unique);
     }
 
-    std::fs::rename(path, &dest).or_else(|_| {
-        std::fs::copy(path, &dest)?;
-        std::fs::remove_file(path)
-    })
-    .with_context(|| {
-        format!(
-            "move imported file {} to {}",
-            path.display(),
-            dest.display()
-        )
-    })?;
+    std::fs::rename(path, &dest)
+        .or_else(|_| {
+            std::fs::copy(path, &dest)?;
+            std::fs::remove_file(path)
+        })
+        .with_context(|| {
+            format!(
+                "move imported file {} to {}",
+                path.display(),
+                dest.display()
+            )
+        })?;
 
     Ok(())
 }
@@ -1683,9 +1786,8 @@ mod tests {
     fn sha1_empty() {
         // SHA1("") = da39a3ee5e6b4b0d3255bfef95601890afd80709
         let expected = [
-            0xda, 0x39, 0xa3, 0xee, 0x5e, 0x6b, 0x4b, 0x0d,
-            0x32, 0x55, 0xbf, 0xef, 0x95, 0x60, 0x18, 0x90,
-            0xaf, 0xd8, 0x07, 0x09,
+            0xda, 0x39, 0xa3, 0xee, 0x5e, 0x6b, 0x4b, 0x0d, 0x32, 0x55, 0xbf, 0xef, 0x95, 0x60,
+            0x18, 0x90, 0xaf, 0xd8, 0x07, 0x09,
         ];
         assert_eq!(sha1_compress(&[]), expected);
     }
@@ -1694,9 +1796,8 @@ mod tests {
     fn sha1_abc() {
         // SHA1("abc") = a9993e364706816aba3e25717850c26c9cd0d89d
         let expected = [
-            0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a,
-            0xba, 0x3e, 0x25, 0x71, 0x78, 0x50, 0xc2, 0x6c,
-            0x9c, 0xd0, 0xd8, 0x9d,
+            0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e, 0x25, 0x71, 0x78, 0x50,
+            0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d,
         ];
         assert_eq!(sha1_compress(b"abc"), expected);
     }
@@ -1726,24 +1827,29 @@ mod tests {
             d.insert(b"name".to_vec(), Value::Bytes(b"album".to_vec()));
             d.insert(b"piece length".to_vec(), Value::Int(262144));
             d.insert(b"pieces".to_vec(), Value::Bytes(vec![0u8; 40]));
-            d.insert(b"files".to_vec(), Value::List(vec![
-                Value::Dict({
-                    let mut f = BTreeMap::new();
-                    f.insert(b"length".to_vec(), Value::Int(512));
-                    f.insert(b"path".to_vec(), Value::List(vec![
-                        Value::Bytes(b"track1.flac".to_vec()),
-                    ]));
-                    f
-                }),
-                Value::Dict({
-                    let mut f = BTreeMap::new();
-                    f.insert(b"length".to_vec(), Value::Int(768));
-                    f.insert(b"path".to_vec(), Value::List(vec![
-                        Value::Bytes(b"track2.flac".to_vec()),
-                    ]));
-                    f
-                }),
-            ]));
+            d.insert(
+                b"files".to_vec(),
+                Value::List(vec![
+                    Value::Dict({
+                        let mut f = BTreeMap::new();
+                        f.insert(b"length".to_vec(), Value::Int(512));
+                        f.insert(
+                            b"path".to_vec(),
+                            Value::List(vec![Value::Bytes(b"track1.flac".to_vec())]),
+                        );
+                        f
+                    }),
+                    Value::Dict({
+                        let mut f = BTreeMap::new();
+                        f.insert(b"length".to_vec(), Value::Int(768));
+                        f.insert(
+                            b"path".to_vec(),
+                            Value::List(vec![Value::Bytes(b"track2.flac".to_vec())]),
+                        );
+                        f
+                    }),
+                ]),
+            );
             d
         });
         let bytes = bencode::encode(&info);
@@ -1800,18 +1906,21 @@ mod tests {
 
     #[test]
     fn xor_distance_ordering() {
-        let target = [0x08, 0xAD, 0xA5, 0xA7, 0xA6, 0x18, 0x3A, 0xAE,
-                       0x1E, 0x09, 0xD8, 0x31, 0xDF, 0x67, 0x48, 0xD5,
-                       0x66, 0x09, 0x5A, 0x10];
-        let close  = [0x08, 0xAD, 0xA5, 0xA7, 0xA6, 0x18, 0x3A, 0xAE,
-                       0x1E, 0x09, 0xD8, 0x31, 0xDF, 0x67, 0x48, 0xD5,
-                       0x66, 0x09, 0x5A, 0x11]; // differs in last bit
-        let far    = [0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                       0x00, 0x00, 0x00, 0x00];
+        let target = [
+            0x08, 0xAD, 0xA5, 0xA7, 0xA6, 0x18, 0x3A, 0xAE, 0x1E, 0x09, 0xD8, 0x31, 0xDF, 0x67,
+            0x48, 0xD5, 0x66, 0x09, 0x5A, 0x10,
+        ];
+        let close = [
+            0x08, 0xAD, 0xA5, 0xA7, 0xA6, 0x18, 0x3A, 0xAE, 0x1E, 0x09, 0xD8, 0x31, 0xDF, 0x67,
+            0x48, 0xD5, 0x66, 0x09, 0x5A, 0x11,
+        ]; // differs in last bit
+        let far = [
+            0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
 
         let d_close = xor_distance(&close, &target);
-        let d_far   = xor_distance(&far, &target);
+        let d_far = xor_distance(&far, &target);
         assert!(d_close < d_far);
     }
 
@@ -1834,12 +1943,15 @@ mod tests {
             let mut d = BTreeMap::new();
             d.insert(b"t".to_vec(), Value::Bytes(b"ab".to_vec()));
             d.insert(b"y".to_vec(), Value::Bytes(b"r".to_vec()));
-            d.insert(b"r".to_vec(), Value::Dict({
-                let mut r = BTreeMap::new();
-                r.insert(b"id".to_vec(), Value::Bytes(vec![0xAA; 20]));
-                r.insert(b"nodes".to_vec(), Value::Bytes(nodes_bytes));
-                r
-            }));
+            d.insert(
+                b"r".to_vec(),
+                Value::Dict({
+                    let mut r = BTreeMap::new();
+                    r.insert(b"id".to_vec(), Value::Bytes(vec![0xAA; 20]));
+                    r.insert(b"nodes".to_vec(), Value::Bytes(nodes_bytes));
+                    r
+                }),
+            );
             d
         });
 
@@ -1860,17 +1972,23 @@ mod tests {
             let mut d = BTreeMap::new();
             d.insert(b"t".to_vec(), Value::Bytes(b"ab".to_vec()));
             d.insert(b"y".to_vec(), Value::Bytes(b"r".to_vec()));
-            d.insert(b"r".to_vec(), Value::Dict({
-                let mut r = BTreeMap::new();
-                r.insert(b"id".to_vec(), Value::Bytes(vec![0xBB; 20]));
-                r.insert(b"values".to_vec(), Value::List(vec![
-                    // 192.168.1.1:8080
-                    Value::Bytes(vec![192, 168, 1, 1, 0x1F, 0x90]),
-                    // 10.0.0.5:6881
-                    Value::Bytes(vec![10, 0, 0, 5, 0x1A, 0xE1]),
-                ]));
-                r
-            }));
+            d.insert(
+                b"r".to_vec(),
+                Value::Dict({
+                    let mut r = BTreeMap::new();
+                    r.insert(b"id".to_vec(), Value::Bytes(vec![0xBB; 20]));
+                    r.insert(
+                        b"values".to_vec(),
+                        Value::List(vec![
+                            // 192.168.1.1:8080
+                            Value::Bytes(vec![192, 168, 1, 1, 0x1F, 0x90]),
+                            // 10.0.0.5:6881
+                            Value::Bytes(vec![10, 0, 0, 5, 0x1A, 0xE1]),
+                        ]),
+                    );
+                    r
+                }),
+            );
             d
         });
 
@@ -1889,34 +2007,46 @@ mod tests {
         // Build a minimal .torrent file (outer dict with "info" key).
         let torrent = Value::Dict({
             let mut d = BTreeMap::new();
-            d.insert(b"announce".to_vec(),
-                Value::Bytes(b"http://tracker.example.com/announce".to_vec()));
-            d.insert(b"info".to_vec(), Value::Dict({
-                let mut info = BTreeMap::new();
-                info.insert(b"name".to_vec(), Value::Bytes(b"movie".to_vec()));
-                info.insert(b"piece length".to_vec(), Value::Int(262144));
-                info.insert(b"pieces".to_vec(), Value::Bytes(vec![0u8; 40]));
-                info.insert(b"files".to_vec(), Value::List(vec![
-                    Value::Dict({
-                        let mut f = BTreeMap::new();
-                        f.insert(b"length".to_vec(), Value::Int(1_000_000));
-                        f.insert(b"path".to_vec(), Value::List(vec![
-                            Value::Bytes(b"video.mp4".to_vec()),
-                        ]));
-                        f
-                    }),
-                    Value::Dict({
-                        let mut f = BTreeMap::new();
-                        f.insert(b"length".to_vec(), Value::Int(500));
-                        f.insert(b"path".to_vec(), Value::List(vec![
-                            Value::Bytes(b"subs".to_vec()),
-                            Value::Bytes(b"en.srt".to_vec()),
-                        ]));
-                        f
-                    }),
-                ]));
-                info
-            }));
+            d.insert(
+                b"announce".to_vec(),
+                Value::Bytes(b"http://tracker.example.com/announce".to_vec()),
+            );
+            d.insert(
+                b"info".to_vec(),
+                Value::Dict({
+                    let mut info = BTreeMap::new();
+                    info.insert(b"name".to_vec(), Value::Bytes(b"movie".to_vec()));
+                    info.insert(b"piece length".to_vec(), Value::Int(262144));
+                    info.insert(b"pieces".to_vec(), Value::Bytes(vec![0u8; 40]));
+                    info.insert(
+                        b"files".to_vec(),
+                        Value::List(vec![
+                            Value::Dict({
+                                let mut f = BTreeMap::new();
+                                f.insert(b"length".to_vec(), Value::Int(1_000_000));
+                                f.insert(
+                                    b"path".to_vec(),
+                                    Value::List(vec![Value::Bytes(b"video.mp4".to_vec())]),
+                                );
+                                f
+                            }),
+                            Value::Dict({
+                                let mut f = BTreeMap::new();
+                                f.insert(b"length".to_vec(), Value::Int(500));
+                                f.insert(
+                                    b"path".to_vec(),
+                                    Value::List(vec![
+                                        Value::Bytes(b"subs".to_vec()),
+                                        Value::Bytes(b"en.srt".to_vec()),
+                                    ]),
+                                );
+                                f
+                            }),
+                        ]),
+                    );
+                    info
+                }),
+            );
             d
         });
 
@@ -1933,8 +2063,10 @@ mod tests {
     fn parse_torrent_file_info_rejects_missing_info() {
         let torrent = Value::Dict({
             let mut d = BTreeMap::new();
-            d.insert(b"announce".to_vec(),
-                Value::Bytes(b"http://tracker.example.com/announce".to_vec()));
+            d.insert(
+                b"announce".to_vec(),
+                Value::Bytes(b"http://tracker.example.com/announce".to_vec()),
+            );
             d
         });
         let bytes = bencode::encode(&torrent);
@@ -1963,7 +2095,8 @@ mod tests {
         http_resp.extend_from_slice(&body);
 
         // Parse body manually (same logic as http_tracker_announce)
-        let body_start = http_resp.windows(4)
+        let body_start = http_resp
+            .windows(4)
             .position(|w| w == b"\r\n\r\n")
             .map(|p| p + 4)
             .unwrap();
@@ -2000,22 +2133,28 @@ mod tests {
 
     #[test]
     fn discovery_method_display() {
+        assert_eq!(format!("{}", DiscoveryMethod::Dht), "DHT (BEP-5 UDP)");
         assert_eq!(
-            format!("{}", DiscoveryMethod::Dht),
-            "DHT (BEP-5 UDP)"
-        );
-        assert_eq!(
-            format!("{}", DiscoveryMethod::TorrentFile { source: "archive.org".into() }),
+            format!(
+                "{}",
+                DiscoveryMethod::TorrentFile {
+                    source: "archive.org".into()
+                }
+            ),
             ".torrent file (archive.org)"
         );
     }
 
     #[test]
     fn strategy_result_display() {
-        let ok = StrategyResult::Success { detail: "42 peers".into() };
+        let ok = StrategyResult::Success {
+            detail: "42 peers".into(),
+        };
         assert!(format!("{ok}").contains("42 peers"));
 
-        let fail = StrategyResult::Failed { reason: "timeout".into() };
+        let fail = StrategyResult::Failed {
+            reason: "timeout".into(),
+        };
         assert!(format!("{fail}").contains("FAILED"));
         assert!(format!("{fail}").contains("timeout"));
 

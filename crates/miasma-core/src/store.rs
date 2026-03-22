@@ -67,7 +67,8 @@ fn load_index(data_dir: &Path) -> StoreIndex {
 
 fn save_index(data_dir: &Path, index: &StoreIndex) -> Result<(), MiasmaError> {
     let path = data_dir.join(INDEX_FILE);
-    let raw = serde_json::to_string(index).map_err(|e| MiasmaError::Serialization(e.to_string()))?;
+    let raw =
+        serde_json::to_string(index).map_err(|e| MiasmaError::Serialization(e.to_string()))?;
     atomic_write(&path, raw.as_bytes())
 }
 
@@ -107,10 +108,11 @@ fn load_or_create_master_key(data_dir: &Path) -> Result<Zeroizing<[u8; 32]>, Mia
         // with a restrictive DACL/mode from the start (Win32 CreateFileW
         // with SECURITY_ATTRIBUTES on Windows, open() with 0o600 on Unix).
         // At no point does the key exist on disk with permissive permissions.
-        crate::secure_file::atomic_write_restricted(&key_path, arr.as_ref())
-            .map_err(|e| MiasmaError::KeyDerivation(format!(
+        crate::secure_file::atomic_write_restricted(&key_path, arr.as_ref()).map_err(|e| {
+            MiasmaError::KeyDerivation(format!(
                 "failed to write master.key with restricted permissions: {e}"
-            )))?;
+            ))
+        })?;
 
         Ok(arr)
     }
@@ -119,7 +121,10 @@ fn load_or_create_master_key(data_dir: &Path) -> Result<Zeroizing<[u8; 32]>, Mia
 /// Derive a per-file XChaCha20-Poly1305 key from the master key and the share address.
 ///
 /// `key = HKDF-SHA256(ikm = master_key, info = "miasma-store-v1:" || address_hex)`
-fn derive_file_key(master_key: &[u8; 32], address: &str) -> Result<Zeroizing<[u8; 32]>, MiasmaError> {
+fn derive_file_key(
+    master_key: &[u8; 32],
+    address: &str,
+) -> Result<Zeroizing<[u8; 32]>, MiasmaError> {
     use hkdf::Hkdf;
     use sha2::Sha256;
     let info = format!("miasma-store-v1:{address}");
@@ -319,8 +324,7 @@ impl LocalShareStore {
     // ── private helpers ────────────────────────────────────────────────────
 
     fn share_path(&self, address: &str) -> PathBuf {
-        self.shares_dir
-            .join(format!("{}{}", address, SHARE_EXT))
+        self.shares_dir.join(format!("{}{}", address, SHARE_EXT))
     }
 
     /// Evict LRU entries until `needed_bytes` fit within quota.

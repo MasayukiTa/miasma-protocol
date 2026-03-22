@@ -36,20 +36,17 @@ use crate::{
         path_selection::{AnonymityPolicy, PathSelectionStats},
         types::{DhtRecord, ShardLocation},
     },
-    onion::{
-        packet::OnionPacketBuilder,
-        share::OnionShareFetcher,
-    },
+    onion::{packet::OnionPacketBuilder, share::OnionShareFetcher},
     pipeline::{dissolve, DissolutionParams},
     retrieval::{
-        coordinator::RetrievalCoordinator,
-        dht_source::DhtShareSource,
+        coordinator::RetrievalCoordinator, dht_source::DhtShareSource,
         transport_source::FallbackShareSource,
     },
     share::MiasmaShare,
     store::LocalShareStore,
     transport::payload::{
-        Libp2pPayloadTransport, PayloadTransport, PayloadTransportSelector, TransportAttempt, TransportStats,
+        Libp2pPayloadTransport, PayloadTransport, PayloadTransportSelector, TransportAttempt,
+        TransportStats,
     },
     MiasmaError,
 };
@@ -132,7 +129,11 @@ impl OnionShareFetcher for NetworkShareFetcher {
             None => return Ok(None),
         };
 
-        let location = match record.locations.iter().find(|l| l.shard_index == slot_index) {
+        let location = match record
+            .locations
+            .iter()
+            .find(|l| l.shard_index == slot_index)
+        {
             Some(l) => l,
             None => return Ok(None),
         };
@@ -142,8 +143,14 @@ impl OnionShareFetcher for NetworkShareFetcher {
             .map_err(|e| MiasmaError::Network(format!("invalid peer_id in DhtRecord: {e}")))?;
 
         // 3. Send request-response to the holder.
-        let request = ShareFetchRequest { mid_digest, slot_index, segment_index };
-        self.share_handle.fetch(peer_id, location.addrs.clone(), request).await
+        let request = ShareFetchRequest {
+            mid_digest,
+            slot_index,
+            segment_index,
+        };
+        self.share_handle
+            .fetch(peer_id, location.addrs.clone(), request)
+            .await
     }
 }
 
@@ -236,16 +243,19 @@ impl MiasmaCoordinator {
         });
 
         // Build the payload transport selector with the default fallback chain.
-        let transport_selector = Arc::new(PayloadTransportSelector::new(vec![
-            Box::new(Libp2pPayloadTransport::new(
-                share_handle.clone(),
-                dht_handle.clone(),
-            )),
-        ]));
+        let transport_selector = Arc::new(PayloadTransportSelector::new(vec![Box::new(
+            Libp2pPayloadTransport::new(share_handle.clone(), dht_handle.clone()),
+        )]));
 
         Self {
-            store, dht_handle, share_handle, shutdown_tx, peer_id, listen_addrs,
-            transport_selector, anonymity_policy: AnonymityPolicy::default(),
+            store,
+            dht_handle,
+            share_handle,
+            shutdown_tx,
+            peer_id,
+            listen_addrs,
+            transport_selector,
+            anonymity_policy: AnonymityPolicy::default(),
             relay_routing_enabled: false,
             retrieval_stats: Arc::new(Mutex::new(RetrievalStats::default())),
         }
@@ -263,12 +273,9 @@ impl MiasmaCoordinator {
 
         // Rebuild the selector with extra transports appended.
         if !extra_transports.is_empty() {
-            let mut all: Vec<Box<dyn PayloadTransport>> = vec![
-                Box::new(Libp2pPayloadTransport::new(
-                    coord.share_handle.clone(),
-                    coord.dht_handle.clone(),
-                )),
-            ];
+            let mut all: Vec<Box<dyn PayloadTransport>> = vec![Box::new(
+                Libp2pPayloadTransport::new(coord.share_handle.clone(), coord.dht_handle.clone()),
+            )];
             all.extend(extra_transports);
             coord.transport_selector = Arc::new(PayloadTransportSelector::new(all));
         }
@@ -392,11 +399,10 @@ impl MiasmaCoordinator {
         params: DissolutionParams,
     ) -> Result<Vec<u8>, MiasmaError> {
         let dht_exec = DirectDhtExecutor::new(self.dht_handle.clone());
-        let source = FallbackShareSource::new(
-            dht_exec,
-            self.transport_selector.clone(),
-        );
-        RetrievalCoordinator::new(source).retrieve(mid, params).await
+        let source = FallbackShareSource::new(dht_exec, self.transport_selector.clone());
+        RetrievalCoordinator::new(source)
+            .retrieve(mid, params)
+            .await
     }
 
     /// Like `retrieve_from_network` but also returns transport attempt diagnostics.
@@ -406,11 +412,10 @@ impl MiasmaCoordinator {
         params: DissolutionParams,
     ) -> Result<(Vec<u8>, Vec<TransportAttempt>), MiasmaError> {
         let dht_exec = DirectDhtExecutor::new(self.dht_handle.clone());
-        let source = FallbackShareSource::new(
-            dht_exec,
-            self.transport_selector.clone(),
-        );
-        let result = RetrievalCoordinator::new(source).retrieve(mid, params).await;
+        let source = FallbackShareSource::new(dht_exec, self.transport_selector.clone());
+        let result = RetrievalCoordinator::new(source)
+            .retrieve(mid, params)
+            .await;
         // Note: drain_attempts is called after retrieve, capturing all attempts.
         // We can't easily get the source back from RetrievalCoordinator,
         // so transport stats are available via self.transport_stats() instead.
@@ -435,7 +440,9 @@ impl MiasmaCoordinator {
         let share_fetcher =
             NetworkShareFetcher::new(self.dht_handle.clone(), self.share_handle.clone());
         let source = DhtShareSource::new(dht_exec, share_fetcher);
-        RetrievalCoordinator::new(source).retrieve(mid, params).await
+        RetrievalCoordinator::new(source)
+            .retrieve(mid, params)
+            .await
     }
 
     // ── Anonymity policy ────────────────────────────────────────────────────
@@ -484,19 +491,27 @@ impl MiasmaCoordinator {
     ) -> Result<Vec<u8>, MiasmaError> {
         match policy {
             AnonymityPolicy::Direct => {
-                if let Ok(mut s) = self.retrieval_stats.lock() { s.direct_attempts += 1; }
+                if let Ok(mut s) = self.retrieval_stats.lock() {
+                    s.direct_attempts += 1;
+                }
                 let result = self.retrieve_from_network(mid, params).await;
                 if result.is_ok() {
-                    if let Ok(mut s) = self.retrieval_stats.lock() { s.direct_successes += 1; }
+                    if let Ok(mut s) = self.retrieval_stats.lock() {
+                        s.direct_successes += 1;
+                    }
                 }
                 result
             }
             AnonymityPolicy::Opportunistic => {
-                if let Ok(mut s) = self.retrieval_stats.lock() { s.opportunistic_attempts += 1; }
+                if let Ok(mut s) = self.retrieval_stats.lock() {
+                    s.opportunistic_attempts += 1;
+                }
                 if self.relay_routing_enabled {
                     match self.retrieve_via_relay(mid, params.clone()).await {
                         Ok(data) => {
-                            if let Ok(mut s) = self.retrieval_stats.lock() { s.opportunistic_relay_successes += 1; }
+                            if let Ok(mut s) = self.retrieval_stats.lock() {
+                                s.opportunistic_relay_successes += 1;
+                            }
                             return Ok(data);
                         }
                         Err(e) => {
@@ -508,21 +523,31 @@ impl MiasmaCoordinator {
                 }
                 let result = self.retrieve_from_network(mid, params).await;
                 if result.is_ok() {
-                    if let Ok(mut s) = self.retrieval_stats.lock() { s.opportunistic_direct_fallbacks += 1; }
+                    if let Ok(mut s) = self.retrieval_stats.lock() {
+                        s.opportunistic_direct_fallbacks += 1;
+                    }
                 }
                 result
             }
             AnonymityPolicy::Required { min_hops } => {
-                if let Ok(mut s) = self.retrieval_stats.lock() { s.required_attempts += 1; }
+                if let Ok(mut s) = self.retrieval_stats.lock() {
+                    s.required_attempts += 1;
+                }
                 if !self.relay_routing_enabled {
-                    if let Ok(mut s) = self.retrieval_stats.lock() { s.required_failures += 1; }
+                    if let Ok(mut s) = self.retrieval_stats.lock() {
+                        s.required_failures += 1;
+                    }
                     return Err(MiasmaError::Network(format!(
                         "anonymity=required({min_hops} hops): relay routing not enabled — call enable_relay_routing() first"
                     )));
                 }
-                let result = self.retrieve_via_relay_required(mid, params, min_hops as usize).await;
+                let result = self
+                    .retrieve_via_relay_required(mid, params, min_hops as usize)
+                    .await;
                 if result.is_err() {
-                    if let Ok(mut s) = self.retrieval_stats.lock() { s.required_failures += 1; }
+                    if let Ok(mut s) = self.retrieval_stats.lock() {
+                        s.required_failures += 1;
+                    }
                 }
                 result
             }
@@ -578,7 +603,10 @@ impl MiasmaCoordinator {
                 mode,
                 "attempting onion+rendezvous retrieval"
             );
-            match self.retrieve_via_onion_rendezvous(mid, params.clone()).await {
+            match self
+                .retrieve_via_onion_rendezvous(mid, params.clone())
+                .await
+            {
                 Ok(data) => {
                     if let Ok(mut s) = self.retrieval_stats.lock() {
                         match mode {
@@ -623,25 +651,34 @@ impl MiasmaCoordinator {
                 for loc in &record.locations {
                     if let Ok(peer_id) = PeerId::from_bytes(&loc.peer_id_bytes) {
                         if let Ok(Some(desc)) = self.dht_handle.peer_descriptor(peer_id).await {
-                            if let ReachabilityKind::Rendezvous { ref intro_points } = desc.reachability {
+                            if let ReachabilityKind::Rendezvous { ref intro_points } =
+                                desc.reachability
+                            {
                                 tracing::info!(
                                     holder = %peer_id,
                                     intro_points = intro_points.len(),
                                     mode,
                                     "routing via rendezvous introduction points"
                                 );
-                                match self.retrieve_via_rendezvous(mid, params.clone(), intro_points).await {
+                                match self
+                                    .retrieve_via_rendezvous(mid, params.clone(), intro_points)
+                                    .await
+                                {
                                     Ok(data) => {
                                         if let Ok(mut s) = self.retrieval_stats.lock() {
                                             match mode {
-                                                "opportunistic" => s.opportunistic_rendezvous_successes += 1,
+                                                "opportunistic" => {
+                                                    s.opportunistic_rendezvous_successes += 1
+                                                }
                                                 _ => s.required_relay_successes += 1,
                                             }
                                         }
                                         return Ok(data);
                                     }
                                     Err(e) => {
-                                        tracing::debug!("{mode}: rendezvous failed ({e}), trying relay circuit");
+                                        tracing::debug!(
+                                            "{mode}: rendezvous failed ({e}), trying relay circuit"
+                                        );
                                     }
                                 }
                                 break;
@@ -668,9 +705,9 @@ impl MiasmaCoordinator {
         }
 
         let (relay_peer_id, relay_addrs) = &relay_peers[0];
-        let relay_addr = relay_addrs.first().ok_or_else(|| {
-            MiasmaError::Network("relay peer has no addresses".into())
-        })?;
+        let relay_addr = relay_addrs
+            .first()
+            .ok_or_else(|| MiasmaError::Network("relay peer has no addresses".into()))?;
 
         tracing::info!(
             relay = %relay_peer_id,
@@ -685,10 +722,15 @@ impl MiasmaCoordinator {
             relay_addr: relay_addr.clone(),
         };
         let source = FallbackShareSource::new(relay_exec, self.transport_selector.clone());
-        let result = RetrievalCoordinator::new(source).retrieve(mid, params).await;
+        let result = RetrievalCoordinator::new(source)
+            .retrieve(mid, params)
+            .await;
 
         if let Ok(Some(ps)) = self.dht_handle.peer_pseudonym(*relay_peer_id).await {
-            let _ = self.dht_handle.record_relay_outcome(ps, result.is_ok()).await;
+            let _ = self
+                .dht_handle
+                .record_relay_outcome(ps, result.is_ok())
+                .await;
         }
 
         if result.is_ok() {
@@ -719,7 +761,8 @@ impl MiasmaCoordinator {
         params: DissolutionParams,
         min_hops: usize,
     ) -> Result<Vec<u8>, MiasmaError> {
-        self.try_relay_paths(mid, params, "required", min_hops).await
+        self.try_relay_paths(mid, params, "required", min_hops)
+            .await
     }
 
     // ── Pre-retrieval relay probing ─────────────────────────────────────────
@@ -739,7 +782,9 @@ impl MiasmaCoordinator {
             Err(_) => return,
         };
 
-        if let Ok(mut s) = self.retrieval_stats.lock() { s.pre_retrieval_probes_run += 1; }
+        if let Ok(mut s) = self.retrieval_stats.lock() {
+            s.pre_retrieval_probes_run += 1;
+        }
 
         let mut stale_candidates = Vec::new();
         for (peer_id, addrs) in &relay_peers {
@@ -747,12 +792,17 @@ impl MiasmaCoordinator {
                 break;
             }
             if let Ok(Some(ps)) = self.dht_handle.peer_pseudonym(*peer_id).await {
-                let fresh = self.dht_handle
+                let fresh = self
+                    .dht_handle
                     .has_fresh_probe(ps, Self::PROBE_FRESHNESS_SECS)
                     .await
                     .unwrap_or(false);
                 if !fresh {
-                    stale_candidates.push((*peer_id, addrs.iter().map(|a| a.to_string()).collect::<Vec<_>>(), ps));
+                    stale_candidates.push((
+                        *peer_id,
+                        addrs.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
+                        ps,
+                    ));
                 }
             }
         }
@@ -780,12 +830,16 @@ impl MiasmaCoordinator {
             let (r2_id, _) = &relay_peers[1];
             if let Ok(Some(r1_ps)) = self.dht_handle.peer_pseudonym(*r1_id).await {
                 if let Ok(Some(obs)) = self.dht_handle.relay_observation(r1_ps).await {
-                    if obs.has_fresh_probe(Self::PROBE_FRESHNESS_SECS) && obs.forwarding_verified_at.is_none() {
-                        let _ = self.verify_relay_forwarding(
-                            *r1_id,
-                            r1_addrs.iter().map(|a| a.to_string()).collect(),
-                            *r2_id,
-                        ).await;
+                    if obs.has_fresh_probe(Self::PROBE_FRESHNESS_SECS)
+                        && obs.forwarding_verified_at.is_none()
+                    {
+                        let _ = self
+                            .verify_relay_forwarding(
+                                *r1_id,
+                                r1_addrs.iter().map(|a| a.to_string()).collect(),
+                                *r2_id,
+                            )
+                            .await;
                     }
                 }
             }
@@ -853,11 +907,16 @@ impl MiasmaCoordinator {
         let r1_addrs: Vec<String> = vec![String::from_utf8_lossy(&r1.addr).to_string()];
 
         // 2. DHT lookup (direct — the DHT query itself is not onion-routed here).
-        let record = self.dht_handle.get_record(*mid.as_bytes()).await?
-            .ok_or_else(|| MiasmaError::Sss(format!(
-                "onion retrieval: DhtRecord not found for MID {}",
-                hex::encode(&mid.as_bytes()[..8])
-            )))?;
+        let record = self
+            .dht_handle
+            .get_record(*mid.as_bytes())
+            .await?
+            .ok_or_else(|| {
+                MiasmaError::Sss(format!(
+                    "onion retrieval: DhtRecord not found for MID {}",
+                    hex::encode(&mid.as_bytes()[..8])
+                ))
+            })?;
 
         let k = params.data_shards;
 
@@ -910,8 +969,7 @@ impl MiasmaCoordinator {
             };
             let mut req_body = vec![0x10u8];
             req_body.extend(
-                bincode::serialize(&req)
-                    .map_err(|e| MiasmaError::Serialization(e.to_string()))?,
+                bincode::serialize(&req).map_err(|e| MiasmaError::Serialization(e.to_string()))?,
             );
 
             // Build onion packet with e2e encryption.
@@ -931,12 +989,15 @@ impl MiasmaCoordinator {
                 layer: packet.layer,
             };
 
-            let response = self.dht_handle.send_onion_request(
-                r1_peer_id,
-                r1_addrs.clone(),
-                onion_req,
-                return_path.r1_init_key,
-            ).await?;
+            let response = self
+                .dht_handle
+                .send_onion_request(
+                    r1_peer_id,
+                    r1_addrs.clone(),
+                    onion_req,
+                    return_path.r1_init_key,
+                )
+                .await?;
 
             // Decrypt 3-layer response and parse share.
             match response {
@@ -955,7 +1016,8 @@ impl MiasmaCoordinator {
         if shares.len() < k {
             return Err(MiasmaError::Sss(format!(
                 "onion retrieval: got {}/{} shards",
-                shares.len(), k
+                shares.len(),
+                k
             )));
         }
 
@@ -997,7 +1059,10 @@ impl MiasmaCoordinator {
 
     /// Return a snapshot of per-anonymity-mode retrieval counters.
     pub fn retrieval_stats(&self) -> RetrievalStats {
-        self.retrieval_stats.lock().map(|s| s.clone()).unwrap_or_default()
+        self.retrieval_stats
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_default()
     }
 
     /// Look up a peer's descriptor (reachability, capabilities, etc).
@@ -1010,7 +1075,10 @@ impl MiasmaCoordinator {
 
     /// Record a relay success/failure for trust tier tracking.
     pub async fn record_relay_outcome(&self, pseudonym: [u8; 32], success: bool) {
-        let _ = self.dht_handle.record_relay_outcome(pseudonym, success).await;
+        let _ = self
+            .dht_handle
+            .record_relay_outcome(pseudonym, success)
+            .await;
     }
 
     /// Resolve rendezvous introduction points for a peer.
@@ -1041,23 +1109,32 @@ impl MiasmaCoordinator {
         mid: &ContentId,
         params: DissolutionParams,
     ) -> Result<Vec<u8>, MiasmaError> {
-        if let Ok(mut s) = self.retrieval_stats.lock() { s.rendezvous_onion_attempts += 1; }
+        if let Ok(mut s) = self.retrieval_stats.lock() {
+            s.rendezvous_onion_attempts += 1;
+        }
 
         // Get all onion-capable relays for R1 selection.
         let relays = self.dht_handle.relay_onion_info().await?;
         if relays.is_empty() {
-            if let Ok(mut s) = self.retrieval_stats.lock() { s.rendezvous_onion_failures += 1; }
+            if let Ok(mut s) = self.retrieval_stats.lock() {
+                s.rendezvous_onion_failures += 1;
+            }
             return Err(MiasmaError::Network(
                 "onion+rendezvous: no onion-capable relays available for R1".into(),
             ));
         }
 
         // DHT lookup.
-        let record = self.dht_handle.get_record(*mid.as_bytes()).await?
-            .ok_or_else(|| MiasmaError::Sss(format!(
-                "onion+rendezvous: DhtRecord not found for MID {}",
-                hex::encode(&mid.as_bytes()[..8])
-            )))?;
+        let record = self
+            .dht_handle
+            .get_record(*mid.as_bytes())
+            .await?
+            .ok_or_else(|| {
+                MiasmaError::Sss(format!(
+                    "onion+rendezvous: DhtRecord not found for MID {}",
+                    hex::encode(&mid.as_bytes()[..8])
+                ))
+            })?;
 
         let k = params.data_shards;
         let mut shares: Vec<MiasmaShare> = Vec::with_capacity(k);
@@ -1099,14 +1176,20 @@ impl MiasmaCoordinator {
             };
 
             // Determine R2 based on reachability kind.
-            let (r2_info, r2_pseudonym) = match self.dht_handle.peer_descriptor(target_peer_id).await {
+            let (r2_info, r2_pseudonym) = match self
+                .dht_handle
+                .peer_descriptor(target_peer_id)
+                .await
+            {
                 Ok(Some(desc)) if desc.is_rendezvous() => {
                     // NAT'd holder: use an onion-capable intro point as R2.
                     if let ReachabilityKind::Rendezvous { ref intro_points } = desc.reachability {
-                        let resolved = self.dht_handle.resolve_intro_points(intro_points.clone()).await?;
+                        let resolved = self
+                            .dht_handle
+                            .resolve_intro_points(intro_points.clone())
+                            .await?;
                         // Find the first onion-capable intro point.
-                        let onion_intro = resolved.iter()
-                            .find(|ip| ip.onion_pubkey.is_some());
+                        let onion_intro = resolved.iter().find(|ip| ip.onion_pubkey.is_some());
                         match onion_intro {
                             Some(intro) => {
                                 let pubkey = intro.onion_pubkey.unwrap();
@@ -1136,7 +1219,9 @@ impl MiasmaCoordinator {
                 _ => {
                     // Direct/Relayed holder: use standard R2 from relay pool.
                     if relays.len() < 2 {
-                        tracing::debug!("onion+rendezvous: need ≥2 relays for non-rendezvous holder");
+                        tracing::debug!(
+                            "onion+rendezvous: need ≥2 relays for non-rendezvous holder"
+                        );
                         continue;
                     }
                     (relays[1].clone(), None)
@@ -1172,8 +1257,7 @@ impl MiasmaCoordinator {
             };
             let mut req_body = vec![0x10u8];
             req_body.extend(
-                bincode::serialize(&req)
-                    .map_err(|e| MiasmaError::Serialization(e.to_string()))?,
+                bincode::serialize(&req).map_err(|e| MiasmaError::Serialization(e.to_string()))?,
             );
 
             // Build e2e onion packet: R1 → R2(intro) → Target.
@@ -1192,16 +1276,17 @@ impl MiasmaCoordinator {
                 layer: packet.layer,
             };
 
-            let response = self.dht_handle.send_onion_request(
-                r1_peer_id,
-                r1_addrs,
-                onion_req,
-                return_path.r1_init_key,
-            ).await;
+            let response = self
+                .dht_handle
+                .send_onion_request(r1_peer_id, r1_addrs, onion_req, return_path.r1_init_key)
+                .await;
 
             // Record relay outcome for intro point used as R2.
             if let Some(ps) = r2_pseudonym {
-                let _ = self.dht_handle.record_relay_outcome(ps, response.is_ok()).await;
+                let _ = self
+                    .dht_handle
+                    .record_relay_outcome(ps, response.is_ok())
+                    .await;
             }
 
             match response {
@@ -1228,14 +1313,19 @@ impl MiasmaCoordinator {
         }
 
         if shares.len() < k {
-            if let Ok(mut s) = self.retrieval_stats.lock() { s.rendezvous_onion_failures += 1; }
+            if let Ok(mut s) = self.retrieval_stats.lock() {
+                s.rendezvous_onion_failures += 1;
+            }
             return Err(MiasmaError::Sss(format!(
                 "onion+rendezvous: got {}/{} shards",
-                shares.len(), k
+                shares.len(),
+                k
             )));
         }
 
-        if let Ok(mut s) = self.retrieval_stats.lock() { s.rendezvous_onion_successes += 1; }
+        if let Ok(mut s) = self.retrieval_stats.lock() {
+            s.rendezvous_onion_successes += 1;
+        }
         crate::pipeline::retrieve(mid, &shares, params)
     }
 
@@ -1246,15 +1336,11 @@ impl MiasmaCoordinator {
         session_key: &[u8; 32],
         encrypted: &[u8],
     ) -> Option<MiasmaShare> {
-        let after_r1 = crate::onion::packet::decrypt_response(
-            &return_path.r1_init_key, encrypted,
-        ).ok()?;
-        let after_r2 = crate::onion::packet::decrypt_response(
-            &return_path.r2_r1_key, &after_r1,
-        ).ok()?;
-        let plaintext = crate::onion::packet::decrypt_response(
-            session_key, &after_r2,
-        ).ok()?;
+        let after_r1 =
+            crate::onion::packet::decrypt_response(&return_path.r1_init_key, encrypted).ok()?;
+        let after_r2 =
+            crate::onion::packet::decrypt_response(&return_path.r2_r1_key, &after_r1).ok()?;
+        let plaintext = crate::onion::packet::decrypt_response(session_key, &after_r2).ok()?;
 
         if plaintext.first() != Some(&0x11) {
             tracing::warn!("onion: unexpected share response tag");
@@ -1281,13 +1367,21 @@ impl MiasmaCoordinator {
         params: DissolutionParams,
         intro_pseudonyms: &[[u8; 32]],
     ) -> Result<Vec<u8>, MiasmaError> {
-        if let Ok(mut s) = self.retrieval_stats.lock() { s.rendezvous_attempts += 1; }
+        if let Ok(mut s) = self.retrieval_stats.lock() {
+            s.rendezvous_attempts += 1;
+        }
 
-        let resolved = self.dht_handle.resolve_intro_points(intro_pseudonyms.to_vec()).await?;
+        let resolved = self
+            .dht_handle
+            .resolve_intro_points(intro_pseudonyms.to_vec())
+            .await?;
         if resolved.is_empty() {
-            if let Ok(mut s) = self.retrieval_stats.lock() { s.rendezvous_failures += 1; }
+            if let Ok(mut s) = self.retrieval_stats.lock() {
+                s.rendezvous_failures += 1;
+            }
             return Err(MiasmaError::Network(
-                "rendezvous: no intro points could be resolved (all stale, missing, or non-relay)".into(),
+                "rendezvous: no intro points could be resolved (all stale, missing, or non-relay)"
+                    .into(),
             ));
         }
 
@@ -1311,16 +1405,27 @@ impl MiasmaCoordinator {
                 relay_addr,
             };
             let source = FallbackShareSource::new(relay_exec, self.transport_selector.clone());
-            match RetrievalCoordinator::new(source).retrieve(mid, params.clone()).await {
+            match RetrievalCoordinator::new(source)
+                .retrieve(mid, params.clone())
+                .await
+            {
                 Ok(data) => {
                     // Record relay success for this intro point.
-                    let _ = self.dht_handle.record_relay_outcome(intro.pseudonym, true).await;
-                    if let Ok(mut s) = self.retrieval_stats.lock() { s.rendezvous_successes += 1; }
+                    let _ = self
+                        .dht_handle
+                        .record_relay_outcome(intro.pseudonym, true)
+                        .await;
+                    if let Ok(mut s) = self.retrieval_stats.lock() {
+                        s.rendezvous_successes += 1;
+                    }
                     return Ok(data);
                 }
                 Err(e) => {
                     // Record relay failure — may demote this intro point's trust tier.
-                    let _ = self.dht_handle.record_relay_outcome(intro.pseudonym, false).await;
+                    let _ = self
+                        .dht_handle
+                        .record_relay_outcome(intro.pseudonym, false)
+                        .await;
                     tracing::debug!(
                         intro_peer = %intro.peer_id,
                         "rendezvous: intro point failed ({e}), trying next"
@@ -1329,7 +1434,9 @@ impl MiasmaCoordinator {
             }
         }
 
-        if let Ok(mut s) = self.retrieval_stats.lock() { s.rendezvous_failures += 1; }
+        if let Ok(mut s) = self.retrieval_stats.lock() {
+            s.rendezvous_failures += 1;
+        }
         Err(MiasmaError::Network(format!(
             "rendezvous: all {} intro points failed",
             resolved.len()
@@ -1341,9 +1448,15 @@ impl MiasmaCoordinator {
     /// Uses the `/miasma/relay-probe/1.0.0` protocol: random nonce echo.
     /// Records a relay observation (success promotes trust tier, failure demotes).
     pub async fn probe_relay(&self, peer_id: PeerId, addrs: Vec<String>) -> bool {
-        if let Ok(mut s) = self.retrieval_stats.lock() { s.relay_probes_sent += 1; }
+        if let Ok(mut s) = self.retrieval_stats.lock() {
+            s.relay_probes_sent += 1;
+        }
 
-        let success = self.dht_handle.probe_relay(peer_id, addrs).await.unwrap_or(false);
+        let success = self
+            .dht_handle
+            .probe_relay(peer_id, addrs)
+            .await
+            .unwrap_or(false);
 
         // Record relay observation for trust tier tracking.
         if let Ok(Some(ps)) = self.dht_handle.peer_pseudonym(peer_id).await {
@@ -1376,14 +1489,20 @@ impl MiasmaCoordinator {
         _r1_addrs: Vec<String>,
         r2_peer_id: PeerId,
     ) -> bool {
-        if let Ok(mut s) = self.retrieval_stats.lock() { s.forwarding_probes_sent += 1; }
+        if let Ok(mut s) = self.retrieval_stats.lock() {
+            s.forwarding_probes_sent += 1;
+        }
 
         // Build circuit address: route to R2 through R1.
         let circuit_addr = format!("/p2p/{}/p2p-circuit/p2p/{}", r1_peer_id, r2_peer_id);
 
         // First ensure R1 is dialable by probing it directly if needed.
         // Then send the circuit-routed probe to R2 via R1.
-        let success = self.dht_handle.probe_relay(r2_peer_id, vec![circuit_addr]).await.unwrap_or(false);
+        let success = self
+            .dht_handle
+            .probe_relay(r2_peer_id, vec![circuit_addr])
+            .await
+            .unwrap_or(false);
 
         if let Ok(Some(r1_ps)) = self.dht_handle.peer_pseudonym(r1_peer_id).await {
             if success {
@@ -1461,7 +1580,10 @@ impl crate::network::dht::OnionAwareDhtExecutor for RelayRewritingDhtExecutor {
         self.inner.put(record).await
     }
 
-    async fn get(&self, mid: &crate::crypto::hash::ContentId) -> Result<Option<DhtRecord>, MiasmaError> {
+    async fn get(
+        &self,
+        mid: &crate::crypto::hash::ContentId,
+    ) -> Result<Option<DhtRecord>, MiasmaError> {
         match self.inner.get(mid).await? {
             Some(record) => Ok(Some(self.rewrite_record(record))),
             None => Ok(None),

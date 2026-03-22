@@ -18,6 +18,7 @@
 //!  └──────────────┘   └──────────────┘
 //! ```
 
+pub mod http_bridge;
 pub mod ipc;
 pub mod replication;
 
@@ -46,8 +47,8 @@ use crate::{
 };
 
 use ipc::{
-    read_frame, remove_port_file, write_frame, write_port_file, ControlRequest,
-    ControlResponse, DaemonStatus,
+    read_frame, remove_port_file, write_frame, write_port_file, ControlRequest, ControlResponse,
+    DaemonStatus,
 };
 use replication::{PendingReplication, ReplicationQueue};
 
@@ -84,6 +85,9 @@ pub struct DaemonServer {
     proxy_type: Option<String>,
     /// Port the ObfuscatedQuic server is bound to (0 if not started).
     obfs_quic_port: u16,
+    /// Port the HTTP bridge is bound to (0 if not started).
+    #[allow(dead_code)]
+    http_bridge_port: u16,
     // Single-consumer resources moved into run():
     listener: Option<TcpListener>,
     rep_success_rx: Option<mpsc::Receiver<[u8; 32]>>,
@@ -145,10 +149,12 @@ impl DaemonServer {
         // Load TLS cert/key from config paths.
         if wss_tls_enabled {
             if let Some(ref cert_path) = transport_config.wss_cert_pem_path {
-                wss_config.tls_cert_pem = Some(std::fs::read(cert_path).context("reading WSS TLS cert")?);
+                wss_config.tls_cert_pem =
+                    Some(std::fs::read(cert_path).context("reading WSS TLS cert")?);
             }
             if let Some(ref key_path) = transport_config.wss_key_pem_path {
-                wss_config.tls_key_pem = Some(std::fs::read(key_path).context("reading WSS TLS key")?);
+                wss_config.tls_key_pem =
+                    Some(std::fs::read(key_path).context("reading WSS TLS key")?);
             }
             if let Some(ref sni) = transport_config.wss_sni {
                 wss_config.sni_override = Some(sni.clone());
@@ -184,7 +190,11 @@ impl DaemonServer {
                 Ok(server) => {
                     let port = server.port;
                     tokio::spawn(server.run());
-                    info!(wss_port = port, tls = true, "WSS share server started (TLS)");
+                    info!(
+                        wss_port = port,
+                        tls = true,
+                        "WSS share server started (TLS)"
+                    );
                     // Add WSS transport to fallback chain.
                     let mut client_config = wss_config.clone();
                     client_config.port = port;
@@ -286,8 +296,37 @@ impl DaemonServer {
 
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
+        // 9. Bind HTTP bridge for web client access.
+        let http_bridge_port = match http_bridge::HttpBridge::bind(
+            ipc::HTTP_BRIDGE_DEFAULT_PORT,
+            coord.clone(),
+            queue.clone(),
+            store.clone(),
+            listen_addr_strings.clone(),
+            wss_port,
+            wss_tls_enabled,
+            proxy_configured,
+            proxy_type.clone(),
+            obfs_quic_port,
+        )
+        .await
+        {
+            Ok(bridge) => {
+                let port = bridge.port();
+                ipc::write_http_port_file(&data_dir, port).ok();
+                info!(port, "HTTP bridge started");
+                tokio::spawn(bridge.run());
+                port
+            }
+            Err(e) => {
+                warn!("HTTP bridge failed to start: {e}");
+                0
+            }
+        };
+
         info!(
             port = control_port,
+            http_port = http_bridge_port,
             peer_id = %coord.peer_id(),
             "daemon IPC server bound"
         );
@@ -307,6 +346,7 @@ impl DaemonServer {
             proxy_configured,
             proxy_type,
             obfs_quic_port,
+            http_bridge_port,
             listener: Some(listener),
             rep_success_rx: Some(rep_rx),
             topology_rx: Some(topo_rx),
@@ -333,6 +373,12 @@ impl DaemonServer {
     /// Port the WSS share server is listening on (0 if not started).
     pub fn wss_port(&self) -> u16 {
         self.wss_port
+    }
+
+    /// Port the HTTP bridge is listening on (0 if not started).
+    #[allow(dead_code)]
+    pub fn http_bridge_port(&self) -> u16 {
+        self.http_bridge_port
     }
 
     /// A clone of the shutdown sender.  Send `()` to stop the daemon.
@@ -371,8 +417,14 @@ impl DaemonServer {
     pub async fn run(mut self) -> Result<()> {
         let listener = self.listener.take().expect("listener already consumed");
         let rep_success_rx = self.rep_success_rx.take().expect("rep_rx already consumed");
-        let topology_rx = self.topology_rx.take().expect("topology_rx already consumed");
-        let mut shutdown_rx = self.shutdown_rx.take().expect("shutdown_rx already consumed");
+        let topology_rx = self
+            .topology_rx
+            .take()
+            .expect("topology_rx already consumed");
+        let mut shutdown_rx = self
+            .shutdown_rx
+            .take()
+            .expect("shutdown_rx already consumed");
 
         let coord = self.coord.clone();
         let queue = self.queue.clone();
@@ -391,9 +443,18 @@ impl DaemonServer {
         let ipc_obfs = self.obfs_quic_port;
         let ipc_handle: JoinHandle<()> = tokio::spawn(async move {
             ipc_server_loop(
-                listener, ipc_coord, ipc_queue, ipc_store, ipc_addrs,
-                ipc_wss_port, ipc_wss_tls, ipc_proxy, ipc_proxy_type, ipc_obfs,
-            ).await;
+                listener,
+                ipc_coord,
+                ipc_queue,
+                ipc_store,
+                ipc_addrs,
+                ipc_wss_port,
+                ipc_wss_tls,
+                ipc_proxy,
+                ipc_proxy_type,
+                ipc_obfs,
+            )
+            .await;
         });
 
         // ── Event-driven replication engine ───────────────────────────────────
@@ -412,6 +473,7 @@ impl DaemonServer {
 
         coord.shutdown().await;
         remove_port_file(&self.data_dir);
+        ipc::remove_http_port_file(&self.data_dir);
         Ok(())
     }
 }
@@ -444,7 +506,8 @@ async fn ipc_server_loop(
                 let pt = proxy_type.clone();
                 let oq = obfs_quic_port;
                 tokio::spawn(async move {
-                    if let Err(e) = handle_ipc_client(stream, c, q, s, la, wp, wt, pc, pt, oq).await {
+                    if let Err(e) = handle_ipc_client(stream, c, q, s, la, wp, wt, pc, pt, oq).await
+                    {
                         debug!("IPC client error: {e}");
                     }
                 });
@@ -471,14 +534,23 @@ async fn handle_ipc_client(
 ) -> Result<()> {
     let req: ControlRequest = read_frame(&mut stream).await?;
     let resp = process_request(
-        req, coord, queue, store, listen_addrs,
-        wss_port, wss_tls_enabled, proxy_configured, proxy_type, obfs_quic_port,
-    ).await;
+        req,
+        coord,
+        queue,
+        store,
+        listen_addrs,
+        wss_port,
+        wss_tls_enabled,
+        proxy_configured,
+        proxy_type,
+        obfs_quic_port,
+    )
+    .await;
     write_frame(&mut stream, &resp).await?;
     Ok(())
 }
 
-async fn process_request(
+pub(crate) async fn process_request(
     req: ControlRequest,
     coord: Arc<MiasmaCoordinator>,
     queue: Arc<Mutex<ReplicationQueue>>,
@@ -491,7 +563,11 @@ async fn process_request(
     obfs_quic_port: u16,
 ) -> ControlResponse {
     match req {
-        ControlRequest::Publish { data, data_shards, total_shards } => {
+        ControlRequest::Publish {
+            data,
+            data_shards,
+            total_shards,
+        } => {
             let params = DissolutionParams {
                 data_shards: data_shards as usize,
                 total_shards: total_shards as usize,
@@ -502,7 +578,11 @@ async fn process_request(
             }
         }
 
-        ControlRequest::Get { mid, data_shards, total_shards } => {
+        ControlRequest::Get {
+            mid,
+            data_shards,
+            total_shards,
+        } => {
             let params = DissolutionParams {
                 data_shards: data_shards as usize,
                 total_shards: total_shards as usize,
@@ -526,16 +606,18 @@ async fn process_request(
                     total_rejections: 0,
                 },
             );
-            let routing = coord.routing_stats().await.unwrap_or(
-                crate::network::routing::RoutingStats {
-                    total_peers: 0,
-                    unreliable_peers: 0,
-                    unique_prefixes: 0,
-                    max_prefix_concentration: 0,
-                    diversity_rejections: 0,
-                    current_difficulty: 8,
-                },
-            );
+            let routing =
+                coord
+                    .routing_stats()
+                    .await
+                    .unwrap_or(crate::network::routing::RoutingStats {
+                        total_peers: 0,
+                        unreliable_peers: 0,
+                        unique_prefixes: 0,
+                        max_prefix_concentration: 0,
+                        diversity_rejections: 0,
+                        current_difficulty: 8,
+                    });
             let share_count = store.list().len();
             let storage_used_bytes = store.used_bytes();
             let (pending_replication, replicated_count) = {
@@ -661,8 +743,10 @@ async fn process_request(
                 retrieval_rendezvous_onion_successes: ret_stats.rendezvous_onion_successes,
                 retrieval_rendezvous_onion_failures: ret_stats.rendezvous_onion_failures,
                 retrieval_opportunistic_onion_successes: ret_stats.opportunistic_onion_successes,
-                retrieval_opportunistic_onion_rendezvous_successes: ret_stats.opportunistic_onion_rendezvous_successes,
-                retrieval_opportunistic_rendezvous_successes: ret_stats.opportunistic_rendezvous_successes,
+                retrieval_opportunistic_onion_rendezvous_successes: ret_stats
+                    .opportunistic_onion_rendezvous_successes,
+                retrieval_opportunistic_rendezvous_successes: ret_stats
+                    .opportunistic_rendezvous_successes,
                 relay_probes_sent: ret_stats.relay_probes_sent,
                 relay_probes_succeeded: ret_stats.relay_probes_succeeded,
                 relay_probes_failed: ret_stats.relay_probes_failed,
@@ -679,15 +763,13 @@ async fn process_request(
             })
         }
 
-        ControlRequest::Wipe => {
-            match store.distress_wipe() {
-                Ok(_) => {
-                    info!("distress wipe executed via IPC");
-                    ControlResponse::Wiped
-                }
-                Err(e) => ControlResponse::Error(format!("wipe failed: {e}")),
+        ControlRequest::Wipe => match store.distress_wipe() {
+            Ok(_) => {
+                info!("distress wipe executed via IPC");
+                ControlResponse::Wiped
             }
-        }
+            Err(e) => ControlResponse::Error(format!("wipe failed: {e}")),
+        },
     }
 }
 
@@ -735,7 +817,11 @@ async fn publish_content(
     // Add to the persistent replication queue so the retry loop can
     // re-announce when peers become available.
     let pending = PendingReplication::new(mid.to_string(), record);
-    queue.lock().unwrap().push(pending).map_err(|e| MiasmaError::Storage(e.to_string()))?;
+    queue
+        .lock()
+        .unwrap()
+        .push(pending)
+        .map_err(|e| MiasmaError::Storage(e.to_string()))?;
 
     let mid_str = mid.to_string();
     info!(mid = %mid_str, "content published; awaiting network replication");

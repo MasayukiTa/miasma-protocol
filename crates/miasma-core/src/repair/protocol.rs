@@ -1,11 +1,7 @@
 /// Repair coordinator — Phase 3 (Task 20).
 ///
 /// Decides when to trigger a repair and orchestrates re-dissolution.
-use crate::{
-    crypto::hash::ContentId,
-    pipeline::DissolutionParams,
-    MiasmaError,
-};
+use crate::{crypto::hash::ContentId, pipeline::DissolutionParams, MiasmaError};
 
 /// Configuration for the repair protocol.
 #[derive(Debug, Clone)]
@@ -45,11 +41,7 @@ impl RepairCoordinator {
     /// Check whether content identified by `mid` needs repair.
     ///
     /// Phase 3: query DHT for current holder list, compare to `replication_min`.
-    pub async fn needs_repair(
-        &self,
-        _mid: &ContentId,
-        reachable_holders: usize,
-    ) -> bool {
+    pub async fn needs_repair(&self, _mid: &ContentId, reachable_holders: usize) -> bool {
         reachable_holders < self.config.replication_min
     }
 

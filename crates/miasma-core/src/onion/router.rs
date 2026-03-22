@@ -20,8 +20,8 @@ use crate::MiasmaError;
 use super::{
     circuit::CircuitManager,
     packet::{
-        encrypt_response, CircuitId, InnerPayload, OnionLayer,
-        OnionLayerProcessor, OnionPacket, ReturnPath, X25519_KEY_LEN,
+        encrypt_response, CircuitId, InnerPayload, OnionLayer, OnionLayerProcessor, OnionPacket,
+        ReturnPath, X25519_KEY_LEN,
     },
 };
 
@@ -70,9 +70,9 @@ impl OnionRelayHandler {
     ) -> Result<(Vec<u8>, ForwardCell), MiasmaError> {
         let payload = OnionLayerProcessor::peel(&self.relay_secret, &packet.layer)?;
 
-        let next_hop = payload.next_hop.ok_or_else(|| {
-            MiasmaError::Sss("Relay1 got a packet with no next_hop".into())
-        })?;
+        let next_hop = payload
+            .next_hop
+            .ok_or_else(|| MiasmaError::Sss("Relay1 got a packet with no next_hop".into()))?;
 
         // Deserialise the inner layer (encrypted for Relay2).
         let inner_layer: OnionLayer = bincode::deserialize(&payload.data)
@@ -97,9 +97,9 @@ impl OnionRelayHandler {
     ) -> Result<(Vec<u8>, InnerPayload), MiasmaError> {
         let payload = OnionLayerProcessor::peel(&self.relay_secret, &cell.layer)?;
 
-        let target = payload.next_hop.ok_or_else(|| {
-            MiasmaError::Sss("Relay2 got a ForwardCell with no next_hop".into())
-        })?;
+        let target = payload
+            .next_hop
+            .ok_or_else(|| MiasmaError::Sss("Relay2 got a ForwardCell with no next_hop".into()))?;
 
         let inner: InnerPayload = bincode::deserialize(&payload.data)
             .map_err(|e| MiasmaError::Serialization(e.to_string()))?;
@@ -180,8 +180,7 @@ impl InProcessRelay {
         let r2_r1_encrypted = encrypt_response(&return_path.r2_r1_key, &response_body)?;
 
         // R1 → Initiator leg: encrypt again with r1_init_key.
-        let r1_init_encrypted =
-            encrypt_response(&return_path.r1_init_key, &r2_r1_encrypted)?;
+        let r1_init_encrypted = encrypt_response(&return_path.r1_init_key, &r2_r1_encrypted)?;
 
         // Deliver to the waiting circuit (CircuitManager decrypts the outer layer).
         circuit_manager

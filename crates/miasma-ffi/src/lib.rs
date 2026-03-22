@@ -29,8 +29,7 @@ use miasma_core::{
     config::{NetworkConfig, NodeConfig, StorageConfig},
     dissolve,
     store::LocalShareStore,
-    ContentId, DissolutionParams, MiasmaError,
-    LocalShareSource, RetrievalCoordinator,
+    ContentId, DissolutionParams, LocalShareSource, MiasmaError, RetrievalCoordinator,
 };
 
 // Tell UniFFI to generate the FFI scaffolding for this crate.
@@ -185,16 +184,18 @@ fn open_store(data_dir: &str) -> Result<(NodeConfig, Arc<LocalShareStore>), Mias
             data_dir: data_dir.to_owned(),
         });
     }
-    let config =
-        NodeConfig::load(&path).map_err(|e| {
-            tracing::warn!("config load error: {e}");
-            MiasmaFfiError::Other { msg: "failed to load config".into() }
-        })?;
-    let store = LocalShareStore::open(&path, config.storage.quota_mb)
-        .map_err(|e| {
-            tracing::warn!("store open error: {e}");
-            MiasmaFfiError::Other { msg: "failed to open store".into() }
-        })?;
+    let config = NodeConfig::load(&path).map_err(|e| {
+        tracing::warn!("config load error: {e}");
+        MiasmaFfiError::Other {
+            msg: "failed to load config".into(),
+        }
+    })?;
+    let store = LocalShareStore::open(&path, config.storage.quota_mb).map_err(|e| {
+        tracing::warn!("store open error: {e}");
+        MiasmaFfiError::Other {
+            msg: "failed to open store".into(),
+        }
+    })?;
     Ok((config, Arc::new(store)))
 }
 
@@ -211,11 +212,12 @@ pub fn initialize_node(
     bandwidth_mb_day: u64,
 ) -> Result<(), MiasmaFfiError> {
     let path = validate_data_dir(&data_dir)?;
-    std::fs::create_dir_all(&path)
-        .map_err(|e| {
-            tracing::warn!("create_dir_all error: {e}");
-            MiasmaFfiError::Other { msg: "failed to create data directory".into() }
-        })?;
+    std::fs::create_dir_all(&path).map_err(|e| {
+        tracing::warn!("create_dir_all error: {e}");
+        MiasmaFfiError::Other {
+            msg: "failed to create data directory".into(),
+        }
+    })?;
 
     let config = NodeConfig {
         storage: StorageConfig {
@@ -228,19 +230,20 @@ pub fn initialize_node(
         },
         transport: Default::default(),
     };
-    config
-        .save(&path)
-        .map_err(|e| {
-            tracing::warn!("config save error: {e}");
-            MiasmaFfiError::Other { msg: "failed to save config".into() }
-        })?;
+    config.save(&path).map_err(|e| {
+        tracing::warn!("config save error: {e}");
+        MiasmaFfiError::Other {
+            msg: "failed to save config".into(),
+        }
+    })?;
 
     // Opening the store creates master.key if absent.
-    LocalShareStore::open(&path, storage_mb)
-        .map_err(|e| {
-            tracing::warn!("store init error: {e}");
-            MiasmaFfiError::Other { msg: "failed to initialize store".into() }
-        })?;
+    LocalShareStore::open(&path, storage_mb).map_err(|e| {
+        tracing::warn!("store init error: {e}");
+        MiasmaFfiError::Other {
+            msg: "failed to initialize store".into(),
+        }
+    })?;
 
     Ok(())
 }
@@ -273,12 +276,12 @@ pub fn dissolve_bytes(data_dir: String, data: Vec<u8>) -> Result<String, MiasmaF
     let (mid, shares) = dissolve(&data, params).map_err(MiasmaFfiError::from)?;
 
     for share in &shares {
-        store
-            .put(share)
-            .map_err(|e| {
-                tracing::warn!("share store error: {e}");
-                MiasmaFfiError::Other { msg: "failed to store share".into() }
-            })?;
+        store.put(share).map_err(|e| {
+            tracing::warn!("share store error: {e}");
+            MiasmaFfiError::Other {
+                msg: "failed to store share".into(),
+            }
+        })?;
     }
 
     let _ = config; // suppress unused warning; quota already enforced by store
@@ -347,11 +350,7 @@ pub fn distress_wipe(data_dir: String) -> Result<(), MiasmaFfiError> {
     // Explicitly delete master.key and Keystore-wrapped blobs.
     // These deletions are best-effort — we don't fail the wipe if some
     // files are already gone.
-    let files_to_delete = [
-        "master.key",
-        "master.key.enc",
-        "master.key.iv",
-    ];
+    let files_to_delete = ["master.key", "master.key.enc", "master.key.iv"];
     for fname in &files_to_delete {
         let fpath = path.join(fname);
         if fpath.exists() {

@@ -127,7 +127,11 @@ impl EphemeralIdentity {
     pub fn generate(epoch: u64) -> Self {
         let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
         let verifying_key = signing_key.verifying_key();
-        Self { signing_key, verifying_key, epoch }
+        Self {
+            signing_key,
+            verifying_key,
+            epoch,
+        }
     }
 
     /// Compute the holder tag: `BLAKE3(domain || ephemeral_pubkey)`.
@@ -145,10 +149,11 @@ impl EphemeralIdentity {
     /// The `context` should bind the presentation to a specific interaction
     /// (e.g., a protocol message hash or verifier challenge) to prevent replay.
     pub fn sign_context(&self, credential_bytes: &[u8], context: &[u8]) -> Vec<u8> {
-        let message = blake3::hash(
-            &[DOMAIN_PRESENT, credential_bytes, context].concat(),
-        );
-        self.signing_key.sign(message.as_bytes()).to_bytes().to_vec()
+        let message = blake3::hash(&[DOMAIN_PRESENT, credential_bytes, context].concat());
+        self.signing_key
+            .sign(message.as_bytes())
+            .to_bytes()
+            .to_vec()
     }
 }
 
@@ -247,7 +252,10 @@ impl CredentialIssuer {
     /// Create an issuer from an Ed25519 signing key.
     pub fn new(signing_key: ed25519_dalek::SigningKey) -> Self {
         let verifying_key = signing_key.verifying_key();
-        Self { signing_key, verifying_key }
+        Self {
+            signing_key,
+            verifying_key,
+        }
     }
 
     /// Public key bytes (used by verifiers to recognise this issuer).
@@ -263,7 +271,12 @@ impl CredentialIssuer {
         capabilities: u8,
         holder_tag: [u8; 32],
     ) -> SignedCredential {
-        let body = CredentialBody { tier, epoch, capabilities, holder_tag };
+        let body = CredentialBody {
+            tier,
+            epoch,
+            capabilities,
+            holder_tag,
+        };
         let body_bytes = body.to_signing_bytes();
         let message = blake3::hash(&[DOMAIN_ISSUE, &body_bytes].concat());
         let sig = self.signing_key.sign(message.as_bytes());
@@ -290,9 +303,15 @@ pub enum CredentialError {
     /// `BLAKE3(ephemeral_pubkey) != credential.holder_tag`.
     HolderTagMismatch,
     /// Credential epoch is outside the acceptable window.
-    ExpiredEpoch { credential_epoch: u64, current_epoch: u64 },
+    ExpiredEpoch {
+        credential_epoch: u64,
+        current_epoch: u64,
+    },
     /// Credential tier is below the required minimum.
-    InsufficientTier { required: CredentialTier, actual: CredentialTier },
+    InsufficientTier {
+        required: CredentialTier,
+        actual: CredentialTier,
+    },
 }
 
 impl std::fmt::Display for CredentialError {
@@ -302,8 +321,14 @@ impl std::fmt::Display for CredentialError {
             CredentialError::InvalidIssuerSignature => write!(f, "invalid issuer signature"),
             CredentialError::InvalidHolderProof => write!(f, "invalid holder proof"),
             CredentialError::HolderTagMismatch => write!(f, "holder tag mismatch"),
-            CredentialError::ExpiredEpoch { credential_epoch, current_epoch } => {
-                write!(f, "expired epoch: cred={credential_epoch} current={current_epoch}")
+            CredentialError::ExpiredEpoch {
+                credential_epoch,
+                current_epoch,
+            } => {
+                write!(
+                    f,
+                    "expired epoch: cred={credential_epoch} current={current_epoch}"
+                )
             }
             CredentialError::InsufficientTier { required, actual } => {
                 write!(f, "insufficient tier: need {required}, have {actual}")
@@ -340,7 +365,9 @@ pub fn verify_presentation(
     let issue_message = blake3::hash(&[DOMAIN_ISSUE, &body_bytes].concat());
     let issuer_pubkey = ed25519_dalek::VerifyingKey::from_bytes(&cred.issuer_pubkey)
         .map_err(|_| CredentialError::InvalidIssuerSignature)?;
-    let issuer_sig_bytes: [u8; 64] = cred.issuer_signature.as_slice()
+    let issuer_sig_bytes: [u8; 64] = cred
+        .issuer_signature
+        .as_slice()
         .try_into()
         .map_err(|_| CredentialError::InvalidIssuerSignature)?;
     let issuer_sig = ed25519_dalek::Signature::from_bytes(&issuer_sig_bytes);
@@ -356,12 +383,12 @@ pub fn verify_presentation(
 
     // 4. Verify holder's context signature (proof of ephemeral key possession).
     let cred_bytes = cred.to_bytes();
-    let present_message = blake3::hash(
-        &[DOMAIN_PRESENT, &cred_bytes, context].concat(),
-    );
+    let present_message = blake3::hash(&[DOMAIN_PRESENT, &cred_bytes, context].concat());
     let holder_pubkey = ed25519_dalek::VerifyingKey::from_bytes(&presentation.ephemeral_pubkey)
         .map_err(|_| CredentialError::InvalidHolderProof)?;
-    let holder_sig_bytes: [u8; 64] = presentation.context_signature.as_slice()
+    let holder_sig_bytes: [u8; 64] = presentation
+        .context_signature
+        .as_slice()
         .try_into()
         .map_err(|_| CredentialError::InvalidHolderProof)?;
     let holder_sig = ed25519_dalek::Signature::from_bytes(&holder_sig_bytes);
@@ -415,7 +442,8 @@ impl CredentialWallet {
         if now != self.identity.epoch {
             self.identity = EphemeralIdentity::generate(now);
             // Prune expired credentials.
-            self.credentials.retain(|&(_, epoch), _| epoch_is_valid(epoch, now));
+            self.credentials
+                .retain(|&(_, epoch), _| epoch_is_valid(epoch, now));
             true
         } else {
             false
@@ -451,7 +479,8 @@ impl CredentialWallet {
     /// Get the best (highest-tier) valid credential from any known issuer.
     pub fn best_credential(&self) -> Option<&SignedCredential> {
         let now = current_epoch();
-        self.credentials.values()
+        self.credentials
+            .values()
             .filter(|c| epoch_is_valid(c.body.epoch, now))
             .max_by_key(|c| c.body.tier)
     }
@@ -459,7 +488,11 @@ impl CredentialWallet {
     /// Create a presentation of the best available credential.
     pub fn present(&self, context: &[u8]) -> Option<CredentialPresentation> {
         let cred = self.best_credential()?;
-        Some(CredentialPresentation::create(cred, &self.identity, context))
+        Some(CredentialPresentation::create(
+            cred,
+            &self.identity,
+            context,
+        ))
     }
 
     /// Number of stored credentials.
@@ -697,7 +730,10 @@ mod tests {
             current_epoch(),
             CredentialTier::Verified,
         );
-        assert!(matches!(result.unwrap_err(), CredentialError::ExpiredEpoch { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            CredentialError::ExpiredEpoch { .. }
+        ));
     }
 
     #[test]
@@ -720,7 +756,10 @@ mod tests {
             current_epoch(),
             CredentialTier::Verified, // requires higher
         );
-        assert!(matches!(result.unwrap_err(), CredentialError::InsufficientTier { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            CredentialError::InsufficientTier { .. }
+        ));
     }
 
     #[test]
@@ -821,7 +860,7 @@ mod tests {
     fn epoch_validity_window() {
         let now = 100;
         assert!(epoch_is_valid(100, now)); // current
-        assert!(epoch_is_valid(99, now));  // grace period
+        assert!(epoch_is_valid(99, now)); // grace period
         assert!(!epoch_is_valid(98, now)); // too old
         assert!(!epoch_is_valid(101, now)); // future
     }
