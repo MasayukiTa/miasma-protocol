@@ -2,8 +2,8 @@
 //!
 //! # Architecture
 //! All exported functions are **synchronous** at the FFI boundary.
-//! Async operations (e.g. `RetrievalCoordinator::retrieve`) are driven by an
-//! in-function `tokio` runtime so that the Kotlin layer can call them from
+//! Async operations (e.g. `RetrievalCoordinator::retrieve`) are driven by a
+//! shared static `tokio` runtime so that the Kotlin layer can call them from
 //! any coroutine dispatcher without worrying about runtime lifecycle.
 //!
 //! # Kotlin bindings generation
@@ -36,6 +36,25 @@ use miasma_core::{
 // Tell UniFFI to generate the FFI scaffolding for this crate.
 uniffi::setup_scaffolding!("miasma_ffi");
 
+// ─── Constants ──────────────────────────────────────────────────────────────
+
+/// Maximum input size for dissolve (100 MiB).
+const MAX_DISSOLVE_SIZE: usize = 100 * 1024 * 1024;
+
+// ─── Static tokio runtime (shared across all FFI calls) ─────────────────────
+
+fn shared_runtime() -> &'static tokio::runtime::Runtime {
+    use std::sync::OnceLock;
+    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("failed to create tokio runtime")
+    })
+}
+
 // ─── Exported types ──────────────────────────────────────────────────────────
 
 /// Node status snapshot returned to the UI.
@@ -56,61 +75,126 @@ pub struct NodeStatusFfi {
 // ─── Error type ───────────────────────────────────────────────────────────────
 
 /// Errors surfaced across the FFI boundary to Kotlin.
+///
+/// Error messages are sanitized to avoid leaking internal paths or system details.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum MiasmaFfiError {
     /// Node has not been initialised (no `master.key` / config found).
-    #[error("Node not initialised at '{data_dir}'. Call initialize_node first.")]
+    #[error("Node not initialised. Call initialize_node first.")]
     NotInitialized { data_dir: String },
 
     /// Supplied MID string could not be parsed.
-    #[error("Invalid MID: {reason}")]
+    #[error("Invalid content identifier")]
     InvalidMid { reason: String },
 
     /// Not enough shares available for reconstruction.
     #[error("Insufficient shares: need {need}, found {got}")]
     InsufficientShares { need: u64, got: u64 },
 
+    /// Input data exceeds size limit.
+    #[error("Input too large")]
+    InputTooLarge { size: u64, max: u64 },
+
     /// Catch-all for I/O, crypto, and serialization errors.
-    #[error("{msg}")]
+    #[error("Operation failed")]
     Other { msg: String },
 }
 
 impl From<MiasmaError> for MiasmaFfiError {
     fn from(e: MiasmaError) -> Self {
         match e {
-            MiasmaError::InvalidMid(m) => MiasmaFfiError::InvalidMid { reason: m },
+            MiasmaError::InvalidMid(_) => MiasmaFfiError::InvalidMid {
+                reason: "invalid format".into(),
+            },
             MiasmaError::InsufficientShares { need, got } => MiasmaFfiError::InsufficientShares {
                 need: need as u64,
                 got: got as u64,
             },
-            other => MiasmaFfiError::Other {
-                msg: other.to_string(),
-            },
+            other => {
+                tracing::warn!("FFI error: {other}");
+                MiasmaFfiError::Other {
+                    msg: "internal error".into(),
+                }
+            }
         }
     }
 }
 
 impl From<anyhow::Error> for MiasmaFfiError {
     fn from(e: anyhow::Error) -> Self {
-        MiasmaFfiError::Other { msg: e.to_string() }
+        tracing::warn!("FFI anyhow error: {e}");
+        MiasmaFfiError::Other {
+            msg: "internal error".into(),
+        }
     }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+/// Validate that `data_dir` is a safe path within the app's private storage.
+/// Rejects paths containing `..`, absolute paths outside expected prefixes,
+/// and symlink traversals.
+fn validate_data_dir(data_dir: &str) -> Result<PathBuf, MiasmaFfiError> {
+    let path = PathBuf::from(data_dir);
+
+    // Must be absolute.
+    if !path.is_absolute() {
+        return Err(MiasmaFfiError::Other {
+            msg: "data_dir must be an absolute path".into(),
+        });
+    }
+
+    // Reject path traversal components.
+    for component in path.components() {
+        if let std::path::Component::ParentDir = component {
+            return Err(MiasmaFfiError::Other {
+                msg: "data_dir must not contain '..'".into(),
+            });
+        }
+    }
+
+    // Canonicalize to resolve symlinks (if the path exists).
+    let canonical = if path.exists() {
+        path.canonicalize().map_err(|_| MiasmaFfiError::Other {
+            msg: "failed to canonicalize data_dir".into(),
+        })?
+    } else {
+        path.clone()
+    };
+
+    // On Android, the app's private data directory is typically:
+    //   /data/data/{package}/files  or  /data/user/{n}/{package}/files
+    // We accept any path under /data/ as a reasonable constraint.
+    let canonical_str = canonical.to_string_lossy();
+    if !canonical_str.starts_with("/data/") && !canonical_str.starts_with("/tmp/") {
+        return Err(MiasmaFfiError::Other {
+            msg: "data_dir must be within app private storage".into(),
+        });
+    }
+
+    Ok(canonical)
+}
+
 /// Load config and open the share store. Returns `NotInitialized` if the node
 /// has not been initialised (`master.key` or `config.toml` missing).
 fn open_store(data_dir: &str) -> Result<(NodeConfig, Arc<LocalShareStore>), MiasmaFfiError> {
-    let path = PathBuf::from(data_dir);
+    let path = validate_data_dir(data_dir)?;
     let master_key_path = path.join("master.key");
     if !master_key_path.exists() {
         return Err(MiasmaFfiError::NotInitialized {
             data_dir: data_dir.to_owned(),
         });
     }
-    let config = NodeConfig::load(&path).map_err(|e| MiasmaFfiError::Other { msg: e.to_string() })?;
+    let config =
+        NodeConfig::load(&path).map_err(|e| {
+            tracing::warn!("config load error: {e}");
+            MiasmaFfiError::Other { msg: "failed to load config".into() }
+        })?;
     let store = LocalShareStore::open(&path, config.storage.quota_mb)
-        .map_err(|e| MiasmaFfiError::Other { msg: e.to_string() })?;
+        .map_err(|e| {
+            tracing::warn!("store open error: {e}");
+            MiasmaFfiError::Other { msg: "failed to open store".into() }
+        })?;
     Ok((config, Arc::new(store)))
 }
 
@@ -126,9 +210,12 @@ pub fn initialize_node(
     storage_mb: u64,
     bandwidth_mb_day: u64,
 ) -> Result<(), MiasmaFfiError> {
-    let path = PathBuf::from(&data_dir);
+    let path = validate_data_dir(&data_dir)?;
     std::fs::create_dir_all(&path)
-        .map_err(|e| MiasmaFfiError::Other { msg: e.to_string() })?;
+        .map_err(|e| {
+            tracing::warn!("create_dir_all error: {e}");
+            MiasmaFfiError::Other { msg: "failed to create data directory".into() }
+        })?;
 
     let config = NodeConfig {
         storage: StorageConfig {
@@ -143,11 +230,17 @@ pub fn initialize_node(
     };
     config
         .save(&path)
-        .map_err(|e| MiasmaFfiError::Other { msg: e.to_string() })?;
+        .map_err(|e| {
+            tracing::warn!("config save error: {e}");
+            MiasmaFfiError::Other { msg: "failed to save config".into() }
+        })?;
 
     // Opening the store creates master.key if absent.
     LocalShareStore::open(&path, storage_mb)
-        .map_err(|e| MiasmaFfiError::Other { msg: e.to_string() })?;
+        .map_err(|e| {
+            tracing::warn!("store init error: {e}");
+            MiasmaFfiError::Other { msg: "failed to initialize store".into() }
+        })?;
 
     Ok(())
 }
@@ -158,6 +251,19 @@ pub fn initialize_node(
 /// Default dissolution parameters (k=10, n=20) are used.
 #[uniffi::export]
 pub fn dissolve_bytes(data_dir: String, data: Vec<u8>) -> Result<String, MiasmaFfiError> {
+    // Enforce input size limit to prevent OOM.
+    if data.len() > MAX_DISSOLVE_SIZE {
+        return Err(MiasmaFfiError::InputTooLarge {
+            size: data.len() as u64,
+            max: MAX_DISSOLVE_SIZE as u64,
+        });
+    }
+    if data.is_empty() {
+        return Err(MiasmaFfiError::Other {
+            msg: "empty input".into(),
+        });
+    }
+
     let (config, store) = open_store(&data_dir)?;
     let params = DissolutionParams {
         data_shards: 10,
@@ -169,7 +275,10 @@ pub fn dissolve_bytes(data_dir: String, data: Vec<u8>) -> Result<String, MiasmaF
     for share in &shares {
         store
             .put(share)
-            .map_err(|e| MiasmaFfiError::Other { msg: e.to_string() })?;
+            .map_err(|e| {
+                tracing::warn!("share store error: {e}");
+                MiasmaFfiError::Other { msg: "failed to store share".into() }
+            })?;
     }
 
     let _ = config; // suppress unused warning; quota already enforced by store
@@ -189,11 +298,8 @@ pub fn retrieve_bytes(data_dir: String, mid_str: String) -> Result<Vec<u8>, Mias
         total_shards: 20,
     };
 
-    // RetrievalCoordinator is async — drive it with a dedicated runtime.
-    let rt = tokio::runtime::Runtime::new()
-        .map_err(|e| MiasmaFfiError::Other { msg: e.to_string() })?;
-
-    let plaintext = rt.block_on(async {
+    // Use the shared static runtime instead of creating a new one per call.
+    let plaintext = shared_runtime().block_on(async {
         let coord = RetrievalCoordinator::new(LocalShareSource::new(store));
         coord.retrieve(&mid, params).await
     })?;
@@ -224,11 +330,39 @@ pub fn get_node_status(data_dir: String) -> Result<NodeStatusFfi, MiasmaFfiError
 /// Zeroes and deletes the master key within seconds. All locally stored shares
 /// become permanently unreadable. The node directory remains so the app
 /// continues to appear normally installed.
+///
+/// This function is intentionally lenient — it proceeds with deletion even if
+/// the node was not fully initialized, to ensure residual files are cleaned.
 #[uniffi::export]
 pub fn distress_wipe(data_dir: String) -> Result<(), MiasmaFfiError> {
-    let (_config, store) = open_store(&data_dir)?;
-    store
-        .distress_wipe()
-        .map_err(|e| MiasmaFfiError::Other { msg: e.to_string() })?;
+    let path = validate_data_dir(&data_dir)?;
+
+    // Try to wipe via store (zeroes master.key contents before deleting).
+    // If the store can't be opened (e.g., master.key already deleted),
+    // proceed with manual cleanup anyway.
+    if let Ok((_config, store)) = open_store(&data_dir) {
+        let _ = store.distress_wipe();
+    }
+
+    // Explicitly delete master.key and Keystore-wrapped blobs.
+    // These deletions are best-effort — we don't fail the wipe if some
+    // files are already gone.
+    let files_to_delete = [
+        "master.key",
+        "master.key.enc",
+        "master.key.iv",
+    ];
+    for fname in &files_to_delete {
+        let fpath = path.join(fname);
+        if fpath.exists() {
+            // Overwrite with zeros before deleting (defense in depth).
+            if let Ok(metadata) = std::fs::metadata(&fpath) {
+                let zeros = vec![0u8; metadata.len() as usize];
+                let _ = std::fs::write(&fpath, &zeros);
+            }
+            let _ = std::fs::remove_file(&fpath);
+        }
+    }
+
     Ok(())
 }
