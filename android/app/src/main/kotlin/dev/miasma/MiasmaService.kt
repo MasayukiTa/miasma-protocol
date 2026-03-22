@@ -80,6 +80,15 @@ class MiasmaService : Service() {
             .setContentText(text)
             .setOngoing(true)
             .setSilent(true)
+            // Hide details on lock screen — only show "Miasma Node" title.
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(
+                NotificationCompat.Builder(this, MiasmaApp.CHANNEL_DAEMON)
+                    .setSmallIcon(android.R.drawable.ic_dialog_info)
+                    .setContentTitle("Miasma Node")
+                    .setContentText("Running")
+                    .build()
+            )
             .setContentIntent(
                 PendingIntent.getActivity(
                     this, 0,
