@@ -12,7 +12,7 @@
     and the script still produces valid checksums.
 
 .PARAMETER ZipPath
-    Path to the release .zip file (e.g. .\dist\miasma-0.2.0-windows-x64.zip).
+    Path to the release .zip file (e.g. .\dist\miasma-0.3.0-windows-x64.zip).
 
 .PARAMETER CertThumbprint
     SHA-1 thumbprint of the Authenticode code-signing certificate in the
@@ -30,10 +30,10 @@
 
 .EXAMPLE
     # Checksum only (no cert):
-    .\scripts\sign-release.ps1 .\dist\miasma-0.2.0-windows-x64.zip
+    .\scripts\sign-release.ps1 .\dist\miasma-0.3.0-windows-x64.zip
 
     # Full signing with Authenticode + GPG:
-    .\scripts\sign-release.ps1 .\dist\miasma-0.2.0-windows-x64.zip `
+    .\scripts\sign-release.ps1 .\dist\miasma-0.3.0-windows-x64.zip `
         -CertThumbprint "A1B2C3..." -GpgSign
 #>
 

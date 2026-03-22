@@ -1,4 +1,4 @@
-# Miasma Protocol v0.2.0-beta.1 - Windows Technical Beta Prerelease
+# Miasma Protocol v0.3.0-beta.1 - Windows Technical Beta Prerelease
 
 **Release date:** 2026-03-22  
 **Platform:** Windows 10/11 x64  
@@ -93,15 +93,15 @@ This beta is the first release where the anonymity and reachability stack is mat
 
 | File | For | Description |
 |---|---|---|
-| `MiasmaSetup-0.2.0-x64.exe` | Everyone | Recommended installer - handles prerequisites and installs everything |
-| `miasma-0.2.0-windows-x64.msi` | IT admins | MSI package for managed or silent deployment |
-| `miasma-0.2.0-windows-x64.zip` | Advanced users | Portable binary bundle without installer |
+| `MiasmaSetup-0.3.0-x64.exe` | Everyone | Recommended installer - handles prerequisites and installs everything |
+| `miasma-0.3.0-windows-x64.msi` | IT admins | MSI package for managed or silent deployment |
+| `miasma-0.3.0-windows-x64.zip` | Advanced users | Portable binary bundle without installer |
 
 ## Installation
 
 ### Installer (Recommended)
 
-1. Download **`MiasmaSetup-0.2.0-x64.exe`**.
+1. Download **`MiasmaSetup-0.3.0-x64.exe`**.
 2. Double-click to run the installer and follow the prompts.
 3. Miasma installs to `C:\Program Files\Miasma Protocol`.
 4. Launch **Miasma Desktop** from the Start Menu.
@@ -111,15 +111,15 @@ The installer handles prerequisites automatically, including the Visual C++ runt
 
 **SmartScreen warning:** This beta is not code-signed. If Windows shows a warning, click **"More info"** and then **"Run anyway"**.
 
-**Silent install:** `MiasmaSetup-0.2.0-x64.exe /install /quiet`
+**Silent install:** `MiasmaSetup-0.3.0-x64.exe /install /quiet`
 
 ### MSI Package
 
 For managed deployment:
 
-1. Download `miasma-0.2.0-windows-x64.msi`.
+1. Download `miasma-0.3.0-windows-x64.msi`.
 2. Deploy via Group Policy, SCCM, or run manually.
-3. Silent install: `msiexec /i miasma-0.2.0-windows-x64.msi /qn`
+3. Silent install: `msiexec /i miasma-0.3.0-windows-x64.msi /qn`
 
 The MSI does not install the Visual C++ runtime automatically. If needed: https://aka.ms/vs/17/release/vc_redist.x64.exe
 
@@ -171,7 +171,7 @@ At release time, the codebase includes:
 
 ## Known Limitations
 
-These are still real limitations in `v0.2.0-beta.1`:
+These are still real limitations in `v0.3.0-beta.1`:
 
 - **No code signing yet.** Windows SmartScreen will warn.
 - **No external security audit yet.**
@@ -207,8 +207,8 @@ See `docs/TROUBLESHOOTING.md` for a full troubleshooting guide covering app star
 Check the SHA-256 checksums in the `.sha256` file:
 
 ```powershell
-$expected = Get-Content .\MiasmaSetup-0.2.0-x64.exe.sha256
-$actual = (Get-FileHash .\MiasmaSetup-0.2.0-x64.exe -Algorithm SHA256).Hash
+$expected = Get-Content .\MiasmaSetup-0.3.0-x64.exe.sha256
+$actual = (Get-FileHash .\MiasmaSetup-0.3.0-x64.exe -Algorithm SHA256).Hash
 if ($actual -eq ($expected -split " ")[0]) { "OK" } else { "MISMATCH" }
 ```
 
