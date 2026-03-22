@@ -36,7 +36,7 @@
 
 .EXAMPLE
     .\scripts\build-installer.ps1
-    .\scripts\build-installer.ps1 -Version "0.2.0" -SkipBundle
+    .\scripts\build-installer.ps1 -Version "0.3.0" -SkipBundle
     .\scripts\build-installer.ps1 -CertThumbprint "A1B2..."
 #>
 
@@ -95,7 +95,7 @@ if (-not $Version) {
     } finally {
         Pop-Location
     }
-    if (-not $Version) { $Version = "0.2.0" }
+    if (-not $Version) { $Version = "0.3.0" }
 }
 
 Write-Host "=== Building Miasma Installer ===" -ForegroundColor Cyan

@@ -4,12 +4,12 @@ Miasma is a censorship-resistant content storage and retrieval protocol inspired
 
 This project is not claiming "finished anonymous file sharing." It is building toward that goal in explicit, documented phases.
 
-## v0.2.0-beta.1
+## v0.3.0-beta.1
 
-The current public release is **v0.2.0-beta.1**, a Windows beta prerelease for technical users and protocol testers.
+The current public release is **v0.3.0-beta.1**, a Windows beta prerelease for technical users and protocol testers.
 
 - Release page: [GitHub Releases](https://github.com/MasayukiTa/miasma-protocol/releases)
-- Recommended artifact: `MiasmaSetup-0.2.0-x64.exe`
+- Recommended artifact: `MiasmaSetup-0.3.0-x64.exe`
 
 ### What ships in this release
 
@@ -114,7 +114,7 @@ cargo build --release
 cargo test --workspace
 ```
 
-The test suite includes 464 tests (268 core unit + 112 adversarial + 53 integration + 31 bridge), with 0 failures.
+The test suite includes 480 tests (268 core unit + 112 adversarial + 53 integration + 31 bridge + 16 desktop), with 0 failures.
 
 One test (`p2p_kademlia_full_roundtrip`) is quarantined with `#[ignore]` due to timing sensitivity. It can be run manually and is also covered by `scripts/smoke-loopback.ps1`.
 

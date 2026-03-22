@@ -13,6 +13,16 @@ This is a release-readiness, operational-quality, and real-user-validation pass 
 It is acceptable if this takes several hours.
 I prefer one deep pass with real validation over many shallow partial edits.
 
+When the work reaches actual cross-device execution, use `docs/tasks/windows-staged-cross-device-validation.md` as the stage-gated runbook.
+
+### Immediate Assumption For This Pass
+
+A second Windows device is available now.
+Use a freshly built beta package from current `main` on that second device for validation.
+
+Do not downgrade this milestone to same-machine-only testing unless a hard blocker makes second-device testing impossible.
+If second-device testing becomes blocked, say exactly why and what evidence is missing.
+
 ### Current State
 
 The project now has:
@@ -56,10 +66,11 @@ Do not spend time on mobile runtime or unrelated protocol expansion here.
 ### Track A: Separate-Machine Validation
 
 Validate on at least one non-dev Windows environment.
+Because a second device is available for this pass, use that device rather than treating a second user profile on the dev machine as sufficient.
 
 Minimum expectations:
 
-- use a different Windows user profile or a separate PC
+- use a separate Windows PC for the primary validation pass
 - verify both Easy and Technical entry points
 - verify first launch without a dev shell nearby
 - verify non-English locale selection and persistence
@@ -67,7 +78,7 @@ Minimum expectations:
 
 Validation scenarios:
 
-1. Fresh MSI install on a clean-ish machine/profile
+1. Fresh MSI install on the second device
 2. Fresh portable ZIP extraction and launch
 3. Launch Easy mode from shortcut / launcher
 4. Launch Technical mode from shortcut / launcher
@@ -75,6 +86,7 @@ Validation scenarios:
 6. Save Report and inspect output location
 7. Switch language and restart
 8. Validate visual quality in EN / JA / ZH-CN on a real Windows desktop
+9. Capture exact differences between installed and portable behavior on the second device
 
 Important:
 Do not call this done based only on automated tests.
@@ -82,7 +94,7 @@ Manual validation evidence is required.
 
 ### Track B: Install / Upgrade / Uninstall / Repair
 
-The installer story must be stronger than “it installs on the dev box.”
+The installer story must be stronger than "it installs on the dev box."
 
 Implement and validate:
 
@@ -127,7 +139,7 @@ Implement and validate:
 - verify failure messaging if bridge is unavailable or import fails
 
 2. `.torrent` flow from Explorer
-- double-click or use “Open with”
+- double-click or use "Open with"
 - verify Miasma appears appropriately
 - verify Miasma receives the file path correctly
 - verify import flow and result messaging
@@ -149,7 +161,7 @@ Implement and validate:
 - if not, at minimum:
   - document the limitation clearly
   - make in-progress state honest
-  - make “close / retry later” behavior understandable
+  - make "close / retry later" behavior understandable
 
 ### Track D: First-Run and Recovery Experience
 
@@ -159,7 +171,7 @@ Implement or improve:
 
 1. First-run clarity
 - users should know what to do first
-- clarify “ready / starting / offline / no peers yet”
+- clarify "ready / starting / offline / no peers yet"
 - surface next action when the app is not usable yet
 
 2. Recovery messaging
@@ -172,7 +184,7 @@ Implement or improve:
 3. Support path
 - Save Report should be easy to find when needed
 - troubleshooting docs should map to the exact wording shown in the app
-- non-technical testers should have a simple “what to send us” path
+- non-technical testers should have a simple "what to send us" path
 
 4. Technical mode support value
 - do not gut diagnostics
@@ -196,7 +208,7 @@ Do the following:
 
 3. Packaging identity
 - ensure app naming, shortcut naming, README naming, and release artifact naming all align
-- avoid confusing “technical” language on normal-user surfaces
+- avoid confusing "technical" language on normal-user surfaces
 
 ### Track F: Runtime and Operational Robustness
 
@@ -271,7 +283,7 @@ At the end of this milestone, provide a clean validation report with these secti
 
 Do not mark this milestone complete unless all of the following are true:
 
-1. A separate-machine or separate-profile manual validation pass has been completed and documented
+1. A real second-device manual validation pass has been completed and documented
 2. Fresh install, portable ZIP, and at least one real upgrade/uninstall path have been validated
 3. `magnet:` opening has been tested from a real browser
 4. `.torrent` opening has been tested from Explorer / Open With
@@ -293,7 +305,7 @@ If something cannot be completed in one pass:
 - say exactly what evidence is still missing
 - say exactly what smallest next step remains
 
-Do not present unvalidated installer, shell, or cross-machine behavior as complete.
+Do not present unvalidated installer, shell, or second-device behavior as complete.
 
 ### Expected Output
 
