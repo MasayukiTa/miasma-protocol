@@ -20,19 +20,19 @@
 
 .PARAMETER SetupExe
     Path to MiasmaSetup bootstrapper EXE.
-    Default: .\dist\MiasmaSetup-0.3.0-x64.exe
+    Default: .\dist\MiasmaSetup-0.3.1-x64.exe
 
 .PARAMETER SkipUpgrade
     Switch to skip the upgrade test (step 4).
 
 .EXAMPLE
     .\scripts\validate-installer.ps1
-    .\scripts\validate-installer.ps1 -SetupExe .\dist\MiasmaSetup-0.3.0-x64.exe
+    .\scripts\validate-installer.ps1 -SetupExe .\dist\MiasmaSetup-0.3.1-x64.exe
     .\scripts\validate-installer.ps1 -SkipUpgrade
 #>
 
 param(
-    [string]$SetupExe = ".\dist\MiasmaSetup-0.3.0-x64.exe",
+    [string]$SetupExe = ".\dist\MiasmaSetup-0.3.1-x64.exe",
     [switch]$SkipUpgrade
 )
 

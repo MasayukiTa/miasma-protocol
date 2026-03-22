@@ -1,4 +1,4 @@
-# Validation Report — Miasma v0.3.0-beta.2
+# Validation Report — Miasma v0.3.1-beta.1
 
 **Date**: 2026-03-22
 **Platform**: Windows 11 Enterprise 10.0.22631 (x64)
@@ -39,7 +39,7 @@ powershell -ExecutionPolicy Bypass -File scripts/smoke-windows.ps1
 
 ## 2. Installer / Package Validation
 
-### Fresh install (v0.3.0 MSI)
+### Fresh install (v0.3.1 MSI)
 - **Result**: PASS
 - Binaries installed to `C:\Program Files\Miasma Protocol\`
 - 3 Start Menu shortcuts created: Miasma, Miasma Technical, Miasma CLI
@@ -48,16 +48,16 @@ powershell -ExecutionPolicy Bypass -File scripts/smoke-windows.ps1
   - `HKLM\Software\Classes\.torrent\OpenWithProgids\Miasma.TorrentFile`
   - `HKLM\Software\RegisteredApplications\Miasma`
 
-### Upgrade (v0.1.0 → v0.3.0 MSI)
+### Upgrade (v0.1.0 → v0.3.1 MSI)
 - **Result**: PASS
 - Installed v0.1.0 MSI silently
-- Upgraded to v0.3.0 MSI silently
-- Binaries replaced correctly (desktop.exe: 9,274,368 → 9,598,464 bytes)
+- Upgraded to v0.3.1 MSI silently
+- Binaries replaced correctly during major upgrade
 - Start Menu shortcuts preserved (3 shortcuts still present)
-- Shell integration registry entries added by v0.3.0 (not in v0.1.0)
+- Shell integration registry entries added by v0.3.1 (not in v0.1.0)
 - No broken shortcuts or PATH state
 
-### Uninstall (v0.3.0 MSI)
+### Uninstall (v0.3.1 MSI)
 - **Result**: PASS
 - `miasma-desktop.exe` removed
 - `miasma.exe` removed
@@ -69,8 +69,8 @@ powershell -ExecutionPolicy Bypass -File scripts/smoke-windows.ps1
 
 ### Portable ZIP
 - **Result**: PASS (artifacts built)
-- `miasma-0.3.0-windows-x64.zip` (15.7 MB) — Technical variant
-- `miasma-0.3.0-windows-x64-easy.zip` (15.7 MB) — Easy variant
+- `miasma-0.3.1-windows-x64.zip` — Technical variant
+- `miasma-0.3.1-windows-x64-easy.zip` — Easy variant
 - Both include: 3 binaries, 2 launcher scripts, README.txt, RELEASE-NOTES.md
 
 ---
@@ -127,7 +127,7 @@ powershell -ExecutionPolicy Bypass -File scripts/smoke-windows.ps1
 ## 5. Documentation
 
 ### Updated
-- `RELEASE-NOTES.md` — v0.3.0 with desktop GUI, shell integration, packaging sections; test count 480; release judgment
+- `RELEASE-NOTES.md` — v0.3.1 with desktop GUI, shell integration, packaging sections; test count 480; release judgment
 - `docs/variant-guide.md` — Shell integration, diagnostics/support, startup/retry policy, updated checklists
 - `docs/TROUBLESHOOTING.md` — 9 sections (added SmartScreen), matches app wording
 - `installer/README-installed.txt` — Added launch modes, SmartScreen, Save Report instructions
@@ -160,10 +160,10 @@ powershell -ExecutionPolicy Bypass -File scripts/smoke-windows.ps1
 
 | Artifact | Size | SHA-256 |
 |---|---|---|
-| `MiasmaSetup-0.3.0-x64.exe` | 36.3 MB | 849F348EC1563F6C7B44EEF17AEA355EA617A5EB73E8D6C3CEA55F60E00B6FBB |
-| `miasma-0.3.0-windows-x64.msi` | 11.2 MB | 30B2D104091AC16445F3CB07AEFC179FCF522C77B874B1971961FDD9BC034497 |
-| `miasma-0.3.0-windows-x64.zip` | 14.9 MB | 7DF8BD838A02B94E248471A237178B99C91DB6347E2EC748A51213921E57A087 |
-| `miasma-0.3.0-windows-x64-easy.zip` | 14.9 MB | A7E82FB74130FCD125197B8E96DEF0324616490F4BDF3307B165684A37776142 |
+| `MiasmaSetup-0.3.1-x64.exe` | see release asset | see `.sha256` |
+| `miasma-0.3.1-windows-x64.msi` | see release asset | see `.sha256` |
+| `miasma-0.3.1-windows-x64.zip` | see release asset | see `.sha256` |
+| `miasma-0.3.1-windows-x64-easy.zip` | see release asset | see `.sha256` |
 
 ---
 
@@ -171,12 +171,12 @@ powershell -ExecutionPolicy Bypass -File scripts/smoke-windows.ps1
 
 **Acceptable for current beta continuation on dev machine. Ready for Stage 1 retry on a second Windows device.**
 
-The 0.3.0 build passes all automated tests, all smoke scenarios, and installer lifecycle (install/upgrade/uninstall). Shell integration registry entries are confirmed working. Desktop GUI functions correctly in both modes with all 3 locales.
+The 0.3.1 build passes all automated tests, all smoke scenarios, and installer lifecycle (install/upgrade/uninstall). Shell integration registry entries are confirmed working. Desktop GUI functions correctly in both modes with all 3 locales.
 
-Stage 1 on a second Windows device already exposed a real same-network discovery gap. `v0.3.0-beta.2` addresses that gap with:
+Stage 1 on a second Windows device already exposed a real same-network discovery gap. `v0.3.1-beta.1` addresses that gap with:
 
 - mDNS-based same-network peer discovery
 - CLI support for `network.bootstrap_peers`
 - updated troubleshooting guidance for LAN discovery and manual bootstrap fallback
 
-**Next step**: Retry `docs/tasks/windows-staged-cross-device-validation.md` Stage 1 using the `MiasmaSetup-0.3.0-x64.exe` artifact on the second Windows device, then stop and report before proceeding to Stage 2.
+**Next step**: Retry `docs/tasks/windows-staged-cross-device-validation.md` Stage 1 using the `MiasmaSetup-0.3.1-x64.exe` artifact on the second Windows device, then stop and report before proceeding to Stage 2.

@@ -9,16 +9,16 @@ Use this task when a second Windows device is actually available and the goal is
 
 ### Current Build Assumption
 
-Use the current locally prepared `0.3.0` Windows beta artifacts for this pass.
+Use the current locally prepared `0.3.1` Windows beta artifacts for this pass.
 
 Preferred artifact:
 
-- `dist\MiasmaSetup-0.3.0-x64.exe`
+- `dist\MiasmaSetup-0.3.1-x64.exe`
 
 Optional portable artifacts:
 
-- `dist\miasma-0.3.0-windows-x64-easy.zip`
-- `dist\miasma-0.3.0-windows-x64.zip`
+- `dist\miasma-0.3.1-windows-x64-easy.zip`
+- `dist\miasma-0.3.1-windows-x64.zip`
 
 ### Important Execution Rule
 
@@ -65,7 +65,7 @@ If an environment prerequisite is missing, say so clearly and stop at the end of
 
 At every stage, validate both:
 
-- installed flow via `MiasmaSetup-0.3.0-x64.exe`
+- installed flow via `MiasmaSetup-0.3.1-x64.exe`
 - practical user flow in the desktop app
 
 Prefer Easy mode for mainstream-user validation and Technical mode for diagnostics when something fails.
@@ -84,12 +84,12 @@ At every stage, capture:
 
 #### Goal
 
-Prove the current `0.3.0` Windows beta behaves correctly across two separate devices under the easiest realistic network condition.
+Prove the current `0.3.1` Windows beta behaves correctly across two separate devices under the easiest realistic network condition.
 
 #### What to validate
 
 1. Install and first launch on the second device
-- run `MiasmaSetup-0.3.0-x64.exe`
+- run `MiasmaSetup-0.3.1-x64.exe`
 - verify SmartScreen instructions if shown
 - verify Start Menu shortcuts and icon appearance
 - launch Easy mode
