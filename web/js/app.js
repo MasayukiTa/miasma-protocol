@@ -26,9 +26,16 @@ async function init() {
   // Feature detection first
   const missing = checkBrowserSupport();
   if (missing.length > 0) {
-    const el = document.querySelector('.loading-container p');
-    el.textContent = `Browser not supported. Missing: ${missing.join(', ')}`;
+    const container = document.querySelector('.loading-container');
+    container.querySelector('.loading-spinner')?.remove();
+    const el = container.querySelector('p');
+    el.innerHTML = `<strong>Browser not supported</strong><br>` +
+      `Missing features: ${missing.join(', ')}<br><br>` +
+      `Miasma Web requires a modern browser with WebAssembly support.<br>` +
+      `Recommended: Chrome 89+, Firefox 89+, Edge 89+, Safari 15+`;
     el.style.color = 'var(--danger)';
+    el.style.textAlign = 'center';
+    el.style.lineHeight = '1.6';
     return;
   }
 
@@ -83,7 +90,8 @@ function setupEventListeners() {
 
   // Language
   document.getElementById('btn-lang').addEventListener('click', () => {
-    setLang(getLang() === 'en' ? 'ja' : 'en');
+    const cycle = { en: 'ja', ja: 'zh', zh: 'en' };
+    setLang(cycle[getLang()] || 'en');
   });
   document.querySelectorAll('.lang-btn').forEach(btn => {
     btn.addEventListener('click', () => setLang(btn.dataset.lang));
@@ -697,7 +705,8 @@ function decodeBase58(str) {
 // ── Service Worker Registration ───────────────────────────────────
 
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('/sw.js').catch(() => {
+  // Use relative path so the SW works when hosted at a subpath
+  navigator.serviceWorker.register('./sw.js').catch(() => {
     // SW registration failure is non-fatal (e.g. localhost without HTTPS)
   });
 }
