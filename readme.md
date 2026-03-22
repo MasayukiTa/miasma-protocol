@@ -4,9 +4,9 @@ Miasma is a censorship-resistant content storage and retrieval protocol inspired
 
 This project is not claiming "finished anonymous file sharing." It is building toward that goal in explicit, documented phases.
 
-## v0.3.0-beta.1
+## v0.3.0-beta.2
 
-The current public release is **v0.3.0-beta.1**, a Windows beta prerelease for technical users and protocol testers.
+The current public release is **v0.3.0-beta.2**, a Windows beta prerelease for technical users and protocol testers.
 
 - Release page: [GitHub Releases](https://github.com/MasayukiTa/miasma-protocol/releases)
 - Recommended artifact: `MiasmaSetup-0.3.0-x64.exe`
@@ -24,6 +24,7 @@ The current public release is **v0.3.0-beta.1**, a Windows beta prerelease for t
 - **BBS+ anonymous credentials** with within-epoch unlinkability (BLS12-381 pairing-based, selective disclosure, link-secret non-transferability)
 - **Pseudonymous peer descriptors** with epoch rotation and churn tracking
 - **Active relay trust verification** -- relay probing (`/miasma/relay-probe/1.0.0`), forwarding verification through circuit addresses, evidence-based trust tiers (Claimed / Observed / Verified)
+- **Same-network peer discovery** -- mDNS for LAN discovery, with manual bootstrap fallback for restrictive networks
 - **Transport obfuscation**: WSS+TLS, ObfuscatedQuic+REALITY, SOCKS5 proxy support
 - **Windows daemon + CLI + desktop GUI + BitTorrent bridge**
 - **Secure key storage** with Win32 API-based restricted file creation (ACL-enforced `master.key`)
@@ -44,7 +45,7 @@ The current public release is **v0.3.0-beta.1**, a Windows beta prerelease for t
 - **No protection against a strong global passive adversary.** A network-level observer who can see all traffic can correlate flows.
 - **Onion padding is fixed-size, not constant-rate.** Packets are padded to 8 KiB to prevent size correlation, but traffic timing analysis is still possible.
 - **Small relay pool in early deployment.** Anonymity set is limited by the number of participating relay nodes.
-- **No automatic peer discovery.** Bootstrap peers must be configured manually.
+- **Automatic discovery is limited to the local network.** Same-network peers now use mDNS; restrictive networks may still need manual bootstrap peers.
 - **No code signing certificate.** Windows SmartScreen will warn on install.
 - **Not audited.** No external security review has been performed.
 - **Mobile not yet operational.** Android and iOS runtime work is pending.

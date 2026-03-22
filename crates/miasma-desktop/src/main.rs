@@ -38,16 +38,29 @@ pub enum LaunchIntent {
 /// Scans for magnet URIs and .torrent file paths after skipping the executable
 /// name and any `--mode` / `--mode <value>` arguments.
 fn parse_launch_intent() -> LaunchIntent {
+    let mut skip_next = false;
     for arg in std::env::args().skip(1) {
-        // Skip known flags.
-        if arg == "--mode" || arg == "easy" || arg == "technical" {
+        // Skip known flags and their values.
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if arg == "--mode" || arg == "--data-dir" {
+            skip_next = true;
+            continue;
+        }
+        if arg.starts_with("--") {
+            continue;
+        }
+        if arg == "easy" || arg == "technical" {
             continue;
         }
         if arg.starts_with("magnet:") {
             return LaunchIntent::Magnet(arg);
         }
         let path = std::path::Path::new(&arg);
-        if path.extension().and_then(|e| e.to_str()) == Some("torrent") && path.exists() {
+        if path.extension().and_then(|e| e.to_str()) == Some("torrent") {
+            // Accept even if file doesn't exist — we'll show an error in the Import tab.
             return LaunchIntent::TorrentFile(path.to_path_buf());
         }
     }

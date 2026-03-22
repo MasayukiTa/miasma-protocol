@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use futures::StreamExt as _;
 use libp2p::{
-    autonat, dcutr, identify,
+    autonat, dcutr, identify, mdns,
     identity::Keypair,
     kad::{self, store::MemoryStore, store::RecordStore},
     noise, ping, relay, request_response, yamux,
@@ -996,6 +996,8 @@ pub struct MiasmaBehaviour {
     pub(crate) onion_relay: request_response::Behaviour<OnionRelayCodec>,
     /// Relay probe: `/miasma/relay-probe/1.0.0` request-response.
     pub(crate) relay_probe: request_response::Behaviour<super::relay_probe::RelayProbeCodec>,
+    /// mDNS for local network peer discovery.
+    pub(crate) mdns: mdns::tokio::Behaviour,
 }
 
 // ─── MiasmaNode ───────────────────────────────────────────────────────────────
@@ -1725,6 +1727,9 @@ impl MiasmaNode {
             SwarmEvent::Behaviour(MiasmaBehaviourEvent::RelayProbe(ev)) => {
                 self.handle_relay_probe_event(ev);
             }
+            SwarmEvent::Behaviour(MiasmaBehaviourEvent::Mdns(ev)) => {
+                self.handle_mdns_event(ev);
+            }
             SwarmEvent::Behaviour(MiasmaBehaviourEvent::Autonat(ev)) => match &ev {
                 autonat::Event::StatusChanged { old, new } => {
                     info!("AutoNAT: {old:?} → {new:?}");
@@ -1741,6 +1746,32 @@ impl MiasmaNode {
             }
             SwarmEvent::Behaviour(MiasmaBehaviourEvent::Ping(_)) => {}
             _ => {}
+        }
+    }
+
+    /// Handle mDNS discovery events — add LAN peers directly to Kademlia.
+    ///
+    /// mDNS-discovered peers are on the local network, so their private
+    /// addresses are trusted and bypassed through the normal address filter.
+    fn handle_mdns_event(&mut self, event: mdns::Event) {
+        match event {
+            mdns::Event::Discovered(peers) => {
+                for (peer_id, addr) in peers {
+                    if peer_id == self.local_peer_id {
+                        continue;
+                    }
+                    info!("mDNS discovered: {peer_id} at {addr}");
+                    self.swarm
+                        .behaviour_mut()
+                        .kademlia
+                        .add_address(&peer_id, addr);
+                }
+            }
+            mdns::Event::Expired(peers) => {
+                for (peer_id, addr) in peers {
+                    debug!("mDNS expired: {peer_id} at {addr}");
+                }
+            }
         }
     }
 
@@ -2718,6 +2749,11 @@ fn build_swarm(
                 request_response::Config::default(),
             );
 
+            let mdns = mdns::tokio::Behaviour::new(
+                mdns::Config::default(),
+                local_peer_id,
+            )?;
+
             Ok(MiasmaBehaviour {
                 kademlia,
                 identify,
@@ -2731,6 +2767,7 @@ fn build_swarm(
                 descriptor_exchange,
                 onion_relay,
                 relay_probe,
+                mdns,
             })
         })
         .map_err(|e| MiasmaError::Sss(format!("behaviour init failed: {e}")))?

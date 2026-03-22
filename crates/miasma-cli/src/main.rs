@@ -759,6 +759,11 @@ fn cmd_config(
                 "storage.quota_mb" => println!("{}", config.storage.quota_mb),
                 "storage.bandwidth_mb_day" => println!("{}", config.storage.bandwidth_mb_day),
                 "network.listen_addr" => println!("{}", config.network.listen_addr),
+                "network.bootstrap_peers" => {
+                    for peer in &config.network.bootstrap_peers {
+                        println!("{peer}");
+                    }
+                }
                 "transport.wss_tls_enabled" => println!("{}", config.transport.wss_tls_enabled),
                 "transport.wss_sni" => println!("{}", config.transport.wss_sni.as_deref().unwrap_or("")),
                 "transport.proxy_type" => println!("{}", config.transport.proxy_type.as_deref().unwrap_or("")),
@@ -779,6 +784,13 @@ fn cmd_config(
                 }
                 "network.listen_addr" => {
                     config.network.listen_addr = v.into();
+                }
+                "network.bootstrap_peers" => {
+                    if v.is_empty() {
+                        config.network.bootstrap_peers.clear();
+                    } else {
+                        config.network.bootstrap_peers.push(v.into());
+                    }
                 }
                 "transport.wss_tls_enabled" => {
                     config.transport.wss_tls_enabled = v.parse().context("expected bool")?;
