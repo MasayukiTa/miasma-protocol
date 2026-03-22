@@ -184,7 +184,7 @@ DIAGNOSTICS AND LOGS
 KNOWN LIMITATIONS
 
   - Not code-signed: SmartScreen will warn on first run
-  - No automatic peer discovery; bootstrap peers must be configured manually
+  - Same-network peer discovery uses mDNS; restrictive networks may still need manual bootstrap peers
   - DHT convergence takes 10-30 seconds after first peer connection
   - Single-machine only; multi-node over real networks not validated
   - Bridge requires real BitTorrent swarm availability

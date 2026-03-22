@@ -1,4 +1,4 @@
-# Miasma Protocol v0.3.0-beta.1 - Windows Technical Beta Prerelease
+# Miasma Protocol v0.3.0-beta.2 - Windows Technical Beta Prerelease
 
 **Release date:** 2026-03-22  
 **Platform:** Windows 10/11 x64  
@@ -35,6 +35,8 @@ This beta is the first release where the anonymity and reachability stack is mat
 - PoW-gated and hybrid peer admission
 - trust tiers and address-class separation
 - prefix diversity and eclipse-resistance controls
+- same-network peer discovery via mDNS
+- manual bootstrap peer configuration via `miasma config network.bootstrap_peers`
 - routing, admission, and retrieval diagnostics
 
 ### Anonymous reachability and retrieval
@@ -171,7 +173,7 @@ At release time, the codebase includes:
 
 ## Known Limitations
 
-These are still real limitations in `v0.3.0-beta.1`:
+These are still real limitations in `v0.3.0-beta.2`:
 
 - **No code signing yet.** Windows SmartScreen will warn.
 - **No external security audit yet.**
@@ -179,7 +181,7 @@ These are still real limitations in `v0.3.0-beta.1`:
 - **Bootstrap trust remains beta-stage.** Early-network trust assumptions are still evolving.
 - **Real Internet scale is not fully validated.**
 - **Mobile runtime and operational behavior are not part of this release.**
-- **Automatic peer discovery remains limited** and multi-node setups still need explicit bootstrap configuration.
+- **Automatic peer discovery is same-network only.** LAN discovery now uses mDNS, but restrictive or corporate networks may still require explicit bootstrap configuration.
 
 ## Diagnostics and Troubleshooting
 

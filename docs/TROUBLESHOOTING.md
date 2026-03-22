@@ -1,5 +1,19 @@
 # Miasma Desktop — Troubleshooting Guide
 
+## Windows SmartScreen warning
+
+**Symptom**: Windows shows "Windows protected your PC" when launching the installer or desktop app.
+
+**This is expected.** The beta is not code-signed, so Windows SmartScreen will warn on first launch.
+
+**To proceed**:
+1. Click **"More info"** (the link below the warning text)
+2. Click **"Run anyway"**
+
+This warning appears once per binary. After you allow it, subsequent launches will not show the warning.
+
+If your organization blocks unsigned software via Group Policy, ask your IT administrator to add an exception or use the MSI package with `msiexec /i` from an admin prompt.
+
 ## App does not start
 
 **Symptom**: Double-clicking the shortcut or exe does nothing, or a brief flash appears.
@@ -25,7 +39,16 @@
 
 **Symptom**: App shows "Connected" but peer count stays at 0.
 
-**This is normal** for the first few minutes after launch. The DHT needs time to discover peers.
+**Same-network discovery (mDNS)**: Miasma uses mDNS to automatically discover peers on the same local network. This should work within 30 seconds if both devices are on the same subnet and mDNS/multicast traffic is not blocked.
+
+**If mDNS does not find peers**:
+1. Ensure both devices are on the same network (same subnet, not isolated by AP)
+2. Corporate networks may block mDNS multicast (port 5353/UDP) — check with IT
+3. Use manual bootstrap: on **Device A**, run `miasma status` and copy a `Listen addr` line. On **Device B**, run:
+   ```
+   miasma config network.bootstrap_peers "/ip4/192.168.x.x/udp/PORT/quic-v1/p2p/PEER_ID"
+   ```
+   Then restart the daemon on Device B.
 
 **If peers remain at 0 after 5+ minutes**:
 1. Check your network connection
