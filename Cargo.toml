@@ -5,6 +5,7 @@ members = [
     "crates/miasma-ffi",
     "crates/miasma-bridge",
     "crates/miasma-desktop",
+    "crates/miasma-wasm",
 ]
 resolver = "2"
 

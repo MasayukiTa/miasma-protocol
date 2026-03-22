@@ -1,0 +1,19 @@
+{
+  "name": "Miasma Web",
+  "short_name": "Miasma",
+  "description": "Censorship-resistant content dissolution and retrieval",
+  "start_url": "/index.html",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "theme_color": "#0a0a0f",
+  "background_color": "#0a0a0f",
+  "categories": ["security", "utilities"],
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><rect width='512' height='512' rx='96' fill='%230a0a0f'/><circle cx='256' cy='256' r='180' fill='none' stroke='%237c3aed' stroke-width='16'/><circle cx='256' cy='256' r='80' fill='none' stroke='%2322d3ee' stroke-width='8' stroke-dasharray='32 16'/><circle cx='256' cy='256' r='24' fill='%237c3aed'/></svg>",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
