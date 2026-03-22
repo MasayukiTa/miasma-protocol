@@ -327,6 +327,19 @@ nav {
   line-height: 1.4;
 }
 
+.scope-notice {
+  max-width: 520px;
+  margin: 0 auto 16px;
+  padding: 12px 16px;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--secondary);
+  border-radius: 8px;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
 .home-stats {
   display: flex;
   justify-content: center;
