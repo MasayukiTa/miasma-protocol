@@ -1,0 +1,20 @@
+{
+  "name": "miasma-wasm",
+  "type": "module",
+  "collaborators": [
+    "Miasma Contributors"
+  ],
+  "description": "Miasma Protocol WebAssembly build — browser-side dissolve/retrieve",
+  "version": "0.3.1",
+  "license": "AGPL-3.0",
+  "files": [
+    "miasma_wasm_bg.wasm",
+    "miasma_wasm.js",
+    "miasma_wasm.d.ts"
+  ],
+  "main": "miasma_wasm.js",
+  "types": "miasma_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

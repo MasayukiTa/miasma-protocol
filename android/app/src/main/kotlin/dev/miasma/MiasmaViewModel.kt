@@ -58,8 +58,11 @@ class MiasmaViewModel(app: Application) : AndroidViewModel(app) {
                 val mid = withContext(Dispatchers.IO) { dissolveBytes(dataDir, data) }
                 _ui.value = _ui.value.copy(isLoading = false, lastMid = mid)
                 refreshStatus()
-            } catch (e: Exception) {
+            } catch (e: MiasmaFfiException) {
                 _ui.value = _ui.value.copy(isLoading = false, error = e.message)
+            } catch (e: Exception) {
+                // Sanitize unexpected exception messages before showing in UI.
+                _ui.value = _ui.value.copy(isLoading = false, error = "Dissolution failed")
             }
         }
     }
@@ -77,8 +80,10 @@ class MiasmaViewModel(app: Application) : AndroidViewModel(app) {
                     isLoading = false,
                     error = "Not enough shares: need ${e.need}, found ${e.got}",
                 )
-            } catch (e: Exception) {
+            } catch (e: MiasmaFfiException) {
                 _ui.value = _ui.value.copy(isLoading = false, error = e.message)
+            } catch (e: Exception) {
+                _ui.value = _ui.value.copy(isLoading = false, error = "Retrieval failed")
             }
         }
     }
@@ -101,13 +106,31 @@ class MiasmaViewModel(app: Application) : AndroidViewModel(app) {
                 withContext(Dispatchers.IO) {
                     ffiDistressWipe(dataDir)
                     KeystoreHelper.deleteKey()
+                    // Delete wrapped key blobs on the Kotlin side too.
+                    val dataFile = java.io.File(dataDir)
+                    dataFile.resolve("master.key.enc").delete()
+                    dataFile.resolve("master.key.iv").delete()
                 }
                 MiasmaService.stopNode(ctx)
-                _ui.value = UiState() // reset all state
+                // Clear all sensitive state including any retrieved bytes.
+                val prev = _ui.value.retrievedBytes
+                _ui.value = UiState()
+                prev?.fill(0)
             } catch (e: Exception) {
-                _ui.value = _ui.value.copy(isLoading = false, error = e.message)
+                // Wipe should never show internal error details.
+                _ui.value = _ui.value.copy(isLoading = false, error = "Wipe operation completed with warnings")
+                // Still try to stop the service even on error.
+                try { MiasmaService.stopNode(ctx) } catch (_: Exception) { }
             }
         }
+    }
+
+    /** Clear retrieved bytes from memory to limit exposure time. */
+    fun clearRetrievedBytes() {
+        val prev = _ui.value.retrievedBytes
+        _ui.value = _ui.value.copy(retrievedBytes = null)
+        // Best-effort zeroing of the ByteArray (JVM may still have copies).
+        prev?.fill(0)
     }
 
     fun clearError() {
