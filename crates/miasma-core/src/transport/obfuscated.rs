@@ -52,7 +52,9 @@ use crate::{
     MiasmaError,
 };
 
-use super::payload::{PayloadTransport, PayloadTransportError, PayloadTransportKind, TransportPhase};
+use super::payload::{
+    PayloadTransport, PayloadTransportError, PayloadTransportKind, TransportPhase,
+};
 use super::{PluggableTransport, TransportStream};
 
 // ─── Browser fingerprint ──────────────────────────────────────────────────────
@@ -79,7 +81,10 @@ impl BrowserFingerprint {
 
     /// ALPN values as byte vectors (for rustls config).
     pub fn alpn_bytes(&self) -> Vec<Vec<u8>> {
-        self.alpn_values().iter().map(|s| s.as_bytes().to_vec()).collect()
+        self.alpn_values()
+            .iter()
+            .map(|s| s.as_bytes().to_vec())
+            .collect()
     }
 
     /// User-Agent string (used in WebSocket fallback SNI).
@@ -178,8 +183,8 @@ fn generate_self_signed_cert(
     params
         .distinguished_name
         .push(rcgen::DnType::CommonName, sni);
-    let key_pair = rcgen::KeyPair::generate()
-        .map_err(|e| MiasmaError::Sss(format!("keygen: {e}")))?;
+    let key_pair =
+        rcgen::KeyPair::generate().map_err(|e| MiasmaError::Sss(format!("keygen: {e}")))?;
     let cert = params
         .self_signed(&key_pair)
         .map_err(|e| MiasmaError::Sss(format!("self-sign: {e}")))?;
@@ -280,11 +285,10 @@ impl ObfuscatedQuicServer {
 
         tls_config.alpn_protocols = config.fingerprint.alpn_bytes();
 
-        let server_config =
-            quinn::ServerConfig::with_crypto(Arc::new(
-                quinn::crypto::rustls::QuicServerConfig::try_from(tls_config)
-                    .map_err(|e| MiasmaError::Sss(format!("QUIC server config: {e}")))?,
-            ));
+        let server_config = quinn::ServerConfig::with_crypto(Arc::new(
+            quinn::crypto::rustls::QuicServerConfig::try_from(tls_config)
+                .map_err(|e| MiasmaError::Sss(format!("QUIC server config: {e}")))?,
+        ));
 
         let addr: SocketAddr = ([0, 0, 0, 0], port).into();
         let endpoint = Endpoint::server(server_config, addr)
@@ -355,9 +359,11 @@ async fn handle_obfuscated_connection(
     let mut auth_buf = [0u8; AUTH_HEADER_LEN];
     recv.read_exact(&mut auth_buf).await?;
 
-    let nonce: [u8; 32] = auth_buf[..AUTH_NONCE_LEN].try_into()
+    let nonce: [u8; 32] = auth_buf[..AUTH_NONCE_LEN]
+        .try_into()
         .map_err(|_| "auth nonce slice mismatch")?;
-    let token: [u8; 32] = auth_buf[AUTH_NONCE_LEN..].try_into()
+    let token: [u8; 32] = auth_buf[AUTH_NONCE_LEN..]
+        .try_into()
         .map_err(|_| "auth token slice mismatch")?;
 
     if !verify_auth_token(probe_secret, &nonce, &token) {
@@ -514,14 +520,18 @@ impl PayloadTransport for ObfuscatedQuicPayloadTransport {
         rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce);
         let token = compute_auth_token(&self.config.probe_secret, &nonce);
 
-        send.write_all(&nonce).await.map_err(|e| PayloadTransportError {
-            phase: TransportPhase::Data,
-            message: format!("write auth nonce: {e}"),
-        })?;
-        send.write_all(&token).await.map_err(|e| PayloadTransportError {
-            phase: TransportPhase::Data,
-            message: format!("write auth token: {e}"),
-        })?;
+        send.write_all(&nonce)
+            .await
+            .map_err(|e| PayloadTransportError {
+                phase: TransportPhase::Data,
+                message: format!("write auth nonce: {e}"),
+            })?;
+        send.write_all(&token)
+            .await
+            .map_err(|e| PayloadTransportError {
+                phase: TransportPhase::Data,
+                message: format!("write auth token: {e}"),
+            })?;
 
         // 2. Send ShareFetchRequest (length-prefixed bincode)
         let request = ShareFetchRequest {
@@ -534,14 +544,18 @@ impl PayloadTransport for ObfuscatedQuicPayloadTransport {
             message: format!("serialize request: {e}"),
         })?;
         let len = (body.len() as u32).to_le_bytes();
-        send.write_all(&len).await.map_err(|e| PayloadTransportError {
-            phase: TransportPhase::Data,
-            message: format!("write request len: {e}"),
-        })?;
-        send.write_all(&body).await.map_err(|e| PayloadTransportError {
-            phase: TransportPhase::Data,
-            message: format!("write request body: {e}"),
-        })?;
+        send.write_all(&len)
+            .await
+            .map_err(|e| PayloadTransportError {
+                phase: TransportPhase::Data,
+                message: format!("write request len: {e}"),
+            })?;
+        send.write_all(&body)
+            .await
+            .map_err(|e| PayloadTransportError {
+                phase: TransportPhase::Data,
+                message: format!("write request body: {e}"),
+            })?;
         send.finish().map_err(|e| PayloadTransportError {
             phase: TransportPhase::Data,
             message: format!("finish send: {e}"),
@@ -549,10 +563,12 @@ impl PayloadTransport for ObfuscatedQuicPayloadTransport {
 
         // 3. Read response (length-prefixed bincode)
         let mut len_buf = [0u8; 4];
-        recv.read_exact(&mut len_buf).await.map_err(|e| PayloadTransportError {
-            phase: TransportPhase::Data,
-            message: format!("read response length: {e}"),
-        })?;
+        recv.read_exact(&mut len_buf)
+            .await
+            .map_err(|e| PayloadTransportError {
+                phase: TransportPhase::Data,
+                message: format!("read response length: {e}"),
+            })?;
         let resp_len = u32::from_le_bytes(len_buf) as usize;
         if resp_len > 64 * 1024 * 1024 {
             return Err(PayloadTransportError {
@@ -561,10 +577,12 @@ impl PayloadTransport for ObfuscatedQuicPayloadTransport {
             });
         }
         let mut resp_buf = vec![0u8; resp_len];
-        recv.read_exact(&mut resp_buf).await.map_err(|e| PayloadTransportError {
-            phase: TransportPhase::Data,
-            message: format!("read response body: {e}"),
-        })?;
+        recv.read_exact(&mut resp_buf)
+            .await
+            .map_err(|e| PayloadTransportError {
+                phase: TransportPhase::Data,
+                message: format!("read response body: {e}"),
+            })?;
 
         let response: ShareFetchResponse =
             bincode::deserialize(&resp_buf).map_err(|e| PayloadTransportError {
@@ -595,7 +613,9 @@ impl ObfuscatedQuicTransport {
 pub struct ObfuscatedStream;
 
 impl TransportStream for ObfuscatedStream {
-    fn as_bytes(&self) -> &[u8] { &[] }
+    fn as_bytes(&self) -> &[u8] {
+        &[]
+    }
 }
 
 #[async_trait]
@@ -611,12 +631,19 @@ impl PluggableTransport for ObfuscatedQuicTransport {
             fingerprint = ?self.config.fingerprint,
             "ObfuscatedQuic dial (legacy PluggableTransport — use ObfuscatedQuicPayloadTransport instead)"
         );
-        Err(MiasmaError::Sss("ObfuscatedQuic legacy transport: use ObfuscatedQuicPayloadTransport".into()))
+        Err(MiasmaError::Sss(
+            "ObfuscatedQuic legacy transport: use ObfuscatedQuicPayloadTransport".into(),
+        ))
     }
 
     async fn listen(&self, addr: &str) -> Result<(), MiasmaError> {
-        tracing::debug!(addr, "ObfuscatedQuic listen (legacy PluggableTransport — use ObfuscatedQuicServer instead)");
-        Err(MiasmaError::Sss("ObfuscatedQuic legacy transport: use ObfuscatedQuicServer".into()))
+        tracing::debug!(
+            addr,
+            "ObfuscatedQuic listen (legacy PluggableTransport — use ObfuscatedQuicServer instead)"
+        );
+        Err(MiasmaError::Sss(
+            "ObfuscatedQuic legacy transport: use ObfuscatedQuicServer".into(),
+        ))
     }
 }
 
@@ -649,7 +676,10 @@ mod tests {
     #[test]
     fn obfuscated_transport_name() {
         let t = ObfuscatedQuicTransport::new(ObfuscatedConfig::new(
-            [0u8; 32], "", "https://x.com", BrowserFingerprint::Chrome124,
+            [0u8; 32],
+            "",
+            "https://x.com",
+            BrowserFingerprint::Chrome124,
         ));
         assert_eq!(t.name(), "obfuscated-quic-reality");
     }
@@ -800,9 +830,7 @@ mod tests {
         let client = ObfuscatedQuicPayloadTransport::new(client_config);
         let peer_addr = format!("127.0.0.1:{port}");
 
-        let result = client
-            .fetch_share(&peer_addr, [0u8; 32], 0, 0)
-            .await;
+        let result = client.fetch_share(&peer_addr, [0u8; 32], 0, 0).await;
 
         // Should fail — server closes connection after auth failure
         assert!(result.is_err(), "expected error with wrong probe_secret");

@@ -79,7 +79,11 @@ pub fn dissolve(
     debug_assert_eq!(shards.len(), params.total_shards);
 
     // 4. SSS split K_enc → n key shares (any data_shards suffice to recover).
-    let key_shares = sss_split(k_enc.as_ref(), params.data_shards as u8, params.total_shards as u8)?;
+    let key_shares = sss_split(
+        k_enc.as_ref(),
+        params.data_shards as u8,
+        params.total_shards as u8,
+    )?;
     debug_assert_eq!(key_shares.len(), params.total_shards);
 
     let timestamp = SystemTime::now()

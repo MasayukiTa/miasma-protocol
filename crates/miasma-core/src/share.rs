@@ -213,7 +213,7 @@ mod tests {
         // Forge: correct mid_prefix but wrong shard_data (hash will not match).
         let mut forged = real_share.clone();
         forged.shard_data = vec![0xFF; 32]; // tampered data
-        // shard_hash still points to original — hash mismatch
+                                            // shard_hash still points to original — hash mismatch
         assert!(!ShareVerification::coarse_verify(&forged, &mid));
     }
 }

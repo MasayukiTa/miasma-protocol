@@ -773,29 +773,74 @@ mod tests {
             assert!(!s.tab_store.is_empty(), "{lang:?} tab_store empty");
             assert!(!s.tab_retrieve.is_empty(), "{lang:?} tab_retrieve empty");
             assert!(!s.welcome_title.is_empty(), "{lang:?} welcome_title empty");
-            assert!(!s.welcome_title_easy.is_empty(), "{lang:?} welcome_title_easy empty");
+            assert!(
+                !s.welcome_title_easy.is_empty(),
+                "{lang:?} welcome_title_easy empty"
+            );
             assert!(!s.store_heading.is_empty(), "{lang:?} store_heading empty");
-            assert!(!s.store_heading_easy.is_empty(), "{lang:?} store_heading_easy empty");
-            assert!(!s.retrieve_heading.is_empty(), "{lang:?} retrieve_heading empty");
-            assert!(!s.retrieve_heading_easy.is_empty(), "{lang:?} retrieve_heading_easy empty");
-            assert!(!s.status_heading.is_empty(), "{lang:?} status_heading empty");
-            assert!(!s.settings_heading.is_empty(), "{lang:?} settings_heading empty");
-            assert!(!s.wipe_confirm_title.is_empty(), "{lang:?} wipe_confirm_title empty");
-            assert!(!s.wipe_confirm_button.is_empty(), "{lang:?} wipe_confirm_button empty");
-            assert!(!s.settings_language.is_empty(), "{lang:?} settings_language empty");
+            assert!(
+                !s.store_heading_easy.is_empty(),
+                "{lang:?} store_heading_easy empty"
+            );
+            assert!(
+                !s.retrieve_heading.is_empty(),
+                "{lang:?} retrieve_heading empty"
+            );
+            assert!(
+                !s.retrieve_heading_easy.is_empty(),
+                "{lang:?} retrieve_heading_easy empty"
+            );
+            assert!(
+                !s.status_heading.is_empty(),
+                "{lang:?} status_heading empty"
+            );
+            assert!(
+                !s.settings_heading.is_empty(),
+                "{lang:?} settings_heading empty"
+            );
+            assert!(
+                !s.wipe_confirm_title.is_empty(),
+                "{lang:?} wipe_confirm_title empty"
+            );
+            assert!(
+                !s.wipe_confirm_button.is_empty(),
+                "{lang:?} wipe_confirm_button empty"
+            );
+            assert!(
+                !s.settings_language.is_empty(),
+                "{lang:?} settings_language empty"
+            );
             assert!(!s.settings_mode.is_empty(), "{lang:?} settings_mode empty");
             // Import strings.
             assert!(!s.tab_import.is_empty(), "{lang:?} tab_import empty");
-            assert!(!s.import_heading.is_empty(), "{lang:?} import_heading empty");
+            assert!(
+                !s.import_heading.is_empty(),
+                "{lang:?} import_heading empty"
+            );
             assert!(!s.import_button.is_empty(), "{lang:?} import_button empty");
-            assert!(!s.import_complete.is_empty(), "{lang:?} import_complete empty");
+            assert!(
+                !s.import_complete.is_empty(),
+                "{lang:?} import_complete empty"
+            );
             // Diagnostics export strings.
-            assert!(!s.status_save_diag.is_empty(), "{lang:?} status_save_diag empty");
-            assert!(!s.status_diag_saved.is_empty(), "{lang:?} status_diag_saved empty");
+            assert!(
+                !s.status_save_diag.is_empty(),
+                "{lang:?} status_save_diag empty"
+            );
+            assert!(
+                !s.status_diag_saved.is_empty(),
+                "{lang:?} status_diag_saved empty"
+            );
             // Nav and dashboard strings.
             assert!(!s.nav_brand.is_empty(), "{lang:?} nav_brand empty");
-            assert!(!s.nav_brand_easy.is_empty(), "{lang:?} nav_brand_easy empty");
-            assert!(!s.dashboard_quick_status.is_empty(), "{lang:?} dashboard_quick_status empty");
+            assert!(
+                !s.nav_brand_easy.is_empty(),
+                "{lang:?} nav_brand_easy empty"
+            );
+            assert!(
+                !s.dashboard_quick_status.is_empty(),
+                "{lang:?} dashboard_quick_status empty"
+            );
         }
     }
 

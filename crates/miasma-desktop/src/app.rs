@@ -45,10 +45,9 @@ fn configure_fonts(ctx: &egui::Context) {
         let path = font_dir.join(file);
         match std::fs::read(&path) {
             Ok(data) => {
-                fonts.font_data.insert(
-                    name.to_owned(),
-                    egui::FontData::from_owned(data),
-                );
+                fonts
+                    .font_data
+                    .insert(name.to_owned(), egui::FontData::from_owned(data));
                 loaded_fonts.push(format!("{name} ({file})"));
                 tracing::info!("Font loaded: {name} from {}", path.display());
                 true
@@ -66,11 +65,11 @@ fn configure_fonts(ctx: &egui::Context) {
     let has_segoe = load_font("Segoe UI", "segoeui.ttf");
     let _has_segoe_bold = load_font("Segoe UI Bold", "segoeuib.ttf");
     // CJK fonts — multiple fallbacks for maximum coverage.
-    let has_meiryo = load_font("Meiryo", "meiryo.ttc");        // Ships with Windows; excellent CJK
-    let has_yu_gothic = load_font("Yu Gothic", "YuGothR.ttc");  // Win 10+ default JA
-    let has_msyh = load_font("Microsoft YaHei", "msyh.ttc");    // Win default zh-CN
-    let has_msgothic = load_font("MS Gothic", "msgothic.ttc");   // Legacy JA fallback, monospace-friendly
-    // Monospace.
+    let has_meiryo = load_font("Meiryo", "meiryo.ttc"); // Ships with Windows; excellent CJK
+    let has_yu_gothic = load_font("Yu Gothic", "YuGothR.ttc"); // Win 10+ default JA
+    let has_msyh = load_font("Microsoft YaHei", "msyh.ttc"); // Win default zh-CN
+    let has_msgothic = load_font("MS Gothic", "msgothic.ttc"); // Legacy JA fallback, monospace-friendly
+                                                               // Monospace.
     let has_consolas = load_font("Consolas", "consola.ttf");
 
     // Build proportional fallback chain.
@@ -143,26 +142,21 @@ fn configure_fonts(ctx: &egui::Context) {
     ctx.set_visuals(egui::Visuals::dark());
 
     let mut style = (*ctx.style()).clone();
-    style.text_styles.insert(
-        egui::TextStyle::Body,
-        egui::FontId::proportional(14.0),
-    );
-    style.text_styles.insert(
-        egui::TextStyle::Button,
-        egui::FontId::proportional(13.5),
-    );
-    style.text_styles.insert(
-        egui::TextStyle::Heading,
-        egui::FontId::proportional(20.0),
-    );
-    style.text_styles.insert(
-        egui::TextStyle::Small,
-        egui::FontId::proportional(11.5),
-    );
-    style.text_styles.insert(
-        egui::TextStyle::Monospace,
-        egui::FontId::monospace(12.5),
-    );
+    style
+        .text_styles
+        .insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
+    style
+        .text_styles
+        .insert(egui::TextStyle::Button, egui::FontId::proportional(13.5));
+    style
+        .text_styles
+        .insert(egui::TextStyle::Heading, egui::FontId::proportional(20.0));
+    style
+        .text_styles
+        .insert(egui::TextStyle::Small, egui::FontId::proportional(11.5));
+    style
+        .text_styles
+        .insert(egui::TextStyle::Monospace, egui::FontId::monospace(12.5));
     style.spacing.item_spacing = egui::vec2(8.0, 6.0);
     style.spacing.button_padding = egui::vec2(12.0, 5.0);
     style.spacing.window_margin = egui::Margin::same(12.0);
@@ -293,7 +287,12 @@ enum MsgKind {
 }
 
 impl MiasmaApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, mode: ProductMode, locale: Locale, intent: LaunchIntent) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        mode: ProductMode,
+        locale: Locale,
+        intent: LaunchIntent,
+    ) -> Self {
         configure_fonts(&cc.egui_ctx);
 
         let data_dir = miasma_core::default_data_dir();
@@ -380,10 +379,7 @@ impl MiasmaApp {
                 WorkerResult::Retrieved { mid, data } => {
                     self.busy = false;
                     let size = format_size(data.len() as u64);
-                    self.retrieved_summary = Some(format!(
-                        "{size}  — {}",
-                        truncate_mid(&mid),
-                    ));
+                    self.retrieved_summary = Some(format!("{size}  — {}", truncate_mid(&mid),));
                     self.save_data = Some(data);
                     self.set_msg(MsgKind::Success, self.s().retrieve_success);
                 }
@@ -436,7 +432,10 @@ impl MiasmaApp {
                 }
                 WorkerResult::ImportStarted { name } => {
                     self.import_state = ImportState::InProgress;
-                    self.set_msg(MsgKind::Info, format!("{}: {name}", self.s().import_progress));
+                    self.set_msg(
+                        MsgKind::Info,
+                        format!("{}: {name}", self.s().import_progress),
+                    );
                 }
                 WorkerResult::ImportComplete { mids } => {
                     self.busy = false;
@@ -473,20 +472,26 @@ impl MiasmaApp {
                 let frame = frame.fill(egui::Color32::from_rgb(45, 40, 30));
                 frame.show(ui, |ui| {
                     ui.vertical(|ui| {
-                        let title = if easy { s.welcome_title_easy } else { s.welcome_title };
-                        ui.label(
-                            egui::RichText::new(title)
-                                .size(18.0)
-                                .strong(),
-                        );
+                        let title = if easy {
+                            s.welcome_title_easy
+                        } else {
+                            s.welcome_title
+                        };
+                        ui.label(egui::RichText::new(title).size(18.0).strong());
                         ui.add_space(6.0);
-                        let desc = if easy { s.welcome_desc_easy } else { s.welcome_desc };
+                        let desc = if easy {
+                            s.welcome_desc_easy
+                        } else {
+                            s.welcome_desc
+                        };
                         ui.label(desc);
                         ui.add_space(4.0);
-                        let detail = if easy { s.welcome_detail_easy } else { s.welcome_detail };
-                        ui.label(
-                            egui::RichText::new(detail).color(DIM)
-                        );
+                        let detail = if easy {
+                            s.welcome_detail_easy
+                        } else {
+                            s.welcome_detail
+                        };
+                        ui.label(egui::RichText::new(detail).color(DIM));
                         ui.add_space(10.0);
                         ui.add_enabled_ui(!self.busy, |ui| {
                             let btn = egui::Button::new(
@@ -495,14 +500,25 @@ impl MiasmaApp {
                             if ui.add_sized([180.0, 36.0], btn).clicked() {
                                 let _ = self.worker.tx.try_send(WorkerCmd::Init);
                                 self.busy = true;
-                                self.set_msg(MsgKind::Info, if easy { s.welcome_progress_easy } else { s.welcome_progress });
+                                self.set_msg(
+                                    MsgKind::Info,
+                                    if easy {
+                                        s.welcome_progress_easy
+                                    } else {
+                                        s.welcome_progress
+                                    },
+                                );
                             }
                         });
                         if self.busy {
                             ui.add_space(4.0);
                             ui.horizontal(|ui| {
                                 ui.spinner();
-                                let progress = if easy { s.welcome_progress_easy } else { s.welcome_progress };
+                                let progress = if easy {
+                                    s.welcome_progress_easy
+                                } else {
+                                    s.welcome_progress
+                                };
                                 ui.label(egui::RichText::new(progress).color(DIM));
                             });
                         }
@@ -514,37 +530,44 @@ impl MiasmaApp {
                 let frame = frame.fill(egui::Color32::from_rgb(50, 30, 30));
                 frame.show(ui, |ui| {
                     ui.vertical(|ui| {
-                        let title = if easy { s.stopped_title_easy } else { s.stopped_title };
-                        ui.label(
-                            egui::RichText::new(title)
-                                .size(14.0)
-                                .color(RED),
-                        );
+                        let title = if easy {
+                            s.stopped_title_easy
+                        } else {
+                            s.stopped_title
+                        };
+                        ui.label(egui::RichText::new(title).size(14.0).color(RED));
                         ui.add_space(2.0);
                         if let Some(ref err) = self.last_error {
                             ui.label(egui::RichText::new(err).color(DIM).small());
                             ui.add_space(4.0);
                         } else {
-                            let desc = if easy { s.stopped_desc_easy } else { s.stopped_desc };
-                            ui.label(
-                                egui::RichText::new(desc).color(DIM).small()
-                            );
+                            let desc = if easy {
+                                s.stopped_desc_easy
+                            } else {
+                                s.stopped_desc
+                            };
+                            ui.label(egui::RichText::new(desc).color(DIM).small());
                             ui.add_space(4.0);
                         }
                         ui.horizontal(|ui| {
                             ui.add_enabled_ui(!self.busy, |ui| {
-                                let btn_text = if easy { s.stopped_button_easy } else { s.stopped_button };
+                                let btn_text = if easy {
+                                    s.stopped_button_easy
+                                } else {
+                                    s.stopped_button
+                                };
                                 if ui
-                                    .add_sized(
-                                        [140.0, 28.0],
-                                        egui::Button::new(btn_text),
-                                    )
+                                    .add_sized([140.0, 28.0], egui::Button::new(btn_text))
                                     .clicked()
                                 {
                                     let _ = self.worker.tx.try_send(WorkerCmd::StartDaemon);
                                     self.busy = true;
                                     self.last_error = None;
-                                    let label = if easy { s.starting_label_easy } else { s.starting_label };
+                                    let label = if easy {
+                                        s.starting_label_easy
+                                    } else {
+                                        s.starting_label
+                                    };
                                     self.set_msg(MsgKind::Info, label);
                                 }
                             });
@@ -558,7 +581,11 @@ impl MiasmaApp {
                 frame.show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        let label = if easy { s.starting_label_easy } else { s.starting_label };
+                        let label = if easy {
+                            s.starting_label_easy
+                        } else {
+                            s.starting_label
+                        };
                         ui.label(egui::RichText::new(label).color(BLUE));
                     });
                 });
@@ -574,17 +601,30 @@ impl MiasmaApp {
         let easy = self.mode.is_easy();
         let connected = self.daemon_state == DaemonState::Connected;
 
-        let heading = if easy { s.store_heading_easy } else { s.store_heading };
+        let heading = if easy {
+            s.store_heading_easy
+        } else {
+            s.store_heading
+        };
         section_heading(ui, heading);
         ui.add_space(4.0);
-        let desc = if easy { s.store_desc_easy } else { s.store_desc };
+        let desc = if easy {
+            s.store_desc_easy
+        } else {
+            s.store_desc
+        };
         ui.label(egui::RichText::new(desc).color(DIM));
         ui.add_space(10.0);
 
         // ── Easy mode: quick status dashboard ──
         if easy && connected {
             card_frame().show(ui, |ui| {
-                ui.label(egui::RichText::new(s.dashboard_quick_status).strong().color(ACCENT).size(13.0));
+                ui.label(
+                    egui::RichText::new(s.dashboard_quick_status)
+                        .strong()
+                        .color(ACCENT)
+                        .size(13.0),
+                );
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     // Storage mini indicator.
@@ -594,7 +634,11 @@ impl MiasmaApp {
                         .fill(egui::Color32::from_rgb(28, 30, 38));
                     storage_frame.show(ui, |ui| {
                         ui.vertical(|ui| {
-                            ui.label(egui::RichText::new(s.dashboard_storage_label).color(DIM).small());
+                            ui.label(
+                                egui::RichText::new(s.dashboard_storage_label)
+                                    .color(DIM)
+                                    .small(),
+                            );
                             if self.quota_mb > 0 {
                                 let pct = (self.used_mb / self.quota_mb as f64) * 100.0;
                                 ui.label(
@@ -611,10 +655,15 @@ impl MiasmaApp {
                                 ui.painter().rect_filled(rect, 2.0, PROGRESS_BG);
                                 let fill_width = (pct as f32 / 100.0).min(1.0) * bar_width;
                                 let fill_color = if pct > 90.0 { YELLOW } else { PROGRESS_FILL };
-                                let fill_rect = egui::Rect::from_min_size(rect.min, egui::vec2(fill_width, 4.0));
+                                let fill_rect = egui::Rect::from_min_size(
+                                    rect.min,
+                                    egui::vec2(fill_width, 4.0),
+                                );
                                 ui.painter().rect_filled(fill_rect, 2.0, fill_color);
                             } else {
-                                ui.label(egui::RichText::new(s.dashboard_no_data).color(DIM).small());
+                                ui.label(
+                                    egui::RichText::new(s.dashboard_no_data).color(DIM).small(),
+                                );
                             }
                         });
                     });
@@ -626,7 +675,11 @@ impl MiasmaApp {
                         .fill(egui::Color32::from_rgb(28, 30, 38));
                     peer_frame.show(ui, |ui| {
                         ui.vertical(|ui| {
-                            ui.label(egui::RichText::new(s.dashboard_peers_label).color(DIM).small());
+                            ui.label(
+                                egui::RichText::new(s.dashboard_peers_label)
+                                    .color(DIM)
+                                    .small(),
+                            );
                             let peer_color = if self.peer_count > 0 { GREEN } else { YELLOW };
                             ui.label(
                                 egui::RichText::new(self.peer_count.to_string())
@@ -635,7 +688,11 @@ impl MiasmaApp {
                                     .color(peer_color),
                             );
                             let peer_hint = if self.peer_count > 0 {
-                                format!("{} {}", self.peer_count, s.status_peers.trim_end_matches('：').trim_end_matches(':'))
+                                format!(
+                                    "{} {}",
+                                    self.peer_count,
+                                    s.status_peers.trim_end_matches('：').trim_end_matches(':')
+                                )
                             } else {
                                 s.health_no_peers.to_string()
                             };
@@ -650,7 +707,11 @@ impl MiasmaApp {
                         .fill(egui::Color32::from_rgb(28, 30, 38));
                     items_frame.show(ui, |ui| {
                         ui.vertical(|ui| {
-                            ui.label(egui::RichText::new(s.status_items_stored).color(DIM).small());
+                            ui.label(
+                                egui::RichText::new(s.status_items_stored)
+                                    .color(DIM)
+                                    .small(),
+                            );
                             ui.label(
                                 egui::RichText::new(self.share_count.to_string())
                                     .size(18.0)
@@ -692,7 +753,8 @@ impl MiasmaApp {
                         let btn = if easy {
                             egui::Button::new(
                                 egui::RichText::new(s.store_button).strong().size(14.0),
-                            ).fill(ACCENT)
+                            )
+                            .fill(ACCENT)
                         } else {
                             egui::Button::new(s.store_button)
                         };
@@ -710,7 +772,10 @@ impl MiasmaApp {
 
                 ui.add_enabled_ui(connected && !self.busy, |ui| {
                     if ui
-                        .add_sized([130.0, if easy { 34.0 } else { 28.0 }], egui::Button::new(s.store_choose_file))
+                        .add_sized(
+                            [130.0, if easy { 34.0 } else { 28.0 }],
+                            egui::Button::new(s.store_choose_file),
+                        )
                         .clicked()
                     {
                         if let Some(path) = rfd::FileDialog::new().pick_file() {
@@ -731,7 +796,11 @@ impl MiasmaApp {
         if let Some(ref mid) = self.last_mid.clone() {
             ui.add_space(8.0);
             card_frame().show(ui, |ui| {
-                let mid_label = if easy { s.store_mid_label_easy } else { s.store_mid_label };
+                let mid_label = if easy {
+                    s.store_mid_label_easy
+                } else {
+                    s.store_mid_label
+                };
                 ui.label(egui::RichText::new(mid_label).strong().color(GREEN));
                 ui.add_space(4.0);
 
@@ -742,19 +811,22 @@ impl MiasmaApp {
                             .desired_width(ui.available_width() - 80.0)
                             .font(egui::TextStyle::Monospace),
                     );
-                    if ui.add_sized([70.0, 26.0], egui::Button::new(s.store_copy)).clicked() {
+                    if ui
+                        .add_sized([70.0, 26.0], egui::Button::new(s.store_copy))
+                        .clicked()
+                    {
                         ui.output_mut(|o| o.copied_text = mid.clone());
                         self.set_msg(MsgKind::Info, s.store_copied);
                     }
                 });
 
                 ui.add_space(4.0);
-                let hint = if easy { s.store_share_hint_easy } else { s.store_share_hint };
-                ui.label(
-                    egui::RichText::new(hint)
-                        .color(DIM)
-                        .small(),
-                );
+                let hint = if easy {
+                    s.store_share_hint_easy
+                } else {
+                    s.store_share_hint
+                };
+                ui.label(egui::RichText::new(hint).color(DIM).small());
             });
         }
     }
@@ -766,10 +838,18 @@ impl MiasmaApp {
         let easy = self.mode.is_easy();
         let connected = self.daemon_state == DaemonState::Connected;
 
-        let heading = if easy { s.retrieve_heading_easy } else { s.retrieve_heading };
+        let heading = if easy {
+            s.retrieve_heading_easy
+        } else {
+            s.retrieve_heading
+        };
         section_heading(ui, heading);
         ui.add_space(4.0);
-        let desc = if easy { s.retrieve_desc_easy } else { s.retrieve_desc };
+        let desc = if easy {
+            s.retrieve_desc_easy
+        } else {
+            s.retrieve_desc
+        };
         ui.label(egui::RichText::new(desc).color(DIM));
         ui.add_space(10.0);
 
@@ -783,7 +863,11 @@ impl MiasmaApp {
 
         // Input card.
         card_frame().show(ui, |ui| {
-            let mid_label = if easy { s.retrieve_mid_label_easy } else { s.retrieve_mid_label };
+            let mid_label = if easy {
+                s.retrieve_mid_label_easy
+            } else {
+                s.retrieve_mid_label
+            };
             ui.label(mid_label);
             ui.add_space(2.0);
             ui.add_enabled(
@@ -799,11 +883,14 @@ impl MiasmaApp {
                 ui.add_enabled_ui(
                     connected && !self.mid_input.is_empty() && !self.busy,
                     |ui| {
-                        let label = if easy { s.retrieve_button_easy } else { s.retrieve_button };
+                        let label = if easy {
+                            s.retrieve_button_easy
+                        } else {
+                            s.retrieve_button
+                        };
                         let btn = if easy {
-                            egui::Button::new(
-                                egui::RichText::new(label).strong().size(14.0),
-                            ).fill(ACCENT)
+                            egui::Button::new(egui::RichText::new(label).strong().size(14.0))
+                                .fill(ACCENT)
                         } else {
                             egui::Button::new(label)
                         };
@@ -829,7 +916,11 @@ impl MiasmaApp {
         if let Some(summary) = self.retrieved_summary.clone() {
             ui.add_space(8.0);
             card_frame().show(ui, |ui| {
-                ui.label(egui::RichText::new(s.retrieve_result_label).strong().color(GREEN));
+                ui.label(
+                    egui::RichText::new(s.retrieve_result_label)
+                        .strong()
+                        .color(GREEN),
+                );
                 ui.add_space(2.0);
                 ui.label(&summary);
                 ui.add_space(6.0);
@@ -837,8 +928,11 @@ impl MiasmaApp {
                 if self.save_data.is_some() {
                     let save_btn = if easy {
                         egui::Button::new(
-                            egui::RichText::new(s.retrieve_save_button).strong().size(14.0),
-                        ).fill(ACCENT)
+                            egui::RichText::new(s.retrieve_save_button)
+                                .strong()
+                                .size(14.0),
+                        )
+                        .fill(ACCENT)
                     } else {
                         egui::Button::new(s.retrieve_save_button)
                     };
@@ -857,7 +951,10 @@ impl MiasmaApp {
                                         );
                                     }
                                     Err(e) => {
-                                        self.set_msg(MsgKind::Error, format!("{} {e}", s.retrieve_save_failed));
+                                        self.set_msg(
+                                            MsgKind::Error,
+                                            format!("{} {e}", s.retrieve_save_failed),
+                                        );
                                     }
                                 }
                             }
@@ -879,7 +976,10 @@ impl MiasmaApp {
 
         // Action buttons — smaller row for Easy, full row for Technical.
         ui.horizontal(|ui| {
-            if ui.add_sized([90.0, 26.0], egui::Button::new(s.status_refresh)).clicked() {
+            if ui
+                .add_sized([90.0, 26.0], egui::Button::new(s.status_refresh))
+                .clicked()
+            {
                 let _ = self.worker.tx.try_send(WorkerCmd::GetStatus);
             }
             if !easy {
@@ -904,8 +1004,12 @@ impl MiasmaApp {
                     .save_file()
                 {
                     match std::fs::write(&path, &diag) {
-                        Ok(()) => self.set_msg(MsgKind::Success, format!("{} {}", s.status_diag_saved, path.display())),
-                        Err(e) => self.set_msg(MsgKind::Error, format!("{}{e}", s.status_diag_save_failed)),
+                        Ok(()) => self.set_msg(
+                            MsgKind::Success,
+                            format!("{} {}", s.status_diag_saved, path.display()),
+                        ),
+                        Err(e) => self
+                            .set_msg(MsgKind::Error, format!("{}{e}", s.status_diag_save_failed)),
                     }
                 }
             }
@@ -926,19 +1030,13 @@ impl MiasmaApp {
             ui.add_enabled_ui(self.daemon_state == DaemonState::Connected, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(s.wipe_label).color(RED).strong());
-                    ui.label(
-                        egui::RichText::new(s.wipe_desc)
-                            .color(DIM)
-                            .small(),
-                    );
+                    ui.label(egui::RichText::new(s.wipe_desc).color(DIM).small());
                 });
                 ui.add_space(4.0);
                 if ui
                     .add_sized(
                         [160.0, 28.0],
-                        egui::Button::new(
-                            egui::RichText::new(s.wipe_button).color(RED),
-                        ),
+                        egui::Button::new(egui::RichText::new(s.wipe_button).color(RED)),
                     )
                     .clicked()
                 {
@@ -967,11 +1065,8 @@ impl MiasmaApp {
             ui.horizontal(|ui| {
                 // Status dot.
                 let dot_rect = ui.allocate_space(egui::vec2(14.0, 14.0));
-                ui.painter().circle_filled(
-                    dot_rect.1.center(),
-                    6.0,
-                    status_color,
-                );
+                ui.painter()
+                    .circle_filled(dot_rect.1.center(), 6.0, status_color);
                 ui.add_space(4.0);
                 ui.label(
                     egui::RichText::new(status_text)
@@ -992,26 +1087,47 @@ impl MiasmaApp {
                 .show(ui, |ui| {
                     // App — always running if we're here.
                     let check = egui::RichText::new("\u{2713}").color(GREEN); // ✓
-                    let cross = egui::RichText::new("\u{2717}").color(RED);   // ✗
-                    let dot = egui::RichText::new("\u{25CF}").color(YELLOW);  // ●
+                    let cross = egui::RichText::new("\u{2717}").color(RED); // ✗
+                    let dot = egui::RichText::new("\u{25CF}").color(YELLOW); // ●
 
                     ui.label(check.clone());
-                    ui.label(egui::RichText::new(format!("{}  {}", s.health_app, s.health_ok)).color(DIM));
+                    ui.label(
+                        egui::RichText::new(format!("{}  {}", s.health_app, s.health_ok))
+                            .color(DIM),
+                    );
                     ui.end_row();
 
                     // Backend.
                     match self.daemon_state {
                         DaemonState::Connected => {
                             ui.label(check.clone());
-                            ui.label(egui::RichText::new(format!("{}  {}", s.health_backend, s.health_ok)).color(DIM));
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{}  {}",
+                                    s.health_backend, s.health_ok
+                                ))
+                                .color(DIM),
+                            );
                         }
                         DaemonState::Starting => {
                             ui.label(dot.clone());
-                            ui.label(egui::RichText::new(format!("{}  {}", s.health_backend, s.health_starting)).color(YELLOW));
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{}  {}",
+                                    s.health_backend, s.health_starting
+                                ))
+                                .color(YELLOW),
+                            );
                         }
                         _ => {
                             ui.label(cross.clone());
-                            ui.label(egui::RichText::new(format!("{}  {}", s.health_backend, s.health_offline)).color(RED));
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{}  {}",
+                                    s.health_backend, s.health_offline
+                                ))
+                                .color(RED),
+                            );
                         }
                     }
                     ui.end_row();
@@ -1020,14 +1136,34 @@ impl MiasmaApp {
                     if self.daemon_state == DaemonState::Connected {
                         if self.peer_count > 0 {
                             ui.label(check);
-                            ui.label(egui::RichText::new(format!("{}  {} {}", s.health_network, self.peer_count, s.status_peers.trim_end_matches('：').trim_end_matches(':'))).color(DIM));
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{}  {} {}",
+                                    s.health_network,
+                                    self.peer_count,
+                                    s.status_peers.trim_end_matches('：').trim_end_matches(':')
+                                ))
+                                .color(DIM),
+                            );
                         } else {
                             ui.label(dot);
-                            ui.label(egui::RichText::new(format!("{}  {}", s.health_network, s.health_no_peers)).color(YELLOW));
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{}  {}",
+                                    s.health_network, s.health_no_peers
+                                ))
+                                .color(YELLOW),
+                            );
                         }
                     } else {
                         ui.label(cross);
-                        ui.label(egui::RichText::new(format!("{}  {}", s.health_network, s.health_offline)).color(RED));
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{}  {}",
+                                s.health_network, s.health_offline
+                            ))
+                            .color(RED),
+                        );
                     }
                     ui.end_row();
                 });
@@ -1050,9 +1186,7 @@ impl MiasmaApp {
                         ui.label(egui::RichText::new(s.status_peers).color(DIM));
                         let peer_text = self.peer_count.to_string();
                         if self.peer_count > 0 {
-                            ui.label(
-                                egui::RichText::new(peer_text).size(15.0).color(GREEN),
-                            );
+                            ui.label(egui::RichText::new(peer_text).size(15.0).color(GREEN));
                         } else {
                             ui.label(egui::RichText::new(peer_text).size(15.0));
                         }
@@ -1080,7 +1214,10 @@ impl MiasmaApp {
                                 ui.painter().rect_filled(rect, 2.0, PROGRESS_BG);
                                 let fill_width = (pct as f32 / 100.0).min(1.0) * bar_width;
                                 let fill_color = if pct > 90.0 { YELLOW } else { PROGRESS_FILL };
-                                let fill_rect = egui::Rect::from_min_size(rect.min, egui::vec2(fill_width, 4.0));
+                                let fill_rect = egui::Rect::from_min_size(
+                                    rect.min,
+                                    egui::vec2(fill_width, 4.0),
+                                );
                                 ui.painter().rect_filled(fill_rect, 2.0, fill_color);
                             });
                             ui.end_row();
@@ -1096,132 +1233,136 @@ impl MiasmaApp {
 
         // ── Connection & identity ─────────────────────────────────────
         card_frame().show(ui, |ui| {
-        ui.label(egui::RichText::new(s.status_connection).strong().color(ACCENT));
-        ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(s.status_connection)
+                    .strong()
+                    .color(ACCENT),
+            );
+            ui.add_space(4.0);
 
-        egui::Grid::new("conn_grid")
-            .num_columns(2)
-            .spacing([16.0, 4.0])
-            .show(ui, |ui| {
-                ui.label(egui::RichText::new(s.status_state).color(DIM));
-                match self.daemon_state {
-                    DaemonState::Connected => {
-                        ui.colored_label(GREEN, s.status_state_connected);
-                    }
-                    DaemonState::Starting => {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.colored_label(BLUE, s.status_state_starting);
-                        });
-                    }
-                    DaemonState::Stopped => {
-                        ui.colored_label(RED, s.status_state_not_running);
-                    }
-                    DaemonState::NeedsInit => {
-                        ui.colored_label(YELLOW, s.status_state_not_init);
-                    }
-                }
-                ui.end_row();
-
-                ui.label(egui::RichText::new(s.status_peer_id).color(DIM));
-                if self.peer_id.is_empty() {
-                    ui.colored_label(DIM, "—");
-                } else {
-                    ui.label(
-                        egui::RichText::new(&self.peer_id)
-                            .font(egui::FontId::monospace(11.0)),
-                    );
-                }
-                ui.end_row();
-
-                ui.label(egui::RichText::new(s.status_peers).color(DIM));
-                let peer_text = self.peer_count.to_string();
-                if self.peer_count > 0 {
-                    ui.colored_label(GREEN, peer_text);
-                } else {
-                    ui.label(peer_text);
-                }
-                ui.end_row();
-
-                if !self.listen_addrs.is_empty() {
-                    ui.label(egui::RichText::new(s.status_listening).color(DIM));
-                    ui.vertical(|ui| {
-                        for addr in &self.listen_addrs {
-                            ui.label(
-                                egui::RichText::new(addr)
-                                    .font(egui::FontId::monospace(11.0)),
-                            );
+            egui::Grid::new("conn_grid")
+                .num_columns(2)
+                .spacing([16.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new(s.status_state).color(DIM));
+                    match self.daemon_state {
+                        DaemonState::Connected => {
+                            ui.colored_label(GREEN, s.status_state_connected);
                         }
-                    });
+                        DaemonState::Starting => {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.colored_label(BLUE, s.status_state_starting);
+                            });
+                        }
+                        DaemonState::Stopped => {
+                            ui.colored_label(RED, s.status_state_not_running);
+                        }
+                        DaemonState::NeedsInit => {
+                            ui.colored_label(YELLOW, s.status_state_not_init);
+                        }
+                    }
                     ui.end_row();
-                }
-            });
+
+                    ui.label(egui::RichText::new(s.status_peer_id).color(DIM));
+                    if self.peer_id.is_empty() {
+                        ui.colored_label(DIM, "—");
+                    } else {
+                        ui.label(
+                            egui::RichText::new(&self.peer_id).font(egui::FontId::monospace(11.0)),
+                        );
+                    }
+                    ui.end_row();
+
+                    ui.label(egui::RichText::new(s.status_peers).color(DIM));
+                    let peer_text = self.peer_count.to_string();
+                    if self.peer_count > 0 {
+                        ui.colored_label(GREEN, peer_text);
+                    } else {
+                        ui.label(peer_text);
+                    }
+                    ui.end_row();
+
+                    if !self.listen_addrs.is_empty() {
+                        ui.label(egui::RichText::new(s.status_listening).color(DIM));
+                        ui.vertical(|ui| {
+                            for addr in &self.listen_addrs {
+                                ui.label(
+                                    egui::RichText::new(addr).font(egui::FontId::monospace(11.0)),
+                                );
+                            }
+                        });
+                        ui.end_row();
+                    }
+                });
         }); // end connection card
 
         ui.add_space(8.0);
 
         // ── Storage & replication ─────────────────────────────────────
         card_frame().show(ui, |ui| {
-        ui.label(egui::RichText::new(s.status_storage).strong().color(ACCENT));
-        ui.add_space(4.0);
+            ui.label(egui::RichText::new(s.status_storage).strong().color(ACCENT));
+            ui.add_space(4.0);
 
-        egui::Grid::new("storage_grid")
-            .num_columns(2)
-            .spacing([16.0, 4.0])
-            .show(ui, |ui| {
-                ui.label(egui::RichText::new(s.status_shares).color(DIM));
-                ui.label(self.share_count.to_string());
-                ui.end_row();
+            egui::Grid::new("storage_grid")
+                .num_columns(2)
+                .spacing([16.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new(s.status_shares).color(DIM));
+                    ui.label(self.share_count.to_string());
+                    ui.end_row();
 
-                ui.label(egui::RichText::new(s.status_used).color(DIM));
-                if self.quota_mb > 0 {
-                    let pct = (self.used_mb / self.quota_mb as f64) * 100.0;
-                    let used_text = format!(
-                        "{:.1} / {} MiB  ({:.0}%)",
-                        self.used_mb, self.quota_mb, pct
-                    );
-                    ui.vertical(|ui| {
-                        if pct > 90.0 {
-                            ui.colored_label(YELLOW, &used_text);
-                        } else {
-                            ui.label(&used_text);
-                        }
-                        // Storage progress bar.
-                        let bar_width = ui.available_width().min(200.0);
-                        let (rect, _) = ui.allocate_exact_size(
-                            egui::vec2(bar_width, 4.0),
-                            egui::Sense::hover(),
+                    ui.label(egui::RichText::new(s.status_used).color(DIM));
+                    if self.quota_mb > 0 {
+                        let pct = (self.used_mb / self.quota_mb as f64) * 100.0;
+                        let used_text =
+                            format!("{:.1} / {} MiB  ({:.0}%)", self.used_mb, self.quota_mb, pct);
+                        ui.vertical(|ui| {
+                            if pct > 90.0 {
+                                ui.colored_label(YELLOW, &used_text);
+                            } else {
+                                ui.label(&used_text);
+                            }
+                            // Storage progress bar.
+                            let bar_width = ui.available_width().min(200.0);
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::vec2(bar_width, 4.0),
+                                egui::Sense::hover(),
+                            );
+                            ui.painter().rect_filled(rect, 2.0, PROGRESS_BG);
+                            let fill_width = (pct as f32 / 100.0).min(1.0) * bar_width;
+                            let fill_color = if pct > 90.0 {
+                                YELLOW
+                            } else if pct > 75.0 {
+                                egui::Color32::from_rgb(200, 160, 60)
+                            } else {
+                                PROGRESS_FILL
+                            };
+                            let fill_rect =
+                                egui::Rect::from_min_size(rect.min, egui::vec2(fill_width, 4.0));
+                            ui.painter().rect_filled(fill_rect, 2.0, fill_color);
+                        });
+                    } else {
+                        ui.label(format!("{:.1} MiB", self.used_mb));
+                    }
+                    ui.end_row();
+
+                    ui.label(egui::RichText::new(s.status_replication).color(DIM));
+                    if self.pending_replication > 0 {
+                        ui.colored_label(
+                            YELLOW,
+                            format!(
+                                "{} replicated, {} pending",
+                                self.replicated_count, self.pending_replication
+                            ),
                         );
-                        ui.painter().rect_filled(rect, 2.0, PROGRESS_BG);
-                        let fill_width = (pct as f32 / 100.0).min(1.0) * bar_width;
-                        let fill_color = if pct > 90.0 { YELLOW } else if pct > 75.0 { egui::Color32::from_rgb(200, 160, 60) } else { PROGRESS_FILL };
-                        let fill_rect = egui::Rect::from_min_size(rect.min, egui::vec2(fill_width, 4.0));
-                        ui.painter().rect_filled(fill_rect, 2.0, fill_color);
-                    });
-                } else {
-                    ui.label(format!("{:.1} MiB", self.used_mb));
-                }
-                ui.end_row();
-
-                ui.label(egui::RichText::new(s.status_replication).color(DIM));
-                if self.pending_replication > 0 {
-                    ui.colored_label(
-                        YELLOW,
-                        format!(
-                            "{} replicated, {} pending",
-                            self.replicated_count, self.pending_replication
-                        ),
-                    );
-                } else if self.replicated_count > 0 {
-                    ui.colored_label(
-                        GREEN,
-                        format!("{} replicated", self.replicated_count),
-                    );
-                } else {
-                    ui.colored_label(DIM, "—");
-                }
-                ui.end_row();
-            });
+                    } else if self.replicated_count > 0 {
+                        ui.colored_label(GREEN, format!("{} replicated", self.replicated_count));
+                    } else {
+                        ui.colored_label(DIM, "—");
+                    }
+                    ui.end_row();
+                });
         }); // end storage card
 
         // ── Transport ─────────────────────────────────────────────────
@@ -1232,95 +1373,118 @@ impl MiasmaApp {
         {
             ui.add_space(8.0);
             card_frame().show(ui, |ui| {
-            ui.label(egui::RichText::new(s.status_transport).strong().color(ACCENT));
-            ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(s.status_transport)
+                        .strong()
+                        .color(ACCENT),
+                );
+                ui.add_space(4.0);
 
-            // Summary line: active services.
-            ui.horizontal_wrapped(|ui| {
-                if self.wss_port > 0 {
-                    let tls = if self.wss_tls_enabled { "TLS" } else { "plain" };
-                    tag_label(ui, GREEN, &format!("WSS :{} ({tls})", self.wss_port));
-                }
-                if self.obfs_quic_port > 0 {
-                    tag_label(ui, GREEN, &format!("ObfuscatedQuic :{}", self.obfs_quic_port));
-                }
-                if self.proxy_configured {
-                    let pt = self.proxy_type.as_deref().unwrap_or("proxy");
-                    tag_label(ui, BLUE, pt);
-                }
-            });
+                // Summary line: active services.
+                ui.horizontal_wrapped(|ui| {
+                    if self.wss_port > 0 {
+                        let tls = if self.wss_tls_enabled { "TLS" } else { "plain" };
+                        tag_label(ui, GREEN, &format!("WSS :{} ({tls})", self.wss_port));
+                    }
+                    if self.obfs_quic_port > 0 {
+                        tag_label(
+                            ui,
+                            GREEN,
+                            &format!("ObfuscatedQuic :{}", self.obfs_quic_port),
+                        );
+                    }
+                    if self.proxy_configured {
+                        let pt = self.proxy_type.as_deref().unwrap_or("proxy");
+                        tag_label(ui, BLUE, pt);
+                    }
+                });
 
-            if !self.transport_statuses.is_empty() {
-                ui.add_space(6.0);
+                if !self.transport_statuses.is_empty() {
+                    ui.add_space(6.0);
 
-                egui::Grid::new("transport_grid")
-                    .num_columns(4)
-                    .spacing([12.0, 3.0])
-                    .striped(true)
-                    .show(ui, |ui| {
-                        // Header.
-                        ui.label(egui::RichText::new(s.status_transport_name).strong().small());
-                        ui.label(egui::RichText::new(s.status_transport_status).strong().small());
-                        ui.label(egui::RichText::new(s.status_transport_counts).strong().small());
-                        ui.label(egui::RichText::new(s.status_transport_details).strong().small());
-                        ui.end_row();
-
-                        for t in &self.transport_statuses {
-                            ui.label(&t.name);
-
-                            // Status badge.
-                            if t.selected {
-                                ui.colored_label(GREEN, "Active");
-                            } else if t.available && t.failure_count == 0 {
-                                ui.colored_label(GREEN, "Ready");
-                            } else if t.available && t.failure_count > 0 {
-                                ui.colored_label(YELLOW, "Degraded");
-                            } else if t.failure_count > 0 {
-                                ui.colored_label(RED, "Failing");
-                            } else {
-                                ui.colored_label(DIM, "Idle");
-                            }
-
-                            // Counts.
-                            ui.label(format!("{} / {}", t.success_count, t.failure_count));
-
-                            // Last error or phase failures.
-                            if let Some(ref err) = t.last_error {
-                                let short = if err.len() > 50 {
-                                    format!("{}...", &err[..50])
-                                } else {
-                                    err.clone()
-                                };
-                                ui.label(egui::RichText::new(short).color(DIM).small());
-                            } else if t.session_failures > 0 || t.data_failures > 0 {
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "session:{} data:{}",
-                                        t.session_failures, t.data_failures
-                                    ))
-                                    .color(DIM)
+                    egui::Grid::new("transport_grid")
+                        .num_columns(4)
+                        .spacing([12.0, 3.0])
+                        .striped(true)
+                        .show(ui, |ui| {
+                            // Header.
+                            ui.label(
+                                egui::RichText::new(s.status_transport_name)
+                                    .strong()
                                     .small(),
-                                );
-                            } else {
-                                ui.colored_label(DIM, "—");
-                            }
+                            );
+                            ui.label(
+                                egui::RichText::new(s.status_transport_status)
+                                    .strong()
+                                    .small(),
+                            );
+                            ui.label(
+                                egui::RichText::new(s.status_transport_counts)
+                                    .strong()
+                                    .small(),
+                            );
+                            ui.label(
+                                egui::RichText::new(s.status_transport_details)
+                                    .strong()
+                                    .small(),
+                            );
                             ui.end_row();
-                        }
-                    });
 
-                // Troubleshooting hint when all transports failing.
-                let all_failing = self
-                    .transport_statuses
-                    .iter()
-                    .all(|t| t.failure_count > 0 && t.success_count == 0);
-                if all_failing && self.transport_statuses.iter().any(|t| t.failure_count > 0)
-                {
-                    ui.add_space(8.0);
-                    ui.horizontal_wrapped(|ui| {
-                        ui.colored_label(YELLOW, s.status_all_failing);
-                    });
+                            for t in &self.transport_statuses {
+                                ui.label(&t.name);
+
+                                // Status badge.
+                                if t.selected {
+                                    ui.colored_label(GREEN, "Active");
+                                } else if t.available && t.failure_count == 0 {
+                                    ui.colored_label(GREEN, "Ready");
+                                } else if t.available && t.failure_count > 0 {
+                                    ui.colored_label(YELLOW, "Degraded");
+                                } else if t.failure_count > 0 {
+                                    ui.colored_label(RED, "Failing");
+                                } else {
+                                    ui.colored_label(DIM, "Idle");
+                                }
+
+                                // Counts.
+                                ui.label(format!("{} / {}", t.success_count, t.failure_count));
+
+                                // Last error or phase failures.
+                                if let Some(ref err) = t.last_error {
+                                    let short = if err.len() > 50 {
+                                        format!("{}...", &err[..50])
+                                    } else {
+                                        err.clone()
+                                    };
+                                    ui.label(egui::RichText::new(short).color(DIM).small());
+                                } else if t.session_failures > 0 || t.data_failures > 0 {
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "session:{} data:{}",
+                                            t.session_failures, t.data_failures
+                                        ))
+                                        .color(DIM)
+                                        .small(),
+                                    );
+                                } else {
+                                    ui.colored_label(DIM, "—");
+                                }
+                                ui.end_row();
+                            }
+                        });
+
+                    // Troubleshooting hint when all transports failing.
+                    let all_failing = self
+                        .transport_statuses
+                        .iter()
+                        .all(|t| t.failure_count > 0 && t.success_count == 0);
+                    if all_failing && self.transport_statuses.iter().any(|t| t.failure_count > 0) {
+                        ui.add_space(8.0);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.colored_label(YELLOW, s.status_all_failing);
+                        });
+                    }
                 }
-            }
             }); // end transport card
         }
     }
@@ -1336,7 +1500,11 @@ impl MiasmaApp {
 
         // ── Preferences card (Language + Mode) ───────────────────────
         card_frame().show(ui, |ui| {
-            ui.label(egui::RichText::new(s.settings_language).strong().color(ACCENT));
+            ui.label(
+                egui::RichText::new(s.settings_language)
+                    .strong()
+                    .color(ACCENT),
+            );
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 for lang in Locale::ALL {
@@ -1358,13 +1526,20 @@ impl MiasmaApp {
                     self.mode = ProductMode::Easy;
                     self.save_prefs();
                 }
-                if ui.selectable_label(!is_easy, s.settings_mode_technical).clicked() {
+                if ui
+                    .selectable_label(!is_easy, s.settings_mode_technical)
+                    .clicked()
+                {
                     self.mode = ProductMode::Technical;
                     self.save_prefs();
                 }
             });
             ui.add_space(2.0);
-            let mode_desc = if easy { s.settings_mode_desc_easy } else { s.settings_mode_desc_technical };
+            let mode_desc = if easy {
+                s.settings_mode_desc_easy
+            } else {
+                s.settings_mode_desc_technical
+            };
             ui.label(egui::RichText::new(mode_desc).color(DIM).small());
         });
 
@@ -1394,15 +1569,23 @@ impl MiasmaApp {
 
                     ui.label(egui::RichText::new(s.settings_config_file).color(DIM));
                     ui.label(
-                        egui::RichText::new(format!("{}{}config.toml", &self.data_dir_display, std::path::MAIN_SEPARATOR))
-                            .font(egui::FontId::monospace(11.0)),
+                        egui::RichText::new(format!(
+                            "{}{}config.toml",
+                            &self.data_dir_display,
+                            std::path::MAIN_SEPARATOR
+                        ))
+                        .font(egui::FontId::monospace(11.0)),
                     );
                     ui.end_row();
 
                     ui.label(egui::RichText::new(s.settings_log).color(DIM));
                     ui.label(
-                        egui::RichText::new(format!("{}{}desktop.log.*", &self.data_dir_display, std::path::MAIN_SEPARATOR))
-                            .font(egui::FontId::monospace(11.0)),
+                        egui::RichText::new(format!(
+                            "{}{}desktop.log.*",
+                            &self.data_dir_display,
+                            std::path::MAIN_SEPARATOR
+                        ))
+                        .font(egui::FontId::monospace(11.0)),
                     );
                     ui.end_row();
 
@@ -1425,27 +1608,35 @@ impl MiasmaApp {
         card_frame().show(ui, |ui| {
             ui.label(egui::RichText::new(s.settings_how).strong().color(ACCENT));
             ui.add_space(4.0);
-            let line1 = if easy { s.settings_how_line1_easy } else { s.settings_how_line1 };
+            let line1 = if easy {
+                s.settings_how_line1_easy
+            } else {
+                s.settings_how_line1
+            };
             ui.label(line1);
-            let line2 = if easy { s.settings_how_line2_easy } else { s.settings_how_line2 };
+            let line2 = if easy {
+                s.settings_how_line2_easy
+            } else {
+                s.settings_how_line2
+            };
             ui.label(line2);
             ui.add_space(6.0);
             ui.label(egui::RichText::new(s.settings_stored_in).color(DIM));
             ui.label(
-                egui::RichText::new(&self.data_dir_display)
-                    .font(egui::FontId::monospace(11.0)),
+                egui::RichText::new(&self.data_dir_display).font(egui::FontId::monospace(11.0)),
             );
-            ui.label(
-                egui::RichText::new(s.settings_preserved)
-                    .color(DIM).small(),
-            );
+            ui.label(egui::RichText::new(s.settings_preserved).color(DIM).small());
         });
 
         ui.add_space(8.0);
 
         // ── Actions card ─────────────────────────────────────────────
         card_frame().show(ui, |ui| {
-            ui.label(egui::RichText::new(s.settings_actions).strong().color(ACCENT));
+            ui.label(
+                egui::RichText::new(s.settings_actions)
+                    .strong()
+                    .color(ACCENT),
+            );
             ui.add_space(4.0);
 
             ui.horizontal(|ui| {
@@ -1468,8 +1659,14 @@ impl MiasmaApp {
                         .save_file()
                     {
                         match std::fs::write(&path, &diag) {
-                            Ok(()) => self.set_msg(MsgKind::Success, format!("{} {}", s.status_diag_saved, path.display())),
-                            Err(e) => self.set_msg(MsgKind::Error, format!("{}{e}", s.status_diag_save_failed)),
+                            Ok(()) => self.set_msg(
+                                MsgKind::Success,
+                                format!("{} {}", s.status_diag_saved, path.display()),
+                            ),
+                            Err(e) => self.set_msg(
+                                MsgKind::Error,
+                                format!("{}{e}", s.status_diag_save_failed),
+                            ),
                         }
                     }
                 }
@@ -1633,7 +1830,9 @@ impl MiasmaApp {
                     for (i, mid) in self.import_mids.clone().iter().enumerate() {
                         ui.horizontal(|ui| {
                             let label = format!("#{}: {}", i + 1, truncate_mid(mid));
-                            ui.label(egui::RichText::new(&label).font(egui::FontId::monospace(11.0)));
+                            ui.label(
+                                egui::RichText::new(&label).font(egui::FontId::monospace(11.0)),
+                            );
                             if ui.small_button(s.store_copy).clicked() {
                                 ui.output_mut(|o| o.copied_text = mid.clone());
                                 self.set_msg(MsgKind::Info, s.store_copied);
@@ -1642,7 +1841,10 @@ impl MiasmaApp {
                     }
 
                     ui.add_space(8.0);
-                    if ui.add_sized([120.0, 28.0], egui::Button::new(s.import_done)).clicked() {
+                    if ui
+                        .add_sized([120.0, 28.0], egui::Button::new(s.import_done))
+                        .clicked()
+                    {
                         self.import_state = ImportState::Idle;
                         self.tab = Tab::Store;
                     }
@@ -1657,10 +1859,16 @@ impl MiasmaApp {
                     }
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.add_sized([120.0, 28.0], egui::Button::new(s.import_retry)).clicked() {
+                        if ui
+                            .add_sized([120.0, 28.0], egui::Button::new(s.import_retry))
+                            .clicked()
+                        {
                             self.import_state = ImportState::Confirming;
                         }
-                        if ui.add_sized([120.0, 28.0], egui::Button::new(s.import_cancel)).clicked() {
+                        if ui
+                            .add_sized([120.0, 28.0], egui::Button::new(s.import_cancel))
+                            .clicked()
+                        {
                             self.import_state = ImportState::Idle;
                             self.import_intent = None;
                             self.tab = Tab::Store;
@@ -1678,12 +1886,23 @@ impl MiasmaApp {
         d.push_str("Miasma Diagnostics Report\n");
         d.push_str("========================\n\n");
 
-        d.push_str(&format!("Desktop version: {} (beta)\n", env!("CARGO_PKG_VERSION")));
-        d.push_str(&format!("OS:              {} {}\n", std::env::consts::OS, std::env::consts::ARCH));
+        d.push_str(&format!(
+            "Desktop version: {} (beta)\n",
+            env!("CARGO_PKG_VERSION")
+        ));
+        d.push_str(&format!(
+            "OS:              {} {}\n",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ));
         d.push_str(&format!("OS version:      {}\n", os_version()));
         d.push_str(&format!("Timestamp:       {}\n", epoch_timestamp()));
         let uptime_secs = self.startup_time.elapsed().as_secs();
-        d.push_str(&format!("Desktop uptime:  {}m {}s\n", uptime_secs / 60, uptime_secs % 60));
+        d.push_str(&format!(
+            "Desktop uptime:  {}m {}s\n",
+            uptime_secs / 60,
+            uptime_secs % 60
+        ));
 
         // Detect installed vs portable.
         let exe_path = std::env::current_exe().unwrap_or_default();
@@ -1695,8 +1914,16 @@ impl MiasmaApp {
         d.push_str(&format!("Install type:    {}\n", install_type));
 
         d.push_str(&format!("Data directory:  {}\n", self.data_dir_display));
-        d.push_str(&format!("Desktop log:     {}{}desktop.log.*\n", self.data_dir_display, std::path::MAIN_SEPARATOR));
-        d.push_str(&format!("Daemon log:      {}{}daemon.log.*\n", self.data_dir_display, std::path::MAIN_SEPARATOR));
+        d.push_str(&format!(
+            "Desktop log:     {}{}desktop.log.*\n",
+            self.data_dir_display,
+            std::path::MAIN_SEPARATOR
+        ));
+        d.push_str(&format!(
+            "Daemon log:      {}{}daemon.log.*\n",
+            self.data_dir_display,
+            std::path::MAIN_SEPARATOR
+        ));
         d.push_str(&format!("Mode:            {:?}\n", self.mode));
         d.push_str(&format!("Locale:          {:?}\n", self.locale));
         d.push_str(&format!("Launch attempts: {}\n", self.launch_attempts));
@@ -1713,7 +1940,11 @@ impl MiasmaApp {
         d.push_str("\n--- Connection ---\n");
         d.push_str(&format!(
             "Peer ID:    {}\n",
-            if self.peer_id.is_empty() { "(none)" } else { &self.peer_id }
+            if self.peer_id.is_empty() {
+                "(none)"
+            } else {
+                &self.peer_id
+            }
         ));
         d.push_str(&format!("Peers:      {}\n", self.peer_count));
         d.push_str(&format!(
@@ -1802,7 +2033,12 @@ impl MiasmaApp {
 // ─── UI helpers ─────────────────────────────────────────────────────────────
 
 fn section_heading(ui: &mut egui::Ui, text: &str) {
-    ui.label(egui::RichText::new(text).size(18.0).strong().color(egui::Color32::from_rgb(220, 225, 235)));
+    ui.label(
+        egui::RichText::new(text)
+            .size(18.0)
+            .strong()
+            .color(egui::Color32::from_rgb(220, 225, 235)),
+    );
     // Subtle separator line below heading.
     let rect = ui.allocate_space(egui::vec2(ui.available_width(), 1.0)).1;
     ui.painter().rect_filled(rect, 0.0, SEPARATOR);
@@ -1826,17 +2062,22 @@ fn nav_tab(ui: &mut egui::Ui, current: &mut Tab, tab: Tab, label: &str) {
             .strong()
             .color(egui::Color32::WHITE)
     } else {
-        egui::RichText::new(label)
-            .size(13.0)
-            .color(DIM)
+        egui::RichText::new(label).size(13.0).color(DIM)
     };
     let frame = egui::Frame::none()
         .inner_margin(egui::Margin::symmetric(10.0, 5.0))
         .rounding(4.0)
-        .fill(if is_active { NAV_ACTIVE_BG } else { egui::Color32::TRANSPARENT });
-    let resp = frame.show(ui, |ui| {
-        ui.label(text);
-    }).response.interact(egui::Sense::click());
+        .fill(if is_active {
+            NAV_ACTIVE_BG
+        } else {
+            egui::Color32::TRANSPARENT
+        });
+    let resp = frame
+        .show(ui, |ui| {
+            ui.label(text);
+        })
+        .response
+        .interact(egui::Sense::click());
     if resp.clicked() {
         *current = tab;
     }
@@ -1946,53 +2187,59 @@ impl eframe::App for MiasmaApp {
 
         // ── Top navigation bar ────────────────────────────────────────
         egui::TopBottomPanel::top("nav_bar")
-            .frame(egui::Frame::none()
-                .fill(NAV_BG)
-                .inner_margin(egui::Margin::symmetric(14.0, 0.0))
-                .stroke(egui::Stroke::new(1.0, SEPARATOR)))
+            .frame(
+                egui::Frame::none()
+                    .fill(NAV_BG)
+                    .inner_margin(egui::Margin::symmetric(14.0, 0.0))
+                    .stroke(egui::Stroke::new(1.0, SEPARATOR)),
+            )
             .show(ctx, |ui| {
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                // ── Brand mark ──
-                let brand = if easy { s.nav_brand_easy } else { s.nav_brand };
-                ui.label(
-                    egui::RichText::new(brand)
-                        .size(14.0)
-                        .strong()
-                        .color(BRAND_TEXT),
-                );
                 ui.add_space(6.0);
-                ui.label(egui::RichText::new("|").size(14.0).color(SEPARATOR));
-                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    // ── Brand mark ──
+                    let brand = if easy { s.nav_brand_easy } else { s.nav_brand };
+                    ui.label(
+                        egui::RichText::new(brand)
+                            .size(14.0)
+                            .strong()
+                            .color(BRAND_TEXT),
+                    );
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new("|").size(14.0).color(SEPARATOR));
+                    ui.add_space(6.0);
 
-                // ── Tab buttons with active indicator ──
-                let store_label = if easy { s.tab_store_easy } else { s.tab_store };
-                let retrieve_label = if easy { s.tab_retrieve_easy } else { s.tab_retrieve };
-                nav_tab(ui, &mut self.tab, Tab::Store, store_label);
-                nav_tab(ui, &mut self.tab, Tab::Retrieve, retrieve_label);
-                nav_tab(ui, &mut self.tab, Tab::Status, s.tab_status);
-                nav_tab(ui, &mut self.tab, Tab::Settings, s.tab_settings);
-                // Show Import tab only when an import is active.
-                if self.import_intent.is_some() || self.import_state != ImportState::Idle {
-                    nav_tab(ui, &mut self.tab, Tab::Import, s.tab_import);
-                }
-
-                // Right-aligned connection indicator with dot.
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let (color, label) = match self.daemon_state {
-                        DaemonState::Connected => (GREEN, s.connected),
-                        DaemonState::Starting => (BLUE, s.starting),
-                        DaemonState::Stopped => (RED, s.offline),
-                        DaemonState::NeedsInit => (YELLOW, s.setup_needed),
+                    // ── Tab buttons with active indicator ──
+                    let store_label = if easy { s.tab_store_easy } else { s.tab_store };
+                    let retrieve_label = if easy {
+                        s.tab_retrieve_easy
+                    } else {
+                        s.tab_retrieve
                     };
-                    ui.colored_label(color, label);
-                    // Status dot.
-                    let dot = ui.allocate_space(egui::vec2(8.0, 8.0));
-                    ui.painter().circle_filled(dot.1.center(), 4.0, color);
+                    nav_tab(ui, &mut self.tab, Tab::Store, store_label);
+                    nav_tab(ui, &mut self.tab, Tab::Retrieve, retrieve_label);
+                    nav_tab(ui, &mut self.tab, Tab::Status, s.tab_status);
+                    nav_tab(ui, &mut self.tab, Tab::Settings, s.tab_settings);
+                    // Show Import tab only when an import is active.
+                    if self.import_intent.is_some() || self.import_state != ImportState::Idle {
+                        nav_tab(ui, &mut self.tab, Tab::Import, s.tab_import);
+                    }
+
+                    // Right-aligned connection indicator with dot.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let (color, label) = match self.daemon_state {
+                            DaemonState::Connected => (GREEN, s.connected),
+                            DaemonState::Starting => (BLUE, s.starting),
+                            DaemonState::Stopped => (RED, s.offline),
+                            DaemonState::NeedsInit => (YELLOW, s.setup_needed),
+                        };
+                        ui.colored_label(color, label);
+                        // Status dot.
+                        let dot = ui.allocate_space(egui::vec2(8.0, 8.0));
+                        ui.painter().circle_filled(dot.1.center(), 4.0, color);
+                    });
                 });
+                ui.add_space(6.0);
             });
-            ui.add_space(6.0);
-        });
 
         // ── Bottom status bar ─────────────────────────────────────────
         if let Some((ref msg, kind)) = self.status_msg.clone() {
@@ -2006,14 +2253,11 @@ impl eframe::App for MiasmaApp {
                             MsgKind::Error => RED,
                         };
                         ui.colored_label(color, msg);
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                if ui.small_button(s.dismiss).clicked() {
-                                    self.status_msg = None;
-                                }
-                            },
-                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button(s.dismiss).clicked() {
+                                self.status_msg = None;
+                            }
+                        });
                     });
                 });
         }
@@ -2048,9 +2292,7 @@ impl eframe::App for MiasmaApp {
                     ui.add_space(4.0);
                     ui.label(s.wipe_confirm_line1);
                     ui.add_space(4.0);
-                    ui.label(
-                        egui::RichText::new(s.wipe_confirm_line2).strong(),
-                    );
+                    ui.label(egui::RichText::new(s.wipe_confirm_line2).strong());
                     ui.add_space(12.0);
                     ui.horizontal(|ui| {
                         if ui

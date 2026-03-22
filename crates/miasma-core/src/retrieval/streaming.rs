@@ -110,18 +110,19 @@ impl<Src: ShareSource + Clone + Send + Sync + 'static> StreamingRetrievalCoordin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        dissolution::dissolve_file,
-        pipeline::DissolutionParams,
-        store::LocalShareStore,
-    };
+    use crate::{dissolution::dissolve_file, pipeline::DissolutionParams, store::LocalShareStore};
     use futures::StreamExt;
     use std::sync::Arc;
     use tempfile::TempDir;
 
     use super::super::source::LocalShareSource;
 
-    fn make_streaming(dir: &TempDir) -> (StreamingRetrievalCoordinator<LocalShareSource>, Arc<LocalShareStore>) {
+    fn make_streaming(
+        dir: &TempDir,
+    ) -> (
+        StreamingRetrievalCoordinator<LocalShareSource>,
+        Arc<LocalShareStore>,
+    ) {
         let store = Arc::new(LocalShareStore::open(dir.path(), 200).unwrap());
         let src = LocalShareSource::new(store.clone());
         (StreamingRetrievalCoordinator::new(src), store)
@@ -138,7 +139,9 @@ mod tests {
 
         let (manifest, all_shares) = dissolve_file(&data, params, segment_size).unwrap();
         for seg in &all_shares {
-            for s in seg { store.put(s).unwrap(); }
+            for s in seg {
+                store.put(s).unwrap();
+            }
         }
 
         let mut stream = coord.retrieve_streaming(manifest.clone());

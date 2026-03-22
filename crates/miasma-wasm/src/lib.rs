@@ -70,9 +70,9 @@ impl ContentId {
     }
 
     pub fn from_mid_str(s: &str) -> Result<Self, MiasmaError> {
-        let s = s.strip_prefix("miasma:").ok_or_else(|| {
-            MiasmaError::InvalidMid("missing 'miasma:' prefix".into())
-        })?;
+        let s = s
+            .strip_prefix("miasma:")
+            .ok_or_else(|| MiasmaError::InvalidMid("missing 'miasma:' prefix".into()))?;
         let bytes = bs58::decode(s)
             .into_vec()
             .map_err(|e| MiasmaError::InvalidMid(e.to_string()))?;
@@ -457,8 +457,11 @@ fn dissolve_inner(
     let (ciphertext, k_enc, nonce) = encrypt(plaintext)?;
 
     let shards = rs_encode(&ciphertext, params.data_shards, params.total_shards)?;
-    let key_shares =
-        sss_split(k_enc.as_ref(), params.data_shards as u8, params.total_shards as u8)?;
+    let key_shares = sss_split(
+        k_enc.as_ref(),
+        params.data_shards as u8,
+        params.total_shards as u8,
+    )?;
 
     #[cfg(target_arch = "wasm32")]
     let timestamp = (js_sys::Date::now() / 1000.0) as u64;
@@ -513,10 +516,7 @@ fn retrieve_inner(
         });
     }
 
-    let valid: Vec<&MiasmaShare> = shares
-        .iter()
-        .filter(|s| coarse_verify(s, mid))
-        .collect();
+    let valid: Vec<&MiasmaShare> = shares.iter().filter(|s| coarse_verify(s, mid)).collect();
 
     if valid.len() < params.data_shards {
         return Err(MiasmaError::InsufficientShares {
@@ -585,10 +585,10 @@ struct ShareJson {
     mid_prefix: String,
     segment_index: u32,
     slot_index: u16,
-    shard_data: String,   // base64
-    key_share: String,    // base64
-    shard_hash: String,   // hex
-    nonce: String,        // hex
+    shard_data: String, // base64
+    key_share: String,  // base64
+    shard_hash: String, // hex
+    nonce: String,      // hex
     original_len: u32,
     timestamp: u64,
     /// bincode-serialized share bytes (base64), for cross-platform interop.
@@ -615,8 +615,8 @@ fn share_to_json(share: &MiasmaShare) -> ShareJson {
 fn share_from_json(j: &ShareJson) -> Result<MiasmaShare, MiasmaError> {
     // Prefer bincode if available (exact cross-platform compat).
     if !j.bincode.is_empty() {
-        let bytes = base64_decode(&j.bincode)
-            .map_err(|e| MiasmaError::Serialization(e.to_string()))?;
+        let bytes =
+            base64_decode(&j.bincode).map_err(|e| MiasmaError::Serialization(e.to_string()))?;
         return MiasmaShare::from_bytes(&bytes);
     }
 
@@ -624,10 +624,10 @@ fn share_from_json(j: &ShareJson) -> Result<MiasmaShare, MiasmaError> {
         .map_err(|e| MiasmaError::Serialization(e.to_string()))?
         .try_into()
         .map_err(|_| MiasmaError::Serialization("mid_prefix must be 8 bytes".into()))?;
-    let shard_data = base64_decode(&j.shard_data)
-        .map_err(|e| MiasmaError::Serialization(e.to_string()))?;
-    let key_share = base64_decode(&j.key_share)
-        .map_err(|e| MiasmaError::Serialization(e.to_string()))?;
+    let shard_data =
+        base64_decode(&j.shard_data).map_err(|e| MiasmaError::Serialization(e.to_string()))?;
+    let key_share =
+        base64_decode(&j.key_share).map_err(|e| MiasmaError::Serialization(e.to_string()))?;
     let shard_hash: [u8; 32] = hex::decode(&j.shard_hash)
         .map_err(|e| MiasmaError::Serialization(e.to_string()))?
         .try_into()
@@ -713,10 +713,7 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
 // hex module (minimal, no extra dep)
 mod hex {
     pub fn encode(data: impl AsRef<[u8]>) -> String {
-        data.as_ref()
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect()
+        data.as_ref().iter().map(|b| format!("{:02x}", b)).collect()
     }
 
     pub fn decode(s: &str) -> Result<Vec<u8>, String> {
@@ -807,7 +804,11 @@ pub fn verify_share(share_json: &str, mid_str: &str) -> Result<bool, JsError> {
 /// Get the protocol version string.
 #[wasm_bindgen]
 pub fn protocol_version() -> String {
-    format!("miasma-wasm v{} (protocol v{})", env!("CARGO_PKG_VERSION"), PROTOCOL_VERSION)
+    format!(
+        "miasma-wasm v{} (protocol v{})",
+        env!("CARGO_PKG_VERSION"),
+        PROTOCOL_VERSION
+    )
 }
 
 // ── Tests (native only — cross-platform compatibility) ────────────────
@@ -835,7 +836,10 @@ mod tests {
     fn mid_string_format() {
         let mid = ContentId::compute(b"hello miasma", b"k=10,n=20,v=1");
         let s = mid.to_mid_string();
-        assert!(s.starts_with("miasma:"), "MID must start with 'miasma:' prefix");
+        assert!(
+            s.starts_with("miasma:"),
+            "MID must start with 'miasma:' prefix"
+        );
         let parsed = ContentId::from_mid_str(&s).unwrap();
         assert_eq!(mid, parsed);
     }
@@ -850,10 +854,16 @@ mod tests {
 
     #[test]
     fn param_bytes_format() {
-        let params = DissolutionParams { data_shards: 10, total_shards: 20 };
+        let params = DissolutionParams {
+            data_shards: 10,
+            total_shards: 20,
+        };
         assert_eq!(params.to_param_bytes(), b"k=10,n=20,v=1");
 
-        let params2 = DissolutionParams { data_shards: 5, total_shards: 10 };
+        let params2 = DissolutionParams {
+            data_shards: 5,
+            total_shards: 10,
+        };
         assert_eq!(params2.to_param_bytes(), b"k=5,n=10,v=1");
     }
 
@@ -939,7 +949,10 @@ mod tests {
         let data = b"Hello Miasma Reed-Solomon test data that is long enough for testing!";
         let shards = rs_encode(data, 10, 20).unwrap();
         // Drop first 5 data shards, keep rest.
-        let indexed: Vec<(usize, Vec<u8>)> = shards.iter().cloned().enumerate()
+        let indexed: Vec<(usize, Vec<u8>)> = shards
+            .iter()
+            .cloned()
+            .enumerate()
             .filter(|(i, _)| *i >= 5)
             .collect();
         let recovered = rs_decode(&indexed, 10, 20, data.len()).unwrap();
@@ -974,7 +987,8 @@ mod tests {
         let (mid, all_shares) = dissolve_inner(TEST_CONTENT, params).unwrap();
 
         // Drop first 5 data shards, use remaining data + recovery.
-        let subset: Vec<MiasmaShare> = all_shares.into_iter()
+        let subset: Vec<MiasmaShare> = all_shares
+            .into_iter()
             .filter(|s| s.slot_index >= 5)
             .collect();
         let recovered = retrieve_inner(&mid, &subset, params).unwrap();
@@ -1017,7 +1031,9 @@ mod tests {
     fn share_bincode_roundtrip() {
         let mid = ContentId::compute(b"serialize test", b"k=10,n=20,v=1");
         let share = MiasmaShare::new(
-            &mid, 0, 7,
+            &mid,
+            0,
+            7,
             vec![0xBB; 64],
             vec![0xAA; 33],
             [0x24; 12],
@@ -1041,7 +1057,9 @@ mod tests {
     fn share_json_roundtrip() {
         let mid = ContentId::compute(b"json test", b"k=10,n=20,v=1");
         let share = MiasmaShare::new(
-            &mid, 0, 3,
+            &mid,
+            0,
+            3,
             vec![0xCC; 48],
             vec![0xDD; 33],
             [0x11; 12],
@@ -1060,7 +1078,9 @@ mod tests {
     fn share_json_bincode_path() {
         let mid = ContentId::compute(b"bincode path", b"k=10,n=20,v=1");
         let share = MiasmaShare::new(
-            &mid, 0, 5,
+            &mid,
+            0,
+            5,
             vec![0xEE; 32],
             vec![0xFF; 33],
             [0x22; 12],

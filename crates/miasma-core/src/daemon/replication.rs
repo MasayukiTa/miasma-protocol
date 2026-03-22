@@ -81,12 +81,16 @@ impl RetryPolicy {
         let jitter = if jitter_range > 0 {
             // Simple deterministic-ish jitter from the attempt count.
             // Not cryptographic, just spread.
-            let seed = now.wrapping_mul(6364136223846793005).wrapping_add(attempt_count as u64);
+            let seed = now
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(attempt_count as u64);
             seed % (jitter_range * 2 + 1)
         } else {
             jitter_range // 0
         };
-        now.saturating_add(delay).saturating_add(jitter).saturating_sub(jitter_range)
+        now.saturating_add(delay)
+            .saturating_add(jitter)
+            .saturating_sub(jitter_range)
     }
 }
 
@@ -379,8 +383,7 @@ impl ReplicationQueue {
         }
         file.flush()?;
         let _ = file.sync_all();
-        std::fs::rename(&self.wal_tmp_path, &self.wal_path)
-            .with_context(|| "atomic WAL rename")?;
+        std::fs::rename(&self.wal_tmp_path, &self.wal_path).with_context(|| "atomic WAL rename")?;
         self.appended_since_compact = 0;
         debug!(items = self.items.len(), "WAL compacted");
         Ok(())
@@ -432,8 +435,7 @@ impl ReplicationQueue {
                     "item degraded — awaiting topology event for re-promotion"
                 );
             } else {
-                item.next_attempt_secs =
-                    self.policy.next_attempt_secs(item.attempt_count, now);
+                item.next_attempt_secs = self.policy.next_attempt_secs(item.attempt_count, now);
             }
 
             (
@@ -534,19 +536,30 @@ impl ReplicationQueue {
 
     /// Items that still need network replication (Pending or Degraded).
     pub fn pending(&self) -> impl Iterator<Item = &PendingReplication> {
-        self.items.values().filter(|i| i.state != ItemState::Replicated)
+        self.items
+            .values()
+            .filter(|i| i.state != ItemState::Replicated)
     }
 
     pub fn pending_count(&self) -> usize {
-        self.items.values().filter(|i| i.state != ItemState::Replicated).count()
+        self.items
+            .values()
+            .filter(|i| i.state != ItemState::Replicated)
+            .count()
     }
 
     pub fn replicated_count(&self) -> usize {
-        self.items.values().filter(|i| i.state == ItemState::Replicated).count()
+        self.items
+            .values()
+            .filter(|i| i.state == ItemState::Replicated)
+            .count()
     }
 
     pub fn degraded_count(&self) -> usize {
-        self.items.values().filter(|i| i.state == ItemState::Degraded).count()
+        self.items
+            .values()
+            .filter(|i| i.state == ItemState::Degraded)
+            .count()
     }
 
     /// Look up a single item by MID digest.
@@ -715,8 +728,7 @@ mod tests {
             jitter_fraction: 0.0,
             ..RetryPolicy::default()
         };
-        let mut q =
-            ReplicationQueue::load_or_create_with_policy(dir.path(), policy).unwrap();
+        let mut q = ReplicationQueue::load_or_create_with_policy(dir.path(), policy).unwrap();
 
         q.push(dummy_item(1)).unwrap();
         let digest = dummy_record(1).mid_digest;
@@ -741,8 +753,7 @@ mod tests {
             jitter_fraction: 0.0,
             ..RetryPolicy::default()
         };
-        let mut q =
-            ReplicationQueue::load_or_create_with_policy(dir.path(), policy).unwrap();
+        let mut q = ReplicationQueue::load_or_create_with_policy(dir.path(), policy).unwrap();
 
         // Push 3 items and degrade them all.
         for id in 1..=3 {

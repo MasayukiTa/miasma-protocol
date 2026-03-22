@@ -13,12 +13,12 @@ use std::time::Duration;
 
 use futures::StreamExt as _;
 use libp2p::{
-    autonat, dcutr, identify, mdns,
+    autonat, dcutr, identify,
     identity::Keypair,
     kad::{self, store::MemoryStore, store::RecordStore},
-    noise, ping, relay, request_response, yamux,
+    mdns, noise, ping, relay, request_response,
     swarm::{NetworkBehaviour, SwarmEvent},
-    Multiaddr, PeerId, StreamProtocol, Swarm,
+    yamux, Multiaddr, PeerId, StreamProtocol, Swarm,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
@@ -28,8 +28,8 @@ use crate::{crypto::keyderive::NodeKeys, share::MiasmaShare, store::LocalShareSt
 
 use super::admission_policy::{AdmissionSignals, HybridAdmissionPolicy};
 use super::bbs_credential::{
-    BbsCredential, BbsCredentialAttributes, BbsCredentialWallet, BbsIssuer, BbsIssuerKey,
-    BbsIssuerRegistry, DisclosurePolicy, bbs_create_proof, bbs_verify_proof,
+    bbs_create_proof, bbs_verify_proof, BbsCredential, BbsCredentialAttributes,
+    BbsCredentialWallet, BbsIssuer, BbsIssuerKey, BbsIssuerRegistry, DisclosurePolicy,
 };
 use super::credential::{
     self, CredentialIssuer, CredentialPresentation, CredentialStats, CredentialTier,
@@ -39,9 +39,7 @@ use super::descriptor::{
     DescriptorStats, DescriptorStore, PeerCapabilities, PeerDescriptor, ReachabilityKind,
     ResourceProfile,
 };
-use super::onion_relay::{
-    OnionRelayCodec, OnionRelayRequest, OnionRelayResponse,
-};
+use super::onion_relay::{OnionRelayCodec, OnionRelayRequest, OnionRelayResponse};
 use super::path_selection::PathSelectionStats;
 use super::peer_state::{AdmissionStats, PeerRegistry, RejectionReason};
 use super::routing::{self, RoutingStats, RoutingTable};
@@ -139,43 +137,79 @@ impl request_response::Codec for CredentialCodec {
     type Request = CredentialRequest;
     type Response = CredentialResponse;
 
-    async fn read_request<T>(&mut self, _: &StreamProtocol, io: &mut T) -> std::io::Result<Self::Request>
-    where T: futures::AsyncRead + Unpin + Send {
+    async fn read_request<T>(
+        &mut self,
+        _: &StreamProtocol,
+        io: &mut T,
+    ) -> std::io::Result<Self::Request>
+    where
+        T: futures::AsyncRead + Unpin + Send,
+    {
         use futures::AsyncReadExt;
         let mut len_buf = [0u8; 4];
         io.read_exact(&mut len_buf).await?;
         let len = u32::from_le_bytes(len_buf) as usize;
         if len > CREDENTIAL_MSG_MAX {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "credential msg too large"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "credential msg too large",
+            ));
         }
         let mut buf = vec![0u8; len];
         io.read_exact(&mut buf).await?;
-        bincode::deserialize(&buf).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        bincode::deserialize(&buf)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
-    async fn read_response<T>(&mut self, _: &StreamProtocol, io: &mut T) -> std::io::Result<Self::Response>
-    where T: futures::AsyncRead + Unpin + Send {
+    async fn read_response<T>(
+        &mut self,
+        _: &StreamProtocol,
+        io: &mut T,
+    ) -> std::io::Result<Self::Response>
+    where
+        T: futures::AsyncRead + Unpin + Send,
+    {
         use futures::AsyncReadExt;
         let mut len_buf = [0u8; 4];
         io.read_exact(&mut len_buf).await?;
         let len = u32::from_le_bytes(len_buf) as usize;
         if len > CREDENTIAL_MSG_MAX {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "credential msg too large"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "credential msg too large",
+            ));
         }
         let mut buf = vec![0u8; len];
         io.read_exact(&mut buf).await?;
-        bincode::deserialize(&buf).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        bincode::deserialize(&buf)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
-    async fn write_request<T>(&mut self, _: &StreamProtocol, io: &mut T, req: Self::Request) -> std::io::Result<()>
-    where T: futures::AsyncWrite + Unpin + Send {
+    async fn write_request<T>(
+        &mut self,
+        _: &StreamProtocol,
+        io: &mut T,
+        req: Self::Request,
+    ) -> std::io::Result<()>
+    where
+        T: futures::AsyncWrite + Unpin + Send,
+    {
         use futures::AsyncWriteExt;
-        let buf = bincode::serialize(&req).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let buf = bincode::serialize(&req)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         io.write_all(&(buf.len() as u32).to_le_bytes()).await?;
         io.write_all(&buf).await
     }
-    async fn write_response<T>(&mut self, _: &StreamProtocol, io: &mut T, res: Self::Response) -> std::io::Result<()>
-    where T: futures::AsyncWrite + Unpin + Send {
+    async fn write_response<T>(
+        &mut self,
+        _: &StreamProtocol,
+        io: &mut T,
+        res: Self::Response,
+    ) -> std::io::Result<()>
+    where
+        T: futures::AsyncWrite + Unpin + Send,
+    {
         use futures::AsyncWriteExt;
-        let buf = bincode::serialize(&res).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let buf = bincode::serialize(&res)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         io.write_all(&(buf.len() as u32).to_le_bytes()).await?;
         io.write_all(&buf).await
     }
@@ -196,43 +230,79 @@ impl request_response::Codec for DescriptorCodec {
     type Request = DescriptorRequest;
     type Response = DescriptorResponse;
 
-    async fn read_request<T>(&mut self, _: &StreamProtocol, io: &mut T) -> std::io::Result<Self::Request>
-    where T: futures::AsyncRead + Unpin + Send {
+    async fn read_request<T>(
+        &mut self,
+        _: &StreamProtocol,
+        io: &mut T,
+    ) -> std::io::Result<Self::Request>
+    where
+        T: futures::AsyncRead + Unpin + Send,
+    {
         use futures::AsyncReadExt;
         let mut len_buf = [0u8; 4];
         io.read_exact(&mut len_buf).await?;
         let len = u32::from_le_bytes(len_buf) as usize;
         if len > DESCRIPTOR_MSG_MAX {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "descriptor msg too large"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "descriptor msg too large",
+            ));
         }
         let mut buf = vec![0u8; len];
         io.read_exact(&mut buf).await?;
-        bincode::deserialize(&buf).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        bincode::deserialize(&buf)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
-    async fn read_response<T>(&mut self, _: &StreamProtocol, io: &mut T) -> std::io::Result<Self::Response>
-    where T: futures::AsyncRead + Unpin + Send {
+    async fn read_response<T>(
+        &mut self,
+        _: &StreamProtocol,
+        io: &mut T,
+    ) -> std::io::Result<Self::Response>
+    where
+        T: futures::AsyncRead + Unpin + Send,
+    {
         use futures::AsyncReadExt;
         let mut len_buf = [0u8; 4];
         io.read_exact(&mut len_buf).await?;
         let len = u32::from_le_bytes(len_buf) as usize;
         if len > DESCRIPTOR_MSG_MAX {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "descriptor msg too large"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "descriptor msg too large",
+            ));
         }
         let mut buf = vec![0u8; len];
         io.read_exact(&mut buf).await?;
-        bincode::deserialize(&buf).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        bincode::deserialize(&buf)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
-    async fn write_request<T>(&mut self, _: &StreamProtocol, io: &mut T, req: Self::Request) -> std::io::Result<()>
-    where T: futures::AsyncWrite + Unpin + Send {
+    async fn write_request<T>(
+        &mut self,
+        _: &StreamProtocol,
+        io: &mut T,
+        req: Self::Request,
+    ) -> std::io::Result<()>
+    where
+        T: futures::AsyncWrite + Unpin + Send,
+    {
         use futures::AsyncWriteExt;
-        let buf = bincode::serialize(&req).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let buf = bincode::serialize(&req)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         io.write_all(&(buf.len() as u32).to_le_bytes()).await?;
         io.write_all(&buf).await
     }
-    async fn write_response<T>(&mut self, _: &StreamProtocol, io: &mut T, res: Self::Response) -> std::io::Result<()>
-    where T: futures::AsyncWrite + Unpin + Send {
+    async fn write_response<T>(
+        &mut self,
+        _: &StreamProtocol,
+        io: &mut T,
+        res: Self::Response,
+    ) -> std::io::Result<()>
+    where
+        T: futures::AsyncWrite + Unpin + Send,
+    {
         use futures::AsyncWriteExt;
-        let buf = bincode::serialize(&res).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let buf = bincode::serialize(&res)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         io.write_all(&(buf.len() as u32).to_le_bytes()).await?;
         io.write_all(&buf).await
     }
@@ -462,9 +532,7 @@ pub enum DhtCommand {
         reply: oneshot::Sender<Result<(), MiasmaError>>,
     },
     /// Query the number of currently connected peers.
-    GetPeerCount {
-        reply: oneshot::Sender<usize>,
-    },
+    GetPeerCount { reply: oneshot::Sender<usize> },
     /// Query admission statistics.
     GetAdmissionStats {
         reply: oneshot::Sender<AdmissionStats>,
@@ -510,18 +578,11 @@ pub enum DhtCommand {
         reply: oneshot::Sender<Result<OnionRelayResponse, MiasmaError>>,
     },
     /// Query this node's onion static public key.
-    GetOnionPubkey {
-        reply: oneshot::Sender<[u8; 32]>,
-    },
+    GetOnionPubkey { reply: oneshot::Sender<[u8; 32]> },
     /// Query this node's current NAT reachability status.
-    GetNatStatus {
-        reply: oneshot::Sender<bool>,
-    },
+    GetNatStatus { reply: oneshot::Sender<bool> },
     /// Record a successful or failed relay operation for a peer pseudonym.
-    RecordRelayOutcome {
-        pseudonym: [u8; 32],
-        success: bool,
-    },
+    RecordRelayOutcome { pseudonym: [u8; 32], success: bool },
     /// Resolve rendezvous introduction point pseudonyms to routable info.
     ResolveIntroPoints {
         intro_pseudonyms: Vec<[u8; 32]>,
@@ -556,13 +617,9 @@ pub enum DhtCommand {
         reply: oneshot::Sender<Option<super::relay_probe::ProbeResponse>>,
     },
     /// Record a successful active probe for a pseudonym.
-    RecordProbeSuccess {
-        pseudonym: [u8; 32],
-    },
+    RecordProbeSuccess { pseudonym: [u8; 32] },
     /// Record a successful forwarding verification for a pseudonym.
-    RecordForwardingVerification {
-        pseudonym: [u8; 32],
-    },
+    RecordForwardingVerification { pseudonym: [u8; 32] },
     /// Check if a pseudonym has a fresh probe result.
     HasFreshProbe {
         pseudonym: [u8; 32],
@@ -600,7 +657,9 @@ impl DhtHandle {
         match tokio::time::timeout(DHT_REPLY_TIMEOUT, rx).await {
             Ok(Ok(v)) => Ok(v),
             Ok(Err(_)) => Err(MiasmaError::Network(format!("DHT reply dropped ({label})"))),
-            Err(_) => Err(MiasmaError::Network(format!("DHT command timed out ({label})"))),
+            Err(_) => Err(MiasmaError::Network(format!(
+                "DHT command timed out ({label})"
+            ))),
         }
     }
 
@@ -622,11 +681,15 @@ impl DhtHandle {
     /// Publish a `DhtRecord` to Kademlia.
     pub async fn put(&self, record: DhtRecord) -> Result<(), MiasmaError> {
         let key = record.mid_digest.to_vec();
-        let value = bincode::serialize(&record)
-            .map_err(|e| MiasmaError::Serialization(e.to_string()))?;
+        let value =
+            bincode::serialize(&record).map_err(|e| MiasmaError::Serialization(e.to_string()))?;
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send(DhtCommand::Put { key, value, reply: tx })
+            .send(DhtCommand::Put {
+                key,
+                value,
+                reply: tx,
+            })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
         self.recv_reply(rx, "put").await?
@@ -643,7 +706,11 @@ impl DhtHandle {
     ) -> Result<(), MiasmaError> {
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send(DhtCommand::AddBootstrapPeer { peer_id, addr, reply: tx })
+            .send(DhtCommand::AddBootstrapPeer {
+                peer_id,
+                addr,
+                reply: tx,
+            })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
         self.recv_reply(rx, "add_bootstrap_peer").await
@@ -673,13 +740,13 @@ impl DhtHandle {
     }
 
     /// Retrieve a `DhtRecord` from Kademlia by raw mid-digest bytes.
-    pub async fn get_record(
-        &self,
-        mid_digest: [u8; 32],
-    ) -> Result<Option<DhtRecord>, MiasmaError> {
+    pub async fn get_record(&self, mid_digest: [u8; 32]) -> Result<Option<DhtRecord>, MiasmaError> {
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send(DhtCommand::Get { key: mid_digest.to_vec(), reply: tx })
+            .send(DhtCommand::Get {
+                key: mid_digest.to_vec(),
+                reply: tx,
+            })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
         let raw_opt = self.recv_reply(rx, "get_record").await??;
@@ -782,7 +849,9 @@ impl DhtHandle {
     }
 
     /// Query relay peers with onion X25519 public keys.
-    pub async fn relay_onion_info(&self) -> Result<Vec<crate::onion::circuit::RelayInfo>, MiasmaError> {
+    pub async fn relay_onion_info(
+        &self,
+    ) -> Result<Vec<crate::onion::circuit::RelayInfo>, MiasmaError> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(DhtCommand::GetRelayOnionInfo { reply: tx })
@@ -801,7 +870,13 @@ impl DhtHandle {
     ) -> Result<OnionRelayResponse, MiasmaError> {
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send(DhtCommand::SendOnionRequest { peer_id, addrs, request, return_key, reply: tx })
+            .send(DhtCommand::SendOnionRequest {
+                peer_id,
+                addrs,
+                request,
+                return_key,
+                reply: tx,
+            })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
         self.recv_reply(rx, "send_onion_request").await?
@@ -828,7 +903,11 @@ impl DhtHandle {
     }
 
     /// Record a relay success/failure for trust tier tracking (fire-and-forget).
-    pub async fn record_relay_outcome(&self, pseudonym: [u8; 32], success: bool) -> Result<(), MiasmaError> {
+    pub async fn record_relay_outcome(
+        &self,
+        pseudonym: [u8; 32],
+        success: bool,
+    ) -> Result<(), MiasmaError> {
         self.fire_and_forget(DhtCommand::RecordRelayOutcome { pseudonym, success })
     }
 
@@ -839,7 +918,10 @@ impl DhtHandle {
     ) -> Result<Vec<super::descriptor::ResolvedIntroPoint>, MiasmaError> {
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send(DhtCommand::ResolveIntroPoints { intro_pseudonyms, reply: tx })
+            .send(DhtCommand::ResolveIntroPoints {
+                intro_pseudonyms,
+                reply: tx,
+            })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
         self.recv_reply(rx, "resolve_intro_points").await
@@ -853,7 +935,11 @@ impl DhtHandle {
     ) -> Result<Vec<[u8; 32]>, MiasmaError> {
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send(DhtCommand::SelectIntroPoints { own_pseudonym, count, reply: tx })
+            .send(DhtCommand::SelectIntroPoints {
+                own_pseudonym,
+                count,
+                reply: tx,
+            })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
         self.recv_reply(rx, "select_intro_points").await
@@ -870,7 +956,10 @@ impl DhtHandle {
     }
 
     /// Look up a peer's full descriptor from the descriptor store.
-    pub async fn peer_descriptor(&self, peer_id: PeerId) -> Result<Option<PeerDescriptor>, MiasmaError> {
+    pub async fn peer_descriptor(
+        &self,
+        peer_id: PeerId,
+    ) -> Result<Option<PeerDescriptor>, MiasmaError> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(DhtCommand::GetPeerDescriptor { peer_id, reply: tx })
@@ -880,7 +969,10 @@ impl DhtHandle {
     }
 
     /// Look up a peer's X25519 onion pubkey from the descriptor store.
-    pub async fn peer_onion_pubkey(&self, peer_id: PeerId) -> Result<Option<[u8; 32]>, MiasmaError> {
+    pub async fn peer_onion_pubkey(
+        &self,
+        peer_id: PeerId,
+    ) -> Result<Option<[u8; 32]>, MiasmaError> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(DhtCommand::GetPeerOnionPubkey { peer_id, reply: tx })
@@ -893,12 +985,21 @@ impl DhtHandle {
     ///
     /// Returns `Ok(true)` if the probe succeeded (nonce matched), `Ok(false)`
     /// if the peer responded with wrong nonce, and `Err` if unreachable.
-    pub async fn probe_relay(&self, peer_id: PeerId, addrs: Vec<String>) -> Result<bool, MiasmaError> {
+    pub async fn probe_relay(
+        &self,
+        peer_id: PeerId,
+        addrs: Vec<String>,
+    ) -> Result<bool, MiasmaError> {
         let mut nonce = [0u8; 32];
         rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send(DhtCommand::SendRelayProbe { peer_id, addrs, nonce, reply: tx })
+            .send(DhtCommand::SendRelayProbe {
+                peer_id,
+                addrs,
+                nonce,
+                reply: tx,
+            })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
         match self.recv_reply(rx, "probe_relay").await {
@@ -914,25 +1015,42 @@ impl DhtHandle {
     }
 
     /// Record a successful forwarding verification for a pseudonym (fire-and-forget).
-    pub async fn record_forwarding_verification(&self, pseudonym: [u8; 32]) -> Result<(), MiasmaError> {
+    pub async fn record_forwarding_verification(
+        &self,
+        pseudonym: [u8; 32],
+    ) -> Result<(), MiasmaError> {
         self.fire_and_forget(DhtCommand::RecordForwardingVerification { pseudonym })
     }
 
     /// Check if a pseudonym has a fresh probe result within `freshness_secs`.
-    pub async fn has_fresh_probe(&self, pseudonym: [u8; 32], freshness_secs: u64) -> Result<bool, MiasmaError> {
+    pub async fn has_fresh_probe(
+        &self,
+        pseudonym: [u8; 32],
+        freshness_secs: u64,
+    ) -> Result<bool, MiasmaError> {
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send(DhtCommand::HasFreshProbe { pseudonym, freshness_secs, reply: tx })
+            .send(DhtCommand::HasFreshProbe {
+                pseudonym,
+                freshness_secs,
+                reply: tx,
+            })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
         self.recv_reply(rx, "has_fresh_probe").await
     }
 
     /// Get relay observation details for a pseudonym.
-    pub async fn relay_observation(&self, pseudonym: [u8; 32]) -> Result<Option<super::descriptor::RelayObservation>, MiasmaError> {
+    pub async fn relay_observation(
+        &self,
+        pseudonym: [u8; 32],
+    ) -> Result<Option<super::descriptor::RelayObservation>, MiasmaError> {
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send(DhtCommand::GetRelayObservation { pseudonym, reply: tx })
+            .send(DhtCommand::GetRelayObservation {
+                pseudonym,
+                reply: tx,
+            })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
         self.recv_reply(rx, "relay_observation").await
@@ -965,7 +1083,12 @@ impl ShareExchangeHandle {
     ) -> Result<Option<MiasmaShare>, MiasmaError> {
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send(ShareCommand { peer_id, addrs, request, reply: tx })
+            .send(ShareCommand {
+                peer_id,
+                addrs,
+                request,
+                reply: tx,
+            })
             .await
             .map_err(|_| MiasmaError::Network("share exchange channel closed".into()))?;
         rx.await
@@ -1018,11 +1141,16 @@ pub struct MiasmaNode {
     pending_puts: HashMap<kad::QueryId, oneshot::Sender<Result<(), MiasmaError>>>,
     pending_gets: HashMap<
         kad::QueryId,
-        (oneshot::Sender<Result<Option<Vec<u8>>, MiasmaError>>, Option<Vec<u8>>),
+        (
+            oneshot::Sender<Result<Option<Vec<u8>>, MiasmaError>>,
+            Option<Vec<u8>>,
+        ),
     >,
     // Pending outbound share-fetch requests.
-    pending_share_fetches:
-        HashMap<request_response::OutboundRequestId, oneshot::Sender<Result<Option<MiasmaShare>, MiasmaError>>>,
+    pending_share_fetches: HashMap<
+        request_response::OutboundRequestId,
+        oneshot::Sender<Result<Option<MiasmaShare>, MiasmaError>>,
+    >,
     // Pending outbound admission requests: req_id → peer_id.
     pending_admissions: HashMap<request_response::OutboundRequestId, PeerId>,
     /// Local share store — used to serve inbound `ShareFetchRequest`s.
@@ -1081,7 +1209,10 @@ pub struct MiasmaNode {
     /// Pending onion relay requests: req_id → relay return key (for response encryption).
     pending_onion_relays: HashMap<request_response::OutboundRequestId, [u8; 32]>,
     /// Pending onion relay reply channels: req_id → reply sender.
-    pending_onion_replies: HashMap<request_response::OutboundRequestId, oneshot::Sender<Result<OnionRelayResponse, MiasmaError>>>,
+    pending_onion_replies: HashMap<
+        request_response::OutboundRequestId,
+        oneshot::Sender<Result<OnionRelayResponse, MiasmaError>>,
+    >,
     /// Inbound onion relay response channels: req_id → inbound channel.
     /// When we're a relay and make a sub-request (R1→R2 or R2→Target),
     /// we store the inbound channel here so we can relay the response back.
@@ -1125,7 +1256,11 @@ impl MiasmaNode {
         // At difficulty 8 this is ~256 BLAKE3 hashes — sub-millisecond.
         let pubkey_bytes = dht_signing_key.verifying_key().to_bytes();
         let local_pow = sybil::mine_pow(pubkey_bytes, sybil::DEFAULT_POW_DIFFICULTY);
-        debug!("PoW mined: nonce={}, difficulty={}", local_pow.nonce, sybil::DEFAULT_POW_DIFFICULTY);
+        debug!(
+            "PoW mined: nonce={}, difficulty={}",
+            local_pow.nonce,
+            sybil::DEFAULT_POW_DIFFICULTY
+        );
 
         let swarm = build_swarm(keypair, local_peer_id, listen_addr)?;
 
@@ -1139,23 +1274,32 @@ impl MiasmaNode {
 
         // Derive credential issuer key from DHT signing key (deterministic).
         let cred_issuer_key = ed25519_dalek::SigningKey::from_bytes(
-            blake3::hash(&[b"miasma-cred-issuer-v1".as_slice(), dht_signing_key.as_bytes()].concat())
-                .as_bytes(),
+            blake3::hash(
+                &[
+                    b"miasma-cred-issuer-v1".as_slice(),
+                    dht_signing_key.as_bytes(),
+                ]
+                .concat(),
+            )
+            .as_bytes(),
         );
         let credential_issuer = CredentialIssuer::new(cred_issuer_key);
 
         // Derive BBS+ issuer key from the same DHT signing key (deterministic).
         let bbs_seed = blake3::hash(
-            &[b"miasma-bbs-issuer-v1".as_slice(), dht_signing_key.as_bytes()].concat(),
+            &[
+                b"miasma-bbs-issuer-v1".as_slice(),
+                dht_signing_key.as_bytes(),
+            ]
+            .concat(),
         );
         let bbs_issuer_key = BbsIssuerKey::from_seed(bbs_seed.as_bytes());
         let bbs_issuer = BbsIssuer::new(bbs_issuer_key.clone());
 
         // Derive X25519 onion static key from the DHT signing key.
         let onion_static_secret = {
-            let derived = crate::onion::packet::derive_onion_static_key(
-                dht_signing_key.as_bytes(),
-            ).map_err(|e| MiasmaError::KeyDerivation(format!("onion key: {e}")))?;
+            let derived = crate::onion::packet::derive_onion_static_key(dht_signing_key.as_bytes())
+                .map_err(|e| MiasmaError::KeyDerivation(format!("onion key: {e}")))?;
             *derived
         };
         let onion_static_pubkey = {
@@ -1262,12 +1406,16 @@ impl MiasmaNode {
 
     /// Returns a sender that drives DHT PUT/GET via the Kademlia event loop.
     pub fn dht_handle(&self) -> DhtHandle {
-        DhtHandle { tx: self.dht_tx.clone() }
+        DhtHandle {
+            tx: self.dht_tx.clone(),
+        }
     }
 
     /// Returns a sender that drives outbound share-fetch requests.
     pub fn share_exchange_handle(&self) -> ShareExchangeHandle {
-        ShareExchangeHandle { tx: self.share_tx.clone() }
+        ShareExchangeHandle {
+            tx: self.share_tx.clone(),
+        }
     }
 
     /// Register a bootstrap peer in the Kademlia routing table and dial it.
@@ -1276,7 +1424,10 @@ impl MiasmaNode {
     /// as the event loop starts, rather than waiting for Kademlia's first
     /// outbound query to trigger the dial.
     pub fn add_bootstrap_peer(&mut self, peer_id: PeerId, addr: Multiaddr) {
-        self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
+        self.swarm
+            .behaviour_mut()
+            .kademlia
+            .add_address(&peer_id, addr.clone());
         // Explicit dial so the QUIC connection is in flight from loop start.
         let p2p_addr = addr.clone().with(libp2p::multiaddr::Protocol::P2p(peer_id));
         if let Err(e) = self.swarm.dial(p2p_addr) {
@@ -1287,7 +1438,10 @@ impl MiasmaNode {
 
     /// Register a relay server for NAT traversal.
     pub fn add_relay_server(&mut self, peer_id: PeerId, addr: Multiaddr) {
-        self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
+        self.swarm
+            .behaviour_mut()
+            .kademlia
+            .add_address(&peer_id, addr.clone());
         let peer_id_str = peer_id.to_string();
         let addr_str = addr.to_string();
         let relay_addr = addr
@@ -1378,11 +1532,7 @@ impl MiasmaNode {
         match cmd {
             DhtCommand::Put { key, value, reply } => {
                 // Wrap the raw value in a SignedDhtRecord envelope.
-                let signed = SignedDhtRecord::sign(
-                    key.clone(),
-                    value,
-                    &self.dht_signing_key,
-                );
+                let signed = SignedDhtRecord::sign(key.clone(), value, &self.dht_signing_key);
                 let signed_bytes = bincode::serialize(&signed).unwrap_or_default();
 
                 let record = kad::Record {
@@ -1393,9 +1543,18 @@ impl MiasmaNode {
                 };
                 // Always store locally first so remote peers can retrieve the
                 // record via GET even if no other peers are reachable yet.
-                let _ = self.swarm.behaviour_mut().kademlia.store_mut().put(record.clone());
+                let _ = self
+                    .swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .store_mut()
+                    .put(record.clone());
                 // Fire-and-forget network replication: reply success immediately.
-                let _ = self.swarm.behaviour_mut().kademlia.put_record(record, kad::Quorum::One);
+                let _ = self
+                    .swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .put_record(record, kad::Quorum::One);
                 let _ = reply.send(Ok(()));
             }
             DhtCommand::Get { key, reply } => {
@@ -1406,8 +1565,15 @@ impl MiasmaNode {
                     .get_record(kad::RecordKey::new(&key));
                 self.pending_gets.insert(qid, (reply, None));
             }
-            DhtCommand::AddBootstrapPeer { peer_id, addr, reply } => {
-                self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
+            DhtCommand::AddBootstrapPeer {
+                peer_id,
+                addr,
+                reply,
+            } => {
+                self.swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .add_address(&peer_id, addr.clone());
                 self.swarm.add_peer_address(peer_id, addr.clone());
                 let p2p_addr = addr.with(libp2p::multiaddr::Protocol::P2p(peer_id));
                 if let Err(e) = self.swarm.dial(p2p_addr) {
@@ -1444,7 +1610,9 @@ impl MiasmaNode {
                 let stats = CredentialStats {
                     current_epoch: credential::current_epoch(),
                     held_credentials: self.credential_wallet.credential_count(),
-                    best_tier: self.credential_wallet.best_credential()
+                    best_tier: self
+                        .credential_wallet
+                        .best_credential()
                         .map(|c| c.body.tier.to_string()),
                     known_issuers: self.issuer_registry.issuer_count(),
                     bootstrap_mode: self.issuer_registry.bootstrap_mode,
@@ -1490,15 +1658,28 @@ impl MiasmaNode {
                 let relays = self.descriptor_store.relay_onion_info();
                 let _ = reply.send(relays);
             }
-            DhtCommand::SendOnionRequest { peer_id, addrs, request, return_key, reply } => {
+            DhtCommand::SendOnionRequest {
+                peer_id,
+                addrs,
+                request,
+                return_key,
+                reply,
+            } => {
                 // Register addresses so libp2p can dial the peer.
                 for addr_str in &addrs {
                     if let Ok(addr) = addr_str.parse::<Multiaddr>() {
-                        self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
+                        self.swarm
+                            .behaviour_mut()
+                            .kademlia
+                            .add_address(&peer_id, addr.clone());
                         self.swarm.add_peer_address(peer_id, addr.clone());
                     }
                 }
-                let req_id = self.swarm.behaviour_mut().onion_relay.send_request(&peer_id, request);
+                let req_id = self
+                    .swarm
+                    .behaviour_mut()
+                    .onion_relay
+                    .send_request(&peer_id, request);
                 // Store both the return_key and the reply channel.
                 // We use pending_onion_relays for the return_key;
                 // store the reply sender in a separate map keyed by req_id.
@@ -1519,16 +1700,29 @@ impl MiasmaNode {
                     self.descriptor_store.record_relay_failure(&pseudonym);
                 }
             }
-            DhtCommand::ResolveIntroPoints { intro_pseudonyms, reply } => {
-                let resolved = self.descriptor_store.resolve_intro_points(&intro_pseudonyms);
+            DhtCommand::ResolveIntroPoints {
+                intro_pseudonyms,
+                reply,
+            } => {
+                let resolved = self
+                    .descriptor_store
+                    .resolve_intro_points(&intro_pseudonyms);
                 let _ = reply.send(resolved);
             }
-            DhtCommand::SelectIntroPoints { own_pseudonym, count, reply } => {
-                let selected = self.descriptor_store.select_intro_points(&own_pseudonym, count);
+            DhtCommand::SelectIntroPoints {
+                own_pseudonym,
+                count,
+                reply,
+            } => {
+                let selected = self
+                    .descriptor_store
+                    .select_intro_points(&own_pseudonym, count);
                 let _ = reply.send(selected);
             }
             DhtCommand::GetPeerPseudonym { peer_id, reply } => {
-                let ps = self.descriptor_store.get_by_peer(&peer_id)
+                let ps = self
+                    .descriptor_store
+                    .get_by_peer(&peer_id)
                     .map(|d| d.pseudonym);
                 let _ = reply.send(ps);
             }
@@ -1540,26 +1734,45 @@ impl MiasmaNode {
                 let pubkey = self.descriptor_store.onion_pubkey_for_peer(&peer_id);
                 let _ = reply.send(pubkey);
             }
-            DhtCommand::SendRelayProbe { peer_id, addrs, nonce, reply } => {
+            DhtCommand::SendRelayProbe {
+                peer_id,
+                addrs,
+                nonce,
+                reply,
+            } => {
                 // Register addresses so libp2p can dial the peer.
                 for addr_str in &addrs {
                     if let Ok(addr) = addr_str.parse::<Multiaddr>() {
-                        self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
+                        self.swarm
+                            .behaviour_mut()
+                            .kademlia
+                            .add_address(&peer_id, addr.clone());
                         self.swarm.add_peer_address(peer_id, addr.clone());
                     }
                 }
                 let req = super::relay_probe::ProbeRequest { nonce };
-                let req_id = self.swarm.behaviour_mut().relay_probe.send_request(&peer_id, req);
+                let req_id = self
+                    .swarm
+                    .behaviour_mut()
+                    .relay_probe
+                    .send_request(&peer_id, req);
                 self.pending_probe_replies.insert(req_id, reply);
             }
             DhtCommand::RecordProbeSuccess { pseudonym } => {
                 self.descriptor_store.record_probe_success(&pseudonym);
             }
             DhtCommand::RecordForwardingVerification { pseudonym } => {
-                self.descriptor_store.record_forwarding_verification(&pseudonym);
+                self.descriptor_store
+                    .record_forwarding_verification(&pseudonym);
             }
-            DhtCommand::HasFreshProbe { pseudonym, freshness_secs, reply } => {
-                let fresh = self.descriptor_store.has_fresh_probe(&pseudonym, freshness_secs);
+            DhtCommand::HasFreshProbe {
+                pseudonym,
+                freshness_secs,
+                reply,
+            } => {
+                let fresh = self
+                    .descriptor_store
+                    .has_fresh_probe(&pseudonym, freshness_secs);
                 let _ = reply.send(fresh);
             }
             DhtCommand::GetRelayObservation { pseudonym, reply } => {
@@ -1570,18 +1783,30 @@ impl MiasmaNode {
     }
 
     fn handle_share_command(&mut self, cmd: ShareCommand) {
-        let ShareCommand { peer_id, addrs, request, reply } = cmd;
+        let ShareCommand {
+            peer_id,
+            addrs,
+            request,
+            reply,
+        } = cmd;
 
         // Register addresses with both Kademlia (routing) and share_exchange
         // (address book used by request_response when it dials the peer).
         for addr_str in &addrs {
             if let Ok(addr) = addr_str.parse::<Multiaddr>() {
-                self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
+                self.swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .add_address(&peer_id, addr.clone());
                 self.swarm.add_peer_address(peer_id, addr.clone());
             }
         }
 
-        let req_id = self.swarm.behaviour_mut().share_exchange.send_request(&peer_id, request);
+        let req_id = self
+            .swarm
+            .behaviour_mut()
+            .share_exchange
+            .send_request(&peer_id, request);
         self.pending_share_fetches.insert(req_id, reply);
     }
 
@@ -1615,7 +1840,9 @@ impl MiasmaNode {
                         epoch: self.credential_wallet.epoch(),
                         bbs_link_secret: Some(self.bbs_wallet.link_secret()),
                     };
-                    let req_id = self.swarm.behaviour_mut()
+                    let req_id = self
+                        .swarm
+                        .behaviour_mut()
                         .credential_exchange
                         .send_request(peer_id, cred_req);
                     self.pending_credential_reqs.insert(req_id, *peer_id);
@@ -1638,13 +1865,20 @@ impl MiasmaNode {
                 // Push to all connected peers.
                 let peers: Vec<_> = self.swarm.connected_peers().copied().collect();
                 for peer in peers {
-                    let req = DescriptorRequest { descriptor: Some(desc.clone()) };
-                    let req_id = self.swarm.behaviour_mut()
+                    let req = DescriptorRequest {
+                        descriptor: Some(desc.clone()),
+                    };
+                    let req_id = self
+                        .swarm
+                        .behaviour_mut()
                         .descriptor_exchange
                         .send_request(&peer, req);
                     self.pending_descriptor_reqs.insert(req_id, peer);
                 }
-                debug!("descriptor.refreshed pseudonym={}", hex::encode(&pseudonym[..8]));
+                debug!(
+                    "descriptor.refreshed pseudonym={}",
+                    hex::encode(&pseudonym[..8])
+                );
             }
 
             // Background relay probing: every 5000 ticks, probe one relay
@@ -1652,7 +1886,9 @@ impl MiasmaNode {
             // evidence during idle periods (no retrieval needed to trigger).
             if self.event_tick % 5000 == 0 {
                 let freshness_secs = 300u64;
-                let stale_candidate = self.descriptor_store.relay_pseudonyms()
+                let stale_candidate = self
+                    .descriptor_store
+                    .relay_pseudonyms()
                     .into_iter()
                     .find(|ps| !self.descriptor_store.has_fresh_probe(ps, freshness_secs));
                 if let Some(ps) = stale_candidate {
@@ -1665,13 +1901,18 @@ impl MiasmaNode {
                             let req = super::relay_probe::ProbeRequest { nonce };
                             for addr_str in &addrs {
                                 if let Ok(addr) = addr_str.parse::<Multiaddr>() {
-                                    self.swarm.behaviour_mut().kademlia
+                                    self.swarm
+                                        .behaviour_mut()
+                                        .kademlia
                                         .add_address(&peer_id, addr.clone());
                                     self.swarm.add_peer_address(peer_id, addr.clone());
                                 }
                             }
-                            let _req_id = self.swarm.behaviour_mut()
-                                .relay_probe.send_request(&peer_id, req);
+                            let _req_id = self
+                                .swarm
+                                .behaviour_mut()
+                                .relay_probe
+                                .send_request(&peer_id, req);
                             // We don't track the response for background probes;
                             // the probe response handler records success anyway.
                             debug!("background_probe.sent peer={peer_id}");
@@ -1701,9 +1942,11 @@ impl MiasmaNode {
                     let _ = tx.try_send(super::types::TopologyEvent::PeerDisconnected { peer_id });
                 }
             }
-            SwarmEvent::Behaviour(MiasmaBehaviourEvent::Identify(
-                identify::Event::Received { peer_id, info, .. },
-            )) => {
+            SwarmEvent::Behaviour(MiasmaBehaviourEvent::Identify(identify::Event::Received {
+                peer_id,
+                info,
+                ..
+            })) => {
                 self.handle_identify(peer_id, info);
             }
             SwarmEvent::Behaviour(MiasmaBehaviourEvent::Kademlia(ev)) => {
@@ -1798,10 +2041,16 @@ impl MiasmaNode {
             // Local mode: skip PoW admission, add directly to Kademlia and
             // auto-promote to Verified.
             for addr in &addrs_to_use {
-                self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
+                self.swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .add_address(&peer_id, addr.clone());
             }
             if let Some(first_addr) = addrs_to_use.first() {
-                self.swarm.behaviour_mut().autonat.add_server(peer_id, Some(first_addr.clone()));
+                self.swarm
+                    .behaviour_mut()
+                    .autonat
+                    .add_server(peer_id, Some(first_addr.clone()));
             }
             // Auto-promote: in local mode, treat as verified.
             let fake_pow = self.local_pow.clone();
@@ -1831,8 +2080,14 @@ impl MiasmaNode {
             self.pending_peer_addrs.insert(peer_id, addrs_to_use);
 
             // Initiate PoW admission exchange.
-            let req = AdmissionRequest { pow: self.local_pow.clone() };
-            let req_id = self.swarm.behaviour_mut().admission.send_request(&peer_id, req);
+            let req = AdmissionRequest {
+                pow: self.local_pow.clone(),
+            };
+            let req_id = self
+                .swarm
+                .behaviour_mut()
+                .admission
+                .send_request(&peer_id, req);
             self.pending_admissions.insert(req_id, peer_id);
             debug!("admission.requested peer={peer_id}");
         }
@@ -1858,20 +2113,25 @@ impl MiasmaNode {
         let pow_difficulty = sybil::leading_zeros(&pow.hash).min(255) as u8;
 
         // Check diversity: is this prefix unique?
-        let unique_prefix = self.pending_peer_addrs
+        let unique_prefix = self
+            .pending_peer_addrs
             .get(peer_id)
             .and_then(|addrs| addrs.first())
-            .map(|a| self.routing_table.check_diversity(std::slice::from_ref(a)).is_ok())
+            .map(|a| {
+                self.routing_table
+                    .check_diversity(std::slice::from_ref(a))
+                    .is_ok()
+            })
             .unwrap_or(false);
 
         // Check if we have a credential for this peer (from a previous exchange).
         // Prefer BBS+ tier (privacy-preserving) over Ed25519 tier; fall back to Ed25519.
         let descriptor = self.descriptor_store.get_by_peer(peer_id);
-        let credential_tier = descriptor
-            .and_then(|d| d.bbs_tier())
-            .or_else(|| descriptor
+        let credential_tier = descriptor.and_then(|d| d.bbs_tier()).or_else(|| {
+            descriptor
                 .and_then(|d| d.credential.as_ref())
-                .map(|c| c.credential.body.tier));
+                .map(|c| c.credential.body.tier)
+        });
 
         // Evaluate using hybrid admission policy.
         let signals = AdmissionSignals {
@@ -1904,15 +2164,24 @@ impl MiasmaNode {
             // Inbound admission request: verify their PoW, respond with ours.
             request_response::Event::Message {
                 peer,
-                message: request_response::Message::Request { request, channel, .. },
+                message:
+                    request_response::Message::Request {
+                        request, channel, ..
+                    },
             } => {
                 // Verify the requester's PoW.
                 match self.verify_remote_pow(&peer, &request.pow) {
                     Ok(()) => {
                         info!("admission.inbound_verified peer={peer}");
                         // Respond with our own PoW.
-                        let resp = AdmissionResponse { pow: self.local_pow.clone() };
-                        let _ = self.swarm.behaviour_mut().admission.send_response(channel, resp);
+                        let resp = AdmissionResponse {
+                            pow: self.local_pow.clone(),
+                        };
+                        let _ = self
+                            .swarm
+                            .behaviour_mut()
+                            .admission
+                            .send_response(channel, resp);
 
                         // Promote the peer to Verified and add to Kademlia.
                         self.promote_peer_to_verified(peer, request.pow);
@@ -1921,15 +2190,25 @@ impl MiasmaNode {
                         warn!("admission.rejected peer={peer} reason={reason}");
                         self.peer_registry.record_rejection();
                         // Still respond (protocol requires it) but peer won't be promoted.
-                        let resp = AdmissionResponse { pow: self.local_pow.clone() };
-                        let _ = self.swarm.behaviour_mut().admission.send_response(channel, resp);
+                        let resp = AdmissionResponse {
+                            pow: self.local_pow.clone(),
+                        };
+                        let _ = self
+                            .swarm
+                            .behaviour_mut()
+                            .admission
+                            .send_response(channel, resp);
                     }
                 }
             }
             // Outbound admission response received: verify their PoW.
             request_response::Event::Message {
                 peer,
-                message: request_response::Message::Response { request_id, response },
+                message:
+                    request_response::Message::Response {
+                        request_id,
+                        response,
+                    },
             } => {
                 self.pending_admissions.remove(&request_id);
                 match self.verify_remote_pow(&peer, &response.pow) {
@@ -1943,7 +2222,11 @@ impl MiasmaNode {
                     }
                 }
             }
-            request_response::Event::OutboundFailure { request_id, peer, error } => {
+            request_response::Event::OutboundFailure {
+                request_id,
+                peer,
+                error,
+            } => {
                 self.pending_admissions.remove(&request_id);
                 warn!("admission.outbound_failure peer={peer} error={error}");
                 self.peer_registry.record_rejection();
@@ -1958,21 +2241,30 @@ impl MiasmaNode {
     /// Promote a peer to Verified: add addresses to Kademlia, issue credential,
     /// publish descriptor, signal routable.
     fn promote_peer_to_verified(&mut self, peer_id: PeerId, pow: NodeIdPoW) {
-        self.peer_registry.on_admission_verified(peer_id, pow.clone());
+        self.peer_registry
+            .on_admission_verified(peer_id, pow.clone());
 
         // Promote held addresses to Kademlia routing table.
         let addrs = self.pending_peer_addrs.remove(&peer_id).unwrap_or_default();
         if !addrs.is_empty() {
-            let prefix = routing::ip_prefix_of(addrs.first().unwrap_or(
-                &"/ip4/127.0.0.1/tcp/0".parse().unwrap(),
-            ));
+            let prefix = routing::ip_prefix_of(
+                addrs
+                    .first()
+                    .unwrap_or(&"/ip4/127.0.0.1/tcp/0".parse().unwrap()),
+            );
             self.routing_table.add_peer(peer_id, prefix);
 
             for addr in &addrs {
-                self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
+                self.swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .add_address(&peer_id, addr.clone());
             }
             if let Some(first_addr) = addrs.first() {
-                self.swarm.behaviour_mut().autonat.add_server(peer_id, Some(first_addr.clone()));
+                self.swarm
+                    .behaviour_mut()
+                    .autonat
+                    .add_server(peer_id, Some(first_addr.clone()));
             }
         }
 
@@ -1982,11 +2274,11 @@ impl MiasmaNode {
             self.issuer_registry.add_issuer(pow.pubkey);
             // Also register their BBS+ issuer key (derived from same PoW pubkey seed).
             // In bootstrap mode, we assume all verified peers are also BBS+ issuers.
-            let bbs_seed = blake3::hash(
-                &[b"miasma-bbs-issuer-v1".as_slice(), &pow.pubkey].concat(),
-            );
+            let bbs_seed =
+                blake3::hash(&[b"miasma-bbs-issuer-v1".as_slice(), &pow.pubkey].concat());
             let remote_bbs_key = BbsIssuerKey::from_seed(bbs_seed.as_bytes());
-            self.bbs_issuer_registry.add_issuer(remote_bbs_key.pk_bytes());
+            self.bbs_issuer_registry
+                .add_issuer(remote_bbs_key.pk_bytes());
         }
 
         // Initiate credential exchange: request a credential from the new peer,
@@ -1997,14 +2289,24 @@ impl MiasmaNode {
             epoch: self.credential_wallet.epoch(),
             bbs_link_secret: Some(self.bbs_wallet.link_secret()),
         };
-        let req_id = self.swarm.behaviour_mut().credential_exchange.send_request(&peer_id, cred_req);
+        let req_id = self
+            .swarm
+            .behaviour_mut()
+            .credential_exchange
+            .send_request(&peer_id, cred_req);
         self.pending_credential_reqs.insert(req_id, peer_id);
 
         // ── Phase 4b: descriptor exchange ────────────────────────────────
         // Build our own descriptor and send it to the new peer.
         let our_desc = self.build_local_descriptor();
-        let desc_req = DescriptorRequest { descriptor: Some(our_desc) };
-        let req_id = self.swarm.behaviour_mut().descriptor_exchange.send_request(&peer_id, desc_req);
+        let desc_req = DescriptorRequest {
+            descriptor: Some(our_desc),
+        };
+        let req_id = self
+            .swarm
+            .behaviour_mut()
+            .descriptor_exchange
+            .send_request(&peer_id, desc_req);
         self.pending_descriptor_reqs.insert(req_id, peer_id);
 
         // Signal that this peer is now routable.
@@ -2016,20 +2318,17 @@ impl MiasmaNode {
     /// Build this node's peer descriptor for publication.
     fn build_local_descriptor(&self) -> PeerDescriptor {
         let pseudonym = self.credential_wallet.holder_tag();
-        let addresses: Vec<String> = self.swarm.listeners()
-            .map(|a| a.to_string())
-            .collect();
+        let addresses: Vec<String> = self.swarm.listeners().map(|a| a.to_string()).collect();
 
-        let credential_presentation = self.credential_wallet.present(
-            &self.local_peer_id.to_bytes(),
-        );
+        let credential_presentation = self
+            .credential_wallet
+            .present(&self.local_peer_id.to_bytes());
 
         // Attach a BBS+ proof if we hold a BBS+ credential.
         // Default policy reveals tier only — sufficient for admission scoring.
-        let bbs_proof = self.bbs_wallet.present(
-            &DisclosurePolicy::default(),
-            &self.local_peer_id.to_bytes(),
-        );
+        let bbs_proof = self
+            .bbs_wallet
+            .present(&DisclosurePolicy::default(), &self.local_peer_id.to_bytes());
 
         // Determine reachability kind based on NAT status.
         // Public nodes use Direct; NAT'd nodes select introduction points
@@ -2044,10 +2343,7 @@ impl MiasmaNode {
                 // switch to Rendezvous once relay peers are discovered.
                 ReachabilityKind::Direct
             } else {
-                debug!(
-                    "descriptor.rendezvous intro_points={}",
-                    intro_points.len()
-                );
+                debug!("descriptor.rendezvous intro_points={}", intro_points.len());
                 ReachabilityKind::Rendezvous { intro_points }
             }
         };
@@ -2060,7 +2356,7 @@ impl MiasmaNode {
                 can_store: true,
                 can_relay: self.nat_publicly_reachable,
                 can_route: true,
-                can_issue: true, // in bootstrap mode, all verified nodes can issue
+                can_issue: true,    // in bootstrap mode, all verified nodes can issue
                 bandwidth_class: 2, // medium
             },
             self.resource_profile,
@@ -2081,7 +2377,10 @@ impl MiasmaNode {
             // Inbound: peer requests a credential from us.
             request_response::Event::Message {
                 peer,
-                message: request_response::Message::Request { request, channel, .. },
+                message:
+                    request_response::Message::Request {
+                        request, channel, ..
+                    },
             } => {
                 // Only issue credentials to verified peers.
                 let (credential, bbs_credential) = if self.peer_registry.is_verified(&peer) {
@@ -2101,19 +2400,34 @@ impl MiasmaNode {
                             nonce: rand::random(),
                         })
                     });
-                    info!("credential.issued peer={peer} tier=Verified epoch={} ed25519=true bbs+={}", request.epoch, bbs_cred.is_some());
+                    info!(
+                        "credential.issued peer={peer} tier=Verified epoch={} ed25519=true bbs+={}",
+                        request.epoch,
+                        bbs_cred.is_some()
+                    );
                     (Some(cred), bbs_cred)
                 } else {
                     debug!("credential.denied peer={peer} reason=not_verified");
                     (None, None)
                 };
-                let resp = CredentialResponse { credential, bbs_credential };
-                let _ = self.swarm.behaviour_mut().credential_exchange.send_response(channel, resp);
+                let resp = CredentialResponse {
+                    credential,
+                    bbs_credential,
+                };
+                let _ = self
+                    .swarm
+                    .behaviour_mut()
+                    .credential_exchange
+                    .send_response(channel, resp);
             }
             // Outbound: we received a credential from a peer.
             request_response::Event::Message {
                 peer,
-                message: request_response::Message::Response { request_id, response },
+                message:
+                    request_response::Message::Response {
+                        request_id,
+                        response,
+                    },
             } => {
                 self.pending_credential_reqs.remove(&request_id);
                 if let Some(cred) = response.credential {
@@ -2141,7 +2455,10 @@ impl MiasmaNode {
                     ) {
                         Ok(_) => {
                             self.credential_wallet.store(cred.clone());
-                            info!("credential.verified_and_stored peer={peer} tier={} epoch={}", cred.body.tier, cred.body.epoch);
+                            info!(
+                                "credential.verified_and_stored peer={peer} tier={} epoch={}",
+                                cred.body.tier, cred.body.epoch
+                            );
                         }
                         Err(e) => {
                             warn!("credential.rejected peer={peer} error={e}");
@@ -2157,10 +2474,12 @@ impl MiasmaNode {
                         if self.bbs_issuer_registry.is_known(&pk_arr) {
                             // Verify the BBS+ credential by creating and verifying a proof.
                             let context = self.local_peer_id.to_bytes();
-                            let proof = bbs_create_proof(&bbs_cred, &DisclosurePolicy::default(), &context);
+                            let proof =
+                                bbs_create_proof(&bbs_cred, &DisclosurePolicy::default(), &context);
                             match bbs_verify_proof(&proof, &pk_arr, &context) {
                                 Ok(disclosed) => {
-                                    let tier_val = disclosed.iter()
+                                    let tier_val = disclosed
+                                        .iter()
                                         .find(|&&(i, _)| i == 1)
                                         .map(|&(_, v)| v)
                                         .unwrap_or(0);
@@ -2177,7 +2496,11 @@ impl MiasmaNode {
                     }
                 }
             }
-            request_response::Event::OutboundFailure { request_id, peer, error } => {
+            request_response::Event::OutboundFailure {
+                request_id,
+                peer,
+                error,
+            } => {
                 self.pending_credential_reqs.remove(&request_id);
                 debug!("credential.outbound_failure peer={peer} error={error}");
             }
@@ -2197,12 +2520,16 @@ impl MiasmaNode {
             // Inbound: peer sends us their descriptor.
             request_response::Event::Message {
                 peer,
-                message: request_response::Message::Request { request, channel, .. },
+                message:
+                    request_response::Message::Request {
+                        request, channel, ..
+                    },
             } => {
                 // Store their descriptor if signature is valid.
                 if let Some(desc) = request.descriptor {
                     if desc.verify_self() {
-                        self.descriptor_store.register_peer_pseudonym(peer, desc.pseudonym);
+                        self.descriptor_store
+                            .register_peer_pseudonym(peer, desc.pseudonym);
                         if self.descriptor_store.upsert(desc) {
                             debug!("descriptor.received peer={peer}");
                         }
@@ -2212,18 +2539,29 @@ impl MiasmaNode {
                 }
                 // Respond with our own descriptor.
                 let our_desc = self.build_local_descriptor();
-                let resp = DescriptorResponse { descriptor: Some(our_desc) };
-                let _ = self.swarm.behaviour_mut().descriptor_exchange.send_response(channel, resp);
+                let resp = DescriptorResponse {
+                    descriptor: Some(our_desc),
+                };
+                let _ = self
+                    .swarm
+                    .behaviour_mut()
+                    .descriptor_exchange
+                    .send_response(channel, resp);
             }
             // Outbound: we received a descriptor from a peer.
             request_response::Event::Message {
                 peer,
-                message: request_response::Message::Response { request_id, response },
+                message:
+                    request_response::Message::Response {
+                        request_id,
+                        response,
+                    },
             } => {
                 self.pending_descriptor_reqs.remove(&request_id);
                 if let Some(desc) = response.descriptor {
                     if desc.verify_self() {
-                        self.descriptor_store.register_peer_pseudonym(peer, desc.pseudonym);
+                        self.descriptor_store
+                            .register_peer_pseudonym(peer, desc.pseudonym);
                         if self.descriptor_store.upsert(desc) {
                             debug!("descriptor.received peer={peer}");
                         }
@@ -2232,7 +2570,11 @@ impl MiasmaNode {
                     }
                 }
             }
-            request_response::Event::OutboundFailure { request_id, peer, error } => {
+            request_response::Event::OutboundFailure {
+                request_id,
+                peer,
+                error,
+            } => {
                 self.pending_descriptor_reqs.remove(&request_id);
                 debug!("descriptor.outbound_failure peer={peer} error={error}");
             }
@@ -2258,23 +2600,29 @@ impl MiasmaNode {
         match ev {
             request_response::Event::Message {
                 peer,
-                message: request_response::Message::Request { request, channel, .. },
+                message:
+                    request_response::Message::Request {
+                        request, channel, ..
+                    },
             } => {
-                debug!("onion_relay.inbound from={peer} variant={}", match &request {
-                    OnionRelayRequest::Packet { .. } => "Packet",
-                    OnionRelayRequest::Forward { .. } => "Forward",
-                    OnionRelayRequest::Deliver { .. } => "Deliver",
-                });
+                debug!(
+                    "onion_relay.inbound from={peer} variant={}",
+                    match &request {
+                        OnionRelayRequest::Packet { .. } => "Packet",
+                        OnionRelayRequest::Forward { .. } => "Forward",
+                        OnionRelayRequest::Deliver { .. } => "Deliver",
+                    }
+                );
                 match request {
                     OnionRelayRequest::Packet { circuit_id, layer }
                     | OnionRelayRequest::Forward { circuit_id, layer } => {
                         // Replay protection: reject packets we've already processed.
                         if self.onion_is_replay(&circuit_id.0, &layer.ephemeral_pubkey) {
                             warn!("onion_relay: replayed packet detected, rejecting");
-                            let _ = self.swarm.behaviour_mut().onion_relay
-                                .send_response(channel, OnionRelayResponse::Error(
-                                    "replayed onion packet".into(),
-                                ));
+                            let _ = self.swarm.behaviour_mut().onion_relay.send_response(
+                                channel,
+                                OnionRelayResponse::Error("replayed onion packet".into()),
+                            );
                             return;
                         }
 
@@ -2295,10 +2643,13 @@ impl MiasmaNode {
                                     Ok(p) => p,
                                     Err(e) => {
                                         warn!("onion_relay: invalid next_hop peer_id: {e}");
-                                        let _ = self.swarm.behaviour_mut().onion_relay
-                                            .send_response(channel, OnionRelayResponse::Error(
-                                                "invalid next_hop peer_id".into(),
-                                            ));
+                                        let _ =
+                                            self.swarm.behaviour_mut().onion_relay.send_response(
+                                                channel,
+                                                OnionRelayResponse::Error(
+                                                    "invalid next_hop peer_id".into(),
+                                                ),
+                                            );
                                         return;
                                     }
                                 };
@@ -2307,8 +2658,11 @@ impl MiasmaNode {
                                     circuit_id,
                                     layer: inner_layer,
                                 };
-                                let req_id = self.swarm.behaviour_mut()
-                                    .onion_relay.send_request(&next_peer, fwd_req);
+                                let req_id = self
+                                    .swarm
+                                    .behaviour_mut()
+                                    .onion_relay
+                                    .send_request(&next_peer, fwd_req);
                                 // Store the return_key so we can encrypt the response,
                                 // and store the inbound channel so we can relay the response back.
                                 self.pending_onion_relays.insert(req_id, return_key);
@@ -2326,57 +2680,75 @@ impl MiasmaNode {
                                     Ok(p) => p,
                                     Err(e) => {
                                         warn!("onion_relay: invalid target peer_id: {e}");
-                                        let _ = self.swarm.behaviour_mut().onion_relay
-                                            .send_response(channel, OnionRelayResponse::Error(
-                                                "invalid target peer_id".into(),
-                                            ));
+                                        let _ =
+                                            self.swarm.behaviour_mut().onion_relay.send_response(
+                                                channel,
+                                                OnionRelayResponse::Error(
+                                                    "invalid target peer_id".into(),
+                                                ),
+                                            );
                                         return;
                                     }
                                 };
-                                let deliver_req = OnionRelayRequest::Deliver {
-                                    circuit_id,
-                                    body,
-                                };
-                                let req_id = self.swarm.behaviour_mut()
-                                    .onion_relay.send_request(&target, deliver_req);
+                                let deliver_req = OnionRelayRequest::Deliver { circuit_id, body };
+                                let req_id = self
+                                    .swarm
+                                    .behaviour_mut()
+                                    .onion_relay
+                                    .send_request(&target, deliver_req);
                                 self.pending_onion_relays.insert(req_id, return_key);
                                 self.pending_onion_inbound_channels.insert(req_id, channel);
                             }
                             Err(e) => {
                                 warn!("onion_relay: peel failed: {e}");
-                                let _ = self.swarm.behaviour_mut().onion_relay
-                                    .send_response(channel, OnionRelayResponse::Error(
-                                        format!("onion peel failed: {e}"),
-                                    ));
+                                let _ = self.swarm.behaviour_mut().onion_relay.send_response(
+                                    channel,
+                                    OnionRelayResponse::Error(format!("onion peel failed: {e}")),
+                                );
                             }
                         }
                     }
                     OnionRelayRequest::Deliver { body, .. } => {
                         // Target role: decrypt e2e body and process share request.
                         let response = self.handle_onion_delivery(&body);
-                        let _ = self.swarm.behaviour_mut().onion_relay
+                        let _ = self
+                            .swarm
+                            .behaviour_mut()
+                            .onion_relay
                             .send_response(channel, response);
                     }
                 }
             }
             request_response::Event::Message {
-                message: request_response::Message::Response { request_id, response },
+                message:
+                    request_response::Message::Response {
+                        request_id,
+                        response,
+                    },
                 ..
             } => {
                 // Response from a sub-request (R1→R2 or R2→Target).
                 if let Some(return_key) = self.pending_onion_relays.remove(&request_id) {
-                    if let Some(inbound_channel) = self.pending_onion_inbound_channels.remove(&request_id) {
+                    if let Some(inbound_channel) =
+                        self.pending_onion_inbound_channels.remove(&request_id)
+                    {
                         // We're a relay: encrypt the response with our return_key and forward back.
                         let relay_response = match response {
                             OnionRelayResponse::Data(data) => {
-                                match super::onion_relay::encrypt_relay_response(&return_key, &data) {
+                                match super::onion_relay::encrypt_relay_response(&return_key, &data)
+                                {
                                     Ok(encrypted) => OnionRelayResponse::Data(encrypted),
-                                    Err(e) => OnionRelayResponse::Error(format!("relay encrypt failed: {e}")),
+                                    Err(e) => OnionRelayResponse::Error(format!(
+                                        "relay encrypt failed: {e}"
+                                    )),
                                 }
                             }
                             OnionRelayResponse::Error(e) => OnionRelayResponse::Error(e),
                         };
-                        let _ = self.swarm.behaviour_mut().onion_relay
+                        let _ = self
+                            .swarm
+                            .behaviour_mut()
+                            .onion_relay
                             .send_response(inbound_channel, relay_response);
                     } else if let Some(reply) = self.pending_onion_replies.remove(&request_id) {
                         // We're the initiator: return the response to the coordinator.
@@ -2387,15 +2759,19 @@ impl MiasmaNode {
                     let _ = reply.send(Ok(response));
                 }
             }
-            request_response::Event::OutboundFailure { request_id, peer, error } => {
+            request_response::Event::OutboundFailure {
+                request_id,
+                peer,
+                error,
+            } => {
                 warn!("onion_relay.outbound_failure peer={peer} error={error}");
                 // Clean up and propagate error.
                 self.pending_onion_relays.remove(&request_id);
                 if let Some(channel) = self.pending_onion_inbound_channels.remove(&request_id) {
-                    let _ = self.swarm.behaviour_mut().onion_relay
-                        .send_response(channel, OnionRelayResponse::Error(
-                            format!("relay outbound failure: {error}"),
-                        ));
+                    let _ = self.swarm.behaviour_mut().onion_relay.send_response(
+                        channel,
+                        OnionRelayResponse::Error(format!("relay outbound failure: {error}")),
+                    );
                 }
                 if let Some(reply) = self.pending_onion_replies.remove(&request_id) {
                     let _ = reply.send(Err(MiasmaError::Network(format!(
@@ -2416,20 +2792,34 @@ impl MiasmaNode {
     /// Outbound: responses delivered to pending probe channels.
     fn handle_relay_probe_event(
         &mut self,
-        ev: request_response::Event<super::relay_probe::ProbeRequest, super::relay_probe::ProbeResponse>,
+        ev: request_response::Event<
+            super::relay_probe::ProbeRequest,
+            super::relay_probe::ProbeResponse,
+        >,
     ) {
-        use super::relay_probe::{ProbeResponse};
+        use super::relay_probe::ProbeResponse;
         match ev {
             request_response::Event::Message {
-                message: request_response::Message::Request { request, channel, .. },
+                message:
+                    request_response::Message::Request {
+                        request, channel, ..
+                    },
                 ..
             } => {
                 // Inbound: echo the nonce.
-                let _ = self.swarm.behaviour_mut().relay_probe
-                    .send_response(channel, ProbeResponse { nonce: request.nonce });
+                let _ = self.swarm.behaviour_mut().relay_probe.send_response(
+                    channel,
+                    ProbeResponse {
+                        nonce: request.nonce,
+                    },
+                );
             }
             request_response::Event::Message {
-                message: request_response::Message::Response { request_id, response },
+                message:
+                    request_response::Message::Response {
+                        request_id,
+                        response,
+                    },
                 ..
             } => {
                 // Outbound: deliver to pending probe channel.
@@ -2437,7 +2827,9 @@ impl MiasmaNode {
                     let _ = reply.send(Some(response));
                 }
             }
-            request_response::Event::OutboundFailure { request_id, error, .. } => {
+            request_response::Event::OutboundFailure {
+                request_id, error, ..
+            } => {
                 if let Some(reply) = self.pending_probe_replies.remove(&request_id) {
                     let _ = reply.send(None);
                 }
@@ -2502,7 +2894,10 @@ impl MiasmaNode {
             return Err(MiasmaError::Sss("empty onion share request".into()));
         }
         if data[0] != 0x10 {
-            return Err(MiasmaError::Sss(format!("unexpected onion share tag: {}", data[0])));
+            return Err(MiasmaError::Sss(format!(
+                "unexpected onion share tag: {}",
+                data[0]
+            )));
         }
 
         let req: ShareFetchRequest = bincode::deserialize(&data[1..])
@@ -2527,8 +2922,7 @@ impl MiasmaNode {
         let resp = ShareFetchResponse { share };
         let mut out = vec![0x11u8];
         out.extend(
-            bincode::serialize(&resp)
-                .map_err(|e| MiasmaError::Serialization(e.to_string()))?,
+            bincode::serialize(&resp).map_err(|e| MiasmaError::Serialization(e.to_string()))?,
         );
         Ok(out)
     }
@@ -2537,7 +2931,9 @@ impl MiasmaNode {
 
     fn handle_kad_event(&mut self, ev: kad::Event) {
         match ev {
-            kad::Event::OutboundQueryProgressed { id, result, step, .. } => match result {
+            kad::Event::OutboundQueryProgressed {
+                id, result, step, ..
+            } => match result {
                 kad::QueryResult::PutRecord(Ok(kad::PutRecordOk { key })) => {
                     // Notify replication tracker: network PUT acknowledged by remote peer.
                     if let Some(tx) = &self.replication_success_tx {
@@ -2564,25 +2960,29 @@ impl MiasmaNode {
                 kad::QueryResult::GetRecord(Ok(kad::GetRecordOk::FoundRecord(pr))) => {
                     // Validate signature on retrieved records.
                     let value = pr.record.value;
-                    let validated = if let Ok(signed) = bincode::deserialize::<SignedDhtRecord>(&value) {
-                        if signed.verify_signature() {
-                            // Record successful interaction for the peer that provided this record.
-                            if let Some(peer) = pr.peer {
-                                self.routing_table.record_success(&peer);
+                    let validated =
+                        if let Ok(signed) = bincode::deserialize::<SignedDhtRecord>(&value) {
+                            if signed.verify_signature() {
+                                // Record successful interaction for the peer that provided this record.
+                                if let Some(peer) = pr.peer {
+                                    self.routing_table.record_success(&peer);
+                                }
+                                Some(value)
+                            } else {
+                                warn!(
+                                    "dht.record_rejected reason=invalid_signature key={:?}",
+                                    pr.record.key
+                                );
+                                // Record failure for the peer that sent a bad record.
+                                if let Some(peer) = pr.peer {
+                                    self.routing_table.record_failure(&peer);
+                                }
+                                None
                             }
-                            Some(value)
                         } else {
-                            warn!("dht.record_rejected reason=invalid_signature key={:?}", pr.record.key);
-                            // Record failure for the peer that sent a bad record.
-                            if let Some(peer) = pr.peer {
-                                self.routing_table.record_failure(&peer);
-                            }
-                            None
-                        }
-                    } else {
-                        // Accept plain DhtRecord during transition period.
-                        Some(value)
-                    };
+                            // Accept plain DhtRecord during transition period.
+                            Some(value)
+                        };
 
                     if let Some(valid_value) = validated {
                         if let Some((reply, _)) = self.pending_gets.remove(&id) {
@@ -2591,9 +2991,9 @@ impl MiasmaNode {
                     }
                     // If invalid, don't resolve — wait for more results or timeout.
                 }
-                kad::QueryResult::GetRecord(
-                    Ok(kad::GetRecordOk::FinishedWithNoAdditionalRecord { .. }),
-                )
+                kad::QueryResult::GetRecord(Ok(
+                    kad::GetRecordOk::FinishedWithNoAdditionalRecord { .. },
+                ))
                 | kad::QueryResult::GetRecord(Err(_)) => {
                     if step.last {
                         if let Some((reply, cached)) = self.pending_gets.remove(&id) {
@@ -2615,7 +3015,9 @@ impl MiasmaNode {
             // Inbound request: serve from local store.
             request_response::Event::Message {
                 message:
-                    request_response::Message::Request { request, channel, .. },
+                    request_response::Message::Request {
+                        request, channel, ..
+                    },
                 ..
             } => {
                 let share = self.local_store.as_ref().and_then(|store| {
@@ -2634,18 +3036,28 @@ impl MiasmaNode {
                     })
                 });
                 let response = ShareFetchResponse { share };
-                let _ = self.swarm.behaviour_mut().share_exchange.send_response(channel, response);
+                let _ = self
+                    .swarm
+                    .behaviour_mut()
+                    .share_exchange
+                    .send_response(channel, response);
             }
             // Outbound response received: resolve pending future.
             request_response::Event::Message {
-                message: request_response::Message::Response { request_id, response },
+                message:
+                    request_response::Message::Response {
+                        request_id,
+                        response,
+                    },
                 ..
             } => {
                 if let Some(reply) = self.pending_share_fetches.remove(&request_id) {
                     let _ = reply.send(Ok(response.share));
                 }
             }
-            request_response::Event::OutboundFailure { request_id, error, .. } => {
+            request_response::Event::OutboundFailure {
+                request_id, error, ..
+            } => {
                 warn!("Share fetch outbound failure: {error}");
                 if let Some(reply) = self.pending_share_fetches.remove(&request_id) {
                     let _ = reply.send(Err(MiasmaError::Network(error.to_string())));
@@ -2683,12 +3095,13 @@ fn build_swarm(
             let mut kademlia = kad::Behaviour::with_config(local_peer_id, store, kad_config);
             kademlia.set_mode(Some(kad::Mode::Server));
 
-            let identify =
-                identify::Behaviour::new(identify::Config::new("/miasma/id/1.0.0".into(), key.public()));
+            let identify = identify::Behaviour::new(identify::Config::new(
+                "/miasma/id/1.0.0".into(),
+                key.public(),
+            ));
 
-            let ping = ping::Behaviour::new(
-                ping::Config::new().with_interval(Duration::from_secs(30)),
-            );
+            let ping =
+                ping::Behaviour::new(ping::Config::new().with_interval(Duration::from_secs(30)));
 
             let autonat = autonat::Behaviour::new(
                 local_peer_id,
@@ -2741,18 +3154,16 @@ fn build_swarm(
                 request_response::Config::default(),
             );
 
-            let relay_probe = request_response::Behaviour::<super::relay_probe::RelayProbeCodec>::new(
-                [(
-                    StreamProtocol::new("/miasma/relay-probe/1.0.0"),
-                    request_response::ProtocolSupport::Full,
-                )],
-                request_response::Config::default(),
-            );
+            let relay_probe =
+                request_response::Behaviour::<super::relay_probe::RelayProbeCodec>::new(
+                    [(
+                        StreamProtocol::new("/miasma/relay-probe/1.0.0"),
+                        request_response::ProtocolSupport::Full,
+                    )],
+                    request_response::Config::default(),
+                );
 
-            let mdns = mdns::tokio::Behaviour::new(
-                mdns::Config::default(),
-                local_peer_id,
-            )?;
+            let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?;
 
             Ok(MiasmaBehaviour {
                 kademlia,

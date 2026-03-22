@@ -19,8 +19,7 @@ use std::process::Child;
 use std::sync::mpsc;
 
 use miasma_core::{
-    daemon_request, read_port_file, ControlRequest, ControlResponse,
-    pipeline::DissolutionParams,
+    daemon_request, pipeline::DissolutionParams, read_port_file, ControlRequest, ControlResponse,
 };
 use tracing::{info, warn};
 
@@ -129,7 +128,10 @@ impl WorkerHandle {
             .spawn(move || worker_thread(data_dir, cmd_rx, res_tx))
             .expect("spawn worker thread");
 
-        Self { tx: cmd_tx, rx: res_rx }
+        Self {
+            tx: cmd_tx,
+            rx: res_rx,
+        }
     }
 }
 
@@ -198,9 +200,7 @@ fn worker_thread(
                 Ok(data) => rt.block_on(publish_bytes(&data, &data_dir, params)),
                 Err(e) => WorkerResult::Err(format!("Read file: {e}")),
             },
-            WorkerCmd::Retrieve(mid_str) => {
-                rt.block_on(retrieve_mid(&mid_str, &data_dir, params))
-            }
+            WorkerCmd::Retrieve(mid_str) => rt.block_on(retrieve_mid(&mid_str, &data_dir, params)),
             WorkerCmd::GetStatus => {
                 let status = rt.block_on(get_status(&data_dir));
                 // Update connection state based on result.
@@ -275,9 +275,7 @@ fn worker_thread(
                 }
             }
             WorkerCmd::Wipe => rt.block_on(do_wipe(&data_dir)),
-            WorkerCmd::ImportMagnet(uri) => {
-                run_bridge_import(&tx, &data_dir, &["--magnet", &uri])
-            }
+            WorkerCmd::ImportMagnet(uri) => run_bridge_import(&tx, &data_dir, &["--magnet", &uri]),
             WorkerCmd::ImportTorrentFile(path) => {
                 let p = path.to_string_lossy().to_string();
                 run_bridge_import(&tx, &data_dir, &["--torrent", &p])
@@ -291,7 +289,10 @@ fn worker_thread(
 
     // Cleanup: if we own the daemon, kill it on exit.
     if let Some(mut child) = owned_daemon {
-        info!("Desktop exiting — stopping owned daemon (pid={})", child.id());
+        info!(
+            "Desktop exiting — stopping owned daemon (pid={})",
+            child.id()
+        );
         let _ = child.kill();
         let _ = child.wait();
     }
@@ -353,7 +354,8 @@ fn detect_state(data_dir: &Path, rt: &tokio::runtime::Runtime) -> DaemonState {
         tokio::time::timeout(
             std::time::Duration::from_secs(3),
             daemon_request(data_dir, ControlRequest::Status),
-        ).await
+        )
+        .await
     }) {
         Ok(Ok(_)) => DaemonState::Connected,
         _ => {
@@ -388,11 +390,19 @@ fn find_miasma_exe() -> Option<PathBuf> {
 
 /// Search PATH for miasma binary.
 fn which_miasma() -> Option<PathBuf> {
-    let name = if cfg!(windows) { "miasma.exe" } else { "miasma" };
+    let name = if cfg!(windows) {
+        "miasma.exe"
+    } else {
+        "miasma"
+    };
     std::env::var_os("PATH").and_then(|paths| {
         std::env::split_paths(&paths).find_map(|dir| {
             let candidate = dir.join(name);
-            if candidate.is_file() { Some(candidate) } else { None }
+            if candidate.is_file() {
+                Some(candidate)
+            } else {
+                None
+            }
         })
     })
 }
@@ -403,30 +413,32 @@ const MAX_AUTO_LAUNCHES: u32 = 2;
 const DAEMON_STARTUP_TIMEOUT_SECS: u64 = 30;
 
 /// Launch daemon as a background process. Waits up to 30s for port file.
-fn auto_launch_daemon(
-    data_dir: &Path,
-    rt: &tokio::runtime::Runtime,
-) -> anyhow::Result<Child> {
+fn auto_launch_daemon(data_dir: &Path, rt: &tokio::runtime::Runtime) -> anyhow::Result<Child> {
     // Safety: check if daemon is already running (avoid duplicates).
     if let Ok(port) = read_port_file(data_dir) {
-        if rt.block_on(async {
-            tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                daemon_request(data_dir, ControlRequest::Status),
-            ).await
-        }).is_ok() {
+        if rt
+            .block_on(async {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    daemon_request(data_dir, ControlRequest::Status),
+                )
+                .await
+            })
+            .is_ok()
+        {
             anyhow::bail!("daemon already running on port {port}");
         }
         // Stale port file — remove it.
         miasma_core::daemon::ipc::remove_port_file(data_dir);
     }
 
-    let miasma_exe = find_miasma_exe()
-        .ok_or_else(|| anyhow::anyhow!(
+    let miasma_exe = find_miasma_exe().ok_or_else(|| {
+        anyhow::anyhow!(
             "Cannot find miasma.exe.\n\
              If installed: check that the installation is intact (reinstall if needed).\n\
              If portable: place miasma.exe next to miasma-desktop.exe."
-        ))?;
+        )
+    })?;
 
     info!("Auto-launching daemon: {} daemon", miasma_exe.display());
 
@@ -446,14 +458,18 @@ fn auto_launch_daemon(
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let child = cmd.spawn()
+    let child = cmd
+        .spawn()
         .map_err(|e| anyhow::anyhow!("spawn daemon: {e}"))?;
 
     // Wait for daemon to become reachable (port file appears + IPC responds).
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(DAEMON_STARTUP_TIMEOUT_SECS);
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(DAEMON_STARTUP_TIMEOUT_SECS);
     loop {
         if std::time::Instant::now() > deadline {
-            anyhow::bail!("daemon did not become ready within {DAEMON_STARTUP_TIMEOUT_SECS} seconds");
+            anyhow::bail!(
+                "daemon did not become ready within {DAEMON_STARTUP_TIMEOUT_SECS} seconds"
+            );
         }
         std::thread::sleep(std::time::Duration::from_millis(300));
 
@@ -465,7 +481,8 @@ fn auto_launch_daemon(
             tokio::time::timeout(
                 std::time::Duration::from_secs(2),
                 daemon_request(data_dir, ControlRequest::Status),
-            ).await
+            )
+            .await
         }) {
             info!("Daemon is ready");
             return Ok(child);
@@ -496,9 +513,10 @@ async fn retrieve_mid(mid_str: &str, data_dir: &Path, params: DissolutionParams)
         total_shards: params.total_shards as u8,
     };
     match daemon_request(data_dir, req).await {
-        Ok(ControlResponse::Retrieved { data }) => {
-            WorkerResult::Retrieved { mid: mid_str.to_string(), data }
-        }
+        Ok(ControlResponse::Retrieved { data }) => WorkerResult::Retrieved {
+            mid: mid_str.to_string(),
+            data,
+        },
         Ok(ControlResponse::Error(e)) => WorkerResult::Err(e),
         Ok(other) => WorkerResult::Err(format!("Unexpected response: {other:?}")),
         Err(e) => WorkerResult::Err(daemon_error(&e)),
@@ -600,11 +618,19 @@ fn find_bridge_exe() -> Option<PathBuf> {
         return Some(candidate);
     }
     // Search PATH.
-    let name = if cfg!(windows) { "miasma-bridge.exe" } else { "miasma-bridge" };
+    let name = if cfg!(windows) {
+        "miasma-bridge.exe"
+    } else {
+        "miasma-bridge"
+    };
     std::env::var_os("PATH").and_then(|paths| {
         std::env::split_paths(&paths).find_map(|dir| {
             let c = dir.join(name);
-            if c.is_file() { Some(c) } else { None }
+            if c.is_file() {
+                Some(c)
+            } else {
+                None
+            }
         })
     })
 }
@@ -618,9 +644,12 @@ fn run_bridge_import(
 ) -> WorkerResult {
     let bridge_exe = match find_bridge_exe() {
         Some(p) => p,
-        None => return WorkerResult::Err(
-            "Cannot find miasma-bridge. Ensure it is installed alongside the desktop app.".into()
-        ),
+        None => {
+            return WorkerResult::Err(
+                "Cannot find miasma-bridge. Ensure it is installed alongside the desktop app."
+                    .into(),
+            )
+        }
     };
 
     let display_name = if args.first() == Some(&"--magnet") {
@@ -628,7 +657,9 @@ fn run_bridge_import(
     } else {
         args.get(1).unwrap_or(&"file")
     };
-    let _ = tx.send(WorkerResult::ImportStarted { name: display_name.to_string() });
+    let _ = tx.send(WorkerResult::ImportStarted {
+        name: display_name.to_string(),
+    });
 
     let mut cmd = std::process::Command::new(&bridge_exe);
     cmd.args(args)

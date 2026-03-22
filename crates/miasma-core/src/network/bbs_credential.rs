@@ -349,7 +349,10 @@ pub fn bbs_create_proof(
 
     // Commitment phase: random blindings for s and hidden attributes.
     let blind_s = Scalar::random(&mut rand::thread_rng());
-    let blindings: Vec<Scalar> = hidden.iter().map(|_| Scalar::random(&mut rand::thread_rng())).collect();
+    let blindings: Vec<Scalar> = hidden
+        .iter()
+        .map(|_| Scalar::random(&mut rand::thread_rng()))
+        .collect();
 
     // t = blind_s * h0 + sum_hidden(blinding_j * h_j)
     let mut t = gv[1] * blind_s;
@@ -450,8 +453,10 @@ pub fn bbs_verify_proof(
     let pk = pk_affine.unwrap();
 
     // Parse proof points.
-    if proof.a_prime.len() != 48 || proof.a_bar.len() != 48
-        || proof.b_point.len() != 48 || proof.challenge.len() < 32
+    if proof.a_prime.len() != 48
+        || proof.a_bar.len() != 48
+        || proof.b_point.len() != 48
+        || proof.challenge.len() < 32
         || proof.response_s.len() < 32
     {
         return Err(BbsError::InvalidProof);
@@ -507,8 +512,7 @@ pub fn bbs_verify_proof(
     challenge_input.extend_from_slice(&G1Affine::from(b_point).to_compressed());
     challenge_input.extend_from_slice(&G1Affine::from(t_recomputed).to_compressed());
     challenge_input.extend_from_slice(context);
-    let challenge_recomputed =
-        hash_to_scalar(&[DOMAIN_BBS_CHALLENGE, &challenge_input].concat());
+    let challenge_recomputed = hash_to_scalar(&[DOMAIN_BBS_CHALLENGE, &challenge_input].concat());
 
     if challenge != challenge_recomputed {
         return Err(BbsError::ProofVerificationFailed);
@@ -532,7 +536,10 @@ pub fn bbs_verify_proof(
     let neg_a_bar = -a_bar;
     let pairing_result = multi_miller_loop(&[
         (&G1Affine::from(a_prime), &G2Prepared::from(pk)),
-        (&G1Affine::from(neg_a_bar), &G2Prepared::from(G2Affine::generator())),
+        (
+            &G1Affine::from(neg_a_bar),
+            &G2Prepared::from(G2Affine::generator()),
+        ),
     ])
     .final_exponentiation();
 
@@ -633,8 +640,7 @@ impl BbsCredentialWallet {
 
     /// Get the best (highest-tier) BBS+ credential from any issuer.
     pub fn best_credential(&self) -> Option<&BbsCredential> {
-        self.credentials.values()
-            .max_by_key(|c| c.attributes.tier)
+        self.credentials.values().max_by_key(|c| c.attributes.tier)
     }
 
     /// Create a proof from the best available BBS+ credential.
@@ -662,7 +668,9 @@ pub struct BbsIssuerRegistry {
 
 impl BbsIssuerRegistry {
     pub fn new() -> Self {
-        Self { issuers: Vec::new() }
+        Self {
+            issuers: Vec::new(),
+        }
     }
 
     /// Register a BBS+ issuer public key.
@@ -709,18 +717,30 @@ pub trait CredentialScheme: Send + Sync {
 pub struct Ed25519Scheme;
 
 impl CredentialScheme for Ed25519Scheme {
-    fn name(&self) -> &str { "ed25519-ephemeral" }
-    fn within_epoch_unlinkable(&self) -> bool { false }
-    fn selective_disclosure(&self) -> bool { false }
+    fn name(&self) -> &str {
+        "ed25519-ephemeral"
+    }
+    fn within_epoch_unlinkable(&self) -> bool {
+        false
+    }
+    fn selective_disclosure(&self) -> bool {
+        false
+    }
 }
 
 /// Marker for the BBS+ scheme.
 pub struct BbsPlusScheme;
 
 impl CredentialScheme for BbsPlusScheme {
-    fn name(&self) -> &str { "bbs-plus" }
-    fn within_epoch_unlinkable(&self) -> bool { true }
-    fn selective_disclosure(&self) -> bool { true }
+    fn name(&self) -> &str {
+        "bbs-plus"
+    }
+    fn within_epoch_unlinkable(&self) -> bool {
+        true
+    }
+    fn selective_disclosure(&self) -> bool {
+        true
+    }
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -803,7 +823,9 @@ mod tests {
         let result = bbs_verify_proof(&proof, &issuer_key.pk_bytes(), context);
         assert!(result.is_ok());
         let disclosed = result.unwrap();
-        assert!(disclosed.iter().any(|&(i, v)| i == 1 && v == CredentialTier::Verified as u64));
+        assert!(disclosed
+            .iter()
+            .any(|&(i, v)| i == 1 && v == CredentialTier::Verified as u64));
         assert!(disclosed.iter().any(|&(i, v)| i == 2 && v == 0x07));
     }
 
@@ -921,7 +943,9 @@ mod tests {
         let result = bbs_verify_proof(&proof, &issuer_key.pk_bytes(), b"endorsed-ctx");
         assert!(result.is_ok());
         let disclosed = result.unwrap();
-        assert!(disclosed.iter().any(|&(i, v)| i == 1 && v == CredentialTier::Endorsed as u64));
+        assert!(disclosed
+            .iter()
+            .any(|&(i, v)| i == 1 && v == CredentialTier::Endorsed as u64));
     }
 
     #[test]

@@ -25,9 +25,7 @@ use crate::{
     crypto::hash::ContentId,
     network::dht::OnionAwareDhtExecutor,
     share::MiasmaShare,
-    transport::payload::{
-        PayloadTransportSelector, TransportAttempt, TransportExhaustedError,
-    },
+    transport::payload::{PayloadTransportSelector, TransportAttempt, TransportExhaustedError},
     MiasmaError,
 };
 
@@ -132,9 +130,9 @@ impl<D: OnionAwareDhtExecutor> ShareSource for FallbackShareSource<D> {
             }
             Err(TransportExhaustedError { attempts }) => {
                 // Check if this was a "share not found" (transport succeeded but share absent)
-                let share_not_found = attempts.iter().any(|a| {
-                    a.succeeded && a.error.as_deref() == Some("share not found on peer")
-                });
+                let share_not_found = attempts
+                    .iter()
+                    .any(|a| a.succeeded && a.error.as_deref() == Some("share not found on peer"));
                 let mut all = self.all_attempts.lock().unwrap();
                 all.extend(attempts);
                 if share_not_found {
@@ -197,8 +195,7 @@ mod tests {
     #[tokio::test]
     async fn fallback_source_retrieves_via_transport() {
         let dir = tempfile::tempdir().unwrap();
-        let store =
-            Arc::new(crate::store::LocalShareStore::open(dir.path(), 100).unwrap());
+        let store = Arc::new(crate::store::LocalShareStore::open(dir.path(), 100).unwrap());
 
         let params = DissolutionParams::default();
         let (mid, shares) = dissolve(b"fallback source test", params).unwrap();
@@ -246,8 +243,7 @@ mod tests {
     #[tokio::test]
     async fn fallback_source_records_attempts() {
         let dir = tempfile::tempdir().unwrap();
-        let store =
-            Arc::new(crate::store::LocalShareStore::open(dir.path(), 100).unwrap());
+        let store = Arc::new(crate::store::LocalShareStore::open(dir.path(), 100).unwrap());
 
         let params = DissolutionParams::default();
         let (mid, shares) = dissolve(b"attempts test", params).unwrap();

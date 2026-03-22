@@ -14,16 +14,28 @@ pub enum Value {
 
 impl Value {
     pub fn as_bytes(&self) -> Option<&[u8]> {
-        match self { Value::Bytes(b) => Some(b), _ => None }
+        match self {
+            Value::Bytes(b) => Some(b),
+            _ => None,
+        }
     }
     pub fn as_int(&self) -> Option<i64> {
-        match self { Value::Int(i) => Some(*i), _ => None }
+        match self {
+            Value::Int(i) => Some(*i),
+            _ => None,
+        }
     }
     pub fn as_dict(&self) -> Option<&BTreeMap<Vec<u8>, Value>> {
-        match self { Value::Dict(d) => Some(d), _ => None }
+        match self {
+            Value::Dict(d) => Some(d),
+            _ => None,
+        }
     }
     pub fn as_list(&self) -> Option<&Vec<Value>> {
-        match self { Value::List(l) => Some(l), _ => None }
+        match self {
+            Value::List(l) => Some(l),
+            _ => None,
+        }
     }
     pub fn dict_get(&self, key: &[u8]) -> Option<&Value> {
         self.as_dict()?.get(key)
@@ -65,7 +77,9 @@ pub fn encode(v: &Value) -> Vec<u8> {
         }
         Value::List(items) => {
             let mut out = vec![b'l'];
-            for item in items { out.extend(encode(item)); }
+            for item in items {
+                out.extend(encode(item));
+            }
             out.push(b'e');
             out
         }
@@ -82,7 +96,9 @@ pub fn encode(v: &Value) -> Vec<u8> {
 }
 
 fn decode_int(data: &[u8]) -> Result<(Value, &[u8]), String> {
-    let end = data.iter().position(|&b| b == b'e')
+    let end = data
+        .iter()
+        .position(|&b| b == b'e')
         .ok_or("unterminated integer")?;
     let s = std::str::from_utf8(&data[..end]).map_err(|e| e.to_string())?;
     let i = s.parse::<i64>().map_err(|e| e.to_string())?;
@@ -90,14 +106,19 @@ fn decode_int(data: &[u8]) -> Result<(Value, &[u8]), String> {
 }
 
 fn decode_bytes(data: &[u8]) -> Result<(Value, &[u8]), String> {
-    let colon = data.iter().position(|&b| b == b':')
+    let colon = data
+        .iter()
+        .position(|&b| b == b':')
         .ok_or("missing colon in string")?;
     let len_str = std::str::from_utf8(&data[..colon]).map_err(|e| e.to_string())?;
     let len = len_str.parse::<usize>().map_err(|e| e.to_string())?;
     let start = colon + 1;
     let end = start + len;
     if end > data.len() {
-        return Err(format!("string too short: need {len}, have {}", data.len() - start));
+        return Err(format!(
+            "string too short: need {len}, have {}",
+            data.len() - start
+        ));
     }
     Ok((Value::Bytes(data[start..end].to_vec()), &data[end..]))
 }
@@ -110,7 +131,9 @@ fn decode_list(data: &[u8], depth: usize) -> Result<(Value, &[u8]), String> {
         items.push(v);
         rest = r;
     }
-    if rest.is_empty() { return Err("unterminated list".into()); }
+    if rest.is_empty() {
+        return Err("unterminated list".into());
+    }
     Ok((Value::List(items), &rest[1..]))
 }
 
@@ -119,12 +142,17 @@ fn decode_dict(data: &[u8], depth: usize) -> Result<(Value, &[u8]), String> {
     let mut rest = data;
     while !rest.is_empty() && rest[0] != b'e' {
         let (k, r) = decode_bytes(rest)?;
-        let key = match k { Value::Bytes(b) => b, _ => unreachable!() };
+        let key = match k {
+            Value::Bytes(b) => b,
+            _ => unreachable!(),
+        };
         let (v, r2) = decode_inner(r, depth - 1)?;
         map.insert(key, v);
         rest = r2;
     }
-    if rest.is_empty() { return Err("unterminated dict".into()); }
+    if rest.is_empty() {
+        return Err("unterminated dict".into());
+    }
     Ok((Value::Dict(map), &rest[1..]))
 }
 

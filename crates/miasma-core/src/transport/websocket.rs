@@ -36,7 +36,9 @@ use crate::{
     MiasmaError,
 };
 
-use super::payload::{PayloadTransport, PayloadTransportError, PayloadTransportKind, TransportPhase};
+use super::payload::{
+    PayloadTransport, PayloadTransportError, PayloadTransportKind, TransportPhase,
+};
 
 // ─── Proxy configuration ─────────────────────────────────────────────────────
 
@@ -477,15 +479,13 @@ impl PayloadTransport for WssPayloadTransport {
         // 2. Optionally wrap in TLS.
         if self.config.tls_enabled {
             let tls_connector = build_client_tls_connector(&self.config)?;
-            let sni = self
-                .config
-                .sni_override
-                .as_deref()
-                .unwrap_or(&host);
-            let server_name = rustls::pki_types::ServerName::try_from(sni.to_string())
-                .map_err(|e| PayloadTransportError {
-                    phase: TransportPhase::Session,
-                    message: format!("WSS TLS invalid SNI '{sni}': {e}"),
+            let sni = self.config.sni_override.as_deref().unwrap_or(&host);
+            let server_name =
+                rustls::pki_types::ServerName::try_from(sni.to_string()).map_err(|e| {
+                    PayloadTransportError {
+                        phase: TransportPhase::Session,
+                        message: format!("WSS TLS invalid SNI '{sni}': {e}"),
+                    }
                 })?;
             let tls_stream = tls_connector
                 .connect(server_name, tcp_stream)
@@ -513,7 +513,16 @@ impl PayloadTransport for WssPayloadTransport {
             };
             let (ws_stream, _response) = ws_result?;
 
-            wss_request_response(ws_stream, mid_digest, slot_index, segment_index, read_timeout, write_timeout, self.config.max_response_bytes).await
+            wss_request_response(
+                ws_stream,
+                mid_digest,
+                slot_index,
+                segment_index,
+                read_timeout,
+                write_timeout,
+                self.config.max_response_bytes,
+            )
+            .await
         } else {
             // Plain WebSocket upgrade over TCP.
             // Use read_timeout for the WS handshake — TCP connect already
@@ -537,7 +546,16 @@ impl PayloadTransport for WssPayloadTransport {
             };
             let (ws_stream, _response) = ws_result?;
 
-            wss_request_response(ws_stream, mid_digest, slot_index, segment_index, read_timeout, write_timeout, self.config.max_response_bytes).await
+            wss_request_response(
+                ws_stream,
+                mid_digest,
+                slot_index,
+                segment_index,
+                read_timeout,
+                write_timeout,
+                self.config.max_response_bytes,
+            )
+            .await
         }
     }
 }
@@ -828,9 +846,7 @@ mod tests {
     async fn wss_connect_refused_is_session_error() {
         let client = WssPayloadTransport::new(WebSocketConfig::default());
         // Port 1 is almost certainly not listening.
-        let result = client
-            .fetch_share("127.0.0.1:1", [0; 32], 0, 0)
-            .await;
+        let result = client.fetch_share("127.0.0.1:1", [0; 32], 0, 0).await;
         let err = result.unwrap_err();
         assert_eq!(err.phase, TransportPhase::Session);
         assert!(err.message.contains("WSS connect"));
@@ -840,7 +856,10 @@ mod tests {
     async fn wss_multiple_shares_correct_slot_selection() {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(LocalShareStore::open(dir.path(), 100).unwrap());
-        let params = DissolutionParams { data_shards: 3, total_shards: 5 };
+        let params = DissolutionParams {
+            data_shards: 3,
+            total_shards: 5,
+        };
         let (mid, shares) = dissolve(b"multi-slot WSS test", params).unwrap();
         for s in &shares {
             store.put(s).unwrap();
@@ -939,8 +958,14 @@ mod tests {
 
     #[test]
     fn parse_host_port_basic() {
-        assert_eq!(parse_host_port("1.2.3.4:8080", 443), ("1.2.3.4".into(), 8080));
-        assert_eq!(parse_host_port("host.example.com", 443), ("host.example.com".into(), 443));
+        assert_eq!(
+            parse_host_port("1.2.3.4:8080", 443),
+            ("1.2.3.4".into(), 8080)
+        );
+        assert_eq!(
+            parse_host_port("host.example.com", 443),
+            ("host.example.com".into(), 443)
+        );
         assert_eq!(
             parse_host_port("ws://127.0.0.1:9999/path", 443),
             ("127.0.0.1".into(), 9999)

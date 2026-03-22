@@ -74,8 +74,7 @@ impl MagnetInfo {
 
         for kv in params.split('&') {
             if let Some(xt) = kv.strip_prefix("xt=urn:btih:") {
-                let decoded = decode_info_hash(xt)
-                    .map_err(|e| PipelineError::InvalidMagnet(e))?;
+                let decoded = decode_info_hash(xt).map_err(|e| PipelineError::InvalidMagnet(e))?;
                 info_hash_bytes = Some(decoded);
             } else if let Some(dn) = kv.strip_prefix("dn=") {
                 display_name = Some(url_decode(dn));
@@ -85,7 +84,10 @@ impl MagnetInfo {
         let info_hash = info_hash_bytes
             .ok_or_else(|| PipelineError::InvalidMagnet("missing xt=urn:btih: field".into()))?;
 
-        Ok(Self { info_hash, display_name })
+        Ok(Self {
+            info_hash,
+            display_name,
+        })
     }
 }
 

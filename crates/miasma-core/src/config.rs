@@ -75,7 +75,7 @@ pub struct TransportConfig {
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
-            quota_mb: 10_240,    // 10 GiB desktop default
+            quota_mb: 10_240, // 10 GiB desktop default
             bandwidth_mb_day: 1_024,
         }
     }
@@ -113,8 +113,8 @@ impl NodeConfig {
     pub fn save(&self, data_dir: &Path) -> Result<(), MiasmaError> {
         std::fs::create_dir_all(data_dir)?;
         let path = data_dir.join("config.toml");
-        let raw = toml::to_string_pretty(self)
-            .map_err(|e| MiasmaError::Serialization(e.to_string()))?;
+        let raw =
+            toml::to_string_pretty(self).map_err(|e| MiasmaError::Serialization(e.to_string()))?;
 
         // If proxy credentials are present, write with restricted permissions
         // from the start (Win32 DACL / Unix 0o600).  The file is never

@@ -75,7 +75,11 @@ pub fn mine_pow(pubkey: [u8; 32], difficulty_bits: u8) -> NodeIdPoW {
         let hash = *hasher.finalize().as_bytes();
 
         if leading_zeros(&hash) >= difficulty_bits as u32 {
-            return NodeIdPoW { pubkey, nonce, hash };
+            return NodeIdPoW {
+                pubkey,
+                nonce,
+                hash,
+            };
         }
         nonce = nonce.wrapping_add(1);
     }
@@ -213,7 +217,10 @@ mod tests {
     fn pow_invalid_hash_rejected() {
         let pubkey = [0x01u8; 32];
         let pow = mine_pow(pubkey, 4);
-        let tampered = NodeIdPoW { hash: [0xFF; 32], ..pow };
+        let tampered = NodeIdPoW {
+            hash: [0xFF; 32],
+            ..pow
+        };
         assert!(!verify_pow(&tampered, 4));
     }
 
@@ -223,11 +230,8 @@ mod tests {
         let signing_key = SigningKey::from_bytes(&[0x42u8; 32]);
 
         // Sign a record.
-        let record = SignedDhtRecord::sign(
-            b"test-key".to_vec(),
-            b"test-value".to_vec(),
-            &signing_key,
-        );
+        let record =
+            SignedDhtRecord::sign(b"test-key".to_vec(), b"test-value".to_vec(), &signing_key);
 
         // Verification must succeed.
         assert!(record.verify_signature(), "valid signature must verify");
@@ -246,24 +250,26 @@ mod tests {
         record.value = b"tampered-value".to_vec();
 
         // Verification must fail.
-        assert!(!record.verify_signature(), "tampered record must fail verification");
+        assert!(
+            !record.verify_signature(),
+            "tampered record must fail verification"
+        );
     }
 
     #[test]
     fn signed_record_wrong_key_rejected() {
         let signing_key = SigningKey::from_bytes(&[0x42u8; 32]);
-        let mut record = SignedDhtRecord::sign(
-            b"key".to_vec(),
-            b"value".to_vec(),
-            &signing_key,
-        );
+        let mut record = SignedDhtRecord::sign(b"key".to_vec(), b"value".to_vec(), &signing_key);
 
         // Replace signer_pubkey with a different key.
         let other_key = SigningKey::from_bytes(&[0x99u8; 32]);
         record.signer_pubkey = other_key.verifying_key().to_bytes();
 
         // Verification must fail — signature doesn't match the claimed signer.
-        assert!(!record.verify_signature(), "wrong signer key must fail verification");
+        assert!(
+            !record.verify_signature(),
+            "wrong signer key must fail verification"
+        );
     }
 
     #[test]
@@ -276,7 +282,10 @@ mod tests {
             signer_pubkey: [0x01; 32],
             signature: vec![0x00; 64], // all zeros
         };
-        assert!(!record.verify_signature(), "zero signature must be rejected");
+        assert!(
+            !record.verify_signature(),
+            "zero signature must be rejected"
+        );
     }
 
     #[test]
@@ -287,17 +296,16 @@ mod tests {
             signer_pubkey: [0x01; 32],
             signature: vec![0x02; 64], // non-zero but not a real signature
         };
-        assert!(!record.verify_signature(), "fake non-zero signature must be rejected");
+        assert!(
+            !record.verify_signature(),
+            "fake non-zero signature must be rejected"
+        );
     }
 
     #[test]
     fn domain_separation_prevents_cross_context_replay() {
         let signing_key = SigningKey::from_bytes(&[0x42u8; 32]);
-        let record = SignedDhtRecord::sign(
-            b"key".to_vec(),
-            b"value".to_vec(),
-            &signing_key,
-        );
+        let record = SignedDhtRecord::sign(b"key".to_vec(), b"value".to_vec(), &signing_key);
 
         // Manually compute what the signature would be WITHOUT domain separation.
         let mut hasher = blake3::Hasher::new();
@@ -308,9 +316,8 @@ mod tests {
         let msg_without_domain = *hasher.finalize().as_bytes();
 
         // The actual signing message includes the domain separator.
-        let msg_with_domain = SignedDhtRecord::signing_message(
-            b"key", b"value", &record.signer_pubkey
-        );
+        let msg_with_domain =
+            SignedDhtRecord::signing_message(b"key", b"value", &record.signer_pubkey);
 
         // They must differ — domain separation works.
         assert_ne!(msg_without_domain, msg_with_domain);
@@ -318,14 +325,20 @@ mod tests {
 
     #[test]
     fn peer_admission_requires_pow() {
-        assert_eq!(check_peer_admission(None, 8), AdmissionResult::RejectedNoPoW);
+        assert_eq!(
+            check_peer_admission(None, 8),
+            AdmissionResult::RejectedNoPoW
+        );
     }
 
     #[test]
     fn peer_admission_accepts_valid_pow() {
         let pubkey = [0xAB; 32];
         let pow = mine_pow(pubkey, 8);
-        assert_eq!(check_peer_admission(Some(&pow), 8), AdmissionResult::Admitted);
+        assert_eq!(
+            check_peer_admission(Some(&pow), 8),
+            AdmissionResult::Admitted
+        );
     }
 
     #[test]
@@ -333,6 +346,9 @@ mod tests {
         let pubkey = [0xAB; 32];
         let pow = mine_pow(pubkey, 4);
         // Require 8 bits but proof only has 4.
-        assert_eq!(check_peer_admission(Some(&pow), 8), AdmissionResult::RejectedLowDifficulty);
+        assert_eq!(
+            check_peer_admission(Some(&pow), 8),
+            AdmissionResult::RejectedLowDifficulty
+        );
     }
 }

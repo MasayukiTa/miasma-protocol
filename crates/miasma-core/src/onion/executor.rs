@@ -68,10 +68,12 @@ pub struct LiveOnionDhtExecutor {
 enum InProcessRelayWrapper {
     InProcess {
         relay: InProcessRelay,
-        payload_rx: Mutex<tokio::sync::mpsc::UnboundedReceiver<(
-            super::packet::CircuitId,
-            super::packet::InnerPayload,
-        )>>,
+        payload_rx: Mutex<
+            tokio::sync::mpsc::UnboundedReceiver<(
+                super::packet::CircuitId,
+                super::packet::InnerPayload,
+            )>,
+        >,
     },
 }
 
@@ -139,10 +141,10 @@ impl LiveOnionDhtExecutor {
         let InProcessRelayWrapper::InProcess { payload_rx, .. } = self.relay.as_ref();
         let mut rx = payload_rx.lock().await;
 
-        let (_, inner) =
-            rx.recv()
-                .await
-                .ok_or_else(|| MiasmaError::Sss("relay channel closed".into()))?;
+        let (_, inner) = rx
+            .recv()
+            .await
+            .ok_or_else(|| MiasmaError::Sss("relay channel closed".into()))?;
 
         let return_path = inner.return_path.clone();
 
@@ -150,12 +152,8 @@ impl LiveOnionDhtExecutor {
         let response_bytes = self.handle_dht_payload(&inner.body).await?;
 
         // Route response back via return path.
-        InProcessRelay::route_response(
-            self.circuit_manager.clone(),
-            &return_path,
-            response_bytes,
-        )
-        .await
+        InProcessRelay::route_response(self.circuit_manager.clone(), &return_path, response_bytes)
+            .await
     }
 
     async fn handle_dht_payload(&self, body: &[u8]) -> Result<Vec<u8>, MiasmaError> {
@@ -230,8 +228,8 @@ impl LiveOnionDhtExecutor {
 impl OnionAwareDhtExecutor for LiveOnionDhtExecutor {
     async fn put(&self, record: DhtRecord) -> Result<(), MiasmaError> {
         let req = DhtPutRequest { record };
-        let body_inner = bincode::serialize(&req)
-            .map_err(|e| MiasmaError::Serialization(e.to_string()))?;
+        let body_inner =
+            bincode::serialize(&req).map_err(|e| MiasmaError::Serialization(e.to_string()))?;
         let mut body = vec![0x01u8]; // PUT tag
         body.extend(body_inner);
 
@@ -247,8 +245,8 @@ impl OnionAwareDhtExecutor for LiveOnionDhtExecutor {
         let req = DhtGetRequest {
             mid_digest: *mid.as_bytes(),
         };
-        let body_inner = bincode::serialize(&req)
-            .map_err(|e| MiasmaError::Serialization(e.to_string()))?;
+        let body_inner =
+            bincode::serialize(&req).map_err(|e| MiasmaError::Serialization(e.to_string()))?;
         let mut body = vec![0x02u8]; // GET tag
         body.extend(body_inner);
 

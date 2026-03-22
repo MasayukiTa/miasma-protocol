@@ -41,8 +41,8 @@ impl Default for OfflineDetector {
         Self {
             peers: HashMap::new(),
             max_failures: 3,
-            probe_interval: Duration::from_secs(3600),   // 1 hour
-            suspect_interval: Duration::from_secs(300),  // 5 minutes
+            probe_interval: Duration::from_secs(3600), // 1 hour
+            suspect_interval: Duration::from_secs(300), // 5 minutes
         }
     }
 }
@@ -95,7 +95,10 @@ impl OfflineDetector {
                     PeerHealth::Suspected => self.suspect_interval,
                     _ => self.probe_interval,
                 };
-                state.last_probe.map(|t| now.duration_since(t) >= interval).unwrap_or(true)
+                state
+                    .last_probe
+                    .map(|t| now.duration_since(t) >= interval)
+                    .unwrap_or(true)
             })
             .map(|(id, _)| id.clone())
             .collect()

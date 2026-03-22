@@ -185,9 +185,7 @@ impl OutcomeMetrics {
         let current_difficulty = routing_table.current_difficulty();
 
         // BBS+ credentialed count.
-        let bbs_credentialed = active.iter()
-            .filter(|d| d.bbs_proof.is_some())
-            .count();
+        let bbs_credentialed = active.iter().filter(|d| d.bbs_proof.is_some()).count();
 
         // Stale descriptor count and utilisation.
         let desc_stats = descriptor_store.stats();

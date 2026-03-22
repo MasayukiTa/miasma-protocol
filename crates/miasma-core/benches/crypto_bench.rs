@@ -1,9 +1,9 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use miasma_core::crypto::{
-    aead::{encrypt_with_key, decrypt},
+    aead::{decrypt, encrypt_with_key},
     hash::ContentId,
-    rs::{rs_encode, rs_decode, DEFAULT_DATA_SHARDS, DEFAULT_TOTAL_SHARDS},
-    sss::{sss_split, sss_combine},
+    rs::{rs_decode, rs_encode, DEFAULT_DATA_SHARDS, DEFAULT_TOTAL_SHARDS},
+    sss::{sss_combine, sss_split},
 };
 
 const MB_100: usize = 100 * 1024 * 1024;
@@ -78,5 +78,11 @@ fn bench_sss(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, bench_blake3, bench_aes_gcm, bench_reed_solomon, bench_sss);
+criterion_group!(
+    benches,
+    bench_blake3,
+    bench_aes_gcm,
+    bench_reed_solomon,
+    bench_sss
+);
 criterion_main!(benches);

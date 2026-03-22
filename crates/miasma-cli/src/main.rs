@@ -186,8 +186,7 @@ async fn main() -> Result<()> {
         let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
-        let stderr_layer = tracing_subscriber::fmt::layer()
-            .with_writer(std::io::stderr);
+        let stderr_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
         let file_layer = tracing_subscriber::fmt::layer()
             .with_writer(non_blocking)
             .with_ansi(false);
@@ -200,9 +199,7 @@ async fn main() -> Result<()> {
         // This is intentional: the guard must outlive all tracing calls.
         std::mem::forget(_guard);
     } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .init();
+        tracing_subscriber::fmt().with_env_filter(filter).init();
     }
 
     // Stamp version for future upgrade detection.
@@ -228,7 +225,13 @@ async fn main() -> Result<()> {
             output,
             data_shards,
             total_shards,
-        } => cmd_get(&data_dir, &mid, output.as_deref(), data_shards, total_shards),
+        } => cmd_get(
+            &data_dir,
+            &mid,
+            output.as_deref(),
+            data_shards,
+            total_shards,
+        ),
 
         Commands::Status => cmd_status(&data_dir).await,
 
@@ -253,7 +256,17 @@ async fn main() -> Result<()> {
             data_shards,
             total_shards,
             bootstrap,
-        } => cmd_network_get(&data_dir, &mid, output.as_deref(), data_shards, total_shards, &bootstrap).await,
+        } => {
+            cmd_network_get(
+                &data_dir,
+                &mid,
+                output.as_deref(),
+                data_shards,
+                total_shards,
+                &bootstrap,
+            )
+            .await
+        }
     }
 }
 
@@ -308,8 +321,8 @@ fn cmd_dissolve(
         .context("cannot open share store")?;
 
     // Read input file.
-    let plaintext = std::fs::read(path)
-        .with_context(|| format!("cannot read file: {}", path.display()))?;
+    let plaintext =
+        std::fs::read(path).with_context(|| format!("cannot read file: {}", path.display()))?;
 
     let params = DissolutionParams {
         data_shards,
@@ -336,9 +349,7 @@ fn cmd_dissolve(
 
     // Print MID to stdout (machine-parseable).
     println!("{mid_str}");
-    eprintln!(
-        "✓ Dissolved into {stored} shares. Retrieve with: miasma get {mid_str}"
-    );
+    eprintln!("✓ Dissolved into {stored} shares. Retrieve with: miasma get {mid_str}");
     Ok(())
 }
 
@@ -355,8 +366,7 @@ fn cmd_get(
     let store = LocalShareStore::open(data_dir, config.storage.quota_mb)
         .context("cannot open share store")?;
 
-    let mid = ContentId::from_str(mid_str)
-        .with_context(|| format!("invalid MID: {mid_str}"))?;
+    let mid = ContentId::from_str(mid_str).with_context(|| format!("invalid MID: {mid_str}"))?;
 
     let params = DissolutionParams {
         data_shards,
@@ -388,7 +398,11 @@ fn cmd_get(
         );
     }
 
-    eprintln!("Retrieving {} (found {} shares locally) …", mid_str, shares.len());
+    eprintln!(
+        "Retrieving {} (found {} shares locally) …",
+        mid_str,
+        shares.len()
+    );
 
     // Reconstruct in memory — plaintext never touches disk until verified.
     let plaintext = retrieve(&mid, &shares, params).context("retrieval failed")?;
@@ -431,14 +445,21 @@ async fn cmd_status(data_dir: &std::path::Path) -> Result<()> {
             println!("  Pending replication: {}", s.pending_replication);
             println!("  Replicated items:    {}", s.replicated_count);
             if s.wss_port > 0 {
-                let tls_tag = if s.wss_tls_enabled { " (TLS)" } else { " (plain WS)" };
+                let tls_tag = if s.wss_tls_enabled {
+                    " (TLS)"
+                } else {
+                    " (plain WS)"
+                };
                 println!("  WSS share server:    127.0.0.1:{}{}", s.wss_port, tls_tag);
             }
             if s.obfs_quic_port > 0 {
                 println!("  ObfuscatedQuic:      127.0.0.1:{}", s.obfs_quic_port);
             }
             if s.proxy_configured {
-                println!("  Outbound proxy:      {} (configured)", s.proxy_type.as_deref().unwrap_or("unknown"));
+                println!(
+                    "  Outbound proxy:      {} (configured)",
+                    s.proxy_type.as_deref().unwrap_or("unknown")
+                );
             }
 
             // Payload transport readiness matrix.
@@ -450,8 +471,12 @@ async fn cmd_status(data_dir: &std::path::Path) -> Result<()> {
                     let sel = if t.selected { " [SELECTED]" } else { "" };
                     print!(
                         "    {:<20} {:<9} success={:<4} fail={:<4} (session={} data={}){sel}",
-                        t.name, status, t.success_count, t.failure_count,
-                        t.session_failures, t.data_failures,
+                        t.name,
+                        status,
+                        t.success_count,
+                        t.failure_count,
+                        t.session_failures,
+                        t.data_failures,
                     );
                     if let Some(ref err) = t.last_error {
                         print!("  last: {err}");
@@ -510,47 +535,78 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
     if json_out {
         let mut report = serde_json::Map::new();
         report.insert("version".into(), serde_json::json!(version));
-        report.insert("data_dir".into(), serde_json::json!(data_dir.display().to_string()));
+        report.insert(
+            "data_dir".into(),
+            serde_json::json!(data_dir.display().to_string()),
+        );
         report.insert("config_exists".into(), serde_json::json!(has_config));
         report.insert("master_key_exists".into(), serde_json::json!(key_exists));
         // Log file location.
         let log_glob = data_dir.join("daemon.log.*");
-        report.insert("log_file".into(), serde_json::json!(log_glob.display().to_string()));
+        report.insert(
+            "log_file".into(),
+            serde_json::json!(log_glob.display().to_string()),
+        );
         report.insert("share_count".into(), serde_json::json!(share_count));
         report.insert("storage_used_bytes".into(), serde_json::json!(storage_used));
 
         if let Ok(ref config) = config_ok {
-            report.insert("storage_quota_mb".into(), serde_json::json!(config.storage.quota_mb));
-            report.insert("listen_addr".into(), serde_json::json!(config.network.listen_addr));
+            report.insert(
+                "storage_quota_mb".into(),
+                serde_json::json!(config.storage.quota_mb),
+            );
+            report.insert(
+                "listen_addr".into(),
+                serde_json::json!(config.network.listen_addr),
+            );
         }
 
-        report.insert("daemon_running".into(), serde_json::json!(daemon_status.is_some()));
+        report.insert(
+            "daemon_running".into(),
+            serde_json::json!(daemon_status.is_some()),
+        );
 
         if let Some(ref s) = daemon_status {
             report.insert("peer_id".into(), serde_json::json!(s.peer_id));
             report.insert("peer_count".into(), serde_json::json!(s.peer_count));
             report.insert("listen_addrs".into(), serde_json::json!(s.listen_addrs));
-            report.insert("pending_replication".into(), serde_json::json!(s.pending_replication));
-            report.insert("replicated_count".into(), serde_json::json!(s.replicated_count));
+            report.insert(
+                "pending_replication".into(),
+                serde_json::json!(s.pending_replication),
+            );
+            report.insert(
+                "replicated_count".into(),
+                serde_json::json!(s.replicated_count),
+            );
             report.insert("wss_port".into(), serde_json::json!(s.wss_port));
-            report.insert("wss_tls_enabled".into(), serde_json::json!(s.wss_tls_enabled));
+            report.insert(
+                "wss_tls_enabled".into(),
+                serde_json::json!(s.wss_tls_enabled),
+            );
             report.insert("obfs_quic_port".into(), serde_json::json!(s.obfs_quic_port));
-            report.insert("proxy_configured".into(), serde_json::json!(s.proxy_configured));
+            report.insert(
+                "proxy_configured".into(),
+                serde_json::json!(s.proxy_configured),
+            );
             report.insert("proxy_type".into(), serde_json::json!(s.proxy_type));
 
-            let transports: Vec<serde_json::Value> = s.transport_readiness.iter().map(|t| {
-                serde_json::json!({
-                    "name": t.name,
-                    "available": t.available,
-                    "selected": t.selected,
-                    "success_count": t.success_count,
-                    "failure_count": t.failure_count,
-                    "session_failures": t.session_failures,
-                    "data_failures": t.data_failures,
-                    "last_error": t.last_error,
-                    "reason": t.reason,
+            let transports: Vec<serde_json::Value> = s
+                .transport_readiness
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "name": t.name,
+                        "available": t.available,
+                        "selected": t.selected,
+                        "success_count": t.success_count,
+                        "failure_count": t.failure_count,
+                        "session_failures": t.session_failures,
+                        "data_failures": t.data_failures,
+                        "last_error": t.last_error,
+                        "reason": t.reason,
+                    })
                 })
-            }).collect();
+                .collect();
             report.insert("transport_readiness".into(), serde_json::json!(transports));
         }
 
@@ -562,7 +618,10 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
         println!("Version:         {version}");
         println!("Data dir:        {}", data_dir.display());
         println!("Config exists:   {has_config}");
-        println!("Master key:      {}", if key_exists { "present" } else { "MISSING" });
+        println!(
+            "Master key:      {}",
+            if key_exists { "present" } else { "MISSING" }
+        );
         println!("Daemon log:      {}/daemon.log.*", data_dir.display());
 
         if let Ok(ref config) = config_ok {
@@ -571,16 +630,29 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
         }
 
         println!("Shares stored:   {share_count}");
-        println!("Storage used:    {:.1} MiB", storage_used as f64 / 1024.0 / 1024.0);
+        println!(
+            "Storage used:    {:.1} MiB",
+            storage_used as f64 / 1024.0 / 1024.0
+        );
 
         println!();
         let daemon_running = daemon_status.is_some();
-        println!("Daemon:          {}", if daemon_running { "RUNNING" } else { "NOT RUNNING" });
+        println!(
+            "Daemon:          {}",
+            if daemon_running {
+                "RUNNING"
+            } else {
+                "NOT RUNNING"
+            }
+        );
 
         if let Some(ref s) = daemon_status {
             println!("Peer ID:         {}", s.peer_id);
             println!("Connected peers: {}", s.peer_count);
-            println!("Replication:     {} done, {} pending", s.replicated_count, s.pending_replication);
+            println!(
+                "Replication:     {} done, {} pending",
+                s.replicated_count, s.pending_replication
+            );
             if s.wss_port > 0 {
                 let tls_tag = if s.wss_tls_enabled { " (TLS)" } else { "" };
                 println!("WSS server:      :{}{tls_tag}", s.wss_port);
@@ -589,7 +661,10 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
                 println!("ObfuscatedQuic:  :{}", s.obfs_quic_port);
             }
             if s.proxy_configured {
-                println!("Proxy:           {}", s.proxy_type.as_deref().unwrap_or("?"));
+                println!(
+                    "Proxy:           {}",
+                    s.proxy_type.as_deref().unwrap_or("?")
+                );
             }
 
             if !s.transport_readiness.is_empty() {
@@ -598,7 +673,10 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
                 for t in &s.transport_readiness {
                     let status = if t.available { "AVAIL" } else { "UNAVL" };
                     let sel_tag = if t.selected { " [SELECTED]" } else { "" };
-                    print!("  {:<20} {status} ok={} fail={}{sel_tag}", t.name, t.success_count, t.failure_count);
+                    print!(
+                        "  {:<20} {status} ok={} fail={}{sel_tag}",
+                        t.name, t.success_count, t.failure_count
+                    );
                     if let Some(ref err) = t.last_error {
                         print!("  last_err: {err}");
                     }
@@ -615,39 +693,84 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
             println!("  Credential epoch: {}", s.credential_epoch);
             println!("  Credentials held: {}", s.credential_held);
             println!("  Known issuers:    {}", s.credential_issuers);
-            println!("  Descriptors:      {} total, {} relays", s.descriptor_total, s.descriptor_relays);
+            println!(
+                "  Descriptors:      {} total, {} relays",
+                s.descriptor_total, s.descriptor_relays
+            );
             println!("  Anonymity policy: {}", s.anonymity_policy);
 
             // Outcome metrics.
             println!();
             println!("Network Health Metrics:");
-            println!("  Relay diversity:       {} /16 prefixes", s.metric_relay_prefix_diversity);
-            println!("  Relay peers routable:  {}", s.metric_relay_peers_routable);
-            println!("  Multi-path score:      {:.1}%", s.metric_multi_path_retrievability * 100.0);
-            println!("  Credentialed peers:    {:.1}%", s.metric_credentialed_fraction * 100.0);
-            println!("  BBS+ credentialed:     {}", s.metric_bbs_credentialed);
-            println!("  Pseudonymous peers:    {:.1}%", s.metric_pseudonymous_fraction * 100.0);
-            println!("  Pseudonym churn:       {:.1}%", s.metric_pseudonym_churn_rate * 100.0);
-            println!("  Verification ratio:    {:.1}%", s.metric_verification_ratio * 100.0);
-            println!("  PoW difficulty:        {} bits", s.metric_pow_difficulty);
-            println!("  Rejection rate:        {:.1}%", s.metric_rejection_rate * 100.0);
-            println!("  Stale descriptors:     {}", s.metric_stale_descriptors);
-            println!("  Descriptor store:      {:.1}% full", s.metric_descriptor_utilisation * 100.0);
-            println!("  Onion relay peers:     {} (content-blind retrieval {})",
-                s.metric_onion_relay_peers,
-                if s.metric_onion_relay_peers >= 2 { "available" } else { "unavailable" }
+            println!(
+                "  Relay diversity:       {} /16 prefixes",
+                s.metric_relay_prefix_diversity
             );
-            println!("  NAT status:            {} (can_relay: {})",
-                if s.nat_publicly_reachable { "public" } else { "private/unknown" },
-                if s.nat_publicly_reachable { "yes" } else { "no" }
+            println!("  Relay peers routable:  {}", s.metric_relay_peers_routable);
+            println!(
+                "  Multi-path score:      {:.1}%",
+                s.metric_multi_path_retrievability * 100.0
+            );
+            println!(
+                "  Credentialed peers:    {:.1}%",
+                s.metric_credentialed_fraction * 100.0
+            );
+            println!("  BBS+ credentialed:     {}", s.metric_bbs_credentialed);
+            println!(
+                "  Pseudonymous peers:    {:.1}%",
+                s.metric_pseudonymous_fraction * 100.0
+            );
+            println!(
+                "  Pseudonym churn:       {:.1}%",
+                s.metric_pseudonym_churn_rate * 100.0
+            );
+            println!(
+                "  Verification ratio:    {:.1}%",
+                s.metric_verification_ratio * 100.0
+            );
+            println!("  PoW difficulty:        {} bits", s.metric_pow_difficulty);
+            println!(
+                "  Rejection rate:        {:.1}%",
+                s.metric_rejection_rate * 100.0
+            );
+            println!("  Stale descriptors:     {}", s.metric_stale_descriptors);
+            println!(
+                "  Descriptor store:      {:.1}% full",
+                s.metric_descriptor_utilisation * 100.0
+            );
+            println!(
+                "  Onion relay peers:     {} (content-blind retrieval {})",
+                s.metric_onion_relay_peers,
+                if s.metric_onion_relay_peers >= 2 {
+                    "available"
+                } else {
+                    "unavailable"
+                }
+            );
+            println!(
+                "  NAT status:            {} (can_relay: {})",
+                if s.nat_publicly_reachable {
+                    "public"
+                } else {
+                    "private/unknown"
+                },
+                if s.nat_publicly_reachable {
+                    "yes"
+                } else {
+                    "no"
+                }
             );
 
             // Rendezvous and relay trust
             println!("  Rendezvous peers:      {}", s.rendezvous_peers);
-            println!("  Relay trust tiers:     claimed={} observed={} verified={}",
-                s.relay_tier_claimed, s.relay_tier_observed, s.relay_tier_verified);
-            println!("  Relay trust evidence:  {} probed (fresh), {} forwarding-verified",
-                s.probe_cache_fresh, s.forwarding_verified_relays);
+            println!(
+                "  Relay trust tiers:     claimed={} observed={} verified={}",
+                s.relay_tier_claimed, s.relay_tier_observed, s.relay_tier_verified
+            );
+            println!(
+                "  Relay trust evidence:  {} probed (fresh), {} forwarding-verified",
+                s.probe_cache_fresh, s.forwarding_verified_relays
+            );
 
             let total_retrievals = s.retrieval_direct_attempts
                 + s.retrieval_opportunistic_attempts
@@ -656,42 +779,64 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
             if total_retrievals > 0 {
                 println!();
                 println!("Retrieval Tracking:");
-                println!("  Direct:        {}/{} succeeded",
-                    s.retrieval_direct_successes, s.retrieval_direct_attempts);
-                println!("  Opportunistic: {}/{} attempts", {
-                    let opp_total = s.retrieval_opportunistic_onion_rendezvous_successes
-                        + s.retrieval_opportunistic_onion_successes
-                        + s.retrieval_opportunistic_rendezvous_successes
-                        + s.retrieval_opportunistic_relay_successes
-                        + s.retrieval_opportunistic_direct_fallbacks;
-                    opp_total
-                }, s.retrieval_opportunistic_attempts);
-                println!("    onion+rendezvous (content-blind+NAT): {}",
-                    s.retrieval_opportunistic_onion_rendezvous_successes);
-                println!("    onion (content-blind):                {}",
-                    s.retrieval_opportunistic_onion_successes);
-                println!("    rendezvous relay (IP-only+NAT):       {}",
-                    s.retrieval_opportunistic_rendezvous_successes);
-                println!("    relay circuit (IP-only):              {}",
-                    s.retrieval_opportunistic_relay_successes);
-                println!("    direct fallback:                      {}",
-                    s.retrieval_opportunistic_direct_fallbacks);
-                println!("  Required:      {}/{} (onion: {}, relay: {}, failed: {})",
+                println!(
+                    "  Direct:        {}/{} succeeded",
+                    s.retrieval_direct_successes, s.retrieval_direct_attempts
+                );
+                println!(
+                    "  Opportunistic: {}/{} attempts",
+                    {
+                        let opp_total = s.retrieval_opportunistic_onion_rendezvous_successes
+                            + s.retrieval_opportunistic_onion_successes
+                            + s.retrieval_opportunistic_rendezvous_successes
+                            + s.retrieval_opportunistic_relay_successes
+                            + s.retrieval_opportunistic_direct_fallbacks;
+                        opp_total
+                    },
+                    s.retrieval_opportunistic_attempts
+                );
+                println!(
+                    "    onion+rendezvous (content-blind+NAT): {}",
+                    s.retrieval_opportunistic_onion_rendezvous_successes
+                );
+                println!(
+                    "    onion (content-blind):                {}",
+                    s.retrieval_opportunistic_onion_successes
+                );
+                println!(
+                    "    rendezvous relay (IP-only+NAT):       {}",
+                    s.retrieval_opportunistic_rendezvous_successes
+                );
+                println!(
+                    "    relay circuit (IP-only):              {}",
+                    s.retrieval_opportunistic_relay_successes
+                );
+                println!(
+                    "    direct fallback:                      {}",
+                    s.retrieval_opportunistic_direct_fallbacks
+                );
+                println!(
+                    "  Required:      {}/{} (onion: {}, relay: {}, failed: {})",
                     s.retrieval_required_onion_successes + s.retrieval_required_relay_successes,
                     s.retrieval_required_attempts,
                     s.retrieval_required_onion_successes,
                     s.retrieval_required_relay_successes,
-                    s.retrieval_required_failures);
-                println!("  Rendezvous:    {}/{} (failed: {}, direct fallback: {})",
+                    s.retrieval_required_failures
+                );
+                println!(
+                    "  Rendezvous:    {}/{} (failed: {}, direct fallback: {})",
                     s.retrieval_rendezvous_successes,
                     s.retrieval_rendezvous_attempts,
                     s.retrieval_rendezvous_failures,
-                    s.retrieval_rendezvous_direct_fallbacks);
+                    s.retrieval_rendezvous_direct_fallbacks
+                );
                 if s.retrieval_rendezvous_onion_attempts > 0 {
-                    println!("  Rendezvous+Onion (content-blind): {}/{} (failed: {})",
+                    println!(
+                        "  Rendezvous+Onion (content-blind): {}/{} (failed: {})",
                         s.retrieval_rendezvous_onion_successes,
                         s.retrieval_rendezvous_onion_attempts,
-                        s.retrieval_rendezvous_onion_failures);
+                        s.retrieval_rendezvous_onion_failures
+                    );
                 }
             }
 
@@ -699,10 +844,16 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
             if s.relay_probes_sent > 0 || s.forwarding_probes_sent > 0 {
                 println!();
                 println!("Relay Verification:");
-                println!("  Reachability probes:   {} sent, {} ok, {} fail",
-                    s.relay_probes_sent, s.relay_probes_succeeded, s.relay_probes_failed);
-                println!("  Forwarding probes:     {} sent, {} ok, {} fail",
-                    s.forwarding_probes_sent, s.forwarding_probes_succeeded, s.forwarding_probes_failed);
+                println!(
+                    "  Reachability probes:   {} sent, {} ok, {} fail",
+                    s.relay_probes_sent, s.relay_probes_succeeded, s.relay_probes_failed
+                );
+                println!(
+                    "  Forwarding probes:     {} sent, {} ok, {} fail",
+                    s.forwarding_probes_sent,
+                    s.forwarding_probes_succeeded,
+                    s.forwarding_probes_failed
+                );
                 println!("  Pre-retrieval sweeps:  {}", s.pre_retrieval_probes_run);
             }
         }
@@ -735,22 +886,20 @@ fn cmd_wipe(data_dir: &std::path::Path, confirm: bool) -> Result<()> {
         "✓ Distress wipe complete in {:.0}ms. Master key deleted.",
         elapsed.as_millis()
     );
-    eprintln!("  All {} locally stored shares are permanently unreadable.", store.list().len());
+    eprintln!(
+        "  All {} locally stored shares are permanently unreadable.",
+        store.list().len()
+    );
     Ok(())
 }
 
-fn cmd_config(
-    data_dir: &std::path::Path,
-    key: Option<&str>,
-    value: Option<&str>,
-) -> Result<()> {
+fn cmd_config(data_dir: &std::path::Path, key: Option<&str>, value: Option<&str>) -> Result<()> {
     let mut config = NodeConfig::load(data_dir).context("cannot load config")?;
 
     match (key, value) {
         (None, _) => {
             // Print all config.
-            let raw = toml::to_string_pretty(&config)
-                .context("cannot serialize config")?;
+            let raw = toml::to_string_pretty(&config).context("cannot serialize config")?;
             print!("{raw}");
         }
         (Some(k), None) => {
@@ -765,11 +914,26 @@ fn cmd_config(
                     }
                 }
                 "transport.wss_tls_enabled" => println!("{}", config.transport.wss_tls_enabled),
-                "transport.wss_sni" => println!("{}", config.transport.wss_sni.as_deref().unwrap_or("")),
-                "transport.proxy_type" => println!("{}", config.transport.proxy_type.as_deref().unwrap_or("")),
-                "transport.proxy_addr" => println!("{}", config.transport.proxy_addr.as_deref().unwrap_or("")),
-                "transport.obfuscated_quic_enabled" => println!("{}", config.transport.obfuscated_quic_enabled),
-                "transport.obfuscated_quic_sni" => println!("{}", config.transport.obfuscated_quic_sni.as_deref().unwrap_or("")),
+                "transport.wss_sni" => {
+                    println!("{}", config.transport.wss_sni.as_deref().unwrap_or(""))
+                }
+                "transport.proxy_type" => {
+                    println!("{}", config.transport.proxy_type.as_deref().unwrap_or(""))
+                }
+                "transport.proxy_addr" => {
+                    println!("{}", config.transport.proxy_addr.as_deref().unwrap_or(""))
+                }
+                "transport.obfuscated_quic_enabled" => {
+                    println!("{}", config.transport.obfuscated_quic_enabled)
+                }
+                "transport.obfuscated_quic_sni" => println!(
+                    "{}",
+                    config
+                        .transport
+                        .obfuscated_quic_sni
+                        .as_deref()
+                        .unwrap_or("")
+                ),
                 _ => bail!("unknown config key: {k}"),
             }
         }
@@ -805,19 +969,24 @@ fn cmd_config(
                     config.transport.proxy_addr = if v.is_empty() { None } else { Some(v.into()) };
                 }
                 "transport.proxy_username" => {
-                    config.transport.proxy_username = if v.is_empty() { None } else { Some(v.into()) };
+                    config.transport.proxy_username =
+                        if v.is_empty() { None } else { Some(v.into()) };
                 }
                 "transport.proxy_password" => {
-                    config.transport.proxy_password = if v.is_empty() { None } else { Some(v.into()) };
+                    config.transport.proxy_password =
+                        if v.is_empty() { None } else { Some(v.into()) };
                 }
                 "transport.obfuscated_quic_enabled" => {
-                    config.transport.obfuscated_quic_enabled = v.parse().context("expected bool")?;
+                    config.transport.obfuscated_quic_enabled =
+                        v.parse().context("expected bool")?;
                 }
                 "transport.obfuscated_quic_sni" => {
-                    config.transport.obfuscated_quic_sni = if v.is_empty() { None } else { Some(v.into()) };
+                    config.transport.obfuscated_quic_sni =
+                        if v.is_empty() { None } else { Some(v.into()) };
                 }
                 "transport.obfuscated_quic_secret" => {
-                    config.transport.obfuscated_quic_secret = if v.is_empty() { None } else { Some(v.into()) };
+                    config.transport.obfuscated_quic_secret =
+                        if v.is_empty() { None } else { Some(v.into()) };
                 }
                 _ => bail!("unknown config key: {k}"),
             }
@@ -853,10 +1022,13 @@ async fn cmd_daemon(data_dir: &std::path::Path, bootstrap_addrs: &[String]) -> R
         .context("cannot create node")?;
 
     let server = DaemonServer::start_with_transport(
-        node, store, data_dir.to_owned(), config.transport.clone(),
+        node,
+        store,
+        data_dir.to_owned(),
+        config.transport.clone(),
     )
-        .await
-        .context("daemon start failed")?;
+    .await
+    .context("daemon start failed")?;
 
     // Print peer ID and bootstrap addresses.
     eprintln!("Peer ID: {}", server.peer_id());
@@ -878,7 +1050,10 @@ async fn cmd_daemon(data_dir: &std::path::Path, bootstrap_addrs: &[String]) -> R
         .collect();
     let has_bootstrap = add_bootstrap_peers_to_server(&server, &all_bootstrap).await;
     if has_bootstrap {
-        server.bootstrap_dht().await.context("DHT bootstrap failed")?;
+        server
+            .bootstrap_dht()
+            .await
+            .context("DHT bootstrap failed")?;
     }
 
     eprintln!("Daemon running. Press Ctrl-C to stop.");
@@ -898,17 +1073,18 @@ async fn cmd_daemon(data_dir: &std::path::Path, bootstrap_addrs: &[String]) -> R
 // ─── Shared bootstrap helper ──────────────────────────────────────────────────
 
 /// Parse multiaddr bootstrap peers and register them with the daemon server.
-async fn add_bootstrap_peers_to_server(
-    server: &miasma_core::DaemonServer,
-    addrs: &[&str],
-) -> bool {
+async fn add_bootstrap_peers_to_server(server: &miasma_core::DaemonServer, addrs: &[&str]) -> bool {
     use libp2p::multiaddr::Protocol;
     let mut added = false;
     for addr_str in addrs {
         match addr_str.parse::<libp2p::Multiaddr>() {
             Ok(mut addr) => {
                 let maybe_peer_id: Option<libp2p::PeerId> = addr.iter().find_map(|proto| {
-                    if let Protocol::P2p(id) = proto { Some(id) } else { None }
+                    if let Protocol::P2p(id) = proto {
+                        Some(id)
+                    } else {
+                        None
+                    }
                 });
                 match maybe_peer_id {
                     Some(peer_id) => {
@@ -937,12 +1113,12 @@ async fn cmd_network_publish(
     path: &std::path::Path,
     data_shards: usize,
     total_shards: usize,
-    _bootstrap_addrs: &[String],  // ignored: daemon handles bootstrap
+    _bootstrap_addrs: &[String], // ignored: daemon handles bootstrap
 ) -> Result<()> {
     use miasma_core::{daemon_request, ControlRequest, ControlResponse};
 
-    let plaintext = std::fs::read(path)
-        .with_context(|| format!("cannot read file: {}", path.display()))?;
+    let plaintext =
+        std::fs::read(path).with_context(|| format!("cannot read file: {}", path.display()))?;
 
     eprintln!(
         "Publishing {} ({} bytes) via local daemon...",
@@ -976,7 +1152,7 @@ async fn cmd_network_get(
     output: Option<&std::path::Path>,
     data_shards: usize,
     total_shards: usize,
-    _bootstrap_addrs: &[String],  // ignored: daemon handles bootstrap
+    _bootstrap_addrs: &[String], // ignored: daemon handles bootstrap
 ) -> Result<()> {
     use miasma_core::{daemon_request, ControlRequest, ControlResponse};
 
@@ -998,7 +1174,9 @@ async fn cmd_network_get(
                 }
                 None => {
                     use std::io::Write as _;
-                    io::stdout().write_all(&data).context("cannot write to stdout")?;
+                    io::stdout()
+                        .write_all(&data)
+                        .context("cannot write to stdout")?;
                 }
             }
             Ok(())
@@ -1012,7 +1190,9 @@ async fn cmd_network_get(
 
 /// Remove old log files beyond `keep` count. Matches files starting with `prefix`.
 fn cleanup_old_logs(dir: &std::path::Path, prefix: &str, keep: usize) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     let mut logs: Vec<(std::path::PathBuf, std::time::SystemTime)> = entries
         .filter_map(|e| e.ok())
         .filter(|e| {

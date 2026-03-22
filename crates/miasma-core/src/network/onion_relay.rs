@@ -194,13 +194,13 @@ pub fn process_onion_layer(
 
     let payload = OnionLayerProcessor::peel(relay_static_secret, layer)?;
 
-    let next_hop = payload.next_hop.ok_or_else(|| {
-        crate::MiasmaError::Sss("relay received a layer with no next_hop".into())
-    })?;
+    let next_hop = payload
+        .next_hop
+        .ok_or_else(|| crate::MiasmaError::Sss("relay received a layer with no next_hop".into()))?;
 
-    let return_key = payload.return_key.ok_or_else(|| {
-        crate::MiasmaError::Sss("relay layer missing return_key".into())
-    })?;
+    let return_key = payload
+        .return_key
+        .ok_or_else(|| crate::MiasmaError::Sss("relay layer missing return_key".into()))?;
 
     // Try to deserialize the data as an inner OnionLayer.
     // If it deserializes, this is an intermediate hop (R1) — forward to next relay.
@@ -216,8 +216,8 @@ pub fn process_onion_layer(
             // R2 position: the data is the InnerPayload, extract the body.
             // For e2e encrypted mode, the body contains session_key || e2e_blob.
             // We pass through the raw data — the target decrypts.
-            let inner: crate::onion::packet::InnerPayload =
-                bincode::deserialize(&payload.data).map_err(|e| {
+            let inner: crate::onion::packet::InnerPayload = bincode::deserialize(&payload.data)
+                .map_err(|e| {
                     crate::MiasmaError::Serialization(format!(
                         "relay: failed to parse inner payload: {e}"
                     ))
@@ -267,8 +267,7 @@ mod tests {
         )
         .unwrap();
 
-        let action =
-            process_onion_layer(&r1_sec, packet.circuit_id, &packet.layer).unwrap();
+        let action = process_onion_layer(&r1_sec, packet.circuit_id, &packet.layer).unwrap();
 
         match action {
             OnionRelayAction::ForwardToNext {
@@ -300,8 +299,7 @@ mod tests {
         .unwrap();
 
         // R1 peels
-        let action1 =
-            process_onion_layer(&r1_sec, packet.circuit_id, &packet.layer).unwrap();
+        let action1 = process_onion_layer(&r1_sec, packet.circuit_id, &packet.layer).unwrap();
         let (inner_layer, r1_return_key) = match action1 {
             OnionRelayAction::ForwardToNext {
                 inner_layer,
@@ -312,8 +310,7 @@ mod tests {
         };
 
         // R2 peels
-        let action2 =
-            process_onion_layer(&r2_sec, packet.circuit_id, &inner_layer).unwrap();
+        let action2 = process_onion_layer(&r2_sec, packet.circuit_id, &inner_layer).unwrap();
         match action2 {
             OnionRelayAction::DeliverToTarget {
                 target_peer_id,
@@ -345,8 +342,7 @@ mod tests {
         .unwrap();
 
         // R1 peels → get r1_return_key
-        let action1 =
-            process_onion_layer(&r1_sec, packet.circuit_id, &packet.layer).unwrap();
+        let action1 = process_onion_layer(&r1_sec, packet.circuit_id, &packet.layer).unwrap();
         let (inner_layer, r1_return_key) = match action1 {
             OnionRelayAction::ForwardToNext {
                 inner_layer,
@@ -357,8 +353,7 @@ mod tests {
         };
 
         // R2 peels → get r2_return_key
-        let action2 =
-            process_onion_layer(&r2_sec, packet.circuit_id, &inner_layer).unwrap();
+        let action2 = process_onion_layer(&r2_sec, packet.circuit_id, &inner_layer).unwrap();
         let r2_return_key = match action2 {
             OnionRelayAction::DeliverToTarget { return_key, .. } => return_key,
             _ => panic!("expected DeliverToTarget"),
@@ -375,10 +370,8 @@ mod tests {
 
         // Initiator decrypts: r1 layer first, then r2 layer
         let after_r1 =
-            crate::onion::packet::decrypt_response(&r1_return_key, &r1_encrypted)
-                .unwrap();
-        let plaintext =
-            crate::onion::packet::decrypt_response(&r2_return_key, &after_r1).unwrap();
+            crate::onion::packet::decrypt_response(&r1_return_key, &r1_encrypted).unwrap();
+        let plaintext = crate::onion::packet::decrypt_response(&r2_return_key, &after_r1).unwrap();
 
         assert_eq!(plaintext, response);
     }
@@ -402,16 +395,14 @@ mod tests {
         .unwrap();
 
         // R1 peels
-        let action1 =
-            process_onion_layer(&r1_sec, packet.circuit_id, &packet.layer).unwrap();
+        let action1 = process_onion_layer(&r1_sec, packet.circuit_id, &packet.layer).unwrap();
         let inner_layer = match action1 {
             OnionRelayAction::ForwardToNext { inner_layer, .. } => inner_layer,
             _ => panic!("expected ForwardToNext"),
         };
 
         // R2 peels — gets the body but can't read it (e2e encrypted)
-        let action2 =
-            process_onion_layer(&r2_sec, packet.circuit_id, &inner_layer).unwrap();
+        let action2 = process_onion_layer(&r2_sec, packet.circuit_id, &inner_layer).unwrap();
         let delivered_body = match action2 {
             OnionRelayAction::DeliverToTarget { body, .. } => body,
             _ => panic!("expected DeliverToTarget"),
@@ -426,8 +417,7 @@ mod tests {
         let e2e_layer: crate::onion::packet::OnionLayer =
             bincode::deserialize(&delivered_body[32..]).unwrap();
         let e2e_payload =
-            crate::onion::packet::OnionLayerProcessor::peel(&target_sec, &e2e_layer)
-                .unwrap();
+            crate::onion::packet::OnionLayerProcessor::peel(&target_sec, &e2e_layer).unwrap();
         assert!(e2e_payload.next_hop.is_none()); // final destination
         assert_eq!(e2e_payload.data, body);
     }

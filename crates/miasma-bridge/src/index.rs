@@ -94,7 +94,9 @@ impl BtMiasmaIndex {
 
     /// Look up the MID for a BitTorrent info-hash.
     pub fn lookup_mid(&self, info_hash: &[u8; 20]) -> Option<&str> {
-        self.bt_to_mid.get(&hex::encode(info_hash)).map(|s| s.as_str())
+        self.bt_to_mid
+            .get(&hex::encode(info_hash))
+            .map(|s| s.as_str())
     }
 
     /// Look up the BT info-hash (as hex) for a MID (only when reverse lookup
@@ -111,9 +113,12 @@ impl BtMiasmaIndex {
         }
         let content = std::fs::read_to_string(&self.path)?;
         for line in content.lines() {
-            if line.trim().is_empty() { continue; }
+            if line.trim().is_empty() {
+                continue;
+            }
             let entry: BridgeEntry = serde_json::from_str(line)?;
-            self.bt_to_mid.insert(entry.info_hash.clone(), entry.mid.clone());
+            self.bt_to_mid
+                .insert(entry.info_hash.clone(), entry.mid.clone());
             if self.reverse_lookup_enabled {
                 self.mid_to_bt.insert(entry.mid, entry.info_hash);
             }

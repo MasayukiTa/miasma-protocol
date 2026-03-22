@@ -173,10 +173,7 @@ fn is_ula_ipv6(ip: &Ipv6Addr) -> bool {
 
 /// Filter a list of multiaddrs, keeping only those safe to route to from
 /// a remote peer. Logs rejected addresses.
-pub fn filter_peer_addresses(
-    peer_id: &libp2p::PeerId,
-    addrs: &[Multiaddr],
-) -> Vec<Multiaddr> {
+pub fn filter_peer_addresses(peer_id: &libp2p::PeerId, addrs: &[Multiaddr]) -> Vec<Multiaddr> {
     let mut accepted = Vec::new();
     for addr in addrs {
         let pa = PeerAddress::new(addr.clone(), AddressTrust::Observed);
@@ -202,42 +199,66 @@ mod tests {
 
     #[test]
     fn classify_loopback_v4() {
-        assert_eq!(classify_multiaddr(&ma("/ip4/127.0.0.1/tcp/4001")), AddressClass::Loopback);
+        assert_eq!(
+            classify_multiaddr(&ma("/ip4/127.0.0.1/tcp/4001")),
+            AddressClass::Loopback
+        );
     }
 
     #[test]
     fn classify_loopback_v6() {
-        assert_eq!(classify_multiaddr(&ma("/ip6/::1/tcp/4001")), AddressClass::Loopback);
+        assert_eq!(
+            classify_multiaddr(&ma("/ip6/::1/tcp/4001")),
+            AddressClass::Loopback
+        );
     }
 
     #[test]
     fn classify_private_10() {
-        assert_eq!(classify_multiaddr(&ma("/ip4/10.0.0.1/tcp/4001")), AddressClass::Private);
+        assert_eq!(
+            classify_multiaddr(&ma("/ip4/10.0.0.1/tcp/4001")),
+            AddressClass::Private
+        );
     }
 
     #[test]
     fn classify_private_172() {
-        assert_eq!(classify_multiaddr(&ma("/ip4/172.16.0.1/tcp/4001")), AddressClass::Private);
+        assert_eq!(
+            classify_multiaddr(&ma("/ip4/172.16.0.1/tcp/4001")),
+            AddressClass::Private
+        );
     }
 
     #[test]
     fn classify_private_192() {
-        assert_eq!(classify_multiaddr(&ma("/ip4/192.168.1.1/tcp/4001")), AddressClass::Private);
+        assert_eq!(
+            classify_multiaddr(&ma("/ip4/192.168.1.1/tcp/4001")),
+            AddressClass::Private
+        );
     }
 
     #[test]
     fn classify_link_local_v4() {
-        assert_eq!(classify_multiaddr(&ma("/ip4/169.254.0.1/tcp/4001")), AddressClass::LinkLocal);
+        assert_eq!(
+            classify_multiaddr(&ma("/ip4/169.254.0.1/tcp/4001")),
+            AddressClass::LinkLocal
+        );
     }
 
     #[test]
     fn classify_global_unicast() {
-        assert_eq!(classify_multiaddr(&ma("/ip4/8.8.8.8/tcp/4001")), AddressClass::GlobalUnicast);
+        assert_eq!(
+            classify_multiaddr(&ma("/ip4/8.8.8.8/tcp/4001")),
+            AddressClass::GlobalUnicast
+        );
     }
 
     #[test]
     fn classify_dns() {
-        assert_eq!(classify_multiaddr(&ma("/dns4/example.com/tcp/4001")), AddressClass::GlobalUnicast);
+        assert_eq!(
+            classify_multiaddr(&ma("/dns4/example.com/tcp/4001")),
+            AddressClass::GlobalUnicast
+        );
     }
 
     #[test]

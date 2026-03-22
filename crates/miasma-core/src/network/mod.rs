@@ -9,26 +9,31 @@ pub mod metrics;
 pub mod node;
 pub mod onion_relay;
 pub mod path_selection;
-pub mod relay_probe;
 pub mod peer_state;
+pub mod relay_probe;
 pub mod routing;
 pub mod sybil;
 pub mod types;
 
 pub use admission_policy::{AdmissionPolicyStats, HybridAdmissionPolicy};
 pub use bbs_credential::{
-    BbsCredential, BbsCredentialWallet, BbsError, BbsIssuer, BbsIssuerKey, BbsProof, BbsPlusScheme,
+    BbsCredential, BbsCredentialWallet, BbsError, BbsIssuer, BbsIssuerKey, BbsPlusScheme, BbsProof,
     CredentialScheme, DisclosurePolicy, Ed25519Scheme,
 };
 pub use coordinator::{MiasmaCoordinator, NetworkShareFetcher, RetrievalStats};
 pub use credential::{CredentialStats, CredentialTier, CredentialWallet, IssuerRegistry};
-pub use descriptor::{DescriptorStats, DescriptorStore, PeerDescriptor, PeerCapabilities, ReachabilityKind, RelayObservation, RelayTrustTier, ResolvedIntroPoint, ResourceProfile};
-pub use dht::{BypassOnionDhtExecutor, DirectDhtExecutor, LiveOnionDhtExecutor, OnionAwareDhtExecutor};
+pub use descriptor::{
+    DescriptorStats, DescriptorStore, PeerCapabilities, PeerDescriptor, ReachabilityKind,
+    RelayObservation, RelayTrustTier, ResolvedIntroPoint, ResourceProfile,
+};
+pub use dht::{
+    BypassOnionDhtExecutor, DirectDhtExecutor, LiveOnionDhtExecutor, OnionAwareDhtExecutor,
+};
+pub use metrics::OutcomeMetrics;
 pub use node::{DhtHandle, MiasmaNode, ShareExchangeHandle};
+pub use onion_relay::{OnionRelayCodec, OnionRelayRequest, OnionRelayResponse};
 pub use path_selection::{AnonymityPolicy, PathSelectionStats};
 pub use peer_state::{AdmissionStats, PeerRegistry, RejectionReason};
-pub use metrics::OutcomeMetrics;
-pub use onion_relay::{OnionRelayCodec, OnionRelayRequest, OnionRelayResponse};
-pub use relay_probe::{RelayProbeCodec, ProbeRequest, ProbeResponse};
+pub use relay_probe::{ProbeRequest, ProbeResponse, RelayProbeCodec};
 pub use routing::{DiversityViolation, RoutingStats};
 pub use types::{DhtRecord, NodeType, ShardLocation, TopologyEvent};

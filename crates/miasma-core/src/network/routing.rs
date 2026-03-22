@@ -168,18 +168,34 @@ impl PeerRoutingState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DiversityViolation {
     /// Too many peers from the same IPv4 /16 subnet.
-    Ipv4SubnetSaturated { prefix: String, count: usize, limit: usize },
+    Ipv4SubnetSaturated {
+        prefix: String,
+        count: usize,
+        limit: usize,
+    },
     /// Too many peers from the same IPv6 /48 prefix.
-    Ipv6PrefixSaturated { prefix: String, count: usize, limit: usize },
+    Ipv6PrefixSaturated {
+        prefix: String,
+        count: usize,
+        limit: usize,
+    },
 }
 
 impl std::fmt::Display for DiversityViolation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DiversityViolation::Ipv4SubnetSaturated { prefix, count, limit } => {
+            DiversityViolation::Ipv4SubnetSaturated {
+                prefix,
+                count,
+                limit,
+            } => {
                 write!(f, "IPv4 /16 {prefix}: {count}/{limit} peers")
             }
-            DiversityViolation::Ipv6PrefixSaturated { prefix, count, limit } => {
+            DiversityViolation::Ipv6PrefixSaturated {
+                prefix,
+                count,
+                limit,
+            } => {
                 write!(f, "IPv6 /48 {prefix}: {count}/{limit} peers")
             }
         }
@@ -224,12 +240,16 @@ impl RoutingTable {
     /// if the peer would create a prefix cluster.
     pub fn check_diversity(&self, addrs: &[Multiaddr]) -> Result<IpPrefix, DiversityViolation> {
         if !self.diversity_enabled {
-            let prefix = addrs.first().map(|a| ip_prefix_of(a)).unwrap_or(IpPrefix::Local);
+            let prefix = addrs
+                .first()
+                .map(|a| ip_prefix_of(a))
+                .unwrap_or(IpPrefix::Local);
             return Ok(prefix);
         }
 
         // Use the first non-local address for prefix determination.
-        let prefix = addrs.iter()
+        let prefix = addrs
+            .iter()
             .map(|a| ip_prefix_of(a))
             .find(|p| *p != IpPrefix::Local)
             .unwrap_or(IpPrefix::Local);
@@ -339,13 +359,18 @@ impl RoutingTable {
                 let reliability_score = (state.reliability() * 100.0) as u32;
 
                 // Diversity bonus: peers from less-common prefixes get a bonus.
-                let prefix_count = self.prefix_counts.get(&state.ip_prefix).copied().unwrap_or(1);
+                let prefix_count = self
+                    .prefix_counts
+                    .get(&state.ip_prefix)
+                    .copied()
+                    .unwrap_or(1);
                 let diversity_score = 50 / prefix_count as u32;
 
                 // Penalty for unreliable peers.
                 let penalty = if state.is_unreliable() { 200 } else { 0 };
 
-                let total = (trust_score + reliability_score + diversity_score).saturating_sub(penalty);
+                let total =
+                    (trust_score + reliability_score + diversity_score).saturating_sub(penalty);
                 Some((*peer_id, total))
             })
             .collect();
@@ -366,7 +391,9 @@ impl RoutingTable {
 
     /// Returns prefix distribution for diagnostics.
     pub fn prefix_distribution(&self) -> Vec<(String, usize)> {
-        let mut dist: Vec<_> = self.prefix_counts.iter()
+        let mut dist: Vec<_> = self
+            .prefix_counts
+            .iter()
             .map(|(p, c)| (p.to_string(), *c))
             .collect();
         dist.sort_by(|a, b| b.1.cmp(&a.1));
@@ -375,7 +402,8 @@ impl RoutingTable {
 
     /// Returns all unreliable peers (for diagnostics).
     pub fn unreliable_peers(&self) -> Vec<(PeerId, f64)> {
-        self.peers.iter()
+        self.peers
+            .iter()
             .filter(|(_, s)| s.is_unreliable())
             .map(|(id, s)| (*id, s.reliability()))
             .collect()
@@ -429,7 +457,9 @@ impl RoutingTable {
             return sybil::DEFAULT_POW_DIFFICULTY;
         }
 
-        let mut sizes: Vec<usize> = self.difficulty_observations.iter()
+        let mut sizes: Vec<usize> = self
+            .difficulty_observations
+            .iter()
             .map(|(_, s)| *s)
             .collect();
         sizes.sort();
@@ -453,8 +483,10 @@ impl RoutingTable {
             self.current_difficulty = recommended;
             info!(
                 "PoW difficulty adjusted: {} → {} bits (median network size: {})",
-                old, recommended,
-                self.difficulty_observations.iter()
+                old,
+                recommended,
+                self.difficulty_observations
+                    .iter()
                     .map(|(_, s)| *s)
                     .sum::<usize>()
                     .checked_div(self.difficulty_observations.len())
@@ -503,13 +535,22 @@ mod tests {
 
     #[test]
     fn ip_prefix_extraction_ipv4() {
-        assert_eq!(ip_prefix_of(&ma("/ip4/8.8.4.4/tcp/4001")), IpPrefix::V4Slash16([8, 8]));
-        assert_eq!(ip_prefix_of(&ma("/ip4/192.168.1.1/tcp/4001")), IpPrefix::V4Slash16([192, 168]));
+        assert_eq!(
+            ip_prefix_of(&ma("/ip4/8.8.4.4/tcp/4001")),
+            IpPrefix::V4Slash16([8, 8])
+        );
+        assert_eq!(
+            ip_prefix_of(&ma("/ip4/192.168.1.1/tcp/4001")),
+            IpPrefix::V4Slash16([192, 168])
+        );
     }
 
     #[test]
     fn ip_prefix_loopback_is_local() {
-        assert_eq!(ip_prefix_of(&ma("/ip4/127.0.0.1/tcp/4001")), IpPrefix::Local);
+        assert_eq!(
+            ip_prefix_of(&ma("/ip4/127.0.0.1/tcp/4001")),
+            IpPrefix::Local
+        );
     }
 
     #[test]
@@ -632,7 +673,11 @@ mod tests {
         rt.add_peer(observed, IpPrefix::V4Slash16([2, 2]));
 
         let ranked = rt.rank_peers(&[observed, verified], |id| {
-            if *id == verified { AddressTrust::Verified } else { AddressTrust::Observed }
+            if *id == verified {
+                AddressTrust::Verified
+            } else {
+                AddressTrust::Observed
+            }
         });
 
         assert_eq!(ranked[0], verified, "verified peer should be ranked first");

@@ -190,8 +190,13 @@ mod tests {
         let shards = rs_encode(DATA, DEFAULT_DATA_SHARDS, DEFAULT_TOTAL_SHARDS).unwrap();
         assert_eq!(shards.len(), DEFAULT_TOTAL_SHARDS);
         let indexed = make_indexed(&shards);
-        let recovered =
-            rs_decode(&indexed, DEFAULT_DATA_SHARDS, DEFAULT_TOTAL_SHARDS, DATA.len()).unwrap();
+        let recovered = rs_decode(
+            &indexed,
+            DEFAULT_DATA_SHARDS,
+            DEFAULT_TOTAL_SHARDS,
+            DATA.len(),
+        )
+        .unwrap();
         assert_eq!(recovered, DATA);
     }
 
@@ -204,8 +209,13 @@ mod tests {
             .cloned()
             .enumerate()
             .collect();
-        let recovered =
-            rs_decode(&indexed, DEFAULT_DATA_SHARDS, DEFAULT_TOTAL_SHARDS, DATA.len()).unwrap();
+        let recovered = rs_decode(
+            &indexed,
+            DEFAULT_DATA_SHARDS,
+            DEFAULT_TOTAL_SHARDS,
+            DATA.len(),
+        )
+        .unwrap();
         assert_eq!(recovered, DATA);
     }
 
@@ -219,8 +229,13 @@ mod tests {
             .enumerate()
             .filter(|(i, _)| *i >= 5)
             .collect();
-        let recovered =
-            rs_decode(&indexed, DEFAULT_DATA_SHARDS, DEFAULT_TOTAL_SHARDS, DATA.len()).unwrap();
+        let recovered = rs_decode(
+            &indexed,
+            DEFAULT_DATA_SHARDS,
+            DEFAULT_TOTAL_SHARDS,
+            DATA.len(),
+        )
+        .unwrap();
         assert_eq!(recovered, DATA);
     }
 
@@ -234,8 +249,13 @@ mod tests {
             .enumerate()
             .map(|(i, s)| (i + DEFAULT_DATA_SHARDS, s))
             .collect();
-        let recovered =
-            rs_decode(&indexed, DEFAULT_DATA_SHARDS, DEFAULT_TOTAL_SHARDS, DATA.len()).unwrap();
+        let recovered = rs_decode(
+            &indexed,
+            DEFAULT_DATA_SHARDS,
+            DEFAULT_TOTAL_SHARDS,
+            DATA.len(),
+        )
+        .unwrap();
         assert_eq!(recovered, DATA);
     }
 
@@ -243,9 +263,13 @@ mod tests {
     fn insufficient_shards_returns_error() {
         let shards = rs_encode(DATA, DEFAULT_DATA_SHARDS, DEFAULT_TOTAL_SHARDS).unwrap();
         let indexed: Vec<(usize, Vec<u8>)> = shards.into_iter().enumerate().take(9).collect();
-        assert!(
-            rs_decode(&indexed, DEFAULT_DATA_SHARDS, DEFAULT_TOTAL_SHARDS, DATA.len()).is_err()
-        );
+        assert!(rs_decode(
+            &indexed,
+            DEFAULT_DATA_SHARDS,
+            DEFAULT_TOTAL_SHARDS,
+            DATA.len()
+        )
+        .is_err());
     }
 
     #[test]

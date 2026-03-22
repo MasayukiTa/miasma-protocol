@@ -14,7 +14,10 @@ pub struct ReputationVerifier {
 
 impl ReputationVerifier {
     pub fn new(issuer_pubkey: Vec<u8>, min_uptime_threshold: u8) -> Self {
-        Self { issuer_pubkey, min_uptime_threshold }
+        Self {
+            issuer_pubkey,
+            min_uptime_threshold,
+        }
     }
 
     /// Verify a proof against the stored issuer key and threshold policy.

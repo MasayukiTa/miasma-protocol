@@ -17,17 +17,17 @@ use miasma_core::network::address::AddressTrust;
 use miasma_core::network::admission_policy::{
     AdmissionSignals, HybridAdmissionPolicy, HybridRejection,
 };
+use miasma_core::network::bbs_credential::{
+    bbs_create_proof, bbs_verify_proof, generate_link_secret, BbsCredentialAttributes,
+    BbsCredentialWallet, BbsIssuer, BbsIssuerKey, DisclosurePolicy,
+};
 use miasma_core::network::credential::{
-    self, CredentialIssuer, CredentialPresentation, CredentialTier,
-    EphemeralIdentity, CAP_ROUTE, CAP_STORE,
+    self, CredentialIssuer, CredentialPresentation, CredentialTier, EphemeralIdentity, CAP_ROUTE,
+    CAP_STORE,
 };
 use miasma_core::network::descriptor::{
-    DescriptorStore, PeerCapabilities, PeerDescriptor, ReachabilityKind,
-    RelayTrustTier, ResourceProfile,
-};
-use miasma_core::network::bbs_credential::{
-    bbs_create_proof, bbs_verify_proof, BbsCredentialWallet, BbsIssuer, BbsIssuerKey,
-    BbsCredentialAttributes, DisclosurePolicy, generate_link_secret,
+    DescriptorStore, PeerCapabilities, PeerDescriptor, ReachabilityKind, RelayTrustTier,
+    ResourceProfile,
 };
 use miasma_core::network::metrics::OutcomeMetrics;
 use miasma_core::network::path_selection::{AnonymityPolicy, PathSelector};
@@ -39,7 +39,6 @@ use miasma_core::network::routing::{IpPrefix, RoutingTable};
 fn test_issuer() -> CredentialIssuer {
     CredentialIssuer::new(ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]))
 }
-
 
 // ─── Scenario 1: Sybil cluster via IP prefix saturation ─────────────────────
 
@@ -69,7 +68,10 @@ fn sybil_cluster_prefix_saturation() {
         }
     }
 
-    assert_eq!(admitted, 3, "only MAX_PEERS_PER_IPV4_SLASH16 should be admitted");
+    assert_eq!(
+        admitted, 3,
+        "only MAX_PEERS_PER_IPV4_SLASH16 should be admitted"
+    );
     assert_eq!(rejected, 97, "remaining should be diversity-rejected");
     assert_eq!(rt.stats().diversity_rejections, 97);
 }
@@ -137,7 +139,8 @@ fn eclipse_via_diverse_sybils_resisted_by_trust() {
     }
 
     // Rank all peers: honest should dominate the top.
-    let all_peers: Vec<PeerId> = attacker_peers.iter()
+    let all_peers: Vec<PeerId> = attacker_peers
+        .iter()
         .chain(honest_peers.iter())
         .copied()
         .collect();
@@ -318,7 +321,10 @@ fn credential_expired_epoch_rejected() {
         CredentialTier::Verified,
     );
     assert!(
-        matches!(result.unwrap_err(), credential::CredentialError::ExpiredEpoch { .. }),
+        matches!(
+            result.unwrap_err(),
+            credential::CredentialError::ExpiredEpoch { .. }
+        ),
         "credential from 100 epochs ago should be expired"
     );
 }
@@ -348,7 +354,10 @@ fn routing_pressure_fake_reliability_impossible() {
     }
 
     let ranked = rt.rank_peers(&[attacker, honest], |_| AddressTrust::Verified);
-    assert_eq!(ranked[0], honest, "honest peer with real successes should rank above attacker with failures");
+    assert_eq!(
+        ranked[0], honest,
+        "honest peer with real successes should rank above attacker with failures"
+    );
 }
 
 /// Attacker creates many peers to dilute the reliability signal.
@@ -361,24 +370,32 @@ fn routing_dilution_attack_mitigated_by_diversity() {
         .map(|i| {
             let peer = PeerId::random();
             rt.add_peer(peer, IpPrefix::V4Slash16([200 + i, 0]));
-            for _ in 0..5 { rt.record_success(&peer); }
+            for _ in 0..5 {
+                rt.record_success(&peer);
+            }
             peer
         })
         .collect();
 
     // 9 attacker peers (3 per /16, diversity capped at 3).
-    let attacker: Vec<PeerId> = (0..9)
-        .map(|_| PeerId::random())
-        .collect();
+    let attacker: Vec<PeerId> = (0..9).map(|_| PeerId::random()).collect();
 
     // Only 3 attackers can get into different /16s.
     for (i, &peer) in attacker.iter().take(3).enumerate() {
         rt.add_peer(peer, IpPrefix::V4Slash16([10 + i as u8, 0]));
     }
 
-    let all: Vec<PeerId> = honest.iter().chain(attacker.iter().take(3)).copied().collect();
+    let all: Vec<PeerId> = honest
+        .iter()
+        .chain(attacker.iter().take(3))
+        .copied()
+        .collect();
     let ranked = rt.rank_peers(&all, |id| {
-        if honest.contains(id) { AddressTrust::Verified } else { AddressTrust::Observed }
+        if honest.contains(id) {
+            AddressTrust::Verified
+        } else {
+            AddressTrust::Observed
+        }
     });
 
     // Honest peers should be ranked higher (Verified + reliable).
@@ -405,7 +422,10 @@ fn hybrid_admission_pow_floor_prevents_gaming() {
     };
 
     let decision = policy.evaluate(&signals);
-    assert!(!decision.admitted, "below minimum PoW should always be rejected");
+    assert!(
+        !decision.admitted,
+        "below minimum PoW should always be rejected"
+    );
     assert!(matches!(
         decision.rejection_reason,
         Some(HybridRejection::InsufficientMinPoW { .. })
@@ -430,7 +450,10 @@ fn hybrid_admission_mobile_sybil_still_costly() {
 
     let decision = policy.evaluate(&signals);
     // 4*10 = 40 < 80 (mobile threshold)
-    assert!(!decision.admitted, "mobile sybil without credential should fail");
+    assert!(
+        !decision.admitted,
+        "mobile sybil without credential should fail"
+    );
 }
 
 /// Legitimate mobile peer with a credential should be admitted.
@@ -448,7 +471,10 @@ fn hybrid_admission_legitimate_mobile_with_credential() {
 
     let decision = policy.evaluate(&signals);
     // 40 + 50 + 100 = 190 >= 80
-    assert!(decision.admitted, "legitimate mobile with credential should pass");
+    assert!(
+        decision.admitted,
+        "legitimate mobile with credential should pass"
+    );
 }
 
 // ─── Scenario 7: Path selection under adversarial relay set ─────────────────
@@ -467,7 +493,10 @@ fn path_selection_same_prefix_relays() {
             ps,
             ReachabilityKind::Direct,
             vec![format!("/ip4/10.0.{i}.1/tcp/4001")],
-            PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+            PeerCapabilities {
+                can_relay: true,
+                ..PeerCapabilities::default()
+            },
             ResourceProfile::Desktop,
             None,
             1,
@@ -483,7 +512,10 @@ fn path_selection_same_prefix_relays() {
         &rt,
     );
 
-    assert!(result.is_err(), "same-prefix relays should not satisfy 2-hop diversity");
+    assert!(
+        result.is_err(),
+        "same-prefix relays should not satisfy 2-hop diversity"
+    );
 }
 
 /// With diverse relays, path selection should succeed.
@@ -499,7 +531,10 @@ fn path_selection_diverse_relays_succeed() {
             ps,
             ReachabilityKind::Direct,
             vec![format!("/ip4/{}.{}.1.1/tcp/4001", i + 1, i + 1)],
-            PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+            PeerCapabilities {
+                can_relay: true,
+                ..PeerCapabilities::default()
+            },
             ResourceProfile::Desktop,
             None,
             1,
@@ -513,13 +548,18 @@ fn path_selection_diverse_relays_succeed() {
         AnonymityPolicy::Required { min_hops: 3 },
         &store,
         &rt,
-    ).unwrap();
+    )
+    .unwrap();
 
     assert!(path.hop_count() >= 3);
     // Verify all hops have different prefixes.
     let prefixes = path.prefixes();
     let unique: std::collections::HashSet<_> = prefixes.iter().collect();
-    assert_eq!(prefixes.len(), unique.len(), "all hops should have unique prefixes");
+    assert_eq!(
+        prefixes.len(),
+        unique.len(),
+        "all hops should have unique prefixes"
+    );
 }
 
 // ─── Scenario 8: PoW cost vs network size ───────────────────────────────────
@@ -541,14 +581,20 @@ fn pow_difficulty_scales_with_network_size() {
         rt.observe_network_size(100);
     }
     rt.maybe_adjust_difficulty();
-    assert!(rt.current_difficulty() > 8, "difficulty should increase with network size");
+    assert!(
+        rt.current_difficulty() > 8,
+        "difficulty should increase with network size"
+    );
 
     // Large network: difficulty should be substantial.
     for _ in 0..30 {
         rt.observe_network_size(500);
     }
     rt.maybe_adjust_difficulty();
-    assert!(rt.current_difficulty() >= 20, "large network should require high PoW");
+    assert!(
+        rt.current_difficulty() >= 20,
+        "large network should require high PoW"
+    );
 }
 
 /// Compute the cost ratio: how many more hashes an attacker needs at higher
@@ -574,7 +620,10 @@ fn pow_sybil_cost_multiplier() {
     // 334 different /16 prefixes to place all 1000 identities.
     let identities = 1000u64;
     let hashes_at_20 = identities * high_cost;
-    assert!(hashes_at_20 > 1_000_000_000, "Sybil cost should be > 1B hashes");
+    assert!(
+        hashes_at_20 > 1_000_000_000,
+        "Sybil cost should be > 1B hashes"
+    );
 }
 
 // ─── Scenario 9: BBS+ credential abuse ──────────────────────────────────────
@@ -598,7 +647,10 @@ fn bbs_proof_context_replay() {
 
     // Replay with a different context.
     let result = bbs_verify_proof(&proof, &issuer_key.pk_bytes(), b"different-context");
-    assert!(result.is_err(), "BBS+ proof replayed with wrong context should fail");
+    assert!(
+        result.is_err(),
+        "BBS+ proof replayed with wrong context should fail"
+    );
 }
 
 /// Attacker generates a BBS+ proof from an unknown issuer.
@@ -687,7 +739,10 @@ fn bbs_proof_tampered_disclosed_tier() {
     }
 
     let result = bbs_verify_proof(&proof, &issuer_key.pk_bytes(), b"ctx");
-    assert!(result.is_err(), "tampered disclosed tier should break Schnorr proof");
+    assert!(
+        result.is_err(),
+        "tampered disclosed tier should break Schnorr proof"
+    );
 }
 
 /// BBS+ within-epoch unlinkability: two proofs from the same credential
@@ -716,7 +771,10 @@ fn bbs_within_epoch_unlinkability() {
     // But they should look different (randomised A', A_bar, challenge, responses).
     assert_ne!(proof1.a_prime, proof2.a_prime, "A' should differ");
     assert_ne!(proof1.a_bar, proof2.a_bar, "A_bar should differ");
-    assert_ne!(proof1.challenge, proof2.challenge, "challenge should differ");
+    assert_ne!(
+        proof1.challenge, proof2.challenge,
+        "challenge should differ"
+    );
 }
 
 // ─── Scenario 10: Descriptor store flooding ─────────────────────────────────
@@ -734,8 +792,16 @@ fn descriptor_store_flooding() {
         store.upsert(PeerDescriptor::new_signed(
             ps,
             ReachabilityKind::Direct,
-            vec![format!("/ip4/{}.{}.{}.1/tcp/4001", (i >> 16) as u8, (i >> 8) as u8, i as u8)],
-            PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+            vec![format!(
+                "/ip4/{}.{}.{}.1/tcp/4001",
+                (i >> 16) as u8,
+                (i >> 8) as u8,
+                i as u8
+            )],
+            PeerCapabilities {
+                can_relay: true,
+                ..PeerCapabilities::default()
+            },
             ResourceProfile::Desktop,
             None,
             1,
@@ -807,7 +873,10 @@ fn hybrid_admission_constrained_device_min_pow() {
     };
 
     let decision = policy.evaluate(&signals);
-    assert!(!decision.admitted, "constrained device below PoW floor should be rejected");
+    assert!(
+        !decision.admitted,
+        "constrained device below PoW floor should be rejected"
+    );
 }
 
 /// Desktop peer at exact threshold boundary.
@@ -825,7 +894,10 @@ fn hybrid_admission_exact_desktop_threshold() {
     };
 
     let decision = policy.evaluate(&signals);
-    assert!(decision.admitted, "peer at exact threshold should be admitted");
+    assert!(
+        decision.admitted,
+        "peer at exact threshold should be admitted"
+    );
 }
 
 // ─── Scenario 12: Path selection with hostile relay injection ────────────────
@@ -845,7 +917,10 @@ fn path_selection_hostile_relay_set_same_subnet() {
             ps,
             ReachabilityKind::Direct,
             vec![format!("/ip4/10.0.{i}.1/tcp/4001")],
-            PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+            PeerCapabilities {
+                can_relay: true,
+                ..PeerCapabilities::default()
+            },
             ResourceProfile::Desktop,
             None,
             1,
@@ -861,7 +936,10 @@ fn path_selection_hostile_relay_set_same_subnet() {
         &rt,
     );
 
-    assert!(result.is_err(), "hostile relay set from one /16 should fail required 3-hop path");
+    assert!(
+        result.is_err(),
+        "hostile relay set from one /16 should fail required 3-hop path"
+    );
 }
 
 /// Opportunistic policy should gracefully degrade with hostile relay set.
@@ -870,14 +948,13 @@ fn path_selection_opportunistic_degrades_gracefully() {
     let store = DescriptorStore::new(); // no relays at all
     let rt = RoutingTable::new(true);
 
-    let path = PathSelector::select(
-        [0xFF; 32],
-        AnonymityPolicy::Opportunistic,
-        &store,
-        &rt,
-    ).unwrap();
+    let path =
+        PathSelector::select([0xFF; 32], AnonymityPolicy::Opportunistic, &store, &rt).unwrap();
 
-    assert!(path.is_direct(), "opportunistic with no relays should fall back to direct");
+    assert!(
+        path.is_direct(),
+        "opportunistic with no relays should fall back to direct"
+    );
 }
 
 // ── Descriptor self-verification adversarial tests ──────────────────────
@@ -898,7 +975,10 @@ fn descriptor_tampered_addresses_rejected() {
     );
     // Attacker injects a rogue address.
     desc.addresses.push("/ip4/6.6.6.6/tcp/9999".to_string());
-    assert!(!desc.verify_self(), "tampered descriptor should fail self-verification");
+    assert!(
+        !desc.verify_self(),
+        "tampered descriptor should fail self-verification"
+    );
 }
 
 /// Descriptor with swapped signing_pubkey (attacker tries to claim another's descriptor).
@@ -919,7 +999,10 @@ fn descriptor_pubkey_swap_rejected() {
     );
     // Attacker replaces pubkey to claim the signature.
     desc.signing_pubkey = attacker_key.verifying_key().to_bytes();
-    assert!(!desc.verify_self(), "pubkey-swapped descriptor should fail verification");
+    assert!(
+        !desc.verify_self(),
+        "pubkey-swapped descriptor should fail verification"
+    );
 }
 
 /// Descriptor store rejects already-stale descriptors at insertion time.
@@ -947,7 +1030,10 @@ fn descriptor_store_rejects_stale_on_insert() {
     );
     // Backdate the descriptor to 2 hours ago (stale).
     desc.published_at = now - 7200;
-    assert!(!store.upsert(desc), "stale descriptor should be rejected on insert");
+    assert!(
+        !store.upsert(desc),
+        "stale descriptor should be rejected on insert"
+    );
     assert_eq!(store.len(), 0);
 }
 
@@ -964,7 +1050,12 @@ fn descriptor_store_capacity_limit_under_flood() {
         store.upsert(PeerDescriptor::new_signed(
             ps,
             ReachabilityKind::Direct,
-            vec![format!("/ip4/10.{}.{}.{}/tcp/4001", (i >> 16) & 0xFF, (i >> 8) & 0xFF, i & 0xFF)],
+            vec![format!(
+                "/ip4/10.{}.{}.{}/tcp/4001",
+                (i >> 16) & 0xFF,
+                (i >> 8) & 0xFF,
+                i & 0xFF
+            )],
             PeerCapabilities::default(),
             ResourceProfile::Desktop,
             None,
@@ -973,7 +1064,11 @@ fn descriptor_store_capacity_limit_under_flood() {
         ));
     }
 
-    assert!(store.len() <= 10_000, "store should enforce capacity limit: got {}", store.len());
+    assert!(
+        store.len() <= 10_000,
+        "store should enforce capacity limit: got {}",
+        store.len()
+    );
 }
 
 /// Credential from a previous epoch should not be accepted after rotation.
@@ -997,11 +1092,7 @@ fn credential_cross_epoch_replay_rejected() {
 
     // Create presentation with old identity.
     let context = b"test-context-replay";
-    let presentation = CredentialPresentation::create(
-        &cred,
-        &identity,
-        context,
-    );
+    let presentation = CredentialPresentation::create(&cred, &identity, context);
 
     // Verify against new epoch — should fail.
     let issuers = vec![issuer.pubkey_bytes()];
@@ -1012,7 +1103,10 @@ fn credential_cross_epoch_replay_rejected() {
         new_epoch,
         CredentialTier::Verified,
     );
-    assert!(result.is_err(), "credential from old epoch should be rejected in new epoch");
+    assert!(
+        result.is_err(),
+        "credential from old epoch should be rejected in new epoch"
+    );
 }
 
 // ─── Scenario 12: Epoch rotation — descriptor churn tracking ────────────
@@ -1082,8 +1176,14 @@ fn epoch_rotation_full_pseudonym_turnover() {
         let mut ps = [0u8; 32];
         ps[0] = i;
         store.upsert(PeerDescriptor::new_signed(
-            ps, ReachabilityKind::Direct, vec![format!("/ip4/10.{i}.1.1/tcp/4001")],
-            PeerCapabilities::default(), ResourceProfile::Desktop, None, 1, &key,
+            ps,
+            ReachabilityKind::Direct,
+            vec![format!("/ip4/10.{i}.1.1/tcp/4001")],
+            PeerCapabilities::default(),
+            ResourceProfile::Desktop,
+            None,
+            1,
+            &key,
         ));
     }
 
@@ -1097,8 +1197,14 @@ fn epoch_rotation_full_pseudonym_turnover() {
         let mut ps = [0u8; 32];
         ps[0] = i;
         store.upsert(PeerDescriptor::new_signed(
-            ps, ReachabilityKind::Direct, vec![format!("/ip4/10.{i}.1.1/tcp/4001")],
-            PeerCapabilities::default(), ResourceProfile::Desktop, None, 1, &key,
+            ps,
+            ReachabilityKind::Direct,
+            vec![format!("/ip4/10.{i}.1.1/tcp/4001")],
+            PeerCapabilities::default(),
+            ResourceProfile::Desktop,
+            None,
+            1,
+            &key,
         ));
     }
 
@@ -1117,8 +1223,14 @@ fn epoch_rotation_idempotent() {
         let mut ps = [0u8; 32];
         ps[0] = i;
         store.upsert(PeerDescriptor::new_signed(
-            ps, ReachabilityKind::Direct, vec![format!("/ip4/10.{i}.1.1/tcp/4001")],
-            PeerCapabilities::default(), ResourceProfile::Desktop, None, 1, &key,
+            ps,
+            ReachabilityKind::Direct,
+            vec![format!("/ip4/10.{i}.1.1/tcp/4001")],
+            PeerCapabilities::default(),
+            ResourceProfile::Desktop,
+            None,
+            1,
+            &key,
         ));
     }
 
@@ -1128,8 +1240,14 @@ fn epoch_rotation_idempotent() {
     let mut ps = [0u8; 32];
     ps[0] = 50;
     store.upsert(PeerDescriptor::new_signed(
-        ps, ReachabilityKind::Direct, vec!["/ip4/10.50.1.1/tcp/4001".into()],
-        PeerCapabilities::default(), ResourceProfile::Desktop, None, 1, &key,
+        ps,
+        ReachabilityKind::Direct,
+        vec!["/ip4/10.50.1.1/tcp/4001".into()],
+        PeerCapabilities::default(),
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &key,
     ));
 
     let churn_before = store.churn_rate();
@@ -1152,14 +1270,30 @@ fn relay_peer_info_requires_peer_mapping() {
 
     // Add two relay descriptors.
     store.upsert(PeerDescriptor::new_signed(
-        ps1, ReachabilityKind::Direct, vec!["/ip4/1.1.1.1/tcp/4001".into()],
-        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
-        ResourceProfile::Desktop, None, 1, &key,
+        ps1,
+        ReachabilityKind::Direct,
+        vec!["/ip4/1.1.1.1/tcp/4001".into()],
+        PeerCapabilities {
+            can_relay: true,
+            ..PeerCapabilities::default()
+        },
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &key,
     ));
     store.upsert(PeerDescriptor::new_signed(
-        ps2, ReachabilityKind::Direct, vec!["/ip4/2.2.2.2/tcp/4001".into()],
-        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
-        ResourceProfile::Desktop, None, 1, &key,
+        ps2,
+        ReachabilityKind::Direct,
+        vec!["/ip4/2.2.2.2/tcp/4001".into()],
+        PeerCapabilities {
+            can_relay: true,
+            ..PeerCapabilities::default()
+        },
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &key,
     ));
 
     // Without PeerId mapping, no relay peers are routable.
@@ -1184,14 +1318,26 @@ fn relay_peer_info_excludes_non_relay() {
 
     let ps = [0x01u8; 32];
     store.upsert(PeerDescriptor::new_signed(
-        ps, ReachabilityKind::Direct, vec!["/ip4/1.1.1.1/tcp/4001".into()],
-        PeerCapabilities { can_relay: false, ..PeerCapabilities::default() },
-        ResourceProfile::Desktop, None, 1, &key,
+        ps,
+        ReachabilityKind::Direct,
+        vec!["/ip4/1.1.1.1/tcp/4001".into()],
+        PeerCapabilities {
+            can_relay: false,
+            ..PeerCapabilities::default()
+        },
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &key,
     ));
     let peer = PeerId::random();
     store.register_peer_pseudonym(peer, ps);
 
-    assert_eq!(store.relay_peer_info().len(), 0, "non-relay should not be returned");
+    assert_eq!(
+        store.relay_peer_info().len(),
+        0,
+        "non-relay should not be returned"
+    );
 }
 
 // ─── Scenario 14: Credential wallet rotation and re-issuance coherence ──
@@ -1205,7 +1351,9 @@ fn wallet_rotation_invalidates_old_credentials() {
     // Create wallet and issue credential.
     let identity_epoch1 = EphemeralIdentity::generate(100);
     let cred = issuer.issue(
-        CredentialTier::Verified, 100, CAP_STORE | CAP_ROUTE,
+        CredentialTier::Verified,
+        100,
+        CAP_STORE | CAP_ROUTE,
         identity_epoch1.holder_tag(),
     );
 
@@ -1213,7 +1361,10 @@ fn wallet_rotation_invalidates_old_credentials() {
     let ctx = b"wallet-rotation-test";
     let pres = CredentialPresentation::create(&cred, &identity_epoch1, ctx);
     let issuers = vec![issuer.pubkey_bytes()];
-    assert!(credential::verify_presentation(&pres, ctx, &issuers, 100, CredentialTier::Observed).is_ok());
+    assert!(
+        credential::verify_presentation(&pres, ctx, &issuers, 100, CredentialTier::Observed)
+            .is_ok()
+    );
 
     // New identity at epoch 101 (simulating rotation).
     let identity_epoch2 = EphemeralIdentity::generate(101);
@@ -1221,7 +1372,8 @@ fn wallet_rotation_invalidates_old_credentials() {
     // Old credential with new identity should fail: holder_tag mismatch.
     let pres2 = CredentialPresentation::create(&cred, &identity_epoch2, ctx);
     assert!(
-        credential::verify_presentation(&pres2, ctx, &issuers, 101, CredentialTier::Observed).is_err(),
+        credential::verify_presentation(&pres2, ctx, &issuers, 101, CredentialTier::Observed)
+            .is_err(),
         "old credential should not work with new identity after rotation"
     );
 }
@@ -1267,8 +1419,14 @@ fn outcome_metrics_reflect_churn() {
         let mut ps = [0u8; 32];
         ps[0] = i;
         store.upsert(PeerDescriptor::new_signed(
-            ps, ReachabilityKind::Direct, vec![format!("/ip4/10.{i}.1.1/tcp/4001")],
-            PeerCapabilities::default(), ResourceProfile::Desktop, None, 1, &key,
+            ps,
+            ReachabilityKind::Direct,
+            vec![format!("/ip4/10.{i}.1.1/tcp/4001")],
+            PeerCapabilities::default(),
+            ResourceProfile::Desktop,
+            None,
+            1,
+            &key,
         ));
     }
 
@@ -1281,13 +1439,23 @@ fn outcome_metrics_reflect_churn() {
         let mut ps = [0u8; 32];
         ps[0] = i;
         store.upsert(PeerDescriptor::new_signed(
-            ps, ReachabilityKind::Direct, vec![format!("/ip4/10.{i}.1.1/tcp/4001")],
-            PeerCapabilities::default(), ResourceProfile::Desktop, None, 1, &key,
+            ps,
+            ReachabilityKind::Direct,
+            vec![format!("/ip4/10.{i}.1.1/tcp/4001")],
+            PeerCapabilities::default(),
+            ResourceProfile::Desktop,
+            None,
+            1,
+            &key,
         ));
     }
 
     let m2 = OutcomeMetrics::compute(&store, &peer_registry, &routing_table, false);
-    assert!(m2.pseudonym_churn_rate > 0.4, "churn rate should be ~50% with 5/10 new: got {}", m2.pseudonym_churn_rate);
+    assert!(
+        m2.pseudonym_churn_rate > 0.4,
+        "churn rate should be ~50% with 5/10 new: got {}",
+        m2.pseudonym_churn_rate
+    );
 }
 
 /// Metrics should track BBS+ credentialed descriptors.
@@ -1300,8 +1468,14 @@ fn outcome_metrics_bbs_credentialed_count() {
 
     // Add a descriptor without BBS+ proof.
     store.upsert(PeerDescriptor::new_signed(
-        [0x01; 32], ReachabilityKind::Direct, vec!["/ip4/1.1.1.1/tcp/4001".into()],
-        PeerCapabilities::default(), ResourceProfile::Desktop, None, 1, &key,
+        [0x01; 32],
+        ReachabilityKind::Direct,
+        vec!["/ip4/1.1.1.1/tcp/4001".into()],
+        PeerCapabilities::default(),
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &key,
     ));
 
     // Add a descriptor with a BBS+ proof.
@@ -1318,9 +1492,15 @@ fn outcome_metrics_bbs_credentialed_count() {
     });
     let bbs_proof = bbs_create_proof(&bbs_cred, &DisclosurePolicy::default(), b"metrics-test");
     store.upsert(PeerDescriptor::new_signed_with_bbs(
-        [0x02; 32], ReachabilityKind::Direct, vec!["/ip4/2.2.2.2/tcp/4001".into()],
-        PeerCapabilities::default(), ResourceProfile::Desktop, None,
-        Some(bbs_proof), 1, &key,
+        [0x02; 32],
+        ReachabilityKind::Direct,
+        vec!["/ip4/2.2.2.2/tcp/4001".into()],
+        PeerCapabilities::default(),
+        ResourceProfile::Desktop,
+        None,
+        Some(bbs_proof),
+        1,
+        &key,
     ));
 
     let m = OutcomeMetrics::compute(&store, &peer_registry, &routing_table, false);
@@ -1344,15 +1524,24 @@ fn descriptor_utilisation_under_pressure() {
         ps[0] = (i & 0xFF) as u8;
         ps[1] = (i >> 8) as u8;
         store.upsert(PeerDescriptor::new_signed(
-            ps, ReachabilityKind::Direct,
+            ps,
+            ReachabilityKind::Direct,
             vec![format!("/ip4/10.{}.{}.1/tcp/4001", i % 256, i / 256)],
-            PeerCapabilities::default(), ResourceProfile::Desktop, None, 1, &key,
+            PeerCapabilities::default(),
+            ResourceProfile::Desktop,
+            None,
+            1,
+            &key,
         ));
     }
 
     let m = OutcomeMetrics::compute(&store, &peer_registry, &routing_table, false);
     assert!(m.descriptor_utilisation > 0.0, "utilisation should be > 0");
-    assert!(m.descriptor_utilisation < 0.1, "100/10000 = 1%, got {}", m.descriptor_utilisation);
+    assert!(
+        m.descriptor_utilisation < 0.1,
+        "100/10000 = 1%, got {}",
+        m.descriptor_utilisation
+    );
 }
 
 // ─── Scenario 17: Path selection uses descriptors for anonymity ──────────
@@ -1369,24 +1558,33 @@ fn path_selection_required_uses_descriptors() {
         let mut ps = [0u8; 32];
         ps[0] = i;
         store.upsert(PeerDescriptor::new_signed(
-            ps, ReachabilityKind::Direct,
+            ps,
+            ReachabilityKind::Direct,
             vec![format!("/ip4/{}.{}.1.1/tcp/4001", i + 1, i + 1)],
-            PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
-            ResourceProfile::Desktop, None, 1, &key,
+            PeerCapabilities {
+                can_relay: true,
+                ..PeerCapabilities::default()
+            },
+            ResourceProfile::Desktop,
+            None,
+            1,
+            &key,
         ));
         store.register_peer_pseudonym(PeerId::random(), ps);
     }
 
     let dest = [0xFF; 32];
-    let path = PathSelector::select(
-        dest, AnonymityPolicy::Required { min_hops: 2 }, &store, &rt,
-    ).unwrap();
+    let path =
+        PathSelector::select(dest, AnonymityPolicy::Required { min_hops: 2 }, &store, &rt).unwrap();
 
     assert!(path.hop_count() >= 2, "Required mode should use ≥2 hops");
 
     // All relays in the path should be in the descriptor store.
     for hop in &path.hops {
-        assert!(store.get(&hop.pseudonym).is_some(), "hop should exist in descriptor store");
+        assert!(
+            store.get(&hop.pseudonym).is_some(),
+            "hop should exist in descriptor store"
+        );
     }
 }
 
@@ -1402,20 +1600,28 @@ fn path_selection_opportunistic_prefers_relays() {
         let mut ps = [0u8; 32];
         ps[0] = i;
         store.upsert(PeerDescriptor::new_signed(
-            ps, ReachabilityKind::Direct,
+            ps,
+            ReachabilityKind::Direct,
             vec![format!("/ip4/{}.{}.1.1/tcp/4001", i + 1, i + 1)],
-            PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
-            ResourceProfile::Desktop, None, 1, &key,
+            PeerCapabilities {
+                can_relay: true,
+                ..PeerCapabilities::default()
+            },
+            ResourceProfile::Desktop,
+            None,
+            1,
+            &key,
         ));
     }
 
     let dest = [0xFF; 32];
-    let path = PathSelector::select(
-        dest, AnonymityPolicy::Opportunistic, &store, &rt,
-    ).unwrap();
+    let path = PathSelector::select(dest, AnonymityPolicy::Opportunistic, &store, &rt).unwrap();
 
     // With relays available, opportunistic should use at least one.
-    assert!(path.hop_count() >= 1, "opportunistic with relays should use ≥1 hop");
+    assert!(
+        path.hop_count() >= 1,
+        "opportunistic with relays should use ≥1 hop"
+    );
 }
 
 // ─── Scenario: Onion-encrypted relay delivery ──────────────────────────────
@@ -1425,11 +1631,9 @@ fn path_selection_opportunistic_prefers_relays() {
 #[test]
 fn onion_relay_per_hop_content_blindness() {
     use miasma_core::network::onion_relay::{
-        process_onion_layer, encrypt_relay_response, OnionRelayAction,
+        encrypt_relay_response, process_onion_layer, OnionRelayAction,
     };
-    use miasma_core::onion::packet::{
-        OnionPacketBuilder, OnionLayerProcessor, decrypt_response,
-    };
+    use miasma_core::onion::packet::{decrypt_response, OnionLayerProcessor, OnionPacketBuilder};
     use x25519_dalek::{PublicKey, StaticSecret};
 
     let make_key = || {
@@ -1446,22 +1650,33 @@ fn onion_relay_per_hop_content_blindness() {
 
     // Build e2e encrypted onion packet.
     let (packet, _return_path, session_key) = OnionPacketBuilder::build_e2e(
-        &r1_pub, &r2_pub, &target_pub,
-        b"r2_peer".to_vec(), b"target".to_vec(), b"r2_addr".to_vec(),
+        &r1_pub,
+        &r2_pub,
+        &target_pub,
+        b"r2_peer".to_vec(),
+        b"target".to_vec(),
+        b"r2_addr".to_vec(),
         share_request.clone(),
-    ).unwrap();
+    )
+    .unwrap();
 
     // R1 peels — cannot see share request (encrypted for R2 and Target).
     let action1 = process_onion_layer(&r1_sec, packet.circuit_id, &packet.layer).unwrap();
     let (inner_layer, r1_return_key) = match action1 {
-        OnionRelayAction::ForwardToNext { inner_layer, return_key, .. } => (inner_layer, return_key),
+        OnionRelayAction::ForwardToNext {
+            inner_layer,
+            return_key,
+            ..
+        } => (inner_layer, return_key),
         _ => panic!("R1 should forward"),
     };
 
     // R2 peels — gets body but it's session_key || e2e_blob. Cannot read share request.
     let action2 = process_onion_layer(&r2_sec, packet.circuit_id, &inner_layer).unwrap();
     let (delivered_body, r2_return_key) = match action2 {
-        OnionRelayAction::DeliverToTarget { body, return_key, .. } => (body, return_key),
+        OnionRelayAction::DeliverToTarget {
+            body, return_key, ..
+        } => (body, return_key),
         _ => panic!("R2 should deliver"),
     };
 
@@ -1484,9 +1699,8 @@ fn onion_relay_per_hop_content_blindness() {
 
     // Target responds with encrypted share data.
     let response = b"share data payload".to_vec();
-    let e2e_response = miasma_core::onion::packet::encrypt_response(
-        &session_key_recv, &response,
-    ).unwrap();
+    let e2e_response =
+        miasma_core::onion::packet::encrypt_response(&session_key_recv, &response).unwrap();
 
     // R2 encrypts response with r2_return_key.
     let r2_encrypted = encrypt_relay_response(&r2_return_key, &e2e_response).unwrap();
@@ -1520,10 +1734,14 @@ fn onion_hostile_relay_wrong_key_rejected() {
     let (attacker_sec, _attacker_pub) = make_key();
 
     let (packet, _rp) = OnionPacketBuilder::build(
-        &r1_pub, &r2_pub,
-        b"r2".to_vec(), b"target".to_vec(), b"addr".to_vec(),
+        &r1_pub,
+        &r2_pub,
+        b"r2".to_vec(),
+        b"target".to_vec(),
+        b"addr".to_vec(),
         b"secret".to_vec(),
-    ).unwrap();
+    )
+    .unwrap();
 
     // Attacker tries to peel with wrong key — must fail.
     let result = process_onion_layer(&attacker_sec, packet.circuit_id, &packet.layer);
@@ -1547,14 +1765,22 @@ fn onion_return_keys_per_hop_uniqueness() {
     let (r2_sec, r2_pub) = make_key();
 
     let (packet, _rp) = OnionPacketBuilder::build(
-        &r1_pub, &r2_pub,
-        b"r2".to_vec(), b"target".to_vec(), b"addr".to_vec(),
+        &r1_pub,
+        &r2_pub,
+        b"r2".to_vec(),
+        b"target".to_vec(),
+        b"addr".to_vec(),
         b"payload".to_vec(),
-    ).unwrap();
+    )
+    .unwrap();
 
     let action1 = process_onion_layer(&r1_sec, packet.circuit_id, &packet.layer).unwrap();
     let (inner_layer, r1_key) = match action1 {
-        OnionRelayAction::ForwardToNext { inner_layer, return_key, .. } => (inner_layer, return_key),
+        OnionRelayAction::ForwardToNext {
+            inner_layer,
+            return_key,
+            ..
+        } => (inner_layer, return_key),
         _ => panic!("expected ForwardToNext"),
     };
 
@@ -1592,12 +1818,18 @@ fn descriptor_onion_pubkey_tamper_detection() {
     // Tamper with onion_pubkey — signature must fail.
     let mut tampered = desc.clone();
     tampered.onion_pubkey = Some([0xBB; 32]);
-    assert!(!tampered.verify_self(), "tampered onion_pubkey should fail verification");
+    assert!(
+        !tampered.verify_self(),
+        "tampered onion_pubkey should fail verification"
+    );
 
     // Remove onion_pubkey — signature must fail.
     let mut removed = desc;
     removed.onion_pubkey = None;
-    assert!(!removed.verify_self(), "removed onion_pubkey should fail verification");
+    assert!(
+        !removed.verify_self(),
+        "removed onion_pubkey should fail verification"
+    );
 }
 
 /// Descriptor store returns relay onion info only for relays with onion pubkeys.
@@ -1609,12 +1841,19 @@ fn descriptor_store_relay_onion_info_filtering() {
     // Relay with onion pubkey.
     let ps1 = [0x01; 32];
     store.upsert(PeerDescriptor::new_signed_full(
-        ps1, ReachabilityKind::Direct,
+        ps1,
+        ReachabilityKind::Direct,
         vec!["/ip4/1.1.1.1/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
-        ResourceProfile::Desktop, None, None,
+        PeerCapabilities {
+            can_relay: true,
+            ..PeerCapabilities::default()
+        },
+        ResourceProfile::Desktop,
+        None,
+        None,
         Some([0xAA; 32]),
-        1, &key,
+        1,
+        &key,
     ));
     let peer1 = PeerId::random();
     store.register_peer_pseudonym(peer1, ps1);
@@ -1622,12 +1861,19 @@ fn descriptor_store_relay_onion_info_filtering() {
     // Relay without onion pubkey.
     let ps2 = [0x02; 32];
     store.upsert(PeerDescriptor::new_signed_full(
-        ps2, ReachabilityKind::Direct,
+        ps2,
+        ReachabilityKind::Direct,
         vec!["/ip4/2.2.2.2/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
-        ResourceProfile::Desktop, None, None,
+        PeerCapabilities {
+            can_relay: true,
+            ..PeerCapabilities::default()
+        },
+        ResourceProfile::Desktop,
+        None,
+        None,
         None, // no onion pubkey
-        1, &key,
+        1,
+        &key,
     ));
     let peer2 = PeerId::random();
     store.register_peer_pseudonym(peer2, ps2);
@@ -1635,18 +1881,29 @@ fn descriptor_store_relay_onion_info_filtering() {
     // Non-relay with onion pubkey.
     let ps3 = [0x03; 32];
     store.upsert(PeerDescriptor::new_signed_full(
-        ps3, ReachabilityKind::Direct,
+        ps3,
+        ReachabilityKind::Direct,
         vec!["/ip4/3.3.3.3/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: false, ..PeerCapabilities::default() },
-        ResourceProfile::Desktop, None, None,
+        PeerCapabilities {
+            can_relay: false,
+            ..PeerCapabilities::default()
+        },
+        ResourceProfile::Desktop,
+        None,
+        None,
         Some([0xCC; 32]),
-        1, &key,
+        1,
+        &key,
     ));
     let peer3 = PeerId::random();
     store.register_peer_pseudonym(peer3, ps3);
 
     let onion_info = store.relay_onion_info();
-    assert_eq!(onion_info.len(), 1, "only relay peers with onion pubkeys should be returned");
+    assert_eq!(
+        onion_info.len(),
+        1,
+        "only relay peers with onion pubkeys should be returned"
+    );
     assert_eq!(onion_info[0].onion_pubkey, [0xAA; 32]);
 }
 
@@ -1668,16 +1925,24 @@ fn onion_cross_circuit_return_key_isolation() {
 
     // Build two separate circuits.
     let (pkt1, _rp1) = OnionPacketBuilder::build(
-        &r1_pub, &r2_pub,
-        b"r2".to_vec(), b"t1".to_vec(), b"addr".to_vec(),
+        &r1_pub,
+        &r2_pub,
+        b"r2".to_vec(),
+        b"t1".to_vec(),
+        b"addr".to_vec(),
         b"body1".to_vec(),
-    ).unwrap();
+    )
+    .unwrap();
 
     let (pkt2, _rp2) = OnionPacketBuilder::build(
-        &r1_pub, &r2_pub,
-        b"r2".to_vec(), b"t2".to_vec(), b"addr".to_vec(),
+        &r1_pub,
+        &r2_pub,
+        b"r2".to_vec(),
+        b"t2".to_vec(),
+        b"addr".to_vec(),
         b"body2".to_vec(),
-    ).unwrap();
+    )
+    .unwrap();
 
     let key1 = match process_onion_layer(&r1_sec, pkt1.circuit_id, &pkt1.layer).unwrap() {
         OnionRelayAction::ForwardToNext { return_key, .. } => return_key,
@@ -1688,7 +1953,10 @@ fn onion_cross_circuit_return_key_isolation() {
         _ => panic!("expected ForwardToNext"),
     };
 
-    assert_ne!(key1, key2, "different circuits must have different return keys");
+    assert_ne!(
+        key1, key2,
+        "different circuits must have different return keys"
+    );
 }
 
 // ─── Scenario 18: NAT-driven relay capability ────────────────────────────────
@@ -1709,7 +1977,10 @@ fn descriptor_relay_capability_reflects_nat_status() {
         ps1,
         ReachabilityKind::Direct,
         vec!["/ip4/192.168.1.1/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: false, ..PeerCapabilities::default() },
+        PeerCapabilities {
+            can_relay: false,
+            ..PeerCapabilities::default()
+        },
         ResourceProfile::Desktop,
         None,
         1,
@@ -1725,7 +1996,10 @@ fn descriptor_relay_capability_reflects_nat_status() {
         ps2,
         ReachabilityKind::Direct,
         vec!["/ip4/203.0.113.1/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+        PeerCapabilities {
+            can_relay: true,
+            ..PeerCapabilities::default()
+        },
         ResourceProfile::Desktop,
         None,
         1,
@@ -1734,7 +2008,10 @@ fn descriptor_relay_capability_reflects_nat_status() {
 
     let stats = store.stats();
     // Only the public node should count as a relay descriptor.
-    assert_eq!(stats.relay_descriptors, 1, "only publicly reachable nodes should be relay descriptors");
+    assert_eq!(
+        stats.relay_descriptors, 1,
+        "only publicly reachable nodes should be relay descriptors"
+    );
 }
 
 /// An adversary that falsely advertises can_relay: true but is actually
@@ -1756,7 +2033,10 @@ fn false_relay_capability_accepted_but_trackable() {
         ps,
         ReachabilityKind::Direct,
         vec!["/ip4/10.0.0.1/tcp/4001".to_string()], // private IP → likely behind NAT
-        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+        PeerCapabilities {
+            can_relay: true,
+            ..PeerCapabilities::default()
+        },
         ResourceProfile::Desktop,
         None,
         1,
@@ -1846,7 +2126,10 @@ fn relay_onion_info_requires_pubkey_and_capability() {
         ps_a,
         ReachabilityKind::Direct,
         vec!["/ip4/1.2.3.4/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+        PeerCapabilities {
+            can_relay: true,
+            ..PeerCapabilities::default()
+        },
         ResourceProfile::Desktop,
         None,
         None,
@@ -1864,7 +2147,10 @@ fn relay_onion_info_requires_pubkey_and_capability() {
         ps_b,
         ReachabilityKind::Direct,
         vec!["/ip4/5.6.7.8/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+        PeerCapabilities {
+            can_relay: true,
+            ..PeerCapabilities::default()
+        },
         ResourceProfile::Desktop,
         None,
         1,
@@ -1880,7 +2166,10 @@ fn relay_onion_info_requires_pubkey_and_capability() {
         ps_c,
         ReachabilityKind::Direct,
         vec!["/ip4/9.10.11.12/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: false, ..PeerCapabilities::default() },
+        PeerCapabilities {
+            can_relay: false,
+            ..PeerCapabilities::default()
+        },
         ResourceProfile::Desktop,
         None,
         None,
@@ -1891,7 +2180,11 @@ fn relay_onion_info_requires_pubkey_and_capability() {
 
     let onion_info = store.relay_onion_info();
     // Only Peer A qualifies: can_relay=true AND has onion_pubkey AND has PeerId.
-    assert_eq!(onion_info.len(), 1, "only relay-capable peers with onion pubkeys should appear");
+    assert_eq!(
+        onion_info.len(),
+        1,
+        "only relay-capable peers with onion pubkeys should appear"
+    );
     assert_eq!(onion_info[0].onion_pubkey, [0x11; 32]);
 }
 
@@ -1907,7 +2200,10 @@ fn nat_transition_updates_relay_capability() {
         [0x01; 32],
         ReachabilityKind::Direct,
         vec!["/ip4/1.2.3.4/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: false, ..PeerCapabilities::default() },
+        PeerCapabilities {
+            can_relay: false,
+            ..PeerCapabilities::default()
+        },
         ResourceProfile::Desktop,
         None,
         1,
@@ -1920,7 +2216,10 @@ fn nat_transition_updates_relay_capability() {
         [0x01; 32],
         ReachabilityKind::Direct,
         vec!["/ip4/1.2.3.4/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+        PeerCapabilities {
+            can_relay: true,
+            ..PeerCapabilities::default()
+        },
         ResourceProfile::Desktop,
         None,
         2,
@@ -1933,7 +2232,11 @@ fn nat_transition_updates_relay_capability() {
     store.upsert(desc_private);
     assert_eq!(store.stats().relay_descriptors, 0);
     store.upsert(desc_public);
-    assert_eq!(store.stats().relay_descriptors, 1, "upsert must update relay capability");
+    assert_eq!(
+        store.stats().relay_descriptors,
+        1,
+        "upsert must update relay capability"
+    );
 }
 
 // ─── Scenario 20: Relay trust tier promotion / demotion ─────────────────────
@@ -1951,7 +2254,10 @@ fn relay_trust_tier_promotion_on_success() {
         ps,
         ReachabilityKind::Direct,
         vec!["/ip4/1.2.3.4/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+        PeerCapabilities {
+            can_relay: true,
+            ..PeerCapabilities::default()
+        },
         ResourceProfile::Desktop,
         None,
         1,
@@ -2007,15 +2313,21 @@ fn false_relay_claim_stays_claimed_without_observation() {
             ps,
             ReachabilityKind::Direct,
             vec![format!("/ip4/1.2.3.{i}/tcp/4001")],
-            PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+            PeerCapabilities {
+                can_relay: true,
+                ..PeerCapabilities::default()
+            },
             ResourceProfile::Desktop,
             None,
             1,
             &key,
         ));
         // All should be Claimed — no real relay participation observed.
-        assert_eq!(store.relay_tier(&ps), RelayTrustTier::Claimed,
-            "peer {i} should be Claimed without observations");
+        assert_eq!(
+            store.relay_tier(&ps),
+            RelayTrustTier::Claimed,
+            "peer {i} should be Claimed without observations"
+        );
     }
 
     let (claimed, observed, verified) = store.relay_tier_counts();
@@ -2068,7 +2380,10 @@ fn rendezvous_descriptor_with_intro_points() {
             ps,
             ReachabilityKind::Direct,
             vec![format!("/ip4/10.0.{i}.1/tcp/4001")],
-            PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+            PeerCapabilities {
+                can_relay: true,
+                ..PeerCapabilities::default()
+            },
             ResourceProfile::Desktop,
             None,
             1,
@@ -2076,7 +2391,9 @@ fn rendezvous_descriptor_with_intro_points() {
         ));
         // Promote relay 0 to Verified.
         if i == 0 {
-            for _ in 0..4 { store.record_relay_success(&ps); }
+            for _ in 0..4 {
+                store.record_relay_success(&ps);
+            }
         }
     }
 
@@ -2088,12 +2405,17 @@ fn rendezvous_descriptor_with_intro_points() {
     // Verified relay should be first (highest trust tier).
     let mut first_ps = [0u8; 32];
     first_ps[0] = 1; // relay 0 is Verified
-    assert_eq!(intro_points[0], first_ps, "Verified relay should be preferred");
+    assert_eq!(
+        intro_points[0], first_ps,
+        "Verified relay should be preferred"
+    );
 
     // Create a rendezvous descriptor.
     let desc = PeerDescriptor::new_signed(
         own_ps,
-        ReachabilityKind::Rendezvous { intro_points: intro_points.clone() },
+        ReachabilityKind::Rendezvous {
+            intro_points: intro_points.clone(),
+        },
         vec![], // no direct addresses for rendezvous peers
         PeerCapabilities::default(),
         ResourceProfile::Desktop,
@@ -2118,50 +2440,86 @@ fn intro_point_resolution_filters_and_sorts() {
     let mut store = DescriptorStore::new();
 
     // Peer A: relay, registered, Observed.
-    let mut ps_a = [0u8; 32]; ps_a[0] = 0xA0;
+    let mut ps_a = [0u8; 32];
+    ps_a[0] = 0xA0;
     let peer_a = PeerId::random();
     store.register_peer_pseudonym(peer_a, ps_a);
     store.upsert(PeerDescriptor::new_signed(
-        ps_a, ReachabilityKind::Direct,
+        ps_a,
+        ReachabilityKind::Direct,
         vec!["/ip4/1.1.1.1/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
-        ResourceProfile::Desktop, None, 1, &key,
+        PeerCapabilities {
+            can_relay: true,
+            ..PeerCapabilities::default()
+        },
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &key,
     ));
     store.record_relay_success(&ps_a);
 
     // Peer B: relay, registered, Claimed (no observations).
-    let mut ps_b = [0u8; 32]; ps_b[0] = 0xB0;
+    let mut ps_b = [0u8; 32];
+    ps_b[0] = 0xB0;
     let peer_b = PeerId::random();
     store.register_peer_pseudonym(peer_b, ps_b);
     store.upsert(PeerDescriptor::new_signed(
-        ps_b, ReachabilityKind::Direct,
+        ps_b,
+        ReachabilityKind::Direct,
         vec!["/ip4/2.2.2.2/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
-        ResourceProfile::Desktop, None, 1, &key,
+        PeerCapabilities {
+            can_relay: true,
+            ..PeerCapabilities::default()
+        },
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &key,
     ));
 
     // Peer C: NOT a relay (can_relay=false) — should be filtered out.
-    let mut ps_c = [0u8; 32]; ps_c[0] = 0xC0;
+    let mut ps_c = [0u8; 32];
+    ps_c[0] = 0xC0;
     let peer_c = PeerId::random();
     store.register_peer_pseudonym(peer_c, ps_c);
     store.upsert(PeerDescriptor::new_signed(
-        ps_c, ReachabilityKind::Direct,
+        ps_c,
+        ReachabilityKind::Direct,
         vec!["/ip4/3.3.3.3/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: false, ..PeerCapabilities::default() },
-        ResourceProfile::Desktop, None, 1, &key,
+        PeerCapabilities {
+            can_relay: false,
+            ..PeerCapabilities::default()
+        },
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &key,
     ));
 
     // Peer D: relay but NO PeerId mapping — should be filtered out.
-    let mut ps_d = [0u8; 32]; ps_d[0] = 0xD0;
+    let mut ps_d = [0u8; 32];
+    ps_d[0] = 0xD0;
     store.upsert(PeerDescriptor::new_signed(
-        ps_d, ReachabilityKind::Direct,
+        ps_d,
+        ReachabilityKind::Direct,
         vec!["/ip4/4.4.4.4/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
-        ResourceProfile::Desktop, None, 1, &key,
+        PeerCapabilities {
+            can_relay: true,
+            ..PeerCapabilities::default()
+        },
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &key,
     ));
 
     let resolved = store.resolve_intro_points(&[ps_a, ps_b, ps_c, ps_d]);
-    assert_eq!(resolved.len(), 2, "only relay peers with PeerId mappings should resolve");
+    assert_eq!(
+        resolved.len(),
+        2,
+        "only relay peers with PeerId mappings should resolve"
+    );
     // Observed (A) should come before Claimed (B).
     assert_eq!(resolved[0].pseudonym, ps_a);
     assert_eq!(resolved[0].relay_tier, RelayTrustTier::Observed);
@@ -2176,7 +2534,10 @@ fn broken_rendezvous_all_invalid_intro_points() {
     // Try to resolve pseudonyms that don't exist in the store.
     let fake_intro = [[0xDE; 32], [0xAD; 32], [0xBE; 32]];
     let resolved = store.resolve_intro_points(&fake_intro);
-    assert!(resolved.is_empty(), "non-existent intro points should resolve to empty");
+    assert!(
+        resolved.is_empty(),
+        "non-existent intro points should resolve to empty"
+    );
 }
 
 /// Rendezvous descriptor reachability is distinct from Relayed.
@@ -2186,11 +2547,15 @@ fn rendezvous_vs_relayed_distinction() {
 
     let rendezvous = PeerDescriptor::new_signed(
         [0x01; 32],
-        ReachabilityKind::Rendezvous { intro_points: vec![[0xAA; 32], [0xBB; 32]] },
+        ReachabilityKind::Rendezvous {
+            intro_points: vec![[0xAA; 32], [0xBB; 32]],
+        },
         vec![],
         PeerCapabilities::default(),
         ResourceProfile::Desktop,
-        None, 1, &key,
+        None,
+        1,
+        &key,
     );
     let relayed = PeerDescriptor::new_signed(
         [0x02; 32],
@@ -2201,7 +2566,9 @@ fn rendezvous_vs_relayed_distinction() {
         vec![],
         PeerCapabilities::default(),
         ResourceProfile::Mobile,
-        None, 1, &key,
+        None,
+        1,
+        &key,
     );
     let direct = PeerDescriptor::new_signed(
         [0x03; 32],
@@ -2209,7 +2576,9 @@ fn rendezvous_vs_relayed_distinction() {
         vec!["/ip4/5.6.7.8/tcp/4001".to_string()],
         PeerCapabilities::default(),
         ResourceProfile::Desktop,
-        None, 1, &key,
+        None,
+        1,
+        &key,
     );
 
     // All three are distinct reachability kinds.
@@ -2234,18 +2603,28 @@ fn descriptor_stats_rendezvous_and_relay_tiers() {
 
     // Direct peer.
     store.upsert(PeerDescriptor::new_signed(
-        [0x01; 32], ReachabilityKind::Direct,
+        [0x01; 32],
+        ReachabilityKind::Direct,
         vec!["/ip4/1.1.1.1/tcp/4001".to_string()],
-        PeerCapabilities::default(), ResourceProfile::Desktop,
-        None, 1, &key,
+        PeerCapabilities::default(),
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &key,
     ));
 
     // Rendezvous peer.
     store.upsert(PeerDescriptor::new_signed(
         [0x02; 32],
-        ReachabilityKind::Rendezvous { intro_points: vec![[0xAA; 32]] },
-        vec![], PeerCapabilities::default(), ResourceProfile::Desktop,
-        None, 1, &key,
+        ReachabilityKind::Rendezvous {
+            intro_points: vec![[0xAA; 32]],
+        },
+        vec![],
+        PeerCapabilities::default(),
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &key,
     ));
 
     // Relay peer (Claimed).
@@ -2253,10 +2632,17 @@ fn descriptor_stats_rendezvous_and_relay_tiers() {
     let relay_peer = PeerId::random();
     store.register_peer_pseudonym(relay_peer, ps_relay);
     store.upsert(PeerDescriptor::new_signed(
-        ps_relay, ReachabilityKind::Direct,
+        ps_relay,
+        ReachabilityKind::Direct,
         vec!["/ip4/2.2.2.2/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
-        ResourceProfile::Desktop, None, 1, &key,
+        PeerCapabilities {
+            can_relay: true,
+            ..PeerCapabilities::default()
+        },
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &key,
     ));
     // Promote to Observed.
     store.record_relay_success(&ps_relay);
@@ -2296,35 +2682,61 @@ fn relay_peer_info_sorted_by_trust_tier() {
     let mut store = DescriptorStore::new();
 
     // Create 3 relays at different trust tiers.
-    let mut ps_claimed = [0u8; 32]; ps_claimed[0] = 1;
+    let mut ps_claimed = [0u8; 32];
+    ps_claimed[0] = 1;
     let peer_claimed = PeerId::random();
     store.register_peer_pseudonym(peer_claimed, ps_claimed);
     store.upsert(PeerDescriptor::new_signed(
-        ps_claimed, ReachabilityKind::Direct,
+        ps_claimed,
+        ReachabilityKind::Direct,
         vec!["/ip4/1.1.1.1/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
-        ResourceProfile::Desktop, None, 1, &key,
+        PeerCapabilities {
+            can_relay: true,
+            ..PeerCapabilities::default()
+        },
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &key,
     ));
 
-    let mut ps_verified = [0u8; 32]; ps_verified[0] = 2;
+    let mut ps_verified = [0u8; 32];
+    ps_verified[0] = 2;
     let peer_verified = PeerId::random();
     store.register_peer_pseudonym(peer_verified, ps_verified);
     store.upsert(PeerDescriptor::new_signed(
-        ps_verified, ReachabilityKind::Direct,
+        ps_verified,
+        ReachabilityKind::Direct,
         vec!["/ip4/2.2.2.2/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
-        ResourceProfile::Desktop, None, 1, &key,
+        PeerCapabilities {
+            can_relay: true,
+            ..PeerCapabilities::default()
+        },
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &key,
     ));
-    for _ in 0..4 { store.record_relay_success(&ps_verified); }
+    for _ in 0..4 {
+        store.record_relay_success(&ps_verified);
+    }
 
-    let mut ps_observed = [0u8; 32]; ps_observed[0] = 3;
+    let mut ps_observed = [0u8; 32];
+    ps_observed[0] = 3;
     let peer_observed = PeerId::random();
     store.register_peer_pseudonym(peer_observed, ps_observed);
     store.upsert(PeerDescriptor::new_signed(
-        ps_observed, ReachabilityKind::Direct,
+        ps_observed,
+        ReachabilityKind::Direct,
         vec!["/ip4/3.3.3.3/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
-        ResourceProfile::Desktop, None, 1, &key,
+        PeerCapabilities {
+            can_relay: true,
+            ..PeerCapabilities::default()
+        },
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &key,
     ));
     store.record_relay_success(&ps_observed);
 
@@ -2346,41 +2758,64 @@ fn rendezvous_intro_onion_capable_preferred() {
     let mut store = DescriptorStore::new();
 
     // Intro A: relay, has onion pubkey, Observed trust.
-    let mut ps_a = [0u8; 32]; ps_a[0] = 0xA0;
+    let mut ps_a = [0u8; 32];
+    ps_a[0] = 0xA0;
     let peer_a = PeerId::random();
     store.register_peer_pseudonym(peer_a, ps_a);
     store.upsert(PeerDescriptor::new_signed_full(
-        ps_a, ReachabilityKind::Direct,
+        ps_a,
+        ReachabilityKind::Direct,
         vec!["/ip4/1.1.1.1/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
-        ResourceProfile::Desktop, None, None,
+        PeerCapabilities {
+            can_relay: true,
+            ..PeerCapabilities::default()
+        },
+        ResourceProfile::Desktop,
+        None,
+        None,
         Some([0xAA; 32]), // onion pubkey
-        1, &key,
+        1,
+        &key,
     ));
     store.record_relay_success(&ps_a);
 
     // Intro B: relay, NO onion pubkey, Verified trust.
-    let mut ps_b = [0u8; 32]; ps_b[0] = 0xB0;
+    let mut ps_b = [0u8; 32];
+    ps_b[0] = 0xB0;
     let peer_b = PeerId::random();
     store.register_peer_pseudonym(peer_b, ps_b);
     store.upsert(PeerDescriptor::new_signed_full(
-        ps_b, ReachabilityKind::Direct,
+        ps_b,
+        ReachabilityKind::Direct,
         vec!["/ip4/2.2.2.2/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
-        ResourceProfile::Desktop, None, None,
+        PeerCapabilities {
+            can_relay: true,
+            ..PeerCapabilities::default()
+        },
+        ResourceProfile::Desktop,
+        None,
+        None,
         None, // no onion pubkey
-        1, &key,
+        1,
+        &key,
     ));
-    for _ in 0..4 { store.record_relay_success(&ps_b); }
+    for _ in 0..4 {
+        store.record_relay_success(&ps_b);
+    }
 
     let resolved = store.resolve_intro_points(&[ps_a, ps_b]);
     assert_eq!(resolved.len(), 2);
 
     // Both should resolve, but only A has onion capability.
-    let onion_capable: Vec<_> = resolved.iter()
+    let onion_capable: Vec<_> = resolved
+        .iter()
         .filter(|r| r.onion_pubkey.is_some())
         .collect();
-    assert_eq!(onion_capable.len(), 1, "only intro A should have onion pubkey");
+    assert_eq!(
+        onion_capable.len(),
+        1,
+        "only intro A should have onion pubkey"
+    );
     assert_eq!(onion_capable[0].pseudonym, ps_a);
     assert_eq!(onion_capable[0].onion_pubkey, Some([0xAA; 32]));
 }
@@ -2394,16 +2829,30 @@ fn rendezvous_no_onion_intro_falls_back() {
 
     // Two intro points, neither has onion pubkey.
     for i in 0..2u8 {
-        let mut ps = [0u8; 32]; ps[0] = i + 1;
+        let mut ps = [0u8; 32];
+        ps[0] = i + 1;
         let peer = PeerId::random();
         store.register_peer_pseudonym(peer, ps);
         store.upsert(PeerDescriptor::new_signed_full(
-            ps, ReachabilityKind::Direct,
-            vec![format!("/ip4/{}.{}.{}.{}/tcp/4001", i+1, i+1, i+1, i+1)],
-            PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
-            ResourceProfile::Desktop, None, None,
+            ps,
+            ReachabilityKind::Direct,
+            vec![format!(
+                "/ip4/{}.{}.{}.{}/tcp/4001",
+                i + 1,
+                i + 1,
+                i + 1,
+                i + 1
+            )],
+            PeerCapabilities {
+                can_relay: true,
+                ..PeerCapabilities::default()
+            },
+            ResourceProfile::Desktop,
+            None,
+            None,
             None, // no onion pubkey
-            1, &key,
+            1,
+            &key,
         ));
     }
 
@@ -2414,8 +2863,10 @@ fn rendezvous_no_onion_intro_falls_back() {
     assert_eq!(resolved.len(), 2);
 
     // No onion-capable intro points.
-    assert!(resolved.iter().all(|r| r.onion_pubkey.is_none()),
-        "no intro points should have onion capability");
+    assert!(
+        resolved.iter().all(|r| r.onion_pubkey.is_none()),
+        "no intro points should have onion capability"
+    );
 }
 
 /// Mixed shard holders: Direct holder has onion pubkey from descriptor store,
@@ -2430,12 +2881,16 @@ fn mixed_holders_direct_and_rendezvous_onion_pubkey() {
     let peer_direct = PeerId::random();
     store.register_peer_pseudonym(peer_direct, ps_direct);
     store.upsert(PeerDescriptor::new_signed_full(
-        ps_direct, ReachabilityKind::Direct,
+        ps_direct,
+        ReachabilityKind::Direct,
         vec!["/ip4/1.1.1.1/tcp/4001".to_string()],
         PeerCapabilities::default(),
-        ResourceProfile::Desktop, None, None,
+        ResourceProfile::Desktop,
+        None,
+        None,
         Some([0xDD; 32]),
-        1, &key,
+        1,
+        &key,
     ));
 
     // Rendezvous holder (NAT'd) with onion pubkey.
@@ -2445,23 +2900,34 @@ fn mixed_holders_direct_and_rendezvous_onion_pubkey() {
     let intro_ps = [0xAA; 32];
     store.upsert(PeerDescriptor::new_signed_full(
         ps_rendezvous,
-        ReachabilityKind::Rendezvous { intro_points: vec![intro_ps] },
+        ReachabilityKind::Rendezvous {
+            intro_points: vec![intro_ps],
+        },
         vec![],
         PeerCapabilities::default(),
-        ResourceProfile::Desktop, None, None,
+        ResourceProfile::Desktop,
+        None,
+        None,
         Some([0xEE; 32]),
-        1, &key,
+        1,
+        &key,
     ));
 
     // Direct holder: onion pubkey accessible.
     let direct_key = store.onion_pubkey_for_peer(&peer_direct);
-    assert_eq!(direct_key, Some([0xDD; 32]),
-        "direct holder should have onion pubkey in descriptor store");
+    assert_eq!(
+        direct_key,
+        Some([0xDD; 32]),
+        "direct holder should have onion pubkey in descriptor store"
+    );
 
     // Rendezvous holder: onion pubkey also accessible.
     let rv_key = store.onion_pubkey_for_peer(&peer_rv);
-    assert_eq!(rv_key, Some([0xEE; 32]),
-        "rendezvous holder should have onion pubkey in descriptor store");
+    assert_eq!(
+        rv_key,
+        Some([0xEE; 32]),
+        "rendezvous holder should have onion pubkey in descriptor store"
+    );
 
     // Rendezvous holder's descriptor should be marked as rendezvous.
     let desc = store.get_by_peer(&peer_rv).unwrap();
@@ -2481,12 +2947,19 @@ fn rendezvous_broken_intro_with_fallback() {
     let good_peer = PeerId::random();
     store.register_peer_pseudonym(good_peer, good_ps);
     store.upsert(PeerDescriptor::new_signed_full(
-        good_ps, ReachabilityKind::Direct,
+        good_ps,
+        ReachabilityKind::Direct,
         vec!["/ip4/5.5.5.5/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
-        ResourceProfile::Desktop, None, None,
+        PeerCapabilities {
+            can_relay: true,
+            ..PeerCapabilities::default()
+        },
+        ResourceProfile::Desktop,
+        None,
+        None,
         Some([0xFF; 32]), // onion capable
-        1, &key,
+        1,
+        &key,
     ));
 
     let resolved = store.resolve_intro_points(&[broken_ps, good_ps]);
@@ -2534,8 +3007,8 @@ fn content_blind_vs_ip_only_distinction_in_stats() {
         opportunistic_onion_rendezvous_successes: 1,
         opportunistic_rendezvous_successes: 1,
         required_attempts: 8,
-        required_onion_successes: 5,  // content-blind
-        required_relay_successes: 2,  // IP privacy only
+        required_onion_successes: 5, // content-blind
+        required_relay_successes: 2, // IP privacy only
         required_failures: 1,
         rendezvous_attempts: 3,
         rendezvous_successes: 2,
@@ -2558,14 +3031,20 @@ fn content_blind_vs_ip_only_distinction_in_stats() {
         + stats.rendezvous_onion_successes
         + stats.opportunistic_onion_successes
         + stats.opportunistic_onion_rendezvous_successes;
-    assert_eq!(content_blind, 10, "content-blind: req_onion(5) + rv_onion(3) + opp_onion(1) + opp_rv_onion(1)");
+    assert_eq!(
+        content_blind, 10,
+        "content-blind: req_onion(5) + rv_onion(3) + opp_onion(1) + opp_rv_onion(1)"
+    );
 
     // IP-privacy-only successes = relay circuit + rendezvous relay + opportunistic relay/rendezvous.
     let ip_only = stats.required_relay_successes
         + stats.rendezvous_successes
         + stats.opportunistic_relay_successes
         + stats.opportunistic_rendezvous_successes;
-    assert_eq!(ip_only, 8, "IP-only: req_relay(2) + rv(2) + opp_relay(3) + opp_rv(1)");
+    assert_eq!(
+        ip_only, 8,
+        "IP-only: req_relay(2) + rv(2) + opp_relay(3) + opp_rv(1)"
+    );
 }
 
 /// R1 and R2 must differ: when an intro point would be the only available relay,
@@ -2580,12 +3059,19 @@ fn onion_rendezvous_requires_distinct_r1_r2() {
     let peer = PeerId::random();
     store.register_peer_pseudonym(peer, ps);
     store.upsert(PeerDescriptor::new_signed_full(
-        ps, ReachabilityKind::Direct,
+        ps,
+        ReachabilityKind::Direct,
         vec!["/ip4/1.1.1.1/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
-        ResourceProfile::Desktop, None, None,
+        PeerCapabilities {
+            can_relay: true,
+            ..PeerCapabilities::default()
+        },
+        ResourceProfile::Desktop,
+        None,
+        None,
         Some([0xAA; 32]),
-        1, &key,
+        1,
+        &key,
     ));
 
     // relay_onion_info returns this one peer.
@@ -2600,10 +3086,11 @@ fn onion_rendezvous_requires_distinct_r1_r2() {
     // different peer for R1. The onion circuit requires R1 ≠ R2.
     // The coordinator should detect this and skip onion-rendezvous.
     let r2_peer_id_bytes = resolved[0].peer_id.to_bytes();
-    let can_find_distinct_r1 = onion_info.iter()
-        .any(|r| r.peer_id != r2_peer_id_bytes);
-    assert!(!can_find_distinct_r1,
-        "with only one relay, R1 ≠ R2 is impossible — coordinator must detect this");
+    let can_find_distinct_r1 = onion_info.iter().any(|r| r.peer_id != r2_peer_id_bytes);
+    assert!(
+        !can_find_distinct_r1,
+        "with only one relay, R1 ≠ R2 is impossible — coordinator must detect this"
+    );
 }
 
 /// Opportunistic stats track granular path successes separately.
@@ -2627,13 +3114,12 @@ fn opportunistic_stats_granularity() {
     assert_eq!(total_succeeded, 10);
 
     // Content-blind in opportunistic = onion + onion_rendezvous.
-    let content_blind = stats.opportunistic_onion_successes
-        + stats.opportunistic_onion_rendezvous_successes;
+    let content_blind =
+        stats.opportunistic_onion_successes + stats.opportunistic_onion_rendezvous_successes;
     assert_eq!(content_blind, 5);
 
     // IP-only in opportunistic = relay + rendezvous.
-    let ip_only = stats.opportunistic_relay_successes
-        + stats.opportunistic_rendezvous_successes;
+    let ip_only = stats.opportunistic_relay_successes + stats.opportunistic_rendezvous_successes;
     assert_eq!(ip_only, 3);
 }
 
@@ -2647,7 +3133,10 @@ fn relay_probe_stats_tracking() {
     stats.relay_probes_succeeded = 7;
     stats.relay_probes_failed = 3;
 
-    assert_eq!(stats.relay_probes_sent, stats.relay_probes_succeeded + stats.relay_probes_failed);
+    assert_eq!(
+        stats.relay_probes_sent,
+        stats.relay_probes_succeeded + stats.relay_probes_failed
+    );
 
     // Serde roundtrip.
     let json = serde_json::to_string(&stats).unwrap();
@@ -2669,7 +3158,9 @@ fn relay_probe_protocol_nonce_echo() {
     assert_eq!(decoded.nonce, nonce);
 
     // Simulate relay echo: relay receives request, echoes nonce in response.
-    let resp = ProbeResponse { nonce: decoded.nonce };
+    let resp = ProbeResponse {
+        nonce: decoded.nonce,
+    };
     assert_eq!(resp.nonce, nonce, "relay must echo the exact nonce");
 
     // Prober verification: compare sent nonce with received nonce.
@@ -2695,7 +3186,10 @@ fn relay_probe_zero_nonce_is_failure() {
 
     let sent_nonce = [0xAB; 32];
     let resp = ProbeResponse { nonce: [0u8; 32] };
-    assert_ne!(resp.nonce, sent_nonce, "zero nonce sentinel = probe failure");
+    assert_ne!(
+        resp.nonce, sent_nonce,
+        "zero nonce sentinel = probe failure"
+    );
 }
 
 /// Five privacy paths are distinguishable in stats:
@@ -2718,15 +3212,15 @@ fn five_privacy_paths_distinguishable() {
         opportunistic_relay_successes: 1,            // path 4
         opportunistic_direct_fallbacks: 0,
         required_attempts: 4,
-        required_onion_successes: 2,     // path 2 (required)
-        required_relay_successes: 1,     // path 4 (required)
+        required_onion_successes: 2, // path 2 (required)
+        required_relay_successes: 1, // path 4 (required)
         required_failures: 1,
         rendezvous_attempts: 1,
-        rendezvous_successes: 1,         // path 3
+        rendezvous_successes: 1, // path 3
         rendezvous_failures: 0,
         rendezvous_direct_fallbacks: 0,
         rendezvous_onion_attempts: 1,
-        rendezvous_onion_successes: 1,   // path 1 (required)
+        rendezvous_onion_successes: 1, // path 1 (required)
         rendezvous_onion_failures: 0,
         relay_probes_sent: 5,
         relay_probes_succeeded: 4,
@@ -2744,8 +3238,14 @@ fn five_privacy_paths_distinguishable() {
     assert!(stats.opportunistic_relay_successes > 0, "path 4");
     assert!(stats.direct_successes > 0, "path 5");
     assert!(stats.relay_probes_sent > 0, "reachability probes tracked");
-    assert!(stats.forwarding_probes_sent > 0, "forwarding probes tracked");
-    assert!(stats.pre_retrieval_probes_run > 0, "pre-retrieval sweeps tracked");
+    assert!(
+        stats.forwarding_probes_sent > 0,
+        "forwarding probes tracked"
+    );
+    assert!(
+        stats.pre_retrieval_probes_run > 0,
+        "pre-retrieval sweeps tracked"
+    );
 }
 
 /// Probe freshness: `has_fresh_probe` returns true within freshness window,
@@ -2791,10 +3291,18 @@ fn trust_tier_fast_track_via_forwarding() {
     let peer = PeerId::random();
     store.register_peer_pseudonym(peer, ps);
     store.upsert(PeerDescriptor::new_signed(
-        ps, ReachabilityKind::Direct,
+        ps,
+        ReachabilityKind::Direct,
         vec!["/ip4/5.5.5.5/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: true, can_store: true, ..PeerCapabilities::default() },
-        ResourceProfile::Desktop, None, 1, &key,
+        PeerCapabilities {
+            can_relay: true,
+            can_store: true,
+            ..PeerCapabilities::default()
+        },
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &key,
     ));
 
     // Record 1 passive success → Observed.
@@ -2817,23 +3325,37 @@ fn trust_tier_mixed_evidence_probe_plus_passive() {
     let peer = PeerId::random();
     store.register_peer_pseudonym(peer, ps);
     store.upsert(PeerDescriptor::new_signed(
-        ps, ReachabilityKind::Direct,
+        ps,
+        ReachabilityKind::Direct,
         vec!["/ip4/6.6.6.6/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: true, can_store: true, ..PeerCapabilities::default() },
-        ResourceProfile::Desktop, None, 1, &key,
+        PeerCapabilities {
+            can_relay: true,
+            can_store: true,
+            ..PeerCapabilities::default()
+        },
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &key,
     ));
 
     // 2 passive successes + 1 failure = Observed (66% < 75% threshold).
     store.record_relay_success(&ps);
     store.record_relay_success(&ps);
     store.record_relay_failure(&ps);
-    assert_eq!(store.relay_tier(&ps), RelayTrustTier::Observed,
-        "2 successes at 66% without probe should be Observed");
+    assert_eq!(
+        store.relay_tier(&ps),
+        RelayTrustTier::Observed,
+        "2 successes at 66% without probe should be Observed"
+    );
 
     // Add probe success → Verified (probe + 2 successes at 66% meets relaxed threshold).
     store.record_probe_success(&ps);
-    assert_eq!(store.relay_tier(&ps), RelayTrustTier::Verified,
-        "probe + 2 successes at 66% should be Verified");
+    assert_eq!(
+        store.relay_tier(&ps),
+        RelayTrustTier::Verified,
+        "probe + 2 successes at 66% should be Verified"
+    );
 }
 
 /// Forwarding verification timestamps survive epoch decay.
@@ -2846,10 +3368,18 @@ fn forwarding_verified_not_cleared_by_decay() {
     let peer = PeerId::random();
     store.register_peer_pseudonym(peer, ps);
     store.upsert(PeerDescriptor::new_signed(
-        ps, ReachabilityKind::Direct,
+        ps,
+        ReachabilityKind::Direct,
         vec!["/ip4/7.7.7.7/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: true, can_store: true, ..PeerCapabilities::default() },
-        ResourceProfile::Desktop, None, 1, &key,
+        PeerCapabilities {
+            can_relay: true,
+            can_store: true,
+            ..PeerCapabilities::default()
+        },
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &key,
     ));
 
     // Build up evidence: 4 successes + forwarding + probe → Verified.
@@ -2866,10 +3396,16 @@ fn forwarding_verified_not_cleared_by_decay() {
 
     // After decay, passive successes halved (4→2), but forwarding evidence remains.
     // Forwarding + ≥1 success → still Verified.
-    assert_eq!(store.relay_tier(&ps), RelayTrustTier::Verified,
-        "forwarding evidence survives decay");
-    assert_eq!(store.forwarding_verified_count(), 1,
-        "forwarding verification count survives decay");
+    assert_eq!(
+        store.relay_tier(&ps),
+        RelayTrustTier::Verified,
+        "forwarding evidence survives decay"
+    );
+    assert_eq!(
+        store.forwarding_verified_count(),
+        1,
+        "forwarding verification count survives decay"
+    );
 }
 
 /// DescriptorStore tracks probe freshness per pseudonym.
@@ -2883,10 +3419,18 @@ fn descriptor_store_probe_freshness() {
     let peer_a = PeerId::random();
     store.register_peer_pseudonym(peer_a, ps_a);
     store.upsert(PeerDescriptor::new_signed(
-        ps_a, ReachabilityKind::Direct,
+        ps_a,
+        ReachabilityKind::Direct,
         vec!["/ip4/1.1.1.1/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: true, can_store: true, ..PeerCapabilities::default() },
-        ResourceProfile::Desktop, None, 1, &key,
+        PeerCapabilities {
+            can_relay: true,
+            can_store: true,
+            ..PeerCapabilities::default()
+        },
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &key,
     ));
 
     let mut ps_b = [0u8; 32];
@@ -2894,10 +3438,18 @@ fn descriptor_store_probe_freshness() {
     let peer_b = PeerId::random();
     store.register_peer_pseudonym(peer_b, ps_b);
     store.upsert(PeerDescriptor::new_signed(
-        ps_b, ReachabilityKind::Direct,
+        ps_b,
+        ReachabilityKind::Direct,
         vec!["/ip4/2.2.2.2/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: true, can_store: true, ..PeerCapabilities::default() },
-        ResourceProfile::Desktop, None, 1, &key,
+        PeerCapabilities {
+            can_relay: true,
+            can_store: true,
+            ..PeerCapabilities::default()
+        },
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &key,
     ));
 
     // Initially no fresh probes.
@@ -2925,10 +3477,18 @@ fn descriptor_store_forwarding_verification() {
     let peer = PeerId::random();
     store.register_peer_pseudonym(peer, ps);
     store.upsert(PeerDescriptor::new_signed(
-        ps, ReachabilityKind::Direct,
+        ps,
+        ReachabilityKind::Direct,
         vec!["/ip4/3.3.3.3/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: true, can_store: true, ..PeerCapabilities::default() },
-        ResourceProfile::Desktop, None, 1, &key,
+        PeerCapabilities {
+            can_relay: true,
+            can_store: true,
+            ..PeerCapabilities::default()
+        },
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &key,
     ));
 
     // Initially no forwarding verification.
@@ -2961,7 +3521,10 @@ fn forwarding_circuit_address_format() {
 
     // Must be parseable as a multiaddr.
     let parsed: Result<libp2p::Multiaddr, _> = addr.parse();
-    assert!(parsed.is_ok(), "circuit address must be a valid multiaddr: {addr}");
+    assert!(
+        parsed.is_ok(),
+        "circuit address must be a valid multiaddr: {addr}"
+    );
 }
 
 /// RetrievalStats: forwarding probe fields round-trip through serde.
@@ -3001,12 +3564,19 @@ fn zero_onion_pubkey_rejected_by_relay_onion_info() {
     store.register_peer_pseudonym(peer, ps);
     // Insert a descriptor with onion_pubkey = all zeros (the old dangerous default).
     store.upsert(PeerDescriptor::new_signed_full(
-        ps, ReachabilityKind::Direct,
+        ps,
+        ReachabilityKind::Direct,
         vec!["/ip4/1.2.3.4/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
-        ResourceProfile::Desktop, None, None,
-        Some([0u8; 32]),  // zero key — must be rejected
-        1, &key,
+        PeerCapabilities {
+            can_relay: true,
+            ..PeerCapabilities::default()
+        },
+        ResourceProfile::Desktop,
+        None,
+        None,
+        Some([0u8; 32]), // zero key — must be rejected
+        1,
+        &key,
     ));
 
     // relay_onion_info should filter out descriptors with zero onion pubkeys,
@@ -3039,7 +3609,10 @@ fn zero_key_array_is_distinguishable() {
     // Code should check: if key == [0u8; 32] { skip }
     // This test documents the invariant.
     let key_is_valid = |k: &[u8; 32]| !k.iter().all(|&b| b == 0);
-    assert!(!key_is_valid(&zero_key), "zero key must not be considered valid");
+    assert!(
+        !key_is_valid(&zero_key),
+        "zero key must not be considered valid"
+    );
     assert!(key_is_valid(&real_key), "non-zero key must be valid");
 }
 
@@ -3055,12 +3628,19 @@ fn r1_eq_r2_impossible_with_single_relay() {
     let peer = PeerId::random();
     store.register_peer_pseudonym(peer, ps);
     store.upsert(PeerDescriptor::new_signed_full(
-        ps, ReachabilityKind::Direct,
+        ps,
+        ReachabilityKind::Direct,
         vec!["/ip4/5.5.5.5/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
-        ResourceProfile::Desktop, None, None,
+        PeerCapabilities {
+            can_relay: true,
+            ..PeerCapabilities::default()
+        },
+        ResourceProfile::Desktop,
+        None,
+        None,
         Some([0xCC; 32]),
-        1, &key,
+        1,
+        &key,
     ));
 
     let onion_info = store.relay_onion_info();
@@ -3069,8 +3649,10 @@ fn r1_eq_r2_impossible_with_single_relay() {
     // If this relay is used as R2, no distinct R1 exists.
     let r2_peer_id = onion_info[0].peer_id.clone();
     let distinct_r1 = onion_info.iter().find(|r| r.peer_id != r2_peer_id);
-    assert!(distinct_r1.is_none(),
-        "with one relay, there must be no distinct R1 — coordinator must skip onion path");
+    assert!(
+        distinct_r1.is_none(),
+        "with one relay, there must be no distinct R1 — coordinator must skip onion path"
+    );
 }
 
 /// VULN-002 regression: with two relays, R1≠R2 IS satisfiable.
@@ -3079,17 +3661,27 @@ fn r1_neq_r2_satisfied_with_two_relays() {
     let key = ed25519_dalek::SigningKey::from_bytes(&[0x72u8; 32]);
     let mut store = DescriptorStore::new();
 
-    for (i, (onion_byte, ip)) in [(0xC1u8, "1.1.1.1"), (0xC2u8, "2.2.2.2")].iter().enumerate() {
+    for (i, (onion_byte, ip)) in [(0xC1u8, "1.1.1.1"), (0xC2u8, "2.2.2.2")]
+        .iter()
+        .enumerate()
+    {
         let ps = [i as u8 + 1; 32];
         let peer = PeerId::random();
         store.register_peer_pseudonym(peer, ps);
         store.upsert(PeerDescriptor::new_signed_full(
-            ps, ReachabilityKind::Direct,
+            ps,
+            ReachabilityKind::Direct,
             vec![format!("/ip4/{ip}/tcp/4001")],
-            PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
-            ResourceProfile::Desktop, None, None,
+            PeerCapabilities {
+                can_relay: true,
+                ..PeerCapabilities::default()
+            },
+            ResourceProfile::Desktop,
+            None,
+            None,
             Some([*onion_byte; 32]),
-            1, &key,
+            1,
+            &key,
         ));
     }
 
@@ -3115,9 +3707,18 @@ fn min_hops_exceeding_max_path_depth_rejects_all() {
 
     let min_hops: usize = 3;
 
-    assert!(min_hops > max_onion_hops, "onion paths cannot satisfy min_hops=3");
-    assert!(min_hops > max_rendezvous_hops, "rendezvous cannot satisfy min_hops=3");
-    assert!(min_hops > max_relay_hops, "relay circuit cannot satisfy min_hops=3");
+    assert!(
+        min_hops > max_onion_hops,
+        "onion paths cannot satisfy min_hops=3"
+    );
+    assert!(
+        min_hops > max_rendezvous_hops,
+        "rendezvous cannot satisfy min_hops=3"
+    );
+    assert!(
+        min_hops > max_relay_hops,
+        "relay circuit cannot satisfy min_hops=3"
+    );
 }
 
 /// VULN-003 regression: min_hops=2 skips single-hop paths (rendezvous, relay circuit).
@@ -3129,12 +3730,19 @@ fn min_hops_2_skips_single_hop_paths() {
     let relay_circuit_hops: usize = 1;
 
     // Onion paths (2 hops) are eligible.
-    assert!(min_hops <= onion_hops, "onion paths must be eligible for min_hops=2");
+    assert!(
+        min_hops <= onion_hops,
+        "onion paths must be eligible for min_hops=2"
+    );
     // Single-hop paths must be skipped.
-    assert!(min_hops > rendezvous_hops,
-        "rendezvous relay (1 hop) must be skipped when min_hops=2");
-    assert!(min_hops > relay_circuit_hops,
-        "relay circuit (1 hop) must be skipped when min_hops=2");
+    assert!(
+        min_hops > rendezvous_hops,
+        "rendezvous relay (1 hop) must be skipped when min_hops=2"
+    );
+    assert!(
+        min_hops > relay_circuit_hops,
+        "relay circuit (1 hop) must be skipped when min_hops=2"
+    );
 }
 
 /// VULN-005 regression: distress_wipe scrubs proxy credentials from config.toml.
@@ -3153,8 +3761,14 @@ fn distress_wipe_scrubs_proxy_credentials() {
 
     // Verify credentials are in the file.
     let raw = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
-    assert!(raw.contains("admin"), "proxy username must be in config before wipe");
-    assert!(raw.contains("s3cret"), "proxy password must be in config before wipe");
+    assert!(
+        raw.contains("admin"),
+        "proxy username must be in config before wipe"
+    );
+    assert!(
+        raw.contains("s3cret"),
+        "proxy password must be in config before wipe"
+    );
 
     // Open store and wipe.
     let store = LocalShareStore::open(dir.path(), 100).unwrap();
@@ -3162,15 +3776,21 @@ fn distress_wipe_scrubs_proxy_credentials() {
 
     // Reload config — credentials must be gone.
     let reloaded = NodeConfig::load(dir.path()).unwrap();
-    assert!(reloaded.transport.proxy_username.is_none(),
-        "proxy_username must be scrubbed after distress wipe");
-    assert!(reloaded.transport.proxy_password.is_none(),
-        "proxy_password must be scrubbed after distress wipe");
+    assert!(
+        reloaded.transport.proxy_username.is_none(),
+        "proxy_username must be scrubbed after distress wipe"
+    );
+    assert!(
+        reloaded.transport.proxy_password.is_none(),
+        "proxy_password must be scrubbed after distress wipe"
+    );
 
     // Verify credentials are not in the raw file content.
     let raw_after = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
-    assert!(!raw_after.contains("s3cret"),
-        "proxy password must not appear in config.toml after wipe");
+    assert!(
+        !raw_after.contains("s3cret"),
+        "proxy password must not appear in config.toml after wipe"
+    );
 }
 
 /// VULN-005 regression: config scrub_credentials removes only credential fields.
@@ -3198,7 +3818,10 @@ fn config_scrub_preserves_non_credential_fields() {
 
     // Other transport config preserved.
     assert_eq!(reloaded.transport.proxy_type.as_deref(), Some("socks5"));
-    assert_eq!(reloaded.transport.proxy_addr.as_deref(), Some("127.0.0.1:1080"));
+    assert_eq!(
+        reloaded.transport.proxy_addr.as_deref(),
+        Some("127.0.0.1:1080")
+    );
     assert!(reloaded.transport.wss_tls_enabled);
 }
 
@@ -3207,8 +3830,8 @@ fn config_scrub_preserves_non_credential_fields() {
 /// master.key is created with restricted ACLs from the start (no race window).
 #[test]
 fn master_key_created_with_restricted_acl() {
-    use miasma_core::store::LocalShareStore;
     use miasma_core::secure_file;
+    use miasma_core::store::LocalShareStore;
 
     let dir = tempfile::tempdir().unwrap();
     let _store = LocalShareStore::open(dir.path(), 100).unwrap();
@@ -3217,8 +3840,10 @@ fn master_key_created_with_restricted_acl() {
     assert!(key_path.exists(), "master.key must exist after store open");
 
     let restricted = secure_file::verify_restricted(&key_path).unwrap();
-    assert!(restricted,
-        "master.key must be restricted to current user (born restricted, no race window)");
+    assert!(
+        restricted,
+        "master.key must be restricted to current user (born restricted, no race window)"
+    );
 }
 
 /// config.toml with proxy credentials is written with restricted ACLs.
@@ -3235,8 +3860,10 @@ fn config_with_credentials_is_restricted() {
 
     let config_path = dir.path().join("config.toml");
     let restricted = secure_file::verify_restricted(&config_path).unwrap();
-    assert!(restricted,
-        "config.toml with proxy credentials must be restricted to current user");
+    assert!(
+        restricted,
+        "config.toml with proxy credentials must be restricted to current user"
+    );
 }
 
 /// config.toml without credentials is NOT restricted (normal permissions).
@@ -3252,8 +3879,10 @@ fn config_without_credentials_is_not_restricted() {
     let config_path = dir.path().join("config.toml");
     // Not restricted — normal file.
     let restricted = secure_file::verify_restricted(&config_path).unwrap();
-    assert!(!restricted,
-        "config.toml without credentials should use normal permissions");
+    assert!(
+        !restricted,
+        "config.toml without credentials should use normal permissions"
+    );
 }
 
 /// Overwriting config.toml to add credentials applies restriction.
@@ -3268,8 +3897,10 @@ fn config_adding_credentials_restricts_existing_file() {
     let mut config = NodeConfig::default();
     config.save(dir.path()).unwrap();
     let config_path = dir.path().join("config.toml");
-    assert!(!secure_file::verify_restricted(&config_path).unwrap(),
-        "should not be restricted without credentials");
+    assert!(
+        !secure_file::verify_restricted(&config_path).unwrap(),
+        "should not be restricted without credentials"
+    );
 
     // Second save: add credentials.
     config.transport.proxy_username = Some("user".into());
@@ -3277,8 +3908,10 @@ fn config_adding_credentials_restricts_existing_file() {
     config.save(dir.path()).unwrap();
 
     let restricted = secure_file::verify_restricted(&config_path).unwrap();
-    assert!(restricted,
-        "config.toml must become restricted when credentials are added");
+    assert!(
+        restricted,
+        "config.toml must become restricted when credentials are added"
+    );
 }
 
 /// Scrubbing credentials and re-saving removes the restriction.
@@ -3322,8 +3955,10 @@ fn secure_file_write_restricted_roundtrip() {
     let read_back = std::fs::read(&path).unwrap();
     assert_eq!(read_back, data);
 
-    assert!(secure_file::verify_restricted(&path).unwrap(),
-        "file must be restricted to current user");
+    assert!(
+        secure_file::verify_restricted(&path).unwrap(),
+        "file must be restricted to current user"
+    );
 }
 
 /// secure_file::atomic_write_restricted does not leave temp files.
@@ -3336,8 +3971,10 @@ fn secure_file_atomic_no_temp_residue() {
 
     secure_file::atomic_write_restricted(&path, b"atomic data").unwrap();
     assert!(path.exists());
-    assert!(!path.with_extension("sec.tmp").exists(),
-        "temp file must not remain after successful atomic write");
+    assert!(
+        !path.with_extension("sec.tmp").exists(),
+        "temp file must not remain after successful atomic write"
+    );
 }
 
 // ─── v0.2.0-beta.1 hardening tests ──────────────────────────────────────────
@@ -3356,16 +3993,24 @@ fn onion_padding_uniform_ciphertext_size() {
 
     // Build two packets with very different payload sizes.
     let (pkt_small, _) = OnionPacketBuilder::build(
-        &r1_pub, &r2_pub,
-        b"r2".to_vec(), b"target".to_vec(), b"addr".to_vec(),
-        b"tiny".to_vec(),  // 4 bytes
-    ).unwrap();
+        &r1_pub,
+        &r2_pub,
+        b"r2".to_vec(),
+        b"target".to_vec(),
+        b"addr".to_vec(),
+        b"tiny".to_vec(), // 4 bytes
+    )
+    .unwrap();
 
     let (pkt_large, _) = OnionPacketBuilder::build(
-        &r1_pub, &r2_pub,
-        b"r2".to_vec(), b"target".to_vec(), b"addr".to_vec(),
-        vec![0xAA; 4000],  // 4000 bytes
-    ).unwrap();
+        &r1_pub,
+        &r2_pub,
+        b"r2".to_vec(),
+        b"target".to_vec(),
+        b"addr".to_vec(),
+        vec![0xAA; 4000], // 4000 bytes
+    )
+    .unwrap();
 
     // Ciphertext sizes must be equal (padding normalises them).
     assert_eq!(
@@ -3379,7 +4024,10 @@ fn onion_padding_uniform_ciphertext_size() {
 /// the original payload.
 #[test]
 fn onion_padding_roundtrip() {
-    use miasma_core::onion::{OnionPacketBuilder, packet::{OnionLayerProcessor, InnerPayload}};
+    use miasma_core::onion::{
+        packet::{InnerPayload, OnionLayerProcessor},
+        OnionPacketBuilder,
+    };
     use x25519_dalek::{PublicKey, StaticSecret};
 
     let r1_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
@@ -3389,10 +4037,14 @@ fn onion_padding_roundtrip() {
 
     let body = b"original content".to_vec();
     let (pkt, _) = OnionPacketBuilder::build(
-        &r1_pub, &r2_pub,
-        b"r2".to_vec(), b"target".to_vec(), b"addr".to_vec(),
+        &r1_pub,
+        &r2_pub,
+        b"r2".to_vec(),
+        b"target".to_vec(),
+        b"addr".to_vec(),
         body.clone(),
-    ).unwrap();
+    )
+    .unwrap();
 
     // Peel layer 1 (R1).
     let payload1 = OnionLayerProcessor::peel(&r1_secret.to_bytes(), &pkt.layer).unwrap();
@@ -3405,7 +4057,10 @@ fn onion_padding_roundtrip() {
 
     // Final payload matches original.
     let inner: InnerPayload = bincode::deserialize(&payload2.data).unwrap();
-    assert_eq!(inner.body, body, "padded onion packet must round-trip correctly");
+    assert_eq!(
+        inner.body, body,
+        "padded onion packet must round-trip correctly"
+    );
 }
 
 /// Onion pad/unpad: basic correctness.
@@ -3435,12 +4090,19 @@ fn anti_gaming_demotion_on_failure_dominance() {
     let peer = PeerId::random();
     store.register_peer_pseudonym(peer, ps);
     store.upsert(PeerDescriptor::new_signed_full(
-        ps, ReachabilityKind::Direct,
+        ps,
+        ReachabilityKind::Direct,
         vec!["/ip4/9.9.9.9/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
-        ResourceProfile::Desktop, None, None,
+        PeerCapabilities {
+            can_relay: true,
+            ..PeerCapabilities::default()
+        },
+        ResourceProfile::Desktop,
+        None,
+        None,
         Some([0xEE; 32]),
-        1, &key,
+        1,
+        &key,
     ));
 
     // Give it 1 success → Observed.
@@ -3454,8 +4116,11 @@ fn anti_gaming_demotion_on_failure_dominance() {
     // 2 failures → rate = 1/3 < 50%, failures=2 → anti-gaming demotion.
     store.record_relay_failure(&ps);
     store.record_relay_failure(&ps);
-    assert_eq!(store.relay_tier(&ps), RelayTrustTier::Claimed,
-        "relay with ≥2 failures and <50% rate must be demoted to Claimed despite probes");
+    assert_eq!(
+        store.relay_tier(&ps),
+        RelayTrustTier::Claimed,
+        "relay with ≥2 failures and <50% rate must be demoted to Claimed despite probes"
+    );
 }
 
 /// Anti-gaming: a relay with many successes but a few failures stays trusted.
@@ -3468,23 +4133,37 @@ fn anti_gaming_does_not_demote_mostly_successful_relay() {
     let peer = PeerId::random();
     store.register_peer_pseudonym(peer, ps);
     store.upsert(PeerDescriptor::new_signed_full(
-        ps, ReachabilityKind::Direct,
+        ps,
+        ReachabilityKind::Direct,
         vec!["/ip4/8.8.8.8/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
-        ResourceProfile::Desktop, None, None,
+        PeerCapabilities {
+            can_relay: true,
+            ..PeerCapabilities::default()
+        },
+        ResourceProfile::Desktop,
+        None,
+        None,
         Some([0xFF; 32]),
-        1, &key,
+        1,
+        &key,
     ));
 
     // 5 successes, 2 failures → rate = 5/7 ≈ 71% > 50% → no anti-gaming demotion.
-    for _ in 0..5 { store.record_relay_success(&ps); }
-    for _ in 0..2 { store.record_relay_failure(&ps); }
+    for _ in 0..5 {
+        store.record_relay_success(&ps);
+    }
+    for _ in 0..2 {
+        store.record_relay_failure(&ps);
+    }
 
     // 5 successes at 71% → should be Verified (≥3 successes at ≥75% fails,
     // but 71% < 75% so it should be Observed).
     let tier = store.relay_tier(&ps);
-    assert!(tier >= RelayTrustTier::Observed,
-        "relay with 71% success rate and 5 successes should be at least Observed, got {:?}", tier);
+    assert!(
+        tier >= RelayTrustTier::Observed,
+        "relay with 71% success rate and 5 successes should be at least Observed, got {:?}",
+        tier
+    );
 }
 
 /// Replay cache: same fingerprint is detected as a replay.
@@ -3523,11 +4202,19 @@ fn descriptor_store_relay_pseudonyms() {
     let peer_relay = PeerId::random();
     store.register_peer_pseudonym(peer_relay, ps_relay);
     store.upsert(PeerDescriptor::new_signed_full(
-        ps_relay, ReachabilityKind::Direct,
+        ps_relay,
+        ReachabilityKind::Direct,
         vec!["/ip4/1.1.1.1/tcp/4001".to_string()],
-        PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
-        ResourceProfile::Desktop, None, None, None,
-        1, &key,
+        PeerCapabilities {
+            can_relay: true,
+            ..PeerCapabilities::default()
+        },
+        ResourceProfile::Desktop,
+        None,
+        None,
+        None,
+        1,
+        &key,
     ));
 
     // One non-relay.
@@ -3535,11 +4222,19 @@ fn descriptor_store_relay_pseudonyms() {
     let peer_store = PeerId::random();
     store.register_peer_pseudonym(peer_store, ps_store);
     store.upsert(PeerDescriptor::new_signed_full(
-        ps_store, ReachabilityKind::Direct,
+        ps_store,
+        ReachabilityKind::Direct,
         vec!["/ip4/2.2.2.2/tcp/4001".to_string()],
-        PeerCapabilities { can_store: true, ..PeerCapabilities::default() },
-        ResourceProfile::Desktop, None, None, None,
-        1, &key,
+        PeerCapabilities {
+            can_store: true,
+            ..PeerCapabilities::default()
+        },
+        ResourceProfile::Desktop,
+        None,
+        None,
+        None,
+        1,
+        &key,
     ));
 
     let relay_ps = store.relay_pseudonyms();
@@ -3551,8 +4246,8 @@ fn descriptor_store_relay_pseudonyms() {
 /// They use try_send and silently drop on backpressure.
 #[tokio::test]
 async fn dht_fire_and_forget_backpressure() {
-    use tokio::sync::mpsc;
     use miasma_core::network::node::DhtHandle;
+    use tokio::sync::mpsc;
 
     // Create a channel with capacity 1 so it saturates immediately.
     let (tx, _rx) = mpsc::channel(1);
@@ -3574,5 +4269,8 @@ async fn dht_fire_and_forget_backpressure() {
 
     // Same for forwarding verification.
     let r4 = handle.record_forwarding_verification(pseudonym).await;
-    assert!(r4.is_ok(), "forwarding verification must not block on full channel");
+    assert!(
+        r4.is_ok(),
+        "forwarding verification must not block on full channel"
+    );
 }

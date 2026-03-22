@@ -162,7 +162,10 @@ pub enum PathError {
     /// Not enough relay descriptors available.
     InsufficientRelays { required: usize, available: usize },
     /// Not enough diverse relays (all from the same prefix).
-    InsufficientDiversity { required: usize, diverse_count: usize },
+    InsufficientDiversity {
+        required: usize,
+        diverse_count: usize,
+    },
     /// Anonymity required but no relays at all.
     NoRelaysAvailable,
     /// Destination descriptor not found.
@@ -172,11 +175,20 @@ pub enum PathError {
 impl std::fmt::Display for PathError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PathError::InsufficientRelays { required, available } => {
+            PathError::InsufficientRelays {
+                required,
+                available,
+            } => {
                 write!(f, "need {required} relays, only {available} available")
             }
-            PathError::InsufficientDiversity { required, diverse_count } => {
-                write!(f, "need {required} diverse relays, only {diverse_count} unique prefixes")
+            PathError::InsufficientDiversity {
+                required,
+                diverse_count,
+            } => {
+                write!(
+                    f,
+                    "need {required} diverse relays, only {diverse_count} unique prefixes"
+                )
             }
             PathError::NoRelaysAvailable => write!(f, "no relay descriptors available"),
             PathError::DestinationUnknown => write!(f, "destination descriptor not found"),
@@ -201,16 +213,22 @@ impl PathSelector {
         routing_table: &RoutingTable,
     ) -> Result<RoutingPath, PathError> {
         match policy {
-            AnonymityPolicy::Direct => {
-                Ok(RoutingPath { hops: vec![], destination, policy })
-            }
+            AnonymityPolicy::Direct => Ok(RoutingPath {
+                hops: vec![],
+                destination,
+                policy,
+            }),
             AnonymityPolicy::Opportunistic => {
                 let constraints = PathConstraints::for_opportunistic();
                 match Self::build_path(destination, &constraints, store, routing_table) {
                     Ok(path) if !path.hops.is_empty() => Ok(path),
                     _ => {
                         // Fall back to direct.
-                        Ok(RoutingPath { hops: vec![], destination, policy })
+                        Ok(RoutingPath {
+                            hops: vec![],
+                            destination,
+                            policy,
+                        })
                     }
                 }
             }
@@ -235,7 +253,8 @@ impl PathSelector {
         }
 
         // Filter by trust tier.
-        let mut candidates: Vec<&PeerDescriptor> = relays.into_iter()
+        let mut candidates: Vec<&PeerDescriptor> = relays
+            .into_iter()
             .filter(|d| d.meets_tier(constraints.min_relay_tier) || d.credential.is_none())
             .collect();
 
@@ -244,7 +263,8 @@ impl PathSelector {
             candidates.sort_by(|a, b| {
                 let a_desktop = a.resource_profile == ResourceProfile::Desktop;
                 let b_desktop = b.resource_profile == ResourceProfile::Desktop;
-                b_desktop.cmp(&a_desktop)
+                b_desktop
+                    .cmp(&a_desktop)
                     .then(b.published_at.cmp(&a.published_at))
             });
         }
@@ -264,7 +284,9 @@ impl PathSelector {
             }
 
             // Extract IP prefix from the first address.
-            let prefix = desc.addresses.first()
+            let prefix = desc
+                .addresses
+                .first()
                 .and_then(|a| a.parse().ok())
                 .map(|a: libp2p::Multiaddr| ip_prefix_of(&a))
                 .unwrap_or(IpPrefix::Local);
@@ -300,7 +322,9 @@ impl PathSelector {
         Ok(RoutingPath {
             hops,
             destination,
-            policy: AnonymityPolicy::Required { min_hops: constraints.min_hops },
+            policy: AnonymityPolicy::Required {
+                min_hops: constraints.min_hops,
+            },
         })
     }
 }
@@ -322,9 +346,9 @@ pub struct PathSelectionStats {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::credential::*;
     use super::super::descriptor::*;
+    use super::*;
 
     fn make_relay_descriptor(
         pseudonym: [u8; 32],
@@ -336,7 +360,10 @@ mod tests {
             pseudonym,
             ReachabilityKind::Direct,
             vec![addr.to_string()],
-            PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+            PeerCapabilities {
+                can_relay: true,
+                ..PeerCapabilities::default()
+            },
             ResourceProfile::Desktop,
             credential,
             1,
@@ -372,9 +399,7 @@ mod tests {
         let rt = RoutingTable::new(true);
         let dest = [0xFF; 32];
 
-        let path = PathSelector::select(
-            dest, AnonymityPolicy::Opportunistic, &store, &rt
-        ).unwrap();
+        let path = PathSelector::select(dest, AnonymityPolicy::Opportunistic, &store, &rt).unwrap();
         // Should use relays since they're available.
         assert!(path.hop_count() >= 1);
     }
@@ -385,9 +410,7 @@ mod tests {
         let rt = RoutingTable::new(true);
         let dest = [0xFF; 32];
 
-        let path = PathSelector::select(
-            dest, AnonymityPolicy::Opportunistic, &store, &rt
-        ).unwrap();
+        let path = PathSelector::select(dest, AnonymityPolicy::Opportunistic, &store, &rt).unwrap();
         assert!(path.is_direct());
     }
 
@@ -397,9 +420,8 @@ mod tests {
         let rt = RoutingTable::new(true);
         let dest = [0xFF; 32];
 
-        let result = PathSelector::select(
-            dest, AnonymityPolicy::Required { min_hops: 2 }, &store, &rt
-        );
+        let result =
+            PathSelector::select(dest, AnonymityPolicy::Required { min_hops: 2 }, &store, &rt);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), PathError::NoRelaysAvailable));
     }
@@ -410,11 +432,13 @@ mod tests {
         let rt = RoutingTable::new(true);
         let dest = [0xFF; 32];
 
-        let result = PathSelector::select(
-            dest, AnonymityPolicy::Required { min_hops: 2 }, &store, &rt
-        );
+        let result =
+            PathSelector::select(dest, AnonymityPolicy::Required { min_hops: 2 }, &store, &rt);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), PathError::InsufficientRelays { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            PathError::InsufficientRelays { .. }
+        ));
     }
 
     #[test]
@@ -423,9 +447,9 @@ mod tests {
         let rt = RoutingTable::new(true);
         let dest = [0xFF; 32];
 
-        let path = PathSelector::select(
-            dest, AnonymityPolicy::Required { min_hops: 2 }, &store, &rt
-        ).unwrap();
+        let path =
+            PathSelector::select(dest, AnonymityPolicy::Required { min_hops: 2 }, &store, &rt)
+                .unwrap();
         assert!(path.hop_count() >= 2);
     }
 
@@ -442,7 +466,10 @@ mod tests {
                 ps,
                 ReachabilityKind::Direct,
                 vec![format!("/ip4/10.0.{i}.1/tcp/4001")],
-                PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+                PeerCapabilities {
+                    can_relay: true,
+                    ..PeerCapabilities::default()
+                },
                 ResourceProfile::Desktop,
                 None,
                 1,
@@ -454,9 +481,8 @@ mod tests {
         let dest = [0xFF; 32];
 
         // Request 2 hops — diversity should limit us to 1 from the same /16.
-        let result = PathSelector::select(
-            dest, AnonymityPolicy::Required { min_hops: 2 }, &store, &rt
-        );
+        let result =
+            PathSelector::select(dest, AnonymityPolicy::Required { min_hops: 2 }, &store, &rt);
         assert!(result.is_err(), "should fail: all relays from same /16");
     }
 
@@ -469,9 +495,9 @@ mod tests {
         let mut dest = [0u8; 32];
         dest[0] = 0; // matches first relay
 
-        let path = PathSelector::select(
-            dest, AnonymityPolicy::Required { min_hops: 1 }, &store, &rt
-        ).unwrap();
+        let path =
+            PathSelector::select(dest, AnonymityPolicy::Required { min_hops: 1 }, &store, &rt)
+                .unwrap();
 
         // The destination should not appear as a relay hop.
         for hop in &path.hops {
@@ -485,9 +511,9 @@ mod tests {
         let rt = RoutingTable::new(true);
         let dest = [0xFF; 32];
 
-        let path = PathSelector::select(
-            dest, AnonymityPolicy::Required { min_hops: 2 }, &store, &rt
-        ).unwrap();
+        let path =
+            PathSelector::select(dest, AnonymityPolicy::Required { min_hops: 2 }, &store, &rt)
+                .unwrap();
 
         let prefixes = path.prefixes();
         assert!(prefixes.len() >= 2);

@@ -12,11 +12,7 @@ use crate::MiasmaError;
 /// K_enc reconstruction requires k shares. Until k shares are collected,
 /// MAC verification (K_tag derived from K_enc) is impossible — by design.
 /// Coarse per-share verification is handled by shard_hash + mid_prefix (ADR-003 ①).
-pub fn sss_split(
-    secret: &[u8],
-    k: u8,
-    n: u8,
-) -> Result<Vec<Vec<u8>>, MiasmaError> {
+pub fn sss_split(secret: &[u8], k: u8, n: u8) -> Result<Vec<Vec<u8>>, MiasmaError> {
     if k == 0 || n == 0 || k > n {
         return Err(MiasmaError::Sss(format!(
             "invalid parameters: k={k}, n={n} (require 0 < k <= n)"
@@ -24,10 +20,7 @@ pub fn sss_split(
     }
     let sharks = Sharks(k);
     let dealer = sharks.dealer(secret);
-    let shares: Vec<Vec<u8>> = dealer
-        .take(n as usize)
-        .map(|s| Vec::from(&s))
-        .collect();
+    let shares: Vec<Vec<u8>> = dealer.take(n as usize).map(|s| Vec::from(&s)).collect();
     Ok(shares)
 }
 
@@ -35,10 +28,7 @@ pub fn sss_split(
 ///
 /// Returns the reconstructed secret wrapped in `Zeroizing` so it is wiped
 /// from memory when dropped.
-pub fn sss_combine(
-    shares: &[Vec<u8>],
-    k: u8,
-) -> Result<Zeroizing<Vec<u8>>, MiasmaError> {
+pub fn sss_combine(shares: &[Vec<u8>], k: u8) -> Result<Zeroizing<Vec<u8>>, MiasmaError> {
     if shares.len() < k as usize {
         return Err(MiasmaError::InsufficientShares {
             need: k as usize,
@@ -91,7 +81,10 @@ mod tests {
         let n = 10u8;
         let shares = sss_split(SECRET, k, n).unwrap();
         let result = sss_combine(&shares[..4], k); // k-1 shares
-        assert!(matches!(result, Err(MiasmaError::InsufficientShares { need: 5, got: 4 })));
+        assert!(matches!(
+            result,
+            Err(MiasmaError::InsufficientShares { need: 5, got: 4 })
+        ));
     }
 
     #[test]

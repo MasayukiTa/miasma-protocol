@@ -1,3 +1,5 @@
+mod bencode;
+mod bridge;
 /// miasma-bridge CLI - BitTorrent <-> Miasma bridge.
 ///
 /// Usage examples:
@@ -16,8 +18,6 @@
 /// ```
 #[allow(dead_code)]
 mod index;
-mod bencode;
-mod bridge;
 mod pipeline;
 mod torrent;
 
@@ -40,8 +40,7 @@ fn main() {
             use tracing_subscriber::util::SubscriberInitExt;
             let filter = tracing_subscriber::EnvFilter::try_from_env("RUST_LOG")
                 .unwrap_or_else(|_| "miasma_bridge=info".parse().unwrap());
-            let stderr_layer = tracing_subscriber::fmt::layer()
-                .with_writer(std::io::stderr);
+            let stderr_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
             let file_layer = tracing_subscriber::fmt::layer()
                 .with_writer(non_blocking)
                 .with_ansi(false);
@@ -214,26 +213,38 @@ fn cmd_dissolve(args: &[String]) {
     println!("      Info hash:    {ih_hex}");
     println!("      Display name: {name}");
     println!("      Data dir:     {}", data_dir.display());
-    println!("      Size limit:   {}", if safety_opts.confirm_download {
-        "unlimited (--confirm-download)".to_string()
-    } else {
-        format_bytes_human(safety_opts.max_total_bytes)
-    });
+    println!(
+        "      Size limit:   {}",
+        if safety_opts.confirm_download {
+            "unlimited (--confirm-download)".to_string()
+        } else {
+            format_bytes_human(safety_opts.max_total_bytes)
+        }
+    );
     if let Some(ref proxy) = safety_opts.proxy_url {
         println!("      Proxy:        {proxy}");
     } else {
         println!("      Proxy:        none (direct connection)");
     }
-    println!("      Seeding:      {}", if safety_opts.seed_enabled {
-        "ENABLED — you will upload to peers after download"
-    } else {
-        "disabled (default)"
-    });
+    println!(
+        "      Seeding:      {}",
+        if safety_opts.seed_enabled {
+            "ENABLED — you will upload to peers after download"
+        } else {
+            "disabled (default)"
+        }
+    );
     if safety_opts.upload_rate_limit_bps > 0 {
-        println!("      Upload limit: {}", format_bytes_human(safety_opts.upload_rate_limit_bps as u64));
+        println!(
+            "      Upload limit: {}",
+            format_bytes_human(safety_opts.upload_rate_limit_bps as u64)
+        );
     }
     if safety_opts.download_rate_limit_bps > 0 {
-        println!("      Down limit:   {}", format_bytes_human(safety_opts.download_rate_limit_bps as u64));
+        println!(
+            "      Down limit:   {}",
+            format_bytes_human(safety_opts.download_rate_limit_bps as u64)
+        );
     }
     println!();
 

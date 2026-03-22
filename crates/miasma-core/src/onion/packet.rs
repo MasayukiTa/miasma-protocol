@@ -171,8 +171,8 @@ impl OnionPacketBuilder {
             return_path: return_path.clone(),
             body,
         };
-        let inner_bytes = bincode::serialize(&inner)
-            .map_err(|e| MiasmaError::Serialization(e.to_string()))?;
+        let inner_bytes =
+            bincode::serialize(&inner).map_err(|e| MiasmaError::Serialization(e.to_string()))?;
 
         let layer2 = Self::encrypt_layer(
             r2_static_pubkey,
@@ -184,8 +184,8 @@ impl OnionPacketBuilder {
         )?;
 
         // ── Outer layer (R1 → R2) ──────────────────────────────────────────
-        let layer2_bytes = bincode::serialize(&layer2)
-            .map_err(|e| MiasmaError::Serialization(e.to_string()))?;
+        let layer2_bytes =
+            bincode::serialize(&layer2).map_err(|e| MiasmaError::Serialization(e.to_string()))?;
 
         let layer1 = Self::encrypt_layer(
             r1_static_pubkey,
@@ -288,8 +288,8 @@ impl OnionPacketBuilder {
         let enc_key = derive_enc_key(shared.as_bytes())?;
 
         // Encrypt.
-        let plaintext = bincode::serialize(&payload)
-            .map_err(|e| MiasmaError::Serialization(e.to_string()))?;
+        let plaintext =
+            bincode::serialize(&payload).map_err(|e| MiasmaError::Serialization(e.to_string()))?;
         let (nonce, ciphertext) = xchacha20_encrypt(&enc_key, &plaintext)?;
 
         Ok(OnionLayer {
@@ -387,7 +387,9 @@ fn pad_to_fixed_size(data: &[u8], target_size: usize) -> Vec<u8> {
 /// Reads the 4-byte LE length prefix and returns only the original data.
 pub fn unpad_fixed_size(padded: &[u8]) -> Result<Vec<u8>, MiasmaError> {
     if padded.len() < 4 {
-        return Err(MiasmaError::Decryption("padded data too short for length prefix".into()));
+        return Err(MiasmaError::Decryption(
+            "padded data too short for length prefix".into(),
+        ));
     }
     let original_len = u32::from_le_bytes([padded[0], padded[1], padded[2], padded[3]]) as usize;
     if 4 + original_len > padded.len() {
@@ -407,10 +409,7 @@ fn derive_enc_key(shared_secret: &[u8]) -> Result<Zeroizing<[u8; 32]>, MiasmaErr
     Ok(key)
 }
 
-fn xchacha20_encrypt(
-    key: &[u8; 32],
-    plaintext: &[u8],
-) -> Result<([u8; 24], Vec<u8>), MiasmaError> {
+fn xchacha20_encrypt(key: &[u8; 32], plaintext: &[u8]) -> Result<([u8; 24], Vec<u8>), MiasmaError> {
     use chacha20poly1305::{aead::Aead, KeyInit, XChaCha20Poly1305, XNonce};
 
     let mut nonce_bytes = [0u8; 24];

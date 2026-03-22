@@ -80,6 +80,12 @@ rustls-pemfile = "2"
 tokio-socks = "0.5"
 quinn = "0.11"
 
+# HTTP bridge for web client
+hyper = { version = "1", features = ["http1", "server"] }
+http-body-util = "0.1"
+hyper-util = { version = "0.1", features = ["tokio"] }
+base64 = "0.22"
+
 # Error handling
 thiserror = "1"
 anyhow = "1"

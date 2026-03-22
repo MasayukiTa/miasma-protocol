@@ -22,6 +22,14 @@ const FRAME_MAX: usize = 16 * 1_024 * 1_024;
 /// Filename inside the data directory containing the control port number.
 pub const PORT_FILE: &str = "daemon.port";
 
+/// Filename inside the data directory containing the HTTP bridge port.
+pub const HTTP_PORT_FILE: &str = "daemon.http";
+
+/// Default HTTP bridge port.  Fixed so browsers can discover the daemon
+/// without filesystem access.  Configurable via `http_bridge.port` in
+/// config.toml.
+pub const HTTP_BRIDGE_DEFAULT_PORT: u16 = 17842;
+
 // ─── Wire types ───────────────────────────────────────────────────────────────
 
 /// Request from a CLI client to the local daemon.
@@ -48,8 +56,12 @@ pub enum ControlRequest {
 /// Response from the daemon to a CLI client.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ControlResponse {
-    Published { mid: String },
-    Retrieved { data: Vec<u8> },
+    Published {
+        mid: String,
+    },
+    Retrieved {
+        data: Vec<u8>,
+    },
     Status(DaemonStatus),
     /// Distress wipe completed successfully.
     Wiped,
@@ -113,7 +125,6 @@ pub struct DaemonStatus {
     pub routing_pow_difficulty: u8,
 
     // ── Phase 4b: credential / descriptor / path selection ─────────────
-
     /// Current trust epoch number.
     #[serde(default)]
     pub credential_epoch: u64,
@@ -143,7 +154,6 @@ pub struct DaemonStatus {
     pub anonymity_policy: String,
 
     // ── Phase 4b: outcome metrics ────────────────────────────────────────
-
     /// Relay infrastructure diversity (unique /16 prefixes).
     #[serde(default)]
     pub metric_relay_prefix_diversity: usize,
@@ -188,7 +198,6 @@ pub struct DaemonStatus {
     pub nat_publicly_reachable: bool,
 
     // ── Retrieval tracking ──────────────────────────────────────────────
-
     /// Direct retrieval attempts.
     #[serde(default)]
     pub retrieval_direct_attempts: u64,
@@ -269,7 +278,6 @@ pub struct DaemonStatus {
     pub pre_retrieval_probes_run: u64,
 
     // ── Rendezvous and relay trust ──────────────────────────────────────
-
     /// Number of peers with Rendezvous reachability descriptors.
     #[serde(default)]
     pub rendezvous_peers: usize,
@@ -318,7 +326,10 @@ pub struct TransportStatus {
 pub async fn write_frame(stream: &mut TcpStream, value: &impl Serialize) -> Result<()> {
     let body = serde_json::to_vec(value).context("frame serialize")?;
     let len = body.len() as u32;
-    stream.write_all(&len.to_le_bytes()).await.context("write frame length")?;
+    stream
+        .write_all(&len.to_le_bytes())
+        .await
+        .context("write frame length")?;
     stream.write_all(&body).await.context("write frame body")?;
     Ok(())
 }
@@ -326,13 +337,19 @@ pub async fn write_frame(stream: &mut TcpStream, value: &impl Serialize) -> Resu
 /// Read a 4-byte LE length-prefixed JSON frame and deserialize it.
 pub async fn read_frame<T: for<'de> Deserialize<'de>>(stream: &mut TcpStream) -> Result<T> {
     let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).await.context("read frame length")?;
+    stream
+        .read_exact(&mut len_buf)
+        .await
+        .context("read frame length")?;
     let len = u32::from_le_bytes(len_buf) as usize;
     if len > FRAME_MAX {
         bail!("IPC frame too large: {len} bytes (max {FRAME_MAX})");
     }
     let mut buf = vec![0u8; len];
-    stream.read_exact(&mut buf).await.context("read frame body")?;
+    stream
+        .read_exact(&mut buf)
+        .await
+        .context("read frame body")?;
     serde_json::from_slice(&buf).context("frame deserialize")
 }
 
@@ -340,13 +357,22 @@ pub async fn read_frame<T: for<'de> Deserialize<'de>>(stream: &mut TcpStream) ->
 
 /// Write the daemon control port to `<data_dir>/daemon.port`.
 pub fn write_port_file(data_dir: &Path, port: u16) -> Result<()> {
-    std::fs::write(data_dir.join(PORT_FILE), port.to_string())
-        .context("write daemon.port")
+    std::fs::write(data_dir.join(PORT_FILE), port.to_string()).context("write daemon.port")
 }
 
 /// Remove `<data_dir>/daemon.port` (called on daemon exit).
 pub fn remove_port_file(data_dir: &Path) {
     let _ = std::fs::remove_file(data_dir.join(PORT_FILE));
+}
+
+/// Write the HTTP bridge port to `<data_dir>/daemon.http`.
+pub fn write_http_port_file(data_dir: &Path, port: u16) -> Result<()> {
+    std::fs::write(data_dir.join(HTTP_PORT_FILE), port.to_string()).context("write daemon.http")
+}
+
+/// Remove `<data_dir>/daemon.http` (called on daemon exit).
+pub fn remove_http_port_file(data_dir: &Path) {
+    let _ = std::fs::remove_file(data_dir.join(HTTP_PORT_FILE));
 }
 
 /// Read and parse the control port.  Returns a descriptive error if the file
@@ -359,7 +385,9 @@ pub fn read_port_file(data_dir: &Path) -> Result<u16> {
             path.display()
         )
     })?;
-    s.trim().parse::<u16>().context("daemon.port contains an invalid port number")
+    s.trim()
+        .parse::<u16>()
+        .context("daemon.port contains an invalid port number")
 }
 
 // ─── Client helper ────────────────────────────────────────────────────────────
