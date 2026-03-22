@@ -10,6 +10,7 @@ use eframe::egui;
 use crate::locale::{self, Locale, Strings};
 use crate::variant::ProductMode;
 use crate::worker::{DaemonState, WorkerCmd, WorkerHandle, WorkerResult};
+use crate::LaunchIntent;
 
 // ─── Font system ────────────────────────────────────────────────────────────
 
@@ -171,6 +172,7 @@ enum Tab {
     Retrieve,
     Status,
     Settings,
+    Import,
 }
 
 // ─── App struct ─────────────────────────────────────────────────────────────
@@ -197,6 +199,11 @@ pub struct MiasmaApp {
     retrieved_summary: Option<String>,
     save_data: Option<Vec<u8>>,
 
+    // Import panel (magnet/torrent)
+    import_intent: Option<LaunchIntent>,
+    import_state: ImportState,
+    import_mids: Vec<String>,
+
     // Status (from daemon)
     peer_id: String,
     peer_count: usize,
@@ -218,6 +225,23 @@ pub struct MiasmaApp {
     busy: bool,
     status_msg: Option<(String, MsgKind)>,
     show_wipe_confirm: bool,
+    startup_time: std::time::Instant,
+    last_status_poll: std::time::Instant,
+    launch_attempts: u32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ImportState {
+    /// No import in progress.
+    Idle,
+    /// Showing confirmation dialog.
+    Confirming,
+    /// Bridge is running.
+    InProgress,
+    /// Import succeeded.
+    Complete,
+    /// Import failed.
+    Failed,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -228,15 +252,25 @@ enum MsgKind {
 }
 
 impl MiasmaApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, mode: ProductMode, locale: Locale) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, mode: ProductMode, locale: Locale, intent: LaunchIntent) -> Self {
         configure_fonts(&cc.egui_ctx);
 
         let data_dir = miasma_core::default_data_dir();
         let worker = WorkerHandle::spawn(data_dir.clone());
 
+        // If launched with a magnet/torrent intent, go to Import tab.
+        let (initial_tab, import_intent, import_state) = match &intent {
+            LaunchIntent::Normal => (Tab::Store, None, ImportState::Idle),
+            LaunchIntent::Magnet(_) | LaunchIntent::TorrentFile(_) => {
+                (Tab::Import, Some(intent), ImportState::Confirming)
+            }
+        };
+
+        let now = std::time::Instant::now();
+
         Self {
             worker,
-            tab: Tab::Store,
+            tab: initial_tab,
             mode,
             locale,
             data_dir: data_dir.clone(),
@@ -247,6 +281,9 @@ impl MiasmaApp {
             mid_input: String::new(),
             retrieved_summary: None,
             save_data: None,
+            import_intent,
+            import_state,
+            import_mids: Vec::new(),
             peer_id: String::new(),
             peer_count: 0,
             share_count: 0,
@@ -265,6 +302,9 @@ impl MiasmaApp {
             busy: false,
             status_msg: None,
             show_wipe_confirm: false,
+            startup_time: now,
+            last_status_poll: now,
+            launch_attempts: 0,
         }
     }
 
@@ -353,8 +393,21 @@ impl MiasmaApp {
                     self.busy = false;
                     self.set_msg(MsgKind::Success, self.s().node_init_msg);
                 }
+                WorkerResult::ImportStarted { name } => {
+                    self.import_state = ImportState::InProgress;
+                    self.set_msg(MsgKind::Info, format!("{}: {name}", self.s().import_progress));
+                }
+                WorkerResult::ImportComplete { mids } => {
+                    self.busy = false;
+                    self.import_state = ImportState::Complete;
+                    self.import_mids = mids;
+                    self.set_msg(MsgKind::Success, self.s().import_complete);
+                }
                 WorkerResult::Err(e) => {
                     self.busy = false;
+                    if self.import_state == ImportState::InProgress {
+                        self.import_state = ImportState::Failed;
+                    }
                     self.last_error = Some(e.clone());
                     self.set_msg(MsgKind::Error, e);
                 }
@@ -714,6 +767,23 @@ impl MiasmaApp {
                     let diag = self.build_diagnostics();
                     ui.output_mut(|o| o.copied_text = diag);
                     self.set_msg(MsgKind::Info, s.status_diag_copied);
+                }
+            }
+            // "Save Report" — available in both modes for support.
+            if ui
+                .add_sized([130.0, 26.0], egui::Button::new(s.status_save_diag))
+                .clicked()
+            {
+                let diag = self.build_diagnostics();
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_file_name("miasma-diagnostics.txt")
+                    .add_filter("Text files", &["txt"])
+                    .save_file()
+                {
+                    match std::fs::write(&path, &diag) {
+                        Ok(()) => self.set_msg(MsgKind::Success, format!("{} {}", s.status_diag_saved, path.display())),
+                        Err(e) => self.set_msg(MsgKind::Error, format!("{}{e}", s.status_diag_save_failed)),
+                    }
                 }
             }
         });
@@ -1190,6 +1260,22 @@ impl MiasmaApp {
                     ui.output_mut(|o| o.copied_text = diag);
                     self.set_msg(MsgKind::Info, s.status_diag_copied);
                 }
+                if ui
+                    .add_sized([130.0, 30.0], egui::Button::new(s.status_save_diag))
+                    .clicked()
+                {
+                    let diag = self.build_diagnostics();
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_file_name("miasma-diagnostics.txt")
+                        .add_filter("Text files", &["txt"])
+                        .save_file()
+                    {
+                        match std::fs::write(&path, &diag) {
+                            Ok(()) => self.set_msg(MsgKind::Success, format!("{} {}", s.status_diag_saved, path.display())),
+                            Err(e) => self.set_msg(MsgKind::Error, format!("{}{e}", s.status_diag_save_failed)),
+                        }
+                    }
+                }
 
                 #[cfg(windows)]
                 if ui
@@ -1226,20 +1312,170 @@ impl MiasmaApp {
         );
     }
 
+    // ── Import panel (magnet / .torrent) ──────────────────────────────────
+
+    fn import_panel(&mut self, ui: &mut egui::Ui) {
+        let s = self.s();
+        let easy = self.mode.is_easy();
+
+        section_heading(ui, s.import_heading);
+        ui.add_space(8.0);
+
+        match self.import_state {
+            ImportState::Idle => {
+                // No import — show hint to go to Save tab instead.
+                card_frame().show(ui, |ui| {
+                    ui.label(s.import_idle_hint);
+                });
+            }
+            ImportState::Confirming => {
+                // Show what was received and ask for confirmation.
+                card_frame().show(ui, |ui| {
+                    let description = match &self.import_intent {
+                        Some(LaunchIntent::Magnet(uri)) => {
+                            let display = if uri.len() > 80 {
+                                format!("{}...", &uri[..80])
+                            } else {
+                                uri.clone()
+                            };
+                            format!("{}: {display}", s.import_magnet_label)
+                        }
+                        Some(LaunchIntent::TorrentFile(path)) => {
+                            format!("{}: {}", s.import_torrent_label, path.display())
+                        }
+                        _ => String::new(),
+                    };
+
+                    ui.label(egui::RichText::new(&description).strong());
+                    ui.add_space(8.0);
+
+                    let explain = if easy { s.import_explain_easy } else { s.import_explain };
+                    ui.label(explain);
+                    ui.add_space(12.0);
+
+                    let connected = self.daemon_state == DaemonState::Connected;
+                    ui.horizontal(|ui| {
+                        ui.add_enabled_ui(connected && !self.busy, |ui| {
+                            let btn = if easy {
+                                egui::Button::new(
+                                    egui::RichText::new(s.import_button).strong().size(14.0),
+                                ).fill(ACCENT)
+                            } else {
+                                egui::Button::new(s.import_button)
+                            };
+                            if ui.add_sized([140.0, 34.0], btn).clicked() {
+                                if let Some(intent) = &self.import_intent {
+                                    let cmd = match intent {
+                                        LaunchIntent::Magnet(uri) => {
+                                            WorkerCmd::ImportMagnet(uri.clone())
+                                        }
+                                        LaunchIntent::TorrentFile(path) => {
+                                            WorkerCmd::ImportTorrentFile(path.clone())
+                                        }
+                                        LaunchIntent::Normal => unreachable!(),
+                                    };
+                                    let _ = self.worker.tx.try_send(cmd);
+                                    self.busy = true;
+                                    self.import_state = ImportState::InProgress;
+                                }
+                            }
+                        });
+
+                        if ui.add_sized([100.0, 34.0], egui::Button::new(s.import_cancel)).clicked() {
+                            self.import_state = ImportState::Idle;
+                            self.import_intent = None;
+                            self.tab = Tab::Store;
+                        }
+                    });
+
+                    if !connected {
+                        ui.add_space(4.0);
+                        ui.colored_label(YELLOW, s.import_not_connected);
+                    }
+                });
+            }
+            ImportState::InProgress => {
+                card_frame().show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(egui::RichText::new(s.import_progress).color(BLUE));
+                    });
+                });
+            }
+            ImportState::Complete => {
+                card_frame().show(ui, |ui| {
+                    ui.label(egui::RichText::new(s.import_complete).strong().color(GREEN));
+                    ui.add_space(8.0);
+
+                    for (i, mid) in self.import_mids.clone().iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            let label = format!("#{}: {}", i + 1, truncate_mid(mid));
+                            ui.label(egui::RichText::new(&label).font(egui::FontId::monospace(11.0)));
+                            if ui.small_button(s.store_copy).clicked() {
+                                ui.output_mut(|o| o.copied_text = mid.clone());
+                                self.set_msg(MsgKind::Info, s.store_copied);
+                            }
+                        });
+                    }
+
+                    ui.add_space(8.0);
+                    if ui.add_sized([120.0, 28.0], egui::Button::new(s.import_done)).clicked() {
+                        self.import_state = ImportState::Idle;
+                        self.tab = Tab::Store;
+                    }
+                });
+            }
+            ImportState::Failed => {
+                card_frame().show(ui, |ui| {
+                    ui.colored_label(RED, s.import_failed);
+                    if let Some(ref err) = self.last_error {
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new(err).color(DIM).small());
+                    }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.add_sized([120.0, 28.0], egui::Button::new(s.import_retry)).clicked() {
+                            self.import_state = ImportState::Confirming;
+                        }
+                        if ui.add_sized([120.0, 28.0], egui::Button::new(s.import_cancel)).clicked() {
+                            self.import_state = ImportState::Idle;
+                            self.import_intent = None;
+                            self.tab = Tab::Store;
+                        }
+                    });
+                });
+            }
+        }
+    }
+
     // ── Diagnostics (always in English — support/debug artifact) ─────────
 
     fn build_diagnostics(&self) -> String {
-        let mut d = String::with_capacity(1024);
+        let mut d = String::with_capacity(2048);
         d.push_str("Miasma Diagnostics Report\n");
         d.push_str("========================\n\n");
 
         d.push_str(&format!("Desktop version: {} (beta)\n", env!("CARGO_PKG_VERSION")));
+        d.push_str(&format!("OS:              {} {}\n", std::env::consts::OS, std::env::consts::ARCH));
         d.push_str(&format!("Timestamp:       {}\n", epoch_timestamp()));
+        let uptime_secs = self.startup_time.elapsed().as_secs();
+        d.push_str(&format!("Desktop uptime:  {}m {}s\n", uptime_secs / 60, uptime_secs % 60));
+
+        // Detect installed vs portable.
+        let exe_path = std::env::current_exe().unwrap_or_default();
+        let install_type = if exe_path.to_string_lossy().contains("Program Files") {
+            "Installed (MSI)"
+        } else {
+            "Portable"
+        };
+        d.push_str(&format!("Install type:    {}\n", install_type));
+
         d.push_str(&format!("Data directory:  {}\n", self.data_dir_display));
         d.push_str(&format!("Desktop log:     {}{}desktop.log.*\n", self.data_dir_display, std::path::MAIN_SEPARATOR));
         d.push_str(&format!("Daemon log:      {}{}daemon.log.*\n", self.data_dir_display, std::path::MAIN_SEPARATOR));
         d.push_str(&format!("Mode:            {:?}\n", self.mode));
         d.push_str(&format!("Locale:          {:?}\n", self.locale));
+        d.push_str(&format!("Launch attempts: {}\n", self.launch_attempts));
         d.push_str(&format!(
             "Daemon state:    {}\n",
             match self.daemon_state {
@@ -1377,6 +1613,14 @@ impl eframe::App for MiasmaApp {
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
         self.poll_worker();
 
+        // Periodic status poll (~30 seconds).
+        if self.daemon_state == DaemonState::Connected
+            && self.last_status_poll.elapsed() > std::time::Duration::from_secs(30)
+        {
+            let _ = self.worker.tx.try_send(WorkerCmd::GetStatus);
+            self.last_status_poll = std::time::Instant::now();
+        }
+
         let s = self.s();
         let easy = self.mode.is_easy();
 
@@ -1394,6 +1638,10 @@ impl eframe::App for MiasmaApp {
                 ui.selectable_value(&mut self.tab, Tab::Retrieve, retrieve_label);
                 ui.selectable_value(&mut self.tab, Tab::Status, s.tab_status);
                 ui.selectable_value(&mut self.tab, Tab::Settings, s.tab_settings);
+                // Show Import tab only when an import is active.
+                if self.import_intent.is_some() || self.import_state != ImportState::Idle {
+                    ui.selectable_value(&mut self.tab, Tab::Import, s.tab_import);
+                }
 
                 // Right-aligned connection indicator.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1454,6 +1702,7 @@ impl eframe::App for MiasmaApp {
                         Tab::Retrieve => self.retrieve_panel(ui),
                         Tab::Status => self.status_panel(ui),
                         Tab::Settings => self.settings_panel(ui),
+                        Tab::Import => self.import_panel(ui),
                     }
                     ui.add_space(8.0);
                 });

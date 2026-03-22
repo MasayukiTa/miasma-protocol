@@ -174,6 +174,28 @@ pub struct Strings {
     pub settings_mode_desc_technical: &'static str,
     pub settings_mode_desc_easy: &'static str,
 
+    // ── Import (magnet / .torrent) ──
+    pub tab_import: &'static str,
+    pub import_heading: &'static str,
+    pub import_idle_hint: &'static str,
+    pub import_magnet_label: &'static str,
+    pub import_torrent_label: &'static str,
+    pub import_explain: &'static str,
+    pub import_explain_easy: &'static str,
+    pub import_button: &'static str,
+    pub import_cancel: &'static str,
+    pub import_not_connected: &'static str,
+    pub import_progress: &'static str,
+    pub import_complete: &'static str,
+    pub import_failed: &'static str,
+    pub import_retry: &'static str,
+    pub import_done: &'static str,
+
+    // ── Diagnostics export ──
+    pub status_save_diag: &'static str,
+    pub status_diag_saved: &'static str,
+    pub status_diag_save_failed: &'static str,
+
     // ── General ──
     pub dismiss: &'static str,
     pub copy: &'static str,
@@ -320,6 +342,26 @@ static EN: Strings = Strings {
     settings_mode_desc_technical: "Full diagnostics, transport details, protocol visibility",
     settings_mode_desc_easy: "Simplified interface, less technical detail",
 
+    tab_import: "Import",
+    import_heading: "Import Content",
+    import_idle_hint: "No content to import. Use the Save tab to store new content.",
+    import_magnet_label: "Magnet link",
+    import_torrent_label: "Torrent file",
+    import_explain: "This will download content via BitTorrent and store it in Miasma. The bridge process handles the transfer.",
+    import_explain_easy: "This will download the content and save it securely in Miasma.",
+    import_button: "Import",
+    import_cancel: "Cancel",
+    import_not_connected: "Start the app first before importing.",
+    import_progress: "Importing",
+    import_complete: "Import complete.",
+    import_failed: "Import failed.",
+    import_retry: "Retry",
+    import_done: "Done",
+
+    status_save_diag: "Save Report",
+    status_diag_saved: "Diagnostics saved.",
+    status_diag_save_failed: "Could not save diagnostics: ",
+
     dismiss: "dismiss",
     copy: "Copy",
     node_init_msg: "Node initialized.",
@@ -456,6 +498,26 @@ static JA: Strings = Strings {
     settings_mode_easy: "かんたん",
     settings_mode_desc_technical: "診断情報、トランスポート詳細、プロトコル表示",
     settings_mode_desc_easy: "シンプルな表示、技術的詳細を非表示",
+
+    tab_import: "インポート",
+    import_heading: "コンテンツのインポート",
+    import_idle_hint: "インポートするコンテンツがありません。「保存」タブで新しいコンテンツを保存してください。",
+    import_magnet_label: "マグネットリンク",
+    import_torrent_label: "トレントファイル",
+    import_explain: "BitTorrentでコンテンツをダウンロードし、Miasmaに保存します。ブリッジプロセスが転送を処理します。",
+    import_explain_easy: "コンテンツをダウンロードして、Miasmaに安全に保存します。",
+    import_button: "インポート",
+    import_cancel: "キャンセル",
+    import_not_connected: "インポートする前にアプリを起動してください。",
+    import_progress: "インポート中",
+    import_complete: "インポート完了。",
+    import_failed: "インポートに失敗しました。",
+    import_retry: "再試行",
+    import_done: "完了",
+
+    status_save_diag: "レポートを保存",
+    status_diag_saved: "診断情報を保存しました。",
+    status_diag_save_failed: "診断情報の保存に失敗しました：",
 
     dismiss: "閉じる",
     copy: "コピー",
@@ -594,6 +656,26 @@ static ZH_CN: Strings = Strings {
     settings_mode_desc_technical: "完整诊断信息、传输详情、协议可见",
     settings_mode_desc_easy: "简化界面，隐藏技术细节",
 
+    tab_import: "导入",
+    import_heading: "导入内容",
+    import_idle_hint: "没有需要导入的内容。请在「保存」标签页保存新内容。",
+    import_magnet_label: "磁力链接",
+    import_torrent_label: "种子文件",
+    import_explain: "通过 BitTorrent 下载内容并保存至 Miasma。桥接进程将处理传输。",
+    import_explain_easy: "下载内容并安全保存到 Miasma。",
+    import_button: "开始导入",
+    import_cancel: "取消",
+    import_not_connected: "导入前请先启动应用。",
+    import_progress: "正在导入",
+    import_complete: "导入完成。",
+    import_failed: "导入失败。",
+    import_retry: "重试",
+    import_done: "完成",
+
+    status_save_diag: "保存报告",
+    status_diag_saved: "诊断信息已保存。",
+    status_diag_save_failed: "无法保存诊断信息：",
+
     dismiss: "关闭",
     copy: "复制",
     node_init_msg: "初始化完成。",
@@ -622,6 +704,14 @@ mod tests {
             assert!(!s.wipe_confirm_button.is_empty(), "{lang:?} wipe_confirm_button empty");
             assert!(!s.settings_language.is_empty(), "{lang:?} settings_language empty");
             assert!(!s.settings_mode.is_empty(), "{lang:?} settings_mode empty");
+            // Import strings.
+            assert!(!s.tab_import.is_empty(), "{lang:?} tab_import empty");
+            assert!(!s.import_heading.is_empty(), "{lang:?} import_heading empty");
+            assert!(!s.import_button.is_empty(), "{lang:?} import_button empty");
+            assert!(!s.import_complete.is_empty(), "{lang:?} import_complete empty");
+            // Diagnostics export strings.
+            assert!(!s.status_save_diag.is_empty(), "{lang:?} status_save_diag empty");
+            assert!(!s.status_diag_saved.is_empty(), "{lang:?} status_diag_saved empty");
         }
     }
 

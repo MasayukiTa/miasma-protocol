@@ -40,12 +40,14 @@
       DowngradeErrorMessage="A newer version of Miasma is already installed."
       Schedule="afterInstallInitialize" />
 
-    <!-- Single feature: all binaries + docs. -->
+    <!-- Single feature: all binaries + docs + shell integration. -->
     <Feature Id="MainFeature" Title="Miasma Protocol" Level="1">
       <ComponentGroupRef Id="Binaries" />
       <ComponentGroupRef Id="Docs" />
       <ComponentGroupRef Id="Shortcuts" />
       <ComponentRef Id="PathEnvComponent" />
+      <ComponentRef Id="MagnetProtocol" />
+      <ComponentRef Id="TorrentOpenWith" />
     </Feature>
 
     <!-- UI: WiX built-in install dir dialog with license. -->
@@ -173,6 +175,91 @@
                      Type="integer"
                      Value="1"
                      KeyPath="yes" />
+    </Component>
+
+    <!-- ── magnet: protocol handler ────────────────────────────── -->
+    <!--
+      Registers Miasma as an available handler for magnet: URIs.
+      Windows will offer Miasma as an option when a user clicks a magnet link.
+      The user must explicitly choose Miasma in "Default apps" or the first-use
+      prompt; the installer does not forcibly take over the association.
+    -->
+    <Component Id="MagnetProtocol" Directory="INSTALLFOLDER"
+               Bitness="always64" Guid="A1B2C3D4-0001-4000-8000-000000000040">
+      <RegistryValue Root="HKLM"
+                     Key="Software\Classes\Miasma.Magnet"
+                     Type="string"
+                     Value="Miasma Magnet Link" />
+      <RegistryValue Root="HKLM"
+                     Key="Software\Classes\Miasma.Magnet"
+                     Name="URL Protocol"
+                     Type="string"
+                     Value="" />
+      <RegistryValue Root="HKLM"
+                     Key="Software\Classes\Miasma.Magnet\DefaultIcon"
+                     Type="string"
+                     Value="[INSTALLFOLDER]miasma-desktop.exe,0" />
+      <RegistryValue Root="HKLM"
+                     Key="Software\Classes\Miasma.Magnet\shell\open\command"
+                     Type="string"
+                     Value="&quot;[INSTALLFOLDER]miasma-desktop.exe&quot; &quot;%1&quot;" />
+      <!-- Register as a capable handler so Windows offers the choice. -->
+      <RegistryValue Root="HKLM"
+                     Key="Software\Miasma Protocol\Capabilities\URLAssociations"
+                     Name="magnet"
+                     Type="string"
+                     Value="Miasma.Magnet" />
+      <RegistryValue Root="HKLM"
+                     Key="Software\Miasma Protocol\Capabilities"
+                     Name="ApplicationName"
+                     Type="string"
+                     Value="Miasma" />
+      <RegistryValue Root="HKLM"
+                     Key="Software\Miasma Protocol\Capabilities"
+                     Name="ApplicationDescription"
+                     Type="string"
+                     Value="Import magnet links into Miasma encrypted storage" />
+      <RegistryValue Root="HKLM"
+                     Key="Software\RegisteredApplications"
+                     Name="Miasma"
+                     Type="string"
+                     Value="Software\Miasma Protocol\Capabilities"
+                     KeyPath="yes" />
+    </Component>
+
+    <!-- ── .torrent file open-with (non-aggressive) ──────────── -->
+    <!--
+      Registers Miasma in the "Open with" list for .torrent files.
+      Uses OpenWithProgids so existing torrent client associations are NOT
+      overridden. The user sees Miasma as one option among others.
+    -->
+    <Component Id="TorrentOpenWith" Directory="INSTALLFOLDER"
+               Bitness="always64" Guid="A1B2C3D4-0001-4000-8000-000000000041">
+      <RegistryValue Root="HKLM"
+                     Key="Software\Classes\Miasma.TorrentFile"
+                     Type="string"
+                     Value="Miasma Torrent Import" />
+      <RegistryValue Root="HKLM"
+                     Key="Software\Classes\Miasma.TorrentFile\DefaultIcon"
+                     Type="string"
+                     Value="[INSTALLFOLDER]miasma-desktop.exe,0" />
+      <RegistryValue Root="HKLM"
+                     Key="Software\Classes\Miasma.TorrentFile\shell\open\command"
+                     Type="string"
+                     Value="&quot;[INSTALLFOLDER]miasma-desktop.exe&quot; &quot;%1&quot;" />
+      <!-- OpenWithProgids — adds to "Open with" without hijacking default. -->
+      <RegistryValue Root="HKLM"
+                     Key="Software\Classes\.torrent\OpenWithProgids"
+                     Name="Miasma.TorrentFile"
+                     Type="string"
+                     Value=""
+                     KeyPath="yes" />
+      <!-- Also register in Capabilities for modern Settings app. -->
+      <RegistryValue Root="HKLM"
+                     Key="Software\Miasma Protocol\Capabilities\FileAssociations"
+                     Name=".torrent"
+                     Type="string"
+                     Value="Miasma.TorrentFile" />
     </Component>
 
   </Package>
