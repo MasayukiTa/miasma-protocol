@@ -182,10 +182,7 @@ mod tests {
     async fn unknown_circuit_returns_false() {
         let mgr = CircuitManager::with_default_ttl();
         let unknown = CircuitId::random();
-        let result = mgr
-            .deliver_response(unknown, vec![0u8; 40])
-            .await
-            .unwrap();
+        let result = mgr.deliver_response(unknown, vec![0u8; 40]).await.unwrap();
         assert!(!result);
     }
 

@@ -27,46 +27,46 @@ use tempfile::TempDir;
 use ed25519_dalek;
 
 use miasma_core::{
-    network::types::DhtRecord,
     // Core pipeline
     dissolve,
     dissolve_file,
-    ContentId,
-    DissolutionParams,
-    // Retrieval
-    DhtShareSource,
-    FallbackShareSource,
-    LocalShareSource,
-    LocalShareStore,
-    MiasmaError,
-    RetrievalCoordinator,
+    network::types::DhtRecord,
+    BrowserFingerprint,
     // DHT + onion
     BypassOnionDhtExecutor,
+    ContentId,
+    // Retrieval
+    DhtShareSource,
+    DissolutionParams,
+    FallbackShareSource,
     LiveOnionDhtExecutor,
     LiveOnionShareFetcher,
-    OnionAwareDhtExecutor,
-    DEFAULT_SEGMENT_SIZE,
+    LocalShareSource,
+    LocalShareStore,
+    MiasmaCoordinator,
+    MiasmaError,
+    MiasmaNode,
     // P2P node
     Multiaddr,
-    MiasmaCoordinator,
-    MiasmaNode,
     NetworkShareFetcher,
     NodeType,
+    // Obfuscated QUIC transport
+    ObfuscatedConfig,
+    ObfuscatedQuicPayloadTransport,
+    ObfuscatedQuicServer,
+    OnionAwareDhtExecutor,
     // Payload transport
     PayloadTransport,
     PayloadTransportError,
     PayloadTransportKind,
     PayloadTransportSelector,
+    RetrievalCoordinator,
     TransportPhase,
     // WSS transport
     WebSocketConfig,
     WssPayloadTransport,
     WssShareServer,
-    // Obfuscated QUIC transport
-    ObfuscatedConfig,
-    ObfuscatedQuicPayloadTransport,
-    ObfuscatedQuicServer,
-    BrowserFingerprint,
+    DEFAULT_SEGMENT_SIZE,
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -243,8 +243,7 @@ fn wipe_makes_shares_unreadable() {
 
     {
         let store = LocalShareStore::open(dir.path(), 100).unwrap();
-        let (_, shares) =
-            dissolve(b"classified document", DissolutionParams::default()).unwrap();
+        let (_, shares) = dissolve(b"classified document", DissolutionParams::default()).unwrap();
         for s in &shares {
             store.put(s).unwrap();
         }
@@ -311,7 +310,10 @@ async fn onion_dht_roundtrip() {
     executor.put(record).await.unwrap();
 
     let retrieved = executor.get(&mid).await.unwrap();
-    assert!(retrieved.is_some(), "expected Some(record) from onion DHT get");
+    assert!(
+        retrieved.is_some(),
+        "expected Some(record) from onion DHT get"
+    );
     assert_eq!(retrieved.unwrap().mid_digest, *mid.as_bytes());
 }
 
@@ -515,8 +517,7 @@ async fn onion_stack_dissolution_retrieval_slo() {
     dht_exec.put(record).await.unwrap();
 
     // Step 3: retrieve via DhtShareSource backed by LiveOnionShareFetcher.
-    let share_fetcher =
-        LiveOnionShareFetcher::new_phase1(&master, store).unwrap();
+    let share_fetcher = LiveOnionShareFetcher::new_phase1(&master, store).unwrap();
     let dht_source = DhtShareSource::new(dht_exec, share_fetcher);
     let coord = RetrievalCoordinator::new(dht_source);
 
@@ -534,7 +535,10 @@ async fn onion_stack_dissolution_retrieval_slo() {
         "onion stack retrieval exceeded 30s: {:?}",
         elapsed
     );
-    println!("[SLO] onion stack retrieval (in-process 2-hop): {:?}", elapsed);
+    println!(
+        "[SLO] onion stack retrieval (in-process 2-hop): {:?}",
+        elapsed
+    );
 }
 
 // ── Test 18: Two-node loopback P2P E2E (bypass DHT, real TCP share-exchange) ──
@@ -558,8 +562,8 @@ async fn onion_stack_dissolution_retrieval_slo() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn p2p_two_node_loopback() {
-    use std::time::Duration;
     use miasma_core::network::types::ShardLocation;
+    use std::time::Duration;
     use tokio::time::{sleep, timeout};
 
     let _ = tracing_subscriber::fmt()
@@ -576,27 +580,23 @@ async fn p2p_two_node_loopback() {
         let key_b = [0x22u8; 32];
 
         // ── Discover OS-assigned TCP ports before starting event loops ─────────
-        let mut node_a =
-            MiasmaNode::new(&key_a, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+        let mut node_a = MiasmaNode::new(&key_a, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
         let peer_id_a = node_a.local_peer_id;
         let addrs_a = node_a.collect_listen_addrs(400).await;
         assert!(!addrs_a.is_empty(), "Node A must have a listen address");
         let listen_addr_a_str = addrs_a[0].to_string();
         println!("[loopback] Node A: {peer_id_a} @ {listen_addr_a_str}");
 
-        let node_b =
-            MiasmaNode::new(&key_b, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+        let node_b = MiasmaNode::new(&key_b, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
         // Extract Node B's handles BEFORE start() consumes node_b.
         let dht_handle_b = node_b.dht_handle();
         let share_handle_b = node_b.share_exchange_handle();
 
         // ── Start both event loops (TCP sockets now accepting) ─────────────────
         // store_a is cloned so it remains accessible below for local puts.
-        let _coord_a = MiasmaCoordinator::start(
-            node_a,
-            store_a.clone(),
-            vec![listen_addr_a_str.clone()],
-        ).await;
+        let _coord_a =
+            MiasmaCoordinator::start(node_a, store_a.clone(), vec![listen_addr_a_str.clone()])
+                .await;
         let _coord_b = MiasmaCoordinator::start(node_b, store_b, vec![]).await;
 
         // Give both TCP stacks time to enter accept().
@@ -604,7 +604,10 @@ async fn p2p_two_node_loopback() {
 
         // ── Dissolve content into Node A's store (no network I/O) ─────────────
         let content = b"two-node loopback integration test payload, verify real P2P";
-        let params = DissolutionParams { data_shards: 3, total_shards: 5 };
+        let params = DissolutionParams {
+            data_shards: 3,
+            total_shards: 5,
+        };
 
         let (mid, shares) = dissolve(content, params).unwrap();
         for share in &shares {
@@ -699,8 +702,7 @@ async fn p2p_kademlia_full_roundtrip() {
         let key_b = [0x44u8; 32];
 
         // ── Start Node A ──────────────────────────────────────────────────────
-        let mut node_a =
-            MiasmaNode::new(&key_a, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+        let mut node_a = MiasmaNode::new(&key_a, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
         let addrs_a = node_a.collect_listen_addrs(400).await;
         assert!(!addrs_a.is_empty(), "Node A must have a listen address");
         let listen_addr_a_str = addrs_a[0].to_string();
@@ -712,8 +714,7 @@ async fn p2p_kademlia_full_roundtrip() {
         println!("[kademlia] Node A: {peer_id_a} @ {listen_addr_a_str}");
 
         // ── Start Node B ──────────────────────────────────────────────────────
-        let mut node_b =
-            MiasmaNode::new(&key_b, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+        let mut node_b = MiasmaNode::new(&key_b, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
         let addrs_b = node_b.collect_listen_addrs(400).await;
         assert!(!addrs_b.is_empty(), "Node B must have a listen address");
         let listen_addr_b_str = addrs_b[0].to_string();
@@ -740,7 +741,10 @@ async fn p2p_kademlia_full_roundtrip() {
 
         // ── Publish via Node A ────────────────────────────────────────────────
         let content = b"kademlia full round-trip: real DHT PUT + GET with TCP share-exchange";
-        let params = DissolutionParams { data_shards: 3, total_shards: 5 };
+        let params = DissolutionParams {
+            data_shards: 3,
+            total_shards: 5,
+        };
 
         let mid = coord_a
             .dissolve_and_publish(content, params)
@@ -802,8 +806,7 @@ async fn cli_smoke_loopback() {
         let store_a = Arc::new(LocalShareStore::open(dir_a.path(), 100).unwrap());
         let key_a = [0x55u8; 32];
 
-        let mut node_a =
-            MiasmaNode::new(&key_a, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+        let mut node_a = MiasmaNode::new(&key_a, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
         let peer_id_a = node_a.local_peer_id;
         let addrs_a = node_a.collect_listen_addrs(400).await;
         assert!(!addrs_a.is_empty(), "Node A must have a listen address");
@@ -812,12 +815,14 @@ async fn cli_smoke_loopback() {
         let bootstrap_str = format!("{addr_a_str}/p2p/{peer_id_a}");
         println!("[smoke] Node A bootstrap addr: {bootstrap_str}");
 
-        let coord_a =
-            MiasmaCoordinator::start(node_a, store_a, vec![addr_a_str.clone()]).await;
+        let coord_a = MiasmaCoordinator::start(node_a, store_a, vec![addr_a_str.clone()]).await;
 
         // Dissolve + publish (same as `miasma network-publish`)
         let content = b"cli smoke test payload";
-        let params = DissolutionParams { data_shards: 2, total_shards: 3 };
+        let params = DissolutionParams {
+            data_shards: 2,
+            total_shards: 3,
+        };
         let mid = coord_a.dissolve_and_publish(content, params).await.unwrap();
         println!("[smoke] Published MID: {}", mid.to_string());
 
@@ -826,27 +831,40 @@ async fn cli_smoke_loopback() {
         let store_b = Arc::new(LocalShareStore::open(dir_b.path(), 100).unwrap());
         let key_b = [0x66u8; 32];
 
-        let mut node_b =
-            MiasmaNode::new(&key_b, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+        let mut node_b = MiasmaNode::new(&key_b, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
         let _addrs_b = node_b.collect_listen_addrs(400).await;
         let coord_b = MiasmaCoordinator::start(node_b, store_b, vec![]).await;
 
         // Parse bootstrap addr and register (same as CLI --bootstrap parsing)
         use libp2p::multiaddr::Protocol;
         let mut addr: Multiaddr = bootstrap_str.parse().unwrap();
-        let bootstrap_peer_id: libp2p::PeerId = addr.iter().find_map(|p| {
-            if let Protocol::P2p(id) = p { Some(id) } else { None }
-        }).unwrap();
-        if matches!(addr.iter().last(), Some(Protocol::P2p(_))) { addr.pop(); }
+        let bootstrap_peer_id: libp2p::PeerId = addr
+            .iter()
+            .find_map(|p| {
+                if let Protocol::P2p(id) = p {
+                    Some(id)
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        if matches!(addr.iter().last(), Some(Protocol::P2p(_))) {
+            addr.pop();
+        }
 
-        coord_b.add_bootstrap_peer(bootstrap_peer_id, addr).await.unwrap();
+        coord_b
+            .add_bootstrap_peer(bootstrap_peer_id, addr)
+            .await
+            .unwrap();
         coord_b.bootstrap_dht().await.unwrap();
 
         // Wait for DHT convergence (same as 2s sleep in `network-get`)
         sleep(Duration::from_millis(1500)).await;
 
         // Retrieve (same as `miasma network-get`)
-        let recovered = coord_b.retrieve_from_network(&mid, params).await
+        let recovered = coord_b
+            .retrieve_from_network(&mid, params)
+            .await
             .expect("network-get failed");
 
         assert_eq!(recovered.as_slice(), content as &[u8], "plaintext mismatch");
@@ -867,8 +885,8 @@ async fn cli_smoke_loopback() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn daemon_ipc_publish_get_roundtrip() {
-    use miasma_core::daemon::DaemonServer;
     use miasma_core::daemon::ipc::{daemon_request, ControlRequest, ControlResponse};
+    use miasma_core::daemon::DaemonServer;
     use std::time::Duration;
     use tokio::time::timeout;
 
@@ -922,11 +940,23 @@ async fn daemon_ipc_publish_get_roundtrip() {
         {
             use libp2p::multiaddr::Protocol;
             let mut addr: Multiaddr = addr_a.parse().unwrap();
-            let bootstrap_peer_id: libp2p::PeerId = addr.iter().find_map(|p| {
-                if let Protocol::P2p(id) = p { Some(id) } else { None }
-            }).unwrap();
-            if matches!(addr.iter().last(), Some(Protocol::P2p(_))) { addr.pop(); }
-            server_b.add_bootstrap_peer(bootstrap_peer_id, addr).await.unwrap();
+            let bootstrap_peer_id: libp2p::PeerId = addr
+                .iter()
+                .find_map(|p| {
+                    if let Protocol::P2p(id) = p {
+                        Some(id)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap();
+            if matches!(addr.iter().last(), Some(Protocol::P2p(_))) {
+                addr.pop();
+            }
+            server_b
+                .add_bootstrap_peer(bootstrap_peer_id, addr)
+                .await
+                .unwrap();
         }
         server_b.bootstrap_dht().await.unwrap();
         tokio::spawn(server_b.run());
@@ -964,8 +994,8 @@ async fn daemon_ipc_publish_get_roundtrip() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn replication_retries_after_peer_join() {
-    use miasma_core::daemon::DaemonServer;
     use miasma_core::daemon::ipc::{daemon_request, ControlRequest, ControlResponse};
+    use miasma_core::daemon::DaemonServer;
     use std::time::Duration;
     use tokio::time::timeout;
 
@@ -977,7 +1007,8 @@ async fn replication_retries_after_peer_join() {
         // ── Node A: publish with no peers ─────────────────────────────────────
         let dir_a = tempfile::tempdir().unwrap();
         let store_a = Arc::new(LocalShareStore::open(dir_a.path(), 100).unwrap());
-        let node_a = MiasmaNode::new(&[0xAAu8; 32], NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+        let node_a =
+            MiasmaNode::new(&[0xAAu8; 32], NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
 
         let server_a = DaemonServer::start(node_a, store_a, dir_a.path().to_owned())
             .await
@@ -989,7 +1020,11 @@ async fn replication_retries_after_peer_join() {
         tokio::spawn(server_a.run());
 
         let content = b"replication-retry test: publish before peers exist";
-        let req = ControlRequest::Publish { data: content.to_vec(), data_shards: 2, total_shards: 3 };
+        let req = ControlRequest::Publish {
+            data: content.to_vec(),
+            data_shards: 2,
+            total_shards: 3,
+        };
         let mid_str = match daemon_request(&dir_a_path, req).await.unwrap() {
             ControlResponse::Published { mid } => mid,
             other => panic!("unexpected: {other:?}"),
@@ -1003,7 +1038,8 @@ async fn replication_retries_after_peer_join() {
         // ── Node B: join and bootstrap to A ───────────────────────────────────
         let dir_b = tempfile::tempdir().unwrap();
         let store_b = Arc::new(LocalShareStore::open(dir_b.path(), 100).unwrap());
-        let node_b = MiasmaNode::new(&[0xBBu8; 32], NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+        let node_b =
+            MiasmaNode::new(&[0xBBu8; 32], NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
 
         let server_b = DaemonServer::start(node_b, store_b, dir_b.path().to_owned())
             .await
@@ -1014,10 +1050,19 @@ async fn replication_retries_after_peer_join() {
         {
             use libp2p::multiaddr::Protocol;
             let mut addr: Multiaddr = addr_a_str.parse().unwrap();
-            let peer_id_a: libp2p::PeerId = addr.iter().find_map(|p| {
-                if let Protocol::P2p(id) = p { Some(id) } else { None }
-            }).unwrap();
-            if matches!(addr.iter().last(), Some(Protocol::P2p(_))) { addr.pop(); }
+            let peer_id_a: libp2p::PeerId = addr
+                .iter()
+                .find_map(|p| {
+                    if let Protocol::P2p(id) = p {
+                        Some(id)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap();
+            if matches!(addr.iter().last(), Some(Protocol::P2p(_))) {
+                addr.pop();
+            }
             server_b.add_bootstrap_peer(peer_id_a, addr).await.unwrap();
         }
         server_b.bootstrap_dht().await.unwrap();
@@ -1038,18 +1083,31 @@ async fn replication_retries_after_peer_join() {
                 break;
             }
         }
-        println!("[retry] replicated_count = {}", queue_a.lock().unwrap().replicated_count());
-        assert!(replicated, "replication was never confirmed by a remote peer");
+        println!(
+            "[retry] replicated_count = {}",
+            queue_a.lock().unwrap().replicated_count()
+        );
+        assert!(
+            replicated,
+            "replication was never confirmed by a remote peer"
+        );
 
         // ── B can now retrieve content ─────────────────────────────────────────
-        let req = ControlRequest::Get { mid: mid_str.clone(), data_shards: 2, total_shards: 3 };
+        let req = ControlRequest::Get {
+            mid: mid_str.clone(),
+            data_shards: 2,
+            total_shards: 3,
+        };
         let retrieved = match daemon_request(&dir_b_path, req).await.unwrap() {
             ControlResponse::Retrieved { data } => data,
             ControlResponse::Error(e) => panic!("get from B failed: {e}"),
             other => panic!("unexpected: {other:?}"),
         };
         assert_eq!(retrieved.as_slice(), content as &[u8]);
-        println!("[retry] Round-trip OK after replication retry: {} bytes", retrieved.len());
+        println!(
+            "[retry] Round-trip OK after replication retry: {} bytes",
+            retrieved.len()
+        );
 
         let _ = shutdown_a.send(()).await;
         let _ = shutdown_b.send(()).await;
@@ -1077,8 +1135,8 @@ fn topology_event_triggers_replication() {
         .unwrap();
 
     let passed = rt.block_on(async {
-        use miasma_core::daemon::DaemonServer;
         use miasma_core::daemon::ipc::{daemon_request, ControlRequest, ControlResponse};
+        use miasma_core::daemon::DaemonServer;
         use std::time::Duration;
         use tokio::time::timeout;
 
@@ -1090,7 +1148,8 @@ fn topology_event_triggers_replication() {
             // ── Node A: publish with no peers ──────────────────────────────
             let dir_a = tempfile::tempdir().unwrap();
             let store_a = Arc::new(LocalShareStore::open(dir_a.path(), 100).unwrap());
-            let node_a = MiasmaNode::new(&[0xCCu8; 32], NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+            let node_a =
+                MiasmaNode::new(&[0xCCu8; 32], NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
 
             let server_a = DaemonServer::start(node_a, store_a, dir_a.path().to_owned())
                 .await
@@ -1101,7 +1160,11 @@ fn topology_event_triggers_replication() {
             tokio::spawn(server_a.run());
 
             let content = b"topology-event-driven replication test";
-            let req = ControlRequest::Publish { data: content.to_vec(), data_shards: 2, total_shards: 3 };
+            let req = ControlRequest::Publish {
+                data: content.to_vec(),
+                data_shards: 2,
+                total_shards: 3,
+            };
             match daemon_request(&dir_a_path, req).await.unwrap() {
                 ControlResponse::Published { mid } => {
                     println!("[topo] Published MID: {mid}");
@@ -1114,7 +1177,8 @@ fn topology_event_triggers_replication() {
             // ── Node B: join — PeerConnected should trigger replication ───
             let dir_b = tempfile::tempdir().unwrap();
             let store_b = Arc::new(LocalShareStore::open(dir_b.path(), 100).unwrap());
-            let node_b = MiasmaNode::new(&[0xDDu8; 32], NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+            let node_b =
+                MiasmaNode::new(&[0xDDu8; 32], NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
 
             let server_b = DaemonServer::start(node_b, store_b, dir_b.path().to_owned())
                 .await
@@ -1123,10 +1187,19 @@ fn topology_event_triggers_replication() {
             {
                 use libp2p::multiaddr::Protocol;
                 let mut addr: Multiaddr = addr_a_str.parse().unwrap();
-                let peer_id_a: libp2p::PeerId = addr.iter().find_map(|p| {
-                    if let Protocol::P2p(id) = p { Some(id) } else { None }
-                }).unwrap();
-                if matches!(addr.iter().last(), Some(Protocol::P2p(_))) { addr.pop(); }
+                let peer_id_a: libp2p::PeerId = addr
+                    .iter()
+                    .find_map(|p| {
+                        if let Protocol::P2p(id) = p {
+                            Some(id)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap();
+                if matches!(addr.iter().last(), Some(Protocol::P2p(_))) {
+                    addr.pop();
+                }
                 server_b.add_bootstrap_peer(peer_id_a, addr).await.unwrap();
             }
             server_b.bootstrap_dht().await.unwrap();
@@ -1139,8 +1212,12 @@ fn topology_event_triggers_replication() {
             let rc = queue_a.lock().unwrap().replicated_count();
             let pc = queue_a.lock().unwrap().pending_count();
             println!("[topo] replicated={rc}, pending={pc}");
-            assert!(rc > 0, "replication should be driven by topology event, not fallback timer");
-        }).await
+            assert!(
+                rc > 0,
+                "replication should be driven by topology event, not fallback timer"
+            );
+        })
+        .await
     });
 
     // Forcibly shut down the runtime without waiting for daemon tasks.
@@ -1155,8 +1232,8 @@ fn topology_event_triggers_replication() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn wal_survives_daemon_restart() {
-    use miasma_core::daemon::replication::ReplicationQueue;
     use miasma_core::daemon::replication::ItemState;
+    use miasma_core::daemon::replication::ReplicationQueue;
     use miasma_core::network::types::DhtRecord;
 
     let dir = tempfile::tempdir().unwrap();
@@ -1367,7 +1444,10 @@ async fn payload_transport_fallback_on_session_failure() {
     let store = make_store(&dir);
 
     let content = b"payload-plane: fallback after session failure";
-    let params = DissolutionParams { data_shards: 3, total_shards: 5 };
+    let params = DissolutionParams {
+        data_shards: 3,
+        total_shards: 5,
+    };
     let (mid, shares) = dissolve(content, params).unwrap();
 
     for s in &shares {
@@ -1410,12 +1490,26 @@ async fn payload_transport_fallback_on_session_failure() {
 
     // Verify: primary transport failed, secondary succeeded.
     let snap = selector.stats().snapshot();
-    let libp2p_stat = snap.iter().find(|r| r.transport == PayloadTransportKind::DirectLibp2p).unwrap();
-    let tcp_stat = snap.iter().find(|r| r.transport == PayloadTransportKind::TcpDirect).unwrap();
-    assert!(libp2p_stat.failure_count >= params.data_shards as u64,
-        "expected {} libp2p failures, got {}", params.data_shards, libp2p_stat.failure_count);
-    assert!(tcp_stat.success_count >= params.data_shards as u64,
-        "expected {} tcp successes, got {}", params.data_shards, tcp_stat.success_count);
+    let libp2p_stat = snap
+        .iter()
+        .find(|r| r.transport == PayloadTransportKind::DirectLibp2p)
+        .unwrap();
+    let tcp_stat = snap
+        .iter()
+        .find(|r| r.transport == PayloadTransportKind::TcpDirect)
+        .unwrap();
+    assert!(
+        libp2p_stat.failure_count >= params.data_shards as u64,
+        "expected {} libp2p failures, got {}",
+        params.data_shards,
+        libp2p_stat.failure_count
+    );
+    assert!(
+        tcp_stat.success_count >= params.data_shards as u64,
+        "expected {} tcp successes, got {}",
+        params.data_shards,
+        tcp_stat.success_count
+    );
 }
 
 // ── Test 27: All transports fail → retrieval fails with InsufficientShares ──
@@ -1429,7 +1523,10 @@ async fn payload_transport_all_fail_returns_insufficient() {
     let store = make_store(&dir);
 
     let content = b"payload-plane: all transports fail";
-    let params = DissolutionParams { data_shards: 3, total_shards: 5 };
+    let params = DissolutionParams {
+        data_shards: 3,
+        total_shards: 5,
+    };
     let (mid, shares) = dissolve(content, params).unwrap();
 
     for s in &shares {
@@ -1471,8 +1568,14 @@ async fn payload_transport_all_fail_returns_insufficient() {
 
     // Both transports should have recorded failures.
     let snap = selector.stats().snapshot();
-    let libp2p_fail = snap.iter().find(|r| r.transport == PayloadTransportKind::DirectLibp2p).unwrap();
-    let tcp_fail = snap.iter().find(|r| r.transport == PayloadTransportKind::TcpDirect).unwrap();
+    let libp2p_fail = snap
+        .iter()
+        .find(|r| r.transport == PayloadTransportKind::DirectLibp2p)
+        .unwrap();
+    let tcp_fail = snap
+        .iter()
+        .find(|r| r.transport == PayloadTransportKind::TcpDirect)
+        .unwrap();
     assert!(libp2p_fail.failure_count > 0);
     assert!(tcp_fail.failure_count > 0);
 }
@@ -1488,7 +1591,10 @@ async fn payload_transport_phase_distinction() {
     let dir = tempfile::tempdir().unwrap();
     let store = make_store(&dir);
 
-    let params = DissolutionParams { data_shards: 2, total_shards: 3 };
+    let params = DissolutionParams {
+        data_shards: 2,
+        total_shards: 3,
+    };
     let (mid, shares) = dissolve(b"phase distinction test", params).unwrap();
     for s in &shares {
         store.put(s).unwrap();
@@ -1531,12 +1637,21 @@ async fn payload_transport_phase_distinction() {
 
     // Verify stats: session failure, data failure, and success all recorded.
     let snap = selector.stats().snapshot();
-    assert!(snap.iter().any(|r| r.transport == PayloadTransportKind::DirectLibp2p && r.failure_count > 0),
-        "session failure should be recorded for libp2p");
-    assert!(snap.iter().any(|r| r.transport == PayloadTransportKind::TcpDirect && r.failure_count > 0),
-        "data failure should be recorded for tcp");
-    assert!(snap.iter().any(|r| r.transport == PayloadTransportKind::RelayHop && r.success_count > 0),
-        "relay success should be recorded");
+    assert!(
+        snap.iter()
+            .any(|r| r.transport == PayloadTransportKind::DirectLibp2p && r.failure_count > 0),
+        "session failure should be recorded for libp2p"
+    );
+    assert!(
+        snap.iter()
+            .any(|r| r.transport == PayloadTransportKind::TcpDirect && r.failure_count > 0),
+        "data failure should be recorded for tcp"
+    );
+    assert!(
+        snap.iter()
+            .any(|r| r.transport == PayloadTransportKind::RelayHop && r.success_count > 0),
+        "relay success should be recorded"
+    );
 }
 
 // ── Test 29: Real P2P payload transport via FallbackShareSource ─────────────
@@ -1547,8 +1662,8 @@ async fn payload_transport_phase_distinction() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn p2p_payload_transport_loopback() {
-    use std::time::Duration;
     use miasma_core::network::types::ShardLocation;
+    use std::time::Duration;
     use tokio::time::{sleep, timeout};
 
     let _ = tracing_subscriber::fmt()
@@ -1564,29 +1679,28 @@ async fn p2p_payload_transport_loopback() {
         let key_a = [0xE1u8; 32];
         let key_b = [0xE2u8; 32];
 
-        let mut node_a =
-            MiasmaNode::new(&key_a, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+        let mut node_a = MiasmaNode::new(&key_a, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
         let peer_id_a = node_a.local_peer_id;
         let addrs_a = node_a.collect_listen_addrs(400).await;
         let listen_addr_a_str = addrs_a[0].to_string();
 
-        let node_b =
-            MiasmaNode::new(&key_b, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+        let node_b = MiasmaNode::new(&key_b, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
         let _dht_handle_b = node_b.dht_handle();
         let share_handle_b = node_b.share_exchange_handle();
 
-        let _coord_a = MiasmaCoordinator::start(
-            node_a,
-            store_a.clone(),
-            vec![listen_addr_a_str.clone()],
-        ).await;
+        let _coord_a =
+            MiasmaCoordinator::start(node_a, store_a.clone(), vec![listen_addr_a_str.clone()])
+                .await;
         let _coord_b = MiasmaCoordinator::start(node_b, store_b, vec![]).await;
 
         sleep(Duration::from_millis(200)).await;
 
         // Dissolve content into Node A's store.
         let content = b"payload-plane: real P2P loopback via FallbackShareSource";
-        let params = DissolutionParams { data_shards: 3, total_shards: 5 };
+        let params = DissolutionParams {
+            data_shards: 3,
+            total_shards: 5,
+        };
         let (mid, shares) = dissolve(content, params).unwrap();
         for share in &shares {
             store_a.put(share).unwrap();
@@ -1599,11 +1713,14 @@ async fn p2p_payload_transport_loopback() {
             data_shards: params.data_shards as u8,
             total_shards: params.total_shards as u8,
             version: 1,
-            locations: shares.iter().map(|s| ShardLocation {
-                peer_id_bytes: peer_bytes_a.clone(),
-                shard_index: s.slot_index,
-                addrs: vec![listen_addr_a_str.clone()],
-            }).collect(),
+            locations: shares
+                .iter()
+                .map(|s| ShardLocation {
+                    peer_id_bytes: peer_bytes_a.clone(),
+                    shard_index: s.slot_index,
+                    addrs: vec![listen_addr_a_str.clone()],
+                })
+                .collect(),
             published_at: 0,
         };
 
@@ -1635,15 +1752,21 @@ async fn p2p_payload_transport_loopback() {
                 slot_index: u16,
                 segment_index: u32,
             ) -> Result<Option<miasma_core::MiasmaShare>, PayloadTransportError> {
-                let location = match self.record.locations.iter().find(|l| l.shard_index == slot_index) {
+                let location = match self
+                    .record
+                    .locations
+                    .iter()
+                    .find(|l| l.shard_index == slot_index)
+                {
                     Some(l) => l,
                     None => return Ok(None),
                 };
-                let peer_id = libp2p::PeerId::from_bytes(&location.peer_id_bytes)
-                    .map_err(|e| PayloadTransportError {
+                let peer_id = libp2p::PeerId::from_bytes(&location.peer_id_bytes).map_err(|e| {
+                    PayloadTransportError {
                         phase: TransportPhase::Session,
                         message: format!("invalid peer_id: {e}"),
-                    })?;
+                    }
+                })?;
                 let request = miasma_core::network::node::ShareFetchRequest {
                     mid_digest,
                     slot_index,
@@ -1659,12 +1782,12 @@ async fn p2p_payload_transport_loopback() {
             }
         }
 
-        let selector = Arc::new(PayloadTransportSelector::new(vec![
-            Box::new(RealLibp2pTransport {
+        let selector = Arc::new(PayloadTransportSelector::new(vec![Box::new(
+            RealLibp2pTransport {
                 share_handle: share_handle_b,
                 record,
-            }),
-        ]));
+            },
+        )]));
 
         let source = FallbackShareSource::new(bypass_dht, selector.clone());
         let recovered = RetrievalCoordinator::new(source)
@@ -1680,7 +1803,8 @@ async fn p2p_payload_transport_loopback() {
 
         // Verify transport stats.
         let snap = selector.stats().snapshot();
-        let libp2p_stat = snap.iter()
+        let libp2p_stat = snap
+            .iter()
             .find(|r| r.transport == PayloadTransportKind::DirectLibp2p)
             .unwrap();
         assert!(
@@ -1713,7 +1837,10 @@ async fn wss_payload_e2e_retrieval() {
 
     // 1. Dissolve content.
     let content = b"WSS payload transport end-to-end test content - proves real share fetch";
-    let params = DissolutionParams { data_shards: 3, total_shards: 5 };
+    let params = DissolutionParams {
+        data_shards: 3,
+        total_shards: 5,
+    };
     let (mid, shares) = dissolve(content, params).unwrap();
     for s in &shares {
         store.put(s).unwrap();
@@ -1748,9 +1875,7 @@ async fn wss_payload_e2e_retrieval() {
         port: wss_port,
         ..Default::default()
     });
-    let selector = Arc::new(PayloadTransportSelector::new(vec![
-        Box::new(wss_transport),
-    ]));
+    let selector = Arc::new(PayloadTransportSelector::new(vec![Box::new(wss_transport)]));
 
     // 5. Retrieve via FallbackShareSource.
     let source = FallbackShareSource::new(dht, selector.clone());
@@ -1797,7 +1922,10 @@ async fn wss_payload_fallback_on_primary_failure() {
     let store = Arc::new(LocalShareStore::open(dir.path(), 100).unwrap());
 
     let content = b"WSS fallback test: primary blocked, WSS rescues";
-    let params = DissolutionParams { data_shards: 3, total_shards: 5 };
+    let params = DissolutionParams {
+        data_shards: 3,
+        total_shards: 5,
+    };
     let (mid, shares) = dissolve(content, params).unwrap();
     for s in &shares {
         store.put(s).unwrap();
@@ -1887,7 +2015,10 @@ async fn wss_payload_diagnostics_transport_kind() {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(LocalShareStore::open(dir.path(), 100).unwrap());
 
-    let params = DissolutionParams { data_shards: 3, total_shards: 5 };
+    let params = DissolutionParams {
+        data_shards: 3,
+        total_shards: 5,
+    };
     let (mid, shares) = dissolve(b"WSS diagnostics test", params).unwrap();
     for s in &shares {
         store.put(s).unwrap();
@@ -1941,14 +2072,23 @@ async fn wss_payload_diagnostics_transport_kind() {
         .iter()
         .find(|r| r.transport == PayloadTransportKind::TcpDirect)
         .expect("TcpDirect stats missing");
-    assert!(tcp_stat.failure_count > 0, "TcpDirect should show data-phase failures");
+    assert!(
+        tcp_stat.failure_count > 0,
+        "TcpDirect should show data-phase failures"
+    );
 
     let wss_stat = snap
         .iter()
         .find(|r| r.transport == PayloadTransportKind::WssTunnel)
         .expect("WssTunnel stats missing");
-    assert!(wss_stat.success_count > 0, "WssTunnel should show successes");
-    assert_eq!(wss_stat.failure_count, 0, "WssTunnel should have no failures");
+    assert!(
+        wss_stat.success_count > 0,
+        "WssTunnel should show successes"
+    );
+    assert_eq!(
+        wss_stat.failure_count, 0,
+        "WssTunnel should have no failures"
+    );
 
     println!(
         "[wss] Diagnostics OK: TcpDirect failures={}, WssTunnel successes={}",
@@ -1983,14 +2123,10 @@ async fn wss_tls_payload_e2e_retrieval() {
     let key_pem = key_pair.serialize_pem();
 
     // 3. Start TLS-enabled WSS server.
-    let server = WssShareServer::bind_tls(
-        store.clone(),
-        0,
-        cert_pem.as_bytes(),
-        key_pem.as_bytes(),
-    )
-    .await
-    .unwrap();
+    let server =
+        WssShareServer::bind_tls(store.clone(), 0, cert_pem.as_bytes(), key_pem.as_bytes())
+            .await
+            .unwrap();
     let port = server.port;
     tokio::spawn(server.run());
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -2089,7 +2225,10 @@ async fn obfuscated_quic_payload_e2e_retrieval() {
             Err(e) => panic!("ObfuscatedQuic fetch error: {e:?}"),
         }
     }
-    assert_eq!(fetched, 5, "all shares should be fetched over ObfuscatedQuic");
+    assert_eq!(
+        fetched, 5,
+        "all shares should be fetched over ObfuscatedQuic"
+    );
     println!("[obfs_quic] Retrieved {fetched}/5 shares over ObfuscatedQuic REALITY");
 }
 
@@ -2130,10 +2269,8 @@ async fn full_transport_fallback_chain_wss_recovery() {
         ..Default::default()
     });
 
-    let selector = PayloadTransportSelector::new(vec![
-        Box::new(broken_primary),
-        Box::new(working_wss),
-    ]);
+    let selector =
+        PayloadTransportSelector::new(vec![Box::new(broken_primary), Box::new(working_wss)]);
 
     // Fetch through selector — primary should fail, WSS should succeed.
     let share = &shares[0];
@@ -2159,9 +2296,9 @@ async fn full_transport_fallback_chain_wss_recovery() {
 
 // ─── Phase 3b: Admission and trust-tier tests ────────────────────────────────
 
-use miasma_core::network::sybil::{self, NodeIdPoW, SignedDhtRecord};
-use miasma_core::network::address::{AddressClass, AddressTrust, classify_multiaddr};
+use miasma_core::network::address::{classify_multiaddr, AddressClass, AddressTrust};
 use miasma_core::network::peer_state::PeerRegistry;
+use miasma_core::network::sybil::{self, NodeIdPoW, SignedDhtRecord};
 
 /// Verify that the peer registry correctly tracks trust-tier promotions
 /// through the full pipeline: Connected → Observed → Verified.
@@ -2246,7 +2383,8 @@ fn signed_dht_record_validation_e2e() {
     tampered.value = bincode::serialize(&DhtRecord {
         mid_digest: [0xBB; 32],
         ..dht_record.clone()
-    }).unwrap();
+    })
+    .unwrap();
     assert!(!tampered.verify_signature(), "tampered record must fail");
 
     // Tampered key fails.
@@ -2262,7 +2400,10 @@ fn signed_dht_record_validation_e2e() {
     // Deserialization roundtrip works.
     let serialized = bincode::serialize(&signed).unwrap();
     let deserialized: SignedDhtRecord = bincode::deserialize(&serialized).unwrap();
-    assert!(deserialized.verify_signature(), "deserialized record must verify");
+    assert!(
+        deserialized.verify_signature(),
+        "deserialized record must verify"
+    );
 }
 
 /// Verify that the address filtering correctly classifies and filters
@@ -2273,7 +2414,7 @@ fn address_filtering_in_admission_path() {
 
     // Build a mixed set of addresses.
     let addrs: Vec<Multiaddr> = vec![
-        "/ip4/127.0.0.1/tcp/4001".parse().unwrap(),  // loopback
+        "/ip4/127.0.0.1/tcp/4001".parse().unwrap(),   // loopback
         "/ip4/10.0.0.1/tcp/4001".parse().unwrap(),    // private
         "/ip4/8.8.8.8/tcp/4001".parse().unwrap(),     // global
         "/ip4/169.254.0.1/tcp/4001".parse().unwrap(), // link-local
@@ -2346,11 +2487,7 @@ fn pow_serialization_roundtrip() {
 #[test]
 fn signed_record_serialization_roundtrip() {
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
-    let record = SignedDhtRecord::sign(
-        b"test-key".to_vec(),
-        b"test-value".to_vec(),
-        &signing_key,
-    );
+    let record = SignedDhtRecord::sign(b"test-key".to_vec(), b"test-value".to_vec(), &signing_key);
 
     let serialized = bincode::serialize(&record).unwrap();
     let deserialized: SignedDhtRecord = bincode::deserialize(&serialized).unwrap();
@@ -2432,10 +2569,19 @@ fn routing_rank_peers_trust_and_reliability() {
     });
 
     // verified_reliable should be first (Verified + reliable).
-    assert_eq!(ranked[0], verified_reliable, "verified+reliable should rank first");
+    assert_eq!(
+        ranked[0], verified_reliable,
+        "verified+reliable should rank first"
+    );
     // observed_reliable should beat verified_unreliable (unreliable penalty).
-    assert_eq!(ranked[1], observed_reliable, "observed+reliable should beat verified+unreliable");
-    assert_eq!(ranked[2], verified_unreliable, "unreliable should rank last");
+    assert_eq!(
+        ranked[1], observed_reliable,
+        "observed+reliable should beat verified+unreliable"
+    );
+    assert_eq!(
+        ranked[2], verified_unreliable,
+        "unreliable should rank last"
+    );
 }
 
 /// Verify dynamic PoW difficulty adjustment based on observed network size.
@@ -2523,7 +2669,10 @@ fn routing_ip_prefix_extraction() {
     assert_eq!(routing::ip_prefix_of(&v4), IpPrefix::V4Slash16([203, 0]));
 
     let v6: libp2p::Multiaddr = "/ip6/2001:db8:85a3::1/tcp/4001".parse().unwrap();
-    assert_eq!(routing::ip_prefix_of(&v6), IpPrefix::V6Slash48([0x2001, 0x0db8, 0x85a3]));
+    assert_eq!(
+        routing::ip_prefix_of(&v6),
+        IpPrefix::V6Slash48([0x2001, 0x0db8, 0x85a3])
+    );
 
     let loopback: libp2p::Multiaddr = "/ip4/127.0.0.1/tcp/4001".parse().unwrap();
     assert_eq!(routing::ip_prefix_of(&loopback), IpPrefix::Local);
@@ -2551,16 +2700,16 @@ fn routing_stats_serde_roundtrip() {
 
 // ─── Phase 4: Epoch rotation, credential lifecycle, and BBS+ integration ─────
 
-use miasma_core::network::credential::{
-    CredentialIssuer, EphemeralIdentity,
-    verify_presentation, CredentialError, current_epoch, CAP_STORE, CAP_ROUTE, CAP_RELAY,
-};
 use miasma_core::network::bbs_credential::{
-    BbsCredentialAttributes, bbs_create_proof, bbs_verify_proof, generate_link_secret,
+    bbs_create_proof, bbs_verify_proof, generate_link_secret, BbsCredentialAttributes,
+};
+use miasma_core::network::credential::{
+    current_epoch, verify_presentation, CredentialError, CredentialIssuer, EphemeralIdentity,
+    CAP_RELAY, CAP_ROUTE, CAP_STORE,
 };
 use miasma_core::{
-    BbsIssuer, BbsIssuerKey, CredentialTier, CredentialWallet, DisclosurePolicy,
-    DescriptorStore, PeerDescriptor, PeerCapabilities, ReachabilityKind, ResourceProfile,
+    BbsIssuer, BbsIssuerKey, CredentialTier, CredentialWallet, DescriptorStore, DisclosurePolicy,
+    PeerCapabilities, PeerDescriptor, ReachabilityKind, ResourceProfile,
 };
 
 /// Test 43: CredentialWallet epoch rotation — stale credentials pruned and
@@ -2675,12 +2824,16 @@ fn descriptor_store_stale_pruning() {
     // Stale descriptors (published 2 hours ago and 24 hours ago) are now rejected
     // at upsert time — the store enforces freshness on insertion.
     let stale_ps = [0x03; 32];
-    assert!(!store.upsert(make_desc(stale_ps, 1, now_secs - 7200)),
-        "stale descriptor should be rejected on insert");
+    assert!(
+        !store.upsert(make_desc(stale_ps, 1, now_secs - 7200)),
+        "stale descriptor should be rejected on insert"
+    );
 
     let very_stale_ps = [0x04; 32];
-    assert!(!store.upsert(make_desc(very_stale_ps, 1, now_secs - 86400)),
-        "very stale descriptor should be rejected on insert");
+    assert!(
+        !store.upsert(make_desc(very_stale_ps, 1, now_secs - 86400)),
+        "very stale descriptor should be rejected on insert"
+    );
 
     assert_eq!(store.len(), 2, "only fresh descriptors should be stored");
 
@@ -2695,11 +2848,26 @@ fn descriptor_store_stale_pruning() {
     assert_eq!(pruned, 0, "59-minute descriptor is still fresh");
 
     // Verify which descriptors survived.
-    assert!(store.get(&fresh_ps).is_some(), "fresh descriptor should remain");
-    assert!(store.get(&recent_ps).is_some(), "recent descriptor should remain");
-    assert!(store.get(&edge_ps).is_some(), "edge descriptor should remain");
-    assert!(store.get(&stale_ps).is_none(), "stale descriptor was never stored");
-    assert!(store.get(&very_stale_ps).is_none(), "very stale descriptor was never stored");
+    assert!(
+        store.get(&fresh_ps).is_some(),
+        "fresh descriptor should remain"
+    );
+    assert!(
+        store.get(&recent_ps).is_some(),
+        "recent descriptor should remain"
+    );
+    assert!(
+        store.get(&edge_ps).is_some(),
+        "edge descriptor should remain"
+    );
+    assert!(
+        store.get(&stale_ps).is_none(),
+        "stale descriptor was never stored"
+    );
+    assert!(
+        store.get(&very_stale_ps).is_none(),
+        "very stale descriptor was never stored"
+    );
 }
 
 /// Test 45: Full Ed25519 credential issuance, presentation, and verification
@@ -2728,7 +2896,9 @@ fn credential_issuance_and_verification_roundtrip() {
 
     // Present the credential with a specific context.
     let context = b"integration-test-context-roundtrip";
-    let presentation = wallet.present(context).expect("wallet should have a credential to present");
+    let presentation = wallet
+        .present(context)
+        .expect("wallet should have a credential to present");
 
     // Verify the presentation succeeds.
     let known_issuers = [issuer.pubkey_bytes()];
@@ -2739,7 +2909,10 @@ fn credential_issuance_and_verification_roundtrip() {
         epoch,
         CredentialTier::Verified,
     );
-    assert!(result.is_ok(), "valid presentation should verify: {result:?}");
+    assert!(
+        result.is_ok(),
+        "valid presentation should verify: {result:?}"
+    );
     assert_eq!(result.unwrap(), CredentialTier::Verified);
 
     // Verify that presentation with a WRONG context fails.
@@ -2841,9 +3014,15 @@ fn bbs_credential_issuance_and_proof_roundtrip() {
     // Change the disclosed tier value from Verified(2) to Endorsed(3).
     tampered_proof.disclosed = vec![(1, CredentialTier::Endorsed as u64)];
     let result = bbs_verify_proof(&tampered_proof, &issuer_key.pk_bytes(), context);
-    assert!(result.is_err(), "tampered disclosure should fail verification");
+    assert!(
+        result.is_err(),
+        "tampered disclosure should fail verification"
+    );
 
     // Verify wrong context fails.
     let result = bbs_verify_proof(&proof, &issuer_key.pk_bytes(), b"wrong-context");
-    assert!(result.is_err(), "wrong context should fail BBS+ verification");
+    assert!(
+        result.is_err(),
+        "wrong context should fail BBS+ verification"
+    );
 }

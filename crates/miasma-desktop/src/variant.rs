@@ -9,7 +9,6 @@
 /// 2. `MIASMA_MODE` environment variable (developer/testing override only)
 /// 3. Persisted user preference in `desktop-prefs.toml`
 /// 4. Built-in default: `Easy`
-
 use std::path::{Path, PathBuf};
 
 use crate::locale::Locale;
@@ -231,8 +230,14 @@ mod tests {
 
     #[test]
     fn resolve_mode_precedence() {
-        let prefs_easy = DesktopPrefs { mode: ProductMode::Easy, locale: Locale::En };
-        let prefs_tech = DesktopPrefs { mode: ProductMode::Technical, locale: Locale::En };
+        let prefs_easy = DesktopPrefs {
+            mode: ProductMode::Easy,
+            locale: Locale::En,
+        };
+        let prefs_tech = DesktopPrefs {
+            mode: ProductMode::Technical,
+            locale: Locale::En,
+        };
 
         // CLI wins over everything
         assert_eq!(

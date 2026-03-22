@@ -18,11 +18,8 @@
 /// slots that are genuinely missing. The `RetrievalCoordinator` handles the
 /// resulting `InsufficientShares` error.
 use crate::{
-    crypto::hash::ContentId,
-    network::dht::OnionAwareDhtExecutor,
-    onion::share::OnionShareFetcher,
-    share::MiasmaShare,
-    MiasmaError,
+    crypto::hash::ContentId, network::dht::OnionAwareDhtExecutor, onion::share::OnionShareFetcher,
+    share::MiasmaShare, MiasmaError,
 };
 
 use super::source::ShareSource;

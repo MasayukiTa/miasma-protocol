@@ -181,18 +181,17 @@ impl<Src: ShareSource> RetrievalCoordinator<Src> {
 mod tests {
     use super::*;
     use crate::{
-        crypto::hash::ContentId,
-        dissolution::dissolve_file,
-        pipeline::dissolve,
-        store::LocalShareStore,
-        MiasmaError,
+        crypto::hash::ContentId, dissolution::dissolve_file, pipeline::dissolve,
+        store::LocalShareStore, MiasmaError,
     };
     use std::sync::Arc;
     use tempfile::TempDir;
 
     use super::super::source::LocalShareSource;
 
-    fn make_coordinator(dir: &TempDir) -> (RetrievalCoordinator<LocalShareSource>, Arc<LocalShareStore>) {
+    fn make_coordinator(
+        dir: &TempDir,
+    ) -> (RetrievalCoordinator<LocalShareSource>, Arc<LocalShareStore>) {
         let store = Arc::new(LocalShareStore::open(dir.path(), 100).unwrap());
         let src = LocalShareSource::new(store.clone());
         (RetrievalCoordinator::new(src), store)
@@ -287,8 +286,7 @@ mod tests {
         let data = vec![0xBBu8; 600];
         let segment_size = 256;
 
-        let (manifest, all_shares) =
-            dissolve_file(&data, params, segment_size).unwrap();
+        let (manifest, all_shares) = dissolve_file(&data, params, segment_size).unwrap();
 
         for seg_shares in &all_shares {
             for s in seg_shares {

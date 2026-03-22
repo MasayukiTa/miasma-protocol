@@ -187,7 +187,11 @@ impl RelayObservation {
     /// trust.
     fn recompute_tier(&mut self) {
         let total = self.successes + self.failures;
-        let rate = if total > 0 { self.successes as f64 / total as f64 } else { 0.0 };
+        let rate = if total > 0 {
+            self.successes as f64 / total as f64
+        } else {
+            0.0
+        };
 
         // Anti-gaming: if failures dominate recent observations, force demotion.
         // A relay that passes probes but drops ≥50% of real traffic cannot
@@ -218,7 +222,11 @@ impl RelayObservation {
     #[allow(dead_code)]
     fn success_rate(&self) -> f64 {
         let total = self.successes + self.failures;
-        if total == 0 { 0.0 } else { self.successes as f64 / total as f64 }
+        if total == 0 {
+            0.0
+        } else {
+            self.successes as f64 / total as f64
+        }
     }
 }
 
@@ -319,8 +327,15 @@ impl PeerDescriptor {
         signing_key: &ed25519_dalek::SigningKey,
     ) -> Self {
         Self::new_signed_with_bbs(
-            pseudonym, reachability, addresses, capabilities, resource_profile,
-            credential, None, version, signing_key,
+            pseudonym,
+            reachability,
+            addresses,
+            capabilities,
+            resource_profile,
+            credential,
+            None,
+            version,
+            signing_key,
         )
     }
 
@@ -337,8 +352,16 @@ impl PeerDescriptor {
         signing_key: &ed25519_dalek::SigningKey,
     ) -> Self {
         Self::new_signed_full(
-            pseudonym, reachability, addresses, capabilities, resource_profile,
-            credential, bbs_proof, None, version, signing_key,
+            pseudonym,
+            reachability,
+            addresses,
+            capabilities,
+            resource_profile,
+            credential,
+            bbs_proof,
+            None,
+            version,
+            signing_key,
         )
     }
 
@@ -470,7 +493,9 @@ impl PeerDescriptor {
     /// Returns `None` if no BBS+ proof is attached or if tier (index 1) is not disclosed.
     pub fn bbs_tier(&self) -> Option<CredentialTier> {
         let proof = self.bbs_proof.as_ref()?;
-        let tier_val = proof.disclosed.iter()
+        let tier_val = proof
+            .disclosed
+            .iter()
             .find(|&&(idx, _)| idx == 1)
             .map(|&(_, val)| val)?;
         match tier_val {
@@ -568,9 +593,7 @@ impl DescriptorStore {
         }
 
         // Enforce capacity: if at limit and this is a new pseudonym, evict stalest.
-        if !self.descriptors.contains_key(&pseudonym)
-            && self.descriptors.len() >= MAX_DESCRIPTORS
-        {
+        if !self.descriptors.contains_key(&pseudonym) && self.descriptors.len() >= MAX_DESCRIPTORS {
             // Prune stale first; if still over limit, evict the oldest descriptor.
             self.prune_stale();
             if self.descriptors.len() >= MAX_DESCRIPTORS {
@@ -608,7 +631,8 @@ impl DescriptorStore {
 
     /// Return pseudonyms of all relay-capable, fresh descriptors.
     pub fn relay_pseudonyms(&self) -> Vec<[u8; 32]> {
-        self.descriptors.values()
+        self.descriptors
+            .values()
             .filter(|d| d.is_relay() && is_fresh(d))
             .map(|d| d.pseudonym)
             .collect()
@@ -620,7 +644,9 @@ impl DescriptorStore {
     /// has a known PeerId mapping. Used to construct libp2p relay circuit addresses.
     /// Return relay-capable peer info, sorted by relay trust tier (Verified first).
     pub fn relay_peer_info(&self) -> Vec<(PeerId, Vec<String>)> {
-        let mut relays: Vec<_> = self.descriptors.values()
+        let mut relays: Vec<_> = self
+            .descriptors
+            .values()
             .filter(|d| d.is_relay() && is_fresh(d))
             .filter_map(|d| {
                 let pid = self.pseudonym_to_peer.get(&d.pseudonym)?;
@@ -630,7 +656,10 @@ impl DescriptorStore {
             .collect();
         // Sort by tier descending (Verified > Observed > Claimed).
         relays.sort_by(|a, b| b.0.cmp(&a.0));
-        relays.into_iter().map(|(_, pid, addrs)| (pid, addrs)).collect()
+        relays
+            .into_iter()
+            .map(|(_, pid, addrs)| (pid, addrs))
+            .collect()
     }
 
     /// Return relay-capable peers with their onion X25519 public keys.
@@ -639,7 +668,9 @@ impl DescriptorStore {
     /// Only returns relays that have published an `onion_pubkey`.
     /// Return relay peers with onion keys, sorted by relay trust tier (Verified first).
     pub fn relay_onion_info(&self) -> Vec<crate::onion::circuit::RelayInfo> {
-        let mut relays: Vec<_> = self.descriptors.values()
+        let mut relays: Vec<_> = self
+            .descriptors
+            .values()
             .filter(|d| d.is_relay() && is_fresh(d))
             .filter_map(|d| {
                 let onion_pubkey = d.onion_pubkey?;
@@ -650,13 +681,18 @@ impl DescriptorStore {
                 }
                 let peer_id = self.pseudonym_to_peer.get(&d.pseudonym)?;
                 let tier = self.relay_tier(&d.pseudonym);
-                Some((tier, crate::onion::circuit::RelayInfo {
-                    peer_id: peer_id.to_bytes(),
-                    onion_pubkey,
-                    addr: d.addresses.first()
-                        .map(|a| a.as_bytes().to_vec())
-                        .unwrap_or_default(),
-                }))
+                Some((
+                    tier,
+                    crate::onion::circuit::RelayInfo {
+                        peer_id: peer_id.to_bytes(),
+                        onion_pubkey,
+                        addr: d
+                            .addresses
+                            .first()
+                            .map(|a| a.as_bytes().to_vec())
+                            .unwrap_or_default(),
+                    },
+                ))
             })
             .collect();
         relays.sort_by(|a, b| b.0.cmp(&a.0));
@@ -666,7 +702,8 @@ impl DescriptorStore {
     /// Look up a peer's onion X25519 public key from their descriptor.
     /// Returns `None` for all-zero keys (VULN-001 defence).
     pub fn onion_pubkey_for_peer(&self, peer_id: &PeerId) -> Option<[u8; 32]> {
-        self.peer_to_pseudonym.get(peer_id)
+        self.peer_to_pseudonym
+            .get(peer_id)
             .and_then(|ps| self.descriptors.get(ps))
             .and_then(|d| d.onion_pubkey)
             .filter(|k| !k.iter().all(|&b| b == 0))
@@ -679,29 +716,30 @@ impl DescriptorStore {
 
     /// Look up a descriptor by PeerId (via pseudonym mapping).
     pub fn get_by_peer(&self, peer_id: &PeerId) -> Option<&PeerDescriptor> {
-        self.peer_to_pseudonym.get(peer_id)
+        self.peer_to_pseudonym
+            .get(peer_id)
             .and_then(|p| self.descriptors.get(p))
     }
 
     /// Return all descriptors that advertise relay capability.
     pub fn relay_descriptors(&self) -> Vec<&PeerDescriptor> {
-        self.descriptors.values()
+        self.descriptors
+            .values()
             .filter(|d| d.is_relay() && is_fresh(d))
             .collect()
     }
 
     /// Return all descriptors meeting a minimum tier.
     pub fn descriptors_at_tier(&self, min_tier: CredentialTier) -> Vec<&PeerDescriptor> {
-        self.descriptors.values()
+        self.descriptors
+            .values()
             .filter(|d| d.meets_tier(min_tier) && is_fresh(d))
             .collect()
     }
 
     /// Return all non-stale descriptors.
     pub fn active_descriptors(&self) -> Vec<&PeerDescriptor> {
-        self.descriptors.values()
-            .filter(|d| is_fresh(d))
-            .collect()
+        self.descriptors.values().filter(|d| is_fresh(d)).collect()
     }
 
     /// Prune stale descriptors (per-kind age limits). Returns number removed.
@@ -709,9 +747,12 @@ impl DescriptorStore {
         let before = self.descriptors.len();
         self.descriptors.retain(|_, d| is_fresh(d));
         // Also clean up peer mappings and relay observations for removed descriptors.
-        self.peer_to_pseudonym.retain(|_, p| self.descriptors.contains_key(p));
-        self.pseudonym_to_peer.retain(|p, _| self.descriptors.contains_key(p));
-        self.relay_observations.retain(|p, _| self.descriptors.contains_key(p));
+        self.peer_to_pseudonym
+            .retain(|_, p| self.descriptors.contains_key(p));
+        self.pseudonym_to_peer
+            .retain(|p, _| self.descriptors.contains_key(p));
+        self.relay_observations
+            .retain(|p, _| self.descriptors.contains_key(p));
         before - self.descriptors.len()
     }
 
@@ -774,14 +815,16 @@ impl DescriptorStore {
 
     /// Count relay observations with fresh probe evidence.
     pub fn probed_fresh_count(&self, freshness_secs: u64) -> usize {
-        self.relay_observations.values()
+        self.relay_observations
+            .values()
             .filter(|o| o.has_fresh_probe(freshness_secs))
             .count()
     }
 
     /// Count relay observations with forwarding verification evidence.
     pub fn forwarding_verified_count(&self) -> usize {
-        self.relay_observations.values()
+        self.relay_observations
+            .values()
             .filter(|o| o.forwarding_verified_at.is_some())
             .count()
     }
@@ -821,11 +864,9 @@ impl DescriptorStore {
     /// 3. Advertise `can_relay: true`
     ///
     /// Results are sorted by relay trust tier (Verified first).
-    pub fn resolve_intro_points(
-        &self,
-        intro_pseudonyms: &[[u8; 32]],
-    ) -> Vec<ResolvedIntroPoint> {
-        let mut resolved: Vec<ResolvedIntroPoint> = intro_pseudonyms.iter()
+    pub fn resolve_intro_points(&self, intro_pseudonyms: &[[u8; 32]]) -> Vec<ResolvedIntroPoint> {
+        let mut resolved: Vec<ResolvedIntroPoint> = intro_pseudonyms
+            .iter()
             .filter_map(|ps| {
                 let desc = self.descriptors.get(ps)?;
                 if !is_fresh(desc) || !desc.is_relay() {
@@ -852,12 +893,10 @@ impl DescriptorStore {
     ///
     /// Prefers relay peers with higher trust tiers. Returns up to `count`
     /// pseudonyms, excluding the node's own pseudonym.
-    pub fn select_intro_points(
-        &self,
-        own_pseudonym: &[u8; 32],
-        count: usize,
-    ) -> Vec<[u8; 32]> {
-        let mut candidates: Vec<_> = self.descriptors.values()
+    pub fn select_intro_points(&self, own_pseudonym: &[u8; 32], count: usize) -> Vec<[u8; 32]> {
+        let mut candidates: Vec<_> = self
+            .descriptors
+            .values()
             .filter(|d| {
                 d.is_relay()
                     && is_fresh(d)
@@ -868,12 +907,17 @@ impl DescriptorStore {
             .collect();
         // Sort by trust tier descending (Verified first).
         candidates.sort_by(|a, b| b.0.cmp(&a.0));
-        candidates.into_iter().take(count).map(|(_, ps)| ps).collect()
+        candidates
+            .into_iter()
+            .take(count)
+            .map(|(_, ps)| ps)
+            .collect()
     }
 
     /// Count rendezvous-capable peers (those with Rendezvous reachability).
     pub fn rendezvous_peer_count(&self) -> usize {
-        self.descriptors.values()
+        self.descriptors
+            .values()
             .filter(|d| d.is_rendezvous() && is_fresh(d))
             .count()
     }
@@ -915,7 +959,9 @@ impl DescriptorStore {
             return 0.0;
         }
         let total = self.descriptors.len();
-        let new_count = self.descriptors.keys()
+        let new_count = self
+            .descriptors
+            .keys()
             .filter(|ps| !self.prev_epoch_pseudonyms.contains(*ps))
             .count();
         new_count as f64 / total as f64
@@ -926,16 +972,20 @@ impl DescriptorStore {
         let total = self.descriptors.len();
         let relay_count = self.descriptors.values().filter(|d| d.is_relay()).count();
         let relayed_count = self.descriptors.values().filter(|d| d.is_relayed()).count();
-        let credentialed = self.descriptors.values()
+        let credentialed = self
+            .descriptors
+            .values()
             .filter(|d| d.credential.is_some())
             .count();
-        let bbs_credentialed = self.descriptors.values()
+        let bbs_credentialed = self
+            .descriptors
+            .values()
             .filter(|d| d.bbs_proof.is_some())
             .count();
-        let stale = self.descriptors.values()
-            .filter(|d| !is_fresh(d))
-            .count();
-        let rendezvous_count = self.descriptors.values()
+        let stale = self.descriptors.values().filter(|d| !is_fresh(d)).count();
+        let rendezvous_count = self
+            .descriptors
+            .values()
             .filter(|d| d.is_rendezvous() && is_fresh(d))
             .count();
 
@@ -1053,7 +1103,7 @@ mod tests {
         let d3 = test_descriptor(ps, 1); // same version as d1
 
         assert!(store.upsert(d1));
-        assert!(store.upsert(d2));  // newer, should replace
+        assert!(store.upsert(d2)); // newer, should replace
         assert!(!store.upsert(d3)); // older, should be rejected
 
         assert_eq!(store.get(&ps).unwrap().version, 2);
@@ -1068,7 +1118,10 @@ mod tests {
             [0x01; 32],
             ReachabilityKind::Direct,
             vec!["/ip4/1.2.3.4/tcp/4001".to_string()],
-            PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+            PeerCapabilities {
+                can_relay: true,
+                ..PeerCapabilities::default()
+            },
             ResourceProfile::Desktop,
             None,
             1,
@@ -1129,7 +1182,10 @@ mod tests {
             [0x02; 32],
             ReachabilityKind::Direct,
             vec![],
-            PeerCapabilities { can_relay: true, ..PeerCapabilities::default() },
+            PeerCapabilities {
+                can_relay: true,
+                ..PeerCapabilities::default()
+            },
             ResourceProfile::Desktop,
             None,
             1,

@@ -195,8 +195,16 @@ impl HybridAdmissionPolicy {
         }
 
         let pow_score = signals.pow_difficulty as u32 * self.pow_weight;
-        let diversity_bonus = if signals.unique_prefix { self.diversity_weight } else { 0 };
-        let reachability_bonus = if signals.reachable { self.reachability_weight } else { 0 };
+        let diversity_bonus = if signals.unique_prefix {
+            self.diversity_weight
+        } else {
+            0
+        };
+        let reachability_bonus = if signals.reachable {
+            self.reachability_weight
+        } else {
+            0
+        };
         let credential_bonus = match signals.credential_tier {
             Some(CredentialTier::Endorsed) => self.credential_weight + self.endorsed_weight,
             Some(CredentialTier::Verified) => self.credential_weight,

@@ -128,7 +128,9 @@ impl PeerRegistry {
 
     /// Returns true if the peer is Verified.
     pub fn is_verified(&self, peer_id: &PeerId) -> bool {
-        self.peers.get(peer_id).map_or(false, |s| s.trust == AddressTrust::Verified)
+        self.peers
+            .get(peer_id)
+            .map_or(false, |s| s.trust == AddressTrust::Verified)
     }
 
     /// Returns all peers at the Verified tier.

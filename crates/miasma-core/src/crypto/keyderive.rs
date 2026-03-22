@@ -66,7 +66,10 @@ mod tests {
         let keys1 = NodeKeys::derive(MASTER).unwrap();
         let keys2 = NodeKeys::derive(MASTER).unwrap();
         assert_eq!(keys1.node_id, keys2.node_id);
-        assert_eq!(keys1.dht_signing_key.as_ref(), keys2.dht_signing_key.as_ref());
+        assert_eq!(
+            keys1.dht_signing_key.as_ref(),
+            keys2.dht_signing_key.as_ref()
+        );
         assert_eq!(keys1.session_key.as_ref(), keys2.session_key.as_ref());
     }
 

@@ -56,10 +56,10 @@ pub fn verify_restricted(path: &Path) -> Result<bool, MiasmaError> {
 #[cfg(windows)]
 mod platform {
     use super::*;
-    use std::io::Write;
-    use std::os::windows::io::FromRawHandle;
     use std::ffi::OsStr;
+    use std::io::Write;
     use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::FromRawHandle;
     use std::ptr;
 
     // Win32 constants — avoids pulling in the large windows-sys crate.
@@ -162,11 +162,7 @@ mod platform {
             pDacl: *mut Acl,
             bDaclDefaulted: i32,
         ) -> i32;
-        fn InitializeAcl(
-            pAcl: *mut Acl,
-            nAclLength: u32,
-            dwAclRevision: u32,
-        ) -> i32;
+        fn InitializeAcl(pAcl: *mut Acl, nAclLength: u32, dwAclRevision: u32) -> i32;
         fn AddAccessAllowedAce(
             pAcl: *mut Acl,
             dwAceRevision: u32,
@@ -189,11 +185,7 @@ mod platform {
             pDacl: *mut *mut Acl,
             lpbDaclDefaulted: *mut i32,
         ) -> i32;
-        fn GetAce(
-            pAcl: *mut Acl,
-            dwAceIndex: u32,
-            pAce: *mut *mut AceHeader,
-        ) -> i32;
+        fn GetAce(pAcl: *mut Acl, dwAceIndex: u32, pAce: *mut *mut AceHeader) -> i32;
         fn EqualSid(pSid1: *mut u8, pSid2: *mut u8) -> i32;
     }
 
@@ -207,14 +199,18 @@ mod platform {
         unsafe {
             let mut token: isize = 0;
             if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
-                return Err(MiasmaError::KeyDerivation(
-                    "OpenProcessToken failed".into(),
-                ));
+                return Err(MiasmaError::KeyDerivation("OpenProcessToken failed".into()));
             }
 
             // Query required buffer size.
             let mut needed: u32 = 0;
-            GetTokenInformation(token, TOKEN_USER_INFO_CLASS, ptr::null_mut(), 0, &mut needed);
+            GetTokenInformation(
+                token,
+                TOKEN_USER_INFO_CLASS,
+                ptr::null_mut(),
+                0,
+                &mut needed,
+            );
             if needed == 0 {
                 CloseHandle(token);
                 return Err(MiasmaError::KeyDerivation(
@@ -270,9 +266,7 @@ mod platform {
             let acl_ptr = acl_buf.as_mut_ptr() as *mut Acl;
 
             if InitializeAcl(acl_ptr, acl_size as u32, ACL_REVISION) == 0 {
-                return Err(MiasmaError::KeyDerivation(
-                    "InitializeAcl failed".into(),
-                ));
+                return Err(MiasmaError::KeyDerivation("InitializeAcl failed".into()));
             }
 
             // AddAccessAllowedAce appends the ACE into the ACL buffer.
@@ -345,7 +339,13 @@ mod platform {
 
             // Query required buffer size for security descriptor.
             let mut needed: u32 = 0;
-            GetFileSecurityW(wide.as_ptr(), DACL_SECURITY_INFORMATION, ptr::null_mut(), 0, &mut needed);
+            GetFileSecurityW(
+                wide.as_ptr(),
+                DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                0,
+                &mut needed,
+            );
             if needed == 0 {
                 return Err(MiasmaError::KeyDerivation(format!(
                     "GetFileSecurityW size query failed for {}",
@@ -405,9 +405,8 @@ mod platform {
             }
 
             // The SID follows the 4-byte access mask after the ACE header.
-            let ace_sid = (ace_ptr as *mut u8).add(
-                std::mem::size_of::<AceHeader>() + std::mem::size_of::<u32>(),
-            );
+            let ace_sid = (ace_ptr as *mut u8)
+                .add(std::mem::size_of::<AceHeader>() + std::mem::size_of::<u32>());
             if EqualSid(ace_sid, sid.as_ptr() as *mut u8) == 0 {
                 return Ok(false);
             }

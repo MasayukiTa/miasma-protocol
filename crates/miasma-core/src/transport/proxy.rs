@@ -91,11 +91,8 @@ impl ProxyConfig {
                         .await
                     }
                     _ => {
-                        tokio_socks::tcp::Socks5Stream::connect(
-                            addr.as_str(),
-                            target.as_str(),
-                        )
-                        .await
+                        tokio_socks::tcp::Socks5Stream::connect(addr.as_str(), target.as_str())
+                            .await
                     }
                 };
                 match stream {
@@ -121,9 +118,7 @@ impl ProxyConfig {
 
                 // Build the CONNECT request.
                 let target = format!("{target_host}:{target_port}");
-                let mut request = format!(
-                    "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n"
-                );
+                let mut request = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n");
 
                 // Add Proxy-Authorization if credentials are present.
                 if let (Some(user), Some(pass)) = (username.as_deref(), password.as_deref()) {
@@ -159,8 +154,7 @@ impl ProxyConfig {
                     if n == 0 {
                         return Err(ProxyError {
                             phase: TransportPhase::Session,
-                            message: "proxy closed connection before sending full response"
-                                .into(),
+                            message: "proxy closed connection before sending full response".into(),
                         });
                     }
                     buf.push(byte[0]);
@@ -197,8 +191,7 @@ impl ProxyConfig {
 /// Minimal Base64 encoder (RFC 4648) — avoids pulling in the `base64` crate
 /// just for a single Proxy-Authorization header.
 fn base64_encode_basic(input: &str) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let bytes = input.as_bytes();
     let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
     for chunk in bytes.chunks(3) {
@@ -301,10 +294,7 @@ mod tests {
                     // Parse the target from the CONNECT line.
                     let hdr_str = String::from_utf8_lossy(&hdr);
                     let first_line = hdr_str.lines().next().unwrap_or("");
-                    let target = first_line
-                        .split_whitespace()
-                        .nth(1)
-                        .unwrap_or("");
+                    let target = first_line.split_whitespace().nth(1).unwrap_or("");
 
                     // Connect to target.
                     let mut upstream = TcpStream::connect(target).await.unwrap();

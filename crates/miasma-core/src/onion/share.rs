@@ -91,10 +91,8 @@ impl LiveOnionShareFetcher {
         let r1_secret = derive(b"miasma-sim-relay1-x25519-v1")?;
         let r2_secret = derive(b"miasma-sim-relay2-x25519-v1")?;
 
-        let r1_pubkey =
-            x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(r1_secret));
-        let r2_pubkey =
-            x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(r2_secret));
+        let r1_pubkey = x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(r1_secret));
+        let r2_pubkey = x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(r2_secret));
 
         let relay_dir = vec![
             RelayInfo {
@@ -170,16 +168,16 @@ impl LiveOnionShareFetcher {
                 );
                 Ok(out)
             }
-            tag => Err(MiasmaError::Sss(format!("unknown share payload tag: {tag}"))),
+            tag => Err(MiasmaError::Sss(format!(
+                "unknown share payload tag: {tag}"
+            ))),
         }
     }
 
     async fn send_onion_query(&self, body: Vec<u8>) -> Result<Vec<u8>, MiasmaError> {
         let dir = self.relay_dir.lock().await;
         if dir.len() < 2 {
-            return Err(MiasmaError::Sss(
-                "need >=2 relays for 2-hop circuit".into(),
-            ));
+            return Err(MiasmaError::Sss("need >=2 relays for 2-hop circuit".into()));
         }
         let r1 = &dir[0];
         let r2 = &dir[1];
@@ -219,8 +217,8 @@ impl OnionShareFetcher for LiveOnionShareFetcher {
             slot_index,
             segment_index,
         };
-        let body_inner = bincode::serialize(&req)
-            .map_err(|e| MiasmaError::Serialization(e.to_string()))?;
+        let body_inner =
+            bincode::serialize(&req).map_err(|e| MiasmaError::Serialization(e.to_string()))?;
         let mut body = vec![0x10u8]; // ShareRequest tag
         body.extend(body_inner);
 
@@ -262,10 +260,7 @@ mod tests {
         let fetcher = LiveOnionShareFetcher::new_phase1(&master, store).unwrap();
 
         // Fetch the first share (slot 0, segment 0).
-        let result = fetcher
-            .fetch_share(*mid.as_bytes(), 0, 0)
-            .await
-            .unwrap();
+        let result = fetcher.fetch_share(*mid.as_bytes(), 0, 0).await.unwrap();
         assert!(result.is_some(), "slot 0 should be found");
         let share = result.unwrap();
         assert_eq!(share.slot_index, 0);

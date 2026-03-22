@@ -344,7 +344,10 @@ impl TransportStats {
             TransportPhase::Session => c.session_failures.fetch_add(1, Ordering::Relaxed),
             TransportPhase::Data => c.data_failures.fetch_add(1, Ordering::Relaxed),
         };
-        self.last_errors.lock().unwrap().insert(kind, message.to_string());
+        self.last_errors
+            .lock()
+            .unwrap()
+            .insert(kind, message.to_string());
     }
 
     /// Snapshot for diagnostics display.
@@ -400,7 +403,11 @@ pub struct TransportReadiness {
 
 impl fmt::Display for TransportReadiness {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let status = if self.available { "AVAILABLE" } else { "UNAVAILABLE" };
+        let status = if self.available {
+            "AVAILABLE"
+        } else {
+            "UNAVAILABLE"
+        };
         let sel = if self.selected { " [SELECTED]" } else { "" };
         write!(
             f,
@@ -506,7 +513,11 @@ impl PayloadTransport for Libp2pPayloadTransport {
         };
 
         // 2. Find the location for this slot.
-        let location = match record.locations.iter().find(|l| l.shard_index == slot_index) {
+        let location = match record
+            .locations
+            .iter()
+            .find(|l| l.shard_index == slot_index)
+        {
             Some(l) => l,
             None => return Ok(None),
         };
@@ -564,12 +575,13 @@ impl PayloadTransport for TcpDirectPayloadTransport {
         use tokio::net::TcpStream;
 
         // 1. Connect
-        let mut stream = TcpStream::connect(peer_addr).await.map_err(|e| {
-            PayloadTransportError {
-                phase: TransportPhase::Session,
-                message: format!("TCP connect to {peer_addr}: {e}"),
-            }
-        })?;
+        let mut stream =
+            TcpStream::connect(peer_addr)
+                .await
+                .map_err(|e| PayloadTransportError {
+                    phase: TransportPhase::Session,
+                    message: format!("TCP connect to {peer_addr}: {e}"),
+                })?;
 
         // 2. Send request: 4-byte LE length + bincode(ShareFetchRequest)
         let request = crate::network::node::ShareFetchRequest {
@@ -582,21 +594,30 @@ impl PayloadTransport for TcpDirectPayloadTransport {
             message: format!("serialize request: {e}"),
         })?;
         let len = (body.len() as u32).to_le_bytes();
-        stream.write_all(&len).await.map_err(|e| PayloadTransportError {
-            phase: TransportPhase::Data,
-            message: format!("write request: {e}"),
-        })?;
-        stream.write_all(&body).await.map_err(|e| PayloadTransportError {
-            phase: TransportPhase::Data,
-            message: format!("write request body: {e}"),
-        })?;
+        stream
+            .write_all(&len)
+            .await
+            .map_err(|e| PayloadTransportError {
+                phase: TransportPhase::Data,
+                message: format!("write request: {e}"),
+            })?;
+        stream
+            .write_all(&body)
+            .await
+            .map_err(|e| PayloadTransportError {
+                phase: TransportPhase::Data,
+                message: format!("write request body: {e}"),
+            })?;
 
         // 3. Read response: 4-byte LE length + bincode(Option<MiasmaShare>)
         let mut len_buf = [0u8; 4];
-        stream.read_exact(&mut len_buf).await.map_err(|e| PayloadTransportError {
-            phase: TransportPhase::Data,
-            message: format!("read response length: {e}"),
-        })?;
+        stream
+            .read_exact(&mut len_buf)
+            .await
+            .map_err(|e| PayloadTransportError {
+                phase: TransportPhase::Data,
+                message: format!("read response length: {e}"),
+            })?;
         let resp_len = u32::from_le_bytes(len_buf) as usize;
         if resp_len > 64 * 1024 * 1024 {
             return Err(PayloadTransportError {
@@ -605,10 +626,13 @@ impl PayloadTransport for TcpDirectPayloadTransport {
             });
         }
         let mut resp_buf = vec![0u8; resp_len];
-        stream.read_exact(&mut resp_buf).await.map_err(|e| PayloadTransportError {
-            phase: TransportPhase::Data,
-            message: format!("read response body: {e}"),
-        })?;
+        stream
+            .read_exact(&mut resp_buf)
+            .await
+            .map_err(|e| PayloadTransportError {
+                phase: TransportPhase::Data,
+                message: format!("read response body: {e}"),
+            })?;
 
         let share: Option<MiasmaShare> =
             bincode::deserialize(&resp_buf).map_err(|e| PayloadTransportError {
@@ -628,9 +652,15 @@ mod tests {
 
     #[test]
     fn transport_kind_display() {
-        assert_eq!(PayloadTransportKind::DirectLibp2p.to_string(), "direct-libp2p");
+        assert_eq!(
+            PayloadTransportKind::DirectLibp2p.to_string(),
+            "direct-libp2p"
+        );
         assert_eq!(PayloadTransportKind::WssTunnel.to_string(), "wss-tunnel");
-        assert_eq!(PayloadTransportKind::ObfuscatedQuic.to_string(), "obfuscated-quic");
+        assert_eq!(
+            PayloadTransportKind::ObfuscatedQuic.to_string(),
+            "obfuscated-quic"
+        );
     }
 
     #[test]
@@ -722,15 +752,25 @@ mod tests {
         let stats = TransportStats::default();
         stats.record_success(PayloadTransportKind::DirectLibp2p);
         stats.record_success(PayloadTransportKind::DirectLibp2p);
-        stats.record_failure(PayloadTransportKind::TcpDirect, TransportPhase::Session, "test");
+        stats.record_failure(
+            PayloadTransportKind::TcpDirect,
+            TransportPhase::Session,
+            "test",
+        );
 
         let snap = stats.snapshot();
-        let libp2p = snap.iter().find(|r| r.transport == PayloadTransportKind::DirectLibp2p).unwrap();
+        let libp2p = snap
+            .iter()
+            .find(|r| r.transport == PayloadTransportKind::DirectLibp2p)
+            .unwrap();
         assert_eq!(libp2p.success_count, 2);
         assert_eq!(libp2p.failure_count, 0);
         assert!(libp2p.available);
 
-        let tcp = snap.iter().find(|r| r.transport == PayloadTransportKind::TcpDirect).unwrap();
+        let tcp = snap
+            .iter()
+            .find(|r| r.transport == PayloadTransportKind::TcpDirect)
+            .unwrap();
         assert_eq!(tcp.failure_count, 1);
     }
 
@@ -882,19 +922,35 @@ mod tests {
         let _ = selector.fetch_share("x", [0u8; 32], 1, 0).await;
 
         let snap = selector.stats().snapshot();
-        let libp2p = snap.iter().find(|r| r.transport == PayloadTransportKind::DirectLibp2p).unwrap();
+        let libp2p = snap
+            .iter()
+            .find(|r| r.transport == PayloadTransportKind::DirectLibp2p)
+            .unwrap();
         assert_eq!(libp2p.failure_count, 2);
-        let tcp = snap.iter().find(|r| r.transport == PayloadTransportKind::TcpDirect).unwrap();
+        let tcp = snap
+            .iter()
+            .find(|r| r.transport == PayloadTransportKind::TcpDirect)
+            .unwrap();
         assert_eq!(tcp.success_count, 2);
     }
 
     #[test]
     fn selector_transport_names() {
         let selector = PayloadTransportSelector::new(vec![
-            Box::new(SuccessTransport { kind: PayloadTransportKind::DirectLibp2p }),
-            Box::new(SuccessTransport { kind: PayloadTransportKind::TcpDirect }),
+            Box::new(SuccessTransport {
+                kind: PayloadTransportKind::DirectLibp2p,
+            }),
+            Box::new(SuccessTransport {
+                kind: PayloadTransportKind::TcpDirect,
+            }),
         ]);
         let names = selector.transport_names();
-        assert_eq!(names, vec![PayloadTransportKind::DirectLibp2p, PayloadTransportKind::TcpDirect]);
+        assert_eq!(
+            names,
+            vec![
+                PayloadTransportKind::DirectLibp2p,
+                PayloadTransportKind::TcpDirect
+            ]
+        );
     }
 }

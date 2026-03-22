@@ -120,7 +120,12 @@ pub fn retrieve_segment(
         .map(|s| (s.slot_index as usize, s.shard_data.clone()))
         .collect();
 
-    let ciphertext = rs_decode(&rs_shards, params.data_shards, params.total_shards, ciphertext_len)?;
+    let ciphertext = rs_decode(
+        &rs_shards,
+        params.data_shards,
+        params.total_shards,
+        ciphertext_len,
+    )?;
 
     // 3. SSS combine key shares → K_enc.
     let key_shares: Vec<Vec<u8>> = selected.iter().map(|s| s.key_share.clone()).collect();

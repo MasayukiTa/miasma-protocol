@@ -162,7 +162,10 @@ mod tests {
         let pkts_clone = packets.clone();
 
         let engine = CoverTrafficEngine::start(
-            CoverTrafficConfig { rate_bytes_per_sec: 100_000, ..Default::default() },
+            CoverTrafficConfig {
+                rate_bytes_per_sec: 100_000,
+                ..Default::default()
+            },
             move |pkt| pkts_clone.lock().unwrap().push(pkt),
         );
 
@@ -179,7 +182,10 @@ mod tests {
         let packets: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
         let pkts_clone = packets.clone();
 
-        let config = CoverTrafficConfig { enabled: false, ..Default::default() };
+        let config = CoverTrafficConfig {
+            enabled: false,
+            ..Default::default()
+        };
         let engine = CoverTrafficEngine::start(config, move |pkt| {
             pkts_clone.lock().unwrap().push(pkt);
         });
