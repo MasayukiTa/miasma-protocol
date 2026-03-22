@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#0a0a0f">
+  <meta name="description" content="Miasma Protocol — censorship-resistant content dissolution and retrieval in your browser">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self';">
+  <title>Miasma Web</title>
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='45' fill='%230a0a0f' stroke='%237c3aed' stroke-width='4'/><circle cx='50' cy='50' r='20' fill='none' stroke='%2322d3ee' stroke-width='2' stroke-dasharray='8 4'/><circle cx='50' cy='50' r='6' fill='%237c3aed'/></svg>">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+</head>
+<body>
+  <div id="app">
+    <!-- Navigation -->
+    <nav id="nav">
+      <div class="nav-brand" data-view="home">
+        <svg class="nav-logo" viewBox="0 0 100 100" width="28" height="28">
+          <circle cx="50" cy="50" r="45" fill="none" stroke="var(--accent)" stroke-width="4"/>
+          <circle cx="50" cy="50" r="20" fill="none" stroke="var(--secondary)" stroke-width="2" stroke-dasharray="8 4"/>
+          <circle cx="50" cy="50" r="6" fill="var(--accent)"/>
+        </svg>
+        <span>Miasma</span>
+      </div>
+      <div class="nav-actions">
+        <button id="btn-lang" class="btn-icon" title="Language">EN</button>
+        <button id="btn-settings" class="btn-icon" data-view="settings" title="Settings">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/>
+          </svg>
+        </button>
+      </div>
+    </nav>
+
+    <!-- Loading Screen -->
+    <div id="view-loading" class="view active">
+      <div class="loading-container">
+        <div class="loading-spinner"></div>
+        <p data-i18n="loading">Loading Miasma Protocol...</p>
+      </div>
+    </div>
+
+    <!-- Home View -->
+    <div id="view-home" class="view">
+      <div class="home-hero">
+        <div class="hero-orb"></div>
+        <h1 data-i18n="hero_title">Miasma Protocol</h1>
+        <p class="hero-sub" data-i18n="hero_sub">Censorship-resistant content protection in your browser</p>
+        <p class="hero-desc" data-i18n="hero_desc">Split and encrypt content into shares. Reconstruct from any k-of-n shares. No server required.</p>
+      </div>
+      <div class="home-actions">
+        <button class="action-card card-dissolve" data-view="dissolve">
+          <div class="card-icon">
+            <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
+            </svg>
+          </div>
+          <h2 data-i18n="dissolve">Dissolve</h2>
+          <p data-i18n="dissolve_desc">Encrypt and split content into protected shares</p>
+        </button>
+        <button class="action-card card-retrieve" data-view="retrieve">
+          <div class="card-icon">
+            <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+          </div>
+          <h2 data-i18n="retrieve">Retrieve</h2>
+          <p data-i18n="retrieve_desc">Reconstruct content from collected shares</p>
+        </button>
+      </div>
+      <div class="home-stats" id="home-stats">
+        <div class="stat">
+          <span class="stat-value" id="stat-shares">0</span>
+          <span class="stat-label" data-i18n="stored_shares">Stored shares</span>
+        </div>
+        <div class="stat">
+          <span class="stat-value" id="stat-mids">0</span>
+          <span class="stat-label" data-i18n="known_mids">Known MIDs</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Dissolve View -->
+    <div id="view-dissolve" class="view">
+      <div class="view-header">
+        <button class="btn-back" data-view="home">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+        </button>
+        <h1 data-i18n="dissolve">Dissolve</h1>
+      </div>
+
+      <div class="dissolve-content">
+        <!-- Input Mode Toggle -->
+        <div class="input-toggle">
+          <button class="toggle-btn active" id="btn-text-mode" data-i18n="text">Text</button>
+          <button class="toggle-btn" id="btn-file-mode" data-i18n="file">File</button>
+        </div>
+
+        <!-- Text Input -->
+        <div id="text-input-area" class="input-area">
+          <textarea id="dissolve-text" placeholder="" data-i18n-placeholder="enter_text" rows="8"></textarea>
+          <div class="input-info">
+            <span id="text-byte-count">0 bytes</span>
+          </div>
+        </div>
+
+        <!-- File Input -->
+        <div id="file-input-area" class="input-area hidden">
+          <div class="drop-zone" id="drop-zone">
+            <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="var(--text-dim)" stroke-width="1">
+              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+            <p data-i18n="drop_file">Drop a file here or tap to select</p>
+            <input type="file" id="file-input" class="hidden">
+          </div>
+          <div id="file-info" class="file-info hidden">
+            <span id="file-name"></span>
+            <span id="file-size"></span>
+            <button class="btn-clear" id="btn-clear-file">&times;</button>
+          </div>
+        </div>
+
+        <!-- Parameters -->
+        <details class="params-section">
+          <summary data-i18n="advanced_params">Advanced Parameters</summary>
+          <div class="params-grid">
+            <label>
+              <span>k <span class="param-hint" data-i18n="param_k_hint">(minimum shares to recover)</span></span>
+              <input type="number" id="param-k" value="10" min="2" max="255">
+            </label>
+            <label>
+              <span>n <span class="param-hint" data-i18n="param_n_hint">(total shares generated)</span></span>
+              <input type="number" id="param-n" value="20" min="3" max="255">
+            </label>
+          </div>
+        </details>
+
+        <!-- Dissolve Button -->
+        <button id="btn-dissolve" class="btn-primary" data-i18n="dissolve_action">Dissolve</button>
+
+        <!-- Progress -->
+        <div id="dissolve-progress" class="progress-bar hidden">
+          <div class="progress-fill"></div>
+          <span class="progress-text" data-i18n="processing">Processing...</span>
+        </div>
+
+        <!-- Result -->
+        <div id="dissolve-result" class="result-section hidden">
+          <div class="result-header">
+            <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="var(--success)" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+            <h3 data-i18n="dissolved">Content Dissolved</h3>
+          </div>
+          <div class="mid-display">
+            <label>MID</label>
+            <div class="mid-value">
+              <code id="result-mid"></code>
+              <button class="btn-copy" id="btn-copy-mid" data-i18n="copy">Copy</button>
+            </div>
+          </div>
+          <div class="result-info">
+            <span id="result-share-count"></span>
+            <span id="result-share-size"></span>
+          </div>
+          <div class="result-actions">
+            <button id="btn-save-shares" class="btn-secondary" data-i18n="save_locally">Save to Browser</button>
+            <button id="btn-export-shares" class="btn-secondary" data-i18n="export_file">Export .miasma</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Retrieve View -->
+    <div id="view-retrieve" class="view">
+      <div class="view-header">
+        <button class="btn-back" data-view="home">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+        </button>
+        <h1 data-i18n="retrieve">Retrieve</h1>
+      </div>
+
+      <div class="retrieve-content">
+        <!-- MID Input -->
+        <div class="mid-input-section">
+          <label data-i18n="enter_mid">Enter MID</label>
+          <div class="mid-input-row">
+            <input type="text" id="retrieve-mid" placeholder="miasma:..." spellcheck="false">
+          </div>
+        </div>
+
+        <!-- Share Source -->
+        <div class="share-source-section">
+          <h3 data-i18n="share_sources">Share Sources</h3>
+
+          <!-- Local shares -->
+          <div class="source-card" id="local-shares-card">
+            <div class="source-header">
+              <span data-i18n="local_storage">Local Storage</span>
+              <span class="share-badge" id="local-share-count">0</span>
+            </div>
+            <p class="source-desc" data-i18n="local_desc">Shares saved in this browser</p>
+          </div>
+
+          <!-- Import -->
+          <div class="source-card">
+            <div class="source-header">
+              <span data-i18n="import_shares">Import Shares</span>
+              <span class="share-badge" id="import-share-count">0</span>
+            </div>
+            <div class="import-actions">
+              <button id="btn-import-file" class="btn-small" data-i18n="import_file">Import .miasma</button>
+              <button id="btn-import-paste" class="btn-small" data-i18n="paste_json">Paste JSON</button>
+              <input type="file" id="import-file-input" class="hidden" accept=".miasma,.json">
+            </div>
+          </div>
+
+          <!-- Paste Modal -->
+          <div id="paste-modal" class="modal hidden">
+            <div class="modal-content">
+              <h3 data-i18n="paste_shares">Paste Share Data</h3>
+              <textarea id="paste-textarea" rows="6" placeholder='[{"version":1, ...}]'></textarea>
+              <div class="modal-actions">
+                <button id="btn-paste-cancel" class="btn-small" data-i18n="cancel">Cancel</button>
+                <button id="btn-paste-confirm" class="btn-small btn-accent" data-i18n="import">Import</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Share Progress -->
+          <div class="share-progress" id="share-progress">
+            <div class="progress-header">
+              <span data-i18n="shares_collected">Shares collected</span>
+              <span id="share-progress-text">0 / 10</span>
+            </div>
+            <div class="progress-bar-mini">
+              <div class="progress-fill-mini" id="share-progress-fill" style="width: 0%"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Parameters -->
+        <details class="params-section">
+          <summary data-i18n="advanced_params">Advanced Parameters</summary>
+          <div class="params-grid">
+            <label>
+              <span>k</span>
+              <input type="number" id="retrieve-k" value="10" min="2" max="255">
+            </label>
+            <label>
+              <span>n</span>
+              <input type="number" id="retrieve-n" value="20" min="3" max="255">
+            </label>
+          </div>
+        </details>
+
+        <!-- Retrieve Button -->
+        <button id="btn-retrieve" class="btn-primary" disabled data-i18n="retrieve_action">Retrieve</button>
+
+        <!-- Result -->
+        <div id="retrieve-result" class="result-section hidden">
+          <div class="result-header">
+            <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="var(--success)" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+            <h3 data-i18n="retrieved">Content Retrieved</h3>
+          </div>
+          <div id="retrieve-text-result" class="text-result hidden">
+            <pre id="retrieve-text-content"></pre>
+            <button class="btn-copy" id="btn-copy-text" data-i18n="copy">Copy</button>
+          </div>
+          <div id="retrieve-binary-result" class="binary-result hidden">
+            <p data-i18n="binary_content">Binary content</p>
+            <span id="retrieve-binary-size"></span>
+            <button id="btn-download" class="btn-secondary" data-i18n="download">Download</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Settings View -->
+    <div id="view-settings" class="view">
+      <div class="view-header">
+        <button class="btn-back" data-view="home">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+        </button>
+        <h1 data-i18n="settings">Settings</h1>
+      </div>
+
+      <div class="settings-content">
+        <div class="settings-group">
+          <h3 data-i18n="storage_title">Storage</h3>
+          <div class="setting-row">
+            <span data-i18n="stored_shares">Stored shares</span>
+            <span id="settings-share-count">0</span>
+          </div>
+          <div class="setting-row">
+            <span data-i18n="storage_used">Storage used</span>
+            <span id="settings-storage-size">0 KB</span>
+          </div>
+          <button id="btn-clear-all" class="btn-danger" data-i18n="clear_all_shares">Clear All Shares</button>
+        </div>
+
+        <div class="settings-group">
+          <h3 data-i18n="language_title">Language</h3>
+          <div class="lang-options">
+            <button class="lang-btn" data-lang="en">English</button>
+            <button class="lang-btn" data-lang="ja">日本語</button>
+          </div>
+        </div>
+
+        <div class="settings-group">
+          <h3 data-i18n="about_title">About</h3>
+          <div class="about-info">
+            <p id="version-info"></p>
+            <p>Protocol Version: 1</p>
+            <p data-i18n="about_desc">Miasma Web is a browser-based client for the Miasma Protocol. All cryptographic operations run locally in WebAssembly. No data is sent to any server.</p>
+          </div>
+        </div>
+
+        <div class="settings-group">
+          <h3 data-i18n="security_title">Security Notice</h3>
+          <div class="security-notice">
+            <p data-i18n="security_notice_1">This is a beta product. It has not been independently audited.</p>
+            <p data-i18n="security_notice_2">Browser memory management differs from native apps. Key material may persist in memory longer than expected.</p>
+            <p data-i18n="security_notice_3">IndexedDB storage is not encrypted. Shares are individually meaningless (require k-of-n), but physical device access could expose them.</p>
+            <p data-i18n="security_notice_4">Do not use for highly sensitive content.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Toast -->
+    <div id="toast" class="toast hidden"></div>
+  </div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
