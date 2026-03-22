@@ -9,9 +9,29 @@ let dissolveResult = null;
 let retrieveShares = [];
 let selectedFile = null;
 
+// ── Feature Detection ─────────────────────────────────────────────
+
+function checkBrowserSupport() {
+  const missing = [];
+  if (typeof WebAssembly === 'undefined') missing.push('WebAssembly');
+  if (typeof indexedDB === 'undefined') missing.push('IndexedDB');
+  if (!window.crypto || !window.crypto.getRandomValues) missing.push('crypto.getRandomValues');
+  if (typeof BigInt === 'undefined') missing.push('BigInt');
+  return missing;
+}
+
 // ── Init ──────────────────────────────────────────────────────────
 
 async function init() {
+  // Feature detection first
+  const missing = checkBrowserSupport();
+  if (missing.length > 0) {
+    const el = document.querySelector('.loading-container p');
+    el.textContent = `Browser not supported. Missing: ${missing.join(', ')}`;
+    el.style.color = 'var(--danger)';
+    return;
+  }
+
   try {
     const module = await import('../pkg/miasma_wasm.js');
     await module.default();
@@ -23,6 +43,7 @@ async function init() {
     updateStats();
     const vi = document.getElementById('version-info');
     if (vi) vi.textContent = wasm.protocol_version();
+    showInstallBanner();
   } catch (e) {
     console.error('Init failed:', e);
     document.querySelector('.loading-container p').textContent =
@@ -41,6 +62,15 @@ function showView(name) {
   }
   if (name === 'home') updateStats();
   if (name === 'settings') updateSettingsView();
+  if (name === 'dissolve') {
+    // Reset dissolve state
+    document.getElementById('dissolve-result').classList.add('hidden');
+    document.getElementById('dissolve-progress').classList.add('hidden');
+  }
+  if (name === 'retrieve') {
+    // Reset retrieve state
+    document.getElementById('retrieve-result').classList.add('hidden');
+  }
 }
 
 // ── Event Listeners ───────────────────────────────────────────────
@@ -126,6 +156,15 @@ function setupEventListeners() {
 
   // Settings
   document.getElementById('btn-clear-all').addEventListener('click', handleClearAll);
+
+  // Install banner dismiss
+  const installBanner = document.getElementById('install-banner');
+  if (installBanner) {
+    document.getElementById('btn-dismiss-install')?.addEventListener('click', () => {
+      installBanner.classList.add('hidden');
+      localStorage.setItem('miasma-install-dismissed', '1');
+    });
+  }
 }
 
 // ── Input Mode ────────────────────────────────────────────────────
@@ -150,6 +189,11 @@ function setInputMode(mode) {
 }
 
 function handleFileSelect(file) {
+  // Check size limit (~100MB practical limit for in-memory WASM)
+  if (file.size > 100 * 1024 * 1024) {
+    showToast(t('error_file_too_large'), 'error');
+    return;
+  }
   selectedFile = file;
   document.getElementById('file-info').classList.remove('hidden');
   document.getElementById('file-name').textContent = file.name;
@@ -199,10 +243,14 @@ async function handleDissolve() {
   const result = document.getElementById('dissolve-result');
 
   btn.disabled = true;
+  btn.classList.add('dissolving');
   progress.classList.remove('hidden');
   result.classList.add('hidden');
 
-  // Use setTimeout to allow UI to update before heavy WASM computation
+  // Start dissolve particle animation
+  startDissolveAnimation();
+
+  // Allow UI to update before heavy WASM computation
   await new Promise(r => setTimeout(r, 50));
 
   try {
@@ -224,11 +272,56 @@ async function handleDissolve() {
 
     progress.classList.add('hidden');
     result.classList.remove('hidden');
+
+    // Success pulse on result
+    result.style.animation = 'none';
+    result.offsetHeight;
+    result.style.animation = '';
   } catch (e) {
     showToast('Error: ' + e.message, 'error');
     progress.classList.add('hidden');
   } finally {
     btn.disabled = false;
+    btn.classList.remove('dissolving');
+    stopDissolveAnimation();
+  }
+}
+
+// ── Dissolve Animation ────────────────────────────────────────────
+
+let animationContainer = null;
+let animationFrame = null;
+
+function startDissolveAnimation() {
+  if (animationContainer) stopDissolveAnimation();
+
+  animationContainer = document.createElement('div');
+  animationContainer.className = 'dissolve-particles';
+  document.getElementById('view-dissolve').appendChild(animationContainer);
+
+  const particles = 24;
+  for (let i = 0; i < particles; i++) {
+    const p = document.createElement('div');
+    p.className = 'particle';
+    const angle = (i / particles) * Math.PI * 2;
+    const delay = (i / particles) * 1.5;
+    const distance = 40 + Math.random() * 80;
+    p.style.setProperty('--angle', angle + 'rad');
+    p.style.setProperty('--distance', distance + 'px');
+    p.style.setProperty('--delay', delay + 's');
+    p.style.setProperty('--size', (2 + Math.random() * 4) + 'px');
+    animationContainer.appendChild(p);
+  }
+}
+
+function stopDissolveAnimation() {
+  if (animationContainer) {
+    animationContainer.remove();
+    animationContainer = null;
+  }
+  if (animationFrame) {
+    cancelAnimationFrame(animationFrame);
+    animationFrame = null;
   }
 }
 
@@ -236,14 +329,23 @@ async function handleDissolve() {
 
 async function handleSaveShares() {
   if (!dissolveResult) return;
+  const btn = document.getElementById('btn-save-shares');
+  btn.disabled = true;
   try {
     const k = parseInt(document.getElementById('param-k').value);
     const n = parseInt(document.getElementById('param-n').value);
     await saveShares(dissolveResult.mid, dissolveResult.shares, { k, n });
     showToast(t('saved'), 'success');
+    btn.textContent = '\u2713 ' + t('saved');
     updateStats();
   } catch (e) {
     showToast('Error: ' + e.message, 'error');
+  } finally {
+    setTimeout(() => {
+      btn.disabled = false;
+      btn.textContent = t('save_locally');
+      applyTranslations();
+    }, 2000);
   }
 }
 
@@ -276,6 +378,7 @@ async function handleMidInput() {
   retrieveShares = [];
   document.getElementById('local-share-count').textContent = '0';
   document.getElementById('import-share-count').textContent = '0';
+  document.getElementById('retrieve-result').classList.add('hidden');
 
   if (!midStr.startsWith('miasma:')) {
     updateShareProgress();
@@ -284,7 +387,6 @@ async function handleMidInput() {
 
   // Search local shares
   try {
-    // Compute mid_prefix from MID string — parse the base58, take first 8 bytes
     const b58part = midStr.slice(7);
     const digestBytes = decodeBase58(b58part);
     if (digestBytes && digestBytes.length >= 8) {
@@ -309,7 +411,14 @@ function updateShareProgress() {
 
   document.getElementById('share-progress-text').textContent = `${total} / ${k}`;
   document.getElementById('share-progress-fill').style.width = pct + '%';
-  document.getElementById('btn-retrieve').disabled = total < k;
+
+  const btn = document.getElementById('btn-retrieve');
+  btn.disabled = total < k;
+  if (total >= k) {
+    btn.classList.add('ready');
+  } else {
+    btn.classList.remove('ready');
+  }
 }
 
 async function handleImportFile(e) {
@@ -323,9 +432,11 @@ async function handleImportFile(e) {
       shares = data;
     } else if (data.shares && Array.isArray(data.shares)) {
       shares = data.shares;
-      // Auto-fill MID if present
+      // Auto-fill MID and params if present
       if (data.mid) {
         document.getElementById('retrieve-mid').value = data.mid;
+        // Trigger local share search
+        await handleMidInput();
       }
       if (data.data_shards) document.getElementById('retrieve-k').value = data.data_shards;
       if (data.total_shards) document.getElementById('retrieve-n').value = data.total_shards;
@@ -343,7 +454,20 @@ function handlePasteImport() {
   const text = document.getElementById('paste-textarea').value.trim();
   try {
     const data = JSON.parse(text);
-    const shares = Array.isArray(data) ? data : (data.shares || []);
+    let shares;
+    if (Array.isArray(data)) {
+      shares = data;
+    } else if (data.shares) {
+      shares = data.shares;
+      // Auto-fill MID and params
+      if (data.mid) {
+        document.getElementById('retrieve-mid').value = data.mid;
+      }
+      if (data.data_shards) document.getElementById('retrieve-k').value = data.data_shards;
+      if (data.total_shards) document.getElementById('retrieve-n').value = data.total_shards;
+    } else {
+      shares = [];
+    }
     addImportedShares(shares);
     document.getElementById('paste-modal').classList.add('hidden');
     document.getElementById('paste-textarea').value = '';
@@ -377,13 +501,18 @@ async function handleRetrieve() {
     showToast(t('error_no_mid'), 'error');
     return;
   }
+  if (!midStr.startsWith('miasma:')) {
+    showToast(t('error_invalid_mid_format'), 'error');
+    return;
+  }
   if (retrieveShares.length < k) {
-    showToast(t('error_insufficient'), 'error');
+    showToast(`${t('error_insufficient')}: ${retrieveShares.length}/${k}`, 'error');
     return;
   }
 
   const btn = document.getElementById('btn-retrieve');
   btn.disabled = true;
+  btn.textContent = t('processing');
 
   await new Promise(r => setTimeout(r, 50));
 
@@ -391,7 +520,6 @@ async function handleRetrieve() {
     const sharesJson = JSON.stringify(retrieveShares);
     const bytes = wasm.retrieve_from_shares(midStr, sharesJson, k, n);
 
-    // Determine if text or binary
     const resultSection = document.getElementById('retrieve-result');
     const textResult = document.getElementById('retrieve-text-result');
     const binaryResult = document.getElementById('retrieve-binary-result');
@@ -408,7 +536,6 @@ async function handleRetrieve() {
       textResult.classList.add('hidden');
       binaryResult.classList.remove('hidden');
 
-      // Setup download
       document.getElementById('btn-download').onclick = () => {
         const blob = new Blob([bytes]);
         const url = URL.createObjectURL(blob);
@@ -419,10 +546,14 @@ async function handleRetrieve() {
         URL.revokeObjectURL(url);
       };
     }
+
+    // Scroll to result
+    resultSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   } catch (e) {
     showToast(t('error_retrieve') + ': ' + e.message, 'error');
   } finally {
-    btn.disabled = false;
+    btn.disabled = retrieveShares.length < k;
+    applyTranslations();
   }
 }
 
@@ -454,6 +585,22 @@ async function updateStats() {
   } catch (_) {}
 }
 
+// ── PWA Install Banner ────────────────────────────────────────────
+
+function showInstallBanner() {
+  // Only show on iOS Safari when not already installed as PWA
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+  const isStandalone = window.navigator.standalone === true;
+  const dismissed = localStorage.getItem('miasma-install-dismissed');
+
+  if (!isIOS || isStandalone || dismissed) return;
+
+  const banner = document.getElementById('install-banner');
+  if (banner) {
+    banner.classList.remove('hidden');
+  }
+}
+
 // ── Utilities ─────────────────────────────────────────────────────
 
 function formatBytes(bytes) {
@@ -464,12 +611,11 @@ function formatBytes(bytes) {
 }
 
 function isLikelyText(bytes) {
-  // Check first 512 bytes for text-like content
   const check = Math.min(bytes.length, 512);
   let textChars = 0;
   for (let i = 0; i < check; i++) {
     const b = bytes[i];
-    if (b === 0) return false;  // null byte = definitely binary
+    if (b === 0) return false;
     if ((b >= 32 && b < 127) || b === 9 || b === 10 || b === 13 || b >= 0xC0) {
       textChars++;
     }
@@ -482,7 +628,6 @@ async function copyToClipboard(text, successMsg) {
     await navigator.clipboard.writeText(text);
     showToast(successMsg || t('copied'), 'success');
   } catch (_) {
-    // Fallback
     const ta = document.createElement('textarea');
     ta.value = text;
     ta.style.position = 'fixed';
@@ -500,7 +645,6 @@ function showToast(msg, type = '') {
   const toast = document.getElementById('toast');
   toast.textContent = msg;
   toast.className = 'toast ' + type;
-  // Force reflow
   toast.offsetHeight;
   toast.classList.add('show');
   clearTimeout(toastTimer);
@@ -517,7 +661,6 @@ function decodeBase58(str) {
     if (idx < 0) return null;
     num = num * BASE + BigInt(idx);
   }
-  // Convert to bytes
   const hex = num.toString(16).padStart(64, '0');
   const bytes = new Uint8Array(32);
   for (let i = 0; i < 32; i++) {

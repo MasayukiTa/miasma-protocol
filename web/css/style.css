@@ -1004,6 +1004,112 @@ nav {
 .toast.success { border-color: var(--success); color: var(--success); }
 .toast.error { border-color: var(--danger); color: var(--danger); }
 
+/* ── Dissolve Particle Animation ───────────────────────────────── */
+
+.dissolve-particles {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 50;
+  overflow: hidden;
+}
+
+.particle {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: var(--size, 3px);
+  height: var(--size, 3px);
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0;
+  animation: particle-fly 2s var(--delay, 0s) ease-out infinite;
+}
+
+.particle:nth-child(even) {
+  background: var(--secondary);
+}
+
+.particle:nth-child(3n) {
+  background: rgba(255, 255, 255, 0.6);
+}
+
+@keyframes particle-fly {
+  0% {
+    opacity: 0.8;
+    transform: translate(0, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform:
+      translate(
+        calc(cos(var(--angle)) * var(--distance)),
+        calc(sin(var(--angle)) * var(--distance))
+      )
+      scale(0.2);
+  }
+}
+
+/* Dissolving button state */
+.btn-primary.dissolving {
+  background: linear-gradient(135deg, var(--accent), var(--secondary));
+  animation: dissolve-pulse 1s ease-in-out infinite;
+}
+
+@keyframes dissolve-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 var(--accent-glow); }
+  50% { box-shadow: 0 0 20px 4px var(--accent-glow); }
+}
+
+/* Retrieve ready state */
+.btn-primary.ready {
+  background: linear-gradient(135deg, var(--accent), var(--secondary));
+  animation: ready-glow 2s ease-in-out infinite;
+}
+
+@keyframes ready-glow {
+  0%, 100% { box-shadow: 0 0 0 0 var(--secondary-glow); }
+  50% { box-shadow: 0 0 16px 2px var(--secondary-glow); }
+}
+
+/* ── iOS Install Banner ────────────────────────────────────────── */
+
+.install-banner {
+  position: fixed;
+  bottom: calc(16px + var(--safe-bottom));
+  left: 16px;
+  right: 16px;
+  z-index: 150;
+  animation: slideUp 0.3s ease;
+}
+
+.install-content {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+.install-content svg {
+  flex-shrink: 0;
+  color: var(--accent);
+}
+
+.install-content span {
+  flex: 1;
+}
+
 /* ── Utilities ─────────────────────────────────────────────────── */
 
 .hidden { display: none !important; }
