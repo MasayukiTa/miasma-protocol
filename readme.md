@@ -69,30 +69,44 @@ Be explicit about what this system resists and what it does not.
 - Sybil attacks at scale (PoW admission raises cost but does not eliminate it)
 - Bootstrap trust circular dependency (first nodes in a deployment credential each other)
 
-## Platform Strategy
+## Platform Maturity
+
+| Surface | Maturity | Networking | User-facing |
+|---|---|---|---|
+| **Windows** | Beta (validated) | Full (libp2p, mDNS, DHT, onion, relay) | Desktop GUI + CLI + installer |
+| **Web/PWA** | Foundation (audited) | None (local-only WASM) | Browser dissolve/retrieve + export/import |
+| **Android** | Foundation (audited) | None (local FFI only) | Compose UI shell |
+| **iOS** | Stub | None (FFI bindings only) | SwiftUI shell |
+
+See `docs/platform-roadmap.md` for capability matrix, milestone order, and detailed analysis.
 
 ### Windows
 
-Windows is the current validation platform. It proves:
+Windows is the current shipping beta. It proves:
 
 - Installer and upgrade flow (MSI + bootstrapper EXE)
 - Desktop and daemon UX (auto-start, crash recovery, stale detection)
 - Routing, trust, and transport behavior
-- Local and loopback retrieval
+- Same-network peer discovery (mDNS) and manual bootstrap
 - Operational diagnostics and release process
+
+### Web/PWA
+
+Local-only browser tool for dissolution and retrieval via WASM. Protocol-compatible with miasma-core v1. Security-audited (all CRITICAL/HIGH/MEDIUM fixed). No networking — shares stay in browser IndexedDB. Transfer between devices requires manual export/import of `.miasma` files. Does not connect to the Miasma network or provide anonymity features. Supports EN, JA, ZH-CN.
 
 ### Android
 
-Android is the intended first-class mobile node target. Hard problems still to solve:
+Android is the intended first-class mobile node target. FFI foundation exists (security-audited, 5 functions exposed via UniFFI). Hard problems still to solve:
 
 - Battery cost and background execution limits
 - NAT traversal and reconnect behavior
 - Storage pressure and bandwidth caps
-- Long-running reliability under mobile network churn
+- Keystore integration for master key wrapping (C-1 from audit)
+- FFI networking (not yet exposed)
 
 ### iOS
 
-iOS should be treated as a retrieval-focused client first, not as an always-on full node. Heavier storage, relay, and long-lived routing duties stay on stronger peers.
+Retrieval-focused client first, not an always-on full node. Swift bindings generated, app shell exists. Depends on FFI maturity from Android work.
 
 ## Repository Structure
 
@@ -101,7 +115,8 @@ crates/miasma-core     Protocol, storage, routing, trust, transport, credentials
 crates/miasma-cli      CLI and daemon entry points
 crates/miasma-desktop  Windows desktop GUI (native Win32)
 crates/miasma-bridge   BitTorrent bridge (librqbit-based ingestion)
-crates/miasma-ffi      FFI bindings (future mobile use)
+crates/miasma-ffi      UniFFI bridge for Android (Kotlin) and iOS (Swift)
+crates/miasma-wasm     Browser WASM dissolution/retrieval (self-contained)
 docs/adr/              Architecture decision records
 scripts/               Build, package, sign, smoke test, soak test scripts
 ```

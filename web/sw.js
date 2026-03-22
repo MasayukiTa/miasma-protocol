@@ -1,20 +1,20 @@
 // Miasma Web — Service Worker
 // Provides offline support via Cache API
 
-const CACHE_NAME = 'miasma-web-v2';
+const CACHE_NAME = 'miasma-web-v3';
 const PRECACHE_ASSETS = [
-  '/index.html',
-  '/css/style.css',
-  '/js/app.js',
-  '/js/i18n.js',
-  '/js/storage.js',
-  '/manifest.json',
+  'index.html',
+  'css/style.css',
+  'js/app.js',
+  'js/i18n.js',
+  'js/storage.js',
+  'manifest.json',
 ];
 
 // Critical assets use stale-while-revalidate to prevent serving tampered caches
 const REVALIDATE_ASSETS = [
-  '/pkg/miasma_wasm.js',
-  '/pkg/miasma_wasm_bg.wasm',
+  'pkg/miasma_wasm.js',
+  'pkg/miasma_wasm_bg.wasm',
 ];
 
 // Install: precache all assets
@@ -46,7 +46,7 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
 
   // WASM/JS assets: stale-while-revalidate (serve cached, update in background)
-  if (REVALIDATE_ASSETS.some(a => url.pathname.endsWith(a))) {
+  if (REVALIDATE_ASSETS.some(a => url.pathname.endsWith('/' + a) || url.pathname.endsWith(a))) {
     event.respondWith(
       caches.open(CACHE_NAME).then((cache) => {
         return cache.match(event.request).then((cached) => {
@@ -70,7 +70,7 @@ self.addEventListener('fetch', (event) => {
       if (cached) return cached;
       return fetch(event.request).then((response) => {
         // Only cache same-origin successful responses from the precache list
-        if (response.ok && PRECACHE_ASSETS.some(a => url.pathname.endsWith(a))) {
+        if (response.ok && PRECACHE_ASSETS.some(a => url.pathname.endsWith('/' + a) || url.pathname.endsWith(a))) {
           const clone = response.clone();
           caches.open(CACHE_NAME).then((cache) => {
             cache.put(event.request, clone);

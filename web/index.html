@@ -48,8 +48,8 @@
       <div class="home-hero">
         <div class="hero-orb"></div>
         <h1 data-i18n="hero_title">Miasma Protocol</h1>
-        <p class="hero-sub" data-i18n="hero_sub">Censorship-resistant content protection in your browser</p>
-        <p class="hero-desc" data-i18n="hero_desc">Split and encrypt content into shares. Reconstruct from any k-of-n shares. No server required.</p>
+        <p class="hero-sub" data-i18n="hero_sub">Local content protection in your browser</p>
+        <p class="hero-desc" data-i18n="hero_desc">Encrypt and split content into shares. Reconstruct from any k-of-n shares. All processing runs locally — nothing leaves your device.</p>
       </div>
       <div class="home-actions">
         <button class="action-card card-dissolve" data-view="dissolve">
@@ -70,6 +70,9 @@
           <h2 data-i18n="retrieve">Retrieve</h2>
           <p data-i18n="retrieve_desc">Reconstruct content from collected shares</p>
         </button>
+      </div>
+      <div class="scope-notice" id="scope-notice">
+        <p data-i18n="scope_notice">This is a local-only tool. Shares stay in your browser. There is no network connectivity, peer discovery, or cloud storage. To move shares between devices, use Export / Import.</p>
       </div>
       <div class="home-stats" id="home-stats">
         <div class="stat">
@@ -305,6 +308,7 @@
           <div class="lang-options">
             <button class="lang-btn" data-lang="en">English</button>
             <button class="lang-btn" data-lang="ja">日本語</button>
+            <button class="lang-btn" data-lang="zh">简体中文</button>
           </div>
         </div>
 
@@ -313,7 +317,8 @@
           <div class="about-info">
             <p id="version-info"></p>
             <p>Protocol Version: 1</p>
-            <p data-i18n="about_desc">Miasma Web is a browser-based client for the Miasma Protocol. All cryptographic operations run locally in WebAssembly. No data is sent to any server.</p>
+            <p data-i18n="about_desc">Miasma Web is a local-only browser tool for the Miasma Protocol. All cryptographic operations run in WebAssembly on your device. No data is sent to any server.</p>
+            <p data-i18n="about_scope">This tool does not connect to the Miasma network. It cannot discover peers, retrieve content from other devices, or provide the anonymity features available in the desktop client. Shares must be transferred between devices manually via Export/Import.</p>
           </div>
         </div>
 
