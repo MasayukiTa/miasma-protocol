@@ -62,7 +62,10 @@ const translations = {
     error_no_mid: "Please enter a MID",
     error_insufficient: "Not enough shares",
     error_retrieve: "Retrieval failed",
+    error_file_too_large: "File too large (max ~100 MB)",
+    error_invalid_mid_format: "MID must start with 'miasma:'",
     confirm_clear: "Delete all stored shares? This cannot be undone.",
+    install_hint: "Add to Home Screen for offline use",
   },
   ja: {
     loading: "Miasma Protocol を読み込み中...",
@@ -125,7 +128,10 @@ const translations = {
     error_no_mid: "MIDを入力してください",
     error_insufficient: "シェアが不足しています",
     error_retrieve: "復元に失敗しました",
+    error_file_too_large: "ファイルが大きすぎます（最大約100MB）",
+    error_invalid_mid_format: "MIDは 'miasma:' で始まる必要があります",
     confirm_clear: "保存された全シェアを削除しますか？この操作は元に戻せません。",
+    install_hint: "ホーム画面に追加してオフラインで使用",
   }
 };
 

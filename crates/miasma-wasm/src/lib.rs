@@ -404,7 +404,13 @@ fn dissolve_inner(
     let key_shares =
         sss_split(k_enc.as_ref(), params.data_shards as u8, params.total_shards as u8)?;
 
+    #[cfg(target_arch = "wasm32")]
     let timestamp = (js_sys::Date::now() / 1000.0) as u64;
+    #[cfg(not(target_arch = "wasm32"))]
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
 
     let shares: Vec<MiasmaShare> = shards
         .into_iter()
@@ -725,4 +731,343 @@ pub fn verify_share(share_json: &str, mid_str: &str) -> Result<bool, JsError> {
 #[wasm_bindgen]
 pub fn protocol_version() -> String {
     format!("miasma-wasm v{} (protocol v{})", env!("CARGO_PKG_VERSION"), PROTOCOL_VERSION)
+}
+
+// ── Tests (native only — cross-platform compatibility) ────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TEST_CONTENT: &[u8] = b"Miasma dissolution pipeline test content. \
+        This is a realistic-length payload that exercises all pipeline stages. \
+        The content must survive encrypt-encode-split-combine-decode-decrypt.";
+
+    // ── MID compatibility ──
+
+    /// Verify MID computation matches miasma-core's algorithm exactly.
+    /// BLAKE3("hello miasma" || "k=10,n=20,v=1") must be deterministic.
+    #[test]
+    fn mid_computation_deterministic() {
+        let mid1 = ContentId::compute(b"hello miasma", b"k=10,n=20,v=1");
+        let mid2 = ContentId::compute(b"hello miasma", b"k=10,n=20,v=1");
+        assert_eq!(mid1, mid2);
+    }
+
+    #[test]
+    fn mid_string_format() {
+        let mid = ContentId::compute(b"hello miasma", b"k=10,n=20,v=1");
+        let s = mid.to_mid_string();
+        assert!(s.starts_with("miasma:"), "MID must start with 'miasma:' prefix");
+        let parsed = ContentId::from_mid_str(&s).unwrap();
+        assert_eq!(mid, parsed);
+    }
+
+    #[test]
+    fn mid_prefix_is_first_8_bytes() {
+        let mid = ContentId::compute(b"test", b"k=10,n=20,v=1");
+        let prefix = mid.prefix();
+        assert_eq!(prefix.len(), MID_PREFIX_LEN);
+        assert_eq!(&prefix[..], &mid.digest[..MID_PREFIX_LEN]);
+    }
+
+    #[test]
+    fn param_bytes_format() {
+        let params = DissolutionParams { data_shards: 10, total_shards: 20 };
+        assert_eq!(params.to_param_bytes(), b"k=10,n=20,v=1");
+
+        let params2 = DissolutionParams { data_shards: 5, total_shards: 10 };
+        assert_eq!(params2.to_param_bytes(), b"k=5,n=10,v=1");
+    }
+
+    /// Cross-platform MID test vector: same input must produce same MID as miasma-core.
+    /// This is the canonical test vector from miasma-core::crypto::hash tests.
+    #[test]
+    fn mid_cross_platform_vector() {
+        let content = b"hello miasma";
+        let params = b"k=10,n=20,v=1";
+        let mid = ContentId::compute(content, params);
+
+        // Compute the expected BLAKE3 hash directly to verify
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(content);
+        hasher.update(params);
+        let expected_digest = *hasher.finalize().as_bytes();
+
+        assert_eq!(mid.digest, expected_digest);
+        // Verify base58 roundtrip
+        let mid_str = mid.to_mid_string();
+        let recovered = ContentId::from_mid_str(&mid_str).unwrap();
+        assert_eq!(recovered.digest, expected_digest);
+    }
+
+    // ── AES-256-GCM ──
+
+    #[test]
+    fn aead_encrypt_decrypt_roundtrip() {
+        let plaintext = b"Miasma Protocol test plaintext";
+        let (ct, key, nonce) = encrypt(plaintext).unwrap();
+        assert_ne!(ct.as_slice(), plaintext.as_ref());
+        let recovered = decrypt(&ct, &key, &nonce).unwrap();
+        assert_eq!(recovered, plaintext);
+    }
+
+    #[test]
+    fn aead_ciphertext_includes_16_byte_tag() {
+        let plaintext = b"exactly 16 bytes";
+        let (ct, _, _) = encrypt(plaintext).unwrap();
+        assert_eq!(ct.len(), plaintext.len() + 16);
+    }
+
+    #[test]
+    fn aead_tampered_ciphertext_fails() {
+        let (mut ct, key, nonce) = encrypt(b"sensitive").unwrap();
+        ct[0] ^= 0xFF;
+        assert!(decrypt(&ct, &key, &nonce).is_err());
+    }
+
+    // ── Shamir SSS ──
+
+    #[test]
+    fn sss_split_combine_roundtrip() {
+        let secret = [0x42u8; 32];
+        let shares = sss_split(&secret, 10, 20).unwrap();
+        assert_eq!(shares.len(), 20);
+        let recovered = sss_combine(&shares[..10], 10).unwrap();
+        assert_eq!(recovered.as_slice(), &secret);
+    }
+
+    #[test]
+    fn sss_insufficient_shares_fails() {
+        let secret = [0x42u8; 32];
+        let shares = sss_split(&secret, 10, 20).unwrap();
+        assert!(sss_combine(&shares[..9], 10).is_err());
+    }
+
+    // ── Reed-Solomon ──
+
+    #[test]
+    fn rs_encode_decode_roundtrip() {
+        let data = b"Hello Miasma Reed-Solomon test data that is long enough for testing!";
+        let shards = rs_encode(data, 10, 20).unwrap();
+        assert_eq!(shards.len(), 20);
+
+        let indexed: Vec<(usize, Vec<u8>)> = shards.iter().cloned().enumerate().collect();
+        let recovered = rs_decode(&indexed, 10, 20, data.len()).unwrap();
+        assert_eq!(recovered, data);
+    }
+
+    #[test]
+    fn rs_decode_with_missing_data_shards() {
+        let data = b"Hello Miasma Reed-Solomon test data that is long enough for testing!";
+        let shards = rs_encode(data, 10, 20).unwrap();
+        // Drop first 5 data shards, keep rest.
+        let indexed: Vec<(usize, Vec<u8>)> = shards.iter().cloned().enumerate()
+            .filter(|(i, _)| *i >= 5)
+            .collect();
+        let recovered = rs_decode(&indexed, 10, 20, data.len()).unwrap();
+        assert_eq!(recovered, data);
+    }
+
+    // ── Full Pipeline ──
+
+    #[test]
+    fn dissolve_and_retrieve_default_params() {
+        let params = DissolutionParams::default();
+        let (mid, shares) = dissolve_inner(TEST_CONTENT, params).unwrap();
+        assert_eq!(shares.len(), params.total_shards);
+
+        let recovered = retrieve_inner(&mid, &shares, params).unwrap();
+        assert_eq!(recovered, TEST_CONTENT);
+    }
+
+    #[test]
+    fn dissolve_and_retrieve_with_minimum_k_shares() {
+        let params = DissolutionParams::default();
+        let (mid, shares) = dissolve_inner(TEST_CONTENT, params).unwrap();
+
+        let subset = &shares[..params.data_shards];
+        let recovered = retrieve_inner(&mid, subset, params).unwrap();
+        assert_eq!(recovered, TEST_CONTENT);
+    }
+
+    #[test]
+    fn dissolve_and_retrieve_using_recovery_shards() {
+        let params = DissolutionParams::default();
+        let (mid, all_shares) = dissolve_inner(TEST_CONTENT, params).unwrap();
+
+        // Drop first 5 data shards, use remaining data + recovery.
+        let subset: Vec<MiasmaShare> = all_shares.into_iter()
+            .filter(|s| s.slot_index >= 5)
+            .collect();
+        let recovered = retrieve_inner(&mid, &subset, params).unwrap();
+        assert_eq!(recovered, TEST_CONTENT);
+    }
+
+    #[test]
+    fn forged_shares_are_rejected() {
+        let params = DissolutionParams::default();
+        let (mid, mut shares) = dissolve_inner(TEST_CONTENT, params).unwrap();
+
+        // Forge 5 shares.
+        for i in 0..5usize {
+            shares[i].shard_data = vec![0xFF; shares[i].shard_data.len()];
+        }
+        // 15 valid shares remain — should succeed.
+        let recovered = retrieve_inner(&mid, &shares, params).unwrap();
+        assert_eq!(recovered, TEST_CONTENT);
+    }
+
+    #[test]
+    fn insufficient_shares_fails() {
+        let params = DissolutionParams::default();
+        let (mid, shares) = dissolve_inner(TEST_CONTENT, params).unwrap();
+        let result = retrieve_inner(&mid, &shares[..5], params);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn small_content_single_byte() {
+        let params = DissolutionParams::default();
+        let (mid, shares) = dissolve_inner(b"X", params).unwrap();
+        let recovered = retrieve_inner(&mid, &shares, params).unwrap();
+        assert_eq!(recovered, b"X");
+    }
+
+    // ── Bincode Share Compatibility ──
+
+    #[test]
+    fn share_bincode_roundtrip() {
+        let mid = ContentId::compute(b"serialize test", b"k=10,n=20,v=1");
+        let share = MiasmaShare::new(
+            &mid, 0, 7,
+            vec![0xBB; 64],
+            vec![0xAA; 33],
+            [0x24; 12],
+            100,
+            1700000000,
+        );
+        let bytes = share.to_bytes().unwrap();
+        let recovered = MiasmaShare::from_bytes(&bytes).unwrap();
+        assert_eq!(share.slot_index, recovered.slot_index);
+        assert_eq!(share.shard_hash, recovered.shard_hash);
+        assert_eq!(share.mid_prefix, recovered.mid_prefix);
+        assert_eq!(share.nonce, recovered.nonce);
+        assert_eq!(share.original_len, recovered.original_len);
+        assert_eq!(share.shard_data, recovered.shard_data);
+        assert_eq!(share.key_share, recovered.key_share);
+    }
+
+    // ── JSON Serialization ──
+
+    #[test]
+    fn share_json_roundtrip() {
+        let mid = ContentId::compute(b"json test", b"k=10,n=20,v=1");
+        let share = MiasmaShare::new(
+            &mid, 0, 3,
+            vec![0xCC; 48],
+            vec![0xDD; 33],
+            [0x11; 12],
+            256,
+            1700000000,
+        );
+        let json = share_to_json(&share);
+        let recovered = share_from_json(&json).unwrap();
+        assert_eq!(share.slot_index, recovered.slot_index);
+        assert_eq!(share.shard_hash, recovered.shard_hash);
+        assert_eq!(share.mid_prefix, recovered.mid_prefix);
+        assert_eq!(share.shard_data, recovered.shard_data);
+    }
+
+    #[test]
+    fn share_json_bincode_path() {
+        let mid = ContentId::compute(b"bincode path", b"k=10,n=20,v=1");
+        let share = MiasmaShare::new(
+            &mid, 0, 5,
+            vec![0xEE; 32],
+            vec![0xFF; 33],
+            [0x22; 12],
+            64,
+            1700000000,
+        );
+        let json = share_to_json(&share);
+        // bincode field should be populated
+        assert!(!json.bincode.is_empty());
+        // Deserialization should prefer bincode path
+        let recovered = share_from_json(&json).unwrap();
+        assert_eq!(share.shard_data, recovered.shard_data);
+        assert_eq!(share.key_share, recovered.key_share);
+    }
+
+    // ── Base64 / Hex Helpers ──
+
+    #[test]
+    fn base64_roundtrip() {
+        let data = b"Hello Miasma";
+        let encoded = base64_encode(data);
+        let decoded = base64_decode(&encoded).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn base64_edge_cases() {
+        // Empty
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_decode("").unwrap(), b"");
+        // 1 byte (padding test)
+        let e1 = base64_encode(b"M");
+        assert_eq!(base64_decode(&e1).unwrap(), b"M");
+        // 2 bytes
+        let e2 = base64_encode(b"Mi");
+        assert_eq!(base64_decode(&e2).unwrap(), b"Mi");
+    }
+
+    #[test]
+    fn hex_roundtrip() {
+        let data = [0xDE, 0xAD, 0xBE, 0xEF];
+        let encoded = hex::encode(data);
+        assert_eq!(encoded, "deadbeef");
+        let decoded = hex::decode(&encoded).unwrap();
+        assert_eq!(decoded, &data);
+    }
+
+    // ── Coarse & Full Verification ──
+
+    #[test]
+    fn coarse_verify_valid() {
+        let mid = ContentId::compute(b"verify test", b"k=10,n=20,v=1");
+        let share = MiasmaShare::new(&mid, 0, 0, vec![1, 2, 3], vec![0xAA; 32], [0; 12], 3, 0);
+        assert!(coarse_verify(&share, &mid));
+    }
+
+    #[test]
+    fn coarse_verify_wrong_mid() {
+        let mid = ContentId::compute(b"content A", b"k=10,n=20,v=1");
+        let other = ContentId::compute(b"content B", b"k=10,n=20,v=1");
+        let share = MiasmaShare::new(&mid, 0, 0, vec![1, 2, 3], vec![0xAA; 32], [0; 12], 3, 0);
+        assert!(!coarse_verify(&share, &other));
+    }
+
+    #[test]
+    fn coarse_verify_tampered_shard() {
+        let mid = ContentId::compute(b"tamper test", b"k=10,n=20,v=1");
+        let mut share = MiasmaShare::new(&mid, 0, 0, vec![1, 2, 3], vec![0xAA; 32], [0; 12], 3, 0);
+        share.shard_data[0] ^= 0xFF;
+        assert!(!coarse_verify(&share, &mid));
+    }
+
+    #[test]
+    fn full_verify_correct() {
+        let content = b"full verify test";
+        let params = b"k=10,n=20,v=1";
+        let mid = ContentId::compute(content, params);
+        assert!(full_verify(content, params, &mid).is_ok());
+    }
+
+    #[test]
+    fn full_verify_wrong_content() {
+        let params = b"k=10,n=20,v=1";
+        let mid = ContentId::compute(b"correct", params);
+        assert!(full_verify(b"wrong", params, &mid).is_err());
+    }
 }
