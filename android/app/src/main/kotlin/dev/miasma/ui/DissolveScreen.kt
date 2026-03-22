@@ -71,12 +71,18 @@ fun DissolveScreen(vm: MiasmaViewModel) {
         }
     }
 
+    val maxFileSize = 100L * 1024 * 1024 // 100 MiB
     val filePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         uri?.let {
-            val bytes = context.contentResolver.openInputStream(it)?.readBytes()
-            if (bytes != null) vm.dissolve(bytes)
+            val inputStream = context.contentResolver.openInputStream(it) ?: return@let
+            val bytes = inputStream.use { stream -> stream.readBytes() }
+            if (bytes.size > maxFileSize) {
+                Toast.makeText(context, "File too large (max 100 MiB)", Toast.LENGTH_LONG).show()
+            } else if (bytes.isNotEmpty()) {
+                vm.dissolve(bytes)
+            }
         }
     }
 

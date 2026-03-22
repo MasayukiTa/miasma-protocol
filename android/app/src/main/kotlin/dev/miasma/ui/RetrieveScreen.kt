@@ -56,7 +56,13 @@ fun RetrieveScreen(vm: MiasmaViewModel) {
     var midInput by remember { mutableStateOf("") }
 
     val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
-        result.contents?.let { midInput = it }
+        result.contents?.let { scanned ->
+            if (scanned.startsWith("miasma:") && scanned.length <= 60) {
+                midInput = scanned
+            } else {
+                Toast.makeText(context, "Invalid Miasma content ID", Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     Column(
@@ -119,7 +125,14 @@ fun RetrieveScreen(vm: MiasmaViewModel) {
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Button(
-                        onClick = { vm.retrieve(midInput.trim()) },
+                        onClick = {
+                            val mid = midInput.trim()
+                            if (mid.startsWith("miasma:")) {
+                                vm.retrieve(mid)
+                            } else {
+                                Toast.makeText(context, "MID must start with 'miasma:'", Toast.LENGTH_SHORT).show()
+                            }
+                        },
                         enabled = midInput.isNotBlank() && !ui.isLoading,
                         modifier = Modifier.weight(1f),
                         shape = RoundedCornerShape(8.dp),
