@@ -6,6 +6,7 @@
 - Treat Easy and Technical as one product family, not a fork.
 - Preserve protocol correctness while improving desktop usability.
 - Keep release claims honest: beta, unaudited, not for highly sensitive use.
+- Build Android as the next serious product surface after Windows, not as a throwaway demo.
 
 ## Product Rules
 
@@ -13,11 +14,14 @@
 - Technical mode should remain useful for diagnostics and protocol validation.
 - Mobile matters, but Windows is the current shipping surface.
 - Android is the first-class future mobile target; iOS is retrieval-first.
+- Android work should preserve the same protocol guarantees where feasible, and clearly document where mobile constraints require reduced behavior.
 
 ## Repo Hotspots
 
 - `crates/miasma-desktop`: desktop UX, localization, runtime behavior
 - `crates/miasma-core`: protocol, storage, daemon, security-sensitive logic
+- `crates/miasma-ffi`: UniFFI bridge between Rust core and mobile clients
+- `android`: Android app, Gradle build, JNI libs, Kotlin UI
 - `installer`: MSI and Windows install behavior
 - `scripts`: build, package, smoke, soak, release helpers
 - `docs`: ADRs, release notes, variant guide, validation logs, tasks
@@ -29,6 +33,14 @@
 3. Improve Easy mode without hollowing out Technical mode
 4. Keep installer/package/launcher behavior honest
 5. Validate installed, portable, and recovery flows on Windows
+
+## Current Android Priorities
+
+1. Turn the existing Android and UniFFI skeleton into a reproducible build
+2. Keep Android aligned with `miasma-core`, not with desktop-only shortcuts
+3. Make Android retrieval/save flows real before polishing
+4. Treat background execution, storage permissions, and battery/network limits as first-class design constraints
+5. Keep Android limitations explicit in docs and release language
 
 ## Working Rules
 
@@ -42,11 +54,14 @@
 
 - `cargo test -p miasma-desktop`
 - `cargo test -p miasma-core --tests`
+- `cargo test -p miasma-ffi`
 - `.\scripts\build-release.ps1`
 - `.\scripts\package-release.ps1 -Variant both`
 - `.\scripts\build-installer.ps1`
 - `.\scripts\smoke-windows.ps1`
 - `.\scripts\validate-installer.ps1`
+- `cd android; .\gradlew.bat assembleDebug`
+- `cd android; .\gradlew.bat installDebug`
 
 ## Docs To Keep In Sync
 
@@ -55,3 +70,4 @@
 - `docs/variant-guide.md`
 - `docs/adr/`
 - `docs/tasks/`
+- Android-facing task docs and validation notes
