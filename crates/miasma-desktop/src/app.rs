@@ -14,11 +14,20 @@ use crate::LaunchIntent;
 
 // ─── Font system ────────────────────────────────────────────────────────────
 
+/// Font detection results for diagnostics.
+struct FontDetectionResult {
+    loaded: Vec<String>,
+    missing: Vec<String>,
+}
+
+/// Global font detection result — written once during configure_fonts().
+static FONT_DETECTION: std::sync::OnceLock<FontDetectionResult> = std::sync::OnceLock::new();
+
 /// Configure fonts: load system CJK fonts for Japanese and Chinese rendering.
 ///
 /// Font priority (per family):
-///   Proportional: Segoe UI → Yu Gothic UI → Microsoft YaHei UI → egui default
-///   Monospace:    Consolas → egui default monospace
+///   Proportional: Segoe UI → Meiryo → Yu Gothic → Microsoft YaHei → MS Gothic → egui default
+///   Monospace:    Consolas → MS Gothic → Yu Gothic → Microsoft YaHei → egui default
 ///
 /// On non-Windows or if system fonts are missing, falls back to egui's built-in
 /// fonts (which cover Latin but not CJK — CJK will show as tofu).
@@ -27,6 +36,9 @@ fn configure_fonts(ctx: &egui::Context) {
 
     // Try to load Windows system fonts for CJK coverage.
     let font_dir = std::path::PathBuf::from(r"C:\Windows\Fonts");
+
+    let mut loaded_fonts: Vec<String> = Vec::new();
+    let mut missing_fonts: Vec<String> = Vec::new();
 
     // Helper: try to load a font file and register it.
     let mut load_font = |name: &str, file: &str| -> bool {
@@ -37,20 +49,28 @@ fn configure_fonts(ctx: &egui::Context) {
                     name.to_owned(),
                     egui::FontData::from_owned(data),
                 );
+                loaded_fonts.push(format!("{name} ({file})"));
+                tracing::info!("Font loaded: {name} from {}", path.display());
                 true
             }
             Err(_) => {
+                missing_fonts.push(format!("{name} ({file})"));
                 tracing::debug!("Font not found: {}", path.display());
                 false
             }
         }
     };
 
-    // Load system fonts (all ship with Windows 10+).
+    // Load system fonts — expanded set for better CJK coverage.
+    // Primary UI font.
     let has_segoe = load_font("Segoe UI", "segoeui.ttf");
-    let has_segoe_bold = load_font("Segoe UI Bold", "segoeuib.ttf");
-    let has_yu_gothic = load_font("Yu Gothic", "YuGothR.ttc");
-    let has_msyh = load_font("Microsoft YaHei", "msyh.ttc");
+    let _has_segoe_bold = load_font("Segoe UI Bold", "segoeuib.ttf");
+    // CJK fonts — multiple fallbacks for maximum coverage.
+    let has_meiryo = load_font("Meiryo", "meiryo.ttc");        // Ships with Windows; excellent CJK
+    let has_yu_gothic = load_font("Yu Gothic", "YuGothR.ttc");  // Win 10+ default JA
+    let has_msyh = load_font("Microsoft YaHei", "msyh.ttc");    // Win default zh-CN
+    let has_msgothic = load_font("MS Gothic", "msgothic.ttc");   // Legacy JA fallback, monospace-friendly
+    // Monospace.
     let has_consolas = load_font("Consolas", "consola.ttf");
 
     // Build proportional fallback chain.
@@ -66,8 +86,10 @@ fn configure_fonts(ctx: &egui::Context) {
             proportional.insert(insert_pos, "Segoe UI".to_owned());
             insert_pos += 1;
         }
-        if has_segoe_bold {
-            // Bold variant registered but not in the chain — used explicitly where needed.
+        // Meiryo has broad CJK coverage and good screen rendering.
+        if has_meiryo {
+            proportional.insert(insert_pos, "Meiryo".to_owned());
+            insert_pos += 1;
         }
         if has_yu_gothic {
             proportional.insert(insert_pos, "Yu Gothic".to_owned());
@@ -75,7 +97,10 @@ fn configure_fonts(ctx: &egui::Context) {
         }
         if has_msyh {
             proportional.insert(insert_pos, "Microsoft YaHei".to_owned());
-            // insert_pos += 1; // not needed, last insert
+            insert_pos += 1;
+        }
+        if has_msgothic {
+            proportional.insert(insert_pos, "MS Gothic".to_owned());
         }
         // egui defaults remain at the end as final fallback.
     }
@@ -87,20 +112,30 @@ fn configure_fonts(ctx: &egui::Context) {
             .entry(egui::FontFamily::Monospace)
             .or_default();
 
+        let mut pos = 0;
         if has_consolas {
-            monospace.insert(0, "Consolas".to_owned());
+            monospace.insert(pos, "Consolas".to_owned());
+            pos += 1;
         }
-        // Add CJK fallback to monospace too (for diagnostics with CJK paths).
+        // MS Gothic is a JIS X 0208 monospace font — ideal for CJK in monospace contexts.
+        if has_msgothic {
+            monospace.insert(pos, "MS Gothic".to_owned());
+            pos += 1;
+        }
         if has_yu_gothic {
-            // Insert after Consolas / default mono but before other fallbacks.
-            let pos = if has_consolas { 1 } else { 0 };
             monospace.insert(pos, "Yu Gothic".to_owned());
+            pos += 1;
         }
         if has_msyh {
-            let pos = monospace.len().saturating_sub(1).max(1);
             monospace.insert(pos, "Microsoft YaHei".to_owned());
         }
     }
+
+    // Store detection results for diagnostics.
+    let _ = FONT_DETECTION.set(FontDetectionResult {
+        loaded: loaded_fonts,
+        missing: missing_fonts,
+    });
 
     ctx.set_fonts(fonts);
 
@@ -163,6 +198,12 @@ const DIM: egui::Color32 = egui::Color32::from_rgb(150, 150, 160);
 const ACCENT: egui::Color32 = egui::Color32::from_rgb(90, 140, 220);
 const CARD_BG: egui::Color32 = egui::Color32::from_rgb(32, 34, 40);
 const PANEL_BG: egui::Color32 = egui::Color32::from_rgb(24, 26, 30);
+const NAV_BG: egui::Color32 = egui::Color32::from_rgb(18, 20, 24);
+const NAV_ACTIVE_BG: egui::Color32 = egui::Color32::from_rgb(40, 44, 56);
+const BRAND_TEXT: egui::Color32 = egui::Color32::from_rgb(180, 190, 210);
+const SEPARATOR: egui::Color32 = egui::Color32::from_rgb(40, 42, 50);
+const PROGRESS_BG: egui::Color32 = egui::Color32::from_rgb(45, 48, 56);
+const PROGRESS_FILL: egui::Color32 = egui::Color32::from_rgb(70, 130, 200);
 
 // ─── Tab enum ───────────────────────────────────────────────────────────────
 
@@ -539,6 +580,88 @@ impl MiasmaApp {
         let desc = if easy { s.store_desc_easy } else { s.store_desc };
         ui.label(egui::RichText::new(desc).color(DIM));
         ui.add_space(10.0);
+
+        // ── Easy mode: quick status dashboard ──
+        if easy && connected {
+            card_frame().show(ui, |ui| {
+                ui.label(egui::RichText::new(s.dashboard_quick_status).strong().color(ACCENT).size(13.0));
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    // Storage mini indicator.
+                    let storage_frame = egui::Frame::none()
+                        .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+                        .rounding(6.0)
+                        .fill(egui::Color32::from_rgb(28, 30, 38));
+                    storage_frame.show(ui, |ui| {
+                        ui.vertical(|ui| {
+                            ui.label(egui::RichText::new(s.dashboard_storage_label).color(DIM).small());
+                            if self.quota_mb > 0 {
+                                let pct = (self.used_mb / self.quota_mb as f64) * 100.0;
+                                ui.label(
+                                    egui::RichText::new(format!("{:.0}%", pct))
+                                        .size(18.0)
+                                        .strong(),
+                                );
+                                // Mini progress bar.
+                                let bar_width = 80.0;
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(bar_width, 4.0),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().rect_filled(rect, 2.0, PROGRESS_BG);
+                                let fill_width = (pct as f32 / 100.0).min(1.0) * bar_width;
+                                let fill_color = if pct > 90.0 { YELLOW } else { PROGRESS_FILL };
+                                let fill_rect = egui::Rect::from_min_size(rect.min, egui::vec2(fill_width, 4.0));
+                                ui.painter().rect_filled(fill_rect, 2.0, fill_color);
+                            } else {
+                                ui.label(egui::RichText::new(s.dashboard_no_data).color(DIM).small());
+                            }
+                        });
+                    });
+
+                    // Peers mini indicator.
+                    let peer_frame = egui::Frame::none()
+                        .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+                        .rounding(6.0)
+                        .fill(egui::Color32::from_rgb(28, 30, 38));
+                    peer_frame.show(ui, |ui| {
+                        ui.vertical(|ui| {
+                            ui.label(egui::RichText::new(s.dashboard_peers_label).color(DIM).small());
+                            let peer_color = if self.peer_count > 0 { GREEN } else { YELLOW };
+                            ui.label(
+                                egui::RichText::new(self.peer_count.to_string())
+                                    .size(18.0)
+                                    .strong()
+                                    .color(peer_color),
+                            );
+                            let peer_hint = if self.peer_count > 0 {
+                                format!("{} {}", self.peer_count, s.status_peers.trim_end_matches('：').trim_end_matches(':'))
+                            } else {
+                                s.health_no_peers.to_string()
+                            };
+                            ui.label(egui::RichText::new(peer_hint).color(DIM).small());
+                        });
+                    });
+
+                    // Items mini indicator.
+                    let items_frame = egui::Frame::none()
+                        .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+                        .rounding(6.0)
+                        .fill(egui::Color32::from_rgb(28, 30, 38));
+                    items_frame.show(ui, |ui| {
+                        ui.vertical(|ui| {
+                            ui.label(egui::RichText::new(s.status_items_stored).color(DIM).small());
+                            ui.label(
+                                egui::RichText::new(self.share_count.to_string())
+                                    .size(18.0)
+                                    .strong(),
+                            );
+                        });
+                    });
+                });
+            });
+            ui.add_space(8.0);
+        }
 
         // Not-connected hint for Easy mode.
         if easy && !connected {
@@ -942,11 +1065,24 @@ impl MiasmaApp {
                                 "{:.1} / {} MiB  ({:.0}%)",
                                 self.used_mb, self.quota_mb, pct
                             );
-                            if pct > 90.0 {
-                                ui.colored_label(YELLOW, used_text);
-                            } else {
-                                ui.label(used_text);
-                            }
+                            ui.vertical(|ui| {
+                                if pct > 90.0 {
+                                    ui.colored_label(YELLOW, &used_text);
+                                } else {
+                                    ui.label(&used_text);
+                                }
+                                // Progress bar for Easy mode too.
+                                let bar_width = 120.0;
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(bar_width, 4.0),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().rect_filled(rect, 2.0, PROGRESS_BG);
+                                let fill_width = (pct as f32 / 100.0).min(1.0) * bar_width;
+                                let fill_color = if pct > 90.0 { YELLOW } else { PROGRESS_FILL };
+                                let fill_rect = egui::Rect::from_min_size(rect.min, egui::vec2(fill_width, 4.0));
+                                ui.painter().rect_filled(fill_rect, 2.0, fill_color);
+                            });
                             ui.end_row();
                         }
                     });
@@ -1044,11 +1180,24 @@ impl MiasmaApp {
                         "{:.1} / {} MiB  ({:.0}%)",
                         self.used_mb, self.quota_mb, pct
                     );
-                    if pct > 90.0 {
-                        ui.colored_label(YELLOW, used_text);
-                    } else {
-                        ui.label(used_text);
-                    }
+                    ui.vertical(|ui| {
+                        if pct > 90.0 {
+                            ui.colored_label(YELLOW, &used_text);
+                        } else {
+                            ui.label(&used_text);
+                        }
+                        // Storage progress bar.
+                        let bar_width = ui.available_width().min(200.0);
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::vec2(bar_width, 4.0),
+                            egui::Sense::hover(),
+                        );
+                        ui.painter().rect_filled(rect, 2.0, PROGRESS_BG);
+                        let fill_width = (pct as f32 / 100.0).min(1.0) * bar_width;
+                        let fill_color = if pct > 90.0 { YELLOW } else if pct > 75.0 { egui::Color32::from_rgb(200, 160, 60) } else { PROGRESS_FILL };
+                        let fill_rect = egui::Rect::from_min_size(rect.min, egui::vec2(fill_width, 4.0));
+                        ui.painter().rect_filled(fill_rect, 2.0, fill_color);
+                    });
                 } else {
                     ui.label(format!("{:.1} MiB", self.used_mb));
                 }
@@ -1531,6 +1680,7 @@ impl MiasmaApp {
 
         d.push_str(&format!("Desktop version: {} (beta)\n", env!("CARGO_PKG_VERSION")));
         d.push_str(&format!("OS:              {} {}\n", std::env::consts::OS, std::env::consts::ARCH));
+        d.push_str(&format!("OS version:      {}\n", os_version()));
         d.push_str(&format!("Timestamp:       {}\n", epoch_timestamp()));
         let uptime_secs = self.startup_time.elapsed().as_secs();
         d.push_str(&format!("Desktop uptime:  {}m {}s\n", uptime_secs / 60, uptime_secs % 60));
@@ -1625,6 +1775,25 @@ impl MiasmaApp {
             d.push_str(&format!("\n--- Last Error ---\n{err}\n"));
         }
 
+        // Font detection results — helpful for diagnosing CJK rendering.
+        if let Some(detection) = FONT_DETECTION.get() {
+            d.push_str("\n--- Font Detection ---\n");
+            if detection.loaded.is_empty() {
+                d.push_str("  (no system fonts loaded — using egui defaults)\n");
+            } else {
+                d.push_str("  Loaded:\n");
+                for f in &detection.loaded {
+                    d.push_str(&format!("    {f}\n"));
+                }
+            }
+            if !detection.missing.is_empty() {
+                d.push_str("  Not found:\n");
+                for f in &detection.missing {
+                    d.push_str(&format!("    {f}\n"));
+                }
+            }
+        }
+
         d.push_str("\n(end of report)\n");
         d
     }
@@ -1634,6 +1803,9 @@ impl MiasmaApp {
 
 fn section_heading(ui: &mut egui::Ui, text: &str) {
     ui.label(egui::RichText::new(text).size(18.0).strong().color(egui::Color32::from_rgb(220, 225, 235)));
+    // Subtle separator line below heading.
+    let rect = ui.allocate_space(egui::vec2(ui.available_width(), 1.0)).1;
+    ui.painter().rect_filled(rect, 0.0, SEPARATOR);
 }
 
 /// Wrap content in a subtle card frame for visual grouping.
@@ -1643,6 +1815,80 @@ fn card_frame() -> egui::Frame {
         .rounding(8.0)
         .fill(CARD_BG)
         .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(45, 48, 56)))
+}
+
+/// Nav bar tab button with active styling.
+fn nav_tab(ui: &mut egui::Ui, current: &mut Tab, tab: Tab, label: &str) {
+    let is_active = *current == tab;
+    let text = if is_active {
+        egui::RichText::new(label)
+            .size(13.0)
+            .strong()
+            .color(egui::Color32::WHITE)
+    } else {
+        egui::RichText::new(label)
+            .size(13.0)
+            .color(DIM)
+    };
+    let frame = egui::Frame::none()
+        .inner_margin(egui::Margin::symmetric(10.0, 5.0))
+        .rounding(4.0)
+        .fill(if is_active { NAV_ACTIVE_BG } else { egui::Color32::TRANSPARENT });
+    let resp = frame.show(ui, |ui| {
+        ui.label(text);
+    }).response.interact(egui::Sense::click());
+    if resp.clicked() {
+        *current = tab;
+    }
+    if resp.hovered() && !is_active {
+        ui.painter().rect_filled(
+            resp.rect,
+            4.0,
+            egui::Color32::from_rgba_premultiplied(255, 255, 255, 8),
+        );
+    }
+}
+
+/// Get OS version string for diagnostics.
+fn os_version() -> String {
+    #[cfg(windows)]
+    {
+        // Try reading Windows version from registry-like env or version API.
+        if let Ok(ver) = std::process::Command::new("cmd")
+            .args(["/c", "ver"])
+            .output()
+        {
+            let out = String::from_utf8_lossy(&ver.stdout);
+            let trimmed = out.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(info) = std::fs::read_to_string("/etc/os-release") {
+            for line in info.lines() {
+                if let Some(name) = line.strip_prefix("PRETTY_NAME=") {
+                    return name.trim_matches('"').to_string();
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(ver) = std::process::Command::new("sw_vers")
+            .arg("-productVersion")
+            .output()
+        {
+            let out = String::from_utf8_lossy(&ver.stdout);
+            let trimmed = out.trim();
+            if !trimmed.is_empty() {
+                return format!("macOS {trimmed}");
+            }
+        }
+    }
+    format!("{} {}", std::env::consts::OS, std::env::consts::ARCH)
 }
 
 fn tag_label(ui: &mut egui::Ui, color: egui::Color32, text: &str) {
@@ -1701,41 +1947,51 @@ impl eframe::App for MiasmaApp {
         // ── Top navigation bar ────────────────────────────────────────
         egui::TopBottomPanel::top("nav_bar")
             .frame(egui::Frame::none()
-                .fill(egui::Color32::from_rgb(28, 30, 36))
-                .inner_margin(egui::Margin::symmetric(12.0, 6.0)))
+                .fill(NAV_BG)
+                .inner_margin(egui::Margin::symmetric(14.0, 0.0))
+                .stroke(egui::Stroke::new(1.0, SEPARATOR)))
             .show(ctx, |ui| {
-            ui.add_space(2.0);
+            ui.add_space(6.0);
             ui.horizontal(|ui| {
+                // ── Brand mark ──
+                let brand = if easy { s.nav_brand_easy } else { s.nav_brand };
+                ui.label(
+                    egui::RichText::new(brand)
+                        .size(14.0)
+                        .strong()
+                        .color(BRAND_TEXT),
+                );
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("|").size(14.0).color(SEPARATOR));
+                ui.add_space(6.0);
+
+                // ── Tab buttons with active indicator ──
                 let store_label = if easy { s.tab_store_easy } else { s.tab_store };
                 let retrieve_label = if easy { s.tab_retrieve_easy } else { s.tab_retrieve };
-                ui.selectable_value(&mut self.tab, Tab::Store, store_label);
-                ui.selectable_value(&mut self.tab, Tab::Retrieve, retrieve_label);
-                ui.selectable_value(&mut self.tab, Tab::Status, s.tab_status);
-                ui.selectable_value(&mut self.tab, Tab::Settings, s.tab_settings);
+                nav_tab(ui, &mut self.tab, Tab::Store, store_label);
+                nav_tab(ui, &mut self.tab, Tab::Retrieve, retrieve_label);
+                nav_tab(ui, &mut self.tab, Tab::Status, s.tab_status);
+                nav_tab(ui, &mut self.tab, Tab::Settings, s.tab_settings);
                 // Show Import tab only when an import is active.
                 if self.import_intent.is_some() || self.import_state != ImportState::Idle {
-                    ui.selectable_value(&mut self.tab, Tab::Import, s.tab_import);
+                    nav_tab(ui, &mut self.tab, Tab::Import, s.tab_import);
                 }
 
-                // Right-aligned connection indicator.
+                // Right-aligned connection indicator with dot.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    match self.daemon_state {
-                        DaemonState::Connected => {
-                            ui.colored_label(GREEN, s.connected);
-                        }
-                        DaemonState::Starting => {
-                            ui.colored_label(BLUE, s.starting);
-                        }
-                        DaemonState::Stopped => {
-                            ui.colored_label(RED, s.offline);
-                        }
-                        DaemonState::NeedsInit => {
-                            ui.colored_label(YELLOW, s.setup_needed);
-                        }
-                    }
+                    let (color, label) = match self.daemon_state {
+                        DaemonState::Connected => (GREEN, s.connected),
+                        DaemonState::Starting => (BLUE, s.starting),
+                        DaemonState::Stopped => (RED, s.offline),
+                        DaemonState::NeedsInit => (YELLOW, s.setup_needed),
+                    };
+                    ui.colored_label(color, label);
+                    // Status dot.
+                    let dot = ui.allocate_space(egui::vec2(8.0, 8.0));
+                    ui.painter().circle_filled(dot.1.center(), 4.0, color);
                 });
             });
-            ui.add_space(2.0);
+            ui.add_space(6.0);
         });
 
         // ── Bottom status bar ─────────────────────────────────────────

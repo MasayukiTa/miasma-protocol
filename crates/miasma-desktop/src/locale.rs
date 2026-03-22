@@ -205,6 +205,20 @@ pub struct Strings {
     pub status_diag_saved: &'static str,
     pub status_diag_save_failed: &'static str,
 
+    // ── Nav branding ──
+    pub nav_brand: &'static str,
+    pub nav_brand_easy: &'static str,
+
+    // ── Easy dashboard (store tab quick stats) ──
+    pub dashboard_quick_status: &'static str,
+    pub dashboard_storage_label: &'static str,
+    pub dashboard_peers_label: &'static str,
+    pub dashboard_free: &'static str,
+    pub dashboard_no_data: &'static str,
+
+    // ── Storage progress bar ──
+    pub storage_bar_label: &'static str,
+
     // ── General ──
     pub dismiss: &'static str,
     pub copy: &'static str,
@@ -379,6 +393,17 @@ static EN: Strings = Strings {
     status_diag_saved: "Diagnostics saved.",
     status_diag_save_failed: "Could not save diagnostics: ",
 
+    nav_brand: "Miasma Protocol",
+    nav_brand_easy: "Miasma",
+
+    dashboard_quick_status: "Quick Status",
+    dashboard_storage_label: "Storage",
+    dashboard_peers_label: "Network",
+    dashboard_free: "free",
+    dashboard_no_data: "No data yet",
+
+    storage_bar_label: "Storage used",
+
     dismiss: "dismiss",
     copy: "Copy",
     node_init_msg: "Node initialized.",
@@ -543,6 +568,17 @@ static JA: Strings = Strings {
     status_save_diag: "レポートを保存",
     status_diag_saved: "診断情報を保存しました。",
     status_diag_save_failed: "診断情報の保存に失敗しました：",
+
+    nav_brand: "Miasma Protocol",
+    nav_brand_easy: "Miasma",
+
+    dashboard_quick_status: "クイックステータス",
+    dashboard_storage_label: "ストレージ",
+    dashboard_peers_label: "ネットワーク",
+    dashboard_free: "空き",
+    dashboard_no_data: "データなし",
+
+    storage_bar_label: "ストレージ使用量",
 
     dismiss: "閉じる",
     copy: "コピー",
@@ -709,6 +745,17 @@ static ZH_CN: Strings = Strings {
     status_diag_saved: "诊断信息已保存。",
     status_diag_save_failed: "无法保存诊断信息：",
 
+    nav_brand: "Miasma Protocol",
+    nav_brand_easy: "Miasma",
+
+    dashboard_quick_status: "快速状态",
+    dashboard_storage_label: "存储",
+    dashboard_peers_label: "网络",
+    dashboard_free: "可用",
+    dashboard_no_data: "暂无数据",
+
+    storage_bar_label: "存储使用量",
+
     dismiss: "关闭",
     copy: "复制",
     node_init_msg: "初始化完成。",
@@ -745,6 +792,10 @@ mod tests {
             // Diagnostics export strings.
             assert!(!s.status_save_diag.is_empty(), "{lang:?} status_save_diag empty");
             assert!(!s.status_diag_saved.is_empty(), "{lang:?} status_diag_saved empty");
+            // Nav and dashboard strings.
+            assert!(!s.nav_brand.is_empty(), "{lang:?} nav_brand empty");
+            assert!(!s.nav_brand_easy.is_empty(), "{lang:?} nav_brand_easy empty");
+            assert!(!s.dashboard_quick_status.is_empty(), "{lang:?} dashboard_quick_status empty");
         }
     }
 
