@@ -1402,8 +1402,34 @@ impl MiasmaApp {
                     ui.add_space(12.0);
 
                     let connected = self.daemon_state == DaemonState::Connected;
+
+                    // Pre-validate: check for problems before showing the Import button.
+                    let validation_error = match &self.import_intent {
+                        Some(LaunchIntent::Magnet(uri)) => {
+                            if !uri.contains("xt=") {
+                                Some("This magnet link appears to be malformed (missing xt= parameter).")
+                            } else {
+                                None
+                            }
+                        }
+                        Some(LaunchIntent::TorrentFile(path)) => {
+                            if !path.exists() {
+                                Some("The .torrent file no longer exists. It may have been moved or deleted.")
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+
+                    if let Some(err) = validation_error {
+                        ui.colored_label(YELLOW, err);
+                        ui.add_space(4.0);
+                    }
+
                     ui.horizontal(|ui| {
-                        ui.add_enabled_ui(connected && !self.busy, |ui| {
+                        let can_import = connected && !self.busy && validation_error.is_none();
+                        ui.add_enabled_ui(can_import, |ui| {
                             let btn = if easy {
                                 egui::Button::new(
                                     egui::RichText::new(s.import_button).strong().size(14.0),

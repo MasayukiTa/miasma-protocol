@@ -660,6 +660,9 @@ fn run_bridge_import(
                     .filter(|l| l.starts_with("miasma:"))
                     .map(|l| l.trim().to_string())
                     .collect();
+                if mids.is_empty() {
+                    warn!("Bridge succeeded but produced no MIDs. stdout: {stdout}");
+                }
                 WorkerResult::ImportComplete { mids }
             } else {
                 let stderr = String::from_utf8_lossy(&output.stderr);

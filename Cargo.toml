@@ -41,6 +41,7 @@ libp2p = { version = "0.54", features = [
     "ping",
     "autonat",
     "dcutr",
+    "mdns",
     "tokio",
     "macros",
     "request-response",
