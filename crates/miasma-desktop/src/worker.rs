@@ -42,6 +42,10 @@ pub enum WorkerCmd {
     StartDaemon,
     /// Distress-wipe: delete master key → all shares become unreadable.
     Wipe,
+    /// Import a magnet URI via the bridge subprocess.
+    ImportMagnet(String),
+    /// Import a .torrent file via the bridge subprocess.
+    ImportTorrentFile(PathBuf),
 }
 
 /// Connection state visible to the UI.
@@ -86,6 +90,10 @@ pub enum WorkerResult {
     StateChanged(DaemonState),
     /// Node initialization complete.
     Initialized,
+    /// Import started — bridge subprocess launched.
+    ImportStarted { name: String },
+    /// Import complete — content stored, MIDs returned.
+    ImportComplete { mids: Vec<String> },
     /// Any error.
     Err(String),
 }
@@ -148,6 +156,8 @@ fn worker_thread(
 
     // Track daemon process if we launched it ourselves.
     let mut owned_daemon: Option<Child> = None;
+    // Track launch attempts to cap auto-relaunch retries.
+    let mut launch_attempts: u32 = 0;
 
     // On startup: detect node state and attempt auto-connect/launch.
     let initial_state = detect_state(&data_dir, &rt);
@@ -155,6 +165,7 @@ fn worker_thread(
 
     if initial_state == DaemonState::Stopped {
         // Try auto-launching daemon.
+        launch_attempts += 1;
         let _ = tx.send(WorkerResult::StateChanged(DaemonState::Starting));
         match auto_launch_daemon(&data_dir, &rt) {
             Ok(child) => {
@@ -194,20 +205,28 @@ fn worker_thread(
                 let status = rt.block_on(get_status(&data_dir));
                 // Update connection state based on result.
                 if matches!(&status, WorkerResult::Err(e) if is_daemon_down(e)) {
-                    // Auto-reconnect: try one relaunch before reporting Stopped.
-                    info!("Daemon unreachable — attempting auto-relaunch");
-                    let _ = tx.send(WorkerResult::StateChanged(DaemonState::Starting));
-                    match auto_launch_daemon(&data_dir, &rt) {
-                        Ok(child) => {
-                            owned_daemon = Some(child);
-                            let _ = tx.send(WorkerResult::StateChanged(DaemonState::Connected));
-                            rt.block_on(get_status(&data_dir))
+                    // Auto-reconnect: try relaunch if under retry cap.
+                    if launch_attempts < MAX_AUTO_LAUNCHES {
+                        launch_attempts += 1;
+                        info!("Daemon unreachable — auto-relaunch attempt {launch_attempts}/{MAX_AUTO_LAUNCHES}");
+                        let _ = tx.send(WorkerResult::StateChanged(DaemonState::Starting));
+                        match auto_launch_daemon(&data_dir, &rt) {
+                            Ok(child) => {
+                                owned_daemon = Some(child);
+                                launch_attempts = 0; // Reset on success.
+                                let _ = tx.send(WorkerResult::StateChanged(DaemonState::Connected));
+                                rt.block_on(get_status(&data_dir))
+                            }
+                            Err(e) => {
+                                warn!("Auto-relaunch failed: {e}");
+                                let _ = tx.send(WorkerResult::StateChanged(DaemonState::Stopped));
+                                status
+                            }
                         }
-                        Err(e) => {
-                            warn!("Auto-relaunch failed: {e}");
-                            let _ = tx.send(WorkerResult::StateChanged(DaemonState::Stopped));
-                            status
-                        }
+                    } else {
+                        warn!("Daemon unreachable — auto-relaunch limit reached ({MAX_AUTO_LAUNCHES})");
+                        let _ = tx.send(WorkerResult::StateChanged(DaemonState::Stopped));
+                        status
                     }
                 } else if matches!(&status, WorkerResult::Status { .. }) {
                     let _ = tx.send(WorkerResult::StateChanged(DaemonState::Connected));
@@ -240,6 +259,8 @@ fn worker_thread(
                 }
             }
             WorkerCmd::StartDaemon => {
+                // Manual start resets the auto-launch counter.
+                launch_attempts = 0;
                 let _ = tx.send(WorkerResult::StateChanged(DaemonState::Starting));
                 match auto_launch_daemon(&data_dir, &rt) {
                     Ok(child) => {
@@ -254,6 +275,13 @@ fn worker_thread(
                 }
             }
             WorkerCmd::Wipe => rt.block_on(do_wipe(&data_dir)),
+            WorkerCmd::ImportMagnet(uri) => {
+                run_bridge_import(&tx, &data_dir, &["--magnet", &uri])
+            }
+            WorkerCmd::ImportTorrentFile(path) => {
+                let p = path.to_string_lossy().to_string();
+                run_bridge_import(&tx, &data_dir, &["--torrent", &p])
+            }
         };
 
         if tx.send(res).is_err() {
@@ -369,7 +397,12 @@ fn which_miasma() -> Option<PathBuf> {
     })
 }
 
-/// Launch daemon as a background process. Waits up to 10s for port file.
+/// Maximum number of auto-launch attempts before giving up.
+const MAX_AUTO_LAUNCHES: u32 = 2;
+/// How long to wait for the daemon to become reachable after spawn.
+const DAEMON_STARTUP_TIMEOUT_SECS: u64 = 30;
+
+/// Launch daemon as a background process. Waits up to 30s for port file.
 fn auto_launch_daemon(
     data_dir: &Path,
     rt: &tokio::runtime::Runtime,
@@ -417,10 +450,10 @@ fn auto_launch_daemon(
         .map_err(|e| anyhow::anyhow!("spawn daemon: {e}"))?;
 
     // Wait for daemon to become reachable (port file appears + IPC responds).
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(DAEMON_STARTUP_TIMEOUT_SECS);
     loop {
         if std::time::Instant::now() > deadline {
-            anyhow::bail!("daemon did not become ready within 15 seconds");
+            anyhow::bail!("daemon did not become ready within {DAEMON_STARTUP_TIMEOUT_SECS} seconds");
         }
         std::thread::sleep(std::time::Duration::from_millis(300));
 
@@ -525,21 +558,115 @@ async fn do_wipe(data_dir: &Path) -> WorkerResult {
     }
 }
 
-/// Convert anyhow errors into user-friendly messages.
+/// Convert anyhow errors into user-friendly messages with actionable guidance.
 fn daemon_error(e: &anyhow::Error) -> String {
     let msg = format!("{e:#}");
     if is_daemon_down(&msg) {
-        "Daemon not running. Click 'Start Daemon' above to restart it.".to_string()
-    } else if msg.contains("Cannot find miasma.exe") {
-        msg // Already user-friendly from find_miasma_exe.
+        "Not connected. Click the Start button above to restart.\n\
+         If the problem persists, try closing all Miasma windows and starting again."
+            .to_string()
+    } else if msg.contains("Cannot find miasma.exe") || msg.contains("Cannot find miasma") {
+        "Cannot find the Miasma backend.\n\
+         If installed: try reinstalling from the MSI.\n\
+         If portable: make sure miasma.exe is in the same folder as miasma-desktop.exe."
+            .to_string()
     } else if msg.contains("spawn daemon") {
-        format!(
-            "Could not start the daemon process.\n\
-             Check that miasma.exe is not blocked by antivirus or SmartScreen.\n\
-             Detail: {msg}"
-        )
+        "Could not start the backend process.\n\
+         This can happen if antivirus or SmartScreen is blocking miasma.exe.\n\
+         Try: right-click miasma.exe → Properties → Unblock, then restart."
+            .to_string()
+    } else if msg.contains("did not become ready within") {
+        "The backend started but is taking too long to respond.\n\
+         This can happen on slower machines or when antivirus is scanning.\n\
+         Try waiting a moment and clicking Start again."
+            .to_string()
     } else {
         msg
+    }
+}
+
+// ─── Bridge import ───────────────────────────────────────────────────────────
+
+/// Find the miasma-bridge binary next to the desktop binary or on PATH.
+fn find_bridge_exe() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let candidate = if cfg!(windows) {
+        dir.join("miasma-bridge.exe")
+    } else {
+        dir.join("miasma-bridge")
+    };
+    if candidate.exists() {
+        return Some(candidate);
+    }
+    // Search PATH.
+    let name = if cfg!(windows) { "miasma-bridge.exe" } else { "miasma-bridge" };
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths).find_map(|dir| {
+            let c = dir.join(name);
+            if c.is_file() { Some(c) } else { None }
+        })
+    })
+}
+
+/// Run bridge subprocess for magnet/torrent import. Sends ImportStarted then
+/// waits for exit. On success, parses MIDs from stdout and sends ImportComplete.
+fn run_bridge_import(
+    tx: &mpsc::SyncSender<WorkerResult>,
+    data_dir: &Path,
+    args: &[&str],
+) -> WorkerResult {
+    let bridge_exe = match find_bridge_exe() {
+        Some(p) => p,
+        None => return WorkerResult::Err(
+            "Cannot find miasma-bridge. Ensure it is installed alongside the desktop app.".into()
+        ),
+    };
+
+    let display_name = if args.first() == Some(&"--magnet") {
+        "magnet import"
+    } else {
+        args.get(1).unwrap_or(&"file")
+    };
+    let _ = tx.send(WorkerResult::ImportStarted { name: display_name.to_string() });
+
+    let mut cmd = std::process::Command::new(&bridge_exe);
+    cmd.args(args)
+        .arg("--data-dir")
+        .arg(data_dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::null());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return WorkerResult::Err(format!("Failed to start bridge: {e}")),
+    };
+
+    match child.wait_with_output() {
+        Ok(output) => {
+            if output.status.success() {
+                // Parse MIDs from stdout — bridge prints one MID per line.
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let mids: Vec<String> = stdout
+                    .lines()
+                    .filter(|l| l.starts_with("miasma:"))
+                    .map(|l| l.trim().to_string())
+                    .collect();
+                WorkerResult::ImportComplete { mids }
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                WorkerResult::Err(format!("Bridge exited with error: {}", stderr.trim()))
+            }
+        }
+        Err(e) => WorkerResult::Err(format!("Bridge process error: {e}")),
     }
 }
 

@@ -131,6 +131,9 @@ Both ZIPs contain the same binaries plus variant-appropriate launcher scripts an
 - [ ] Emergency Wipe works with translated confirmation dialog
 - [ ] No console window visible during any operation
 - [ ] Settings: can switch to Easy mode, change persists across restart
+- [ ] Save Report exports diagnostics to file with native dialog
+- [ ] magnet: link opens Import tab with confirmation flow
+- [ ] .torrent file opens Import tab with confirmation flow
 - [ ] Uninstall is clean (data directory preserved)
 
 ### Easy Trial Build
@@ -151,6 +154,9 @@ Both ZIPs contain the same binaries plus variant-appropriate launcher scripts an
 - [ ] Chinese text renders correctly (no mojibake)
 - [ ] Button widths accommodate translated text
 - [ ] Settings: can switch to Technical mode, change persists
+- [ ] Save Report button works in both Status and Settings panels
+- [ ] magnet: link opens Import tab with simplified explanation
+- [ ] .torrent file opens Import tab with simplified explanation
 - [ ] No console window visible during any operation
 
 ## Font and rendering system
@@ -164,6 +170,55 @@ All three fonts ship with Windows 10+ and are loaded from `C:\Windows\Fonts`. If
 
 Validated rendering: English, Japanese, and Simplified Chinese all render correctly in the running Windows app — no tofu boxes, no mojibake, in both Easy and Technical modes.
 
+## Shell integration
+
+### magnet: protocol handler
+
+The MSI installer registers Miasma as an available handler for `magnet:` URIs via Windows Registered Applications. Windows will offer Miasma in the "Default apps" chooser — it does not forcibly take over from existing torrent clients.
+
+When launched with a magnet URI:
+1. The app opens to an **Import** tab
+2. A confirmation screen shows the magnet link and explains what will happen
+3. The user clicks Import to start (or Cancel to dismiss)
+4. The bridge subprocess downloads and dissolves the content into Miasma
+5. On completion, the resulting MIDs are shown for safekeeping
+
+### .torrent file association
+
+The installer registers Miasma in the **Open with** list for `.torrent` files using `OpenWithProgids`. This is intentionally non-aggressive — existing torrent client associations are not overridden. Users see Miasma as one option when right-clicking a `.torrent` file.
+
+The import flow is identical to magnet links: confirmation → bridge download → dissolve → MIDs.
+
+### Portable mode
+
+Shell integration requires the MSI installer (registry entries). Portable ZIP users can still open magnets and torrents by dragging files onto `miasma-desktop.exe` or passing arguments manually.
+
+## Diagnostics and support
+
+### Copy diagnostics (Technical mode)
+
+The Status panel's "Copy Diagnostics" button copies a structured text report to the clipboard containing: version, OS, install type, uptime, daemon state, connection info, storage stats, transport readiness, and last error.
+
+### Save report (both modes)
+
+The "Save Report" button (available in both Status and Settings panels) opens a native file-save dialog to write the diagnostics report to a `.txt` file. This is the primary support path for Easy-mode users who may not use the clipboard.
+
+### Recovery messaging
+
+When the daemon cannot start or becomes unreachable, error messages include:
+- What failed
+- What the app already tried (auto-relaunch attempts)
+- What to do next (clear actionable steps)
+
+Messages avoid protocol jargon in Easy mode.
+
+### Startup and retry policy
+
+- Startup timeout: 30 seconds (accommodates slower machines and antivirus scanning)
+- Auto-relaunch cap: 2 attempts before giving up
+- Manual "Start" button resets the retry counter
+- Stale port-file detection prevents confusion from zombie daemon state
+
 ## Honest limitations
 
 - Mode is runtime, not compile-time: both variants are the same binary with different launch arguments
@@ -171,3 +226,7 @@ Validated rendering: English, Japanese, and Simplified Chinese all render correc
 - CJK font rendering loads Windows system fonts (Yu Gothic, Microsoft YaHei) — these ship with Windows 10+ but may not be present on older Windows or non-Windows platforms
 - Installer does not yet prompt the user to choose a variant during install — both shortcuts are created
 - No automatic locale detection from OS settings — defaults to English
+- Shell integration (magnet/torrent) requires MSI install — portable ZIP users must pass arguments manually
+- Import flow requires `miasma-bridge.exe` to be installed alongside the desktop binary
+- Bridge subprocess import is blocking — the UI shows progress but cannot cancel a running download
+- The binary is not code-signed; Windows SmartScreen will warn on first launch until a certificate is applied

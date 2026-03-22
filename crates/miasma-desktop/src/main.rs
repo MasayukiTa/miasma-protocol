@@ -22,6 +22,38 @@ pub mod locale;
 pub mod variant;
 mod worker;
 
+/// What triggered this launch — normal startup, or a file/URI association.
+#[derive(Debug, Clone)]
+pub enum LaunchIntent {
+    /// Normal launch (no special args).
+    Normal,
+    /// Launched with a `magnet:` URI (e.g., from browser or shell).
+    Magnet(String),
+    /// Launched with a `.torrent` file path (e.g., from Explorer "Open with").
+    TorrentFile(std::path::PathBuf),
+}
+
+/// Parse command-line arguments for launch intent.
+///
+/// Scans for magnet URIs and .torrent file paths after skipping the executable
+/// name and any `--mode` / `--mode <value>` arguments.
+fn parse_launch_intent() -> LaunchIntent {
+    for arg in std::env::args().skip(1) {
+        // Skip known flags.
+        if arg == "--mode" || arg == "easy" || arg == "technical" {
+            continue;
+        }
+        if arg.starts_with("magnet:") {
+            return LaunchIntent::Magnet(arg);
+        }
+        let path = std::path::Path::new(&arg);
+        if path.extension().and_then(|e| e.to_str()) == Some("torrent") && path.exists() {
+            return LaunchIntent::TorrentFile(path.to_path_buf());
+        }
+    }
+    LaunchIntent::Normal
+}
+
 fn main() -> eframe::Result<()> {
     // Logging: stderr + file in data dir.
     let data_dir = miasma_core::default_data_dir();
@@ -54,22 +86,35 @@ fn main() -> eframe::Result<()> {
     let mode = variant::resolve_mode(cli_mode, &prefs);
     let locale = prefs.locale;
 
+    // Parse launch intent (magnet URI or .torrent file).
+    let intent = parse_launch_intent();
+
     let version = env!("CARGO_PKG_VERSION");
     let title = match mode {
         variant::ProductMode::Technical => format!("Miasma v{version} (Technical Beta)"),
         variant::ProductMode::Easy => format!("Miasma v{version}"),
     };
+
+    // Embedded 32x32 RGBA icon for the window titlebar and taskbar.
+    let icon_rgba = include_bytes!("../assets/icon-32x32.rgba");
+    let icon_data = egui::IconData {
+        rgba: icon_rgba.to_vec(),
+        width: 32,
+        height: 32,
+    };
+
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([960.0, 680.0])
             .with_min_inner_size([600.0, 400.0])
-            .with_title(title),
+            .with_title(title)
+            .with_icon(std::sync::Arc::new(icon_data)),
         ..Default::default()
     };
 
     eframe::run_native(
         "Miasma",
         native_options,
-        Box::new(move |cc| Box::new(app::MiasmaApp::new(cc, mode, locale))),
+        Box::new(move |cc| Box::new(app::MiasmaApp::new(cc, mode, locale, intent))),
     )
 }
