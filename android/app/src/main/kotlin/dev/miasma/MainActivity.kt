@@ -9,11 +9,11 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Cloud
-import androidx.compose.material.icons.filled.CloudDownload
-import androidx.compose.material.icons.filled.CloudUpload
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material.icons.outlined.CloudUpload
+import androidx.compose.material.icons.outlined.CloudDownload
+import androidx.compose.material.icons.outlined.Analytics
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -108,9 +108,9 @@ class MainActivity : ComponentActivity() {
 private data class NavItem(val route: String, val label: String, val icon: androidx.compose.ui.graphics.vector.ImageVector)
 
 private val NAV_ITEMS = listOf(
-    NavItem("home",     "Home",     Icons.Default.Cloud),
-    NavItem("dissolve", "Dissolve", Icons.Default.CloudUpload),
-    NavItem("retrieve", "Retrieve", Icons.Default.CloudDownload),
-    NavItem("status",   "Status",   Icons.Default.Info),
-    NavItem("settings", "Settings", Icons.Default.Settings),
+    NavItem("home",     "Home",     Icons.Outlined.Home),
+    NavItem("dissolve", "Save",     Icons.Outlined.CloudUpload),
+    NavItem("retrieve", "Get Back", Icons.Outlined.CloudDownload),
+    NavItem("status",   "Status",   Icons.Outlined.Analytics),
+    NavItem("settings", "Settings", Icons.Outlined.Settings),
 )
