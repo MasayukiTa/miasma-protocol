@@ -191,6 +191,15 @@ pub struct Strings {
     pub import_retry: &'static str,
     pub import_done: &'static str,
 
+    // ── Health checks (Easy mode) ──
+    pub health_app: &'static str,
+    pub health_backend: &'static str,
+    pub health_network: &'static str,
+    pub health_ok: &'static str,
+    pub health_starting: &'static str,
+    pub health_offline: &'static str,
+    pub health_no_peers: &'static str,
+
     // ── Diagnostics export ──
     pub status_save_diag: &'static str,
     pub status_diag_saved: &'static str,
@@ -358,6 +367,14 @@ static EN: Strings = Strings {
     import_retry: "Retry",
     import_done: "Done",
 
+    health_app: "App",
+    health_backend: "Backend",
+    health_network: "Network",
+    health_ok: "OK",
+    health_starting: "Starting",
+    health_offline: "Offline",
+    health_no_peers: "No peers yet",
+
     status_save_diag: "Save Report",
     status_diag_saved: "Diagnostics saved.",
     status_diag_save_failed: "Could not save diagnostics: ",
@@ -515,6 +532,14 @@ static JA: Strings = Strings {
     import_retry: "再試行",
     import_done: "完了",
 
+    health_app: "アプリ",
+    health_backend: "バックエンド",
+    health_network: "ネットワーク",
+    health_ok: "OK",
+    health_starting: "起動中",
+    health_offline: "オフライン",
+    health_no_peers: "ノード未接続",
+
     status_save_diag: "レポートを保存",
     status_diag_saved: "診断情報を保存しました。",
     status_diag_save_failed: "診断情報の保存に失敗しました：",
@@ -671,6 +696,14 @@ static ZH_CN: Strings = Strings {
     import_failed: "导入失败。",
     import_retry: "重试",
     import_done: "完成",
+
+    health_app: "应用",
+    health_backend: "后台服务",
+    health_network: "网络",
+    health_ok: "正常",
+    health_starting: "启动中",
+    health_offline: "离线",
+    health_no_peers: "尚未连接节点",
 
     status_save_diag: "保存报告",
     status_diag_saved: "诊断信息已保存。",
