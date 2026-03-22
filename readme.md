@@ -4,12 +4,12 @@ Miasma is a censorship-resistant content storage and retrieval protocol inspired
 
 This project is not claiming "finished anonymous file sharing." It is building toward that goal in explicit, documented phases.
 
-## v0.3.0-beta.2
+## v0.3.1-beta.1
 
-The current public release is **v0.3.0-beta.2**, a Windows beta prerelease for technical users and protocol testers.
+The current public release is **v0.3.1-beta.1**, a Windows beta prerelease for technical users and protocol testers.
 
 - Release page: [GitHub Releases](https://github.com/MasayukiTa/miasma-protocol/releases)
-- Recommended artifact: `MiasmaSetup-0.3.0-x64.exe`
+- Recommended artifact: `MiasmaSetup-0.3.1-x64.exe`
 
 ### What ships in this release
 
