@@ -214,7 +214,7 @@ async function handleDissolve() {
   const k = parseInt(document.getElementById('param-k').value);
   const n = parseInt(document.getElementById('param-n').value);
 
-  if (k >= n || k < 2 || n < 3) {
+  if (Number.isNaN(k) || Number.isNaN(n) || k >= n || k < 2 || n < 3 || k > 255 || n > 255) {
     showToast(t('error_invalid_params'), 'error');
     return;
   }
@@ -278,7 +278,8 @@ async function handleDissolve() {
     result.offsetHeight;
     result.style.animation = '';
   } catch (e) {
-    showToast('Error: ' + e.message, 'error');
+    console.error('Dissolve failed:', e);
+    showToast(t('error_dissolve_failed'), 'error');
     progress.classList.add('hidden');
   } finally {
     btn.disabled = false;
@@ -445,7 +446,8 @@ async function handleImportFile(e) {
     }
     addImportedShares(shares);
   } catch (err) {
-    showToast('Import error: ' + err.message, 'error');
+    console.error('Import failed:', err);
+    showToast(t('error_import_failed'), 'error');
   }
   e.target.value = '';
 }
@@ -472,14 +474,36 @@ function handlePasteImport() {
     document.getElementById('paste-modal').classList.add('hidden');
     document.getElementById('paste-textarea').value = '';
   } catch (err) {
-    showToast('Parse error: ' + err.message, 'error');
+    console.error('Paste parse failed:', err);
+    showToast(t('error_parse_failed'), 'error');
   }
+}
+
+function sanitizeShare(s) {
+  // Only keep known share fields — strips __proto__, constructor, etc.
+  if (typeof s !== 'object' || s === null) return null;
+  if (typeof s.slot_index !== 'number') return null;
+  return {
+    version: s.version,
+    mid_prefix: s.mid_prefix,
+    segment_index: s.segment_index,
+    slot_index: s.slot_index,
+    shard_data: s.shard_data,
+    key_share: s.key_share,
+    shard_hash: s.shard_hash,
+    nonce: s.nonce,
+    original_len: s.original_len,
+    timestamp: s.timestamp,
+    bincode: s.bincode || '',
+  };
 }
 
 function addImportedShares(shares) {
   const existing = new Set(retrieveShares.map(s => s.slot_index));
   let added = 0;
-  for (const s of shares) {
+  for (const raw of shares) {
+    const s = sanitizeShare(raw);
+    if (!s) continue;
     if (!existing.has(s.slot_index)) {
       retrieveShares.push(s);
       existing.add(s.slot_index);
@@ -550,7 +574,8 @@ async function handleRetrieve() {
     // Scroll to result
     resultSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   } catch (e) {
-    showToast(t('error_retrieve') + ': ' + e.message, 'error');
+    console.error('Retrieve failed:', e);
+    showToast(t('error_retrieve'), 'error');
   } finally {
     btn.disabled = retrieveShares.length < k;
     applyTranslations();

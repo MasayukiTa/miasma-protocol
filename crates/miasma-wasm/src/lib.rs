@@ -40,6 +40,8 @@ pub enum MiasmaError {
     InsufficientShares { need: usize, got: usize },
     #[error("hash mismatch: content does not match MID")]
     HashMismatch,
+    #[error("share integrity check failed")]
+    ShareIntegrity,
     #[error("serialization failed: {0}")]
     Serialization(String),
 }
@@ -69,7 +71,7 @@ impl ContentId {
 
     pub fn from_mid_str(s: &str) -> Result<Self, MiasmaError> {
         let s = s.strip_prefix("miasma:").ok_or_else(|| {
-            MiasmaError::InvalidMid(format!("missing 'miasma:' prefix in '{}'", s))
+            MiasmaError::InvalidMid("missing 'miasma:' prefix".into())
         })?;
         let bytes = bs58::decode(s)
             .into_vec()
@@ -135,6 +137,14 @@ impl MiasmaShare {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, MiasmaError> {
+        // Limit input size to prevent OOM from crafted length prefixes.
+        if bytes.len() as u64 > MAX_BINCODE_SIZE {
+            return Err(MiasmaError::Serialization(format!(
+                "share data too large: {} bytes (max {})",
+                bytes.len(),
+                MAX_BINCODE_SIZE
+            )));
+        }
         bincode::deserialize(bytes).map_err(|e| MiasmaError::Serialization(e.to_string()))
     }
 }
@@ -389,12 +399,58 @@ impl DissolutionParams {
     }
 }
 
+// ── Input Validation ──────────────────────────────────────────────────
+
+/// Maximum allowed input size for dissolve (100 MiB).
+const MAX_INPUT_SIZE: usize = 100 * 1024 * 1024;
+/// Maximum allowed share count per retrieval.
+const MAX_SHARE_COUNT: usize = 512;
+/// Maximum allowed bincode deserialization size (1 MiB per share).
+const MAX_BINCODE_SIZE: u64 = 1024 * 1024;
+
+fn validate_params(k: usize, n: usize) -> Result<(), MiasmaError> {
+    if k == 0 || n == 0 || k >= n {
+        return Err(MiasmaError::Sss(format!(
+            "invalid parameters: k={k}, n={n} (require 0 < k < n)"
+        )));
+    }
+    if k > 255 || n > 255 {
+        return Err(MiasmaError::Sss(format!(
+            "parameters out of range: k={k}, n={n} (max 255)"
+        )));
+    }
+    if n > u16::MAX as usize {
+        return Err(MiasmaError::Sss(format!(
+            "total_shards {n} exceeds u16::MAX"
+        )));
+    }
+    Ok(())
+}
+
 // ── Pipeline: dissolve ────────────────────────────────────────────────
 
 fn dissolve_inner(
     plaintext: &[u8],
     params: DissolutionParams,
 ) -> Result<(ContentId, Vec<MiasmaShare>), MiasmaError> {
+    validate_params(params.data_shards, params.total_shards)?;
+
+    if plaintext.is_empty() {
+        return Err(MiasmaError::Encryption("empty input".into()));
+    }
+    if plaintext.len() > MAX_INPUT_SIZE {
+        return Err(MiasmaError::Encryption(format!(
+            "input too large: {} bytes (max {})",
+            plaintext.len(),
+            MAX_INPUT_SIZE
+        )));
+    }
+    if plaintext.len() > u32::MAX as usize {
+        return Err(MiasmaError::Encryption(
+            "input exceeds u32::MAX bytes".into(),
+        ));
+    }
+
     let param_bytes = params.to_param_bytes();
     let mid = ContentId::compute(plaintext, &param_bytes);
 
@@ -440,6 +496,16 @@ fn retrieve_inner(
     shares: &[MiasmaShare],
     params: DissolutionParams,
 ) -> Result<Vec<u8>, MiasmaError> {
+    validate_params(params.data_shards, params.total_shards)?;
+
+    if shares.len() > MAX_SHARE_COUNT {
+        return Err(MiasmaError::Sss(format!(
+            "too many shares: {} (max {})",
+            shares.len(),
+            MAX_SHARE_COUNT
+        )));
+    }
+
     if shares.len() < params.data_shards {
         return Err(MiasmaError::InsufficientShares {
             need: params.data_shards,
@@ -462,7 +528,18 @@ fn retrieve_inner(
     let selected = &valid[..params.data_shards];
     let nonce: [u8; NONCE_LEN] = selected[0].nonce;
     let plaintext_len = selected[0].original_len as usize;
-    let ciphertext_len = plaintext_len + 16;
+
+    // Verify nonce and original_len consistency across selected shares.
+    for s in &selected[1..] {
+        if s.nonce != nonce {
+            return Err(MiasmaError::ShareIntegrity);
+        }
+        if s.original_len as usize != plaintext_len {
+            return Err(MiasmaError::ShareIntegrity);
+        }
+    }
+
+    let ciphertext_len = plaintext_len + 16; // AES-GCM tag length
 
     let rs_shards: Vec<(usize, Vec<u8>)> = selected
         .iter()
