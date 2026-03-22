@@ -22,6 +22,7 @@
 - `crates/miasma-core`: protocol, storage, daemon, security-sensitive logic
 - `crates/miasma-ffi`: UniFFI bridge between Rust core and mobile clients
 - `android`: Android app, Gradle build, JNI libs, Kotlin UI
+- `ios`: SwiftUI app, Swift package, XCFramework/UniFFI integration
 - `installer`: MSI and Windows install behavior
 - `scripts`: build, package, smoke, soak, release helpers
 - `docs`: ADRs, release notes, variant guide, validation logs, tasks
@@ -41,6 +42,14 @@
 3. Make Android retrieval/save flows real before polishing
 4. Treat background execution, storage permissions, and battery/network limits as first-class design constraints
 5. Keep Android limitations explicit in docs and release language
+
+## Current iOS Priorities
+
+1. Keep iOS retrieval-first and honest about that scope
+2. Turn the current SwiftUI/UniFFI shell into a reproducible macOS build
+3. Replace stub-only assumptions with real Swift/XCFramework integration
+4. Make the first real iOS loop about retrieve, save/export, and supportability
+5. Keep iOS limitations explicit in docs and release language
 
 ## Working Rules
 
@@ -71,3 +80,4 @@
 - `docs/adr/`
 - `docs/tasks/`
 - Android-facing task docs and validation notes
+- iOS-facing task docs and validation notes
