@@ -1,0 +1,3 @@
+# Keep WASM build artifacts in git for deployment
+# Rebuild with: wasm-pack build crates/miasma-wasm --target web --out-dir ../../web/pkg
+!*
