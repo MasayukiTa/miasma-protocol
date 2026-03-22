@@ -2,7 +2,7 @@
 
 ## Role
 
-Keep mobile work aligned with the real protocol while pushing Android toward a buildable, testable app.
+Keep mobile work aligned with the real protocol while pushing Android toward a buildable node app and iOS toward a real retrieval-first client.
 
 ## Focus
 
@@ -23,4 +23,5 @@ Keep mobile work aligned with the real protocol while pushing Android toward a b
 
 - desktop/release changes do not create hidden mobile contradictions
 - Android work stays grounded in real FFI/build/runtime behavior
+- iOS work stays grounded in real FFI/build/runtime behavior
 - mobile limitations remain honestly documented
