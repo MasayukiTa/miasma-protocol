@@ -9,7 +9,7 @@
          Start Menu shortcuts, docs present
       3. Functional test — init, daemon start, dissolve/get round-trip,
          desktop launches
-      4. Upgrade — build v0.2.1 MSI+bundle, install over v0.2.0,
+      4. Upgrade — build v0.3.1 MSI+bundle, install over v0.3.0,
          verify data preserved
       5. Uninstall via bootstrapper (silent)
       6. Verify uninstall — binaries gone, PATH entry removed,
@@ -20,19 +20,19 @@
 
 .PARAMETER SetupExe
     Path to MiasmaSetup bootstrapper EXE.
-    Default: .\dist\MiasmaSetup-0.2.0-x64.exe
+    Default: .\dist\MiasmaSetup-0.3.0-x64.exe
 
 .PARAMETER SkipUpgrade
     Switch to skip the upgrade test (step 4).
 
 .EXAMPLE
     .\scripts\validate-installer.ps1
-    .\scripts\validate-installer.ps1 -SetupExe .\dist\MiasmaSetup-0.2.0-x64.exe
+    .\scripts\validate-installer.ps1 -SetupExe .\dist\MiasmaSetup-0.3.0-x64.exe
     .\scripts\validate-installer.ps1 -SkipUpgrade
 #>
 
 param(
-    [string]$SetupExe = ".\dist\MiasmaSetup-0.2.0-x64.exe",
+    [string]$SetupExe = ".\dist\MiasmaSetup-0.3.0-x64.exe",
     [switch]$SkipUpgrade
 )
 
@@ -420,7 +420,7 @@ if (-not $SkipUpgrade) {
 
             # Install the upgrade.
             if ($builtBundle) {
-                Write-Host "  Installing v0.2.1 over v0.2.0 (silent)..."
+                Write-Host "  Installing v0.3.1 over v0.3.0 (silent)..."
                 $upgradeProc = Start-Process -FilePath $upgradeExe `
                     -ArgumentList "/install /quiet" `
                     -Verb RunAs -Wait -PassThru
@@ -433,7 +433,7 @@ if (-not $SkipUpgrade) {
                 }
             } else {
                 # Fall back to MSI-only upgrade.
-                Write-Host "  Installing v0.2.1 MSI over v0.2.0 (silent)..."
+                Write-Host "  Installing v0.3.1 MSI over v0.3.0 (silent)..."
                 $msiProc = Start-Process -FilePath "msiexec.exe" `
                     -ArgumentList "/i `"$upgradeMsi`" /qn" `
                     -Verb RunAs -Wait -PassThru
