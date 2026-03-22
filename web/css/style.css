@@ -1123,6 +1123,45 @@ nav {
   flex: 1;
 }
 
+/* ── Connection Status ─────────────────────────────────────────── */
+
+.connection-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  cursor: help;
+  transition: background 0.3s, box-shadow 0.3s;
+}
+
+.connection-dot.connected {
+  background: var(--success);
+  box-shadow: 0 0 8px rgba(34, 197, 94, 0.5);
+}
+
+.connection-dot.local {
+  background: var(--text-muted);
+}
+
+.connection-dot.connecting {
+  background: var(--warning);
+  animation: pulse-dot 1.5s infinite;
+}
+
+.connection-dot.error {
+  background: var(--danger);
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.scope-notice.scope-connected {
+  border-left-color: var(--success);
+}
+
 /* ── Utilities ─────────────────────────────────────────────────── */
 
 .hidden { display: none !important; }

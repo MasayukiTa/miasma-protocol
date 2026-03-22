@@ -74,9 +74,9 @@ Be explicit about what this system resists and what it does not.
 | Surface | Maturity | Networking | User-facing |
 |---|---|---|---|
 | **Windows** | Beta (validated) | Full (libp2p, mDNS, DHT, onion, relay) | Desktop GUI + CLI + installer |
-| **Web/PWA** | Foundation (audited) | None (local-only WASM) | Browser dissolve/retrieve + export/import |
-| **Android** | Foundation (audited) | None (local FFI only) | Compose UI shell |
-| **iOS** | Stub | None (FFI bindings only) | SwiftUI shell |
+| **Web/PWA** | Foundation (audited) | Desktop: HTTP bridge; Mobile: WebView bridge; Standalone: local-only | Browser dissolve/retrieve + network when bridged |
+| **Android** | Foundation (audited) | WebView bridge (local FFI; network FFI pending) | Compose UI + WebView |
+| **iOS** | Stub | WebView bridge (local FFI; network FFI pending) | SwiftUI + WKWebView |
 
 See `docs/platform-roadmap.md` for capability matrix, milestone order, and detailed analysis.
 
@@ -92,7 +92,13 @@ Windows is the current shipping beta. It proves:
 
 ### Web/PWA
 
-Local-only browser tool for dissolution and retrieval via WASM. Protocol-compatible with miasma-core v1. Security-audited (all CRITICAL/HIGH/MEDIUM fixed). No networking — shares stay in browser IndexedDB. Transfer between devices requires manual export/import of `.miasma` files. Does not connect to the Miasma network or provide anonymity features. Supports EN, JA, ZH-CN.
+Browser-based dissolution and retrieval. Protocol-compatible with miasma-core v1. Security-audited (all CRITICAL/HIGH/MEDIUM fixed). Supports EN, JA, ZH-CN.
+
+**Network modes** (detected automatically):
+- **Desktop**: Connects to the local daemon via HTTP bridge (`localhost:17842`). Full P2P network access — dissolve publishes to DHT, retrieve fetches from peers.
+- **Android WebView**: Loaded inside the Android app with a JavaScript bridge to native FFI. Currently local-only (FFI networking not yet exposed).
+- **iOS WKWebView**: Loaded inside the iOS app with a message handler bridge. Currently local-only.
+- **Standalone browser**: Falls back to local-only WASM. Shares stay in IndexedDB, transferred manually via `.miasma` export/import.
 
 ### Android
 
