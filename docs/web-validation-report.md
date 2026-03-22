@@ -120,7 +120,67 @@ This requires a share export format bridge (desktop currently stores shares in b
 
 ---
 
-## 4. What Changed (2026-03-23)
+## 4. Network Bridge Validation (2026-03-23)
+
+### Desktop HTTP Bridge
+
+| Test | Result |
+|---|---|
+| `http_bridge.rs` compiles (hyper 1.x) | PASS |
+| All 480 workspace tests pass | PASS (268+112+53+31+16) |
+| HTTP bridge binds to `127.0.0.1:17842` | PASS (code review) |
+| CORS headers on all responses | PASS (code review) |
+| OPTIONS preflight returns 204 | PASS (code review) |
+| `/api/ping` → `{"ok":true}` | PASS (code review) |
+| `/api/status` → full DaemonStatus JSON | PASS (code review, reuses IPC handler) |
+| `/api/publish` → base64 data → MID | PASS (code review) |
+| `/api/retrieve` → MID → base64 data | PASS (code review) |
+| Request size limit (16 MiB) | PASS (code review) |
+| Port fallback to OS-assigned if 17842 occupied | PASS (code review) |
+| Port file cleanup on daemon shutdown | PASS (code review) |
+
+### Web Bridge Detection
+
+| Test | Result |
+|---|---|
+| `bridge.js` detects `window.miasma` (WebView mode) | PASS (code review) |
+| `bridge.js` tries HTTP ping (HTTP mode) | PASS (code review) |
+| `bridge.js` falls back to local-only (WASM mode) | PASS (code review) |
+| Connection dot updates on state change | PASS (code review) |
+| Scope notice text changes when connected | PASS (code review) |
+| Share source section hidden in connected mode | PASS (code review) |
+| Retrieve button enabled without shares in connected mode | PASS (code review) |
+
+### Android WebView Bridge
+
+| Test | Result |
+|---|---|
+| `WebBridgeActivity.kt` compiles | PASS (syntax review — full build requires NDK) |
+| `@JavascriptInterface` methods match bridge contract | PASS (code review) |
+| Activity registered in AndroidManifest.xml | PASS |
+| Settings screen has "Open Web View" button | PASS |
+
+### iOS WKWebView Bridge
+
+| Test | Result |
+|---|---|
+| `WebBridgeView.swift` syntax valid | PASS (code review — full build requires Xcode) |
+| `WKScriptMessageHandler` matches bridge contract | PASS (code review) |
+| `WKUserScript` injects Promise-based `window.miasma` | PASS (code review) |
+| "Web" tab added to ContentView | PASS |
+
+### Runtime validation (pending)
+
+- [ ] Start daemon, open web in Chrome → green dot, peer count visible
+- [ ] Dissolve text via web → "Published to P2P network" shown, MID returned
+- [ ] Retrieve via web (MID only, no manual shares) → content returned
+- [ ] Stop daemon → dot goes gray, scope notice returns to local-only
+- [ ] Android WebView loads web assets, bridge.ping() returns ok
+- [ ] iOS WKWebView loads web assets, bridge.ping() returns ok
+
+---
+
+## 5. What Changed (2026-03-23)
 
 1. **Scope transparency**: Added scope-notice card on home page, explicit scope text in About, updated hero wording from "censorship-resistant" to "local content protection"
 2. **ZH-CN locale**: Added complete Chinese translation (72+ keys)
@@ -128,3 +188,11 @@ This requires a share export format bridge (desktop currently stores shares in b
 4. **Feature detection**: Improved error message with recommended browser versions
 5. **Service Worker**: Updated to relative paths for subpath hosting, cache version bumped to v3
 6. **i18n strings**: Updated hero_sub, hero_desc, about_desc to reflect local-only scope accurately
+7. **HTTP bridge**: Daemon exposes HTTP JSON API on `localhost:17842` (hyper 1.x, base64 encoding, CORS)
+8. **bridge.js**: Runtime environment detection (WebView / HTTP / local-only), unified async API
+9. **Connection state UI**: Dot indicator in nav bar, dynamic scope notice, peer count when connected
+10. **Android WebBridgeActivity**: WebView with `@JavascriptInterface` bridge to FFI
+11. **iOS WebBridgeView**: WKWebView with `WKScriptMessageHandler` bridge to FFI
+12. **CSP updated**: `connect-src` allows `http://127.0.0.1:17842`
+13. **Service Worker**: Cache version bumped to v4, bridge.js added to precache
+14. **ADR-007**: Architecture decision record for web network bridge

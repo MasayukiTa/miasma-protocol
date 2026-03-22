@@ -106,30 +106,37 @@ All items from the original implementation specification are complete:
 
 ### Next Milestone
 
-**Web scope hardening (current)**:
+**Web network bridge (complete)**:
 - [x] Explicit local-only scope statement in UI and docs
 - [x] ZH-CN locale added (3-locale parity with desktop)
 - [x] Browser support target defined
 - [x] Feature detection with helpful error messages
 - [x] Service Worker paths fixed for subpath hosting
+- [x] Network architecture chosen (ADR-007: HTTP bridge + WebView hybrid)
+- [x] HTTP bridge in daemon (hyper 1.x, port 17842, CORS, base64)
+- [x] bridge.js abstraction layer (WebView / HTTP / local-only detection)
+- [x] Connection state UI (dot indicator, scope notice, peer count)
+- [x] Android WebBridgeActivity (WebView + @JavascriptInterface)
+- [x] iOS WebBridgeView (WKWebView + WKScriptMessageHandler)
+- [x] All 480 tests pass
 - [ ] Browser validation report (Chrome, Edge, Firefox, Safari)
 - [ ] Cross-platform share format compatibility test (WASM ↔ desktop roundtrip)
 
-**Future milestones (not started)**:
+**Future milestones**:
 - Browser compatibility validation across all target browsers
-- Cross-platform share import/export testing (desktop → web → desktop)
-- Future networking architecture decision (see docs/platform-roadmap.md Track E)
+- Android FFI networking (expose libp2p through FFI for real P2P participation)
+- iOS FFI networking (retrieval-focused)
 
-### Architecture Decision: Future Web Networking
+### Network Architecture (ADR-007)
 
-The web app is intentionally local-only today. Adding network connectivity would require one of:
+The web app connects to the Miasma network through a hybrid bridge:
 
-1. **WebRTC data channels** — Browser-to-browser P2P, but requires signaling server and has NAT traversal challenges. Would need a new protocol layer incompatible with libp2p.
+1. **Desktop**: HTTP bridge on `localhost:17842` exposed by the daemon. The browser connects via `fetch()`. Same handler as IPC — full P2P network access.
 
-2. **Relay/proxy server** — A server-assisted model where a Miasma relay bridges browser requests to the DHT. Simplest path but introduces a centralized trust point.
+2. **Android**: WebView inside the Android app loads web assets from app bundle. `@JavascriptInterface` exposes FFI functions as `window.miasma`. Currently local-only (FFI networking not yet exposed).
 
-3. **Desktop companion mode** — The browser sends requests to a locally-running desktop daemon via localhost HTTP/WebSocket. Most compatible but requires desktop app running.
+3. **iOS**: WKWebView inside the iOS app with `WKScriptMessageHandler`. Same bridge contract. Currently local-only (FFI networking not yet exposed).
 
-4. **libp2p-wasm** — Experimental libp2p WebTransport/WebRTC support exists but is immature and not production-ready for libp2p 0.54.
+4. **Standalone browser**: Falls back to local-only WASM mode. No network. Current behavior preserved.
 
-**Current decision**: Deferred. The local-only tool provides real value without networking. Any networking path requires an ADR and significant architecture work. The local-only positioning is honest and sustainable.
+See `docs/adr/adr-007-web-network-bridge.md` for full decision record.
