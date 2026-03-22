@@ -861,6 +861,54 @@ impl MiasmaApp {
             ui.add_space(4.0);
             ui.label(egui::RichText::new(hint).color(DIM));
 
+            // Health checklist — explicit indicators for app/backend/network.
+            ui.add_space(10.0);
+            egui::Grid::new("easy_health_grid")
+                .num_columns(2)
+                .spacing([10.0, 4.0])
+                .show(ui, |ui| {
+                    // App — always running if we're here.
+                    let check = egui::RichText::new("\u{2713}").color(GREEN); // ✓
+                    let cross = egui::RichText::new("\u{2717}").color(RED);   // ✗
+                    let dot = egui::RichText::new("\u{25CF}").color(YELLOW);  // ●
+
+                    ui.label(check.clone());
+                    ui.label(egui::RichText::new(format!("{}  {}", s.health_app, s.health_ok)).color(DIM));
+                    ui.end_row();
+
+                    // Backend.
+                    match self.daemon_state {
+                        DaemonState::Connected => {
+                            ui.label(check.clone());
+                            ui.label(egui::RichText::new(format!("{}  {}", s.health_backend, s.health_ok)).color(DIM));
+                        }
+                        DaemonState::Starting => {
+                            ui.label(dot.clone());
+                            ui.label(egui::RichText::new(format!("{}  {}", s.health_backend, s.health_starting)).color(YELLOW));
+                        }
+                        _ => {
+                            ui.label(cross.clone());
+                            ui.label(egui::RichText::new(format!("{}  {}", s.health_backend, s.health_offline)).color(RED));
+                        }
+                    }
+                    ui.end_row();
+
+                    // Network.
+                    if self.daemon_state == DaemonState::Connected {
+                        if self.peer_count > 0 {
+                            ui.label(check);
+                            ui.label(egui::RichText::new(format!("{}  {} {}", s.health_network, self.peer_count, s.status_peers.trim_end_matches('：').trim_end_matches(':'))).color(DIM));
+                        } else {
+                            ui.label(dot);
+                            ui.label(egui::RichText::new(format!("{}  {}", s.health_network, s.health_no_peers)).color(YELLOW));
+                        }
+                    } else {
+                        ui.label(cross);
+                        ui.label(egui::RichText::new(format!("{}  {}", s.health_network, s.health_offline)).color(RED));
+                    }
+                    ui.end_row();
+                });
+
             if self.daemon_state == DaemonState::Connected {
                 ui.add_space(10.0);
 
