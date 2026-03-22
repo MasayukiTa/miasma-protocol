@@ -25,12 +25,12 @@ Both variants share all backend code: storage, protocol, encryption, daemon IPC,
 
 | Aspect | Technical | Easy |
 |--------|-----------|------|
-| Window title | Miasma v0.3.0 (Technical Beta) | Miasma v0.3.0 |
+| Window title | Miasma v0.3.1 (Technical Beta) | Miasma v0.3.1 |
 | Tab labels | Store / Retrieve | Save / Get Back |
 | Welcome flow | Mentions encryption key, daemon | "We'll set everything up for you" |
 | Status panel | Full: Connection, Storage, Transport grid, Diagnostics (card-grouped) | Simplified: Ready/Not Ready with status dot, items, storage, next-step hint |
 | Stopped state | "Daemon not running" / "Start Daemon" | "Not running" / "Start" |
-| Settings footer | "Miasma Technical Beta v0.3.0" | "Miasma v0.3.0" |
+| Settings footer | "Miasma Technical Beta v0.3.1" | "Miasma v0.3.1" |
 | Settings mode description | "Full diagnostics, transport details, protocol visibility" | "Simplified interface, less technical detail" |
 
 ## Visual design
@@ -109,8 +109,8 @@ Diagnostics export stays English (support artifact, not user-facing).
 ```
 
 Output:
-- `miasma-0.3.0-windows-x64.zip` — Technical package (README leads with CLI/diagnostics)
-- `miasma-0.3.0-windows-x64-easy.zip` — Easy package (README leads with "double-click and go")
+- `miasma-0.3.1-windows-x64.zip` — Technical package (README leads with CLI/diagnostics)
+- `miasma-0.3.1-windows-x64-easy.zip` — Easy package (README leads with "double-click and go")
 
 Both ZIPs contain the same binaries plus variant-appropriate launcher scripts and README.
 
@@ -120,7 +120,7 @@ Both ZIPs contain the same binaries plus variant-appropriate launcher scripts an
 
 - [ ] Install via MSI
 - [ ] "Miasma Technical" shortcut launches in Technical mode
-- [ ] Window title shows "Miasma v0.3.0 (Technical Beta)"
+- [ ] Window title shows "Miasma v0.3.1 (Technical Beta)"
 - [ ] Set Up Node creates identity and starts daemon
 - [ ] Status tab shows full Connection/Storage/Transport/Diagnostics
 - [ ] Transport grid displays all transports with success/failure counts
@@ -140,7 +140,7 @@ Both ZIPs contain the same binaries plus variant-appropriate launcher scripts an
 
 - [ ] Install via MSI or unzip portable
 - [ ] "Miasma" shortcut or "Miasma.cmd" launches in Easy mode
-- [ ] Window title shows "Miasma v0.3.0" (no "Technical Beta")
+- [ ] Window title shows "Miasma v0.3.1" (no "Technical Beta")
 - [ ] Welcome screen says "Welcome" not "Welcome to Miasma"
 - [ ] Setup button says "Set Up Node", progress says "Setting up..."
 - [ ] No mention of "daemon" or "encryption key" in primary flow
