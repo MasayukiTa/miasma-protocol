@@ -7,13 +7,26 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.RestartAlt
+import androidx.compose.material.icons.outlined.Storage
+import androidx.compose.material.icons.outlined.Speed
+import androidx.compose.material.icons.outlined.Hub
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -34,22 +47,12 @@ import dev.miasma.Prefs
 import kotlinx.coroutines.launch
 import kotlin.math.roundToLong
 
-/**
- * Settings screen — lets the user configure:
- *  • Storage quota (MiB) via slider (64 MiB – 10 240 MiB)
- *  • Daily bandwidth quota (MiB/day) via slider (10 MiB – 1 000 MiB)
- *  • Bootstrap peer multiaddrs (one per line)
- *
- * Changes are persisted to SharedPreferences and the Miasma daemon is
- * restarted with the new values.
- */
 @Composable
 fun SettingsScreen() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
-    // Initialise from persisted prefs.
     var storageMb by remember {
         mutableFloatStateOf(Prefs.storageMb(context).toFloat())
     }
@@ -64,53 +67,121 @@ fun SettingsScreen() {
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(16.dp),
+            .padding(20.dp),
     ) {
-        Text("Settings", style = MaterialTheme.typography.headlineSmall)
-        Spacer(Modifier.height(24.dp))
-
-        // ── Storage quota ─────────────────────────────────────────────────
-        LabelRow("Storage quota", "${storageMb.roundToLong()} MiB")
-        Slider(
-            value = storageMb,
-            onValueChange = { storageMb = it },
-            valueRange = 64f..10_240f,
-            steps = 0,
-            modifier = Modifier.fillMaxWidth(),
-        )
-
-        Spacer(Modifier.height(16.dp))
-
-        // ── Bandwidth quota ───────────────────────────────────────────────
-        LabelRow("Daily bandwidth", "${bandwidthMbDay.roundToLong()} MiB/day")
-        Slider(
-            value = bandwidthMbDay,
-            onValueChange = { bandwidthMbDay = it },
-            valueRange = 10f..1_000f,
-            steps = 0,
-            modifier = Modifier.fillMaxWidth(),
-        )
-
-        Spacer(Modifier.height(16.dp))
-
-        // ── Bootstrap peers ───────────────────────────────────────────────
-        Text("Bootstrap peers (one multiaddr per line)",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("Settings", style = MaterialTheme.typography.headlineMedium)
         Spacer(Modifier.height(4.dp))
-        OutlinedTextField(
-            value = bootstrapText,
-            onValueChange = { bootstrapText = it },
-            modifier = Modifier.fillMaxWidth(),
-            minLines = 3,
-            maxLines = 8,
-            placeholder = { Text("/ip4/1.2.3.4/udp/9000/quic-v1/p2p/12D3Koo…") },
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+        Text(
+            "Configure your node",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        Spacer(Modifier.height(20.dp))
+
+        // ── Storage quota ──
+        SettingsSection(
+            icon = Icons.Outlined.Storage,
+            title = "Storage Quota",
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Local storage limit",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    "${storageMb.roundToLong()} MiB",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            Slider(
+                value = storageMb,
+                onValueChange = { storageMb = it },
+                valueRange = 64f..10_240f,
+                modifier = Modifier.fillMaxWidth(),
+                colors = SliderDefaults.colors(
+                    thumbColor = MaterialTheme.colorScheme.primary,
+                    activeTrackColor = MaterialTheme.colorScheme.primary,
+                ),
+            )
+            Text(
+                "Range: 64 MiB – 10,240 MiB (10 GiB)",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+            )
+        }
+
+        Spacer(Modifier.height(12.dp))
+
+        // ── Bandwidth quota ──
+        SettingsSection(
+            icon = Icons.Outlined.Speed,
+            title = "Bandwidth",
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Daily transfer limit",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    "${bandwidthMbDay.roundToLong()} MiB/day",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            Slider(
+                value = bandwidthMbDay,
+                onValueChange = { bandwidthMbDay = it },
+                valueRange = 10f..1_000f,
+                modifier = Modifier.fillMaxWidth(),
+                colors = SliderDefaults.colors(
+                    thumbColor = MaterialTheme.colorScheme.primary,
+                    activeTrackColor = MaterialTheme.colorScheme.primary,
+                ),
+            )
+        }
+
+        Spacer(Modifier.height(12.dp))
+
+        // ── Bootstrap peers ──
+        SettingsSection(
+            icon = Icons.Outlined.Hub,
+            title = "Bootstrap Peers",
+        ) {
+            Text(
+                "One multiaddr per line",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                value = bootstrapText,
+                onValueChange = { bootstrapText = it },
+                modifier = Modifier.fillMaxWidth(),
+                minLines = 3,
+                maxLines = 8,
+                placeholder = { Text("/ip4/1.2.3.4/udp/9000/quic-v1/p2p/12D3Koo...") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                shape = RoundedCornerShape(8.dp),
+                textStyle = MaterialTheme.typography.bodySmall,
+            )
+        }
 
         Spacer(Modifier.height(24.dp))
 
-        // ── Save + restart ────────────────────────────────────────────────
+        // ── Save & restart ──
         Button(
             onClick = {
                 val sMb = storageMb.roundToLong()
@@ -121,33 +192,87 @@ fun SettingsScreen() {
                 Prefs.setBandwidthMbDay(context, bMb)
                 Prefs.setBootstrapPeers(context, peers)
 
-                // Restart daemon with new settings.
                 MiasmaService.stopNode(context)
-                MiasmaService.startNode(context,
-                    context.filesDir.absolutePath, sMb, bMb)
+                MiasmaService.startNode(context, context.filesDir.absolutePath, sMb, bMb)
 
                 scope.launch {
                     snackbarHostState.showSnackbar("Settings saved — daemon restarted")
                 }
             },
             modifier = Modifier.fillMaxWidth(),
-        ) { Text("Save & restart daemon") }
+            shape = RoundedCornerShape(8.dp),
+        ) {
+            Icon(Icons.Outlined.RestartAlt, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("Save & Restart")
+        }
 
         Spacer(Modifier.height(8.dp))
         SnackbarHost(hostState = snackbarHostState)
+
+        // ── About ──
+        Spacer(Modifier.height(24.dp))
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+            ),
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Outlined.Info,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "About",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Miasma v0.3.1 Beta\n" +
+                    "Plausibly-deniable distributed storage protocol\n" +
+                    "AGPL-3.0 License",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                )
+            }
+        }
     }
 }
 
 @Composable
-private fun LabelRow(label: String, value: String) {
-    Row(
+private fun SettingsSection(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    content: @Composable () -> Unit,
+) {
+    Card(
         modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface,
+        ),
     ) {
-        Text(label,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.weight(1f))
-        Text(value, style = MaterialTheme.typography.bodyMedium)
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    icon,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(20.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(title, style = MaterialTheme.typography.titleMedium)
+            }
+            Spacer(Modifier.height(12.dp))
+            content()
+        }
     }
 }
