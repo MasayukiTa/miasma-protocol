@@ -2,8 +2,10 @@
 
 import { t, getLang, setLang, applyTranslations } from './i18n.js';
 import { initDB, saveShares, getSharesByMidPrefix, getShareCount, getMidCount, getStorageEstimate, clearAll } from './storage.js';
+import { MiasmaBridge } from './bridge.js';
 
 let wasm = null;
+let bridge = null;
 let currentView = 'loading';
 let dissolveResult = null;
 let retrieveShares = [];
@@ -44,10 +46,17 @@ async function init() {
     await module.default();
     wasm = module;
     await initDB();
+
+    // Initialize bridge (detects WebView / HTTP / local-only)
+    bridge = new MiasmaBridge();
+    await bridge.init(wasm);
+    bridge.onStateChange = onBridgeStateChange;
+
     showView('home');
     setupEventListeners();
     applyTranslations();
     updateStats();
+    updateConnectionUI();
     const vi = document.getElementById('version-info');
     if (vi) vi.textContent = wasm.protocol_version();
     showInstallBanner();
@@ -262,21 +271,31 @@ async function handleDissolve() {
   await new Promise(r => setTimeout(r, 50));
 
   try {
-    let jsonStr;
-    if (data.type === 'text') {
-      jsonStr = wasm.dissolve_text(data.content, k, n);
-    } else {
-      jsonStr = wasm.dissolve_bytes(data.content, k, n);
-    }
-    dissolveResult = JSON.parse(jsonStr);
+    const inputData = data.type === 'text' ? data.content : data.content;
+    const bridgeResult = await bridge.dissolve(inputData, k, n);
+
+    dissolveResult = bridgeResult;
 
     // Show result
-    document.getElementById('result-mid').textContent = dissolveResult.mid;
-    document.getElementById('result-share-count').textContent =
-      `${dissolveResult.shares.length} shares (k=${k}, n=${n})`;
+    document.getElementById('result-mid').textContent = bridgeResult.mid;
 
-    const totalSize = JSON.stringify(dissolveResult.shares).length;
-    document.getElementById('result-share-size').textContent = formatBytes(totalSize);
+    if (bridgeResult.networkPublished) {
+      // Connected mode: published to network
+      document.getElementById('result-share-count').textContent =
+        t('published_to_network') + ` (k=${k}, n=${n})`;
+      document.getElementById('result-share-size').textContent = '';
+      // Hide local save/export buttons when published to network
+      document.getElementById('btn-save-shares').style.display = 'none';
+      document.getElementById('btn-export-shares').style.display = 'none';
+    } else {
+      // Local mode: show share details
+      document.getElementById('result-share-count').textContent =
+        `${bridgeResult.shares.length} shares (k=${k}, n=${n})`;
+      const totalSize = JSON.stringify(bridgeResult.shares).length;
+      document.getElementById('result-share-size').textContent = formatBytes(totalSize);
+      document.getElementById('btn-save-shares').style.display = '';
+      document.getElementById('btn-export-shares').style.display = '';
+    }
 
     progress.classList.add('hidden');
     result.classList.remove('hidden');
@@ -416,17 +435,27 @@ async function handleMidInput() {
 function updateShareProgress() {
   const k = parseInt(document.getElementById('retrieve-k').value);
   const total = retrieveShares.length;
+  const isConnected = bridge && bridge.connected;
   const pct = Math.min(100, (total / k) * 100);
 
   document.getElementById('share-progress-text').textContent = `${total} / ${k}`;
   document.getElementById('share-progress-fill').style.width = pct + '%';
 
   const btn = document.getElementById('btn-retrieve');
-  btn.disabled = total < k;
-  if (total >= k) {
-    btn.classList.add('ready');
+
+  if (isConnected) {
+    // In connected mode, retrieve button is always enabled when MID is entered
+    const midStr = document.getElementById('retrieve-mid').value.trim();
+    btn.disabled = !midStr.startsWith('miasma:');
+    if (!btn.disabled) btn.classList.add('ready');
+    else btn.classList.remove('ready');
   } else {
-    btn.classList.remove('ready');
+    btn.disabled = total < k;
+    if (total >= k) {
+      btn.classList.add('ready');
+    } else {
+      btn.classList.remove('ready');
+    }
   }
 }
 
@@ -537,7 +566,11 @@ async function handleRetrieve() {
     showToast(t('error_invalid_mid_format'), 'error');
     return;
   }
-  if (retrieveShares.length < k) {
+
+  const isConnected = bridge && bridge.connected;
+
+  // In local mode, require manual shares
+  if (!isConnected && retrieveShares.length < k) {
     showToast(`${t('error_insufficient')}: ${retrieveShares.length}/${k}`, 'error');
     return;
   }
@@ -549,8 +582,16 @@ async function handleRetrieve() {
   await new Promise(r => setTimeout(r, 50));
 
   try {
-    const sharesJson = JSON.stringify(retrieveShares);
-    const bytes = wasm.retrieve_from_shares(midStr, sharesJson, k, n);
+    let bytes;
+
+    if (isConnected) {
+      // Connected mode: retrieve from P2P network via daemon
+      bytes = await bridge.retrieve(midStr, k, n);
+    } else {
+      // Local mode: reconstruct from manually collected shares
+      const sharesJson = JSON.stringify(retrieveShares);
+      bytes = wasm.retrieve_from_shares(midStr, sharesJson, k, n);
+    }
 
     const resultSection = document.getElementById('retrieve-result');
     const textResult = document.getElementById('retrieve-text-result');
@@ -585,7 +626,7 @@ async function handleRetrieve() {
     console.error('Retrieve failed:', e);
     showToast(t('error_retrieve'), 'error');
   } finally {
-    btn.disabled = retrieveShares.length < k;
+    btn.disabled = !isConnected && retrieveShares.length < k;
     applyTranslations();
   }
 }
@@ -700,6 +741,68 @@ function decodeBase58(str) {
     bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
   }
   return bytes;
+}
+
+// ── Connection State UI ───────────────────────────────────────────
+
+function updateConnectionUI() {
+  const dot = document.getElementById('connection-status');
+  const scopeNotice = document.getElementById('scope-notice');
+  const shareSourceSection = document.querySelector('.share-source-section');
+  const peersContainer = document.getElementById('stat-peers-container');
+  if (!dot) return;
+
+  const isConnected = bridge && bridge.connected;
+  const mode = bridge ? bridge.mode : 'local';
+
+  // Connection dot
+  dot.className = 'connection-dot';
+  if (isConnected) {
+    dot.classList.add('connected');
+    dot.title = t('connection_connected');
+  } else {
+    dot.classList.add('local');
+    dot.title = t('connection_local');
+  }
+
+  // Scope notice: update text based on connection state
+  if (scopeNotice) {
+    const p = scopeNotice.querySelector('p');
+    if (p) {
+      if (isConnected) {
+        p.textContent = t('scope_connected');
+        scopeNotice.classList.add('scope-connected');
+      } else {
+        p.textContent = t('scope_notice');
+        scopeNotice.classList.remove('scope-connected');
+      }
+    }
+  }
+
+  // In connected mode, hide the manual share source section and show network retrieve
+  if (shareSourceSection) {
+    shareSourceSection.style.display = isConnected ? 'none' : '';
+  }
+
+  // Show peer count when connected
+  if (peersContainer) {
+    peersContainer.style.display = isConnected ? '' : 'none';
+    if (isConnected && bridge.lastStatus) {
+      document.getElementById('stat-peers').textContent =
+        (bridge.lastStatus.peer_count || 0).toString();
+    }
+  }
+
+  // Update retrieve button state
+  updateShareProgress();
+}
+
+function onBridgeStateChange(mode, connected, status) {
+  updateConnectionUI();
+  if (connected && status) {
+    const peerEl = document.getElementById('stat-peers');
+    if (peerEl) peerEl.textContent = (status.peer_count || 0).toString();
+  }
 }
 
 // ── Service Worker Registration ───────────────────────────────────

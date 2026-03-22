@@ -1,5 +1,6 @@
 /// ContentView.swift — Tab-based root UI for iOS (Phase 2, Task 13).
 import SwiftUI
+import WebKit
 
 struct ContentView: View {
     @EnvironmentObject var vm: MiasmaViewModel
@@ -21,6 +22,10 @@ struct ContentView: View {
             StatusView()
                 .tabItem {
                     Label("Status", systemImage: "info.circle")
+                }
+            WebBridgeView()
+                .tabItem {
+                    Label("Web", systemImage: "globe")
                 }
         }
     }

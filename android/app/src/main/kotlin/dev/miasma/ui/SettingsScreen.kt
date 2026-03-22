@@ -42,8 +42,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import android.content.Intent
 import dev.miasma.MiasmaService
 import dev.miasma.Prefs
+import dev.miasma.WebBridgeActivity
 import kotlinx.coroutines.launch
 import kotlin.math.roundToLong
 
@@ -205,6 +207,21 @@ fun SettingsScreen() {
             Icon(Icons.Outlined.RestartAlt, contentDescription = null, modifier = Modifier.size(18.dp))
             Spacer(Modifier.width(8.dp))
             Text("Save & Restart")
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        // ── Web View ──
+        Button(
+            onClick = {
+                context.startActivity(Intent(context, WebBridgeActivity::class.java))
+            },
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(8.dp),
+        ) {
+            Icon(Icons.Outlined.Hub, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("Open Web View")
         }
 
         Spacer(Modifier.height(8.dp))

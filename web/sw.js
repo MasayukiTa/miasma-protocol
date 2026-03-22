@@ -1,11 +1,12 @@
 // Miasma Web — Service Worker
 // Provides offline support via Cache API
 
-const CACHE_NAME = 'miasma-web-v3';
+const CACHE_NAME = 'miasma-web-v4';
 const PRECACHE_ASSETS = [
   'index.html',
   'css/style.css',
   'js/app.js',
+  'js/bridge.js',
   'js/i18n.js',
   'js/storage.js',
   'manifest.json',

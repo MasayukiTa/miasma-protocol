@@ -34,6 +34,12 @@
             </intent-filter>
         </activity>
 
+        <!-- WebView-hosted web UI with native FFI bridge -->
+        <activity
+            android:name=".WebBridgeActivity"
+            android:exported="false"
+            android:label="Miasma Web" />
+
         <!-- Foreground Service for the Miasma daemon -->
         <service
             android:name=".MiasmaService"

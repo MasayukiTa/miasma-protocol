@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="theme-color" content="#0a0a0f">
   <meta name="description" content="Miasma Protocol — censorship-resistant content dissolution and retrieval in your browser">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' http://127.0.0.1:17842 http://localhost:17842; frame-ancestors 'none'; base-uri 'self'; form-action 'self';">
   <title>Miasma Web</title>
   <link rel="stylesheet" href="css/style.css">
   <link rel="manifest" href="manifest.json">
@@ -26,6 +26,7 @@
         <span>Miasma</span>
       </div>
       <div class="nav-actions">
+        <span id="connection-status" class="connection-dot" title="" data-i18n-title="connection_local"></span>
         <button id="btn-lang" class="btn-icon" title="Language">EN</button>
         <button id="btn-settings" class="btn-icon" data-view="settings" title="Settings">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
@@ -82,6 +83,10 @@
         <div class="stat">
           <span class="stat-value" id="stat-mids">0</span>
           <span class="stat-label" data-i18n="known_mids">Known MIDs</span>
+        </div>
+        <div class="stat" id="stat-peers-container" style="display:none">
+          <span class="stat-value" id="stat-peers">0</span>
+          <span class="stat-label" data-i18n="connected_peers">Connected peers</span>
         </div>
       </div>
     </div>
