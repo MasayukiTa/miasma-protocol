@@ -1841,19 +1841,16 @@ impl MiasmaNode {
             }
             DhtCommand::SendDirectedRequest {
                 peer_id,
-                addrs,
+                addrs: _addrs,
                 request,
                 reply,
             } => {
-                for addr_str in &addrs {
-                    if let Ok(addr) = addr_str.parse::<Multiaddr>() {
-                        self.swarm
-                            .behaviour_mut()
-                            .kademlia
-                            .add_address(&peer_id, addr.clone());
-                        self.swarm.add_peer_address(peer_id, addr.clone());
-                    }
-                }
+                // Do NOT add external addresses here.  The `addrs` field
+                // was historically passed from the daemon but contained
+                // the *sender's* own listen addresses, not the target's.
+                // The peer should already be reachable via mDNS / Kademlia
+                // / the existing connection.  Adding stale or wrong
+                // addresses causes "Failed to dial" errors.
                 let req_id = self
                     .swarm
                     .behaviour_mut()

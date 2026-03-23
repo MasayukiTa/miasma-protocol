@@ -1238,27 +1238,29 @@ async fn cmd_send(
 ) -> Result<()> {
     use miasma_core::{daemon_request, ControlRequest, ControlResponse};
 
-    let data =
-        std::fs::read(path).with_context(|| format!("cannot read file: {}", path.display()))?;
+    // Validate the file exists and get its size for display, but don't read it —
+    // the daemon reads it directly via DirectedSendFile, avoiding IPC bloat.
+    let meta = std::fs::metadata(path)
+        .with_context(|| format!("cannot access file: {}", path.display()))?;
     let retention_secs = parse_retention(retention)?;
-    let filename = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .map(|s| s.to_owned());
 
     eprintln!(
         "Sending {} ({} bytes) to {} …",
         path.display(),
-        data.len(),
+        meta.len(),
         to
     );
 
-    let req = ControlRequest::DirectedSend {
+    // Canonicalize path so the daemon can find it regardless of cwd.
+    let abs_path = std::fs::canonicalize(path)
+        .with_context(|| format!("cannot resolve path: {}", path.display()))?;
+
+    let req = ControlRequest::DirectedSendFile {
         recipient_contact: to.to_owned(),
-        data,
+        file_path: abs_path.to_string_lossy().to_string(),
         password: password.to_owned(),
         retention_secs,
-        filename,
+        filename: None, // daemon derives from file_path
     };
 
     match daemon_request(data_dir, req).await? {
@@ -1305,33 +1307,78 @@ async fn cmd_receive(
 
     eprintln!("Retrieving directed share {envelope_id} …");
 
-    let req = ControlRequest::DirectedRetrieve {
+    // If we have an output path (explicit or can be derived later), use the
+    // file-path variant so the daemon writes directly — avoids IPC bloat.
+    if let Some(out) = output {
+        let abs_out = if out.is_absolute() {
+            out.to_owned()
+        } else {
+            std::env::current_dir()
+                .unwrap_or_default()
+                .join(out)
+        };
+        let req = ControlRequest::DirectedRetrieveToFile {
+            envelope_id: envelope_id.to_owned(),
+            password: password.to_owned(),
+            output_path: abs_out.to_string_lossy().to_string(),
+        };
+        match daemon_request(data_dir, req).await? {
+            ControlResponse::DirectedRetrievedToFile {
+                output_path,
+                bytes_written,
+                ..
+            } => {
+                eprintln!("✓ Written {bytes_written} bytes to {output_path}");
+            }
+            ControlResponse::Error(e) => bail!("retrieval failed: {e}"),
+            other => bail!("unexpected response: {other:?}"),
+        }
+        return Ok(());
+    }
+
+    // No explicit output — try to get the filename from the daemon, then decide.
+    // We need to use a temp file as the target so we can learn the original
+    // filename before choosing the final destination.
+    let tmp_dir = std::env::temp_dir();
+    let tmp_path = tmp_dir.join(format!("miasma-retrieve-{envelope_id}.tmp"));
+    let req = ControlRequest::DirectedRetrieveToFile {
         envelope_id: envelope_id.to_owned(),
         password: password.to_owned(),
+        output_path: tmp_path.to_string_lossy().to_string(),
     };
-
     match daemon_request(data_dir, req).await? {
-        ControlResponse::DirectedRetrieved { data, filename } => {
-            // Determine output path: explicit --output > original filename > stdout.
-            let out_path = output
-                .map(|p| p.to_owned())
-                .or_else(|| filename.as_ref().map(PathBuf::from));
-
-            match out_path {
-                Some(path) => {
-                    std::fs::write(&path, &data)
-                        .with_context(|| format!("cannot write output: {}", path.display()))?;
-                    eprintln!("✓ Written to {}", path.display());
-                }
-                None => {
-                    io::stdout()
-                        .write_all(&data)
-                        .context("cannot write to stdout")?;
-                }
+        ControlResponse::DirectedRetrievedToFile {
+            filename,
+            bytes_written,
+            ..
+        } => {
+            if let Some(fname) = &filename {
+                // Move from temp to final filename in current directory.
+                let final_path = PathBuf::from(fname);
+                std::fs::rename(&tmp_path, &final_path).or_else(|_| {
+                    // rename can fail across filesystems; fall back to copy+delete.
+                    std::fs::copy(&tmp_path, &final_path).map(|_| ())?;
+                    std::fs::remove_file(&tmp_path).ok();
+                    Ok::<(), std::io::Error>(())
+                }).with_context(|| format!("cannot write output: {}", final_path.display()))?;
+                eprintln!("✓ Written {bytes_written} bytes to {}", final_path.display());
+            } else {
+                // No filename — dump temp file contents to stdout.
+                let data = std::fs::read(&tmp_path).context("read temp file")?;
+                std::fs::remove_file(&tmp_path).ok();
+                io::stdout()
+                    .write_all(&data)
+                    .context("cannot write to stdout")?;
             }
         }
-        ControlResponse::Error(e) => bail!("retrieval failed: {e}"),
-        other => bail!("unexpected response: {other:?}"),
+        ControlResponse::Error(e) => {
+            std::fs::remove_file(&tmp_path).ok();
+            bail!("retrieval failed: {e}");
+        }
+        other => {
+            std::fs::remove_file(&tmp_path).ok();
+            bail!("unexpected response: {other:?}");
+        }
     }
     Ok(())
 }

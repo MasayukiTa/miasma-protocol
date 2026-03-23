@@ -122,10 +122,12 @@ pub enum WorkerResult {
     SharingKey { contact: String },
     /// Directed share sent.
     DirectedSent { envelope_id: String },
-    /// Directed share retrieved.
+    /// Directed share retrieved (written to temp file).
     DirectedRetrieved {
-        data: Vec<u8>,
+        /// Path to the temp file containing decrypted content.
+        temp_path: std::path::PathBuf,
         filename: Option<String>,
+        bytes_written: u64,
     },
     /// Directed share revoked.
     DirectedRevoked,
@@ -811,24 +813,23 @@ async fn do_directed_send(
     password: &str,
     retention: &str,
 ) -> WorkerResult {
-    let data = match std::fs::read(file_path) {
-        Ok(d) => d,
-        Err(e) => return WorkerResult::Err(format!("Cannot read file: {e}")),
-    };
+    // Validate file exists before sending path to daemon.
+    if !file_path.exists() {
+        return WorkerResult::Err(format!("File not found: {}", file_path.display()));
+    }
     let retention_secs = match parse_retention(retention) {
         Ok(s) => s,
         Err(e) => return WorkerResult::Err(format!("Invalid retention: {e}")),
     };
-    let filename = file_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .map(|s| s.to_owned());
-    let req = ControlRequest::DirectedSend {
+    // Use file-path variant — daemon reads file directly, no IPC bloat.
+    let abs_path = std::fs::canonicalize(file_path)
+        .unwrap_or_else(|_| file_path.to_owned());
+    let req = ControlRequest::DirectedSendFile {
         recipient_contact: recipient_contact.to_owned(),
-        data,
+        file_path: abs_path.to_string_lossy().to_string(),
         password: password.to_owned(),
         retention_secs,
-        filename,
+        filename: None,
     };
     match daemon_request(data_dir, req).await {
         Ok(ControlResponse::DirectedSent { envelope_id }) => {
@@ -841,14 +842,24 @@ async fn do_directed_send(
 }
 
 async fn do_directed_retrieve(data_dir: &Path, envelope_id: &str, password: &str) -> WorkerResult {
-    let req = ControlRequest::DirectedRetrieve {
+    // Use file-path variant — daemon writes decrypted content to a temp file,
+    // avoiding IPC bloat for large files.
+    let tmp_path = std::env::temp_dir().join(format!("miasma-retrieve-{envelope_id}.tmp"));
+    let req = ControlRequest::DirectedRetrieveToFile {
         envelope_id: envelope_id.to_owned(),
         password: password.to_owned(),
+        output_path: tmp_path.to_string_lossy().to_string(),
     };
     match daemon_request(data_dir, req).await {
-        Ok(ControlResponse::DirectedRetrieved { data, filename }) => {
-            WorkerResult::DirectedRetrieved { data, filename }
-        }
+        Ok(ControlResponse::DirectedRetrievedToFile {
+            filename,
+            bytes_written,
+            ..
+        }) => WorkerResult::DirectedRetrieved {
+            temp_path: tmp_path,
+            filename,
+            bytes_written,
+        },
         Ok(ControlResponse::Error(e)) => WorkerResult::Err(e),
         Ok(other) => WorkerResult::Err(format!("Unexpected response: {other:?}")),
         Err(e) => WorkerResult::Err(daemon_error(&e)),
