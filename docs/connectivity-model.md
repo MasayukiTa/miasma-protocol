@@ -1,7 +1,7 @@
 # Miasma Connectivity Model
 
 **Date**: 2026-03-23
-**Version**: 0.3.1 (post-directed-sharing completion)
+**Version**: 0.3.1 (post-mobile-directed-sharing)
 
 This document describes the real current network posture of each active
 surface. It is intentionally conservative.
@@ -15,10 +15,10 @@ surface. It is intentionally conservative.
 | Windows Desktop | Full network participant | Yes | Yes (complete) |
 | Web in Desktop Browser | Host-assisted bridge | Yes, via local daemon HTTP bridge | Yes (complete) |
 | Standalone Browser (no daemon) | Local-only fallback | No | No |
-| Android App | Local-only native shell | No | No |
-| Android-Hosted Web | Local-only hosted bridge | No | No |
-| iOS App | Retrieval-first groundwork | Not yet validated | No |
-| iOS-Hosted Web | Retrieval-first hosted bridge | Not yet validated | No |
+| Android App | Embedded daemon participant | Yes, via embedded daemon + HTTP bridge | Yes (send + receive) |
+| Android-Hosted Web | Daemon-assisted bridge | Yes, via embedded daemon HTTP bridge | Yes (complete via web surface) |
+| iOS App | Embedded daemon (retrieval-first) | Yes, via embedded daemon + HTTP bridge | Retrieval-first (inbox/confirm/retrieve/delete) |
+| iOS-Hosted Web | Daemon-assisted bridge | Yes, via embedded daemon HTTP bridge | Retrieval-first (via web surface) |
 
 ---
 
@@ -105,48 +105,89 @@ Current limitations:
 
 ### Android App
 
-**Classification**: Local-only native shell
+**Classification**: Embedded daemon participant
 
-Android has UI, service, and FFI groundwork, but does not yet have a completed,
-validated network-capable path for the current milestone.
+Android runs an embedded daemon within the app process via FFI. The daemon
+starts automatically with the foreground service and provides full libp2p
+networking and an HTTP bridge on `127.0.0.1`.
+
+Architecture decision: **Embedded daemon via FFI** — chosen because:
+- Reuses the proven DaemonServer + HTTP bridge infrastructure
+- No subprocess management needed (complex on Android)
+- Both native Compose UI and WebView can access the HTTP bridge
+- Same trust model as desktop (localhost-only binding)
 
 Current capabilities:
 
-- local/native app shell
-- local operations through FFI
-- hosted web surface path exists conceptually
+- embedded MiasmaNode (libp2p, DHT, peer discovery)
+- HTTP bridge on localhost (same endpoints as desktop)
+- foreground service managing daemon lifecycle
+- **directed sharing** (complete send + receive):
+  - Send screen: recipient contact, message, password, retention
+  - Inbox screen: challenge display, password-gated retrieval, state badges
+  - Outbox screen: sender confirmation with challenge code entry, revoke
+  - WebView: full directed sharing via JS bridge → HTTP bridge
+- sharing contact display for cross-device exchange
+- Keystore-backed master key wrapping
+- distress wipe (FFI + Keystore deletion)
 
 Current limitations:
 
-- no completed validated network participation in this milestone
-- **no directed sharing UI screens implemented**
-- infrastructure (FFI bridge, activity, service) exists for future integration
+- daemon binary size includes full libp2p stack
+- no persistent reconnect across app restarts (daemon restarts fresh)
+- cross-device validation requires manual testing
+- no i18n yet (English only)
 
 ### Android-Hosted Web
 
-**Classification**: Local-only hosted bridge
+**Classification**: Daemon-assisted bridge
 
-The Android-hosted web surface exists, but it does not yet expose a completed
-network-capable path equivalent to desktop-hosted web.
+The Android-hosted web surface runs in a WebView with a JavaScript bridge
+that routes directed sharing operations through the embedded daemon's HTTP
+bridge. When the daemon is running, the web surface has full directed
+sharing capability equivalent to the desktop web surface.
 
 ### iOS App
 
-**Classification**: Retrieval-first groundwork
+**Classification**: Embedded daemon (retrieval-first)
 
-iOS remains the least mature surface. It should be treated as groundwork, not
-as a validated network participant.
+iOS runs the same embedded daemon as Android, providing full networking.
+However, the UI scope is intentionally retrieval-first: iOS can receive
+and retrieve directed shares, but sending is deferred to a future milestone.
+
+Architecture decision: **Same embedded daemon as Android** — chosen because:
+- Shared FFI crate serves both platforms
+- Retrieval requires network access (DHT, peer connections)
+- Companion mode (connecting to a desktop daemon) was rejected as too fragile
+
+Current capabilities:
+
+- embedded MiasmaNode via FFI
+- HTTP bridge on localhost
+- **retrieval-first directed sharing**:
+  - Inbox tab: list incoming shares, display challenge codes, state badges
+  - Password-gated retrieval
+  - Delete envelopes
+  - Sharing contact display (for others to send to this device)
+- WebView: directed sharing via JS bridge → HTTP bridge
+- daemon lifecycle (start/stop from UI)
+- distress wipe
 
 Current limitations:
 
-- no validated end-to-end network retrieval for this milestone
-- **no directed sharing views implemented**
+- **sending directed shares not supported in this milestone** (no Send/Outbox UI)
+- no persistent daemon across app backgrounding
+- cross-device validation requires manual testing on real hardware
+- no i18n (English only)
+- FFI stubs exist for IDE navigation; real build requires Xcode + cargo cross-compilation
 
 ### iOS-Hosted Web
 
-**Classification**: Retrieval-first hosted bridge
+**Classification**: Daemon-assisted bridge
 
-Same honesty boundary as the iOS app: this is groundwork, not a validated
-network-capable surface today.
+Same as Android-hosted web: WKWebView with JS bridge routing through the
+embedded daemon's HTTP bridge. Capability matches the native iOS scope
+(retrieval-first).
 
 ---
 
@@ -158,8 +199,10 @@ network-capable surface today.
 | Windows Desktop GUI | Yes | Yes | Yes | Yes | Complete — Send/Inbox/Outbox panels |
 | Desktop Web + Daemon | Yes | Yes | Yes | Yes | Complete — all bridge endpoints wired |
 | Standalone Browser | No | No | No | No | Local-only fallback |
-| Android | No | No | No | No | Not implemented |
-| iOS | No | No | No | No | Not implemented |
+| Android Native | Yes | Yes | Yes | Yes | Complete — Send/Inbox/Outbox screens via HTTP bridge |
+| Android WebView | Yes | Yes | Yes | Yes | Complete — JS bridge → HTTP bridge |
+| iOS Native | No | No | Yes | Yes | Retrieval-first — Inbox only, no Send/Outbox |
+| iOS WebView | No | No | Yes | Yes | Retrieval-first — via JS bridge |
 
 ---
 
@@ -172,18 +215,33 @@ Today:
   challenge confirmation, password-gated retrieval, revoke, delete, inbox,
   and outbox with proper state visibility.
 - **Desktop web is a real host-assisted directed-sharing client** when a
-  local daemon is present. The outbox, sender confirmation, and inline
-  password retrieval are all available.
+  local daemon is present.
 - Standalone web remains local-only with no directed sharing.
-- **Android and iOS do not have directed sharing.** The protocol and crypto
-  infrastructure is ready for them, but no UI screens have been implemented
-  for either mobile platform.
+- **Android is a complete directed-sharing mobile surface.** The embedded
+  daemon provides full networking. Native Compose UI has Send, Inbox, and
+  Outbox screens. WebView has full directed sharing via JS bridge.
+  Windows → Android and Android → Windows directed share exchange is
+  architecturally supported.
+- **iOS is a retrieval-first directed-sharing surface.** The embedded
+  daemon provides networking. Inbox with challenge display, password-gated
+  retrieval, and delete are implemented. Sending is explicitly deferred —
+  iOS cannot initiate directed shares in this milestone.
+- **Hosted web on both Android and iOS** reflects native capability
+  honestly: Android-hosted web has full directed sharing; iOS-hosted web
+  has retrieval-first directed sharing.
 
 What changed in this pass:
 
-- Desktop GUI gained Outbox tab with sender challenge confirmation
-- Desktop GUI inbox enhanced with state badges, filename, error states
-- Web gained outbox view with sender confirmation flow
-- Web inbox replaced prompt() with inline password form
-- Security: challenge file cleanup, terminal state enforcement, inbox size limit
-- 8 new adversarial tests (136 total)
+- FFI crate gained embedded daemon support (start/stop/port/contact)
+- Android: MiasmaService starts embedded daemon with full networking
+- Android: 3 new Compose screens (SendScreen, InboxScreen, OutboxScreen)
+- Android: DirectedApi HTTP client for all directed sharing operations
+- Android: WebBridgeActivity extended with 7 directed sharing JS methods
+- Android: ViewModel extended with directed sharing state and operations
+- iOS: MiasmaViewModel gains daemon lifecycle (start/stop)
+- iOS: InboxView with challenge display, password retrieval, state badges
+- iOS: ContentView gains Inbox tab, daemon auto-start on launch
+- iOS: WebBridgeView extended with directed sharing JS methods
+- iOS: FFI stubs updated with all new function signatures
+- validate_data_dir extended to accept iOS paths (/var/mobile/, Library/)
+- Documentation updated to reflect honest mobile capability

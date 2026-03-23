@@ -7,12 +7,16 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.CloudUpload
 import androidx.compose.material.icons.outlined.CloudDownload
 import androidx.compose.material.icons.outlined.Analytics
+import androidx.compose.material.icons.outlined.Inbox
+import androidx.compose.material.icons.outlined.Outbox
+import androidx.compose.material.icons.outlined.Send
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
@@ -30,7 +34,10 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import dev.miasma.ui.DissolveScreen
 import dev.miasma.ui.HomeScreen
+import dev.miasma.ui.InboxScreen
+import dev.miasma.ui.OutboxScreen
 import dev.miasma.ui.RetrieveScreen
+import dev.miasma.ui.SendScreen
 import dev.miasma.ui.SettingsScreen
 import dev.miasma.ui.StatusScreen
 import dev.miasma.ui.theme.MiasmaTheme
@@ -58,6 +65,17 @@ class MainActivity : ComponentActivity() {
             != PackageManager.PERMISSION_GRANTED
         ) {
             requestCameraPermission.launch(Manifest.permission.CAMERA)
+        }
+
+        // Poll for daemon status to update ViewModel once daemon is ready.
+        kotlinx.coroutines.MainScope().launch {
+            while (true) {
+                val ds = MiasmaService.lastDaemonStatus
+                if (ds != null && vm.daemonHttpPort.value == 0) {
+                    vm.onDaemonStarted(ds.httpPort.toInt(), ds.sharingContact)
+                }
+                kotlinx.coroutines.delay(1_000)
+            }
         }
 
         setContent {
@@ -94,6 +112,9 @@ class MainActivity : ComponentActivity() {
                         modifier = Modifier.padding(innerPadding),
                     ) {
                         composable("home")     { HomeScreen(vm) }
+                        composable("send")     { SendScreen(vm) }
+                        composable("inbox")    { InboxScreen(vm) }
+                        composable("outbox")   { OutboxScreen(vm) }
                         composable("dissolve") { DissolveScreen(vm) }
                         composable("retrieve") { RetrieveScreen(vm) }
                         composable("status")   { StatusScreen(vm) }
@@ -109,6 +130,9 @@ private data class NavItem(val route: String, val label: String, val icon: andro
 
 private val NAV_ITEMS = listOf(
     NavItem("home",     "Home",     Icons.Outlined.Home),
+    NavItem("send",     "Send",     Icons.Outlined.Send),
+    NavItem("inbox",    "Inbox",    Icons.Outlined.Inbox),
+    NavItem("outbox",   "Outbox",   Icons.Outlined.Outbox),
     NavItem("dissolve", "Save",     Icons.Outlined.CloudUpload),
     NavItem("retrieve", "Get Back", Icons.Outlined.CloudDownload),
     NavItem("status",   "Status",   Icons.Outlined.Analytics),

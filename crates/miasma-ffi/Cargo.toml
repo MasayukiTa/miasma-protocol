@@ -13,13 +13,14 @@ crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
 miasma-core = { path = "../miasma-core" }
-tokio    = { version = "1", features = ["rt-multi-thread"] }
+tokio    = { version = "1", features = ["rt-multi-thread", "sync"] }
 uniffi   = { version = "0.28" }
 thiserror.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 x25519-dalek.workspace = true
+libp2p.workspace = true
 
 [build-dependencies]
 uniffi = { version = "0.28", features = ["build"] }
