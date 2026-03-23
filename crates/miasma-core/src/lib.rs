@@ -2,6 +2,7 @@ pub mod config;
 pub mod cover_traffic;
 pub mod crypto;
 pub mod daemon;
+pub mod directed;
 pub mod dissolution;
 pub mod error;
 pub mod network;
@@ -17,6 +18,12 @@ pub mod transport;
 
 pub use config::{default_data_dir, NodeConfig, TransportConfig};
 pub use cover_traffic::{CoverTrafficConfig, CoverTrafficEngine};
+pub use directed::{
+    create_envelope, decrypt_directed_content, decrypt_envelope_payload, derive_content_key,
+    finalize_envelope, format_sharing_contact, format_sharing_key, parse_sharing_contact,
+    parse_sharing_key, DirectedCodec, DirectedEnvelope, DirectedInbox, DirectedRequest,
+    DirectedResponse, EnvelopePayload, EnvelopeState, EnvelopeSummary, RetentionPeriod,
+};
 pub use crypto::hash::ContentId;
 pub use daemon::{
     ipc::{daemon_request, read_port_file, ControlRequest, ControlResponse, DaemonStatus},

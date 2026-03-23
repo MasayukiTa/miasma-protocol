@@ -144,6 +144,76 @@ enum Commands {
         json: bool,
     },
 
+    // ── Directed sharing ──────────────────────────────────────────────
+
+    /// Show this node's sharing key and contact string.
+    ///
+    /// Share the contact string with people who want to send you files.
+    /// Format: msk:<base58-pubkey>@<PeerId>
+    SharingKey,
+
+    /// Send a file to a specific recipient using directed private sharing.
+    ///
+    /// The file is encrypted with the recipient's public key and a password,
+    /// then dissolved into the Miasma network. The recipient must confirm
+    /// with a challenge code and provide the password to retrieve.
+    Send {
+        /// Path to the file to send.
+        path: PathBuf,
+        /// Recipient's sharing contact string (msk:...@PeerId).
+        #[arg(long)]
+        to: String,
+        /// Password the recipient must provide to retrieve the content.
+        #[arg(long)]
+        password: String,
+        /// Retention period (e.g. "24h", "7d", "30d"). Default: 7 days.
+        #[arg(long, default_value = "7d")]
+        retention: String,
+    },
+
+    /// Submit a confirmation challenge code for a received directed share.
+    ///
+    /// After receiving a directed share, a challenge code is generated.
+    /// Share this code with the sender through a side channel.
+    /// The sender submits it here to confirm delivery.
+    Confirm {
+        /// Hex-encoded envelope ID.
+        envelope_id: String,
+        /// Challenge code (XXXX-XXXX format).
+        #[arg(long)]
+        code: String,
+    },
+
+    /// Retrieve content from a confirmed directed share.
+    ///
+    /// Requires the password set by the sender.
+    Receive {
+        /// Hex-encoded envelope ID.
+        envelope_id: String,
+        /// Password set by the sender.
+        #[arg(long)]
+        password: String,
+        /// Write decrypted content to this file. If omitted, uses original filename or stdout.
+        #[arg(long, short = 'o')]
+        output: Option<PathBuf>,
+    },
+
+    /// Revoke a directed share (as sender) or delete it (as recipient).
+    ///
+    /// Performs cryptographic deletion: discards key material so content
+    /// is permanently unreadable. Underlying network shards are cleaned up
+    /// on a best-effort basis — this is NOT guaranteed physical deletion.
+    Revoke {
+        /// Hex-encoded envelope ID.
+        envelope_id: String,
+    },
+
+    /// List incoming directed shares (your inbox).
+    Inbox,
+
+    /// List outgoing directed shares (your outbox).
+    Outbox,
+
     /// Retrieve and reconstruct content from the P2P network by MID.
     NetworkGet {
         /// Miasma Content ID (format: `miasma:<base58>`).
@@ -242,6 +312,26 @@ async fn main() -> Result<()> {
         Commands::Daemon { bootstrap } => cmd_daemon(&data_dir, &bootstrap).await,
 
         Commands::Diagnostics { json } => cmd_diagnostics(&data_dir, json).await,
+
+        Commands::SharingKey => cmd_sharing_key(&data_dir).await,
+        Commands::Send {
+            path,
+            to,
+            password,
+            retention,
+        } => cmd_send(&data_dir, &path, &to, &password, &retention).await,
+        Commands::Confirm {
+            envelope_id,
+            code,
+        } => cmd_confirm(&data_dir, &envelope_id, &code).await,
+        Commands::Receive {
+            envelope_id,
+            password,
+            output,
+        } => cmd_receive(&data_dir, &envelope_id, &password, output.as_deref()).await,
+        Commands::Revoke { envelope_id } => cmd_revoke(&data_dir, &envelope_id).await,
+        Commands::Inbox => cmd_inbox(&data_dir).await,
+        Commands::Outbox => cmd_outbox(&data_dir).await,
 
         Commands::NetworkPublish {
             path,
@@ -1104,6 +1194,264 @@ async fn add_bootstrap_peers_to_server(server: &miasma_core::DaemonServer, addrs
         }
     }
     added
+}
+
+// ─── Directed sharing commands ────────────────────────────────────────────────
+
+async fn cmd_sharing_key(data_dir: &std::path::Path) -> Result<()> {
+    use miasma_core::{daemon_request, ControlRequest, ControlResponse};
+
+    match daemon_request(data_dir, ControlRequest::SharingKey).await? {
+        ControlResponse::SharingKey { key, contact } => {
+            println!("Sharing key:     {key}");
+            println!("Sharing contact: {contact}");
+            eprintln!();
+            eprintln!("Share your contact string with people who want to send you files.");
+        }
+        ControlResponse::Error(e) => bail!("daemon error: {e}"),
+        other => bail!("unexpected response: {other:?}"),
+    }
+    Ok(())
+}
+
+fn parse_retention(s: &str) -> Result<u64> {
+    let s = s.trim().to_lowercase();
+    if let Some(h) = s.strip_suffix('h') {
+        let hours: u64 = h.parse().context("invalid hours")?;
+        Ok(hours * 3600)
+    } else if let Some(d) = s.strip_suffix('d') {
+        let days: u64 = d.parse().context("invalid days")?;
+        Ok(days * 86400)
+    } else if let Some(m) = s.strip_suffix('m') {
+        let mins: u64 = m.parse().context("invalid minutes")?;
+        Ok(mins * 60)
+    } else {
+        // Try parsing as raw seconds.
+        s.parse::<u64>().context("invalid retention: use e.g. '24h', '7d', or seconds")
+    }
+}
+
+async fn cmd_send(
+    data_dir: &std::path::Path,
+    path: &std::path::Path,
+    to: &str,
+    password: &str,
+    retention: &str,
+) -> Result<()> {
+    use miasma_core::{daemon_request, ControlRequest, ControlResponse};
+
+    let data =
+        std::fs::read(path).with_context(|| format!("cannot read file: {}", path.display()))?;
+    let retention_secs = parse_retention(retention)?;
+    let filename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_owned());
+
+    eprintln!(
+        "Sending {} ({} bytes) to {} …",
+        path.display(),
+        data.len(),
+        to
+    );
+
+    let req = ControlRequest::DirectedSend {
+        recipient_contact: to.to_owned(),
+        data,
+        password: password.to_owned(),
+        retention_secs,
+        filename,
+    };
+
+    match daemon_request(data_dir, req).await? {
+        ControlResponse::DirectedSent { envelope_id } => {
+            println!("{envelope_id}");
+            eprintln!("✓ Directed share created.");
+            eprintln!("  Envelope ID: {envelope_id}");
+            eprintln!("  Waiting for recipient to generate a challenge code.");
+            eprintln!("  Then confirm with: miasma confirm {envelope_id} --code XXXX-XXXX");
+        }
+        ControlResponse::Error(e) => bail!("daemon error: {e}"),
+        other => bail!("unexpected response: {other:?}"),
+    }
+    Ok(())
+}
+
+async fn cmd_confirm(
+    data_dir: &std::path::Path,
+    envelope_id: &str,
+    code: &str,
+) -> Result<()> {
+    use miasma_core::{daemon_request, ControlRequest, ControlResponse};
+
+    eprintln!("Submitting challenge code for {envelope_id} …");
+
+    let req = ControlRequest::DirectedConfirm {
+        envelope_id: envelope_id.to_owned(),
+        challenge_code: code.to_owned(),
+    };
+
+    match daemon_request(data_dir, req).await? {
+        ControlResponse::DirectedConfirmed => {
+            eprintln!("✓ Challenge confirmed. Recipient can now retrieve the content.");
+        }
+        ControlResponse::Error(e) => bail!("challenge failed: {e}"),
+        other => bail!("unexpected response: {other:?}"),
+    }
+    Ok(())
+}
+
+async fn cmd_receive(
+    data_dir: &std::path::Path,
+    envelope_id: &str,
+    password: &str,
+    output: Option<&std::path::Path>,
+) -> Result<()> {
+    use miasma_core::{daemon_request, ControlRequest, ControlResponse};
+
+    eprintln!("Retrieving directed share {envelope_id} …");
+
+    let req = ControlRequest::DirectedRetrieve {
+        envelope_id: envelope_id.to_owned(),
+        password: password.to_owned(),
+    };
+
+    match daemon_request(data_dir, req).await? {
+        ControlResponse::DirectedRetrieved { data, filename } => {
+            // Determine output path: explicit --output > original filename > stdout.
+            let out_path = output
+                .map(|p| p.to_owned())
+                .or_else(|| filename.as_ref().map(PathBuf::from));
+
+            match out_path {
+                Some(path) => {
+                    std::fs::write(&path, &data)
+                        .with_context(|| format!("cannot write output: {}", path.display()))?;
+                    eprintln!("✓ Written to {}", path.display());
+                }
+                None => {
+                    io::stdout()
+                        .write_all(&data)
+                        .context("cannot write to stdout")?;
+                }
+            }
+        }
+        ControlResponse::Error(e) => bail!("retrieval failed: {e}"),
+        other => bail!("unexpected response: {other:?}"),
+    }
+    Ok(())
+}
+
+async fn cmd_revoke(data_dir: &std::path::Path, envelope_id: &str) -> Result<()> {
+    use miasma_core::{daemon_request, ControlRequest, ControlResponse};
+
+    eprintln!("Revoking directed share {envelope_id} …");
+
+    let req = ControlRequest::DirectedRevoke {
+        envelope_id: envelope_id.to_owned(),
+    };
+
+    match daemon_request(data_dir, req).await? {
+        ControlResponse::DirectedRevoked => {
+            eprintln!("✓ Directed share revoked. Key material discarded.");
+            eprintln!("  Content is cryptographically deleted (not guaranteed physical deletion).");
+        }
+        ControlResponse::Error(e) => bail!("revoke failed: {e}"),
+        other => bail!("unexpected response: {other:?}"),
+    }
+    Ok(())
+}
+
+async fn cmd_inbox(data_dir: &std::path::Path) -> Result<()> {
+    use miasma_core::{daemon_request, ControlRequest, ControlResponse};
+
+    match daemon_request(data_dir, ControlRequest::DirectedInbox).await? {
+        ControlResponse::DirectedInboxList(items) => {
+            if items.is_empty() {
+                println!("Inbox is empty.");
+                return Ok(());
+            }
+            println!("Directed Inbox ({} item{})", items.len(), if items.len() == 1 { "" } else { "s" });
+            println!();
+            for item in &items {
+                let age = format_age(item.created_at);
+                let expires = format_age(item.expires_at);
+                println!("  ID:        {}", item.envelope_id);
+                println!("  From:      {}", item.sender_pubkey);
+                println!("  State:     {:?}", item.state);
+                println!("  Created:   {age}");
+                println!("  Expires:   {expires}");
+                if let Some(ref code) = item.challenge_code {
+                    println!("  Challenge: {code}");
+                    eprintln!("  → Share this code with the sender for confirmation.");
+                }
+                println!();
+            }
+        }
+        ControlResponse::Error(e) => bail!("inbox error: {e}"),
+        other => bail!("unexpected response: {other:?}"),
+    }
+    Ok(())
+}
+
+async fn cmd_outbox(data_dir: &std::path::Path) -> Result<()> {
+    use miasma_core::{daemon_request, ControlRequest, ControlResponse};
+
+    match daemon_request(data_dir, ControlRequest::DirectedOutbox).await? {
+        ControlResponse::DirectedOutboxList(items) => {
+            if items.is_empty() {
+                println!("Outbox is empty.");
+                return Ok(());
+            }
+            println!("Directed Outbox ({} item{})", items.len(), if items.len() == 1 { "" } else { "s" });
+            println!();
+            for item in &items {
+                let age = format_age(item.created_at);
+                let expires = format_age(item.expires_at);
+                println!("  ID:        {}", item.envelope_id);
+                println!("  To:        {}", item.recipient_pubkey);
+                println!("  State:     {:?}", item.state);
+                println!("  Created:   {age}");
+                println!("  Expires:   {expires}");
+                println!();
+            }
+        }
+        ControlResponse::Error(e) => bail!("outbox error: {e}"),
+        other => bail!("unexpected response: {other:?}"),
+    }
+    Ok(())
+}
+
+fn format_age(epoch_secs: u64) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if epoch_secs == 0 {
+        return "unknown".into();
+    }
+    if epoch_secs > now {
+        let diff = epoch_secs - now;
+        if diff < 3600 {
+            format!("in {}m", diff / 60)
+        } else if diff < 86400 {
+            format!("in {}h", diff / 3600)
+        } else {
+            format!("in {}d", diff / 86400)
+        }
+    } else {
+        let diff = now - epoch_secs;
+        if diff < 60 {
+            "just now".into()
+        } else if diff < 3600 {
+            format!("{}m ago", diff / 60)
+        } else if diff < 86400 {
+            format!("{}h ago", diff / 3600)
+        } else {
+            format!("{}d ago", diff / 86400)
+        }
+    }
 }
 
 // ─── network-publish ──────────────────────────────────────────────────────────

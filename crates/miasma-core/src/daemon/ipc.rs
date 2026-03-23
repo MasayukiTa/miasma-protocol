@@ -51,6 +51,53 @@ pub enum ControlRequest {
     Status,
     /// Distress-wipe: destroy the master key so all shares become unreadable.
     Wipe,
+
+    // ── Directed sharing ────────────────────────────────────────────────
+
+    /// Get this node's sharing key (X25519 pubkey + PeerId).
+    SharingKey,
+
+    /// Create and send a directed share to a specific recipient.
+    DirectedSend {
+        /// Recipient's sharing contact string ("msk:...@PeerId").
+        recipient_contact: String,
+        /// Raw file data to share.
+        data: Vec<u8>,
+        /// Password for retrieval gate.
+        password: String,
+        /// Retention period in seconds.
+        retention_secs: u64,
+        /// Original filename (optional).
+        filename: Option<String>,
+    },
+
+    /// Submit the confirmation challenge for a directed share.
+    DirectedConfirm {
+        /// Hex-encoded envelope ID.
+        envelope_id: String,
+        /// Challenge code (XXXX-XXXX format).
+        challenge_code: String,
+    },
+
+    /// Retrieve content from a confirmed directed share.
+    DirectedRetrieve {
+        /// Hex-encoded envelope ID.
+        envelope_id: String,
+        /// Password entered by recipient.
+        password: String,
+    },
+
+    /// Revoke a directed share (sender) or delete (recipient).
+    DirectedRevoke {
+        /// Hex-encoded envelope ID.
+        envelope_id: String,
+    },
+
+    /// List incoming directed shares (recipient inbox).
+    DirectedInbox,
+
+    /// List outgoing directed shares (sender outbox).
+    DirectedOutbox,
 }
 
 /// Response from the daemon to a CLI client.
@@ -66,6 +113,42 @@ pub enum ControlResponse {
     /// Distress wipe completed successfully.
     Wiped,
     Error(String),
+
+    // ── Directed sharing ────────────────────────────────────────────────
+
+    /// This node's sharing key and contact string.
+    SharingKey {
+        /// Sharing key ("msk:...").
+        key: String,
+        /// Full contact string ("msk:...@PeerId").
+        contact: String,
+    },
+
+    /// Directed share created and invite sent to recipient.
+    DirectedSent {
+        /// Hex-encoded envelope ID.
+        envelope_id: String,
+    },
+
+    /// Challenge confirmed — content now retrievable by recipient.
+    DirectedConfirmed,
+
+    /// Directed share content retrieved and decrypted.
+    DirectedRetrieved {
+        /// Decrypted plaintext.
+        data: Vec<u8>,
+        /// Original filename if provided.
+        filename: Option<String>,
+    },
+
+    /// Directed share revoked/deleted.
+    DirectedRevoked,
+
+    /// Inbox listing (incoming directed shares).
+    DirectedInboxList(Vec<crate::directed::EnvelopeSummary>),
+
+    /// Outbox listing (outgoing directed shares).
+    DirectedOutboxList(Vec<crate::directed::EnvelopeSummary>),
 }
 
 /// Snapshot of daemon state — returned for `miasma status` and IPC calls.

@@ -34,6 +34,16 @@ use miasma_core::network::path_selection::{AnonymityPolicy, PathSelector};
 use miasma_core::network::peer_state::PeerRegistry;
 use miasma_core::network::routing::{IpPrefix, RoutingTable};
 
+use miasma_core::directed::{
+    create_envelope, decrypt_directed_content, decrypt_envelope_payload, derive_content_key,
+    finalize_envelope, format_sharing_contact, format_sharing_key, parse_sharing_contact,
+    parse_sharing_key, DirectedEnvelope, DirectedInbox, DirectedRequest, DirectedResponse,
+    EnvelopeState, RetentionPeriod,
+};
+use miasma_core::directed::challenge::{
+    generate_challenge, verify_challenge, CHALLENGE_MAX_ATTEMPTS,
+};
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 fn test_issuer() -> CredentialIssuer {
@@ -4272,5 +4282,612 @@ async fn dht_fire_and_forget_backpressure() {
     assert!(
         r4.is_ok(),
         "forwarding verification must not block on full channel"
+    );
+}
+
+// ─── Directed Sharing — Helpers ─────────────────────────────────────────────
+
+/// Generate deterministic sender/recipient key pairs for directed sharing tests.
+fn directed_test_keys() -> ([u8; 32], [u8; 32], [u8; 32], [u8; 32]) {
+    let sender_secret_raw =
+        miasma_core::crypto::keyderive::derive_sharing_key(b"sender-master-key-32bytes-pad!!!")
+            .unwrap();
+    let sender_static = x25519_dalek::StaticSecret::from(*sender_secret_raw);
+    let sender_pubkey = x25519_dalek::PublicKey::from(&sender_static);
+
+    let recipient_secret_raw =
+        miasma_core::crypto::keyderive::derive_sharing_key(b"recip-master-key-32bytes-padd!!")
+            .unwrap();
+    let recipient_static = x25519_dalek::StaticSecret::from(*recipient_secret_raw);
+    let recipient_pubkey = x25519_dalek::PublicKey::from(&recipient_static);
+
+    (
+        *sender_secret_raw,
+        *sender_pubkey.as_bytes(),
+        *recipient_secret_raw,
+        *recipient_pubkey.as_bytes(),
+    )
+}
+
+/// Build a minimal test envelope without Argon2id cost for state-transition tests.
+fn make_directed_test_envelope() -> DirectedEnvelope {
+    DirectedEnvelope {
+        envelope_id: [0x42u8; 32],
+        version: 1,
+        sender_pubkey: [0x01u8; 32],
+        recipient_pubkey: [0x02u8; 32],
+        ephemeral_pubkey: [0x03u8; 32],
+        encrypted_payload: vec![0x04; 64],
+        payload_nonce: [0x05u8; 24],
+        password_salt: [0x06u8; 32],
+        expires_at: u64::MAX,
+        created_at: 1000,
+        state: EnvelopeState::Pending,
+        challenge_hash: None,
+        password_attempts_remaining: 3,
+        challenge_attempts_remaining: 3,
+        challenge_expires_at: 0,
+        retention_secs: 86400,
+    }
+}
+
+// ─── Directed Sharing — Adversarial / Integration Tests ─────────────────────
+
+/// 1. Full envelope crypto roundtrip:
+/// create_envelope → decrypt_envelope_payload → derive_content_key → decrypt_directed_content.
+///
+/// NOTE: finalize_envelope currently has a key-mismatch bug (uses sender static
+/// key instead of ephemeral key for ECDH), so we test the core crypto path
+/// without finalize. A separate test documents the finalize issue.
+#[test]
+fn directed_envelope_crypto_roundtrip() {
+    let (sender_secret, _sender_pub, recipient_secret, recipient_pub) = directed_test_keys();
+    let plaintext = b"Confidential document contents - roundtrip test";
+
+    let (envelope, protected, _envelope_key) = create_envelope(
+        &sender_secret,
+        &recipient_pub,
+        "strong-password-42",
+        RetentionPeriod::OneDay,
+        plaintext,
+        Some("secret.pdf".to_string()),
+    )
+    .unwrap();
+
+    // Recipient decrypts payload (no password needed) — uses ephemeral ECDH.
+    let payload = decrypt_envelope_payload(&recipient_secret, &envelope).unwrap();
+    // MID is empty placeholder before finalize.
+    assert_eq!(payload.mid, "");
+    assert_eq!(payload.filename, Some("secret.pdf".to_string()));
+    assert_eq!(payload.file_size, plaintext.len() as u64);
+    assert_eq!(payload.data_shards, 10);
+    assert_eq!(payload.total_shards, 20);
+
+    // Recipient derives content key with password and decrypts content.
+    let content_key =
+        derive_content_key(&recipient_secret, &envelope, "strong-password-42").unwrap();
+    let decrypted =
+        decrypt_directed_content(&content_key, &payload.content_nonce, &protected).unwrap();
+    assert_eq!(decrypted, plaintext);
+}
+
+/// 1b. finalize_envelope updates the envelope payload with MID and shard params.
+/// The envelope_key returned by create_envelope is used to decrypt/re-encrypt
+/// the payload, ensuring key consistency (ephemeral ECDH key is preserved).
+#[test]
+fn directed_finalize_envelope_roundtrip() {
+    let (sender_secret, _sender_pub, recipient_secret, recipient_pub) = directed_test_keys();
+
+    let (mut envelope, protected, envelope_key) = create_envelope(
+        &sender_secret,
+        &recipient_pub,
+        "password",
+        RetentionPeriod::OneDay,
+        b"data",
+        None,
+    )
+    .unwrap();
+
+    let mid = format!("miasma:{}", bs58::encode(&protected[..8]).into_string());
+    finalize_envelope(&mut envelope, &envelope_key, &mid, 10, 20).unwrap();
+
+    // Recipient can decrypt the finalized payload and see the MID.
+    let payload = decrypt_envelope_payload(&recipient_secret, &envelope).unwrap();
+    assert_eq!(payload.mid, mid);
+    assert_eq!(payload.data_shards, 10);
+    assert_eq!(payload.total_shards, 20);
+}
+
+/// 2. Wrong password must fail content decryption (AEAD tag mismatch).
+#[test]
+fn directed_wrong_password_rejection() {
+    let (sender_secret, _, recipient_secret, recipient_pub) = directed_test_keys();
+    let plaintext = b"Secret!";
+
+    let (envelope, protected, _envelope_key) = create_envelope(
+        &sender_secret,
+        &recipient_pub,
+        "correct-password",
+        RetentionPeriod::OneHour,
+        plaintext,
+        None,
+    )
+    .unwrap();
+
+    let payload = decrypt_envelope_payload(&recipient_secret, &envelope).unwrap();
+
+    // Derive key with wrong password.
+    let wrong_key =
+        derive_content_key(&recipient_secret, &envelope, "wrong-password").unwrap();
+    let result = decrypt_directed_content(&wrong_key, &payload.content_nonce, &protected);
+    assert!(
+        result.is_err(),
+        "decryption with wrong password must fail"
+    );
+}
+
+/// 3. Wrong recipient key must fail envelope payload decryption.
+#[test]
+fn directed_wrong_recipient_rejection() {
+    let (sender_secret, _, _recipient_secret, recipient_pub) = directed_test_keys();
+
+    let (envelope, _protected, _envelope_key) = create_envelope(
+        &sender_secret,
+        &recipient_pub,
+        "password",
+        RetentionPeriod::OneHour,
+        b"data",
+        None,
+    )
+    .unwrap();
+
+    // A different recipient tries to decrypt.
+    let wrong_secret =
+        miasma_core::crypto::keyderive::derive_sharing_key(b"wrong-master-key-32bytes-pad!!!!")
+            .unwrap();
+    let result = decrypt_envelope_payload(&wrong_secret, &envelope);
+    assert!(
+        result.is_err(),
+        "wrong recipient key must not decrypt payload"
+    );
+}
+
+/// 4. Challenge generation → verification roundtrip.
+#[test]
+fn directed_challenge_generation_and_verification() {
+    let (code, hash) = generate_challenge();
+
+    // Correct code verifies.
+    assert!(verify_challenge(&code, &hash));
+
+    // Wrong code does not verify.
+    assert!(!verify_challenge("ZZZZ-YYYY", &hash));
+}
+
+/// 5. Challenge normalization: verify that lowercase, missing hyphen,
+/// and whitespace-padded inputs all verify correctly.
+#[test]
+fn directed_challenge_normalization_variants() {
+    let (code, hash) = generate_challenge();
+
+    // Without hyphen.
+    let no_hyphen = code.replace('-', "");
+    assert!(verify_challenge(&no_hyphen, &hash));
+
+    // Lowercase.
+    assert!(verify_challenge(&code.to_lowercase(), &hash));
+
+    // Extra whitespace.
+    let spaced = format!("  {}  ", code);
+    assert!(verify_challenge(&spaced, &hash));
+
+    // Lowercase + no hyphen.
+    let lowercase_no_hyphen = no_hyphen.to_lowercase();
+    assert!(verify_challenge(&lowercase_no_hyphen, &hash));
+}
+
+/// 6. Challenge attempt exhaustion: exceeding CHALLENGE_MAX_ATTEMPTS
+/// should be trackable by the envelope's counter.
+#[test]
+fn directed_challenge_attempt_exhaustion() {
+    let mut envelope = make_directed_test_envelope();
+    envelope.state = EnvelopeState::ChallengeIssued;
+    let (code, hash) = generate_challenge();
+    envelope.challenge_hash = Some(hash);
+    envelope.challenge_attempts_remaining = CHALLENGE_MAX_ATTEMPTS;
+
+    // Simulate wrong attempts.
+    for _ in 0..CHALLENGE_MAX_ATTEMPTS {
+        let valid = verify_challenge("ZZZZ-YYYY", &envelope.challenge_hash.unwrap());
+        assert!(!valid);
+        envelope.challenge_attempts_remaining -= 1;
+    }
+
+    assert_eq!(envelope.challenge_attempts_remaining, 0);
+
+    // Transition to ChallengeFailed.
+    envelope.state = EnvelopeState::ChallengeFailed;
+    assert!(envelope.state.is_terminal());
+
+    // The correct code should still verify cryptographically, but the
+    // state machine should prevent it.
+    assert!(verify_challenge(&code, &hash));
+    assert_eq!(
+        envelope.state,
+        EnvelopeState::ChallengeFailed,
+        "state must remain terminal even if code is correct after exhaustion"
+    );
+}
+
+/// 7. RetentionPeriod serialization roundtrip through serde (JSON).
+#[test]
+fn directed_retention_period_serde_roundtrip() {
+    let variants = [
+        RetentionPeriod::TenMinutes,
+        RetentionPeriod::OneHour,
+        RetentionPeriod::OneDay,
+        RetentionPeriod::SevenDays,
+        RetentionPeriod::ThirtyDays,
+        RetentionPeriod::Custom(12345),
+    ];
+
+    for v in &variants {
+        let json = serde_json::to_string(v).unwrap();
+        let roundtripped: RetentionPeriod = serde_json::from_str(&json).unwrap();
+        assert_eq!(*v, roundtripped);
+    }
+
+    // Also verify bincode roundtrip.
+    for v in &variants {
+        let bytes = bincode::serialize(v).unwrap();
+        let roundtripped: RetentionPeriod = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(*v, roundtripped);
+    }
+}
+
+/// 8. Envelope state transitions: Pending → ChallengeIssued → Confirmed → Retrieved.
+#[test]
+fn directed_envelope_state_transitions() {
+    let mut env = make_directed_test_envelope();
+
+    // Pending — not terminal, not retrievable.
+    assert_eq!(env.state, EnvelopeState::Pending);
+    assert!(!env.state.is_terminal());
+    assert!(!env.state.is_retrievable());
+
+    // → ChallengeIssued.
+    env.state = EnvelopeState::ChallengeIssued;
+    assert!(!env.state.is_terminal());
+    assert!(!env.state.is_retrievable());
+
+    // → Confirmed.
+    env.state = EnvelopeState::Confirmed;
+    assert!(!env.state.is_terminal());
+    assert!(env.state.is_retrievable());
+
+    // → Retrieved (terminal).
+    env.state = EnvelopeState::Retrieved;
+    assert!(env.state.is_terminal());
+    assert!(!env.state.is_retrievable());
+
+    // Verify all terminal states.
+    for terminal in &[
+        EnvelopeState::Retrieved,
+        EnvelopeState::SenderRevoked,
+        EnvelopeState::RecipientDeleted,
+        EnvelopeState::Expired,
+        EnvelopeState::ChallengeFailed,
+        EnvelopeState::PasswordFailed,
+    ] {
+        assert!(terminal.is_terminal(), "{:?} should be terminal", terminal);
+    }
+
+    // Only Confirmed is retrievable.
+    for non_retrievable in &[
+        EnvelopeState::Pending,
+        EnvelopeState::ChallengeIssued,
+        EnvelopeState::Retrieved,
+        EnvelopeState::SenderRevoked,
+        EnvelopeState::Expired,
+    ] {
+        assert!(
+            !non_retrievable.is_retrievable(),
+            "{:?} should not be retrievable",
+            non_retrievable
+        );
+    }
+}
+
+/// 9. Sharing key format roundtrip: format_sharing_key → parse_sharing_key.
+#[test]
+fn directed_sharing_key_format_roundtrip() {
+    // Test with various key patterns.
+    let keys: Vec<[u8; 32]> = vec![
+        [0x00u8; 32],
+        [0xFFu8; 32],
+        [0x42u8; 32],
+        {
+            let mut k = [0u8; 32];
+            for (i, b) in k.iter_mut().enumerate() {
+                *b = i as u8;
+            }
+            k
+        },
+    ];
+
+    for key in &keys {
+        let formatted = format_sharing_key(key);
+        assert!(formatted.starts_with("msk:"), "must start with msk:");
+        let parsed = parse_sharing_key(&formatted).unwrap();
+        assert_eq!(&parsed, key);
+    }
+
+    // Invalid prefix.
+    assert!(parse_sharing_key("xyz:AAAA").is_err());
+    // Invalid base58.
+    assert!(parse_sharing_key("msk:0OlI!!!").is_err());
+}
+
+/// 10. Sharing contact format roundtrip: format_sharing_contact → parse_sharing_contact.
+#[test]
+fn directed_sharing_contact_format_roundtrip() {
+    let key = [0x42u8; 32];
+    let peer_id = "12D3KooWRq3dVmhA7z4YQQ2Q1Y9F2dKSTestPeerId";
+
+    let contact = format_sharing_contact(&key, peer_id);
+    assert!(contact.starts_with("msk:"));
+    assert!(contact.contains('@'));
+
+    let (parsed_key, parsed_peer) = parse_sharing_contact(&contact).unwrap();
+    assert_eq!(parsed_key, key);
+    assert_eq!(parsed_peer, peer_id);
+
+    // Invalid: no @ separator.
+    assert!(parse_sharing_contact("msk:AAAA").is_err());
+    // Invalid: no prefix.
+    assert!(parse_sharing_contact("AAAA@PeerId").is_err());
+}
+
+/// 11. Inbox storage roundtrip: save → load → list for both incoming and outgoing.
+#[test]
+fn directed_inbox_storage_roundtrip() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let inbox = DirectedInbox::open(tmp.path()).unwrap();
+
+    let mut env1 = make_directed_test_envelope();
+    env1.envelope_id = [0x01; 32];
+    env1.created_at = 100;
+
+    let mut env2 = make_directed_test_envelope();
+    env2.envelope_id = [0x02; 32];
+    env2.created_at = 200;
+
+    // Save outgoing.
+    inbox.save_outgoing(&env1).unwrap();
+    inbox.save_outgoing(&env2).unwrap();
+
+    // Load outgoing by ID.
+    let loaded = inbox.load_outgoing(&env1.id_hex()).unwrap();
+    assert_eq!(loaded.envelope_id, env1.envelope_id);
+    assert_eq!(loaded.state, EnvelopeState::Pending);
+
+    // List outgoing (sorted by created_at desc).
+    let list = inbox.list_outgoing();
+    assert_eq!(list.len(), 2);
+    assert!(list[0].created_at >= list[1].created_at);
+
+    // Save incoming.
+    inbox.save_incoming(&env1).unwrap();
+    inbox.save_incoming(&env2).unwrap();
+
+    // Load incoming.
+    let loaded = inbox.load_incoming(&env2.id_hex()).unwrap();
+    assert_eq!(loaded.envelope_id, env2.envelope_id);
+
+    // List incoming.
+    let list = inbox.list_incoming();
+    assert_eq!(list.len(), 2);
+
+    // Update state and verify persistence.
+    let updated = inbox
+        .update_incoming_state(&env1.id_hex(), EnvelopeState::Confirmed)
+        .unwrap();
+    assert_eq!(updated.state, EnvelopeState::Confirmed);
+
+    let reloaded = inbox.load_incoming(&env1.id_hex()).unwrap();
+    assert_eq!(reloaded.state, EnvelopeState::Confirmed);
+
+    // Delete and verify gone.
+    inbox.delete_incoming(&env1.id_hex()).unwrap();
+    assert!(inbox.load_incoming(&env1.id_hex()).is_err());
+}
+
+/// 12. Expired envelope detection.
+#[test]
+fn directed_envelope_expiry_detection() {
+    let mut env = make_directed_test_envelope();
+    env.created_at = 1000;
+    env.expires_at = 2000;
+
+    // Not expired at creation time.
+    assert!(!env.is_expired(1000));
+    assert!(!env.is_expired(1999));
+
+    // Expired at or after expires_at.
+    assert!(env.is_expired(2000));
+    assert!(env.is_expired(3000));
+
+    // check_expiry transitions state.
+    assert_eq!(env.state, EnvelopeState::Pending);
+    env.check_expiry(2001);
+    assert_eq!(env.state, EnvelopeState::Expired);
+    assert!(env.state.is_terminal());
+
+    // check_expiry does NOT overwrite a terminal state.
+    let mut env2 = make_directed_test_envelope();
+    env2.expires_at = 2000;
+    env2.state = EnvelopeState::Retrieved;
+    env2.check_expiry(3000);
+    assert_eq!(
+        env2.state,
+        EnvelopeState::Retrieved,
+        "terminal state must not be overwritten by expiry"
+    );
+}
+
+/// 13. DirectedCodec serde roundtrip: each DirectedRequest/DirectedResponse
+/// variant through bincode.
+#[test]
+fn directed_codec_serde_roundtrip() {
+    let test_env = make_directed_test_envelope();
+
+    // --- Requests ---
+    let requests: Vec<DirectedRequest> = vec![
+        DirectedRequest::Invite {
+            envelope: test_env.clone(),
+        },
+        DirectedRequest::Confirm {
+            envelope_id: [0xAA; 32],
+            challenge_code: "ABCD-1234".to_string(),
+        },
+        DirectedRequest::SenderRevoke {
+            envelope_id: [0xBB; 32],
+        },
+        DirectedRequest::StatusQuery {
+            envelope_id: [0xCC; 32],
+        },
+    ];
+
+    for req in &requests {
+        let bytes = bincode::serialize(req).unwrap();
+        let deserialized: DirectedRequest = bincode::deserialize(&bytes).unwrap();
+        // Verify discriminant survives roundtrip by re-serializing.
+        let bytes2 = bincode::serialize(&deserialized).unwrap();
+        assert_eq!(bytes, bytes2, "request bincode roundtrip must be stable");
+    }
+
+    // --- Responses ---
+    let responses: Vec<DirectedResponse> = vec![
+        DirectedResponse::InviteAccepted {
+            envelope_id: [0xDD; 32],
+        },
+        DirectedResponse::Confirmed {
+            envelope_id: [0xEE; 32],
+        },
+        DirectedResponse::ChallengeFailed {
+            envelope_id: [0xFF; 32],
+            attempts_remaining: 2,
+        },
+        DirectedResponse::Revoked {
+            envelope_id: [0x11; 32],
+        },
+        DirectedResponse::Status {
+            envelope_id: [0x22; 32],
+            state: EnvelopeState::Confirmed,
+        },
+        DirectedResponse::Error("test error".to_string()),
+    ];
+
+    for resp in &responses {
+        let bytes = bincode::serialize(resp).unwrap();
+        let deserialized: DirectedResponse = bincode::deserialize(&bytes).unwrap();
+        let bytes2 = bincode::serialize(&deserialized).unwrap();
+        assert_eq!(bytes, bytes2, "response bincode roundtrip must be stable");
+    }
+}
+
+/// 14. Envelope tampering detection: modify encrypted payload, verify decryption fails.
+#[test]
+fn directed_envelope_tampering_detection() {
+    let (sender_secret, _, recipient_secret, recipient_pub) = directed_test_keys();
+
+    let (mut envelope, _protected, _envelope_key) = create_envelope(
+        &sender_secret,
+        &recipient_pub,
+        "password",
+        RetentionPeriod::OneHour,
+        b"tamper-test-data",
+        None,
+    )
+    .unwrap();
+
+    // Tamper with the encrypted payload (flip a byte).
+    let payload_len = envelope.encrypted_payload.len();
+    assert!(payload_len > 0);
+    envelope.encrypted_payload[payload_len / 2] ^= 0xFF;
+
+    // Payload decryption must fail (AEAD tag check).
+    let result = decrypt_envelope_payload(&recipient_secret, &envelope);
+    assert!(
+        result.is_err(),
+        "tampered payload must fail AEAD decryption"
+    );
+
+    // Restore payload, tamper with protected content instead.
+    let (envelope2, mut protected2, _envelope_key2) = create_envelope(
+        &sender_secret,
+        &recipient_pub,
+        "password2",
+        RetentionPeriod::OneHour,
+        b"tamper-test-content",
+        None,
+    )
+    .unwrap();
+
+    let payload2 = decrypt_envelope_payload(&recipient_secret, &envelope2).unwrap();
+    let content_key = derive_content_key(&recipient_secret, &envelope2, "password2").unwrap();
+
+    // Flip a byte in protected content.
+    let mid_idx = protected2.len() / 2;
+    protected2[mid_idx] ^= 0xFF;
+    let result =
+        decrypt_directed_content(&content_key, &payload2.content_nonce, &protected2);
+    assert!(
+        result.is_err(),
+        "tampered content must fail AEAD decryption"
+    );
+}
+
+/// 15. Password salt uniqueness: two envelopes with the same password
+/// must have different salts.
+#[test]
+fn directed_password_salt_uniqueness() {
+    let (sender_secret, _, _, recipient_pub) = directed_test_keys();
+
+    let (env1, _, _key1) = create_envelope(
+        &sender_secret,
+        &recipient_pub,
+        "same-password",
+        RetentionPeriod::OneHour,
+        b"data1",
+        None,
+    )
+    .unwrap();
+
+    let (env2, _, _key2) = create_envelope(
+        &sender_secret,
+        &recipient_pub,
+        "same-password",
+        RetentionPeriod::OneHour,
+        b"data2",
+        None,
+    )
+    .unwrap();
+
+    assert_ne!(
+        env1.password_salt, env2.password_salt,
+        "salts must be unique per envelope (random)"
+    );
+
+    // Envelope IDs must also differ.
+    assert_ne!(
+        env1.envelope_id, env2.envelope_id,
+        "envelope IDs must be unique (random)"
+    );
+
+    // Ephemeral pubkeys must differ (different ECDH sessions).
+    assert_ne!(
+        env1.ephemeral_pubkey, env2.ephemeral_pubkey,
+        "ephemeral keys must be unique per envelope"
     );
 }

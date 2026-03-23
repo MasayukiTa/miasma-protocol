@@ -105,6 +105,9 @@ struct BridgeState {
     proxy_configured: bool,
     proxy_type: Option<String>,
     obfs_quic_port: u16,
+    sharing_secret: [u8; 32],
+    sharing_pubkey: [u8; 32],
+    data_dir: std::path::PathBuf,
 }
 
 // ─── HttpBridge ──────────────────────────────────────────────────────────────
@@ -117,6 +120,7 @@ pub struct HttpBridge {
 impl HttpBridge {
     /// Bind the HTTP bridge.  Tries `preferred_port` first, falls back to
     /// OS-assigned if that port is occupied.
+    #[allow(clippy::too_many_arguments)]
     pub async fn bind(
         preferred_port: u16,
         coord: Arc<MiasmaCoordinator>,
@@ -128,6 +132,9 @@ impl HttpBridge {
         proxy_configured: bool,
         proxy_type: Option<String>,
         obfs_quic_port: u16,
+        sharing_secret: [u8; 32],
+        sharing_pubkey: [u8; 32],
+        data_dir: std::path::PathBuf,
     ) -> Result<Self> {
         let listener = match TcpListener::bind(format!("127.0.0.1:{preferred_port}")).await {
             Ok(l) => l,
@@ -152,6 +159,9 @@ impl HttpBridge {
             proxy_configured,
             proxy_type,
             obfs_quic_port,
+            sharing_secret,
+            sharing_pubkey,
+            data_dir,
         };
 
         Ok(Self { listener, state })
@@ -225,15 +235,43 @@ async fn handle(
 
         (Method::POST, "/api/wipe") => handle_wipe(state).await,
 
+        // ── Directed sharing endpoints ──────────────────────────────────
+        (Method::GET, "/api/sharing-key") => handle_sharing_key(state).await,
+
+        (Method::POST, "/api/directed/send") => match read_body(req).await {
+            Ok(body) => handle_directed_send(body, state).await,
+            Err(e) => json_error(StatusCode::BAD_REQUEST, &e.to_string()),
+        },
+
+        (Method::POST, "/api/directed/confirm") => match read_body(req).await {
+            Ok(body) => handle_directed_confirm(body, state).await,
+            Err(e) => json_error(StatusCode::BAD_REQUEST, &e.to_string()),
+        },
+
+        (Method::POST, "/api/directed/retrieve") => match read_body(req).await {
+            Ok(body) => handle_directed_retrieve(body, state).await,
+            Err(e) => json_error(StatusCode::BAD_REQUEST, &e.to_string()),
+        },
+
+        (Method::POST, "/api/directed/revoke") => match read_body(req).await {
+            Ok(body) => handle_directed_revoke(body, state).await,
+            Err(e) => json_error(StatusCode::BAD_REQUEST, &e.to_string()),
+        },
+
+        (Method::GET, "/api/directed/inbox") => handle_directed_inbox(state).await,
+
+        (Method::GET, "/api/directed/outbox") => handle_directed_outbox(state).await,
+
         _ => json_error(StatusCode::NOT_FOUND, "not found"),
     };
 
     Ok(cors(resp))
 }
 
-async fn handle_status(state: BridgeState) -> Response<Full<Bytes>> {
-    let resp = process_request(
-        ControlRequest::Status,
+/// Send a ControlRequest through process_request with all bridge state params.
+async fn bridge_request(state: BridgeState, req: ControlRequest) -> ControlResponse {
+    process_request(
+        req,
         state.coord,
         state.queue,
         state.store,
@@ -243,8 +281,15 @@ async fn handle_status(state: BridgeState) -> Response<Full<Bytes>> {
         state.proxy_configured,
         state.proxy_type,
         state.obfs_quic_port,
+        state.sharing_secret,
+        state.sharing_pubkey,
+        state.data_dir,
     )
-    .await;
+    .await
+}
+
+async fn handle_status(state: BridgeState) -> Response<Full<Bytes>> {
+    let resp = bridge_request(state, ControlRequest::Status).await;
 
     match resp {
         ControlResponse::Status(status) => json_ok(&status),
@@ -264,21 +309,13 @@ async fn handle_publish(body: Bytes, state: BridgeState) -> Response<Full<Bytes>
         Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("invalid base64: {e}")),
     };
 
-    let resp = process_request(
+    let resp = bridge_request(
+        state,
         ControlRequest::Publish {
             data,
             data_shards: req.data_shards,
             total_shards: req.total_shards,
         },
-        state.coord,
-        state.queue,
-        state.store,
-        state.listen_addrs,
-        state.wss_port,
-        state.wss_tls_enabled,
-        state.proxy_configured,
-        state.proxy_type,
-        state.obfs_quic_port,
     )
     .await;
 
@@ -295,21 +332,13 @@ async fn handle_retrieve(body: Bytes, state: BridgeState) -> Response<Full<Bytes
         Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("invalid JSON: {e}")),
     };
 
-    let resp = process_request(
+    let resp = bridge_request(
+        state,
         ControlRequest::Get {
             mid: req.mid,
             data_shards: req.data_shards,
             total_shards: req.total_shards,
         },
-        state.coord,
-        state.queue,
-        state.store,
-        state.listen_addrs,
-        state.wss_port,
-        state.wss_tls_enabled,
-        state.proxy_configured,
-        state.proxy_type,
-        state.obfs_quic_port,
     )
     .await;
 
@@ -323,22 +352,181 @@ async fn handle_retrieve(body: Bytes, state: BridgeState) -> Response<Full<Bytes
 }
 
 async fn handle_wipe(state: BridgeState) -> Response<Full<Bytes>> {
-    let resp = process_request(
-        ControlRequest::Wipe,
-        state.coord,
-        state.queue,
-        state.store,
-        state.listen_addrs,
-        state.wss_port,
-        state.wss_tls_enabled,
-        state.proxy_configured,
-        state.proxy_type,
-        state.obfs_quic_port,
-    )
-    .await;
+    let resp = bridge_request(state, ControlRequest::Wipe).await;
 
     match resp {
         ControlResponse::Wiped => json_ok(&OkResponse { ok: true }),
+        ControlResponse::Error(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+        _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "unexpected response"),
+    }
+}
+
+// ─── Directed sharing HTTP types ─────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct DirectedSendRequest {
+    recipient_contact: String,
+    data: String, // base64
+    password: String,
+    retention_secs: u64,
+    #[serde(default)]
+    filename: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DirectedSendResponse {
+    envelope_id: String,
+}
+
+#[derive(Deserialize)]
+struct DirectedConfirmRequest {
+    envelope_id: String,
+    challenge_code: String,
+}
+
+#[derive(Deserialize)]
+struct DirectedRetrieveRequest {
+    envelope_id: String,
+    password: String,
+}
+
+#[derive(Serialize)]
+struct DirectedRetrieveResponse {
+    data: String, // base64
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filename: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DirectedRevokeRequest {
+    envelope_id: String,
+}
+
+#[derive(Serialize)]
+struct SharingKeyResponse {
+    key: String,
+    contact: String,
+}
+
+// ─── Directed sharing HTTP handlers ─────────────────────────────────────────
+
+async fn handle_sharing_key(state: BridgeState) -> Response<Full<Bytes>> {
+    let resp = bridge_request(state, ControlRequest::SharingKey).await;
+    match resp {
+        ControlResponse::SharingKey { key, contact } => {
+            json_ok(&SharingKeyResponse { key, contact })
+        }
+        ControlResponse::Error(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+        _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "unexpected response"),
+    }
+}
+
+async fn handle_directed_send(body: Bytes, state: BridgeState) -> Response<Full<Bytes>> {
+    let req: DirectedSendRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("invalid JSON: {e}")),
+    };
+    let data = match B64.decode(&req.data) {
+        Ok(d) => d,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("invalid base64: {e}")),
+    };
+    let resp = bridge_request(
+        state,
+        ControlRequest::DirectedSend {
+            recipient_contact: req.recipient_contact,
+            data,
+            password: req.password,
+            retention_secs: req.retention_secs,
+            filename: req.filename,
+        },
+    )
+    .await;
+    match resp {
+        ControlResponse::DirectedSent { envelope_id } => {
+            json_ok(&DirectedSendResponse { envelope_id })
+        }
+        ControlResponse::Error(e) => json_error(StatusCode::BAD_REQUEST, &e),
+        _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "unexpected response"),
+    }
+}
+
+async fn handle_directed_confirm(body: Bytes, state: BridgeState) -> Response<Full<Bytes>> {
+    let req: DirectedConfirmRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("invalid JSON: {e}")),
+    };
+    let resp = bridge_request(
+        state,
+        ControlRequest::DirectedConfirm {
+            envelope_id: req.envelope_id,
+            challenge_code: req.challenge_code,
+        },
+    )
+    .await;
+    match resp {
+        ControlResponse::DirectedConfirmed => json_ok(&OkResponse { ok: true }),
+        ControlResponse::Error(e) => json_error(StatusCode::BAD_REQUEST, &e),
+        _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "unexpected response"),
+    }
+}
+
+async fn handle_directed_retrieve(body: Bytes, state: BridgeState) -> Response<Full<Bytes>> {
+    let req: DirectedRetrieveRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("invalid JSON: {e}")),
+    };
+    let resp = bridge_request(
+        state,
+        ControlRequest::DirectedRetrieve {
+            envelope_id: req.envelope_id,
+            password: req.password,
+        },
+    )
+    .await;
+    match resp {
+        ControlResponse::DirectedRetrieved { data, filename } => {
+            json_ok(&DirectedRetrieveResponse {
+                data: B64.encode(&data),
+                filename,
+            })
+        }
+        ControlResponse::Error(e) => json_error(StatusCode::BAD_REQUEST, &e),
+        _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "unexpected response"),
+    }
+}
+
+async fn handle_directed_revoke(body: Bytes, state: BridgeState) -> Response<Full<Bytes>> {
+    let req: DirectedRevokeRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("invalid JSON: {e}")),
+    };
+    let resp = bridge_request(
+        state,
+        ControlRequest::DirectedRevoke {
+            envelope_id: req.envelope_id,
+        },
+    )
+    .await;
+    match resp {
+        ControlResponse::DirectedRevoked => json_ok(&OkResponse { ok: true }),
+        ControlResponse::Error(e) => json_error(StatusCode::BAD_REQUEST, &e),
+        _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "unexpected response"),
+    }
+}
+
+async fn handle_directed_inbox(state: BridgeState) -> Response<Full<Bytes>> {
+    let resp = bridge_request(state, ControlRequest::DirectedInbox).await;
+    match resp {
+        ControlResponse::DirectedInboxList(entries) => json_ok(&entries),
+        ControlResponse::Error(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+        _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "unexpected response"),
+    }
+}
+
+async fn handle_directed_outbox(state: BridgeState) -> Response<Full<Bytes>> {
+    let resp = bridge_request(state, ControlRequest::DirectedOutbox).await;
+    match resp {
+        ControlResponse::DirectedOutboxList(entries) => json_ok(&entries),
         ControlResponse::Error(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
         _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "unexpected response"),
     }

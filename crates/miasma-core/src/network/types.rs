@@ -78,6 +78,13 @@ pub enum TopologyEvent {
     PeerRoutable { peer_id: PeerId },
     /// A peer disconnected.
     PeerDisconnected { peer_id: PeerId },
+    /// A directed envelope was received from a peer over the P2P protocol.
+    DirectedEnvelopeReceived {
+        peer_id: PeerId,
+        envelope: Box<crate::directed::envelope::DirectedEnvelope>,
+    },
+    /// A sender revoked a directed share over the P2P protocol.
+    DirectedRevokeReceived { envelope_id: [u8; 32] },
 }
 
 impl TopologyEvent {
