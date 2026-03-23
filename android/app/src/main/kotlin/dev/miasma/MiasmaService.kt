@@ -7,9 +7,13 @@ import android.content.Context
 import android.content.Intent
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import dev.miasma.uniffi.EmbeddedDaemonStatus
 import dev.miasma.uniffi.NodeStatusFfi
 import dev.miasma.uniffi.getNodeStatus
 import dev.miasma.uniffi.initializeNode
+import dev.miasma.uniffi.startEmbeddedDaemon
+import dev.miasma.uniffi.stopEmbeddedDaemon
+import dev.miasma.uniffi.isDaemonRunning
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -42,13 +46,16 @@ class MiasmaService : Service() {
             // Ensure Android Keystore wrapping key exists.
             try { KeystoreHelper.ensureKey() } catch (_: Exception) { }
 
-            // Initialise node (idempotent).
+            // Start the embedded daemon (initialises node + networking + HTTP bridge).
             try {
-                initializeNode(dataDir, storageMb, bandwidthMbDay)
+                val daemonStatus = startEmbeddedDaemon(dataDir, storageMb, bandwidthMbDay)
+                updateNotification("Connected · port ${daemonStatus.httpPort}")
+                // Notify the ViewModel if the activity is active.
+                lastDaemonStatus = daemonStatus
             } catch (e: Exception) {
-                updateNotification("Init error: ${e.message}")
-                stopSelf()
-                return@launch
+                updateNotification("Daemon error: ${e.message}")
+                // Fall back to local-only initialisation.
+                try { initializeNode(dataDir, storageMb, bandwidthMbDay) } catch (_: Exception) { }
             }
 
             // Poll status and update the notification every 30 s.
@@ -65,6 +72,8 @@ class MiasmaService : Service() {
     }
 
     override fun onDestroy() {
+        // Stop the embedded daemon gracefully.
+        try { stopEmbeddedDaemon() } catch (_: Exception) { }
         scope.cancel()
         super.onDestroy()
     }
@@ -115,6 +124,11 @@ class MiasmaService : Service() {
         private const val EXTRA_BANDWIDTH_MB_DAY = "bandwidth_mb_day"
         private const val DEFAULT_STORAGE_MB = 512L
         private const val DEFAULT_BANDWIDTH_MB_DAY = 100L
+
+        /** Last daemon status, accessible from ViewModel to get HTTP port. */
+        @Volatile
+        var lastDaemonStatus: EmbeddedDaemonStatus? = null
+            private set
 
         fun startNode(
             context: Context,

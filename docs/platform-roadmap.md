@@ -23,21 +23,21 @@
 - **Key constraint**: Completely self-contained — no miasma-core dependency, no networking, local-only share storage. Share transfer between devices is manual (export/import only)
 - **Product scope decision**: Local-only dissolution tool. Future networking deferred pending architecture decision (WebRTC, relay, or companion mode)
 
-### Android — Foundation Stage
+### Android — Network-Capable Mobile Node
 
-- **Audience**: Developers building the mobile path
-- **Maturity**: Foundation (security-audited, buildable, not user-validated)
-- **What it can do**: Initialize node, dissolve/retrieve via FFI (local shares only), node status, distress wipe, Compose UI with 5 screens, background service, Keystore helper (not yet wired to FFI key lifecycle)
-- **What it should not claim**: Network connectivity, peer discovery, cross-device retrieval, production key management
-- **Key constraint**: FFI wraps local-only operations — no libp2p/DHT/networking exposed through FFI boundary
+- **Audience**: Mobile users participating in directed sharing
+- **Maturity**: Foundation (embedded daemon implemented, cross-device validation pending)
+- **What it can do**: Initialize node, embedded daemon with full libp2p networking, HTTP bridge on localhost, dissolve/retrieve (local + network), **directed private sharing** (send, confirm, retrieve, revoke, inbox, outbox — native Compose UI + WebView), Compose UI with 8 screens, foreground service managing daemon lifecycle, Keystore-backed master key, distress wipe
+- **What it should not claim**: Cross-device validation proven, production key management, persistent background networking
+- **Architecture**: Embedded daemon via FFI — MiasmaNode + DaemonServer + HTTP bridge run within the app process. Native UI and WebView both use HTTP bridge at 127.0.0.1.
 
-### iOS — Retrieval-First Groundwork
+### iOS — Retrieval-First Network Client
 
-- **Audience**: Future retrieval-only mobile client
-- **Maturity**: Stub (Swift bindings generated, app shell exists)
-- **What it can do**: Build target for aarch64-apple-ios, SwiftUI app shell with ViewModel, FFI bindings generated
-- **What it should not claim**: Any functional capability — retrieval not yet wired, no validation performed
-- **Key constraint**: Depends on same FFI as Android; retrieval-first by design (not a full node)
+- **Audience**: Mobile recipients of directed shares
+- **Maturity**: Foundation (embedded daemon implemented, real device validation pending)
+- **What it can do**: Embedded daemon with full libp2p networking, HTTP bridge, **retrieval-first directed sharing** (inbox with challenge display, password-gated retrieval, delete), sharing contact display, SwiftUI app with 6 tabs (Home, Inbox, Dissolve, Retrieve, Status, Web), daemon lifecycle management, distress wipe
+- **What it should not claim**: Sending directed shares (intentionally deferred), persistent background daemon, production validation
+- **Key constraint**: Retrieval-first by design — can receive and retrieve directed shares but cannot send them in this milestone
 
 ---
 
@@ -45,22 +45,22 @@
 
 | Capability | Windows | Web/PWA | Android | iOS |
 |---|---|---|---|---|
-| Initialize | Real | N/A | Real (FFI) | Stub |
-| Status/health | Real | N/A | Real (FFI) | Stub |
-| Dissolve/store | Real | Real (WASM) | Real (FFI) | Stub |
-| Retrieve/get | Real | Real (local) | Real (FFI, local) | Stub |
+| Initialize | Real | N/A | Real (FFI+daemon) | Real (FFI+daemon) |
+| Status/health | Real | N/A | Real (FFI+daemon) | Real (FFI+daemon) |
+| Dissolve/store | Real | Real (WASM) | Real (FFI+daemon) | Real (FFI+daemon) |
+| Retrieve/get | Real | Real (local) | Real (FFI+daemon, local+network) | Real (FFI+daemon, local+network) |
 | Diagnostics export | Real | Unsupported | Unsupported | Unsupported |
 | Localization (i18n) | Real (3 locales) | Partial (JS i18n) | Unsupported | Unsupported |
 | Import flows | Real (magnet/torrent) | Unsupported | Unsupported | Unsupported |
 | Shell/share integration | Real (registry) | Unsupported | Unsupported | Unsupported |
-| Background behavior | Real (daemon) | Partial (SW) | Foundation (service) | Unsupported |
-| Same-network discovery | Real (mDNS) | Unsupported | Unsupported | Unsupported |
-| External peer retrieval | Partial (DHT) | Unsupported | Unsupported | Unsupported |
+| Background behavior | Real (daemon) | Partial (SW) | Real (foreground service+daemon) | Foundation (embedded daemon) |
+| Same-network discovery | Real (mDNS) | Unsupported | Partial (libp2p mDNS via daemon) | Partial (libp2p mDNS via daemon) |
+| External peer retrieval | Partial (DHT) | Unsupported | Partial (DHT via daemon) | Partial (DHT via daemon) |
 | Release packaging | Real (MSI/EXE/ZIP) | N/A (static site) | Foundation (APK) | Stub (Xcode) |
 | Security posture | Audited + hardened | Audited + hardened | Audited (1 critical open) | Not audited |
-| Distress wipe | Real | Unsupported | Real (FFI) | Stub |
-| Cross-device retrieval | Partial (mDNS+DHT) | Unsupported | Unsupported | Unsupported |
-| Directed private sharing | Real (CLI+GUI+Web) | Real (Web+Daemon) | Unsupported | Unsupported |
+| Distress wipe | Real | Unsupported | Real (FFI+Keystore) | Real (FFI) |
+| Cross-device retrieval | Partial (mDNS+DHT) | Unsupported | Partial (daemon networking) | Partial (daemon networking) |
+| Directed private sharing | Real (CLI+GUI+Web) | Real (Web+Daemon) | Real (Native+WebView) | Partial (retrieval-first, Inbox only) |
 
 **Legend**: Real = validated and working. Partial = implemented but not fully validated. Foundation = code exists, not user-testable. Stub = binding/shell only. Unsupported = intentionally absent.
 
@@ -82,19 +82,20 @@
 3. Code signing certificate (eliminates SmartScreen friction)
 4. External tester distribution via `windows-broader-tester-expansion.md`
 
-### Milestone 2: Android First Serious Mobile Milestone
+### Milestone 2: Android Cross-Device Validation *(architecture decided, directed sharing implemented)*
 
-**Why now**: FFI foundation exists and has been security-audited. Android is the designated first-class mobile node. The biggest gap is networking — FFI currently exposes zero network capabilities.
+**Status**: Embedded daemon architecture chosen and implemented. Full directed sharing UI (Send/Inbox/Outbox) in native Compose + WebView. Remaining work is cross-device validation.
 
-**What it unlocks**: Mobile dissolution/retrieval proof-of-concept with real networking. Foundation for cross-platform retrieval (phone ↔ desktop).
+**What it unlocks**: Proven Windows↔Android directed share exchange. Confidence that the embedded daemon approach works on real devices.
 
-**What it postpones**: iOS retrieval client, web networking, Android production key management.
+**What it postpones**: Android production hardening (persistent reconnect, i18n), App Store distribution.
 
 **Concrete tasks**:
-1. Complete `android-mobile-node-foundation.md` (reproducible build, real app shell)
-2. Complete `android-staged-validation.md` (build → emulator → device → network)
-3. Wire Keystore wrapping into FFI key lifecycle (C-1 from security audit)
-4. Evaluate: expose limited networking through FFI (bootstrap + status) or embed miasma-core daemon as subprocess
+1. ~~Evaluate networking architecture~~ → **DECIDED: embedded daemon via FFI**
+2. ~~Implement directed sharing UI~~ → **DONE: Send/Inbox/Outbox screens + WebView bridge**
+3. Complete `android-staged-validation.md` (build → emulator → device → network)
+4. Wire Keystore wrapping into FFI key lifecycle (C-1 from security audit)
+5. Cross-device validation: Windows→Android and Android→Windows directed share exchange
 
 ### Milestone 3: Web Scope Hardening and Honest Positioning
 
@@ -110,19 +111,19 @@
 3. If future-networked: design relay/WebRTC bridge architecture (ADR needed)
 4. Browser compatibility testing (Chrome, Firefox, Edge, Safari WASM support)
 
-### Milestone 4: iOS Retrieval-First Closure
+### Milestone 4: iOS Cross-Device Validation *(architecture decided, retrieval-first implemented)*
 
-**Why now**: iOS is the least mature surface. It depends on the same FFI as Android, so Android milestone work directly benefits iOS.
+**Status**: Embedded daemon implemented (shared FFI with Android). Retrieval-first UI (Inbox with challenge display, password retrieval, delete) in SwiftUI + WebView. Sending intentionally deferred.
 
-**What it unlocks**: Basic retrieval capability on iPhone/iPad. Proof that the FFI boundary works for both mobile platforms.
+**What it unlocks**: Proven Windows→iOS directed share retrieval. Validated retrieval-first product surface.
 
-**What it postpones**: Full iOS node, iOS-specific features, App Store distribution.
+**What it postpones**: iOS sending support, App Store distribution, i18n.
 
 **Concrete tasks**:
-1. Complete `ios-retrieval-client-foundation.md`
-2. Complete `ios-staged-validation.md`
-3. Wire FFI retrieve_bytes through SwiftUI
-4. Test on real device (simulator first)
+1. ~~Implement retrieval-first UI~~ → **DONE: Inbox tab + WebView bridge**
+2. Complete `ios-staged-validation.md` (simulator → device → retrieval loop)
+3. Cross-device validation: Windows→iOS directed share retrieval
+4. Real device testing (Xcode + cargo cross-compilation required)
 
 ### Milestone 5: Shared Protocol/Support/Release Convergence
 
@@ -152,17 +153,14 @@
 
 - **miasma-core**: Full networking (libp2p, DHT, relay, onion, trust). Desktop/daemon only.
 - **miasma-wasm**: Browser-compatible reimplementation. No networking. WASM memory model.
-- **miasma-ffi**: UniFFI bridge exposing local-only operations to Kotlin/Swift. No networking.
+- **miasma-ffi**: UniFFI bridge exposing local operations + embedded daemon (full networking) to Kotlin/Swift.
 - **miasma-desktop**: egui GUI. Windows-specific (fonts, registry, CREATE_NO_WINDOW).
 - **miasma-bridge**: BitTorrent import. Desktop/CLI only.
 
 ### What should be unified next
 
 1. **Cross-platform test vectors**: A shared set of known-good dissolution/retrieval vectors to verify protocol compatibility across miasma-core, miasma-wasm, and miasma-ffi.
-2. **FFI networking**: The biggest gap. Android/iOS cannot participate in the network. Options:
-   - Expose limited libp2p through FFI (complex, large binary)
-   - Run miasma-core as embedded daemon process (simpler, proven on Windows)
-   - Relay-only retrieval via HTTP API (simplest, requires server)
+2. **FFI networking**: ~~The biggest gap.~~ **RESOLVED** — embedded daemon via FFI chosen and implemented. MiasmaNode + DaemonServer + HTTP bridge run within the app process. Both Android and iOS use this architecture.
 
 ---
 
@@ -223,7 +221,7 @@ The 0.3.0 → 0.3.0 upgrade issue (same version, different binaries with mDNS fi
 ## 7. What Should NOT Be Worked On Yet
 
 1. **Web networking** — Requires fundamental architecture decision (WebRTC, relay server, or hybrid). Not worth designing until web product scope is defined.
-2. **iOS full node** — iOS is retrieval-first by design. Full node adds complexity without clear user value on iOS.
+2. **iOS sending support** — iOS is retrieval-first by design. The embedded daemon has full capability, but Send/Outbox UI is explicitly deferred. Adding it now would blur the product distinction.
 3. **Code signing** — Important for tester expansion but does not block current validation work. Should happen between Milestone 1 cross-device validation and external distribution.
 4. **Constant-rate traffic shaping** — Listed in README roadmap but is a deep protocol change. No user-facing value until cross-network retrieval is proven.
 5. **External security audit** — Premature until cross-device validation is complete and the product surface is stable.
@@ -236,9 +234,9 @@ The 0.3.0 → 0.3.0 upgrade issue (same version, different binaries with mDNS fi
 | Platform | Next Task | Existing Task File |
 |---|---|---|
 | Windows | Complete Stage 1 cross-device validation (mDNS fix deployed, retry pending) | `docs/tasks/windows-staged-cross-device-validation.md` |
-| Android | Reproducible build + real app shell | `docs/tasks/android-mobile-node-foundation.md` |
+| Android | Cross-device directed sharing validation (Windows↔Android exchange) | `docs/tasks/android-staged-validation.md` |
 | Web | Define product scope (local-only vs future-networked) | None — needs new decision, not a task file |
-| iOS | Retrieval client foundation | `docs/tasks/ios-retrieval-client-foundation.md` |
+| iOS | Cross-device retrieval validation (Windows→iOS directed share retrieval) | `docs/tasks/ios-staged-validation.md` |
 
 ---
 
@@ -250,15 +248,19 @@ Windows Stage 1-3 validation
         └── Code signing
             └── External tester distribution
 
-Android foundation
-    └── Android staged validation
-        └── FFI networking decision (subprocess vs embedded vs relay)
-            └── Cross-device mobile retrieval
+Android directed sharing (DONE: embedded daemon + native UI + WebView)
+    └── Android cross-device validation (Windows↔Android exchange)
+        └── Android production hardening (persistent reconnect, i18n)
+
+iOS retrieval-first (DONE: embedded daemon + Inbox UI + WebView)
+    └── iOS cross-device validation (Windows→iOS retrieval)
+        └── iOS sending support (future milestone)
 
 Web scope decision
     └── (if local-only) Documentation + browser testing
     └── (if networked) Relay architecture ADR
 
-iOS foundation
-    └── iOS staged validation (depends on FFI maturity from Android work)
+Cross-platform convergence (depends on Android + iOS validation)
+    └── Shared test vectors (WASM ↔ core ↔ FFI)
+    └── Unified version stamp and release cadence
 ```

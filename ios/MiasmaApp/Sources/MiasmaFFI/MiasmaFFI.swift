@@ -22,16 +22,32 @@ public struct NodeStatusFfi {
     public let bootstrapCount: UInt64
 }
 
+public struct EmbeddedDaemonStatus {
+    public let httpPort: UInt16
+    public let peerId: String
+    public let sharingContact: String
+}
+
+public struct EnvelopeSummaryFfi {
+    public let id: String
+    public let senderKey: String
+    public let state: String
+    public let challengeCode: String?
+    public let createdAt: UInt64
+    public let expiresAt: UInt64
+}
+
 // MARK: - Errors
 
 public enum MiasmaFfiError: Error {
     case notInitialized(dataDir: String)
     case invalidMid(reason: String)
     case insufficientShares(need: UInt64, got: UInt64)
+    case inputTooLarge(size: UInt64, max: UInt64)
     case other(msg: String)
 }
 
-// MARK: - Functions (stubs)
+// MARK: - Core functions (stubs)
 
 public func initializeNode(dataDir: String, storageMb: UInt64, bandwidthMbDay: UInt64) throws {
     throw MiasmaFfiError.other(msg: "Generated FFI not loaded — run cargo build + uniffi-bindgen")
@@ -50,5 +66,45 @@ public func getNodeStatus(dataDir: String) throws -> NodeStatusFfi {
 }
 
 public func distressWipe(dataDir: String) throws {
+    throw MiasmaFfiError.other(msg: "Generated FFI not loaded")
+}
+
+// MARK: - Embedded daemon functions (stubs)
+
+public func startEmbeddedDaemon(dataDir: String, storageMb: UInt64, bandwidthMbDay: UInt64) throws -> EmbeddedDaemonStatus {
+    throw MiasmaFfiError.other(msg: "Generated FFI not loaded")
+}
+
+public func stopEmbeddedDaemon() {
+    // No-op in stub
+}
+
+public func getDaemonHttpPort() -> UInt16 {
+    return 0
+}
+
+public func isDaemonRunning() -> Bool {
+    return false
+}
+
+public func getSharingContact() -> String {
+    return ""
+}
+
+// MARK: - Directed sharing functions (stubs)
+
+public func getSharingKey(dataDir: String) throws -> String {
+    throw MiasmaFfiError.other(msg: "Generated FFI not loaded")
+}
+
+public func listDirectedInbox(dataDir: String) throws -> [EnvelopeSummaryFfi] {
+    throw MiasmaFfiError.other(msg: "Generated FFI not loaded")
+}
+
+public func listDirectedOutbox(dataDir: String) throws -> [EnvelopeSummaryFfi] {
+    throw MiasmaFfiError.other(msg: "Generated FFI not loaded")
+}
+
+public func deleteDirectedEnvelope(dataDir: String, envelopeId: String) throws {
     throw MiasmaFfiError.other(msg: "Generated FFI not loaded")
 }
