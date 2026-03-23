@@ -231,6 +231,239 @@ export class MiasmaBridge {
     return false;
   }
 
+  /** Get this node's sharing key and contact string. Returns { key, contact } or null. */
+  async sharingKey() {
+    if (this._mode === MODE_LOCAL) return null;
+
+    if (this._mode === MODE_WEBVIEW) {
+      try {
+        const result = await Promise.resolve(window.miasma.sharingKey());
+        const parsed = typeof result === 'string' ? JSON.parse(result) : result;
+        if (parsed.error) return null;
+        return { key: parsed.key, contact: parsed.contact };
+      } catch (_) { return null; }
+    }
+
+    if (this._mode === MODE_HTTP) {
+      try {
+        const resp = await fetch(`${HTTP_BRIDGE_URL}/api/sharing-key`, {
+          method: 'GET',
+        });
+        if (!resp.ok) return null;
+        const data = await resp.json();
+        return { key: data.key, contact: data.contact };
+      } catch (_) { return null; }
+    }
+
+    return null;
+  }
+
+  /**
+   * Send a directed share.
+   * @param {string} recipientContact - msk:... contact
+   * @param {Uint8Array} data - file content
+   * @param {string} password
+   * @param {number} retentionSecs
+   * @param {string|null} filename
+   * @returns {{ envelope_id: string }}
+   */
+  async directedSend(recipientContact, data, password, retentionSecs, filename) {
+    if (this._mode === MODE_LOCAL) {
+      throw new Error('Not available in local mode');
+    }
+
+    const b64 = arrayBufferToBase64(data);
+
+    if (this._mode === MODE_WEBVIEW) {
+      try {
+        const result = await Promise.resolve(
+          window.miasma.directedSend(recipientContact, b64, password, retentionSecs, filename)
+        );
+        const parsed = typeof result === 'string' ? JSON.parse(result) : result;
+        if (parsed.error) throw new Error(parsed.error);
+        return { envelope_id: parsed.envelope_id };
+      } catch (e) {
+        throw new Error(`Directed send failed: ${e.message}`);
+      }
+    }
+
+    if (this._mode === MODE_HTTP) {
+      try {
+        const resp = await fetch(`${HTTP_BRIDGE_URL}/api/directed/send`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            recipient_contact: recipientContact,
+            data: b64,
+            password,
+            retention_secs: retentionSecs,
+            filename,
+          }),
+        });
+        const result = await resp.json();
+        if (result.error) throw new Error(result.error);
+        return { envelope_id: result.envelope_id };
+      } catch (e) {
+        throw new Error(`Directed send failed: ${e.message}`);
+      }
+    }
+  }
+
+  /**
+   * Confirm a directed share with challenge code.
+   * @param {string} envelopeId
+   * @param {string} challengeCode
+   * @returns {boolean}
+   */
+  async directedConfirm(envelopeId, challengeCode) {
+    if (this._mode === MODE_LOCAL) return false;
+
+    if (this._mode === MODE_WEBVIEW) {
+      try {
+        const result = await Promise.resolve(
+          window.miasma.directedConfirm(envelopeId, challengeCode)
+        );
+        const parsed = typeof result === 'string' ? JSON.parse(result) : result;
+        return parsed.ok === true;
+      } catch (_) { return false; }
+    }
+
+    if (this._mode === MODE_HTTP) {
+      try {
+        const resp = await fetch(`${HTTP_BRIDGE_URL}/api/directed/confirm`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ envelope_id: envelopeId, challenge_code: challengeCode }),
+        });
+        const result = await resp.json();
+        return result.ok === true;
+      } catch (_) { return false; }
+    }
+
+    return false;
+  }
+
+  /**
+   * Retrieve directed share content.
+   * @param {string} envelopeId
+   * @param {string} password
+   * @returns {{ data: Uint8Array, filename: string }}
+   */
+  async directedRetrieve(envelopeId, password) {
+    if (this._mode === MODE_LOCAL) {
+      throw new Error('Not available in local mode');
+    }
+
+    if (this._mode === MODE_WEBVIEW) {
+      try {
+        const result = await Promise.resolve(
+          window.miasma.directedRetrieve(envelopeId, password)
+        );
+        const parsed = typeof result === 'string' ? JSON.parse(result) : result;
+        if (parsed.error) throw new Error(parsed.error);
+        return { data: base64ToArrayBuffer(parsed.data), filename: parsed.filename };
+      } catch (e) {
+        throw new Error(`Directed retrieve failed: ${e.message}`);
+      }
+    }
+
+    if (this._mode === MODE_HTTP) {
+      try {
+        const resp = await fetch(`${HTTP_BRIDGE_URL}/api/directed/retrieve`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ envelope_id: envelopeId, password }),
+        });
+        const result = await resp.json();
+        if (result.error) throw new Error(result.error);
+        return { data: base64ToArrayBuffer(result.data), filename: result.filename };
+      } catch (e) {
+        throw new Error(`Directed retrieve failed: ${e.message}`);
+      }
+    }
+  }
+
+  /**
+   * Revoke a directed share.
+   * @param {string} envelopeId
+   * @returns {boolean}
+   */
+  async directedRevoke(envelopeId) {
+    if (this._mode === MODE_LOCAL) return false;
+
+    if (this._mode === MODE_WEBVIEW) {
+      try {
+        const result = await Promise.resolve(window.miasma.directedRevoke(envelopeId));
+        const parsed = typeof result === 'string' ? JSON.parse(result) : result;
+        return parsed.ok === true;
+      } catch (_) { return false; }
+    }
+
+    if (this._mode === MODE_HTTP) {
+      try {
+        const resp = await fetch(`${HTTP_BRIDGE_URL}/api/directed/revoke`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ envelope_id: envelopeId }),
+        });
+        const result = await resp.json();
+        return result.ok === true;
+      } catch (_) { return false; }
+    }
+
+    return false;
+  }
+
+  /** List inbox items. Returns array of envelope objects. */
+  async directedInbox() {
+    if (this._mode === MODE_LOCAL) return [];
+
+    if (this._mode === MODE_WEBVIEW) {
+      try {
+        const result = await Promise.resolve(window.miasma.directedInbox());
+        const parsed = typeof result === 'string' ? JSON.parse(result) : result;
+        return Array.isArray(parsed) ? parsed : [];
+      } catch (_) { return []; }
+    }
+
+    if (this._mode === MODE_HTTP) {
+      try {
+        const resp = await fetch(`${HTTP_BRIDGE_URL}/api/directed/inbox`, {
+          method: 'GET',
+        });
+        if (!resp.ok) return [];
+        return await resp.json();
+      } catch (_) { return []; }
+    }
+
+    return [];
+  }
+
+  /** List outbox items. Returns array of envelope objects. */
+  async directedOutbox() {
+    if (this._mode === MODE_LOCAL) return [];
+
+    if (this._mode === MODE_WEBVIEW) {
+      try {
+        const result = await Promise.resolve(window.miasma.directedOutbox());
+        const parsed = typeof result === 'string' ? JSON.parse(result) : result;
+        return Array.isArray(parsed) ? parsed : [];
+      } catch (_) { return []; }
+    }
+
+    if (this._mode === MODE_HTTP) {
+      try {
+        const resp = await fetch(`${HTTP_BRIDGE_URL}/api/directed/outbox`, {
+          method: 'GET',
+        });
+        if (!resp.ok) return [];
+        return await resp.json();
+      } catch (_) { return []; }
+    }
+
+    return [];
+  }
+
   /** Try to reconnect if currently disconnected. */
   async reconnect() {
     await this.init(this._wasm);

@@ -29,12 +29,14 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+#[allow(unused_imports)]
 use libp2p::PeerId;
 use tokio::{net::TcpListener, sync::mpsc, task::JoinHandle, time::Duration};
 use tracing::{debug, info, warn};
 
 use crate::{
     config::TransportConfig,
+    directed::{self, DirectedInbox},
     network::{
         coordinator::MiasmaCoordinator,
         node::MiasmaNode,
@@ -88,6 +90,10 @@ pub struct DaemonServer {
     /// Port the HTTP bridge is bound to (0 if not started).
     #[allow(dead_code)]
     http_bridge_port: u16,
+    /// X25519 sharing secret (derived from master key).
+    sharing_secret: [u8; 32],
+    /// X25519 sharing public key.
+    sharing_pubkey: [u8; 32],
     // Single-consumer resources moved into run():
     listener: Option<TcpListener>,
     rep_success_rx: Option<mpsc::Receiver<[u8; 32]>>,
@@ -296,7 +302,27 @@ impl DaemonServer {
 
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
-        // 9. Bind HTTP bridge for web client access.
+        // 9. Derive sharing key from master.key for directed sharing.
+        let (sharing_secret, sharing_pubkey) = {
+            let master_key_path = data_dir.join("master.key");
+            match std::fs::read(&master_key_path) {
+                Ok(bytes) if bytes.len() == 32 => {
+                    let mut mk = [0u8; 32];
+                    mk.copy_from_slice(&bytes);
+                    match crate::crypto::keyderive::derive_sharing_key(&mk) {
+                        Ok(secret) => {
+                            let static_secret = x25519_dalek::StaticSecret::from(*secret);
+                            let pubkey = x25519_dalek::PublicKey::from(&static_secret);
+                            (*secret, *pubkey.as_bytes())
+                        }
+                        Err(_) => ([0u8; 32], [0u8; 32]),
+                    }
+                }
+                _ => ([0u8; 32], [0u8; 32]),
+            }
+        };
+
+        // 10. Bind HTTP bridge for web client access.
         let http_bridge_port = match http_bridge::HttpBridge::bind(
             ipc::HTTP_BRIDGE_DEFAULT_PORT,
             coord.clone(),
@@ -308,6 +334,9 @@ impl DaemonServer {
             proxy_configured,
             proxy_type.clone(),
             obfs_quic_port,
+            sharing_secret,
+            sharing_pubkey,
+            data_dir.clone(),
         )
         .await
         {
@@ -347,6 +376,8 @@ impl DaemonServer {
             proxy_type,
             obfs_quic_port,
             http_bridge_port,
+            sharing_secret,
+            sharing_pubkey,
             listener: Some(listener),
             rep_success_rx: Some(rep_rx),
             topology_rx: Some(topo_rx),
@@ -441,6 +472,9 @@ impl DaemonServer {
         let ipc_proxy = self.proxy_configured;
         let ipc_proxy_type = self.proxy_type.clone();
         let ipc_obfs = self.obfs_quic_port;
+        let ipc_sharing_secret = self.sharing_secret;
+        let ipc_sharing_pubkey = self.sharing_pubkey;
+        let ipc_data_dir = self.data_dir.clone();
         let ipc_handle: JoinHandle<()> = tokio::spawn(async move {
             ipc_server_loop(
                 listener,
@@ -453,6 +487,9 @@ impl DaemonServer {
                 ipc_proxy,
                 ipc_proxy_type,
                 ipc_obfs,
+                ipc_sharing_secret,
+                ipc_sharing_pubkey,
+                ipc_data_dir,
             )
             .await;
         });
@@ -460,8 +497,9 @@ impl DaemonServer {
         // ── Event-driven replication engine ───────────────────────────────────
         let rep_coord = coord.clone();
         let rep_queue = queue.clone();
+        let rep_data_dir = self.data_dir.clone();
         let rep_handle: JoinHandle<()> = tokio::spawn(async move {
-            replication_engine(rep_coord, rep_queue, rep_success_rx, topology_rx).await;
+            replication_engine(rep_coord, rep_queue, rep_success_rx, topology_rx, rep_data_dir).await;
         });
 
         // ── Wait for shutdown ─────────────────────────────────────────────────
@@ -491,6 +529,9 @@ async fn ipc_server_loop(
     proxy_configured: bool,
     proxy_type: Option<String>,
     obfs_quic_port: u16,
+    sharing_secret: [u8; 32],
+    sharing_pubkey: [u8; 32],
+    data_dir: PathBuf,
 ) {
     loop {
         match listener.accept().await {
@@ -505,8 +546,13 @@ async fn ipc_server_loop(
                 let pc = proxy_configured;
                 let pt = proxy_type.clone();
                 let oq = obfs_quic_port;
+                let ss = sharing_secret;
+                let sp = sharing_pubkey;
+                let dd = data_dir.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_ipc_client(stream, c, q, s, la, wp, wt, pc, pt, oq).await
+                    if let Err(e) =
+                        handle_ipc_client(stream, c, q, s, la, wp, wt, pc, pt, oq, ss, sp, dd)
+                            .await
                     {
                         debug!("IPC client error: {e}");
                     }
@@ -531,6 +577,9 @@ async fn handle_ipc_client(
     proxy_configured: bool,
     proxy_type: Option<String>,
     obfs_quic_port: u16,
+    sharing_secret: [u8; 32],
+    sharing_pubkey: [u8; 32],
+    data_dir: PathBuf,
 ) -> Result<()> {
     let req: ControlRequest = read_frame(&mut stream).await?;
     let resp = process_request(
@@ -544,6 +593,9 @@ async fn handle_ipc_client(
         proxy_configured,
         proxy_type,
         obfs_quic_port,
+        sharing_secret,
+        sharing_pubkey,
+        data_dir,
     )
     .await;
     write_frame(&mut stream, &resp).await?;
@@ -561,6 +613,9 @@ pub(crate) async fn process_request(
     proxy_configured: bool,
     proxy_type: Option<String>,
     obfs_quic_port: u16,
+    sharing_secret: [u8; 32],
+    sharing_pubkey: [u8; 32],
+    data_dir: PathBuf,
 ) -> ControlResponse {
     match req {
         ControlRequest::Publish {
@@ -770,7 +825,351 @@ pub(crate) async fn process_request(
             }
             Err(e) => ControlResponse::Error(format!("wipe failed: {e}")),
         },
+
+        // ── Directed sharing ────────────────────────────────────────────
+        ControlRequest::SharingKey => {
+            let key = directed::format_sharing_key(&sharing_pubkey);
+            let contact =
+                directed::format_sharing_contact(&sharing_pubkey, &coord.peer_id().to_string());
+            ControlResponse::SharingKey { key, contact }
+        }
+
+        ControlRequest::DirectedSend {
+            recipient_contact,
+            data,
+            password,
+            retention_secs,
+            filename,
+        } => {
+            match process_directed_send(
+                &sharing_secret,
+                &recipient_contact,
+                &data,
+                &password,
+                retention_secs,
+                filename,
+                &coord,
+                &queue,
+                &store,
+                &listen_addrs,
+                &data_dir,
+            )
+            .await
+            {
+                Ok(envelope_id) => ControlResponse::DirectedSent { envelope_id },
+                Err(e) => ControlResponse::Error(e.to_string()),
+            }
+        }
+
+        ControlRequest::DirectedConfirm {
+            envelope_id,
+            challenge_code,
+        } => match process_directed_confirm(&envelope_id, &challenge_code, &data_dir) {
+            Ok(_) => ControlResponse::DirectedConfirmed,
+            Err(e) => ControlResponse::Error(e.to_string()),
+        },
+
+        ControlRequest::DirectedRetrieve {
+            envelope_id,
+            password,
+        } => {
+            match process_directed_retrieve(
+                &sharing_secret,
+                &envelope_id,
+                &password,
+                &coord,
+                &data_dir,
+            )
+            .await
+            {
+                Ok((data, filename)) => ControlResponse::DirectedRetrieved { data, filename },
+                Err(e) => ControlResponse::Error(e.to_string()),
+            }
+        }
+
+        ControlRequest::DirectedRevoke { envelope_id } => {
+            match process_directed_revoke(&envelope_id, &sharing_pubkey, &data_dir) {
+                Ok(_) => ControlResponse::DirectedRevoked,
+                Err(e) => ControlResponse::Error(e.to_string()),
+            }
+        }
+
+        ControlRequest::DirectedInbox => {
+            let inbox = match DirectedInbox::open(&data_dir) {
+                Ok(i) => i,
+                Err(e) => return ControlResponse::Error(format!("inbox open failed: {e}")),
+            };
+            let now = now_secs();
+            inbox.expire_all(now);
+            ControlResponse::DirectedInboxList(inbox.list_incoming())
+        }
+
+        ControlRequest::DirectedOutbox => {
+            let inbox = match DirectedInbox::open(&data_dir) {
+                Ok(i) => i,
+                Err(e) => return ControlResponse::Error(format!("outbox open failed: {e}")),
+            };
+            let now = now_secs();
+            inbox.expire_all(now);
+            ControlResponse::DirectedOutboxList(inbox.list_outgoing())
+        }
     }
+}
+
+// ─── Directed sharing helpers ────────────────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+async fn process_directed_send(
+    sender_secret: &[u8; 32],
+    recipient_contact: &str,
+    data: &[u8],
+    password: &str,
+    retention_secs: u64,
+    filename: Option<String>,
+    coord: &MiasmaCoordinator,
+    queue: &Arc<Mutex<ReplicationQueue>>,
+    store: &LocalShareStore,
+    listen_addrs: &[String],
+    data_dir: &std::path::Path,
+) -> Result<String, MiasmaError> {
+    // Parse recipient contact.
+    let (recipient_pubkey, _peer_id_str) = directed::parse_sharing_contact(recipient_contact)?;
+
+    // Create envelope and protected data.
+    let retention = directed::RetentionPeriod::Custom(retention_secs);
+    let (mut envelope, protected_data, envelope_key) = directed::create_envelope(
+        sender_secret,
+        &recipient_pubkey,
+        password,
+        retention,
+        data,
+        filename,
+    )?;
+
+    // Dissolve protected data and publish to network.
+    let params = DissolutionParams {
+        data_shards: 10,
+        total_shards: 20,
+    };
+    let mid_str = publish_content(&protected_data, params, coord, queue, store, listen_addrs).await?;
+
+    // Finalize envelope with the MID.
+    directed::finalize_envelope(
+        &mut envelope,
+        &envelope_key,
+        &mid_str,
+        10,
+        20,
+    )?;
+
+    let envelope_id_hex = envelope.id_hex();
+
+    // Save to outbox.
+    let inbox = DirectedInbox::open(data_dir)
+        .map_err(|e| MiasmaError::Storage(format!("open inbox: {e}")))?;
+    inbox
+        .save_outgoing(&envelope)
+        .map_err(|e| MiasmaError::Storage(format!("save outgoing: {e}")))?;
+
+    // Deliver envelope to recipient via P2P (best-effort).
+    let recipient_peer_id_str = directed::parse_sharing_contact(recipient_contact)
+        .map(|(_, pid)| pid)
+        .unwrap_or_default();
+    if let Ok(peer_id) = recipient_peer_id_str.parse::<libp2p::PeerId>() {
+        let invite_req = directed::DirectedRequest::Invite {
+            envelope: envelope.clone(),
+        };
+        match coord
+            .send_directed_request(peer_id, listen_addrs.to_vec(), invite_req)
+            .await
+        {
+            Ok(directed::DirectedResponse::InviteAccepted { .. }) => {
+                info!(envelope_id = %envelope_id_hex, "directed invite delivered to recipient");
+            }
+            Ok(other) => {
+                warn!(envelope_id = %envelope_id_hex, ?other, "directed invite: unexpected response");
+            }
+            Err(e) => {
+                warn!(envelope_id = %envelope_id_hex, %e, "directed invite delivery failed (recipient may be offline)");
+            }
+        }
+    }
+
+    info!(envelope_id = %envelope_id_hex, "directed share created and published");
+    Ok(envelope_id_hex)
+}
+
+fn process_directed_confirm(
+    envelope_id: &str,
+    challenge_code: &str,
+    data_dir: &std::path::Path,
+) -> Result<(), MiasmaError> {
+    let inbox = DirectedInbox::open(data_dir)
+        .map_err(|e| MiasmaError::Storage(format!("open inbox: {e}")))?;
+
+    // Try outgoing first (sender confirming their own send).
+    let mut envelope = inbox
+        .load_outgoing(envelope_id)
+        .map_err(|e| MiasmaError::Storage(format!("load envelope: {e}")))?;
+
+    // Check state.
+    if envelope.state != directed::EnvelopeState::ChallengeIssued {
+        return Err(MiasmaError::Storage(format!(
+            "envelope not in ChallengeIssued state (current: {:?})",
+            envelope.state
+        )));
+    }
+
+    // Check challenge expiry.
+    if envelope.is_challenge_expired(now_secs()) {
+        envelope.state = directed::EnvelopeState::Expired;
+        let _ = inbox.save_outgoing(&envelope);
+        return Err(MiasmaError::Storage("challenge expired".into()));
+    }
+
+    // Verify challenge.
+    let hash = envelope.challenge_hash.ok_or_else(|| {
+        MiasmaError::Storage("no challenge hash set".into())
+    })?;
+
+    if directed::verify_challenge(challenge_code, &hash) {
+        envelope.state = directed::EnvelopeState::Confirmed;
+        inbox
+            .save_outgoing(&envelope)
+            .map_err(|e| MiasmaError::Storage(format!("save: {e}")))?;
+        info!(envelope_id, "directed share challenge confirmed");
+        Ok(())
+    } else {
+        envelope.challenge_attempts_remaining =
+            envelope.challenge_attempts_remaining.saturating_sub(1);
+        if envelope.challenge_attempts_remaining == 0 {
+            envelope.state = directed::EnvelopeState::ChallengeFailed;
+        }
+        inbox
+            .save_outgoing(&envelope)
+            .map_err(|e| MiasmaError::Storage(format!("save: {e}")))?;
+        Err(MiasmaError::Storage(format!(
+            "wrong challenge code ({} attempts remaining)",
+            envelope.challenge_attempts_remaining
+        )))
+    }
+}
+
+async fn process_directed_retrieve(
+    recipient_secret: &[u8; 32],
+    envelope_id: &str,
+    password: &str,
+    coord: &MiasmaCoordinator,
+    data_dir: &std::path::Path,
+) -> Result<(Vec<u8>, Option<String>), MiasmaError> {
+    let inbox = DirectedInbox::open(data_dir)
+        .map_err(|e| MiasmaError::Storage(format!("open inbox: {e}")))?;
+
+    let mut envelope = inbox
+        .load_incoming(envelope_id)
+        .map_err(|e| MiasmaError::Storage(format!("load envelope: {e}")))?;
+
+    // Check state.
+    if !envelope.state.is_retrievable() {
+        return Err(MiasmaError::Storage(format!(
+            "envelope not retrievable (state: {:?})",
+            envelope.state
+        )));
+    }
+
+    // Check expiry.
+    if envelope.is_expired(now_secs()) {
+        envelope.state = directed::EnvelopeState::Expired;
+        let _ = inbox.save_incoming(&envelope);
+        return Err(MiasmaError::Storage("envelope expired".into()));
+    }
+
+    // Check password attempts.
+    if envelope.password_attempts_remaining == 0 {
+        envelope.state = directed::EnvelopeState::PasswordFailed;
+        let _ = inbox.save_incoming(&envelope);
+        return Err(MiasmaError::Storage("max password attempts exceeded".into()));
+    }
+
+    // Decrypt envelope payload to get MID.
+    let payload = directed::decrypt_envelope_payload(recipient_secret, &envelope)?;
+
+    // Derive content key (ECDH + password).
+    let content_key = directed::derive_content_key(recipient_secret, &envelope, password)?;
+
+    // Retrieve protected content from network.
+    let mid = crate::crypto::hash::ContentId::from_str(&payload.mid)?;
+    let params = DissolutionParams {
+        data_shards: payload.data_shards as usize,
+        total_shards: payload.total_shards as usize,
+    };
+    let protected_data = coord.retrieve_from_network(&mid, params).await?;
+
+    // Decrypt with directed key.
+    match directed::decrypt_directed_content(&content_key, &payload.content_nonce, &protected_data)
+    {
+        Ok(plaintext) => {
+            envelope.state = directed::EnvelopeState::Retrieved;
+            let _ = inbox.save_incoming(&envelope);
+            info!(envelope_id, "directed share retrieved successfully");
+            Ok((plaintext, payload.filename))
+        }
+        Err(_) => {
+            envelope.password_attempts_remaining =
+                envelope.password_attempts_remaining.saturating_sub(1);
+            if envelope.password_attempts_remaining == 0 {
+                envelope.state = directed::EnvelopeState::PasswordFailed;
+            }
+            let _ = inbox.save_incoming(&envelope);
+            Err(MiasmaError::Encryption(format!(
+                "wrong password ({} attempts remaining)",
+                envelope.password_attempts_remaining
+            )))
+        }
+    }
+}
+
+fn process_directed_revoke(
+    envelope_id: &str,
+    sharing_pubkey: &[u8; 32],
+    data_dir: &std::path::Path,
+) -> Result<(), MiasmaError> {
+    let inbox = DirectedInbox::open(data_dir)
+        .map_err(|e| MiasmaError::Storage(format!("open inbox: {e}")))?;
+
+    // Try outgoing (sender revoke).
+    if let Ok(mut envelope) = inbox.load_outgoing(envelope_id) {
+        if envelope.sender_pubkey == *sharing_pubkey {
+            if envelope.state.is_terminal() {
+                return Err(MiasmaError::Storage(format!(
+                    "cannot revoke: envelope in terminal state ({:?})",
+                    envelope.state
+                )));
+            }
+            envelope.state = directed::EnvelopeState::SenderRevoked;
+            inbox
+                .save_outgoing(&envelope)
+                .map_err(|e| MiasmaError::Storage(format!("save: {e}")))?;
+            info!(envelope_id, "directed share sender-revoked");
+            return Ok(());
+        }
+    }
+
+    // Try incoming (recipient delete).
+    if let Ok(mut envelope) = inbox.load_incoming(envelope_id) {
+        if envelope.recipient_pubkey == *sharing_pubkey {
+            envelope.state = directed::EnvelopeState::RecipientDeleted;
+            inbox
+                .save_incoming(&envelope)
+                .map_err(|e| MiasmaError::Storage(format!("save: {e}")))?;
+            info!(envelope_id, "directed share recipient-deleted");
+            return Ok(());
+        }
+    }
+
+    Err(MiasmaError::Storage(format!(
+        "envelope not found: {envelope_id}"
+    )))
 }
 
 // ─── Publish helper ──────────────────────────────────────────────────────────
@@ -841,6 +1240,7 @@ async fn replication_engine(
     queue: Arc<Mutex<ReplicationQueue>>,
     mut rep_success_rx: mpsc::Receiver<[u8; 32]>,
     mut topology_rx: mpsc::Receiver<TopologyEvent>,
+    data_dir: PathBuf,
 ) {
     let mut interval = tokio::time::interval(Duration::from_secs(FALLBACK_TIMER_SECS));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -849,6 +1249,34 @@ async fn replication_engine(
         tokio::select! {
             // ── Primary: topology change ────────────────────────────────────
             Some(event) = topology_rx.recv() => {
+                // Handle directed sharing events.
+                match &event {
+                    TopologyEvent::DirectedEnvelopeReceived { peer_id, envelope } => {
+                        match directed::DirectedInbox::open(&data_dir) {
+                            Ok(inbox) => {
+                                if let Err(e) = inbox.save_incoming(envelope) {
+                                    warn!(%peer_id, "failed to save incoming envelope: {e}");
+                                }
+                                info!(%peer_id, id = %envelope.id_hex(), "directed envelope received and saved");
+                            }
+                            Err(e) => warn!(%peer_id, "failed to open inbox: {e}"),
+                        }
+                    }
+                    TopologyEvent::DirectedRevokeReceived { envelope_id } => {
+                        match directed::DirectedInbox::open(&data_dir) {
+                            Ok(inbox) => {
+                                let id_hex = hex::encode(envelope_id);
+                                if let Err(e) = inbox.update_incoming_state(&id_hex, directed::EnvelopeState::SenderRevoked) {
+                                    warn!(id = %id_hex, "failed to update revoked envelope: {e}");
+                                }
+                                info!(id = %id_hex, "directed envelope revoked by sender");
+                            }
+                            Err(e) => warn!("failed to open inbox for revocation: {e}"),
+                        }
+                    }
+                    _ => {}
+                }
+
                 let budget = event.promotion_budget();
                 if budget > 0 {
                     let (promoted, made_due, pending) = {

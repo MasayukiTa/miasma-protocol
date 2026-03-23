@@ -87,6 +87,13 @@ function showView(name) {
     // Reset retrieve state
     document.getElementById('retrieve-result').classList.add('hidden');
   }
+  if (name === 'send') {
+    loadSendContactInfo();
+    document.getElementById('send-result').classList.add('hidden');
+  }
+  if (name === 'inbox') {
+    refreshInbox();
+  }
 }
 
 // ── Event Listeners ───────────────────────────────────────────────
@@ -170,6 +177,12 @@ function setupEventListeners() {
     const text = document.getElementById('retrieve-text-content').textContent;
     copyToClipboard(text, t('copied'));
   });
+
+  // Directed Send
+  document.getElementById('btn-directed-send').addEventListener('click', handleDirectedSend);
+
+  // Inbox
+  document.getElementById('btn-inbox-refresh').addEventListener('click', refreshInbox);
 
   // Settings
   document.getElementById('btn-clear-all').addEventListener('click', handleClearAll);
@@ -628,6 +641,213 @@ async function handleRetrieve() {
   } finally {
     btn.disabled = !isConnected && retrieveShares.length < k;
     applyTranslations();
+  }
+}
+
+// ── Directed Send ─────────────────────────────────────────────────
+
+async function loadSendContactInfo() {
+  const el = document.getElementById('send-my-contact');
+  const infoSection = document.getElementById('send-contact-info');
+  if (!bridge || !bridge.connected) {
+    infoSection.style.display = 'none';
+    return;
+  }
+  try {
+    const info = await bridge.sharingKey();
+    if (info && info.contact) {
+      el.textContent = info.contact;
+      infoSection.style.display = '';
+    } else {
+      infoSection.style.display = 'none';
+    }
+  } catch (_) {
+    infoSection.style.display = 'none';
+  }
+}
+
+async function handleDirectedSend() {
+  if (!bridge || !bridge.connected) {
+    showToast(t('error_not_connected'), 'error');
+    return;
+  }
+
+  const recipient = document.getElementById('send-recipient').value.trim();
+  const password = document.getElementById('send-password').value;
+  const retentionSecs = parseInt(document.getElementById('send-retention').value);
+  const fileInput = document.getElementById('send-file-input');
+
+  if (!recipient) {
+    showToast(t('error_no_input'), 'error');
+    return;
+  }
+  if (!fileInput.files || fileInput.files.length === 0) {
+    showToast(t('error_no_input'), 'error');
+    return;
+  }
+
+  const file = fileInput.files[0];
+  if (file.size > 100 * 1024 * 1024) {
+    showToast(t('error_file_too_large'), 'error');
+    return;
+  }
+
+  const btn = document.getElementById('btn-directed-send');
+  btn.disabled = true;
+  btn.textContent = t('processing');
+
+  try {
+    const buf = await file.arrayBuffer();
+    const data = new Uint8Array(buf);
+    const result = await bridge.directedSend(recipient, data, password, retentionSecs, file.name);
+
+    document.getElementById('send-envelope-id').textContent = result.envelope_id;
+    document.getElementById('send-result').classList.remove('hidden');
+    showToast(t('send_success'), 'success');
+  } catch (e) {
+    console.error('Directed send failed:', e);
+    showToast(e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = t('send_btn');
+    applyTranslations();
+  }
+}
+
+// ── Inbox ─────────────────────────────────────────────────────────
+
+async function refreshInbox() {
+  const listEl = document.getElementById('inbox-list');
+  const emptyEl = document.getElementById('inbox-empty');
+
+  if (!bridge || !bridge.connected) {
+    listEl.innerHTML = '';
+    emptyEl.classList.remove('hidden');
+    return;
+  }
+
+  try {
+    const items = await bridge.directedInbox();
+    listEl.innerHTML = '';
+
+    if (!items || items.length === 0) {
+      emptyEl.classList.remove('hidden');
+      return;
+    }
+    emptyEl.classList.add('hidden');
+
+    for (const item of items) {
+      const card = document.createElement('div');
+      card.className = 'source-card';
+
+      const header = document.createElement('div');
+      header.className = 'source-header';
+
+      const idSpan = document.createElement('code');
+      idSpan.textContent = item.envelope_id || '(unknown)';
+      idSpan.style.fontSize = '0.75rem';
+      idSpan.style.wordBreak = 'break-all';
+      header.appendChild(idSpan);
+
+      // State badge
+      const badge = document.createElement('span');
+      badge.className = 'share-badge';
+      const state = item.state || 'pending';
+      if (state === 'expired') {
+        badge.textContent = t('inbox_expired');
+        badge.style.background = 'var(--text-dim)';
+      } else if (state === 'revoked') {
+        badge.textContent = t('inbox_revoked');
+        badge.style.background = 'var(--danger)';
+      } else {
+        badge.textContent = state;
+      }
+      header.appendChild(badge);
+      card.appendChild(header);
+
+      // Challenge code for pending items
+      if (item.challenge_code) {
+        const challengeRow = document.createElement('div');
+        challengeRow.className = 'setting-row';
+        challengeRow.style.marginTop = '0.5rem';
+        const label = document.createElement('span');
+        label.textContent = t('inbox_challenge');
+        const code = document.createElement('code');
+        code.textContent = item.challenge_code;
+        challengeRow.appendChild(label);
+        challengeRow.appendChild(code);
+        card.appendChild(challengeRow);
+      }
+
+      // Filename if present
+      if (item.filename) {
+        const fnRow = document.createElement('div');
+        fnRow.className = 'source-desc';
+        fnRow.textContent = item.filename;
+        card.appendChild(fnRow);
+      }
+
+      // Action buttons
+      const actions = document.createElement('div');
+      actions.className = 'import-actions';
+      actions.style.marginTop = '0.5rem';
+
+      if (state !== 'expired' && state !== 'revoked') {
+        const retrieveBtn = document.createElement('button');
+        retrieveBtn.className = 'btn-small btn-accent';
+        retrieveBtn.textContent = t('inbox_retrieve');
+        retrieveBtn.addEventListener('click', () => handleDirectedRetrieve(item.envelope_id));
+        actions.appendChild(retrieveBtn);
+
+        const revokeBtn = document.createElement('button');
+        revokeBtn.className = 'btn-small';
+        revokeBtn.textContent = t('inbox_revoke');
+        revokeBtn.addEventListener('click', () => handleDirectedRevoke(item.envelope_id));
+        actions.appendChild(revokeBtn);
+      }
+
+      card.appendChild(actions);
+      listEl.appendChild(card);
+    }
+  } catch (e) {
+    console.error('Inbox refresh failed:', e);
+    listEl.innerHTML = '';
+    emptyEl.classList.remove('hidden');
+  }
+}
+
+async function handleDirectedRetrieve(envelopeId) {
+  const password = prompt(t('send_password'));
+  if (password === null) return;
+
+  try {
+    const result = await bridge.directedRetrieve(envelopeId, password);
+    const blob = new Blob([result.data]);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = result.filename || 'miasma-directed';
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast(t('retrieved'), 'success');
+  } catch (e) {
+    console.error('Directed retrieve failed:', e);
+    showToast(e.message, 'error');
+  }
+}
+
+async function handleDirectedRevoke(envelopeId) {
+  if (!confirm(t('confirm_clear'))) return;
+  try {
+    const ok = await bridge.directedRevoke(envelopeId);
+    if (ok) {
+      showToast(t('cleared'), 'success');
+      refreshInbox();
+    } else {
+      showToast(t('error_retrieve'), 'error');
+    }
+  } catch (e) {
+    showToast(e.message, 'error');
   }
 }
 

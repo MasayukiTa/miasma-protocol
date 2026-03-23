@@ -40,6 +40,7 @@ use super::descriptor::{
     ResourceProfile,
 };
 use super::onion_relay::{OnionRelayCodec, OnionRelayRequest, OnionRelayResponse};
+use crate::directed::protocol::{DirectedCodec, DirectedRequest, DirectedResponse};
 use super::path_selection::PathSelectionStats;
 use super::peer_state::{AdmissionStats, PeerRegistry, RejectionReason};
 use super::routing::{self, RoutingStats, RoutingTable};
@@ -631,6 +632,13 @@ pub enum DhtCommand {
         pseudonym: [u8; 32],
         reply: oneshot::Sender<Option<super::descriptor::RelayObservation>>,
     },
+    /// Send a directed sharing request to a specific peer.
+    SendDirectedRequest {
+        peer_id: PeerId,
+        addrs: Vec<String>,
+        request: DirectedRequest,
+        reply: oneshot::Sender<Result<DirectedResponse, MiasmaError>>,
+    },
 }
 
 /// Sender side of the DHT command channel.
@@ -1055,6 +1063,26 @@ impl DhtHandle {
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
         self.recv_reply(rx, "relay_observation").await
     }
+
+    /// Send a directed sharing request to a specific peer.
+    pub async fn send_directed_request(
+        &self,
+        peer_id: PeerId,
+        addrs: Vec<String>,
+        request: DirectedRequest,
+    ) -> Result<DirectedResponse, MiasmaError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::SendDirectedRequest {
+                peer_id,
+                addrs,
+                request,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
+        self.recv_reply(rx, "send_directed_request").await?
+    }
 }
 
 // ─── Share-exchange command channel ──────────────────────────────────────────
@@ -1119,6 +1147,8 @@ pub struct MiasmaBehaviour {
     pub(crate) onion_relay: request_response::Behaviour<OnionRelayCodec>,
     /// Relay probe: `/miasma/relay-probe/1.0.0` request-response.
     pub(crate) relay_probe: request_response::Behaviour<super::relay_probe::RelayProbeCodec>,
+    /// Directed sharing: `/miasma/directed/1.0.0` request-response.
+    pub(crate) directed_sharing: request_response::Behaviour<DirectedCodec>,
     /// mDNS for local network peer discovery.
     pub(crate) mdns: mdns::tokio::Behaviour,
 }
@@ -1230,6 +1260,11 @@ pub struct MiasmaNode {
     /// tuples. Prevents an attacker from replaying captured onion packets
     /// to confirm circuit endpoints.
     onion_replay_cache: std::collections::VecDeque<[u8; 32]>,
+    /// Pending directed sharing reply channels.
+    pending_directed_replies: HashMap<
+        request_response::OutboundRequestId,
+        oneshot::Sender<Result<DirectedResponse, MiasmaError>>,
+    >,
 }
 
 impl MiasmaNode {
@@ -1358,6 +1393,7 @@ impl MiasmaNode {
             onion_replay_cache: std::collections::VecDeque::with_capacity(
                 Self::ONION_REPLAY_CACHE_SIZE,
             ),
+            pending_directed_replies: HashMap::new(),
         })
     }
 
@@ -1779,6 +1815,28 @@ impl MiasmaNode {
                 let obs = self.descriptor_store.relay_observation(&pseudonym).cloned();
                 let _ = reply.send(obs);
             }
+            DhtCommand::SendDirectedRequest {
+                peer_id,
+                addrs,
+                request,
+                reply,
+            } => {
+                for addr_str in &addrs {
+                    if let Ok(addr) = addr_str.parse::<Multiaddr>() {
+                        self.swarm
+                            .behaviour_mut()
+                            .kademlia
+                            .add_address(&peer_id, addr.clone());
+                        self.swarm.add_peer_address(peer_id, addr.clone());
+                    }
+                }
+                let req_id = self
+                    .swarm
+                    .behaviour_mut()
+                    .directed_sharing
+                    .send_request(&peer_id, request);
+                self.pending_directed_replies.insert(req_id, reply);
+            }
         }
     }
 
@@ -1969,6 +2027,9 @@ impl MiasmaNode {
             }
             SwarmEvent::Behaviour(MiasmaBehaviourEvent::RelayProbe(ev)) => {
                 self.handle_relay_probe_event(ev);
+            }
+            SwarmEvent::Behaviour(MiasmaBehaviourEvent::DirectedSharing(ev)) => {
+                self.handle_directed_sharing_event(ev);
             }
             SwarmEvent::Behaviour(MiasmaBehaviourEvent::Mdns(ev)) => {
                 self.handle_mdns_event(ev);
@@ -2842,6 +2903,110 @@ impl MiasmaNode {
         }
     }
 
+    fn handle_directed_sharing_event(
+        &mut self,
+        ev: request_response::Event<DirectedRequest, DirectedResponse>,
+    ) {
+        match ev {
+            request_response::Event::Message {
+                peer,
+                message:
+                    request_response::Message::Request {
+                        request, channel, ..
+                    },
+            } => {
+                // Inbound directed request from a peer.
+                // For now, handle Invite by accepting and storing to inbox.
+                // Challenge generation and confirmation happen locally via IPC.
+                match request {
+                    DirectedRequest::Invite { envelope } => {
+                        info!(
+                            peer = %peer,
+                            envelope_id = %hex::encode(envelope.envelope_id),
+                            "directed.invite_received"
+                        );
+                        // Accept the envelope — the recipient will see it via `inbox`.
+                        // Store to the data directory's incoming dir.
+                        // Note: actual storage is handled by daemon IPC layer;
+                        // here we just acknowledge receipt over the wire.
+                        let envelope_id = envelope.envelope_id;
+                        let _ = self.swarm.behaviour_mut().directed_sharing.send_response(
+                            channel,
+                            DirectedResponse::InviteAccepted { envelope_id },
+                        );
+                        // Notify daemon layer via topology event channel.
+                        if let Some(ref tx) = self.topology_tx {
+                            let _ = tx.try_send(super::types::TopologyEvent::DirectedEnvelopeReceived {
+                                peer_id: peer,
+                                envelope: Box::new(envelope),
+                            });
+                        }
+                    }
+                    DirectedRequest::Confirm {
+                        envelope_id,
+                        challenge_code: _,
+                    } => {
+                        // Confirm is handled via IPC, not P2P.
+                        let _ = self.swarm.behaviour_mut().directed_sharing.send_response(
+                            channel,
+                            DirectedResponse::Error("confirm via IPC, not P2P".into()),
+                        );
+                        debug!(envelope_id = %hex::encode(envelope_id), "directed.confirm_via_p2p_rejected");
+                    }
+                    DirectedRequest::SenderRevoke { envelope_id } => {
+                        info!(
+                            envelope_id = %hex::encode(envelope_id),
+                            "directed.revoke_received"
+                        );
+                        let _ = self.swarm.behaviour_mut().directed_sharing.send_response(
+                            channel,
+                            DirectedResponse::Revoked { envelope_id },
+                        );
+                        if let Some(ref tx) = self.topology_tx {
+                            let _ = tx.try_send(super::types::TopologyEvent::DirectedRevokeReceived {
+                                envelope_id,
+                            });
+                        }
+                    }
+                    DirectedRequest::StatusQuery { envelope_id } => {
+                        // Status is handled via IPC.
+                        let _ = self.swarm.behaviour_mut().directed_sharing.send_response(
+                            channel,
+                            DirectedResponse::Error("status via IPC, not P2P".into()),
+                        );
+                        debug!(envelope_id = %hex::encode(envelope_id), "directed.status_via_p2p_rejected");
+                    }
+                }
+            }
+            request_response::Event::Message {
+                message:
+                    request_response::Message::Response {
+                        request_id,
+                        response,
+                    },
+                ..
+            } => {
+                if let Some(reply) = self.pending_directed_replies.remove(&request_id) {
+                    let _ = reply.send(Ok(response));
+                }
+            }
+            request_response::Event::OutboundFailure {
+                request_id, error, ..
+            } => {
+                if let Some(reply) = self.pending_directed_replies.remove(&request_id) {
+                    let _ = reply.send(Err(MiasmaError::Network(format!(
+                        "directed sharing outbound failure: {error}"
+                    ))));
+                }
+                debug!("directed_sharing outbound failure: {error}");
+            }
+            request_response::Event::InboundFailure { error, .. } => {
+                debug!("directed_sharing inbound failure: {error}");
+            }
+            _ => {}
+        }
+    }
+
     /// Handle an onion delivery at the target node.
     ///
     /// The body format is: `session_key(32) || e2e_encrypted_layer(OnionLayer)`.
@@ -3163,6 +3328,14 @@ fn build_swarm(
                     request_response::Config::default(),
                 );
 
+            let directed_sharing = request_response::Behaviour::<DirectedCodec>::new(
+                [(
+                    StreamProtocol::new("/miasma/directed/1.0.0"),
+                    request_response::ProtocolSupport::Full,
+                )],
+                request_response::Config::default(),
+            );
+
             let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?;
 
             Ok(MiasmaBehaviour {
@@ -3178,6 +3351,7 @@ fn build_swarm(
                 descriptor_exchange,
                 onion_relay,
                 relay_probe,
+                directed_sharing,
                 mdns,
             })
         })

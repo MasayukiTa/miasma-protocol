@@ -9,6 +9,7 @@ const LABEL_NODE_ID: &[u8] = b"miasma-v1-node-id";
 const LABEL_DHT_SIGN: &[u8] = b"miasma-v1-dht-signing-key";
 const LABEL_SESSION: &[u8] = b"miasma-v1-session-key";
 const LABEL_MAC: &[u8] = b"miasma-v1-mac-key-v1";
+const LABEL_SHARING: &[u8] = b"miasma-v1-sharing-key";
 
 /// Node key hierarchy derived from a single master key.
 ///
@@ -33,6 +34,14 @@ impl NodeKeys {
             session_key: Zeroizing::new(hkdf_derive(master_key, LABEL_SESSION)?),
         })
     }
+}
+
+/// Derive an X25519 static key for directed sharing (recipient binding).
+///
+/// This key is persistent (does not rotate with epochs) and is shared
+/// out-of-band with potential senders.
+pub fn derive_sharing_key(master_key: &[u8]) -> Result<Zeroizing<[u8; 32]>, MiasmaError> {
+    Ok(Zeroizing::new(hkdf_derive(master_key, LABEL_SHARING)?))
 }
 
 /// Derive a MAC key (K_tag) from an encryption key (K_enc).
