@@ -11,6 +11,15 @@ reference implementation, and close the next major product gap:
 
 This is the next milestone after Windows / desktop-web completion.
 
+## Execution guidance
+
+It is acceptable if this milestone takes a long time.
+Spend as much time as needed to close the real gaps properly.
+
+It is also acceptable to use multiple sub-agents aggressively where that helps.
+Parallelize implementation, validation, and documentation work whenever it
+meaningfully speeds up progress without creating conflicting write scopes.
+
 ## Current baseline
 
 Already complete and should be treated as the reference:
