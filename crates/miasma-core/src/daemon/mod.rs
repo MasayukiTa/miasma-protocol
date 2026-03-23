@@ -134,6 +134,9 @@ impl DaemonServer {
         let (topo_tx, topo_rx) = mpsc::channel(64);
         node.set_topology_notifier(topo_tx);
 
+        // 3b. Set data_dir on node for directed sharing P2P confirm handling.
+        node.set_directed_data_dir(data_dir.clone());
+
         // 4. Bind IPC listener (OS-assigned port).
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -870,7 +873,15 @@ pub(crate) async fn process_request(
         ControlRequest::DirectedConfirm {
             envelope_id,
             challenge_code,
-        } => match process_directed_confirm(&envelope_id, &challenge_code, &data_dir) {
+        } => match process_directed_confirm(
+            &envelope_id,
+            &challenge_code,
+            &data_dir,
+            &coord,
+            &listen_addrs,
+        )
+        .await
+        {
             Ok(_) => ControlResponse::DirectedConfirmed,
             Err(e) => ControlResponse::Error(e.to_string()),
         },
@@ -894,7 +905,15 @@ pub(crate) async fn process_request(
         }
 
         ControlRequest::DirectedRevoke { envelope_id } => {
-            match process_directed_revoke(&envelope_id, &sharing_pubkey, &data_dir) {
+            match process_directed_revoke(
+                &envelope_id,
+                &sharing_pubkey,
+                &data_dir,
+                &coord,
+                &listen_addrs,
+            )
+            .await
+            {
                 Ok(_) => ControlResponse::DirectedRevoked,
                 Err(e) => ControlResponse::Error(e.to_string()),
             }
@@ -976,6 +995,9 @@ async fn process_directed_send(
     let recipient_peer_id_str = directed::parse_sharing_contact(recipient_contact)
         .map(|(_, pid)| pid)
         .unwrap_or_default();
+
+    // Store recipient PeerId alongside outgoing envelope for later confirm.
+    inbox.save_outgoing_peer_id(&envelope_id_hex, &recipient_peer_id_str);
     if let Ok(peer_id) = recipient_peer_id_str.parse::<libp2p::PeerId>() {
         let invite_req = directed::DirectedRequest::Invite {
             envelope: envelope.clone(),
@@ -1000,59 +1022,66 @@ async fn process_directed_send(
     Ok(envelope_id_hex)
 }
 
-fn process_directed_confirm(
+async fn process_directed_confirm(
     envelope_id: &str,
     challenge_code: &str,
     data_dir: &std::path::Path,
+    coord: &MiasmaCoordinator,
+    listen_addrs: &[String],
 ) -> Result<(), MiasmaError> {
     let inbox = DirectedInbox::open(data_dir)
         .map_err(|e| MiasmaError::Storage(format!("open inbox: {e}")))?;
 
-    // Try outgoing first (sender confirming their own send).
+    // Load outgoing envelope (sender confirming their own send).
     let mut envelope = inbox
         .load_outgoing(envelope_id)
         .map_err(|e| MiasmaError::Storage(format!("load envelope: {e}")))?;
 
-    // Check state.
-    if envelope.state != directed::EnvelopeState::ChallengeIssued {
-        return Err(MiasmaError::Storage(format!(
-            "envelope not in ChallengeIssued state (current: {:?})",
-            envelope.state
-        )));
-    }
+    // Load the stored recipient PeerId.
+    let peer_id_str = inbox.load_outgoing_peer_id(envelope_id).ok_or_else(|| {
+        MiasmaError::Storage("no recipient peer ID stored for this envelope".into())
+    })?;
+    let peer_id = peer_id_str
+        .parse::<libp2p::PeerId>()
+        .map_err(|e| MiasmaError::Storage(format!("invalid peer ID: {e}")))?;
 
-    // Check challenge expiry.
-    if envelope.is_challenge_expired(now_secs()) {
-        envelope.state = directed::EnvelopeState::Expired;
-        let _ = inbox.save_outgoing(&envelope);
-        return Err(MiasmaError::Storage("challenge expired".into()));
-    }
+    // Send Confirm request to recipient via P2P.
+    let confirm_req = directed::DirectedRequest::Confirm {
+        envelope_id: envelope.envelope_id,
+        challenge_code: challenge_code.to_string(),
+    };
 
-    // Verify challenge.
-    let hash = envelope
-        .challenge_hash
-        .ok_or_else(|| MiasmaError::Storage("no challenge hash set".into()))?;
-
-    if directed::verify_challenge(challenge_code, &hash) {
-        envelope.state = directed::EnvelopeState::Confirmed;
-        inbox
-            .save_outgoing(&envelope)
-            .map_err(|e| MiasmaError::Storage(format!("save: {e}")))?;
-        info!(envelope_id, "directed share challenge confirmed");
-        Ok(())
-    } else {
-        envelope.challenge_attempts_remaining =
-            envelope.challenge_attempts_remaining.saturating_sub(1);
-        if envelope.challenge_attempts_remaining == 0 {
-            envelope.state = directed::EnvelopeState::ChallengeFailed;
+    match coord
+        .send_directed_request(peer_id, listen_addrs.to_vec(), confirm_req)
+        .await
+    {
+        Ok(directed::DirectedResponse::Confirmed { .. }) => {
+            envelope.state = directed::EnvelopeState::Confirmed;
+            inbox
+                .save_outgoing(&envelope)
+                .map_err(|e| MiasmaError::Storage(format!("save: {e}")))?;
+            info!(envelope_id, "directed share challenge confirmed via P2P");
+            Ok(())
         }
-        inbox
-            .save_outgoing(&envelope)
-            .map_err(|e| MiasmaError::Storage(format!("save: {e}")))?;
-        Err(MiasmaError::Storage(format!(
-            "wrong challenge code ({} attempts remaining)",
-            envelope.challenge_attempts_remaining
-        )))
+        Ok(directed::DirectedResponse::ChallengeFailed {
+            attempts_remaining, ..
+        }) => {
+            envelope.challenge_attempts_remaining = attempts_remaining;
+            if attempts_remaining == 0 {
+                envelope.state = directed::EnvelopeState::ChallengeFailed;
+            }
+            let _ = inbox.save_outgoing(&envelope);
+            Err(MiasmaError::Storage(format!(
+                "wrong challenge code ({attempts_remaining} attempts remaining)"
+            )))
+        }
+        Ok(directed::DirectedResponse::Error(e)) => Err(MiasmaError::Storage(format!(
+            "recipient rejected confirm: {e}"
+        ))),
+        Err(e) => Err(MiasmaError::Network(format!(
+            "could not reach recipient: {e}"
+        ))),
+        _ => Err(MiasmaError::Storage("unexpected response".into())),
     }
 }
 
@@ -1134,10 +1163,12 @@ async fn process_directed_retrieve(
     }
 }
 
-fn process_directed_revoke(
+async fn process_directed_revoke(
     envelope_id: &str,
     sharing_pubkey: &[u8; 32],
     data_dir: &std::path::Path,
+    coord: &MiasmaCoordinator,
+    listen_addrs: &[String],
 ) -> Result<(), MiasmaError> {
     let inbox = DirectedInbox::open(data_dir)
         .map_err(|e| MiasmaError::Storage(format!("open inbox: {e}")))?;
@@ -1156,6 +1187,30 @@ fn process_directed_revoke(
                 .save_outgoing(&envelope)
                 .map_err(|e| MiasmaError::Storage(format!("save: {e}")))?;
             inbox.cleanup_challenge(envelope_id);
+
+            // Propagate revocation to recipient via P2P (best-effort).
+            if let Some(peer_id_str) = inbox.load_outgoing_peer_id(envelope_id) {
+                if let Ok(peer_id) = peer_id_str.parse::<libp2p::PeerId>() {
+                    let revoke_req = directed::DirectedRequest::SenderRevoke {
+                        envelope_id: envelope.envelope_id,
+                    };
+                    match coord
+                        .send_directed_request(peer_id, listen_addrs.to_vec(), revoke_req)
+                        .await
+                    {
+                        Ok(directed::DirectedResponse::Revoked { .. }) => {
+                            info!(envelope_id, "revocation propagated to recipient");
+                        }
+                        Ok(other) => {
+                            warn!(envelope_id, ?other, "revocation: unexpected response");
+                        }
+                        Err(e) => {
+                            warn!(envelope_id, %e, "revocation propagation failed (recipient may be offline)");
+                        }
+                    }
+                }
+            }
+
             info!(envelope_id, "directed share sender-revoked");
             return Ok(());
         }
@@ -1267,8 +1322,26 @@ async fn replication_engine(
                     TopologyEvent::DirectedEnvelopeReceived { peer_id, envelope } => {
                         match directed::DirectedInbox::open(&data_dir) {
                             Ok(inbox) => {
+                                // Save incoming envelope first.
                                 if let Err(e) = inbox.save_incoming(envelope) {
                                     warn!(%peer_id, "failed to save incoming envelope: {e}");
+                                } else {
+                                    // Generate challenge code and update envelope state.
+                                    let id_hex = envelope.id_hex();
+                                    let (code, hash) = directed::generate_challenge();
+                                    inbox.save_challenge_code(&id_hex, &code).unwrap_or_else(|e| {
+                                        warn!(id = %id_hex, "failed to save challenge code: {e}");
+                                    });
+                                    if let Ok(mut env) = inbox.load_incoming(&id_hex) {
+                                        env.state = directed::EnvelopeState::ChallengeIssued;
+                                        env.challenge_hash = Some(hash);
+                                        let now = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_secs();
+                                        env.challenge_expires_at = now + directed::CHALLENGE_TTL_SECS;
+                                        let _ = inbox.save_incoming(&env);
+                                    }
                                 }
                                 info!(%peer_id, id = %envelope.id_hex(), "directed envelope received and saved");
                             }
