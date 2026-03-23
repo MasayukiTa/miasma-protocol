@@ -16,16 +16,15 @@
   - **Outbox**: Native Compose OutboxScreen — outgoing envelopes with state badges, challenge code entry for sender confirmation, revoke with confirmation dialog.
   - **WebView**: 7 JS bridge methods (sharingKey, directedInbox, directedOutbox, directedSend, directedConfirm, directedRetrieve, directedRevoke) all route through HTTP bridge.
 - **HTTP client**: DirectedApi.kt with JSON parsing safety (try-catch on malformed responses).
-- **Lifecycle**: Foreground service manages daemon. START_STICKY for restart resilience. ViewModel polls daemon status every 1s.
-- **Security**: Keystore-backed master key wrapping, distress wipe (FFI + Keystore deletion).
+- **Lifecycle**: Foreground service manages daemon. START_STICKY for restart resilience. Lifecycle-scoped polling detects daemon start, death, and port changes. Stale state cleared on service restart.
+- **Security**: Keystore-backed master key wrapping (wrap-on-startup, unwrap-on-restart), distress wipe (FFI + Keystore deletion + wrapped blob deletion).
+- **Daemon error propagation**: Daemon startup errors shown in UI (not just notification). ViewModel resets inbox/outbox when daemon dies.
 
 ### Known Limitations
 - **No persistent reconnect**: Daemon restarts fresh on each app launch. Peer connections are not preserved across backgrounding.
 - **No i18n**: English only. Localization deferred until UX is validated.
 - **No background networking**: When app is backgrounded, foreground service keeps daemon alive but no push notification for incoming shares.
-- **Error messages partially developer-oriented**: HTTP error codes and FFI exception messages surfaced directly in some paths. Partially mitigated by UX fix pass.
-- **No concurrent request deduplication**: Rapid double-taps on Send/Confirm could fire duplicate requests.
-- **Daemon death detection incomplete**: If daemon crashes after VM initializes, port may remain non-zero until next poll cycle (1s window).
+- **Keystore wrapping Phase 1**: Plaintext `master.key` remains on disk alongside encrypted blob (Rust FFI reads from file). Phase 2 would delete plaintext after node loads it.
 
 ### Architecture
 ```
