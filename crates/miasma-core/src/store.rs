@@ -452,7 +452,7 @@ mod tests {
             let addr = store.put(&share).unwrap();
             addrs.push(addr);
         }
-        assert!(store.used_bytes() <= 1 * 1024 * 1024 + 4096 /* slack */);
+        assert!(store.used_bytes() <= 1024 * 1024 + 4096 /* slack */);
     }
 
     #[test]

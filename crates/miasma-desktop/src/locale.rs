@@ -5,16 +5,12 @@
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum Locale {
+    #[default]
     En,
     Ja,
     ZhCn,
-}
-
-impl Default for Locale {
-    fn default() -> Self {
-        Self::En
-    }
 }
 
 impl Locale {

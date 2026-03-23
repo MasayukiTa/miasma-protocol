@@ -499,7 +499,14 @@ impl DaemonServer {
         let rep_queue = queue.clone();
         let rep_data_dir = self.data_dir.clone();
         let rep_handle: JoinHandle<()> = tokio::spawn(async move {
-            replication_engine(rep_coord, rep_queue, rep_success_rx, topology_rx, rep_data_dir).await;
+            replication_engine(
+                rep_coord,
+                rep_queue,
+                rep_success_rx,
+                topology_rx,
+                rep_data_dir,
+            )
+            .await;
         });
 
         // ── Wait for shutdown ─────────────────────────────────────────────────
@@ -551,8 +558,7 @@ async fn ipc_server_loop(
                 let dd = data_dir.clone();
                 tokio::spawn(async move {
                     if let Err(e) =
-                        handle_ipc_client(stream, c, q, s, la, wp, wt, pc, pt, oq, ss, sp, dd)
-                            .await
+                        handle_ipc_client(stream, c, q, s, la, wp, wt, pc, pt, oq, ss, sp, dd).await
                     {
                         debug!("IPC client error: {e}");
                     }
@@ -951,16 +957,11 @@ async fn process_directed_send(
         data_shards: 10,
         total_shards: 20,
     };
-    let mid_str = publish_content(&protected_data, params, coord, queue, store, listen_addrs).await?;
+    let mid_str =
+        publish_content(&protected_data, params, coord, queue, store, listen_addrs).await?;
 
     // Finalize envelope with the MID.
-    directed::finalize_envelope(
-        &mut envelope,
-        &envelope_key,
-        &mid_str,
-        10,
-        20,
-    )?;
+    directed::finalize_envelope(&mut envelope, &envelope_key, &mid_str, 10, 20)?;
 
     let envelope_id_hex = envelope.id_hex();
 
@@ -1028,9 +1029,9 @@ fn process_directed_confirm(
     }
 
     // Verify challenge.
-    let hash = envelope.challenge_hash.ok_or_else(|| {
-        MiasmaError::Storage("no challenge hash set".into())
-    })?;
+    let hash = envelope
+        .challenge_hash
+        .ok_or_else(|| MiasmaError::Storage("no challenge hash set".into()))?;
 
     if directed::verify_challenge(challenge_code, &hash) {
         envelope.state = directed::EnvelopeState::Confirmed;
@@ -1088,7 +1089,9 @@ async fn process_directed_retrieve(
     if envelope.password_attempts_remaining == 0 {
         envelope.state = directed::EnvelopeState::PasswordFailed;
         let _ = inbox.save_incoming(&envelope);
-        return Err(MiasmaError::Storage("max password attempts exceeded".into()));
+        return Err(MiasmaError::Storage(
+            "max password attempts exceeded".into(),
+        ));
     }
 
     // Decrypt envelope payload to get MID.

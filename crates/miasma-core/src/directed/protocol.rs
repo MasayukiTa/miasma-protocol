@@ -19,22 +19,16 @@ pub const DIRECTED_MSG_MAX: usize = 32 * 1024;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DirectedRequest {
     /// Sender invites recipient to receive a directed share.
-    Invite {
-        envelope: DirectedEnvelope,
-    },
+    Invite { envelope: DirectedEnvelope },
     /// Sender submits the confirmation challenge code.
     Confirm {
         envelope_id: [u8; 32],
         challenge_code: String,
     },
     /// Sender revokes a previously sent directed share.
-    SenderRevoke {
-        envelope_id: [u8; 32],
-    },
+    SenderRevoke { envelope_id: [u8; 32] },
     /// Query the current state of an envelope.
-    StatusQuery {
-        envelope_id: [u8; 32],
-    },
+    StatusQuery { envelope_id: [u8; 32] },
 }
 
 /// Response to a `DirectedRequest`.
@@ -42,22 +36,16 @@ pub enum DirectedRequest {
 pub enum DirectedResponse {
     /// Invite accepted — recipient generated a challenge.
     /// The challenge code is shown on the recipient's screen (not in this message).
-    InviteAccepted {
-        envelope_id: [u8; 32],
-    },
+    InviteAccepted { envelope_id: [u8; 32] },
     /// Challenge confirmed correctly — content is now retrievable.
-    Confirmed {
-        envelope_id: [u8; 32],
-    },
+    Confirmed { envelope_id: [u8; 32] },
     /// Challenge verification failed.
     ChallengeFailed {
         envelope_id: [u8; 32],
         attempts_remaining: u8,
     },
     /// Revocation acknowledged.
-    Revoked {
-        envelope_id: [u8; 32],
-    },
+    Revoked { envelope_id: [u8; 32] },
     /// Current envelope state.
     Status {
         envelope_id: [u8; 32],

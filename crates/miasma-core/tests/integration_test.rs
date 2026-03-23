@@ -24,8 +24,6 @@
 use std::sync::Arc;
 use tempfile::TempDir;
 
-use ed25519_dalek;
-
 use miasma_core::{
     // Core pipeline
     dissolve,
@@ -451,7 +449,7 @@ fn store_quota_enforced() {
 
     // Used bytes should not exceed quota.
     let used = store.used_bytes();
-    let quota = 1 * 1024 * 1024; // 1 MB
+    let quota = 1024 * 1024; // 1 MB
     assert!(
         used <= quota,
         "store used {} bytes exceeds quota {} bytes",

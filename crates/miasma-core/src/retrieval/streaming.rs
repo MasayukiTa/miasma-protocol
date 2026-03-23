@@ -62,7 +62,7 @@ impl<Src: ShareSource + Clone + Send + Sync + 'static> StreamingRetrievalCoordin
         let mid = manifest.mid.clone();
         let segments = manifest.segments.clone();
 
-        let s = stream::iter(segments.into_iter()).then(move |meta| {
+        let s = stream::iter(segments).then(move |meta| {
             let source = source.clone();
             let mid = mid.clone();
             async move {

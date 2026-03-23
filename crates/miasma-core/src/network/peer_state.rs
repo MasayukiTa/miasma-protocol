@@ -72,6 +72,12 @@ pub struct PeerRegistry {
     rejection_count: u64,
 }
 
+impl Default for PeerRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PeerRegistry {
     pub fn new() -> Self {
         Self {
@@ -130,7 +136,7 @@ impl PeerRegistry {
     pub fn is_verified(&self, peer_id: &PeerId) -> bool {
         self.peers
             .get(peer_id)
-            .map_or(false, |s| s.trust == AddressTrust::Verified)
+            .is_some_and(|s| s.trust == AddressTrust::Verified)
     }
 
     /// Returns all peers at the Verified tier.
