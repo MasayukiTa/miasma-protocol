@@ -7,6 +7,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
@@ -68,11 +69,22 @@ class MainActivity : ComponentActivity() {
         }
 
         // Poll for daemon status to update ViewModel once daemon is ready.
-        kotlinx.coroutines.MainScope().launch {
+        lifecycleScope.launch {
             while (true) {
                 val ds = MiasmaService.lastDaemonStatus
-                if (ds != null && vm.daemonHttpPort.value == 0) {
-                    vm.onDaemonStarted(ds.httpPort.toInt(), ds.sharingContact)
+                if (ds != null) {
+                    val newPort = ds.httpPort.toInt()
+                    if (newPort != vm.daemonHttpPort.value) {
+                        vm.onDaemonStarted(newPort, ds.sharingContact)
+                    }
+                } else if (vm.daemonHttpPort.value != 0) {
+                    // Daemon died or hasn't started — reset port.
+                    vm.onDaemonStarted(0, "")
+                }
+                // Propagate daemon startup errors.
+                val err = MiasmaService.lastDaemonError
+                if (err != null && vm.daemonHttpPort.value == 0) {
+                    vm.onDaemonError(err)
                 }
                 kotlinx.coroutines.delay(1_000)
             }

@@ -51,6 +51,14 @@ class MiasmaViewModel(app: Application) : AndroidViewModel(app) {
     fun onDaemonStarted(httpPort: Int, contact: String) {
         _daemonHttpPort.value = httpPort
         _sharingContact.value = contact
+        if (httpPort == 0) {
+            _inboxItems.value = emptyList()
+            _outboxItems.value = emptyList()
+        }
+    }
+
+    fun onDaemonError(error: String) {
+        _ui.value = _ui.value.copy(error = "Daemon: $error")
     }
 
     // ──── Status ─────────────────────────────────────────────────────────────
