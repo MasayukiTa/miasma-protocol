@@ -1538,6 +1538,13 @@ impl MiasmaCoordinator {
             .send_directed_request(peer_id, addrs, request)
             .await
     }
+
+    /// Get all connected peers with their addresses.
+    pub async fn connected_peer_addrs(
+        &self,
+    ) -> Vec<(PeerId, Vec<libp2p::Multiaddr>)> {
+        self.dht_handle.connected_peers().await.unwrap_or_default()
+    }
 }
 
 // ─── RelayRewritingDhtExecutor ─────────────────────────────────────────────

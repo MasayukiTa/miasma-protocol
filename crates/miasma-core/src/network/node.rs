@@ -8,6 +8,7 @@
 /// Descriptor: `/miasma/descriptor/1.0.0` descriptor exchange (ADR-005)
 /// NAT: AutoNAT + DCUtR + relay
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -639,6 +640,10 @@ pub enum DhtCommand {
         request: DirectedRequest,
         reply: oneshot::Sender<Result<DirectedResponse, MiasmaError>>,
     },
+    /// Get connected peers with their addresses.
+    GetConnectedPeers {
+        reply: oneshot::Sender<Vec<(PeerId, Vec<Multiaddr>)>>,
+    },
 }
 
 /// Sender side of the DHT command channel.
@@ -1083,6 +1088,16 @@ impl DhtHandle {
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
         self.recv_reply(rx, "send_directed_request").await?
     }
+
+    /// Get all connected peers and their known addresses.
+    pub async fn connected_peers(&self) -> Result<Vec<(PeerId, Vec<Multiaddr>)>, MiasmaError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::GetConnectedPeers { reply: tx })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
+        self.recv_reply(rx, "connected_peers").await
+    }
 }
 
 // ─── Share-exchange command channel ──────────────────────────────────────────
@@ -1265,6 +1280,9 @@ pub struct MiasmaNode {
         request_response::OutboundRequestId,
         oneshot::Sender<Result<DirectedResponse, MiasmaError>>,
     >,
+    /// Optional data directory for handling directed sharing Confirm requests.
+    /// When set, the node can verify challenge codes against the local inbox.
+    directed_data_dir: Option<PathBuf>,
 }
 
 impl MiasmaNode {
@@ -1394,6 +1412,7 @@ impl MiasmaNode {
                 Self::ONION_REPLAY_CACHE_SIZE,
             ),
             pending_directed_replies: HashMap::new(),
+            directed_data_dir: None,
         })
     }
 
@@ -1433,6 +1452,11 @@ impl MiasmaNode {
     /// Set a channel to receive topology change events (peer connect/disconnect).
     pub fn set_topology_notifier(&mut self, tx: mpsc::Sender<super::types::TopologyEvent>) {
         self.topology_tx = Some(tx);
+    }
+
+    /// Set the data directory for handling directed sharing Confirm requests.
+    pub fn set_directed_data_dir(&mut self, dir: PathBuf) {
+        self.directed_data_dir = Some(dir);
     }
 
     /// Allow loopback/private addresses (for local testing only).
@@ -1836,6 +1860,18 @@ impl MiasmaNode {
                     .directed_sharing
                     .send_request(&peer_id, request);
                 self.pending_directed_replies.insert(req_id, reply);
+            }
+            DhtCommand::GetConnectedPeers { reply } => {
+                let peers: Vec<(PeerId, Vec<Multiaddr>)> = self
+                    .swarm
+                    .connected_peers()
+                    .cloned()
+                    .map(|pid| {
+                        // No addresses needed — peer is already connected/dialed.
+                        (pid, Vec::new())
+                    })
+                    .collect();
+                let _ = reply.send(peers);
             }
         }
     }
@@ -2946,14 +2982,55 @@ impl MiasmaNode {
                     }
                     DirectedRequest::Confirm {
                         envelope_id,
-                        challenge_code: _,
+                        challenge_code,
                     } => {
-                        // Confirm is handled via IPC, not P2P.
+                        let id_hex = hex::encode(envelope_id);
+                        let response = if let Some(ref data_dir) = self.directed_data_dir {
+                            match crate::directed::DirectedInbox::open(data_dir) {
+                                Ok(inbox) => {
+                                    match inbox.load_incoming(&id_hex) {
+                                        Ok(mut envelope) => {
+                                            if envelope.state != crate::directed::EnvelopeState::ChallengeIssued {
+                                                DirectedResponse::Error(format!(
+                                                    "not in ChallengeIssued state (current: {:?})",
+                                                    envelope.state
+                                                ))
+                                            } else if let Some(hash) = envelope.challenge_hash {
+                                                if crate::directed::verify_challenge(&challenge_code, &hash) {
+                                                    envelope.state = crate::directed::EnvelopeState::Confirmed;
+                                                    let _ = inbox.save_incoming(&envelope);
+                                                    inbox.cleanup_challenge(&id_hex);
+                                                    info!(envelope_id = %id_hex, "directed.challenge_confirmed_via_p2p");
+                                                    DirectedResponse::Confirmed { envelope_id }
+                                                } else {
+                                                    envelope.challenge_attempts_remaining =
+                                                        envelope.challenge_attempts_remaining.saturating_sub(1);
+                                                    if envelope.challenge_attempts_remaining == 0 {
+                                                        envelope.state = crate::directed::EnvelopeState::ChallengeFailed;
+                                                        inbox.cleanup_challenge(&id_hex);
+                                                    }
+                                                    let _ = inbox.save_incoming(&envelope);
+                                                    DirectedResponse::ChallengeFailed {
+                                                        envelope_id,
+                                                        attempts_remaining: envelope.challenge_attempts_remaining,
+                                                    }
+                                                }
+                                            } else {
+                                                DirectedResponse::Error("no challenge hash set".into())
+                                            }
+                                        }
+                                        Err(e) => DirectedResponse::Error(format!("load envelope: {e}")),
+                                    }
+                                }
+                                Err(e) => DirectedResponse::Error(format!("open inbox: {e}")),
+                            }
+                        } else {
+                            DirectedResponse::Error("confirm not available (no data dir)".into())
+                        };
                         let _ = self.swarm.behaviour_mut().directed_sharing.send_response(
                             channel,
-                            DirectedResponse::Error("confirm via IPC, not P2P".into()),
+                            response,
                         );
-                        debug!(envelope_id = %hex::encode(envelope_id), "directed.confirm_via_p2p_rejected");
                     }
                     DirectedRequest::SenderRevoke { envelope_id } => {
                         info!(

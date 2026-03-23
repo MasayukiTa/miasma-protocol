@@ -285,6 +285,19 @@ impl DirectedInbox {
         let path = self.incoming_dir.join(format!("{id_hex}.challenge"));
         let _ = std::fs::remove_file(&path);
     }
+
+    /// Store the recipient's PeerId alongside an outgoing envelope.
+    /// Used to reconnect for challenge confirmation.
+    pub fn save_outgoing_peer_id(&self, id_hex: &str, peer_id: &str) {
+        let path = self.outgoing_dir.join(format!("{id_hex}.peer"));
+        let _ = std::fs::write(&path, peer_id);
+    }
+
+    /// Load the recipient's PeerId for an outgoing envelope.
+    pub fn load_outgoing_peer_id(&self, id_hex: &str) -> Option<String> {
+        let path = self.outgoing_dir.join(format!("{id_hex}.peer"));
+        std::fs::read_to_string(&path).ok()
+    }
 }
 
 #[cfg(test)]
