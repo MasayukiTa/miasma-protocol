@@ -306,7 +306,11 @@ pub fn finalize_envelope(
     total_shards: u8,
 ) -> Result<(), MiasmaError> {
     // Decrypt existing payload, update MID, re-encrypt.
-    let payload_bytes = xchacha20_decrypt(&envelope_key, &envelope.payload_nonce, &envelope.encrypted_payload)?;
+    let payload_bytes = xchacha20_decrypt(
+        envelope_key,
+        &envelope.payload_nonce,
+        &envelope.encrypted_payload,
+    )?;
     let mut payload: EnvelopePayload = bincode::deserialize(&payload_bytes)
         .map_err(|e| MiasmaError::Encryption(format!("payload deserialize: {e}")))?;
     payload.mid = mid.to_string();
@@ -315,7 +319,7 @@ pub fn finalize_envelope(
 
     let payload_bytes = bincode::serialize(&payload)
         .map_err(|e| MiasmaError::Encryption(format!("payload serialize: {e}")))?;
-    let (nonce, encrypted) = xchacha20_encrypt(&envelope_key, &payload_bytes)?;
+    let (nonce, encrypted) = xchacha20_encrypt(envelope_key, &payload_bytes)?;
     envelope.encrypted_payload = encrypted;
     envelope.payload_nonce = nonce;
 
@@ -509,10 +513,7 @@ fn derive_envelope_key(shared_secret: &[u8]) -> Result<Zeroizing<[u8; 32]>, Mias
 }
 
 /// XChaCha20-Poly1305 encrypt.
-fn xchacha20_encrypt(
-    key: &[u8; 32],
-    plaintext: &[u8],
-) -> Result<([u8; 24], Vec<u8>), MiasmaError> {
+fn xchacha20_encrypt(key: &[u8; 32], plaintext: &[u8]) -> Result<([u8; 24], Vec<u8>), MiasmaError> {
     use chacha20poly1305::{aead::Aead, KeyInit, XChaCha20Poly1305, XNonce};
     use rand::RngCore;
 
@@ -618,8 +619,7 @@ mod tests {
         let payload = decrypt_envelope_payload(&recipient_secret, &envelope).unwrap();
 
         // Wrong password → different key → AEAD fails.
-        let wrong_key =
-            derive_content_key(&recipient_secret, &envelope, "wrong-password").unwrap();
+        let wrong_key = derive_content_key(&recipient_secret, &envelope, "wrong-password").unwrap();
         let result = decrypt_directed_content(&wrong_key, &payload.content_nonce, &protected);
         assert!(result.is_err());
     }

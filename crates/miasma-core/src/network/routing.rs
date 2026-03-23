@@ -240,17 +240,14 @@ impl RoutingTable {
     /// if the peer would create a prefix cluster.
     pub fn check_diversity(&self, addrs: &[Multiaddr]) -> Result<IpPrefix, DiversityViolation> {
         if !self.diversity_enabled {
-            let prefix = addrs
-                .first()
-                .map(|a| ip_prefix_of(a))
-                .unwrap_or(IpPrefix::Local);
+            let prefix = addrs.first().map(ip_prefix_of).unwrap_or(IpPrefix::Local);
             return Ok(prefix);
         }
 
         // Use the first non-local address for prefix determination.
         let prefix = addrs
             .iter()
-            .map(|a| ip_prefix_of(a))
+            .map(ip_prefix_of)
             .find(|p| *p != IpPrefix::Local)
             .unwrap_or(IpPrefix::Local);
 

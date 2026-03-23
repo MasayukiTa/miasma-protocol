@@ -507,7 +507,7 @@ impl MiasmaCoordinator {
                     s.opportunistic_attempts += 1;
                 }
                 if self.relay_routing_enabled {
-                    match self.retrieve_via_relay(mid, params.clone()).await {
+                    match self.retrieve_via_relay(mid, params).await {
                         Ok(data) => {
                             if let Ok(mut s) = self.retrieval_stats.lock() {
                                 s.opportunistic_relay_successes += 1;
@@ -603,10 +603,7 @@ impl MiasmaCoordinator {
                 mode,
                 "attempting onion+rendezvous retrieval"
             );
-            match self
-                .retrieve_via_onion_rendezvous(mid, params.clone())
-                .await
-            {
+            match self.retrieve_via_onion_rendezvous(mid, params).await {
                 Ok(data) => {
                     if let Ok(mut s) = self.retrieval_stats.lock() {
                         match mode {
@@ -629,7 +626,7 @@ impl MiasmaCoordinator {
                 mode,
                 "attempting onion-encrypted retrieval"
             );
-            match self.retrieve_via_onion(mid, params.clone()).await {
+            match self.retrieve_via_onion(mid, params).await {
                 Ok(data) => {
                     if let Ok(mut s) = self.retrieval_stats.lock() {
                         match mode {
@@ -661,7 +658,7 @@ impl MiasmaCoordinator {
                                     "routing via rendezvous introduction points"
                                 );
                                 match self
-                                    .retrieve_via_rendezvous(mid, params.clone(), intro_points)
+                                    .retrieve_via_rendezvous(mid, params, intro_points)
                                     .await
                                 {
                                     Ok(data) => {
@@ -1406,7 +1403,7 @@ impl MiasmaCoordinator {
             };
             let source = FallbackShareSource::new(relay_exec, self.transport_selector.clone());
             match RetrievalCoordinator::new(source)
-                .retrieve(mid, params.clone())
+                .retrieve(mid, params)
                 .await
             {
                 Ok(data) => {

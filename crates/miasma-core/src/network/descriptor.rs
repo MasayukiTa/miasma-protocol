@@ -76,20 +76,17 @@ pub enum ReachabilityKind {
 /// Promotion requires real successful relay participation — descriptor
 /// claims alone only reach `Claimed`. Demotion happens on failure or
 /// inactivity so stale trust does not linger.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash, Default,
+)]
 pub enum RelayTrustTier {
     /// Descriptor says `can_relay` but we have no observation.
+    #[default]
     Claimed,
     /// At least one successful relay operation observed.
     Observed,
     /// Consistent relay behavior: ≥3 successes AND success rate ≥75%.
     Verified,
-}
-
-impl Default for RelayTrustTier {
-    fn default() -> Self {
-        Self::Claimed
-    }
 }
 
 /// Accumulated relay behavior observations for a single peer.
@@ -258,20 +255,15 @@ impl Default for PeerCapabilities {
 }
 
 /// Resource profile hint — helps the network decide what to ask of this peer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ResourceProfile {
     /// Desktop/server: ample CPU, storage, and bandwidth.
+    #[default]
     Desktop,
     /// Mobile: constrained CPU and battery, variable bandwidth.
     Mobile,
     /// Embedded/IoT: very limited resources.
     Constrained,
-}
-
-impl Default for ResourceProfile {
-    fn default() -> Self {
-        ResourceProfile::Desktop
-    }
 }
 
 /// A peer descriptor — structured routing material.
@@ -560,6 +552,12 @@ pub struct DescriptorStore {
     new_pseudonyms_this_epoch: usize,
     /// Relay behavior observations keyed by pseudonym.
     relay_observations: HashMap<[u8; 32], RelayObservation>,
+}
+
+impl Default for DescriptorStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DescriptorStore {
