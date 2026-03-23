@@ -27,6 +27,7 @@ use std::sync::Arc;
 
 use miasma_core::{
     config::{NetworkConfig, NodeConfig, StorageConfig},
+    directed,
     dissolve,
     store::LocalShareStore,
     ContentId, DissolutionParams, LocalShareSource, MiasmaError, RetrievalCoordinator,
@@ -363,5 +364,125 @@ pub fn distress_wipe(data_dir: String) -> Result<(), MiasmaFfiError> {
         }
     }
 
+    Ok(())
+}
+
+// ─── Directed sharing FFI ───────────────────────────────────────────────────
+
+/// Envelope summary returned to the mobile UI.
+#[derive(uniffi::Record)]
+pub struct EnvelopeSummaryFfi {
+    pub id: String,
+    pub sender_key: String,
+    pub state: String,
+    pub challenge_code: Option<String>,
+    pub created_at: u64,
+    pub expires_at: u64,
+}
+
+/// Get this node's sharing key (formatted as `msk:<base58>`).
+///
+/// The sharing key is derived deterministically from the master key,
+/// so it is stable across restarts.
+#[uniffi::export]
+pub fn get_sharing_key(data_dir: String) -> Result<String, MiasmaFfiError> {
+    let path = validate_data_dir(&data_dir)?;
+    let master_key_path = path.join("master.key");
+    if !master_key_path.exists() {
+        return Err(MiasmaFfiError::NotInitialized {
+            data_dir: data_dir.to_owned(),
+        });
+    }
+    let master_key = std::fs::read(&master_key_path).map_err(|e| {
+        tracing::warn!("read master.key: {e}");
+        MiasmaFfiError::Other {
+            msg: "failed to read master key".into(),
+        }
+    })?;
+    if master_key.len() < 32 {
+        return Err(MiasmaFfiError::Other {
+            msg: "invalid master key".into(),
+        });
+    }
+    let key_array: [u8; 32] = master_key[..32].try_into().unwrap();
+    let secret = miasma_core::crypto::keyderive::derive_sharing_key(&key_array)
+        .map_err(|e| MiasmaFfiError::Other {
+            msg: format!("{e}"),
+        })?;
+    let static_secret = x25519_dalek::StaticSecret::from(*secret);
+    let pubkey = x25519_dalek::PublicKey::from(&static_secret);
+    Ok(directed::format_sharing_key(pubkey.as_bytes()))
+}
+
+/// List incoming directed envelopes.
+#[uniffi::export]
+pub fn list_directed_inbox(
+    data_dir: String,
+) -> Result<Vec<EnvelopeSummaryFfi>, MiasmaFfiError> {
+    let path = validate_data_dir(&data_dir)?;
+    let inbox =
+        directed::DirectedInbox::open(&path).map_err(|e| MiasmaFfiError::Other {
+            msg: format!("open inbox: {e}"),
+        })?;
+    let items =
+        inbox.list_incoming().map_err(|e| MiasmaFfiError::Other {
+            msg: format!("list inbox: {e}"),
+        })?;
+    Ok(items
+        .into_iter()
+        .map(|s| EnvelopeSummaryFfi {
+            id: s.id,
+            sender_key: s.sender_key,
+            state: s.state,
+            challenge_code: s.challenge_code,
+            created_at: s.created_at,
+            expires_at: s.expires_at,
+        })
+        .collect())
+}
+
+/// List outgoing directed envelopes.
+#[uniffi::export]
+pub fn list_directed_outbox(
+    data_dir: String,
+) -> Result<Vec<EnvelopeSummaryFfi>, MiasmaFfiError> {
+    let path = validate_data_dir(&data_dir)?;
+    let inbox =
+        directed::DirectedInbox::open(&path).map_err(|e| MiasmaFfiError::Other {
+            msg: format!("open inbox: {e}"),
+        })?;
+    let items =
+        inbox.list_outgoing().map_err(|e| MiasmaFfiError::Other {
+            msg: format!("list outbox: {e}"),
+        })?;
+    Ok(items
+        .into_iter()
+        .map(|s| EnvelopeSummaryFfi {
+            id: s.id,
+            sender_key: s.sender_key,
+            state: s.state,
+            challenge_code: s.challenge_code,
+            created_at: s.created_at,
+            expires_at: s.expires_at,
+        })
+        .collect())
+}
+
+/// Delete a directed envelope from the local inbox.
+#[uniffi::export]
+pub fn delete_directed_envelope(
+    data_dir: String,
+    envelope_id: String,
+) -> Result<(), MiasmaFfiError> {
+    let path = validate_data_dir(&data_dir)?;
+    let inbox =
+        directed::DirectedInbox::open(&path).map_err(|e| MiasmaFfiError::Other {
+            msg: format!("open inbox: {e}"),
+        })?;
+    inbox
+        .delete(&envelope_id)
+        .map_err(|e| MiasmaFfiError::Other {
+            msg: format!("delete envelope: {e}"),
+        })?;
     Ok(())
 }

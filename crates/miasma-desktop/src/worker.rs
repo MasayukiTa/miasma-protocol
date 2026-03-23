@@ -45,6 +45,24 @@ pub enum WorkerCmd {
     ImportMagnet(String),
     /// Import a .torrent file via the bridge subprocess.
     ImportTorrentFile(PathBuf),
+    /// Get sharing key/contact.
+    GetSharingKey,
+    /// Send a directed share.
+    DirectedSend {
+        file_path: PathBuf,
+        recipient_contact: String,
+        password: String,
+        retention: String,
+    },
+    /// Retrieve a directed share.
+    DirectedRetrieve {
+        envelope_id: String,
+        password: String,
+    },
+    /// Revoke/delete a directed share.
+    DirectedRevoke { envelope_id: String },
+    /// List inbox.
+    DirectedInbox,
 }
 
 /// Connection state visible to the UI.
@@ -93,8 +111,29 @@ pub enum WorkerResult {
     ImportStarted { name: String },
     /// Import complete — content stored, MIDs returned.
     ImportComplete { mids: Vec<String> },
+    /// Sharing key/contact retrieved.
+    SharingKey { contact: String },
+    /// Directed share sent.
+    DirectedSent { envelope_id: String },
+    /// Directed share retrieved.
+    DirectedRetrieved { data: Vec<u8>, filename: Option<String> },
+    /// Directed share revoked.
+    DirectedRevoked,
+    /// Inbox listing.
+    DirectedInboxList(Vec<DirectedInboxItem>),
     /// Any error.
     Err(String),
+}
+
+/// Directed inbox item for display.
+#[derive(Debug, Clone)]
+pub struct DirectedInboxItem {
+    pub envelope_id: String,
+    pub sender_pubkey: String,
+    pub state: String,
+    pub challenge_code: Option<String>,
+    pub created_at: u64,
+    pub expires_at: u64,
 }
 
 /// Transport readiness info for desktop display.
@@ -280,6 +319,27 @@ fn worker_thread(
                 let p = path.to_string_lossy().to_string();
                 run_bridge_import(&tx, &data_dir, &["--torrent", &p])
             }
+            WorkerCmd::GetSharingKey => rt.block_on(do_sharing_key(&data_dir)),
+            WorkerCmd::DirectedSend {
+                file_path,
+                recipient_contact,
+                password,
+                retention,
+            } => rt.block_on(do_directed_send(
+                &data_dir,
+                &file_path,
+                &recipient_contact,
+                &password,
+                &retention,
+            )),
+            WorkerCmd::DirectedRetrieve {
+                envelope_id,
+                password,
+            } => rt.block_on(do_directed_retrieve(&data_dir, &envelope_id, &password)),
+            WorkerCmd::DirectedRevoke { envelope_id } => {
+                rt.block_on(do_directed_revoke(&data_dir, &envelope_id))
+            }
+            WorkerCmd::DirectedInbox => rt.block_on(do_directed_inbox(&data_dir)),
         };
 
         if tx.send(res).is_err() {
@@ -708,4 +768,119 @@ fn is_daemon_down(msg: &str) -> bool {
     msg.contains("daemon.port not found")
         || msg.contains("cannot connect to daemon")
         || msg.contains("Daemon not running")
+}
+
+// ─── Directed sharing handlers ──────────────────────────────────────────────
+
+async fn do_sharing_key(data_dir: &Path) -> WorkerResult {
+    match daemon_request(data_dir, ControlRequest::SharingKey).await {
+        Ok(ControlResponse::SharingKey { contact, .. }) => {
+            WorkerResult::SharingKey { contact }
+        }
+        Ok(ControlResponse::Error(e)) => WorkerResult::Err(e),
+        Ok(other) => WorkerResult::Err(format!("Unexpected response: {other:?}")),
+        Err(e) => WorkerResult::Err(daemon_error(&e)),
+    }
+}
+
+async fn do_directed_send(
+    data_dir: &Path,
+    file_path: &Path,
+    recipient_contact: &str,
+    password: &str,
+    retention: &str,
+) -> WorkerResult {
+    let data = match std::fs::read(file_path) {
+        Ok(d) => d,
+        Err(e) => return WorkerResult::Err(format!("Cannot read file: {e}")),
+    };
+    let retention_secs = match parse_retention(retention) {
+        Ok(s) => s,
+        Err(e) => return WorkerResult::Err(format!("Invalid retention: {e}")),
+    };
+    let filename = file_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_owned());
+    let req = ControlRequest::DirectedSend {
+        recipient_contact: recipient_contact.to_owned(),
+        data,
+        password: password.to_owned(),
+        retention_secs,
+        filename,
+    };
+    match daemon_request(data_dir, req).await {
+        Ok(ControlResponse::DirectedSent { envelope_id }) => {
+            WorkerResult::DirectedSent { envelope_id }
+        }
+        Ok(ControlResponse::Error(e)) => WorkerResult::Err(e),
+        Ok(other) => WorkerResult::Err(format!("Unexpected response: {other:?}")),
+        Err(e) => WorkerResult::Err(daemon_error(&e)),
+    }
+}
+
+async fn do_directed_retrieve(
+    data_dir: &Path,
+    envelope_id: &str,
+    password: &str,
+) -> WorkerResult {
+    let req = ControlRequest::DirectedRetrieve {
+        envelope_id: envelope_id.to_owned(),
+        password: password.to_owned(),
+    };
+    match daemon_request(data_dir, req).await {
+        Ok(ControlResponse::DirectedRetrieved { data, filename }) => {
+            WorkerResult::DirectedRetrieved { data, filename }
+        }
+        Ok(ControlResponse::Error(e)) => WorkerResult::Err(e),
+        Ok(other) => WorkerResult::Err(format!("Unexpected response: {other:?}")),
+        Err(e) => WorkerResult::Err(daemon_error(&e)),
+    }
+}
+
+async fn do_directed_revoke(data_dir: &Path, envelope_id: &str) -> WorkerResult {
+    let req = ControlRequest::DirectedRevoke {
+        envelope_id: envelope_id.to_owned(),
+    };
+    match daemon_request(data_dir, req).await {
+        Ok(ControlResponse::DirectedRevoked) => WorkerResult::DirectedRevoked,
+        Ok(ControlResponse::Error(e)) => WorkerResult::Err(e),
+        Ok(other) => WorkerResult::Err(format!("Unexpected response: {other:?}")),
+        Err(e) => WorkerResult::Err(daemon_error(&e)),
+    }
+}
+
+async fn do_directed_inbox(data_dir: &Path) -> WorkerResult {
+    match daemon_request(data_dir, ControlRequest::DirectedInbox).await {
+        Ok(ControlResponse::DirectedInboxList(items)) => {
+            let mapped: Vec<DirectedInboxItem> = items
+                .into_iter()
+                .map(|item| DirectedInboxItem {
+                    envelope_id: item.envelope_id,
+                    sender_pubkey: item.sender_pubkey,
+                    state: format!("{:?}", item.state),
+                    challenge_code: item.challenge_code,
+                    created_at: item.created_at,
+                    expires_at: item.expires_at,
+                })
+                .collect();
+            WorkerResult::DirectedInboxList(mapped)
+        }
+        Ok(ControlResponse::Error(e)) => WorkerResult::Err(e),
+        Ok(other) => WorkerResult::Err(format!("Unexpected response: {other:?}")),
+        Err(e) => WorkerResult::Err(daemon_error(&e)),
+    }
+}
+
+fn parse_retention(s: &str) -> Result<u64, String> {
+    let s = s.trim().to_lowercase();
+    if let Some(h) = s.strip_suffix('h') {
+        h.parse::<u64>().map(|v| v * 3600).map_err(|e| e.to_string())
+    } else if let Some(d) = s.strip_suffix('d') {
+        d.parse::<u64>().map(|v| v * 86400).map_err(|e| e.to_string())
+    } else if let Some(m) = s.strip_suffix('m') {
+        m.parse::<u64>().map(|v| v * 60).map_err(|e| e.to_string())
+    } else {
+        s.parse::<u64>().map_err(|e| e.to_string())
+    }
 }

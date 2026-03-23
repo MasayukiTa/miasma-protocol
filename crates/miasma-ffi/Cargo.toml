@@ -19,6 +19,7 @@ thiserror.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+x25519-dalek.workspace = true
 
 [build-dependencies]
 uniffi = { version = "0.28", features = ["build"] }

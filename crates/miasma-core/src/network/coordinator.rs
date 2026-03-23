@@ -1529,6 +1529,18 @@ impl MiasmaCoordinator {
         );
         success
     }
+
+    /// Send a directed sharing request to a specific peer.
+    pub async fn send_directed_request(
+        &self,
+        peer_id: PeerId,
+        addrs: Vec<String>,
+        request: crate::directed::DirectedRequest,
+    ) -> Result<crate::directed::DirectedResponse, MiasmaError> {
+        self.dht_handle
+            .send_directed_request(peer_id, addrs, request)
+            .await
+    }
 }
 
 // ─── RelayRewritingDhtExecutor ─────────────────────────────────────────────

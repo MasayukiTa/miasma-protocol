@@ -205,6 +205,8 @@ const PROGRESS_FILL: egui::Color32 = egui::Color32::from_rgb(70, 130, 200);
 enum Tab {
     Store,
     Retrieve,
+    Send,
+    Inbox,
     Status,
     Settings,
     Import,
@@ -255,6 +257,18 @@ pub struct MiasmaApp {
     obfs_quic_port: u16,
     transport_statuses: Vec<crate::worker::TransportStatusInfo>,
 
+    // Send panel (directed sharing)
+    send_contact: String,
+    send_password: String,
+    send_retention: String,
+    send_file_path: Option<std::path::PathBuf>,
+    last_envelope_id: Option<String>,
+    sharing_contact: Option<String>,
+
+    // Inbox panel
+    inbox_items: Vec<InboxItem>,
+    inbox_retrieve_password: String,
+
     // Settings / general
     data_dir_display: String,
     busy: bool,
@@ -277,6 +291,17 @@ enum ImportState {
     Complete,
     /// Import failed.
     Failed,
+}
+
+/// An entry in the directed sharing inbox/outbox.
+#[derive(Clone)]
+struct InboxItem {
+    envelope_id: String,
+    sender: String,
+    state: String,
+    challenge_code: Option<String>,
+    created_at: String,
+    expires_at: String,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -345,6 +370,18 @@ impl MiasmaApp {
             startup_time: now,
             last_status_poll: now,
             launch_attempts: 0,
+
+            // Directed sharing
+            send_contact: String::new(),
+            send_password: String::new(),
+            send_retention: "7d".to_owned(),
+            send_file_path: None,
+            last_envelope_id: None,
+            sharing_contact: None,
+
+            // Inbox
+            inbox_items: Vec::new(),
+            inbox_retrieve_password: String::new(),
         }
     }
 
@@ -442,6 +479,54 @@ impl MiasmaApp {
                     self.import_state = ImportState::Complete;
                     self.import_mids = mids;
                     self.set_msg(MsgKind::Success, self.s().import_complete);
+                }
+                WorkerResult::SharingKey { contact } => {
+                    self.sharing_contact = Some(contact);
+                }
+                WorkerResult::DirectedSent { envelope_id } => {
+                    self.busy = false;
+                    self.last_envelope_id = Some(envelope_id);
+                    self.set_msg(MsgKind::Success, self.s().send_success);
+                }
+                WorkerResult::DirectedRetrieved { data, filename } => {
+                    self.busy = false;
+                    // Save the retrieved directed data.
+                    let fname = filename.as_deref().unwrap_or("directed_content.bin");
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_file_name(fname)
+                        .save_file()
+                    {
+                        match std::fs::write(&path, &data) {
+                            Ok(()) => {
+                                self.set_msg(
+                                    MsgKind::Success,
+                                    format!("Saved to {}", path.display()),
+                                );
+                            }
+                            Err(e) => {
+                                self.set_msg(MsgKind::Error, format!("Save failed: {e}"));
+                            }
+                        }
+                    }
+                }
+                WorkerResult::DirectedRevoked => {
+                    self.busy = false;
+                    self.set_msg(MsgKind::Success, "Revoked.");
+                    // Refresh inbox.
+                    let _ = self.worker.tx.try_send(WorkerCmd::DirectedInbox);
+                }
+                WorkerResult::DirectedInboxList(items) => {
+                    self.inbox_items = items
+                        .into_iter()
+                        .map(|item| InboxItem {
+                            envelope_id: item.envelope_id,
+                            sender: item.sender_pubkey,
+                            state: item.state,
+                            challenge_code: item.challenge_code,
+                            created_at: format_epoch(item.created_at),
+                            expires_at: format_epoch(item.expires_at),
+                        })
+                        .collect();
                 }
                 WorkerResult::Err(e) => {
                     self.busy = false;
@@ -963,6 +1048,217 @@ impl MiasmaApp {
                 }
             });
         }
+    }
+
+    // ── Send panel (directed sharing) ──────────────────────────────────
+
+    fn send_panel(&mut self, ui: &mut egui::Ui) {
+        let s = self.s();
+        let easy = self.mode.is_easy();
+        let heading = if easy { s.send_heading_easy } else { s.send_heading };
+        let desc = if easy { s.send_desc_easy } else { s.send_desc };
+
+        card_frame().show(ui, |ui| {
+            ui.colored_label(ACCENT, egui::RichText::new(heading).size(15.0).strong());
+            ui.add_space(4.0);
+            ui.colored_label(DIM, desc);
+            ui.add_space(10.0);
+
+            // Show sharing contact (own).
+            if let Some(contact) = self.sharing_contact.clone() {
+                let key_desc = if easy {
+                    s.sharing_key_desc_easy
+                } else {
+                    s.sharing_key_desc
+                };
+                ui.colored_label(DIM, key_desc);
+                ui.horizontal(|ui| {
+                    ui.monospace(contact.as_str());
+                    if ui.small_button(s.sharing_key_copy).clicked() {
+                        ui.output_mut(|o| o.copied_text = contact.clone());
+                        self.set_msg(MsgKind::Success, s.sharing_key_copied);
+                    }
+                });
+                ui.add_space(8.0);
+            } else if self.daemon_state == DaemonState::Connected {
+                // Request sharing key on first render.
+                let _ = self.worker.tx.try_send(WorkerCmd::GetSharingKey);
+            }
+
+            // Recipient contact.
+            ui.horizontal(|ui| {
+                ui.label(s.send_contact_label);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.send_contact)
+                        .hint_text(s.send_contact_hint)
+                        .desired_width(350.0),
+                );
+            });
+
+            // Password.
+            ui.horizontal(|ui| {
+                ui.label(s.send_password_label);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.send_password)
+                        .password(true)
+                        .desired_width(200.0),
+                );
+            });
+
+            // Retention.
+            ui.horizontal(|ui| {
+                ui.label(s.send_retention_label);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.send_retention)
+                        .desired_width(80.0),
+                );
+                ui.colored_label(DIM, "(e.g. 24h, 7d, 30d)");
+            });
+
+            // File chooser.
+            ui.horizontal(|ui| {
+                if ui.button(s.send_choose_file).clicked() {
+                    if let Some(path) = rfd::FileDialog::new().pick_file() {
+                        self.send_file_path = Some(path);
+                    }
+                }
+                if let Some(ref path) = self.send_file_path {
+                    ui.monospace(path.display().to_string());
+                }
+            });
+
+            ui.add_space(8.0);
+
+            // Send button.
+            let can_send = self.daemon_state == DaemonState::Connected
+                && !self.busy
+                && !self.send_contact.is_empty()
+                && !self.send_password.is_empty()
+                && self.send_file_path.is_some();
+
+            if self.daemon_state != DaemonState::Connected {
+                ui.colored_label(DIM, s.send_not_connected);
+            } else if self.busy {
+                ui.colored_label(DIM, s.send_busy);
+            } else {
+                ui.horizontal(|ui| {
+                    let btn = egui::Button::new(
+                        egui::RichText::new(s.send_button).color(egui::Color32::WHITE),
+                    )
+                    .fill(if can_send { ACCENT } else { CARD_BG });
+                    if ui.add_enabled(can_send, btn).clicked() {
+                        if let Some(ref path) = self.send_file_path {
+                            self.busy = true;
+                            let _ = self.worker.tx.try_send(WorkerCmd::DirectedSend {
+                                file_path: path.clone(),
+                                recipient_contact: self.send_contact.clone(),
+                                password: self.send_password.clone(),
+                                retention: self.send_retention.clone(),
+                            });
+                        }
+                    }
+                });
+            }
+
+            // Show last envelope ID.
+            if let Some(ref eid) = self.last_envelope_id {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.colored_label(GREEN, "Envelope ID:");
+                    ui.monospace(eid.as_str());
+                    if ui.small_button(s.copy).clicked() {
+                        ui.output_mut(|o| o.copied_text = eid.clone());
+                    }
+                });
+            }
+        });
+    }
+
+    // ── Inbox panel ─────────────────────────────────────────────────────
+
+    fn inbox_panel(&mut self, ui: &mut egui::Ui) {
+        let s = self.s();
+        let easy = self.mode.is_easy();
+        let heading = if easy { s.inbox_heading_easy } else { s.inbox_heading };
+        let desc = if easy { s.inbox_desc_easy } else { s.inbox_desc };
+
+        card_frame().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.colored_label(ACCENT, egui::RichText::new(heading).size(15.0).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button(s.inbox_refresh).clicked()
+                        && self.daemon_state == DaemonState::Connected
+                    {
+                        let _ = self.worker.tx.try_send(WorkerCmd::DirectedInbox);
+                    }
+                });
+            });
+            ui.add_space(4.0);
+            ui.colored_label(DIM, desc);
+            ui.add_space(10.0);
+
+            if self.inbox_items.is_empty() {
+                ui.colored_label(DIM, s.inbox_empty);
+                // Auto-refresh on first render.
+                if self.daemon_state == DaemonState::Connected {
+                    let _ = self.worker.tx.try_send(WorkerCmd::DirectedInbox);
+                }
+            } else {
+                for item in &self.inbox_items.clone() {
+                    card_frame().show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.monospace(&item.envelope_id[..16.min(item.envelope_id.len())]);
+                            ui.colored_label(DIM, format!("  {} {}", s.inbox_state, item.state));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.colored_label(DIM, s.inbox_from);
+                            ui.monospace(&item.sender[..20.min(item.sender.len())]);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.colored_label(DIM, format!("Created: {}", item.created_at));
+                            ui.colored_label(DIM, format!("  Expires: {}", item.expires_at));
+                        });
+                        if let Some(ref code) = item.challenge_code {
+                            ui.horizontal(|ui| {
+                                ui.colored_label(GREEN, format!("{} {}", s.inbox_challenge, code));
+                                if ui.small_button(s.copy).clicked() {
+                                    ui.output_mut(|o| o.copied_text = code.clone());
+                                }
+                            });
+                        }
+
+                        // Retrieve button.
+                        if item.state == "Confirmed" {
+                            ui.horizontal(|ui| {
+                                ui.label(s.inbox_password_label);
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.inbox_retrieve_password)
+                                        .password(true)
+                                        .desired_width(150.0),
+                                );
+                                if ui.button(s.inbox_retrieve_button).clicked()
+                                    && !self.inbox_retrieve_password.is_empty()
+                                {
+                                    self.busy = true;
+                                    let _ = self.worker.tx.try_send(WorkerCmd::DirectedRetrieve {
+                                        envelope_id: item.envelope_id.clone(),
+                                        password: self.inbox_retrieve_password.clone(),
+                                    });
+                                }
+                            });
+                        }
+
+                        // Revoke/delete button.
+                        if ui.small_button(s.inbox_revoke_button).clicked() {
+                            let _ = self.worker.tx.try_send(WorkerCmd::DirectedRevoke {
+                                envelope_id: item.envelope_id.clone(),
+                            });
+                        }
+                    });
+                    ui.add_space(4.0);
+                }
+            }
+        });
     }
 
     // ── Status panel ─────────────────────────────────────────────────────
@@ -2045,6 +2341,38 @@ fn section_heading(ui: &mut egui::Ui, text: &str) {
 }
 
 /// Wrap content in a subtle card frame for visual grouping.
+fn format_epoch(epoch_secs: u64) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if epoch_secs == 0 {
+        return "unknown".into();
+    }
+    if epoch_secs > now {
+        let diff = epoch_secs - now;
+        if diff < 3600 {
+            format!("in {}m", diff / 60)
+        } else if diff < 86400 {
+            format!("in {}h", diff / 3600)
+        } else {
+            format!("in {}d", diff / 86400)
+        }
+    } else {
+        let diff = now - epoch_secs;
+        if diff < 60 {
+            "just now".into()
+        } else if diff < 3600 {
+            format!("{}m ago", diff / 60)
+        } else if diff < 86400 {
+            format!("{}h ago", diff / 3600)
+        } else {
+            format!("{}d ago", diff / 86400)
+        }
+    }
+}
+
 fn card_frame() -> egui::Frame {
     egui::Frame::none()
         .inner_margin(egui::Margin::same(14.0))
@@ -2217,6 +2545,10 @@ impl eframe::App for MiasmaApp {
                     };
                     nav_tab(ui, &mut self.tab, Tab::Store, store_label);
                     nav_tab(ui, &mut self.tab, Tab::Retrieve, retrieve_label);
+                    let send_label = if easy { s.tab_send_easy } else { s.tab_send };
+                    let inbox_label = if easy { s.tab_inbox_easy } else { s.tab_inbox };
+                    nav_tab(ui, &mut self.tab, Tab::Send, send_label);
+                    nav_tab(ui, &mut self.tab, Tab::Inbox, inbox_label);
                     nav_tab(ui, &mut self.tab, Tab::Status, s.tab_status);
                     nav_tab(ui, &mut self.tab, Tab::Settings, s.tab_settings);
                     // Show Import tab only when an import is active.
@@ -2274,6 +2606,8 @@ impl eframe::App for MiasmaApp {
                     match self.tab {
                         Tab::Store => self.store_panel(ui),
                         Tab::Retrieve => self.retrieve_panel(ui),
+                        Tab::Send => self.send_panel(ui),
+                        Tab::Inbox => self.inbox_panel(ui),
                         Tab::Status => self.status_panel(ui),
                         Tab::Settings => self.settings_panel(ui),
                         Tab::Import => self.import_panel(ui),

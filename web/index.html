@@ -71,6 +71,24 @@
           <h2 data-i18n="retrieve">Retrieve</h2>
           <p data-i18n="retrieve_desc">Reconstruct content from collected shares</p>
         </button>
+        <button class="action-card card-send" data-view="send">
+          <div class="card-icon">
+            <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.5">
+              <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+            </svg>
+          </div>
+          <h2 data-i18n="tab_send">Send</h2>
+          <p data-i18n="send_desc">Send encrypted content directly to a specific recipient</p>
+        </button>
+        <button class="action-card card-inbox" data-view="inbox">
+          <div class="card-icon">
+            <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.5">
+              <polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 002 2h16a2 2 0 002-2v-6l-3.45-6.89A2 2 0 0016.76 4H7.24a2 2 0 00-1.79 1.11z"/>
+            </svg>
+          </div>
+          <h2 data-i18n="tab_inbox">Inbox</h2>
+          <p data-i18n="inbox_desc">Directed shares received from other users</p>
+        </button>
       </div>
       <div class="scope-notice" id="scope-notice">
         <p data-i18n="scope_notice">This is a local-only tool. Shares stay in your browser. There is no network connectivity, peer discovery, or cloud storage. To move shares between devices, use Export / Import.</p>
@@ -282,6 +300,90 @@
             <button id="btn-download" class="btn-secondary" data-i18n="download">Download</button>
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- Send View -->
+    <div id="view-send" class="view">
+      <div class="view-header">
+        <button class="btn-back" data-view="home">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+        </button>
+        <h1 data-i18n="send_heading">Directed Send</h1>
+      </div>
+
+      <div class="send-content">
+        <!-- Your contact info (auto-loaded) -->
+        <div class="settings-group" id="send-contact-info">
+          <div class="setting-row">
+            <span data-i18n="sharing_contact_label">Your contact string</span>
+            <code id="send-my-contact" class="mid-value" style="font-size:0.75rem;word-break:break-all;"></code>
+          </div>
+        </div>
+
+        <!-- Recipient -->
+        <div class="mid-input-section">
+          <label data-i18n="send_recipient">Recipient contact</label>
+          <input type="text" id="send-recipient" placeholder="msk:..." spellcheck="false" autocomplete="off">
+        </div>
+
+        <!-- Password -->
+        <div class="mid-input-section">
+          <label data-i18n="send_password">Password</label>
+          <input type="password" id="send-password" autocomplete="new-password">
+        </div>
+
+        <!-- Retention -->
+        <div class="mid-input-section">
+          <label data-i18n="send_retention">Retention</label>
+          <select id="send-retention">
+            <option value="600" data-i18n="retention_10m">10 minutes</option>
+            <option value="3600" data-i18n="retention_1h" selected>1 hour</option>
+            <option value="86400" data-i18n="retention_1d">1 day</option>
+            <option value="604800" data-i18n="retention_7d">7 days</option>
+          </select>
+        </div>
+
+        <!-- File -->
+        <div class="mid-input-section">
+          <label data-i18n="send_file">File to send</label>
+          <input type="file" id="send-file-input">
+        </div>
+
+        <!-- Send button -->
+        <button id="btn-directed-send" class="btn-primary" data-i18n="send_btn">Send</button>
+
+        <!-- Result -->
+        <div id="send-result" class="result-section hidden">
+          <div class="result-header">
+            <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="var(--success)" stroke-width="2"><path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+            <h3 data-i18n="send_success">Sent successfully</h3>
+          </div>
+          <div class="mid-display">
+            <label>Envelope ID</label>
+            <div class="mid-value">
+              <code id="send-envelope-id"></code>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Inbox View -->
+    <div id="view-inbox" class="view">
+      <div class="view-header">
+        <button class="btn-back" data-view="home">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+        </button>
+        <h1 data-i18n="inbox_heading">Inbox</h1>
+      </div>
+
+      <div class="inbox-content">
+        <div class="inbox-toolbar">
+          <button id="btn-inbox-refresh" class="btn-secondary" data-i18n="inbox_refresh">Refresh</button>
+        </div>
+        <div id="inbox-list"></div>
+        <p id="inbox-empty" class="hidden" data-i18n="inbox_empty" style="text-align:center;color:var(--text-dim);padding:2rem 0;">No items in inbox</p>
       </div>
     </div>
 
