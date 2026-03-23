@@ -81,17 +81,16 @@ pub struct DiscoveryAttempts {
 }
 
 /// Outcome of a single discovery strategy.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum StrategyResult {
+    #[default]
     NotAttempted,
-    Success { detail: String },
-    Failed { reason: String },
-}
-
-impl Default for StrategyResult {
-    fn default() -> Self {
-        Self::NotAttempted
-    }
+    Success {
+        detail: String,
+    },
+    Failed {
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for StrategyResult {
@@ -749,8 +748,9 @@ async fn dht_get_peers(info_hash: &[u8; 20]) -> anyhow::Result<Vec<SocketAddr>> 
 /// Parse a DHT `get_peers` response, returning (values_peers, closer_nodes).
 ///
 /// BEP-5 response contains either:
-/// - `r.values`: list of compact 6-byte peer addresses (peers with the torrent)
-/// - `r.nodes`: compact 26-byte node info (20-byte id + 6-byte addr) for closer DHT nodes
+///  - `r.values`: list of compact 6-byte peer addresses (peers with the torrent)
+///  - `r.nodes`: compact 26-byte node info (20-byte id + 6-byte addr) for closer DHT nodes
+///
 /// A response may contain both.
 ///
 /// Returns `DhtNode`s (with their 20-byte node IDs) so the caller can sort by
@@ -1031,10 +1031,10 @@ async fn https_get(url: &str) -> anyhow::Result<Vec<u8>> {
     }
 
     // Check for GlobalProtect block pages
-    if output.stdout.starts_with(b"<html") || output.stdout.starts_with(b"<!DOCTYPE") {
-        if output.stdout.windows(14).any(|w| w == b"Web Page Block") {
-            bail!("blocked by firewall");
-        }
+    if (output.stdout.starts_with(b"<html") || output.stdout.starts_with(b"<!DOCTYPE"))
+        && output.stdout.windows(14).any(|w| w == b"Web Page Block")
+    {
+        bail!("blocked by firewall");
     }
 
     Ok(output.stdout)
@@ -1170,7 +1170,7 @@ async fn fetch_ut_metadata(peer: SocketAddr, info_hash: &[u8; 20]) -> anyhow::Re
 
     // ── Request metadata pieces (BEP-9) ─────────────────────────────────────
     let piece_size = 16_384usize;
-    let num_pieces = (metadata_size + piece_size - 1) / piece_size;
+    let num_pieces = metadata_size.div_ceil(piece_size);
     let mut pieces: Vec<Option<Vec<u8>>> = vec![None; num_pieces];
 
     for i in 0..num_pieces {
@@ -1323,7 +1323,7 @@ async fn download_file(
         .ok_or_else(|| anyhow::anyhow!("missing pieces"))?
         .to_owned();
 
-    let num_pieces = (size as usize + piece_length - 1) / piece_length;
+    let num_pieces = (size as usize).div_ceil(piece_length);
 
     // Try each peer until we get a full download.
     for &peer in peers.iter().take(10) {
@@ -1437,7 +1437,7 @@ async fn download_from_peer(
 #[allow(dead_code)]
 /// Verify pieces using SHA1 hashes from the info dict.
 fn verify_pieces(data: &[u8], pieces_hash: &[u8], piece_length: usize) -> bool {
-    if pieces_hash.len() % 20 != 0 {
+    if !pieces_hash.len().is_multiple_of(20) {
         return false;
     }
     let num_pieces = pieces_hash.len() / 20;
@@ -1488,6 +1488,7 @@ fn sha1_compress(data: &[u8]) -> [u8; 20] {
             w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
         }
         let (mut a, mut b, mut c, mut d, mut e) = (h[0], h[1], h[2], h[3], h[4]);
+        #[allow(clippy::needless_range_loop)]
         for i in 0..80 {
             let (f, k) = match i {
                 0..=19 => ((b & c) | ((!b) & d), 0x5A827999u32),

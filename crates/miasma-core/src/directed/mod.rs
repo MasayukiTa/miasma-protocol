@@ -56,7 +56,9 @@ pub mod envelope;
 pub mod inbox;
 pub mod protocol;
 
-pub use challenge::{generate_challenge, verify_challenge, CHALLENGE_MAX_ATTEMPTS, CHALLENGE_TTL_SECS};
+pub use challenge::{
+    generate_challenge, verify_challenge, CHALLENGE_MAX_ATTEMPTS, CHALLENGE_TTL_SECS,
+};
 pub use envelope::{
     create_envelope, decrypt_directed_content, decrypt_envelope_payload, derive_content_key,
     finalize_envelope, format_sharing_contact, format_sharing_key, parse_sharing_contact,

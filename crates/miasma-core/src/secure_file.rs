@@ -29,16 +29,14 @@ pub fn write_restricted(path: &Path, data: &[u8]) -> Result<(), MiasmaError> {
 /// other users even momentarily at the final path.
 pub fn atomic_write_restricted(path: &Path, data: &[u8]) -> Result<(), MiasmaError> {
     let tmp = path.with_extension("sec.tmp");
-    write_restricted(&tmp, data).map_err(|e| {
+    write_restricted(&tmp, data).inspect_err(|_e| {
         let _ = std::fs::remove_file(&tmp);
-        e
     })?;
     std::fs::rename(&tmp, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
-        MiasmaError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("failed to rename restricted file into place: {e}"),
-        ))
+        MiasmaError::Io(std::io::Error::other(format!(
+            "failed to rename restricted file into place: {e}"
+        )))
     })
 }
 

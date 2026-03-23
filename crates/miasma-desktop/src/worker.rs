@@ -116,7 +116,10 @@ pub enum WorkerResult {
     /// Directed share sent.
     DirectedSent { envelope_id: String },
     /// Directed share retrieved.
-    DirectedRetrieved { data: Vec<u8>, filename: Option<String> },
+    DirectedRetrieved {
+        data: Vec<u8>,
+        filename: Option<String>,
+    },
     /// Directed share revoked.
     DirectedRevoked,
     /// Inbox listing.
@@ -774,9 +777,7 @@ fn is_daemon_down(msg: &str) -> bool {
 
 async fn do_sharing_key(data_dir: &Path) -> WorkerResult {
     match daemon_request(data_dir, ControlRequest::SharingKey).await {
-        Ok(ControlResponse::SharingKey { contact, .. }) => {
-            WorkerResult::SharingKey { contact }
-        }
+        Ok(ControlResponse::SharingKey { contact, .. }) => WorkerResult::SharingKey { contact },
         Ok(ControlResponse::Error(e)) => WorkerResult::Err(e),
         Ok(other) => WorkerResult::Err(format!("Unexpected response: {other:?}")),
         Err(e) => WorkerResult::Err(daemon_error(&e)),
@@ -819,11 +820,7 @@ async fn do_directed_send(
     }
 }
 
-async fn do_directed_retrieve(
-    data_dir: &Path,
-    envelope_id: &str,
-    password: &str,
-) -> WorkerResult {
+async fn do_directed_retrieve(data_dir: &Path, envelope_id: &str, password: &str) -> WorkerResult {
     let req = ControlRequest::DirectedRetrieve {
         envelope_id: envelope_id.to_owned(),
         password: password.to_owned(),
@@ -875,9 +872,13 @@ async fn do_directed_inbox(data_dir: &Path) -> WorkerResult {
 fn parse_retention(s: &str) -> Result<u64, String> {
     let s = s.trim().to_lowercase();
     if let Some(h) = s.strip_suffix('h') {
-        h.parse::<u64>().map(|v| v * 3600).map_err(|e| e.to_string())
+        h.parse::<u64>()
+            .map(|v| v * 3600)
+            .map_err(|e| e.to_string())
     } else if let Some(d) = s.strip_suffix('d') {
-        d.parse::<u64>().map(|v| v * 86400).map_err(|e| e.to_string())
+        d.parse::<u64>()
+            .map(|v| v * 86400)
+            .map_err(|e| e.to_string())
     } else if let Some(m) = s.strip_suffix('m') {
         m.parse::<u64>().map(|v| v * 60).map_err(|e| e.to_string())
     } else {

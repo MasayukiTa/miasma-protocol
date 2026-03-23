@@ -201,7 +201,7 @@ mod tests {
         let mut rng = rand::thread_rng();
         let pkt = make_cover_packet(&mut rng);
         assert_eq!(pkt[0], COVER_TAG);
-        assert!(pkt.len() >= COVER_MIN_BYTES + 1);
+        assert!(pkt.len() > COVER_MIN_BYTES);
         assert!(pkt.len() <= COVER_MAX_BYTES + 1);
     }
 }

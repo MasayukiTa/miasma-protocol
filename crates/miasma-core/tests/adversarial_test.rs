@@ -1,3 +1,4 @@
+#![allow(clippy::field_reassign_with_default, clippy::doc_lazy_continuation)]
 /// Adversarial simulation tests for Miasma's routing and trust model.
 ///
 /// These tests simulate attack scenarios against the routing overlay,
@@ -34,14 +35,14 @@ use miasma_core::network::path_selection::{AnonymityPolicy, PathSelector};
 use miasma_core::network::peer_state::PeerRegistry;
 use miasma_core::network::routing::{IpPrefix, RoutingTable};
 
+use miasma_core::directed::challenge::{
+    generate_challenge, verify_challenge, CHALLENGE_MAX_ATTEMPTS,
+};
 use miasma_core::directed::{
     create_envelope, decrypt_directed_content, decrypt_envelope_payload, derive_content_key,
     finalize_envelope, format_sharing_contact, format_sharing_key, parse_sharing_contact,
     parse_sharing_key, DirectedEnvelope, DirectedInbox, DirectedRequest, DirectedResponse,
     EnvelopeState, RetentionPeriod,
-};
-use miasma_core::directed::challenge::{
-    generate_challenge, verify_challenge, CHALLENGE_MAX_ATTEMPTS,
 };
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -1721,7 +1722,7 @@ fn onion_relay_per_hop_content_blindness() {
     // Initiator decrypts: r1_return_key → r2_return_key → session_key.
     let after_r1 = decrypt_response(&r1_return_key, &r1_encrypted).unwrap();
     let after_r2 = decrypt_response(&r2_return_key, &after_r1).unwrap();
-    let plaintext = decrypt_response(&*session_key, &after_r2).unwrap();
+    let plaintext = decrypt_response(&session_key, &after_r2).unwrap();
 
     assert_eq!(plaintext, response);
 }
@@ -4417,13 +4418,9 @@ fn directed_wrong_password_rejection() {
     let payload = decrypt_envelope_payload(&recipient_secret, &envelope).unwrap();
 
     // Derive key with wrong password.
-    let wrong_key =
-        derive_content_key(&recipient_secret, &envelope, "wrong-password").unwrap();
+    let wrong_key = derive_content_key(&recipient_secret, &envelope, "wrong-password").unwrap();
     let result = decrypt_directed_content(&wrong_key, &payload.content_nonce, &protected);
-    assert!(
-        result.is_err(),
-        "decryption with wrong password must fail"
-    );
+    assert!(result.is_err(), "decryption with wrong password must fail");
 }
 
 /// 3. Wrong recipient key must fail envelope payload decryption.
@@ -4602,18 +4599,13 @@ fn directed_envelope_state_transitions() {
 #[test]
 fn directed_sharing_key_format_roundtrip() {
     // Test with various key patterns.
-    let keys: Vec<[u8; 32]> = vec![
-        [0x00u8; 32],
-        [0xFFu8; 32],
-        [0x42u8; 32],
-        {
-            let mut k = [0u8; 32];
-            for (i, b) in k.iter_mut().enumerate() {
-                *b = i as u8;
-            }
-            k
-        },
-    ];
+    let keys: Vec<[u8; 32]> = vec![[0x00u8; 32], [0xFFu8; 32], [0x42u8; 32], {
+        let mut k = [0u8; 32];
+        for (i, b) in k.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        k
+    }];
 
     for key in &keys {
         let formatted = format_sharing_key(key);
@@ -4840,8 +4832,7 @@ fn directed_envelope_tampering_detection() {
     // Flip a byte in protected content.
     let mid_idx = protected2.len() / 2;
     protected2[mid_idx] ^= 0xFF;
-    let result =
-        decrypt_directed_content(&content_key, &payload2.content_nonce, &protected2);
+    let result = decrypt_directed_content(&content_key, &payload2.content_nonce, &protected2);
     assert!(
         result.is_err(),
         "tampered content must fail AEAD decryption"
