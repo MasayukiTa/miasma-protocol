@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::MiasmaError;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NodeConfig {
     #[serde(default)]
     pub storage: StorageConfig,
@@ -86,16 +86,6 @@ impl Default for NetworkConfig {
         Self {
             listen_addr: "/ip4/0.0.0.0/udp/0/quic-v1".into(),
             bootstrap_peers: vec![],
-        }
-    }
-}
-
-impl Default for NodeConfig {
-    fn default() -> Self {
-        Self {
-            storage: StorageConfig::default(),
-            network: NetworkConfig::default(),
-            transport: TransportConfig::default(),
         }
     }
 }

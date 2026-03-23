@@ -504,10 +504,7 @@ impl MiasmaApp {
                     self.busy = false;
                     // Save the retrieved directed data.
                     let fname = filename.as_deref().unwrap_or("directed_content.bin");
-                    if let Some(path) = rfd::FileDialog::new()
-                        .set_file_name(fname)
-                        .save_file()
-                    {
+                    if let Some(path) = rfd::FileDialog::new().set_file_name(fname).save_file() {
                         match std::fs::write(&path, &data) {
                             Ok(()) => {
                                 self.set_msg(
@@ -588,9 +585,7 @@ impl MiasmaApp {
             .rounding(8.0);
 
         match self.daemon_state {
-            DaemonState::Connected => {
-                return;
-            }
+            DaemonState::Connected => {}
             DaemonState::NeedsInit => {
                 let frame = frame.fill(egui::Color32::from_rgb(45, 40, 30));
                 frame.show(ui, |ui| {
@@ -1093,7 +1088,11 @@ impl MiasmaApp {
     fn send_panel(&mut self, ui: &mut egui::Ui) {
         let s = self.s();
         let easy = self.mode.is_easy();
-        let heading = if easy { s.send_heading_easy } else { s.send_heading };
+        let heading = if easy {
+            s.send_heading_easy
+        } else {
+            s.send_heading
+        };
         let desc = if easy { s.send_desc_easy } else { s.send_desc };
 
         card_frame().show(ui, |ui| {
@@ -1146,10 +1145,7 @@ impl MiasmaApp {
             // Retention.
             ui.horizontal(|ui| {
                 ui.label(s.send_retention_label);
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.send_retention)
-                        .desired_width(80.0),
-                );
+                ui.add(egui::TextEdit::singleline(&mut self.send_retention).desired_width(80.0));
                 ui.colored_label(DIM, "(e.g. 24h, 7d, 30d)");
             });
 
@@ -1217,8 +1213,16 @@ impl MiasmaApp {
     fn inbox_panel(&mut self, ui: &mut egui::Ui) {
         let s = self.s();
         let easy = self.mode.is_easy();
-        let heading = if easy { s.inbox_heading_easy } else { s.inbox_heading };
-        let desc = if easy { s.inbox_desc_easy } else { s.inbox_desc };
+        let heading = if easy {
+            s.inbox_heading_easy
+        } else {
+            s.inbox_heading
+        };
+        let desc = if easy {
+            s.inbox_desc_easy
+        } else {
+            s.inbox_desc
+        };
 
         card_frame().show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -1499,15 +1503,14 @@ impl MiasmaApp {
             {
                 let _ = self.worker.tx.try_send(WorkerCmd::GetStatus);
             }
-            if !easy {
-                if ui
+            if !easy
+                && ui
                     .add_sized([160.0, 26.0], egui::Button::new(s.status_copy_diag))
                     .clicked()
-                {
-                    let diag = self.build_diagnostics();
-                    ui.output_mut(|o| o.copied_text = diag);
-                    self.set_msg(MsgKind::Info, s.status_diag_copied);
-                }
+            {
+                let diag = self.build_diagnostics();
+                ui.output_mut(|o| o.copied_text = diag);
+                self.set_msg(MsgKind::Info, s.status_diag_copied);
             }
             // "Save Report" — available in both modes for support.
             if ui

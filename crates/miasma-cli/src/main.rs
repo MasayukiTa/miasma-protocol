@@ -145,7 +145,6 @@ enum Commands {
     },
 
     // ── Directed sharing ──────────────────────────────────────────────
-
     /// Show this node's sharing key and contact string.
     ///
     /// Share the contact string with people who want to send you files.
@@ -320,10 +319,9 @@ async fn main() -> Result<()> {
             password,
             retention,
         } => cmd_send(&data_dir, &path, &to, &password, &retention).await,
-        Commands::Confirm {
-            envelope_id,
-            code,
-        } => cmd_confirm(&data_dir, &envelope_id, &code).await,
+        Commands::Confirm { envelope_id, code } => {
+            cmd_confirm(&data_dir, &envelope_id, &code).await
+        }
         Commands::Receive {
             envelope_id,
             password,
@@ -876,12 +874,11 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
                 println!(
                     "  Opportunistic: {}/{} attempts",
                     {
-                        let opp_total = s.retrieval_opportunistic_onion_rendezvous_successes
+                        s.retrieval_opportunistic_onion_rendezvous_successes
                             + s.retrieval_opportunistic_onion_successes
                             + s.retrieval_opportunistic_rendezvous_successes
                             + s.retrieval_opportunistic_relay_successes
-                            + s.retrieval_opportunistic_direct_fallbacks;
-                        opp_total
+                            + s.retrieval_opportunistic_direct_fallbacks
                     },
                     s.retrieval_opportunistic_attempts
                 );
@@ -1108,7 +1105,7 @@ async fn cmd_daemon(data_dir: &std::path::Path, bootstrap_addrs: &[String]) -> R
             .context("cannot open share store")?,
     );
 
-    let node = MiasmaNode::new(&*master_key, NodeType::Full, &config.network.listen_addr)
+    let node = MiasmaNode::new(&master_key, NodeType::Full, &config.network.listen_addr)
         .context("cannot create node")?;
 
     let server = DaemonServer::start_with_transport(
@@ -1227,7 +1224,8 @@ fn parse_retention(s: &str) -> Result<u64> {
         Ok(mins * 60)
     } else {
         // Try parsing as raw seconds.
-        s.parse::<u64>().context("invalid retention: use e.g. '24h', '7d', or seconds")
+        s.parse::<u64>()
+            .context("invalid retention: use e.g. '24h', '7d', or seconds")
     }
 }
 
@@ -1277,11 +1275,7 @@ async fn cmd_send(
     Ok(())
 }
 
-async fn cmd_confirm(
-    data_dir: &std::path::Path,
-    envelope_id: &str,
-    code: &str,
-) -> Result<()> {
+async fn cmd_confirm(data_dir: &std::path::Path, envelope_id: &str, code: &str) -> Result<()> {
     use miasma_core::{daemon_request, ControlRequest, ControlResponse};
 
     eprintln!("Submitting challenge code for {envelope_id} …");
@@ -1371,7 +1365,11 @@ async fn cmd_inbox(data_dir: &std::path::Path) -> Result<()> {
                 println!("Inbox is empty.");
                 return Ok(());
             }
-            println!("Directed Inbox ({} item{})", items.len(), if items.len() == 1 { "" } else { "s" });
+            println!(
+                "Directed Inbox ({} item{})",
+                items.len(),
+                if items.len() == 1 { "" } else { "s" }
+            );
             println!();
             for item in &items {
                 let age = format_age(item.created_at);
@@ -1403,7 +1401,11 @@ async fn cmd_outbox(data_dir: &std::path::Path) -> Result<()> {
                 println!("Outbox is empty.");
                 return Ok(());
             }
-            println!("Directed Outbox ({} item{})", items.len(), if items.len() == 1 { "" } else { "s" });
+            println!(
+                "Directed Outbox ({} item{})",
+                items.len(),
+                if items.len() == 1 { "" } else { "s" }
+            );
             println!();
             for item in &items {
                 let age = format_age(item.created_at);
