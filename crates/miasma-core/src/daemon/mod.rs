@@ -870,6 +870,48 @@ pub(crate) async fn process_request(
             }
         }
 
+        ControlRequest::DirectedSendFile {
+            recipient_contact,
+            file_path,
+            password,
+            retention_secs,
+            filename,
+        } => {
+            // Read the file directly — avoids JSON Vec<u8> bloat over IPC.
+            let data = match std::fs::read(&file_path) {
+                Ok(d) => d,
+                Err(e) => {
+                    return ControlResponse::Error(format!(
+                        "cannot read file {file_path}: {e}"
+                    ))
+                }
+            };
+            let fname = filename.or_else(|| {
+                std::path::Path::new(&file_path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_owned())
+            });
+            match process_directed_send(
+                &sharing_secret,
+                &recipient_contact,
+                &data,
+                &password,
+                retention_secs,
+                fname,
+                &coord,
+                &queue,
+                &store,
+                &listen_addrs,
+                &data_dir,
+            )
+            .await
+            {
+                Ok(envelope_id) => ControlResponse::DirectedSent { envelope_id },
+                Err(e) => ControlResponse::Error(e.to_string()),
+            }
+        }
+
         ControlRequest::DirectedConfirm {
             envelope_id,
             challenge_code,
@@ -900,6 +942,37 @@ pub(crate) async fn process_request(
             .await
             {
                 Ok((data, filename)) => ControlResponse::DirectedRetrieved { data, filename },
+                Err(e) => ControlResponse::Error(e.to_string()),
+            }
+        }
+
+        ControlRequest::DirectedRetrieveToFile {
+            envelope_id,
+            password,
+            output_path,
+        } => {
+            match process_directed_retrieve(
+                &sharing_secret,
+                &envelope_id,
+                &password,
+                &coord,
+                &data_dir,
+            )
+            .await
+            {
+                Ok((data, filename)) => {
+                    // Write decrypted content to the requested output path.
+                    match std::fs::write(&output_path, &data) {
+                        Ok(_) => ControlResponse::DirectedRetrievedToFile {
+                            output_path,
+                            filename,
+                            bytes_written: data.len() as u64,
+                        },
+                        Err(e) => ControlResponse::Error(format!(
+                            "cannot write to {output_path}: {e}"
+                        )),
+                    }
+                }
                 Err(e) => ControlResponse::Error(e.to_string()),
             }
         }
