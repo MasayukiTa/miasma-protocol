@@ -2,9 +2,12 @@
 ///
 /// Loads the web app from the app bundle and injects `window.miasma` via a
 /// WKUserScript + WKScriptMessageHandler.  JS calls dispatch to UniFFI
-/// functions and return results via evaluateJavaScript callbacks.
+/// functions and the HTTP bridge for directed sharing, returning results
+/// via evaluateJavaScript callbacks.
 ///
-/// Usage: Add `WebBridgeView()` as a tab or push destination.
+/// Directed sharing methods (sharingKey, directedInbox, directedOutbox,
+/// directedSend, directedConfirm, directedRetrieve, directedRevoke) route
+/// through the local HTTP bridge when the daemon is running.
 
 import SwiftUI
 import WebKit
@@ -30,7 +33,7 @@ struct WebBridgeRepresentable: UIViewRepresentable {
         let handler = MiasmaBridgeHandler()
         config.userContentController.add(handler, name: "miasma")
 
-        // Inject window.miasma bridge object
+        // Inject window.miasma bridge object with directed sharing support
         let bridgeJS = """
         window.miasma = {
           _pending: {},
@@ -53,7 +56,16 @@ struct WebBridgeRepresentable: UIViewRepresentable {
           status: function() { return this._call('status'); },
           dissolve: function(data, k, n) { return this._call('dissolve', {data: data, k: k, n: n}); },
           retrieve: function(mid, k, n) { return this._call('retrieve', {mid: mid, k: k, n: n}); },
-          wipe: function() { return this._call('wipe'); }
+          wipe: function() { return this._call('wipe'); },
+          sharingKey: function() { return this._call('sharingKey'); },
+          directedInbox: function() { return this._call('directedInbox'); },
+          directedOutbox: function() { return this._call('directedOutbox'); },
+          directedSend: function(contact, data, pwd, secs, fname) {
+            return this._call('directedSend', {contact: contact, data: data, password: pwd, retention_secs: secs, filename: fname});
+          },
+          directedConfirm: function(envId, code) { return this._call('directedConfirm', {envelope_id: envId, challenge_code: code}); },
+          directedRetrieve: function(envId, pwd) { return this._call('directedRetrieve', {envelope_id: envId, password: pwd}); },
+          directedRevoke: function(envId) { return this._call('directedRevoke', {envelope_id: envId}); }
         };
         """
         let script = WKUserScript(
@@ -156,9 +168,87 @@ class MiasmaBridgeHandler: NSObject, WKScriptMessageHandler {
                 return "{\"error\":\"\(escapeJSON(error.localizedDescription))\"}"
             }
 
+        // ── Directed sharing (via HTTP bridge) ──────────────────────────
+
+        case "sharingKey":
+            return httpGet(path: "/api/sharing-key") ?? "{\"error\":\"daemon not running\"}"
+
+        case "directedInbox":
+            return httpGet(path: "/api/directed/inbox") ?? "[]"
+
+        case "directedOutbox":
+            return httpGet(path: "/api/directed/outbox") ?? "[]"
+
+        case "directedSend":
+            let postBody: [String: Any] = [
+                "recipient_contact": body["contact"] as? String ?? "",
+                "data": body["data"] as? String ?? "",
+                "password": body["password"] as? String ?? "",
+                "retention_secs": body["retention_secs"] as? Int ?? 86400,
+                "filename": body["filename"] as Any
+            ]
+            return httpPost(path: "/api/directed/send", body: postBody) ?? "{\"error\":\"daemon not running\"}"
+
+        case "directedConfirm":
+            let postBody: [String: Any] = [
+                "envelope_id": body["envelope_id"] as? String ?? "",
+                "challenge_code": body["challenge_code"] as? String ?? ""
+            ]
+            return httpPost(path: "/api/directed/confirm", body: postBody) ?? "{\"error\":\"daemon not running\"}"
+
+        case "directedRetrieve":
+            let postBody: [String: Any] = [
+                "envelope_id": body["envelope_id"] as? String ?? "",
+                "password": body["password"] as? String ?? ""
+            ]
+            return httpPost(path: "/api/directed/retrieve", body: postBody) ?? "{\"error\":\"daemon not running\"}"
+
+        case "directedRevoke":
+            let postBody: [String: Any] = [
+                "envelope_id": body["envelope_id"] as? String ?? ""
+            ]
+            return httpPost(path: "/api/directed/revoke", body: postBody) ?? "{\"error\":\"daemon not running\"}"
+
         default:
             return "{\"error\":\"unknown action: \(escapeJSON(action))\"}"
         }
+    }
+
+    // MARK: - HTTP bridge helpers
+
+    private func httpGet(path: String) -> String? {
+        let port = getDaemonHttpPort()
+        guard port > 0 else { return nil }
+        guard let url = URL(string: "http://127.0.0.1:\(port)\(path)") else { return nil }
+
+        var result: String?
+        let semaphore = DispatchSemaphore(value: 0)
+        URLSession.shared.dataTask(with: url) { data, _, _ in
+            if let data = data { result = String(data: data, encoding: .utf8) }
+            semaphore.signal()
+        }.resume()
+        semaphore.wait()
+        return result
+    }
+
+    private func httpPost(path: String, body: [String: Any]) -> String? {
+        let port = getDaemonHttpPort()
+        guard port > 0 else { return nil }
+        guard let url = URL(string: "http://127.0.0.1:\(port)\(path)") else { return nil }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+
+        var result: String?
+        let semaphore = DispatchSemaphore(value: 0)
+        URLSession.shared.dataTask(with: request) { data, _, _ in
+            if let data = data { result = String(data: data, encoding: .utf8) }
+            semaphore.signal()
+        }.resume()
+        semaphore.wait()
+        return result
     }
 
     private func escapeJSON(_ s: String) -> String {

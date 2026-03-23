@@ -1,10 +1,15 @@
-//! UniFFI bridge — exposes miasma-core to Kotlin/Android.
+//! UniFFI bridge — exposes miasma-core to Kotlin/Android and Swift/iOS.
 //!
 //! # Architecture
 //! All exported functions are **synchronous** at the FFI boundary.
 //! Async operations (e.g. `RetrievalCoordinator::retrieve`) are driven by a
-//! shared static `tokio` runtime so that the Kotlin layer can call them from
-//! any coroutine dispatcher without worrying about runtime lifecycle.
+//! shared static `tokio` runtime so that the Kotlin/Swift layer can call them
+//! from any coroutine dispatcher without worrying about runtime lifecycle.
+//!
+//! # Embedded daemon
+//! `start_embedded_daemon()` starts a full MiasmaNode + DaemonServer + HTTP
+//! bridge within the FFI process.  The HTTP bridge on `127.0.0.1` provides
+//! all directed sharing endpoints to both native UI and hosted WebView.
 //!
 //! # Kotlin bindings generation
 //! ```sh
@@ -27,7 +32,9 @@ use std::sync::Arc;
 
 use miasma_core::{
     config::{NetworkConfig, NodeConfig, StorageConfig},
+    daemon::DaemonServer,
     directed, dissolve,
+    network::{node::MiasmaNode, types::NodeType},
     store::LocalShareStore,
     ContentId, DissolutionParams, LocalShareSource, MiasmaError, RetrievalCoordinator,
 };
@@ -53,6 +60,26 @@ fn shared_runtime() -> &'static tokio::runtime::Runtime {
             .expect("failed to create tokio runtime")
     })
 }
+
+// ─── Embedded daemon state ───────────────────────────────────────────────────
+
+use std::sync::Mutex;
+use tokio::sync::mpsc;
+
+/// State of the embedded daemon (started via `start_embedded_daemon`).
+struct EmbeddedDaemon {
+    /// HTTP bridge port on 127.0.0.1.
+    http_port: u16,
+    /// Peer ID (libp2p).
+    peer_id: String,
+    /// Sharing contact string (`msk:<base58>@<PeerId>`).
+    sharing_contact: String,
+    /// Channel to signal daemon shutdown.
+    shutdown_tx: mpsc::Sender<()>,
+}
+
+/// Global singleton for the embedded daemon.
+static EMBEDDED_DAEMON: Mutex<Option<EmbeddedDaemon>> = Mutex::new(None);
 
 // ─── Exported types ──────────────────────────────────────────────────────────
 
@@ -163,9 +190,17 @@ fn validate_data_dir(data_dir: &str) -> Result<PathBuf, MiasmaFfiError> {
 
     // On Android, the app's private data directory is typically:
     //   /data/data/{package}/files  or  /data/user/{n}/{package}/files
-    // We accept any path under /data/ as a reasonable constraint.
+    // On iOS:
+    //   /var/mobile/Containers/Data/Application/{UUID}/...
+    //   ~/Library/Application Support/miasma/
+    // We accept paths under known safe prefixes.
     let canonical_str = canonical.to_string_lossy();
-    if !canonical_str.starts_with("/data/") && !canonical_str.starts_with("/tmp/") {
+    let allowed = canonical_str.starts_with("/data/")
+        || canonical_str.starts_with("/tmp/")
+        || canonical_str.starts_with("/var/mobile/")
+        || canonical_str.starts_with("/private/var/")
+        || canonical_str.contains("/Library/Application Support/");
+    if !allowed {
         return Err(MiasmaFfiError::Other {
             msg: "data_dir must be within app private storage".into(),
         });
@@ -466,4 +501,212 @@ pub fn delete_directed_envelope(
             })?;
     }
     Ok(())
+}
+
+// ─── Embedded daemon FFI ────────────────────────────────────────────────────
+
+/// Daemon status returned to mobile UI when the embedded daemon is running.
+#[derive(uniffi::Record)]
+pub struct EmbeddedDaemonStatus {
+    /// HTTP bridge port on 127.0.0.1.
+    pub http_port: u16,
+    /// libp2p Peer ID.
+    pub peer_id: String,
+    /// Full sharing contact string (`msk:<base58>@<PeerId>`).
+    pub sharing_contact: String,
+}
+
+/// Start the embedded daemon with full networking and HTTP bridge.
+///
+/// This starts a MiasmaNode (libp2p, DHT, peer discovery) and a DaemonServer
+/// with HTTP bridge on `127.0.0.1`.  After this call, all directed sharing
+/// operations are available via the HTTP bridge at the returned port.
+///
+/// Idempotent — if already running, returns the existing daemon's status.
+///
+/// # Arguments
+/// * `data_dir` — absolute path to the app's private data directory
+/// * `storage_mb` — storage quota in MiB
+/// * `bandwidth_mb_day` — bandwidth quota in MiB/day
+#[uniffi::export]
+pub fn start_embedded_daemon(
+    data_dir: String,
+    storage_mb: u64,
+    bandwidth_mb_day: u64,
+) -> Result<EmbeddedDaemonStatus, MiasmaFfiError> {
+    // If already running, return existing status.
+    {
+        let guard = EMBEDDED_DAEMON.lock().unwrap();
+        if let Some(ref d) = *guard {
+            return Ok(EmbeddedDaemonStatus {
+                http_port: d.http_port,
+                peer_id: d.peer_id.clone(),
+                sharing_contact: d.sharing_contact.clone(),
+            });
+        }
+    }
+
+    let path = validate_data_dir(&data_dir)?;
+
+    // Ensure node is initialised.
+    initialize_node(data_dir.clone(), storage_mb, bandwidth_mb_day)?;
+
+    let (config, store) = open_store(&data_dir)?;
+
+    // Read master key for node identity.
+    let master_key_path = path.join("master.key");
+    let master_bytes = std::fs::read(&master_key_path).map_err(|e| {
+        tracing::warn!("read master.key: {e}");
+        MiasmaFfiError::Other {
+            msg: "failed to read master key".into(),
+        }
+    })?;
+    let master_key: [u8; 32] = master_bytes[..32].try_into().map_err(|_| {
+        MiasmaFfiError::Other {
+            msg: "invalid master key length".into(),
+        }
+    })?;
+
+    // Create MiasmaNode with full networking.
+    let node = MiasmaNode::new(&master_key, NodeType::Full, &config.network.listen_addr)
+        .map_err(|e| {
+            tracing::warn!("node create error: {e}");
+            MiasmaFfiError::Other {
+                msg: "failed to create network node".into(),
+            }
+        })?;
+
+    // Start DaemonServer (binds IPC + HTTP bridge + transports).
+    let rt = shared_runtime();
+    let result = rt.block_on(async {
+        let server = DaemonServer::start_with_transport(
+            node,
+            store,
+            path.clone(),
+            config.transport.clone(),
+        )
+        .await
+        .map_err(|e| {
+            tracing::warn!("daemon start error: {e}");
+            MiasmaFfiError::Other {
+                msg: "failed to start daemon".into(),
+            }
+        })?;
+
+        let http_port = server.http_bridge_port();
+        let peer_id = server.peer_id().to_string();
+        let shutdown_handle = server.shutdown_handle();
+
+        // Derive sharing contact for this daemon.
+        let sharing_contact = {
+            let secret = miasma_core::crypto::keyderive::derive_sharing_key(&master_key)
+                .map_err(|e| MiasmaFfiError::Other {
+                    msg: format!("{e}"),
+                })?;
+            let static_secret = x25519_dalek::StaticSecret::from(*secret);
+            let pubkey = x25519_dalek::PublicKey::from(&static_secret);
+            directed::format_sharing_contact(pubkey.as_bytes(), &peer_id)
+        };
+
+        // Add bootstrap peers from config.
+        for addr_str in &config.network.bootstrap_peers {
+            if let Ok(addr) = addr_str.parse::<libp2p::Multiaddr>() {
+                let peer_id_opt = addr.iter().find_map(|p| {
+                    if let libp2p::multiaddr::Protocol::P2p(pid) = p {
+                        Some(pid)
+                    } else {
+                        None
+                    }
+                });
+                if let Some(pid) = peer_id_opt {
+                    let _ = server.add_bootstrap_peer(pid, addr.clone()).await;
+                }
+            }
+        }
+
+        // Bootstrap DHT if we have peers.
+        if !config.network.bootstrap_peers.is_empty() {
+            let _ = server.bootstrap_dht().await;
+        }
+
+        // Spawn the daemon event loop in the background.
+        let _daemon_handle = tokio::spawn(async move {
+            if let Err(e) = server.run().await {
+                tracing::warn!("embedded daemon exited: {e}");
+            }
+        });
+
+        Ok::<_, MiasmaFfiError>((http_port, peer_id, sharing_contact, shutdown_handle))
+    })?;
+
+    let (http_port, peer_id, sharing_contact, shutdown_tx) = result;
+
+    // Store the daemon state.
+    {
+        let mut guard = EMBEDDED_DAEMON.lock().unwrap();
+        *guard = Some(EmbeddedDaemon {
+            http_port,
+            peer_id: peer_id.clone(),
+            sharing_contact: sharing_contact.clone(),
+            shutdown_tx,
+        });
+    }
+
+    tracing::info!(
+        http_port,
+        peer_id = %peer_id,
+        "embedded daemon started"
+    );
+
+    Ok(EmbeddedDaemonStatus {
+        http_port,
+        peer_id,
+        sharing_contact,
+    })
+}
+
+/// Stop the embedded daemon.
+///
+/// Sends a shutdown signal and clears the daemon state. Safe to call even
+/// if no daemon is running.
+#[uniffi::export]
+pub fn stop_embedded_daemon() {
+    let daemon = {
+        let mut guard = EMBEDDED_DAEMON.lock().unwrap();
+        guard.take()
+    };
+    if let Some(d) = daemon {
+        let _ = d.shutdown_tx.try_send(());
+        tracing::info!("embedded daemon stop requested");
+    }
+}
+
+/// Get the HTTP bridge port of the running embedded daemon.
+///
+/// Returns 0 if no daemon is running.
+#[uniffi::export]
+pub fn get_daemon_http_port() -> u16 {
+    let guard = EMBEDDED_DAEMON.lock().unwrap();
+    guard.as_ref().map(|d| d.http_port).unwrap_or(0)
+}
+
+/// Check if the embedded daemon is currently running.
+#[uniffi::export]
+pub fn is_daemon_running() -> bool {
+    let guard = EMBEDDED_DAEMON.lock().unwrap();
+    guard.is_some()
+}
+
+/// Get the sharing contact string for the running daemon.
+///
+/// Returns the full `msk:<base58>@<PeerId>` contact that other nodes
+/// can use to send directed shares to this device.
+/// Returns empty string if no daemon is running.
+#[uniffi::export]
+pub fn get_sharing_contact() -> String {
+    let guard = EMBEDDED_DAEMON.lock().unwrap();
+    guard
+        .as_ref()
+        .map(|d| d.sharing_contact.clone())
+        .unwrap_or_default()
 }
