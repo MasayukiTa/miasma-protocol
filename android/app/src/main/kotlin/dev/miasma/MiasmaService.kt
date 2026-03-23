@@ -43,8 +43,24 @@ class MiasmaService : Service() {
         startForeground(NOTIF_ID, buildNotification("Starting…"))
 
         scope.launch {
+            lastDaemonStatus = null
+            lastDaemonError = null
+
             // Ensure Android Keystore wrapping key exists.
             try { KeystoreHelper.ensureKey() } catch (_: Exception) { }
+
+            val dataDirFile = java.io.File(dataDir)
+            val masterKeyFile = dataDirFile.resolve("master.key")
+
+            // If master.key is missing but wrapped blob exists, unwrap from Keystore.
+            if (!masterKeyFile.exists()) {
+                try {
+                    val unwrapped = KeystoreHelper.unwrapKey(dataDirFile)
+                    if (unwrapped != null) {
+                        masterKeyFile.writeBytes(unwrapped)
+                    }
+                } catch (_: Exception) { /* Keystore may not have key yet on first run */ }
+            }
 
             // Start the embedded daemon (initialises node + networking + HTTP bridge).
             try {
@@ -52,14 +68,24 @@ class MiasmaService : Service() {
                 updateNotification("Connected · port ${daemonStatus.httpPort}")
                 // Notify the ViewModel if the activity is active.
                 lastDaemonStatus = daemonStatus
+                lastDaemonError = null
+
+                // Wrap the master key into Keystore (idempotent — overwrites existing blob).
+                // This ensures the key is Keystore-backed even if it was just created by FFI.
+                if (masterKeyFile.exists()) {
+                    try {
+                        KeystoreHelper.wrapKey(dataDirFile, masterKeyFile.readBytes())
+                    } catch (_: Exception) { /* Keystore wrapping failure is non-fatal for now */ }
+                }
             } catch (e: Exception) {
                 updateNotification("Daemon error: ${e.message}")
+                lastDaemonError = e.message
                 // Fall back to local-only initialisation.
                 try { initializeNode(dataDir, storageMb, bandwidthMbDay) } catch (_: Exception) { }
             }
 
             // Poll status and update the notification every 30 s.
-            while (true) {
+            while (isActive) {
                 try {
                     val status = getNodeStatus(dataDir)
                     updateNotification(statusSummary(status))
@@ -128,6 +154,10 @@ class MiasmaService : Service() {
         /** Last daemon status, accessible from ViewModel to get HTTP port. */
         @Volatile
         var lastDaemonStatus: EmbeddedDaemonStatus? = null
+            private set
+
+        @Volatile
+        var lastDaemonError: String? = null
             private set
 
         fun startNode(
