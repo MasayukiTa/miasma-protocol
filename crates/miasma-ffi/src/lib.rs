@@ -27,8 +27,7 @@ use std::sync::Arc;
 
 use miasma_core::{
     config::{NetworkConfig, NodeConfig, StorageConfig},
-    directed,
-    dissolve,
+    directed, dissolve,
     store::LocalShareStore,
     ContentId, DissolutionParams, LocalShareSource, MiasmaError, RetrievalCoordinator,
 };
@@ -380,6 +379,17 @@ pub struct EnvelopeSummaryFfi {
     pub expires_at: u64,
 }
 
+fn summary_to_ffi(s: directed::EnvelopeSummary) -> EnvelopeSummaryFfi {
+    EnvelopeSummaryFfi {
+        id: s.envelope_id,
+        sender_key: s.sender_pubkey,
+        state: format!("{:?}", s.state),
+        challenge_code: s.challenge_code,
+        created_at: s.created_at,
+        expires_at: s.expires_at,
+    }
+}
+
 /// Get this node's sharing key (formatted as `msk:<base58>`).
 ///
 /// The sharing key is derived deterministically from the master key,
@@ -405,10 +415,11 @@ pub fn get_sharing_key(data_dir: String) -> Result<String, MiasmaFfiError> {
         });
     }
     let key_array: [u8; 32] = master_key[..32].try_into().unwrap();
-    let secret = miasma_core::crypto::keyderive::derive_sharing_key(&key_array)
-        .map_err(|e| MiasmaFfiError::Other {
+    let secret = miasma_core::crypto::keyderive::derive_sharing_key(&key_array).map_err(|e| {
+        MiasmaFfiError::Other {
             msg: format!("{e}"),
-        })?;
+        }
+    })?;
     let static_secret = x25519_dalek::StaticSecret::from(*secret);
     let pubkey = x25519_dalek::PublicKey::from(&static_secret);
     Ok(directed::format_sharing_key(pubkey.as_bytes()))
@@ -416,56 +427,24 @@ pub fn get_sharing_key(data_dir: String) -> Result<String, MiasmaFfiError> {
 
 /// List incoming directed envelopes.
 #[uniffi::export]
-pub fn list_directed_inbox(
-    data_dir: String,
-) -> Result<Vec<EnvelopeSummaryFfi>, MiasmaFfiError> {
+pub fn list_directed_inbox(data_dir: String) -> Result<Vec<EnvelopeSummaryFfi>, MiasmaFfiError> {
     let path = validate_data_dir(&data_dir)?;
-    let inbox =
-        directed::DirectedInbox::open(&path).map_err(|e| MiasmaFfiError::Other {
-            msg: format!("open inbox: {e}"),
-        })?;
-    let items =
-        inbox.list_incoming().map_err(|e| MiasmaFfiError::Other {
-            msg: format!("list inbox: {e}"),
-        })?;
-    Ok(items
-        .into_iter()
-        .map(|s| EnvelopeSummaryFfi {
-            id: s.id,
-            sender_key: s.sender_key,
-            state: s.state,
-            challenge_code: s.challenge_code,
-            created_at: s.created_at,
-            expires_at: s.expires_at,
-        })
-        .collect())
+    let inbox = directed::DirectedInbox::open(&path).map_err(|e| MiasmaFfiError::Other {
+        msg: format!("open inbox: {e}"),
+    })?;
+    let items = inbox.list_incoming();
+    Ok(items.into_iter().map(summary_to_ffi).collect())
 }
 
 /// List outgoing directed envelopes.
 #[uniffi::export]
-pub fn list_directed_outbox(
-    data_dir: String,
-) -> Result<Vec<EnvelopeSummaryFfi>, MiasmaFfiError> {
+pub fn list_directed_outbox(data_dir: String) -> Result<Vec<EnvelopeSummaryFfi>, MiasmaFfiError> {
     let path = validate_data_dir(&data_dir)?;
-    let inbox =
-        directed::DirectedInbox::open(&path).map_err(|e| MiasmaFfiError::Other {
-            msg: format!("open inbox: {e}"),
-        })?;
-    let items =
-        inbox.list_outgoing().map_err(|e| MiasmaFfiError::Other {
-            msg: format!("list outbox: {e}"),
-        })?;
-    Ok(items
-        .into_iter()
-        .map(|s| EnvelopeSummaryFfi {
-            id: s.id,
-            sender_key: s.sender_key,
-            state: s.state,
-            challenge_code: s.challenge_code,
-            created_at: s.created_at,
-            expires_at: s.expires_at,
-        })
-        .collect())
+    let inbox = directed::DirectedInbox::open(&path).map_err(|e| MiasmaFfiError::Other {
+        msg: format!("open inbox: {e}"),
+    })?;
+    let items = inbox.list_outgoing();
+    Ok(items.into_iter().map(summary_to_ffi).collect())
 }
 
 /// Delete a directed envelope from the local inbox.
@@ -475,14 +454,16 @@ pub fn delete_directed_envelope(
     envelope_id: String,
 ) -> Result<(), MiasmaFfiError> {
     let path = validate_data_dir(&data_dir)?;
-    let inbox =
-        directed::DirectedInbox::open(&path).map_err(|e| MiasmaFfiError::Other {
-            msg: format!("open inbox: {e}"),
-        })?;
-    inbox
-        .delete(&envelope_id)
-        .map_err(|e| MiasmaFfiError::Other {
-            msg: format!("delete envelope: {e}"),
-        })?;
+    let inbox = directed::DirectedInbox::open(&path).map_err(|e| MiasmaFfiError::Other {
+        msg: format!("open inbox: {e}"),
+    })?;
+    // Try incoming first, then outgoing.
+    if let Err(e) = inbox.delete_incoming(&envelope_id) {
+        inbox
+            .delete_outgoing(&envelope_id)
+            .map_err(|e2| MiasmaFfiError::Other {
+                msg: format!("delete envelope: {e}, {e2}"),
+            })?;
+    }
     Ok(())
 }

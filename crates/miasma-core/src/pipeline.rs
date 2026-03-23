@@ -251,8 +251,8 @@ mod tests {
         let (mid, mut shares) = dissolve(TEST_CONTENT, params).unwrap();
 
         // Inject 5 forged shares (wrong shard_hash will fail coarse verify).
-        for i in 0..5usize {
-            shares[i].shard_data = vec![0xFF; shares[i].shard_data.len()];
+        for share in &mut shares[..5] {
+            share.shard_data = vec![0xFF; share.shard_data.len()];
             // shard_hash is now stale — coarse verify will reject these.
         }
 

@@ -212,26 +212,20 @@ impl DirectedInbox {
     /// Store the raw challenge code alongside the incoming envelope.
     /// This is stored separately so it's only on the recipient's machine.
     pub fn save_challenge_code(&self, id_hex: &str, code: &str) -> Result<()> {
-        let path = self
-            .incoming_dir
-            .join(format!("{id_hex}.challenge"));
+        let path = self.incoming_dir.join(format!("{id_hex}.challenge"));
         std::fs::write(&path, code).context("write challenge code")?;
         Ok(())
     }
 
     /// Load the challenge code for an incoming envelope.
     pub fn load_challenge_code(&self, id_hex: &str) -> Option<String> {
-        let path = self
-            .incoming_dir
-            .join(format!("{id_hex}.challenge"));
+        let path = self.incoming_dir.join(format!("{id_hex}.challenge"));
         std::fs::read_to_string(&path).ok()
     }
 
     /// Delete the challenge code file.
     pub fn delete_challenge_code(&self, id_hex: &str) {
-        let path = self
-            .incoming_dir
-            .join(format!("{id_hex}.challenge"));
+        let path = self.incoming_dir.join(format!("{id_hex}.challenge"));
         let _ = std::fs::remove_file(&path);
     }
 }
