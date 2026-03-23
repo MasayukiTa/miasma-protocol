@@ -23,6 +23,8 @@ fun SendScreen(vm: MiasmaViewModel) {
     var isSending by remember { mutableStateOf(false) }
     var sendResult by remember { mutableStateOf<String?>(null) }
     var sendError by remember { mutableStateOf<String?>(null) }
+    var recipientFormatError by remember { mutableStateOf<String?>(null) }
+    var retentionFallbackUsed by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -69,11 +71,25 @@ fun SendScreen(vm: MiasmaViewModel) {
         // Recipient
         OutlinedTextField(
             value = recipientContact,
-            onValueChange = { recipientContact = it },
+            onValueChange = {
+                recipientContact = it
+                recipientFormatError = if (it.isNotBlank() && (!it.trimStart().startsWith("msk:") || !it.contains("@"))) {
+                    "Must start with \"msk:\" and contain \"@\" separator"
+                } else null
+            },
             label = { Text("Recipient contact (msk:…@PeerId)") },
             singleLine = true,
+            isError = recipientFormatError != null,
             modifier = Modifier.fillMaxWidth(),
         )
+        if (recipientFormatError != null) {
+            Text(
+                recipientFormatError!!,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(start = 4.dp),
+            )
+        }
         Spacer(Modifier.height(8.dp))
 
         // Message content
@@ -99,11 +115,22 @@ fun SendScreen(vm: MiasmaViewModel) {
         // Retention
         OutlinedTextField(
             value = retentionHours,
-            onValueChange = { retentionHours = it.filter { c -> c.isDigit() } },
+            onValueChange = {
+                retentionHours = it.filter { c -> c.isDigit() }
+                retentionFallbackUsed = false
+            },
             label = { Text("Retention (hours)") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(0.5f),
         )
+        if (retentionFallbackUsed) {
+            Text(
+                "Invalid hours — defaulting to 24",
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(start = 4.dp),
+            )
+        }
         Spacer(Modifier.height(12.dp))
 
         // Send button
@@ -112,7 +139,9 @@ fun SendScreen(vm: MiasmaViewModel) {
                 isSending = true
                 sendResult = null
                 sendError = null
-                val retSecs = (retentionHours.toLongOrNull() ?: 24) * 3600
+                val parsedHours = retentionHours.toLongOrNull()
+                if (parsedHours == null) retentionFallbackUsed = true
+                val retSecs = (parsedHours ?: 24) * 3600
                 vm.sendDirected(
                     recipientContact = recipientContact.trim(),
                     data = message.toByteArray(Charsets.UTF_8),
@@ -124,7 +153,7 @@ fun SendScreen(vm: MiasmaViewModel) {
                     sendError = error
                 }
             },
-            enabled = recipientContact.isNotBlank() && message.isNotBlank() && password.isNotBlank() && !isSending,
+            enabled = recipientContact.isNotBlank() && recipientFormatError == null && message.isNotBlank() && password.isNotBlank() && !isSending,
             modifier = Modifier.fillMaxWidth(),
         ) {
             if (isSending) {

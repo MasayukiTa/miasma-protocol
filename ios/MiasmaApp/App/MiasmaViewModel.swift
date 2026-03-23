@@ -36,6 +36,9 @@ class MiasmaViewModel: ObservableObject {
     // ── Directed sharing ────────────────────────────────────────────────
     @Published var inboxItems: [DirectedInboxItem] = []
 
+    // ── Daemon start guard ───────────────────────────────────────────────
+    private var isDaemonStarting = false
+
     private var dataDir: String {
         (FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)
@@ -47,6 +50,8 @@ class MiasmaViewModel: ObservableObject {
     // MARK: - Daemon lifecycle
 
     func startDaemon() {
+        guard !isDaemonStarting else { return }
+        isDaemonStarting = true
         Task {
             isLoading = true
             errorMessage = nil
@@ -79,6 +84,7 @@ class MiasmaViewModel: ObservableObject {
                 } catch { /* best effort */ }
             }
             isLoading = false
+            isDaemonStarting = false
         }
     }
 
@@ -179,7 +185,7 @@ class MiasmaViewModel: ObservableObject {
                 }.value
                 inboxItems = items
             } catch {
-                // Silent failure — inbox will show empty
+                errorMessage = "Inbox refresh failed"
             }
         }
     }
@@ -262,7 +268,10 @@ class MiasmaViewModel: ObservableObject {
             error = e
             semaphore.signal()
         }.resume()
-        semaphore.wait()
+        let waitResult = semaphore.wait(timeout: .now() + 15)
+        if waitResult == .timedOut {
+            throw MiasmaFfiError.other(msg: "HTTP request timed out")
+        }
         if let e = error { throw e }
         guard let r = result else { throw MiasmaFfiError.other(msg: "no response") }
         return r
@@ -282,7 +291,10 @@ class MiasmaViewModel: ObservableObject {
             error = e
             semaphore.signal()
         }.resume()
-        semaphore.wait()
+        let waitResult = semaphore.wait(timeout: .now() + 15)
+        if waitResult == .timedOut {
+            throw MiasmaFfiError.other(msg: "HTTP request timed out")
+        }
         if let e = error { throw e }
         guard let r = result else { throw MiasmaFfiError.other(msg: "no response") }
         return r

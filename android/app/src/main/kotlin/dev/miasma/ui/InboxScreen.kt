@@ -12,6 +12,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import androidx.compose.ui.platform.LocalContext
 import dev.miasma.DirectedApi
 import dev.miasma.MiasmaViewModel
 
@@ -72,6 +76,7 @@ fun InboxScreen(vm: MiasmaViewModel) {
 
 @Composable
 private fun InboxCard(item: DirectedApi.EnvelopeItem, vm: MiasmaViewModel) {
+    val context = LocalContext.current
     var password by remember { mutableStateOf("") }
     var retrieveError by remember { mutableStateOf<String?>(null) }
     var isRetrieving by remember { mutableStateOf(false) }
@@ -131,11 +136,23 @@ private fun InboxCard(item: DirectedApi.EnvelopeItem, vm: MiasmaViewModel) {
                             "Challenge code (share with sender):",
                             style = MaterialTheme.typography.labelSmall,
                         )
-                        Text(
-                            item.challengeCode,
-                            style = MaterialTheme.typography.titleMedium,
-                            fontFamily = FontFamily.Monospace,
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                item.challengeCode,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontFamily = FontFamily.Monospace,
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            IconButton(
+                                onClick = {
+                                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    cm.setPrimaryClip(ClipData.newPlainText("challenge", item.challengeCode))
+                                },
+                                modifier = Modifier.size(28.dp),
+                            ) {
+                                Text("\uD83D\uDCCB", style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
                     }
                 }
             }

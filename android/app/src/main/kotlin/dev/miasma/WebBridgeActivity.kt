@@ -143,7 +143,7 @@ class WebBridgeActivity : ComponentActivity() {
         fun directedInbox(): String {
             return try {
                 val port = httpPort()
-                if (port == 0) return "[]"
+                if (port == 0) return """{"error":"daemon not running"}"""
                 val items = DirectedApi.inbox(port)
                 org.json.JSONArray().also { arr ->
                     items.forEach { item ->
@@ -170,7 +170,7 @@ class WebBridgeActivity : ComponentActivity() {
         fun directedOutbox(): String {
             return try {
                 val port = httpPort()
-                if (port == 0) return "[]"
+                if (port == 0) return """{"error":"daemon not running"}"""
                 val items = DirectedApi.outbox(port)
                 org.json.JSONArray().also { arr ->
                     items.forEach { item ->
@@ -225,7 +225,8 @@ class WebBridgeActivity : ComponentActivity() {
                 if (port == 0) return """{"error":"daemon not running"}"""
                 val result = DirectedApi.retrieve(port, envelopeId, password)
                 val b64 = android.util.Base64.encodeToString(result.data, android.util.Base64.NO_WRAP)
-                """{"data":"$b64"${if (result.filename != null) ""","filename":"${result.filename}"""" else ""}}"""
+                val escapedFilename = result.filename?.replace("\\", "\\\\")?.replace("\"", "\\\"")
+                """{"data":"$b64"${if (escapedFilename != null) ""","filename":"$escapedFilename"""" else ""}}"""
             } catch (e: Exception) {
                 """{"error":"${e.message?.replace("\"", "\\\"")}"}"""
             }

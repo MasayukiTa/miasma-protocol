@@ -17,6 +17,7 @@ struct MiasmaApp: App {
                 .environmentObject(vm)
                 .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
                     vm.refreshStatus()
+                    vm.refreshInbox()
                 }
         }
     }

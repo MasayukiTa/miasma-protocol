@@ -34,7 +34,11 @@ object DirectedApi {
             } else {
                 conn.errorStream?.bufferedReader()?.readText() ?: """{"error":"HTTP $code"}"""
             }
-            return JSONObject(body)
+            return try {
+                JSONObject(body)
+            } catch (_: org.json.JSONException) {
+                JSONObject().apply { put("error", "Malformed response") }
+            }
         } finally {
             conn.disconnect()
         }
@@ -52,7 +56,11 @@ object DirectedApi {
             } else {
                 "[]"
             }
-            return JSONArray(body)
+            return try {
+                JSONArray(body)
+            } catch (_: org.json.JSONException) {
+                JSONArray()
+            }
         } finally {
             conn.disconnect()
         }
@@ -75,7 +83,11 @@ object DirectedApi {
             } else {
                 conn.errorStream?.bufferedReader()?.readText() ?: """{"error":"HTTP $code"}"""
             }
-            return JSONObject(respBody)
+            return try {
+                JSONObject(respBody)
+            } catch (_: org.json.JSONException) {
+                JSONObject().apply { put("error", "Malformed response") }
+            }
         } finally {
             conn.disconnect()
         }

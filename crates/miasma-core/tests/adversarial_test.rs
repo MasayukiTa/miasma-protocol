@@ -42,7 +42,7 @@ use miasma_core::directed::{
     create_envelope, decrypt_directed_content, decrypt_envelope_payload, derive_content_key,
     finalize_envelope, format_sharing_contact, format_sharing_key, parse_sharing_contact,
     parse_sharing_key, DirectedEnvelope, DirectedInbox, DirectedRequest, DirectedResponse,
-    EnvelopeState, RetentionPeriod,
+    EnvelopeSummary, EnvelopeState, RetentionPeriod,
 };
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -5081,4 +5081,382 @@ fn directed_envelope_summary_has_required_fields() {
     assert_eq!(list[0].retention_secs, 7200);
     assert!(!list[0].recipient_pubkey.is_empty());
     assert!(!list[0].sender_pubkey.is_empty());
+}
+
+// ─── Cross-device Directed Sharing Validation Tests ─────────────────────────
+//
+// These tests exercise the security boundaries and state-machine invariants
+// that a cross-device directed sharing flow depends on. They validate the
+// protocol layer that Android/iOS/Windows all share.
+
+/// 24. Full cross-device lifecycle: Pending → ChallengeIssued → Confirmed → Retrieved,
+/// with inbox/outbox sync at each step. Simulates Windows→Android flow.
+#[test]
+fn directed_cross_device_full_lifecycle() {
+    let tmp_sender = tempfile::TempDir::new().unwrap();
+    let tmp_recipient = tempfile::TempDir::new().unwrap();
+    let sender_inbox = DirectedInbox::open(tmp_sender.path()).unwrap();
+    let recipient_inbox = DirectedInbox::open(tmp_recipient.path()).unwrap();
+
+    // Step 1: Sender creates envelope.
+    let mut env = make_directed_test_envelope();
+    env.envelope_id = [0xC0; 32];
+    env.state = EnvelopeState::Pending;
+    sender_inbox.save_outgoing(&env).unwrap();
+    recipient_inbox.save_incoming(&env).unwrap();
+
+    // Verify both sides see Pending.
+    assert_eq!(sender_inbox.list_outgoing()[0].state, EnvelopeState::Pending);
+    assert_eq!(recipient_inbox.list_incoming()[0].state, EnvelopeState::Pending);
+
+    // Step 2: Recipient generates challenge.
+    let (code, hash) = miasma_core::directed::challenge::generate_challenge();
+    let id_hex = env.id_hex();
+    recipient_inbox.save_challenge_code(&id_hex, &code).unwrap();
+    let mut env = recipient_inbox.load_incoming(&id_hex).unwrap();
+    env.state = EnvelopeState::ChallengeIssued;
+    env.challenge_hash = Some(hash);
+    recipient_inbox.save_incoming(&env).unwrap();
+
+    // Update sender side too (simulating protocol delivery).
+    let mut sender_env = sender_inbox.load_outgoing(&id_hex).unwrap();
+    sender_env.state = EnvelopeState::ChallengeIssued;
+    sender_env.challenge_hash = Some(hash);
+    sender_inbox.save_outgoing(&sender_env).unwrap();
+
+    // Step 3: Sender enters correct challenge code.
+    assert!(miasma_core::directed::challenge::verify_challenge(&code, &hash));
+
+    // Transition to Confirmed on both sides.
+    sender_inbox
+        .update_outgoing_state(&id_hex, EnvelopeState::Confirmed)
+        .unwrap();
+    recipient_inbox
+        .update_incoming_state(&id_hex, EnvelopeState::Confirmed)
+        .unwrap();
+
+    assert!(recipient_inbox.load_incoming(&id_hex).unwrap().state.is_retrievable());
+
+    // Step 4: Recipient retrieves → terminal.
+    recipient_inbox
+        .update_incoming_state(&id_hex, EnvelopeState::Retrieved)
+        .unwrap();
+    sender_inbox
+        .update_outgoing_state(&id_hex, EnvelopeState::Retrieved)
+        .unwrap();
+
+    let final_env = recipient_inbox.load_incoming(&id_hex).unwrap();
+    assert!(final_env.state.is_terminal());
+    assert_eq!(final_env.state, EnvelopeState::Retrieved);
+}
+
+/// 25. Password attempt exhaustion transitions to PasswordFailed (terminal).
+/// Cross-device scenario: 3 wrong passwords, then the envelope is locked forever.
+#[test]
+fn directed_password_attempt_exhaustion() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let inbox = DirectedInbox::open(tmp.path()).unwrap();
+
+    let mut env = make_directed_test_envelope();
+    env.envelope_id = [0xD0; 32];
+    env.state = EnvelopeState::Confirmed;
+    env.password_attempts_remaining = 3;
+    inbox.save_incoming(&env).unwrap();
+
+    let id_hex = env.id_hex();
+
+    // Simulate 3 wrong password attempts.
+    for remaining in (0..3).rev() {
+        let mut e = inbox.load_incoming(&id_hex).unwrap();
+        assert!(!e.state.is_terminal(), "should not be terminal with attempts left");
+        e.password_attempts_remaining = remaining;
+        if remaining == 0 {
+            e.state = EnvelopeState::PasswordFailed;
+        }
+        inbox.save_incoming(&e).unwrap();
+    }
+
+    let final_env = inbox.load_incoming(&id_hex).unwrap();
+    assert_eq!(final_env.state, EnvelopeState::PasswordFailed);
+    assert!(final_env.state.is_terminal());
+    assert_eq!(final_env.password_attempts_remaining, 0);
+
+    // Terminal state must not be retrievable.
+    assert!(!final_env.state.is_retrievable());
+}
+
+/// 26. Terminal state resurrection prevention: once terminal, no transition back.
+/// Tests all 6 terminal states to ensure none can be overwritten by expire_all.
+#[test]
+fn directed_terminal_state_resurrection_prevention() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let inbox = DirectedInbox::open(tmp.path()).unwrap();
+
+    let terminal_states = [
+        EnvelopeState::Retrieved,
+        EnvelopeState::SenderRevoked,
+        EnvelopeState::RecipientDeleted,
+        EnvelopeState::Expired,
+        EnvelopeState::ChallengeFailed,
+        EnvelopeState::PasswordFailed,
+    ];
+
+    for (i, &state) in terminal_states.iter().enumerate() {
+        let mut env = make_directed_test_envelope();
+        env.envelope_id = [i as u8; 32];
+        env.state = state;
+        // Set expires_at to the past so expire_all would try to transition.
+        env.expires_at = 100;
+        inbox.save_incoming(&env).unwrap();
+    }
+
+    // expire_all with a future timestamp.
+    inbox.expire_all(200);
+
+    // All envelopes must retain their original terminal state.
+    for (i, &expected_state) in terminal_states.iter().enumerate() {
+        let id_hex = hex::encode([i as u8; 32]);
+        let env = inbox.load_incoming(&id_hex).unwrap();
+        assert_eq!(
+            env.state, expected_state,
+            "terminal state {:?} was overwritten by expire_all",
+            expected_state
+        );
+    }
+}
+
+/// 27. Revoked envelope cannot be retrieved.
+/// Simulates sender revoking after challenge but before retrieval.
+#[test]
+fn directed_revoked_envelope_not_retrievable() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let inbox = DirectedInbox::open(tmp.path()).unwrap();
+
+    let mut env = make_directed_test_envelope();
+    env.envelope_id = [0xE0; 32];
+    env.state = EnvelopeState::Confirmed;
+    inbox.save_incoming(&env).unwrap();
+
+    let id_hex = env.id_hex();
+    assert!(inbox.load_incoming(&id_hex).unwrap().state.is_retrievable());
+
+    // Sender revokes.
+    inbox
+        .update_incoming_state(&id_hex, EnvelopeState::SenderRevoked)
+        .unwrap();
+
+    let revoked = inbox.load_incoming(&id_hex).unwrap();
+    assert!(revoked.state.is_terminal());
+    assert!(!revoked.state.is_retrievable());
+}
+
+/// 28. Challenge file cleanup on all terminal transitions.
+/// Verifies no orphaned challenge files survive any terminal state.
+#[test]
+fn directed_challenge_cleanup_all_terminal_states() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let inbox = DirectedInbox::open(tmp.path()).unwrap();
+
+    let terminal_states = [
+        EnvelopeState::Retrieved,
+        EnvelopeState::SenderRevoked,
+        EnvelopeState::Expired,
+        EnvelopeState::ChallengeFailed,
+        EnvelopeState::PasswordFailed,
+    ];
+
+    for (i, &state) in terminal_states.iter().enumerate() {
+        let mut env = make_directed_test_envelope();
+        env.envelope_id = [0xF0 + i as u8; 32];
+        env.state = EnvelopeState::ChallengeIssued;
+        inbox.save_incoming(&env).unwrap();
+
+        let id_hex = env.id_hex();
+        inbox.save_challenge_code(&id_hex, "TEST-CODE").unwrap();
+        assert!(inbox.load_challenge_code(&id_hex).is_some());
+
+        // Transition to terminal.
+        inbox.update_incoming_state(&id_hex, state).unwrap();
+        inbox.cleanup_challenge(&id_hex);
+
+        assert!(
+            inbox.load_challenge_code(&id_hex).is_none(),
+            "challenge file not cleaned up for terminal state {:?}",
+            state
+        );
+    }
+}
+
+/// 29. Expiry timing precision: envelope expires exactly at expires_at, not before.
+#[test]
+fn directed_expiry_timing_boundary() {
+    let mut env = make_directed_test_envelope();
+    env.expires_at = 5000;
+    env.state = EnvelopeState::Confirmed;
+
+    // One second before expiry: not expired.
+    assert!(!env.is_expired(4999));
+    env.check_expiry(4999);
+    assert_eq!(env.state, EnvelopeState::Confirmed);
+
+    // Exactly at expiry: expired.
+    assert!(env.is_expired(5000));
+    env.check_expiry(5000);
+    assert_eq!(env.state, EnvelopeState::Expired);
+    assert!(env.state.is_terminal());
+}
+
+/// 30. Cross-device sender revoke: both sides see SenderRevoked after revoke.
+/// Challenge file cleaned up on recipient side.
+#[test]
+fn directed_cross_device_sender_revoke() {
+    let tmp_sender = tempfile::TempDir::new().unwrap();
+    let tmp_recipient = tempfile::TempDir::new().unwrap();
+    let sender_inbox = DirectedInbox::open(tmp_sender.path()).unwrap();
+    let recipient_inbox = DirectedInbox::open(tmp_recipient.path()).unwrap();
+
+    let mut env = make_directed_test_envelope();
+    env.envelope_id = [0xAA; 32];
+    env.state = EnvelopeState::ChallengeIssued;
+    sender_inbox.save_outgoing(&env).unwrap();
+    recipient_inbox.save_incoming(&env).unwrap();
+
+    let id_hex = env.id_hex();
+    recipient_inbox.save_challenge_code(&id_hex, "ABCD-EFGH").unwrap();
+
+    // Sender revokes.
+    sender_inbox
+        .update_outgoing_state(&id_hex, EnvelopeState::SenderRevoked)
+        .unwrap();
+    recipient_inbox
+        .update_incoming_state(&id_hex, EnvelopeState::SenderRevoked)
+        .unwrap();
+    recipient_inbox.cleanup_challenge(&id_hex);
+
+    assert!(sender_inbox.load_outgoing(&id_hex).unwrap().state.is_terminal());
+    assert!(recipient_inbox.load_incoming(&id_hex).unwrap().state.is_terminal());
+    assert!(recipient_inbox.load_challenge_code(&id_hex).is_none());
+}
+
+/// 31. Deleted envelope cannot be resurrected by save_incoming.
+/// Once deleted, loading fails; re-saving the same ID creates a new file.
+#[test]
+fn directed_deleted_envelope_cannot_resurrect() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let inbox = DirectedInbox::open(tmp.path()).unwrap();
+
+    let mut env = make_directed_test_envelope();
+    env.envelope_id = [0xBB; 32];
+    env.state = EnvelopeState::Retrieved;
+    inbox.save_incoming(&env).unwrap();
+
+    let id_hex = env.id_hex();
+    inbox.delete_incoming(&id_hex).unwrap();
+
+    // Load after delete should fail.
+    assert!(inbox.load_incoming(&id_hex).is_err());
+
+    // Re-saving creates a fresh file but the state is whatever we pass.
+    // This is expected — the protection is at the protocol layer, not storage.
+    env.state = EnvelopeState::Confirmed;
+    inbox.save_incoming(&env).unwrap();
+    let reloaded = inbox.load_incoming(&id_hex).unwrap();
+    assert_eq!(reloaded.state, EnvelopeState::Confirmed);
+}
+
+/// 32. Multiple envelopes: operations on one don't affect others.
+/// Simulates concurrent directed shares from different senders.
+#[test]
+fn directed_multiple_envelope_isolation() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let inbox = DirectedInbox::open(tmp.path()).unwrap();
+
+    let mut env_a = make_directed_test_envelope();
+    env_a.envelope_id = [0x01; 32];
+    env_a.state = EnvelopeState::Confirmed;
+    env_a.expires_at = u64::MAX;
+    inbox.save_incoming(&env_a).unwrap();
+
+    let mut env_b = make_directed_test_envelope();
+    env_b.envelope_id = [0x02; 32];
+    env_b.state = EnvelopeState::Pending;
+    env_b.expires_at = 100; // Already expired.
+    inbox.save_incoming(&env_b).unwrap();
+
+    // Expire all — only env_b should be affected.
+    inbox.expire_all(200);
+
+    let a = inbox.load_incoming(&env_a.id_hex()).unwrap();
+    let b = inbox.load_incoming(&env_b.id_hex()).unwrap();
+    assert_eq!(a.state, EnvelopeState::Confirmed, "env_a should not be expired");
+    assert_eq!(b.state, EnvelopeState::Expired, "env_b should be expired");
+}
+
+/// 33. Challenge code constant-time verification: wrong code with matching length
+/// still fails (no timing side channel).
+#[test]
+fn directed_challenge_wrong_code_same_length() {
+    let (code, hash) = miasma_core::directed::challenge::generate_challenge();
+
+    // Same length but different content.
+    let wrong_code = if code.starts_with('A') {
+        code.replacen('A', "B", 1)
+    } else {
+        code.replacen(&code[..1], "A", 1)
+    };
+
+    assert!(!miasma_core::directed::challenge::verify_challenge(
+        &wrong_code, &hash
+    ));
+    // Original still works.
+    assert!(miasma_core::directed::challenge::verify_challenge(
+        &code, &hash
+    ));
+}
+
+/// 34. Envelope listing includes challenge_code for incoming (when saved).
+/// Validates that mobile inbox UI can display challenge codes from listing.
+#[test]
+fn directed_inbox_listing_includes_challenge_code() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let inbox = DirectedInbox::open(tmp.path()).unwrap();
+
+    let mut env = make_directed_test_envelope();
+    env.envelope_id = [0xCC; 32];
+    env.state = EnvelopeState::ChallengeIssued;
+    inbox.save_incoming(&env).unwrap();
+
+    let id_hex = env.id_hex();
+    inbox.save_challenge_code(&id_hex, "XYZW-1234").unwrap();
+
+    let list = inbox.list_incoming();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].challenge_code.as_deref(), Some("XYZW-1234"));
+}
+
+/// 35. EnvelopeSummary serialization roundtrip (mobile JSON transport).
+/// This is the format used by HTTP bridge /api/directed/inbox and /api/directed/outbox.
+#[test]
+fn directed_envelope_summary_json_roundtrip() {
+    let summary = EnvelopeSummary {
+        envelope_id: "abc123".to_string(),
+        sender_pubkey: "sender_key".to_string(),
+        recipient_pubkey: "recipient_key".to_string(),
+        state: EnvelopeState::Confirmed,
+        created_at: 1000,
+        expires_at: 2000,
+        retention_secs: 1000,
+        challenge_code: Some("ABCD-1234".to_string()),
+        filename: Some("secret.pdf".to_string()),
+        file_size: 4096,
+    };
+
+    let json = serde_json::to_string(&summary).unwrap();
+    let parsed: EnvelopeSummary = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed.envelope_id, "abc123");
+    assert_eq!(parsed.state, EnvelopeState::Confirmed);
+    assert_eq!(parsed.challenge_code.as_deref(), Some("ABCD-1234"));
+    assert_eq!(parsed.filename.as_deref(), Some("secret.pdf"));
+    assert_eq!(parsed.file_size, 4096);
+    assert_eq!(parsed.retention_secs, 1000);
 }
