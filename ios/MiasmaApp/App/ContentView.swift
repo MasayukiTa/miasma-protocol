@@ -40,6 +40,10 @@ struct ContentView: View {
             // Start embedded daemon on app launch.
             vm.startDaemon()
         }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+            vm.refreshInbox()
+            vm.refreshStatus()
+        }
     }
 }
 

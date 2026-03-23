@@ -67,6 +67,11 @@ struct InboxItemRow: View {
             Text("From: \(String(item.senderKey.prefix(20)))…")
                 .font(.caption)
 
+            // Expiry
+            Text(expiryText)
+                .font(.caption)
+                .foregroundStyle(isExpired ? .red : .secondary)
+
             // Challenge code (for recipient to share with sender)
             if let code = item.challengeCode, item.state == "ChallengeIssued" {
                 GroupBox("Challenge code (share with sender)") {
@@ -148,6 +153,26 @@ struct InboxItemRow: View {
         switch item.state {
         case "ChallengeIssued": return "Challenge"
         default: return item.state
+        }
+    }
+
+    private var isExpired: Bool {
+        guard item.expiresAt > 0 else { return false }
+        return Date().timeIntervalSince1970 >= Double(item.expiresAt)
+    }
+
+    private var expiryText: String {
+        guard item.expiresAt > 0 else { return "" }
+        let now = Date().timeIntervalSince1970
+        let remaining = Double(item.expiresAt) - now
+        if remaining <= 0 { return "Expired" }
+        let totalMinutes = Int(remaining) / 60
+        let hours = totalMinutes / 60
+        let minutes = totalMinutes % 60
+        if hours > 0 {
+            return "Expires in \(hours)h \(minutes)m"
+        } else {
+            return "Expires in \(minutes)m"
         }
     }
 

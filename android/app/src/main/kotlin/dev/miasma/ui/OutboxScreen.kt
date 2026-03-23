@@ -73,6 +73,8 @@ fun OutboxScreen(vm: MiasmaViewModel) {
 private fun OutboxCard(item: DirectedApi.EnvelopeItem, vm: MiasmaViewModel) {
     var challengeInput by remember { mutableStateOf("") }
     var confirmError by remember { mutableStateOf<String?>(null) }
+    var confirmSuccess by remember { mutableStateOf(false) }
+    var showRevokeDialog by remember { mutableStateOf(false) }
 
     val (badgeColor, badgeLabel) = outboxStateBadge(item.state)
 
@@ -139,13 +141,22 @@ private fun OutboxCard(item: DirectedApi.EnvelopeItem, vm: MiasmaViewModel) {
                         Button(
                             onClick = {
                                 confirmError = null
+                                confirmSuccess = false
                                 vm.confirmDirected(item.envelopeId, challengeInput) { error ->
                                     confirmError = error
+                                    if (error == null) confirmSuccess = true
                                 }
                             },
                             enabled = challengeInput.length >= 9,
                         ) {
                             Text("Confirm")
+                        }
+                        if (confirmSuccess) {
+                            Text(
+                                "Confirmed",
+                                color = Color(0xFF4CAF50),
+                                style = MaterialTheme.typography.bodySmall,
+                            )
                         }
                         if (confirmError != null) {
                             Text(
@@ -173,11 +184,32 @@ private fun OutboxCard(item: DirectedApi.EnvelopeItem, vm: MiasmaViewModel) {
             if (item.state !in setOf("Retrieved", "Expired", "SenderRevoked", "RecipientDeleted", "ChallengeFailed", "PasswordFailed")) {
                 Spacer(Modifier.height(6.dp))
                 OutlinedButton(
-                    onClick = { vm.revokeDirected(item.envelopeId) },
+                    onClick = { showRevokeDialog = true },
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
                 ) {
                     Text("Revoke")
                 }
+            }
+
+            if (showRevokeDialog) {
+                AlertDialog(
+                    onDismissRequest = { showRevokeDialog = false },
+                    title = { Text("Revoke share?") },
+                    text = { Text("Are you sure? This cannot be undone.") },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            showRevokeDialog = false
+                            vm.revokeDirected(item.envelopeId)
+                        }) {
+                            Text("Revoke", color = MaterialTheme.colorScheme.error)
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showRevokeDialog = false }) {
+                            Text("Cancel")
+                        }
+                    },
+                )
             }
         }
     }
