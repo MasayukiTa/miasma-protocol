@@ -91,7 +91,7 @@ pub fn rs_decode(
 
     // Defensive checks: shard sizes must be non-zero, even, and equal.
     // `reed-solomon-simd` requires shard size even. [2](https://users.rust-lang.org/t/cargo-use-windows-tls-ssl-ca-store/117029)
-    if shard_len == 0 || shard_len % 2 != 0 {
+    if shard_len == 0 || !shard_len.is_multiple_of(2) {
         return Err(MiasmaError::ReedSolomon(format!(
             "invalid shard size: {shard_len} bytes (must non-zero and multiple of 2)"
         )));

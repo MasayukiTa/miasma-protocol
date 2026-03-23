@@ -425,7 +425,7 @@ fn parse_safety_opts(args: &[String]) -> bridge::DownloadSafetyOpts {
     opts
 }
 
-fn find_dissolve_magnet_arg<'a>(args: &'a [String]) -> Option<&'a str> {
+fn find_dissolve_magnet_arg(args: &[String]) -> Option<&str> {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {

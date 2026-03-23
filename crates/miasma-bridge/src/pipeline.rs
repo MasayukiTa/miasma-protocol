@@ -32,7 +32,7 @@
 /// 1. Add `librqbit` dependency in Cargo.toml.
 /// 2. Replace `fetch_torrent_metadata` stub with a real `librqbit` session.
 /// 3. Stream each file directly into `miasma-core::dissolve_file` so that
-///   large files never fully land on disk.
+///    large files never fully land on disk.
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -74,7 +74,7 @@ impl MagnetInfo {
 
         for kv in params.split('&') {
             if let Some(xt) = kv.strip_prefix("xt=urn:btih:") {
-                let decoded = decode_info_hash(xt).map_err(|e| PipelineError::InvalidMagnet(e))?;
+                let decoded = decode_info_hash(xt).map_err(PipelineError::InvalidMagnet)?;
                 info_hash_bytes = Some(decoded);
             } else if let Some(dn) = kv.strip_prefix("dn=") {
                 display_name = Some(url_decode(dn));

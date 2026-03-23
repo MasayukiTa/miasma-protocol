@@ -3,22 +3,17 @@ use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
 
 /// Node classification — determines storage and routing duties.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum NodeType {
     /// Stores a limited share quota; participates in DHT routing.
     Light,
     /// Stores full quota; participates in DHT routing with higher priority.
+    #[default]
     Full,
     /// Translates BitTorrent magnets into Miasma dissolves (Phase 2).
     Bridge,
     /// Well-known entry points; provide initial DHT routing tables.
     Bootstrap,
-}
-
-impl Default for NodeType {
-    fn default() -> Self {
-        Self::Full
-    }
 }
 
 /// Location of a single shard on the network.

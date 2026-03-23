@@ -53,7 +53,6 @@ pub enum ControlRequest {
     Wipe,
 
     // ── Directed sharing ────────────────────────────────────────────────
-
     /// Get this node's sharing key (X25519 pubkey + PeerId).
     SharingKey,
 
@@ -115,7 +114,6 @@ pub enum ControlResponse {
     Error(String),
 
     // ── Directed sharing ────────────────────────────────────────────────
-
     /// This node's sharing key and contact string.
     SharingKey {
         /// Sharing key ("msk:...").

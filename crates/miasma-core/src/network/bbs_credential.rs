@@ -666,6 +666,12 @@ pub struct BbsIssuerRegistry {
     issuers: Vec<[u8; 96]>,
 }
 
+impl Default for BbsIssuerRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BbsIssuerRegistry {
     pub fn new() -> Self {
         Self {
