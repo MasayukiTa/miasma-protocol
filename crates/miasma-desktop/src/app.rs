@@ -500,22 +500,39 @@ impl MiasmaApp {
                     // Auto-refresh outbox to show new item.
                     let _ = self.worker.tx.try_send(WorkerCmd::DirectedOutbox);
                 }
-                WorkerResult::DirectedRetrieved { data, filename } => {
+                WorkerResult::DirectedRetrieved {
+                    temp_path,
+                    filename,
+                    bytes_written,
+                } => {
                     self.busy = false;
-                    // Save the retrieved directed data.
+                    // Content is in temp_path — let user choose save location.
                     let fname = filename.as_deref().unwrap_or("directed_content.bin");
                     if let Some(path) = rfd::FileDialog::new().set_file_name(fname).save_file() {
-                        match std::fs::write(&path, &data) {
+                        let result = std::fs::rename(&temp_path, &path).or_else(|_| {
+                            // rename can fail across filesystems; fall back to copy+delete.
+                            std::fs::copy(&temp_path, &path).map(|_| ())?;
+                            std::fs::remove_file(&temp_path).ok();
+                            Ok::<(), std::io::Error>(())
+                        });
+                        match result {
                             Ok(()) => {
                                 self.set_msg(
                                     MsgKind::Success,
-                                    format!("Saved to {}", path.display()),
+                                    format!(
+                                        "Saved {} bytes to {}",
+                                        bytes_written,
+                                        path.display()
+                                    ),
                                 );
                             }
                             Err(e) => {
                                 self.set_msg(MsgKind::Error, format!("Save failed: {e}"));
                             }
                         }
+                    } else {
+                        // User cancelled — clean up temp file.
+                        std::fs::remove_file(&temp_path).ok();
                     }
                 }
                 WorkerResult::DirectedRevoked => {

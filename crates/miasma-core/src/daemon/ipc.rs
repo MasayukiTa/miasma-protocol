@@ -70,6 +70,24 @@ pub enum ControlRequest {
         filename: Option<String>,
     },
 
+    /// Create and send a directed share — file-path variant.
+    ///
+    /// The daemon reads the file directly from `file_path`, avoiding
+    /// JSON `Vec<u8>` serialization bloat over IPC.  Preferred over
+    /// `DirectedSend` for CLI and desktop callers that have a local path.
+    DirectedSendFile {
+        /// Recipient's sharing contact string ("msk:...@PeerId").
+        recipient_contact: String,
+        /// Absolute path to the file on the local filesystem.
+        file_path: String,
+        /// Password for retrieval gate.
+        password: String,
+        /// Retention period in seconds.
+        retention_secs: u64,
+        /// Original filename override (if None, derived from file_path).
+        filename: Option<String>,
+    },
+
     /// Submit the confirmation challenge for a directed share.
     DirectedConfirm {
         /// Hex-encoded envelope ID.
@@ -84,6 +102,20 @@ pub enum ControlRequest {
         envelope_id: String,
         /// Password entered by recipient.
         password: String,
+    },
+
+    /// Retrieve content — file-path variant.
+    ///
+    /// The daemon writes decrypted content directly to `output_path`,
+    /// avoiding JSON `Vec<u8>` serialization bloat on the response.
+    /// Preferred for CLI and desktop callers.
+    DirectedRetrieveToFile {
+        /// Hex-encoded envelope ID.
+        envelope_id: String,
+        /// Password entered by recipient.
+        password: String,
+        /// Absolute path where decrypted content should be written.
+        output_path: String,
     },
 
     /// Revoke a directed share (sender) or delete (recipient).
@@ -137,6 +169,16 @@ pub enum ControlResponse {
         data: Vec<u8>,
         /// Original filename if provided.
         filename: Option<String>,
+    },
+
+    /// Directed share content retrieved and written to a file.
+    DirectedRetrievedToFile {
+        /// Path where the decrypted content was written.
+        output_path: String,
+        /// Original filename if provided.
+        filename: Option<String>,
+        /// Number of bytes written.
+        bytes_written: u64,
     },
 
     /// Directed share revoked/deleted.
