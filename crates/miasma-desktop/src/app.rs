@@ -207,6 +207,7 @@ enum Tab {
     Retrieve,
     Send,
     Inbox,
+    Outbox,
     Status,
     Settings,
     Import,
@@ -269,6 +270,10 @@ pub struct MiasmaApp {
     inbox_items: Vec<InboxItem>,
     inbox_retrieve_password: String,
 
+    // Outbox panel
+    outbox_items: Vec<InboxItem>,
+    outbox_confirm_code: String,
+
     // Settings / general
     data_dir_display: String,
     busy: bool,
@@ -298,10 +303,13 @@ enum ImportState {
 struct InboxItem {
     envelope_id: String,
     sender: String,
+    recipient: String,
     state: String,
     challenge_code: Option<String>,
     created_at: String,
     expires_at: String,
+    filename: Option<String>,
+    file_size: u64,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -382,6 +390,8 @@ impl MiasmaApp {
             // Inbox
             inbox_items: Vec::new(),
             inbox_retrieve_password: String::new(),
+            outbox_items: Vec::new(),
+            outbox_confirm_code: String::new(),
         }
     }
 
@@ -487,6 +497,8 @@ impl MiasmaApp {
                     self.busy = false;
                     self.last_envelope_id = Some(envelope_id);
                     self.set_msg(MsgKind::Success, self.s().send_success);
+                    // Auto-refresh outbox to show new item.
+                    let _ = self.worker.tx.try_send(WorkerCmd::DirectedOutbox);
                 }
                 WorkerResult::DirectedRetrieved { data, filename } => {
                     self.busy = false;
@@ -512,8 +524,15 @@ impl MiasmaApp {
                 WorkerResult::DirectedRevoked => {
                     self.busy = false;
                     self.set_msg(MsgKind::Success, "Revoked.");
-                    // Refresh inbox.
+                    // Refresh inbox and outbox.
                     let _ = self.worker.tx.try_send(WorkerCmd::DirectedInbox);
+                    let _ = self.worker.tx.try_send(WorkerCmd::DirectedOutbox);
+                }
+                WorkerResult::DirectedConfirmed => {
+                    self.busy = false;
+                    self.outbox_confirm_code.clear();
+                    self.set_msg(MsgKind::Success, self.s().outbox_confirm_success);
+                    let _ = self.worker.tx.try_send(WorkerCmd::DirectedOutbox);
                 }
                 WorkerResult::DirectedInboxList(items) => {
                     self.inbox_items = items
@@ -521,10 +540,29 @@ impl MiasmaApp {
                         .map(|item| InboxItem {
                             envelope_id: item.envelope_id,
                             sender: item.sender_pubkey,
+                            recipient: item.recipient_pubkey,
                             state: item.state,
                             challenge_code: item.challenge_code,
                             created_at: format_epoch(item.created_at),
                             expires_at: format_epoch(item.expires_at),
+                            filename: item.filename,
+                            file_size: item.file_size,
+                        })
+                        .collect();
+                }
+                WorkerResult::DirectedOutboxList(items) => {
+                    self.outbox_items = items
+                        .into_iter()
+                        .map(|item| InboxItem {
+                            envelope_id: item.envelope_id,
+                            sender: item.sender_pubkey,
+                            recipient: item.recipient_pubkey,
+                            state: item.state,
+                            challenge_code: item.challenge_code,
+                            created_at: format_epoch(item.created_at),
+                            expires_at: format_epoch(item.expires_at),
+                            filename: item.filename,
+                            file_size: item.file_size,
                         })
                         .collect();
                 }
@@ -1206,53 +1244,236 @@ impl MiasmaApp {
             } else {
                 for item in &self.inbox_items.clone() {
                     card_frame().show(ui, |ui| {
+                        // Envelope ID and colored state badge.
                         ui.horizontal(|ui| {
                             ui.monospace(&item.envelope_id[..16.min(item.envelope_id.len())]);
-                            ui.colored_label(DIM, format!("  {} {}", s.inbox_state, item.state));
+                            let (state_color, state_label) =
+                                inbox_state_display(s, &item.state);
+                            ui.colored_label(state_color, format!("  {state_label}"));
                         });
+
+                        // Sender.
                         ui.horizontal(|ui| {
                             ui.colored_label(DIM, s.inbox_from);
                             ui.monospace(&item.sender[..20.min(item.sender.len())]);
                         });
+
+                        // Filename and size.
+                        if let Some(ref fname) = item.filename {
+                            ui.horizontal(|ui| {
+                                ui.colored_label(DIM, s.inbox_filename);
+                                ui.label(fname.as_str());
+                                if item.file_size > 0 {
+                                    ui.colored_label(
+                                        DIM,
+                                        format!("  ({} {})", s.inbox_file_size, format_size(item.file_size)),
+                                    );
+                                }
+                            });
+                        }
+
+                        // Timestamps.
                         ui.horizontal(|ui| {
                             ui.colored_label(DIM, format!("Created: {}", item.created_at));
                             ui.colored_label(DIM, format!("  Expires: {}", item.expires_at));
                         });
+
+                        // Challenge code display (recipient shows this to sender out-of-band).
                         if let Some(ref code) = item.challenge_code {
                             ui.horizontal(|ui| {
-                                ui.colored_label(GREEN, format!("{} {}", s.inbox_challenge, code));
+                                ui.colored_label(
+                                    GREEN,
+                                    format!("{} {}", s.inbox_challenge, code),
+                                );
                                 if ui.small_button(s.copy).clicked() {
                                     ui.output_mut(|o| o.copied_text = code.clone());
                                 }
                             });
                         }
 
-                        // Retrieve button.
+                        // Error / terminal state messages.
+                        match item.state.as_str() {
+                            "Expired" => {
+                                ui.colored_label(RED, s.inbox_expired);
+                            }
+                            "SenderRevoked" => {
+                                ui.colored_label(RED, s.inbox_revoked);
+                            }
+                            "PasswordFailed" => {
+                                ui.colored_label(RED, s.inbox_attempts_exhausted);
+                            }
+                            "ChallengeFailed" => {
+                                ui.colored_label(RED, s.outbox_challenge_failed);
+                            }
+                            _ => {}
+                        }
+
+                        // Retrieve button (only in Confirmed state).
                         if item.state == "Confirmed" {
+                            ui.add_space(4.0);
                             ui.horizontal(|ui| {
                                 ui.label(s.inbox_password_label);
                                 ui.add(
-                                    egui::TextEdit::singleline(&mut self.inbox_retrieve_password)
-                                        .password(true)
-                                        .desired_width(150.0),
+                                    egui::TextEdit::singleline(
+                                        &mut self.inbox_retrieve_password,
+                                    )
+                                    .password(true)
+                                    .desired_width(150.0),
                                 );
-                                if ui.button(s.inbox_retrieve_button).clicked()
-                                    && !self.inbox_retrieve_password.is_empty()
-                                {
+                                let can_retrieve = !self.inbox_retrieve_password.is_empty()
+                                    && self.daemon_state == DaemonState::Connected
+                                    && !self.busy;
+                                let btn = egui::Button::new(
+                                    egui::RichText::new(s.inbox_retrieve_button)
+                                        .color(egui::Color32::WHITE),
+                                )
+                                .fill(if can_retrieve { ACCENT } else { CARD_BG });
+                                if ui.add_enabled(can_retrieve, btn).clicked() {
                                     self.busy = true;
-                                    let _ = self.worker.tx.try_send(WorkerCmd::DirectedRetrieve {
-                                        envelope_id: item.envelope_id.clone(),
-                                        password: self.inbox_retrieve_password.clone(),
-                                    });
+                                    let _ =
+                                        self.worker.tx.try_send(WorkerCmd::DirectedRetrieve {
+                                            envelope_id: item.envelope_id.clone(),
+                                            password: self.inbox_retrieve_password.clone(),
+                                        });
                                 }
                             });
                         }
 
-                        // Revoke/delete button.
-                        if ui.small_button(s.inbox_revoke_button).clicked() {
-                            let _ = self.worker.tx.try_send(WorkerCmd::DirectedRevoke {
-                                envelope_id: item.envelope_id.clone(),
+                        // Delete button (non-terminal states only).
+                        let is_terminal = matches!(
+                            item.state.as_str(),
+                            "Retrieved"
+                                | "SenderRevoked"
+                                | "RecipientDeleted"
+                                | "Expired"
+                                | "ChallengeFailed"
+                                | "PasswordFailed"
+                        );
+                        if !is_terminal {
+                            if ui.small_button(s.inbox_revoke_button).clicked() {
+                                let _ = self.worker.tx.try_send(WorkerCmd::DirectedRevoke {
+                                    envelope_id: item.envelope_id.clone(),
+                                });
+                            }
+                        }
+                    });
+                    ui.add_space(4.0);
+                }
+            }
+        });
+    }
+
+    // ── Outbox panel (sender view) ──────────────────────────────────────
+
+    fn outbox_panel(&mut self, ui: &mut egui::Ui) {
+        let s = self.s();
+        let easy = self.mode.is_easy();
+        let heading = if easy { s.outbox_heading_easy } else { s.outbox_heading };
+        let desc = if easy { s.outbox_desc_easy } else { s.outbox_desc };
+
+        card_frame().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.colored_label(ACCENT, egui::RichText::new(heading).size(15.0).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button(s.outbox_refresh).clicked()
+                        && self.daemon_state == DaemonState::Connected
+                    {
+                        let _ = self.worker.tx.try_send(WorkerCmd::DirectedOutbox);
+                    }
+                });
+            });
+            ui.add_space(4.0);
+            ui.colored_label(DIM, desc);
+            ui.add_space(10.0);
+
+            if self.outbox_items.is_empty() {
+                ui.colored_label(DIM, s.outbox_empty);
+                // Auto-refresh on first render.
+                if self.daemon_state == DaemonState::Connected {
+                    let _ = self.worker.tx.try_send(WorkerCmd::DirectedOutbox);
+                }
+            } else {
+                for item in &self.outbox_items.clone() {
+                    card_frame().show(ui, |ui| {
+                        // Envelope ID and state badge.
+                        ui.horizontal(|ui| {
+                            ui.monospace(&item.envelope_id[..16.min(item.envelope_id.len())]);
+                            let (state_color, state_label) = outbox_state_display(s, &item.state);
+                            ui.colored_label(state_color, format!("  {state_label}"));
+                        });
+
+                        // Recipient.
+                        ui.horizontal(|ui| {
+                            ui.colored_label(DIM, s.outbox_to);
+                            ui.monospace(&item.recipient[..20.min(item.recipient.len())]);
+                        });
+
+                        // Filename.
+                        if let Some(ref fname) = item.filename {
+                            ui.horizontal(|ui| {
+                                ui.colored_label(DIM, s.outbox_filename);
+                                ui.label(fname.as_str());
                             });
+                        }
+
+                        // Timestamps.
+                        ui.horizontal(|ui| {
+                            ui.colored_label(DIM, format!("Created: {}", item.created_at));
+                            ui.colored_label(DIM, format!("  Expires: {}", item.expires_at));
+                        });
+
+                        // Sender confirmation: if ChallengeIssued, show challenge code entry.
+                        if item.state == "ChallengeIssued" {
+                            ui.add_space(4.0);
+                            ui.colored_label(YELLOW, s.outbox_confirm_heading);
+                            ui.horizontal(|ui| {
+                                ui.label(s.outbox_confirm_label);
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.outbox_confirm_code)
+                                        .hint_text(s.outbox_confirm_hint)
+                                        .desired_width(120.0)
+                                        .font(egui::TextStyle::Monospace),
+                                );
+                                let can_confirm = !self.outbox_confirm_code.is_empty()
+                                    && self.daemon_state == DaemonState::Connected
+                                    && !self.busy;
+                                let btn = egui::Button::new(
+                                    egui::RichText::new(s.outbox_confirm_button)
+                                        .color(egui::Color32::WHITE),
+                                )
+                                .fill(if can_confirm { ACCENT } else { CARD_BG });
+                                if ui.add_enabled(can_confirm, btn).clicked() {
+                                    self.busy = true;
+                                    let _ =
+                                        self.worker.tx.try_send(WorkerCmd::DirectedConfirm {
+                                            envelope_id: item.envelope_id.clone(),
+                                            challenge_code: self.outbox_confirm_code.clone(),
+                                        });
+                                }
+                            });
+                        }
+
+                        // Waiting state hint.
+                        if item.state == "Pending" {
+                            ui.colored_label(YELLOW, s.outbox_waiting_challenge);
+                        }
+
+                        // Revoke button for non-terminal states.
+                        let is_terminal = matches!(
+                            item.state.as_str(),
+                            "Retrieved"
+                                | "SenderRevoked"
+                                | "RecipientDeleted"
+                                | "Expired"
+                                | "ChallengeFailed"
+                                | "PasswordFailed"
+                        );
+                        if !is_terminal {
+                            if ui.small_button(s.outbox_revoke_button).clicked() {
+                                let _ = self.worker.tx.try_send(WorkerCmd::DirectedRevoke {
+                                    envelope_id: item.envelope_id.clone(),
+                                });
+                            }
                         }
                     });
                     ui.add_space(4.0);
@@ -2373,6 +2594,37 @@ fn format_epoch(epoch_secs: u64) -> String {
     }
 }
 
+/// Map envelope state string to a (color, label) for outbox display.
+fn outbox_state_display<'a>(s: &'a crate::locale::Strings, state: &'a str) -> (egui::Color32, &'a str) {
+    match state {
+        "Pending" => (YELLOW, s.outbox_waiting_challenge),
+        "ChallengeIssued" => (YELLOW, s.outbox_confirm_heading),
+        "Confirmed" => (GREEN, s.outbox_confirmed),
+        "Retrieved" => (GREEN, s.outbox_retrieved),
+        "Expired" => (RED, s.outbox_expired),
+        "SenderRevoked" => (RED, s.outbox_revoked),
+        "RecipientDeleted" => (DIM, s.outbox_revoked),
+        "ChallengeFailed" => (RED, s.outbox_challenge_failed),
+        "PasswordFailed" => (RED, s.outbox_password_failed),
+        _ => (DIM, state),
+    }
+}
+
+/// Map envelope state string to a (color, label) for inbox display.
+fn inbox_state_display<'a>(s: &'a crate::locale::Strings, state: &'a str) -> (egui::Color32, &'a str) {
+    match state {
+        "Pending" | "ChallengeIssued" => (YELLOW, s.inbox_state),
+        "Confirmed" => (GREEN, s.outbox_confirmed),
+        "Retrieved" => (GREEN, s.inbox_retrieved),
+        "Expired" => (RED, s.inbox_expired),
+        "SenderRevoked" => (RED, s.inbox_revoked),
+        "RecipientDeleted" => (DIM, s.outbox_revoked),
+        "ChallengeFailed" => (RED, s.outbox_challenge_failed),
+        "PasswordFailed" => (RED, s.inbox_attempts_exhausted),
+        _ => (DIM, state),
+    }
+}
+
 fn card_frame() -> egui::Frame {
     egui::Frame::none()
         .inner_margin(egui::Margin::same(14.0))
@@ -2547,8 +2799,10 @@ impl eframe::App for MiasmaApp {
                     nav_tab(ui, &mut self.tab, Tab::Retrieve, retrieve_label);
                     let send_label = if easy { s.tab_send_easy } else { s.tab_send };
                     let inbox_label = if easy { s.tab_inbox_easy } else { s.tab_inbox };
+                    let outbox_label = if easy { s.tab_outbox_easy } else { s.tab_outbox };
                     nav_tab(ui, &mut self.tab, Tab::Send, send_label);
                     nav_tab(ui, &mut self.tab, Tab::Inbox, inbox_label);
+                    nav_tab(ui, &mut self.tab, Tab::Outbox, outbox_label);
                     nav_tab(ui, &mut self.tab, Tab::Status, s.tab_status);
                     nav_tab(ui, &mut self.tab, Tab::Settings, s.tab_settings);
                     // Show Import tab only when an import is active.
@@ -2608,6 +2862,7 @@ impl eframe::App for MiasmaApp {
                         Tab::Retrieve => self.retrieve_panel(ui),
                         Tab::Send => self.send_panel(ui),
                         Tab::Inbox => self.inbox_panel(ui),
+                        Tab::Outbox => self.outbox_panel(ui),
                         Tab::Status => self.status_panel(ui),
                         Tab::Settings => self.settings_panel(ui),
                         Tab::Import => self.import_panel(ui),

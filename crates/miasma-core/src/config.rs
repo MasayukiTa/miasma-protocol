@@ -117,9 +117,19 @@ impl NodeConfig {
             toml::to_string_pretty(self).map_err(|e| MiasmaError::Serialization(e.to_string()))?;
 
         // If proxy credentials are present, write with restricted permissions
-        // from the start (Win32 DACL / Unix 0o600).  The file is never
-        // world-readable.  Failure is propagated, not silently ignored.
-        if self.transport.proxy_username.is_some() || self.transport.proxy_password.is_some() {
+        // from the start (Win32 DACL / Unix 0o600). If we're rewriting an
+        // already-restricted config after scrubbing credentials, keep using the
+        // restricted writer so Windows doesn't fail reopening the existing
+        // restricted file with a normal std::fs::write path.
+        let has_credentials =
+            self.transport.proxy_username.is_some() || self.transport.proxy_password.is_some();
+        let was_restricted = if path.exists() {
+            crate::secure_file::verify_restricted(&path).unwrap_or(false)
+        } else {
+            false
+        };
+
+        if has_credentials || was_restricted {
             crate::secure_file::write_restricted(&path, raw.as_bytes())?;
         } else {
             std::fs::write(&path, raw)?;
