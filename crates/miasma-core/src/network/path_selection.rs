@@ -35,20 +35,15 @@ use super::routing::{ip_prefix_of, IpPrefix, RoutingTable};
 // ─── Anonymity policy ───────────────────────────────────────────────────────
 
 /// Anonymity policy for a retrieval or routing operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum AnonymityPolicy {
     /// No anonymity protection. Direct connection to target.
     Direct,
     /// Use onion routing if possible, fall back to direct.
+    #[default]
     Opportunistic,
     /// Require anonymity. Fail if insufficient relay capacity.
     Required { min_hops: u8 },
-}
-
-impl Default for AnonymityPolicy {
-    fn default() -> Self {
-        AnonymityPolicy::Opportunistic
-    }
 }
 
 impl std::fmt::Display for AnonymityPolicy {

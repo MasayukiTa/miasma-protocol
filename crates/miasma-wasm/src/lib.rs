@@ -3,6 +3,8 @@
 //! Provides dissolve/retrieve operations in the browser via wasm-bindgen.
 //! Protocol-compatible with miasma-core v1 (MID, share format, crypto pipeline).
 
+#![allow(clippy::type_complexity)]
+
 use std::collections::HashMap;
 
 use aes_gcm::{
@@ -276,7 +278,7 @@ fn rs_decode(
     let recovery_shards = total_shards - data_shards;
     let shard_len = available_shards[0].1.len();
 
-    if shard_len == 0 || shard_len % 2 != 0 {
+    if shard_len == 0 || !shard_len.is_multiple_of(2) {
         return Err(MiasmaError::ReedSolomon(format!(
             "invalid shard size: {shard_len} bytes (must be non-zero and even)"
         )));
@@ -655,7 +657,7 @@ fn share_from_json(j: &ShareJson) -> Result<MiasmaShare, MiasmaError> {
 
 fn base64_encode(data: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
@@ -717,7 +719,7 @@ mod hex {
     }
 
     pub fn decode(s: &str) -> Result<Vec<u8>, String> {
-        if s.len() % 2 != 0 {
+        if !s.len().is_multiple_of(2) {
             return Err("odd-length hex string".into());
         }
         (0..s.len())
@@ -743,7 +745,7 @@ pub fn dissolve_text(plaintext: &str, k: usize, n: usize) -> Result<String, JsEr
     let (mid, shares) = dissolve_inner(plaintext.as_bytes(), params)?;
     let result = DissolveResult {
         mid: mid.to_mid_string(),
-        shares: shares.iter().map(|s| share_to_json(s)).collect(),
+        shares: shares.iter().map(share_to_json).collect(),
         data_shards: k,
         total_shards: n,
     };
@@ -761,7 +763,7 @@ pub fn dissolve_bytes(data: &[u8], k: usize, n: usize) -> Result<String, JsError
     let (mid, shares) = dissolve_inner(data, params)?;
     let result = DissolveResult {
         mid: mid.to_mid_string(),
-        shares: shares.iter().map(|s| share_to_json(s)).collect(),
+        shares: shares.iter().map(share_to_json).collect(),
         data_shards: k,
         total_shards: n,
     };
@@ -1001,8 +1003,8 @@ mod tests {
         let (mid, mut shares) = dissolve_inner(TEST_CONTENT, params).unwrap();
 
         // Forge 5 shares.
-        for i in 0..5usize {
-            shares[i].shard_data = vec![0xFF; shares[i].shard_data.len()];
+        for share in &mut shares[..5] {
+            share.shard_data = vec![0xFF; share.shard_data.len()];
         }
         // 15 valid shares remain — should succeed.
         let recovered = retrieve_inner(&mid, &shares, params).unwrap();

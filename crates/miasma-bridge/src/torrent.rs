@@ -112,17 +112,11 @@ impl MiasmaSession {
             .await
             .context("creating torrent output directory")?;
 
-        let mut opts = SessionOptions::default();
-        opts.disable_dht = config.disable_dht;
-        opts.disable_dht_persistence = true; // bridge sessions are ephemeral
-
-        // Proxy configuration.
-        if let Some(ref proxy) = config.proxy_url {
+        let proxy_url = config.proxy_url.as_ref().map(|proxy| {
             info!(proxy = %proxy, "BT connections routed through proxy");
-            opts.socks_proxy_url = Some(proxy.clone());
-        }
+            proxy.clone()
+        });
 
-        // Rate limits.
         let upload_limit = if config.seed_enabled && config.upload_rate_limit_bps > 0 {
             std::num::NonZeroU32::new(config.upload_rate_limit_bps)
         } else if !config.seed_enabled {
@@ -133,9 +127,15 @@ impl MiasmaSession {
         };
         let download_limit = std::num::NonZeroU32::new(config.download_rate_limit_bps);
 
-        opts.ratelimits = librqbit::limits::LimitsConfig {
-            upload_bps: upload_limit,
-            download_bps: download_limit,
+        let opts = SessionOptions {
+            disable_dht: config.disable_dht,
+            disable_dht_persistence: true, // bridge sessions are ephemeral
+            socks_proxy_url: proxy_url,
+            ratelimits: librqbit::limits::LimitsConfig {
+                upload_bps: upload_limit,
+                download_bps: download_limit,
+            },
+            ..Default::default()
         };
 
         let session = Session::new_with_opts(config.output_dir.clone(), opts)
@@ -240,15 +240,15 @@ impl MiasmaSession {
 
         // Progress monitoring loop.
         let progress_handle = handle.clone();
-        let progress_task = if let Some(cb) = progress_fn {
-            Some(tokio::spawn(async move {
+        let progress_task = progress_fn.map(|cb| {
+            tokio::spawn(async move {
                 loop {
                     let stats = progress_handle.stats();
                     let live = stats.live.as_ref();
                     let progress = DownloadProgress {
                         downloaded_bytes: stats.progress_bytes,
                         total_bytes: stats.total_bytes,
-                        peers: live.map_or(0, |l| l.snapshot.peer_stats.live as usize),
+                        peers: live.map_or(0, |l| l.snapshot.peer_stats.live),
                         download_speed_mbps: live.map_or(0.0, |l| l.download_speed.mbps),
                         finished: stats.finished,
                     };
@@ -258,10 +258,8 @@ impl MiasmaSession {
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
-            }))
-        } else {
-            None
-        };
+            })
+        });
 
         // Wait for download completion.
         handle

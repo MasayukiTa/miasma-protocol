@@ -40,12 +40,12 @@ use super::descriptor::{
     ResourceProfile,
 };
 use super::onion_relay::{OnionRelayCodec, OnionRelayRequest, OnionRelayResponse};
-use crate::directed::protocol::{DirectedCodec, DirectedRequest, DirectedResponse};
 use super::path_selection::PathSelectionStats;
 use super::peer_state::{AdmissionStats, PeerRegistry, RejectionReason};
 use super::routing::{self, RoutingStats, RoutingTable};
 use super::sybil::{self, NodeIdPoW, SignedDhtRecord};
 use super::types::{DhtRecord, NodeType};
+use crate::directed::protocol::{DirectedCodec, DirectedRequest, DirectedResponse};
 
 // ─── Share-exchange wire types ────────────────────────────────────────────────
 
@@ -1872,7 +1872,7 @@ impl MiasmaNode {
         // Periodic network-size observation for difficulty adjustment.
         // Every ~500 events, sample the connected peer count and adjust difficulty.
         self.event_tick = self.event_tick.wrapping_add(1);
-        if self.event_tick % 500 == 0 {
+        if self.event_tick.is_multiple_of(500) {
             let peer_count = self.swarm.connected_peers().count();
             self.routing_table.observe_network_size(peer_count);
             if let Some(new_diff) = self.routing_table.maybe_adjust_difficulty() {
@@ -1880,7 +1880,7 @@ impl MiasmaNode {
             }
         }
         // Epoch rotation check (every ~1000 events).
-        if self.event_tick % 1000 == 0 {
+        if self.event_tick.is_multiple_of(1000) {
             let rotated = self.credential_wallet.maybe_rotate();
             if rotated {
                 let new_epoch = self.credential_wallet.epoch();
@@ -1916,7 +1916,7 @@ impl MiasmaNode {
             }
             // Refresh and broadcast our own descriptor on epoch rotation
             // or periodically (every 5000 ticks) to keep it non-stale.
-            if rotated || self.event_tick % 5000 == 0 {
+            if rotated || self.event_tick.is_multiple_of(5000) {
                 let desc = self.build_local_descriptor();
                 let pseudonym = desc.pseudonym;
                 self.descriptor_store.upsert(desc.clone());
@@ -1942,7 +1942,7 @@ impl MiasmaNode {
             // Background relay probing: every 5000 ticks, probe one relay
             // peer that lacks a fresh probe result. This builds trust
             // evidence during idle periods (no retrieval needed to trigger).
-            if self.event_tick % 5000 == 0 {
+            if self.event_tick.is_multiple_of(5000) {
                 let freshness_secs = 300u64;
                 let stale_candidate = self
                     .descriptor_store
@@ -2504,7 +2504,7 @@ impl MiasmaNode {
                     let context = self.local_peer_id.to_bytes();
                     let presentation = CredentialPresentation::create(
                         &cred,
-                        &self.credential_wallet.identity(),
+                        self.credential_wallet.identity(),
                         &context,
                     );
                     match credential::verify_presentation(
@@ -2936,10 +2936,12 @@ impl MiasmaNode {
                         );
                         // Notify daemon layer via topology event channel.
                         if let Some(ref tx) = self.topology_tx {
-                            let _ = tx.try_send(super::types::TopologyEvent::DirectedEnvelopeReceived {
-                                peer_id: peer,
-                                envelope: Box::new(envelope),
-                            });
+                            let _ = tx.try_send(
+                                super::types::TopologyEvent::DirectedEnvelopeReceived {
+                                    peer_id: peer,
+                                    envelope: Box::new(envelope),
+                                },
+                            );
                         }
                     }
                     DirectedRequest::Confirm {
@@ -2958,14 +2960,16 @@ impl MiasmaNode {
                             envelope_id = %hex::encode(envelope_id),
                             "directed.revoke_received"
                         );
-                        let _ = self.swarm.behaviour_mut().directed_sharing.send_response(
-                            channel,
-                            DirectedResponse::Revoked { envelope_id },
-                        );
+                        let _ = self
+                            .swarm
+                            .behaviour_mut()
+                            .directed_sharing
+                            .send_response(channel, DirectedResponse::Revoked { envelope_id });
                         if let Some(ref tx) = self.topology_tx {
-                            let _ = tx.try_send(super::types::TopologyEvent::DirectedRevokeReceived {
-                                envelope_id,
-                            });
+                            let _ =
+                                tx.try_send(super::types::TopologyEvent::DirectedRevokeReceived {
+                                    envelope_id,
+                                });
                         }
                     }
                     DirectedRequest::StatusQuery { envelope_id } => {
@@ -3095,10 +3099,11 @@ impl MiasmaNode {
     // (wallet identity is accessed via self.credential_wallet.identity())
 
     fn handle_kad_event(&mut self, ev: kad::Event) {
-        match ev {
-            kad::Event::OutboundQueryProgressed {
-                id, result, step, ..
-            } => match result {
+        if let kad::Event::OutboundQueryProgressed {
+            id, result, step, ..
+        } = ev
+        {
+            match result {
                 kad::QueryResult::PutRecord(Ok(kad::PutRecordOk { key })) => {
                     // Notify replication tracker: network PUT acknowledged by remote peer.
                     if let Some(tx) = &self.replication_success_tx {
@@ -3167,8 +3172,7 @@ impl MiasmaNode {
                     }
                 }
                 _ => {}
-            },
-            _ => {}
+            }
         }
     }
 

@@ -15,17 +15,13 @@ use crate::locale::Locale;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum ProductMode {
     /// Full diagnostics, transport details, protocol terminology.
     Technical,
     /// Simplified language, hidden internals, product-like UX.
+    #[default]
     Easy,
-}
-
-impl Default for ProductMode {
-    fn default() -> Self {
-        Self::Easy
-    }
 }
 
 impl ProductMode {
@@ -48,18 +44,10 @@ const PREFS_FILE: &str = "desktop-prefs.toml";
 /// Survives restart, upgrade, and reinstall (data dir is preserved).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct DesktopPrefs {
     pub mode: ProductMode,
     pub locale: Locale,
-}
-
-impl Default for DesktopPrefs {
-    fn default() -> Self {
-        Self {
-            mode: ProductMode::default(),
-            locale: Locale::default(),
-        }
-    }
 }
 
 impl DesktopPrefs {
