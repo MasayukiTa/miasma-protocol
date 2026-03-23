@@ -11,6 +11,10 @@ use serde::{Deserialize, Serialize};
 
 use super::envelope::{DirectedEnvelope, EnvelopeState};
 
+/// Maximum number of envelopes allowed in a single directory (inbox or outbox).
+/// Prevents unbounded disk growth from malicious or excessive invite delivery.
+const MAX_ENVELOPES: usize = 10_000;
+
 /// Summary of an envelope for listing (avoids loading full envelope).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvelopeSummary {
@@ -85,8 +89,14 @@ impl DirectedInbox {
     // ─── Incoming (recipient) ───────────────────────────────────────────
 
     /// Save an incoming envelope (recipient side).
+    ///
+    /// Rejects if the inbox already has `MAX_ENVELOPES` items (unless
+    /// this is an update to an existing envelope).
     pub fn save_incoming(&self, envelope: &DirectedEnvelope) -> Result<()> {
         let path = self.incoming_path(&envelope.id_hex());
+        if !path.exists() {
+            self.check_limit(&self.incoming_dir, "inbox")?;
+        }
         let json = serde_json::to_vec_pretty(envelope).context("serialize envelope")?;
         std::fs::write(&path, &json).context("write incoming envelope")?;
         Ok(())
@@ -138,18 +148,32 @@ impl DirectedInbox {
     }
 
     /// Expire all envelopes past their retention period.
+    ///
+    /// Also cleans up orphaned `.challenge` files for envelopes that have
+    /// already reached a terminal state.
     pub fn expire_all(&self, now_secs: u64) {
         for dir in [&self.incoming_dir, &self.outgoing_dir] {
             if let Ok(entries) = std::fs::read_dir(dir) {
                 for entry in entries.flatten() {
-                    if let Ok(json) = std::fs::read(entry.path()) {
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                        continue;
+                    }
+                    if let Ok(json) = std::fs::read(&path) {
                         if let Ok(mut env) = serde_json::from_slice::<DirectedEnvelope>(&json) {
                             if env.is_expired(now_secs) && !env.state.is_terminal() {
                                 env.state = EnvelopeState::Expired;
                                 let _ = std::fs::write(
-                                    entry.path(),
+                                    &path,
                                     serde_json::to_vec_pretty(&env).unwrap_or_default(),
                                 );
+                            }
+                            // Clean up challenge file for terminal envelopes.
+                            if env.state.is_terminal() {
+                                let challenge_path = path.with_extension("challenge");
+                                if challenge_path.exists() {
+                                    let _ = std::fs::remove_file(&challenge_path);
+                                }
                             }
                         }
                     }
@@ -158,7 +182,40 @@ impl DirectedInbox {
         }
     }
 
+    /// Clean up the challenge code file for an envelope that has reached
+    /// a terminal state. Should be called whenever a terminal transition
+    /// happens on an incoming envelope.
+    pub fn cleanup_challenge(&self, id_hex: &str) {
+        let challenge_path = self.incoming_dir.join(format!("{id_hex}.challenge"));
+        if challenge_path.exists() {
+            let _ = std::fs::remove_file(&challenge_path);
+        }
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────
+
+    /// Check that the directory has not exceeded `MAX_ENVELOPES` .json files.
+    fn check_limit(&self, dir: &Path, name: &str) -> Result<()> {
+        let count = std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|e| {
+                        e.path()
+                            .extension()
+                            .and_then(|x| x.to_str())
+                            == Some("json")
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        if count >= MAX_ENVELOPES {
+            anyhow::bail!(
+                "{name} full: {count} envelopes (max {MAX_ENVELOPES})"
+            );
+        }
+        Ok(())
+    }
 
     fn incoming_path(&self, id_hex: &str) -> PathBuf {
         self.incoming_dir.join(format!("{id_hex}.json"))

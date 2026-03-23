@@ -94,6 +94,9 @@ function showView(name) {
   if (name === 'inbox') {
     refreshInbox();
   }
+  if (name === 'outbox') {
+    refreshOutbox();
+  }
 }
 
 // ── Event Listeners ───────────────────────────────────────────────
@@ -183,6 +186,9 @@ function setupEventListeners() {
 
   // Inbox
   document.getElementById('btn-inbox-refresh').addEventListener('click', refreshInbox);
+
+  // Outbox
+  document.getElementById('btn-outbox-refresh').addEventListener('click', refreshOutbox);
 
   // Settings
   document.getElementById('btn-clear-all').addEventListener('click', handleClearAll);
@@ -716,6 +722,21 @@ async function handleDirectedSend() {
 
 // ── Inbox ─────────────────────────────────────────────────────────
 
+function inboxStateBadge(state) {
+  const map = {
+    'Pending': { label: t('inbox_pending'), color: 'var(--warning, #f0b432)' },
+    'ChallengeIssued': { label: t('inbox_challenge_issued'), color: 'var(--warning, #f0b432)' },
+    'Confirmed': { label: t('inbox_confirmed'), color: 'var(--success)' },
+    'Retrieved': { label: t('inbox_retrieved'), color: 'var(--success)' },
+    'Expired': { label: t('inbox_expired'), color: 'var(--text-dim)' },
+    'SenderRevoked': { label: t('inbox_sender_revoked'), color: 'var(--danger)' },
+    'RecipientDeleted': { label: t('inbox_revoked'), color: 'var(--text-dim)' },
+    'ChallengeFailed': { label: t('inbox_challenge_failed'), color: 'var(--danger)' },
+    'PasswordFailed': { label: t('inbox_password_failed'), color: 'var(--danger)' },
+  };
+  return map[state] || { label: state, color: 'var(--text-dim)' };
+}
+
 async function refreshInbox() {
   const listEl = document.getElementById('inbox-list');
   const emptyEl = document.getElementById('inbox-empty');
@@ -744,39 +765,28 @@ async function refreshInbox() {
       header.className = 'source-header';
 
       const idSpan = document.createElement('code');
-      idSpan.textContent = item.envelope_id || '(unknown)';
+      idSpan.textContent = (item.envelope_id || '').substring(0, 16) + '...';
       idSpan.style.fontSize = '0.75rem';
-      idSpan.style.wordBreak = 'break-all';
       header.appendChild(idSpan);
 
       // State badge
+      const state = item.state || 'Pending';
+      const badgeInfo = inboxStateBadge(state);
       const badge = document.createElement('span');
       badge.className = 'share-badge';
-      const state = item.state || 'pending';
-      if (state === 'expired') {
-        badge.textContent = t('inbox_expired');
-        badge.style.background = 'var(--text-dim)';
-      } else if (state === 'revoked') {
-        badge.textContent = t('inbox_revoked');
-        badge.style.background = 'var(--danger)';
-      } else {
-        badge.textContent = state;
-      }
+      badge.textContent = badgeInfo.label;
+      badge.style.background = badgeInfo.color;
       header.appendChild(badge);
       card.appendChild(header);
 
-      // Challenge code for pending items
-      if (item.challenge_code) {
-        const challengeRow = document.createElement('div');
-        challengeRow.className = 'setting-row';
-        challengeRow.style.marginTop = '0.5rem';
-        const label = document.createElement('span');
-        label.textContent = t('inbox_challenge');
-        const code = document.createElement('code');
-        code.textContent = item.challenge_code;
-        challengeRow.appendChild(label);
-        challengeRow.appendChild(code);
-        card.appendChild(challengeRow);
+      // Sender
+      if (item.sender_pubkey) {
+        const senderRow = document.createElement('div');
+        senderRow.className = 'source-desc';
+        senderRow.style.fontSize = '0.75rem';
+        senderRow.style.color = 'var(--text-dim)';
+        senderRow.textContent = 'From: ' + (item.sender_pubkey || '').substring(0, 20) + '...';
+        card.appendChild(senderRow);
       }
 
       // Filename if present
@@ -784,55 +794,126 @@ async function refreshInbox() {
         const fnRow = document.createElement('div');
         fnRow.className = 'source-desc';
         fnRow.textContent = item.filename;
+        if (item.file_size > 0) {
+          fnRow.textContent += ` (${formatBytes(item.file_size)})`;
+        }
         card.appendChild(fnRow);
       }
 
-      // Action buttons
-      const actions = document.createElement('div');
-      actions.className = 'import-actions';
-      actions.style.marginTop = '0.5rem';
+      // Challenge code for pending items
+      if (item.challenge_code) {
+        const challengeRow = document.createElement('div');
+        challengeRow.className = 'setting-row';
+        challengeRow.style.marginTop = '0.5rem';
+        const label = document.createElement('span');
+        label.textContent = t('inbox_challenge') + ': ';
+        label.style.color = 'var(--success)';
+        label.style.fontWeight = 'bold';
+        const code = document.createElement('code');
+        code.textContent = item.challenge_code;
+        code.style.fontSize = '1.1rem';
+        code.style.letterSpacing = '0.1rem';
+        challengeRow.appendChild(label);
+        challengeRow.appendChild(code);
+        card.appendChild(challengeRow);
+      }
 
-      if (state !== 'expired' && state !== 'revoked') {
+      // Terminal state messages
+      if (state === 'Expired') {
+        const msg = document.createElement('div');
+        msg.style.color = 'var(--danger)';
+        msg.style.marginTop = '0.5rem';
+        msg.textContent = t('inbox_expired');
+        card.appendChild(msg);
+      } else if (state === 'SenderRevoked') {
+        const msg = document.createElement('div');
+        msg.style.color = 'var(--danger)';
+        msg.style.marginTop = '0.5rem';
+        msg.textContent = t('inbox_sender_revoked');
+        card.appendChild(msg);
+      } else if (state === 'PasswordFailed') {
+        const msg = document.createElement('div');
+        msg.style.color = 'var(--danger)';
+        msg.style.marginTop = '0.5rem';
+        msg.textContent = t('inbox_attempts_exhausted');
+        card.appendChild(msg);
+      }
+
+      // Inline retrieve form (Confirmed state only)
+      const isTerminal = ['Retrieved', 'SenderRevoked', 'RecipientDeleted',
+                          'Expired', 'ChallengeFailed', 'PasswordFailed'].includes(state);
+      if (state === 'Confirmed') {
+        const retrieveForm = document.createElement('div');
+        retrieveForm.style.marginTop = '0.5rem';
+        retrieveForm.style.display = 'flex';
+        retrieveForm.style.gap = '0.5rem';
+        retrieveForm.style.alignItems = 'center';
+
+        const pwLabel = document.createElement('label');
+        pwLabel.textContent = t('inbox_password_label') + ':';
+        pwLabel.style.fontSize = '0.85rem';
+        retrieveForm.appendChild(pwLabel);
+
+        const pwInput = document.createElement('input');
+        pwInput.type = 'password';
+        pwInput.placeholder = t('inbox_password_label');
+        pwInput.style.flex = '1';
+        pwInput.style.padding = '0.3rem 0.5rem';
+        pwInput.style.borderRadius = '4px';
+        pwInput.style.border = '1px solid var(--border)';
+        pwInput.style.background = 'var(--bg)';
+        pwInput.style.color = 'var(--text)';
+        retrieveForm.appendChild(pwInput);
+
         const retrieveBtn = document.createElement('button');
         retrieveBtn.className = 'btn-small btn-accent';
-        retrieveBtn.textContent = t('inbox_retrieve');
-        retrieveBtn.addEventListener('click', () => handleDirectedRetrieve(item.envelope_id));
-        actions.appendChild(retrieveBtn);
+        retrieveBtn.textContent = t('inbox_retrieve_btn');
+        retrieveBtn.addEventListener('click', async () => {
+          if (!pwInput.value) return;
+          retrieveBtn.disabled = true;
+          retrieveBtn.textContent = t('processing');
+          try {
+            const result = await bridge.directedRetrieve(item.envelope_id, pwInput.value);
+            const blob = new Blob([result.data]);
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = result.filename || 'miasma-directed';
+            a.click();
+            URL.revokeObjectURL(url);
+            showToast(t('retrieved'), 'success');
+            refreshInbox();
+          } catch (e) {
+            console.error('Directed retrieve failed:', e);
+            showToast(e.message || t('inbox_wrong_password'), 'error');
+          } finally {
+            retrieveBtn.disabled = false;
+            retrieveBtn.textContent = t('inbox_retrieve_btn');
+          }
+        });
+        retrieveForm.appendChild(retrieveBtn);
+        card.appendChild(retrieveForm);
+      }
 
+      // Delete button for non-terminal states
+      if (!isTerminal) {
+        const actions = document.createElement('div');
+        actions.className = 'import-actions';
+        actions.style.marginTop = '0.5rem';
         const revokeBtn = document.createElement('button');
         revokeBtn.className = 'btn-small';
         revokeBtn.textContent = t('inbox_revoke');
         revokeBtn.addEventListener('click', () => handleDirectedRevoke(item.envelope_id));
         actions.appendChild(revokeBtn);
+        card.appendChild(actions);
       }
 
-      card.appendChild(actions);
       listEl.appendChild(card);
     }
   } catch (e) {
     console.error('Inbox refresh failed:', e);
     listEl.innerHTML = '';
     emptyEl.classList.remove('hidden');
-  }
-}
-
-async function handleDirectedRetrieve(envelopeId) {
-  const password = prompt(t('send_password'));
-  if (password === null) return;
-
-  try {
-    const result = await bridge.directedRetrieve(envelopeId, password);
-    const blob = new Blob([result.data]);
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = result.filename || 'miasma-directed';
-    a.click();
-    URL.revokeObjectURL(url);
-    showToast(t('retrieved'), 'success');
-  } catch (e) {
-    console.error('Directed retrieve failed:', e);
-    showToast(e.message, 'error');
   }
 }
 
@@ -843,11 +924,188 @@ async function handleDirectedRevoke(envelopeId) {
     if (ok) {
       showToast(t('cleared'), 'success');
       refreshInbox();
+      refreshOutbox();
     } else {
       showToast(t('error_retrieve'), 'error');
     }
   } catch (e) {
     showToast(e.message, 'error');
+  }
+}
+
+// ── Outbox ────────────────────────────────────────────────────────
+
+function outboxStateBadge(state) {
+  const map = {
+    'Pending': { label: t('outbox_waiting'), color: 'var(--warning, #f0b432)' },
+    'ChallengeIssued': { label: t('outbox_confirm_label'), color: 'var(--warning, #f0b432)' },
+    'Confirmed': { label: t('outbox_confirmed'), color: 'var(--success)' },
+    'Retrieved': { label: t('outbox_retrieved'), color: 'var(--success)' },
+    'Expired': { label: t('outbox_expired'), color: 'var(--text-dim)' },
+    'SenderRevoked': { label: t('outbox_revoked'), color: 'var(--danger)' },
+    'RecipientDeleted': { label: t('outbox_revoked'), color: 'var(--text-dim)' },
+    'ChallengeFailed': { label: t('outbox_challenge_failed'), color: 'var(--danger)' },
+    'PasswordFailed': { label: t('outbox_password_failed'), color: 'var(--danger)' },
+  };
+  return map[state] || { label: state, color: 'var(--text-dim)' };
+}
+
+async function refreshOutbox() {
+  const listEl = document.getElementById('outbox-list');
+  const emptyEl = document.getElementById('outbox-empty');
+
+  if (!bridge || !bridge.connected) {
+    listEl.innerHTML = '';
+    emptyEl.classList.remove('hidden');
+    return;
+  }
+
+  try {
+    const items = await bridge.directedOutbox();
+    listEl.innerHTML = '';
+
+    if (!items || items.length === 0) {
+      emptyEl.classList.remove('hidden');
+      return;
+    }
+    emptyEl.classList.add('hidden');
+
+    for (const item of items) {
+      const card = document.createElement('div');
+      card.className = 'source-card';
+
+      const header = document.createElement('div');
+      header.className = 'source-header';
+
+      const idSpan = document.createElement('code');
+      idSpan.textContent = (item.envelope_id || '').substring(0, 16) + '...';
+      idSpan.style.fontSize = '0.75rem';
+      header.appendChild(idSpan);
+
+      // State badge
+      const state = item.state || 'Pending';
+      const badgeInfo = outboxStateBadge(state);
+      const badge = document.createElement('span');
+      badge.className = 'share-badge';
+      badge.textContent = badgeInfo.label;
+      badge.style.background = badgeInfo.color;
+      header.appendChild(badge);
+      card.appendChild(header);
+
+      // Recipient
+      if (item.recipient_pubkey) {
+        const recipRow = document.createElement('div');
+        recipRow.className = 'source-desc';
+        recipRow.style.fontSize = '0.75rem';
+        recipRow.style.color = 'var(--text-dim)';
+        recipRow.textContent = t('outbox_to') + ': ' + (item.recipient_pubkey || '').substring(0, 20) + '...';
+        card.appendChild(recipRow);
+      }
+
+      // Filename
+      if (item.filename) {
+        const fnRow = document.createElement('div');
+        fnRow.className = 'source-desc';
+        fnRow.textContent = item.filename;
+        if (item.file_size > 0) {
+          fnRow.textContent += ` (${formatBytes(item.file_size)})`;
+        }
+        card.appendChild(fnRow);
+      }
+
+      // Sender confirmation: challenge code entry for ChallengeIssued state
+      if (state === 'ChallengeIssued') {
+        const confirmForm = document.createElement('div');
+        confirmForm.style.marginTop = '0.5rem';
+        confirmForm.style.display = 'flex';
+        confirmForm.style.gap = '0.5rem';
+        confirmForm.style.alignItems = 'center';
+
+        const codeLabel = document.createElement('label');
+        codeLabel.textContent = t('outbox_confirm_label') + ':';
+        codeLabel.style.fontSize = '0.85rem';
+        confirmForm.appendChild(codeLabel);
+
+        const codeInput = document.createElement('input');
+        codeInput.type = 'text';
+        codeInput.placeholder = t('outbox_confirm_hint');
+        codeInput.style.flex = '1';
+        codeInput.style.padding = '0.3rem 0.5rem';
+        codeInput.style.borderRadius = '4px';
+        codeInput.style.border = '1px solid var(--border)';
+        codeInput.style.background = 'var(--bg)';
+        codeInput.style.color = 'var(--text)';
+        codeInput.style.fontFamily = 'monospace';
+        codeInput.style.letterSpacing = '0.1rem';
+        confirmForm.appendChild(codeInput);
+
+        const confirmBtn = document.createElement('button');
+        confirmBtn.className = 'btn-small btn-accent';
+        confirmBtn.textContent = t('outbox_confirm_btn');
+        confirmBtn.addEventListener('click', async () => {
+          if (!codeInput.value.trim()) return;
+          confirmBtn.disabled = true;
+          confirmBtn.textContent = t('processing');
+          try {
+            const ok = await bridge.directedConfirm(item.envelope_id, codeInput.value.trim());
+            if (ok) {
+              showToast(t('outbox_confirm_success'), 'success');
+              refreshOutbox();
+            } else {
+              showToast(t('outbox_challenge_failed'), 'error');
+            }
+          } catch (e) {
+            console.error('Confirm failed:', e);
+            showToast(e.message || t('outbox_challenge_failed'), 'error');
+          } finally {
+            confirmBtn.disabled = false;
+            confirmBtn.textContent = t('outbox_confirm_btn');
+          }
+        });
+        confirmForm.appendChild(confirmBtn);
+        card.appendChild(confirmForm);
+      }
+
+      // Pending state hint
+      if (state === 'Pending') {
+        const hint = document.createElement('div');
+        hint.style.color = 'var(--warning, #f0b432)';
+        hint.style.marginTop = '0.5rem';
+        hint.style.fontSize = '0.85rem';
+        hint.textContent = t('outbox_waiting');
+        card.appendChild(hint);
+      }
+
+      // Revoke button for non-terminal states
+      const isTerminal = ['Retrieved', 'SenderRevoked', 'RecipientDeleted',
+                          'Expired', 'ChallengeFailed', 'PasswordFailed'].includes(state);
+      if (!isTerminal) {
+        const actions = document.createElement('div');
+        actions.className = 'import-actions';
+        actions.style.marginTop = '0.5rem';
+        const revokeBtn = document.createElement('button');
+        revokeBtn.className = 'btn-small';
+        revokeBtn.textContent = t('outbox_revoke');
+        revokeBtn.addEventListener('click', async () => {
+          if (!confirm(t('confirm_clear'))) return;
+          try {
+            await bridge.directedRevoke(item.envelope_id);
+            showToast(t('cleared'), 'success');
+            refreshOutbox();
+          } catch (e) {
+            showToast(e.message, 'error');
+          }
+        });
+        actions.appendChild(revokeBtn);
+        card.appendChild(actions);
+      }
+
+      listEl.appendChild(card);
+    }
+  } catch (e) {
+    console.error('Outbox refresh failed:', e);
+    listEl.innerHTML = '';
+    emptyEl.classList.remove('hidden');
   }
 }
 

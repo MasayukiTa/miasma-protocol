@@ -11,14 +11,14 @@
 
 - **Audience**: Protocol testers, developers, early adopters
 - **Maturity**: Beta (validated)
-- **What it can do**: Initialize node, daemon lifecycle, dissolve/retrieve, dual-mode desktop GUI (Easy/Technical), 3-locale i18n (EN/JA/ZH-CN), mDNS same-network peer discovery, manual bootstrap, shell integration (magnet:/torrent), BitTorrent bridge import, diagnostics export, installer (MSI/EXE/portable ZIP), upgrade/uninstall lifecycle, distress wipe, persistent logging
+- **What it can do**: Initialize node, daemon lifecycle, dissolve/retrieve, dual-mode desktop GUI (Easy/Technical), 3-locale i18n (EN/JA/ZH-CN), mDNS same-network peer discovery, manual bootstrap, shell integration (magnet:/torrent), BitTorrent bridge import, diagnostics export, installer (MSI/EXE/portable ZIP), upgrade/uninstall lifecycle, distress wipe, persistent logging, **directed private sharing** (send, confirm, retrieve, revoke, inbox, outbox — CLI + GUI + Web)
 - **What it should not claim**: Cross-network retrieval proven at scale, code-signed, externally audited, production-ready
 
 ### Web/PWA — Local-Only Browser Tool
 
 - **Audience**: Browser-only users wanting portable dissolution/retrieval without installing software
 - **Maturity**: Foundation (security-audited, scope-hardened, browser validation pending)
-- **What it can do**: Dissolve text/bytes via WASM, retrieve from locally-held shares (IndexedDB), export/import shares as .miasma files, PWA offline support, 3-locale i18n (EN/JA/ZH-CN), protocol-compatible with miasma-core v1
+- **What it can do**: Dissolve text/bytes via WASM, retrieve from locally-held shares (IndexedDB), export/import shares as .miasma files, PWA offline support, 3-locale i18n (EN/JA/ZH-CN), protocol-compatible with miasma-core v1, **directed private sharing in connected mode** (send, confirm, retrieve, revoke, inbox, outbox — via HTTP bridge to local daemon)
 - **What it should not claim**: Peer discovery, network retrieval, daemon connectivity, anonymity features, production-grade key management (WASM memory model limits apply)
 - **Key constraint**: Completely self-contained — no miasma-core dependency, no networking, local-only share storage. Share transfer between devices is manual (export/import only)
 - **Product scope decision**: Local-only dissolution tool. Future networking deferred pending architecture decision (WebRTC, relay, or companion mode)
@@ -60,6 +60,7 @@
 | Security posture | Audited + hardened | Audited + hardened | Audited (1 critical open) | Not audited |
 | Distress wipe | Real | Unsupported | Real (FFI) | Stub |
 | Cross-device retrieval | Partial (mDNS+DHT) | Unsupported | Unsupported | Unsupported |
+| Directed private sharing | Real (CLI+GUI+Web) | Real (Web+Daemon) | Unsupported | Unsupported |
 
 **Legend**: Real = validated and working. Partial = implemented but not fully validated. Foundation = code exists, not user-testable. Stub = binding/shell only. Unsupported = intentionally absent.
 

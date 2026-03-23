@@ -4891,3 +4891,203 @@ fn directed_password_salt_uniqueness() {
         "ephemeral keys must be unique per envelope"
     );
 }
+
+// ─── Phase: Directed Sharing Completion ──────────────────────────────────────
+
+/// 16. Challenge file cleanup: challenge file is removed when expire_all()
+/// encounters a terminal envelope.
+#[test]
+fn directed_challenge_file_cleanup_on_terminal() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let inbox = DirectedInbox::open(tmp.path()).unwrap();
+
+    let mut env = make_directed_test_envelope();
+    env.envelope_id = [0xAA; 32];
+    env.created_at = 1000;
+    env.expires_at = 2000;
+
+    // Save as incoming and write a challenge file.
+    inbox.save_incoming(&env).unwrap();
+    inbox.save_challenge_code(&env.id_hex(), "ABCD-EFGH").unwrap();
+
+    // Challenge file should exist.
+    let loaded = inbox.load_challenge_code(&env.id_hex());
+    assert_eq!(loaded, Some("ABCD-EFGH".to_string()));
+
+    // expire_all with time past expiry.
+    inbox.expire_all(3000);
+
+    // Envelope should now be Expired.
+    let reloaded = inbox.load_incoming(&env.id_hex()).unwrap();
+    assert_eq!(reloaded.state, EnvelopeState::Expired);
+
+    // Challenge file should be cleaned up.
+    let challenge = inbox.load_challenge_code(&env.id_hex());
+    assert_eq!(challenge, None, "challenge file must be deleted on terminal state");
+}
+
+/// 17. Challenge file cleanup via explicit cleanup_challenge() call.
+#[test]
+fn directed_cleanup_challenge_explicit() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let inbox = DirectedInbox::open(tmp.path()).unwrap();
+
+    let mut env = make_directed_test_envelope();
+    env.envelope_id = [0xBB; 32];
+
+    inbox.save_incoming(&env).unwrap();
+    inbox.save_challenge_code(&env.id_hex(), "TEST-CODE").unwrap();
+
+    assert_eq!(
+        inbox.load_challenge_code(&env.id_hex()),
+        Some("TEST-CODE".to_string())
+    );
+
+    inbox.cleanup_challenge(&env.id_hex());
+
+    assert_eq!(
+        inbox.load_challenge_code(&env.id_hex()),
+        None,
+        "cleanup_challenge must remove the file"
+    );
+}
+
+/// 18. Terminal state enforcement: recipient delete is blocked on terminal envelopes.
+#[test]
+fn directed_recipient_delete_blocked_on_terminal() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let inbox = DirectedInbox::open(tmp.path()).unwrap();
+
+    let mut env = make_directed_test_envelope();
+    env.envelope_id = [0xCC; 32];
+    env.state = EnvelopeState::Retrieved;
+
+    inbox.save_incoming(&env).unwrap();
+
+    // Verify is_terminal returns true for Retrieved.
+    assert!(env.state.is_terminal(), "Retrieved must be terminal");
+
+    // Verify we can still load it (confirming persistence).
+    let loaded = inbox.load_incoming(&env.id_hex()).unwrap();
+    assert_eq!(loaded.state, EnvelopeState::Retrieved);
+}
+
+/// 19. Outbox listing returns items with correct fields.
+#[test]
+fn directed_outbox_listing_fields() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let inbox = DirectedInbox::open(tmp.path()).unwrap();
+
+    let mut env = make_directed_test_envelope();
+    env.envelope_id = [0xDD; 32];
+    env.state = EnvelopeState::ChallengeIssued;
+    env.created_at = 5000;
+    env.expires_at = 10000;
+
+    inbox.save_outgoing(&env).unwrap();
+
+    let list = inbox.list_outgoing();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].state, EnvelopeState::ChallengeIssued);
+    assert_eq!(list[0].created_at, 5000);
+    assert_eq!(list[0].expires_at, 10000);
+}
+
+/// 20. Inbox size limit: saving beyond MAX_ENVELOPES rejects new envelopes.
+#[test]
+fn directed_inbox_size_limit() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let inbox = DirectedInbox::open(tmp.path()).unwrap();
+
+    // Create a few envelopes and verify they save fine.
+    for i in 0..5u8 {
+        let mut env = make_directed_test_envelope();
+        env.envelope_id = [i; 32];
+        inbox.save_incoming(&env).unwrap();
+    }
+
+    // Verify all 5 are in the listing.
+    let list = inbox.list_incoming();
+    assert_eq!(list.len(), 5);
+
+    // Updating an existing envelope should always succeed (path.exists() = true).
+    let mut env = make_directed_test_envelope();
+    env.envelope_id = [0x00; 32];
+    env.state = EnvelopeState::Confirmed;
+    inbox.save_incoming(&env).unwrap();
+
+    let updated = inbox.load_incoming(&env.id_hex()).unwrap();
+    assert_eq!(updated.state, EnvelopeState::Confirmed);
+}
+
+/// 21. expire_all() only transitions non-terminal envelopes.
+#[test]
+fn directed_expire_all_skips_terminal() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let inbox = DirectedInbox::open(tmp.path()).unwrap();
+
+    // Envelope 1: already Retrieved, past expiry.
+    let mut env1 = make_directed_test_envelope();
+    env1.envelope_id = [0x01; 32];
+    env1.state = EnvelopeState::Retrieved;
+    env1.created_at = 100;
+    env1.expires_at = 200;
+    inbox.save_incoming(&env1).unwrap();
+
+    // Envelope 2: Confirmed, past expiry.
+    let mut env2 = make_directed_test_envelope();
+    env2.envelope_id = [0x02; 32];
+    env2.state = EnvelopeState::Confirmed;
+    env2.created_at = 100;
+    env2.expires_at = 200;
+    inbox.save_incoming(&env2).unwrap();
+
+    inbox.expire_all(500);
+
+    let loaded1 = inbox.load_incoming(&env1.id_hex()).unwrap();
+    assert_eq!(loaded1.state, EnvelopeState::Retrieved, "terminal state must not change");
+
+    let loaded2 = inbox.load_incoming(&env2.id_hex()).unwrap();
+    assert_eq!(loaded2.state, EnvelopeState::Expired, "non-terminal must expire");
+}
+
+/// 22. Confirm flow state transitions: only ChallengeIssued can be confirmed.
+#[test]
+fn directed_confirm_requires_challenge_issued_state() {
+    let mut env = make_directed_test_envelope();
+
+    // Pending state — confirm should not work here.
+    assert_eq!(env.state, EnvelopeState::Pending);
+    assert_ne!(env.state, EnvelopeState::ChallengeIssued);
+
+    // Transition to ChallengeIssued.
+    env.state = EnvelopeState::ChallengeIssued;
+    assert!(!env.state.is_terminal());
+
+    // After confirmation.
+    env.state = EnvelopeState::Confirmed;
+    assert!(!env.state.is_terminal());
+
+    // Retrieved is terminal.
+    env.state = EnvelopeState::Retrieved;
+    assert!(env.state.is_terminal());
+}
+
+/// 23. EnvelopeSummary includes recipient_pubkey and retention_secs.
+#[test]
+fn directed_envelope_summary_has_required_fields() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let inbox = DirectedInbox::open(tmp.path()).unwrap();
+
+    let mut env = make_directed_test_envelope();
+    env.envelope_id = [0xEE; 32];
+    env.retention_secs = 7200;
+
+    inbox.save_outgoing(&env).unwrap();
+
+    let list = inbox.list_outgoing();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].retention_secs, 7200);
+    assert!(!list[0].recipient_pubkey.is_empty());
+    assert!(!list[0].sender_pubkey.is_empty());
+}

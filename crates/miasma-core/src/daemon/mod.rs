@@ -1111,6 +1111,7 @@ async fn process_directed_retrieve(
         Ok(plaintext) => {
             envelope.state = directed::EnvelopeState::Retrieved;
             let _ = inbox.save_incoming(&envelope);
+            inbox.cleanup_challenge(envelope_id);
             info!(envelope_id, "directed share retrieved successfully");
             Ok((plaintext, payload.filename))
         }
@@ -1119,6 +1120,7 @@ async fn process_directed_retrieve(
                 envelope.password_attempts_remaining.saturating_sub(1);
             if envelope.password_attempts_remaining == 0 {
                 envelope.state = directed::EnvelopeState::PasswordFailed;
+                inbox.cleanup_challenge(envelope_id);
             }
             let _ = inbox.save_incoming(&envelope);
             Err(MiasmaError::Encryption(format!(
@@ -1150,6 +1152,7 @@ fn process_directed_revoke(
             inbox
                 .save_outgoing(&envelope)
                 .map_err(|e| MiasmaError::Storage(format!("save: {e}")))?;
+            inbox.cleanup_challenge(envelope_id);
             info!(envelope_id, "directed share sender-revoked");
             return Ok(());
         }
@@ -1158,10 +1161,17 @@ fn process_directed_revoke(
     // Try incoming (recipient delete).
     if let Ok(mut envelope) = inbox.load_incoming(envelope_id) {
         if envelope.recipient_pubkey == *sharing_pubkey {
+            if envelope.state.is_terminal() {
+                return Err(MiasmaError::Storage(format!(
+                    "cannot delete: envelope in terminal state ({:?})",
+                    envelope.state
+                )));
+            }
             envelope.state = directed::EnvelopeState::RecipientDeleted;
             inbox
                 .save_incoming(&envelope)
                 .map_err(|e| MiasmaError::Storage(format!("save: {e}")))?;
+            inbox.cleanup_challenge(envelope_id);
             info!(envelope_id, "directed share recipient-deleted");
             return Ok(());
         }

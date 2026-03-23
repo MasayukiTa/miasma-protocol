@@ -1,7 +1,7 @@
 # Miasma Connectivity Model
 
-**Date**: 2026-03-23  
-**Version**: 0.3.1
+**Date**: 2026-03-23
+**Version**: 0.3.1 (post-directed-sharing completion)
 
 This document describes the real current network posture of each active
 surface. It is intentionally conservative.
@@ -12,8 +12,8 @@ surface. It is intentionally conservative.
 
 | Surface | Classification | Network Capable Today | Directed Sharing Today |
 |---|---|---:|---:|
-| Windows Desktop | Full network participant | Yes | Yes |
-| Web in Desktop Browser | Host-assisted bridge | Yes, via local daemon HTTP bridge | Partial |
+| Windows Desktop | Full network participant | Yes | Yes (complete) |
+| Web in Desktop Browser | Host-assisted bridge | Yes, via local daemon HTTP bridge | Yes (complete) |
 | Standalone Browser (no daemon) | Local-only fallback | No | No |
 | Android App | Local-only native shell | No | No |
 | Android-Hosted Web | Local-only hosted bridge | No | No |
@@ -37,36 +37,53 @@ Current capabilities:
 - same-network peer discovery
 - DHT-backed retrieval/publish path
 - CLI, desktop GUI, and daemon IPC
-- directed sharing core flow
+- **complete directed sharing lifecycle**
 
 Directed sharing status:
 
-- protocol and crypto are implemented
-- CLI path exists
-- desktop GUI first pass exists
-- still needs full end-to-end validation and UX completion
+- protocol and crypto: fully implemented
+- CLI: all 7 commands (sharing-key, send, confirm, receive, revoke, inbox, outbox)
+- desktop GUI: full Send, Inbox, and Outbox panels
+  - sender confirmation with challenge code entry in Outbox
+  - recipient challenge display with copy button in Inbox
+  - inline password entry for retrieval
+  - colored state badges for all 9 envelope states
+  - filename and file size display
+  - revoke/delete from both Inbox and Outbox
+  - 3-locale support (EN/JA/ZH-CN) including all new strings
+- security hardening:
+  - challenge file cleanup on terminal states
+  - terminal state enforcement (recipient delete blocked on terminal)
+  - inbox/outbox size limit (10,000 envelopes)
+  - password never persisted to disk
 
 ### Web in Desktop Browser
 
 **Classification**: Host-assisted bridge
 
-The desktop browser web surface can now connect through the local daemon by
-using the HTTP bridge. It is no longer purely local-only when opened on a
-desktop machine with a running daemon.
+The desktop browser web surface connects through the local daemon via the
+HTTP bridge at `http://127.0.0.1:17842`.
 
 Current capabilities:
 
 - local-only WASM fallback remains available
-- connected mode via `http://127.0.0.1:17842`
+- connected mode via HTTP bridge
 - daemon-backed status/publish/retrieve flow
-- first-pass directed sharing bridge endpoints and UI hooks
+- **complete directed sharing flow in connected mode**:
+  - Send panel with file upload, recipient contact, password, retention
+  - Inbox panel with inline password retrieval (no more prompt())
+  - **Outbox panel** with sender confirmation (challenge code entry)
+  - colored state badges for all 9 envelope states
+  - filename and file size display
+  - revoke/delete from both Inbox and Outbox
+  - connection status indicator (connected/local-only)
+  - 3-locale support (EN/JA/ZH-CN) including all new strings
 
 Current limitations:
 
 - depends on local daemon availability
-- browser validation is still pending
-- sender confirmation / outbox UX is not yet fully finished
-- fallback vs connected mode still needs clearer product behavior
+- browser validation still pending as end-to-end manual test
+- standalone (no daemon) mode has no directed sharing capability
 
 ### Standalone Browser (No Daemon)
 
@@ -102,7 +119,8 @@ Current capabilities:
 Current limitations:
 
 - no completed validated network participation in this milestone
-- no validated directed sharing flow
+- **no directed sharing UI screens implemented**
+- infrastructure (FFI bridge, activity, service) exists for future integration
 
 ### Android-Hosted Web
 
@@ -121,7 +139,7 @@ as a validated network participant.
 Current limitations:
 
 - no validated end-to-end network retrieval for this milestone
-- no validated directed sharing support
+- **no directed sharing views implemented**
 
 ### iOS-Hosted Web
 
@@ -136,12 +154,12 @@ network-capable surface today.
 
 | Surface | Send | Confirm | Receive | Revoke/Delete | Notes |
 |---|---:|---:|---:|---:|---|
-| Windows CLI | Yes | Yes | Yes | Yes | Most complete current path |
-| Windows Desktop GUI | Partial | Not fully complete | Partial | Partial | First pass exists; UX completion still required |
-| Desktop Web + Daemon | Partial | Not fully complete | Partial | Partial | Bridge exists; product flow still incomplete |
+| Windows CLI | Yes | Yes | Yes | Yes | Complete — most direct path |
+| Windows Desktop GUI | Yes | Yes | Yes | Yes | Complete — Send/Inbox/Outbox panels |
+| Desktop Web + Daemon | Yes | Yes | Yes | Yes | Complete — all bridge endpoints wired |
 | Standalone Browser | No | No | No | No | Local-only fallback |
-| Android | No | No | No | No | Not completed |
-| iOS | No | No | No | No | Not completed |
+| Android | No | No | No | No | Not implemented |
+| iOS | No | No | No | No | Not implemented |
 
 ---
 
@@ -149,10 +167,23 @@ network-capable surface today.
 
 Today:
 
-- Windows is the only real network-capable product surface.
-- Desktop web is now a real host-assisted network client when a local daemon is
-  present.
-- Standalone web remains local-only.
-- Android and iOS are not yet complete directed-sharing clients.
+- **Windows desktop is a complete directed-sharing product surface.** CLI,
+  desktop GUI, and web (with daemon) all support the full lifecycle: send,
+  challenge confirmation, password-gated retrieval, revoke, delete, inbox,
+  and outbox with proper state visibility.
+- **Desktop web is a real host-assisted directed-sharing client** when a
+  local daemon is present. The outbox, sender confirmation, and inline
+  password retrieval are all available.
+- Standalone web remains local-only with no directed sharing.
+- **Android and iOS do not have directed sharing.** The protocol and crypto
+  infrastructure is ready for them, but no UI screens have been implemented
+  for either mobile platform.
 
-That is the baseline the next task should close from.
+What changed in this pass:
+
+- Desktop GUI gained Outbox tab with sender challenge confirmation
+- Desktop GUI inbox enhanced with state badges, filename, error states
+- Web gained outbox view with sender confirmation flow
+- Web inbox replaced prompt() with inline password form
+- Security: challenge file cleanup, terminal state enforcement, inbox size limit
+- 8 new adversarial tests (136 total)

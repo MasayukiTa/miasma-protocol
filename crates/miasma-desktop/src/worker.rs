@@ -61,8 +61,15 @@ pub enum WorkerCmd {
     },
     /// Revoke/delete a directed share.
     DirectedRevoke { envelope_id: String },
+    /// Submit challenge confirmation for a directed share (sender side).
+    DirectedConfirm {
+        envelope_id: String,
+        challenge_code: String,
+    },
     /// List inbox.
     DirectedInbox,
+    /// List outbox.
+    DirectedOutbox,
 }
 
 /// Connection state visible to the UI.
@@ -119,21 +126,29 @@ pub enum WorkerResult {
     DirectedRetrieved { data: Vec<u8>, filename: Option<String> },
     /// Directed share revoked.
     DirectedRevoked,
+    /// Challenge confirmed.
+    DirectedConfirmed,
     /// Inbox listing.
     DirectedInboxList(Vec<DirectedInboxItem>),
+    /// Outbox listing.
+    DirectedOutboxList(Vec<DirectedInboxItem>),
     /// Any error.
     Err(String),
 }
 
-/// Directed inbox item for display.
+/// Directed inbox/outbox item for display.
 #[derive(Debug, Clone)]
 pub struct DirectedInboxItem {
     pub envelope_id: String,
     pub sender_pubkey: String,
+    pub recipient_pubkey: String,
     pub state: String,
     pub challenge_code: Option<String>,
     pub created_at: u64,
     pub expires_at: u64,
+    pub retention_secs: u64,
+    pub filename: Option<String>,
+    pub file_size: u64,
 }
 
 /// Transport readiness info for desktop display.
@@ -339,7 +354,12 @@ fn worker_thread(
             WorkerCmd::DirectedRevoke { envelope_id } => {
                 rt.block_on(do_directed_revoke(&data_dir, &envelope_id))
             }
+            WorkerCmd::DirectedConfirm {
+                envelope_id,
+                challenge_code,
+            } => rt.block_on(do_directed_confirm(&data_dir, &envelope_id, &challenge_code)),
             WorkerCmd::DirectedInbox => rt.block_on(do_directed_inbox(&data_dir)),
+            WorkerCmd::DirectedOutbox => rt.block_on(do_directed_outbox(&data_dir)),
         };
 
         if tx.send(res).is_err() {
@@ -850,21 +870,56 @@ async fn do_directed_revoke(data_dir: &Path, envelope_id: &str) -> WorkerResult 
     }
 }
 
+async fn do_directed_confirm(
+    data_dir: &Path,
+    envelope_id: &str,
+    challenge_code: &str,
+) -> WorkerResult {
+    let req = ControlRequest::DirectedConfirm {
+        envelope_id: envelope_id.to_owned(),
+        challenge_code: challenge_code.to_owned(),
+    };
+    match daemon_request(data_dir, req).await {
+        Ok(ControlResponse::DirectedConfirmed) => WorkerResult::DirectedConfirmed,
+        Ok(ControlResponse::Error(e)) => WorkerResult::Err(e),
+        Ok(other) => WorkerResult::Err(format!("Unexpected response: {other:?}")),
+        Err(e) => WorkerResult::Err(daemon_error(&e)),
+    }
+}
+
+fn map_summary_items(items: Vec<miasma_core::directed::EnvelopeSummary>) -> Vec<DirectedInboxItem> {
+    items
+        .into_iter()
+        .map(|item| DirectedInboxItem {
+            envelope_id: item.envelope_id,
+            sender_pubkey: item.sender_pubkey,
+            recipient_pubkey: item.recipient_pubkey,
+            state: format!("{:?}", item.state),
+            challenge_code: item.challenge_code,
+            created_at: item.created_at,
+            expires_at: item.expires_at,
+            retention_secs: item.retention_secs,
+            filename: item.filename,
+            file_size: item.file_size,
+        })
+        .collect()
+}
+
 async fn do_directed_inbox(data_dir: &Path) -> WorkerResult {
     match daemon_request(data_dir, ControlRequest::DirectedInbox).await {
         Ok(ControlResponse::DirectedInboxList(items)) => {
-            let mapped: Vec<DirectedInboxItem> = items
-                .into_iter()
-                .map(|item| DirectedInboxItem {
-                    envelope_id: item.envelope_id,
-                    sender_pubkey: item.sender_pubkey,
-                    state: format!("{:?}", item.state),
-                    challenge_code: item.challenge_code,
-                    created_at: item.created_at,
-                    expires_at: item.expires_at,
-                })
-                .collect();
-            WorkerResult::DirectedInboxList(mapped)
+            WorkerResult::DirectedInboxList(map_summary_items(items))
+        }
+        Ok(ControlResponse::Error(e)) => WorkerResult::Err(e),
+        Ok(other) => WorkerResult::Err(format!("Unexpected response: {other:?}")),
+        Err(e) => WorkerResult::Err(daemon_error(&e)),
+    }
+}
+
+async fn do_directed_outbox(data_dir: &Path) -> WorkerResult {
+    match daemon_request(data_dir, ControlRequest::DirectedOutbox).await {
+        Ok(ControlResponse::DirectedOutboxList(items)) => {
+            WorkerResult::DirectedOutboxList(map_summary_items(items))
         }
         Ok(ControlResponse::Error(e)) => WorkerResult::Err(e),
         Ok(other) => WorkerResult::Err(format!("Unexpected response: {other:?}")),
