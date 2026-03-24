@@ -19,7 +19,7 @@ This document honestly states what Miasma's transport layer can and cannot do re
 - **Adapt transport strategy**: Automatically select the most appropriate transport based on detected network conditions
 
 ### With user configuration
-- **Shadowsocks proxy traversal**: Route through user-provided Shadowsocks server via ss-local SOCKS5 proxy. Uses proven WSS wire protocol over the proxied connection — peer sees standard WebSocket traffic. Effective against many DPI implementations including partial GFW bypass
+- **Shadowsocks proxy traversal**: Two modes — (1) **Native AEAD-2022**: direct encrypted tunnel to Shadowsocks server using `shadowsocks-crypto` (no ss-local required), or (2) **External**: route through user-run ss-local SOCKS5 proxy. Both use proven WSS wire protocol over the encrypted/proxied connection — peer sees standard WebSocket traffic. Effective against many DPI implementations including partial GFW bypass
 - **Tor anonymity**: Route through Tor network via external SOCKS5 proxy (standalone Tor or Tor Browser). Uses proven WSS wire protocol over the Tor-anonymized connection. Provides IP anonymity and censorship circumvention where Tor is accessible
 - **Tor bridges**: Support for bridge lines (obfs4, etc.) for networks that block Tor directory authorities
 - **Custom proxy**: SOCKS5 and HTTP CONNECT proxy support for enterprise environments
@@ -45,8 +45,8 @@ Users in jurisdictions where specific transports are restricted can disable them
 - **ZTNA full TLS termination**: When a zero-trust product (Zscaler, Netskope) terminates ALL TLS connections and re-encrypts them, the interceptor sees plaintext. No transport can bypass this. ObfuscatedQuic REALITY works only if the ZTNA allows unknown QUIC traffic through (some do, some don't).
 - **Captive portal auto-bypass**: Miasma detects captive portals but cannot automatically authenticate to arbitrary identity providers. The user must complete authentication in a browser.
 - **Full GFW bypass guarantee**: China's Great Firewall uses active probing, traffic analysis, and machine learning. While Shadowsocks AEAD-2022 and ObfuscatedQuic REALITY resist many detection methods, the GFW has demonstrated ability to detect and block some Shadowsocks patterns. No single tool guarantees bypass.
-- **Shadowsocks requires ss-local**: The current implementation routes through a user-run ss-local SOCKS5 proxy. Native AEAD-2022 cipher tunnel (no external process) is not yet implemented.
-- **Tor requires external Tor**: The current implementation routes through a user-run Tor SOCKS5 proxy (standalone Tor or Tor Browser). Embedded Arti (in-process Tor) is not yet implemented.
+- **Shadowsocks native mode**: Direct AEAD-2022 tunnel to SS server using `shadowsocks-crypto` (pure Rust, no OpenSSL). Requires user to provide server address and base64-encoded PSK. External ss-local SOCKS5 mode available as fallback. See ADR-009.
+- **Tor requires external Tor**: Routes through a user-run Tor SOCKS5 proxy (standalone Tor or Tor Browser). Embedded Arti (in-process Tor) is intentionally not implemented — `arti-client` is pre-1.0, adds ~50 dependencies, and is untested on iOS. See ADR-009.
 - **Domain fronting**: Not implemented. Would require CDN cooperation (most CDNs have banned this practice).
 - **Meek/Snowflake bridges**: Not implemented. Would complement Tor bridges for extreme censorship environments.
 
@@ -80,9 +80,9 @@ Claims marked "Partial" or "Not guaranteed" reflect honest assessment of capabil
 
 **What is proven (automated tests)**: config validation, transport fallback, dial backoff, flap damping, stale pruning, rate limiting, origin validation, environment classification, TLS inspector detection.
 
-**What is implemented but not yet field-tested**: Shadowsocks external SOCKS5 mode (requires ss-local + SS server), Tor external SOCKS5 mode (requires Tor daemon), network environment changes during operation.
+**What is implemented but not yet field-tested**: Shadowsocks native AEAD-2022 tunnel (requires SS server + base64 PSK), Shadowsocks external SOCKS5 mode (requires ss-local + SS server), Tor external SOCKS5 mode (requires Tor daemon), network environment changes during operation.
 
-**What is not yet implemented**: Shadowsocks native AEAD tunnel, Tor embedded Arti, domain fronting, meek/snowflake bridges.
+**What is not yet implemented**: Tor embedded Arti, domain fronting, meek/snowflake bridges.
 
 ---
 

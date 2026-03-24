@@ -971,6 +971,7 @@ pub(crate) async fn process_request(
                     let rl = bridge_state.rate_limiter.lock().unwrap();
                     rl.rejections
                 },
+                partial_failures: coord.partial_failures().await.unwrap_or_default(),
                 // Censorship resistance
                 shadowsocks_configured: bridge_state.shadowsocks_configured,
                 tor_configured: bridge_state.tor_configured,

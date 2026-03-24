@@ -49,6 +49,7 @@ hyper.workspace = true
 http-body-util.workspace = true
 hyper-util.workspace = true
 base64.workspace = true
+shadowsocks-crypto.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

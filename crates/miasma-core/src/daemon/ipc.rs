@@ -447,6 +447,9 @@ pub struct DaemonStatus {
     /// Number of rate-limited requests since startup.
     #[serde(default)]
     pub rate_limit_rejections: u64,
+    /// Current partial failure conditions (e.g., "relay-only mode", "no peers").
+    #[serde(default)]
+    pub partial_failures: Vec<String>,
 
     // ── Censorship resistance (Phases 3-4) ──────────────────────────────
     /// Whether Shadowsocks transport is configured.

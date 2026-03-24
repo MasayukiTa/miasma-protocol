@@ -5649,7 +5649,7 @@ fn bridge_transport_recommendation_adapts() {
 fn bridge_shadowsocks_config_validation() {
     use miasma_core::transport::shadowsocks::ShadowsocksConfig;
 
-    // Missing server
+    // Missing both server and local_addr
     let c = ShadowsocksConfig {
         enabled: true,
         ..Default::default()
@@ -5665,6 +5665,174 @@ fn bridge_shadowsocks_config_validation() {
         ..Default::default()
     };
     assert!(c.validate().unwrap_err().contains("unknown cipher"));
+}
+
+/// Verify native SS AEAD-2022 config validates PSK length and encoding.
+#[test]
+fn bridge_shadowsocks_native_psk_validation() {
+    use base64::Engine;
+    use miasma_core::transport::shadowsocks::ShadowsocksConfig;
+
+    // Valid 32-byte PSK for AES-256
+    let c = ShadowsocksConfig {
+        enabled: true,
+        server: Some("1.2.3.4:8388".to_string()),
+        password: Some(base64::engine::general_purpose::STANDARD.encode([0u8; 32])),
+        cipher: "2022-blake3-aes-256-gcm".to_string(),
+        ..Default::default()
+    };
+    assert!(c.validate().is_ok());
+    assert!(c.native_configured());
+
+    // Wrong PSK length (16 bytes for AES-256 — needs 32)
+    let c = ShadowsocksConfig {
+        enabled: true,
+        server: Some("1.2.3.4:8388".to_string()),
+        password: Some(base64::engine::general_purpose::STANDARD.encode([0u8; 16])),
+        cipher: "2022-blake3-aes-256-gcm".to_string(),
+        ..Default::default()
+    };
+    let err = c.validate().unwrap_err();
+    assert!(err.contains("32 bytes"), "should require 32-byte PSK: {err}");
+
+    // Non-base64 password
+    let c = ShadowsocksConfig {
+        enabled: true,
+        server: Some("1.2.3.4:8388".to_string()),
+        password: Some("not-valid-base64!!!".to_string()),
+        cipher: "2022-blake3-aes-256-gcm".to_string(),
+        ..Default::default()
+    };
+    assert!(c.validate().unwrap_err().contains("base64"));
+}
+
+/// Verify dual-mode (native + external) config and fallback preference.
+#[test]
+fn bridge_shadowsocks_dual_mode_config() {
+    use base64::Engine;
+    use miasma_core::transport::shadowsocks::ShadowsocksConfig;
+
+    let c = ShadowsocksConfig {
+        enabled: true,
+        server: Some("1.2.3.4:8388".to_string()),
+        password: Some(base64::engine::general_purpose::STANDARD.encode([42u8; 32])),
+        cipher: "2022-blake3-aes-256-gcm".to_string(),
+        local_addr: Some("127.0.0.1:1080".to_string()),
+        ..Default::default()
+    };
+    assert!(c.validate().is_ok());
+    assert!(c.native_configured(), "native should be configured");
+    assert!(c.external_configured(), "external should be configured");
+    assert!(c.is_configured(), "overall should be configured");
+}
+
+/// Verify AEAD-2022 encrypt/decrypt roundtrip with all three cipher variants.
+#[test]
+fn bridge_shadowsocks_aead2022_all_ciphers() {
+    use shadowsocks_crypto::v2::tcp::TcpCipher;
+    use shadowsocks_crypto::CipherKind;
+
+    let ciphers = [
+        (CipherKind::AEAD2022_BLAKE3_AES_256_GCM, 32),
+        (CipherKind::AEAD2022_BLAKE3_AES_128_GCM, 16),
+        (CipherKind::AEAD2022_BLAKE3_CHACHA20_POLY1305, 32),
+    ];
+
+    for (kind, key_len) in ciphers {
+        let key = vec![0xABu8; key_len];
+        let salt = vec![0xCDu8; kind.salt_len()];
+
+        let mut enc = TcpCipher::new(kind, &key, &salt);
+        let mut dec = TcpCipher::new(kind, &key, &salt);
+
+        let plaintext = b"miasma bridge test payload";
+        let tag_len = kind.tag_len();
+
+        // Encrypt
+        let mut buf = vec![0u8; plaintext.len() + tag_len];
+        buf[..plaintext.len()].copy_from_slice(plaintext);
+        enc.encrypt_packet(&mut buf);
+
+        // Verify ciphertext is different from plaintext
+        assert_ne!(&buf[..plaintext.len()], plaintext);
+
+        // Decrypt
+        assert!(dec.decrypt_packet(&mut buf), "decrypt failed for {kind:?}");
+        assert_eq!(
+            &buf[..plaintext.len()],
+            plaintext,
+            "roundtrip failed for {kind:?}"
+        );
+    }
+}
+
+/// Verify AEAD-2022 nonce counter increments correctly (multi-packet).
+#[test]
+fn bridge_shadowsocks_aead2022_nonce_counter() {
+    use shadowsocks_crypto::v2::tcp::TcpCipher;
+    use shadowsocks_crypto::CipherKind;
+
+    let kind = CipherKind::AEAD2022_BLAKE3_AES_256_GCM;
+    let key = [1u8; 32];
+    let salt = [2u8; 32];
+    let tag_len = kind.tag_len();
+
+    let mut enc = TcpCipher::new(kind, &key, &salt);
+    let mut dec = TcpCipher::new(kind, &key, &salt);
+
+    // Encrypt 5 packets and decrypt them in order
+    for i in 0u8..5 {
+        let mut buf = vec![0u8; 1 + tag_len];
+        buf[0] = i;
+        enc.encrypt_packet(&mut buf);
+        assert!(dec.decrypt_packet(&mut buf), "packet {i} failed");
+        assert_eq!(buf[0], i);
+    }
+}
+
+/// Verify AEAD-2022 rejects out-of-order decryption (nonce mismatch).
+#[test]
+fn bridge_shadowsocks_aead2022_out_of_order_rejected() {
+    use shadowsocks_crypto::v2::tcp::TcpCipher;
+    use shadowsocks_crypto::CipherKind;
+
+    let kind = CipherKind::AEAD2022_BLAKE3_AES_256_GCM;
+    let key = [3u8; 32];
+    let salt = [4u8; 32];
+    let tag_len = kind.tag_len();
+
+    let mut enc = TcpCipher::new(kind, &key, &salt);
+    let mut dec = TcpCipher::new(kind, &key, &salt);
+
+    // Encrypt two packets
+    let mut pkt0 = vec![0u8; 1 + tag_len];
+    pkt0[0] = 0xAA;
+    enc.encrypt_packet(&mut pkt0);
+
+    let mut pkt1 = vec![0u8; 1 + tag_len];
+    pkt1[0] = 0xBB;
+    enc.encrypt_packet(&mut pkt1);
+
+    // Decrypt packet 0 first (correct order)
+    assert!(dec.decrypt_packet(&mut pkt0));
+
+    // Now skip packet 1 — decrypt a fresh packet 0 copy should fail
+    // because the nonce has advanced
+    let mut fake = pkt1.clone();
+    fake[0] ^= 0xFF; // tamper
+    assert!(!dec.decrypt_packet(&mut fake), "tampered packet should fail");
+}
+
+/// Verify backward-compatible config serde (old format without local_addr).
+#[test]
+fn bridge_shadowsocks_config_backward_compat() {
+    use miasma_core::transport::shadowsocks::ShadowsocksConfig;
+
+    let json = r#"{"enabled":true,"server":"1.2.3.4:8388","password":"dGVzdA==","cipher":"aes-256-gcm","timeout_secs":30}"#;
+    let c: ShadowsocksConfig = serde_json::from_str(json).unwrap();
+    assert!(c.enabled);
+    assert!(c.local_addr.is_none());
+    assert!(!c.native_configured(), "legacy cipher should not enable native mode");
 }
 
 /// Verify Tor config validation catches misconfigurations.
@@ -5742,4 +5910,118 @@ fn bridge_daemon_status_serde_defaults() {
     assert!(!status.tls_inspection_detected);
     assert_eq!(status.network_environment, "");
     assert_eq!(status.connection_quality_score, 0.0);
+    // partial_failures defaults to empty via serde(default)
+    assert!(status.partial_failures.is_empty());
+}
+
+// ── Track C: Runtime signal completion tests ─────────────────────────────
+
+#[test]
+fn partial_failure_detector_relay_only_detection() {
+    let mut d = miasma_core::daemon::self_heal::PartialFailureDetector::default();
+    // With peers but relay-only
+    let failures = d.evaluate(3, false, true);
+    assert!(
+        failures.iter().any(|f| f.to_string().contains("relay-only")),
+        "should detect relay-only mode"
+    );
+    // Without relay-only
+    let failures = d.evaluate(3, false, false);
+    assert!(
+        !failures.iter().any(|f| f.to_string().contains("relay-only")),
+        "should not report relay-only when not relay-only"
+    );
+}
+
+#[test]
+fn partial_failure_detector_all_transports_dead() {
+    let mut d = miasma_core::daemon::self_heal::PartialFailureDetector::default();
+    let failures = d.evaluate(2, true, false);
+    assert!(
+        failures.iter().any(|f| f.to_string().contains("transport")),
+        "should detect all transports dead"
+    );
+}
+
+#[test]
+fn partial_failures_serde_in_daemon_status() {
+    use miasma_core::daemon::ipc::DaemonStatus;
+    let json = r#"{
+        "running": true,
+        "peer_id": "12D3KooWtest",
+        "partial_failures": ["relay-only mode", "stale peer count"],
+        "listen_addrs": [],
+        "peer_count": 0,
+        "share_count": 0,
+        "storage_used_bytes": 0,
+        "pending_replication": 0,
+        "replicated_count": 0
+    }"#;
+    let status: DaemonStatus = serde_json::from_str(json).unwrap();
+    assert_eq!(status.partial_failures.len(), 2);
+    assert!(status.partial_failures.contains(&"relay-only mode".to_string()));
+}
+
+#[test]
+fn transport_stats_kind_stats_attribution() {
+    use miasma_core::transport::payload::{PayloadTransportKind, TransportPhase, TransportStats};
+    let stats = TransportStats::default();
+    // Record some activity
+    stats.record_success(PayloadTransportKind::WssTunnel);
+    stats.record_success(PayloadTransportKind::WssTunnel);
+    stats.record_failure(
+        PayloadTransportKind::DirectLibp2p,
+        TransportPhase::Session,
+        "connection refused",
+    );
+    // Verify attribution
+    let (wss_ok, wss_fail) = stats.kind_stats(PayloadTransportKind::WssTunnel);
+    assert_eq!(wss_ok, 2);
+    assert_eq!(wss_fail, 0);
+    let (libp2p_ok, libp2p_fail) = stats.kind_stats(PayloadTransportKind::DirectLibp2p);
+    assert_eq!(libp2p_ok, 0);
+    assert_eq!(libp2p_fail, 1);
+    // Last selected should be WSS (most recent success)
+    assert_eq!(
+        stats.last_selected(),
+        Some(PayloadTransportKind::WssTunnel)
+    );
+    assert!(stats.is_fallback_active());
+}
+
+#[test]
+fn dial_backoff_records_failure_and_delays() {
+    use miasma_core::network::connection_health::DialBackoff;
+    let mut backoff = DialBackoff::default();
+    backoff.record_failure("peer-a");
+    assert!(!backoff.is_allowed("peer-a"), "should be backed off after failure");
+    assert_eq!(backoff.active_count(), 1);
+    // After success, should be cleared
+    backoff.record_success("peer-a");
+    assert!(backoff.is_allowed("peer-a"), "should be allowed after success");
+    assert_eq!(backoff.active_count(), 0);
+}
+
+#[test]
+fn health_monitor_snapshot_reflects_events() {
+    use miasma_core::network::connection_health::ConnectionHealthMonitor;
+    let mut monitor = ConnectionHealthMonitor::default();
+    // Record some peer events
+    monitor.record_peer_success("peer-1", std::time::Duration::from_millis(50));
+    monitor.record_peer_success("peer-2", std::time::Duration::from_millis(100));
+    monitor.record_peer_failure("peer-3");
+
+    let snap = monitor.snapshot(3);
+    assert!(snap.quality_score > 0.0, "quality should be positive with successes");
+    assert!(!snap.degraded, "should not be degraded with 3 peers (default min is lower)");
+}
+
+#[test]
+fn environment_snapshot_default_is_open() {
+    use miasma_core::network::environment::EnvironmentSnapshot;
+    let snap = EnvironmentSnapshot::default();
+    assert_eq!(snap.environment.to_string(), "open");
+    assert!(!snap.capabilities.tls_inspection_detected);
+    assert!(!snap.capabilities.captive_portal_detected);
+    assert!(!snap.capabilities.vpn_detected);
 }

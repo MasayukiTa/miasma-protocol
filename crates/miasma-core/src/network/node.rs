@@ -652,6 +652,10 @@ pub enum DhtCommand {
     GetFlapDamping {
         reply: oneshot::Sender<bool>,
     },
+    /// Get current partial failure conditions.
+    GetPartialFailures {
+        reply: oneshot::Sender<Vec<String>>,
+    },
 }
 
 /// Sender side of the DHT command channel.
@@ -1128,6 +1132,16 @@ impl DhtHandle {
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
         self.recv_reply(rx, "flap_damping").await
     }
+
+    /// Get current partial failure conditions (relay-only, no peers, etc.).
+    pub async fn partial_failures(&self) -> Result<Vec<String>, MiasmaError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::GetPartialFailures { reply: tx })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
+        self.recv_reply(rx, "partial_failures").await
+    }
 }
 
 // ─── Share-exchange command channel ──────────────────────────────────────────
@@ -1319,6 +1333,8 @@ pub struct MiasmaNode {
     health_monitor: super::connection_health::ConnectionHealthMonitor,
     /// Network flap detector — suppresses reconnection storms.
     flap_detector: crate::daemon::self_heal::NetworkFlapDetector,
+    /// Partial failure detector — relay-only mode, stale peers, no peers.
+    partial_failure: crate::daemon::self_heal::PartialFailureDetector,
 }
 
 impl MiasmaNode {
@@ -1451,6 +1467,7 @@ impl MiasmaNode {
             directed_data_dir: None,
             health_monitor: super::connection_health::ConnectionHealthMonitor::default(),
             flap_detector: crate::daemon::self_heal::NetworkFlapDetector::default(),
+            partial_failure: crate::daemon::self_heal::PartialFailureDetector::default(),
         })
     }
 
@@ -1915,6 +1932,17 @@ impl MiasmaNode {
             DhtCommand::GetFlapDamping { reply } => {
                 let _ = reply.send(self.flap_detector.is_damping());
             }
+            DhtCommand::GetPartialFailures { reply } => {
+                let peer_count = self.swarm.connected_peers().count();
+                let all_transports_failing = self.health_monitor.average_quality() < 0.1;
+                let relay_only = peer_count > 0 && !self.nat_publicly_reachable;
+                let failures = self.partial_failure.evaluate(
+                    peer_count,
+                    all_transports_failing,
+                    relay_only,
+                );
+                let _ = reply.send(failures.iter().map(|f| f.to_string()).collect());
+            }
         }
     }
 
@@ -1960,6 +1988,19 @@ impl MiasmaNode {
             let pruned = self.health_monitor.prune_stale_peers();
             if pruned > 0 {
                 debug!("health.pruned_stale_peers count={pruned}");
+            }
+            // Evaluate partial failures — relay-only, no peers, stale state.
+            let all_transports_failing = self.health_monitor.average_quality() < 0.1;
+            let relay_only = peer_count > 0 && !self.nat_publicly_reachable;
+            let failures = self.partial_failure.evaluate(
+                peer_count,
+                all_transports_failing,
+                relay_only,
+            );
+            if !failures.is_empty() {
+                for f in &failures {
+                    warn!("partial_failure.detected: {f}");
+                }
             }
         }
         // Epoch rotation check (every ~1000 events).
@@ -2140,6 +2181,23 @@ impl MiasmaNode {
                 debug!("Relay client: {ev:?}");
             }
             SwarmEvent::Behaviour(MiasmaBehaviourEvent::Ping(_)) => {}
+            SwarmEvent::OutgoingConnectionError {
+                peer_id,
+                error,
+                ..
+            } => {
+                if let Some(peer_id) = peer_id {
+                    debug!("Dial failed: {peer_id} ({error})");
+                    // Record dial failure in health monitor — more granular than
+                    // connection close (this fires when dial never completes).
+                    self.health_monitor.record_peer_failure(&peer_id.to_string());
+                    // Apply dial backoff for the failed peer.
+                    self.health_monitor.backoff.record_failure(&peer_id.to_string());
+                }
+            }
+            SwarmEvent::IncomingConnectionError { error, .. } => {
+                debug!("Incoming connection error: {error}");
+            }
             _ => {}
         }
     }
