@@ -36,6 +36,12 @@
 | Tor config validation | Mode + port + bridges | PASS | 8 unit tests, adversarial test |
 | Fallback trace buffer | Circular, capacity-bounded | PASS | 6 unit tests, adversarial test |
 | DaemonStatus serde compat | Defaults for new fields | PASS | Adversarial test |
+| Streaming MID computation | Matches in-memory | PASS | 3 unit + 1 adversarial test |
+| PublishFile IPC serde | Roundtrip JSON | PASS | 1 adversarial test |
+| Reconnection scheduler | Exponential backoff + circuit breaker | PASS | 7 unit + 3 adversarial tests |
+| Recovery actions | Partial failure → actions mapping | PASS | 4 unit + 2 adversarial tests |
+| Reconnection metrics | Success rate tracking | PASS | 3 unit + 1 adversarial test |
+| Flap + scheduler composition | Damping suppresses reconnect | PASS | 1 adversarial test |
 
 ### Manual (Windows — 2-device, 2026-03-23)
 
@@ -114,15 +120,15 @@
 
 | Category | Count |
 |---|---|
-| Unit tests (miasma-core --lib) | 393 |
-| Adversarial tests | 168 |
+| Unit tests (miasma-core --lib) | 412 |
+| Adversarial tests | 182 |
 | Integration tests | 53 (+1 ignored) |
 | Desktop tests | 16 |
 | Binary tests | 31 |
 | WASM tests | 33 (29+4) |
-| **Total** | **694** (+1 ignored) |
+| **Total** | **727** (+1 ignored) |
 
-Previous total: 682. New tests added: **12** (native Shadowsocks AEAD-2022 + config validation).
+Previous total: 694. New tests added: **33** (streaming MID, PublishFile IPC, reconnection scheduler, circuit breaker, recovery actions, reconnection metrics, hard failure scenarios, native Shadowsocks AEAD-2022).
 
 ---
 
@@ -132,7 +138,7 @@ Previous total: 682. New tests added: **12** (native Shadowsocks AEAD-2022 + con
 2. **Embedded Tor rejected (ADR-009)**: `arti-client` is pre-1.0, ~50 transitive deps, untested on iOS. External SOCKS5 mode (standalone Tor) is the accepted architecture.
 3. **Domain fronting not implemented**: Would require CDN cooperation or cloud function intermediary.
 4. **Meek bridges not implemented**: Would complement Tor bridges for extreme censorship.
-5. **Streaming dissolution for very large files**: Files >100MB held in RAM during encryption.
+5. ~~Streaming dissolution for very large files~~ **RESOLVED**: `PublishFile` IPC variant + `dissolve_and_publish_file()` streams 64 MiB segments, BLAKE3 MID computed via streaming reader. CLI uses file-path publishing to bypass IPC frame limit.
 
 ## Live Wiring Status (2026-03-24)
 

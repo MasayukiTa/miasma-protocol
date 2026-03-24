@@ -51,6 +51,28 @@ impl ContentId {
         Ok(Self { digest })
     }
 
+    /// Compute the MID by streaming file content through BLAKE3.
+    ///
+    /// Uses `std::io::Read` to avoid loading the full file into RAM.
+    /// `params` is appended after all content bytes.
+    pub fn compute_from_reader<R: std::io::Read>(
+        reader: &mut R,
+        params: &[u8],
+    ) -> Result<Self, std::io::Error> {
+        let mut hasher = blake3::Hasher::new();
+        let mut buf = [0u8; 64 * 1024]; // 64 KiB read buffer
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        hasher.update(params);
+        let digest = *hasher.finalize().as_bytes();
+        Ok(Self { digest })
+    }
+
     /// Construct a `ContentId` from a raw 32-byte digest already known to the caller.
     ///
     /// Use only when the digest is already available (e.g. from a `DhtRecord.mid_digest`).
@@ -117,5 +139,32 @@ mod tests {
         let mid1 = ContentId::compute(b"hello miasma", PARAMS);
         let mid2 = ContentId::compute(b"hello miasma", PARAMS);
         assert_eq!(mid1, mid2, "MID computation must be deterministic");
+    }
+
+    #[test]
+    fn streaming_matches_in_memory() {
+        let content = b"hello miasma streaming test data";
+        let in_memory = ContentId::compute(content, PARAMS);
+        let mut cursor = std::io::Cursor::new(content);
+        let streamed = ContentId::compute_from_reader(&mut cursor, PARAMS).unwrap();
+        assert_eq!(in_memory, streamed, "streaming and in-memory MID must match");
+    }
+
+    #[test]
+    fn streaming_large_multi_buffer() {
+        // Content larger than the 64 KiB internal buffer to exercise the read loop.
+        let content = vec![0xABu8; 128 * 1024];
+        let in_memory = ContentId::compute(&content, PARAMS);
+        let mut cursor = std::io::Cursor::new(&content);
+        let streamed = ContentId::compute_from_reader(&mut cursor, PARAMS).unwrap();
+        assert_eq!(in_memory, streamed);
+    }
+
+    #[test]
+    fn streaming_empty() {
+        let in_memory = ContentId::compute(b"", PARAMS);
+        let mut cursor = std::io::Cursor::new(b"");
+        let streamed = ContentId::compute_from_reader(&mut cursor, PARAMS).unwrap();
+        assert_eq!(in_memory, streamed);
     }
 }

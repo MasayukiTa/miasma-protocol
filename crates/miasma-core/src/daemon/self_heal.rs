@@ -262,6 +262,230 @@ pub fn cleanup_stale_state(data_dir: &std::path::Path) -> CleanupReport {
     report
 }
 
+// ─── Recovery actions ────────────────────────────────────────────────────────
+
+/// Concrete actions the daemon should take in response to partial failure detection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RecoveryAction {
+    /// Re-dial bootstrap peers to discover new peers.
+    ReDialBootstrap,
+    /// Refresh peer descriptors from the descriptor store.
+    RefreshDescriptors,
+    /// Attempt the next transport in the fallback ladder.
+    EscalateTransport,
+    /// Enter relay-only mode and stop attempting direct connections.
+    AcceptRelayOnly,
+    /// Abandon a persistently failing peer (circuit breaker tripped).
+    AbandonPeer { peer_id_bytes: Vec<u8> },
+}
+
+impl std::fmt::Display for RecoveryAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ReDialBootstrap => write!(f, "re-dial bootstrap peers"),
+            Self::RefreshDescriptors => write!(f, "refresh peer descriptors"),
+            Self::EscalateTransport => write!(f, "escalate to next transport"),
+            Self::AcceptRelayOnly => write!(f, "accept relay-only mode"),
+            Self::AbandonPeer { .. } => write!(f, "abandon persistently failing peer"),
+        }
+    }
+}
+
+/// Maps partial failure conditions to recovery actions.
+pub fn recovery_actions_for(failures: &[PartialFailure]) -> Vec<RecoveryAction> {
+    let mut actions = Vec::new();
+    for f in failures {
+        match f {
+            PartialFailure::NoPeers => {
+                actions.push(RecoveryAction::ReDialBootstrap);
+                actions.push(RecoveryAction::RefreshDescriptors);
+            }
+            PartialFailure::AllTransportsDead => {
+                actions.push(RecoveryAction::EscalateTransport);
+            }
+            PartialFailure::RelayOnly => {
+                // If relay-only persists, accept it rather than flapping
+                actions.push(RecoveryAction::AcceptRelayOnly);
+            }
+            PartialFailure::StalePeerCount => {
+                actions.push(RecoveryAction::ReDialBootstrap);
+            }
+        }
+    }
+    actions.dedup();
+    actions
+}
+
+// ─── Reconnection scheduler ─────────────────────────────────────────────────
+
+/// Tracks reconnection scheduling with decaying backoff per peer.
+///
+/// After a peer disconnects, schedules reconnection attempts with increasing
+/// delays. After `max_failures` consecutive failures the peer is abandoned
+/// (circuit breaker). Resets on successful reconnection.
+#[derive(Debug)]
+pub struct ReconnectionScheduler {
+    /// Per-peer reconnection state keyed by peer ID bytes.
+    peers: std::collections::HashMap<Vec<u8>, ReconnectionState>,
+    /// Base delay between reconnection attempts.
+    base_delay: Duration,
+    /// Maximum delay cap.
+    max_delay: Duration,
+    /// Consecutive failures before circuit breaker trips.
+    max_failures: u32,
+}
+
+#[derive(Debug, Clone)]
+struct ReconnectionState {
+    consecutive_failures: u32,
+    next_attempt: Instant,
+    last_failure: Instant,
+}
+
+impl Default for ReconnectionScheduler {
+    fn default() -> Self {
+        Self {
+            peers: std::collections::HashMap::new(),
+            base_delay: Duration::from_secs(5),
+            max_delay: Duration::from_secs(600), // 10 minutes
+            max_failures: 10,
+        }
+    }
+}
+
+impl ReconnectionScheduler {
+    /// Create with custom parameters.
+    pub fn new(base_delay: Duration, max_delay: Duration, max_failures: u32) -> Self {
+        Self {
+            peers: std::collections::HashMap::new(),
+            base_delay,
+            max_delay,
+            max_failures,
+        }
+    }
+
+    /// Record a failed reconnection attempt for a peer.
+    /// Returns `true` if the circuit breaker has tripped (peer should be abandoned).
+    pub fn record_failure(&mut self, peer_id: &[u8]) -> bool {
+        let now = Instant::now();
+        let state = self.peers.entry(peer_id.to_vec()).or_insert(ReconnectionState {
+            consecutive_failures: 0,
+            next_attempt: now,
+            last_failure: now,
+        });
+        state.consecutive_failures += 1;
+        state.last_failure = now;
+
+        // Exponential backoff: base * 2^(failures-1), capped at max_delay
+        let multiplier = 2u64.saturating_pow(state.consecutive_failures.saturating_sub(1));
+        let delay = std::cmp::min(
+            self.base_delay.saturating_mul(multiplier as u32),
+            self.max_delay,
+        );
+        state.next_attempt = now + delay;
+
+        state.consecutive_failures >= self.max_failures
+    }
+
+    /// Record a successful reconnection. Resets backoff for the peer.
+    pub fn record_success(&mut self, peer_id: &[u8]) {
+        self.peers.remove(peer_id);
+    }
+
+    /// Check if a reconnection attempt is due for a peer.
+    pub fn should_attempt(&self, peer_id: &[u8]) -> bool {
+        match self.peers.get(peer_id) {
+            None => true, // Never failed — go ahead
+            Some(state) => {
+                if state.consecutive_failures >= self.max_failures {
+                    false // Circuit breaker tripped
+                } else {
+                    Instant::now() >= state.next_attempt
+                }
+            }
+        }
+    }
+
+    /// Return peer IDs that have been abandoned (circuit breaker tripped).
+    pub fn abandoned_peers(&self) -> Vec<Vec<u8>> {
+        self.peers
+            .iter()
+            .filter(|(_, s)| s.consecutive_failures >= self.max_failures)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// Return peer IDs that are due for a reconnection attempt now.
+    pub fn peers_due_for_reconnect(&self) -> Vec<Vec<u8>> {
+        let now = Instant::now();
+        self.peers
+            .iter()
+            .filter(|(_, s)| {
+                s.consecutive_failures < self.max_failures && now >= s.next_attempt
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// Number of tracked peers.
+    pub fn tracked_count(&self) -> usize {
+        self.peers.len()
+    }
+
+    /// Consecutive failures for a peer (0 if not tracked).
+    pub fn failures_for(&self, peer_id: &[u8]) -> u32 {
+        self.peers.get(peer_id).map(|s| s.consecutive_failures).unwrap_or(0)
+    }
+}
+
+// ─── Reconnection metrics ───────────────────────────────────────────────────
+
+/// Tracks reconnection event metrics for diagnostics.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReconnectionMetrics {
+    /// Total reconnection attempts.
+    pub attempts: u64,
+    /// Successful reconnections.
+    pub successes: u64,
+    /// Failed reconnection attempts.
+    pub failures: u64,
+    /// Peers abandoned via circuit breaker.
+    pub circuit_breaker_trips: u64,
+    /// Recovery actions triggered.
+    pub recovery_actions_triggered: u64,
+}
+
+impl ReconnectionMetrics {
+    pub fn record_attempt(&mut self) {
+        self.attempts += 1;
+    }
+
+    pub fn record_success(&mut self) {
+        self.successes += 1;
+    }
+
+    pub fn record_failure(&mut self) {
+        self.failures += 1;
+    }
+
+    pub fn record_circuit_breaker(&mut self) {
+        self.circuit_breaker_trips += 1;
+    }
+
+    pub fn record_recovery_action(&mut self) {
+        self.recovery_actions_triggered += 1;
+    }
+
+    /// Success rate (0.0-1.0), NaN-safe.
+    pub fn success_rate(&self) -> f64 {
+        if self.attempts == 0 {
+            1.0
+        } else {
+            self.successes as f64 / self.attempts as f64
+        }
+    }
+}
+
 // ─── Bridge health status ───────────────────────────────────────────────────
 
 /// Aggregated health status for the bridge layer.
@@ -279,6 +503,8 @@ pub struct BridgeHealthStatus {
     pub partial_failures: Vec<String>,
     /// Stale state cleanup report from last startup.
     pub last_cleanup: Option<CleanupReport>,
+    /// Reconnection metrics.
+    pub reconnection: Option<ReconnectionMetrics>,
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -450,11 +676,182 @@ mod tests {
                 stale_peers_invalidated: 3,
                 stuck_replications_reset: 1,
             }),
+            reconnection: None,
         };
         let json = serde_json::to_string(&status).unwrap();
         let de: BridgeHealthStatus = serde_json::from_str(&json).unwrap();
         assert!(de.ipc_healthy);
         assert_eq!(de.partial_failures.len(), 1);
         assert!(de.last_cleanup.unwrap().stale_port_file_removed);
+    }
+
+    // ── Recovery actions ────────────────────────────────────────────────
+
+    #[test]
+    fn recovery_no_peers_dials_bootstrap() {
+        let actions = recovery_actions_for(&[PartialFailure::NoPeers]);
+        assert!(actions.contains(&RecoveryAction::ReDialBootstrap));
+        assert!(actions.contains(&RecoveryAction::RefreshDescriptors));
+    }
+
+    #[test]
+    fn recovery_all_dead_escalates_transport() {
+        let actions = recovery_actions_for(&[PartialFailure::AllTransportsDead]);
+        assert!(actions.contains(&RecoveryAction::EscalateTransport));
+    }
+
+    #[test]
+    fn recovery_relay_only_accepts() {
+        let actions = recovery_actions_for(&[PartialFailure::RelayOnly]);
+        assert!(actions.contains(&RecoveryAction::AcceptRelayOnly));
+    }
+
+    #[test]
+    fn recovery_stale_count_dials_bootstrap() {
+        let actions = recovery_actions_for(&[PartialFailure::StalePeerCount]);
+        assert!(actions.contains(&RecoveryAction::ReDialBootstrap));
+    }
+
+    #[test]
+    fn recovery_action_display() {
+        assert!(RecoveryAction::ReDialBootstrap.to_string().contains("bootstrap"));
+        assert!(RecoveryAction::EscalateTransport.to_string().contains("transport"));
+    }
+
+    // ── Reconnection scheduler ──────────────────────────────────────────
+
+    #[test]
+    fn scheduler_new_peer_allows_attempt() {
+        let sched = ReconnectionScheduler::default();
+        assert!(sched.should_attempt(b"peer-a"));
+    }
+
+    #[test]
+    fn scheduler_failure_blocks_immediate_retry() {
+        let mut sched = ReconnectionScheduler::new(
+            Duration::from_secs(60), // long enough that it won't expire during test
+            Duration::from_secs(600),
+            10,
+        );
+        sched.record_failure(b"peer-a");
+        assert!(!sched.should_attempt(b"peer-a"));
+    }
+
+    #[test]
+    fn scheduler_success_resets_backoff() {
+        let mut sched = ReconnectionScheduler::default();
+        sched.record_failure(b"peer-a");
+        sched.record_success(b"peer-a");
+        assert!(sched.should_attempt(b"peer-a"));
+        assert_eq!(sched.failures_for(b"peer-a"), 0);
+    }
+
+    #[test]
+    fn scheduler_circuit_breaker_trips() {
+        let mut sched = ReconnectionScheduler::new(
+            Duration::from_millis(1),
+            Duration::from_millis(10),
+            3,
+        );
+        assert!(!sched.record_failure(b"peer-a")); // 1
+        assert!(!sched.record_failure(b"peer-a")); // 2
+        assert!(sched.record_failure(b"peer-a"));  // 3 — tripped
+        assert!(!sched.should_attempt(b"peer-a"));
+        assert!(sched.abandoned_peers().contains(&b"peer-a".to_vec()));
+    }
+
+    #[test]
+    fn scheduler_backoff_is_exponential() {
+        let mut sched = ReconnectionScheduler::new(
+            Duration::from_millis(10),
+            Duration::from_secs(60),
+            20,
+        );
+        // After 1 failure: 10ms delay
+        sched.record_failure(b"p");
+        let f1 = sched.failures_for(b"p");
+        // After 2 failures: 20ms delay
+        sched.record_failure(b"p");
+        let f2 = sched.failures_for(b"p");
+        // After 3 failures: 40ms delay
+        sched.record_failure(b"p");
+        let f3 = sched.failures_for(b"p");
+        assert_eq!(f1, 1);
+        assert_eq!(f2, 2);
+        assert_eq!(f3, 3);
+    }
+
+    #[test]
+    fn scheduler_due_for_reconnect_after_delay() {
+        let mut sched = ReconnectionScheduler::new(
+            Duration::from_millis(10),
+            Duration::from_secs(60),
+            10,
+        );
+        sched.record_failure(b"peer-a");
+        assert!(sched.peers_due_for_reconnect().is_empty());
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(sched.peers_due_for_reconnect().contains(&b"peer-a".to_vec()));
+    }
+
+    #[test]
+    fn scheduler_independent_peers() {
+        let mut sched = ReconnectionScheduler::default();
+        sched.record_failure(b"peer-a");
+        assert!(sched.should_attempt(b"peer-b"));
+        assert_eq!(sched.tracked_count(), 1);
+    }
+
+    // ── Reconnection metrics ────────────────────────────────────────────
+
+    #[test]
+    fn metrics_defaults_to_100_percent() {
+        let m = ReconnectionMetrics::default();
+        assert_eq!(m.success_rate(), 1.0);
+    }
+
+    #[test]
+    fn metrics_tracks_events() {
+        let mut m = ReconnectionMetrics::default();
+        m.record_attempt();
+        m.record_attempt();
+        m.record_success();
+        m.record_failure();
+        m.record_circuit_breaker();
+        m.record_recovery_action();
+        assert_eq!(m.attempts, 2);
+        assert_eq!(m.successes, 1);
+        assert_eq!(m.failures, 1);
+        assert_eq!(m.circuit_breaker_trips, 1);
+        assert_eq!(m.recovery_actions_triggered, 1);
+        assert!((m.success_rate() - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn metrics_serde_roundtrip() {
+        let m = ReconnectionMetrics {
+            attempts: 10,
+            successes: 7,
+            failures: 3,
+            circuit_breaker_trips: 1,
+            recovery_actions_triggered: 2,
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        let de: ReconnectionMetrics = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.attempts, 10);
+        assert_eq!(de.successes, 7);
+    }
+
+    #[test]
+    fn recovery_action_serde_roundtrip() {
+        let actions = vec![
+            RecoveryAction::ReDialBootstrap,
+            RecoveryAction::EscalateTransport,
+            RecoveryAction::AbandonPeer { peer_id_bytes: vec![1, 2, 3] },
+        ];
+        let json = serde_json::to_string(&actions).unwrap();
+        let de: Vec<RecoveryAction> = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.len(), 3);
+        assert_eq!(de[0], RecoveryAction::ReDialBootstrap);
     }
 }

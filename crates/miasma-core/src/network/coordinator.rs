@@ -37,6 +37,7 @@ use crate::{
         types::{DhtRecord, ShardLocation},
     },
     onion::{packet::OnionPacketBuilder, share::OnionShareFetcher},
+    dissolution::{dissolve_segment, DEFAULT_SEGMENT_SIZE},
     pipeline::{dissolve, DissolutionParams},
     retrieval::{
         coordinator::RetrievalCoordinator, dht_source::DhtShareSource,
@@ -380,6 +381,95 @@ impl MiasmaCoordinator {
 
         // Publish to the real Kademlia DHT.
         self.dht_handle.put(record).await?;
+
+        Ok(mid)
+    }
+
+    /// Dissolve a file from disk into shares using streaming per-segment
+    /// dissolution.  Only one segment (~64 MiB) is held in RAM at a time,
+    /// enabling files of any size without full-file buffering.
+    pub async fn dissolve_and_publish_file(
+        &self,
+        file_path: &std::path::Path,
+        params: DissolutionParams,
+    ) -> Result<ContentId, MiasmaError> {
+        use std::io::{BufReader, Read, Seek, SeekFrom};
+
+        let file = std::fs::File::open(file_path)?;
+        let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+
+        // 1. Compute MID by streaming through file (no full-file buffer).
+        let param_bytes = params.to_param_bytes();
+        let mut reader = BufReader::new(&file);
+        let mid = ContentId::compute_from_reader(&mut reader, &param_bytes)?;
+
+        // 2. Rewind and dissolve per-segment.
+        reader.seek(SeekFrom::Start(0))?;
+
+        let segment_size = DEFAULT_SEGMENT_SIZE;
+        let mut segment_buf = vec![0u8; segment_size];
+        let mut seg_idx: u32 = 0;
+        let mut offset: u64 = 0;
+        let mut all_locations: Vec<ShardLocation> = Vec::new();
+        let peer_bytes = self.peer_id.to_bytes();
+
+        loop {
+            let mut filled = 0;
+            // Read one segment worth of data.
+            while filled < segment_size {
+                let n = reader.read(&mut segment_buf[filled..segment_size])?;
+                if n == 0 {
+                    break;
+                }
+                filled += n;
+            }
+
+            if filled == 0 && seg_idx > 0 {
+                break; // No more data, and we've processed at least one segment.
+            }
+
+            let chunk = &segment_buf[..filled];
+            let (_meta, shares) = dissolve_segment(chunk, &mid, seg_idx, offset, params)?;
+
+            // Store shares and record locations.
+            for share in &shares {
+                self.store.put(share)?;
+                all_locations.push(ShardLocation {
+                    peer_id_bytes: peer_bytes.clone(),
+                    shard_index: share.slot_index,
+                    addrs: self.listen_addrs.clone(),
+                });
+            }
+
+            offset += filled as u64;
+            seg_idx += 1;
+
+            if filled < segment_size {
+                break; // Last segment was shorter than full.
+            }
+        }
+
+        // 3. Publish DHT record with all shard locations.
+        let record = DhtRecord {
+            mid_digest: *mid.as_bytes(),
+            data_shards: params.data_shards as u8,
+            total_shards: params.total_shards as u8,
+            version: 1,
+            locations: all_locations,
+            published_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        };
+
+        self.dht_handle.put(record).await?;
+
+        tracing::info!(
+            "Published {} ({} bytes, {} segments) via streaming dissolution",
+            mid.to_string(),
+            file_len,
+            seg_idx,
+        );
 
         Ok(mid)
     }

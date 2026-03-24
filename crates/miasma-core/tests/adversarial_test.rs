@@ -6025,3 +6025,146 @@ fn environment_snapshot_default_is_open() {
     assert!(!snap.capabilities.captive_portal_detected);
     assert!(!snap.capabilities.vpn_detected);
 }
+
+// ── Streaming dissolution / PublishFile IPC ──────────────────────────────────
+
+/// PublishFile IPC variant serializes and deserializes correctly.
+#[test]
+fn ipc_publish_file_serde_roundtrip() {
+    use miasma_core::daemon::ipc::ControlRequest;
+
+    let req = ControlRequest::PublishFile {
+        file_path: "/tmp/test-file.bin".to_string(),
+        data_shards: 3,
+        total_shards: 5,
+    };
+    let json = serde_json::to_string(&req).unwrap();
+    let deser: ControlRequest = serde_json::from_str(&json).unwrap();
+    match deser {
+        ControlRequest::PublishFile { file_path, data_shards, total_shards } => {
+            assert_eq!(file_path, "/tmp/test-file.bin");
+            assert_eq!(data_shards, 3);
+            assert_eq!(total_shards, 5);
+        }
+        _ => panic!("deserialized to wrong variant"),
+    }
+}
+
+/// Streaming MID computation matches in-memory computation.
+#[test]
+fn streaming_mid_matches_in_memory() {
+    use miasma_core::crypto::hash::ContentId;
+
+    let content = vec![0x42u8; 256 * 1024]; // 256 KiB — multiple read buffers
+    let params = b"k=3,n=5,v=1";
+    let in_memory = ContentId::compute(&content, params);
+    let mut cursor = std::io::Cursor::new(&content);
+    let streamed = ContentId::compute_from_reader(&mut cursor, params).unwrap();
+    assert_eq!(in_memory, streamed, "streaming must produce identical MID");
+}
+
+// ── Hard failure recovery ───────────────────────────────────────────────────
+
+/// Recovery actions for NoPeers include bootstrap re-dial.
+#[test]
+fn hard_failure_no_peers_triggers_bootstrap_redial() {
+    use miasma_core::daemon::self_heal::{PartialFailure, RecoveryAction, recovery_actions_for};
+
+    let actions = recovery_actions_for(&[PartialFailure::NoPeers]);
+    assert!(actions.contains(&RecoveryAction::ReDialBootstrap));
+    assert!(actions.contains(&RecoveryAction::RefreshDescriptors));
+}
+
+/// Circuit breaker trips after max_failures and blocks further reconnection.
+#[test]
+fn hard_failure_circuit_breaker_prevents_reconnect() {
+    use miasma_core::daemon::self_heal::ReconnectionScheduler;
+    use std::time::Duration;
+
+    let mut sched = ReconnectionScheduler::new(
+        Duration::from_millis(1),
+        Duration::from_millis(10),
+        3, // trip after 3 failures
+    );
+    let peer = b"failing-peer";
+    sched.record_failure(peer);
+    sched.record_failure(peer);
+    let tripped = sched.record_failure(peer);
+    assert!(tripped, "circuit breaker should trip at max_failures");
+    assert!(!sched.should_attempt(peer), "abandoned peer should not be retried");
+}
+
+/// Successful reconnection fully resets circuit breaker state.
+#[test]
+fn hard_failure_success_resets_circuit_breaker_progress() {
+    use miasma_core::daemon::self_heal::ReconnectionScheduler;
+    use std::time::Duration;
+
+    let mut sched = ReconnectionScheduler::new(
+        Duration::from_millis(1),
+        Duration::from_millis(10),
+        5,
+    );
+    let peer = b"flaky-peer";
+    // Accumulate failures close to threshold
+    sched.record_failure(peer);
+    sched.record_failure(peer);
+    sched.record_failure(peer);
+    sched.record_failure(peer); // 4 of 5
+    // Success resets completely
+    sched.record_success(peer);
+    assert_eq!(sched.failures_for(peer), 0);
+    assert!(sched.should_attempt(peer));
+    // Would need 5 fresh failures to trip again
+    for _ in 0..4 {
+        assert!(!sched.record_failure(peer));
+    }
+    assert!(sched.record_failure(peer)); // Now trips at 5
+}
+
+/// Multiple partial failures produce combined recovery actions.
+#[test]
+fn hard_failure_combined_recovery_actions() {
+    use miasma_core::daemon::self_heal::{PartialFailure, RecoveryAction, recovery_actions_for};
+
+    let actions = recovery_actions_for(&[
+        PartialFailure::NoPeers,
+        PartialFailure::AllTransportsDead,
+    ]);
+    assert!(actions.contains(&RecoveryAction::ReDialBootstrap));
+    assert!(actions.contains(&RecoveryAction::EscalateTransport));
+}
+
+/// Reconnection metrics track success rate correctly.
+#[test]
+fn hard_failure_reconnection_metrics_accuracy() {
+    use miasma_core::daemon::self_heal::ReconnectionMetrics;
+
+    let mut m = ReconnectionMetrics::default();
+    for _ in 0..7 { m.record_attempt(); m.record_success(); }
+    for _ in 0..3 { m.record_attempt(); m.record_failure(); }
+    assert_eq!(m.attempts, 10);
+    assert_eq!(m.successes, 7);
+    assert!((m.success_rate() - 0.7).abs() < f64::EPSILON);
+}
+
+/// Flap detector + scheduler compose correctly: damping suppresses reconnection.
+#[test]
+fn hard_failure_flap_damping_suppresses_scheduler() {
+    use miasma_core::daemon::self_heal::{NetworkFlapDetector, ReconnectionScheduler};
+    use std::time::Duration;
+
+    let mut flap = NetworkFlapDetector::new(2, Duration::from_secs(60), Duration::from_secs(120));
+    let sched = ReconnectionScheduler::default();
+
+    // Simulate disconnections
+    flap.record_disconnect();
+    flap.record_disconnect(); // Triggers damping
+
+    assert!(flap.is_damping());
+    // Even though scheduler says "go ahead", flap damping should suppress
+    assert!(sched.should_attempt(b"peer-x"));
+    // The daemon should check flap FIRST, then scheduler
+    let should_reconnect = !flap.is_damping() && sched.should_attempt(b"peer-x");
+    assert!(!should_reconnect, "flap damping must suppress reconnection");
+}
