@@ -1583,17 +1583,23 @@ async fn cmd_network_publish(
 ) -> Result<()> {
     use miasma_core::{daemon_request, ControlRequest, ControlResponse};
 
-    let plaintext =
-        std::fs::read(path).with_context(|| format!("cannot read file: {}", path.display()))?;
+    // Use file-path-based publish: daemon reads the file directly,
+    // streaming per-segment dissolution so files of any size work
+    // without full-file RAM buffering or IPC size limits.
+    let abs_path = std::fs::canonicalize(path)
+        .with_context(|| format!("cannot resolve path: {}", path.display()))?;
+    let file_len = std::fs::metadata(&abs_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
 
     eprintln!(
         "Publishing {} ({} bytes) via local daemon...",
         path.display(),
-        plaintext.len()
+        file_len
     );
 
-    let req = ControlRequest::Publish {
-        data: plaintext,
+    let req = ControlRequest::PublishFile {
+        file_path: abs_path.to_string_lossy().into_owned(),
         data_shards: data_shards as u8,
         total_shards: total_shards as u8,
     };

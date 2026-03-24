@@ -744,6 +744,22 @@ pub(crate) async fn process_request(
             }
         }
 
+        ControlRequest::PublishFile {
+            file_path,
+            data_shards,
+            total_shards,
+        } => {
+            let params = DissolutionParams {
+                data_shards: data_shards as usize,
+                total_shards: total_shards as usize,
+            };
+            let path = std::path::Path::new(&file_path);
+            match coord.dissolve_and_publish_file(path, params).await {
+                Ok(mid) => ControlResponse::Published { mid: mid.to_string() },
+                Err(e) => ControlResponse::Error(e.to_string()),
+            }
+        }
+
         ControlRequest::Get {
             mid,
             data_shards,
