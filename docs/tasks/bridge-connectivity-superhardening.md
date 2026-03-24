@@ -1,10 +1,10 @@
-Next task: finish the remaining live transport integration and real-network proof for Bridge Connectivity Superhardening.
+Next task: finish the real-network proof and native tunnel completion for Bridge Connectivity Superhardening.
 
 Current state:
-- The architecture, fallback ladder, diagnostics types, environment model, rate limiting model, and transport placeholders are now materially implemented.
-- Live status fields are populated.
-- Bridge/connectivity validation docs exist.
-- The remaining work is no longer broad architecture. It is the last mile of real transport integration, daemon-loop wiring, and harsh-condition proof.
+- The fallback ladder, diagnostics model, rate limiting, health monitoring, flap damping, and environment detection are now live.
+- External Shadowsocks and external Tor paths make real proxy-backed network calls by reusing the proven WSS request/response path.
+- Validation docs exist and are substantially more honest than before.
+- The remaining work is now focused on field proof, native tunnel removal of external dependencies, and the last runtime signal gaps.
 
 Important execution guidance:
 - It is acceptable if this milestone takes a long time.
@@ -14,47 +14,9 @@ Important execution guidance:
 - Do not overclaim censorship-resistance or hostile-network survivability without direct evidence.
 
 Goal:
-Turn the current bridge/connectivity foundation into a genuinely validated transport layer under real network conditions.
+Turn the current bridge/connectivity layer from "implemented and test-heavy" into "field-proven and release-truthful" under harsh network conditions.
 
-Track A: Complete live daemon/node-loop wiring
-1. Wire `ConnectionHealthMonitor` into real swarm events.
-- dial success/failure
-- disconnect
-- reconnect
-- transport outcome
-- relay dependence
-
-2. Wire `EnvironmentDetector` into a real periodic daemon task.
-- refresh cadence
-- snapshot replacement
-- degraded-environment reactions
-- diagnostics export
-
-3. Verify that live status fields reflect actual runtime changes, not just boot-time snapshots.
-
-Track B: Complete real Shadowsocks integration
-1. Add the actual `shadowsocks` crate integration.
-- feature surface if still needed
-- runtime config parsing
-- real tunnel establishment
-- payload transport execution, not placeholder returns
-
-2. Validate:
-- wrong config fails cleanly
-- correct config actually routes traffic
-- fallback ladder uses Shadowsocks only when intended
-
-Track C: Complete real Tor integration
-1. Add the actual `arti-client` integration or the chosen real Tor path.
-- embedded mode if supported
-- external SOCKS5 mode if that is the practical baseline
-
-2. Validate:
-- Tor config works
-- fallback ladder invokes Tor when intended
-- diagnostics reflect Tor use honestly
-
-Track D: Real-network validation
+Track A: Real-network validation
 1. Re-run the bridge/connectivity validation matrix on actual network conditions.
 At minimum:
 - same LAN
@@ -72,7 +34,32 @@ At minimum:
 - whether directed sharing still worked
 - what broke
 
-Track E: Release-truthfulness and posture
+Track B: Native tunnel completion
+1. Add native Shadowsocks tunnel support.
+- remove the hard dependency on `ss-local` for the strongest supported path
+- implement real AEAD tunnel establishment using the `shadowsocks` crate
+- preserve the current external-proxy path as fallback if useful
+
+2. Add embedded Tor support if viable.
+- use `arti-client` only if it is stable enough for the supported targets
+- if embedded Tor is not viable on all targets, document the supported matrix explicitly rather than pretending it is
+
+3. Validate:
+- wrong config fails cleanly
+- correct config actually routes traffic
+- fallback ladder uses native tunnels only when intended
+- diagnostics show whether the path was external-proxy or native-tunnel
+
+Track C: Runtime signal completion
+1. Wire additional runtime quality signals that are still incomplete.
+- dial success/failure callbacks where available
+- transport outcome attribution
+- relay dependence visibility
+- reconnect quality after failure
+
+2. Verify that status/diagnostics reflect runtime changes, not only coarse connection events.
+
+Track D: Release-truthfulness and posture
 1. Update validation docs with only what is truly proven.
 2. Keep the censorship-resistance posture honest.
 - what is proven
@@ -83,18 +70,18 @@ Track E: Release-truthfulness and posture
 
 Completion bar:
 Do not call this complete unless all of the following are true:
-- ConnectionHealthMonitor is wired to real runtime events
-- EnvironmentDetector runs as a live periodic daemon task
-- Shadowsocks uses a real transport implementation, not only config/trait scaffolding
-- Tor uses a real transport implementation, not only config/trait scaffolding
 - at least one real Shadowsocks validation run is documented
 - at least one real Tor validation run is documented
+- at least one VPN/degraded-network validation run is documented
+- native Shadowsocks tunnel support is either implemented or explicitly rejected with a documented reason
+- embedded Tor support is either implemented or explicitly rejected with a documented reason
+- runtime diagnostics reflect the stronger live wiring truthfully
 - docs make no unsupported claims about censorship-resistance or severe-network survivability
 
 Expected final output:
-1. What remaining live wiring was completed
-2. What real Shadowsocks integration now does
-3. What real Tor integration now does
-4. What network conditions were actually validated
-5. What remains unproven or fragile
+1. What real-network conditions were actually validated
+2. What native Shadowsocks support now does
+3. What embedded or external Tor support now does
+4. What runtime diagnostics became more truthful
+5. What remains unproven or intentionally unsupported
 6. Whether the bridge layer is ready for broader field testing
