@@ -70,6 +70,16 @@ pub struct TransportConfig {
     /// Fallback URL for ObfuscatedQuic active-probe resistance.
     #[serde(default)]
     pub obfuscated_quic_fallback_url: Option<String>,
+
+    // ── Shadowsocks (bridge superhardening Phase 3) ─────────────────────
+    /// Shadowsocks transport configuration.
+    #[serde(default)]
+    pub shadowsocks: crate::transport::shadowsocks::ShadowsocksConfig,
+
+    // ── Tor (bridge superhardening Phase 4) ─────────────────────────────
+    /// Tor transport configuration.
+    #[serde(default)]
+    pub tor: crate::transport::tor::TorConfig,
 }
 
 impl Default for StorageConfig {
