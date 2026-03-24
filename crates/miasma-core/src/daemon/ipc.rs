@@ -419,6 +419,56 @@ pub struct DaemonStatus {
     /// Relays with forwarding verification evidence.
     #[serde(default)]
     pub forwarding_verified_relays: usize,
+
+    // ── Connection health (Phase 1: bridge superhardening) ──────────────
+    /// Overall connection quality score (0.0–1.0).
+    #[serde(default)]
+    pub connection_quality_score: f64,
+    /// Number of addresses currently in dial backoff.
+    #[serde(default)]
+    pub dial_backoff_addresses: usize,
+    /// Total addresses pruned as stale since startup.
+    #[serde(default)]
+    pub stale_addresses_pruned: u64,
+    /// Whether connectivity is considered degraded.
+    #[serde(default)]
+    pub connectivity_degraded: bool,
+    /// Currently active (most recently successful) transport name.
+    #[serde(default)]
+    pub active_transport: Option<String>,
+    /// Whether the system is operating in fallback mode (not using primary transport).
+    #[serde(default)]
+    pub fallback_active: bool,
+
+    // ── Self-healing (Phase 2) ──────────────────────────────────────────
+    /// Whether network flap damping is active.
+    #[serde(default)]
+    pub flap_damping_active: bool,
+    /// Number of rate-limited requests since startup.
+    #[serde(default)]
+    pub rate_limit_rejections: u64,
+
+    // ── Censorship resistance (Phases 3-4) ──────────────────────────────
+    /// Whether Shadowsocks transport is configured.
+    #[serde(default)]
+    pub shadowsocks_configured: bool,
+    /// Whether Tor transport is configured.
+    #[serde(default)]
+    pub tor_configured: bool,
+
+    // ── Network environment (Phase 5) ───────────────────────────────────
+    /// Detected network environment.
+    #[serde(default)]
+    pub network_environment: String,
+    /// Whether TLS inspection was detected.
+    #[serde(default)]
+    pub tls_inspection_detected: bool,
+    /// Whether a captive portal was detected.
+    #[serde(default)]
+    pub captive_portal_detected: bool,
+    /// Whether a VPN was detected.
+    #[serde(default)]
+    pub vpn_detected: bool,
 }
 
 /// Per-transport readiness info for IPC/CLI display.
