@@ -482,6 +482,23 @@ pub struct DaemonStatus {
     /// Whether a VPN was detected.
     #[serde(default)]
     pub vpn_detected: bool,
+
+    // ── Reconnection (Track B wiring) ───────────────────────────────────
+    /// Total reconnection attempts.
+    #[serde(default)]
+    pub reconnection_attempts: u64,
+    /// Successful reconnections.
+    #[serde(default)]
+    pub reconnection_successes: u64,
+    /// Failed reconnection attempts.
+    #[serde(default)]
+    pub reconnection_failures: u64,
+    /// Circuit breaker trips (peer abandoned).
+    #[serde(default)]
+    pub reconnection_circuit_breaker_trips: u64,
+    /// Recovery actions dispatched from partial failures.
+    #[serde(default)]
+    pub reconnection_recovery_actions: u64,
 }
 
 /// Per-transport readiness info for IPC/CLI display.

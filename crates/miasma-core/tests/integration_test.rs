@@ -3024,3 +3024,430 @@ fn bbs_credential_issuance_and_proof_roundtrip() {
         "wrong context should fail BBS+ verification"
     );
 }
+
+// ── Field validation: real Shadowsocks AEAD-2022 tunnel ──────────────────────
+
+/// Field test: connect through a real ssserver using AEAD-2022 native tunnel.
+///
+/// Requires: WSL2 MiasmaLab running ssserver on 172.24.51.174:8388 with
+/// AEAD-2022 (2022-blake3-aes-256-gcm) and an echo server on port 9999.
+///
+/// Run manually: `cargo test -p miasma-core --test integration_test field_ss -- --ignored --nocapture`
+#[tokio::test]
+#[ignore]
+async fn field_ss_native_aead2022_tunnel() {
+    use miasma_core::transport::shadowsocks::connect_native_by_cipher;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let psk_b64 = std::env::var("SS_PSK")
+        .unwrap_or_else(|_| "GfUl7Rk0bjD/iEauq0JKnZqf/vlcSofjBmOt4QKtJKc=".to_string());
+    let server = std::env::var("SS_SERVER")
+        .unwrap_or_else(|_| "172.24.51.174:8388".to_string());
+    let target_host = std::env::var("SS_TARGET_HOST")
+        .unwrap_or_else(|_| "172.24.51.174".to_string());
+    let target_port: u16 = std::env::var("SS_TARGET_PORT")
+        .unwrap_or_else(|_| "9999".to_string())
+        .parse()
+        .unwrap();
+
+    // Decode PSK
+    let key = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        &psk_b64,
+    )
+    .expect("invalid base64 PSK");
+    assert_eq!(key.len(), 32, "AEAD-2022 AES-256-GCM requires 32-byte key");
+
+    println!("Connecting to SS server at {server}...");
+    println!("Target: {target_host}:{target_port} (echo server)");
+
+    let mut stream = connect_native_by_cipher(
+        &server,
+        &target_host,
+        target_port,
+        &key,
+        "2022-blake3-aes-256-gcm",
+        std::time::Duration::from_secs(10),
+    )
+    .await
+    .expect("native SS tunnel connection failed");
+
+    // Send test data through the encrypted tunnel to the echo server.
+    let test_data = b"hello through shadowsocks AEAD-2022 tunnel!";
+    stream
+        .write_all(test_data)
+        .await
+        .expect("write through SS tunnel failed");
+
+    // Read echo response.
+    let mut buf = vec![0u8; test_data.len()];
+    stream
+        .read_exact(&mut buf)
+        .await
+        .expect("read echo response through SS tunnel failed");
+
+    assert_eq!(&buf, test_data, "echo mismatch — data corrupted in SS tunnel");
+    println!("SUCCESS: AEAD-2022 tunnel to echo server verified!");
+    println!("  Sent {} bytes, received {} bytes, data matches", test_data.len(), buf.len());
+}
+
+/// Field diagnostic: raw AEAD-2022 handshake to see exactly what ssserver returns.
+///
+/// This bypasses the relay abstraction to trace each protocol step.
+#[tokio::test]
+#[ignore]
+async fn field_ss_raw_diagnostic() {
+    use shadowsocks_crypto::v2::tcp::TcpCipher;
+    use shadowsocks_crypto::CipherKind;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let psk_b64 = std::env::var("SS_PSK")
+        .unwrap_or_else(|_| "GfUl7Rk0bjD/iEauq0JKnZqf/vlcSofjBmOt4QKtJKc=".to_string());
+    let server = std::env::var("SS_SERVER")
+        .unwrap_or_else(|_| "172.24.51.174:8388".to_string());
+    let target_host = "172.24.51.174";
+    let target_port: u16 = 9999;
+
+    let key = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        &psk_b64,
+    )
+    .expect("invalid base64 PSK");
+
+    let kind = CipherKind::AEAD2022_BLAKE3_AES_256_GCM;
+    let salt_len = kind.salt_len();
+    let tag_len = kind.tag_len();
+
+    println!("salt_len={salt_len}, tag_len={tag_len}, key_len={}", key.len());
+
+    // Connect
+    let tcp = tokio::net::TcpStream::connect(&server)
+        .await
+        .expect("TCP connect failed");
+    tcp.set_nodelay(true).expect("set_nodelay failed");
+    let mut tcp = tcp;
+    println!("TCP connected to {server} (nodelay=true)");
+
+    // Client salt
+    let mut client_salt = vec![0u8; salt_len];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut client_salt);
+    tcp.write_all(&client_salt).await.unwrap();
+    println!("Sent client salt ({salt_len} bytes)");
+
+    let mut write_cipher = TcpCipher::new(kind, &key, &client_salt);
+
+    // Variable header: IPv4 addr + port + padding
+    let ipv4: std::net::Ipv4Addr = target_host.parse().unwrap();
+    let mut var_header = Vec::new();
+    var_header.push(0x01); // IPv4
+    var_header.extend_from_slice(&ipv4.octets());
+    var_header.extend_from_slice(&target_port.to_be_bytes());
+    let padding_len: u16 = 4;
+    var_header.extend_from_slice(&padding_len.to_be_bytes());
+    var_header.extend_from_slice(&[0xAA; 4]); // padding
+    println!("Variable header: {} bytes (addr=0x01 {:?}:{target_port}, padding={padding_len})",
+        var_header.len(), ipv4);
+
+    // First: self-test encrypt/decrypt roundtrip
+    {
+        let test_salt = vec![0xAA; salt_len];
+        let mut enc = TcpCipher::new(kind, &key, &test_salt);
+        let mut dec = TcpCipher::new(kind, &key, &test_salt);
+        let plaintext = [0x00u8, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A]; // 11 bytes
+        let mut buf = Vec::from(plaintext.as_slice());
+        buf.resize(11 + tag_len, 0);
+        enc.encrypt_packet(&mut buf);
+        println!("Self-test: encrypted {} bytes → {:02x?}", plaintext.len(), &buf);
+        let ok = dec.decrypt_packet(&mut buf);
+        println!("Self-test: decrypt ok={ok}, plaintext matches={}", &buf[..11] == plaintext);
+    }
+
+    // TWO separate encrypted chunks (matching sslocal wire format)
+    let var_header_len = var_header.len() as u16;
+    let mut fixed = Vec::with_capacity(11 + tag_len);
+    fixed.push(0x00); // client request type
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    fixed.extend_from_slice(&ts.to_be_bytes());
+    fixed.extend_from_slice(&var_header_len.to_be_bytes());
+    println!("Fixed header plaintext ({} bytes): {:02x?}", fixed.len(), &fixed);
+
+    fixed.resize(11 + tag_len, 0);
+    write_cipher.encrypt_packet(&mut fixed);
+    println!("Encrypted fixed header ({} bytes): {:02x?}", fixed.len(), &fixed);
+
+    // Encrypt variable header (separate nonce)
+    var_header.resize(var_header.len() + tag_len, 0);
+    write_cipher.encrypt_packet(&mut var_header);
+    println!("Encrypted variable header ({} bytes)", var_header.len());
+
+    // Now send application data as encrypted chunks
+    let test_data = b"hello echo!";
+    let chunk_len = test_data.len();
+
+    // Length chunk: 2 bytes + tag
+    let mut len_buf = vec![0u8; 2 + tag_len];
+    len_buf[0..2].copy_from_slice(&(chunk_len as u16).to_be_bytes());
+    write_cipher.encrypt_packet(&mut len_buf);
+
+    // Payload chunk
+    let mut payload_buf = vec![0u8; chunk_len + tag_len];
+    payload_buf[..chunk_len].copy_from_slice(test_data);
+    write_cipher.encrypt_packet(&mut payload_buf);
+
+    // Send EVERYTHING in one massive write: salt + fixed + var + length_chunk + data_chunk
+    let mut mega_buf = Vec::new();
+    mega_buf.extend_from_slice(&client_salt);
+    mega_buf.extend_from_slice(&fixed);
+    mega_buf.extend_from_slice(&var_header);
+    mega_buf.extend_from_slice(&len_buf);
+    mega_buf.extend_from_slice(&payload_buf);
+    tcp.write_all(&mega_buf).await.unwrap();
+    tcp.flush().await.unwrap();
+    println!("Sent everything in one write ({} bytes)", mega_buf.len());
+
+    // Wait for server response
+    println!("Waiting for server response (5s timeout)...");
+    let mut resp_buf = vec![0u8; 4096];
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tcp.read(&mut resp_buf),
+    )
+    .await
+    {
+        Ok(Ok(n)) => {
+            println!("Got {n} raw bytes from server");
+            if n >= salt_len {
+                println!("  First {salt_len} bytes (server salt): {:02x?}", &resp_buf[..salt_len]);
+                let remaining = n - salt_len;
+                println!("  Remaining {remaining} bytes after salt");
+
+                // Try to decrypt the fixed header
+                let fixed_plaintext_len = 1 + 8 + salt_len + 2;
+                let fixed_wire_len = fixed_plaintext_len + tag_len;
+                if remaining >= fixed_wire_len {
+                    let server_salt = &resp_buf[..salt_len].to_vec();
+                    let mut read_cipher = TcpCipher::new(kind, &key, server_salt);
+                    let mut fh = resp_buf[salt_len..salt_len + fixed_wire_len].to_vec();
+                    if read_cipher.decrypt_packet(&mut fh) {
+                        println!("  Fixed header decrypted OK!");
+                        println!("    type=0x{:02x}, first_payload_len={}",
+                            fh[0],
+                            u16::from_be_bytes([fh[1 + 8 + salt_len], fh[1 + 8 + salt_len + 1]]));
+                        let echoed_salt = &fh[9..9 + salt_len];
+                        println!("    client salt match: {}", echoed_salt == client_salt.as_slice());
+                    } else {
+                        println!("  Fixed header AEAD decrypt FAILED");
+                    }
+                } else {
+                    println!("  Not enough bytes for fixed header (need {fixed_wire_len}, have {remaining})");
+                }
+            } else {
+                println!("  Fewer than salt_len bytes: {:02x?}", &resp_buf[..n]);
+            }
+        }
+        Ok(Err(e)) => println!("Read error: {e}"),
+        Err(_) => println!("TIMEOUT: server sent nothing in 5s"),
+    }
+}
+
+/// Field test: verify Shadowsocks SOCKS5 (external mode) tunnel to echo server.
+///
+/// Requires: WSL2 MiasmaLab running sslocal SOCKS5 on 172.24.51.174:1080
+/// and echo server on 172.24.51.174:9999.
+///
+/// Run manually: `cargo test -p miasma-core --test integration_test field_ss_socks5_echo -- --ignored --nocapture`
+#[tokio::test]
+#[ignore]
+async fn field_ss_socks5_echo() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_socks::tcp::Socks5Stream;
+
+    let proxy_addr = std::env::var("SS_SOCKS5")
+        .unwrap_or_else(|_| "172.24.51.174:1080".to_string());
+    let target = std::env::var("SS_TARGET")
+        .unwrap_or_else(|_| "172.24.51.174:9999".to_string());
+
+    println!("Connecting through SS SOCKS5 at {proxy_addr} → {target}...");
+
+    let proxy: std::net::SocketAddr = proxy_addr.parse().expect("invalid proxy addr");
+    let stream = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        Socks5Stream::connect(proxy, target.as_str()),
+    )
+    .await
+    .expect("SOCKS5 connect timeout")
+    .expect("SOCKS5 connect failed");
+
+    let mut stream = stream.into_inner();
+    stream.set_nodelay(true).ok();
+    println!("SOCKS5 tunnel established");
+
+    // Send test data through the encrypted tunnel to the echo server.
+    // Echo server is a Python socket echo that sends data back immediately.
+    let test_data = b"hello through shadowsocks SOCKS5 tunnel!\n";
+    stream
+        .write_all(test_data)
+        .await
+        .expect("write through SS SOCKS5 failed");
+    stream.flush().await.expect("flush failed");
+    println!("Wrote {} bytes", test_data.len());
+
+    // Read echo response with timeout.
+    let mut buf = vec![0u8; test_data.len()];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        stream.read_exact(&mut buf),
+    )
+    .await
+    .expect("read timeout — echo server may not be running")
+    .expect("read echo response through SS SOCKS5 failed");
+
+    println!("Read {} bytes: {:?}", buf.len(), String::from_utf8_lossy(&buf));
+    assert_eq!(&buf, test_data, "echo mismatch — data corrupted in SS SOCKS5 tunnel");
+
+    assert_eq!(&buf, test_data, "echo mismatch — data corrupted in SS SOCKS5 tunnel");
+    println!("SUCCESS: SS SOCKS5 tunnel to echo server verified!");
+    println!("  Sent {} bytes, received {} bytes, data matches", test_data.len(), buf.len());
+}
+
+/// Field test: stream-dissolve a 200MB file without OOM.
+///
+/// This test runs locally (no external infrastructure needed) but is slow (~30s).
+///
+/// Run manually: `cargo test -p miasma-core --test integration_test field_large -- --ignored --nocapture`
+#[tokio::test]
+#[ignore]
+async fn field_large_file_streaming_publish() {
+    use miasma_core::dissolution::dissolve_segment;
+    use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+
+    // Create a 200MB temp file with patterned data.
+    let dir = tempfile::tempdir().unwrap();
+    let file_path = dir.path().join("large_test_200mb.bin");
+    let target_size: u64 = 200 * 1024 * 1024; // 200 MiB
+
+    println!("Creating {target_size}-byte temp file...");
+    {
+        let mut f = std::fs::File::create(&file_path).unwrap();
+        let chunk = vec![0xABu8; 1024 * 1024]; // 1 MiB write chunks
+        let mut written: u64 = 0;
+        while written < target_size {
+            let to_write = std::cmp::min(chunk.len() as u64, target_size - written) as usize;
+            f.write_all(&chunk[..to_write]).unwrap();
+            written += to_write as u64;
+        }
+        f.flush().unwrap();
+    }
+    assert_eq!(std::fs::metadata(&file_path).unwrap().len(), target_size);
+    println!("Temp file created: {}", file_path.display());
+
+    // Stream-dissolve the file per-segment — mimics dissolve_and_publish_file
+    // but without needing MiasmaCoordinator/DHT.
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = make_store(&store_dir);
+    let params = DissolutionParams::default();
+
+    let start = std::time::Instant::now();
+
+    // 1. Compute MID by streaming.
+    let file = std::fs::File::open(&file_path).unwrap();
+    let param_bytes = params.to_param_bytes();
+    let mut reader = BufReader::new(&file);
+    let mid = ContentId::compute_from_reader(&mut reader, &param_bytes)
+        .expect("streaming MID computation failed");
+
+    // 2. Rewind and dissolve per-segment (64 MiB default).
+    reader.seek(SeekFrom::Start(0)).unwrap();
+    let segment_size: usize = DEFAULT_SEGMENT_SIZE;
+    let mut segment_buf = vec![0u8; segment_size];
+    let mut seg_idx: u32 = 0;
+    let mut offset: u64 = 0;
+    let mut total_shares: usize = 0;
+
+    loop {
+        let mut filled = 0;
+        while filled < segment_size {
+            let n = reader.read(&mut segment_buf[filled..segment_size]).unwrap();
+            if n == 0 {
+                break;
+            }
+            filled += n;
+        }
+        if filled == 0 && seg_idx > 0 {
+            break;
+        }
+
+        let chunk = &segment_buf[..filled];
+        let (_meta, shares) =
+            dissolve_segment(chunk, &mid, seg_idx, offset, params).unwrap();
+
+        for share in &shares {
+            store.put(share).unwrap();
+        }
+        total_shares += shares.len();
+
+        offset += filled as u64;
+        seg_idx += 1;
+        let pct = (offset as f64 / target_size as f64 * 100.0).min(100.0);
+        println!("  segment {seg_idx}: {offset}/{target_size} bytes ({pct:.0}%)");
+
+        if filled < segment_size {
+            break;
+        }
+    }
+
+    let elapsed = start.elapsed();
+
+    println!(
+        "Streaming dissolution complete: MID={:?}, segments={}, shares={}, elapsed={:.1}s",
+        mid, seg_idx, total_shares, elapsed.as_secs_f64()
+    );
+
+    // Verify MID is valid (non-zero).
+    assert_ne!(mid.as_bytes(), &[0u8; 32], "MID should not be zero");
+    assert!(total_shares > 0, "should have produced shares");
+    assert!(seg_idx >= 3, "200MB should produce at least 3 segments at 64MiB each");
+
+    println!(
+        "Published: {} shares in store, {:.1} MB/s throughput",
+        total_shares,
+        target_size as f64 / 1024.0 / 1024.0 / elapsed.as_secs_f64()
+    );
+}
+
+/// Verify Tor SOCKS5 port is reachable (requires Tor daemon in WSL2 MiasmaLab).
+///
+/// Run manually: `cargo test -p miasma-core --test integration_test field_tor -- --ignored --nocapture`
+#[tokio::test]
+#[ignore]
+async fn field_tor_socks5_reachable() {
+    let tor_addr = std::env::var("TOR_SOCKS")
+        .unwrap_or_else(|_| "172.24.51.174:9050".to_string());
+
+    println!("Testing Tor SOCKS5 at {tor_addr}...");
+
+    // Verify TCP connectivity to Tor SOCKS5 port.
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::net::TcpStream::connect(&tor_addr),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(_stream)) => {
+            println!("SUCCESS: Tor SOCKS5 port reachable at {tor_addr}");
+            // Note: full circuit establishment may fail in corporate networks
+            // that block Tor directory authorities. The SOCKS5 port being
+            // reachable proves the daemon is running and accepting connections.
+        }
+        Ok(Err(e)) => {
+            panic!("Tor SOCKS5 port connection failed: {e}");
+        }
+        Err(_) => {
+            panic!("Tor SOCKS5 port connection timed out");
+        }
+    }
+}

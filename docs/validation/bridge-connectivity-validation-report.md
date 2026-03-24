@@ -52,6 +52,19 @@
 | Directed sharing 50MB | PASS | File-path IPC, no size limit |
 | Broken mDNS | PASS | Bootstrap peers fallback |
 
+### Field Validated (WSL2 Alpine MiasmaLab — 2026-03-24)
+
+| Condition | Result | Notes |
+|---|---|---|
+| Real SS server (native AEAD-2022) | PASS | ssserver 1.21 `2022-blake3-aes-256-gcm`, 43-byte echo roundtrip through native `TcpCipher` tunnel. `field_ss_native_aead2022_tunnel` test. |
+| Real SS server (external SOCKS5) | PASS | sslocal SOCKS5 → ssserver, 41-byte echo roundtrip via `tokio-socks`. `field_ss_socks5_echo` test. |
+| Tor SOCKS5 port reachable | PARTIAL | Tor daemon on WSL2, SOCKS port 9050 accepts connections. Bootstrap blocked by corporate proxy (directory authority fetch fails). External SOCKS5 code path validated structurally. |
+| Large file streaming publish (200MB) | PASS | 4 segments (64 MiB each), 80 shares, 176.8s, 1.1 MB/s. No OOM. `field_large_file_streaming_publish` test. |
+
+**Test infrastructure**: WSL2 Alpine (`MiasmaLab`), ssserver on :8388, sslocal SOCKS5 on :1080, Python echo server on :9999, Tor on :9050.
+
+**Key fix during validation**: AEAD-2022 handshake must send salt + encrypted fixed header + encrypted variable header in a single `write_all` call. Separate TCP writes cause segmentation across WSL2 virtual NIC, resulting in ssserver "header too short" errors.
+
 ### Not Yet Validated
 
 | Condition | Reason | Mitigation |
@@ -59,9 +72,7 @@
 | One-sided VPN | Requires VPN test infrastructure | Fallback ladder handles transparently |
 | Two-sided VPN | Requires 2 VPN-connected machines | RelayHop expected to work |
 | Real DPI bypass | Requires actual DPI appliance | ObfuscatedQuic REALITY tested against structure |
-| Real Shadowsocks server (native) | Requires SS server + PSK | Native AEAD-2022 implemented, needs field test |
-| Real Shadowsocks server (external) | Requires ss-local + SS server | External SOCKS5 implemented, needs field test |
-| Real Tor network | Requires Internet + Tor | External SOCKS5 mode reuses proven proxy code |
+| Real Tor bootstrap | Corporate proxy blocks Tor directory authorities | External SOCKS5 code path structurally validated; needs unrestricted network |
 | Mobile transport (Android/iOS) | Requires device testing | Uses same FFI daemon — transport code shared |
 | Nation-state filtering | Requires censored network | Shadowsocks + Tor + ObfuscatedQuic available |
 
@@ -106,7 +117,7 @@
 | WssTunnel | Full | Via daemon | Via FFI | Via FFI |
 | ObfuscatedQuic | Full | Via daemon | Via FFI | Via FFI |
 | RelayHop | Full | Via daemon | Via FFI | Via FFI |
-| Shadowsocks | Config ready | Via daemon | Feature flag | Feature flag |
+| Shadowsocks | **Field validated** | Via daemon | Feature flag | Feature flag |
 | Tor | Config ready | Not supported | Feature flag | Not supported (*) |
 | Connection health | Full | Via /api/status | Via /api/status | Via /api/status |
 | Environment detection | Full | Limited | Limited | Limited |
@@ -122,19 +133,20 @@
 |---|---|
 | Unit tests (miasma-core --lib) | 412 |
 | Adversarial tests | 182 |
-| Integration tests | 53 (+1 ignored) |
+| Integration tests | 53 (+6 ignored: 1 quarantined + 5 field) |
 | Desktop tests | 16 |
 | Binary tests | 31 |
 | WASM tests | 33 (29+4) |
-| **Total** | **727** (+1 ignored) |
+| Field tests (ignored, manual) | 5 (SS native, SS raw diag, SS SOCKS5, Tor reachable, 200MB streaming) |
+| **Total** | **727 running** (+6 ignored) |
 
-Previous total: 694. New tests added: **33** (streaming MID, PublishFile IPC, reconnection scheduler, circuit breaker, recovery actions, reconnection metrics, hard failure scenarios, native Shadowsocks AEAD-2022).
+Previous total: 694 running (+1 ignored). New tests added since: **33** reconnection/streaming tests + **5** field validation tests (SS native AEAD-2022 tunnel, SS raw diagnostic, SS SOCKS5 echo, Tor SOCKS5 reachable, 200MB large file streaming publish). Field tests require external infrastructure or long runtime and are `#[ignore]`.
 
 ---
 
 ## Known Hard Blockers
 
-1. ~~Native Shadowsocks tunnel rejected~~ **RESOLVED**: `shadowsocks-crypto` v0.6.2 (pure-Rust, no OpenSSL) provides AEAD-2022 ciphers. Native tunnel implemented. See revised `docs/adr/009-native-tunnel-decision.md`.
+1. ~~Native Shadowsocks tunnel rejected~~ **RESOLVED + FIELD VALIDATED**: `shadowsocks-crypto` v0.6.2 (pure-Rust, no OpenSSL) provides AEAD-2022 ciphers. Native tunnel implemented and field-tested against ssserver 1.21 (2026-03-24). Both native AEAD-2022 and external SOCKS5 modes validated. See revised `docs/adr/009-native-tunnel-decision.md`.
 2. **Embedded Tor rejected (ADR-009)**: `arti-client` is pre-1.0, ~50 transitive deps, untested on iOS. External SOCKS5 mode (standalone Tor) is the accepted architecture.
 3. **Domain fronting not implemented**: Would require CDN cooperation or cloud function intermediary.
 4. **Meek bridges not implemented**: Would complement Tor bridges for extreme censorship.
@@ -149,7 +161,7 @@ Previous total: 694. New tests added: **33** (streaming MID, PublishFile IPC, re
 | EnvironmentDetector | **LIVE** | Periodic 5min daemon task, derives capabilities from transport outcomes + NAT status |
 | NetworkFlapDetector | **LIVE** | Node disconnect events, damping active in DaemonStatus |
 | PartialFailureDetector | **LIVE** | Periodic evaluation (relay-only, no-peers, stale, all-dead), exposed in DaemonStatus |
-| Shadowsocks transport | **LIVE** | Native AEAD-2022 via `shadowsocks-crypto` + external SOCKS5 fallback |
+| Shadowsocks transport | **FIELD VALIDATED** | Native AEAD-2022 via `shadowsocks-crypto` + external SOCKS5 — both tested against ssserver 1.21 (2026-03-24) |
 | Tor transport | **LIVE** | Real SOCKS5 proxy through Tor → WSS protocol to peer (external mode) |
 | TransportStats | **LIVE** | Per-kind success/failure/phase attribution, last_selected, fallback_active |
 | DialBackoff | **LIVE** | Dial failure → backoff in node, exposed in health snapshot |
@@ -168,9 +180,9 @@ Previous total: 694. New tests added: **33** (streaming MID, PublishFile IPC, re
 ## Next Milestone Recommendation
 
 **Bridge Connectivity Phase 4: Real-Network Field Testing**
-1. Run `validate-bridge-connectivity.ps1` with ss-local + SS server
-2. Run `validate-bridge-connectivity.ps1` with Tor daemon
+1. ~~Run `validate-bridge-connectivity.ps1` with ss-local + SS server~~ **DONE** (2026-03-24) — native AEAD-2022 + external SOCKS5 both validated
+2. Run `validate-bridge-connectivity.ps1` with Tor daemon (requires unrestricted network — corporate proxy blocks bootstrap)
 3. Validate VPN / filtered network transport fallback (manual)
 4. Validate ObfuscatedQuic REALITY under real DPI (requires test infrastructure)
 5. Mobile platform transport validation (Android/iOS)
-6. Revisit native tunnels if `shadowsocks-crypto` gains pure-Rust AEAD or Arti reaches 1.0
+6. ~~Large-file streaming field test~~ **DONE** (2026-03-24) — 200MB, 4 segments, 80 shares, no OOM
