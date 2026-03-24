@@ -895,6 +895,9 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
             if s.rate_limit_rejections > 0 {
                 println!("  Rate limit rejections: {}", s.rate_limit_rejections);
             }
+            if !s.partial_failures.is_empty() {
+                println!("  Partial failures:      {}", s.partial_failures.join(", "));
+            }
 
             // Censorship resistance transports
             if s.shadowsocks_configured || s.tor_configured {
