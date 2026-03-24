@@ -591,12 +591,20 @@ impl DaemonServer {
             .await;
         });
 
+        // ── Periodic environment detection task ─────────────────────────────
+        let env_coord = coord.clone();
+        let env_snapshot = self.env_snapshot.clone();
+        let env_handle: JoinHandle<()> = tokio::spawn(async move {
+            environment_detector_loop(env_coord, env_snapshot).await;
+        });
+
         // ── Wait for shutdown ─────────────────────────────────────────────────
         shutdown_rx.recv().await;
         info!("daemon shutdown signal received");
 
         ipc_handle.abort();
         rep_handle.abort();
+        env_handle.abort();
 
         coord.shutdown().await;
         remove_port_file(&self.data_dir);
@@ -918,27 +926,47 @@ pub(crate) async fn process_request(
                 relay_tier_verified: desc_stats.relay_verified,
                 probe_cache_fresh: desc_stats.probed_fresh,
                 forwarding_verified_relays: desc_stats.forwarding_verified_count,
-                // Connection health — from live monitor
+                // Connection health — from live node monitor (fallback to shared mutex)
                 connection_quality_score: {
-                    let hm = bridge_state.health_monitor.lock().unwrap();
-                    hm.average_quality()
+                    match coord.health_snapshot().await {
+                        Ok(snap) => snap.quality_score,
+                        Err(_) => {
+                            let hm = bridge_state.health_monitor.lock().unwrap();
+                            hm.average_quality()
+                        }
+                    }
                 },
                 dial_backoff_addresses: {
-                    let hm = bridge_state.health_monitor.lock().unwrap();
-                    hm.backoff.active_count()
+                    match coord.health_snapshot().await {
+                        Ok(snap) => snap.backoff_addresses,
+                        Err(_) => {
+                            let hm = bridge_state.health_monitor.lock().unwrap();
+                            hm.backoff.active_count()
+                        }
+                    }
                 },
                 stale_addresses_pruned: {
-                    let hm = bridge_state.health_monitor.lock().unwrap();
-                    hm.pruner.pruned_count
+                    match coord.health_snapshot().await {
+                        Ok(snap) => snap.addresses_pruned,
+                        Err(_) => {
+                            let hm = bridge_state.health_monitor.lock().unwrap();
+                            hm.pruner.pruned_count
+                        }
+                    }
                 },
                 connectivity_degraded: {
-                    let hm = bridge_state.health_monitor.lock().unwrap();
-                    hm.is_degraded(peer_count)
+                    match coord.health_snapshot().await {
+                        Ok(snap) => snap.degraded,
+                        Err(_) => {
+                            let hm = bridge_state.health_monitor.lock().unwrap();
+                            hm.is_degraded(peer_count)
+                        }
+                    }
                 },
                 active_transport: coord.transport_stats().last_selected().map(|s| s.to_string()),
                 fallback_active: coord.transport_stats().is_fallback_active(),
-                // Self-healing
-                flap_damping_active: false, // populated when self_heal wired into event loop
+                // Self-healing — from live node flap detector
+                flap_damping_active: coord.flap_damping_active().await.unwrap_or(false),
                 rate_limit_rejections: {
                     let rl = bridge_state.rate_limiter.lock().unwrap();
                     rl.rejections
@@ -1645,5 +1673,72 @@ async fn retry_due(coord: &MiasmaCoordinator, queue: &Arc<Mutex<ReplicationQueue
         }
         // Marking as replicated happens via the rep_success_rx channel
         // when the Kademlia PutRecord(Ok) event fires in the node event loop.
+    }
+}
+
+// ─── Periodic environment detection ──────────────────────────────────────────
+
+/// Periodically refreshes the network environment snapshot by observing
+/// transport outcomes and NAT status from the live coordinator.
+///
+/// Runs every 5 minutes. Updates the shared `EnvironmentSnapshot` that
+/// DaemonStatus and CLI diagnostics read from.
+async fn environment_detector_loop(
+    coord: Arc<MiasmaCoordinator>,
+    env_snapshot: Arc<Mutex<EnvironmentSnapshot>>,
+) {
+    use crate::network::environment::{EnvironmentSnapshot as EnvSnap, NetworkCapabilities};
+    use crate::transport::payload::PayloadTransportKind;
+
+    let mut interval = tokio::time::interval(Duration::from_secs(300)); // 5 minutes
+    interval.tick().await; // skip immediate first tick
+
+    loop {
+        interval.tick().await;
+
+        // Derive capabilities from observed transport outcomes
+        let stats = coord.transport_stats();
+        let nat_reachable = coord.nat_publicly_reachable().await.unwrap_or(false);
+
+        let mut caps = NetworkCapabilities::default();
+
+        // If DirectLibp2p (QUIC) has failures and no successes, UDP may be blocked
+        let (quic_ok, quic_fail) = stats.kind_stats(PayloadTransportKind::DirectLibp2p);
+        if quic_fail > 0 && quic_ok == 0 {
+            caps.udp_available = false;
+        }
+
+        // If WSS has failures and no successes while others work, port filtering possible
+        let (wss_ok, wss_fail) = stats.kind_stats(PayloadTransportKind::WssTunnel);
+        if wss_fail > 0 && wss_ok == 0 {
+            caps.port_443_available = false;
+        }
+
+        // NAT not reachable with no UDP suggests full-tunnel VPN or heavy filtering
+        if !nat_reachable && !caps.udp_available {
+            // Could be VPN or filtered — check if any transport succeeded
+            let (tcp_ok, _) = stats.kind_stats(PayloadTransportKind::TcpDirect);
+            if tcp_ok > 0 || wss_ok > 0 {
+                // TCP works but UDP doesn't — likely filtered or VPN
+                caps.tcp_high_ports_available = tcp_ok > 0;
+            }
+        }
+
+        let new_snap = EnvSnap::from_capabilities(caps);
+
+        // Only update if environment changed
+        let should_log = {
+            let current = env_snapshot.lock().unwrap();
+            current.environment != new_snap.environment
+        };
+        if should_log {
+            info!(
+                old = %env_snapshot.lock().unwrap().environment,
+                new = %new_snap.environment,
+                "network environment changed"
+            );
+        }
+
+        *env_snapshot.lock().unwrap() = new_snap;
     }
 }
