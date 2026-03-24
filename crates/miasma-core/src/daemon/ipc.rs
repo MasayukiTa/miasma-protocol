@@ -41,6 +41,16 @@ pub enum ControlRequest {
         data_shards: u8,
         total_shards: u8,
     },
+    /// Dissolve a file from `file_path` into shares and publish a DHT record.
+    ///
+    /// The daemon reads the file directly — no IPC size limit.  Uses
+    /// streaming per-segment dissolution so files >64 MiB do not require
+    /// full-file RAM buffering.  Preferred over `Publish` for large files.
+    PublishFile {
+        file_path: String,
+        data_shards: u8,
+        total_shards: u8,
+    },
     /// Retrieve content by MID string from the P2P network.
     Get {
         mid: String,
