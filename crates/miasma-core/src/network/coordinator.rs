@@ -1545,6 +1545,18 @@ impl MiasmaCoordinator {
     ) -> Vec<(PeerId, Vec<libp2p::Multiaddr>)> {
         self.dht_handle.connected_peers().await.unwrap_or_default()
     }
+
+    /// Get a live connection health snapshot from the node's health monitor.
+    pub async fn health_snapshot(
+        &self,
+    ) -> Result<super::connection_health::ConnectionHealthSnapshot, MiasmaError> {
+        self.dht_handle.health_snapshot().await
+    }
+
+    /// Check whether network flap damping is currently active.
+    pub async fn flap_damping_active(&self) -> Result<bool, MiasmaError> {
+        self.dht_handle.flap_damping_active().await
+    }
 }
 
 // ─── RelayRewritingDhtExecutor ─────────────────────────────────────────────

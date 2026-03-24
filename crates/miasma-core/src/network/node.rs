@@ -644,6 +644,14 @@ pub enum DhtCommand {
     GetConnectedPeers {
         reply: oneshot::Sender<Vec<(PeerId, Vec<Multiaddr>)>>,
     },
+    /// Get connection health snapshot from the live health monitor.
+    GetHealthSnapshot {
+        reply: oneshot::Sender<super::connection_health::ConnectionHealthSnapshot>,
+    },
+    /// Get whether flap damping is currently active.
+    GetFlapDamping {
+        reply: oneshot::Sender<bool>,
+    },
 }
 
 /// Sender side of the DHT command channel.
@@ -1098,6 +1106,28 @@ impl DhtHandle {
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
         self.recv_reply(rx, "connected_peers").await
     }
+
+    /// Get a live connection health snapshot from the node's health monitor.
+    pub async fn health_snapshot(
+        &self,
+    ) -> Result<super::connection_health::ConnectionHealthSnapshot, MiasmaError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::GetHealthSnapshot { reply: tx })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
+        self.recv_reply(rx, "health_snapshot").await
+    }
+
+    /// Check whether network flap damping is currently active.
+    pub async fn flap_damping_active(&self) -> Result<bool, MiasmaError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::GetFlapDamping { reply: tx })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
+        self.recv_reply(rx, "flap_damping").await
+    }
 }
 
 // ─── Share-exchange command channel ──────────────────────────────────────────
@@ -1283,6 +1313,12 @@ pub struct MiasmaNode {
     /// Optional data directory for handling directed sharing Confirm requests.
     /// When set, the node can verify challenge codes against the local inbox.
     directed_data_dir: Option<PathBuf>,
+
+    // ── Bridge superhardening: connection health + flap detection ──────
+    /// Connection health monitor — peer scoring, dial backoff, stale pruning.
+    health_monitor: super::connection_health::ConnectionHealthMonitor,
+    /// Network flap detector — suppresses reconnection storms.
+    flap_detector: crate::daemon::self_heal::NetworkFlapDetector,
 }
 
 impl MiasmaNode {
@@ -1413,6 +1449,8 @@ impl MiasmaNode {
             ),
             pending_directed_replies: HashMap::new(),
             directed_data_dir: None,
+            health_monitor: super::connection_health::ConnectionHealthMonitor::default(),
+            flap_detector: crate::daemon::self_heal::NetworkFlapDetector::default(),
         })
     }
 
@@ -1870,6 +1908,13 @@ impl MiasmaNode {
                     .collect();
                 let _ = reply.send(peers);
             }
+            DhtCommand::GetHealthSnapshot { reply } => {
+                let peer_count = self.swarm.connected_peers().count();
+                let _ = reply.send(self.health_monitor.snapshot(peer_count));
+            }
+            DhtCommand::GetFlapDamping { reply } => {
+                let _ = reply.send(self.flap_detector.is_damping());
+            }
         }
     }
 
@@ -1910,6 +1955,11 @@ impl MiasmaNode {
             self.routing_table.observe_network_size(peer_count);
             if let Some(new_diff) = self.routing_table.maybe_adjust_difficulty() {
                 info!("routing.difficulty_changed bits={new_diff}");
+            }
+            // Prune stale peers and expired backoff entries.
+            let pruned = self.health_monitor.prune_stale_peers();
+            if pruned > 0 {
+                debug!("health.pruned_stale_peers count={pruned}");
             }
         }
         // Epoch rotation check (every ~1000 events).
@@ -2020,6 +2070,11 @@ impl MiasmaNode {
             SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                 debug!("Connected: {peer_id}");
                 self.peer_registry.on_connected(peer_id);
+                // Track connection success in health monitor.
+                self.health_monitor.record_peer_success(
+                    &peer_id.to_string(),
+                    std::time::Duration::from_millis(0), // No latency for connection events
+                );
                 if let Some(tx) = &self.topology_tx {
                     let _ = tx.try_send(super::types::TopologyEvent::PeerConnected { peer_id });
                 }
@@ -2029,6 +2084,9 @@ impl MiasmaNode {
                 self.peer_registry.on_disconnected(&peer_id);
                 self.routing_table.remove_peer(&peer_id);
                 self.pending_peer_addrs.remove(&peer_id);
+                // Track disconnection in health monitor and flap detector.
+                self.health_monitor.record_peer_failure(&peer_id.to_string());
+                self.flap_detector.record_disconnect();
                 if let Some(tx) = &self.topology_tx {
                     let _ = tx.try_send(super::types::TopologyEvent::PeerDisconnected { peer_id });
                 }
