@@ -157,9 +157,18 @@ impl fmt::Debug for ShadowsocksPayloadTransport {
     }
 }
 
-/// Shadowsocks transport is always compiled. Actual network calls through
-/// the Shadowsocks tunnel are pending integration of the `shadowsocks` crate;
-/// until then, `fetch_share` returns a clean error explaining the status.
+/// Shadowsocks transport routes share fetches through a Shadowsocks SOCKS5
+/// local proxy (ss-local). The user runs ss-local pointing at their SS server,
+/// and Miasma connects through it to the peer's WSS endpoint.
+///
+/// # How it works
+/// 1. Connect to ss-local's SOCKS5 interface (server address in config)
+/// 2. SOCKS5 CONNECT to the peer's WSS address through the SS tunnel
+/// 3. WebSocket upgrade over the proxied stream
+/// 4. Standard bincode ShareFetchRequest → ShareFetchResponse
+///
+/// This approach reuses the proven WSS protocol — the peer doesn't know
+/// the client is using Shadowsocks.
 #[async_trait::async_trait]
 impl super::payload::PayloadTransport for ShadowsocksPayloadTransport {
     fn kind(&self) -> PayloadTransportKind {
@@ -170,23 +179,62 @@ impl super::payload::PayloadTransport for ShadowsocksPayloadTransport {
     async fn fetch_share(
         &self,
         peer_addr: &str,
-        _mid_digest: [u8; 32],
-        _slot_index: u16,
-        _segment_index: u32,
+        mid_digest: [u8; 32],
+        slot_index: u16,
+        segment_index: u32,
     ) -> Result<Option<crate::share::MiasmaShare>, PayloadTransportError> {
-        let server = self.config.server.as_deref().unwrap_or("(not configured)");
-        // When the `shadowsocks` crate is added:
-        // 1. Connect to SS server
-        // 2. Request connection to peer_addr through SS
-        // 3. Send ShareFetchRequest
-        // 4. Read ShareFetchResponse
-        Err(PayloadTransportError {
+        let server = self.config.server.as_deref().ok_or(PayloadTransportError {
             phase: TransportPhase::Session,
-            message: format!(
-                "Shadowsocks transport to {peer_addr} via {server}: \
-                 not yet connected (requires 'shadowsocks' crate feature)"
-            ),
-        })
+            message: "Shadowsocks server not configured".to_string(),
+        })?;
+
+        let timeout_dur = self.timeout();
+
+        // 1. Connect to ss-local's SOCKS5 interface
+        let (host, port) = super::websocket::parse_host_port(peer_addr, 443);
+        let proxy_stream = tokio::time::timeout(
+            timeout_dur,
+            tokio_socks::tcp::Socks5Stream::connect(server, (host.as_str(), port)),
+        )
+        .await
+        .map_err(|_| PayloadTransportError {
+            phase: TransportPhase::Session,
+            message: format!("Shadowsocks SOCKS5 connect timeout to {server}"),
+        })?
+        .map_err(|e| PayloadTransportError {
+            phase: TransportPhase::Session,
+            message: format!("Shadowsocks SOCKS5 connect via {server}: {e}"),
+        })?;
+
+        let tcp_stream = proxy_stream.into_inner();
+
+        // 2. WebSocket upgrade over the proxied stream
+        let ws_url = format!("ws://{host}:{port}/static/v2/bundle.js");
+        let (ws_stream, _) = tokio::time::timeout(
+            timeout_dur,
+            tokio_tungstenite::client_async(&ws_url, tcp_stream),
+        )
+        .await
+        .map_err(|_| PayloadTransportError {
+            phase: TransportPhase::Session,
+            message: format!("Shadowsocks WS upgrade timeout to {peer_addr}"),
+        })?
+        .map_err(|e| PayloadTransportError {
+            phase: TransportPhase::Session,
+            message: format!("Shadowsocks WS upgrade to {peer_addr}: {e}"),
+        })?;
+
+        // 3. Standard WSS request-response
+        super::websocket::wss_request_response(
+            ws_stream,
+            mid_digest,
+            slot_index,
+            segment_index,
+            timeout_dur,
+            timeout_dur,
+            16 * 1024 * 1024,
+        )
+        .await
     }
 }
 
@@ -289,11 +337,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transport_returns_error() {
+    async fn transport_returns_connection_error() {
         let c = ShadowsocksConfig {
             enabled: true,
-            server: Some("1.2.3.4:8388".to_string()),
+            // Use a non-routable address to trigger fast connection error
+            server: Some("127.0.0.1:1".to_string()),
             password: Some("secret".to_string()),
+            timeout_secs: 2,
             ..Default::default()
         };
         let t = ShadowsocksPayloadTransport::new(c).unwrap();

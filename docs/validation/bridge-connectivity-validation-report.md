@@ -126,8 +126,8 @@ Previous total: 569. New tests added: **106** (68 unit + 13 adversarial + 25 Pha
 
 ## Known Hard Blockers
 
-1. **Shadowsocks network calls require `shadowsocks` crate**: Config, validation, transport trait, and daemon wiring are complete. Actual AEAD tunnel network calls pending crate addition. Always compiled — runtime `enabled` toggle.
-2. **Tor network calls require `arti-client` crate**: Same status. External SOCKS5 mode can use existing proxy infrastructure immediately. Always compiled — runtime `enabled` toggle.
+1. **Shadowsocks AEAD tunnel**: External SOCKS5 mode (ss-local proxy) is now LIVE — real network calls through the proxy. Native AEAD-2022 cipher tunnel (without ss-local) would require the `shadowsocks` crate.
+2. **Tor embedded mode**: External SOCKS5 mode (standalone Tor/Tor Browser) is now LIVE — real network calls through Tor circuits. Embedded Arti mode requires the `arti-client` crate.
 3. **Domain fronting not implemented**: Would require CDN cooperation or cloud function intermediary.
 4. **Meek bridges not implemented**: Would complement Tor bridges for extreme censorship.
 5. **Streaming dissolution for very large files**: Files >100MB held in RAM during encryption.
@@ -137,20 +137,21 @@ Previous total: 569. New tests added: **106** (68 unit + 13 adversarial + 25 Pha
 | Component | Status | Details |
 |---|---|---|
 | RateLimiter | **WIRED** | Token-bucket in HTTP bridge `handle()`, origin validation, 429 responses |
-| ConnectionHealthMonitor | **WIRED** | Shared state in DaemonServer, live metrics in DaemonStatus |
-| EnvironmentDetector | **WIRED** | Shared snapshot in DaemonServer, live in DaemonStatus |
-| Shadowsocks transport | **WIRED** | Added to fallback ladder when `enabled=true` in config |
-| Tor transport | **WIRED** | Added to fallback ladder when `enabled=true` in config |
-| DaemonStatus fields | **LIVE** | All 14 bridge fields populated from live state |
+| ConnectionHealthMonitor | **LIVE** | Wired into node swarm events (connect/disconnect), periodic pruning, live DaemonStatus via coordinator query |
+| EnvironmentDetector | **LIVE** | Periodic 5min task in daemon, derives capabilities from transport outcomes, updates shared snapshot |
+| NetworkFlapDetector | **LIVE** | Wired into node disconnect events, damping active in DaemonStatus |
+| Shadowsocks transport | **LIVE** | Real SOCKS5 proxy connection through ss-local → WSS protocol to peer |
+| Tor transport | **LIVE** | Real SOCKS5 proxy connection through Tor → WSS protocol to peer (external mode) |
+| DaemonStatus fields | **LIVE** | All 14 bridge fields from live state + coordinator queries |
 
 ---
 
 ## Next Milestone Recommendation
 
-**Bridge Connectivity Phase 3: Real Network Integration**
-1. Add `shadowsocks` crate — complete the AEAD tunnel network calls
-2. Add `arti-client` crate — complete embedded Tor circuit establishment
-3. Wire `ConnectionHealthMonitor` into node swarm events (dial success/failure callbacks)
-4. Wire `EnvironmentDetector` as periodic task in daemon run loop (5min interval)
-5. Real-network validation: VPN, filtered network, Shadowsocks server, Tor
+**Bridge Connectivity Phase 4: Real-Network Validation & Native Tunnels**
+1. Validate Shadowsocks over real ss-local + SS server
+2. Validate Tor external mode over real Tor daemon
+3. Add `shadowsocks` crate for native AEAD-2022 tunnel (no ss-local dependency)
+4. Add `arti-client` crate for embedded Tor (no standalone Tor dependency)
+5. Real-network validation: VPN, filtered network, nation-state DPI
 6. Domain fronting investigation (CDN-dependent, may not be viable)

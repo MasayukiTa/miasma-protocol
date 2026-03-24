@@ -185,6 +185,17 @@ impl fmt::Debug for TorPayloadTransport {
     }
 }
 
+/// Tor transport routes share fetches through the Tor SOCKS5 proxy.
+///
+/// # External mode
+/// 1. Connect to Tor's SOCKS5 interface (127.0.0.1:9050 by default)
+/// 2. SOCKS5 CONNECT to the peer's WSS address through Tor circuits
+/// 3. WebSocket upgrade over the anonymized stream
+/// 4. Standard bincode ShareFetchRequest → ShareFetchResponse
+///
+/// # Embedded mode
+/// Returns a clear error — requires `arti-client` crate (not yet integrated).
+/// Users should use external mode with Tor Browser or standalone Tor.
 #[async_trait::async_trait]
 impl super::payload::PayloadTransport for TorPayloadTransport {
     fn kind(&self) -> PayloadTransportKind {
@@ -195,35 +206,76 @@ impl super::payload::PayloadTransport for TorPayloadTransport {
     async fn fetch_share(
         &self,
         peer_addr: &str,
-        _mid_digest: [u8; 32],
-        _slot_index: u16,
-        _segment_index: u32,
+        mid_digest: [u8; 32],
+        slot_index: u16,
+        segment_index: u32,
     ) -> Result<Option<crate::share::MiasmaShare>, PayloadTransportError> {
         match &self.mode {
             TorMode::External { socks_addr } => {
-                // When integrated:
-                // 1. Connect to Tor SOCKS5 proxy
-                // 2. Request connection to peer_addr through Tor
-                // 3. Send ShareFetchRequest over the anonymized stream
-                // 4. Read ShareFetchResponse
-                Err(PayloadTransportError {
+                let timeout_dur = self.circuit_timeout();
+
+                // 1. Connect to Tor's SOCKS5 interface
+                let (host, port) = super::websocket::parse_host_port(peer_addr, 443);
+                let proxy_stream = tokio::time::timeout(
+                    timeout_dur,
+                    tokio_socks::tcp::Socks5Stream::connect(
+                        socks_addr.as_str(),
+                        (host.as_str(), port),
+                    ),
+                )
+                .await
+                .map_err(|_| PayloadTransportError {
                     phase: TransportPhase::Session,
                     message: format!(
-                        "Tor (external SOCKS5 at {socks_addr}) to {peer_addr}: \
-                         not yet connected (integration pending)"
+                        "Tor SOCKS5 connect timeout to {socks_addr} \
+                         (is Tor running?)"
                     ),
-                })
+                })?
+                .map_err(|e| PayloadTransportError {
+                    phase: TransportPhase::Session,
+                    message: format!(
+                        "Tor SOCKS5 connect via {socks_addr}: {e}"
+                    ),
+                })?;
+
+                let tcp_stream = proxy_stream.into_inner();
+
+                // 2. WebSocket upgrade over the Tor-anonymized stream
+                let ws_url = format!("ws://{host}:{port}/static/v2/bundle.js");
+                let (ws_stream, _) = tokio::time::timeout(
+                    timeout_dur,
+                    tokio_tungstenite::client_async(&ws_url, tcp_stream),
+                )
+                .await
+                .map_err(|_| PayloadTransportError {
+                    phase: TransportPhase::Session,
+                    message: format!("Tor WS upgrade timeout to {peer_addr}"),
+                })?
+                .map_err(|e| PayloadTransportError {
+                    phase: TransportPhase::Session,
+                    message: format!("Tor WS upgrade to {peer_addr}: {e}"),
+                })?;
+
+                // 3. Standard WSS request-response
+                super::websocket::wss_request_response(
+                    ws_stream,
+                    mid_digest,
+                    slot_index,
+                    segment_index,
+                    timeout_dur,
+                    timeout_dur,
+                    16 * 1024 * 1024,
+                )
+                .await
             }
             TorMode::Embedded => {
-                // When Arti is integrated:
-                // 1. Bootstrap TorClient (lazy, first use)
-                // 2. client.connect((peer_host, peer_port))
-                // 3. Run share-fetch protocol over anonymized stream
+                // Embedded Arti requires the `arti-client` crate.
+                // Users should use external mode with Tor Browser or standalone Tor.
                 Err(PayloadTransportError {
                     phase: TransportPhase::Session,
                     message: format!(
-                        "Tor (embedded Arti) to {peer_addr}: \
-                         requires 'tor' crate feature (arti-client)"
+                        "Tor embedded Arti to {peer_addr}: not available. \
+                         Use external mode (set use_embedded=false, run Tor separately)"
                     ),
                 })
             }
@@ -363,18 +415,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transport_external_returns_error() {
+    async fn transport_external_returns_connection_error() {
         let c = TorConfig {
             enabled: true,
             use_embedded: false,
-            socks_port: 9050,
+            // Use non-routable port to trigger fast connection error
+            socks_port: 1,
+            circuit_timeout_secs: 2,
             ..Default::default()
         };
         let t = TorPayloadTransport::new(c).unwrap();
         use super::super::payload::PayloadTransport;
         let result = t.fetch_share("peer:9000", [0u8; 32], 0, 0).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().message.contains("SOCKS5"));
+        let err = result.unwrap_err();
+        assert_eq!(err.phase, TransportPhase::Session);
+        assert!(err.message.contains("Tor"));
     }
 
     #[tokio::test]

@@ -385,6 +385,15 @@ impl TransportStats {
         *self.last_selected.lock().unwrap()
     }
 
+    /// Get (successes, failures) for a given transport kind.
+    pub fn kind_stats(&self, kind: PayloadTransportKind) -> (u64, u64) {
+        let c = self.counters(kind);
+        (
+            c.success.load(Ordering::Relaxed),
+            c.failure.load(Ordering::Relaxed),
+        )
+    }
+
     /// Whether a non-default transport was last selected (fallback active).
     pub fn is_fallback_active(&self) -> bool {
         match *self.last_selected.lock().unwrap() {

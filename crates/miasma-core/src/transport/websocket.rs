@@ -599,7 +599,10 @@ fn build_client_tls_connector(
 }
 
 /// Perform the WebSocket request-response cycle over any stream type.
-async fn wss_request_response<S>(
+///
+/// Exposed as `pub(crate)` so that Shadowsocks and Tor transports can
+/// reuse the same WSS protocol over their proxied streams.
+pub(crate) async fn wss_request_response<S>(
     ws_stream: tokio_tungstenite::WebSocketStream<S>,
     mid_digest: [u8; 32],
     slot_index: u16,
@@ -691,7 +694,7 @@ where
 
 /// Parse "host:port" from a peer address string.
 /// Falls back to `default_port` if no port is present.
-fn parse_host_port(addr: &str, default_port: u16) -> (String, u16) {
+pub(crate) fn parse_host_port(addr: &str, default_port: u16) -> (String, u16) {
     // Strip any scheme prefix.
     let stripped = addr
         .strip_prefix("ws://")
