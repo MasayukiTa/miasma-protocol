@@ -861,6 +861,7 @@ pub(crate) async fn process_request(
             );
             let outcome = coord.outcome_metrics().await.unwrap_or_default();
             let ret_stats = coord.retrieval_stats();
+            let reconn_metrics = coord.reconnection_metrics().await.unwrap_or_default();
 
             ControlResponse::Status(DaemonStatus {
                 peer_id: coord.peer_id().to_string(),
@@ -1008,6 +1009,12 @@ pub(crate) async fn process_request(
                     let env = bridge_state.env_snapshot.lock().unwrap();
                     env.capabilities.vpn_detected
                 },
+                // ── Reconnection metrics (single fetch) ──────────────────
+                reconnection_attempts: reconn_metrics.attempts,
+                reconnection_successes: reconn_metrics.successes,
+                reconnection_failures: reconn_metrics.failures,
+                reconnection_circuit_breaker_trips: reconn_metrics.circuit_breaker_trips,
+                reconnection_recovery_actions: reconn_metrics.recovery_actions_triggered,
             })
         }
 

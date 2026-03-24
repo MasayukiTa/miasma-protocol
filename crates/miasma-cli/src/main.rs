@@ -898,6 +898,19 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
             if !s.partial_failures.is_empty() {
                 println!("  Partial failures:      {}", s.partial_failures.join(", "));
             }
+            if s.reconnection_attempts > 0 {
+                println!();
+                println!("Reconnection:");
+                println!("  Attempts:              {}", s.reconnection_attempts);
+                println!("  Successes:             {}", s.reconnection_successes);
+                println!("  Failures:              {}", s.reconnection_failures);
+                if s.reconnection_circuit_breaker_trips > 0 {
+                    println!("  Circuit breaker trips: {}", s.reconnection_circuit_breaker_trips);
+                }
+                if s.reconnection_recovery_actions > 0 {
+                    println!("  Recovery actions:      {}", s.reconnection_recovery_actions);
+                }
+            }
 
             // Censorship resistance transports
             if s.shadowsocks_configured || s.tor_configured {

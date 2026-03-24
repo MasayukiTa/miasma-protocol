@@ -444,6 +444,13 @@ impl MiasmaCoordinator {
             offset += filled as u64;
             seg_idx += 1;
 
+            if file_len > 0 {
+                let pct = (offset as f64 / file_len as f64 * 100.0).min(100.0);
+                tracing::info!(
+                    "Publishing: segment {seg_idx} done, {offset}/{file_len} bytes ({pct:.0}%)"
+                );
+            }
+
             if filled < segment_size {
                 break; // Last segment was shorter than full.
             }
@@ -1651,6 +1658,13 @@ impl MiasmaCoordinator {
     /// Get current partial failure conditions (relay-only, no peers, etc.).
     pub async fn partial_failures(&self) -> Result<Vec<String>, MiasmaError> {
         self.dht_handle.partial_failures().await
+    }
+
+    /// Get reconnection metrics from the live node.
+    pub async fn reconnection_metrics(
+        &self,
+    ) -> Result<crate::daemon::self_heal::ReconnectionMetrics, MiasmaError> {
+        self.dht_handle.reconnection_metrics().await
     }
 }
 

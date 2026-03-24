@@ -656,6 +656,10 @@ pub enum DhtCommand {
     GetPartialFailures {
         reply: oneshot::Sender<Vec<String>>,
     },
+    /// Get reconnection metrics snapshot.
+    GetReconnectionMetrics {
+        reply: oneshot::Sender<crate::daemon::self_heal::ReconnectionMetrics>,
+    },
 }
 
 /// Sender side of the DHT command channel.
@@ -1142,6 +1146,18 @@ impl DhtHandle {
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
         self.recv_reply(rx, "partial_failures").await
     }
+
+    /// Get reconnection metrics snapshot.
+    pub async fn reconnection_metrics(
+        &self,
+    ) -> Result<crate::daemon::self_heal::ReconnectionMetrics, MiasmaError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::GetReconnectionMetrics { reply: tx })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
+        self.recv_reply(rx, "reconnection_metrics").await
+    }
 }
 
 // ─── Share-exchange command channel ──────────────────────────────────────────
@@ -1335,6 +1351,12 @@ pub struct MiasmaNode {
     flap_detector: crate::daemon::self_heal::NetworkFlapDetector,
     /// Partial failure detector — relay-only mode, stale peers, no peers.
     partial_failure: crate::daemon::self_heal::PartialFailureDetector,
+    /// Reconnection scheduler — per-peer backoff, circuit breaker.
+    reconnection_scheduler: crate::daemon::self_heal::ReconnectionScheduler,
+    /// Reconnection metrics — attempt/success/failure counters.
+    reconnection_metrics: crate::daemon::self_heal::ReconnectionMetrics,
+    /// Remembered bootstrap peers for recovery re-dialing.
+    bootstrap_peers: Vec<(PeerId, Multiaddr)>,
 }
 
 impl MiasmaNode {
@@ -1468,6 +1490,9 @@ impl MiasmaNode {
             health_monitor: super::connection_health::ConnectionHealthMonitor::default(),
             flap_detector: crate::daemon::self_heal::NetworkFlapDetector::default(),
             partial_failure: crate::daemon::self_heal::PartialFailureDetector::default(),
+            reconnection_scheduler: crate::daemon::self_heal::ReconnectionScheduler::default(),
+            reconnection_metrics: crate::daemon::self_heal::ReconnectionMetrics::default(),
+            bootstrap_peers: Vec::new(),
         })
     }
 
@@ -1543,6 +1568,8 @@ impl MiasmaNode {
             .behaviour_mut()
             .kademlia
             .add_address(&peer_id, addr.clone());
+        // Remember for recovery re-dialing.
+        self.bootstrap_peers.push((peer_id, addr.clone()));
         // Explicit dial so the QUIC connection is in flight from loop start.
         let p2p_addr = addr.clone().with(libp2p::multiaddr::Protocol::P2p(peer_id));
         if let Err(e) = self.swarm.dial(p2p_addr) {
@@ -1943,6 +1970,9 @@ impl MiasmaNode {
                 );
                 let _ = reply.send(failures.iter().map(|f| f.to_string()).collect());
             }
+            DhtCommand::GetReconnectionMetrics { reply } => {
+                let _ = reply.send(self.reconnection_metrics.clone());
+            }
         }
     }
 
@@ -2000,6 +2030,45 @@ impl MiasmaNode {
             if !failures.is_empty() {
                 for f in &failures {
                     warn!("partial_failure.detected: {f}");
+                }
+                // Dispatch recovery actions for detected partial failures.
+                let actions = crate::daemon::self_heal::recovery_actions_for(&failures);
+                for action in &actions {
+                    debug!("recovery_action.dispatched: {action}");
+                    self.reconnection_metrics.record_recovery_action();
+                    match action {
+                        crate::daemon::self_heal::RecoveryAction::ReDialBootstrap => {
+                            // Re-dial bootstrap peers to discover new peers.
+                            if !self.flap_detector.is_damping() {
+                                for (peer_id, addr) in &self.bootstrap_peers {
+                                    if self.reconnection_scheduler.should_attempt(&peer_id.to_bytes()) {
+                                        let p2p = addr.clone().with(
+                                            libp2p::multiaddr::Protocol::P2p(*peer_id),
+                                        );
+                                        let _ = self.swarm.dial(p2p);
+                                        self.reconnection_metrics.record_attempt();
+                                    }
+                                }
+                            }
+                        }
+                        _ => {
+                            // Other actions logged for diagnostics; full wiring TBD.
+                        }
+                    }
+                }
+            }
+            // Process scheduled reconnection attempts (respect flap damping).
+            if !self.flap_detector.is_damping() {
+                let due = self.reconnection_scheduler.peers_due_for_reconnect();
+                for peer_bytes in due.iter().take(3) { // At most 3 redials per tick
+                    if let Ok(peer_id) = libp2p::PeerId::from_bytes(peer_bytes) {
+                        // Dial by PeerId — libp2p resolves addresses from Kademlia routing table.
+                        debug!("reconnection_scheduler.redial peer={peer_id}");
+                        if let Err(e) = self.swarm.dial(peer_id) {
+                            debug!("reconnection_scheduler.redial_failed peer={peer_id}: {e}");
+                        }
+                        self.reconnection_metrics.record_attempt();
+                    }
                 }
             }
         }
@@ -2116,6 +2185,9 @@ impl MiasmaNode {
                     &peer_id.to_string(),
                     std::time::Duration::from_millis(0), // No latency for connection events
                 );
+                // Reset reconnection backoff on successful connection.
+                self.reconnection_scheduler.record_success(&peer_id.to_bytes());
+                self.reconnection_metrics.record_success();
                 if let Some(tx) = &self.topology_tx {
                     let _ = tx.try_send(super::types::TopologyEvent::PeerConnected { peer_id });
                 }
@@ -2128,6 +2200,12 @@ impl MiasmaNode {
                 // Track disconnection in health monitor and flap detector.
                 self.health_monitor.record_peer_failure(&peer_id.to_string());
                 self.flap_detector.record_disconnect();
+                // Schedule reconnection with backoff.
+                let tripped = self.reconnection_scheduler.record_failure(&peer_id.to_bytes());
+                if tripped {
+                    self.reconnection_metrics.record_circuit_breaker();
+                    debug!("Circuit breaker tripped for peer {peer_id}");
+                }
                 if let Some(tx) = &self.topology_tx {
                     let _ = tx.try_send(super::types::TopologyEvent::PeerDisconnected { peer_id });
                 }
@@ -2193,6 +2271,15 @@ impl MiasmaNode {
                     self.health_monitor.record_peer_failure(&peer_id.to_string());
                     // Apply dial backoff for the failed peer.
                     self.health_monitor.backoff.record_failure(&peer_id.to_string());
+                    // Track in reconnection scheduler.
+                    self.reconnection_metrics.record_attempt();
+                    let tripped = self.reconnection_scheduler.record_failure(&peer_id.to_bytes());
+                    if tripped {
+                        self.reconnection_metrics.record_circuit_breaker();
+                        debug!("Circuit breaker tripped for peer {peer_id}");
+                    } else {
+                        self.reconnection_metrics.record_failure();
+                    }
                 }
             }
             SwarmEvent::IncomingConnectionError { error, .. } => {

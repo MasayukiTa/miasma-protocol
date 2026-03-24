@@ -174,12 +174,33 @@ pub const TRANSPORT_NAME: &str = "shadowsocks";
 
 // ─── Native AEAD-2022 tunnel ────────────────────────────────────────────────
 
+/// Connect to a Shadowsocks server by cipher name string.
+///
+/// Convenience wrapper that resolves the cipher string and delegates to
+/// [`connect_native`]. Returns an error if the cipher is unknown.
+pub async fn connect_native_by_cipher(
+    server: &str,
+    target_host: &str,
+    target_port: u16,
+    key: &[u8],
+    cipher: &str,
+    timeout: Duration,
+) -> Result<tokio::io::DuplexStream, PayloadTransportError> {
+    let kind = resolve_cipher_kind(cipher).ok_or_else(|| {
+        PayloadTransportError {
+            phase: TransportPhase::Session,
+            message: format!("unknown SS cipher: {cipher}"),
+        }
+    })?;
+    connect_native(server, target_host, target_port, key, kind, timeout).await
+}
+
 /// Connect to a Shadowsocks server using native AEAD-2022 and return a
 /// bidirectional stream tunneled to `target_host:target_port`.
 ///
 /// Uses `tokio::io::duplex` + spawned relay tasks to provide an
 /// `AsyncRead + AsyncWrite` interface over the encrypted chunked protocol.
-async fn connect_native(
+pub async fn connect_native(
     server: &str,
     target_host: &str,
     target_port: u16,
@@ -211,16 +232,12 @@ async fn connect_native(
     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut client_salt);
 
     // --- Send client handshake ---
-
-    // 1. Write salt (plaintext)
-    tcp.write_all(&client_salt).await.map_err(|e| PayloadTransportError {
-        phase: TransportPhase::Session,
-        message: format!("SS write salt: {e}"),
-    })?;
+    // Buffer the entire request header (salt + encrypted fixed + encrypted variable)
+    // into a single write to avoid TCP segmentation that confuses some SS servers.
 
     let mut write_cipher = TcpCipher::new(kind, key, &client_salt);
 
-    // 2. Build variable header (to know its length for fixed header)
+    // 1. Build variable header (to know its length for fixed header)
     let mut var_header = Vec::new();
     if let Ok(ipv4) = target_host.parse::<std::net::Ipv4Addr>() {
         var_header.push(0x01);
@@ -252,7 +269,7 @@ async fn connect_native(
         &mut var_header[padding_start..],
     );
 
-    // 3. Build and encrypt fixed header: type(1) + timestamp(8) + length(2) = 11 bytes
+    // 2. Build and encrypt fixed header: type(1) + timestamp(8) + length(2) = 11 bytes
     let var_header_len = var_header.len() as u16;
     let mut fixed = Vec::with_capacity(11 + tag_len);
     fixed.push(0x00); // client request type
@@ -264,19 +281,20 @@ async fn connect_native(
     fixed.extend_from_slice(&var_header_len.to_be_bytes());
     fixed.resize(11 + tag_len, 0);
     write_cipher.encrypt_packet(&mut fixed);
-    tcp.write_all(&fixed).await.map_err(|e| PayloadTransportError {
-        phase: TransportPhase::Session,
-        message: format!("SS write fixed header: {e}"),
-    })?;
 
-    // 4. Encrypt and write variable header
+    // 3. Encrypt variable header
     var_header.resize(var_header.len() + tag_len, 0);
     write_cipher.encrypt_packet(&mut var_header);
-    tcp.write_all(&var_header).await.map_err(|e| PayloadTransportError {
-        phase: TransportPhase::Session,
-        message: format!("SS write var header: {e}"),
-    })?;
 
+    // 4. Send salt + fixed header + variable header in ONE write
+    let mut handshake_buf = Vec::with_capacity(client_salt.len() + fixed.len() + var_header.len());
+    handshake_buf.extend_from_slice(&client_salt);
+    handshake_buf.extend_from_slice(&fixed);
+    handshake_buf.extend_from_slice(&var_header);
+    tcp.write_all(&handshake_buf).await.map_err(|e| PayloadTransportError {
+        phase: TransportPhase::Session,
+        message: format!("SS write handshake: {e}"),
+    })?;
     tcp.flush().await.map_err(|e| PayloadTransportError {
         phase: TransportPhase::Session,
         message: format!("SS flush handshake: {e}"),
@@ -372,9 +390,11 @@ async fn ss_read_relay(
 
     // 1. Read server salt
     let mut server_salt = vec![0u8; salt_len];
-    if tcp_read.read_exact(&mut server_salt).await.is_err() {
+    if let Err(e) = tcp_read.read_exact(&mut server_salt).await {
+        warn!("SS read relay: failed to read server salt ({salt_len} bytes): {e}");
         return;
     }
+    debug!("SS read relay: got server salt ({salt_len} bytes)");
 
     let mut read_cipher = TcpCipher::new(kind, key, &server_salt);
 
@@ -382,25 +402,28 @@ async fn ss_read_relay(
     // Response fixed header: type(1) + timestamp(8) + request_salt(salt_len) + length(2)
     let fixed_plaintext_len = 1 + 8 + salt_len + 2;
     let mut fixed_buf = vec![0u8; fixed_plaintext_len + tag_len];
-    if tcp_read.read_exact(&mut fixed_buf).await.is_err() {
+    if let Err(e) = tcp_read.read_exact(&mut fixed_buf).await {
+        warn!("SS read relay: failed to read fixed header ({} bytes): {e}", fixed_plaintext_len + tag_len);
         return;
     }
     if !read_cipher.decrypt_packet(&mut fixed_buf) {
-        warn!("SS response fixed header auth failed");
+        warn!("SS read relay: fixed header AEAD auth failed (likely wrong key or protocol mismatch)");
         return;
     }
+    debug!("SS read relay: decrypted fixed header OK");
 
     // Verify type byte
     if fixed_buf[0] != 0x01 {
-        warn!("SS response type mismatch: {}", fixed_buf[0]);
+        warn!("SS read relay: response type mismatch: expected 0x01, got 0x{:02x}", fixed_buf[0]);
         return;
     }
 
     // Verify echoed client salt
     if fixed_buf[9..9 + salt_len] != *client_salt {
-        warn!("SS response salt mismatch");
+        warn!("SS read relay: client salt echo mismatch");
         return;
     }
+    debug!("SS read relay: server response header validated");
 
     // 3. Read first payload chunk (length from fixed header)
     let first_len_offset = 1 + 8 + salt_len;
@@ -408,16 +431,19 @@ async fn ss_read_relay(
         fixed_buf[first_len_offset],
         fixed_buf[first_len_offset + 1],
     ]) as usize;
+    debug!("SS read relay: first payload length = {first_payload_len}");
 
     if first_payload_len > 0 {
         let mut payload_buf = vec![0u8; first_payload_len + tag_len];
-        if tcp_read.read_exact(&mut payload_buf).await.is_err() {
+        if let Err(e) = tcp_read.read_exact(&mut payload_buf).await {
+            warn!("SS read relay: failed to read first payload ({} bytes): {e}", first_payload_len + tag_len);
             return;
         }
         if !read_cipher.decrypt_packet(&mut payload_buf) {
-            warn!("SS first payload auth failed");
+            warn!("SS read relay: first payload AEAD auth failed");
             return;
         }
+        debug!("SS read relay: first payload decrypted OK ({first_payload_len} bytes)");
         if app_write
             .write_all(&payload_buf[..first_payload_len])
             .await
