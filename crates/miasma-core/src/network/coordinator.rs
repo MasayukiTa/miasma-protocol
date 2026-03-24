@@ -1557,6 +1557,11 @@ impl MiasmaCoordinator {
     pub async fn flap_damping_active(&self) -> Result<bool, MiasmaError> {
         self.dht_handle.flap_damping_active().await
     }
+
+    /// Get current partial failure conditions (relay-only, no peers, etc.).
+    pub async fn partial_failures(&self) -> Result<Vec<String>, MiasmaError> {
+        self.dht_handle.partial_failures().await
+    }
 }
 
 // ─── RelayRewritingDhtExecutor ─────────────────────────────────────────────

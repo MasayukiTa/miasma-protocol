@@ -31,7 +31,8 @@
 | Environment: Captive portal | User action required | PASS | Unit + adversarial tests |
 | Environment: VPN | Depends on capabilities | PASS | Unit tests |
 | TLS inspector detection | Zscaler/Netskope/Palo Alto | PASS | Unit + adversarial tests |
-| Shadowsocks config validation | Cipher + server + password | PASS | 7 unit tests, adversarial test |
+| Shadowsocks config validation | Cipher + server + PSK + modes | PASS | 21 unit tests (native+external) |
+| Shadowsocks native AEAD-2022 | TcpCipher roundtrip + wrong key | PASS | Encrypt/decrypt + auth failure tests |
 | Tor config validation | Mode + port + bridges | PASS | 8 unit tests, adversarial test |
 | Fallback trace buffer | Circular, capacity-bounded | PASS | 6 unit tests, adversarial test |
 | DaemonStatus serde compat | Defaults for new fields | PASS | Adversarial test |
@@ -52,7 +53,8 @@
 | One-sided VPN | Requires VPN test infrastructure | Fallback ladder handles transparently |
 | Two-sided VPN | Requires 2 VPN-connected machines | RelayHop expected to work |
 | Real DPI bypass | Requires actual DPI appliance | ObfuscatedQuic REALITY tested against structure |
-| Real Shadowsocks server | Requires SS server | Config validation + transport trait wired |
+| Real Shadowsocks server (native) | Requires SS server + PSK | Native AEAD-2022 implemented, needs field test |
+| Real Shadowsocks server (external) | Requires ss-local + SS server | External SOCKS5 implemented, needs field test |
 | Real Tor network | Requires Internet + Tor | External SOCKS5 mode reuses proven proxy code |
 | Mobile transport (Android/iOS) | Requires device testing | Uses same FFI daemon — transport code shared |
 | Nation-state filtering | Requires censored network | Shadowsocks + Tor + ObfuscatedQuic available |
@@ -112,22 +114,22 @@
 
 | Category | Count |
 |---|---|
-| Unit tests (miasma-core --lib) | 381 |
-| Adversarial tests | 161 |
+| Unit tests (miasma-core --lib) | 393 |
+| Adversarial tests | 168 |
 | Integration tests | 53 (+1 ignored) |
 | Desktop tests | 16 |
 | Binary tests | 31 |
 | WASM tests | 33 (29+4) |
-| **Total** | **675** (+1 ignored) |
+| **Total** | **694** (+1 ignored) |
 
-Previous total: 569. New tests added: **106** (68 unit + 13 adversarial + 25 Phase 1).
+Previous total: 682. New tests added: **12** (native Shadowsocks AEAD-2022 + config validation).
 
 ---
 
 ## Known Hard Blockers
 
-1. **Shadowsocks AEAD tunnel**: External SOCKS5 mode (ss-local proxy) is now LIVE — real network calls through the proxy. Native AEAD-2022 cipher tunnel (without ss-local) would require the `shadowsocks` crate.
-2. **Tor embedded mode**: External SOCKS5 mode (standalone Tor/Tor Browser) is now LIVE — real network calls through Tor circuits. Embedded Arti mode requires the `arti-client` crate.
+1. ~~Native Shadowsocks tunnel rejected~~ **RESOLVED**: `shadowsocks-crypto` v0.6.2 (pure-Rust, no OpenSSL) provides AEAD-2022 ciphers. Native tunnel implemented. See revised `docs/adr/009-native-tunnel-decision.md`.
+2. **Embedded Tor rejected (ADR-009)**: `arti-client` is pre-1.0, ~50 transitive deps, untested on iOS. External SOCKS5 mode (standalone Tor) is the accepted architecture.
 3. **Domain fronting not implemented**: Would require CDN cooperation or cloud function intermediary.
 4. **Meek bridges not implemented**: Would complement Tor bridges for extreme censorship.
 5. **Streaming dissolution for very large files**: Files >100MB held in RAM during encryption.
@@ -137,21 +139,32 @@ Previous total: 569. New tests added: **106** (68 unit + 13 adversarial + 25 Pha
 | Component | Status | Details |
 |---|---|---|
 | RateLimiter | **WIRED** | Token-bucket in HTTP bridge `handle()`, origin validation, 429 responses |
-| ConnectionHealthMonitor | **LIVE** | Wired into node swarm events (connect/disconnect), periodic pruning, live DaemonStatus via coordinator query |
-| EnvironmentDetector | **LIVE** | Periodic 5min task in daemon, derives capabilities from transport outcomes, updates shared snapshot |
-| NetworkFlapDetector | **LIVE** | Wired into node disconnect events, damping active in DaemonStatus |
-| Shadowsocks transport | **LIVE** | Real SOCKS5 proxy connection through ss-local → WSS protocol to peer |
-| Tor transport | **LIVE** | Real SOCKS5 proxy connection through Tor → WSS protocol to peer (external mode) |
-| DaemonStatus fields | **LIVE** | All 14 bridge fields from live state + coordinator queries |
+| ConnectionHealthMonitor | **LIVE** | Node swarm events (connect/disconnect/dial-failure), periodic pruning, live coordinator query |
+| EnvironmentDetector | **LIVE** | Periodic 5min daemon task, derives capabilities from transport outcomes + NAT status |
+| NetworkFlapDetector | **LIVE** | Node disconnect events, damping active in DaemonStatus |
+| PartialFailureDetector | **LIVE** | Periodic evaluation (relay-only, no-peers, stale, all-dead), exposed in DaemonStatus |
+| Shadowsocks transport | **LIVE** | Native AEAD-2022 via `shadowsocks-crypto` + external SOCKS5 fallback |
+| Tor transport | **LIVE** | Real SOCKS5 proxy through Tor → WSS protocol to peer (external mode) |
+| TransportStats | **LIVE** | Per-kind success/failure/phase attribution, last_selected, fallback_active |
+| DialBackoff | **LIVE** | Dial failure → backoff in node, exposed in health snapshot |
+| DaemonStatus fields | **LIVE** | All 14 bridge fields + partial_failures from live state + coordinator queries |
+
+---
+
+## Validation Infrastructure
+
+- `scripts/validate-bridge-connectivity.ps1` — automated validation against real SS/Tor proxies
+- Validation script tests: same-LAN, diagnostics, Shadowsocks proxy, Tor proxy, partial failures
+- Results written to `docs/validation/bridge-connectivity-live-results.md`
 
 ---
 
 ## Next Milestone Recommendation
 
-**Bridge Connectivity Phase 4: Real-Network Validation & Native Tunnels**
-1. Validate Shadowsocks over real ss-local + SS server
-2. Validate Tor external mode over real Tor daemon
-3. Add `shadowsocks` crate for native AEAD-2022 tunnel (no ss-local dependency)
-4. Add `arti-client` crate for embedded Tor (no standalone Tor dependency)
-5. Real-network validation: VPN, filtered network, nation-state DPI
-6. Domain fronting investigation (CDN-dependent, may not be viable)
+**Bridge Connectivity Phase 4: Real-Network Field Testing**
+1. Run `validate-bridge-connectivity.ps1` with ss-local + SS server
+2. Run `validate-bridge-connectivity.ps1` with Tor daemon
+3. Validate VPN / filtered network transport fallback (manual)
+4. Validate ObfuscatedQuic REALITY under real DPI (requires test infrastructure)
+5. Mobile platform transport validation (Android/iOS)
+6. Revisit native tunnels if `shadowsocks-crypto` gains pure-Rust AEAD or Arti reaches 1.0

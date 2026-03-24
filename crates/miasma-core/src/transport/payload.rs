@@ -332,12 +332,12 @@ impl TransportStats {
         }
     }
 
-    fn record_success(&self, kind: PayloadTransportKind) {
+    pub fn record_success(&self, kind: PayloadTransportKind) {
         self.counters(kind).success.fetch_add(1, Ordering::Relaxed);
         *self.last_selected.lock().unwrap() = Some(kind);
     }
 
-    fn record_failure(&self, kind: PayloadTransportKind, phase: TransportPhase, message: &str) {
+    pub fn record_failure(&self, kind: PayloadTransportKind, phase: TransportPhase, message: &str) {
         let c = self.counters(kind);
         c.failure.fetch_add(1, Ordering::Relaxed);
         match phase {
