@@ -37,7 +37,8 @@ use crate::{network::coordinator::MiasmaCoordinator, store::LocalShareStore};
 
 use super::{
     ipc::{ControlRequest, ControlResponse},
-    process_request,
+    process_request, BridgeLiveState,
+    rate_limit::{classify_endpoint, validate_origin},
     replication::ReplicationQueue,
 };
 
@@ -108,6 +109,8 @@ struct BridgeState {
     sharing_secret: [u8; 32],
     sharing_pubkey: [u8; 32],
     data_dir: std::path::PathBuf,
+    /// Bridge superhardening live state (rate limiter, health monitor, env snapshot).
+    bridge_live: BridgeLiveState,
 }
 
 // ─── HttpBridge ──────────────────────────────────────────────────────────────
@@ -135,6 +138,7 @@ impl HttpBridge {
         sharing_secret: [u8; 32],
         sharing_pubkey: [u8; 32],
         data_dir: std::path::PathBuf,
+        bridge_live: BridgeLiveState,
     ) -> Result<Self> {
         let listener = match TcpListener::bind(format!("127.0.0.1:{preferred_port}")).await {
             Ok(l) => l,
@@ -162,6 +166,7 @@ impl HttpBridge {
             sharing_secret,
             sharing_pubkey,
             data_dir,
+            bridge_live,
         };
 
         Ok(Self { listener, state })
@@ -216,6 +221,39 @@ async fn handle(
                 .body(Full::new(Bytes::new()))
                 .unwrap(),
         ));
+    }
+
+    // Origin validation — reject non-localhost origins
+    let origin = req
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok());
+    if !validate_origin(origin) {
+        warn!("HTTP bridge: rejected non-localhost origin: {:?}", origin);
+        return Ok(cors(json_error(StatusCode::FORBIDDEN, "origin not allowed")));
+    }
+
+    // Rate limiting — check before routing
+    let method_str = req.method().as_str().to_string();
+    let path_str = req.uri().path().to_string();
+    let rate_class = classify_endpoint(&method_str, &path_str);
+    {
+        let mut rl = state.bridge_live.rate_limiter.lock().unwrap();
+        if !rl.check(rate_class) {
+            debug!(
+                "HTTP bridge: rate limited {} {}",
+                method_str, path_str
+            );
+            return Ok(cors(
+                Response::builder()
+                    .status(StatusCode::TOO_MANY_REQUESTS)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Full::new(Bytes::from(
+                        r#"{"error":"rate limited"}"#,
+                    )))
+                    .unwrap(),
+            ));
+        }
     }
 
     let resp = match (req.method().clone(), req.uri().path()) {
@@ -284,6 +322,7 @@ async fn bridge_request(state: BridgeState, req: ControlRequest) -> ControlRespo
         state.sharing_secret,
         state.sharing_pubkey,
         state.data_dir,
+        state.bridge_live,
     )
     .await
 }

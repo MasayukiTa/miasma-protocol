@@ -20,7 +20,9 @@
 
 pub mod http_bridge;
 pub mod ipc;
+pub mod rate_limit;
 pub mod replication;
+pub mod self_heal;
 
 use std::{
     path::PathBuf,
@@ -38,7 +40,9 @@ use crate::{
     config::TransportConfig,
     directed::{self, DirectedInbox},
     network::{
+        connection_health::ConnectionHealthMonitor,
         coordinator::MiasmaCoordinator,
+        environment::EnvironmentSnapshot,
         node::MiasmaNode,
         types::{DhtRecord, ShardLocation, TopologyEvent},
     },
@@ -94,6 +98,16 @@ pub struct DaemonServer {
     sharing_secret: [u8; 32],
     /// X25519 sharing public key.
     sharing_pubkey: [u8; 32],
+    /// Rate limiter shared with HTTP bridge.
+    rate_limiter: Arc<Mutex<rate_limit::RateLimiter>>,
+    /// Connection health monitor.
+    health_monitor: Arc<Mutex<ConnectionHealthMonitor>>,
+    /// Network environment snapshot (periodically updated).
+    env_snapshot: Arc<Mutex<EnvironmentSnapshot>>,
+    /// Whether Shadowsocks is configured.
+    shadowsocks_configured: bool,
+    /// Whether Tor is configured.
+    tor_configured: bool,
     // Single-consumer resources moved into run():
     listener: Option<TcpListener>,
     rep_success_rx: Option<mpsc::Receiver<[u8; 32]>>,
@@ -289,6 +303,46 @@ impl DaemonServer {
             }
         }
 
+        // 6c. Shadowsocks transport (config-driven, always compiled).
+        let shadowsocks_configured = transport_config.shadowsocks.is_configured();
+        if shadowsocks_configured {
+            match crate::transport::shadowsocks::ShadowsocksPayloadTransport::new(
+                transport_config.shadowsocks.clone(),
+            ) {
+                Ok(transport) => {
+                    info!(
+                        server = ?transport.server_addr(),
+                        cipher = transport.cipher(),
+                        "Shadowsocks transport configured"
+                    );
+                    extra_transports.push(Box::new(transport));
+                }
+                Err(e) => {
+                    warn!("Shadowsocks config invalid: {e}");
+                }
+            }
+        }
+
+        // 6d. Tor transport (config-driven, always compiled).
+        let tor_configured = transport_config.tor.is_configured();
+        if tor_configured {
+            match crate::transport::tor::TorPayloadTransport::new(
+                transport_config.tor.clone(),
+            ) {
+                Ok(transport) => {
+                    info!(
+                        mode = transport.mode_name(),
+                        bridges = transport.has_bridges(),
+                        "Tor transport configured"
+                    );
+                    extra_transports.push(Box::new(transport));
+                }
+                Err(e) => {
+                    warn!("Tor config invalid: {e}");
+                }
+            }
+        }
+
         // 7. Start the coordinator with all transports.
         let coord = Arc::new(
             MiasmaCoordinator::start_with_transports(
@@ -302,6 +356,11 @@ impl DaemonServer {
 
         // 8. Load the persistent replication queue.
         let queue = Arc::new(Mutex::new(ReplicationQueue::load_or_create(&data_dir)?));
+
+        // 8b. Create shared rate limiter, health monitor, environment snapshot.
+        let rate_limiter = Arc::new(Mutex::new(rate_limit::RateLimiter::default()));
+        let health_monitor = Arc::new(Mutex::new(ConnectionHealthMonitor::default()));
+        let env_snapshot = Arc::new(Mutex::new(EnvironmentSnapshot::default()));
 
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
@@ -340,6 +399,13 @@ impl DaemonServer {
             sharing_secret,
             sharing_pubkey,
             data_dir.clone(),
+            BridgeLiveState {
+                rate_limiter: rate_limiter.clone(),
+                health_monitor: health_monitor.clone(),
+                env_snapshot: env_snapshot.clone(),
+                shadowsocks_configured,
+                tor_configured,
+            },
         )
         .await
         {
@@ -381,6 +447,11 @@ impl DaemonServer {
             http_bridge_port,
             sharing_secret,
             sharing_pubkey,
+            rate_limiter,
+            health_monitor,
+            env_snapshot,
+            shadowsocks_configured,
+            tor_configured,
             listener: Some(listener),
             rep_success_rx: Some(rep_rx),
             topology_rx: Some(topo_rx),
@@ -478,6 +549,13 @@ impl DaemonServer {
         let ipc_sharing_secret = self.sharing_secret;
         let ipc_sharing_pubkey = self.sharing_pubkey;
         let ipc_data_dir = self.data_dir.clone();
+        let ipc_bridge_state = BridgeLiveState {
+            rate_limiter: self.rate_limiter.clone(),
+            health_monitor: self.health_monitor.clone(),
+            env_snapshot: self.env_snapshot.clone(),
+            shadowsocks_configured: self.shadowsocks_configured,
+            tor_configured: self.tor_configured,
+        };
         let ipc_handle: JoinHandle<()> = tokio::spawn(async move {
             ipc_server_loop(
                 listener,
@@ -493,6 +571,7 @@ impl DaemonServer {
                 ipc_sharing_secret,
                 ipc_sharing_pubkey,
                 ipc_data_dir,
+                ipc_bridge_state,
             )
             .await;
         });
@@ -542,6 +621,7 @@ async fn ipc_server_loop(
     sharing_secret: [u8; 32],
     sharing_pubkey: [u8; 32],
     data_dir: PathBuf,
+    bridge_state: BridgeLiveState,
 ) {
     loop {
         match listener.accept().await {
@@ -559,9 +639,10 @@ async fn ipc_server_loop(
                 let ss = sharing_secret;
                 let sp = sharing_pubkey;
                 let dd = data_dir.clone();
+                let bs = bridge_state.clone();
                 tokio::spawn(async move {
                     if let Err(e) =
-                        handle_ipc_client(stream, c, q, s, la, wp, wt, pc, pt, oq, ss, sp, dd).await
+                        handle_ipc_client(stream, c, q, s, la, wp, wt, pc, pt, oq, ss, sp, dd, bs).await
                     {
                         debug!("IPC client error: {e}");
                     }
@@ -589,6 +670,7 @@ async fn handle_ipc_client(
     sharing_secret: [u8; 32],
     sharing_pubkey: [u8; 32],
     data_dir: PathBuf,
+    bridge_state: BridgeLiveState,
 ) -> Result<()> {
     let req: ControlRequest = read_frame(&mut stream).await?;
     let resp = process_request(
@@ -605,10 +687,21 @@ async fn handle_ipc_client(
         sharing_secret,
         sharing_pubkey,
         data_dir,
+        bridge_state,
     )
     .await;
     write_frame(&mut stream, &resp).await?;
     Ok(())
+}
+
+/// Bridge superhardening live state passed into request processing.
+#[derive(Clone)]
+pub struct BridgeLiveState {
+    pub rate_limiter: Arc<Mutex<rate_limit::RateLimiter>>,
+    pub health_monitor: Arc<Mutex<ConnectionHealthMonitor>>,
+    pub env_snapshot: Arc<Mutex<EnvironmentSnapshot>>,
+    pub shadowsocks_configured: bool,
+    pub tor_configured: bool,
 }
 
 pub(crate) async fn process_request(
@@ -625,6 +718,7 @@ pub(crate) async fn process_request(
     sharing_secret: [u8; 32],
     sharing_pubkey: [u8; 32],
     data_dir: PathBuf,
+    bridge_state: BridgeLiveState,
 ) -> ControlResponse {
     match req {
         ControlRequest::Publish {
@@ -824,6 +918,51 @@ pub(crate) async fn process_request(
                 relay_tier_verified: desc_stats.relay_verified,
                 probe_cache_fresh: desc_stats.probed_fresh,
                 forwarding_verified_relays: desc_stats.forwarding_verified_count,
+                // Connection health — from live monitor
+                connection_quality_score: {
+                    let hm = bridge_state.health_monitor.lock().unwrap();
+                    hm.average_quality()
+                },
+                dial_backoff_addresses: {
+                    let hm = bridge_state.health_monitor.lock().unwrap();
+                    hm.backoff.active_count()
+                },
+                stale_addresses_pruned: {
+                    let hm = bridge_state.health_monitor.lock().unwrap();
+                    hm.pruner.pruned_count
+                },
+                connectivity_degraded: {
+                    let hm = bridge_state.health_monitor.lock().unwrap();
+                    hm.is_degraded(peer_count)
+                },
+                active_transport: coord.transport_stats().last_selected().map(|s| s.to_string()),
+                fallback_active: coord.transport_stats().is_fallback_active(),
+                // Self-healing
+                flap_damping_active: false, // populated when self_heal wired into event loop
+                rate_limit_rejections: {
+                    let rl = bridge_state.rate_limiter.lock().unwrap();
+                    rl.rejections
+                },
+                // Censorship resistance
+                shadowsocks_configured: bridge_state.shadowsocks_configured,
+                tor_configured: bridge_state.tor_configured,
+                // Network environment — from live snapshot
+                network_environment: {
+                    let env = bridge_state.env_snapshot.lock().unwrap();
+                    env.environment.to_string()
+                },
+                tls_inspection_detected: {
+                    let env = bridge_state.env_snapshot.lock().unwrap();
+                    env.capabilities.tls_inspection_detected
+                },
+                captive_portal_detected: {
+                    let env = bridge_state.env_snapshot.lock().unwrap();
+                    env.capabilities.captive_portal_detected
+                },
+                vpn_detected: {
+                    let env = bridge_state.env_snapshot.lock().unwrap();
+                    env.capabilities.vpn_detected
+                },
             })
         }
 

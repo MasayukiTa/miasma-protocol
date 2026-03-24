@@ -860,6 +860,72 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
                 s.probe_cache_fresh, s.forwarding_verified_relays
             );
 
+            // Connection health
+            println!();
+            println!("Connection Health:");
+            println!(
+                "  Quality score:         {:.1}%",
+                s.connection_quality_score * 100.0
+            );
+            println!(
+                "  Dial backoff addrs:    {}",
+                s.dial_backoff_addresses
+            );
+            println!(
+                "  Stale addrs pruned:    {}",
+                s.stale_addresses_pruned
+            );
+            println!(
+                "  Connectivity:          {}",
+                if s.connectivity_degraded {
+                    "DEGRADED"
+                } else {
+                    "healthy"
+                }
+            );
+            if let Some(ref transport) = s.active_transport {
+                println!("  Active transport:      {}", transport);
+            }
+            if s.fallback_active {
+                println!("  Fallback mode:         ACTIVE (not using primary transport)");
+            }
+            if s.flap_damping_active {
+                println!("  Flap damping:          ACTIVE (suppressing reconnections)");
+            }
+            if s.rate_limit_rejections > 0 {
+                println!("  Rate limit rejections: {}", s.rate_limit_rejections);
+            }
+
+            // Censorship resistance transports
+            if s.shadowsocks_configured || s.tor_configured {
+                println!();
+                println!("Censorship Resistance:");
+                println!(
+                    "  Shadowsocks:           {}",
+                    if s.shadowsocks_configured { "configured" } else { "not configured" }
+                );
+                println!(
+                    "  Tor:                   {}",
+                    if s.tor_configured { "configured" } else { "not configured" }
+                );
+            }
+
+            // Network environment
+            if s.network_environment != "unknown" {
+                println!();
+                println!("Network Environment:");
+                println!("  Detected:              {}", s.network_environment);
+                if s.tls_inspection_detected {
+                    println!("  TLS inspection:        DETECTED (corporate proxy/ZTNA)");
+                }
+                if s.captive_portal_detected {
+                    println!("  Captive portal:        DETECTED (authentication required)");
+                }
+                if s.vpn_detected {
+                    println!("  VPN:                   DETECTED");
+                }
+            }
+
             let total_retrievals = s.retrieval_direct_attempts
                 + s.retrieval_opportunistic_attempts
                 + s.retrieval_required_attempts

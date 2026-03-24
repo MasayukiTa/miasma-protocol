@@ -29,9 +29,12 @@
 /// - A shared secret (`probe_secret`) is required to distinguish Miasma
 ///   traffic from a real TLS handshake.  Without the secret, the server
 ///   proxies the connection to a legitimate CDN, defeating active probing.
+pub mod diagnostics;
 pub mod obfuscated;
 pub mod payload;
 pub mod proxy;
+pub mod shadowsocks;
+pub mod tor;
 pub mod websocket;
 
 use async_trait::async_trait;

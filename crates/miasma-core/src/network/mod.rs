@@ -1,7 +1,9 @@
 pub mod address;
 pub mod admission_policy;
 pub mod bbs_credential;
+pub mod connection_health;
 pub mod coordinator;
+pub mod environment;
 pub mod credential;
 pub mod descriptor;
 pub mod dht;
@@ -36,4 +38,11 @@ pub use path_selection::{AnonymityPolicy, PathSelectionStats};
 pub use peer_state::{AdmissionStats, PeerRegistry, RejectionReason};
 pub use relay_probe::{ProbeRequest, ProbeResponse, RelayProbeCodec};
 pub use routing::{DiversityViolation, RoutingStats};
+pub use connection_health::{
+    ConnectionHealthMonitor, ConnectionHealthSnapshot, DialBackoff, PeerConnectionScore,
+    StaleAddressPruner,
+};
+pub use environment::{
+    EnvironmentSnapshot, NetworkCapabilities, NetworkEnvironment, TransportRecommendation,
+};
 pub use types::{DhtRecord, NodeType, ShardLocation, TopologyEvent};

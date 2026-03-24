@@ -379,6 +379,20 @@ impl TransportStats {
             })
             .collect()
     }
+
+    /// The transport kind that most recently succeeded, if any.
+    pub fn last_selected(&self) -> Option<PayloadTransportKind> {
+        *self.last_selected.lock().unwrap()
+    }
+
+    /// Whether a non-default transport was last selected (fallback active).
+    pub fn is_fallback_active(&self) -> bool {
+        match *self.last_selected.lock().unwrap() {
+            None => false,
+            Some(PayloadTransportKind::DirectLibp2p) => false,
+            Some(_) => true,
+        }
+    }
 }
 
 // ─── Transport readiness (diagnostics) ───────────────────────────────────────

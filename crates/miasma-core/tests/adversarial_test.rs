@@ -5460,3 +5460,286 @@ fn directed_envelope_summary_json_roundtrip() {
     assert_eq!(parsed.file_size, 4096);
     assert_eq!(parsed.retention_secs, 1000);
 }
+
+// ─── Bridge connectivity superhardening tests ───────────────────────────────
+
+/// Verify that the dial backoff prevents rapid-fire reconnections to dead peers.
+#[test]
+fn bridge_dial_backoff_prevents_rapid_reconnection() {
+    use miasma_core::network::connection_health::DialBackoff;
+    use std::time::Duration;
+
+    let mut backoff = DialBackoff::new(Duration::from_secs(2), Duration::from_secs(60));
+    let addr = "192.168.1.100:4001";
+
+    // First failure should block immediate retry
+    backoff.record_failure(addr);
+    assert!(!backoff.is_allowed(addr));
+
+    // Success clears backoff
+    backoff.record_success(addr);
+    assert!(backoff.is_allowed(addr));
+}
+
+/// Verify that connection quality degrades under repeated failures.
+#[test]
+fn bridge_quality_degrades_under_failure() {
+    use miasma_core::network::connection_health::PeerConnectionScore;
+    use std::time::Duration;
+
+    let mut score = PeerConnectionScore::default();
+    score.record_success(Duration::from_millis(50));
+    let initial = score.quality();
+
+    // Simulate many failures
+    for _ in 0..10 {
+        score.record_failure();
+    }
+    assert!(score.quality() < initial * 0.5);
+    assert_eq!(score.consecutive_failures, 10);
+}
+
+/// Verify that the stale address pruner fires at the correct threshold.
+#[test]
+fn bridge_stale_pruner_threshold() {
+    use miasma_core::network::connection_health::{StaleAddressConfig, StaleAddressPruner};
+    use std::time::Duration;
+
+    let mut pruner = StaleAddressPruner::new(StaleAddressConfig {
+        max_consecutive_failures: 4,
+        max_idle_age: Duration::from_secs(3600),
+    });
+    let addr = "10.0.0.1:4001";
+
+    // 3 failures: not pruned
+    for _ in 0..3 {
+        assert!(!pruner.record_failure(addr));
+    }
+    // 4th failure: pruned
+    assert!(pruner.record_failure(addr));
+    assert_eq!(pruner.pruned_count, 1);
+}
+
+/// Verify that the network flap detector triggers damping correctly.
+#[test]
+fn bridge_flap_detector_triggers_damping() {
+    use miasma_core::daemon::self_heal::NetworkFlapDetector;
+    use std::time::Duration;
+
+    let mut detector = NetworkFlapDetector::new(
+        3,
+        Duration::from_secs(60),
+        Duration::from_millis(100),
+    );
+
+    assert!(!detector.record_disconnect());
+    assert!(!detector.record_disconnect());
+    // 3rd disconnect within window triggers damping
+    assert!(detector.record_disconnect());
+    assert!(detector.is_damping());
+}
+
+/// Verify that rate limiter rejects excess heavy requests.
+#[test]
+fn bridge_rate_limiter_heavy_endpoint() {
+    use miasma_core::daemon::rate_limit::{RateLimitClass, RateLimiter};
+
+    let mut rl = RateLimiter::default();
+    // HeavyApi allows burst of 10
+    for _ in 0..10 {
+        assert!(rl.check(RateLimitClass::HeavyApi));
+    }
+    // Excess rejected
+    assert!(!rl.check(RateLimitClass::HeavyApi));
+    assert_eq!(rl.rejections, 1);
+}
+
+/// Verify origin validation rejects cross-origin requests.
+#[test]
+fn bridge_origin_validation() {
+    use miasma_core::daemon::rate_limit::validate_origin;
+
+    assert!(validate_origin(None)); // No origin (non-browser)
+    assert!(validate_origin(Some("http://localhost:17842")));
+    assert!(validate_origin(Some("http://127.0.0.1:17842")));
+    assert!(!validate_origin(Some("http://evil.com")));
+    assert!(!validate_origin(Some("https://attacker.io")));
+}
+
+/// Verify network environment classification under various conditions.
+#[test]
+fn bridge_environment_classification() {
+    use miasma_core::network::environment::{NetworkCapabilities, NetworkEnvironment};
+
+    // Open network
+    let caps = NetworkCapabilities::default();
+    assert_eq!(caps.classify(), NetworkEnvironment::Open);
+
+    // TLS inspection → corporate proxy
+    let caps = NetworkCapabilities {
+        tls_inspection_detected: true,
+        ..Default::default()
+    };
+    assert_eq!(caps.classify(), NetworkEnvironment::CorporateProxy);
+
+    // UDP blocked → filtered
+    let caps = NetworkCapabilities {
+        udp_available: false,
+        ..Default::default()
+    };
+    assert_eq!(caps.classify(), NetworkEnvironment::Filtered);
+
+    // Captive portal takes priority over everything
+    let caps = NetworkCapabilities {
+        captive_portal_detected: true,
+        tls_inspection_detected: true,
+        vpn_detected: true,
+        ..Default::default()
+    };
+    assert_eq!(caps.classify(), NetworkEnvironment::CaptivePortal);
+}
+
+/// Verify TLS inspector detection for known ZTNA products.
+#[test]
+fn bridge_tls_inspector_detection() {
+    use miasma_core::network::environment::detect_tls_inspector;
+
+    assert_eq!(detect_tls_inspector("CN=Zscaler Root CA"), Some("Zscaler"));
+    assert_eq!(
+        detect_tls_inspector("O=Netskope Inc, CN=Root"),
+        Some("Netskope")
+    );
+    assert_eq!(
+        detect_tls_inspector("CN=Palo Alto Networks"),
+        Some("Palo Alto GlobalProtect")
+    );
+    // Legitimate CA should not match
+    assert_eq!(detect_tls_inspector("CN=DigiCert Global Root G2"), None);
+    assert_eq!(detect_tls_inspector("CN=Let's Encrypt R3"), None);
+}
+
+/// Verify transport recommendation adapts to environment.
+#[test]
+fn bridge_transport_recommendation_adapts() {
+    use miasma_core::network::environment::{recommend_transport, NetworkCapabilities};
+
+    // Captive portal requires user action
+    let rec = recommend_transport(&NetworkCapabilities {
+        captive_portal_detected: true,
+        ..Default::default()
+    });
+    assert!(rec.user_action_required);
+
+    // Filtered network prefers WSS on 443
+    let rec = recommend_transport(&NetworkCapabilities {
+        udp_available: false,
+        tcp_high_ports_available: false,
+        port_443_available: true,
+        ..Default::default()
+    });
+    assert_eq!(rec.primary, "wss-tunnel");
+
+    // Open network prefers direct
+    let rec = recommend_transport(&NetworkCapabilities::default());
+    assert_eq!(rec.primary, "direct-libp2p");
+}
+
+/// Verify Shadowsocks config validation catches misconfigurations.
+#[test]
+fn bridge_shadowsocks_config_validation() {
+    use miasma_core::transport::shadowsocks::ShadowsocksConfig;
+
+    // Missing server
+    let c = ShadowsocksConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    assert!(c.validate().is_err());
+
+    // Invalid cipher
+    let c = ShadowsocksConfig {
+        enabled: true,
+        server: Some("1.2.3.4:8388".to_string()),
+        password: Some("secret".to_string()),
+        cipher: "rot13".to_string(),
+        ..Default::default()
+    };
+    assert!(c.validate().unwrap_err().contains("unknown cipher"));
+}
+
+/// Verify Tor config validation catches misconfigurations.
+#[test]
+fn bridge_tor_config_validation() {
+    use miasma_core::transport::tor::TorConfig;
+
+    // Zero SOCKS port in external mode
+    let c = TorConfig {
+        enabled: true,
+        use_embedded: false,
+        socks_port: 0,
+        ..Default::default()
+    };
+    assert!(c.validate().is_err());
+
+    // Empty bridge line
+    let c = TorConfig {
+        enabled: true,
+        bridges: vec!["".to_string()],
+        ..Default::default()
+    };
+    assert!(c.validate().is_err());
+}
+
+/// Verify fallback trace buffer evicts oldest entries at capacity.
+#[test]
+fn bridge_trace_buffer_eviction() {
+    use miasma_core::transport::diagnostics::FallbackTraceBuffer;
+    use miasma_core::transport::payload::{PayloadTransportKind, TransportAttempt, TransportPhase};
+    use std::time::Duration;
+
+    let buf = FallbackTraceBuffer::new(5);
+    for i in 0..10 {
+        buf.record(
+            "fetch",
+            &format!("t-{i}"),
+            &[TransportAttempt {
+                transport: PayloadTransportKind::DirectLibp2p,
+                succeeded: true,
+                phase: TransportPhase::Data,
+                error: None,
+                duration: Duration::from_millis(10),
+            }],
+            Some(PayloadTransportKind::DirectLibp2p),
+        );
+    }
+    // Buffer holds only last 5
+    assert_eq!(buf.len(), 5);
+    let snap = buf.snapshot();
+    assert_eq!(snap[0].target, "t-5");
+    assert_eq!(snap[4].target, "t-9");
+}
+
+/// DaemonStatus new fields have correct serde defaults.
+#[test]
+fn bridge_daemon_status_serde_defaults() {
+    use miasma_core::daemon::ipc::DaemonStatus;
+
+    // Deserialize a minimal JSON (missing new fields) — should use defaults
+    let json = r#"{
+        "peer_id": "test",
+        "listen_addrs": [],
+        "peer_count": 0,
+        "share_count": 0,
+        "storage_used_bytes": 0,
+        "pending_replication": 0,
+        "replicated_count": 0
+    }"#;
+    let status: DaemonStatus = serde_json::from_str(json).unwrap();
+    assert!(!status.connectivity_degraded);
+    assert!(!status.flap_damping_active);
+    assert!(!status.shadowsocks_configured);
+    assert!(!status.tor_configured);
+    assert!(!status.tls_inspection_detected);
+    assert_eq!(status.network_environment, "");
+    assert_eq!(status.connection_quality_score, 0.0);
+}
