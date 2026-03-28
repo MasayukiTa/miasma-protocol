@@ -76,6 +76,66 @@
 | Mobile transport (Android/iOS) | Requires device testing | Uses same FFI daemon — transport code shared |
 | Nation-state filtering | Requires censored network | Shadowsocks + Tor + ObfuscatedQuic available |
 
+### Mobile Transport Bounding (2026-03-25)
+
+This section bounds what the shared Rust codebase proves — and does not prove — about transport behavior on Android and iOS.
+
+#### What Code Sharing Proves
+
+Both Android and iOS start an embedded daemon via the same FFI entry point: `start_embedded_daemon()` in `miasma-ffi/src/lib.rs`. This function calls `DaemonServer::start_with_transport()`, which constructs a `MiasmaNode` (libp2p swarm with QUIC+TCP), wires up the `PayloadTransportSelector` (full 7-level fallback ladder), starts the `MiasmaCoordinator`, and binds the HTTP bridge on `127.0.0.1`. The transport config is `Default::default()` — the same default used by the desktop daemon.
+
+This means the following are **proven by code identity** (not just code similarity — the exact same compiled Rust functions execute on mobile):
+
+| Proven by Code Sharing | Reason |
+|---|---|
+| Transport fallback ladder (7 levels) | Same `PayloadTransportSelector` instance, same fallback logic |
+| Connection health scoring (EMA, consecutive penalty) | Same `ConnectionHealthMonitor` |
+| Dial backoff (exponential 2s–300s) | Same backoff logic in `MiasmaNode` swarm |
+| Stale address pruning | Same pruning thresholds |
+| Network flap damping (3 disconnects/60s) | Same `NetworkFlapDetector` |
+| Partial failure detection | Same `PartialFailureDetector` |
+| Rate limiting (token bucket) | Same `RateLimiter` in HTTP bridge |
+| Environment detection | Same `EnvironmentDetector` |
+| Shadowsocks native AEAD-2022 | Same `shadowsocks-crypto` crate, same `TcpCipher` |
+| ObfuscatedQuic REALITY | Same QUIC+REALITY implementation |
+| Onion routing + relay circuits | Same coordinator logic, same `OnionPacketBuilder` |
+| DHT operations (Kademlia) | Same libp2p-kad configuration |
+| mDNS peer discovery | Same libp2p-mdns feature flag |
+
+#### What Code Sharing Does NOT Prove
+
+Shared Rust code is necessary but not sufficient for transport correctness on mobile. The following remain unvalidated without real device testing:
+
+| Not Proven | Why |
+|---|---|
+| UDP/QUIC actually works on Android/iOS network stack | Mobile OS network stacks may handle UDP differently (carrier NAT, battery-saver UDP throttling, IPv6-only carriers). libp2p QUIC has not been exercised on Android's `ConnectivityManager`-mediated network or iOS Network Extension. |
+| TCP connect succeeds through mobile network stack | Android and iOS may enforce per-app network permissions, VPN routing, or proxy settings that the Rust `tokio::net::TcpStream` does not see. |
+| TLS certificate validation on mobile | Android uses its own trust store (not system OpenSSL). iOS uses Security.framework. `rustls` (used by WSS tunnel and QUIC) ships its own `webpki-roots` — behavior may diverge from platform expectations, especially on networks with corporate MITM certificates. |
+| mDNS multicast packets reach the LAN | Android requires `WifiManager.MulticastLock` for mDNS. iOS restricts multicast in background. libp2p-mdns may silently fail without platform-specific permissions. |
+| DNS resolution for bootstrap peers | Mobile OS DNS resolution may differ (DNS-over-HTTPS, private relay on iOS, carrier DNS interception). |
+| Background daemon survival (Android) | Android foreground service (`START_STICKY`) keeps the process alive, but Doze mode, battery optimization, and OEM-specific task killers may suspend or kill the daemon. Transport connections will drop; reconnection behavior under these conditions is untested. |
+| Background daemon survival (iOS) | iOS suspends the process when backgrounded. All network connections drop. There is no background networking mechanism implemented. The daemon must restart from scratch on app return. |
+| Memory pressure behavior | Mobile devices have tighter memory limits. The `tokio` multi-thread runtime (2 worker threads) plus libp2p swarm plus DHT state may face OOM under memory pressure, especially during large retrievals. |
+| Concurrent network transitions (WiFi↔cellular) | Android and iOS switch networks transparently. libp2p sockets bound to the old interface will break. No reconnection-on-network-change logic exists. |
+| ARM64 cross-compilation correctness | The FFI `.so` (Android) and `.a` (iOS) must be compiled for `aarch64-linux-android` and `aarch64-apple-ios` respectively. Neither cross-compilation target has been built or tested. |
+
+#### What Would Be Needed to Validate
+
+| Validation Step | Requirements |
+|---|---|
+| Android transport smoke test | ARM64 cross-compilation (`cargo ndk`), physical Android device or emulator with network access, APK install, daemon startup, peer discovery observation |
+| iOS transport smoke test | Xcode + `cargo` cross-compilation for `aarch64-apple-ios`, Apple signing, physical device or simulator, daemon startup verification |
+| Cross-platform directed share exchange | Windows node + Android/iOS node on same LAN, mDNS discovery working, directed share send + retrieve observed end-to-end |
+| Network transition testing | Real device, WiFi→cellular switch during active retrieval, observe reconnection behavior |
+| Background lifecycle testing | Real device, background the app, wait >5min, foreground, verify daemon state and reconnection |
+| Memory pressure testing | Real device, trigger low-memory warning during retrieval, observe OOM behavior |
+
+#### Current Status
+
+- **Code-level transport sharing**: VALIDATED. Android and iOS execute the identical Rust transport stack via `start_embedded_daemon()` → `DaemonServer::start_with_transport()` → `PayloadTransportSelector`. This is not a reimplementation — it is the same compiled code.
+- **Device-level transport behavior**: NOT VALIDATED. No ARM64 cross-compilation has been performed. No mobile binary has been run on a real device or emulator. The gap between "same code" and "same behavior" on mobile network stacks is real and cannot be closed by code review alone.
+- **Risk assessment**: The code sharing provides high confidence that transport *logic* is correct (fallback order, health scoring, protocol handling). The risk lies in platform-specific network stack behavior (UDP routing, TLS trust stores, multicast permissions, background restrictions) — areas where the OS mediates between the Rust runtime and the network, and where identical code can produce different outcomes.
+
 ---
 
 ## Transport Path Observations
