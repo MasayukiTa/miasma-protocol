@@ -24,6 +24,8 @@
 use std::sync::Arc;
 use tempfile::TempDir;
 
+use miasma_core::transport::websocket::{ProxyConfig, ProxyKind};
+
 use miasma_core::{
     // Core pipeline
     dissolve,
@@ -3450,4 +3452,363 @@ async fn field_tor_socks5_reachable() {
             panic!("Tor SOCKS5 port connection timed out");
         }
     }
+}
+
+// ── Track B: Transport fallback ladder under forced failure ──────────────────
+//
+// These tests validate the transport fallback ladder by forcing individual
+// transports to fail and verifying the selector falls through to working
+// alternatives, recording the full fallback path for observability.
+
+// ── Test: Field-style transport fallback ladder with real WSS ────────────────
+//
+// Sets up a real WssShareServer, creates a selector with a broken WSS transport
+// (pointing at a closed port) first and the working WSS second, then verifies:
+// - Fallback from broken to working transport
+// - The fallback path is recorded in transport attempts
+// - Transport stats show the failure on the first and success on the second
+// - Backoff/reconnect evidence: repeated fetches accumulate failure counts
+
+#[ignore] // Field test — requires real network I/O, skip in CI
+#[tokio::test(flavor = "multi_thread")]
+async fn field_transport_fallback_ladder_forced_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(LocalShareStore::open(dir.path(), 100).unwrap());
+
+    // 1. Dissolve content into shares.
+    let content = b"Track-B field test: forced transport failure fallback ladder";
+    let params = DissolutionParams {
+        data_shards: 3,
+        total_shards: 5,
+    };
+    let (mid, shares) = dissolve(content, params).unwrap();
+    for s in &shares {
+        store.put(s).unwrap();
+    }
+
+    // 2. Start a real WSS share server on an OS-assigned port.
+    let server = WssShareServer::bind(store.clone(), 0).await.unwrap();
+    let working_port = server.port;
+    tokio::spawn(server.run());
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // 3. Create a broken WSS transport by forcing it through an unreachable
+    //    SOCKS5 proxy. This preserves the same peer_addr while guaranteeing a
+    //    session-phase failure before the working direct WSS transport runs.
+    let broken_wss = WssPayloadTransport::new(WebSocketConfig {
+        connect_timeout_ms: 500, // short timeout for fast failure
+        proxy: Some(ProxyConfig {
+            addr: "127.0.0.1:1".into(), // unreachable — OS will refuse immediately
+            kind: ProxyKind::Socks5,
+        }),
+        ..Default::default()
+    });
+
+    // 4. Create the working WSS transport pointing at the real server.
+    let working_wss = WssPayloadTransport::new(WebSocketConfig {
+        port: working_port,
+        connect_timeout_ms: 5_000,
+        ..Default::default()
+    });
+
+    // 5. Build the fallback selector: broken first, working second.
+    //    Both are WssTunnel kind, so stats will merge — this tests the ladder
+    //    at the attempt level.
+    let selector = Arc::new(PayloadTransportSelector::new(vec![
+        Box::new(broken_wss),
+        Box::new(working_wss),
+    ]));
+
+    // 6. Build DhtRecord pointing all shard locations at the working server.
+    let dht = BypassOnionDhtExecutor::new();
+    let record = DhtRecord {
+        mid_digest: *mid.as_bytes(),
+        data_shards: params.data_shards as u8,
+        total_shards: params.total_shards as u8,
+        version: 1,
+        locations: (0..params.total_shards as u16)
+            .map(|i| miasma_core::network::types::ShardLocation {
+                peer_id_bytes: vec![0; 38],
+                shard_index: i,
+                addrs: vec![format!("127.0.0.1:{working_port}")],
+            })
+            .collect(),
+        published_at: 0,
+    };
+    dht.put(record).await.unwrap();
+
+    // 7. Retrieve via FallbackShareSource — forces selector to try each shard.
+    let source = FallbackShareSource::new(dht, selector.clone());
+    let recovered = RetrievalCoordinator::new(source)
+        .retrieve(&mid, params)
+        .await
+        .expect("field fallback retrieval should succeed via working WSS");
+
+    assert_eq!(
+        recovered.as_slice(),
+        content as &[u8],
+        "content mismatch after field fallback retrieval"
+    );
+
+    // 8. Verify transport stats: WSS should show both failures (broken) and
+    //    successes (working). Since both transports are WssTunnel kind, stats
+    //    merge into the wss bucket.
+    let snap = selector.stats().snapshot();
+    let wss_stat = snap
+        .iter()
+        .find(|r| r.transport == PayloadTransportKind::WssTunnel)
+        .expect("WssTunnel stats missing");
+
+    // The broken transport fails once per shard fetch attempt, then the working
+    // transport succeeds. We need data_shards successes minimum.
+    assert!(
+        wss_stat.success_count >= params.data_shards as u64,
+        "expected at least {} WSS successes (working transport), got {}",
+        params.data_shards,
+        wss_stat.success_count
+    );
+    assert!(
+        wss_stat.failure_count >= params.data_shards as u64,
+        "expected at least {} WSS failures (broken transport), got {}",
+        params.data_shards,
+        wss_stat.failure_count
+    );
+    assert!(
+        wss_stat.session_failures >= params.data_shards as u64,
+        "broken transport failures should be session-phase: got {} session failures",
+        wss_stat.session_failures
+    );
+
+    // 9. Print the fallback path for field diagnostics.
+    println!("[field-fallback] Transport fallback ladder validation:");
+    println!(
+        "  WSS successes={}, failures={} (session={}, data={})",
+        wss_stat.success_count,
+        wss_stat.failure_count,
+        wss_stat.session_failures,
+        wss_stat.data_failures,
+    );
+    println!(
+        "  last_error={:?}",
+        wss_stat.last_error
+    );
+    println!(
+        "  Content recovered: {} bytes, matches: true",
+        recovered.len()
+    );
+
+    // 10. Verify backoff evidence: do a second retrieval round and confirm
+    //     failure counts accumulate (no reset between fetches).
+    let dht2 = BypassOnionDhtExecutor::new();
+    let record2 = DhtRecord {
+        mid_digest: *mid.as_bytes(),
+        data_shards: params.data_shards as u8,
+        total_shards: params.total_shards as u8,
+        version: 1,
+        locations: (0..params.total_shards as u16)
+            .map(|i| miasma_core::network::types::ShardLocation {
+                peer_id_bytes: vec![0; 38],
+                shard_index: i,
+                addrs: vec![format!("127.0.0.1:{working_port}")],
+            })
+            .collect(),
+        published_at: 0,
+    };
+    dht2.put(record2).await.unwrap();
+
+    let source2 = FallbackShareSource::new(dht2, selector.clone());
+    let _recovered2 = RetrievalCoordinator::new(source2)
+        .retrieve(&mid, params)
+        .await
+        .expect("second retrieval round should also succeed");
+
+    let snap2 = selector.stats().snapshot();
+    let wss_stat2 = snap2
+        .iter()
+        .find(|r| r.transport == PayloadTransportKind::WssTunnel)
+        .unwrap();
+
+    assert!(
+        wss_stat2.failure_count > wss_stat.failure_count,
+        "failure count should accumulate across retrieval rounds: {} > {}",
+        wss_stat2.failure_count,
+        wss_stat.failure_count
+    );
+    assert!(
+        wss_stat2.success_count > wss_stat.success_count,
+        "success count should accumulate across retrieval rounds: {} > {}",
+        wss_stat2.success_count,
+        wss_stat.success_count
+    );
+
+    println!(
+        "  Round 2: WSS successes={}, failures={} (accumulated)",
+        wss_stat2.success_count, wss_stat2.failure_count
+    );
+    println!("[field-fallback] PASS — fallback ladder validated with real WSS");
+}
+
+// ── Test: Forced transport failure fallback evidence (mock, non-ignored) ─────
+//
+// Uses mock/loopback transports to exercise the same fallback ladder pattern
+// without needing a real server. Validates:
+// - Three-deep fallback: two transports fail, third succeeds
+// - Each failure is recorded with correct phase and error message
+// - Transport stats correctly attribute failures and the success
+// - The fallback path order matches the configured transport order
+// - is_fallback_active() returns true when a non-primary transport wins
+
+#[tokio::test]
+async fn forced_transport_failure_fallback_evidence() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(LocalShareStore::open(dir.path(), 100).unwrap());
+
+    // 1. Dissolve content.
+    let content = b"Mock fallback evidence test: two failures then success";
+    let params = DissolutionParams {
+        data_shards: 3,
+        total_shards: 5,
+    };
+    let (mid, shares) = dissolve(content, params).unwrap();
+    for s in &shares {
+        store.put(s).unwrap();
+    }
+
+    // 2. Build DhtRecord.
+    let dht = BypassOnionDhtExecutor::new();
+    let record = DhtRecord {
+        mid_digest: *mid.as_bytes(),
+        data_shards: params.data_shards as u8,
+        total_shards: params.total_shards as u8,
+        version: 1,
+        locations: (0..params.total_shards as u16)
+            .map(|i| miasma_core::network::types::ShardLocation {
+                peer_id_bytes: vec![0; 38],
+                shard_index: i,
+                addrs: vec!["127.0.0.1:1".into()],
+            })
+            .collect(),
+        published_at: 0,
+    };
+    dht.put(record).await.unwrap();
+
+    // 3. Build a three-deep fallback chain:
+    //    [0] DirectLibp2p — session failure (simulates QUIC blocked by DPI)
+    //    [1] TcpDirect    — data failure (simulates mid-transfer corruption)
+    //    [2] RelayHop     — success (local store loopback, simulates relay rescue)
+    let selector = Arc::new(PayloadTransportSelector::new(vec![
+        Box::new(SessionFailTransport), // DirectLibp2p, session fail
+        Box::new(DataFailTransport),    // TcpDirect, data fail
+        Box::new(LocalStoreTransport {
+            store: store.clone(),
+            kind: PayloadTransportKind::RelayHop,
+        }),
+    ]));
+
+    // 4. Retrieve — should fall through two failures to the relay loopback.
+    let source = FallbackShareSource::new(dht, selector.clone());
+    let recovered = RetrievalCoordinator::new(source)
+        .retrieve(&mid, params)
+        .await
+        .expect("three-deep fallback retrieval should succeed");
+
+    assert_eq!(
+        recovered.as_slice(),
+        content as &[u8],
+        "content mismatch after three-deep fallback"
+    );
+
+    // 5. Verify transport stats: each transport kind has correct counts.
+    let snap = selector.stats().snapshot();
+
+    let libp2p_stat = snap
+        .iter()
+        .find(|r| r.transport == PayloadTransportKind::DirectLibp2p)
+        .expect("DirectLibp2p stats missing");
+    assert!(
+        libp2p_stat.failure_count >= params.data_shards as u64,
+        "DirectLibp2p should have at least {} session failures, got {}",
+        params.data_shards,
+        libp2p_stat.failure_count
+    );
+    assert_eq!(libp2p_stat.success_count, 0, "DirectLibp2p should have no successes");
+    assert!(
+        libp2p_stat.session_failures >= params.data_shards as u64,
+        "DirectLibp2p failures should be session-phase"
+    );
+    assert_eq!(libp2p_stat.data_failures, 0, "DirectLibp2p should have no data failures");
+    assert!(
+        libp2p_stat.last_error.is_some(),
+        "DirectLibp2p should have a last_error recorded"
+    );
+
+    let tcp_stat = snap
+        .iter()
+        .find(|r| r.transport == PayloadTransportKind::TcpDirect)
+        .expect("TcpDirect stats missing");
+    assert!(
+        tcp_stat.failure_count >= params.data_shards as u64,
+        "TcpDirect should have at least {} data failures, got {}",
+        params.data_shards,
+        tcp_stat.failure_count
+    );
+    assert_eq!(tcp_stat.success_count, 0, "TcpDirect should have no successes");
+    assert!(
+        tcp_stat.data_failures >= params.data_shards as u64,
+        "TcpDirect failures should be data-phase"
+    );
+    assert_eq!(tcp_stat.session_failures, 0, "TcpDirect should have no session failures");
+    assert!(
+        tcp_stat.last_error.is_some(),
+        "TcpDirect should have a last_error recorded"
+    );
+
+    let relay_stat = snap
+        .iter()
+        .find(|r| r.transport == PayloadTransportKind::RelayHop)
+        .expect("RelayHop stats missing");
+    assert!(
+        relay_stat.success_count >= params.data_shards as u64,
+        "RelayHop should have at least {} successes, got {}",
+        params.data_shards,
+        relay_stat.success_count
+    );
+    assert_eq!(relay_stat.failure_count, 0, "RelayHop should have no failures");
+
+    // 6. Verify fallback was detected: last_selected should be RelayHop (non-primary).
+    assert_eq!(
+        selector.stats().last_selected(),
+        Some(PayloadTransportKind::RelayHop),
+        "last_selected should be the relay transport that rescued"
+    );
+    assert!(
+        selector.stats().is_fallback_active(),
+        "is_fallback_active() should be true when non-primary transport wins"
+    );
+
+    // 7. Verify transport ordering matches configured order.
+    let names = selector.transport_names();
+    assert_eq!(
+        names,
+        vec![
+            PayloadTransportKind::DirectLibp2p,
+            PayloadTransportKind::TcpDirect,
+            PayloadTransportKind::RelayHop,
+        ],
+        "transport order should match configuration"
+    );
+
+    // 8. Print fallback evidence for diagnostics.
+    println!("[fallback-evidence] Three-deep transport fallback ladder:");
+    for r in &snap {
+        if r.success_count > 0 || r.failure_count > 0 {
+            println!("  {r}");
+        }
+    }
+    println!(
+        "  Fallback active: {}, last_selected: {:?}",
+        selector.stats().is_fallback_active(),
+        selector.stats().last_selected()
+    );
+    println!("[fallback-evidence] PASS — fallback path: DirectLibp2p(fail) -> TcpDirect(fail) -> RelayHop(ok)");
 }
