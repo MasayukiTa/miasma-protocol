@@ -8,6 +8,10 @@ on:
         required: false
         default: '19900'
 
+permissions:
+  contents: read
+  actions: write
+
 jobs:
   remote-peer:
     name: Remote Miasma Peer (GitHub-hosted Ubuntu)
@@ -86,6 +90,13 @@ jobs:
           echo ""
           echo "peer_id=${PEER_ID}" >> $GITHUB_OUTPUT
           echo "multiaddr=${MULTIADDR}" >> $GITHUB_OUTPUT
+
+          # Write peer info to a repo variable so Windows can poll it in real time
+          gh variable set RUNNER_PEER_MULTIADDR --body "${MULTIADDR}" --repo "${{ github.repository }}" || true
+          gh variable set RUNNER_PEER_ID --body "${PEER_ID}" --repo "${{ github.repository }}" || true
+          echo "Peer info written to repo variables RUNNER_PEER_MULTIADDR and RUNNER_PEER_ID"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Wait for Windows connection (poll for up to 20 minutes)
         id: wait_connect
