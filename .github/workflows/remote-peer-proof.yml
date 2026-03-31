@@ -1,0 +1,185 @@
+name: Remote Peer Proof
+
+on:
+  workflow_dispatch:
+    inputs:
+      listen_port:
+        description: 'UDP port for Miasma QUIC listen'
+        required: false
+        default: '19900'
+
+jobs:
+  remote-peer:
+    name: Remote Miasma Peer (GitHub-hosted Ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Record environment
+        run: |
+          echo "=== ENVIRONMENT ==="
+          uname -a
+          lsb_release -a 2>/dev/null || cat /etc/os-release | head -5
+          echo "Runner: ${RUNNER_NAME}"
+          echo "Runner OS: ${RUNNER_OS}"
+
+      - name: Get public IP and network info
+        id: netinfo
+        run: |
+          PUBLIC_IP=$(curl -s --connect-timeout 10 https://api.ipify.org || curl -s --connect-timeout 10 https://checkip.amazonaws.com | tr -d '[:space:]')
+          echo "public_ip=${PUBLIC_IP}" >> $GITHUB_OUTPUT
+          echo "=== NETWORK INFO ==="
+          echo "Public IP: ${PUBLIC_IP}"
+          ip addr show | grep -E "inet " | head -10
+          echo "Listen port: ${{ inputs.listen_port }}"
+
+      - name: Download Miasma Linux binary
+        run: |
+          echo "=== DOWNLOADING BINARY ==="
+          gh release download v0.3.1-beta.1 \
+            --repo ${{ github.repository }} \
+            --pattern "miasma-linux-x64-musl" \
+            --output miasma
+          chmod +x miasma
+          ./miasma --version 2>/dev/null || file miasma
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Initialize Miasma data directory
+        run: |
+          echo "=== INIT ==="
+          mkdir -p /tmp/miasma-data
+          MIASMA_DATA_DIR=/tmp/miasma-data ./miasma init \
+            --listen-addr "/ip4/0.0.0.0/udp/${{ inputs.listen_port }}/quic-v1" 2>&1
+
+      - name: Start Miasma daemon
+        run: |
+          echo "=== STARTING DAEMON ==="
+          MIASMA_DATA_DIR=/tmp/miasma-data ./miasma daemon > /tmp/miasma.log 2>&1 &
+          DAEMON_PID=$!
+          echo "daemon pid: ${DAEMON_PID}"
+          sleep 6
+
+      - name: Print peer info (Windows should read this)
+        id: peerinfo
+        run: |
+          echo "=== PEER INFO ==="
+          STATUS=$(MIASMA_DATA_DIR=/tmp/miasma-data ./miasma status 2>&1)
+          echo "${STATUS}"
+
+          PEER_ID=$(echo "${STATUS}" | grep "Peer ID" | awk '{print $NF}')
+          PUBLIC_IP="${{ steps.netinfo.outputs.public_ip }}"
+          PORT="${{ inputs.listen_port }}"
+          MULTIADDR="/ip4/${PUBLIC_IP}/udp/${PORT}/quic-v1/p2p/${PEER_ID}"
+
+          echo ""
+          echo "========================================"
+          echo "PEER_ID=${PEER_ID}"
+          echo "PUBLIC_IP=${PUBLIC_IP}"
+          echo "LISTEN_PORT=${PORT}"
+          echo "BOOTSTRAP_MULTIADDR=${MULTIADDR}"
+          echo "========================================"
+          echo ""
+          echo "## Windows config update:"
+          echo "Add to bootstrap_peers in config.toml:"
+          echo "  \"${MULTIADDR}\""
+          echo ""
+          echo "peer_id=${PEER_ID}" >> $GITHUB_OUTPUT
+          echo "multiaddr=${MULTIADDR}" >> $GITHUB_OUTPUT
+
+      - name: Wait for Windows connection (poll for up to 8 minutes)
+        id: wait_connect
+        run: |
+          echo "=== WAITING FOR WINDOWS CONNECTION ==="
+          echo "Polling every 10s for up to 480s..."
+          CONNECTED=0
+          for i in $(seq 1 48); do
+            sleep 10
+            STATUS=$(MIASMA_DATA_DIR=/tmp/miasma-data ./miasma status 2>&1)
+            COUNT=$(echo "${STATUS}" | grep "Connected peers" | grep -oP '\d+' | head -1)
+            echo "t=$((i*10))s: connected_peers=${COUNT:-0}"
+            if [ "${COUNT:-0}" != "0" ]; then
+              echo "CONNECTED=true" >> $GITHUB_OUTPUT
+              echo ""
+              echo "=== WINDOWS PEER CONNECTED at t=$((i*10))s ==="
+              echo "${STATUS}"
+              CONNECTED=1
+              break
+            fi
+          done
+          if [ $CONNECTED -eq 0 ]; then
+            echo "CONNECTED=false" >> $GITHUB_OUTPUT
+            echo "=== NO CONNECTION after 480s ==="
+          fi
+
+      - name: Run retrieval tests if connected
+        if: steps.wait_connect.outputs.CONNECTED == 'true'
+        run: |
+          echo "=== RUNNING TESTS ==="
+          echo "=== Linux → Publish (Windows will retrieve) ==="
+          echo "Remote Linux test content $(date)" > /tmp/test-tiny.txt
+          MIASMA_DATA_DIR=/tmp/miasma-data ./miasma get /tmp/test-tiny.txt 2>&1
+          echo ""
+
+          python3 -c "import random, string; print(''.join(random.choices(string.ascii_letters + ' \n', k=4096)))" > /tmp/test-medium.txt
+          MIASMA_DATA_DIR=/tmp/miasma-data ./miasma get /tmp/test-medium.txt 2>&1
+          echo ""
+
+          echo "=== Linux status after publish ==="
+          MIASMA_DATA_DIR=/tmp/miasma-data ./miasma status 2>&1
+
+      - name: Directed sharing test setup (if connected)
+        if: steps.wait_connect.outputs.CONNECTED == 'true'
+        run: |
+          echo "=== DIRECTED SHARING SETUP ==="
+          echo "Linux sharing key (peer contact for Windows to target):"
+          MIASMA_DATA_DIR=/tmp/miasma-data ./miasma sharing-key 2>&1 | head -5
+          echo ""
+          echo "Checking inbox..."
+          MIASMA_DATA_DIR=/tmp/miasma-data ./miasma inbox 2>&1
+
+      - name: Wait for directed sharing operations (if connected)
+        if: steps.wait_connect.outputs.CONNECTED == 'true'
+        run: |
+          echo "=== WAITING FOR DIRECTED SHARING ==="
+          echo "Polling inbox for 5 minutes..."
+          for i in $(seq 1 30); do
+            sleep 10
+            INBOX=$(MIASMA_DATA_DIR=/tmp/miasma-data ./miasma inbox 2>&1)
+            ITEM_COUNT=$(echo "${INBOX}" | grep -c "ID:" || true)
+            echo "t=$((i*10))s: inbox_items=${ITEM_COUNT}"
+            if [ "${ITEM_COUNT}" -gt 0 ] 2>/dev/null; then
+              echo "=== INBOX ITEM RECEIVED ==="
+              echo "${INBOX}"
+              # Extract envelope ID and challenge
+              ENVELOPE_ID=$(echo "${INBOX}" | grep "ID:" | head -1 | awk '{print $NF}')
+              CHALLENGE=$(echo "${INBOX}" | grep "Challenge:" | head -1 | awk '{print $NF}')
+              echo ""
+              echo "ENVELOPE_ID=${ENVELOPE_ID}"
+              echo "CHALLENGE=${CHALLENGE}"
+              echo ""
+              echo "Confirming challenge..."
+              MIASMA_DATA_DIR=/tmp/miasma-data ./miasma confirm "${ENVELOPE_ID}" --code "${CHALLENGE}" 2>&1 || true
+              break
+            fi
+          done
+
+      - name: Final status and log capture
+        if: always()
+        run: |
+          echo "=== FINAL STATUS ==="
+          MIASMA_DATA_DIR=/tmp/miasma-data ./miasma status 2>&1 || echo "daemon not running"
+          echo ""
+          echo "=== DAEMON LOG (last 50 lines) ==="
+          tail -50 /tmp/miasma.log 2>/dev/null || echo "no log"
+          echo ""
+          echo "=== SHARES STORED ==="
+          MIASMA_DATA_DIR=/tmp/miasma-data ./miasma status 2>&1 | grep -E "Shares|Storage" || true
+
+      - name: Upload evidence log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: remote-peer-proof-logs
+          path: /tmp/miasma.log
+          retention-days: 7
