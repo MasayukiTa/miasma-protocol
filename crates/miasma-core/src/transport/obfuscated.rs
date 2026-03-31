@@ -17,9 +17,18 @@
 ///    (ALPN values) is set to match a real browser. DPI sees plausible
 ///    browser-like QUIC traffic.
 ///
-/// 3. **Fallback proxy**: if a connection does NOT contain a valid
-///    `probe_secret`, the server closes the connection. (Phase 2.1: proxy
-///    to `fallback_url` for full active-probing resistance.)
+/// 3. **Fallback proxy** (active-probing resistance): if a connection does NOT
+///    contain a valid `probe_secret`, the server connects to `fallback_url` via
+///    TCP+TLS and relays the conversation bidirectionally. Active probers (e.g.,
+///    GFW) receive a real response from the fallback site and cannot distinguish
+///    this server from a legitimate web service.
+///
+///    Limitation: the TLS certificate is still self-signed for the SNI domain.
+///    Full REALITY requires the server to present the *real* site's certificate
+///    by proxying the TLS handshake at the QUIC packet level (before TLS
+///    completes), which requires raw QUIC interception not yet implemented.
+///    This implementation provides stream-level forwarding after TLS, which
+///    defeats passive fingerprinting and simple HTTP/2 active probes.
 ///
 /// # Wire protocol
 /// ```text
@@ -43,6 +52,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use quinn::Endpoint;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -325,15 +335,18 @@ impl ObfuscatedQuicServer {
     /// Call via `tokio::spawn(server.run())`.
     pub async fn run(self) {
         let probe_secret = self.config.probe_secret;
+        let fallback_url = self.config.fallback_url.clone();
         let store = self.store;
 
         while let Some(incoming) = self.endpoint.accept().await {
             let store = store.clone();
+            let fallback_url = fallback_url.clone();
             tokio::spawn(async move {
                 match incoming.await {
                     Ok(conn) => {
                         if let Err(e) =
-                            handle_obfuscated_connection(conn, &probe_secret, store).await
+                            handle_obfuscated_connection(conn, &probe_secret, store, &fallback_url)
+                                .await
                         {
                             debug!("ObfuscatedQuic connection error: {e}");
                         }
@@ -347,11 +360,133 @@ impl ObfuscatedQuicServer {
     }
 }
 
+// ─── Fallback transparent forwarding ─────────────────────────────────────────
+
+/// Parse "https://hostname[:port][/path]" → (hostname, port).
+fn parse_fallback_host(url: &str) -> Result<(String, u16), Box<dyn std::error::Error + Send + Sync>> {
+    let after_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+
+    // Strip any path component
+    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
+
+    // Split host:port
+    let (host, port) = if let Some(colon) = authority.rfind(':') {
+        let port_str = &authority[colon + 1..];
+        match port_str.parse::<u16>() {
+            Ok(p) => (&authority[..colon], p),
+            Err(_) => (authority, 443u16),
+        }
+    } else {
+        (authority, 443u16)
+    };
+
+    if host.is_empty() {
+        return Err("empty fallback host".into());
+    }
+    Ok((host.to_string(), port))
+}
+
+/// Forward an unauthenticated QUIC stream to the fallback URL via TCP+TLS.
+///
+/// The bytes already read from the stream (`already_read`) are prepended
+/// before forwarding, so the fallback server sees a complete request.
+/// The fallback's response is relayed back to the QUIC client.
+///
+/// This makes active probers (e.g. GFW) receive a real response from the
+/// fallback site rather than an immediate connection reset.
+async fn forward_to_fallback(
+    send: &mut quinn::SendStream,
+    recv: &mut quinn::RecvStream,
+    already_read: &[u8],
+    fallback_url: &str,
+) {
+    let result: Result<(), Box<dyn std::error::Error + Send + Sync>> = async {
+        let (host, port) = parse_fallback_host(fallback_url)?;
+
+        // TCP connect with 3s timeout
+        let tcp = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            tokio::net::TcpStream::connect(format!("{host}:{port}")),
+        )
+        .await
+        .map_err(|_| "fallback TCP connect timeout")?
+        .map_err(|e| format!("fallback TCP connect {host}:{port}: {e}"))?;
+
+        // TLS using system trust roots
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let tls_cfg = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .map_err(|e| format!("TLS protocol config: {e}"))?
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(tls_cfg));
+        let server_name = rustls::pki_types::ServerName::try_from(host.clone())
+            .map_err(|e| format!("invalid server name {host}: {e}"))?;
+
+        let mut tls = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            connector.connect(server_name, tcp),
+        )
+        .await
+        .map_err(|_| "fallback TLS connect timeout")?
+        .map_err(|e| format!("fallback TLS {host}: {e}"))?;
+
+        // Forward bytes already read from the QUIC stream (the auth header
+        // we consumed), then drain any remaining data.
+        tls.write_all(already_read).await?;
+
+        let mut buf = vec![0u8; 16384];
+        loop {
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(300),
+                recv.read(&mut buf),
+            )
+            .await
+            {
+                Ok(Ok(Some(n))) if n > 0 => tls.write_all(&buf[..n]).await?,
+                _ => break,
+            }
+        }
+        tls.flush().await?;
+
+        // Relay response back to the QUIC client (5s timeout).
+        let n = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tls.read(&mut buf),
+        )
+        .await
+        .unwrap_or(Ok(0))
+        .unwrap_or(0);
+
+        if n > 0 {
+            send.write_all(&buf[..n]).await?;
+            let _ = send.finish();
+        }
+
+        Ok(())
+    }
+    .await;
+
+    if let Err(e) = result {
+        debug!("ObfuscatedQuic fallback forward: {e}");
+    }
+}
+
+// ─── Connection handler ───────────────────────────────────────────────────────
+
 /// Handle a single obfuscated QUIC connection.
 async fn handle_obfuscated_connection(
     conn: quinn::Connection,
     probe_secret: &[u8; 32],
     store: Arc<LocalShareStore>,
+    fallback_url: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (mut send, mut recv) = conn.accept_bi().await?;
 
@@ -367,8 +502,13 @@ async fn handle_obfuscated_connection(
         .map_err(|_| "auth token slice mismatch")?;
 
     if !verify_auth_token(probe_secret, &nonce, &token) {
-        debug!("ObfuscatedQuic: invalid probe_secret — closing connection");
-        conn.close(quinn::VarInt::from_u32(1), b"unauthorized");
+        if !fallback_url.is_empty() {
+            debug!("ObfuscatedQuic: invalid probe_secret — forwarding to fallback {fallback_url}");
+            forward_to_fallback(&mut send, &mut recv, &auth_buf, fallback_url).await;
+        } else {
+            debug!("ObfuscatedQuic: invalid probe_secret — closing (no fallback configured)");
+            conn.close(quinn::VarInt::from_u32(1), b"unauthorized");
+        }
         return Ok(());
     }
 
@@ -792,7 +932,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = Arc::new(LocalShareStore::open(tmp.path(), 100).unwrap());
 
-        // 2. Server uses secret A
+        // 2. Server uses secret A, no fallback configured (empty string)
+        //    so it closes the connection immediately on auth failure.
         let secret_a = [0x42u8; 32];
         let sni = "test.example.com";
         let (cert_der, key_der) = generate_test_cert(sni);
@@ -800,7 +941,7 @@ mod tests {
         let server_config = ObfuscatedConfig::new(
             secret_a,
             sni,
-            "https://example.com",
+            "",  // no fallback — closes connection on bad secret
             BrowserFingerprint::Chrome124,
         );
 
@@ -823,7 +964,7 @@ mod tests {
         let client_config = ObfuscatedConfig::new(
             secret_b,
             sni,
-            "https://example.com",
+            "",
             BrowserFingerprint::Chrome124,
         );
 
@@ -832,11 +973,9 @@ mod tests {
 
         let result = client.fetch_share(&peer_addr, [0u8; 32], 0, 0).await;
 
-        // Should fail — server closes connection after auth failure
+        // Should fail — server closes connection after auth failure (no fallback)
         assert!(result.is_err(), "expected error with wrong probe_secret");
         let err = result.unwrap_err();
-        // The error could be session or data phase depending on timing,
-        // but it should definitely be an error.
         assert!(
             err.message.contains("reset")
                 || err.message.contains("closed")
@@ -844,6 +983,71 @@ mod tests {
                 || err.message.contains("read")
                 || err.message.contains("Application"),
             "unexpected error message: {}",
+            err.message
+        );
+    }
+
+    /// Verify that with a fallback configured, a wrong-secret connection does
+    /// NOT cause an immediate protocol-level connection reset. The server
+    /// attempts to forward to the fallback rather than closing with VarInt(1).
+    /// (Network-dependent test: the fallback attempt may fail if no internet
+    ///  is available, but the client sees a different error than a hard reset.)
+    #[tokio::test]
+    async fn obfuscated_quic_fallback_path_taken_on_wrong_secret() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(LocalShareStore::open(tmp.path(), 100).unwrap());
+
+        let secret_a = [0x42u8; 32];
+        let sni = "test.example.com";
+        let (cert_der, key_der) = generate_test_cert(sni);
+
+        // Server configured with a fallback URL
+        let server_config = ObfuscatedConfig::new(
+            secret_a,
+            sni,
+            "https://example.com",  // fallback — connection forwarded, not hard-closed
+            BrowserFingerprint::Chrome124,
+        );
+
+        let server = ObfuscatedQuicServer::bind_with_cert(
+            store.clone(),
+            0,
+            server_config,
+            cert_der,
+            key_der,
+        )
+        .await
+        .unwrap();
+        let port = server.port;
+        tokio::spawn(server.run());
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let secret_b = [0x99u8; 32];
+        let client_config = ObfuscatedConfig::new(
+            secret_b,
+            sni,
+            "https://example.com",
+            BrowserFingerprint::Chrome124,
+        );
+
+        let client = ObfuscatedQuicPayloadTransport::new(client_config);
+        let peer_addr = format!("127.0.0.1:{port}");
+
+        // The call must fail (wrong secret → no valid share data returned),
+        // but the error must NOT be "Application" close code 1 (hard-reject).
+        // It will be a data-phase error because the stream carries fallback
+        // response data (HTTP) rather than a valid ShareFetchResponse.
+        let result = client.fetch_share(&peer_addr, [0u8; 32], 0, 0).await;
+        assert!(result.is_err(), "expected error with wrong probe_secret");
+        let err = result.unwrap_err();
+        // With fallback, the server doesn't close with VarInt(1)/b"unauthorized".
+        // The client gets malformed data (HTTP response), read error, or timeout.
+        // "Application" with code 1 would mean the old hard-close path — that
+        // must NOT appear when fallback is configured.
+        assert!(
+            !err.message.contains("code: 1"),
+            "server must not hard-close with code 1 when fallback is configured; got: {}",
             err.message
         );
     }
