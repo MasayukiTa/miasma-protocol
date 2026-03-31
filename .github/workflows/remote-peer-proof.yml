@@ -87,13 +87,13 @@ jobs:
           echo "peer_id=${PEER_ID}" >> $GITHUB_OUTPUT
           echo "multiaddr=${MULTIADDR}" >> $GITHUB_OUTPUT
 
-      - name: Wait for Windows connection (poll for up to 8 minutes)
+      - name: Wait for Windows connection (poll for up to 20 minutes)
         id: wait_connect
         run: |
           echo "=== WAITING FOR WINDOWS CONNECTION ==="
-          echo "Polling every 10s for up to 480s..."
+          echo "Polling every 10s for up to 1200s..."
           CONNECTED=0
-          for i in $(seq 1 48); do
+          for i in $(seq 1 120); do
             sleep 10
             STATUS=$(MIASMA_DATA_DIR=/tmp/miasma-data ./miasma status 2>&1)
             COUNT=$(echo "${STATUS}" | grep "Connected peers" | grep -oP '\d+' | head -1)
@@ -109,7 +109,7 @@ jobs:
           done
           if [ $CONNECTED -eq 0 ]; then
             echo "CONNECTED=false" >> $GITHUB_OUTPUT
-            echo "=== NO CONNECTION after 480s ==="
+            echo "=== NO CONNECTION after 1200s ==="
           fi
 
       - name: Run retrieval tests if connected
