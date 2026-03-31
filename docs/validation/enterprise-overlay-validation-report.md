@@ -540,10 +540,11 @@ artifact until a macOS build environment is available.
 |------------|-------|----------|
 | **Core dissolve/retrieve** | FIELD-PROVEN | Track A (enterprise), Track B (restart) |
 | **Directed sharing lifecycle** | FIELD-PROVEN | Track A (full cycle), Track B (post-restart) |
-| **Cross-host connectivity (Win↔Linux)** | FIELD-PROVEN | Linux lab: QUIC, WSL2 peer, both sides connected_peers=1 |
-| **Cross-host retrieval (Win↔Linux)** | FIELD-PROVEN | Linux lab: both directions, up to 1.4 MiB, MD5-verified |
-| **Cross-host directed sharing (Win↔Linux)** | FIELD-PROVEN | Linux lab: both directions, full 4-step lifecycle |
-| **Cross-host reconnect after restart** | FIELD-PROVEN | Linux lab: ~5s recovery after Linux daemon kill+restart |
+| **Cross-host connectivity (Win↔Linux WSL2)** | FIELD-PROVEN | Linux lab: QUIC, WSL2 same-host virtual network |
+| **Cross-host retrieval (Win↔Linux WSL2)** | FIELD-PROVEN | Linux lab: both directions, up to 1.4 MiB, MD5-verified |
+| **Cross-host directed sharing (Win↔Linux WSL2)** | FIELD-PROVEN | Linux lab: both directions, full 4-step lifecycle |
+| **Cross-host reconnect after restart (WSL2)** | FIELD-PROVEN | Linux lab: ~5s recovery after Linux daemon kill+restart |
+| **Internet QUIC (Win→Azure runner)** | ENVIRONMENT-BLOCKED | GlobalProtect blocks outbound UDP to internet; HandshakeTimedOut confirmed over 20min |
 | **QUIC transport** | FIELD-PROVEN | Track A (ok=10, fail=0 under GlobalProtect) |
 | **Enterprise overlay survival** | FIELD-PROVEN | Track A (GlobalProtect, corporate LAN) |
 | **Daemon crash/restart data survival** | FIELD-PROVEN | Track B (kill→restart→retrieve) |
