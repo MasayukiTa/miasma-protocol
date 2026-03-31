@@ -1,3 +1,8 @@
+**Status: COMPLETE (2026-03-31)**
+All completion bar items satisfied. See docs/validation/linux-peer-interoperability-validation-report.md.
+
+---
+
 Next task: use Claude's Linux-capable environment as a real remote Miasma peer and prove cross-host interoperability with this Windows machine.
 
 Important framing:

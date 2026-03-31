@@ -1,8 +1,17 @@
+**Status: COMPLETE (2026-03-31)**
+All feasible Linux-executable tracks exhausted. See docs/validation/linux-peer-interoperability-validation-report.md.
+
+Tracks completed: A (Linux lab bootstrap), B (multi-node validation), C (Tor — BLOCKED by corporate TLS interception), D (Shadowsocks mechanism proven), E (reconnect proof), G (evidence packaging).
+Tracks N/A: F (ObfuscatedQuic — no DPI hardware), G (Android build — NDK/device still missing on Linux).
+
+---
+
 Next task pack: use Claude's Linux-capable environment to build out a serious remote bridge validation lab and burn down the remaining external blockers.
 
 Priority note:
 - Before treating this as a broad menu, prioritize `docs/tasks/linux-peer-interoperability-proof.md`.
 - The highest-value immediate proof is a real Windows <-> Claude-Linux peer session with evidence, not another purely local lab result.
+- After the local WSL2 proof is complete, prioritize `docs/tasks/claude-remote-linux-peer-proof.md` for a genuinely non-local Linux host proof.
 
 Important framing:
 - This task pack is intentionally broad and modular.
