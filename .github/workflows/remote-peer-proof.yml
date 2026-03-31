@@ -93,14 +93,9 @@ jobs:
 
           # Post peer info as issue comment (GITHUB_TOKEN has issues:write)
           # Issue #5 is used as coordination blackboard
-          gh issue comment 5 \
-            --repo "${{ github.repository }}" \
-            --body "**RUNNER_PEER_INFO** run=${{ github.run_id }}
-PEER_ID=${PEER_ID}
-PUBLIC_IP=${PUBLIC_IP}
-BOOTSTRAP_MULTIADDR=${MULTIADDR}
-STATUS=waiting_for_windows_connection"
-          echo "Peer info posted to issue #5 as comment"
+          BODY="RUNNER_PEER_INFO run=${{ github.run_id }} PEER_ID=${PEER_ID} PUBLIC_IP=${PUBLIC_IP} BOOTSTRAP_MULTIADDR=${MULTIADDR}"
+          gh issue comment 5 --repo "${{ github.repository }}" --body "${BODY}"
+          echo "Peer info posted to issue #5 as comment: ${BODY}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
