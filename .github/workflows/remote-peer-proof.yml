@@ -10,7 +10,7 @@ on:
 
 permissions:
   contents: read
-  actions: write
+  issues: write
 
 jobs:
   remote-peer:
@@ -91,10 +91,16 @@ jobs:
           echo "peer_id=${PEER_ID}" >> $GITHUB_OUTPUT
           echo "multiaddr=${MULTIADDR}" >> $GITHUB_OUTPUT
 
-          # Write peer info to a repo variable so Windows can poll it in real time
-          gh variable set RUNNER_PEER_MULTIADDR --body "${MULTIADDR}" --repo "${{ github.repository }}" || true
-          gh variable set RUNNER_PEER_ID --body "${PEER_ID}" --repo "${{ github.repository }}" || true
-          echo "Peer info written to repo variables RUNNER_PEER_MULTIADDR and RUNNER_PEER_ID"
+          # Post peer info as issue comment (GITHUB_TOKEN has issues:write)
+          # Issue #5 is used as coordination blackboard
+          gh issue comment 5 \
+            --repo "${{ github.repository }}" \
+            --body "**RUNNER_PEER_INFO** run=${{ github.run_id }}
+PEER_ID=${PEER_ID}
+PUBLIC_IP=${PUBLIC_IP}
+BOOTSTRAP_MULTIADDR=${MULTIADDR}
+STATUS=waiting_for_windows_connection"
+          echo "Peer info posted to issue #5 as comment"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
