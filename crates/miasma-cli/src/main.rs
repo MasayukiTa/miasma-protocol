@@ -230,6 +230,30 @@ enum Commands {
         #[arg(long)]
         bootstrap: Vec<String>,
     },
+
+    /// Probe WebSocket/WSS connectivity to a URL.
+    ///
+    /// Connects via TCP (+ TLS for wss:// or https://) and performs a WebSocket
+    /// upgrade. Useful for verifying that a restrictive network (corporate VPN,
+    /// GFW) passes WebSocket traffic on port 443.
+    ///
+    /// Exit 0 = connection established (TCP + WS upgrade succeeded).
+    /// Exit 1 = connection failed (timeout, TCP reset, TLS error, etc.).
+    ///
+    /// Examples:
+    ///   miasma wss-probe wss://abc.trycloudflare.com
+    ///   miasma wss-probe ws://127.0.0.1:8080
+    WssProbe {
+        /// WebSocket URL to probe.
+        /// Accepted schemes: ws://, wss://, http://, https://
+        url: String,
+        /// Connect + handshake timeout in seconds. Default: 15.
+        #[arg(long, default_value = "15")]
+        timeout_secs: u64,
+        /// Custom CA certificate PEM file for self-signed server certs.
+        #[arg(long)]
+        ca_cert: Option<PathBuf>,
+    },
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
@@ -355,6 +379,12 @@ async fn main() -> Result<()> {
             )
             .await
         }
+
+        Commands::WssProbe {
+            url,
+            timeout_secs,
+            ca_cert,
+        } => cmd_wss_probe(&url, timeout_secs, ca_cert.as_deref()).await,
     }
 }
 
@@ -1669,6 +1699,89 @@ async fn cmd_network_get(
         ControlResponse::Error(e) => bail!("daemon error: {e}"),
         other => bail!("unexpected response: {other:?}"),
     }
+}
+
+// ─── wss-probe ───────────────────────────────────────────────────────────────
+
+/// Probe WebSocket connectivity to a URL.
+///
+/// Distinguishes between:
+/// - Session-phase failure: TCP connect / TLS handshake / WS upgrade failed
+///   → transport is blocked (GlobalProtect, GFW, firewall)
+/// - Data-phase failure:  WS connected but share not found / bad response
+///   → transport is functional, server just doesn't have the dummy shard
+///
+/// Exit 0 on session success (or data-phase error → connection itself worked).
+/// Exit 1 on session failure.
+async fn cmd_wss_probe(
+    url: &str,
+    timeout_secs: u64,
+    ca_cert: Option<&std::path::Path>,
+) -> Result<()> {
+    use miasma_core::transport::{
+        payload::{PayloadTransport, TransportPhase},
+        websocket::{WebSocketConfig, WssPayloadTransport},
+    };
+    use std::time::Instant;
+
+    let is_tls = url.starts_with("wss://") || url.starts_with("https://");
+
+    // Load optional custom CA cert (for self-signed server certs).
+    let custom_ca_pem = if let Some(path) = ca_cert {
+        Some(
+            std::fs::read(path)
+                .with_context(|| format!("cannot read CA cert: {}", path.display()))?,
+        )
+    } else {
+        None
+    };
+
+    let config = WebSocketConfig {
+        tls_enabled: is_tls,
+        custom_ca_pem,
+        connect_timeout_ms: timeout_secs * 1000,
+        read_timeout_ms: timeout_secs * 1000,
+        write_timeout_ms: timeout_secs * 1000,
+        idle_timeout_ms: timeout_secs * 1000 * 2,
+        ..WebSocketConfig::default()
+    };
+
+    let transport = WssPayloadTransport::new(config);
+
+    let scheme = if is_tls { "WSS (TLS)" } else { "WS (plain)" };
+    eprintln!("Probing {scheme} connection to: {url}");
+    eprintln!("Timeout: {timeout_secs}s");
+
+    let start = Instant::now();
+
+    // Use an all-zeros dummy MID. The server will respond "share not found"
+    // (data-phase error) if the connection works, or a session-phase error if
+    // the transport itself is blocked.
+    let result = transport.fetch_share(url, [0u8; 32], 0, 0).await;
+    let elapsed = start.elapsed();
+
+    match result {
+        Ok(_) => {
+            eprintln!("\n✓ PASS — WSS connected and server returned a valid response ({elapsed:.2?})");
+            eprintln!("  TCP + WebSocket upgrade: OK");
+            eprintln!("  This transport path is NOT blocked.");
+        }
+        Err(ref e) if e.phase == TransportPhase::Session => {
+            eprintln!("\n✗ FAIL — connection blocked at transport layer ({elapsed:.2?})");
+            eprintln!("  Error: {}", e.message);
+            eprintln!("  Conclusion: TCP 443 / WebSocket is blocked on this network.");
+            bail!("WSS probe failed (session): {}", e.message);
+        }
+        Err(ref e) => {
+            // Data-phase error = connection worked, server just doesn't have shard 0
+            eprintln!("\n✓ PASS — WSS connection established ({elapsed:.2?})");
+            eprintln!("  TCP + WebSocket upgrade: OK");
+            eprintln!("  Server response (data-phase, expected for probe): {}", e.message);
+            eprintln!("  Conclusion: this transport path IS functional.");
+        }
+    }
+
+    Ok(())
 }
 
 // ─── Log file cleanup ───────────────────────────────────────────────────────
