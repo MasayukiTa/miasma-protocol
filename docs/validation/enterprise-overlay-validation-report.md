@@ -309,9 +309,10 @@ restart once peer connectivity is re-established.
 | Android SDK | NOT INSTALLED |
 | Android NDK | NOT INSTALLED |
 | ADB | NOT INSTALLED |
-| cargo-ndk | NOT INSTALLED |
-| aarch64-linux-android Rust target | NOT INSTALLED |
+| cargo-ndk | INSTALLED (v4.1.2) |
+| aarch64-linux-android Rust target | INSTALLED |
 | Gradle wrapper (gradlew) | NOT PRESENT in repo |
+| miasma-ffi (Windows DLL host build) | BUILT (cargo build --release -p miasma-ffi) |
 
 ## Source Completeness
 
@@ -348,10 +349,22 @@ All 13 FFI functions are defined and match the Android code's expectations:
 
 ### Build Blockers
 
-1. **No Android SDK/NDK on this Windows host** — cannot compile native library
-2. **No Gradle wrapper** — project not immediately buildable without local Gradle
-3. **No cargo-ndk** — cannot cross-compile Rust to aarch64-android
-4. **UniFFI bindings are stubs** — require actual .so to generate real bindings
+The exact sequential dependency chain (each blocks all subsequent steps):
+
+```
+1. Android NDK (aarch64-linux-android-clang)    ← MISSING
+   └── enables: cargo ndk -t arm64-v8a build --release -p miasma-ffi
+2. uniffi-bindgen                                ← needs .so from step 1
+   └── generates: MiasmaFfi.kt from libmiasma_ffi.so
+3. Gradle wrapper (gradlew + wrapper jar)        ← MISSING
+4. Android SDK (build-tools, platform)           ← MISSING
+5. Java 17+ (Gradle requirement)                 ← have Java 8 only
+   └── enables: ./gradlew assembleDebug
+```
+
+Steps completed: Rust target (`aarch64-linux-android`) and `cargo-ndk` (v4.1.2)
+are installed. The miasma-ffi crate builds for the Windows host. ARM64 build
+fails at NDK linker: `aarch64-linux-android-clang` not found.
 
 ### What Is Proven (by code analysis, not device test)
 
@@ -392,36 +405,70 @@ Rust FFI projects with C dependencies.
 
 ## Assessment
 
-Directed sharing over Tor **cannot be field-tested** in this environment.
-Tor installation is explicitly prohibited on this corporate device.
+Directed sharing over Tor is **not blocked by environment** — it is blocked by
+**code architecture**. Even if Tor were installed and available, directed sharing
+would fail at the confirm step.
 
-### What Exists (from prior work)
+Tor installation is separately prohibited on this corporate device, but that is
+not the root blocker.
 
-- Tor transport module is implemented and tested (automated suite)
-- External SOCKS5 proxy configuration exists in config.toml
-- Prior WSL2 evidence (2026-03-29) confirmed Tor bootstrap and circuit isolation
-  on an unrestricted network
-- 78 transport tests cover proxy path including wrong-key, server-restart,
-  reconnect, and large-file scenarios
+### Architectural Finding (2026-03-31)
 
-### What Remains Unproven
+**Directed sharing uses a different transport layer than payload retrieval.**
 
-- Directed sharing envelope delivery over Tor SOCKS5
-- Challenge/confirm flow over Tor (latency tolerance)
-- Retrieval over Tor
-- Revoke/delete propagation over Tor
-- Performance characteristics (Tor circuit latency + share retrieval)
+The directed sharing control plane (`/miasma/directed/1.0.0`) uses **libp2p
+request-response**, which requires bidirectional P2P reachability. This is the
+same mechanism used for relay probing and credential exchange — it is NOT routed
+through the payload transport pipeline.
 
-### Honest Boundary
+Tor SOCKS5 is integrated only into `fetch_share()` (payload transport). It has
+no effect on the libp2p request-response protocol used for Invite, Confirm, and
+Revoke operations.
 
-The directed sharing protocol does not have any Tor-specific code path — it uses
-the same P2P transport layer as all other operations. If the transport works
-(which automated tests confirm), directed sharing should work. However, **no
-field evidence exists** for end-to-end directed sharing over Tor.
+| Step | Protocol | Tor-aware? |
+|------|----------|-----------|
+| Invite (sender→recipient) | libp2p request-response | NO |
+| InviteAccepted (recipient→sender) | libp2p response | NO |
+| Confirm (sender→recipient) | libp2p request-response | NO |
+| Confirmed (recipient→sender) | libp2p response | NO |
+| SenderRevoke (sender→recipient) | libp2p request-response | NO |
+| Revoked (recipient→sender) | libp2p response | NO |
+| Share fetch (retrieval) | payload transport | YES (SOCKS5) |
 
-The primary risk is **latency**: Tor circuits add 2-5 seconds per hop, and
-directed sharing involves multiple round-trips (send → challenge → confirm →
-retrieve). Timeout behavior under Tor latency is untested in the field.
+**Why this matters**: Tor SOCKS5 is outbound-only. The Confirm step requires the
+sender to be inbound-reachable by the recipient. This cannot work over a
+unidirectional outbound proxy.
+
+### What the Earlier Claim Got Wrong
+
+The prior assessment stated: "The directed sharing protocol does not have any
+Tor-specific code path — it uses the same P2P transport layer as all other
+operations."
+
+This was incorrect. Share fetches use the payload transport layer (SOCKS5-aware);
+directed sharing uses libp2p request-response (not SOCKS5-aware). These are
+separate transport layers.
+
+### Architecture Decision (ADR-010)
+
+This finding has been converted to an architecture decision in
+`docs/adr/010-directed-sharing-transport-architecture.md`:
+
+- **Current product boundary**: directed sharing requires direct or relay P2P
+  connectivity. Tor SOCKS5 is not supported for the control plane.
+- **Next implementation**: relay circuit fallback in `SendDirectedRequest`
+  handler — dial target via `/p2p/{relay}/p2p-circuit/p2p/{target}` when not
+  already connected. The relay circuit infrastructure (Phase 4c through 4e++)
+  already exists; it must be wired to the directed sharing control plane.
+
+### What Remains Blocked (Field Evidence)
+
+- End-to-end directed sharing over Tor: **ARCHITECTURALLY BLOCKED** until
+  relay circuit fallback is implemented (ADR-010 Part 2)
+- Directed sharing via relay circuit: **CODE CHANGE REQUIRED** (no field test
+  possible until relay fallback is implemented)
+- Latency characteristics of directed sharing over Tor: secondary concern;
+  the structural blocker must be resolved first
 
 ---
 ---
@@ -503,13 +550,13 @@ artifact until a macOS build environment is available.
 | **Obfuscated QUIC** | AUTOMATED-PROVEN | Adversarial suite |
 | **Shadowsocks proxy** | AUTOMATED-PROVEN | 78 transport tests |
 | **Tor transport** | AUTOMATED-PROVEN | Transport suite + prior WSL2 evidence |
-| **Directed sharing over Tor** | BOUNDED | No Tor available; protocol is transport-agnostic |
+| **Directed sharing over Tor** | ARCHITECTURAL-BLOCKER | Control plane uses libp2p request-response (not Tor SOCKS5); relay circuit fallback required (ADR-010) |
 | **Fallback ladder (full chain)** | AUTOMATED-PROVEN | 50 fallback + 30 self-heal tests |
 | **Circuit breaker / flap damping** | AUTOMATED-PROVEN | 3 + 2 tests |
 | **DPI detection/evasion** | AUTOMATED-PROVEN | 181 adversarial tests |
 | **Aggressive TLS MITM** | BOUNDED | Not present in test environment |
 | **UDP-blocking firewall** | BOUNDED | Not present in test environment |
-| **Android app** | CODE-COMPLETE | 18 Kotlin files, 13 FFI functions, no device test |
+| **Android app** | CODE-COMPLETE | 18 Kotlin files, 13 FFI functions, cargo-ndk+target installed, NDK missing → no ARM64 build |
 | **Android directed sharing** | CODE-COMPLETE | DirectedApi wired, no device test |
 | **Windows-to-Android sharing** | BOUNDED | No Android device available |
 | **iOS app (retrieval-first)** | CODE-COMPLETE | 7 Swift files, no macOS/device |
@@ -524,8 +571,12 @@ artifact until a macOS build environment is available.
 1. "Works on Android" — code exists but no device has run it
 2. "Works on iOS" — source exists but cannot be built on Windows
 3. "Survives aggressive TLS MITM" — not field-tested
-4. "Directed sharing works over Tor" — untested in field
+4. "Directed sharing works over Tor" — architecturally impossible with current
+   design (control plane is not Tor-aware); see ADR-010
 5. "Works on UDP-blocking networks" — fallback exists but not field-proven
+6. "Directed sharing uses the same transport as file retrieval" — INCORRECT;
+   control plane uses libp2p request-response (direct P2P only); retrieval
+   uses payload transport (SOCKS5-aware)
 
 ## Claims That CAN Be Made
 
@@ -551,11 +602,15 @@ directed sharing, enterprise network survival, and automatic peer recovery
 after crash/restart (30s self-heal).
 
 **What needs further validation before broader claims**:
-- Android real-device testing (needs SDK + NDK + device)
+- Android real-device testing (needs NDK + SDK + Gradle wrapper + Java 17 + device)
 - iOS build and device testing (needs macOS + Xcode + iPhone)
-- Directed sharing over Tor (needs Tor-capable environment)
+- Directed sharing over Tor (requires relay circuit fallback per ADR-010 first,
+  then Tor-capable environment for field test)
 - Aggressive network restriction scenarios (TLS MITM, UDP blocking)
 
 **What is honestly bounded**:
-- Tor/Shadowsocks field proof requires environments where installation is permitted
+- Directed sharing over Tor is an architectural blocker (ADR-010), not just a
+  missing environment. Even with Tor available, directed sharing would fail
+  at the confirm step until relay circuit fallback is implemented.
 - Mobile platforms are code-complete but device-unvalidated
+- Tor/Shadowsocks field proof for share retrieval requires permitted environments
