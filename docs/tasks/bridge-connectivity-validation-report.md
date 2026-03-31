@@ -118,10 +118,18 @@ Android build readiness advanced from "theoretical" to "toolchain-installed, FFI
 | Android SDK/NDK | NOT AVAILABLE |
 | Gradle wrapper | NOT PRESENT in repo |
 | APK assembly | BLOCKED — needs SDK + NDK + Gradle wrapper |
-| UniFFI bindgen CLI | NOT INSTALLED — version conflict |
+| UniFFI Kotlin codegen | DONE — 1804-line miasma_ffi.kt, all 16 functions |
 | Kotlin source present | YES — 18 files, full UI |
 
-**Progress**: Moved from "theoretical" to "toolchain partially installed, FFI compiles on host." Remaining: NDK, Gradle wrapper, cross-linker.
+**Progress**: Moved from "theoretical" to "toolchain installed, FFI compiles, Kotlin bindings generated."
+
+**UniFFI codegen result**: 1804-line `miasma_ffi.kt` generated successfully with all 16 exported functions:
+`initializeNode`, `dissolveBytes`, `retrieveBytes`, `getNodeStatus`, `distressWipe`,
+`getSharingKey`, `getSharingContact`, `listDirectedInbox`, `listDirectedOutbox`,
+`deleteDirectedEnvelope`, `startEmbeddedDaemon`, `stopEmbeddedDaemon`, `isDaemonRunning`, `getDaemonHttpPort`
++ 4 types: `EmbeddedDaemonStatus`, `EnvelopeSummaryFfi`, `NodeStatusFfi`, `MiasmaFfiException` (5 variants).
+
+**Remaining**: NDK (for `ring`/`aws-lc-sys` C cross-compiler), Gradle wrapper.
 
 ---
 
