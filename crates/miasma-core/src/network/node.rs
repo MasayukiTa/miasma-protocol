@@ -1645,6 +1645,14 @@ impl MiasmaNode {
 
     /// Run the node event loop. Blocks until shutdown or error.
     pub async fn run(&mut self) -> Result<(), MiasmaError> {
+        // Time-based bootstrap re-dial interval — fires independently of swarm
+        // events so that an isolated node (zero peers, minimal events) can still
+        // attempt reconnection on a predictable schedule.
+        let mut bootstrap_interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        bootstrap_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Skip the first immediate tick (startup bootstrap is handled elsewhere).
+        bootstrap_interval.tick().await;
+
         loop {
             tokio::select! {
                 event = self.swarm.next() => {
@@ -1659,6 +1667,9 @@ impl MiasmaNode {
                 cmd = self.share_rx.recv() => {
                     if let Some(cmd) = cmd { self.handle_share_command(cmd); }
                 }
+                _ = bootstrap_interval.tick() => {
+                    self.periodic_bootstrap_redial();
+                }
                 _ = self.shutdown_rx.recv() => {
                     info!("Shutdown signal received");
                     break;
@@ -1666,6 +1677,59 @@ impl MiasmaNode {
             }
         }
         Ok(())
+    }
+
+    /// Time-driven bootstrap re-dial.  Called every 30 seconds independently
+    /// of the swarm event stream so that a node with zero peers still attempts
+    /// to reconnect to its configured bootstrap peers.
+    ///
+    /// Bootstrap peers are treated specially: the reconnection scheduler's
+    /// circuit breaker is reset for them because a configured bootstrap peer
+    /// is the node's lifeline back to the network and should never be
+    /// permanently abandoned.
+    fn periodic_bootstrap_redial(&mut self) {
+        let peer_count = self.swarm.connected_peers().count();
+        if peer_count > 0 || self.bootstrap_peers.is_empty() {
+            return; // Already connected or nothing to dial.
+        }
+        if self.flap_detector.is_damping() {
+            info!("bootstrap_redial.skipped reason=flap_damping");
+            return;
+        }
+
+        let mut dialed = 0usize;
+        for (peer_id, addr) in &self.bootstrap_peers {
+            let peer_bytes = peer_id.to_bytes();
+            // Reset circuit breaker for bootstrap peers — they should never
+            // be permanently abandoned since they are the configured lifeline.
+            if self.reconnection_scheduler.failures_for(&peer_bytes) >= 10 {
+                self.reconnection_scheduler.record_success(&peer_bytes);
+                info!("bootstrap_redial.circuit_breaker_reset peer={peer_id}");
+            }
+            if !self.reconnection_scheduler.should_attempt(&peer_bytes) {
+                continue;
+            }
+            let p2p = addr
+                .clone()
+                .with(libp2p::multiaddr::Protocol::P2p(*peer_id));
+            match self.swarm.dial(p2p) {
+                Ok(_) => {
+                    dialed += 1;
+                    self.reconnection_metrics.record_attempt();
+                }
+                Err(e) => {
+                    info!("bootstrap_redial.dial_failed peer={peer_id}: {e}");
+                }
+            }
+        }
+        if dialed > 0 {
+            info!("bootstrap_redial.attempted peers={dialed}");
+        } else {
+            info!(
+                "bootstrap_redial.no_attempt bootstrap_count={} peer_count={peer_count}",
+                self.bootstrap_peers.len()
+            );
+        }
     }
 
     // ── Private helpers ──────────────────────────────────────────────────────
@@ -1717,6 +1781,10 @@ impl MiasmaNode {
                     .kademlia
                     .add_address(&peer_id, addr.clone());
                 self.swarm.add_peer_address(peer_id, addr.clone());
+                // Remember for periodic recovery re-dialing.
+                if !self.bootstrap_peers.iter().any(|(p, _)| *p == peer_id) {
+                    self.bootstrap_peers.push((peer_id, addr.clone()));
+                }
                 let p2p_addr = addr.with(libp2p::multiaddr::Protocol::P2p(peer_id));
                 if let Err(e) = self.swarm.dial(p2p_addr) {
                     debug!("bootstrap dial queued error (may be harmless): {e}");
