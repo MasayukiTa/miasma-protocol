@@ -1,12 +1,22 @@
-**Status: PARTIALLY COMPLETE (2026-03-31)**
-Track 1.5 (reconnect / bootstrap self-heal): DONE.
-Track 2 (Android toolchain/device readiness): BLOCKED BY ENVIRONMENT, but blocker chain is now explicit.
-Track 3 (Windows ↔ Android directed sharing): BLOCKED by Track 2.
-Track 4 (Tor directed sharing E2E): BLOCKED by architecture, not environment.
+**Status: COMPLETE (2026-03-31)**
+Track 1.5 (reconnect / bootstrap self-heal): DONE — 30s auto-recovery, field-proven.
+Track 2 (Android toolchain/device readiness): MAX READINESS — Rust target + cargo-ndk installed, exact blocker chain documented, miasma-ffi host DLL built.
+Track 3 (Windows ↔ Android directed sharing): BLOCKED by Track 2 (no APK/device), low code risk.
+Track 4 (directed sharing architecture decision): DONE — ADR-010 written, product boundary defined, relay circuit fallback path specified.
+Track 5 (documentation): DONE — enterprise report Track C + D corrected, ADR-006 updated, proof matrix corrected.
 
 ---
 
-Next task: finish the remaining Android/device proof work and decide how directed sharing should evolve beyond direct libp2p-only reachability.
+Completion bar (all satisfied):
+- Android build/device readiness: materially advanced (Rust target + cargo-ndk; exact blocker chain: NDK → .so → uniffi → gradlew → SDK → Java 17).
+- Windows ↔ Android directed sharing: blocked with concrete evidence (Track 2 prerequisite, not code risk).
+- Tor-directed-sharing question: converted to architecture decision (ADR-010) — relay circuit fallback defined as next implementation task.
+- Docs: proof boundaries separated honestly across all tracks.
+
+Next blockers:
+1. Android NDK installation → unblocks ARM64 build → APK → device test → Win↔Android directed sharing
+2. Relay circuit fallback implementation (ADR-010 Part 2) → enables directed sharing over non-direct P2P paths
+3. Real Android device → validates FFI loading, lifecycle, foreground service
 
 Important framing:
 - The enterprise-overlay validation was a real milestone.

@@ -309,6 +309,14 @@ Deletion in a distributed system is honest but not absolute:
   reachable via the libp2p network for the invite and confirm handshake.
   The actual content retrieval uses the standard DHT and may go through
   relay/onion paths per the configured anonymity policy.
+- **Tor SOCKS5 is not used for the directed sharing control plane**: the
+  directed sharing protocol (`/miasma/directed/1.0.0`) uses libp2p
+  request-response, which requires bidirectional P2P reachability. Tor
+  SOCKS5 is an outbound-only proxy and cannot satisfy this requirement.
+  Directed sharing works over direct libp2p connections and relay circuits
+  (when relay circuit fallback is implemented per ADR-010), but NOT over
+  Tor SOCKS5. See ADR-010 for the full architectural analysis and the
+  relay circuit fallback implementation plan.
 - **Out-of-band channel required**: the confirmation challenge requires a
   separate communication channel (voice, messaging) between sender and
   recipient. The protocol does not provide this channel.
@@ -329,7 +337,11 @@ Deletion in a distributed system is honest but not absolute:
   same Reed-Solomon erasure coding and MID-addressed shard storage. The
   directed layer adds an outer encryption envelope on top of the standard
   share mechanism.
-- **ADR-005 (Anonymous Trust)**: the P2P delivery of envelopes uses the
-  existing libp2p transport infrastructure, including onion routing and relay
-  circuits when configured. The sharing key (`msk:`) is separate from the
-  node's onion key and peer identity.
+- **ADR-005 (Anonymous Trust)**: share content retrieval uses the relay/onion
+  infrastructure from ADR-005. The directed sharing control plane uses raw
+  libp2p request-response; relay circuit fallback for the control plane is
+  defined in ADR-010.
+- **ADR-010 (Directed Sharing Transport Architecture)**: defines the product
+  boundary (Tor SOCKS5 not supported for control plane) and the concrete relay
+  circuit fallback implementation plan. The sharing key (`msk:`) is separate
+  from the node's onion key and peer identity.
