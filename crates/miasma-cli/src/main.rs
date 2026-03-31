@@ -253,6 +253,10 @@ enum Commands {
         /// Custom CA certificate PEM file for self-signed server certs.
         #[arg(long)]
         ca_cert: Option<PathBuf>,
+        /// Skip TLS certificate verification (for testing through MITM proxies).
+        /// WARNING: insecure — use only for connectivity testing, never for production.
+        #[arg(long)]
+        skip_tls_verify: bool,
     },
 }
 
@@ -384,7 +388,8 @@ async fn main() -> Result<()> {
             url,
             timeout_secs,
             ca_cert,
-        } => cmd_wss_probe(&url, timeout_secs, ca_cert.as_deref()).await,
+            skip_tls_verify,
+        } => cmd_wss_probe(&url, timeout_secs, ca_cert.as_deref(), skip_tls_verify).await,
     }
 }
 
@@ -1717,6 +1722,7 @@ async fn cmd_wss_probe(
     url: &str,
     timeout_secs: u64,
     ca_cert: Option<&std::path::Path>,
+    skip_tls_verify: bool,
 ) -> Result<()> {
     use miasma_core::transport::{
         payload::{PayloadTransport, TransportPhase},
@@ -1725,6 +1731,11 @@ async fn cmd_wss_probe(
     use std::time::Instant;
 
     let is_tls = url.starts_with("wss://") || url.starts_with("https://");
+
+    if skip_tls_verify && is_tls {
+        eprintln!("WARNING: TLS certificate verification is DISABLED (--skip-tls-verify).");
+        eprintln!("         Use only for connectivity testing, never for production.");
+    }
 
     // Load optional custom CA cert (for self-signed server certs).
     let custom_ca_pem = if let Some(path) = ca_cert {
@@ -1739,6 +1750,7 @@ async fn cmd_wss_probe(
     let config = WebSocketConfig {
         tls_enabled: is_tls,
         custom_ca_pem,
+        accept_invalid_certs: skip_tls_verify,
         connect_timeout_ms: timeout_secs * 1000,
         read_timeout_ms: timeout_secs * 1000,
         write_timeout_ms: timeout_secs * 1000,
