@@ -1,5 +1,9 @@
 Next task pack: use Claude's Linux-capable environment to build out a serious remote bridge validation lab and burn down the remaining external blockers.
 
+Priority note:
+- Before treating this as a broad menu, prioritize `docs/tasks/linux-peer-interoperability-proof.md`.
+- The highest-value immediate proof is a real Windows <-> Claude-Linux peer session with evidence, not another purely local lab result.
+
 Important framing:
 - This task pack is intentionally broad and modular.
 - It is designed for a Linux-capable Claude environment where local services, multiple processes, and network tooling can be driven more aggressively than on the current Windows machine.
