@@ -1,15 +1,18 @@
-Next task: close the reconnect/self-heal gap, then push through Android device proof, Windows↔Android directed sharing, and Tor end-to-end directed sharing.
+**Status: PARTIALLY COMPLETE (2026-03-31)**
+Track 1.5 (reconnect / bootstrap self-heal): DONE.
+Track 2 (Android toolchain/device readiness): BLOCKED BY ENVIRONMENT, but blocker chain is now explicit.
+Track 3 (Windows ↔ Android directed sharing): BLOCKED by Track 2.
+Track 4 (Tor directed sharing E2E): BLOCKED by architecture, not environment.
+
+---
+
+Next task: finish the remaining Android/device proof work and decide how directed sharing should evolve beyond direct libp2p-only reachability.
 
 Important framing:
 - The enterprise-overlay validation was a real milestone.
-- GlobalProtect-active same-LAN bridge behavior is now field-proven.
-- However, the validation also exposed a real operational weakness: after a peer is hard-killed and restarted, the surviving node does not reliably self-heal back to the bootstrap peer without extra help.
-- That weakness matters for every harder next step: Android device validation, Tor end-to-end sharing, and unstable-network behavior.
-- So this milestone is intentionally split into:
-  - **Track 1.5**: reconnect / bootstrap self-heal hardening
-  - **Track 2**: Android toolchain + ARM64/device readiness
-  - **Track 3**: Windows ↔ Android directed sharing proof
-  - **Track 4**: Tor directed sharing end-to-end proof
+- GlobalProtect-active same-LAN bridge behavior is field-proven.
+- The reconnect/self-heal gap exposed in that validation is now fixed and field-proven.
+- The remaining work is no longer about basic survivability; it is about Android execution proof and a product/architecture decision for directed sharing beyond direct bidirectional libp2p reachability.
 
 Execution guidance:
 - It is acceptable if this milestone takes a long time.
@@ -21,36 +24,13 @@ Execution guidance:
 Current state:
 - Windows bridge connectivity is field-proven on an unrestricted path.
 - GlobalProtect-active same-LAN behavior is field-proven.
-- Directed sharing on Windows is already strong.
+- Reconnect/self-heal after peer restart is field-proven with automatic ~30s recovery.
 - Tor external SOCKS5 bootstrap is field-proven on an unrestricted path.
-- Android transport is still bounded mostly by shared-code analysis, not real-device proof.
-- The main newly exposed weakness is reconnect/self-heal after peer loss and restart.
+- Android remains build-blocked by missing SDK/NDK/Gradle wrapper/Java 17 toolchain.
+- Directed sharing over Tor is now understood to be architecturally incompatible with the current direct libp2p request-response design.
 
 Goal:
-Strengthen runtime self-healing enough that harder field tests are meaningful, then prove the next product-critical paths on Android and Tor.
-
-Track 1.5: Reconnect / bootstrap self-heal hardening
-1. Fix the gap observed in enterprise-overlay validation:
-- when Node A is killed and restarted
-- Node B should not remain stranded indefinitely if Node A is still a configured bootstrap peer
-
-2. Implement and/or validate:
-- periodic bootstrap re-dial
-- re-seeding bootstrap peers after peer loss
-- bounded retry behavior
-- interaction with flap damping and reconnection scheduler
-- stale routing-table or address-book recovery
-
-3. Record:
-- what the root cause was
-- what was changed
-- whether reconnect becomes automatic
-- how long recovery takes
-- whether any manual restart/bootstrap is still required
-
-4. Completion for this track:
-- peer loss + restart is either self-healed automatically with evidence
-- or the remaining non-healed case is isolated precisely and documented honestly
+Advance Android from "bounded by shared-code analysis" to "build-ready or device-proven," and turn the Tor-directed-sharing question into an explicit next-architecture decision instead of an ambiguous blocker.
 
 Track 2: Android toolchain and ARM64/device readiness
 1. Set up the Android path if still missing:
@@ -103,26 +83,18 @@ Track 3: Windows ↔ Android directed sharing proof
 - Windows ↔ Android directed sharing is either proven end-to-end
 - or blocked with concrete evidence, not guesswork
 
-Track 4: Tor directed sharing end-to-end proof
-1. Go beyond SOCKS reachability and plain HTTPS proof.
-2. Validate:
-- envelope delivery
-- challenge confirmation
-- password-gated retrieval
-- revoke/delete propagation
-- latency and stability
+Track 4: Directed sharing architecture follow-through
+1. Treat the Tor-directed-sharing result as an architecture decision point, not a field-test checkbox.
+2. Decide and document the next supported path for directed sharing when direct bidirectional libp2p reachability is unavailable.
+Examples may include:
+- relay-routed directed requests
+- bridge-mediated directed control plane
+- a separate mailbox/inbox delivery layer
+- explicit scoping: directed sharing requires direct/relay P2P and is not supported over Tor SOCKS5
 
-3. If two nodes are required, use them.
-4. If the chain fails, isolate whether the break is in:
-- Tor SOCKS path
-- WebSocket / WSS transport
-- transport selection
-- directed sharing control plane
-- directed sharing data plane
-
-5. Completion for this track:
-- directed sharing over Tor is either proven end-to-end
-- or reduced to a sharply bounded blocker
+3. The output of this track must be one of:
+- a concrete implementation task for the chosen architecture
+- or a sharply bounded product statement that removes ambiguity
 
 Track 5: Documentation and release truthfulness
 1. Update validation docs with only what is actually proven.
@@ -141,16 +113,15 @@ Track 5: Documentation and release truthfulness
 
 Completion bar:
 Do not call this complete unless all of the following are true:
-- reconnect/self-heal after peer restart is improved or precisely bounded with evidence
-- Android build/device readiness is materially advanced
+- Android build/device readiness is materially advanced or blocked with a precise setup chain
 - Windows ↔ Android directed sharing is either proven or blocked with concrete evidence
-- Tor directed sharing is either proven or blocked with concrete evidence
+- the Tor-directed-sharing question has been converted into an explicit architecture/product decision
 - docs clearly separate each proof boundary honestly
 
 Expected final output:
-1. What was fixed in reconnect/self-heal
-2. Whether Android is now build-ready or device-proven
-3. Whether Windows ↔ Android directed sharing now works
-4. Whether directed sharing over Tor now works
+1. Whether Android is now build-ready or device-proven
+2. Whether Windows ↔ Android directed sharing now works
+3. What the exact Android blocker chain still is, if any
+4. What the next directed-sharing architecture decision is
 5. What remains blocked
 6. What the next true blocker is after this milestone
