@@ -1,0 +1,221 @@
+name: WSS Port-443 Connectivity Proof
+
+# Prove that WebSocket over TLS on port 443 works between a GlobalProtect-
+# managed Windows machine and a GitHub-hosted Ubuntu runner (Azure).
+#
+# Architecture:
+#   Windows (GlobalProtect)
+#     → WSS (TCP 443, TLS by Cloudflare)
+#     → Cloudflare Edge (trycloudflare.com, real TLS cert)
+#     → cloudflared tunnel (outbound from runner, no inbound port needed)
+#     → Miasma plain WS server on runner localhost
+#
+# Coordination: GitHub issue #5 comments (GITHUB_TOKEN issues:write).
+#
+# Windows side:
+#   1. Poll issue #5 for WSS_PROBE_INFO comment from this run ID
+#   2. Run: miasma wss-probe wss://<tunnel_url>
+#   3. Post result back as WSS_PROBE_RESULT comment
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  wss-server:
+    name: WSS Server (GitHub-hosted Ubuntu, cloudflared tunnel)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Record environment
+        run: |
+          echo "=== ENVIRONMENT ==="
+          uname -a
+          lsb_release -a 2>/dev/null || true
+          echo "Runner: ${RUNNER_NAME}"
+
+      - name: Get public IP
+        id: netinfo
+        run: |
+          PUBLIC_IP=$(curl -s --connect-timeout 10 https://api.ipify.org \
+            || curl -s --connect-timeout 10 https://checkip.amazonaws.com | tr -d '[:space:]')
+          echo "public_ip=${PUBLIC_IP}" >> $GITHUB_OUTPUT
+          echo "Public IP: ${PUBLIC_IP}"
+
+      - name: Download Miasma Linux binary
+        run: |
+          echo "=== DOWNLOADING BINARY ==="
+          gh release download v0.3.1-beta.1 \
+            --repo ${{ github.repository }} \
+            --pattern "miasma-linux-x64-musl" \
+            --output miasma
+          chmod +x miasma
+          ./miasma --version 2>/dev/null || file miasma
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Init Miasma (plain WS, cloudflared will handle TLS)
+        run: |
+          echo "=== INIT ==="
+          mkdir -p /tmp/miasma-data
+          MIASMA_DATA_DIR=/tmp/miasma-data ./miasma init \
+            --listen-addr "/ip4/0.0.0.0/udp/19900/quic-v1" 2>&1
+          # Ensure WSS is enabled (plain, not TLS — cloudflared provides TLS)
+          # The daemon starts a plain WS server automatically.
+
+      - name: Start Miasma daemon
+        run: |
+          echo "=== STARTING DAEMON ==="
+          MIASMA_DATA_DIR=/tmp/miasma-data ./miasma daemon > /tmp/miasma.log 2>&1 &
+          DAEMON_PID=$!
+          echo "daemon pid: ${DAEMON_PID}"
+          sleep 8
+
+      - name: Extract WSS port from daemon log
+        id: wssinfo
+        run: |
+          echo "=== EXTRACTING WSS PORT ==="
+          WSS_PORT=$(grep -oE "WSS share server bound on 127\.0\.0\.1:[0-9]+" /tmp/miasma.log \
+            | grep -oE '[0-9]+$' | head -1)
+          if [ -z "$WSS_PORT" ]; then
+            # fallback: try status command
+            WSS_PORT=$(MIASMA_DATA_DIR=/tmp/miasma-data ./miasma status 2>&1 \
+              | grep -E "WSS share server" | grep -oE '[0-9]+' | tail -1)
+          fi
+          echo "wss_port=${WSS_PORT}" >> $GITHUB_OUTPUT
+          echo "WSS port: ${WSS_PORT}"
+          if [ -z "$WSS_PORT" ]; then
+            echo "ERROR: Could not find WSS port. Daemon log:"
+            cat /tmp/miasma.log
+            exit 1
+          fi
+
+      - name: Install cloudflared
+        run: |
+          echo "=== INSTALLING CLOUDFLARED ==="
+          wget -q "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb"
+          sudo dpkg -i cloudflared-linux-amd64.deb
+          cloudflared --version
+
+      - name: Start cloudflared tunnel
+        id: tunnel
+        run: |
+          echo "=== STARTING CLOUDFLARE TUNNEL ==="
+          WSS_PORT="${{ steps.wssinfo.outputs.wss_port }}"
+          echo "Tunneling http://localhost:${WSS_PORT} → Cloudflare HTTPS"
+          cloudflared tunnel --no-autoupdate \
+            --url "http://localhost:${WSS_PORT}" \
+            > /tmp/cloudflared.log 2>&1 &
+          CF_PID=$!
+          echo "cloudflared pid: $CF_PID"
+
+          # Wait up to 30s for the tunnel URL
+          TUNNEL_URL=""
+          for i in $(seq 1 15); do
+            sleep 2
+            TUNNEL_URL=$(grep -oE 'https://[^[:space:]]+\.trycloudflare\.com' \
+              /tmp/cloudflared.log | head -1)
+            if [ -n "$TUNNEL_URL" ]; then
+              echo "Tunnel URL: ${TUNNEL_URL}"
+              break
+            fi
+          done
+
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "ERROR: cloudflared did not produce a tunnel URL"
+            cat /tmp/cloudflared.log
+            exit 1
+          fi
+
+          echo "tunnel_url=${TUNNEL_URL}" >> $GITHUB_OUTPUT
+
+      - name: Dissolve test file for retrieval proof
+        id: dissolve
+        run: |
+          echo "=== DISSOLVING TEST FILE ==="
+          echo "WSS-over-443 probe content $(date) run=${{ github.run_id }}" \
+            > /tmp/wss-test.txt
+          DISSOLVE_OUT=$(MIASMA_DATA_DIR=/tmp/miasma-data ./miasma dissolve \
+            /tmp/wss-test.txt 2>&1)
+          echo "${DISSOLVE_OUT}"
+          MID=$(echo "${DISSOLVE_OUT}" | grep -oE 'miasma:[A-Za-z0-9]+' | head -1)
+          echo "mid=${MID}" >> $GITHUB_OUTPUT
+          echo "Test MID: ${MID}"
+
+      - name: Post probe info to issue #5
+        run: |
+          TUNNEL_URL="${{ steps.tunnel.outputs.tunnel_url }}"
+          WSS_PORT="${{ steps.wssinfo.outputs.wss_port }}"
+          MID="${{ steps.dissolve.outputs.mid }}"
+          PUBLIC_IP="${{ steps.netinfo.outputs.public_ip }}"
+
+          BODY="WSS_PROBE_INFO run=${{ github.run_id }} TUNNEL_URL=${TUNNEL_URL} MID=${MID} WSS_PORT=${WSS_PORT} RUNNER_IP=${PUBLIC_IP}"
+          gh issue comment 5 --repo "${{ github.repository }}" --body "${BODY}"
+          echo "Posted: ${BODY}"
+
+          echo ""
+          echo "========================================"
+          echo "Windows test command:"
+          echo "  miasma wss-probe ${TUNNEL_URL}"
+          echo "========================================"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Wait for Windows probe result (up to 20 minutes)
+        id: wait_result
+        run: |
+          echo "=== WAITING FOR WINDOWS PROBE RESULT ==="
+          RUN_ID="${{ github.run_id }}"
+          RESULT=""
+          for i in $(seq 1 120); do
+            sleep 10
+            RESULT=$(gh issue view 5 \
+              --repo "${{ github.repository }}" \
+              --comments \
+              --json comments \
+              --jq ".comments[].body" 2>/dev/null \
+              | grep "WSS_PROBE_RESULT run=${RUN_ID}" | tail -1)
+            echo "t=$((i*10))s: ${RESULT:-waiting...}"
+            if [ -n "$RESULT" ]; then
+              break
+            fi
+          done
+
+          if [ -z "$RESULT" ]; then
+            echo "No Windows probe result after 1200s"
+            echo "windows_result=TIMEOUT" >> $GITHUB_OUTPUT
+          else
+            echo "Windows result: ${RESULT}"
+            echo "windows_result=${RESULT}" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Final status and evidence
+        if: always()
+        run: |
+          echo "=== FINAL STATUS ==="
+          MIASMA_DATA_DIR=/tmp/miasma-data ./miasma status 2>&1 || echo "daemon not running"
+          echo ""
+          echo "=== WINDOWS RESULT ==="
+          echo "${{ steps.wait_result.outputs.windows_result }}"
+          echo ""
+          echo "=== CLOUDFLARED LOG ==="
+          cat /tmp/cloudflared.log || true
+          echo ""
+          echo "=== DAEMON LOG (last 50 lines) ==="
+          tail -50 /tmp/miasma.log || true
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wss-proof-logs-${{ github.run_id }}
+          path: |
+            /tmp/miasma.log
+            /tmp/cloudflared.log
+          retention-days: 7
