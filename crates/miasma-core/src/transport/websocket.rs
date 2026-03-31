@@ -109,6 +109,13 @@ pub struct WebSocketConfig {
 
     /// Optional SOCKS5 proxy for outbound connections.
     pub proxy: Option<ProxyConfig>,
+
+    /// Skip TLS certificate verification entirely.
+    ///
+    /// **Security**: disables all server authentication. Use only for
+    /// connectivity testing through MITM proxies (e.g. corporate TLS
+    /// inspection). Never set this in production.
+    pub accept_invalid_certs: bool,
 }
 
 impl Default for WebSocketConfig {
@@ -128,6 +135,7 @@ impl Default for WebSocketConfig {
             max_concurrent: 64,
             max_response_bytes: 16 * 1024 * 1024,
             proxy: None,
+            accept_invalid_certs: false,
         }
     }
 }
@@ -560,12 +568,75 @@ impl PayloadTransport for WssPayloadTransport {
     }
 }
 
+/// A TLS certificate verifier that accepts any certificate (for testing only).
+#[derive(Debug)]
+struct AcceptAnyCert;
+
+impl rustls::client::danger::ServerCertVerifier for AcceptAnyCert {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        vec![
+            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+            rustls::SignatureScheme::ECDSA_NISTP521_SHA512,
+            rustls::SignatureScheme::ED25519,
+            rustls::SignatureScheme::RSA_PSS_SHA256,
+            rustls::SignatureScheme::RSA_PSS_SHA384,
+            rustls::SignatureScheme::RSA_PSS_SHA512,
+            rustls::SignatureScheme::RSA_PKCS1_SHA256,
+            rustls::SignatureScheme::RSA_PKCS1_SHA384,
+            rustls::SignatureScheme::RSA_PKCS1_SHA512,
+        ]
+    }
+}
+
 /// Build a rustls `TlsConnector` for the client side.
 fn build_client_tls_connector(
     config: &WebSocketConfig,
 ) -> Result<tokio_rustls::TlsConnector, PayloadTransportError> {
     // Ensure the ring crypto provider is installed (idempotent).
     let _ = rustls::crypto::ring::default_provider().install_default();
+
+    // Testing mode: accept any certificate (for MITM proxy environments).
+    if config.accept_invalid_certs {
+        let tls_cfg = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .map_err(|e| PayloadTransportError {
+            phase: TransportPhase::Session,
+            message: format!("TLS protocol versions: {e}"),
+        })?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
+        .with_no_client_auth();
+        return Ok(tokio_rustls::TlsConnector::from(Arc::new(tls_cfg)));
+    }
 
     let root_store = if let Some(ref ca_pem) = config.custom_ca_pem {
         // Custom CA.
