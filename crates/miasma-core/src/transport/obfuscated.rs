@@ -133,6 +133,16 @@ pub struct ObfuscatedConfig {
 
     /// DER-encoded private key (PKCS#8). If `None`, generated with the cert.
     pub server_key_der: Option<Vec<u8>>,
+
+    /// Enable true REALITY mode.
+    ///
+    /// When `true`, the client embeds a BLAKE3-derived authentication signal
+    /// in the TLS ClientHello SNI (as a hex prefix: `"<short_id>.<sni>"`).
+    /// The server must be fronted by a `RealityDispatcher` that intercepts raw
+    /// QUIC Initial packets, verifies the SNI signal, and routes unauthenticated
+    /// connections to the real HTTPS server at `fallback_url` — so active probers
+    /// receive the genuine TLS certificate of the fallback site.
+    pub reality_mode: bool,
 }
 
 impl ObfuscatedConfig {
@@ -160,7 +170,14 @@ impl ObfuscatedConfig {
             sni: sni.into(),
             server_cert_der: None,
             server_key_der: None,
+            reality_mode: false,
         }
+    }
+
+    /// Enable true REALITY mode.
+    pub fn with_reality_mode(mut self, enable: bool) -> Self {
+        self.reality_mode = enable;
+        self
     }
 }
 
@@ -329,6 +346,78 @@ impl ObfuscatedQuicServer {
         let sni = config.sni.clone();
         let (cert_der, key_der) = generate_self_signed_cert(&sni)?;
         Self::bind_with_cert(store, port, config, cert_der, key_der).await
+    }
+
+    /// Bind in **true REALITY mode**: the internal Quinn server binds to
+    /// `127.0.0.1`, and a `RealityDispatcher` is spawned on `external_port`
+    /// (the public-facing UDP port).
+    ///
+    /// The dispatcher intercepts raw QUIC Initial packets, verifies the
+    /// BLAKE3 short_id signal in the ClientHello SNI, and routes:
+    /// - Authenticated connections → this Quinn server (internal port).
+    /// - Unauthenticated connections → raw UDP proxy to `fallback_addr`
+    ///   (the real HTTPS server), so active probers receive a genuine cert.
+    ///
+    /// Returns the `ObfuscatedQuicServer` (internal); the dispatcher runs as
+    /// a background Tokio task.
+    pub async fn bind_with_reality_dispatcher(
+        store: Arc<LocalShareStore>,
+        external_port: u16,
+        config: ObfuscatedConfig,
+        fallback_addr: std::net::SocketAddr,
+    ) -> Result<Self, MiasmaError> {
+        // Bind Quinn to 127.0.0.1 on an ephemeral port
+        let sni = config.sni.clone();
+        let (cert_der, key_der) = generate_self_signed_cert(&sni)?;
+
+        let mut tls_config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .map_err(|e| MiasmaError::Sss(format!("TLS protocol versions: {e}")))?
+        .with_no_client_auth()
+        .with_single_cert(vec![cert_der], key_der)
+        .map_err(|e| MiasmaError::Sss(format!("TLS server config: {e}")))?;
+
+        tls_config.alpn_protocols = config.fingerprint.alpn_bytes();
+
+        let server_config = quinn::ServerConfig::with_crypto(Arc::new(
+            quinn::crypto::rustls::QuicServerConfig::try_from(tls_config)
+                .map_err(|e| MiasmaError::Sss(format!("QUIC server config: {e}")))?,
+        ));
+
+        // Bind Quinn internally (localhost only)
+        let internal_addr: std::net::SocketAddr = ([127, 0, 0, 1], 0).into();
+        let endpoint = Endpoint::server(server_config, internal_addr)
+            .map_err(|e| MiasmaError::Sss(format!("QUIC bind internal: {e}")))?;
+
+        let internal_port = endpoint
+            .local_addr()
+            .map_err(|e| MiasmaError::Sss(format!("local_addr: {e}")))?
+            .port();
+
+        info!(
+            internal_port,
+            external_port, "ObfuscatedQuicServer (REALITY) bound internal"
+        );
+
+        // Spawn the dispatcher on the external port
+        let probe_secret = config.probe_secret;
+        let dispatcher =
+            super::reality::RealityDispatcher::new(probe_secret, internal_port, fallback_addr);
+        let ext_bind: std::net::SocketAddr = ([0, 0, 0, 0], external_port).into();
+        tokio::spawn(async move {
+            if let Err(e) = dispatcher.run(ext_bind).await {
+                tracing::error!("RealityDispatcher error: {e}");
+            }
+        });
+
+        Ok(Self {
+            endpoint,
+            store,
+            port: internal_port,
+            config,
+        })
     }
 
     /// Run the server loop. Accepts connections and handles each one.
@@ -636,9 +725,18 @@ impl PayloadTransport for ObfuscatedQuicPayloadTransport {
             })?;
         endpoint.set_default_client_config(client_config);
 
+        // In REALITY mode, embed the authentication short_id in the SNI prefix.
+        // The dispatcher on the server side reads this from the QUIC Initial packet
+        // before the TLS handshake completes and routes the connection accordingly.
+        let sni = if self.config.reality_mode {
+            super::reality::compute_reality_sni(&self.config.probe_secret, &self.config.sni)
+        } else {
+            self.config.sni.clone()
+        };
+
         // Connect with SNI
         let conn = endpoint
-            .connect(addr, &self.config.sni)
+            .connect(addr, &sni)
             .map_err(|e| PayloadTransportError {
                 phase: TransportPhase::Session,
                 message: format!("QUIC connect to {addr}: {e}"),
