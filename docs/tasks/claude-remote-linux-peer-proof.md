@@ -1,3 +1,14 @@
+**Status: COMPLETE (2026-03-31)**
+Track A (environment non-local): PROVEN — GitHub Actions Ubuntu runner on Azure West US.
+Track B (remote peer bootstrap): PROVEN — musl binary ran on Ubuntu 24.04, peer ID and QUIC listen confirmed.
+Track C (connectivity): BLOCKED — GlobalProtect TLS/UDP policy blocks outbound QUIC to internet IPs. HandshakeTimedOut confirmed. 4 workflow runs, definitive evidence.
+Tracks D/E/F: Not reachable — dependent on Track C.
+See docs/validation/remote-linux-peer-validation-report.md.
+
+Next blocker: unrestricted network OR WSS transport to public server to reach internet peers.
+
+---
+
 Next task: use Claude's non-local Linux environment as a genuinely remote Miasma peer and prove Windows-to-remote-Linux interoperability.
 
 Important framing:
