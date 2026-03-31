@@ -33,6 +33,7 @@ pub mod diagnostics;
 pub mod obfuscated;
 pub mod payload;
 pub mod proxy;
+pub mod reality;
 pub mod shadowsocks;
 pub mod tor;
 pub mod websocket;
