@@ -74,8 +74,8 @@ impl<D: OnionAwareDhtExecutor> ShareSource for FallbackShareSource<D> {
                         let peer_id_hex = hex::encode(&loc.peer_id_bytes);
                         let addrs = loc.addrs.join(",");
                         format!(
-                            "{}|{}|0|{}|{}",
-                            mid_hex, loc.shard_index, peer_id_hex, addrs
+                            "{}|{}|{}|{}|{}",
+                            mid_hex, loc.shard_index, loc.segment_index, peer_id_hex, addrs
                         )
                     })
                     .collect()
@@ -214,6 +214,7 @@ mod tests {
                 .map(|i| crate::network::types::ShardLocation {
                     peer_id_bytes: vec![0; 38],
                     shard_index: i,
+                    segment_index: 0,
                     addrs: vec!["127.0.0.1:9999".into()],
                 })
                 .collect(),
@@ -260,6 +261,7 @@ mod tests {
             locations: vec![crate::network::types::ShardLocation {
                 peer_id_bytes: vec![0; 38],
                 shard_index: 0,
+                segment_index: 0,
                 addrs: vec!["127.0.0.1:9999".into()],
             }],
             published_at: 0,

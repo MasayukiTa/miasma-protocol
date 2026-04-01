@@ -162,6 +162,74 @@ fn decrypt_share(key: &[u8; 32], blob: &[u8]) -> Result<Vec<u8>, MiasmaError> {
         .map_err(|e| MiasmaError::Decryption(e.to_string()))
 }
 
+// ─── Startup hygiene ─────────────────────────────────────────────────────────
+
+/// Remove orphaned `.tmp` files left by interrupted atomic writes.
+fn cleanup_tmp_files(dir: &Path) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("tmp") {
+                tracing::debug!(path = %path.display(), "removing orphaned .tmp file");
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+}
+
+/// Count `.ms` share files in the shares directory.
+fn count_share_files(shares_dir: &Path) -> usize {
+    std::fs::read_dir(shares_dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| {
+                    e.path()
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .map(|s| s == "ms")
+                        .unwrap_or(false)
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// Rebuild `store_index.json` from share files on disk.
+///
+/// For each `.ms` file in `shares/`, records its size and current timestamp.
+/// The content address is derived from the file stem (filename without `.ms`).
+fn rebuild_index(data_dir: &Path, shares_dir: &Path) {
+    let mut index = StoreIndex::new();
+    let now = now_secs();
+    if let Ok(entries) = std::fs::read_dir(shares_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("ms") {
+                continue;
+            }
+            let address = match path.file_stem().and_then(|s| s.to_str()) {
+                Some(a) => a.to_string(),
+                None => continue,
+            };
+            let size = std::fs::metadata(&path)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            index.insert(
+                address,
+                IndexEntry {
+                    size_bytes: size,
+                    last_accessed_secs: now,
+                },
+            );
+        }
+    }
+    if !index.is_empty() {
+        let _ = save_index(data_dir, &index);
+        tracing::info!(entries = index.len(), "store index rebuilt from disk");
+    }
+}
+
 // ─── LocalShareStore ─────────────────────────────────────────────────────────
 
 /// Encrypted local share store.
@@ -177,10 +245,34 @@ pub struct LocalShareStore {
 
 impl LocalShareStore {
     /// Open (or create) the store under `data_dir`.
+    ///
+    /// Performs startup hygiene:
+    /// 1. Creates `shares/` directory if missing.
+    /// 2. Loads or creates `master.key`.
+    /// 3. Cleans up orphaned `.tmp` files from prior interrupted writes.
+    /// 4. Rebuilds `store_index.json` from disk if missing or corrupt.
     pub fn open(data_dir: &Path, quota_mb: u64) -> Result<Self, MiasmaError> {
         let shares_dir = data_dir.join(SHARES_DIR);
         std::fs::create_dir_all(&shares_dir)?;
         let master_key = load_or_create_master_key(data_dir)?;
+
+        // Cleanup orphaned .tmp files from interrupted atomic writes.
+        cleanup_tmp_files(data_dir);
+        cleanup_tmp_files(&shares_dir);
+
+        // If store_index.json is missing or corrupt, rebuild from share files.
+        let index = load_index(data_dir);
+        if index.is_empty() && shares_dir.exists() {
+            let on_disk = count_share_files(&shares_dir);
+            if on_disk > 0 {
+                tracing::info!(
+                    orphaned_shares = on_disk,
+                    "store_index.json empty/corrupt — rebuilding from share files"
+                );
+                rebuild_index(data_dir, &shares_dir);
+            }
+        }
+
         Ok(Self {
             data_dir: data_dir.to_path_buf(),
             shares_dir,
@@ -466,5 +558,190 @@ mod tests {
         let list = store.list();
         assert!(list.contains(&a0));
         assert!(list.contains(&a1));
+    }
+
+    // ── Crash recovery tests ────────────────────────────────────────────────
+
+    #[test]
+    fn corrupted_index_falls_back_to_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        let share = dummy_share(10);
+        let addr = store.put(&share).unwrap();
+        drop(store);
+
+        // Corrupt the index file.
+        std::fs::write(dir.path().join(INDEX_FILE), b"{{not json!").unwrap();
+
+        // Re-open: should rebuild from share files on disk.
+        let store2 = LocalShareStore::open(dir.path(), 100).unwrap();
+        let list = store2.list();
+        assert!(list.contains(&addr), "index should be rebuilt from share files");
+        // Share should still be readable.
+        let recovered = store2.get(&addr).unwrap();
+        assert_eq!(recovered.slot_index, 10);
+    }
+
+    #[test]
+    fn missing_index_rebuilt_from_share_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        let s0 = dummy_share(20);
+        let s1 = dummy_share(21);
+        let a0 = store.put(&s0).unwrap();
+        let a1 = store.put(&s1).unwrap();
+        drop(store);
+
+        // Delete the index file entirely.
+        let _ = std::fs::remove_file(dir.path().join(INDEX_FILE));
+
+        // Re-open: should rebuild from share files.
+        let store2 = LocalShareStore::open(dir.path(), 100).unwrap();
+        let list = store2.list();
+        assert!(list.contains(&a0));
+        assert!(list.contains(&a1));
+        assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn orphaned_tmp_files_cleaned_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        drop(store);
+
+        // Create orphaned .tmp files simulating interrupted writes.
+        let tmp1 = dir.path().join("store_index.tmp");
+        let tmp2 = dir.path().join(SHARES_DIR).join("deadbeef.tmp");
+        std::fs::write(&tmp1, b"partial write").unwrap();
+        std::fs::write(&tmp2, b"partial share").unwrap();
+        assert!(tmp1.exists());
+        assert!(tmp2.exists());
+
+        // Re-open: .tmp files should be cleaned up.
+        let _store2 = LocalShareStore::open(dir.path(), 100).unwrap();
+        assert!(!tmp1.exists(), "data_dir .tmp should be removed");
+        assert!(!tmp2.exists(), "shares_dir .tmp should be removed");
+    }
+
+    #[test]
+    fn master_key_wrong_length_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path()).unwrap();
+        // Write a 16-byte key (wrong length — should be 32).
+        std::fs::write(dir.path().join(MASTER_KEY_FILE), &[0xFFu8; 16]).unwrap();
+
+        let result = LocalShareStore::open(dir.path(), 100);
+        assert!(result.is_err(), "wrong-length master.key should fail");
+        let err_msg = result.err().map(|e| format!("{e}")).unwrap_or_default();
+        assert!(
+            err_msg.contains("wrong length"),
+            "error should mention wrong length: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn master_key_empty_file_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path()).unwrap();
+        // Write an empty file.
+        std::fs::write(dir.path().join(MASTER_KEY_FILE), &[]).unwrap();
+
+        let result = LocalShareStore::open(dir.path(), 100);
+        assert!(result.is_err(), "empty master.key should fail");
+    }
+
+    #[test]
+    fn shares_dir_deleted_recreated_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        drop(store);
+
+        // Delete shares directory.
+        std::fs::remove_dir_all(dir.path().join(SHARES_DIR)).unwrap();
+
+        // Re-open: shares dir should be recreated.
+        let store2 = LocalShareStore::open(dir.path(), 100).unwrap();
+        let share = dummy_share(30);
+        let addr = store2.put(&share).unwrap();
+        let recovered = store2.get(&addr).unwrap();
+        assert_eq!(recovered.slot_index, 30);
+    }
+
+    #[test]
+    fn partial_share_write_does_not_corrupt_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        let share = dummy_share(40);
+        let addr = store.put(&share).unwrap();
+        drop(store);
+
+        // Simulate a crash that left a .tmp file but the actual .ms is fine.
+        let orphan = dir.path().join(SHARES_DIR).join(format!("{addr}.tmp"));
+        std::fs::write(&orphan, b"interrupted write data").unwrap();
+
+        let store2 = LocalShareStore::open(dir.path(), 100).unwrap();
+        assert!(!orphan.exists(), ".tmp should be cleaned up");
+        // Original share should still be readable.
+        let recovered = store2.get(&addr).unwrap();
+        assert_eq!(recovered.slot_index, 40);
+    }
+
+    #[test]
+    fn truncated_share_file_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        let share = dummy_share(50);
+        let addr = store.put(&share).unwrap();
+        drop(store);
+
+        // Truncate the share file (simulate disk corruption).
+        let share_path = dir.path().join(SHARES_DIR).join(format!("{addr}{SHARE_EXT}"));
+        std::fs::write(&share_path, &[0u8; 10]).unwrap();
+
+        let store2 = LocalShareStore::open(dir.path(), 100).unwrap();
+        let result = store2.get(&addr);
+        assert!(result.is_err(), "truncated share should fail to decrypt");
+    }
+
+    #[test]
+    fn multiple_shares_survive_index_corruption() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        let mut addrs = vec![];
+        for i in 60..65u16 {
+            addrs.push(store.put(&dummy_share(i)).unwrap());
+        }
+        drop(store);
+
+        // Corrupt index.
+        std::fs::write(dir.path().join(INDEX_FILE), b"garbage").unwrap();
+
+        // Rebuild: all 5 shares should reappear.
+        let store2 = LocalShareStore::open(dir.path(), 100).unwrap();
+        let list = store2.list();
+        assert_eq!(list.len(), 5, "all 5 shares should be in rebuilt index");
+        for addr in &addrs {
+            assert!(list.contains(addr));
+        }
+    }
+
+    #[test]
+    fn index_and_shares_dir_both_missing_starts_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        // Only create master.key — no shares dir, no index.
+        std::fs::create_dir_all(dir.path()).unwrap();
+        let key = [0xABu8; 32];
+        crate::secure_file::atomic_write_restricted(
+            &dir.path().join(MASTER_KEY_FILE),
+            &key,
+        )
+        .unwrap();
+
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        assert!(store.list().is_empty());
+        // Should be able to write a share.
+        let addr = store.put(&dummy_share(70)).unwrap();
+        assert_eq!(store.list().len(), 1);
+        assert!(store.list().contains(&addr));
     }
 }

@@ -58,6 +58,49 @@ impl<Src: ShareSource> RetrievalCoordinator<Src> {
         pipeline::retrieve(mid, &valid, params)
     }
 
+    /// Retrieve multi-segment content by collecting shares per segment.
+    ///
+    /// Used when the DHT record indicates multiple segments (segment_index > 0).
+    /// Collects k valid shares for each segment, reconstructs each independently,
+    /// and concatenates the results.
+    pub async fn retrieve_segments(
+        &self,
+        mid: &ContentId,
+        segment_count: u32,
+        params: DissolutionParams,
+    ) -> Result<Vec<u8>, MiasmaError> {
+        let mut all_data: Vec<u8> = Vec::new();
+
+        for seg_idx in 0..segment_count {
+            let valid = self.collect_k_shares(mid, seg_idx, params).await?;
+            tracing::info!(
+                segment = seg_idx,
+                shares = valid.len(),
+                original_len = valid[0].original_len,
+                segment_index_0 = valid[0].segment_index,
+                slot_0 = valid[0].slot_index,
+                "retrieve_segments: collected shares for segment"
+            );
+            // Build a synthetic SegmentMeta from the first share's metadata.
+            let meta = SegmentMeta {
+                index: seg_idx,
+                offset_bytes: 0, // not used by retrieve_segment
+                plaintext_len: valid[0].original_len,
+                share_count: params.total_shards as u16,
+            };
+            let segment_data =
+                crate::dissolution::segment::retrieve_segment(mid, &valid, &meta, params)?;
+            tracing::info!(
+                segment = seg_idx,
+                data_len = segment_data.len(),
+                "retrieve_segments: segment decrypted"
+            );
+            all_data.extend_from_slice(&segment_data);
+        }
+
+        Ok(all_data)
+    }
+
     /// Retrieve multi-segment content using a pre-fetched `DissolutionManifest`.
     ///
     /// Collects shares for each segment independently and concatenates the
@@ -315,6 +358,58 @@ mod tests {
         }
 
         let recovered = coord.retrieve_file(&manifest).await.unwrap();
+        assert_eq!(recovered.as_slice(), data.as_slice());
+    }
+
+    /// Test `retrieve_segments` — the code path used by network retrieval for
+    /// multi-segment files.  Dissolves data with a small segment size, stores
+    /// all shares, and reconstructs via `retrieve_segments`.
+    #[tokio::test]
+    async fn retrieve_segments_multi_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let (coord, store) = make_coordinator(&dir);
+
+        let params = DissolutionParams::default();
+        let data = vec![0xCCu8; 600];
+        let segment_size = 256;
+
+        let (manifest, all_shares) = dissolve_file(&data, params, segment_size).unwrap();
+        assert!(manifest.segments.len() > 1, "test requires multi-segment");
+
+        for seg_shares in &all_shares {
+            for s in seg_shares {
+                store.put(s).unwrap();
+            }
+        }
+
+        let recovered = coord
+            .retrieve_segments(&manifest.mid, manifest.segments.len() as u32, params)
+            .await
+            .unwrap();
+        assert_eq!(recovered.as_slice(), data.as_slice());
+    }
+
+    /// Same as above, but with only k shares per segment.
+    #[tokio::test]
+    async fn retrieve_segments_with_k_shares() {
+        let dir = tempfile::tempdir().unwrap();
+        let (coord, store) = make_coordinator(&dir);
+
+        let params = DissolutionParams::default();
+        let data = vec![0xDDu8; 500];
+        let (manifest, all_shares) = dissolve_file(&data, params, 200).unwrap();
+        assert!(manifest.segments.len() > 1);
+
+        for seg_shares in &all_shares {
+            for s in seg_shares.iter().take(params.data_shards) {
+                store.put(s).unwrap();
+            }
+        }
+
+        let recovered = coord
+            .retrieve_segments(&manifest.mid, manifest.segments.len() as u32, params)
+            .await
+            .unwrap();
         assert_eq!(recovered.as_slice(), data.as_slice());
     }
 

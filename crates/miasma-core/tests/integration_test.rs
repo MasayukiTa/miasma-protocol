@@ -622,6 +622,7 @@ async fn p2p_two_node_loopback() {
             .map(|s| ShardLocation {
                 peer_id_bytes: peer_bytes_a.clone(),
                 shard_index: s.slot_index,
+                    segment_index: 0,
                 addrs: vec![listen_addr_a_str.clone()],
             })
             .collect();
@@ -1396,6 +1397,7 @@ async fn payload_transport_single_transport_success() {
             .map(|i| miasma_core::network::types::ShardLocation {
                 peer_id_bytes: vec![0; 38],
                 shard_index: i,
+                segment_index: 0,
                 addrs: vec!["127.0.0.1:9999".into()],
             })
             .collect(),
@@ -1464,6 +1466,7 @@ async fn payload_transport_fallback_on_session_failure() {
             .map(|i| miasma_core::network::types::ShardLocation {
                 peer_id_bytes: vec![0; 38],
                 shard_index: i,
+                segment_index: 0,
                 addrs: vec!["127.0.0.1:9999".into()],
             })
             .collect(),
@@ -1543,6 +1546,7 @@ async fn payload_transport_all_fail_returns_insufficient() {
             .map(|i| miasma_core::network::types::ShardLocation {
                 peer_id_bytes: vec![0; 38],
                 shard_index: i,
+                segment_index: 0,
                 addrs: vec!["127.0.0.1:9999".into()],
             })
             .collect(),
@@ -1610,6 +1614,7 @@ async fn payload_transport_phase_distinction() {
             .map(|i| miasma_core::network::types::ShardLocation {
                 peer_id_bytes: vec![0; 38],
                 shard_index: i,
+                segment_index: 0,
                 addrs: vec!["127.0.0.1:9999".into()],
             })
             .collect(),
@@ -1718,6 +1723,7 @@ async fn p2p_payload_transport_loopback() {
                 .map(|s| ShardLocation {
                     peer_id_bytes: peer_bytes_a.clone(),
                     shard_index: s.slot_index,
+                    segment_index: 0,
                     addrs: vec![listen_addr_a_str.clone()],
                 })
                 .collect(),
@@ -1863,6 +1869,7 @@ async fn wss_payload_e2e_retrieval() {
             .map(|i| miasma_core::network::types::ShardLocation {
                 peer_id_bytes: vec![0; 38],
                 shard_index: i,
+                segment_index: 0,
                 addrs: vec![format!("127.0.0.1:{wss_port}")],
             })
             .collect(),
@@ -1948,6 +1955,7 @@ async fn wss_payload_fallback_on_primary_failure() {
             .map(|i| miasma_core::network::types::ShardLocation {
                 peer_id_bytes: vec![0; 38],
                 shard_index: i,
+                segment_index: 0,
                 addrs: vec![format!("127.0.0.1:{wss_port}")],
             })
             .collect(),
@@ -2039,6 +2047,7 @@ async fn wss_payload_diagnostics_transport_kind() {
             .map(|i| miasma_core::network::types::ShardLocation {
                 peer_id_bytes: vec![0; 38],
                 shard_index: i,
+                segment_index: 0,
                 addrs: vec![format!("127.0.0.1:{wss_port}")],
             })
             .collect(),
@@ -3530,6 +3539,7 @@ async fn field_transport_fallback_ladder_forced_failure() {
             .map(|i| miasma_core::network::types::ShardLocation {
                 peer_id_bytes: vec![0; 38],
                 shard_index: i,
+                segment_index: 0,
                 addrs: vec![format!("127.0.0.1:{working_port}")],
             })
             .collect(),
@@ -3609,6 +3619,7 @@ async fn field_transport_fallback_ladder_forced_failure() {
             .map(|i| miasma_core::network::types::ShardLocation {
                 peer_id_bytes: vec![0; 38],
                 shard_index: i,
+                segment_index: 0,
                 addrs: vec![format!("127.0.0.1:{working_port}")],
             })
             .collect(),
@@ -3685,6 +3696,7 @@ async fn forced_transport_failure_fallback_evidence() {
             .map(|i| miasma_core::network::types::ShardLocation {
                 peer_id_bytes: vec![0; 38],
                 shard_index: i,
+                segment_index: 0,
                 addrs: vec!["127.0.0.1:1".into()],
             })
             .collect(),

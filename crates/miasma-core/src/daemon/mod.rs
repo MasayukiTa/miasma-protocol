@@ -862,6 +862,7 @@ pub(crate) async fn process_request(
             let outcome = coord.outcome_metrics().await.unwrap_or_default();
             let ret_stats = coord.retrieval_stats();
             let reconn_metrics = coord.reconnection_metrics().await.unwrap_or_default();
+            let dir_relay = coord.directed_relay_stats().await.unwrap_or_default();
 
             ControlResponse::Status(DaemonStatus {
                 peer_id: coord.peer_id().to_string(),
@@ -943,6 +944,11 @@ pub(crate) async fn process_request(
                 relay_tier_verified: desc_stats.relay_verified,
                 probe_cache_fresh: desc_stats.probed_fresh,
                 forwarding_verified_relays: desc_stats.forwarding_verified_count,
+                // Directed sharing relay fallback (ADR-010 Part 2)
+                directed_direct_sends: dir_relay.direct_sends,
+                directed_relay_fallback_attempts: dir_relay.relay_fallback_attempts,
+                directed_relay_circuits_registered: dir_relay.relay_circuits_registered,
+                directed_no_relay_candidates: dir_relay.no_relay_candidates,
                 // Connection health — from live node monitor (fallback to shared mutex)
                 connection_quality_score: {
                     match coord.health_snapshot().await {
@@ -1529,6 +1535,7 @@ async fn publish_content(
         .map(|s| ShardLocation {
             peer_id_bytes: peer_bytes.clone(),
             shard_index: s.slot_index,
+            segment_index: s.segment_index,
             addrs: listen_addrs.to_vec(),
         })
         .collect();

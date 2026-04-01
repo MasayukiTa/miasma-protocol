@@ -895,6 +895,30 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
                 s.probe_cache_fresh, s.forwarding_verified_relays
             );
 
+            // Directed sharing relay fallback
+            let total_directed = s.directed_direct_sends
+                + s.directed_relay_fallback_attempts
+                + s.directed_no_relay_candidates;
+            if total_directed > 0 {
+                println!();
+                println!("Directed Sharing (control plane):");
+                println!(
+                    "  Direct sends:          {}",
+                    s.directed_direct_sends
+                );
+                println!(
+                    "  Relay fallback:        {} attempts, {} circuits registered",
+                    s.directed_relay_fallback_attempts,
+                    s.directed_relay_circuits_registered
+                );
+                if s.directed_no_relay_candidates > 0 {
+                    println!(
+                        "  No relay candidates:   {}",
+                        s.directed_no_relay_candidates
+                    );
+                }
+            }
+
             // Connection health
             println!();
             println!("Connection Health:");

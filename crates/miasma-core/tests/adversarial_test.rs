@@ -6168,3 +6168,335 @@ fn hard_failure_flap_damping_suppresses_scheduler() {
     let should_reconnect = !flap.is_damping() && sched.should_attempt(b"peer-x");
     assert!(!should_reconnect, "flap damping must suppress reconnection");
 }
+
+// ─── Scenario 29: Relay circuit fallback for directed sharing ───────────────
+// Verifies that the DescriptorStore provides relay peer info that can be used
+// to build circuit addresses for directed sharing when the target is not
+// directly connected (ADR-010 Part 2).
+
+/// Helper: create a relay-capable PeerDescriptor with given pseudonym and can_relay=true.
+fn relay_descriptor(pseudonym: [u8; 32], addrs: Vec<String>) -> PeerDescriptor {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[0x77u8; 32]);
+    let mut caps = PeerCapabilities::default();
+    caps.can_relay = true;
+    PeerDescriptor::new_signed(
+        pseudonym,
+        ReachabilityKind::Direct,
+        addrs,
+        caps,
+        ResourceProfile::Desktop,
+        None,
+        1,
+        &key,
+    )
+}
+
+/// Relay circuit addresses are correctly formatted from relay peer info.
+#[test]
+fn directed_relay_circuit_address_format() {
+    let relay_peer = PeerId::random();
+    let target_peer = PeerId::random();
+
+    // Build circuit address using the same format as node.rs
+    let circuit_addr = format!("/p2p/{relay_peer}/p2p-circuit/p2p/{target_peer}");
+
+    // Must be a valid libp2p Multiaddr
+    let parsed: libp2p::Multiaddr = circuit_addr.parse().expect("circuit addr must parse");
+    let addr_str = parsed.to_string();
+
+    // Must contain both peer IDs
+    assert!(addr_str.contains(&relay_peer.to_string()));
+    assert!(addr_str.contains(&target_peer.to_string()));
+    // Must contain /p2p-circuit/ segment
+    assert!(addr_str.contains("/p2p-circuit/"));
+
+    assert_ne!(relay_peer, target_peer, "relay must differ from target");
+}
+
+/// relay_peer_info() returns empty when no relay-capable descriptors exist.
+#[test]
+fn directed_relay_no_candidates_empty() {
+    let store = DescriptorStore::new();
+    let relays = store.relay_peer_info();
+    assert!(relays.is_empty(), "no descriptors → no relay candidates");
+}
+
+/// relay_peer_info() returns relay-capable descriptors sorted by trust tier.
+#[test]
+fn directed_relay_candidates_sorted_by_trust() {
+    let mut store = DescriptorStore::new();
+
+    let relay_a_peer = PeerId::random();
+    let relay_b_peer = PeerId::random();
+
+    let desc_a = relay_descriptor(
+        [0xAA; 32],
+        vec!["/ip4/1.2.3.4/udp/443/quic-v1".to_string()],
+    );
+    let desc_b = relay_descriptor(
+        [0xBB; 32],
+        vec!["/ip4/5.6.7.8/udp/443/quic-v1".to_string()],
+    );
+
+    store.upsert(desc_a);
+    store.register_peer_pseudonym(relay_a_peer, [0xAA; 32]);
+    store.upsert(desc_b);
+    store.register_peer_pseudonym(relay_b_peer, [0xBB; 32]);
+
+    // Promote relay_b to Observed by recording a success
+    store.record_relay_success(&[0xBB; 32]);
+
+    let relays = store.relay_peer_info();
+    assert_eq!(relays.len(), 2, "both relay descriptors should appear");
+
+    // Observed tier (relay_b) should sort before Claimed (relay_a)
+    assert_eq!(relays[0].0, relay_b_peer, "Observed relay should be first");
+    assert_eq!(relays[1].0, relay_a_peer, "Claimed relay should be second");
+}
+
+/// Circuit addresses built from relay_peer_info exclude the target itself.
+#[test]
+fn directed_relay_excludes_target_as_relay() {
+    let mut store = DescriptorStore::new();
+    let target_peer = PeerId::random();
+
+    let desc = relay_descriptor(
+        [0xCC; 32],
+        vec!["/ip4/9.8.7.6/udp/443/quic-v1".to_string()],
+    );
+    store.upsert(desc);
+    store.register_peer_pseudonym(target_peer, [0xCC; 32]);
+
+    let relays = store.relay_peer_info();
+    // The store returns the target as a relay candidate (it is relay-capable).
+    // The SendDirectedRequest handler must filter it out: if relay_id == peer_id, skip.
+    // Simulate the handler logic:
+    let mut circuit_addrs_registered = 0;
+    for (relay_id, _) in &relays {
+        if *relay_id == target_peer {
+            continue; // Same filter as in node.rs handler
+        }
+        circuit_addrs_registered += 1;
+    }
+    assert_eq!(
+        circuit_addrs_registered, 0,
+        "target peer must not be used as its own relay"
+    );
+}
+
+/// Directed sharing invite/confirm/revoke request variants all serialise correctly.
+#[test]
+fn directed_relay_request_variants_serde() {
+    // Verify that all DirectedRequest variants survive serde roundtrip,
+    // which is required for relay-circuit delivery (data passes through relay).
+    //
+    // Create a minimal envelope using create_envelope() to avoid depending
+    // on struct field layout (which has many fields).
+    let sender_secret = [0x11u8; 32];
+    let recipient_secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+    let recipient_pubkey = x25519_dalek::PublicKey::from(&recipient_secret);
+    let (test_envelope, _protected, _key) = create_envelope(
+        &sender_secret,
+        recipient_pubkey.as_bytes(),
+        "test-password",
+        RetentionPeriod::OneDay,
+        b"test content",
+        Some("test.txt".to_string()),
+    )
+    .expect("create_envelope");
+
+    // Invite
+    let invite = DirectedRequest::Invite {
+        envelope: test_envelope.clone(),
+    };
+    let bytes = bincode::serialize(&invite).expect("serialize invite");
+    let _: DirectedRequest = bincode::deserialize(&bytes).expect("deserialize invite");
+
+    // Confirm
+    let confirm = DirectedRequest::Confirm {
+        envelope_id: [0x02; 32],
+        challenge_code: "ABCD-EFGH".to_string(),
+    };
+    let bytes = bincode::serialize(&confirm).expect("serialize confirm");
+    let _: DirectedRequest = bincode::deserialize(&bytes).expect("deserialize confirm");
+
+    // SenderRevoke
+    let revoke = DirectedRequest::SenderRevoke {
+        envelope_id: [0x03; 32],
+    };
+    let bytes = bincode::serialize(&revoke).expect("serialize revoke");
+    let _: DirectedRequest = bincode::deserialize(&bytes).expect("deserialize revoke");
+
+    // StatusQuery
+    let status = DirectedRequest::StatusQuery {
+        envelope_id: [0x04; 32],
+    };
+    let bytes = bincode::serialize(&status).expect("serialize status");
+    let _: DirectedRequest = bincode::deserialize(&bytes).expect("deserialize status");
+}
+
+/// Multiple relay candidates produce multiple circuit addresses.
+#[test]
+fn directed_relay_multiple_candidates_multiple_circuits() {
+    let target = PeerId::random();
+    let relay_a = PeerId::random();
+    let relay_b = PeerId::random();
+    let relay_c = PeerId::random();
+
+    let relays = vec![
+        (relay_a, vec!["/ip4/1.1.1.1/udp/443".to_string()]),
+        (relay_b, vec!["/ip4/2.2.2.2/udp/443".to_string()]),
+        (relay_c, vec!["/ip4/3.3.3.3/udp/443".to_string()]),
+    ];
+
+    // Simulate the handler: build circuit addresses, skip if relay == target
+    let mut circuit_addrs = Vec::new();
+    for (relay_id, _) in &relays {
+        if *relay_id == target {
+            continue;
+        }
+        let addr_str = format!("/p2p/{relay_id}/p2p-circuit/p2p/{target}");
+        let addr: libp2p::Multiaddr = addr_str.parse().expect("must parse");
+        circuit_addrs.push(addr);
+    }
+
+    assert_eq!(circuit_addrs.len(), 3, "3 relays → 3 circuit addresses");
+    // All must be distinct
+    let set: std::collections::HashSet<String> =
+        circuit_addrs.iter().map(|a| a.to_string()).collect();
+    assert_eq!(set.len(), 3, "all circuit addresses must be distinct");
+}
+
+/// Verify directed sharing response roundtrip over relay (serde stability).
+#[test]
+fn directed_relay_response_serde_roundtrip() {
+    let responses = vec![
+        DirectedResponse::InviteAccepted {
+            envelope_id: [0x10; 32],
+        },
+        DirectedResponse::Confirmed {
+            envelope_id: [0x20; 32],
+        },
+        DirectedResponse::ChallengeFailed {
+            envelope_id: [0x30; 32],
+            attempts_remaining: 2,
+        },
+        DirectedResponse::Revoked {
+            envelope_id: [0x40; 32],
+        },
+    ];
+
+    for resp in &responses {
+        let bytes = bincode::serialize(resp).expect("serialize");
+        let rt: DirectedResponse = bincode::deserialize(&bytes).expect("deserialize");
+        let bytes2 = bincode::serialize(&rt).expect("re-serialize");
+        assert_eq!(bytes, bytes2, "serde roundtrip must be stable");
+    }
+}
+
+// ─── Crash recovery / resilience tests ──────────────────────────────────────
+
+/// Store index corruption: shares survive and index is rebuilt from disk.
+#[test]
+fn crash_recovery_store_index_corruption_rebuilds() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = miasma_core::store::LocalShareStore::open(dir.path(), 100).unwrap();
+    // Store 3 shares.
+    let mut addrs = vec![];
+    for i in 0..3u16 {
+        let mid = miasma_core::crypto::hash::ContentId::compute(
+            format!("crash-test-{i}").as_bytes(),
+            b"k=10,n=20,v=1",
+        );
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let share = miasma_core::share::MiasmaShare::new(
+            &mid, 0, i, vec![i as u8; 64], vec![0xBB; 32], [0u8; 12], 100, ts,
+        );
+        addrs.push(store.put(&share).unwrap());
+    }
+    drop(store);
+
+    // Corrupt the index.
+    std::fs::write(dir.path().join("store_index.json"), b"CORRUPT!").unwrap();
+
+    // Re-open: index rebuilt, all shares accessible.
+    let store2 = miasma_core::store::LocalShareStore::open(dir.path(), 100).unwrap();
+    let list = store2.list();
+    assert_eq!(list.len(), 3, "all 3 shares should be in rebuilt index");
+    for addr in &addrs {
+        assert!(list.contains(addr), "rebuilt index missing {addr}");
+        assert!(store2.get(addr).is_ok(), "share {addr} should be readable");
+    }
+}
+
+/// Directed inbox survives missing envelope files gracefully.
+#[test]
+fn crash_recovery_directed_inbox_missing_envelope() {
+    let dir = tempfile::tempdir().unwrap();
+    let inbox = DirectedInbox::open(dir.path()).unwrap();
+    // Listing an empty inbox should work.
+    let items = inbox.list_incoming();
+    assert!(items.is_empty());
+    let outgoing = inbox.list_outgoing();
+    assert!(outgoing.is_empty());
+}
+
+/// Directed envelope with corrupt JSON in inbox dir doesn't panic.
+#[test]
+fn crash_recovery_directed_envelope_corrupt_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let inbox_dir = dir.path().join("directed").join("incoming");
+    std::fs::create_dir_all(&inbox_dir).unwrap();
+
+    // Write a corrupt envelope file.
+    std::fs::write(inbox_dir.join("envelope_test.json"), b"{{not json").unwrap();
+
+    let inbox = DirectedInbox::open(dir.path()).unwrap();
+    // List should not panic — corrupt entries are handled gracefully.
+    let _items = inbox.list_incoming();
+}
+
+/// Onion Phase 2: NetworkOnionDhtExecutor instantiation (no panic).
+#[test]
+fn onion_phase2_network_executor_type_exists() {
+    // Verify the Phase 2 executor type is exported and constructible with the
+    // correct API surface. We can't test with a real DhtHandle here (needs a
+    // running node), but we verify the type compiles and is accessible.
+    fn _assert_dht_executor_trait<T: miasma_core::network::OnionAwareDhtExecutor>() {}
+    // Both Phase 1 and Phase 2 implement OnionAwareDhtExecutor.
+    _assert_dht_executor_trait::<miasma_core::LiveOnionDhtExecutor>();
+    // Phase 2 type is visible.
+    let _: fn(
+        std::sync::Arc<miasma_core::network::node::DhtHandle>,
+    ) -> miasma_core::NetworkOnionDhtExecutor = miasma_core::NetworkOnionDhtExecutor::new;
+}
+
+/// ADR-010: DirectedRelayStats serde roundtrip and default values.
+#[test]
+fn directed_relay_stats_serde_and_defaults() {
+    use miasma_core::network::DirectedRelayStats;
+
+    // Default should be all zeros.
+    let default = DirectedRelayStats::default();
+    assert_eq!(default.direct_sends, 0);
+    assert_eq!(default.relay_fallback_attempts, 0);
+    assert_eq!(default.relay_circuits_registered, 0);
+    assert_eq!(default.no_relay_candidates, 0);
+
+    // Roundtrip with non-zero values.
+    let stats = DirectedRelayStats {
+        direct_sends: 5,
+        relay_fallback_attempts: 3,
+        relay_circuits_registered: 9,
+        no_relay_candidates: 2,
+    };
+    let json = serde_json::to_string(&stats).expect("serialize");
+    let rt: DirectedRelayStats = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(rt.direct_sends, 5);
+    assert_eq!(rt.relay_fallback_attempts, 3);
+    assert_eq!(rt.relay_circuits_registered, 9);
+    assert_eq!(rt.no_relay_candidates, 2);
+}

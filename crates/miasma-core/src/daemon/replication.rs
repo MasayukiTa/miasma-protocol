@@ -808,4 +808,99 @@ mod tests {
         assert_eq!(item.state, ItemState::Pending);
         assert_eq!(item.promotion_generation, 1);
     }
+
+    // ── Crash recovery / corruption tests ───────────────────────────────────
+
+    #[test]
+    fn wal_with_corrupt_lines_skips_bad_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal_path = dir.path().join(WAL_FILE);
+
+        // Write a WAL with one valid entry, one corrupt, one valid.
+        let item1 = dummy_item(1);
+        let item2 = dummy_item(2);
+        let line1 =
+            serde_json::to_string(&WalEntry::Snapshot(item1)).unwrap();
+        let line2 =
+            serde_json::to_string(&WalEntry::Snapshot(item2)).unwrap();
+        let content = format!("{line1}\n{{not valid json!!\n{line2}\n");
+        std::fs::write(&wal_path, content).unwrap();
+
+        let q = ReplicationQueue::load_or_create(dir.path()).unwrap();
+        // Both valid items should be loaded; corrupt line silently skipped.
+        assert_eq!(q.items.len(), 2);
+    }
+
+    #[test]
+    fn empty_wal_file_handled_gracefully() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal_path = dir.path().join(WAL_FILE);
+
+        // Create an empty WAL file.
+        std::fs::write(&wal_path, "").unwrap();
+
+        let q = ReplicationQueue::load_or_create(dir.path()).unwrap();
+        assert!(q.items.is_empty());
+        assert_eq!(q.pending_count(), 0);
+    }
+
+    #[test]
+    fn wal_with_only_whitespace_handled() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal_path = dir.path().join(WAL_FILE);
+
+        std::fs::write(&wal_path, "\n\n  \n\n").unwrap();
+
+        let q = ReplicationQueue::load_or_create(dir.path()).unwrap();
+        assert!(q.items.is_empty());
+    }
+
+    #[test]
+    fn wal_truncated_last_line_recovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal_path = dir.path().join(WAL_FILE);
+
+        // Write one complete entry and one truncated entry (simulating crash mid-write).
+        let item1 = dummy_item(1);
+        let line1 =
+            serde_json::to_string(&WalEntry::Snapshot(item1)).unwrap();
+        let partial = r#"{"Snapshot":{"mid_str":"mid-2","record":{"mid_dige"#;
+        let content = format!("{line1}\n{partial}");
+        std::fs::write(&wal_path, content).unwrap();
+
+        let q = ReplicationQueue::load_or_create(dir.path()).unwrap();
+        // First item should survive, truncated entry skipped.
+        assert_eq!(q.items.len(), 1);
+        assert!(q.get(&dummy_record(1).mid_digest).is_some());
+    }
+
+    #[test]
+    fn wal_tmp_left_over_does_not_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Normal session: push an item.
+        {
+            let mut q = ReplicationQueue::load_or_create(dir.path()).unwrap();
+            q.push(dummy_item(1)).unwrap();
+        }
+
+        // Simulate a crash during compaction: leave a .tmp file.
+        let tmp_path = dir.path().join(WAL_TMP);
+        std::fs::write(&tmp_path, "garbage partial compact").unwrap();
+
+        // Reload: should use the real WAL, not the partial tmp.
+        let q = ReplicationQueue::load_or_create(dir.path()).unwrap();
+        assert_eq!(q.items.len(), 1);
+        assert!(q.get(&dummy_record(1).mid_digest).is_some());
+    }
+
+    #[test]
+    fn no_wal_no_legacy_starts_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let q = ReplicationQueue::load_or_create(dir.path()).unwrap();
+        assert!(q.items.is_empty());
+        assert_eq!(q.pending_count(), 0);
+        assert_eq!(q.degraded_count(), 0);
+    }
 }
