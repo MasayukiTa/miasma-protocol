@@ -1,11 +1,13 @@
-/// LiveOnionDhtExecutor — wires onion routing into the DHT (ADR-002 production impl).
+/// Onion-routed DHT executors — Phase 1 (in-process) and Phase 2 (real network).
 ///
-/// This replaces the stub in `network/dht.rs`. It:
-/// 1. Selects two relay nodes from a relay directory.
-/// 2. Builds an `OnionPacket` wrapping the DHT query.
-/// 3. Forwards the packet through `InProcessRelay` (Phase 1)
-///    or the real libp2p transport (Phase 2).
-/// 4. Awaits the response via `CircuitManager`.
+/// ## Phase 1: `LiveOnionDhtExecutor`
+/// Uses `InProcessRelay` — no real network, full crypto round-trip.
+/// Relay nodes are simulated; anonymity is not provided.
+///
+/// ## Phase 2: `NetworkOnionDhtExecutor`
+/// Sends onion-wrapped DHT queries through real relay peers via libp2p.
+/// Relay directory is obtained from the descriptor store.
+/// Provides real anonymity for DHT PUT/GET operations.
 use std::{sync::Arc, time::Duration};
 
 use serde::{Deserialize, Serialize};
@@ -13,7 +15,11 @@ use tokio::sync::Mutex;
 
 use crate::{
     crypto::hash::ContentId,
-    network::{dht::OnionAwareDhtExecutor, types::DhtRecord},
+    network::{
+        dht::OnionAwareDhtExecutor,
+        onion_relay::{OnionRelayRequest, OnionRelayResponse},
+        types::DhtRecord,
+    },
     MiasmaError,
 };
 
@@ -47,13 +53,11 @@ pub(crate) struct DhtGetResponse {
 
 /// DHT executor that wraps every query in a 2-hop onion circuit.
 ///
-/// # Phase 1 mode (`use_inprocess_relay = true`)
+/// # Phase 1 (in-process simulation)
 /// Uses `InProcessRelay` — no real network, full crypto round-trip.
 /// Relay nodes are simulated; anonymity is not provided.
 ///
-/// # Phase 2 mode (TODO)
-/// `use_inprocess_relay = false` — packets are forwarded via libp2p QUIC to
-/// real relay nodes. The relay directory is fetched from the DHT.
+/// For Phase 2 (real network), see `NetworkOnionDhtExecutor` below.
 pub struct LiveOnionDhtExecutor {
     circuit_manager: Arc<CircuitManager>,
     /// Phase 1: in-process relay simulation. Phase 2: replaced by network transport.
@@ -226,6 +230,124 @@ impl LiveOnionDhtExecutor {
 
 #[async_trait::async_trait]
 impl OnionAwareDhtExecutor for LiveOnionDhtExecutor {
+    async fn put(&self, record: DhtRecord) -> Result<(), MiasmaError> {
+        let req = DhtPutRequest { record };
+        let body_inner =
+            bincode::serialize(&req).map_err(|e| MiasmaError::Serialization(e.to_string()))?;
+        let mut body = vec![0x01u8]; // PUT tag
+        body.extend(body_inner);
+
+        let resp = self.send_onion_query(body).await?;
+        if resp.first() == Some(&0x01) {
+            Ok(())
+        } else {
+            Err(MiasmaError::Sss("unexpected DHT PUT response".into()))
+        }
+    }
+
+    async fn get(&self, mid: &ContentId) -> Result<Option<DhtRecord>, MiasmaError> {
+        let req = DhtGetRequest {
+            mid_digest: *mid.as_bytes(),
+        };
+        let body_inner =
+            bincode::serialize(&req).map_err(|e| MiasmaError::Serialization(e.to_string()))?;
+        let mut body = vec![0x02u8]; // GET tag
+        body.extend(body_inner);
+
+        let resp = self.send_onion_query(body).await?;
+        if resp.first() != Some(&0x02) {
+            return Err(MiasmaError::Sss("unexpected DHT GET response".into()));
+        }
+        let response: DhtGetResponse = bincode::deserialize(&resp[1..])
+            .map_err(|e| MiasmaError::Serialization(e.to_string()))?;
+        Ok(response.record)
+    }
+}
+
+// ─── Phase 2: NetworkOnionDhtExecutor ────────────────────────────────────────
+
+/// Phase 2 DHT executor: sends onion-wrapped queries through real relay peers.
+///
+/// Unlike `LiveOnionDhtExecutor`, this does NOT simulate relays in-process.
+/// It builds onion packets and sends them to real relay peers via
+/// `DhtHandle::send_onion_request()`, which routes through real libp2p QUIC
+/// connections.
+///
+/// The target DHT node processes the query and responds through the onion
+/// return path. Each relay encrypts the response with its per-hop return key.
+/// The initiator then decrypts the layered response to get the plaintext.
+pub struct NetworkOnionDhtExecutor {
+    /// Handle to the node's DHT command channel (for send_onion_request).
+    dht_handle: Arc<crate::network::node::DhtHandle>,
+}
+
+impl NetworkOnionDhtExecutor {
+    /// Create a Phase 2 executor backed by a real network node.
+    pub fn new(dht_handle: Arc<crate::network::node::DhtHandle>) -> Self {
+        Self { dht_handle }
+    }
+
+    /// Send an onion-wrapped query to a DHT target via 2-hop relay circuit.
+    ///
+    /// 1. Fetches relay directory from descriptor store.
+    /// 2. Selects R1, R2 from available onion-keyed relays.
+    /// 3. Builds an `OnionPacket` with the query body.
+    /// 4. Sends via `send_onion_request()` → R1 → R2 → target.
+    /// 5. Decrypts the 2-layer response (R1 return key, R2 return key).
+    async fn send_onion_query(&self, body: Vec<u8>) -> Result<Vec<u8>, MiasmaError> {
+        // 1. Get relay info with onion pubkeys.
+        let relays = self.dht_handle.relay_onion_info().await?;
+        if relays.len() < 2 {
+            return Err(MiasmaError::Network(format!(
+                "onion DHT requires ≥2 relays with onion keys, have {}",
+                relays.len()
+            )));
+        }
+        let r1 = &relays[0];
+        let r2 = &relays[1];
+
+        let r1_peer_id = libp2p::PeerId::from_bytes(&r1.peer_id)
+            .map_err(|e| MiasmaError::Network(format!("invalid R1 peer_id: {e}")))?;
+        let r1_addrs: Vec<String> = vec![String::from_utf8_lossy(&r1.addr).to_string()];
+
+        // 2. Build 2-hop onion packet wrapping the DHT query.
+        let (packet, return_path) = OnionPacketBuilder::build(
+            &r1.onion_pubkey,
+            &r2.onion_pubkey,
+            r2.peer_id.clone(),
+            b"dht-target".to_vec(),
+            r2.addr.clone(),
+            body,
+        )?;
+
+        // 3. Send via the real onion relay protocol.
+        let onion_req = OnionRelayRequest::Packet {
+            circuit_id: packet.circuit_id,
+            layer: packet.layer,
+        };
+
+        let response = self
+            .dht_handle
+            .send_onion_request(r1_peer_id, r1_addrs, onion_req, return_path.r1_init_key)
+            .await?;
+
+        // 4. Decrypt 2-layer response.
+        match response {
+            OnionRelayResponse::Data(encrypted) => {
+                // Peel R2→R1 layer.
+                let r2_plaintext =
+                    super::packet::decrypt_response(&return_path.r2_r1_key, &encrypted)?;
+                Ok(r2_plaintext)
+            }
+            OnionRelayResponse::Error(e) => {
+                Err(MiasmaError::Network(format!("onion DHT relay error: {e}")))
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl OnionAwareDhtExecutor for NetworkOnionDhtExecutor {
     async fn put(&self, record: DhtRecord) -> Result<(), MiasmaError> {
         let req = DhtPutRequest { record };
         let body_inner =

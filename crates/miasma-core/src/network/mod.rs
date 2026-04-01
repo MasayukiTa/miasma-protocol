@@ -29,10 +29,11 @@ pub use descriptor::{
     RelayObservation, RelayTrustTier, ResolvedIntroPoint, ResourceProfile,
 };
 pub use dht::{
-    BypassOnionDhtExecutor, DirectDhtExecutor, LiveOnionDhtExecutor, OnionAwareDhtExecutor,
+    BypassOnionDhtExecutor, DirectDhtExecutor, LiveOnionDhtExecutor, NetworkOnionDhtExecutor,
+    OnionAwareDhtExecutor,
 };
 pub use metrics::OutcomeMetrics;
-pub use node::{DhtHandle, MiasmaNode, ShareExchangeHandle};
+pub use node::{DhtHandle, DirectedRelayStats, MiasmaNode, ShareExchangeHandle};
 pub use onion_relay::{OnionRelayCodec, OnionRelayRequest, OnionRelayResponse};
 pub use path_selection::{AnonymityPolicy, PathSelectionStats};
 pub use peer_state::{AdmissionStats, PeerRegistry, RejectionReason};

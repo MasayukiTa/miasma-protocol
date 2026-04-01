@@ -30,7 +30,7 @@ use crate::{
     network::{
         credential::CredentialStats,
         descriptor::{DescriptorStats, PeerDescriptor, ReachabilityKind},
-        dht::DirectDhtExecutor,
+        dht::{DirectDhtExecutor, OnionAwareDhtExecutor},
         node::{DhtHandle, MiasmaNode, ShareExchangeHandle, ShareFetchRequest, ShareFetchResponse},
         onion_relay::{OnionRelayRequest, OnionRelayResponse},
         path_selection::{AnonymityPolicy, PathSelectionStats},
@@ -363,6 +363,7 @@ impl MiasmaCoordinator {
             .map(|s| ShardLocation {
                 peer_id_bytes: peer_bytes.clone(),
                 shard_index: s.slot_index,
+                segment_index: s.segment_index,
                 addrs: self.listen_addrs.clone(),
             })
             .collect();
@@ -437,6 +438,7 @@ impl MiasmaCoordinator {
                 all_locations.push(ShardLocation {
                     peer_id_bytes: peer_bytes.clone(),
                     shard_index: share.slot_index,
+                    segment_index: seg_idx,
                     addrs: self.listen_addrs.clone(),
                 });
             }
@@ -497,9 +499,32 @@ impl MiasmaCoordinator {
     ) -> Result<Vec<u8>, MiasmaError> {
         let dht_exec = DirectDhtExecutor::new(self.dht_handle.clone());
         let source = FallbackShareSource::new(dht_exec, self.transport_selector.clone());
-        RetrievalCoordinator::new(source)
-            .retrieve(mid, params)
-            .await
+        let coord = RetrievalCoordinator::new(source);
+
+        // Determine segment count from DHT record.
+        let max_seg = {
+            let dht = DirectDhtExecutor::new(self.dht_handle.clone());
+            match OnionAwareDhtExecutor::get(&dht, mid).await? {
+                Some(record) => record
+                    .locations
+                    .iter()
+                    .map(|l| l.segment_index)
+                    .max()
+                    .unwrap_or(0),
+                None => 0,
+            }
+        };
+
+        tracing::info!(max_seg = max_seg, "retrieve_from_network: segment detection");
+
+        if max_seg == 0 {
+            // Single-segment file — fast path.
+            coord.retrieve(mid, params).await
+        } else {
+            // Multi-segment file: collect shares for each segment and reassemble.
+            tracing::info!(segment_count = max_seg + 1, "retrieve_from_network: multi-segment path");
+            coord.retrieve_segments(mid, max_seg + 1, params).await
+        }
     }
 
     /// Like `retrieve_from_network` but also returns transport attempt diagnostics.
@@ -1665,6 +1690,13 @@ impl MiasmaCoordinator {
         &self,
     ) -> Result<crate::daemon::self_heal::ReconnectionMetrics, MiasmaError> {
         self.dht_handle.reconnection_metrics().await
+    }
+
+    /// Get directed sharing relay fallback diagnostics from the live node.
+    pub async fn directed_relay_stats(
+        &self,
+    ) -> Result<super::node::DirectedRelayStats, MiasmaError> {
+        self.dht_handle.directed_relay_stats().await
     }
 }
 

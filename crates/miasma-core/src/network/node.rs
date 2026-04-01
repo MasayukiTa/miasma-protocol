@@ -316,8 +316,11 @@ impl request_response::Codec for DescriptorCodec {
 #[derive(Clone, Default)]
 pub struct ShareCodec;
 
-/// Max message size for share exchange (4 MiB).
-const SHARE_MSG_MAX: usize = 4 * 1024 * 1024;
+/// Max message size for share exchange (8 MiB).
+///
+/// Must exceed the largest possible shard: with DEFAULT_SEGMENT_SIZE = 64 MiB
+/// and 10 data shards, each shard body ≈ 6.4 MiB plus serialisation overhead.
+const SHARE_MSG_MAX: usize = 8 * 1024 * 1024;
 /// Max message size for admission protocol (4 KiB — PoW proofs are tiny).
 const ADMISSION_MSG_MAX: usize = 4 * 1024;
 
@@ -660,6 +663,23 @@ pub enum DhtCommand {
     GetReconnectionMetrics {
         reply: oneshot::Sender<crate::daemon::self_heal::ReconnectionMetrics>,
     },
+    /// Get directed sharing relay fallback diagnostics.
+    GetDirectedRelayStats {
+        reply: oneshot::Sender<DirectedRelayStats>,
+    },
+}
+
+/// Diagnostics for directed sharing relay fallback (ADR-010 Part 2).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DirectedRelayStats {
+    /// Directed requests sent to already-connected peers (direct path).
+    pub direct_sends: u64,
+    /// Directed requests where relay circuit fallback was attempted.
+    pub relay_fallback_attempts: u64,
+    /// Total relay circuit addresses registered for directed fallback.
+    pub relay_circuits_registered: u64,
+    /// Directed requests where no relay candidates were available.
+    pub no_relay_candidates: u64,
 }
 
 /// Sender side of the DHT command channel.
@@ -1158,6 +1178,16 @@ impl DhtHandle {
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
         self.recv_reply(rx, "reconnection_metrics").await
     }
+
+    /// Get directed sharing relay fallback diagnostics.
+    pub async fn directed_relay_stats(&self) -> Result<DirectedRelayStats, MiasmaError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::GetDirectedRelayStats { reply: tx })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
+        self.recv_reply(rx, "directed_relay_stats").await
+    }
 }
 
 // ─── Share-exchange command channel ──────────────────────────────────────────
@@ -1357,6 +1387,16 @@ pub struct MiasmaNode {
     reconnection_metrics: crate::daemon::self_heal::ReconnectionMetrics,
     /// Remembered bootstrap peers for recovery re-dialing.
     bootstrap_peers: Vec<(PeerId, Multiaddr)>,
+
+    // ── Directed sharing relay fallback diagnostics ─────────────────────
+    /// Directed requests sent to already-connected peers (direct path).
+    directed_direct_sends: u64,
+    /// Directed requests where relay circuit fallback was attempted.
+    directed_relay_fallback_attempts: u64,
+    /// Total relay circuit addresses registered for directed fallback.
+    directed_relay_circuits_registered: u64,
+    /// Directed requests where no relay candidates were available.
+    directed_no_relay_candidates: u64,
 }
 
 impl MiasmaNode {
@@ -1493,6 +1533,10 @@ impl MiasmaNode {
             reconnection_scheduler: crate::daemon::self_heal::ReconnectionScheduler::default(),
             reconnection_metrics: crate::daemon::self_heal::ReconnectionMetrics::default(),
             bootstrap_peers: Vec::new(),
+            directed_direct_sends: 0,
+            directed_relay_fallback_attempts: 0,
+            directed_relay_circuits_registered: 0,
+            directed_no_relay_candidates: 0,
         })
     }
 
@@ -1995,12 +2039,60 @@ impl MiasmaNode {
                 request,
                 reply,
             } => {
-                // Do NOT add external addresses here.  The `addrs` field
-                // was historically passed from the daemon but contained
-                // the *sender's* own listen addresses, not the target's.
-                // The peer should already be reachable via mDNS / Kademlia
-                // / the existing connection.  Adding stale or wrong
-                // addresses causes "Failed to dial" errors.
+                // Do NOT add the caller-supplied `addrs` here — they
+                // historically contained the *sender's* own listen
+                // addresses, not the target's, and caused "Failed to
+                // dial" errors.
+
+                // ── Relay circuit fallback (ADR-010 Part 2) ──────────
+                // If the target peer is not already connected, register
+                // relay circuit addresses so libp2p can dial through a
+                // relay.  Relay peers are sorted by trust tier (Verified
+                // first) by `relay_peer_info()`.
+                let directly_connected = self
+                    .swarm
+                    .connected_peers()
+                    .any(|p| *p == peer_id);
+
+                if directly_connected {
+                    self.directed_direct_sends += 1;
+                } else {
+                    let relays = self.descriptor_store.relay_peer_info();
+                    if relays.is_empty() {
+                        self.directed_no_relay_candidates += 1;
+                        debug!(
+                            target_peer = %peer_id,
+                            "directed request: peer not connected, no relay candidates"
+                        );
+                    } else {
+                        self.directed_relay_fallback_attempts += 1;
+                        let mut registered = 0usize;
+                        for (relay_id, _relay_addrs) in &relays {
+                            if *relay_id == peer_id {
+                                continue; // Don't relay through the target itself
+                            }
+                            let circuit_addr_str = format!(
+                                "/p2p/{relay_id}/p2p-circuit/p2p/{peer_id}"
+                            );
+                            if let Ok(addr) = circuit_addr_str.parse::<Multiaddr>() {
+                                self.swarm
+                                    .behaviour_mut()
+                                    .kademlia
+                                    .add_address(&peer_id, addr.clone());
+                                self.swarm.add_peer_address(peer_id, addr);
+                                registered += 1;
+                            }
+                        }
+                        self.directed_relay_circuits_registered += registered as u64;
+                        info!(
+                            target_peer = %peer_id,
+                            relay_candidates = relays.len(),
+                            circuit_addrs_registered = registered,
+                            "directed request: peer not connected, relay circuit fallback"
+                        );
+                    }
+                }
+
                 let req_id = self
                     .swarm
                     .behaviour_mut()
@@ -2040,6 +2132,14 @@ impl MiasmaNode {
             }
             DhtCommand::GetReconnectionMetrics { reply } => {
                 let _ = reply.send(self.reconnection_metrics.clone());
+            }
+            DhtCommand::GetDirectedRelayStats { reply } => {
+                let _ = reply.send(DirectedRelayStats {
+                    direct_sends: self.directed_direct_sends,
+                    relay_fallback_attempts: self.directed_relay_fallback_attempts,
+                    relay_circuits_registered: self.directed_relay_circuits_registered,
+                    no_relay_candidates: self.directed_no_relay_candidates,
+                });
             }
         }
     }
@@ -3633,7 +3733,8 @@ fn build_swarm(
                     StreamProtocol::new("/miasma/share/1.0.0"),
                     request_response::ProtocolSupport::Full,
                 )],
-                request_response::Config::default(),
+                request_response::Config::default()
+                    .with_request_timeout(Duration::from_secs(60)),
             );
 
             let admission = request_response::Behaviour::<AdmissionCodec>::new(

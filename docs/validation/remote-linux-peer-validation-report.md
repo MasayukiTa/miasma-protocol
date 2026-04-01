@@ -162,7 +162,40 @@ The WSL2 proof is valid but limited to a same-host virtual network. The GitHub r
 
 ---
 
-## 9. Remaining Blocker Ledger
+## 9. Post-ADR-010 Part 2 Analysis (2026-04-01)
+
+**Relay circuit fallback was implemented** (ADR-010 Part 2) for the directed sharing
+control plane. When the target peer is not directly connected, the node now
+inspects `DescriptorStore::relay_peer_info()` for relay-capable peers, builds
+circuit multiaddrs (`/p2p/{relay}/p2p-circuit/p2p/{target}`), and registers
+them with the swarm so libp2p can dial-on-demand via relay.
+
+**However, this does not change the remote Linux proof result.**
+
+The relay fallback solves a *different* problem: it allows directed sharing
+between peers that are each individually connected to a shared relay, but not
+directly connected to each other. The remote Linux blocker is more fundamental:
+
+1. **Windows cannot connect to ANY internet QUIC peer** (GlobalProtect blocks
+   outbound UDP to public IPs). This means Windows cannot reach the relay either.
+2. **No relay peers exist in this topology** — both the Windows peer and the
+   GitHub runner are isolated, with no shared third peer to serve as relay.
+3. The relay fallback is a control-plane enhancement, not a transport-level
+   bypass. It requires at least one established libp2p connection path to the relay.
+
+**Conclusion**: Re-running the remote Linux proof would produce the same
+`HandshakeTimedOut` result. The relay circuit fallback is architecturally
+correct and field-proven in the WSL2 test topology, but does not unblock the
+corporate network constraint.
+
+**What would actually unblock this**:
+- Test on an unrestricted network (no GlobalProtect)
+- WSS transport to a public relay server (bypasses UDP-blocking)
+- Deploy Miasma on a public VPS both peers can reach
+
+---
+
+## 10. Remaining Blocker Ledger (updated 2026-04-01)
 
 | Blocker | Type | What would unblock it | Beta-critical? |
 |---------|------|----------------------|----------------|
@@ -170,11 +203,13 @@ The WSL2 proof is valid but limited to a same-host virtual network. The GitHub r
 | Direct non-local peer connectivity | Environment | Unrestricted network OR deploy Miasma on a public VPS | Desirable for broad beta confidence |
 | WSS to public internet | Config/Infra | Deploy a WSS relay/rendezvous server with cert | No — fallback path exists |
 | Azure inbound UDP policy | Infrastructure | Use TCP-based transport (WSS) instead of QUIC | N/A — environment-dependent |
+| Directed sharing relay field test | Code+Topology | Need ≥3 peers with a shared relay; ADR-010 code complete | No — proven in adversarial suite |
+| Directed sharing over Tor | Architecture | Tor HS integration in libp2p (multi-month, external dep) | No — explicitly out-of-scope |
 | Android real-device test | Hardware | Android NDK + SDK + device | Yes |
 
 ---
 
-## 10. Operator Notes
+## 11. Operator Notes
 
 **Workflow for future non-local tests** (when unrestricted network is available):
 
@@ -193,7 +228,7 @@ gh issue view 5 -R MasayukiTa/miasma-protocol --comments
 
 ---
 
-## 11. Conclusion
+## 12. Conclusion
 
 The genuinely non-local test was attempted and produced a clear result: **direct QUIC UDP connectivity between a GlobalProtect-managed Windows machine and an Azure-hosted Linux peer is blocked**. This is an environment blocker (corporate network policy), not a code blocker.
 

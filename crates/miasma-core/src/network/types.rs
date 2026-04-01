@@ -23,6 +23,10 @@ pub struct ShardLocation {
     pub peer_id_bytes: Vec<u8>,
     /// Global shard index (0-based, matches `MiasmaShare::slot_index`).
     pub shard_index: u16,
+    /// Segment index for multi-segment files (0-based).
+    /// Defaults to 0 for backward compatibility with single-segment records.
+    #[serde(default)]
+    pub segment_index: u32,
     /// Multiaddr strings where this peer can be reached.
     pub addrs: Vec<String>,
 }

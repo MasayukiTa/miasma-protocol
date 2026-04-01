@@ -314,9 +314,8 @@ Deletion in a distributed system is honest but not absolute:
   request-response, which requires bidirectional P2P reachability. Tor
   SOCKS5 is an outbound-only proxy and cannot satisfy this requirement.
   Directed sharing works over direct libp2p connections and relay circuits
-  (when relay circuit fallback is implemented per ADR-010), but NOT over
-  Tor SOCKS5. See ADR-010 for the full architectural analysis and the
-  relay circuit fallback implementation plan.
+  (relay circuit fallback implemented per ADR-010 Part 2, 2026-04-01), but
+  NOT over Tor SOCKS5. See ADR-010 for the full architectural analysis.
 - **Out-of-band channel required**: the confirmation challenge requires a
   separate communication channel (voice, messaging) between sender and
   recipient. The protocol does not provide this channel.
@@ -340,7 +339,7 @@ Deletion in a distributed system is honest but not absolute:
 - **ADR-005 (Anonymous Trust)**: share content retrieval uses the relay/onion
   infrastructure from ADR-005. The directed sharing control plane uses raw
   libp2p request-response; relay circuit fallback for the control plane is
-  defined in ADR-010.
+  implemented per ADR-010 Part 2.
 - **ADR-010 (Directed Sharing Transport Architecture)**: defines the product
   boundary (Tor SOCKS5 not supported for control plane) and the concrete relay
   circuit fallback implementation plan. The sharing key (`msk:`) is separate

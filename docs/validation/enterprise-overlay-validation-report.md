@@ -456,19 +456,24 @@ This finding has been converted to an architecture decision in
 
 - **Current product boundary**: directed sharing requires direct or relay P2P
   connectivity. Tor SOCKS5 is not supported for the control plane.
-- **Next implementation**: relay circuit fallback in `SendDirectedRequest`
-  handler — dial target via `/p2p/{relay}/p2p-circuit/p2p/{target}` when not
-  already connected. The relay circuit infrastructure (Phase 4c through 4e++)
-  already exists; it must be wired to the directed sharing control plane.
+- **Relay circuit fallback IMPLEMENTED** (ADR-010 Part 2, 2026-04-01):
+  `SendDirectedRequest` handler now dials target via
+  `/p2p/{relay}/p2p-circuit/p2p/{target}` when not already connected.
+  Relay peers sorted by trust tier (Verified > Observed > Claimed).
+  8 adversarial tests. Diagnostics: `DirectedRelayStats` in DaemonStatus + CLI.
 
-### What Remains Blocked (Field Evidence)
+### What Remains Blocked (Field Evidence — updated 2026-04-01)
 
-- End-to-end directed sharing over Tor: **ARCHITECTURALLY BLOCKED** until
-  relay circuit fallback is implemented (ADR-010 Part 2)
-- Directed sharing via relay circuit: **CODE CHANGE REQUIRED** (no field test
-  possible until relay fallback is implemented)
-- Latency characteristics of directed sharing over Tor: secondary concern;
-  the structural blocker must be resolved first
+- End-to-end directed sharing over Tor: **STILL BLOCKED** — Tor SOCKS5 is
+  outbound-only; relay circuit fallback solves control-plane routing but does
+  not make Tor provide bidirectional connectivity. Full Tor HS integration
+  would be needed (not on roadmap).
+- Directed sharing via relay circuit: **IMPLEMENTED** — code complete, tested
+  in adversarial suite. No live field test yet (requires topology with a
+  shared relay peer reachable by both sender and recipient).
+- Remote non-local proof: **STILL BLOCKED** — GlobalProtect blocks outbound
+  QUIC UDP to internet IPs. Relay fallback does not help because Windows
+  cannot connect to any relay peer on the public internet either.
 
 ---
 ---
@@ -555,7 +560,8 @@ artifact until a macOS build environment is available.
 | **Obfuscated QUIC** | AUTOMATED-PROVEN | Adversarial suite |
 | **Shadowsocks proxy** | AUTOMATED-PROVEN | 78 transport tests |
 | **Tor transport** | AUTOMATED-PROVEN | Transport suite + prior WSL2 evidence |
-| **Directed sharing over Tor** | ARCHITECTURAL-BLOCKER | Control plane uses libp2p request-response (not Tor SOCKS5); relay circuit fallback required (ADR-010) |
+| **Directed sharing over relay circuit** | AUTOMATED-PROVEN | ADR-010 Part 2 implemented, 8 adversarial tests, diagnostics wired |
+| **Directed sharing over Tor** | ARCHITECTURAL-BLOCKER | Tor SOCKS5 is outbound-only; relay fallback does not make Tor bidirectional |
 | **Fallback ladder (full chain)** | AUTOMATED-PROVEN | 50 fallback + 30 self-heal tests |
 | **Circuit breaker / flap damping** | AUTOMATED-PROVEN | 3 + 2 tests |
 | **DPI detection/evasion** | AUTOMATED-PROVEN | 181 adversarial tests |
@@ -580,8 +586,8 @@ artifact until a macOS build environment is available.
    design (control plane is not Tor-aware); see ADR-010
 5. "Works on UDP-blocking networks" — fallback exists but not field-proven
 6. "Directed sharing uses the same transport as file retrieval" — INCORRECT;
-   control plane uses libp2p request-response (direct P2P only); retrieval
-   uses payload transport (SOCKS5-aware)
+   control plane uses libp2p request-response (direct P2P or relay circuit);
+   retrieval uses payload transport (SOCKS5-aware)
 
 ## Claims That CAN Be Made
 
@@ -610,13 +616,14 @@ after crash/restart (30s self-heal).
 **What needs further validation before broader claims**:
 - Android real-device testing (needs NDK + SDK + Gradle wrapper + Java 17 + device)
 - iOS build and device testing (needs macOS + Xcode + iPhone)
-- Directed sharing over Tor (requires relay circuit fallback per ADR-010 first,
-  then Tor-capable environment for field test)
+- Directed sharing over relay circuit field test (code-complete, needs topology
+  with shared relay peer)
+- Directed sharing over Tor (Tor SOCKS5 outbound-only; Tor HS support not on roadmap)
 - Aggressive network restriction scenarios (TLS MITM, UDP blocking)
 
 **What is honestly bounded**:
-- Directed sharing over Tor is an architectural blocker (ADR-010), not just a
-  missing environment. Even with Tor available, directed sharing would fail
-  at the confirm step until relay circuit fallback is implemented.
+- Directed sharing over Tor is an architectural blocker (ADR-010). Relay
+  circuit fallback (now implemented) does not make Tor bidirectional.
+  Full Tor hidden service integration would be required.
 - Mobile platforms are code-complete but device-unvalidated
 - Tor/Shadowsocks field proof for share retrieval requires permitted environments
