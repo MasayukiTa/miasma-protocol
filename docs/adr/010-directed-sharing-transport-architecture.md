@@ -1,6 +1,6 @@
 # ADR-010: Directed Sharing Transport Architecture
 
-## Status: Accepted
+## Status: Accepted (Part 2 implemented — 2026-04-01)
 
 ## Date: 2026-03-31
 
@@ -127,13 +127,19 @@ relay lookup is performed.
 - Validation reports: Track D accurately describes the architectural boundary
   rather than framing it as a missing field test.
 
-### What changes (Part 2 — next implementation)
+### What changes (Part 2 — IMPLEMENTED 2026-04-01)
 
-- `node.rs` `DhtCommand::SendDirectedRequest` handler: add relay dial fallback
-  before `send_request` when peer is not connected.
+- `node.rs` `DhtCommand::SendDirectedRequest` handler: relay circuit fallback
+  added. When the target peer is not directly connected, the handler inspects
+  `DescriptorStore::relay_peer_info()` for relay-capable peers (sorted by trust
+  tier: Verified > Observed > Claimed), builds circuit multiaddrs
+  (`/p2p/{relay}/p2p-circuit/p2p/{target}`), and registers them with the swarm
+  so libp2p can dial via relay. Self-relay (target == relay) is excluded.
 - `DhtHandle::send_directed_request`: no signature change; fallback is internal
   to the node.
-- New tests: relay circuit fallback for directed invite, confirm, revoke.
+- 7 adversarial tests: circuit address format, no-candidates empty, trust-tier
+  sorting, target-self-exclusion, request serde (Invite/Confirm/Revoke/Status),
+  multiple-candidate multiple-circuit, response serde roundtrip.
 
 ### What does NOT change
 

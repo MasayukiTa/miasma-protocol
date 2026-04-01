@@ -16,8 +16,17 @@ use tokio::{
     net::TcpStream,
 };
 
-/// Maximum JSON frame body size (16 MiB).
-const FRAME_MAX: usize = 16 * 1_024 * 1_024;
+/// Maximum JSON frame body size (256 MiB).
+///
+/// Raised from 16 MiB to support large file retrieval via `network-get`.
+/// A 100 MB file produces ~370 MB of IPC JSON after base64-encoding shares;
+/// 256 MiB covers files up to ~70 MB inline. For larger files, use the
+/// HTTP bridge or streaming retrieval API instead.
+/// Maximum JSON frame body size (512 MiB).
+///
+/// JSON-serialised `Vec<u8>` expands ~3.5-4× vs raw bytes, so 100 MB file
+/// retrieval produces ~370 MB frames. 512 MiB covers files up to ~140 MB.
+const FRAME_MAX: usize = 512 * 1_024 * 1_024;
 
 /// Filename inside the data directory containing the control port number.
 pub const PORT_FILE: &str = "daemon.port";
@@ -429,6 +438,20 @@ pub struct DaemonStatus {
     /// Relays with forwarding verification evidence.
     #[serde(default)]
     pub forwarding_verified_relays: usize,
+
+    // ── Directed sharing relay fallback (ADR-010 Part 2) ─────────────────
+    /// Directed requests sent via direct (already-connected) path.
+    #[serde(default)]
+    pub directed_direct_sends: u64,
+    /// Directed requests where relay circuit fallback was attempted.
+    #[serde(default)]
+    pub directed_relay_fallback_attempts: u64,
+    /// Total relay circuit addresses registered for directed fallback.
+    #[serde(default)]
+    pub directed_relay_circuits_registered: u64,
+    /// Directed requests where no relay candidates were available.
+    #[serde(default)]
+    pub directed_no_relay_candidates: u64,
 
     // ── Connection health (Phase 1: bridge superhardening) ──────────────
     /// Overall connection quality score (0.0–1.0).

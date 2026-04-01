@@ -110,11 +110,13 @@ impl OnionAwareDhtExecutor for DirectDhtExecutor {
 
 // ─── Live executor (Task 4 — implemented in onion::executor) ─────────────────
 
-/// Production DHT executor with 2-hop onion routing.
-///
+/// Phase 1 DHT executor with 2-hop in-process onion routing.
 /// Re-exported from `onion::executor::LiveOnionDhtExecutor`.
-/// This type alias keeps the `network::dht` API surface stable.
 pub use crate::onion::executor::LiveOnionDhtExecutor;
+
+/// Phase 2 DHT executor — sends onion-wrapped queries through real relay peers.
+/// Re-exported from `onion::executor::NetworkOnionDhtExecutor`.
+pub use crate::onion::executor::NetworkOnionDhtExecutor;
 
 #[cfg(test)]
 mod tests {
