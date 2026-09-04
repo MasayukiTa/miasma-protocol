@@ -1309,6 +1309,135 @@ async fn daemon_ipc_publish_get_roundtrip() {
     result.expect("daemon_ipc_publish_get_roundtrip timed out");
 }
 
+// ── Test 21b: Daemon IPC publish → GetToFile round-trip (Phase 2.4) ───────────
+//
+// Same shape as `daemon_ipc_publish_get_roundtrip`, but retrieves via
+// `GetToFile` (streams straight to disk via `retrieve_from_network_streaming`)
+// instead of `Get` (buffers the whole file, then base64-inflates it into a
+// JSON response). Proves the file-path variant actually round-trips content
+// correctly over the real daemon IPC + DHT + libp2p path, not just that it
+// compiles.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn daemon_ipc_get_to_file_roundtrip() {
+    use miasma_core::daemon::ipc::{daemon_request, ControlRequest, ControlResponse};
+    use miasma_core::daemon::DaemonServer;
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let result = timeout(Duration::from_secs(30), async {
+        // ── Node A daemon ─────────────────────────────────────────────────────
+        let dir_a = tempfile::tempdir().unwrap();
+        let store_a = Arc::new(LocalShareStore::open(dir_a.path(), 100).unwrap());
+        let key_a = [0xAAu8; 32];
+        let node_a = MiasmaNode::new(&key_a, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+
+        let server_a = DaemonServer::start(node_a, store_a, dir_a.path().to_owned())
+            .await
+            .unwrap();
+        let addr_a = format!("{}/p2p/{}", server_a.listen_addrs()[0], server_a.peer_id());
+        let shutdown_a = server_a.shutdown_handle();
+        let dir_a_path = dir_a.path().to_owned();
+        tokio::spawn(server_a.run());
+
+        let content = b"daemon IPC GetToFile round-trip test payload -- streamed to disk";
+        let req = ControlRequest::Publish {
+            data: content.to_vec(),
+            data_shards: 2,
+            total_shards: 3,
+        };
+        let mid_str = match daemon_request(&dir_a_path, req).await.unwrap() {
+            ControlResponse::Published { mid } => mid,
+            other => panic!("unexpected: {other:?}"),
+        };
+
+        // ── Node B daemon ─────────────────────────────────────────────────────
+        let dir_b = tempfile::tempdir().unwrap();
+        let store_b = Arc::new(LocalShareStore::open(dir_b.path(), 100).unwrap());
+        let key_b = [0xBBu8; 32];
+        let node_b = MiasmaNode::new(&key_b, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+
+        let server_b = DaemonServer::start(node_b, store_b, dir_b.path().to_owned())
+            .await
+            .unwrap();
+        let dir_b_path = dir_b.path().to_owned();
+        let shutdown_b = server_b.shutdown_handle();
+
+        {
+            use libp2p::multiaddr::Protocol;
+            let mut addr: Multiaddr = addr_a.parse().unwrap();
+            let bootstrap_peer_id: libp2p::PeerId = addr
+                .iter()
+                .find_map(|p| {
+                    if let Protocol::P2p(id) = p {
+                        Some(id)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap();
+            if matches!(addr.iter().last(), Some(Protocol::P2p(_))) {
+                addr.pop();
+            }
+            server_b
+                .add_bootstrap_peer(bootstrap_peer_id, addr)
+                .await
+                .unwrap();
+        }
+        server_b.bootstrap_dht().await.unwrap();
+        tokio::spawn(server_b.run());
+
+        tokio::time::sleep(Duration::from_millis(2000)).await;
+
+        // ── GetToFile via IPC client (network-get -o behaviour) ────────────────
+        let out_dir = tempfile::tempdir().unwrap();
+        let out_path = out_dir.path().join("retrieved.bin");
+        let req = ControlRequest::GetToFile {
+            mid: mid_str.clone(),
+            data_shards: 2,
+            total_shards: 3,
+            output_path: out_path.to_string_lossy().to_string(),
+        };
+        let bytes_written = match daemon_request(&dir_b_path, req).await.unwrap() {
+            ControlResponse::RetrievedToFile { bytes_written, .. } => bytes_written,
+            ControlResponse::Error(e) => panic!("get-to-file error: {e}"),
+            other => panic!("unexpected: {other:?}"),
+        };
+
+        assert_eq!(bytes_written, content.len() as u64);
+        let on_disk = std::fs::read(&out_path).unwrap();
+        assert_eq!(on_disk.as_slice(), content as &[u8], "content mismatch");
+
+        let _ = shutdown_a.send(()).await;
+        let _ = shutdown_b.send(()).await;
+    })
+    .await;
+
+    result.expect("daemon_ipc_get_to_file_roundtrip timed out");
+}
+
+// A large-payload (>140 MB, multi-segment) `GetToFile` field test was
+// attempted here and deliberately dropped, not skipped by oversight.
+//
+// Diagnosing why it kept timing out surfaced a real, pre-existing bug shared
+// by *both* `GetToFile` and the old buffered `Get` -- `retrieve_segments` /
+// `retrieve_streaming_by_mid`'s per-segment fetch loop calls
+// `ShareSource::list_candidates(mid)`, which returns candidate addresses for
+// *every* segment of the content (it filters only by MID prefix, not by
+// segment), so each segment's fetch loop must sequentially fetch-and-reject
+// shares belonging to every *other* segment before finding enough valid ones
+// for its own. Measured locally: a 20 MB / 2-segment / data_shards=2 file
+// took 136s end-to-end (a single segment's fetch alone took 44-65s for just
+// 2 shares); a 200 MB / 4-segment / default-params (data_shards=10) file did
+// not finish retrieval within 900s. This is not something either Phase 2.3
+// or 2.4 introduced -- no prior test exercised `dissolve_and_publish_file`
+// together with real network retrieval, so it was never caught. See
+// `docs/tasks/p2p-content-transfer-hardening.md`'s Phase 2.4 entry and
+// `docs/tasks/remaining-tasks-prioritized.md` for the full writeup; fixing
+// the underlying candidate-listing algorithm is its own scoped follow-up,
+// not a rider on this phase. `daemon_ipc_get_to_file_roundtrip` above is the
+// real correctness proof for `GetToFile` at a size this bug doesn't obscure.
+
 // ── Test 22: Publish before peers exist → replication retries when peer joins ──
 //
 // Proves that the replication queue defers announce until a peer is available,
