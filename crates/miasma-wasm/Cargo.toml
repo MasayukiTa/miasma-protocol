@@ -18,7 +18,7 @@ blake3 = "1"
 aes-gcm = "0.10"
 sharks = "0.5"
 reed-solomon-simd = "3"
-rand = "0.8"
+rand = "0.9"
 zeroize = { version = "1", features = ["derive"] }
 bs58 = "0.5"
 thiserror = "1"
