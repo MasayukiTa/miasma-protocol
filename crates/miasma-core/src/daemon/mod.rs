@@ -779,6 +779,79 @@ pub(crate) async fn process_request(
             }
         }
 
+        ControlRequest::GetToFile {
+            mid,
+            data_shards,
+            total_shards,
+            output_path,
+        } => {
+            let params = DissolutionParams {
+                data_shards: data_shards as usize,
+                total_shards: total_shards as usize,
+            };
+            match crate::crypto::hash::ContentId::from_str(&mid) {
+                Ok(content_id) => {
+                    match coord
+                        .retrieve_from_network_streaming(&content_id, params)
+                        .await
+                    {
+                        Ok(mut stream) => {
+                            use futures::StreamExt;
+                            use tokio::io::AsyncWriteExt;
+
+                            match tokio::fs::File::create(&output_path).await {
+                                Ok(mut file) => {
+                                    let mut bytes_written: u64 = 0;
+                                    let mut write_err: Option<String> = None;
+                                    while let Some(chunk) = stream.next().await {
+                                        match chunk {
+                                            Ok(bytes) => match file.write_all(&bytes).await {
+                                                Ok(_) => bytes_written += bytes.len() as u64,
+                                                Err(e) => {
+                                                    write_err = Some(format!(
+                                                        "cannot write to {output_path}: {e}"
+                                                    ));
+                                                    break;
+                                                }
+                                            },
+                                            Err(e) => {
+                                                write_err = Some(e.to_string());
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    match write_err {
+                                        None => ControlResponse::RetrievedToFile {
+                                            output_path,
+                                            bytes_written,
+                                        },
+                                        Some(msg) => {
+                                            // A partially-written file on disk would
+                                            // silently look like a valid (if short)
+                                            // file to anything reading it later --
+                                            // unlike the buffered DirectedRetrieveToFile
+                                            // path, which only ever writes once
+                                            // everything is already reconstructed in
+                                            // memory. Remove it rather than leave
+                                            // truncated content behind.
+                                            drop(file);
+                                            let _ = tokio::fs::remove_file(&output_path).await;
+                                            ControlResponse::Error(msg)
+                                        }
+                                    }
+                                }
+                                Err(e) => ControlResponse::Error(format!(
+                                    "cannot create {output_path}: {e}"
+                                )),
+                            }
+                        }
+                        Err(e) => ControlResponse::Error(e.to_string()),
+                    }
+                }
+                Err(e) => ControlResponse::Error(format!("invalid MID: {e}")),
+            }
+        }
+
         ControlRequest::Status => {
             let peer_count = coord.peer_count().await.unwrap_or(0);
             let admission = coord.admission_stats().await.unwrap_or(
