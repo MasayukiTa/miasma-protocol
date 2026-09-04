@@ -67,6 +67,11 @@ fn main() {
         "dht-ping" => cmd_dht_ping(),
         "inspect" => cmd_inspect(&args[2..]),
         "dissolve" => cmd_dissolve(&args[2..]),
+        // The desktop app invokes the bridge as `miasma-bridge --magnet <uri>`
+        // and `miasma-bridge --torrent <path>` (see miasma-desktop's worker).
+        // Those are the same operation as `dissolve`, named by source kind, so
+        // pass the flag itself through for `cmd_dissolve` to read.
+        "--magnet" | "--torrent" => cmd_dissolve(&args[1..]),
         "init-inbox" => cmd_init_inbox(&args[2..]),
         "retrieve" => cmd_retrieve(&args[2..]),
         "daemon" => cmd_daemon(&args[2..]),
@@ -176,12 +181,13 @@ fn cmd_inspect(args: &[String]) {
 
 fn cmd_dissolve(args: &[String]) {
     let (data_dir, rest) = parse_data_dir(args);
-    let magnet = find_dissolve_magnet_arg(&rest);
-    let magnet = match magnet {
-        Some(m) => m.to_owned(),
+    let source = match find_dissolve_source(&rest) {
+        Some(s) => s,
         None => {
             eprintln!(
-                "Usage: miasma-bridge dissolve [options] <magnet-uri>\n\
+                "Usage: miasma-bridge dissolve [options] <magnet-uri|.torrent file>\n\
+                 \x20      miasma-bridge --magnet <magnet-uri> [options]\n\
+                 \x20      miasma-bridge --torrent <path.torrent> [options]\n\
                  Options: --max-total-bytes <N> --confirm-download --proxy <url>\n\
                  \x20        --seed/--no-seed --upload-limit <bps> --download-limit <bps>"
             );
@@ -189,16 +195,34 @@ fn cmd_dissolve(args: &[String]) {
         }
     };
 
-    let info = match pipeline::MagnetInfo::parse(&magnet) {
-        Ok(i) => i,
-        Err(e) => {
-            error!("Failed to parse magnet link: {e}");
-            std::process::exit(1);
+    // Identify the source for the preflight report. A magnet is parsed here
+    // for display and early validation only — the URI itself is handed to the
+    // downloader verbatim so its trackers survive.
+    let (source_label, source_detail) = match &source {
+        DissolveSource::Magnet(magnet) => match pipeline::MagnetInfo::parse(magnet) {
+            Ok(info) => (
+                format!("Info hash:    {}", hex::encode(info.info_hash)),
+                format!(
+                    "Display name: {}",
+                    info.display_name.as_deref().unwrap_or("unknown")
+                ),
+            ),
+            Err(e) => {
+                error!("Failed to parse magnet link: {e}");
+                std::process::exit(1);
+            }
+        },
+        DissolveSource::TorrentFile(path) => {
+            if !path.is_file() {
+                error!("No such .torrent file: {}", path.display());
+                std::process::exit(1);
+            }
+            (
+                format!("Torrent file: {}", path.display()),
+                "Display name: (read from .torrent)".to_string(),
+            )
         }
     };
-
-    let ih_hex = hex::encode(info.info_hash);
-    let name = info.display_name.as_deref().unwrap_or("unknown");
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -210,8 +234,8 @@ fn cmd_dissolve(args: &[String]) {
 
     // ── Stage 1: Preflight ──────────────────────────────────────────────
     println!("[1/3] Preflight check");
-    println!("      Info hash:    {ih_hex}");
-    println!("      Display name: {name}");
+    println!("      {source_label}");
+    println!("      {source_detail}");
     println!("      Data dir:     {}", data_dir.display());
     println!(
         "      Size limit:   {}",
@@ -250,15 +274,24 @@ fn cmd_dissolve(args: &[String]) {
 
     // ── Stage 2: Download ────────────────────────────────────────────────
     println!("[2/3] Downloading torrent...");
-    info!("Dissolving torrent: hash={ih_hex}, name={name}");
+    info!("Dissolving torrent: {source_label}");
 
-    match rt.block_on(bridge::dissolve_torrent(
-        &info.info_hash,
-        info.display_name.as_deref(),
-        &data_dir,
-        quota_mb,
-        &safety_opts,
-    )) {
+    let outcome = match &source {
+        DissolveSource::Magnet(magnet) => rt.block_on(bridge::dissolve_magnet(
+            magnet,
+            &data_dir,
+            quota_mb,
+            &safety_opts,
+        )),
+        DissolveSource::TorrentFile(path) => rt.block_on(bridge::dissolve_torrent_file(
+            path,
+            &data_dir,
+            quota_mb,
+            &safety_opts,
+        )),
+    };
+
+    match outcome {
         Ok(mids) => {
             // ── Stage 3: Result ──────────────────────────────────────────
             println!();
@@ -425,21 +458,49 @@ fn parse_safety_opts(args: &[String]) -> bridge::DownloadSafetyOpts {
     opts
 }
 
-fn find_dissolve_magnet_arg(args: &[String]) -> Option<&str> {
+/// What a `dissolve` invocation was pointed at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DissolveSource {
+    /// A magnet URI, passed through to the downloader verbatim.
+    Magnet(String),
+    /// A local `.torrent` file.
+    TorrentFile(PathBuf),
+}
+
+/// Find what to dissolve, accepting all three call shapes:
+/// `dissolve <magnet|file>`, `--magnet <uri>`, and `--torrent <path>`.
+fn find_dissolve_source(args: &[String]) -> Option<DissolveSource> {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--magnet" if i + 1 < args.len() => {
+                return Some(DissolveSource::Magnet(args[i + 1].clone()))
+            }
+            "--torrent" if i + 1 < args.len() => {
+                return Some(DissolveSource::TorrentFile(PathBuf::from(&args[i + 1])))
+            }
             "--confirm-download" | "--seed" | "--no-seed" => {
                 i += 1;
             }
             "--max-total-bytes" | "--proxy" | "--upload-limit" | "--download-limit" => {
                 i += 2;
             }
-            other if !other.starts_with("--") => return Some(other),
+            other if !other.starts_with("--") => return Some(classify_positional_source(other)),
             _ => i += 1,
         }
     }
     None
+}
+
+/// Classify a bare (unflagged) argument. Only a `.torrent` suffix selects the
+/// file path; everything else stays a magnet URI, which is what `dissolve`
+/// has always accepted positionally.
+fn classify_positional_source(arg: &str) -> DissolveSource {
+    if arg.to_ascii_lowercase().ends_with(".torrent") {
+        DissolveSource::TorrentFile(PathBuf::from(arg))
+    } else {
+        DissolveSource::Magnet(arg.to_owned())
+    }
 }
 
 fn format_bytes_human(bytes: u64) -> String {
@@ -485,6 +546,8 @@ fn print_usage() {
         "  dht-ping    Test UDP connectivity to DHT bootstrap nodes\n",
         "  inspect     Probe a magnet via DHT + metadata without downloading payload files\n",
         "  dissolve    Dissolve a torrent's files into Miasma (preflight size check)\n",
+        "              Accepts a magnet URI or a .torrent file path; --magnet/--torrent\n",
+        "              select the source explicitly and may be used without 'dissolve'.\n",
         "  init-inbox  Create a dedicated inbox approved for bridge daemon imports\n",
         "  retrieve    Retrieve a MID and re-seed as torrent [Phase 2 stub]\n",
         "  daemon      Watch a dedicated inbox for new files and auto-dissolve them\n",
@@ -506,6 +569,9 @@ fn print_usage() {
         "  miasma-bridge dissolve --max-total-bytes 500M \"magnet:?xt=urn:btih:...\"\n",
         "  miasma-bridge dissolve --proxy socks5://127.0.0.1:9050 \"magnet:?xt=urn:btih:...\"\n",
         "  miasma-bridge dissolve --download-limit 5M --no-seed \"magnet:?xt=urn:btih:...\"\n",
+        "  miasma-bridge dissolve ./example.torrent\n",
+        "  miasma-bridge --magnet \"magnet:?xt=urn:btih:...\"\n",
+        "  miasma-bridge --torrent ./example.torrent\n",
         "  miasma-bridge init-inbox C:\\\\MiasmaInbox\n",
         "  miasma-bridge daemon --inbox-dir C:\\\\MiasmaInbox\n",
         "\n",
@@ -525,36 +591,84 @@ fn print_usage() {
 
 #[cfg(test)]
 mod tests {
-    use super::find_dissolve_magnet_arg;
+    use super::{find_dissolve_source, DissolveSource};
+    use std::path::PathBuf;
+
+    fn args(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    const MAGNET: &str = "magnet:?xt=urn:btih:abcdef0123456789abcdef0123456789abcdef01";
 
     #[test]
-    fn dissolve_magnet_arg_skips_flag_values() {
-        let args = vec![
-            "--max-total-bytes".to_string(),
-            "500M".to_string(),
-            "--proxy".to_string(),
-            "socks5://127.0.0.1:9050".to_string(),
-            "--seed".to_string(),
-            "magnet:?xt=urn:btih:abcdef0123456789abcdef0123456789abcdef01".to_string(),
-        ];
+    fn positional_magnet_skips_flag_values() {
+        let a = args(&[
+            "--max-total-bytes",
+            "500M",
+            "--proxy",
+            "socks5://127.0.0.1:9050",
+            "--seed",
+            MAGNET,
+        ]);
 
-        let magnet = find_dissolve_magnet_arg(&args);
         assert_eq!(
-            magnet,
-            Some("magnet:?xt=urn:btih:abcdef0123456789abcdef0123456789abcdef01")
+            find_dissolve_source(&a),
+            Some(DissolveSource::Magnet(MAGNET.to_string()))
         );
     }
 
     #[test]
-    fn dissolve_magnet_arg_returns_none_when_only_flags_are_present() {
-        let args = vec![
-            "--max-total-bytes".to_string(),
-            "500M".to_string(),
-            "--no-seed".to_string(),
-            "--download-limit".to_string(),
-            "1M".to_string(),
-        ];
+    fn returns_none_when_only_flags_are_present() {
+        let a = args(&[
+            "--max-total-bytes",
+            "500M",
+            "--no-seed",
+            "--download-limit",
+            "1M",
+        ]);
 
-        assert_eq!(find_dissolve_magnet_arg(&args), None);
+        assert_eq!(find_dissolve_source(&a), None);
+    }
+
+    /// The desktop app spawns `miasma-bridge --magnet <uri> --data-dir <dir>`.
+    /// Before this was wired up the dispatcher rejected it as an unknown
+    /// command, so Import Magnet had never once worked.
+    #[test]
+    fn desktop_magnet_flag_is_recognized() {
+        let a = args(&["--magnet", MAGNET]);
+        assert_eq!(
+            find_dissolve_source(&a),
+            Some(DissolveSource::Magnet(MAGNET.to_string()))
+        );
+    }
+
+    /// Same for `--torrent <path>` (Import Torrent File in the desktop app).
+    #[test]
+    fn desktop_torrent_flag_is_recognized() {
+        let a = args(&["--torrent", "C:\\tmp\\example.torrent"]);
+        assert_eq!(
+            find_dissolve_source(&a),
+            Some(DissolveSource::TorrentFile(PathBuf::from(
+                "C:\\tmp\\example.torrent"
+            )))
+        );
+    }
+
+    #[test]
+    fn positional_torrent_file_is_detected_by_suffix() {
+        let a = args(&["--no-seed", "./downloads/Example.TORRENT"]);
+        assert_eq!(
+            find_dissolve_source(&a),
+            Some(DissolveSource::TorrentFile(PathBuf::from(
+                "./downloads/Example.TORRENT"
+            )))
+        );
+    }
+
+    /// A flag with no value after it must not be mistaken for a source.
+    #[test]
+    fn dangling_magnet_flag_yields_no_source() {
+        assert_eq!(find_dissolve_source(&args(&["--magnet"])), None);
+        assert_eq!(find_dissolve_source(&args(&["--torrent"])), None);
     }
 }
