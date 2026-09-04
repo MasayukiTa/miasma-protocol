@@ -163,29 +163,38 @@
 - **工数**: 2-3日
 - **前提**: P0-1 (コード署名) 完了後
 
-### P1-6: yamux リモート panic 脆弱性 (CVE-2026-32314) の解消
+### P1-6: yamux リモート panic 脆弱性 (CVE-2026-32314) ✅ 調査完了・実害なしと確認 (2026-09-04)
 
 - **種別**: セキュリティ
-- **現状**: GitHub Dependabot が検出 (severity: high)。`GHSA-vxx9-2994-q338` /
+- **経緯**: GitHub Dependabot が検出 (severity: high)。`GHSA-vxx9-2994-q338` /
   `CVE-2026-32314` — SYN フラグ付き・len=262145 の不正な Data フレームで
   リモート panic (DoS)。cargo-audit のローカル RustSec DB にはまだ
-  ミラーされておらず、`cargo audit`(2026-09-04時点)では検知されない
-  ("no fixed upgrade" の10件リストには含まれていない別枠)
-- **根本原因**: `libp2p-yamux 0.46.0`(現状ロック済みの最新0.54.x系)自体が
-  `yamux 0.12.1`(脆弱・fix版は`>=0.13.10`)と`yamux 0.13.10`の**両方**に
-  依存している(Cargo.lock 4191-4192行目)。`cargo update`(同一0.54系内)
-  では0.12.1依存を消せないことを確認済み — 修正には`libp2p`自体を
-  0.55+ へ上げる必要がある(このワークスペースの`libp2p = "0.54"`制約を
-  超えるメジャー更新)
-- **作業内容**:
-  - `libp2p 0.55+`が`libp2p-yamux`の`yamux 0.12`依存を落としているか確認
-  - 上げた場合の破壊的変更(API差分)の洗い出しと対応
-  - もしくは`libp2p-yamux`側に0.12を無効化するfeatureフラグが無いか確認
-    (未調査 — crates.io上の実際のCargo.toml/ソースを直接見る必要あり)
-- **工数**: 調査半日、libp2p本体の破壊的変更対応は規模不明(要調査後見積)
-- **リスク**: 実際に到達可能なP2P受信経路でのpanicなので、悪意ある/不正な
-  ピアからのDoSとして現実的に悪用可能。優先度は高いが、CIをブロックする
-  ものではないため(cargo-auditが未検知)P0には入れていない
+  ミラーされておらず、`cargo audit`単体では検知されない
+- **対応1: libp2p 0.54→0.56 へメジャー更新** — 副産物として `h2 0.3.x`・
+  重複していた旧`ring 0.16.20`・重複していた旧`rustls-webpki`2バージョンが
+  依存グラフから完全に消え、audit ignoreリスト(`.github/workflows/ci.yml`)
+  が10件→6件に減少。破壊的変更は`request_response::Event::{Message,
+  OutboundFailure}`への`connection_id`フィールド追加のみで、
+  `crates/miasma-core/src/network/node.rs`内12箇所のパターンマッチに`..`
+  を追加して解消(全701テスト green を確認)
+- **対応2: yamux本体の到達可能性を実コードで検証** — `libp2p-yamux 0.47.0`
+  (0.56系の最新)のCargo.tomlを直接確認したところ、`yamux012`(脆弱)と
+  `yamux013`(修正済)の**両方に無条件で依存**しており、featureフラグでの
+  切り離しは不可能(バージョンをいくら上げても構造的に解消できない)。
+  そこで`libp2p_yamux::Config`の実装を追跡した結果:
+  - `Config::default()` は `Either::Right(Config013::default())` を返す
+    (fixed側)
+  - このプロジェクトのコードは `yamux::Config::default` のみを呼んでおり
+    (`crates/miasma-core/src/network/node.rs:3718,3722`)、`Config012`側を
+    構築する経路が一切ない
+  - つまり脆弱な`yamux012`はバイナリに**コンパイルはされるが、実行時に
+    一度もインスタンス化されない** — このプロジェクトの実際の設定では
+    到達不可能で、実害は無いと判断
+- **結論**: 依存グラフ上の存在自体は`libp2p-yamux`が両バージョンへの
+  依存を切り離すまで(未定)解消できないが、実行時の到達可能性を実コードで
+  確認した上で受容可能なリスクと判断。対応するDependabotアラートは
+  `tolerable_risk`として根拠付きでdismiss済み。将来`libp2p-yamux`が
+  featureフラグ等で`yamux012`を分離可能にした場合は再度確認すること
 
 ---
 
