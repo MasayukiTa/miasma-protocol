@@ -874,6 +874,95 @@ async fn dht_put_blocks_until_acked() {
     result.expect("dht_put_blocks_until_acked timed out (30s)");
 }
 
+/// Phase 2.3: `retrieve_from_network_streaming` wires
+/// `StreamingRetrievalCoordinator` into the real network path (DHT segment
+/// lookup + `FallbackShareSource`, wrapped in `Arc` to satisfy the streaming
+/// coordinator's `Clone` bound) rather than the buffer-everything
+/// `retrieve_from_network`.
+///
+/// This only proves the single-segment case over the wire -- multi-segment
+/// streaming's actual per-segment loop is already covered without the
+/// network by `retrieval::streaming::tests::streaming_by_mid_yields_all_segments`.
+/// A real multi-segment *network* variant of this test is deliberately not
+/// attempted here: `dissolve_and_publish_file`'s segment size floors at
+/// `max_segment_size_for(data_shards)` (tens of MB even at `data_shards=2`),
+/// so forcing two real segments through two live libp2p nodes would need a
+/// multi-ten-megabyte fixture file, trading a slow/flaky test for coverage
+/// the unit test above already provides.
+#[tokio::test(flavor = "multi_thread")]
+async fn retrieve_from_network_streaming_single_segment_roundtrip() {
+    use futures::StreamExt;
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let result = timeout(Duration::from_secs(30), async {
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let store_a = Arc::new(LocalShareStore::open(dir_a.path(), 100).unwrap());
+        let store_b = Arc::new(LocalShareStore::open(dir_b.path(), 100).unwrap());
+
+        let key_a = [0x11u8; 32];
+        let key_b = [0x22u8; 32];
+
+        let mut node_a = MiasmaNode::new(&key_a, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+        let addrs_a = node_a.collect_listen_addrs(400).await;
+        let listen_addr_a_str = addrs_a[0].to_string();
+        let coord_a =
+            MiasmaCoordinator::start(node_a, store_a.clone(), vec![listen_addr_a_str.clone()])
+                .await;
+        let peer_id_a = *coord_a.peer_id();
+
+        let mut node_b = MiasmaNode::new(&key_b, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+        let addrs_b = node_b.collect_listen_addrs(400).await;
+        let listen_addr_b_str = addrs_b[0].to_string();
+        let coord_b =
+            MiasmaCoordinator::start(node_b, store_b.clone(), vec![listen_addr_b_str.clone()])
+                .await;
+
+        let addr_a: Multiaddr = listen_addr_a_str.parse().unwrap();
+        coord_b.add_bootstrap_peer(peer_id_a, addr_a).await.unwrap();
+        coord_b.bootstrap_dht().await.unwrap();
+        coord_b
+            .wait_until_peer_connected(peer_id_a, Duration::from_secs(10))
+            .await
+            .expect("Node B never connected to Node A");
+
+        let content = b"streaming retrieval over the real network path, one segment";
+        let params = DissolutionParams {
+            data_shards: 2,
+            total_shards: 3,
+        };
+        let mid = coord_a
+            .dissolve_and_publish(content, params)
+            .await
+            .expect("dissolve_and_publish failed");
+
+        let mut stream = coord_b
+            .retrieve_from_network_streaming(&mid, params)
+            .await
+            .expect("retrieve_from_network_streaming failed to start");
+
+        let mut recovered: Vec<u8> = Vec::new();
+        let mut segment_count = 0usize;
+        while let Some(chunk) = stream.next().await {
+            recovered.extend(chunk.expect("segment fetch/reconstruct failed"));
+            segment_count += 1;
+        }
+
+        assert_eq!(recovered.as_slice(), content as &[u8]);
+        assert_eq!(
+            segment_count, 1,
+            "single dissolve_and_publish call is one segment"
+        );
+
+        coord_a.shutdown().await;
+        coord_b.shutdown().await;
+    })
+    .await;
+
+    result.expect("retrieve_from_network_streaming_single_segment_roundtrip timed out (30s)");
+}
+
 /// Regression test for Phase 2.2: `retrieve_from_network` retries on
 /// `InsufficientShares` instead of failing on the very first attempt.
 ///
