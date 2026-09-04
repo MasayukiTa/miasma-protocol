@@ -196,7 +196,7 @@
   `tolerable_risk`として根拠付きでdismiss済み。将来`libp2p-yamux`が
   featureフラグ等で`yamux012`を分離可能にした場合は再度確認すること
 
-### P1-7: P2Pコンテンツ転送層の強化(Phase 0-2.4完了, Phase 3残, 2026-09-04〜)
+### P1-7: P2Pコンテンツ転送層の強化(Phase 0-3 全完了, 2026-09-04〜09-05)
 
 - **種別**: アーキテクチャ・セキュリティ
 - **現状**: 詳細な進捗ログは `docs/tasks/p2p-content-transfer-hardening.md`、実装計画は
@@ -238,7 +238,25 @@
   副次バグも発見・修正(peer_registryはVerified済でもrank_peersが空を返す)。
   新規テスト6件+`ShareVerification::self_consistent`単体テスト3件、
   フルスイート719 passed/0 failed。README「Resists」欄を復帰(条件付き)。
-  残るのはPhase 3(BitTorrentブリッジ)のみ。
+- **Phase 3完了(2026-09-05)**: BitTorrentブリッジのデスクトップ統合を修復。
+  `--magnet`/`--torrent`をディスパッチャに追加し、`.torrent`ファイル経路の
+  実装(`dissolve_torrent_file`)を追加——`download_torrent_file`は存在したが
+  `#[allow(dead_code)]`で誰も呼んでいなかった。`worker.rs`のMID抽出は
+  filterの前にtrimしていなかったため、引数を直しても常に空リストになる
+  状態だった(こちらも修正)。**配線中に別の実欠陥を発見**: 旧
+  `dissolve_torrent`はinfo_hashとdn からmagnetを組み立て直しており、
+  ユーザが渡した`tr=`トラッカーを全て黙って捨てていた——UDP DHTが塞がれた
+  網でトラッカーだけが頼りという、この crate の`inspect`が多段フォールバック
+  を持つ理由そのもののケースで、ダウンロードは原理的に成立しなかった。
+  URIをそのまま渡すよう修正。新規`tests/cli_import_roundtrip.rs`が
+  in-process librqbit seeder + スタブHTTPトラッカー(loopback完結)に対して
+  実バイナリを3通りの引数形で起動し、**元データの content address と同一の
+  MIDを印字すること**を要求する(exit 0では通らない)。約8秒。
+  **CIはこの crate のテストを一度も実行していなかった**
+  (`cargo build`のみ、既存35件が不可視)ため、Windows jobに
+  `cargo test -p miasma-bridge`を追加。
+  未検証のまま残るのは、デスクトップGUIのImportボタンから
+  `worker.rs`までの結線そのもの(バイナリとパーサは個別に検証済み)。
 
 ---
 

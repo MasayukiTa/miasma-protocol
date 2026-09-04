@@ -33,7 +33,7 @@ use tracing::{debug, info, warn};
 use miasma_core::{pipeline::dissolve, pipeline::DissolutionParams, LocalShareStore};
 
 use crate::bencode::{self, Value};
-use crate::torrent::{MiasmaSession, TorrentConfig};
+use crate::torrent::{DownloadProgress, MiasmaSession, TorrentConfig, TorrentDownloadResult};
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -150,7 +150,7 @@ impl Default for DownloadSafetyOpts {
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
-/// Dissolve a torrent identified by `info_hash` into Miasma.
+/// Dissolve a torrent given by magnet URI into Miasma.
 ///
 /// Uses librqbit for full BT protocol download (multi-peer, choking, piece
 /// selection), then dissolves each downloaded file into the local share store.
@@ -159,29 +159,77 @@ impl Default for DownloadSafetyOpts {
 /// 2. Download the torrent from the existing BT swarm.
 /// 3. Dissolve each downloaded file into the local share store.
 ///
+/// The URI is handed to librqbit **verbatim**. An earlier version rebuilt it
+/// from the parsed info-hash and display name, which silently discarded every
+/// `tr=` tracker the user supplied — leaving DHT as the only way to find peers
+/// for a magnet whose whole point may have been to name its tracker.
+///
 /// Returns the list of MID strings produced.
-pub async fn dissolve_torrent(
-    info_hash: &[u8; 20],
-    display_name: Option<&str>,
+pub async fn dissolve_magnet(
+    magnet_uri: &str,
     data_dir: &std::path::Path,
     quota_mb: u64,
     opts: &DownloadSafetyOpts,
 ) -> anyhow::Result<Vec<String>> {
     let store = Arc::new(LocalShareStore::open(data_dir, quota_mb).context("open share store")?);
 
-    let ih_hex = hex::encode(info_hash);
-    let name = display_name.unwrap_or("unknown");
-    info!("Dissolving torrent {ih_hex} ({name}) via librqbit");
+    info!("Dissolving magnet via librqbit");
 
-    // Build magnet URI from info_hash + display_name.
-    let mut magnet = format!("magnet:?xt=urn:btih:{ih_hex}");
-    if let Some(dn) = display_name {
-        magnet.push_str("&dn=");
-        magnet.push_str(&urlencoded(dn));
+    let session = MiasmaSession::new(torrent_config_for(data_dir, opts))
+        .await
+        .context("create librqbit session")?;
+
+    let result = session
+        .download_magnet(magnet_uri, Some(log_download_progress))
+        .await
+        .context("librqbit download")?;
+
+    let mids = dissolve_downloaded_files(&result, &store).await?;
+
+    // Clean up session (stop seeding, release resources).
+    session.shutdown().await;
+
+    Ok(mids)
+}
+
+/// Dissolve a torrent given by a local `.torrent` file into Miasma.
+///
+/// Same pipeline as [`dissolve_magnet`], but the metadata comes from disk
+/// instead of from the swarm, so no ut_metadata exchange is needed before the
+/// payload download can start.
+pub async fn dissolve_torrent_file(
+    torrent_path: &Path,
+    data_dir: &std::path::Path,
+    quota_mb: u64,
+    opts: &DownloadSafetyOpts,
+) -> anyhow::Result<Vec<String>> {
+    if !torrent_path.is_file() {
+        bail!("no such .torrent file: {}", torrent_path.display());
     }
 
-    // Configure librqbit session with safety limits and transport options.
-    let torrent_config = TorrentConfig {
+    let store = Arc::new(LocalShareStore::open(data_dir, quota_mb).context("open share store")?);
+
+    info!("Dissolving {} via librqbit", torrent_path.display());
+
+    let session = MiasmaSession::new(torrent_config_for(data_dir, opts))
+        .await
+        .context("create librqbit session")?;
+
+    let result = session
+        .download_torrent_file(torrent_path, Some(log_download_progress))
+        .await
+        .context("librqbit download")?;
+
+    let mids = dissolve_downloaded_files(&result, &store).await?;
+
+    session.shutdown().await;
+
+    Ok(mids)
+}
+
+/// Build the librqbit session configuration from the CLI safety options.
+fn torrent_config_for(data_dir: &std::path::Path, opts: &DownloadSafetyOpts) -> TorrentConfig {
+    TorrentConfig {
         output_dir: data_dir.join("bridge-downloads"),
         seed_enabled: opts.seed_enabled,
         upload_rate_limit_bps: opts.upload_rate_limit_bps,
@@ -193,41 +241,35 @@ pub async fn dissolve_torrent(
             opts.max_total_bytes
         },
         ..Default::default()
-    };
+    }
+}
 
-    let session = MiasmaSession::new(torrent_config)
-        .await
-        .context("create librqbit session")?;
+/// Progress callback shared by both download entry points.
+fn log_download_progress(progress: DownloadProgress) {
+    if progress.total_bytes > 0 {
+        let pct = (progress.downloaded_bytes as f64 / progress.total_bytes as f64) * 100.0;
+        info!(
+            "  {:.1}% ({}/{} bytes) peers={} speed={:.2} Mbps",
+            pct,
+            progress.downloaded_bytes,
+            progress.total_bytes,
+            progress.peers,
+            progress.download_speed_mbps,
+        );
+    }
+}
 
-    // Download with progress logging.
-    let result = session
-        .download_magnet(
-            &magnet,
-            Some(|progress: crate::torrent::DownloadProgress| {
-                if progress.total_bytes > 0 {
-                    let pct =
-                        (progress.downloaded_bytes as f64 / progress.total_bytes as f64) * 100.0;
-                    info!(
-                        "  {:.1}% ({}/{} bytes) peers={} speed={:.2} Mbps",
-                        pct,
-                        progress.downloaded_bytes,
-                        progress.total_bytes,
-                        progress.peers,
-                        progress.download_speed_mbps,
-                    );
-                }
-            }),
-        )
-        .await
-        .context("librqbit download")?;
-
+/// Dissolve every file of a completed download into the local share store.
+async fn dissolve_downloaded_files(
+    result: &TorrentDownloadResult,
+    store: &LocalShareStore,
+) -> anyhow::Result<Vec<String>> {
     info!(
         "Downloaded {} file(s), {} bytes total",
         result.files.len(),
         result.total_bytes
     );
 
-    // Dissolve each downloaded file.
     let params = DissolutionParams::default();
     let mut mids = Vec::new();
 
@@ -250,26 +292,7 @@ pub async fn dissolve_torrent(
         }
     }
 
-    // Clean up session (stop seeding, release resources).
-    session.shutdown().await;
-
     Ok(mids)
-}
-
-/// Simple URL encoding for display name in magnet URIs.
-fn urlencoded(s: &str) -> String {
-    let mut out = String::new();
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            _ => {
-                out.push_str(&format!("%{b:02X}"));
-            }
-        }
-    }
-    out
 }
 
 #[allow(dead_code)]
