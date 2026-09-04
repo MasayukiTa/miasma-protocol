@@ -148,7 +148,20 @@ impl BbsSignature {
     /// Computes: `A = (1/(sk+e)) * (g1 + s*h0 + sum(mi*hi))`
     pub fn sign(issuer: &BbsIssuerKey, messages: &[Scalar; NUM_MESSAGES]) -> Self {
         let gv = generators();
-        let e = Scalar::random(&mut rand::thread_rng());
+        // Resample e until sk+e != 0. This is not a security-relevant fallback
+        // (e is freshly random and never attacker-controlled at signing time),
+        // but a signature computed with `inv` silently replaced by `Scalar::one()`
+        // would satisfy neither the intended equation `A = B/(sk+e)` nor produce
+        // a diagnosable error -- it would just be a signature that fails to
+        // verify later, for a reason invisible at the call site. Resampling
+        // keeps `sign` total (always produces a genuine signature) instead of
+        // ever emitting a value computed under a substituted, wrong scalar.
+        // Practically this loop runs exactly once: `sk+e==0` occurs with
+        // probability ~1/2^255 for a random Scalar e over BLS12-381's scalar field.
+        let mut e = Scalar::random(&mut rand::thread_rng());
+        while bool::from((issuer.sk + e).invert().is_none()) {
+            e = Scalar::random(&mut rand::thread_rng());
+        }
         let s = Scalar::random(&mut rand::thread_rng());
 
         // B = g1 + s*h0 + m[0]*h[1] + ... + m[4]*h[5]
@@ -159,13 +172,9 @@ impl BbsSignature {
             bpt += gv[i + 2] * messages[i]; // mi * hi
         }
 
-        // A = B * (1/(sk + e))
-        let inv = (issuer.sk + e).invert();
-        let inv = if bool::from(inv.is_some()) {
-            inv.unwrap()
-        } else {
-            Scalar::one() // fallback for the near-impossible sk+e==0 case
-        };
+        // A = B * (1/(sk + e)). Guaranteed to succeed: the loop above already
+        // ensures sk+e is invertible.
+        let inv = (issuer.sk + e).invert().unwrap();
         let a = bpt * inv;
 
         Self {
@@ -409,6 +418,32 @@ fn parse_g1_proof(bytes: &[u8]) -> Result<G1Projective, BbsError> {
     }
 }
 
+/// Parse a scalar response from a BBS+ proof (no fallback).
+///
+/// Mirrors `parse_g1_proof`'s strictness: `Scalar::from_bytes` rejects any
+/// byte string that is not the canonical little-endian encoding of a value
+/// strictly less than the field modulus. Unlike `deserialize_scalar` (used
+/// only for locally-held, previously-accepted credential fields), a proof's
+/// responses arrive from an untrusted peer at verification time and a
+/// malformed encoding must be rejected outright, not silently reinterpreted
+/// as `hash_to_scalar(bytes)`. Silently substituting a fallback value on a
+/// parse failure is exactly the pattern behind VULN-001/VULN-002
+/// (docs/adr/005-anonymous-trust-descriptors.md) applied to a different
+/// field type; this function exists so the verifier never does that again.
+fn parse_scalar_proof(bytes: &[u8]) -> Result<Scalar, BbsError> {
+    if bytes.len() != 32 {
+        return Err(BbsError::InvalidProof);
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(bytes);
+    let opt = Scalar::from_bytes(&arr);
+    if bool::from(opt.is_some()) {
+        Ok(opt.unwrap())
+    } else {
+        Err(BbsError::InvalidProof)
+    }
+}
+
 /// Deserialize a G1 point from compressed bytes, with fallback.
 fn deserialize_g1(bytes: &[u8]) -> G1Projective {
     if bytes.len() == 48 {
@@ -476,8 +511,9 @@ pub fn bbs_verify_proof(
         return Err(BbsError::InvalidProof);
     };
 
-    // Parse response for s.
-    let resp_s = deserialize_scalar(&proof.response_s);
+    // Parse response for s (strict: a malformed/non-canonical encoding must
+    // fail verification outright, not be silently reinterpreted).
+    let resp_s = parse_scalar_proof(&proof.response_s)?;
 
     // Determine hidden indices.
     let disclosed_indices: Vec<usize> = proof.disclosed.iter().map(|&(i, _)| i).collect();
@@ -500,7 +536,7 @@ pub fn bbs_verify_proof(
 
     let mut t_recomputed = gv[1] * resp_s; // resp_s * h0
     for (j, &idx) in hidden.iter().enumerate() {
-        let resp = deserialize_scalar(&proof.responses[j]);
+        let resp = parse_scalar_proof(&proof.responses[j])?;
         t_recomputed += gv[idx + 2] * resp;
     }
     t_recomputed -= (b_point - b_disclosed) * challenge;
@@ -811,6 +847,61 @@ mod tests {
 
         let result = bbs_verify_proof(&proof, &issuer_key.pk_bytes(), b"context-B");
         assert!(result.is_err());
+    }
+
+    /// A non-canonical scalar encoding (all-0xff bytes, >= the BLS12-381
+    /// scalar field modulus) must be rejected outright by the verifier, not
+    /// silently reinterpreted via `hash_to_scalar`. Regression test for the
+    /// fallback that `parse_scalar_proof` replaced -- see its doc comment.
+    #[test]
+    fn bbs_malformed_response_s_rejected() {
+        let issuer_key = BbsIssuerKey::from_seed(b"test-issuer-seed");
+        let issuer = BbsIssuer::new(issuer_key.clone());
+        let credential = issuer.issue(test_attributes());
+
+        let policy = DisclosurePolicy::default();
+        let context = b"malformed-scalar-ctx";
+        let mut proof = bbs_create_proof(&credential, &policy, context);
+
+        proof.response_s = vec![0xffu8; 32]; // non-canonical: >= field modulus
+
+        let result = bbs_verify_proof(&proof, &issuer_key.pk_bytes(), context);
+        assert_eq!(result, Err(BbsError::InvalidProof));
+    }
+
+    /// Same as above, but for a hidden-message response rather than `response_s`.
+    #[test]
+    fn bbs_malformed_hidden_response_rejected() {
+        let issuer_key = BbsIssuerKey::from_seed(b"test-issuer-seed");
+        let issuer = BbsIssuer::new(issuer_key.clone());
+        let credential = issuer.issue(test_attributes());
+
+        let policy = DisclosurePolicy::default();
+        let context = b"malformed-response-ctx";
+        let mut proof = bbs_create_proof(&credential, &policy, context);
+
+        assert!(!proof.responses.is_empty());
+        proof.responses[0] = vec![0xffu8; 32]; // non-canonical: >= field modulus
+
+        let result = bbs_verify_proof(&proof, &issuer_key.pk_bytes(), context);
+        assert_eq!(result, Err(BbsError::InvalidProof));
+    }
+
+    /// A response of the wrong length must also be rejected outright.
+    #[test]
+    fn bbs_wrong_length_response_rejected() {
+        let issuer_key = BbsIssuerKey::from_seed(b"test-issuer-seed");
+        let issuer = BbsIssuer::new(issuer_key.clone());
+        let credential = issuer.issue(test_attributes());
+
+        let policy = DisclosurePolicy::default();
+        let context = b"wrong-length-ctx";
+        let mut proof = bbs_create_proof(&credential, &policy, context);
+
+        proof.response_s = vec![0x01u8; 16]; // too short
+
+        let result = bbs_verify_proof(&proof, &issuer_key.pk_bytes(), context);
+        assert_eq!(result, Err(BbsError::InvalidProof));
     }
 
     #[test]

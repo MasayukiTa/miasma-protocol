@@ -197,12 +197,23 @@ jobs:
 
       - name: Final status and evidence
         if: always()
+        env:
+          # Passed through the shell's own environment instead of interpolated
+          # directly into the script text: `windows_result` is sourced from a
+          # GitHub issue comment body (see the "Wait for Windows result" step),
+          # so it is attacker-controlled content on a public repo. A `${{ }}`
+          # expression is substituted into the script BEFORE the shell parses
+          # it, so embedding it directly would let a comment containing shell
+          # metacharacters run arbitrary commands on the runner. Referencing
+          # it as `$WINDOWS_RESULT` below lets the shell treat it as inert
+          # string data instead (CodeQL actions/code-injection/critical).
+          WINDOWS_RESULT: ${{ steps.wait_result.outputs.windows_result }}
         run: |
           echo "=== FINAL STATUS ==="
           MIASMA_DATA_DIR=/tmp/miasma-data ./miasma status 2>&1 || echo "daemon not running"
           echo ""
           echo "=== WINDOWS RESULT ==="
-          echo "${{ steps.wait_result.outputs.windows_result }}"
+          echo "$WINDOWS_RESULT"
           echo ""
           echo "=== CLOUDFLARED LOG ==="
           cat /tmp/cloudflared.log || true
