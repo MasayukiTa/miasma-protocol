@@ -269,8 +269,15 @@
   **CIはこの crate のテストを一度も実行していなかった**
   (`cargo build`のみ、既存35件が不可視)ため、Windows jobに
   `cargo test -p miasma-bridge`を追加。
-  未検証のまま残るのは、デスクトップGUIのImportボタンから
-  `worker.rs`までの結線そのもの(バイナリとパーサは個別に検証済み)。
+  未検証のまま残るのは、デスクトップGUIのImportボタンのクリックそのものだけ。
+- **Phase 3 追補(2026-09-05)**: 計画の残る完了基準を消化。`worker.rs`に
+  `bridge_import_args`を切り出して**desktop→bridgeの引数契約を両側で固定**
+  (空白を含むdata_dirが1引数のまま渡ることも検証)。`scripts/smoke-loopback.ps1`を
+  再実行し**PASS**(release実ビルド・実デーモン2本・A公開→B取得でSHA256一致)——
+  1.1のPUT ack化が一度この経路を壊した実績があるため必須の確認だった。
+  READMEのテスト数480は古い計測値だったので実測780へ、および
+  `p2p_kademlia_full_roundtrip`を「タイミング過敏で#[ignore]」と書いていた記述を
+  訂正(Phase 1以降は非ignore。真因はテストのflakeでなくfire-and-forget PUTという製品欠陥)。
 
 ---
 
