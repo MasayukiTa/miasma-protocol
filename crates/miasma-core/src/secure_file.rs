@@ -421,6 +421,20 @@ mod platform {
     use std::os::unix::fs::OpenOptionsExt;
 
     pub(super) fn write_restricted_impl(path: &Path, data: &[u8]) -> Result<(), MiasmaError> {
+        // `OpenOptions::mode()` is only honoured by open(2) when O_CREAT
+        // actually creates the file -- if `path` already exists (e.g. it was
+        // first written without restriction, then rewritten with it once
+        // credentials were added), `.truncate(true).mode(0o600)` truncates
+        // and reuses the file's EXISTING permission bits, silently leaving a
+        // previously-unrestricted file unrestricted. Removing it first (same
+        // fix already applied on the Windows side, a few lines up in this
+        // file) forces every restricted write through real O_CREAT, so mode
+        // is always applied. See docs/adr/005 VULN-004/005 -- this is the
+        // same "must be born restricted, not restricted after the fact" bug,
+        // just missing on this platform's implementation.
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
