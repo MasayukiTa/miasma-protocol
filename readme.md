@@ -59,7 +59,6 @@ Be explicit about what this system resists and what it does not.
 
 - Casual observation of network traffic (transport obfuscation, encrypted payloads)
 - Non-targeted surveillance (pseudonymous descriptors, epoch rotation, unlinkable credentials)
-- Content seizure via single node compromise (erasure coding distributes shards, encryption at rest)
 
 **Does not resist:**
 
@@ -68,6 +67,7 @@ Be explicit about what this system resists and what it does not.
 - Traffic analysis via timing (fixed-size padding prevents size correlation, but no constant-rate cover traffic)
 - Sybil attacks at scale (PoW admission raises cost but does not eliminate it)
 - Bootstrap trust circular dependency (first nodes in a deployment credential each other)
+- Content seizure via single node compromise: every published record currently lists only the publishing node as holder of all shards (erasure coding splits the content, but does not yet distribute the splits across peers) -- taking the publisher offline makes its content unavailable, the same failure mode as a regular server. Shard distribution to remote peers is in progress; see `docs/tasks/p2p-content-transfer-hardening.md`. This line moves back to "Resists" once that lands and the corresponding tests pass.
 
 ## Platform Maturity
 
