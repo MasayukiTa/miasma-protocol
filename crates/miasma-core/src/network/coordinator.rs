@@ -27,6 +27,7 @@ use tracing::error;
 
 use crate::{
     crypto::hash::ContentId,
+    daemon::replication::RetryPolicy,
     dissolution::{dissolve_segment, DEFAULT_SEGMENT_SIZE},
     network::{
         credential::CredentialStats,
@@ -541,6 +542,57 @@ impl MiasmaCoordinator {
     /// Returns `(plaintext, transport_attempts)` so the caller can observe
     /// which transports were tried and which succeeded.
     pub async fn retrieve_from_network(
+        &self,
+        mid: &ContentId,
+        params: DissolutionParams,
+    ) -> Result<Vec<u8>, MiasmaError> {
+        // Phase 2.2: retry on InsufficientShares -- the record may not have
+        // propagated to this node's view of the DHT yet, or a shard-holder may
+        // not be reachable on the first attempt. Reuses the same backoff engine
+        // already proven for publish-side re-announcement (`daemon::replication`),
+        // just with a tighter policy since this is a synchronous, interactive
+        // caller (CLI/IPC) rather than a background daemon loop. Every other
+        // error (invalid MID, decode/crypto failure, protocol error) is not
+        // retried -- retrying those would just repeat the same failure 6x slower.
+        let policy = RetryPolicy {
+            base_delay_secs: 1,
+            max_delay_secs: 15,
+            max_attempts: 6,
+            jitter_fraction: 0.25,
+        };
+        let mut attempt: u32 = 0;
+        loop {
+            match self.retrieve_from_network_once(mid, params).await {
+                Ok(data) => return Ok(data),
+                Err(MiasmaError::InsufficientShares { need, got })
+                    if attempt < policy.max_attempts =>
+                {
+                    attempt += 1;
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let next = policy.next_attempt_secs(attempt, now);
+                    let delay_secs = next.saturating_sub(now);
+                    tracing::info!(
+                        attempt,
+                        need,
+                        got,
+                        delay_secs,
+                        "retrieve_from_network: insufficient shares, retrying"
+                    );
+                    tokio::time::sleep(Duration::from_secs(delay_secs)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Single-pass retrieval attempt, no retry. This is `retrieve_from_network`'s
+    /// entire pre-Phase-2.2 body, unchanged -- kept as its own method so the
+    /// retry wrapper above can call it repeatedly without duplicating the
+    /// segment-detection/single-vs-multi-segment logic.
+    async fn retrieve_from_network_once(
         &self,
         mid: &ContentId,
         params: DissolutionParams,
@@ -1851,8 +1903,8 @@ mod segment_sizing_tests {
 
         let segment_data = vec![0xABu8; segment_size];
         let mid = ContentId::compute(&segment_data, b"test-params");
-        let (_meta, shares) = dissolve_segment(&segment_data, &mid, 0, 0, params)
-            .expect("dissolve_segment failed");
+        let (_meta, shares) =
+            dissolve_segment(&segment_data, &mid, 0, 0, params).expect("dissolve_segment failed");
 
         assert_eq!(shares.len(), params.total_shards);
         for share in &shares {
