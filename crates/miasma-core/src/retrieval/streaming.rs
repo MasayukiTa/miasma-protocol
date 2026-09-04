@@ -68,7 +68,7 @@ impl<Src: ShareSource + Clone + Send + Sync + 'static> StreamingRetrievalCoordin
             let source = source.clone();
             let mid = mid.clone();
             async move {
-                let mut candidates = source.list_candidates(&mid).await;
+                let mut candidates = source.list_candidates_for_segment(&mid, meta.index).await;
                 candidates.shuffle(&mut rand::thread_rng());
 
                 let mut valid: Vec<MiasmaShare> = Vec::with_capacity(params.data_shards);
@@ -135,7 +135,7 @@ impl<Src: ShareSource + Clone + Send + Sync + 'static> StreamingRetrievalCoordin
             let source = source.clone();
             let mid = mid.clone();
             async move {
-                let mut candidates = source.list_candidates(&mid).await;
+                let mut candidates = source.list_candidates_for_segment(&mid, seg_idx).await;
                 candidates.shuffle(&mut rand::thread_rng());
 
                 let mut valid: Vec<MiasmaShare> = Vec::with_capacity(params.data_shards);
