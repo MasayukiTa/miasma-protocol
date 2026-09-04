@@ -26,6 +26,27 @@ pub trait ShareSource: Send + Sync {
     async fn fetch(&self, address: &str) -> Result<Option<MiasmaShare>, MiasmaError>;
 }
 
+/// Blanket impl so `Arc<T>` satisfies `ShareSource` whenever `T` does.
+///
+/// Phase 2.3: `StreamingRetrievalCoordinator<Src>` requires `Src: Clone`, but
+/// `FallbackShareSource` (the network-backed source used by
+/// `retrieve_from_network`) holds a `Mutex<Vec<TransportAttempt>>` for
+/// diagnostics and so isn't itself `Clone`. Wrapping it in `Arc` (which is
+/// always `Clone` regardless of what it wraps) is the standard way to make a
+/// non-`Clone` implementation usable wherever a `Clone` bound is required,
+/// without changing `FallbackShareSource` itself or adding a second
+/// `ShareSource` impl per source type.
+#[async_trait::async_trait]
+impl<T: ShareSource + ?Sized> ShareSource for Arc<T> {
+    async fn list_candidates(&self, mid: &ContentId) -> Vec<String> {
+        (**self).list_candidates(mid).await
+    }
+
+    async fn fetch(&self, address: &str) -> Result<Option<MiasmaShare>, MiasmaError> {
+        (**self).fetch(address).await
+    }
+}
+
 // ─── LocalShareSource ─────────────────────────────────────────────────────────
 
 /// Phase 1 share source backed by `LocalShareStore`.

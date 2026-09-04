@@ -633,6 +633,56 @@ impl MiasmaCoordinator {
         }
     }
 
+    /// Streaming counterpart of `retrieve_from_network` -- wires the
+    /// fully-implemented but previously-unused `StreamingRetrievalCoordinator`
+    /// (Phase 2.3) into the real network retrieve path so large files don't
+    /// have to be buffered whole in memory.
+    ///
+    /// Segment count is discovered from the DHT record exactly as
+    /// `retrieve_from_network_once` does; each segment is then fetched and
+    /// reconstructed lazily as the caller polls the returned stream, capping
+    /// peak RAM at roughly one segment regardless of file size.
+    ///
+    /// No retry/backoff wrapper here (unlike `retrieve_from_network`):
+    /// retrying a mid-stream failure would mean re-deriving the stream from
+    /// scratch, which is the caller's call to make, not this method's.
+    pub async fn retrieve_from_network_streaming(
+        &self,
+        mid: &ContentId,
+        params: DissolutionParams,
+    ) -> Result<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = Result<Vec<u8>, MiasmaError>> + Send + 'static>,
+        >,
+        MiasmaError,
+    > {
+        let dht_exec = DirectDhtExecutor::new(self.dht_handle.clone());
+        let source = FallbackShareSource::new(dht_exec, self.transport_selector.clone());
+        let coord = crate::retrieval::StreamingRetrievalCoordinator::new(Arc::new(source));
+
+        // Determine segment count from DHT record (same lookup as
+        // `retrieve_from_network_once`).
+        let max_seg = {
+            let dht = DirectDhtExecutor::new(self.dht_handle.clone());
+            match OnionAwareDhtExecutor::get(&dht, mid).await? {
+                Some(record) => record
+                    .locations
+                    .iter()
+                    .map(|l| l.segment_index)
+                    .max()
+                    .unwrap_or(0),
+                None => 0,
+            }
+        };
+
+        tracing::info!(
+            max_seg = max_seg,
+            "retrieve_from_network_streaming: segment detection"
+        );
+
+        Ok(coord.retrieve_streaming_by_mid(mid.clone(), max_seg + 1, params))
+    }
+
     /// Like `retrieve_from_network` but also returns transport attempt diagnostics.
     pub async fn retrieve_from_network_with_diagnostics(
         &self,
