@@ -820,6 +820,20 @@ pub(crate) async fn process_request(
                                             }
                                         }
                                     }
+                                    // Explicit flush before declaring success: tokio::fs::File
+                                    // writes are dispatched to a blocking-pool thread, so a
+                                    // caller reading the file back immediately after this
+                                    // response returns is racing that thread unless we wait
+                                    // for it here. Caught by CI (not local runs) on a slower/
+                                    // more contended runner -- exactly the kind of gap that
+                                    // wouldn't show up until the disk I/O is slow enough for
+                                    // the read to land first.
+                                    if write_err.is_none() {
+                                        if let Err(e) = file.flush().await {
+                                            write_err =
+                                                Some(format!("cannot flush {output_path}: {e}"));
+                                        }
+                                    }
                                     match write_err {
                                         None => ControlResponse::RetrievedToFile {
                                             output_path,
