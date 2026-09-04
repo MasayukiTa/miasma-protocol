@@ -8,6 +8,7 @@
 /// Descriptor: `/miasma/descriptor/1.0.0` descriptor exchange (ADR-005)
 /// NAT: AutoNAT + DCUtR + relay
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -320,7 +321,14 @@ pub struct ShareCodec;
 ///
 /// Must exceed the largest possible shard: with DEFAULT_SEGMENT_SIZE = 64 MiB
 /// and 10 data shards, each shard body ≈ 6.4 MiB plus serialisation overhead.
-const SHARE_MSG_MAX: usize = 8 * 1024 * 1024;
+///
+/// This assumes `data_shards ≈ 10`. Callers publishing with a smaller shard
+/// count against the same segment size produce proportionally larger shards
+/// that can exceed this cap -- `network::coordinator::max_segment_size_for`
+/// clamps the segment size against this constant so that doesn't happen
+/// silently. `pub(crate)` so that clamp can reference the real wire limit
+/// instead of duplicating the number.
+pub(crate) const SHARE_MSG_MAX: usize = 8 * 1024 * 1024;
 /// Max message size for admission protocol (4 KiB — PoW proofs are tiny).
 const ADMISSION_MSG_MAX: usize = 4 * 1024;
 
@@ -1131,6 +1139,39 @@ impl DhtHandle {
         self.recv_reply(rx, "connected_peers").await
     }
 
+    /// Poll until `peer_id` appears in the connected-peers set, or `timeout` elapses.
+    ///
+    /// Replaces the ad-hoc `sleep(Duration::from_millis(N))` calls this codebase (and
+    /// its tests) previously used as a substitute for an actual readiness check --
+    /// every caller had to guess a duration, and the guesses varied wildly between
+    /// call sites (500ms to 5s) because none of them were actually waiting on a
+    /// condition. This is deliberately a simple poll against the already-existing
+    /// `connected_peers()` accessor rather than a new event-driven `DhtCommand` --
+    /// it adds zero new swarm event-loop state and cannot itself introduce a race.
+    /// It answers "is a transport connection to `peer_id` up," which is sufficient
+    /// for a directly-bootstrapped peer (that peer answers KAD queries directly,
+    /// not via full-network convergence) -- it is not a "DHT has converged"
+    /// guarantee for peers reached only transitively.
+    pub async fn wait_until_peer_connected(
+        &self,
+        peer_id: PeerId,
+        timeout: Duration,
+    ) -> Result<(), MiasmaError> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let peers = self.connected_peers().await?;
+            if peers.iter().any(|(p, _)| *p == peer_id) {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(MiasmaError::Network(format!(
+                    "timed out after {timeout:?} waiting for peer {peer_id} to connect"
+                )));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     /// Get a live connection health snapshot from the node's health monitor.
     pub async fn health_snapshot(
         &self,
@@ -1795,13 +1836,47 @@ impl MiasmaNode {
                     .kademlia
                     .store_mut()
                     .put(record.clone());
-                // Fire-and-forget network replication: reply success immediately.
-                let _ = self
+                // A lone node with no connected peers yet has nowhere to replicate
+                // to: `put_record`'s Quorum::One would fail immediately with
+                // `QuorumFailed { success: [], .. }` since there is no peer to
+                // satisfy the quorum against, even though the local write a few
+                // lines up already made the record fully answerable to anyone who
+                // queries this node directly (this is exactly the `dissolve_and_publish`
+                // -> (nobody bootstrapped yet) -> `network-get --bootstrap` flow that
+                // the CLI runbook and `cli_smoke_loopback` both exercise). Still issue
+                // the network PUT below so it takes effect the moment a peer *does*
+                // connect, but don't make the caller wait on (or fail because of) a
+                // quorum that cannot possibly be met right now.
+                let no_peers_connected = self.swarm.connected_peers().next().is_none();
+
+                // Wait for real network acknowledgement instead of replying as soon as
+                // the record is queued: `put_record` only guarantees a *local* write
+                // has happened by the time it returns a QueryId. The actual PUT is
+                // resolved asynchronously via `pending_puts` when
+                // `kad::QueryResult::PutRecord(..)` arrives in the swarm event loop
+                // (see the existing Ok/Err arms there) -- bounded by `DhtHandle::put`'s
+                // `DHT_REPLY_TIMEOUT` wrapper on the receiving end, so an unresponsive
+                // network degrades to a clean timeout rather than a false "success".
+                match self
                     .swarm
                     .behaviour_mut()
                     .kademlia
-                    .put_record(record, kad::Quorum::One);
-                let _ = reply.send(Ok(()));
+                    .put_record(record, kad::Quorum::One)
+                {
+                    Ok(qid) => {
+                        if no_peers_connected {
+                            // Nothing to wait for; the eventual QuorumFailed/Ok for
+                            // this query_id is intentionally left unhandled (no entry
+                            // in pending_puts) since the caller already has its answer.
+                            let _ = reply.send(Ok(()));
+                        } else {
+                            self.pending_puts.insert(qid, reply);
+                        }
+                    }
+                    Err(e) => {
+                        let _ = reply.send(Err(MiasmaError::Dht(format!("{e:?}"))));
+                    }
+                }
             }
             DhtCommand::Get { key, reply } => {
                 let qid = self
@@ -3723,7 +3798,28 @@ fn build_swarm(
         .map_err(|e| MiasmaError::Sss(format!("relay client init failed: {e}")))?
         .with_behaviour(|key: &Keypair, relay_client| {
             let store = MemoryStore::new(local_peer_id);
-            let kad_config = kad::Config::new(StreamProtocol::new("/miasma/kad/1.0.0"));
+            let mut kad_config = kad::Config::new(StreamProtocol::new("/miasma/kad/1.0.0"));
+            // Explicit rather than silently inherited from libp2p-kad's own defaults --
+            // these are conservative starting points for a small, early-deployment
+            // network (see README's "small relay pool" disclaimer), not values tuned
+            // against measured production traffic. Revisit once real network size and
+            // churn are known.
+            kad_config
+                // Was: upstream default 60s. A single stuck query shouldn't block a
+                // caller for a full minute; DhtHandle::put/get already enforce their
+                // own 30s DHT_REPLY_TIMEOUT on top of this.
+                .set_query_timeout(Duration::from_secs(20))
+                // Was: upstream default K_VALUE (20). Bounded explicitly rather than
+                // left implicit; at current network sizes this is not yet the binding
+                // constraint on replication (that's Phase 2's shard-distribution work).
+                .set_replication_factor(NonZeroUsize::new(8).expect("8 is nonzero"))
+                // Was: upstream default 22h. Republish more often while the network
+                // and its churn characteristics are still small and unmeasured.
+                .set_publication_interval(Some(Duration::from_secs(20 * 60)))
+                .set_provider_publication_interval(Some(Duration::from_secs(20 * 60)))
+                // Was: upstream default 48h. Shorter TTL trades some availability for
+                // faster staleness recovery until real content lifetimes are known.
+                .set_record_ttl(Some(Duration::from_secs(24 * 60 * 60)));
             let mut kademlia = kad::Behaviour::with_config(local_peer_id, store, kad_config);
             kademlia.set_mode(Some(kad::Mode::Server));
 
