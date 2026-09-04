@@ -751,9 +751,7 @@ fn run_bridge_import(
     });
 
     let mut cmd = std::process::Command::new(&bridge_exe);
-    cmd.args(args)
-        .arg("--data-dir")
-        .arg(data_dir)
+    cmd.args(bridge_import_args(args, data_dir))
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .stdin(std::process::Stdio::null());
@@ -787,6 +785,25 @@ fn run_bridge_import(
         }
         Err(e) => WorkerResult::Err(format!("Bridge process error: {e}")),
     }
+}
+
+/// Build the argument vector handed to `miasma-bridge`.
+///
+/// This is one half of a two-sided contract. The bridge's own cross-process
+/// test (`crates/miasma-bridge/tests/cli_import_roundtrip.rs`) spawns exactly
+/// this shape against the real compiled binary and proves it works end to end;
+/// this function pins what the desktop actually sends, so the two halves can't
+/// drift apart again. They were completely out of sync before Phase 3 — the
+/// desktop sent `--magnet`, the bridge's dispatcher had never heard of it — and
+/// nothing caught it because neither side was pinned to the other.
+fn bridge_import_args(source: &[&str], data_dir: &Path) -> Vec<std::ffi::OsString> {
+    let mut argv: Vec<std::ffi::OsString> = source.iter().map(Into::into).collect();
+    argv.push("--data-dir".into());
+    // Pushed as one OsString, never formatted into a string: a data dir with
+    // spaces (the default under `AppData\Local\Programs`) must stay a single
+    // argument.
+    argv.push(data_dir.as_os_str().to_owned());
+    argv
 }
 
 /// Extract the MIDs the bridge printed on stdout.
@@ -969,7 +986,48 @@ fn parse_retention(s: &str) -> Result<u64, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_mids_from_stdout;
+    use super::{bridge_import_args, parse_mids_from_stdout};
+    use std::ffi::OsString;
+    use std::path::Path;
+
+    const MAGNET: &str = "magnet:?xt=urn:btih:abcdef0123456789abcdef0123456789abcdef01";
+
+    fn os(items: &[&str]) -> Vec<OsString> {
+        items.iter().map(OsString::from).collect()
+    }
+
+    /// The exact argv the bridge's cross-process round-trip test spawns.
+    #[test]
+    fn magnet_import_sends_the_shape_the_bridge_accepts() {
+        assert_eq!(
+            bridge_import_args(&["--magnet", MAGNET], Path::new("C:/nodes/a")),
+            os(&["--magnet", MAGNET, "--data-dir", "C:/nodes/a"])
+        );
+    }
+
+    #[test]
+    fn torrent_import_sends_the_shape_the_bridge_accepts() {
+        assert_eq!(
+            bridge_import_args(&["--torrent", "C:/dl/x.torrent"], Path::new("C:/nodes/a")),
+            os(&["--torrent", "C:/dl/x.torrent", "--data-dir", "C:/nodes/a"])
+        );
+    }
+
+    /// The installed default data dir sits under `AppData\Local\Programs`, and
+    /// a user profile name with a space in it is ordinary. The path has to
+    /// survive as one argument.
+    #[test]
+    fn a_data_dir_with_spaces_stays_a_single_argument() {
+        let argv = bridge_import_args(
+            &["--magnet", MAGNET],
+            Path::new(r"C:\Users\Ada Lovelace\AppData\Roaming\miasma"),
+        );
+        assert_eq!(argv.len(), 4);
+        assert_eq!(
+            argv[3],
+            OsString::from(r"C:\Users\Ada Lovelace\AppData\Roaming\miasma")
+        );
+    }
 
     /// Verbatim shape of what `miasma-bridge dissolve` writes on success —
     /// the MIDs are indented six spaces under the stage heading.
