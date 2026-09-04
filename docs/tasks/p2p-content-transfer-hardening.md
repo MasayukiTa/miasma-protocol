@@ -39,7 +39,7 @@ Get to the point where README's "Resists: Content seizure via single node compro
 
 ## Phase 2 -- wire in what already exists
 - [ ] 2.1 Shard distribution to remote peers via existing `ShareDistributor`/`ShareSink`, pushed over an enum-extended `/miasma/share/1.0.0`. **External design review checkpoint -- see below.**
-- [ ] 2.2 Retrieve-side retry/backoff via existing `RetryPolicy`.
+- [x] 2.2 Retrieve-side retry/backoff via existing `RetryPolicy` (DONE, 2026-09-04). `retrieve_from_network` renamed its body to `retrieve_from_network_once` and became a retry wrapper (policy: base=1s, max=15s, max_attempts=6, retries only on `InsufficientShares`). New tests: `retrieve_from_network_retries_until_record_propagates` (publish deliberately delayed, retrieve succeeds via retry), `retrieve_from_network_gives_up_on_nonexistent_record` (bounded termination, not infinite -- marked `#[ignore]`, 40-100s+ depending on CPU contention, run manually). Full suite: 708 passed / 10 ignored / 0 failed.
 - [ ] 2.3 `StreamingRetrievalCoordinator` wired into the real network retrieve path.
 - [ ] 2.4 IPC `Get`/`Retrieved` fixed to be file-path-based like `PublishFile`/`DirectedSendFile` already are.
 - [ ] README's "Resists" line moved back once 2.1's two censorship-resistance tests are green.
