@@ -674,20 +674,24 @@ async fn p2p_two_node_loopback() {
 //   3. Node B retrieves via `retrieve_from_network()` → Kademlia GET + TCP
 //      share-exchange → reconstruct plaintext.
 
-/// **Quarantined** — flaky due to DHT convergence timing on CI.
+/// Real DHT publish/retrieve round trip, with simultaneous bidirectional bootstrap
+/// (the harder, more realistic case than `cli_smoke_loopback`'s one-directional
+/// bootstrap).
 ///
-/// Manual validation: `cargo test p2p_kademlia_full_roundtrip -- --ignored`
-/// Expected: passes ~80% of the time locally; DHT convergence may take 5-15s.
-/// The equivalent scenario is also covered by `scripts/smoke-loopback.ps1`
-/// which runs the same flow via CLI and is more reliable (longer convergence window).
-///
-/// Known risk: if this test fails, DHT publish/get is not broken — the convergence
-/// timeout (60s) is sometimes insufficient on loaded CI runners.
+/// Formerly `#[ignore]`d as "flaky" -- root cause diagnosed and fixed rather than
+/// left disabled: the two fixed `sleep()` calls this test used to have (guessing
+/// at DHT convergence and PUT-replication timing) raced against two real bugs --
+/// `dissolve_and_publish` used to return as soon as the record was written to the
+/// *local* Kademlia store, before any remote peer had acknowledged it, and there
+/// was no way to know when the A<->B connection was actually up other than
+/// guessing a sleep duration. Both are now fixed: DHT PUT waits for a real
+/// `PutRecordOk` before returning (see `DhtCommand::Put`'s handler in `node.rs`),
+/// and `wait_until_peer_connected` replaces the guessed sleeps with an actual
+/// condition wait.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "flaky: DHT convergence timing sensitive — run manually with --ignored"]
 async fn p2p_kademlia_full_roundtrip() {
     use std::time::Duration;
-    use tokio::time::{sleep, timeout};
+    use tokio::time::timeout;
 
     let _ = tracing_subscriber::fmt()
         .with_env_filter("miasma_core=debug,libp2p_swarm=info")
@@ -736,9 +740,17 @@ async fn p2p_kademlia_full_roundtrip() {
         coord_a.bootstrap_dht().await.unwrap();
         coord_b.bootstrap_dht().await.unwrap();
 
-        // Wait for Kademlia routing tables to converge (~1-3 round trips).
-        eprintln!("[kademlia] Waiting for DHT convergence…");
-        sleep(Duration::from_millis(2500)).await;
+        // Wait until the transport connection is actually up in both directions,
+        // instead of guessing how long DHT convergence takes.
+        eprintln!("[kademlia] Waiting for A<->B connection…");
+        coord_a
+            .wait_until_peer_connected(peer_id_b, Duration::from_secs(10))
+            .await
+            .expect("Node A never connected to Node B");
+        coord_b
+            .wait_until_peer_connected(peer_id_a, Duration::from_secs(10))
+            .await
+            .expect("Node B never connected to Node A");
 
         // ── Publish via Node A ────────────────────────────────────────────────
         let content = b"kademlia full round-trip: real DHT PUT + GET with TCP share-exchange";
@@ -753,8 +765,10 @@ async fn p2p_kademlia_full_roundtrip() {
             .expect("dissolve_and_publish failed");
         println!("[kademlia] Published MID: {}", mid.to_string());
 
-        // Allow the PUT to replicate to the routing table.
-        sleep(Duration::from_millis(500)).await;
+        // No further wait needed: dissolve_and_publish now doesn't return until the
+        // record is genuinely acknowledged by the network (DhtCommand::Put waits for
+        // kad::QueryResult::PutRecord(Ok(..)) before replying), not just written
+        // locally.
 
         // ── Retrieve via Node B ───────────────────────────────────────────────
         let recovered = coord_b
@@ -775,6 +789,89 @@ async fn p2p_kademlia_full_roundtrip() {
     .await;
 
     result.expect("p2p_kademlia_full_roundtrip timed out (60s)");
+}
+
+/// Regression test for Phase 1.1: `dissolve_and_publish` must not return until the
+/// DHT record is genuinely acknowledged by the network, not merely written to the
+/// publisher's own local Kademlia store.
+///
+/// Publishes on A *after* B is already connected, then immediately (zero sleep)
+/// retrieves from B. Before the fix this required a `sleep()` between publish and
+/// retrieve to avoid racing the still-in-flight PUT; this test asserts no such
+/// wait is needed by construction (the absence of any `sleep` call between publish
+/// and retrieve *is* the assertion, not something checked after the fact).
+#[tokio::test(flavor = "multi_thread")]
+async fn dht_put_blocks_until_acked() {
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("miasma_core=debug")
+        .try_init();
+
+    let result = timeout(Duration::from_secs(30), async {
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let store_a = Arc::new(LocalShareStore::open(dir_a.path(), 100).unwrap());
+        let store_b = Arc::new(LocalShareStore::open(dir_b.path(), 100).unwrap());
+
+        let key_a = [0x77u8; 32];
+        let key_b = [0x88u8; 32];
+
+        let mut node_a = MiasmaNode::new(&key_a, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+        let addrs_a = node_a.collect_listen_addrs(400).await;
+        let listen_addr_a_str = addrs_a[0].to_string();
+        let coord_a =
+            MiasmaCoordinator::start(node_a, store_a.clone(), vec![listen_addr_a_str.clone()])
+                .await;
+        let peer_id_a = *coord_a.peer_id();
+
+        let mut node_b = MiasmaNode::new(&key_b, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+        let addrs_b = node_b.collect_listen_addrs(400).await;
+        let listen_addr_b_str = addrs_b[0].to_string();
+        let coord_b =
+            MiasmaCoordinator::start(node_b, store_b.clone(), vec![listen_addr_b_str.clone()])
+                .await;
+        let peer_id_b = *coord_b.peer_id();
+
+        // Unidirectional bootstrap only (avoids the simultaneous-dial race that
+        // `p2p_kademlia_full_roundtrip` deliberately exercises instead).
+        let addr_a: Multiaddr = listen_addr_a_str.parse().unwrap();
+        coord_b.add_bootstrap_peer(peer_id_a, addr_a).await.unwrap();
+        coord_b.bootstrap_dht().await.unwrap();
+        coord_b
+            .wait_until_peer_connected(peer_id_a, Duration::from_secs(10))
+            .await
+            .expect("Node B never connected to Node A");
+
+        // Publish on A *after* the connection is already up -- this is the case
+        // that previously required a post-publish sleep to avoid racing PUT
+        // propagation. No sleep follows this call.
+        let content = b"dht put must be acked before returning, not fire-and-forget";
+        let params = DissolutionParams {
+            data_shards: 2,
+            total_shards: 3,
+        };
+        let mid = coord_a
+            .dissolve_and_publish(content, params)
+            .await
+            .expect("dissolve_and_publish failed");
+
+        // Immediate retrieve, zero sleep.
+        let recovered = coord_b
+            .retrieve_from_network(&mid, params)
+            .await
+            .expect("retrieve_from_network failed immediately after publish");
+
+        assert_eq!(recovered.as_slice(), content as &[u8]);
+
+        let _ = peer_id_b; // kept for symmetry/documentation; not otherwise used
+        coord_a.shutdown().await;
+        coord_b.shutdown().await;
+    })
+    .await;
+
+    result.expect("dht_put_blocks_until_acked timed out (30s)");
 }
 
 // ── Test 20: CLI smoke path — mirrors `network-publish` → `network-get` ───────

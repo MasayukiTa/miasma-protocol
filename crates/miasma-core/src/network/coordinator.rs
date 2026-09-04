@@ -19,7 +19,7 @@
 /// ```
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use libp2p::{Multiaddr, PeerId};
 use tokio::sync::mpsc;
@@ -32,7 +32,10 @@ use crate::{
         credential::CredentialStats,
         descriptor::{DescriptorStats, PeerDescriptor, ReachabilityKind},
         dht::{DirectDhtExecutor, OnionAwareDhtExecutor},
-        node::{DhtHandle, MiasmaNode, ShareExchangeHandle, ShareFetchRequest, ShareFetchResponse},
+        node::{
+            DhtHandle, MiasmaNode, ShareExchangeHandle, ShareFetchRequest, ShareFetchResponse,
+            SHARE_MSG_MAX,
+        },
         onion_relay::{OnionRelayRequest, OnionRelayResponse},
         path_selection::{AnonymityPolicy, PathSelectionStats},
         types::{DhtRecord, ShardLocation},
@@ -51,6 +54,30 @@ use crate::{
     },
     MiasmaError,
 };
+
+// ─── Segment sizing ────────────────────────────────────────────────────────
+
+/// Wire-protocol overhead budget subtracted from `SHARE_MSG_MAX` before deriving
+/// a per-shard byte budget: bincode framing plus `MiasmaShare`'s non-payload
+/// fields (mid_prefix, slot/segment indices, coarse hash, SSS key fragment).
+/// Generous on purpose -- this only needs to avoid ever landing *above*
+/// `SHARE_MSG_MAX`, not to be a tight estimate.
+const SHARE_WIRE_OVERHEAD_BYTES: usize = 4096;
+
+/// Largest segment size that keeps every shard under the share-exchange wire
+/// cap (`SHARE_MSG_MAX`), for a dissolution using `data_shards` data shards.
+///
+/// `SHARE_MSG_MAX` was sized assuming `data_shards ≈ 10` against
+/// `DEFAULT_SEGMENT_SIZE`; a caller publishing with a smaller `data_shards`
+/// against the same segment size produces proportionally larger shards that
+/// silently exceed the wire cap and get rejected as "too large" during
+/// share-exchange. Clamping the segment size here (rather than failing fast)
+/// keeps every existing caller working unchanged -- the default `data_shards`
+/// never approaches this clamp -- while making small-`data_shards` configs
+/// correct instead of producing an oversized frame the protocol then rejects.
+pub(crate) fn max_segment_size_for(data_shards: usize) -> usize {
+    (SHARE_MSG_MAX - SHARE_WIRE_OVERHEAD_BYTES).saturating_mul(data_shards.max(1))
+}
 
 // ─── NetworkShareFetcher ──────────────────────────────────────────────────────
 
@@ -298,10 +325,28 @@ impl MiasmaCoordinator {
 
     /// Trigger Kademlia FIND_NODE bootstrap.
     ///
-    /// Call after `add_bootstrap_peer`; sleep ~1–3 s before issuing DHT
-    /// PUT/GET so Kademlia has time to populate both routing tables.
+    /// Call after `add_bootstrap_peer`. Prefer `wait_until_peer_connected` over a
+    /// fixed sleep to know when it's safe to issue DHT PUT/GET -- the "sleep ~1-3s"
+    /// guidance this comment used to give was a guess every caller had to
+    /// independently re-guess, and was the root cause behind
+    /// `p2p_kademlia_full_roundtrip`'s long-standing flakiness.
     pub async fn bootstrap_dht(&self) -> Result<(), MiasmaError> {
         self.dht_handle.bootstrap().await
+    }
+
+    /// Wait until `peer_id` is connected, or `timeout` elapses.
+    ///
+    /// See `DhtHandle::wait_until_peer_connected` for exactly what this does and
+    /// does not guarantee (transport connectivity to a specific peer, not full DHT
+    /// convergence).
+    pub async fn wait_until_peer_connected(
+        &self,
+        peer_id: PeerId,
+        timeout: Duration,
+    ) -> Result<(), MiasmaError> {
+        self.dht_handle
+            .wait_until_peer_connected(peer_id, timeout)
+            .await
     }
 
     /// Send a shutdown signal to the background node task.
@@ -407,7 +452,10 @@ impl MiasmaCoordinator {
         // 2. Rewind and dissolve per-segment.
         reader.seek(SeekFrom::Start(0))?;
 
-        let segment_size = DEFAULT_SEGMENT_SIZE;
+        // Clamp against the share-exchange wire cap for small data_shards counts
+        // (see `max_segment_size_for`'s doc comment) -- default `data_shards`
+        // never triggers this, so this is a no-op for every existing caller.
+        let segment_size = DEFAULT_SEGMENT_SIZE.min(max_segment_size_for(params.data_shards));
         let mut segment_buf = vec![0u8; segment_size];
         let mut seg_idx: u32 = 0;
         let mut offset: u64 = 0;
@@ -1760,6 +1808,61 @@ impl crate::network::dht::OnionAwareDhtExecutor for RelayRewritingDhtExecutor {
         match self.inner.get(mid).await? {
             Some(record) => Ok(Some(self.rewrite_record(record))),
             None => Ok(None),
+        }
+    }
+}
+
+#[cfg(test)]
+mod segment_sizing_tests {
+    use super::*;
+    use crate::crypto::hash::ContentId;
+    use crate::dissolution::dissolve_segment;
+
+    #[test]
+    fn max_segment_size_for_k2_is_below_default() {
+        // Phase 1.5: a data_shards count much smaller than the ~10 SHARE_MSG_MAX
+        // was sized for must clamp well below DEFAULT_SEGMENT_SIZE, not silently
+        // allow a shard-exceeding-the-wire-cap segment through.
+        assert!(max_segment_size_for(2) < DEFAULT_SEGMENT_SIZE);
+    }
+
+    #[test]
+    fn max_segment_size_for_k10_does_not_clamp_default() {
+        // The default/common case (data_shards ≈ 10, what SHARE_MSG_MAX was
+        // actually sized for) must not be affected by this clamp at all.
+        assert!(max_segment_size_for(10) >= DEFAULT_SEGMENT_SIZE);
+    }
+
+    #[test]
+    fn dissolve_and_publish_file_k2_produces_shares_under_wire_cap() {
+        // Bypasses the network entirely -- this is a pure dissolution-side test
+        // proving the clamp actually keeps every produced share's serialized
+        // size at or under SHARE_MSG_MAX for a small data_shards count, which
+        // is what the wire protocol enforces at share-exchange time.
+        let params = DissolutionParams {
+            data_shards: 2,
+            total_shards: 3,
+        };
+        let segment_size = DEFAULT_SEGMENT_SIZE.min(max_segment_size_for(params.data_shards));
+        assert!(
+            segment_size < DEFAULT_SEGMENT_SIZE,
+            "test is only meaningful if k=2 actually triggers the clamp"
+        );
+
+        let segment_data = vec![0xABu8; segment_size];
+        let mid = ContentId::compute(&segment_data, b"test-params");
+        let (_meta, shares) = dissolve_segment(&segment_data, &mid, 0, 0, params)
+            .expect("dissolve_segment failed");
+
+        assert_eq!(shares.len(), params.total_shards);
+        for share in &shares {
+            let bytes = share.to_bytes().expect("share serialization failed");
+            assert!(
+                bytes.len() <= SHARE_MSG_MAX,
+                "share size {} exceeds SHARE_MSG_MAX {}",
+                bytes.len(),
+                SHARE_MSG_MAX
+            );
         }
     }
 }
