@@ -196,7 +196,7 @@
   `tolerable_risk`として根拠付きでdismiss済み。将来`libp2p-yamux`が
   featureフラグ等で`yamux012`を分離可能にした場合は再度確認すること
 
-### P1-7: P2Pコンテンツ転送層の強化(着手中, 2026-09-04〜)
+### P1-7: P2Pコンテンツ転送層の強化(Phase 0-2.4完了, Phase 3残, 2026-09-04〜)
 
 - **種別**: アーキテクチャ・セキュリティ
 - **現状**: 詳細な進捗ログは `docs/tasks/p2p-content-transfer-hardening.md`、実装計画は
@@ -221,6 +221,24 @@
   修正は`list_candidates`をセグメント認識にする(または呼び出し側でサーバ側
   絞り込みを行う)必要があり、既存の全ネットワーク取得経路が使う共有ロジック
   に触るため、このフェーズに相乗りさせず別タスクとして着手すること。
+- **Phase 2.1完了(2026-09-04)**: シャード分散を実装。codex 5.6 sol・claude fable
+  両方の外部設計レビューを経て、当初案(既存プロトコルのenum拡張、
+  `connected_peers()`ベースの選定、`Mutex`側チャネル)から設計を変更——
+  新規プロトコル`/miasma/share-store/1.0.0`、`LocalShareStore`に
+  Owned/Hosted分離クォータ+専用書き込みロック、`ShareSink`トレイトに
+  associated `Receipt`型、admission-Verified必須の受信側ゲート、
+  ホルダー多様性キャップ+ランダム化した選定。実装中に自分のテストが
+  実欠陥を発見して即修正: `Libp2pPayloadTransport::fetch_share`が
+  `(slot,segment)`だけで場所を検索するため、同一スロットに複数の
+  ロケーション(自分用+配布先)があると常に同じ1件(常に公開ノード自身)
+  に解決されてしまい、"複数の保持者を順に試す"はずが実際は死んだ
+  公開ノードへ何度も再解決していた(詳細はhardening docのPhase 2.1欄)。
+  修正は1スロット1ロケーション(配布成功時はローカルコピー側を置換)。
+  ローカルmode admissionの高速パスが`routing_table`に登録していなかった
+  副次バグも発見・修正(peer_registryはVerified済でもrank_peersが空を返す)。
+  新規テスト6件+`ShareVerification::self_consistent`単体テスト3件、
+  フルスイート719 passed/0 failed。README「Resists」欄を復帰(条件付き)。
+  残るのはPhase 3(BitTorrentブリッジ)のみ。
 
 ---
 

@@ -28,7 +28,7 @@ use tracing::error;
 use crate::{
     crypto::hash::ContentId,
     daemon::replication::RetryPolicy,
-    dissolution::{dissolve_segment, DEFAULT_SEGMENT_SIZE},
+    dissolution::{dissolve_segment, ShareDistributor, ShareSink, DEFAULT_SEGMENT_SIZE},
     network::{
         credential::CredentialStats,
         descriptor::{DescriptorStats, PeerDescriptor, ReachabilityKind},
@@ -78,6 +78,177 @@ const SHARE_WIRE_OVERHEAD_BYTES: usize = 4096;
 /// correct instead of producing an oversized frame the protocol then rejects.
 pub(crate) fn max_segment_size_for(data_shards: usize) -> usize {
     (SHARE_MSG_MAX - SHARE_WIRE_OVERHEAD_BYTES).saturating_mul(data_shards.max(1))
+}
+
+// ─── Publish options / report (Phase 2.1) ──────────────────────────────────
+
+/// Options controlling how strictly `dissolve_and_publish*_with_options`
+/// enforces real remote distribution before a publish is considered
+/// successful.
+#[derive(Debug, Clone, Copy)]
+pub struct PublishOptions {
+    /// Minimum number of *distinct* shard slots that must be acknowledged by
+    /// *remote* peers (i.e. not counting the publisher's own local copy)
+    /// before the publish succeeds. `0` (the `Default`) preserves pre-2.1
+    /// behaviour: publish always succeeds; distribution to other peers is
+    /// attempted best-effort but never blocks. This is deliberately the
+    /// default for `dissolve_and_publish`/`dissolve_and_publish_file` (see
+    /// their doc comments) -- per the external design review, refusing to
+    /// publish outright whenever fewer than `data_shards` peers happen to be
+    /// connected would make the common early-beta case (a desktop user with
+    /// zero or one peer) unable to publish anything at all. Use
+    /// `PublishOptions::strict` to opt in to the phase's actual "resists
+    /// single-node compromise" guarantee.
+    pub min_remote_distinct_shards: usize,
+}
+
+impl Default for PublishOptions {
+    fn default() -> Self {
+        Self {
+            min_remote_distinct_shards: 0,
+        }
+    }
+}
+
+impl PublishOptions {
+    /// Require genuine publisher-independence for this publish: at least
+    /// `data_shards` distinct shard slots (per segment) must be acknowledged
+    /// by peers other than the publisher, or the call fails with
+    /// `MiasmaError::InsufficientShares` and no `DhtRecord` is published --
+    /// never a normal-looking record for content that isn't actually
+    /// recoverable without the publisher.
+    pub fn strict(params: DissolutionParams) -> Self {
+        Self {
+            min_remote_distinct_shards: params.data_shards,
+        }
+    }
+}
+
+/// Outcome of a `dissolve_and_publish*_with_options` call.
+#[derive(Debug, Clone)]
+pub struct PublishReport {
+    pub mid: ContentId,
+    /// How many distinct shard slots were acknowledged by remote peers, per
+    /// segment in order (excludes the publisher's own local copy). A
+    /// single-segment publish has exactly one entry.
+    pub remote_distinct_shards_per_segment: Vec<usize>,
+}
+
+// ─── NetworkShareSink (Phase 2.1) ───────────────────────────────────────────
+
+/// `ShareSink` that pushes shares to real remote peers via
+/// `/miasma/share-store/1.0.0`, rather than writing to local disk.
+///
+/// # Peer selection
+/// Candidates come from `DhtHandle::select_storage_candidates` --
+/// currently-connected, admission-`Verified` peers only, ranked by the
+/// existing routing overlay's trust/reliability/IP-diversity scoring
+/// (`RoutingTable::rank_peers`). This is **not** true Kademlia
+/// K-closest-to-content-key placement; per the external design review, that
+/// trade-off is an acceptable, explicitly-documented simplification for this
+/// phase (see `docs/tasks/p2p-content-transfer-hardening.md`) -- K-closest
+/// discovery is deferred as its own follow-up.
+///
+/// # Per-holder cap
+/// No single holder is allowed to accumulate more than
+/// `total_shards - data_shards` of one segment's shards -- reviewers flagged
+/// this as security-relevant, not just a load-balancing nicety: Shamir
+/// shares are a *confidentiality* control (a peer holding `data_shards`
+/// worth of key-share fragments could reconstruct `K_enc`), and this is also
+/// what keeps the "resists single-node compromise" property meaningful (no
+/// one holder's loss can singlehandedly drop the segment below `k`
+/// recoverable shards, given every other shard sits with someone else).
+/// Candidates already at the cap for the current segment are excluded from
+/// selection rather than merely deprioritised.
+///
+/// # Randomization
+/// The top-ranked-but-not-over-cap candidates are shuffled before picking a
+/// target, rather than always pushing to whichever peer `rank_peers` scores
+/// highest -- otherwise every publish from every node would concentrate
+/// shards on the same few best-connected peers.
+pub struct NetworkShareSink {
+    dht_handle: DhtHandle,
+    total_shards: usize,
+    data_shards: usize,
+    /// Per-peer count of shards already pushed *for this sink's current
+    /// segment*. A fresh `NetworkShareSink` is constructed per segment (see
+    /// `MiasmaCoordinator::store_locally_and_distribute`), so this never
+    /// needs an explicit reset.
+    per_holder_count: Mutex<HashMap<PeerId, usize>>,
+}
+
+impl NetworkShareSink {
+    pub fn new(dht_handle: DhtHandle, params: DissolutionParams) -> Self {
+        Self {
+            dht_handle,
+            total_shards: params.total_shards,
+            data_shards: params.data_shards,
+            per_holder_count: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// No holder may exclusively hold more than this many of one segment's
+    /// shards without risking dropping the recoverable count below `k` if
+    /// that one holder is lost -- see the type's doc comment.
+    fn per_holder_cap(&self) -> usize {
+        self.total_shards.saturating_sub(self.data_shards).max(1)
+    }
+}
+
+#[async_trait::async_trait]
+impl ShareSink for NetworkShareSink {
+    type Receipt = ShardLocation;
+
+    async fn store(&self, share: MiasmaShare) -> Result<ShardLocation, MiasmaError> {
+        let cap = self.per_holder_cap();
+        let at_cap: Vec<PeerId> = {
+            let counts = self.per_holder_count.lock().unwrap();
+            counts
+                .iter()
+                .filter(|(_, count)| **count >= cap)
+                .map(|(peer, _)| *peer)
+                .collect()
+        };
+
+        let mut candidates = self.dht_handle.select_storage_candidates(at_cap).await?;
+        if candidates.is_empty() {
+            return Err(MiasmaError::Network(
+                "no eligible (verified, under-cap) storage candidates".into(),
+            ));
+        }
+
+        // Randomize among the top-ranked slice rather than always picking
+        // rank #1 (see doc comment).
+        use rand::seq::SliceRandom as _;
+        let window = candidates.len().min(5);
+        candidates[..window].shuffle(&mut rand::thread_rng());
+        let peer_id = candidates[0];
+
+        let slot_index = share.slot_index;
+        let segment_index = share.segment_index;
+
+        match self.dht_handle.store_share_on_peer(peer_id, share).await? {
+            super::node::StoreResponse::Accepted {
+                advertised_addrs, ..
+            } => {
+                *self
+                    .per_holder_count
+                    .lock()
+                    .unwrap()
+                    .entry(peer_id)
+                    .or_insert(0) += 1;
+                Ok(ShardLocation {
+                    peer_id_bytes: peer_id.to_bytes(),
+                    shard_index: slot_index,
+                    segment_index,
+                    addrs: advertised_addrs,
+                })
+            }
+            super::node::StoreResponse::Rejected(reason) => Err(MiasmaError::Network(format!(
+                "peer {peer_id} rejected share store: {reason}"
+            ))),
+        }
+    }
 }
 
 // ─── NetworkShareFetcher ──────────────────────────────────────────────────────
@@ -158,10 +329,16 @@ impl OnionShareFetcher for NetworkShareFetcher {
             None => return Ok(None),
         };
 
+        // Match on segment_index too, not just shard_index -- harmless while
+        // every segment happened to live on the single publisher (any
+        // segment's shard N and any other segment's shard N looked
+        // interchangeable because they were all the same peer anyway), but
+        // wrong now that Phase 2.1 can place different segments' shards on
+        // different holders. Flagged by external design review.
         let location = match record
             .locations
             .iter()
-            .find(|l| l.shard_index == slot_index)
+            .find(|l| l.shard_index == slot_index && l.segment_index == segment_index)
         {
             Some(l) => l,
             None => return Ok(None),
@@ -264,6 +441,10 @@ impl MiasmaCoordinator {
 
         // Give the node a reference to the store so it can serve inbound requests.
         node.set_store(store.clone());
+        // So an inbound StoreRequest can report back addresses that
+        // actually point at this node (see `own_listen_addrs`'s doc comment
+        // on `MiasmaNode`).
+        node.set_listen_addrs(listen_addrs.clone());
 
         tokio::spawn(async move {
             if let Err(e) = node.run().await {
@@ -388,31 +569,48 @@ impl MiasmaCoordinator {
         &self.peer_id
     }
 
-    /// Dissolve `data` into shares, store them locally, and publish the
-    /// `DhtRecord` that announces this node as the shard holder.
+    /// Dissolve `data` into shares, store them locally, distribute them to
+    /// other peers on a best-effort basis, and publish the `DhtRecord`.
+    ///
+    /// Preserves pre-Phase-2.1 behaviour exactly: always succeeds (best-
+    /// effort distribution, never blocks on remote peers), returns just the
+    /// `ContentId`. Shares now actually get pushed to real peers when any
+    /// are available (Phase 2.1) -- previously every shard stayed on this
+    /// node regardless. Callers that need to know *how well* distribution
+    /// went, or that need the phase's actual "resists single-node
+    /// compromise" guarantee enforced (fail rather than silently publish an
+    /// under-distributed record), should use
+    /// `dissolve_and_publish_with_options` with `PublishOptions::strict`.
     pub async fn dissolve_and_publish(
         &self,
         data: &[u8],
         params: DissolutionParams,
     ) -> Result<ContentId, MiasmaError> {
+        self.dissolve_and_publish_with_options(data, params, PublishOptions::default())
+            .await
+            .map(|report| report.mid)
+    }
+
+    /// Like `dissolve_and_publish`, but with explicit control over how
+    /// strictly remote distribution is enforced, and a typed report instead
+    /// of just a `ContentId`. See `PublishOptions`.
+    pub async fn dissolve_and_publish_with_options(
+        &self,
+        data: &[u8],
+        params: DissolutionParams,
+        options: PublishOptions,
+    ) -> Result<PublishReport, MiasmaError> {
         let (mid, shares) = dissolve(data, params)?;
 
-        // Store shares in the local encrypted share store.
-        for share in &shares {
-            self.store.put(share)?;
-        }
+        let (locations, remote_distinct) =
+            self.store_locally_and_distribute(shares, params).await?;
 
-        // Build shard-location entries: this node holds all shards.
-        let peer_bytes = self.peer_id.to_bytes();
-        let locations: Vec<ShardLocation> = shares
-            .iter()
-            .map(|s| ShardLocation {
-                peer_id_bytes: peer_bytes.clone(),
-                shard_index: s.slot_index,
-                segment_index: s.segment_index,
-                addrs: self.listen_addrs.clone(),
-            })
-            .collect();
+        if remote_distinct < options.min_remote_distinct_shards {
+            return Err(MiasmaError::InsufficientShares {
+                need: options.min_remote_distinct_shards,
+                got: remote_distinct,
+            });
+        }
 
         let record = DhtRecord {
             mid_digest: *mid.as_bytes(),
@@ -429,17 +627,37 @@ impl MiasmaCoordinator {
         // Publish to the real Kademlia DHT.
         self.dht_handle.put(record).await?;
 
-        Ok(mid)
+        Ok(PublishReport {
+            mid,
+            remote_distinct_shards_per_segment: vec![remote_distinct],
+        })
     }
 
     /// Dissolve a file from disk into shares using streaming per-segment
     /// dissolution.  Only one segment (~64 MiB) is held in RAM at a time,
     /// enabling files of any size without full-file buffering.
+    ///
+    /// See `dissolve_and_publish`'s doc comment -- the same backward-
+    /// compatibility and strict-mode notes apply here.
     pub async fn dissolve_and_publish_file(
         &self,
         file_path: &std::path::Path,
         params: DissolutionParams,
     ) -> Result<ContentId, MiasmaError> {
+        self.dissolve_and_publish_file_with_options(file_path, params, PublishOptions::default())
+            .await
+            .map(|report| report.mid)
+    }
+
+    /// Like `dissolve_and_publish_file`, but with explicit control over how
+    /// strictly remote distribution is enforced, and a typed report. See
+    /// `PublishOptions`.
+    pub async fn dissolve_and_publish_file_with_options(
+        &self,
+        file_path: &std::path::Path,
+        params: DissolutionParams,
+        options: PublishOptions,
+    ) -> Result<PublishReport, MiasmaError> {
         use std::io::{BufReader, Read, Seek, SeekFrom};
 
         let file = std::fs::File::open(file_path)?;
@@ -461,7 +679,7 @@ impl MiasmaCoordinator {
         let mut seg_idx: u32 = 0;
         let mut offset: u64 = 0;
         let mut all_locations: Vec<ShardLocation> = Vec::new();
-        let peer_bytes = self.peer_id.to_bytes();
+        let mut remote_distinct_per_segment: Vec<usize> = Vec::new();
 
         loop {
             let mut filled = 0;
@@ -481,16 +699,16 @@ impl MiasmaCoordinator {
             let chunk = &segment_buf[..filled];
             let (_meta, shares) = dissolve_segment(chunk, &mid, seg_idx, offset, params)?;
 
-            // Store shares and record locations.
-            for share in &shares {
-                self.store.put(share)?;
-                all_locations.push(ShardLocation {
-                    peer_id_bytes: peer_bytes.clone(),
-                    shard_index: share.slot_index,
-                    segment_index: seg_idx,
-                    addrs: self.listen_addrs.clone(),
+            let (mut locations, remote_distinct) =
+                self.store_locally_and_distribute(shares, params).await?;
+            if remote_distinct < options.min_remote_distinct_shards {
+                return Err(MiasmaError::InsufficientShares {
+                    need: options.min_remote_distinct_shards,
+                    got: remote_distinct,
                 });
             }
+            all_locations.append(&mut locations);
+            remote_distinct_per_segment.push(remote_distinct);
 
             offset += filled as u64;
             seg_idx += 1;
@@ -529,7 +747,73 @@ impl MiasmaCoordinator {
             seg_idx,
         );
 
-        Ok(mid)
+        Ok(PublishReport {
+            mid,
+            remote_distinct_shards_per_segment: remote_distinct_per_segment,
+        })
+    }
+
+    /// Store one segment's shares locally (publisher redundancy -- always
+    /// kept, per the external design review: dropping local copies when
+    /// remote distribution falls short would make content unrecoverable by
+    /// *anyone*, publisher included), then attempt best-effort remote
+    /// distribution via `NetworkShareSink`. Returns the full set of
+    /// `ShardLocation`s to publish (local + whatever remote pushes were
+    /// actually accepted) and the count of distinct shard slots a *remote*
+    /// peer acknowledged (excludes the local copy -- this is the number
+    /// `PublishOptions::min_remote_distinct_shards` is compared against).
+    async fn store_locally_and_distribute(
+        &self,
+        shares: Vec<MiasmaShare>,
+        params: DissolutionParams,
+    ) -> Result<(Vec<ShardLocation>, usize), MiasmaError> {
+        for share in &shares {
+            self.store.put(share)?;
+        }
+
+        let peer_bytes = self.peer_id.to_bytes();
+        let mut locations: std::collections::HashMap<usize, ShardLocation> = shares
+            .iter()
+            .map(|s| {
+                (
+                    s.slot_index as usize,
+                    ShardLocation {
+                        peer_id_bytes: peer_bytes.clone(),
+                        shard_index: s.slot_index,
+                        segment_index: s.segment_index,
+                        addrs: self.listen_addrs.clone(),
+                    },
+                )
+            })
+            .collect();
+
+        let sink = NetworkShareSink::new(self.dht_handle.clone(), params);
+        let distributor = ShareDistributor::new(sink, params.data_shards);
+        let result = distributor.distribute_segment(shares).await;
+        let remote_distinct = result.succeeded.len();
+
+        // A remote placement *replaces* this slot's local-copy entry rather
+        // than coexisting alongside it. This isn't just about advertising
+        // fewer, more useful addresses: `Libp2pPayloadTransport::fetch_share`
+        // resolves "which holder to fetch from" by scanning the record for
+        // the first location matching (slot_index, segment_index) -- it has
+        // no way to distinguish *which* of several locations for the same
+        // slot a given retry attempt intended to try. With more than one
+        // location per slot, every attempt silently collapses onto whichever
+        // one sorts first (always the publisher's own local-copy entry, since
+        // those are inserted before remote ones below) -- discovered directly
+        // via this phase's own publisher-offline test, which kept "trying"
+        // supposedly-different remote holders but was actually always
+        // re-resolving the dead publisher underneath. One location per slot
+        // sidesteps the ambiguity entirely; teaching that resolution step to
+        // consider multiple candidates for one slot is a separate, larger
+        // change to the transport layer, tracked as a follow-up rather than
+        // folded into this phase.
+        for (slot, loc) in result.succeeded {
+            locations.insert(slot, loc);
+        }
+
+        Ok((locations.into_values().collect(), remote_distinct))
     }
 
     /// Retrieve content by MID from the P2P network using the transport

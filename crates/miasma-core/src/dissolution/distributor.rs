@@ -28,12 +28,17 @@ use crate::{
 use super::segment::dissolve_segment;
 
 /// Result of a best-effort distribution attempt for one segment.
+///
+/// Generic over `R`, the sink's `ShareSink::Receipt` type -- a local sink's
+/// receipt might just be a storage address (`String`); a network sink's
+/// receipt carries real placement metadata (peer ID, advertised addresses)
+/// that a caller needs to build a `ShardLocation` others can actually dial.
 #[derive(Debug)]
-pub struct DistributionResult {
+pub struct DistributionResult<R> {
     /// Segment index this result corresponds to.
     pub segment_index: u32,
-    /// Slot indices that were stored successfully, paired with their addresses.
-    pub succeeded: Vec<(usize, String)>,
+    /// Slot indices that were stored successfully, paired with the sink's receipt.
+    pub succeeded: Vec<(usize, R)>,
     /// Slot indices for which the store attempt failed.
     pub failed: Vec<usize>,
     /// True if `failed.len() > (total_shards - data_shards)`.
@@ -44,7 +49,7 @@ pub struct DistributionResult {
     pub needs_repair: bool,
 }
 
-impl DistributionResult {
+impl<R> DistributionResult<R> {
     /// Number of successfully stored shares.
     pub fn distributed_count(&self) -> usize {
         self.succeeded.len()
@@ -56,17 +61,31 @@ impl DistributionResult {
     }
 }
 
-/// A sink that accepts one `MiasmaShare` and returns its storage address.
+/// A sink that accepts one `MiasmaShare` and returns a receipt proving where
+/// it landed.
 ///
 /// # Implementations
-/// - Phase 1: `LocalShareStore` (local encrypted on-disk store)
-/// - Phase 2: network transport (stores on remote peers via libp2p)
+/// - Phase 1: `LocalShareStore` (local encrypted on-disk store) -- receipt is
+///   just the storage address, since there's no peer/network metadata to report.
+/// - Phase 2.1: `network::NetworkShareSink` (stores on remote peers via
+///   libp2p `/miasma/share-store/1.0.0`) -- receipt carries the real
+///   `peer_id`/`advertised_addrs` the holder reported accepting the share,
+///   which is what actually makes the resulting `ShardLocation` dialable by
+///   someone who was never connected to the publisher.
+///
+/// `Receipt` is an associated type rather than a fixed `String` return so
+/// each sink can report exactly the placement metadata its own callers need,
+/// without every implementor being forced into the lowest common denominator
+/// (or the distributor needing a side-channel to recover what `store()`
+/// already knew and then discarded).
 ///
 /// Failures are communicated as `MiasmaError`; the distributor records them
 /// and continues to the next share rather than aborting.
 #[async_trait::async_trait]
 pub trait ShareSink: Send + Sync {
-    async fn store(&self, share: MiasmaShare) -> Result<String, MiasmaError>;
+    type Receipt: Send;
+
+    async fn store(&self, share: MiasmaShare) -> Result<Self::Receipt, MiasmaError>;
 }
 
 /// Best-effort + repair share distributor.
@@ -87,7 +106,10 @@ impl<S: ShareSink> ShareDistributor<S> {
     ///
     /// All stores are attempted regardless of individual failures.
     /// Returns a `DistributionResult` describing which slots succeeded.
-    pub async fn distribute_segment(&self, shares: Vec<MiasmaShare>) -> DistributionResult {
+    pub async fn distribute_segment(
+        &self,
+        shares: Vec<MiasmaShare>,
+    ) -> DistributionResult<S::Receipt> {
         let total_shards = shares.len();
         let segment_index = shares.first().map(|s| s.segment_index).unwrap_or(0);
 
@@ -97,7 +119,7 @@ impl<S: ShareSink> ShareDistributor<S> {
         for share in shares {
             let slot = share.slot_index as usize;
             match self.sink.store(share).await {
-                Ok(addr) => succeeded.push((slot, addr)),
+                Ok(receipt) => succeeded.push((slot, receipt)),
                 Err(_) => failed.push(slot),
             }
         }
@@ -132,7 +154,7 @@ impl<S: ShareSink> ShareDistributor<S> {
         segment_index: u32,
         offset_bytes: u64,
         params: DissolutionParams,
-    ) -> Result<DistributionResult, MiasmaError> {
+    ) -> Result<DistributionResult<S::Receipt>, MiasmaError> {
         let (_, shares) = dissolve_segment(segment_data, mid, segment_index, offset_bytes, params)?;
         Ok(self.distribute_segment(shares).await)
     }
@@ -163,6 +185,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ShareSink for AlwaysOkSink {
+        type Receipt = String;
+
         async fn store(&self, share: MiasmaShare) -> Result<String, MiasmaError> {
             let addr = format!("addr:{}", share.slot_index);
             self.stored.lock().unwrap().push(share);
@@ -191,6 +215,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ShareSink for SelectiveFailSink {
+        type Receipt = String;
+
         async fn store(&self, share: MiasmaShare) -> Result<String, MiasmaError> {
             if self.fail_slots.contains(&share.slot_index) {
                 return Err(MiasmaError::Sss("simulated store failure".into()));

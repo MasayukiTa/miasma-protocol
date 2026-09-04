@@ -52,10 +52,11 @@ pub use network::{
     BbsIssuerKey, BbsPlusScheme, BbsProof, BypassOnionDhtExecutor, CredentialScheme,
     CredentialStats, CredentialTier, CredentialWallet, DescriptorStats, DescriptorStore, DhtHandle,
     DirectDhtExecutor, DisclosurePolicy, DiversityViolation, Ed25519Scheme, HybridAdmissionPolicy,
-    IssuerRegistry, MiasmaCoordinator, MiasmaNode, NetworkShareFetcher, NodeType,
+    IssuerRegistry, MiasmaCoordinator, MiasmaNode, NetworkShareFetcher, NetworkShareSink, NodeType,
     OnionAwareDhtExecutor, OutcomeMetrics, PathSelectionStats, PeerCapabilities, PeerDescriptor,
-    PeerRegistry, ReachabilityKind, RejectionReason, ResourceProfile, RoutingStats,
-    ShareExchangeHandle, TopologyEvent,
+    PeerRegistry, PublishOptions, PublishReport, ReachabilityKind, RejectionReason,
+    ResourceProfile, RoutingStats, ShareExchangeHandle, StoreRejectReason, StoreResponse,
+    TopologyEvent,
 };
 pub use onion::{
     CircuitId, CircuitManager, InProcessRelay, LiveOnionDhtExecutor, LiveOnionShareFetcher,
