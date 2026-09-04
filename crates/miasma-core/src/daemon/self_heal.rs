@@ -252,10 +252,7 @@ pub fn cleanup_stale_state(data_dir: &std::path::Path) -> CleanupReport {
     if http_port_file.exists() {
         if std::fs::remove_file(&http_port_file).is_ok() {
             report.stale_http_port_file_removed = true;
-            tracing::info!(
-                "Removed stale HTTP port file: {}",
-                http_port_file.display()
-            );
+            tracing::info!("Removed stale HTTP port file: {}", http_port_file.display());
         }
     }
 
@@ -368,11 +365,14 @@ impl ReconnectionScheduler {
     /// Returns `true` if the circuit breaker has tripped (peer should be abandoned).
     pub fn record_failure(&mut self, peer_id: &[u8]) -> bool {
         let now = Instant::now();
-        let state = self.peers.entry(peer_id.to_vec()).or_insert(ReconnectionState {
-            consecutive_failures: 0,
-            next_attempt: now,
-            last_failure: now,
-        });
+        let state = self
+            .peers
+            .entry(peer_id.to_vec())
+            .or_insert(ReconnectionState {
+                consecutive_failures: 0,
+                next_attempt: now,
+                last_failure: now,
+            });
         state.consecutive_failures += 1;
         state.last_failure = now;
 
@@ -420,9 +420,7 @@ impl ReconnectionScheduler {
         let now = Instant::now();
         self.peers
             .iter()
-            .filter(|(_, s)| {
-                s.consecutive_failures < self.max_failures && now >= s.next_attempt
-            })
+            .filter(|(_, s)| s.consecutive_failures < self.max_failures && now >= s.next_attempt)
             .map(|(id, _)| id.clone())
             .collect()
     }
@@ -434,7 +432,10 @@ impl ReconnectionScheduler {
 
     /// Consecutive failures for a peer (0 if not tracked).
     pub fn failures_for(&self, peer_id: &[u8]) -> u32 {
-        self.peers.get(peer_id).map(|s| s.consecutive_failures).unwrap_or(0)
+        self.peers
+            .get(peer_id)
+            .map(|s| s.consecutive_failures)
+            .unwrap_or(0)
     }
 }
 
@@ -533,11 +534,7 @@ mod tests {
 
     #[test]
     fn flap_triggers_at_threshold() {
-        let mut d = NetworkFlapDetector::new(
-            3,
-            Duration::from_secs(60),
-            Duration::from_secs(120),
-        );
+        let mut d = NetworkFlapDetector::new(3, Duration::from_secs(60), Duration::from_secs(120));
         d.record_disconnect();
         d.record_disconnect();
         let triggered = d.record_disconnect();
@@ -547,11 +544,7 @@ mod tests {
 
     #[test]
     fn flap_reset_clears_state() {
-        let mut d = NetworkFlapDetector::new(
-            2,
-            Duration::from_secs(60),
-            Duration::from_secs(120),
-        );
+        let mut d = NetworkFlapDetector::new(2, Duration::from_secs(60), Duration::from_secs(120));
         d.record_disconnect();
         d.record_disconnect();
         assert!(d.is_damping());
@@ -714,8 +707,12 @@ mod tests {
 
     #[test]
     fn recovery_action_display() {
-        assert!(RecoveryAction::ReDialBootstrap.to_string().contains("bootstrap"));
-        assert!(RecoveryAction::EscalateTransport.to_string().contains("transport"));
+        assert!(RecoveryAction::ReDialBootstrap
+            .to_string()
+            .contains("bootstrap"));
+        assert!(RecoveryAction::EscalateTransport
+            .to_string()
+            .contains("transport"));
     }
 
     // ── Reconnection scheduler ──────────────────────────────────────────
@@ -748,25 +745,19 @@ mod tests {
 
     #[test]
     fn scheduler_circuit_breaker_trips() {
-        let mut sched = ReconnectionScheduler::new(
-            Duration::from_millis(1),
-            Duration::from_millis(10),
-            3,
-        );
+        let mut sched =
+            ReconnectionScheduler::new(Duration::from_millis(1), Duration::from_millis(10), 3);
         assert!(!sched.record_failure(b"peer-a")); // 1
         assert!(!sched.record_failure(b"peer-a")); // 2
-        assert!(sched.record_failure(b"peer-a"));  // 3 — tripped
+        assert!(sched.record_failure(b"peer-a")); // 3 — tripped
         assert!(!sched.should_attempt(b"peer-a"));
         assert!(sched.abandoned_peers().contains(&b"peer-a".to_vec()));
     }
 
     #[test]
     fn scheduler_backoff_is_exponential() {
-        let mut sched = ReconnectionScheduler::new(
-            Duration::from_millis(10),
-            Duration::from_secs(60),
-            20,
-        );
+        let mut sched =
+            ReconnectionScheduler::new(Duration::from_millis(10), Duration::from_secs(60), 20);
         // After 1 failure: 10ms delay
         sched.record_failure(b"p");
         let f1 = sched.failures_for(b"p");
@@ -783,15 +774,14 @@ mod tests {
 
     #[test]
     fn scheduler_due_for_reconnect_after_delay() {
-        let mut sched = ReconnectionScheduler::new(
-            Duration::from_millis(10),
-            Duration::from_secs(60),
-            10,
-        );
+        let mut sched =
+            ReconnectionScheduler::new(Duration::from_millis(10), Duration::from_secs(60), 10);
         sched.record_failure(b"peer-a");
         assert!(sched.peers_due_for_reconnect().is_empty());
         std::thread::sleep(Duration::from_millis(20));
-        assert!(sched.peers_due_for_reconnect().contains(&b"peer-a".to_vec()));
+        assert!(sched
+            .peers_due_for_reconnect()
+            .contains(&b"peer-a".to_vec()));
     }
 
     #[test]
@@ -847,7 +837,9 @@ mod tests {
         let actions = vec![
             RecoveryAction::ReDialBootstrap,
             RecoveryAction::EscalateTransport,
-            RecoveryAction::AbandonPeer { peer_id_bytes: vec![1, 2, 3] },
+            RecoveryAction::AbandonPeer {
+                peer_id_bytes: vec![1, 2, 3],
+            },
         ];
         let json = serde_json::to_string(&actions).unwrap();
         let de: Vec<RecoveryAction> = serde_json::from_str(&json).unwrap();

@@ -362,7 +362,11 @@ fn worker_thread(
             WorkerCmd::DirectedConfirm {
                 envelope_id,
                 challenge_code,
-            } => rt.block_on(do_directed_confirm(&data_dir, &envelope_id, &challenge_code)),
+            } => rt.block_on(do_directed_confirm(
+                &data_dir,
+                &envelope_id,
+                &challenge_code,
+            )),
             WorkerCmd::DirectedInbox => rt.block_on(do_directed_inbox(&data_dir)),
             WorkerCmd::DirectedOutbox => rt.block_on(do_directed_outbox(&data_dir)),
         };
@@ -822,8 +826,7 @@ async fn do_directed_send(
         Err(e) => return WorkerResult::Err(format!("Invalid retention: {e}")),
     };
     // Use file-path variant — daemon reads file directly, no IPC bloat.
-    let abs_path = std::fs::canonicalize(file_path)
-        .unwrap_or_else(|_| file_path.to_owned());
+    let abs_path = std::fs::canonicalize(file_path).unwrap_or_else(|_| file_path.to_owned());
     let req = ControlRequest::DirectedSendFile {
         recipient_contact: recipient_contact.to_owned(),
         file_path: abs_path.to_string_lossy().to_string(),

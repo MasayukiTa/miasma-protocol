@@ -84,9 +84,9 @@ pub enum RateLimitClass {
 impl RateLimitClass {
     pub fn default_rpm(self) -> u32 {
         match self {
-            Self::ReadApi => 120,   // 2/sec
-            Self::WriteApi => 30,   // 0.5/sec
-            Self::HeavyApi => 10,   // ~1 per 6 sec
+            Self::ReadApi => 120, // 2/sec
+            Self::WriteApi => 30, // 0.5/sec
+            Self::HeavyApi => 10, // ~1 per 6 sec
         }
     }
 }
@@ -108,10 +108,7 @@ impl Default for RateLimiter {
             RateLimitClass::HeavyApi,
         ] {
             let rpm = class.default_rpm();
-            buckets.insert(
-                class,
-                TokenBucket::new(rpm, rpm as f64 / 60.0),
-            );
+            buckets.insert(class, TokenBucket::new(rpm, rpm as f64 / 60.0));
         }
         Self {
             buckets,
@@ -186,9 +183,9 @@ pub fn classify_endpoint(method: &str, path: &str) -> RateLimitClass {
         | ("GET", "/api/directed/outbox") => RateLimitClass::ReadApi,
 
         // Heavyweight
-        ("POST", "/api/retrieve")
-        | ("POST", "/api/directed/retrieve")
-        | ("POST", "/api/wipe") => RateLimitClass::HeavyApi,
+        ("POST", "/api/retrieve") | ("POST", "/api/directed/retrieve") | ("POST", "/api/wipe") => {
+            RateLimitClass::HeavyApi
+        }
 
         // All other POST endpoints are write operations
         _ => RateLimitClass::WriteApi,
@@ -249,7 +246,7 @@ mod tests {
     #[test]
     fn bucket_refills_over_time() {
         let mut b = TokenBucket::new(5, 100.0); // 100/sec for fast test
-        // Exhaust all tokens
+                                                // Exhaust all tokens
         for _ in 0..5 {
             b.try_consume();
         }
@@ -325,8 +322,14 @@ mod tests {
 
     #[test]
     fn classify_read_endpoints() {
-        assert_eq!(classify_endpoint("GET", "/api/ping"), RateLimitClass::ReadApi);
-        assert_eq!(classify_endpoint("GET", "/api/status"), RateLimitClass::ReadApi);
+        assert_eq!(
+            classify_endpoint("GET", "/api/ping"),
+            RateLimitClass::ReadApi
+        );
+        assert_eq!(
+            classify_endpoint("GET", "/api/status"),
+            RateLimitClass::ReadApi
+        );
         assert_eq!(
             classify_endpoint("GET", "/api/directed/inbox"),
             RateLimitClass::ReadApi
@@ -339,7 +342,10 @@ mod tests {
             classify_endpoint("POST", "/api/retrieve"),
             RateLimitClass::HeavyApi
         );
-        assert_eq!(classify_endpoint("POST", "/api/wipe"), RateLimitClass::HeavyApi);
+        assert_eq!(
+            classify_endpoint("POST", "/api/wipe"),
+            RateLimitClass::HeavyApi
+        );
     }
 
     #[test]

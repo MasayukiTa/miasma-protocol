@@ -452,7 +452,9 @@ impl ObfuscatedQuicServer {
 // ─── Fallback transparent forwarding ─────────────────────────────────────────
 
 /// Parse "https://hostname[:port][/path]" → (hostname, port).
-fn parse_fallback_host(url: &str) -> Result<(String, u16), Box<dyn std::error::Error + Send + Sync>> {
+fn parse_fallback_host(
+    url: &str,
+) -> Result<(String, u16), Box<dyn std::error::Error + Send + Sync>> {
     let after_scheme = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))
@@ -533,11 +535,8 @@ async fn forward_to_fallback(
 
         let mut buf = vec![0u8; 16384];
         loop {
-            match tokio::time::timeout(
-                std::time::Duration::from_millis(300),
-                recv.read(&mut buf),
-            )
-            .await
+            match tokio::time::timeout(std::time::Duration::from_millis(300), recv.read(&mut buf))
+                .await
             {
                 Ok(Ok(Some(n))) if n > 0 => tls.write_all(&buf[..n]).await?,
                 _ => break,
@@ -546,13 +545,10 @@ async fn forward_to_fallback(
         tls.flush().await?;
 
         // Relay response back to the QUIC client (5s timeout).
-        let n = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            tls.read(&mut buf),
-        )
-        .await
-        .unwrap_or(Ok(0))
-        .unwrap_or(0);
+        let n = tokio::time::timeout(std::time::Duration::from_secs(5), tls.read(&mut buf))
+            .await
+            .unwrap_or(Ok(0))
+            .unwrap_or(0);
 
         if n > 0 {
             send.write_all(&buf[..n]).await?;
@@ -1039,7 +1035,7 @@ mod tests {
         let server_config = ObfuscatedConfig::new(
             secret_a,
             sni,
-            "",  // no fallback — closes connection on bad secret
+            "", // no fallback — closes connection on bad secret
             BrowserFingerprint::Chrome124,
         );
 
@@ -1059,12 +1055,7 @@ mod tests {
 
         // 3. Client uses secret B (different!)
         let secret_b = [0x99u8; 32];
-        let client_config = ObfuscatedConfig::new(
-            secret_b,
-            sni,
-            "",
-            BrowserFingerprint::Chrome124,
-        );
+        let client_config = ObfuscatedConfig::new(secret_b, sni, "", BrowserFingerprint::Chrome124);
 
         let client = ObfuscatedQuicPayloadTransport::new(client_config);
         let peer_addr = format!("127.0.0.1:{port}");
@@ -1103,7 +1094,7 @@ mod tests {
         let server_config = ObfuscatedConfig::new(
             secret_a,
             sni,
-            "https://example.com",  // fallback — connection forwarded, not hard-closed
+            "https://example.com", // fallback — connection forwarded, not hard-closed
             BrowserFingerprint::Chrome124,
         );
 

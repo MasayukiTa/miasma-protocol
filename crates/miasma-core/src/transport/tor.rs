@@ -26,9 +26,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use super::payload::{
-    PayloadTransportError, PayloadTransportKind, TransportPhase,
-};
+use super::payload::{PayloadTransportError, PayloadTransportKind, TransportPhase};
 
 // ─── Configuration ──────────────────────────────────────────────────────────
 
@@ -233,9 +231,7 @@ impl super::payload::PayloadTransport for TorPayloadTransport {
                 })?
                 .map_err(|e| PayloadTransportError {
                     phase: TransportPhase::Session,
-                    message: format!(
-                        "Tor SOCKS5 connect via {socks_addr}: {e}"
-                    ),
+                    message: format!("Tor SOCKS5 connect via {socks_addr}: {e}"),
                 })?;
 
                 let tcp_stream = proxy_stream.into_inner();

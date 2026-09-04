@@ -37,9 +37,10 @@ use crate::{network::coordinator::MiasmaCoordinator, store::LocalShareStore};
 
 use super::{
     ipc::{ControlRequest, ControlResponse},
-    process_request, BridgeLiveState,
+    process_request,
     rate_limit::{classify_endpoint, validate_origin},
     replication::ReplicationQueue,
+    BridgeLiveState,
 };
 
 /// Maximum HTTP request body size (16 MiB, matching IPC FRAME_MAX).
@@ -230,7 +231,10 @@ async fn handle(
         .and_then(|v| v.to_str().ok());
     if !validate_origin(origin) {
         warn!("HTTP bridge: rejected non-localhost origin: {:?}", origin);
-        return Ok(cors(json_error(StatusCode::FORBIDDEN, "origin not allowed")));
+        return Ok(cors(json_error(
+            StatusCode::FORBIDDEN,
+            "origin not allowed",
+        )));
     }
 
     // Rate limiting — check before routing
@@ -240,17 +244,12 @@ async fn handle(
     {
         let mut rl = state.bridge_live.rate_limiter.lock().unwrap();
         if !rl.check(rate_class) {
-            debug!(
-                "HTTP bridge: rate limited {} {}",
-                method_str, path_str
-            );
+            debug!("HTTP bridge: rate limited {} {}", method_str, path_str);
             return Ok(cors(
                 Response::builder()
                     .status(StatusCode::TOO_MANY_REQUESTS)
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Full::new(Bytes::from(
-                        r#"{"error":"rate limited"}"#,
-                    )))
+                    .body(Full::new(Bytes::from(r#"{"error":"rate limited"}"#)))
                     .unwrap(),
             ));
         }

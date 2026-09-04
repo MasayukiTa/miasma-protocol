@@ -819,10 +819,8 @@ mod tests {
         // Write a WAL with one valid entry, one corrupt, one valid.
         let item1 = dummy_item(1);
         let item2 = dummy_item(2);
-        let line1 =
-            serde_json::to_string(&WalEntry::Snapshot(item1)).unwrap();
-        let line2 =
-            serde_json::to_string(&WalEntry::Snapshot(item2)).unwrap();
+        let line1 = serde_json::to_string(&WalEntry::Snapshot(item1)).unwrap();
+        let line2 = serde_json::to_string(&WalEntry::Snapshot(item2)).unwrap();
         let content = format!("{line1}\n{{not valid json!!\n{line2}\n");
         std::fs::write(&wal_path, content).unwrap();
 
@@ -862,8 +860,7 @@ mod tests {
 
         // Write one complete entry and one truncated entry (simulating crash mid-write).
         let item1 = dummy_item(1);
-        let line1 =
-            serde_json::to_string(&WalEntry::Snapshot(item1)).unwrap();
+        let line1 = serde_json::to_string(&WalEntry::Snapshot(item1)).unwrap();
         let partial = r#"{"Snapshot":{"mid_str":"mid-2","record":{"mid_dige"#;
         let content = format!("{line1}\n{partial}");
         std::fs::write(&wal_path, content).unwrap();

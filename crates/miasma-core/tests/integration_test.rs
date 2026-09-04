@@ -622,7 +622,7 @@ async fn p2p_two_node_loopback() {
             .map(|s| ShardLocation {
                 peer_id_bytes: peer_bytes_a.clone(),
                 shard_index: s.slot_index,
-                    segment_index: 0,
+                segment_index: 0,
                 addrs: vec![listen_addr_a_str.clone()],
             })
             .collect();
@@ -3052,21 +3052,17 @@ async fn field_ss_native_aead2022_tunnel() {
 
     let psk_b64 = std::env::var("SS_PSK")
         .unwrap_or_else(|_| "GfUl7Rk0bjD/iEauq0JKnZqf/vlcSofjBmOt4QKtJKc=".to_string());
-    let server = std::env::var("SS_SERVER")
-        .unwrap_or_else(|_| "172.24.51.174:8388".to_string());
-    let target_host = std::env::var("SS_TARGET_HOST")
-        .unwrap_or_else(|_| "172.24.51.174".to_string());
+    let server = std::env::var("SS_SERVER").unwrap_or_else(|_| "172.24.51.174:8388".to_string());
+    let target_host =
+        std::env::var("SS_TARGET_HOST").unwrap_or_else(|_| "172.24.51.174".to_string());
     let target_port: u16 = std::env::var("SS_TARGET_PORT")
         .unwrap_or_else(|_| "9999".to_string())
         .parse()
         .unwrap();
 
     // Decode PSK
-    let key = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        &psk_b64,
-    )
-    .expect("invalid base64 PSK");
+    let key = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &psk_b64)
+        .expect("invalid base64 PSK");
     assert_eq!(key.len(), 32, "AEAD-2022 AES-256-GCM requires 32-byte key");
 
     println!("Connecting to SS server at {server}...");
@@ -3097,9 +3093,16 @@ async fn field_ss_native_aead2022_tunnel() {
         .await
         .expect("read echo response through SS tunnel failed");
 
-    assert_eq!(&buf, test_data, "echo mismatch — data corrupted in SS tunnel");
+    assert_eq!(
+        &buf, test_data,
+        "echo mismatch — data corrupted in SS tunnel"
+    );
     println!("SUCCESS: AEAD-2022 tunnel to echo server verified!");
-    println!("  Sent {} bytes, received {} bytes, data matches", test_data.len(), buf.len());
+    println!(
+        "  Sent {} bytes, received {} bytes, data matches",
+        test_data.len(),
+        buf.len()
+    );
 }
 
 /// Field diagnostic: raw AEAD-2022 handshake to see exactly what ssserver returns.
@@ -3114,22 +3117,21 @@ async fn field_ss_raw_diagnostic() {
 
     let psk_b64 = std::env::var("SS_PSK")
         .unwrap_or_else(|_| "GfUl7Rk0bjD/iEauq0JKnZqf/vlcSofjBmOt4QKtJKc=".to_string());
-    let server = std::env::var("SS_SERVER")
-        .unwrap_or_else(|_| "172.24.51.174:8388".to_string());
+    let server = std::env::var("SS_SERVER").unwrap_or_else(|_| "172.24.51.174:8388".to_string());
     let target_host = "172.24.51.174";
     let target_port: u16 = 9999;
 
-    let key = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        &psk_b64,
-    )
-    .expect("invalid base64 PSK");
+    let key = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &psk_b64)
+        .expect("invalid base64 PSK");
 
     let kind = CipherKind::AEAD2022_BLAKE3_AES_256_GCM;
     let salt_len = kind.salt_len();
     let tag_len = kind.tag_len();
 
-    println!("salt_len={salt_len}, tag_len={tag_len}, key_len={}", key.len());
+    println!(
+        "salt_len={salt_len}, tag_len={tag_len}, key_len={}",
+        key.len()
+    );
 
     // Connect
     let tcp = tokio::net::TcpStream::connect(&server)
@@ -3156,21 +3158,33 @@ async fn field_ss_raw_diagnostic() {
     let padding_len: u16 = 4;
     var_header.extend_from_slice(&padding_len.to_be_bytes());
     var_header.extend_from_slice(&[0xAA; 4]); // padding
-    println!("Variable header: {} bytes (addr=0x01 {:?}:{target_port}, padding={padding_len})",
-        var_header.len(), ipv4);
+    println!(
+        "Variable header: {} bytes (addr=0x01 {:?}:{target_port}, padding={padding_len})",
+        var_header.len(),
+        ipv4
+    );
 
     // First: self-test encrypt/decrypt roundtrip
     {
         let test_salt = vec![0xAA; salt_len];
         let mut enc = TcpCipher::new(kind, &key, &test_salt);
         let mut dec = TcpCipher::new(kind, &key, &test_salt);
-        let plaintext = [0x00u8, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A]; // 11 bytes
+        let plaintext = [
+            0x00u8, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A,
+        ]; // 11 bytes
         let mut buf = Vec::from(plaintext.as_slice());
         buf.resize(11 + tag_len, 0);
         enc.encrypt_packet(&mut buf);
-        println!("Self-test: encrypted {} bytes → {:02x?}", plaintext.len(), &buf);
+        println!(
+            "Self-test: encrypted {} bytes → {:02x?}",
+            plaintext.len(),
+            &buf
+        );
         let ok = dec.decrypt_packet(&mut buf);
-        println!("Self-test: decrypt ok={ok}, plaintext matches={}", &buf[..11] == plaintext);
+        println!(
+            "Self-test: decrypt ok={ok}, plaintext matches={}",
+            &buf[..11] == plaintext
+        );
     }
 
     // TWO separate encrypted chunks (matching sslocal wire format)
@@ -3183,11 +3197,19 @@ async fn field_ss_raw_diagnostic() {
         .as_secs();
     fixed.extend_from_slice(&ts.to_be_bytes());
     fixed.extend_from_slice(&var_header_len.to_be_bytes());
-    println!("Fixed header plaintext ({} bytes): {:02x?}", fixed.len(), &fixed);
+    println!(
+        "Fixed header plaintext ({} bytes): {:02x?}",
+        fixed.len(),
+        &fixed
+    );
 
     fixed.resize(11 + tag_len, 0);
     write_cipher.encrypt_packet(&mut fixed);
-    println!("Encrypted fixed header ({} bytes): {:02x?}", fixed.len(), &fixed);
+    println!(
+        "Encrypted fixed header ({} bytes): {:02x?}",
+        fixed.len(),
+        &fixed
+    );
 
     // Encrypt variable header (separate nonce)
     var_header.resize(var_header.len() + tag_len, 0);
@@ -3222,16 +3244,14 @@ async fn field_ss_raw_diagnostic() {
     // Wait for server response
     println!("Waiting for server response (5s timeout)...");
     let mut resp_buf = vec![0u8; 4096];
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        tcp.read(&mut resp_buf),
-    )
-    .await
-    {
+    match tokio::time::timeout(std::time::Duration::from_secs(5), tcp.read(&mut resp_buf)).await {
         Ok(Ok(n)) => {
             println!("Got {n} raw bytes from server");
             if n >= salt_len {
-                println!("  First {salt_len} bytes (server salt): {:02x?}", &resp_buf[..salt_len]);
+                println!(
+                    "  First {salt_len} bytes (server salt): {:02x?}",
+                    &resp_buf[..salt_len]
+                );
                 let remaining = n - salt_len;
                 println!("  Remaining {remaining} bytes after salt");
 
@@ -3244,11 +3264,16 @@ async fn field_ss_raw_diagnostic() {
                     let mut fh = resp_buf[salt_len..salt_len + fixed_wire_len].to_vec();
                     if read_cipher.decrypt_packet(&mut fh) {
                         println!("  Fixed header decrypted OK!");
-                        println!("    type=0x{:02x}, first_payload_len={}",
+                        println!(
+                            "    type=0x{:02x}, first_payload_len={}",
                             fh[0],
-                            u16::from_be_bytes([fh[1 + 8 + salt_len], fh[1 + 8 + salt_len + 1]]));
+                            u16::from_be_bytes([fh[1 + 8 + salt_len], fh[1 + 8 + salt_len + 1]])
+                        );
                         let echoed_salt = &fh[9..9 + salt_len];
-                        println!("    client salt match: {}", echoed_salt == client_salt.as_slice());
+                        println!(
+                            "    client salt match: {}",
+                            echoed_salt == client_salt.as_slice()
+                        );
                     } else {
                         println!("  Fixed header AEAD decrypt FAILED");
                     }
@@ -3276,10 +3301,9 @@ async fn field_ss_socks5_echo() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_socks::tcp::Socks5Stream;
 
-    let proxy_addr = std::env::var("SS_SOCKS5")
-        .unwrap_or_else(|_| "172.24.51.174:1080".to_string());
-    let target = std::env::var("SS_TARGET")
-        .unwrap_or_else(|_| "172.24.51.174:9999".to_string());
+    let proxy_addr =
+        std::env::var("SS_SOCKS5").unwrap_or_else(|_| "172.24.51.174:1080".to_string());
+    let target = std::env::var("SS_TARGET").unwrap_or_else(|_| "172.24.51.174:9999".to_string());
 
     println!("Connecting through SS SOCKS5 at {proxy_addr} → {target}...");
 
@@ -3316,12 +3340,26 @@ async fn field_ss_socks5_echo() {
     .expect("read timeout — echo server may not be running")
     .expect("read echo response through SS SOCKS5 failed");
 
-    println!("Read {} bytes: {:?}", buf.len(), String::from_utf8_lossy(&buf));
-    assert_eq!(&buf, test_data, "echo mismatch — data corrupted in SS SOCKS5 tunnel");
+    println!(
+        "Read {} bytes: {:?}",
+        buf.len(),
+        String::from_utf8_lossy(&buf)
+    );
+    assert_eq!(
+        &buf, test_data,
+        "echo mismatch — data corrupted in SS SOCKS5 tunnel"
+    );
 
-    assert_eq!(&buf, test_data, "echo mismatch — data corrupted in SS SOCKS5 tunnel");
+    assert_eq!(
+        &buf, test_data,
+        "echo mismatch — data corrupted in SS SOCKS5 tunnel"
+    );
     println!("SUCCESS: SS SOCKS5 tunnel to echo server verified!");
-    println!("  Sent {} bytes, received {} bytes, data matches", test_data.len(), buf.len());
+    println!(
+        "  Sent {} bytes, received {} bytes, data matches",
+        test_data.len(),
+        buf.len()
+    );
 }
 
 /// Field test: stream-dissolve a 200MB file without OOM.
@@ -3392,8 +3430,7 @@ async fn field_large_file_streaming_publish() {
         }
 
         let chunk = &segment_buf[..filled];
-        let (_meta, shares) =
-            dissolve_segment(chunk, &mid, seg_idx, offset, params).unwrap();
+        let (_meta, shares) = dissolve_segment(chunk, &mid, seg_idx, offset, params).unwrap();
 
         for share in &shares {
             store.put(share).unwrap();
@@ -3414,13 +3451,19 @@ async fn field_large_file_streaming_publish() {
 
     println!(
         "Streaming dissolution complete: MID={:?}, segments={}, shares={}, elapsed={:.1}s",
-        mid, seg_idx, total_shares, elapsed.as_secs_f64()
+        mid,
+        seg_idx,
+        total_shares,
+        elapsed.as_secs_f64()
     );
 
     // Verify MID is valid (non-zero).
     assert_ne!(mid.as_bytes(), &[0u8; 32], "MID should not be zero");
     assert!(total_shares > 0, "should have produced shares");
-    assert!(seg_idx >= 3, "200MB should produce at least 3 segments at 64MiB each");
+    assert!(
+        seg_idx >= 3,
+        "200MB should produce at least 3 segments at 64MiB each"
+    );
 
     println!(
         "Published: {} shares in store, {:.1} MB/s throughput",
@@ -3435,8 +3478,7 @@ async fn field_large_file_streaming_publish() {
 #[tokio::test]
 #[ignore]
 async fn field_tor_socks5_reachable() {
-    let tor_addr = std::env::var("TOR_SOCKS")
-        .unwrap_or_else(|_| "172.24.51.174:9050".to_string());
+    let tor_addr = std::env::var("TOR_SOCKS").unwrap_or_else(|_| "172.24.51.174:9050".to_string());
 
     println!("Testing Tor SOCKS5 at {tor_addr}...");
 
@@ -3598,10 +3640,7 @@ async fn field_transport_fallback_ladder_forced_failure() {
         wss_stat.session_failures,
         wss_stat.data_failures,
     );
-    println!(
-        "  last_error={:?}",
-        wss_stat.last_error
-    );
+    println!("  last_error={:?}", wss_stat.last_error);
     println!(
         "  Content recovered: {} bytes, matches: true",
         recovered.len()
@@ -3743,12 +3782,18 @@ async fn forced_transport_failure_fallback_evidence() {
         params.data_shards,
         libp2p_stat.failure_count
     );
-    assert_eq!(libp2p_stat.success_count, 0, "DirectLibp2p should have no successes");
+    assert_eq!(
+        libp2p_stat.success_count, 0,
+        "DirectLibp2p should have no successes"
+    );
     assert!(
         libp2p_stat.session_failures >= params.data_shards as u64,
         "DirectLibp2p failures should be session-phase"
     );
-    assert_eq!(libp2p_stat.data_failures, 0, "DirectLibp2p should have no data failures");
+    assert_eq!(
+        libp2p_stat.data_failures, 0,
+        "DirectLibp2p should have no data failures"
+    );
     assert!(
         libp2p_stat.last_error.is_some(),
         "DirectLibp2p should have a last_error recorded"
@@ -3764,12 +3809,18 @@ async fn forced_transport_failure_fallback_evidence() {
         params.data_shards,
         tcp_stat.failure_count
     );
-    assert_eq!(tcp_stat.success_count, 0, "TcpDirect should have no successes");
+    assert_eq!(
+        tcp_stat.success_count, 0,
+        "TcpDirect should have no successes"
+    );
     assert!(
         tcp_stat.data_failures >= params.data_shards as u64,
         "TcpDirect failures should be data-phase"
     );
-    assert_eq!(tcp_stat.session_failures, 0, "TcpDirect should have no session failures");
+    assert_eq!(
+        tcp_stat.session_failures, 0,
+        "TcpDirect should have no session failures"
+    );
     assert!(
         tcp_stat.last_error.is_some(),
         "TcpDirect should have a last_error recorded"
@@ -3785,7 +3836,10 @@ async fn forced_transport_failure_fallback_evidence() {
         params.data_shards,
         relay_stat.success_count
     );
-    assert_eq!(relay_stat.failure_count, 0, "RelayHop should have no failures");
+    assert_eq!(
+        relay_stat.failure_count, 0,
+        "RelayHop should have no failures"
+    );
 
     // 6. Verify fallback was detected: last_selected should be RelayHop (non-primary).
     assert_eq!(

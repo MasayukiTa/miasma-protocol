@@ -561,15 +561,16 @@ pub fn start_embedded_daemon(
             msg: "failed to read master key".into(),
         }
     })?;
-    let master_key: [u8; 32] = master_bytes[..32].try_into().map_err(|_| {
-        MiasmaFfiError::Other {
-            msg: "invalid master key length".into(),
-        }
-    })?;
+    let master_key: [u8; 32] =
+        master_bytes[..32]
+            .try_into()
+            .map_err(|_| MiasmaFfiError::Other {
+                msg: "invalid master key length".into(),
+            })?;
 
     // Create MiasmaNode with full networking.
-    let node = MiasmaNode::new(&master_key, NodeType::Full, &config.network.listen_addr)
-        .map_err(|e| {
+    let node =
+        MiasmaNode::new(&master_key, NodeType::Full, &config.network.listen_addr).map_err(|e| {
             tracing::warn!("node create error: {e}");
             MiasmaFfiError::Other {
                 msg: "failed to create network node".into(),
@@ -579,34 +580,31 @@ pub fn start_embedded_daemon(
     // Start DaemonServer (binds IPC + HTTP bridge + transports).
     let rt = shared_runtime();
     let result = rt.block_on(async {
-        let server = DaemonServer::start_with_transport(
-            node,
-            store,
-            path.clone(),
-            config.transport.clone(),
-        )
-        .await
-        .map_err(|e| {
-            tracing::warn!("daemon start error: {e}");
-            MiasmaFfiError::Other {
-                msg: "failed to start daemon".into(),
-            }
-        })?;
+        let server =
+            DaemonServer::start_with_transport(node, store, path.clone(), config.transport.clone())
+                .await
+                .map_err(|e| {
+                    tracing::warn!("daemon start error: {e}");
+                    MiasmaFfiError::Other {
+                        msg: "failed to start daemon".into(),
+                    }
+                })?;
 
         let http_port = server.http_bridge_port();
         let peer_id = server.peer_id().to_string();
         let shutdown_handle = server.shutdown_handle();
 
         // Derive sharing contact for this daemon.
-        let sharing_contact = {
-            let secret = miasma_core::crypto::keyderive::derive_sharing_key(&master_key)
-                .map_err(|e| MiasmaFfiError::Other {
-                    msg: format!("{e}"),
-                })?;
-            let static_secret = x25519_dalek::StaticSecret::from(*secret);
-            let pubkey = x25519_dalek::PublicKey::from(&static_secret);
-            directed::format_sharing_contact(pubkey.as_bytes(), &peer_id)
-        };
+        let sharing_contact =
+            {
+                let secret = miasma_core::crypto::keyderive::derive_sharing_key(&master_key)
+                    .map_err(|e| MiasmaFfiError::Other {
+                        msg: format!("{e}"),
+                    })?;
+                let static_secret = x25519_dalek::StaticSecret::from(*secret);
+                let pubkey = x25519_dalek::PublicKey::from(&static_secret);
+                directed::format_sharing_contact(pubkey.as_bytes(), &peer_id)
+            };
 
         // Add bootstrap peers from config.
         for addr_str in &config.network.bootstrap_peers {

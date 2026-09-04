@@ -27,6 +27,7 @@ use tracing::error;
 
 use crate::{
     crypto::hash::ContentId,
+    dissolution::{dissolve_segment, DEFAULT_SEGMENT_SIZE},
     network::{
         credential::CredentialStats,
         descriptor::{DescriptorStats, PeerDescriptor, ReachabilityKind},
@@ -37,7 +38,6 @@ use crate::{
         types::{DhtRecord, ShardLocation},
     },
     onion::{packet::OnionPacketBuilder, share::OnionShareFetcher},
-    dissolution::{dissolve_segment, DEFAULT_SEGMENT_SIZE},
     pipeline::{dissolve, DissolutionParams},
     retrieval::{
         coordinator::RetrievalCoordinator, dht_source::DhtShareSource,
@@ -515,14 +515,20 @@ impl MiasmaCoordinator {
             }
         };
 
-        tracing::info!(max_seg = max_seg, "retrieve_from_network: segment detection");
+        tracing::info!(
+            max_seg = max_seg,
+            "retrieve_from_network: segment detection"
+        );
 
         if max_seg == 0 {
             // Single-segment file — fast path.
             coord.retrieve(mid, params).await
         } else {
             // Multi-segment file: collect shares for each segment and reassemble.
-            tracing::info!(segment_count = max_seg + 1, "retrieve_from_network: multi-segment path");
+            tracing::info!(
+                segment_count = max_seg + 1,
+                "retrieve_from_network: multi-segment path"
+            );
             coord.retrieve_segments(mid, max_seg + 1, params).await
         }
     }
@@ -1662,9 +1668,7 @@ impl MiasmaCoordinator {
     }
 
     /// Get all connected peers with their addresses.
-    pub async fn connected_peer_addrs(
-        &self,
-    ) -> Vec<(PeerId, Vec<libp2p::Multiaddr>)> {
+    pub async fn connected_peer_addrs(&self) -> Vec<(PeerId, Vec<libp2p::Multiaddr>)> {
         self.dht_handle.connected_peers().await.unwrap_or_default()
     }
 

@@ -326,9 +326,7 @@ impl DaemonServer {
         // 6d. Tor transport (config-driven, always compiled).
         let tor_configured = transport_config.tor.is_configured();
         if tor_configured {
-            match crate::transport::tor::TorPayloadTransport::new(
-                transport_config.tor.clone(),
-            ) {
+            match crate::transport::tor::TorPayloadTransport::new(transport_config.tor.clone()) {
                 Ok(transport) => {
                     info!(
                         mode = transport.mode_name(),
@@ -650,7 +648,8 @@ async fn ipc_server_loop(
                 let bs = bridge_state.clone();
                 tokio::spawn(async move {
                     if let Err(e) =
-                        handle_ipc_client(stream, c, q, s, la, wp, wt, pc, pt, oq, ss, sp, dd, bs).await
+                        handle_ipc_client(stream, c, q, s, la, wp, wt, pc, pt, oq, ss, sp, dd, bs)
+                            .await
                     {
                         debug!("IPC client error: {e}");
                     }
@@ -755,7 +754,9 @@ pub(crate) async fn process_request(
             };
             let path = std::path::Path::new(&file_path);
             match coord.dissolve_and_publish_file(path, params).await {
-                Ok(mid) => ControlResponse::Published { mid: mid.to_string() },
+                Ok(mid) => ControlResponse::Published {
+                    mid: mid.to_string(),
+                },
                 Err(e) => ControlResponse::Error(e.to_string()),
             }
         }
@@ -986,7 +987,10 @@ pub(crate) async fn process_request(
                         }
                     }
                 },
-                active_transport: coord.transport_stats().last_selected().map(|s| s.to_string()),
+                active_transport: coord
+                    .transport_stats()
+                    .last_selected()
+                    .map(|s| s.to_string()),
                 fallback_active: coord.transport_stats().is_fallback_active(),
                 // Self-healing — from live node flap detector
                 flap_damping_active: coord.flap_damping_active().await.unwrap_or(false),
@@ -1078,9 +1082,7 @@ pub(crate) async fn process_request(
             let data = match std::fs::read(&file_path) {
                 Ok(d) => d,
                 Err(e) => {
-                    return ControlResponse::Error(format!(
-                        "cannot read file {file_path}: {e}"
-                    ))
+                    return ControlResponse::Error(format!("cannot read file {file_path}: {e}"))
                 }
             };
             let fname = filename.or_else(|| {
@@ -1165,9 +1167,9 @@ pub(crate) async fn process_request(
                             filename,
                             bytes_written: data.len() as u64,
                         },
-                        Err(e) => ControlResponse::Error(format!(
-                            "cannot write to {output_path}: {e}"
-                        )),
+                        Err(e) => {
+                            ControlResponse::Error(format!("cannot write to {output_path}: {e}"))
+                        }
                     }
                 }
                 Err(e) => ControlResponse::Error(e.to_string()),
