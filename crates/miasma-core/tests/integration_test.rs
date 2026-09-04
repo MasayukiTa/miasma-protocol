@@ -20,6 +20,7 @@
 //! | retrieval_latency_slo | 1 MB local retrieval << 45s P2P SLO |
 //! | multi_dissolution_isolation | two files don't contaminate each other |
 //! | empty_file_roundtrip | zero-byte content |
+//! | dissolve_and_publish_file_multi_segment_network_retrieval_is_fast | real 2-node network + dissolve_and_publish_file + both retrieval paths, fast (Phase 2.4 fix) |
 
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -885,12 +886,16 @@ async fn dht_put_blocks_until_acked() {
 /// This only proves the single-segment case over the wire -- multi-segment
 /// streaming's actual per-segment loop is already covered without the
 /// network by `retrieval::streaming::tests::streaming_by_mid_yields_all_segments`.
-/// A real multi-segment *network* variant of this test is deliberately not
-/// attempted here: `dissolve_and_publish_file`'s segment size floors at
-/// `max_segment_size_for(data_shards)` (tens of MB even at `data_shards=2`),
-/// so forcing two real segments through two live libp2p nodes would need a
-/// multi-ten-megabyte fixture file, trading a slow/flaky test for coverage
-/// the unit test above already provides.
+/// The real multi-segment *network* variant of this test -- for both this
+/// streaming path and the buffered `retrieve_from_network` path -- lives
+/// below as `dissolve_and_publish_file_multi_segment_network_retrieval_is_fast`.
+/// It used to be deliberately skipped here as "trading a slow/flaky test for
+/// coverage the unit test already provides", because before the Phase 2.4
+/// fix, forcing two real segments through two live libp2p nodes was
+/// genuinely slow (100+ seconds -- see that test's doc comment). The fix
+/// removed that cost, so the gap it left (no test ever combined
+/// `dissolve_and_publish_file` with real network retrieval) is now closed
+/// instead of worked around.
 #[tokio::test(flavor = "multi_thread")]
 async fn retrieve_from_network_streaming_single_segment_roundtrip() {
     use futures::StreamExt;
@@ -1423,22 +1428,170 @@ async fn daemon_ipc_get_to_file_roundtrip() {
 //
 // Diagnosing why it kept timing out surfaced a real, pre-existing bug shared
 // by *both* `GetToFile` and the old buffered `Get` -- `retrieve_segments` /
-// `retrieve_streaming_by_mid`'s per-segment fetch loop calls
-// `ShareSource::list_candidates(mid)`, which returns candidate addresses for
-// *every* segment of the content (it filters only by MID prefix, not by
-// segment), so each segment's fetch loop must sequentially fetch-and-reject
+// `retrieve_streaming_by_mid`'s per-segment fetch loop called
+// `ShareSource::list_candidates(mid)`, which returned candidate addresses for
+// *every* segment of the content (it filtered only by MID prefix, not by
+// segment), so each segment's fetch loop had to sequentially fetch-and-reject
 // shares belonging to every *other* segment before finding enough valid ones
 // for its own. Measured locally: a 20 MB / 2-segment / data_shards=2 file
 // took 136s end-to-end (a single segment's fetch alone took 44-65s for just
 // 2 shares); a 200 MB / 4-segment / default-params (data_shards=10) file did
-// not finish retrieval within 900s. This is not something either Phase 2.3
+// not finish retrieval within 900s. This was not something either Phase 2.3
 // or 2.4 introduced -- no prior test exercised `dissolve_and_publish_file`
-// together with real network retrieval, so it was never caught. See
-// `docs/tasks/p2p-content-transfer-hardening.md`'s Phase 2.4 entry and
-// `docs/tasks/remaining-tasks-prioritized.md` for the full writeup; fixing
-// the underlying candidate-listing algorithm is its own scoped follow-up,
-// not a rider on this phase. `daemon_ipc_get_to_file_roundtrip` above is the
-// real correctness proof for `GetToFile` at a size this bug doesn't obscure.
+// together with real network retrieval, so it was never caught.
+//
+// FIXED (Phase 2.4 follow-up): `ShareSource` gained a segment-scoped
+// `list_candidates_for_segment(mid, segment_index)` (default impl falls back
+// to unfiltered `list_candidates` for backends without per-segment location
+// data). `FallbackShareSource` -- the real network-path source, used by both
+// `retrieve_from_network` and `retrieve_from_network_streaming` -- overrides
+// it to filter `DhtRecord::locations` by `segment_index` *before* building
+// any locator, using the `segment_index` each `ShardLocation` already
+// carried. `RetrievalCoordinator::collect_k_shares` and
+// `StreamingRetrievalCoordinator::{retrieve_streaming, retrieve_streaming_by_mid}`
+// now call it instead of the unfiltered `list_candidates`, so a segment's
+// fetch loop never sees, let alone fetches and rejects, another segment's
+// shares -- O(total_shards) round-trips per segment instead of
+// O(total_segments * total_shards). See
+// `dissolve_and_publish_file_multi_segment_network_retrieval_is_fast` below
+// for the regression test (real 2-node network, real
+// `dissolve_and_publish_file`, both retrieval paths) and
+// `docs/tasks/p2p-content-transfer-hardening.md`'s Phase 2.4 entry /
+// `docs/tasks/remaining-tasks-prioritized.md`'s P1-7 entry for the full
+// writeup. `daemon_ipc_get_to_file_roundtrip` above remains the correctness
+// proof for `GetToFile` at a size too small to have shown this bug.
+
+/// Regression test for the Phase 2.4 candidate-listing fix described above.
+///
+/// Two real libp2p nodes, real `dissolve_and_publish_file` (the streaming
+/// per-segment publish path -- never before combined with real network
+/// retrieval by any test), and both network retrieval entry points
+/// (`retrieve_from_network` and `retrieve_from_network_streaming`), against a
+/// file just large enough to force two genuine segments.
+///
+/// The file size is the smallest one that actually exercises the bug:
+/// `max_segment_size_for(2)` (crate-private, `network::coordinator.rs`)
+/// clamps the per-segment size for `data_shards=2` to
+/// `(SHARE_MSG_MAX - wire_overhead) * data_shards` = `(8 MiB - 4096) * 2` =
+/// 16,769,024 bytes; duplicated here as a local constant since this
+/// integration test only sees the public API. A file just over that produces
+/// one full segment plus a small second one -- close to this bug's original
+/// 20 MB/data_shards=2 reproduction, without padding the fixture any larger
+/// than necessary.
+///
+/// Before the fix, this exact shape (2 segments, data_shards=2/total_shards=3,
+/// same 2-node topology) did not even complete within a 120s bound -- verified
+/// directly by running this test body against the pre-fix candidate-listing
+/// code, which timed out rather than converging (consistent with the original
+/// bug report: 136s for a comparable 20 MB file, and non-completion within
+/// 900s for a larger one). After the fix each retrieval path -- which now
+/// fetches at most `total_shards` candidates per segment instead of
+/// `total_segments * total_shards` -- consistently completes in well under a
+/// minute. The bounds below are set well above that (with real dev-machine
+/// variance observed up to ~100s per path, and CI's Linux runner expected to
+/// be faster and less variable than this Windows dev box's own network
+/// stack) while still being far tighter than the demonstrated pre-fix
+/// non-convergence, so a regression back toward
+/// O(total_segments * total_shards) fails the test instead of just running
+/// long and getting shrugged off.
+#[tokio::test(flavor = "multi_thread")]
+async fn dissolve_and_publish_file_multi_segment_network_retrieval_is_fast() {
+    use futures::StreamExt;
+    use std::time::{Duration, Instant};
+    use tokio::time::timeout;
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("miasma_core=info")
+        .try_init();
+
+    let result = timeout(Duration::from_secs(360), async {
+        // A = publisher, B = retriever. Neither opts in to hosting pushed
+        // shares, so (as in `p2p_kademlia_full_roundtrip`) every share stays
+        // on A and B's retrieval genuinely goes over the wire for each one.
+        let (coord_a, _store_a) = spawn_phase21_node(0xF1, 0).await;
+        let (coord_b, _store_b) = spawn_phase21_node(0xF2, 0).await;
+
+        let peer_id_a = *coord_a.peer_id();
+        let addr_a: Multiaddr = coord_a.listen_addrs()[0].parse().unwrap();
+        coord_b.add_bootstrap_peer(peer_id_a, addr_a).await.unwrap();
+        coord_b.bootstrap_dht().await.unwrap();
+        coord_b
+            .wait_until_peer_connected(peer_id_a, Duration::from_secs(10))
+            .await
+            .expect("Node B never connected to Node A");
+
+        let params = DissolutionParams {
+            data_shards: 2,
+            total_shards: 3,
+        };
+
+        // See doc comment above for the derivation of this floor.
+        const SEGMENT_SIZE_FLOOR_K2: usize = (8 * 1024 * 1024 - 4096) * 2;
+        let file_len = SEGMENT_SIZE_FLOOR_K2 + 64 * 1024;
+        let content: Vec<u8> = (0..file_len).map(|i| (i % 251) as u8).collect();
+
+        let src_dir = tempfile::tempdir().unwrap();
+        let file_path = src_dir.path().join("multi_segment_input.bin");
+        std::fs::write(&file_path, &content).unwrap();
+
+        let report = coord_a
+            .dissolve_and_publish_file_with_options(&file_path, params, PublishOptions::default())
+            .await
+            .expect("dissolve_and_publish_file failed");
+        assert_eq!(
+            report.remote_distinct_shards_per_segment.len(),
+            2,
+            "fixture file must produce exactly two segments -- adjust its size \
+             if `max_segment_size_for` ever changes"
+        );
+
+        // ── Buffered path: retrieve_from_network → RetrievalCoordinator::retrieve_segments ──
+        let started = Instant::now();
+        let recovered = coord_b
+            .retrieve_from_network(&report.mid, params)
+            .await
+            .expect("retrieve_from_network failed");
+        let buffered_elapsed = started.elapsed();
+        assert_eq!(recovered, content, "buffered retrieval content mismatch");
+        assert!(
+            buffered_elapsed < Duration::from_secs(150),
+            "buffered multi-segment network retrieval took {buffered_elapsed:?} -- \
+             the Phase 2.4 segment-scoped candidate-listing fix appears to have \
+             regressed (pre-fix, this exact shape did not even complete within 120s)"
+        );
+        println!("[phase2.4] buffered retrieval: {buffered_elapsed:?}");
+
+        // ── Streaming path: retrieve_from_network_streaming → StreamingRetrievalCoordinator::retrieve_streaming_by_mid ──
+        let started = Instant::now();
+        let mut stream = coord_b
+            .retrieve_from_network_streaming(&report.mid, params)
+            .await
+            .expect("retrieve_from_network_streaming failed to start");
+        let mut streamed: Vec<u8> = Vec::new();
+        let mut segment_count = 0usize;
+        while let Some(chunk) = stream.next().await {
+            streamed.extend(chunk.expect("segment fetch/reconstruct failed"));
+            segment_count += 1;
+        }
+        let streaming_elapsed = started.elapsed();
+        assert_eq!(streamed, content, "streaming retrieval content mismatch");
+        assert_eq!(segment_count, 2, "expected both segments to be yielded");
+        assert!(
+            streaming_elapsed < Duration::from_secs(150),
+            "streaming multi-segment network retrieval took {streaming_elapsed:?} -- \
+             the Phase 2.4 segment-scoped candidate-listing fix appears to have regressed"
+        );
+        println!("[phase2.4] streaming retrieval: {streaming_elapsed:?}");
+
+        coord_a.shutdown().await;
+        coord_b.shutdown().await;
+    })
+    .await;
+
+    result.expect(
+        "dissolve_and_publish_file_multi_segment_network_retrieval_is_fast timed out (360s)",
+    );
+}
 
 // ── Phase 2.1: shard distribution to remote peers ──────────────────────────────
 //
