@@ -2630,6 +2630,7 @@ impl MiasmaNode {
                     request_response::Message::Request {
                         request, channel, ..
                     },
+                ..
             } => {
                 // Verify the requester's PoW.
                 match self.verify_remote_pow(&peer, &request.pow) {
@@ -2671,6 +2672,7 @@ impl MiasmaNode {
                         request_id,
                         response,
                     },
+                ..
             } => {
                 self.pending_admissions.remove(&request_id);
                 match self.verify_remote_pow(&peer, &response.pow) {
@@ -2688,6 +2690,7 @@ impl MiasmaNode {
                 request_id,
                 peer,
                 error,
+                ..
             } => {
                 self.pending_admissions.remove(&request_id);
                 warn!("admission.outbound_failure peer={peer} error={error}");
@@ -2843,6 +2846,7 @@ impl MiasmaNode {
                     request_response::Message::Request {
                         request, channel, ..
                     },
+                ..
             } => {
                 // Only issue credentials to verified peers.
                 let (credential, bbs_credential) = if self.peer_registry.is_verified(&peer) {
@@ -2890,6 +2894,7 @@ impl MiasmaNode {
                         request_id,
                         response,
                     },
+                ..
             } => {
                 self.pending_credential_reqs.remove(&request_id);
                 if let Some(cred) = response.credential {
@@ -2962,6 +2967,7 @@ impl MiasmaNode {
                 request_id,
                 peer,
                 error,
+                ..
             } => {
                 self.pending_credential_reqs.remove(&request_id);
                 debug!("credential.outbound_failure peer={peer} error={error}");
@@ -2986,6 +2992,7 @@ impl MiasmaNode {
                     request_response::Message::Request {
                         request, channel, ..
                     },
+                ..
             } => {
                 // Store their descriptor if signature is valid.
                 if let Some(desc) = request.descriptor {
@@ -3018,6 +3025,7 @@ impl MiasmaNode {
                         request_id,
                         response,
                     },
+                ..
             } => {
                 self.pending_descriptor_reqs.remove(&request_id);
                 if let Some(desc) = response.descriptor {
@@ -3036,6 +3044,7 @@ impl MiasmaNode {
                 request_id,
                 peer,
                 error,
+                ..
             } => {
                 self.pending_descriptor_reqs.remove(&request_id);
                 debug!("descriptor.outbound_failure peer={peer} error={error}");
@@ -3066,6 +3075,7 @@ impl MiasmaNode {
                     request_response::Message::Request {
                         request, channel, ..
                     },
+                ..
             } => {
                 debug!(
                     "onion_relay.inbound from={peer} variant={}",
@@ -3225,6 +3235,7 @@ impl MiasmaNode {
                 request_id,
                 peer,
                 error,
+                ..
             } => {
                 warn!("onion_relay.outbound_failure peer={peer} error={error}");
                 // Clean up and propagate error.
@@ -3315,6 +3326,7 @@ impl MiasmaNode {
                     request_response::Message::Request {
                         request, channel, ..
                     },
+                ..
             } => {
                 // Inbound directed request from a peer.
                 // For now, handle Invite by accepting and storing to inbox.
