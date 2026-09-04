@@ -775,11 +775,7 @@ fn run_bridge_import(
             if output.status.success() {
                 // Parse MIDs from stdout — bridge prints one MID per line.
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                let mids: Vec<String> = stdout
-                    .lines()
-                    .filter(|l| l.starts_with("miasma:"))
-                    .map(|l| l.trim().to_string())
-                    .collect();
+                let mids = parse_mids_from_stdout(&stdout);
                 if mids.is_empty() {
                     warn!("Bridge succeeded but produced no MIDs. stdout: {stdout}");
                 }
@@ -791,6 +787,22 @@ fn run_bridge_import(
         }
         Err(e) => WorkerResult::Err(format!("Bridge process error: {e}")),
     }
+}
+
+/// Extract the MIDs the bridge printed on stdout.
+///
+/// The bridge indents them under a `[3/3] Dissolved N file(s)` heading, so the
+/// `miasma:` test has to run on the *trimmed* line. Trimming only after the
+/// filter — as this did originally — matched nothing at all, which meant that
+/// even once the bridge's argument dispatch was fixed, every import would still
+/// have reported "no MIDs".
+fn parse_mids_from_stdout(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("miasma:"))
+        .map(str::to_owned)
+        .collect()
 }
 
 fn is_daemon_down(msg: &str) -> bool {
@@ -952,5 +964,55 @@ fn parse_retention(s: &str) -> Result<u64, String> {
         m.parse::<u64>().map(|v| v * 60).map_err(|e| e.to_string())
     } else {
         s.parse::<u64>().map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_mids_from_stdout;
+
+    /// Verbatim shape of what `miasma-bridge dissolve` writes on success —
+    /// the MIDs are indented six spaces under the stage heading.
+    const BRIDGE_STDOUT: &str = "\
+[1/3] Preflight check
+      Info hash:    abcdef0123456789abcdef0123456789abcdef01
+      Data dir:     C:\\Users\\me\\AppData\\Roaming\\miasma
+
+[2/3] Downloading torrent...
+
+[3/3] Dissolved 2 file(s) into Miasma:
+      miasma:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+      miasma:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+
+Done. Use 'miasma get <MID>' to retrieve content.
+";
+
+    #[test]
+    fn indented_mids_are_parsed() {
+        assert_eq!(
+            parse_mids_from_stdout(BRIDGE_STDOUT),
+            vec![
+                "miasma:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string(),
+                "miasma:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn unindented_mids_are_parsed_too() {
+        assert_eq!(
+            parse_mids_from_stdout("miasma:ZZZZ\n"),
+            vec!["miasma:ZZZZ".to_string()]
+        );
+    }
+
+    #[test]
+    fn prose_mentioning_mids_is_not_collected() {
+        // Only lines that *are* a MID count; the trailing hint line mentions
+        // "miasma" but does not start with the scheme once trimmed.
+        assert!(parse_mids_from_stdout(
+            "Done. Use 'miasma get <MID>' to retrieve content.\n[2/3] Downloading torrent...\n"
+        )
+        .is_empty());
     }
 }

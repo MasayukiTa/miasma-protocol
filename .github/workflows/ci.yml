@@ -68,8 +68,14 @@ jobs:
       - name: Test desktop
         run: cargo test -p miasma-desktop --locked
 
-      - name: Build CLI and bridge
-        run: cargo build -p miasma-cli -p miasma-bridge --locked
+      # The bridge's tests were only ever built, never run, so its entire
+      # suite (including the cross-process BitTorrent round trip) was
+      # invisible to CI. `cargo test` builds the binary too.
+      - name: Test bridge
+        run: cargo test -p miasma-bridge --locked
+
+      - name: Build CLI
+        run: cargo build -p miasma-cli --locked
 
   test-web-wasm:
     name: Web/WASM Tests (Ubuntu)
