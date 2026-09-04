@@ -28,12 +28,14 @@ Get to the point where README's "Resists: Content seizure via single node compro
 - [x] README's "Resists" claim moved to "Does NOT resist" until Phase 2 makes it true again.
 - [x] This doc created; cross-reference added to `remaining-tasks-prioritized.md`.
 
-## Phase 1 -- fix what's broken, minimal new surface
-- [ ] 1.1 DHT PUT waits for real network ack (`node.rs`'s already-half-built `pending_puts` map).
-- [ ] 1.2 Kademlia config made explicit instead of silent upstream defaults.
-- [ ] 1.3 `wait_until_peer_connected` readiness primitive added (poll-based, zero new event-loop state).
-- [ ] 1.4 `p2p_kademlia_full_roundtrip` un-ignored, fixed sleeps replaced with 1.3's primitive, 20/20 green locally.
-- [ ] 1.5 `SHARE_MSG_MAX` vs segment-size/shard-count interaction fixed via dynamic clamp (`max_segment_size_for`).
+## Phase 1 -- fix what's broken, minimal new surface (DONE, 2026-09-04)
+- [x] 1.1 DHT PUT waits for real network ack (`node.rs`'s already-half-built `pending_puts` map). Also had to handle the zero-connected-peers case explicitly: `put_record`'s `Quorum::One` fails immediately with `QuorumFailed { success: [], .. }` when there's nobody to replicate to yet -- this broke `cli_smoke_loopback` (which publishes before any peer exists, by design) until fixed to reply `Ok` immediately when `connected_peers().next().is_none()` rather than waiting on a quorum that cannot be met.
+- [x] 1.2 Kademlia config made explicit (`set_query_timeout`=20s, `set_replication_factor`=8, `set_publication_interval`/`set_provider_publication_interval`=20min, `set_record_ttl`=24h) instead of silent upstream defaults.
+- [x] 1.3 `wait_until_peer_connected` readiness primitive added on `DhtHandle` and `MiasmaCoordinator` (poll-based, zero new event-loop state).
+- [x] 1.4 `p2p_kademlia_full_roundtrip` un-ignored, fixed sleeps replaced with 1.3's primitive + 1.1's real PUT-ack. **20/20 green** in local repeat runs (was quarantined at "~80% locally" before this fix).
+- [x] 1.5 `SHARE_MSG_MAX` vs segment-size/shard-count interaction fixed via dynamic clamp (`max_segment_size_for` in `coordinator.rs`).
+- New test `dht_put_blocks_until_acked` (integration_test.rs): 20/20 green.
+- Full suite: `cargo test -p miasma-core --locked` -- 706 passed / 9 ignored / 0 failed (was 701/10/0 baseline; net +5 passed from 4 new tests + 1 un-ignored, -1 ignored).
 
 ## Phase 2 -- wire in what already exists
 - [ ] 2.1 Shard distribution to remote peers via existing `ShareDistributor`/`ShareSink`, pushed over an enum-extended `/miasma/share/1.0.0`. **External design review checkpoint -- see below.**
