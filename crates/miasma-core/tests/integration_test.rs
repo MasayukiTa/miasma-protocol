@@ -874,6 +874,141 @@ async fn dht_put_blocks_until_acked() {
     result.expect("dht_put_blocks_until_acked timed out (30s)");
 }
 
+/// Regression test for Phase 2.2: `retrieve_from_network` retries on
+/// `InsufficientShares` instead of failing on the very first attempt.
+///
+/// Node B starts retrieving *before* Node A has published anything (the DHT
+/// record genuinely does not exist yet from B's point of view). A publishes on
+/// a short delay, concurrently with B's retrieve call. Before this fix, B's
+/// single-pass retrieve would have failed outright on this first exchange; the
+/// retry wrapper's backoff gives A's publish time to land.
+#[tokio::test(flavor = "multi_thread")]
+async fn retrieve_from_network_retries_until_record_propagates() {
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("miasma_core=info")
+        .try_init();
+
+    let result = timeout(Duration::from_secs(30), async {
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let store_a = Arc::new(LocalShareStore::open(dir_a.path(), 100).unwrap());
+        let store_b = Arc::new(LocalShareStore::open(dir_b.path(), 100).unwrap());
+
+        let key_a = [0x99u8; 32];
+        let key_b = [0xAAu8; 32];
+
+        let mut node_a = MiasmaNode::new(&key_a, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+        let addrs_a = node_a.collect_listen_addrs(400).await;
+        let listen_addr_a_str = addrs_a[0].to_string();
+        let coord_a = Arc::new(
+            MiasmaCoordinator::start(node_a, store_a.clone(), vec![listen_addr_a_str.clone()])
+                .await,
+        );
+        let peer_id_a = *coord_a.peer_id();
+
+        let mut node_b = MiasmaNode::new(&key_b, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+        let addrs_b = node_b.collect_listen_addrs(400).await;
+        let coord_b = MiasmaCoordinator::start(node_b, store_b.clone(), vec![]).await;
+
+        let addr_a: Multiaddr = listen_addr_a_str.parse().unwrap();
+        coord_b.add_bootstrap_peer(peer_id_a, addr_a).await.unwrap();
+        coord_b.bootstrap_dht().await.unwrap();
+        coord_b
+            .wait_until_peer_connected(peer_id_a, Duration::from_secs(10))
+            .await
+            .expect("Node B never connected to Node A");
+
+        let content = b"published late on purpose, to force at least one retry";
+        let params = DissolutionParams {
+            data_shards: 2,
+            total_shards: 3,
+        };
+
+        // Precompute the MID so B can start retrieving before A has actually
+        // published (dissolve() is deterministic given the same content+params).
+        let mid = ContentId::compute(content, &params.to_param_bytes());
+
+        // A publishes after a short delay, concurrently with B's retrieve call
+        // below -- B's first attempt(s) must race against this and lose, then
+        // succeed via retry once the record actually exists.
+        let coord_a_clone = coord_a.clone();
+        let content_owned = content.to_vec();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            coord_a_clone
+                .dissolve_and_publish(&content_owned, params)
+                .await
+                .expect("delayed dissolve_and_publish failed");
+        });
+
+        let recovered = coord_b
+            .retrieve_from_network(&mid, params)
+            .await
+            .expect("retrieve_from_network should have retried until the record propagated");
+
+        assert_eq!(recovered.as_slice(), content as &[u8]);
+
+        let _ = addrs_b; // kept for symmetry/documentation; not otherwise used
+        coord_a.shutdown().await;
+        coord_b.shutdown().await;
+    })
+    .await;
+
+    result.expect("retrieve_from_network_retries_until_record_propagates timed out (30s)");
+}
+
+/// Regression test for Phase 2.2: a genuinely nonexistent record must not be
+/// retried forever. The retry policy (base=1s, max_delay=15s, max_attempts=6)
+/// bounds total wait to roughly a minute, not an unbounded loop.
+///
+/// Ignored by default: takes 40-100+s depending on CPU contention from this
+/// binary's other concurrently-run tests, which is disproportionate for an
+/// edge case that isn't on the hot path.
+/// Run manually: `cargo test -p miasma-core --test integration_test retrieve_from_network_gives_up -- --ignored --nocapture`
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn retrieve_from_network_gives_up_on_nonexistent_record() {
+    use std::time::{Duration, Instant};
+    use tokio::time::timeout;
+
+    let dir_a = tempfile::tempdir().unwrap();
+    let store_a = Arc::new(LocalShareStore::open(dir_a.path(), 100).unwrap());
+    let key_a = [0xBBu8; 32];
+    let mut node_a = MiasmaNode::new(&key_a, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+    let _addrs_a = node_a.collect_listen_addrs(400).await;
+    let coord_a = MiasmaCoordinator::start(node_a, store_a, vec![]).await;
+
+    let params = DissolutionParams {
+        data_shards: 2,
+        total_shards: 3,
+    };
+    // A MID nobody ever published -- the DHT GET will genuinely find nothing.
+    let mid = ContentId::compute(b"never published", &params.to_param_bytes());
+
+    // The bound that actually matters is "this terminates at all" (the retry
+    // policy's max_attempts=6, not an unbounded/infinite loop) -- asserted by
+    // the outer timeout itself. A secondary elapsed-time assertion here would
+    // be measuring wall-clock time under whatever CPU contention this test
+    // happens to run under (this binary spins up many concurrent libp2p nodes
+    // across its other tests), which is fragile and not what this test is
+    // actually about; the retry policy's own unit tests (daemon::replication)
+    // already cover the exact backoff timing in isolation.
+    let _started = Instant::now();
+    let result = timeout(
+        Duration::from_secs(180),
+        coord_a.retrieve_from_network(&mid, params),
+    )
+    .await
+    .expect("retrieve_from_network_gives_up_on_nonexistent_record: retry loop ran past the 180s outer timeout -- it is not bounded");
+
+    assert!(result.is_err(), "a never-published MID must not succeed");
+
+    coord_a.shutdown().await;
+}
+
 // ── Test 20: CLI smoke path — mirrors `network-publish` → `network-get` ───────
 //
 // This test is the in-process analogue of the 2-terminal CLI runbook:
