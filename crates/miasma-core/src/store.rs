@@ -42,10 +42,50 @@ const SHARE_EXT: &str = ".ms";
 
 // ─── LRU index ───────────────────────────────────────────────────────────────
 
+/// Who a stored share belongs to.
+///
+/// Phase 2.1: a node can now hold shares on behalf of a remote publisher
+/// (`Hosted`, via an inbound `/miasma/share-store/1.0.0` request) in addition
+/// to shares it produced by dissolving its own content (`Owned`). The two
+/// must never share one quota/eviction policy -- a peer this node is merely
+/// helping distribute content for must never be able to evict this node's
+/// own shares (or another publisher's already-hosted shares) just by pushing
+/// enough junk. `#[serde(default)]` on the field that carries this so every
+/// pre-2.1 `store_index.json` entry (with no `origin` at all) deserializes as
+/// `Owned` -- the only kind that existed before this phase.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub enum ShareOrigin {
+    #[default]
+    Owned,
+    Hosted,
+}
+
+/// Identifies the logical "slot" a hosted share occupies: the same
+/// `(mid_prefix, segment_index, slot_index)` triple that
+/// `redistribute_segment` (best-effort repair) or a second dissolution of
+/// identical content can independently regenerate with different bytes
+/// (fresh key, fresh RS/SSS output) and a different content address. Content
+/// addressing (`BLAKE3(bincode(share))`) means those generations would
+/// otherwise coexist forever instead of the newer one replacing the older --
+/// see the "hosted put replaces same-tuple entry" logic in `put_hosted`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+struct HostedTuple {
+    mid_prefix: [u8; 8],
+    segment_index: u32,
+    slot_index: u16,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct IndexEntry {
     size_bytes: u64,
     last_accessed_secs: u64,
+    #[serde(default)]
+    origin: ShareOrigin,
+    /// Set only for `Hosted` entries (including ones stored before this field
+    /// existed, which get `None` and are simply never replaced by tuple --
+    /// they age out via normal hosted-quota pressure instead).
+    #[serde(default)]
+    hosted_tuple: Option<HostedTuple>,
 }
 
 type StoreIndex = HashMap<String, IndexEntry>;
@@ -218,6 +258,13 @@ fn rebuild_index(data_dir: &Path, shares_dir: &Path) {
                 IndexEntry {
                     size_bytes: size,
                     last_accessed_secs: now,
+                    // Rebuild has no way to recover which shares were hosted
+                    // on behalf of a remote publisher vs. produced locally --
+                    // `Owned` is the safe default (worst case, a formerly-
+                    // hosted share becomes eligible for owned-quota LRU
+                    // eviction sooner than ideal; never a security issue).
+                    origin: ShareOrigin::Owned,
+                    hosted_tuple: None,
                 },
             );
         }
@@ -232,13 +279,37 @@ fn rebuild_index(data_dir: &Path, shares_dir: &Path) {
 
 /// Encrypted local share store.
 ///
-/// Thread-safety: not `Sync`. Wrap in `Arc<Mutex<_>>` for shared access.
+/// Thread-safety: safe to share as `Arc<LocalShareStore>` across concurrent
+/// callers -- `write_lock` serializes every index read-modify-write sequence
+/// (`put`/`put_hosted`/`delete`/`evict_if_needed`) into one critical section
+/// each, which is what actually matters here (the on-disk index is the only
+/// mutable shared state; individual share files are written once, under a
+/// content-derived name, and never mutated in place). Before Phase 2.1 this
+/// was documented as "not thread-safe, wrap in `Arc<Mutex<_>>`" -- true at the
+/// time because there was only ever one caller (local dissolution); Phase
+/// 2.1 added a second writer (inbound network `Store` requests), which is
+/// exactly the case that comment was warning about.
 pub struct LocalShareStore {
     data_dir: PathBuf,
     shares_dir: PathBuf,
     master_key: Zeroizing<[u8; 32]>,
-    /// Quota in bytes.
+    /// Quota in bytes for `Owned` shares (produced by this node's own
+    /// dissolutions).
     quota_bytes: u64,
+    /// Quota in bytes for `Hosted` shares (accepted on behalf of a remote
+    /// publisher via inbound `/miasma/share-store/1.0.0`). Separate from
+    /// `quota_bytes` so a peer this node is merely helping distribute
+    /// content for can never evict this node's own shares, or another
+    /// publisher's already-hosted shares, just by pushing enough shares of
+    /// its own -- see `put_hosted`'s reject-rather-than-evict behaviour.
+    /// Zero by default (a node must opt in via `with_hosted_quota_mb` to
+    /// accept any pushed shares at all).
+    hosted_quota_bytes: u64,
+    /// Serializes every index read-modify-write sequence across all mutating
+    /// methods, so two concurrent writers (e.g. a local dissolve and an
+    /// inbound network `Store` request) can never interleave and corrupt or
+    /// silently drop an update to `store_index.json`.
+    write_lock: std::sync::Mutex<()>,
 }
 
 impl LocalShareStore {
@@ -276,7 +347,22 @@ impl LocalShareStore {
             shares_dir,
             master_key,
             quota_bytes: quota_mb * 1024 * 1024,
+            hosted_quota_bytes: 0,
+            write_lock: std::sync::Mutex::new(()),
         })
+    }
+
+    /// Opt this store in to accepting inbound-hosted shares (from
+    /// `/miasma/share-store/1.0.0`), with their own byte budget separate
+    /// from the owned-share quota. Call before wrapping in `Arc` --
+    /// `Arc::new(LocalShareStore::open(dir, quota_mb)?.with_hosted_quota_mb(50))`.
+    ///
+    /// A store that never calls this has `hosted_quota_bytes == 0`, so
+    /// `put_hosted` always rejects -- a node must opt in to hosting other
+    /// publishers' shares, not have it happen implicitly.
+    pub fn with_hosted_quota_mb(mut self, hosted_quota_mb: u64) -> Self {
+        self.hosted_quota_bytes = hosted_quota_mb * 1024 * 1024;
+        self
     }
 
     /// Content-address of a share: `BLAKE3(bincode(share))` as lowercase hex.
@@ -285,11 +371,14 @@ impl LocalShareStore {
         Ok(hex::encode(blake3::hash(&bytes).as_bytes()))
     }
 
-    /// Store a share. Returns its content address.
+    /// Store a share this node produced itself (owned quota). Returns its
+    /// content address.
     ///
     /// If the address already exists (idempotent re-store), updates last_accessed.
-    /// If quota is exceeded, evicts LRU entries until space is available.
+    /// If quota is exceeded, evicts LRU entries (owned entries only) until
+    /// space is available.
     pub fn put(&self, share: &MiasmaShare) -> Result<String, MiasmaError> {
+        let _guard = self.write_lock.lock().unwrap();
         let address = Self::address_of(share)?;
         let file_path = self.share_path(&address);
 
@@ -298,7 +387,7 @@ impl LocalShareStore {
         let size = plaintext.len() as u64;
 
         // Ensure quota.
-        self.evict_if_needed(size, &address)?;
+        self.evict_if_needed_locked(size, &address)?;
 
         // Derive per-file key and encrypt.
         let file_key = derive_file_key(&self.master_key, &address)?;
@@ -313,11 +402,102 @@ impl LocalShareStore {
             IndexEntry {
                 size_bytes: blob.len() as u64,
                 last_accessed_secs: now_secs(),
+                origin: ShareOrigin::Owned,
+                hosted_tuple: None,
             },
         );
         save_index(&self.data_dir, &index)?;
 
         Ok(address)
+    }
+
+    /// Store a share on behalf of a remote publisher (hosted quota), as
+    /// accepted via inbound `/miasma/share-store/1.0.0`. Returns its content
+    /// address.
+    ///
+    /// Unlike `put`, this **never evicts** owned shares or other publishers'
+    /// hosted shares to make room -- a peer merely being helped with
+    /// distribution must not be able to push its way past what it was
+    /// allocated. When the hosted budget would be exceeded, returns
+    /// `Err(MiasmaError::Storage(..))` (reject, not evict).
+    ///
+    /// If an existing hosted entry already occupies the same
+    /// `(mid_prefix, segment_index, slot_index)` tuple as `share` (a newer
+    /// generation from `redistribute_segment`'s repair path, or from the
+    /// same content being re-dissolved and re-pushed), that older entry is
+    /// replaced rather than left to coexist ambiguously with the new one --
+    /// see `HostedTuple`'s doc comment.
+    pub fn put_hosted(&self, share: &MiasmaShare) -> Result<String, MiasmaError> {
+        let _guard = self.write_lock.lock().unwrap();
+        let address = Self::address_of(share)?;
+        let file_path = self.share_path(&address);
+
+        let plaintext = share.to_bytes()?;
+        let size = plaintext.len() as u64;
+
+        let mut index = load_index(&self.data_dir);
+        let already_present = index.contains_key(&address);
+
+        let tuple = HostedTuple {
+            mid_prefix: share.mid_prefix,
+            segment_index: share.segment_index,
+            slot_index: share.slot_index,
+        };
+        let conflicting_old = index
+            .iter()
+            .find(|(addr, e)| {
+                addr.as_str() != address
+                    && e.origin == ShareOrigin::Hosted
+                    && e.hosted_tuple == Some(tuple)
+            })
+            .map(|(addr, e)| (addr.clone(), e.size_bytes));
+
+        if !already_present {
+            let current_hosted: u64 = index
+                .values()
+                .filter(|e| e.origin == ShareOrigin::Hosted)
+                .map(|e| e.size_bytes)
+                .sum();
+            let freed_by_replacement = conflicting_old.as_ref().map(|(_, sz)| *sz).unwrap_or(0);
+            if current_hosted + size - freed_by_replacement > self.hosted_quota_bytes {
+                return Err(MiasmaError::Storage(
+                    "hosted share storage quota exceeded".into(),
+                ));
+            }
+        }
+
+        // Replace an older generation of the same (mid, segment, slot) tuple
+        // rather than let both coexist.
+        if let Some((old_addr, _)) = &conflicting_old {
+            let _ = std::fs::remove_file(self.share_path(old_addr));
+            index.remove(old_addr);
+        }
+
+        let file_key = derive_file_key(&self.master_key, &address)?;
+        let blob = encrypt_share(&file_key, &plaintext)?;
+        atomic_write(&file_path, &blob)?;
+
+        index.insert(
+            address.clone(),
+            IndexEntry {
+                size_bytes: blob.len() as u64,
+                last_accessed_secs: now_secs(),
+                origin: ShareOrigin::Hosted,
+                hosted_tuple: Some(tuple),
+            },
+        );
+        save_index(&self.data_dir, &index)?;
+
+        Ok(address)
+    }
+
+    /// Current total size of `Hosted`-origin share blobs in bytes.
+    pub fn used_hosted_bytes(&self) -> u64 {
+        load_index(&self.data_dir)
+            .values()
+            .filter(|e| e.origin == ShareOrigin::Hosted)
+            .map(|e| e.size_bytes)
+            .sum()
     }
 
     /// Retrieve a share by its content address.
@@ -351,6 +531,7 @@ impl LocalShareStore {
 
     /// Delete a specific share by address.
     pub fn delete(&self, address: &str) -> Result<(), MiasmaError> {
+        let _guard = self.write_lock.lock().unwrap();
         let _ = std::fs::remove_file(self.share_path(address));
         let mut index = load_index(&self.data_dir);
         index.remove(address);
@@ -417,20 +598,32 @@ impl LocalShareStore {
         self.shares_dir.join(format!("{}{}", address, SHARE_EXT))
     }
 
-    /// Evict LRU entries until `needed_bytes` fit within quota.
-    /// Never evicts `skip_address` (the entry being written).
-    fn evict_if_needed(&self, needed_bytes: u64, skip_address: &str) -> Result<(), MiasmaError> {
+    /// Evict LRU *owned* entries until `needed_bytes` fit within the owned
+    /// quota. Never evicts `skip_address` (the entry being written) or any
+    /// `Hosted` entry -- a local dissolve running low on owned-quota space
+    /// must never free room by deleting shares this node is hosting on
+    /// behalf of a remote publisher. Caller must already hold `write_lock`.
+    fn evict_if_needed_locked(
+        &self,
+        needed_bytes: u64,
+        skip_address: &str,
+    ) -> Result<(), MiasmaError> {
         let mut index = load_index(&self.data_dir);
-        let current: u64 = index.values().map(|e| e.size_bytes).sum();
+        let current: u64 = index
+            .values()
+            .filter(|e| e.origin == ShareOrigin::Owned)
+            .map(|e| e.size_bytes)
+            .sum();
 
         if current + needed_bytes <= self.quota_bytes {
             return Ok(());
         }
 
-        // Sort by last_accessed ascending (oldest first).
+        // Sort by last_accessed ascending (oldest first). Hosted entries are
+        // never eviction candidates here.
         let mut entries: Vec<(String, u64, u64)> = index
             .iter()
-            .filter(|(addr, _)| addr.as_str() != skip_address)
+            .filter(|(addr, e)| addr.as_str() != skip_address && e.origin == ShareOrigin::Owned)
             .map(|(addr, e)| (addr.clone(), e.size_bytes, e.last_accessed_secs))
             .collect();
         entries.sort_by_key(|(_, _, t)| *t);
@@ -456,6 +649,11 @@ impl LocalShareStore {
 /// `ShareDistributor` (Task 5 distribution protocol).
 #[async_trait::async_trait]
 impl crate::dissolution::ShareSink for LocalShareStore {
+    /// Just the storage address -- a local store has no peer/network
+    /// placement metadata to report (see `network::NetworkShareSink` for the
+    /// receipt type that does).
+    type Receipt = String;
+
     async fn store(&self, share: MiasmaShare) -> Result<String, crate::MiasmaError> {
         self.put(&share)
     }

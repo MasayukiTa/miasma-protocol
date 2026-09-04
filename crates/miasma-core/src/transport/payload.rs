@@ -535,11 +535,14 @@ impl PayloadTransport for Libp2pPayloadTransport {
             }
         };
 
-        // 2. Find the location for this slot.
+        // 2. Find the location for this slot. Matches on segment_index too,
+        // not just shard_index -- see the identical fix (and rationale) in
+        // network/coordinator.rs's `NetworkShareFetcher::fetch_share`,
+        // flagged by external design review.
         let location = match record
             .locations
             .iter()
-            .find(|l| l.shard_index == slot_index)
+            .find(|l| l.shard_index == slot_index && l.segment_index == segment_index)
         {
             Some(l) => l,
             None => return Ok(None),

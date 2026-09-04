@@ -26,7 +26,10 @@ pub use connection_health::{
     ConnectionHealthMonitor, ConnectionHealthSnapshot, DialBackoff, PeerConnectionScore,
     StaleAddressPruner,
 };
-pub use coordinator::{MiasmaCoordinator, NetworkShareFetcher, RetrievalStats};
+pub use coordinator::{
+    MiasmaCoordinator, NetworkShareFetcher, NetworkShareSink, PublishOptions, PublishReport,
+    RetrievalStats,
+};
 pub use credential::{CredentialStats, CredentialTier, CredentialWallet, IssuerRegistry};
 pub use descriptor::{
     DescriptorStats, DescriptorStore, PeerCapabilities, PeerDescriptor, ReachabilityKind,
@@ -40,7 +43,10 @@ pub use environment::{
     EnvironmentSnapshot, NetworkCapabilities, NetworkEnvironment, TransportRecommendation,
 };
 pub use metrics::OutcomeMetrics;
-pub use node::{DhtHandle, DirectedRelayStats, MiasmaNode, ShareExchangeHandle};
+pub use node::{
+    DhtHandle, DirectedRelayStats, MiasmaNode, ShareExchangeHandle, StoreRejectReason,
+    StoreResponse,
+};
 pub use onion_relay::{OnionRelayCodec, OnionRelayRequest, OnionRelayResponse};
 pub use path_selection::{AnonymityPolicy, PathSelectionStats};
 pub use peer_state::{AdmissionStats, PeerRegistry, RejectionReason};
