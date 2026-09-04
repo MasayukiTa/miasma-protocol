@@ -80,7 +80,13 @@ impl fmt::Display for FallbackTrace {
         )?;
         for (i, step) in self.steps.iter().enumerate() {
             if step.succeeded {
-                write!(f, "\n  {}. {} → OK ({}ms)", i + 1, step.transport, step.duration_ms)?;
+                write!(
+                    f,
+                    "\n  {}. {} → OK ({}ms)",
+                    i + 1,
+                    step.transport,
+                    step.duration_ms
+                )?;
             } else {
                 write!(
                     f,
@@ -154,7 +160,14 @@ impl FallbackTraceBuffer {
     /// Get the most recent N traces.
     pub fn recent(&self, n: usize) -> Vec<FallbackTrace> {
         let buf = self.traces.lock().unwrap();
-        buf.iter().rev().take(n).cloned().collect::<Vec<_>>().into_iter().rev().collect()
+        buf.iter()
+            .rev()
+            .take(n)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
     }
 
     /// Number of traces currently stored.
@@ -221,8 +234,8 @@ pub struct TransportStatEntry {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::payload::TransportPhase;
+    use super::*;
     use std::time::Duration;
 
     fn make_attempt(kind: PayloadTransportKind, success: bool) -> TransportAttempt {

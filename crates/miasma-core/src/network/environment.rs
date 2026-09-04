@@ -75,7 +75,7 @@ pub struct NetworkCapabilities {
 impl Default for NetworkCapabilities {
     fn default() -> Self {
         Self {
-            udp_available: true,        // Assume open until proven otherwise
+            udp_available: true, // Assume open until proven otherwise
             tcp_high_ports_available: true,
             port_443_available: true,
             port_80_available: true,
@@ -371,14 +371,8 @@ mod tests {
 
     #[test]
     fn detect_known_inspectors() {
-        assert_eq!(
-            detect_tls_inspector("CN=Zscaler Root CA"),
-            Some("Zscaler")
-        );
-        assert_eq!(
-            detect_tls_inspector("O=Netskope Inc"),
-            Some("Netskope")
-        );
+        assert_eq!(detect_tls_inspector("CN=Zscaler Root CA"), Some("Zscaler"));
+        assert_eq!(detect_tls_inspector("O=Netskope Inc"), Some("Netskope"));
         assert_eq!(
             detect_tls_inspector("CN=Palo Alto Networks Root CA"),
             Some("Palo Alto GlobalProtect")
@@ -431,8 +425,14 @@ mod tests {
     #[test]
     fn environment_display() {
         assert_eq!(NetworkEnvironment::Open.to_string(), "open");
-        assert_eq!(NetworkEnvironment::CorporateProxy.to_string(), "corporate-proxy");
-        assert_eq!(NetworkEnvironment::CaptivePortal.to_string(), "captive-portal");
+        assert_eq!(
+            NetworkEnvironment::CorporateProxy.to_string(),
+            "corporate-proxy"
+        );
+        assert_eq!(
+            NetworkEnvironment::CaptivePortal.to_string(),
+            "captive-portal"
+        );
     }
 
     #[test]

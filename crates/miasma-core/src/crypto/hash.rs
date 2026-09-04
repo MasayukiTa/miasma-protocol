@@ -147,7 +147,10 @@ mod tests {
         let in_memory = ContentId::compute(content, PARAMS);
         let mut cursor = std::io::Cursor::new(content);
         let streamed = ContentId::compute_from_reader(&mut cursor, PARAMS).unwrap();
-        assert_eq!(in_memory, streamed, "streaming and in-memory MID must match");
+        assert_eq!(
+            in_memory, streamed,
+            "streaming and in-memory MID must match"
+        );
     }
 
     #[test]

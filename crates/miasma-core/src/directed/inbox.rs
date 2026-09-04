@@ -200,19 +200,12 @@ impl DirectedInbox {
             .map(|entries| {
                 entries
                     .flatten()
-                    .filter(|e| {
-                        e.path()
-                            .extension()
-                            .and_then(|x| x.to_str())
-                            == Some("json")
-                    })
+                    .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
                     .count()
             })
             .unwrap_or(0);
         if count >= MAX_ENVELOPES {
-            anyhow::bail!(
-                "{name} full: {count} envelopes (max {MAX_ENVELOPES})"
-            );
+            anyhow::bail!("{name} full: {count} envelopes (max {MAX_ENVELOPES})");
         }
         Ok(())
     }

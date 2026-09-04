@@ -42,7 +42,7 @@ use miasma_core::directed::{
     create_envelope, decrypt_directed_content, decrypt_envelope_payload, derive_content_key,
     finalize_envelope, format_sharing_contact, format_sharing_key, parse_sharing_contact,
     parse_sharing_key, DirectedEnvelope, DirectedInbox, DirectedRequest, DirectedResponse,
-    EnvelopeSummary, EnvelopeState, RetentionPeriod,
+    EnvelopeState, EnvelopeSummary, RetentionPeriod,
 };
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -4899,7 +4899,9 @@ fn directed_challenge_file_cleanup_on_terminal() {
 
     // Save as incoming and write a challenge file.
     inbox.save_incoming(&env).unwrap();
-    inbox.save_challenge_code(&env.id_hex(), "ABCD-EFGH").unwrap();
+    inbox
+        .save_challenge_code(&env.id_hex(), "ABCD-EFGH")
+        .unwrap();
 
     // Challenge file should exist.
     let loaded = inbox.load_challenge_code(&env.id_hex());
@@ -4914,7 +4916,10 @@ fn directed_challenge_file_cleanup_on_terminal() {
 
     // Challenge file should be cleaned up.
     let challenge = inbox.load_challenge_code(&env.id_hex());
-    assert_eq!(challenge, None, "challenge file must be deleted on terminal state");
+    assert_eq!(
+        challenge, None,
+        "challenge file must be deleted on terminal state"
+    );
 }
 
 /// 17. Challenge file cleanup via explicit cleanup_challenge() call.
@@ -4927,7 +4932,9 @@ fn directed_cleanup_challenge_explicit() {
     env.envelope_id = [0xBB; 32];
 
     inbox.save_incoming(&env).unwrap();
-    inbox.save_challenge_code(&env.id_hex(), "TEST-CODE").unwrap();
+    inbox
+        .save_challenge_code(&env.id_hex(), "TEST-CODE")
+        .unwrap();
 
     assert_eq!(
         inbox.load_challenge_code(&env.id_hex()),
@@ -5036,10 +5043,18 @@ fn directed_expire_all_skips_terminal() {
     inbox.expire_all(500);
 
     let loaded1 = inbox.load_incoming(&env1.id_hex()).unwrap();
-    assert_eq!(loaded1.state, EnvelopeState::Retrieved, "terminal state must not change");
+    assert_eq!(
+        loaded1.state,
+        EnvelopeState::Retrieved,
+        "terminal state must not change"
+    );
 
     let loaded2 = inbox.load_incoming(&env2.id_hex()).unwrap();
-    assert_eq!(loaded2.state, EnvelopeState::Expired, "non-terminal must expire");
+    assert_eq!(
+        loaded2.state,
+        EnvelopeState::Expired,
+        "non-terminal must expire"
+    );
 }
 
 /// 22. Confirm flow state transitions: only ChallengeIssued can be confirmed.
@@ -5106,8 +5121,14 @@ fn directed_cross_device_full_lifecycle() {
     recipient_inbox.save_incoming(&env).unwrap();
 
     // Verify both sides see Pending.
-    assert_eq!(sender_inbox.list_outgoing()[0].state, EnvelopeState::Pending);
-    assert_eq!(recipient_inbox.list_incoming()[0].state, EnvelopeState::Pending);
+    assert_eq!(
+        sender_inbox.list_outgoing()[0].state,
+        EnvelopeState::Pending
+    );
+    assert_eq!(
+        recipient_inbox.list_incoming()[0].state,
+        EnvelopeState::Pending
+    );
 
     // Step 2: Recipient generates challenge.
     let (code, hash) = miasma_core::directed::challenge::generate_challenge();
@@ -5125,7 +5146,9 @@ fn directed_cross_device_full_lifecycle() {
     sender_inbox.save_outgoing(&sender_env).unwrap();
 
     // Step 3: Sender enters correct challenge code.
-    assert!(miasma_core::directed::challenge::verify_challenge(&code, &hash));
+    assert!(miasma_core::directed::challenge::verify_challenge(
+        &code, &hash
+    ));
 
     // Transition to Confirmed on both sides.
     sender_inbox
@@ -5135,7 +5158,11 @@ fn directed_cross_device_full_lifecycle() {
         .update_incoming_state(&id_hex, EnvelopeState::Confirmed)
         .unwrap();
 
-    assert!(recipient_inbox.load_incoming(&id_hex).unwrap().state.is_retrievable());
+    assert!(recipient_inbox
+        .load_incoming(&id_hex)
+        .unwrap()
+        .state
+        .is_retrievable());
 
     // Step 4: Recipient retrieves → terminal.
     recipient_inbox
@@ -5168,7 +5195,10 @@ fn directed_password_attempt_exhaustion() {
     // Simulate 3 wrong password attempts.
     for remaining in (0..3).rev() {
         let mut e = inbox.load_incoming(&id_hex).unwrap();
-        assert!(!e.state.is_terminal(), "should not be terminal with attempts left");
+        assert!(
+            !e.state.is_terminal(),
+            "should not be terminal with attempts left"
+        );
         e.password_attempts_remaining = remaining;
         if remaining == 0 {
             e.state = EnvelopeState::PasswordFailed;
@@ -5322,7 +5352,9 @@ fn directed_cross_device_sender_revoke() {
     recipient_inbox.save_incoming(&env).unwrap();
 
     let id_hex = env.id_hex();
-    recipient_inbox.save_challenge_code(&id_hex, "ABCD-EFGH").unwrap();
+    recipient_inbox
+        .save_challenge_code(&id_hex, "ABCD-EFGH")
+        .unwrap();
 
     // Sender revokes.
     sender_inbox
@@ -5333,8 +5365,16 @@ fn directed_cross_device_sender_revoke() {
         .unwrap();
     recipient_inbox.cleanup_challenge(&id_hex);
 
-    assert!(sender_inbox.load_outgoing(&id_hex).unwrap().state.is_terminal());
-    assert!(recipient_inbox.load_incoming(&id_hex).unwrap().state.is_terminal());
+    assert!(sender_inbox
+        .load_outgoing(&id_hex)
+        .unwrap()
+        .state
+        .is_terminal());
+    assert!(recipient_inbox
+        .load_incoming(&id_hex)
+        .unwrap()
+        .state
+        .is_terminal());
     assert!(recipient_inbox.load_challenge_code(&id_hex).is_none());
 }
 
@@ -5388,7 +5428,11 @@ fn directed_multiple_envelope_isolation() {
 
     let a = inbox.load_incoming(&env_a.id_hex()).unwrap();
     let b = inbox.load_incoming(&env_b.id_hex()).unwrap();
-    assert_eq!(a.state, EnvelopeState::Confirmed, "env_a should not be expired");
+    assert_eq!(
+        a.state,
+        EnvelopeState::Confirmed,
+        "env_a should not be expired"
+    );
     assert_eq!(b.state, EnvelopeState::Expired, "env_b should be expired");
 }
 
@@ -5406,7 +5450,8 @@ fn directed_challenge_wrong_code_same_length() {
     };
 
     assert!(!miasma_core::directed::challenge::verify_challenge(
-        &wrong_code, &hash
+        &wrong_code,
+        &hash
     ));
     // Original still works.
     assert!(miasma_core::directed::challenge::verify_challenge(
@@ -5526,11 +5571,8 @@ fn bridge_flap_detector_triggers_damping() {
     use miasma_core::daemon::self_heal::NetworkFlapDetector;
     use std::time::Duration;
 
-    let mut detector = NetworkFlapDetector::new(
-        3,
-        Duration::from_secs(60),
-        Duration::from_millis(100),
-    );
+    let mut detector =
+        NetworkFlapDetector::new(3, Duration::from_secs(60), Duration::from_millis(100));
 
     assert!(!detector.record_disconnect());
     assert!(!detector.record_disconnect());
@@ -5693,7 +5735,10 @@ fn bridge_shadowsocks_native_psk_validation() {
         ..Default::default()
     };
     let err = c.validate().unwrap_err();
-    assert!(err.contains("32 bytes"), "should require 32-byte PSK: {err}");
+    assert!(
+        err.contains("32 bytes"),
+        "should require 32-byte PSK: {err}"
+    );
 
     // Non-base64 password
     let c = ShadowsocksConfig {
@@ -5820,7 +5865,10 @@ fn bridge_shadowsocks_aead2022_out_of_order_rejected() {
     // because the nonce has advanced
     let mut fake = pkt1.clone();
     fake[0] ^= 0xFF; // tamper
-    assert!(!dec.decrypt_packet(&mut fake), "tampered packet should fail");
+    assert!(
+        !dec.decrypt_packet(&mut fake),
+        "tampered packet should fail"
+    );
 }
 
 /// Verify backward-compatible config serde (old format without local_addr).
@@ -5832,7 +5880,10 @@ fn bridge_shadowsocks_config_backward_compat() {
     let c: ShadowsocksConfig = serde_json::from_str(json).unwrap();
     assert!(c.enabled);
     assert!(c.local_addr.is_none());
-    assert!(!c.native_configured(), "legacy cipher should not enable native mode");
+    assert!(
+        !c.native_configured(),
+        "legacy cipher should not enable native mode"
+    );
 }
 
 /// Verify Tor config validation catches misconfigurations.
@@ -5922,13 +5973,17 @@ fn partial_failure_detector_relay_only_detection() {
     // With peers but relay-only
     let failures = d.evaluate(3, false, true);
     assert!(
-        failures.iter().any(|f| f.to_string().contains("relay-only")),
+        failures
+            .iter()
+            .any(|f| f.to_string().contains("relay-only")),
         "should detect relay-only mode"
     );
     // Without relay-only
     let failures = d.evaluate(3, false, false);
     assert!(
-        !failures.iter().any(|f| f.to_string().contains("relay-only")),
+        !failures
+            .iter()
+            .any(|f| f.to_string().contains("relay-only")),
         "should not report relay-only when not relay-only"
     );
 }
@@ -5959,7 +6014,9 @@ fn partial_failures_serde_in_daemon_status() {
     }"#;
     let status: DaemonStatus = serde_json::from_str(json).unwrap();
     assert_eq!(status.partial_failures.len(), 2);
-    assert!(status.partial_failures.contains(&"relay-only mode".to_string()));
+    assert!(status
+        .partial_failures
+        .contains(&"relay-only mode".to_string()));
 }
 
 #[test]
@@ -5982,10 +6039,7 @@ fn transport_stats_kind_stats_attribution() {
     assert_eq!(libp2p_ok, 0);
     assert_eq!(libp2p_fail, 1);
     // Last selected should be WSS (most recent success)
-    assert_eq!(
-        stats.last_selected(),
-        Some(PayloadTransportKind::WssTunnel)
-    );
+    assert_eq!(stats.last_selected(), Some(PayloadTransportKind::WssTunnel));
     assert!(stats.is_fallback_active());
 }
 
@@ -5994,11 +6048,17 @@ fn dial_backoff_records_failure_and_delays() {
     use miasma_core::network::connection_health::DialBackoff;
     let mut backoff = DialBackoff::default();
     backoff.record_failure("peer-a");
-    assert!(!backoff.is_allowed("peer-a"), "should be backed off after failure");
+    assert!(
+        !backoff.is_allowed("peer-a"),
+        "should be backed off after failure"
+    );
     assert_eq!(backoff.active_count(), 1);
     // After success, should be cleared
     backoff.record_success("peer-a");
-    assert!(backoff.is_allowed("peer-a"), "should be allowed after success");
+    assert!(
+        backoff.is_allowed("peer-a"),
+        "should be allowed after success"
+    );
     assert_eq!(backoff.active_count(), 0);
 }
 
@@ -6012,8 +6072,14 @@ fn health_monitor_snapshot_reflects_events() {
     monitor.record_peer_failure("peer-3");
 
     let snap = monitor.snapshot(3);
-    assert!(snap.quality_score > 0.0, "quality should be positive with successes");
-    assert!(!snap.degraded, "should not be degraded with 3 peers (default min is lower)");
+    assert!(
+        snap.quality_score > 0.0,
+        "quality should be positive with successes"
+    );
+    assert!(
+        !snap.degraded,
+        "should not be degraded with 3 peers (default min is lower)"
+    );
 }
 
 #[test]
@@ -6041,7 +6107,11 @@ fn ipc_publish_file_serde_roundtrip() {
     let json = serde_json::to_string(&req).unwrap();
     let deser: ControlRequest = serde_json::from_str(&json).unwrap();
     match deser {
-        ControlRequest::PublishFile { file_path, data_shards, total_shards } => {
+        ControlRequest::PublishFile {
+            file_path,
+            data_shards,
+            total_shards,
+        } => {
             assert_eq!(file_path, "/tmp/test-file.bin");
             assert_eq!(data_shards, 3);
             assert_eq!(total_shards, 5);
@@ -6068,7 +6138,7 @@ fn streaming_mid_matches_in_memory() {
 /// Recovery actions for NoPeers include bootstrap re-dial.
 #[test]
 fn hard_failure_no_peers_triggers_bootstrap_redial() {
-    use miasma_core::daemon::self_heal::{PartialFailure, RecoveryAction, recovery_actions_for};
+    use miasma_core::daemon::self_heal::{recovery_actions_for, PartialFailure, RecoveryAction};
 
     let actions = recovery_actions_for(&[PartialFailure::NoPeers]);
     assert!(actions.contains(&RecoveryAction::ReDialBootstrap));
@@ -6091,7 +6161,10 @@ fn hard_failure_circuit_breaker_prevents_reconnect() {
     sched.record_failure(peer);
     let tripped = sched.record_failure(peer);
     assert!(tripped, "circuit breaker should trip at max_failures");
-    assert!(!sched.should_attempt(peer), "abandoned peer should not be retried");
+    assert!(
+        !sched.should_attempt(peer),
+        "abandoned peer should not be retried"
+    );
 }
 
 /// Successful reconnection fully resets circuit breaker state.
@@ -6100,18 +6173,15 @@ fn hard_failure_success_resets_circuit_breaker_progress() {
     use miasma_core::daemon::self_heal::ReconnectionScheduler;
     use std::time::Duration;
 
-    let mut sched = ReconnectionScheduler::new(
-        Duration::from_millis(1),
-        Duration::from_millis(10),
-        5,
-    );
+    let mut sched =
+        ReconnectionScheduler::new(Duration::from_millis(1), Duration::from_millis(10), 5);
     let peer = b"flaky-peer";
     // Accumulate failures close to threshold
     sched.record_failure(peer);
     sched.record_failure(peer);
     sched.record_failure(peer);
     sched.record_failure(peer); // 4 of 5
-    // Success resets completely
+                                // Success resets completely
     sched.record_success(peer);
     assert_eq!(sched.failures_for(peer), 0);
     assert!(sched.should_attempt(peer));
@@ -6125,12 +6195,10 @@ fn hard_failure_success_resets_circuit_breaker_progress() {
 /// Multiple partial failures produce combined recovery actions.
 #[test]
 fn hard_failure_combined_recovery_actions() {
-    use miasma_core::daemon::self_heal::{PartialFailure, RecoveryAction, recovery_actions_for};
+    use miasma_core::daemon::self_heal::{recovery_actions_for, PartialFailure, RecoveryAction};
 
-    let actions = recovery_actions_for(&[
-        PartialFailure::NoPeers,
-        PartialFailure::AllTransportsDead,
-    ]);
+    let actions =
+        recovery_actions_for(&[PartialFailure::NoPeers, PartialFailure::AllTransportsDead]);
     assert!(actions.contains(&RecoveryAction::ReDialBootstrap));
     assert!(actions.contains(&RecoveryAction::EscalateTransport));
 }
@@ -6141,8 +6209,14 @@ fn hard_failure_reconnection_metrics_accuracy() {
     use miasma_core::daemon::self_heal::ReconnectionMetrics;
 
     let mut m = ReconnectionMetrics::default();
-    for _ in 0..7 { m.record_attempt(); m.record_success(); }
-    for _ in 0..3 { m.record_attempt(); m.record_failure(); }
+    for _ in 0..7 {
+        m.record_attempt();
+        m.record_success();
+    }
+    for _ in 0..3 {
+        m.record_attempt();
+        m.record_failure();
+    }
     assert_eq!(m.attempts, 10);
     assert_eq!(m.successes, 7);
     assert!((m.success_rate() - 0.7).abs() < f64::EPSILON);
@@ -6229,14 +6303,8 @@ fn directed_relay_candidates_sorted_by_trust() {
     let relay_a_peer = PeerId::random();
     let relay_b_peer = PeerId::random();
 
-    let desc_a = relay_descriptor(
-        [0xAA; 32],
-        vec!["/ip4/1.2.3.4/udp/443/quic-v1".to_string()],
-    );
-    let desc_b = relay_descriptor(
-        [0xBB; 32],
-        vec!["/ip4/5.6.7.8/udp/443/quic-v1".to_string()],
-    );
+    let desc_a = relay_descriptor([0xAA; 32], vec!["/ip4/1.2.3.4/udp/443/quic-v1".to_string()]);
+    let desc_b = relay_descriptor([0xBB; 32], vec!["/ip4/5.6.7.8/udp/443/quic-v1".to_string()]);
 
     store.upsert(desc_a);
     store.register_peer_pseudonym(relay_a_peer, [0xAA; 32]);
@@ -6260,10 +6328,7 @@ fn directed_relay_excludes_target_as_relay() {
     let mut store = DescriptorStore::new();
     let target_peer = PeerId::random();
 
-    let desc = relay_descriptor(
-        [0xCC; 32],
-        vec!["/ip4/9.8.7.6/udp/443/quic-v1".to_string()],
-    );
+    let desc = relay_descriptor([0xCC; 32], vec!["/ip4/9.8.7.6/udp/443/quic-v1".to_string()]);
     store.upsert(desc);
     store.register_peer_pseudonym(target_peer, [0xCC; 32]);
 
@@ -6413,7 +6478,14 @@ fn crash_recovery_store_index_corruption_rebuilds() {
             .unwrap()
             .as_secs();
         let share = miasma_core::share::MiasmaShare::new(
-            &mid, 0, i, vec![i as u8; 64], vec![0xBB; 32], [0u8; 12], 100, ts,
+            &mid,
+            0,
+            i,
+            vec![i as u8; 64],
+            vec![0xBB; 32],
+            [0u8; 12],
+            100,
+            ts,
         );
         addrs.push(store.put(&share).unwrap());
     }

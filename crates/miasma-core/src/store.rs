@@ -212,9 +212,7 @@ fn rebuild_index(data_dir: &Path, shares_dir: &Path) {
                 Some(a) => a.to_string(),
                 None => continue,
             };
-            let size = std::fs::metadata(&path)
-                .map(|m| m.len())
-                .unwrap_or(0);
+            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
             index.insert(
                 address,
                 IndexEntry {
@@ -576,7 +574,10 @@ mod tests {
         // Re-open: should rebuild from share files on disk.
         let store2 = LocalShareStore::open(dir.path(), 100).unwrap();
         let list = store2.list();
-        assert!(list.contains(&addr), "index should be rebuilt from share files");
+        assert!(
+            list.contains(&addr),
+            "index should be rebuilt from share files"
+        );
         // Share should still be readable.
         let recovered = store2.get(&addr).unwrap();
         assert_eq!(recovered.slot_index, 10);
@@ -695,7 +696,10 @@ mod tests {
         drop(store);
 
         // Truncate the share file (simulate disk corruption).
-        let share_path = dir.path().join(SHARES_DIR).join(format!("{addr}{SHARE_EXT}"));
+        let share_path = dir
+            .path()
+            .join(SHARES_DIR)
+            .join(format!("{addr}{SHARE_EXT}"));
         std::fs::write(&share_path, &[0u8; 10]).unwrap();
 
         let store2 = LocalShareStore::open(dir.path(), 100).unwrap();
@@ -731,11 +735,8 @@ mod tests {
         // Only create master.key — no shares dir, no index.
         std::fs::create_dir_all(dir.path()).unwrap();
         let key = [0xABu8; 32];
-        crate::secure_file::atomic_write_restricted(
-            &dir.path().join(MASTER_KEY_FILE),
-            &key,
-        )
-        .unwrap();
+        crate::secure_file::atomic_write_restricted(&dir.path().join(MASTER_KEY_FILE), &key)
+            .unwrap();
 
         let store = LocalShareStore::open(dir.path(), 100).unwrap();
         assert!(store.list().is_empty());
