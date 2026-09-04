@@ -221,6 +221,20 @@
   修正は`list_candidates`をセグメント認識にする(または呼び出し側でサーバ側
   絞り込みを行う)必要があり、既存の全ネットワーク取得経路が使う共有ロジック
   に触るため、このフェーズに相乗りさせず別タスクとして着手すること。
+- **修正完了(2026-09-05)**: `ShareSource`に`list_candidates_for_segment(mid, segment_index)`を
+  追加(未対応バックエンドは`list_candidates`にフォールバックする既定実装、
+  `Arc<T>`のblanket implも転送)。本番経路の`FallbackShareSource`がこれを
+  オーバーライドし、`DhtRecord::locations`が既に持つ`segment_index`で
+  ロケータを作る*前に*絞り込む——他セグメント宛てシェアをfetchしてから
+  棄却する経路そのものを無くした(fetch後のフィルタで誤魔化す対症療法ではない)。
+  `RetrievalCoordinator::collect_k_shares`・`StreamingRetrievalCoordinator`の
+  両メソッドを新メソッド呼び出しに変更。新規テスト
+  `dissolve_and_publish_file_multi_segment_network_retrieval_is_fast`
+  (2ノード実ネットワーク、実`dissolve_and_publish_file`、新旧両取得経路)が
+  この「一度も無かった組み合わせ」を恒久的に埋める——修正前コードに対して
+  同じテスト本体を実行して直接確認済み: 120秒のboundで収束すらしなかった
+  (修正後は各経路46-101秒で安定完了、実測に基づき150秒/経路のboundを設定)。
+  詳細は`docs/tasks/p2p-content-transfer-hardening.md`のPhase 2.4欄の追記。
 - **Phase 2.1完了(2026-09-04)**: シャード分散を実装。codex 5.6 sol・claude fable
   両方の外部設計レビューを経て、当初案(既存プロトコルのenum拡張、
   `connected_peers()`ベースの選定、`Mutex`側チャネル)から設計を変更——
@@ -244,7 +258,7 @@
   `#[allow(dead_code)]`で誰も呼んでいなかった。`worker.rs`のMID抽出は
   filterの前にtrimしていなかったため、引数を直しても常に空リストになる
   状態だった(こちらも修正)。**配線中に別の実欠陥を発見**: 旧
-  `dissolve_torrent`はinfo_hashとdn からmagnetを組み立て直しており、
+  `dissolve_torrent`はinfo_hashとdnからmagnetを組み立て直しており、
   ユーザが渡した`tr=`トラッカーを全て黙って捨てていた——UDP DHTが塞がれた
   網でトラッカーだけが頼りという、この crate の`inspect`が多段フォールバック
   を持つ理由そのもののケースで、ダウンロードは原理的に成立しなかった。

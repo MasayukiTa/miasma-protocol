@@ -22,6 +22,41 @@ pub trait ShareSource: Send + Sync {
     /// MUST NOT return false negatives (missing addresses for valid shares).
     async fn list_candidates(&self, mid: &ContentId) -> Vec<String>;
 
+    /// Return addresses of candidate shares for `mid`, scoped to a single
+    /// segment when the backend can do so cheaply.
+    ///
+    /// For multi-segment content, `list_candidates` alone returns candidates
+    /// for *every* segment's shards combined (it only filters by MID). Every
+    /// caller retrieving segment-by-segment (`RetrievalCoordinator::retrieve_segments`,
+    /// `StreamingRetrievalCoordinator::retrieve_streaming_by_mid`) then has to
+    /// sequentially fetch-and-reject shares belonging to every *other* segment
+    /// before it accumulates enough valid shares for its own segment — O(total
+    /// segments × total shards) network round-trips per segment instead of
+    /// O(total shards). See docs/tasks/p2p-content-transfer-hardening.md Phase 2.4.
+    ///
+    /// An implementation that has per-shard segment metadata available (e.g.
+    /// `FallbackShareSource`, whose `DhtRecord` locations already carry a
+    /// `segment_index` per `ShardLocation`) SHOULD override this to filter
+    /// down to just that segment's candidates *before* any share is fetched,
+    /// which is the fundamental fix: it avoids enumerating irrelevant
+    /// candidates at all, rather than skipping them after a network round-trip.
+    ///
+    /// The default implementation is a correctness-preserving fallback for
+    /// backends without per-segment location metadata (e.g. `LocalShareSource`,
+    /// `DhtShareSource`): it returns the full unfiltered candidate list, exactly
+    /// as `list_candidates` does. Callers still coarse-verify
+    /// `share.segment_index == segment_index` after fetching, so overriding
+    /// this method is a pure performance optimization — never overriding it
+    /// cannot cause incorrect results, only slower ones.
+    async fn list_candidates_for_segment(
+        &self,
+        mid: &ContentId,
+        segment_index: u32,
+    ) -> Vec<String> {
+        let _ = segment_index;
+        self.list_candidates(mid).await
+    }
+
     /// Fetch a share by its address/locator. Returns `None` if not found.
     async fn fetch(&self, address: &str) -> Result<Option<MiasmaShare>, MiasmaError>;
 }
@@ -40,6 +75,16 @@ pub trait ShareSource: Send + Sync {
 impl<T: ShareSource + ?Sized> ShareSource for Arc<T> {
     async fn list_candidates(&self, mid: &ContentId) -> Vec<String> {
         (**self).list_candidates(mid).await
+    }
+
+    async fn list_candidates_for_segment(
+        &self,
+        mid: &ContentId,
+        segment_index: u32,
+    ) -> Vec<String> {
+        (**self)
+            .list_candidates_for_segment(mid, segment_index)
+            .await
     }
 
     async fn fetch(&self, address: &str) -> Result<Option<MiasmaShare>, MiasmaError> {

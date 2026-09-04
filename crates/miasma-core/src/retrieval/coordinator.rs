@@ -1,7 +1,9 @@
 /// RetrievalCoordinator — orchestrates share collection and reconstruction.
 ///
 /// # Retrieval algorithm
-/// 1. List candidate share addresses from `ShareSource` (filtered by MID prefix).
+/// 1. List candidate share addresses from `ShareSource`, scoped to the segment
+///    being collected (`list_candidates_for_segment`) so multi-segment content
+///    doesn't enumerate every other segment's shards too.
 /// 2. **Shuffle** the list — ensures share requests are in random order so that
 ///    a network observer cannot correlate request timing to shard index.
 /// 3. Fetch and coarse-verify each share. Reject forgeries (shard_hash mismatch
@@ -138,7 +140,10 @@ impl<Src: ShareSource> RetrievalCoordinator<Src> {
         segment_index: u32,
         params: DissolutionParams,
     ) -> Result<Vec<MiasmaShare>, MiasmaError> {
-        let mut candidates = self.source.list_candidates(mid).await;
+        let mut candidates = self
+            .source
+            .list_candidates_for_segment(mid, segment_index)
+            .await;
 
         if candidates.is_empty() {
             return Err(MiasmaError::InsufficientShares {

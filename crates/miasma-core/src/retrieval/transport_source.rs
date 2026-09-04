@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex};
 use crate::{
     crypto::hash::ContentId,
     network::dht::OnionAwareDhtExecutor,
+    network::types::ShardLocation,
     share::MiasmaShare,
     transport::payload::{PayloadTransportSelector, TransportAttempt, TransportExhaustedError},
     MiasmaError,
@@ -54,6 +55,25 @@ impl<D: OnionAwareDhtExecutor> FallbackShareSource<D> {
         let mut attempts = self.all_attempts.lock().unwrap();
         std::mem::take(&mut *attempts)
     }
+
+    /// Build locator strings from a set of `ShardLocation`s. Shared by
+    /// `list_candidates` (all locations) and `list_candidates_for_segment`
+    /// (locations pre-filtered to one segment).
+    fn locators_from<'a>(
+        mid_hex: &str,
+        locations: impl Iterator<Item = &'a ShardLocation>,
+    ) -> Vec<String> {
+        locations
+            .map(|loc| {
+                let peer_id_hex = hex::encode(&loc.peer_id_bytes);
+                let addrs = loc.addrs.join(",");
+                format!(
+                    "{}|{}|{}|{}|{}",
+                    mid_hex, loc.shard_index, loc.segment_index, peer_id_hex, addrs
+                )
+            })
+            .collect()
+    }
 }
 
 #[async_trait::async_trait]
@@ -67,18 +87,36 @@ impl<D: OnionAwareDhtExecutor> ShareSource for FallbackShareSource<D> {
         match self.dht.get(mid).await {
             Ok(Some(record)) => {
                 let mid_hex = hex::encode(record.mid_digest);
-                record
-                    .locations
-                    .iter()
-                    .map(|loc| {
-                        let peer_id_hex = hex::encode(&loc.peer_id_bytes);
-                        let addrs = loc.addrs.join(",");
-                        format!(
-                            "{}|{}|{}|{}|{}",
-                            mid_hex, loc.shard_index, loc.segment_index, peer_id_hex, addrs
-                        )
-                    })
-                    .collect()
+                Self::locators_from(&mid_hex, record.locations.iter())
+            }
+            Ok(None) | Err(_) => vec![],
+        }
+    }
+
+    /// Segment-scoped variant of `list_candidates` — the fix for the
+    /// multi-segment retrieval slowdown described in
+    /// docs/tasks/p2p-content-transfer-hardening.md Phase 2.4.
+    ///
+    /// `DhtRecord::locations` already carries a `segment_index` per
+    /// `ShardLocation`, so this filters to just `segment_index`'s shards
+    /// before ever building a locator — the fetch loop for segment N never
+    /// even sees, let alone fetches and rejects, shares belonging to any
+    /// other segment.
+    async fn list_candidates_for_segment(
+        &self,
+        mid: &ContentId,
+        segment_index: u32,
+    ) -> Vec<String> {
+        match self.dht.get(mid).await {
+            Ok(Some(record)) => {
+                let mid_hex = hex::encode(record.mid_digest);
+                Self::locators_from(
+                    &mid_hex,
+                    record
+                        .locations
+                        .iter()
+                        .filter(|loc| loc.segment_index == segment_index),
+                )
             }
             Ok(None) | Err(_) => vec![],
         }
