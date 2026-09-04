@@ -1707,6 +1707,36 @@ async fn cmd_network_get(
 
     eprintln!("Requesting {mid_str} from local daemon...");
 
+    // With an output path, use the file-path variant so the daemon streams
+    // reconstructed segments straight to disk instead of buffering the whole
+    // file twice (once in the daemon, once again as base64-inflated JSON over
+    // IPC). Without one (stdout pipe), there is no path to stream to, so fall
+    // back to the byte-returning `Get`.
+    if let Some(path) = output {
+        let abs_path = if path.is_absolute() {
+            path.to_owned()
+        } else {
+            std::env::current_dir().unwrap_or_default().join(path)
+        };
+        let req = ControlRequest::GetToFile {
+            mid: mid_str.to_owned(),
+            data_shards: data_shards as u8,
+            total_shards: total_shards as u8,
+            output_path: abs_path.to_string_lossy().to_string(),
+        };
+        return match daemon_request(data_dir, req).await? {
+            ControlResponse::RetrievedToFile {
+                output_path,
+                bytes_written,
+            } => {
+                eprintln!("Written {bytes_written} bytes to {output_path}");
+                Ok(())
+            }
+            ControlResponse::Error(e) => bail!("daemon error: {e}"),
+            other => bail!("unexpected response: {other:?}"),
+        };
+    }
+
     let req = ControlRequest::Get {
         mid: mid_str.to_owned(),
         data_shards: data_shards as u8,
@@ -1715,19 +1745,10 @@ async fn cmd_network_get(
 
     match daemon_request(data_dir, req).await? {
         ControlResponse::Retrieved { data } => {
-            match output {
-                Some(path) => {
-                    std::fs::write(path, &data)
-                        .with_context(|| format!("cannot write output: {}", path.display()))?;
-                    eprintln!("Written to {}", path.display());
-                }
-                None => {
-                    use std::io::Write as _;
-                    io::stdout()
-                        .write_all(&data)
-                        .context("cannot write to stdout")?;
-                }
-            }
+            use std::io::Write as _;
+            io::stdout()
+                .write_all(&data)
+                .context("cannot write to stdout")?;
             Ok(())
         }
         ControlResponse::Error(e) => bail!("daemon error: {e}"),

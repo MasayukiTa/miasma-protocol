@@ -66,6 +66,23 @@ pub enum ControlRequest {
         data_shards: u8,
         total_shards: u8,
     },
+    /// Retrieve content by MID string — file-path variant.
+    ///
+    /// The daemon streams reconstructed segments directly to `output_path`
+    /// (`MiasmaCoordinator::retrieve_from_network_streaming`) instead of
+    /// buffering the whole file and round-tripping it through a JSON `Vec<u8>`
+    /// response. Avoids `Get`'s double-buffering (once in the daemon, once
+    /// again as base64-inflated JSON over IPC) and keeps peak RAM at roughly
+    /// one segment regardless of file size. Preferred over `Get` for CLI and
+    /// desktop callers that have a local output path (`Get` remains for the
+    /// stdout-pipe case, which has no path to stream to).
+    GetToFile {
+        mid: String,
+        data_shards: u8,
+        total_shards: u8,
+        /// Absolute path where reconstructed content should be written.
+        output_path: String,
+    },
     /// Return daemon status metrics.
     Status,
     /// Distress-wipe: destroy the master key so all shares become unreadable.
@@ -158,6 +175,13 @@ pub enum ControlResponse {
     },
     Retrieved {
         data: Vec<u8>,
+    },
+    /// Content retrieved via `GetToFile` and written directly to disk.
+    RetrievedToFile {
+        /// Path where the reconstructed content was written.
+        output_path: String,
+        /// Number of bytes written.
+        bytes_written: u64,
     },
     Status(DaemonStatus),
     /// Distress wipe completed successfully.
