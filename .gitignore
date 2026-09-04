@@ -3,7 +3,6 @@
 /target-*/
 /dist/
 /.wix/
-Cargo.lock
 *.pdb
 /task.md
 *.txt
