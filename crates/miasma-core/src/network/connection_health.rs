@@ -68,25 +68,33 @@ impl DialBackoff {
     /// Record a dial failure for the given address. Returns the backoff duration.
     pub fn record_failure(&mut self, addr: &str) -> Duration {
         let now = Instant::now();
-        let entry = self.entries.entry(addr.to_owned()).or_insert(DialBackoffEntry {
-            consecutive_failures: 0,
-            last_failure: now,
-            next_allowed: now,
-        });
+        let entry = self
+            .entries
+            .entry(addr.to_owned())
+            .or_insert(DialBackoffEntry {
+                consecutive_failures: 0,
+                last_failure: now,
+                next_allowed: now,
+            });
         entry.consecutive_failures += 1;
         entry.last_failure = now;
 
         // Exponential backoff: base * 2^(failures-1), capped at max
         let backoff = self
             .base
-            .saturating_mul(1u32.checked_shl(entry.consecutive_failures.saturating_sub(1)).unwrap_or(u32::MAX))
+            .saturating_mul(
+                1u32.checked_shl(entry.consecutive_failures.saturating_sub(1))
+                    .unwrap_or(u32::MAX),
+            )
             .min(self.max);
 
         // Add jitter: ±25% of the backoff
         let jitter_range = backoff.as_millis() as u64 / 4;
         let jitter = if jitter_range > 0 {
             // Simple deterministic jitter based on failure count (no RNG needed in core)
-            let pseudo = (entry.consecutive_failures as u64).wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let pseudo = (entry.consecutive_failures as u64)
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             Duration::from_millis(pseudo % jitter_range)
         } else {
             Duration::ZERO

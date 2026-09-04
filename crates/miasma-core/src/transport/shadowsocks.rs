@@ -94,9 +94,7 @@ impl ShadowsocksConfig {
     fn is_aead_2022(&self) -> bool {
         matches!(
             self.cipher.as_str(),
-            "2022-blake3-aes-256-gcm"
-                | "2022-blake3-aes-128-gcm"
-                | "2022-blake3-chacha20-poly1305"
+            "2022-blake3-aes-256-gcm" | "2022-blake3-aes-128-gcm" | "2022-blake3-chacha20-poly1305"
         )
     }
 
@@ -131,11 +129,11 @@ impl ShadowsocksConfig {
             // Validate base64 PSK for AEAD-2022
             if self.is_aead_2022() {
                 let password = self.password.as_deref().unwrap();
-                let key_bytes = base64::Engine::decode(
-                    &base64::engine::general_purpose::STANDARD,
-                    password,
-                )
-                .map_err(|e| format!("password must be base64-encoded PSK for AEAD-2022: {e}"))?;
+                let key_bytes =
+                    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, password)
+                        .map_err(|e| {
+                            format!("password must be base64-encoded PSK for AEAD-2022: {e}")
+                        })?;
                 let expected_len = resolve_cipher_kind(&self.cipher)
                     .map(|k| k.key_len())
                     .unwrap_or(32);
@@ -186,11 +184,9 @@ pub async fn connect_native_by_cipher(
     cipher: &str,
     timeout: Duration,
 ) -> Result<tokio::io::DuplexStream, PayloadTransportError> {
-    let kind = resolve_cipher_kind(cipher).ok_or_else(|| {
-        PayloadTransportError {
-            phase: TransportPhase::Session,
-            message: format!("unknown SS cipher: {cipher}"),
-        }
+    let kind = resolve_cipher_kind(cipher).ok_or_else(|| PayloadTransportError {
+        phase: TransportPhase::Session,
+        message: format!("unknown SS cipher: {cipher}"),
     })?;
     connect_native(server, target_host, target_port, key, kind, timeout).await
 }
@@ -210,19 +206,16 @@ pub async fn connect_native(
 ) -> Result<tokio::io::DuplexStream, PayloadTransportError> {
     use shadowsocks_crypto::v2::tcp::TcpCipher;
 
-    let mut tcp = tokio::time::timeout(
-        timeout,
-        tokio::net::TcpStream::connect(server),
-    )
-    .await
-    .map_err(|_| PayloadTransportError {
-        phase: TransportPhase::Session,
-        message: format!("SS native connect timeout to {server}"),
-    })?
-    .map_err(|e| PayloadTransportError {
-        phase: TransportPhase::Session,
-        message: format!("SS native connect to {server}: {e}"),
-    })?;
+    let mut tcp = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(server))
+        .await
+        .map_err(|_| PayloadTransportError {
+            phase: TransportPhase::Session,
+            message: format!("SS native connect timeout to {server}"),
+        })?
+        .map_err(|e| PayloadTransportError {
+            phase: TransportPhase::Session,
+            message: format!("SS native connect to {server}: {e}"),
+        })?;
 
     let salt_len = kind.salt_len();
     let tag_len = kind.tag_len(); // always 16
@@ -264,10 +257,7 @@ pub async fn connect_native(
     var_header.extend_from_slice(&padding_len.to_be_bytes());
     let padding_start = var_header.len();
     var_header.resize(padding_start + padding_len as usize, 0);
-    rand::RngCore::fill_bytes(
-        &mut rand::thread_rng(),
-        &mut var_header[padding_start..],
-    );
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut var_header[padding_start..]);
 
     // 2. Build and encrypt fixed header: type(1) + timestamp(8) + length(2) = 11 bytes
     let var_header_len = var_header.len() as u16;
@@ -291,10 +281,12 @@ pub async fn connect_native(
     handshake_buf.extend_from_slice(&client_salt);
     handshake_buf.extend_from_slice(&fixed);
     handshake_buf.extend_from_slice(&var_header);
-    tcp.write_all(&handshake_buf).await.map_err(|e| PayloadTransportError {
-        phase: TransportPhase::Session,
-        message: format!("SS write handshake: {e}"),
-    })?;
+    tcp.write_all(&handshake_buf)
+        .await
+        .map_err(|e| PayloadTransportError {
+            phase: TransportPhase::Session,
+            message: format!("SS write handshake: {e}"),
+        })?;
     tcp.flush().await.map_err(|e| PayloadTransportError {
         phase: TransportPhase::Session,
         message: format!("SS flush handshake: {e}"),
@@ -403,18 +395,26 @@ async fn ss_read_relay(
     let fixed_plaintext_len = 1 + 8 + salt_len + 2;
     let mut fixed_buf = vec![0u8; fixed_plaintext_len + tag_len];
     if let Err(e) = tcp_read.read_exact(&mut fixed_buf).await {
-        warn!("SS read relay: failed to read fixed header ({} bytes): {e}", fixed_plaintext_len + tag_len);
+        warn!(
+            "SS read relay: failed to read fixed header ({} bytes): {e}",
+            fixed_plaintext_len + tag_len
+        );
         return;
     }
     if !read_cipher.decrypt_packet(&mut fixed_buf) {
-        warn!("SS read relay: fixed header AEAD auth failed (likely wrong key or protocol mismatch)");
+        warn!(
+            "SS read relay: fixed header AEAD auth failed (likely wrong key or protocol mismatch)"
+        );
         return;
     }
     debug!("SS read relay: decrypted fixed header OK");
 
     // Verify type byte
     if fixed_buf[0] != 0x01 {
-        warn!("SS read relay: response type mismatch: expected 0x01, got 0x{:02x}", fixed_buf[0]);
+        warn!(
+            "SS read relay: response type mismatch: expected 0x01, got 0x{:02x}",
+            fixed_buf[0]
+        );
         return;
     }
 
@@ -427,16 +427,17 @@ async fn ss_read_relay(
 
     // 3. Read first payload chunk (length from fixed header)
     let first_len_offset = 1 + 8 + salt_len;
-    let first_payload_len = u16::from_be_bytes([
-        fixed_buf[first_len_offset],
-        fixed_buf[first_len_offset + 1],
-    ]) as usize;
+    let first_payload_len =
+        u16::from_be_bytes([fixed_buf[first_len_offset], fixed_buf[first_len_offset + 1]]) as usize;
     debug!("SS read relay: first payload length = {first_payload_len}");
 
     if first_payload_len > 0 {
         let mut payload_buf = vec![0u8; first_payload_len + tag_len];
         if let Err(e) = tcp_read.read_exact(&mut payload_buf).await {
-            warn!("SS read relay: failed to read first payload ({} bytes): {e}", first_payload_len + tag_len);
+            warn!(
+                "SS read relay: failed to read first payload ({} bytes): {e}",
+                first_payload_len + tag_len
+            );
             return;
         }
         if !read_cipher.decrypt_packet(&mut payload_buf) {
@@ -465,8 +466,7 @@ async fn ss_read_relay(
             break;
         }
 
-        let payload_len =
-            u16::from_be_bytes([len_buf[0], len_buf[1]]) as usize;
+        let payload_len = u16::from_be_bytes([len_buf[0], len_buf[1]]) as usize;
         if payload_len == 0 {
             continue;
         }
@@ -549,14 +549,11 @@ impl ShadowsocksPayloadTransport {
         let timeout_dur = self.timeout();
 
         // Decode base64 PSK
-        let key = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            password,
-        )
-        .map_err(|e| PayloadTransportError {
-            phase: TransportPhase::Session,
-            message: format!("SS PSK decode: {e}"),
-        })?;
+        let key = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, password)
+            .map_err(|e| PayloadTransportError {
+                phase: TransportPhase::Session,
+                message: format!("SS PSK decode: {e}"),
+            })?;
 
         let (host, port) = super::websocket::parse_host_port(peer_addr, 443);
 
@@ -599,10 +596,14 @@ impl ShadowsocksPayloadTransport {
         slot_index: u16,
         segment_index: u32,
     ) -> Result<Option<crate::share::MiasmaShare>, PayloadTransportError> {
-        let local_addr = self.config.local_addr.as_deref().ok_or(PayloadTransportError {
-            phase: TransportPhase::Session,
-            message: "SS external: local_addr not configured".to_string(),
-        })?;
+        let local_addr = self
+            .config
+            .local_addr
+            .as_deref()
+            .ok_or(PayloadTransportError {
+                phase: TransportPhase::Session,
+                message: "SS external: local_addr not configured".to_string(),
+            })?;
 
         let timeout_dur = self.timeout();
         let (host, port) = super::websocket::parse_host_port(peer_addr, 443);
@@ -701,7 +702,9 @@ impl super::payload::PayloadTransport for ShadowsocksPayloadTransport {
 
         Err(last_err.unwrap_or(PayloadTransportError {
             phase: TransportPhase::Session,
-            message: "SS not configured (need server+password for native or local_addr for external)".to_string(),
+            message:
+                "SS not configured (need server+password for native or local_addr for external)"
+                    .to_string(),
         }))
     }
 }

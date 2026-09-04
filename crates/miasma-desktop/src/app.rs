@@ -519,11 +519,7 @@ impl MiasmaApp {
                             Ok(()) => {
                                 self.set_msg(
                                     MsgKind::Success,
-                                    format!(
-                                        "Saved {} bytes to {}",
-                                        bytes_written,
-                                        path.display()
-                                    ),
+                                    format!("Saved {} bytes to {}", bytes_written, path.display()),
                                 );
                             }
                             Err(e) => {
@@ -1268,8 +1264,7 @@ impl MiasmaApp {
                         // Envelope ID and colored state badge.
                         ui.horizontal(|ui| {
                             ui.monospace(&item.envelope_id[..16.min(item.envelope_id.len())]);
-                            let (state_color, state_label) =
-                                inbox_state_display(s, &item.state);
+                            let (state_color, state_label) = inbox_state_display(s, &item.state);
                             ui.colored_label(state_color, format!("  {state_label}"));
                         });
 
@@ -1287,7 +1282,11 @@ impl MiasmaApp {
                                 if item.file_size > 0 {
                                     ui.colored_label(
                                         DIM,
-                                        format!("  ({} {})", s.inbox_file_size, format_size(item.file_size)),
+                                        format!(
+                                            "  ({} {})",
+                                            s.inbox_file_size,
+                                            format_size(item.file_size)
+                                        ),
                                     );
                                 }
                             });
@@ -1302,10 +1301,7 @@ impl MiasmaApp {
                         // Challenge code display (recipient shows this to sender out-of-band).
                         if let Some(ref code) = item.challenge_code {
                             ui.horizontal(|ui| {
-                                ui.colored_label(
-                                    GREEN,
-                                    format!("{} {}", s.inbox_challenge, code),
-                                );
+                                ui.colored_label(GREEN, format!("{} {}", s.inbox_challenge, code));
                                 if ui.small_button(s.copy).clicked() {
                                     ui.output_mut(|o| o.copied_text = code.clone());
                                 }
@@ -1335,11 +1331,9 @@ impl MiasmaApp {
                             ui.horizontal(|ui| {
                                 ui.label(s.inbox_password_label);
                                 ui.add(
-                                    egui::TextEdit::singleline(
-                                        &mut self.inbox_retrieve_password,
-                                    )
-                                    .password(true)
-                                    .desired_width(150.0),
+                                    egui::TextEdit::singleline(&mut self.inbox_retrieve_password)
+                                        .password(true)
+                                        .desired_width(150.0),
                                 );
                                 let can_retrieve = !self.inbox_retrieve_password.is_empty()
                                     && self.daemon_state == DaemonState::Connected
@@ -1348,14 +1342,17 @@ impl MiasmaApp {
                                     egui::RichText::new(s.inbox_retrieve_button)
                                         .color(egui::Color32::WHITE),
                                 )
-                                .fill(if can_retrieve { ACCENT } else { CARD_BG });
+                                .fill(if can_retrieve {
+                                    ACCENT
+                                } else {
+                                    CARD_BG
+                                });
                                 if ui.add_enabled(can_retrieve, btn).clicked() {
                                     self.busy = true;
-                                    let _ =
-                                        self.worker.tx.try_send(WorkerCmd::DirectedRetrieve {
-                                            envelope_id: item.envelope_id.clone(),
-                                            password: self.inbox_retrieve_password.clone(),
-                                        });
+                                    let _ = self.worker.tx.try_send(WorkerCmd::DirectedRetrieve {
+                                        envelope_id: item.envelope_id.clone(),
+                                        password: self.inbox_retrieve_password.clone(),
+                                    });
                                 }
                             });
                         }
@@ -1389,8 +1386,16 @@ impl MiasmaApp {
     fn outbox_panel(&mut self, ui: &mut egui::Ui) {
         let s = self.s();
         let easy = self.mode.is_easy();
-        let heading = if easy { s.outbox_heading_easy } else { s.outbox_heading };
-        let desc = if easy { s.outbox_desc_easy } else { s.outbox_desc };
+        let heading = if easy {
+            s.outbox_heading_easy
+        } else {
+            s.outbox_heading
+        };
+        let desc = if easy {
+            s.outbox_desc_easy
+        } else {
+            s.outbox_desc
+        };
 
         card_frame().show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -1462,14 +1467,17 @@ impl MiasmaApp {
                                     egui::RichText::new(s.outbox_confirm_button)
                                         .color(egui::Color32::WHITE),
                                 )
-                                .fill(if can_confirm { ACCENT } else { CARD_BG });
+                                .fill(if can_confirm {
+                                    ACCENT
+                                } else {
+                                    CARD_BG
+                                });
                                 if ui.add_enabled(can_confirm, btn).clicked() {
                                     self.busy = true;
-                                    let _ =
-                                        self.worker.tx.try_send(WorkerCmd::DirectedConfirm {
-                                            envelope_id: item.envelope_id.clone(),
-                                            challenge_code: self.outbox_confirm_code.clone(),
-                                        });
+                                    let _ = self.worker.tx.try_send(WorkerCmd::DirectedConfirm {
+                                        envelope_id: item.envelope_id.clone(),
+                                        challenge_code: self.outbox_confirm_code.clone(),
+                                    });
                                 }
                             });
                         }
@@ -2615,7 +2623,10 @@ fn format_epoch(epoch_secs: u64) -> String {
 }
 
 /// Map envelope state string to a (color, label) for outbox display.
-fn outbox_state_display<'a>(s: &'a crate::locale::Strings, state: &'a str) -> (egui::Color32, &'a str) {
+fn outbox_state_display<'a>(
+    s: &'a crate::locale::Strings,
+    state: &'a str,
+) -> (egui::Color32, &'a str) {
     match state {
         "Pending" => (YELLOW, s.outbox_waiting_challenge),
         "ChallengeIssued" => (YELLOW, s.outbox_confirm_heading),
@@ -2631,7 +2642,10 @@ fn outbox_state_display<'a>(s: &'a crate::locale::Strings, state: &'a str) -> (e
 }
 
 /// Map envelope state string to a (color, label) for inbox display.
-fn inbox_state_display<'a>(s: &'a crate::locale::Strings, state: &'a str) -> (egui::Color32, &'a str) {
+fn inbox_state_display<'a>(
+    s: &'a crate::locale::Strings,
+    state: &'a str,
+) -> (egui::Color32, &'a str) {
     match state {
         "Pending" | "ChallengeIssued" => (YELLOW, s.inbox_state),
         "Confirmed" => (GREEN, s.outbox_confirmed),
@@ -2819,7 +2833,11 @@ impl eframe::App for MiasmaApp {
                     nav_tab(ui, &mut self.tab, Tab::Retrieve, retrieve_label);
                     let send_label = if easy { s.tab_send_easy } else { s.tab_send };
                     let inbox_label = if easy { s.tab_inbox_easy } else { s.tab_inbox };
-                    let outbox_label = if easy { s.tab_outbox_easy } else { s.tab_outbox };
+                    let outbox_label = if easy {
+                        s.tab_outbox_easy
+                    } else {
+                        s.tab_outbox
+                    };
                     nav_tab(ui, &mut self.tab, Tab::Send, send_label);
                     nav_tab(ui, &mut self.tab, Tab::Inbox, inbox_label);
                     nav_tab(ui, &mut self.tab, Tab::Outbox, outbox_label);

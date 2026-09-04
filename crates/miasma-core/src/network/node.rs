@@ -652,13 +652,9 @@ pub enum DhtCommand {
         reply: oneshot::Sender<super::connection_health::ConnectionHealthSnapshot>,
     },
     /// Get whether flap damping is currently active.
-    GetFlapDamping {
-        reply: oneshot::Sender<bool>,
-    },
+    GetFlapDamping { reply: oneshot::Sender<bool> },
     /// Get current partial failure conditions.
-    GetPartialFailures {
-        reply: oneshot::Sender<Vec<String>>,
-    },
+    GetPartialFailures { reply: oneshot::Sender<Vec<String>> },
     /// Get reconnection metrics snapshot.
     GetReconnectionMetrics {
         reply: oneshot::Sender<crate::daemon::self_heal::ReconnectionMetrics>,
@@ -2049,10 +2045,7 @@ impl MiasmaNode {
                 // relay circuit addresses so libp2p can dial through a
                 // relay.  Relay peers are sorted by trust tier (Verified
                 // first) by `relay_peer_info()`.
-                let directly_connected = self
-                    .swarm
-                    .connected_peers()
-                    .any(|p| *p == peer_id);
+                let directly_connected = self.swarm.connected_peers().any(|p| *p == peer_id);
 
                 if directly_connected {
                     self.directed_direct_sends += 1;
@@ -2071,9 +2064,8 @@ impl MiasmaNode {
                             if *relay_id == peer_id {
                                 continue; // Don't relay through the target itself
                             }
-                            let circuit_addr_str = format!(
-                                "/p2p/{relay_id}/p2p-circuit/p2p/{peer_id}"
-                            );
+                            let circuit_addr_str =
+                                format!("/p2p/{relay_id}/p2p-circuit/p2p/{peer_id}");
                             if let Ok(addr) = circuit_addr_str.parse::<Multiaddr>() {
                                 self.swarm
                                     .behaviour_mut()
@@ -2123,11 +2115,9 @@ impl MiasmaNode {
                 let peer_count = self.swarm.connected_peers().count();
                 let all_transports_failing = self.health_monitor.average_quality() < 0.1;
                 let relay_only = peer_count > 0 && !self.nat_publicly_reachable;
-                let failures = self.partial_failure.evaluate(
-                    peer_count,
-                    all_transports_failing,
-                    relay_only,
-                );
+                let failures =
+                    self.partial_failure
+                        .evaluate(peer_count, all_transports_failing, relay_only);
                 let _ = reply.send(failures.iter().map(|f| f.to_string()).collect());
             }
             DhtCommand::GetReconnectionMetrics { reply } => {
@@ -2190,11 +2180,9 @@ impl MiasmaNode {
             // Evaluate partial failures — relay-only, no peers, stale state.
             let all_transports_failing = self.health_monitor.average_quality() < 0.1;
             let relay_only = peer_count > 0 && !self.nat_publicly_reachable;
-            let failures = self.partial_failure.evaluate(
-                peer_count,
-                all_transports_failing,
-                relay_only,
-            );
+            let failures =
+                self.partial_failure
+                    .evaluate(peer_count, all_transports_failing, relay_only);
             if !failures.is_empty() {
                 for f in &failures {
                     warn!("partial_failure.detected: {f}");
@@ -2209,10 +2197,13 @@ impl MiasmaNode {
                             // Re-dial bootstrap peers to discover new peers.
                             if !self.flap_detector.is_damping() {
                                 for (peer_id, addr) in &self.bootstrap_peers {
-                                    if self.reconnection_scheduler.should_attempt(&peer_id.to_bytes()) {
-                                        let p2p = addr.clone().with(
-                                            libp2p::multiaddr::Protocol::P2p(*peer_id),
-                                        );
+                                    if self
+                                        .reconnection_scheduler
+                                        .should_attempt(&peer_id.to_bytes())
+                                    {
+                                        let p2p = addr
+                                            .clone()
+                                            .with(libp2p::multiaddr::Protocol::P2p(*peer_id));
                                         let _ = self.swarm.dial(p2p);
                                         self.reconnection_metrics.record_attempt();
                                     }
@@ -2228,7 +2219,8 @@ impl MiasmaNode {
             // Process scheduled reconnection attempts (respect flap damping).
             if !self.flap_detector.is_damping() {
                 let due = self.reconnection_scheduler.peers_due_for_reconnect();
-                for peer_bytes in due.iter().take(3) { // At most 3 redials per tick
+                for peer_bytes in due.iter().take(3) {
+                    // At most 3 redials per tick
                     if let Ok(peer_id) = libp2p::PeerId::from_bytes(peer_bytes) {
                         // Dial by PeerId — libp2p resolves addresses from Kademlia routing table.
                         debug!("reconnection_scheduler.redial peer={peer_id}");
@@ -2354,7 +2346,8 @@ impl MiasmaNode {
                     std::time::Duration::from_millis(0), // No latency for connection events
                 );
                 // Reset reconnection backoff on successful connection.
-                self.reconnection_scheduler.record_success(&peer_id.to_bytes());
+                self.reconnection_scheduler
+                    .record_success(&peer_id.to_bytes());
                 self.reconnection_metrics.record_success();
                 if let Some(tx) = &self.topology_tx {
                     let _ = tx.try_send(super::types::TopologyEvent::PeerConnected { peer_id });
@@ -2366,10 +2359,13 @@ impl MiasmaNode {
                 self.routing_table.remove_peer(&peer_id);
                 self.pending_peer_addrs.remove(&peer_id);
                 // Track disconnection in health monitor and flap detector.
-                self.health_monitor.record_peer_failure(&peer_id.to_string());
+                self.health_monitor
+                    .record_peer_failure(&peer_id.to_string());
                 self.flap_detector.record_disconnect();
                 // Schedule reconnection with backoff.
-                let tripped = self.reconnection_scheduler.record_failure(&peer_id.to_bytes());
+                let tripped = self
+                    .reconnection_scheduler
+                    .record_failure(&peer_id.to_bytes());
                 if tripped {
                     self.reconnection_metrics.record_circuit_breaker();
                     debug!("Circuit breaker tripped for peer {peer_id}");
@@ -2427,21 +2423,22 @@ impl MiasmaNode {
                 debug!("Relay client: {ev:?}");
             }
             SwarmEvent::Behaviour(MiasmaBehaviourEvent::Ping(_)) => {}
-            SwarmEvent::OutgoingConnectionError {
-                peer_id,
-                error,
-                ..
-            } => {
+            SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
                 if let Some(peer_id) = peer_id {
                     debug!("Dial failed: {peer_id} ({error})");
                     // Record dial failure in health monitor — more granular than
                     // connection close (this fires when dial never completes).
-                    self.health_monitor.record_peer_failure(&peer_id.to_string());
+                    self.health_monitor
+                        .record_peer_failure(&peer_id.to_string());
                     // Apply dial backoff for the failed peer.
-                    self.health_monitor.backoff.record_failure(&peer_id.to_string());
+                    self.health_monitor
+                        .backoff
+                        .record_failure(&peer_id.to_string());
                     // Track in reconnection scheduler.
                     self.reconnection_metrics.record_attempt();
-                    let tripped = self.reconnection_scheduler.record_failure(&peer_id.to_bytes());
+                    let tripped = self
+                        .reconnection_scheduler
+                        .record_failure(&peer_id.to_bytes());
                     if tripped {
                         self.reconnection_metrics.record_circuit_breaker();
                         debug!("Circuit breaker tripped for peer {peer_id}");
@@ -3355,50 +3352,59 @@ impl MiasmaNode {
                         let id_hex = hex::encode(envelope_id);
                         let response = if let Some(ref data_dir) = self.directed_data_dir {
                             match crate::directed::DirectedInbox::open(data_dir) {
-                                Ok(inbox) => {
-                                    match inbox.load_incoming(&id_hex) {
-                                        Ok(mut envelope) => {
-                                            if envelope.state != crate::directed::EnvelopeState::ChallengeIssued {
-                                                DirectedResponse::Error(format!(
-                                                    "not in ChallengeIssued state (current: {:?})",
-                                                    envelope.state
-                                                ))
-                                            } else if let Some(hash) = envelope.challenge_hash {
-                                                if crate::directed::verify_challenge(&challenge_code, &hash) {
-                                                    envelope.state = crate::directed::EnvelopeState::Confirmed;
-                                                    let _ = inbox.save_incoming(&envelope);
-                                                    inbox.cleanup_challenge(&id_hex);
-                                                    info!(envelope_id = %id_hex, "directed.challenge_confirmed_via_p2p");
-                                                    DirectedResponse::Confirmed { envelope_id }
-                                                } else {
-                                                    envelope.challenge_attempts_remaining =
-                                                        envelope.challenge_attempts_remaining.saturating_sub(1);
-                                                    if envelope.challenge_attempts_remaining == 0 {
-                                                        envelope.state = crate::directed::EnvelopeState::ChallengeFailed;
-                                                        inbox.cleanup_challenge(&id_hex);
-                                                    }
-                                                    let _ = inbox.save_incoming(&envelope);
-                                                    DirectedResponse::ChallengeFailed {
-                                                        envelope_id,
-                                                        attempts_remaining: envelope.challenge_attempts_remaining,
-                                                    }
-                                                }
+                                Ok(inbox) => match inbox.load_incoming(&id_hex) {
+                                    Ok(mut envelope) => {
+                                        if envelope.state
+                                            != crate::directed::EnvelopeState::ChallengeIssued
+                                        {
+                                            DirectedResponse::Error(format!(
+                                                "not in ChallengeIssued state (current: {:?})",
+                                                envelope.state
+                                            ))
+                                        } else if let Some(hash) = envelope.challenge_hash {
+                                            if crate::directed::verify_challenge(
+                                                &challenge_code,
+                                                &hash,
+                                            ) {
+                                                envelope.state =
+                                                    crate::directed::EnvelopeState::Confirmed;
+                                                let _ = inbox.save_incoming(&envelope);
+                                                inbox.cleanup_challenge(&id_hex);
+                                                info!(envelope_id = %id_hex, "directed.challenge_confirmed_via_p2p");
+                                                DirectedResponse::Confirmed { envelope_id }
                                             } else {
-                                                DirectedResponse::Error("no challenge hash set".into())
+                                                envelope.challenge_attempts_remaining = envelope
+                                                    .challenge_attempts_remaining
+                                                    .saturating_sub(1);
+                                                if envelope.challenge_attempts_remaining == 0 {
+                                                    envelope.state = crate::directed::EnvelopeState::ChallengeFailed;
+                                                    inbox.cleanup_challenge(&id_hex);
+                                                }
+                                                let _ = inbox.save_incoming(&envelope);
+                                                DirectedResponse::ChallengeFailed {
+                                                    envelope_id,
+                                                    attempts_remaining: envelope
+                                                        .challenge_attempts_remaining,
+                                                }
                                             }
+                                        } else {
+                                            DirectedResponse::Error("no challenge hash set".into())
                                         }
-                                        Err(e) => DirectedResponse::Error(format!("load envelope: {e}")),
                                     }
-                                }
+                                    Err(e) => {
+                                        DirectedResponse::Error(format!("load envelope: {e}"))
+                                    }
+                                },
                                 Err(e) => DirectedResponse::Error(format!("open inbox: {e}")),
                             }
                         } else {
                             DirectedResponse::Error("confirm not available (no data dir)".into())
                         };
-                        let _ = self.swarm.behaviour_mut().directed_sharing.send_response(
-                            channel,
-                            response,
-                        );
+                        let _ = self
+                            .swarm
+                            .behaviour_mut()
+                            .directed_sharing
+                            .send_response(channel, response);
                     }
                     DirectedRequest::SenderRevoke { envelope_id } => {
                         info!(
@@ -3733,8 +3739,7 @@ fn build_swarm(
                     StreamProtocol::new("/miasma/share/1.0.0"),
                     request_response::ProtocolSupport::Full,
                 )],
-                request_response::Config::default()
-                    .with_request_timeout(Duration::from_secs(60)),
+                request_response::Config::default().with_request_timeout(Duration::from_secs(60)),
             );
 
             let admission = request_response::Behaviour::<AdmissionCodec>::new(

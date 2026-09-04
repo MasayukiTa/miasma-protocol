@@ -57,8 +57,8 @@ use crate::MiasmaError;
 
 /// QUIC v1 Initial packet protection salt (RFC 9001 §5.2).
 const QUIC_V1_INITIAL_SALT: &[u8] = &[
-    0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3, 0x4d, 0x17, 0x9a, 0xe6, 0xa4, 0xc8, 0x0c,
-    0xad, 0xcc, 0xbb, 0x7f, 0x0a,
+    0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3, 0x4d, 0x17, 0x9a, 0xe6, 0xa4, 0xc8, 0x0c, 0xad,
+    0xcc, 0xbb, 0x7f, 0x0a,
 ];
 
 /// Context label for REALITY short_id derivation (domain-separated from other uses).
@@ -279,7 +279,13 @@ pub fn try_decrypt_quic_initial(data: &[u8]) -> Option<Vec<u8>> {
     let nonce_arr = Nonce::from_slice(&nonce_bytes);
 
     let plaintext = cipher
-        .decrypt(nonce_arr, AeadPayload { msg: ciphertext, aad: &aad })
+        .decrypt(
+            nonce_arr,
+            AeadPayload {
+                msg: ciphertext,
+                aad: &aad,
+            },
+        )
         .ok()?;
 
     Some(plaintext)
@@ -351,8 +357,7 @@ pub fn extract_sni_from_client_hello(tls_data: &[u8]) -> Option<String> {
     if tls_data[0] != 0x01 {
         return None; // Not ClientHello
     }
-    let body_len =
-        u32::from_be_bytes([0, tls_data[1], tls_data[2], tls_data[3]]) as usize;
+    let body_len = u32::from_be_bytes([0, tls_data[1], tls_data[2], tls_data[3]]) as usize;
     if tls_data.len() < 4 + body_len {
         return None;
     }
@@ -535,11 +540,10 @@ impl RealityDispatcher {
     /// This method loops indefinitely, routing each UDP datagram to the
     /// appropriate upstream. Call via `tokio::spawn(dispatcher.run(bind_addr))`.
     pub async fn run(self, bind_addr: SocketAddr) -> Result<(), MiasmaError> {
-        let external = Arc::new(
-            UdpSocket::bind(bind_addr)
-                .await
-                .map_err(|e| MiasmaError::Sss(format!("RealityDispatcher bind {bind_addr}: {e}")))?,
-        );
+        let external =
+            Arc::new(UdpSocket::bind(bind_addr).await.map_err(|e| {
+                MiasmaError::Sss(format!("RealityDispatcher bind {bind_addr}: {e}"))
+            })?);
         info!(
             addr = %bind_addr,
             internal_port = self.internal_port,
@@ -769,11 +773,7 @@ mod tests {
         let mut out = Vec::new();
         out.push(0x01); // HandshakeType: ClientHello
         let len = ch_body.len() as u32;
-        out.extend_from_slice(&[
-            (len >> 16) as u8,
-            (len >> 8) as u8,
-            len as u8,
-        ]);
+        out.extend_from_slice(&[(len >> 16) as u8, (len >> 8) as u8, len as u8]);
         out.extend_from_slice(&ch_body);
         out
     }
@@ -876,11 +876,11 @@ mod tests {
         // Full protected Initial packet from RFC 9001 Appendix A.2
         // (client Initial, containing a CRYPTO frame with ClientHello data)
         let _pkt_hex = concat!(
-            "c000000001088394c8f03e515708",   // header
-            "00004500",                         // token_len=0, length=0x45=69
+            "c000000001088394c8f03e515708", // header
+            "00004500",                     // token_len=0, length=0x45=69
             // Protected PN + ciphertext (69 bytes):
-            "3a985b3e",  // protected first_byte + pn + start of payload (header prot applied)
-            // remaining payload (we include the full packet below)
+            "3a985b3e", // protected first_byte + pn + start of payload (header prot applied)
+                        // remaining payload (we include the full packet below)
         );
 
         // The full RFC 9001 Appendix A.2 packet bytes (hex)
@@ -894,7 +894,8 @@ mod tests {
             "ad47c8ce5aa0a33e8ad05dd8d05048",
             "f4aef9d77fdb9e0def6012e1ccbf39",
             "ee73b58fc13ae4ce9d24b7de0e56f2",
-        )).unwrap_or_default();
+        ))
+        .unwrap_or_default();
 
         // If the hex decode fails (the above is abbreviated), skip.
         // The RFC 9001 vector test is the real validation; local parse tests cover structure.

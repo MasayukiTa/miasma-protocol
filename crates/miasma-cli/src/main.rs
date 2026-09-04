@@ -902,14 +902,10 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
             if total_directed > 0 {
                 println!();
                 println!("Directed Sharing (control plane):");
-                println!(
-                    "  Direct sends:          {}",
-                    s.directed_direct_sends
-                );
+                println!("  Direct sends:          {}", s.directed_direct_sends);
                 println!(
                     "  Relay fallback:        {} attempts, {} circuits registered",
-                    s.directed_relay_fallback_attempts,
-                    s.directed_relay_circuits_registered
+                    s.directed_relay_fallback_attempts, s.directed_relay_circuits_registered
                 );
                 if s.directed_no_relay_candidates > 0 {
                     println!(
@@ -926,14 +922,8 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
                 "  Quality score:         {:.1}%",
                 s.connection_quality_score * 100.0
             );
-            println!(
-                "  Dial backoff addrs:    {}",
-                s.dial_backoff_addresses
-            );
-            println!(
-                "  Stale addrs pruned:    {}",
-                s.stale_addresses_pruned
-            );
+            println!("  Dial backoff addrs:    {}", s.dial_backoff_addresses);
+            println!("  Stale addrs pruned:    {}", s.stale_addresses_pruned);
             println!(
                 "  Connectivity:          {}",
                 if s.connectivity_degraded {
@@ -964,10 +954,16 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
                 println!("  Successes:             {}", s.reconnection_successes);
                 println!("  Failures:              {}", s.reconnection_failures);
                 if s.reconnection_circuit_breaker_trips > 0 {
-                    println!("  Circuit breaker trips: {}", s.reconnection_circuit_breaker_trips);
+                    println!(
+                        "  Circuit breaker trips: {}",
+                        s.reconnection_circuit_breaker_trips
+                    );
                 }
                 if s.reconnection_recovery_actions > 0 {
-                    println!("  Recovery actions:      {}", s.reconnection_recovery_actions);
+                    println!(
+                        "  Recovery actions:      {}",
+                        s.reconnection_recovery_actions
+                    );
                 }
             }
 
@@ -977,11 +973,19 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
                 println!("Censorship Resistance:");
                 println!(
                     "  Shadowsocks:           {}",
-                    if s.shadowsocks_configured { "configured" } else { "not configured" }
+                    if s.shadowsocks_configured {
+                        "configured"
+                    } else {
+                        "not configured"
+                    }
                 );
                 println!(
                     "  Tor:                   {}",
-                    if s.tor_configured { "configured" } else { "not configured" }
+                    if s.tor_configured {
+                        "configured"
+                    } else {
+                        "not configured"
+                    }
                 );
             }
 
@@ -1454,9 +1458,7 @@ async fn cmd_receive(
         let abs_out = if out.is_absolute() {
             out.to_owned()
         } else {
-            std::env::current_dir()
-                .unwrap_or_default()
-                .join(out)
+            std::env::current_dir().unwrap_or_default().join(out)
         };
         let req = ControlRequest::DirectedRetrieveToFile {
             envelope_id: envelope_id.to_owned(),
@@ -1496,13 +1498,18 @@ async fn cmd_receive(
             if let Some(fname) = &filename {
                 // Move from temp to final filename in current directory.
                 let final_path = PathBuf::from(fname);
-                std::fs::rename(&tmp_path, &final_path).or_else(|_| {
-                    // rename can fail across filesystems; fall back to copy+delete.
-                    std::fs::copy(&tmp_path, &final_path).map(|_| ())?;
-                    std::fs::remove_file(&tmp_path).ok();
-                    Ok::<(), std::io::Error>(())
-                }).with_context(|| format!("cannot write output: {}", final_path.display()))?;
-                eprintln!("✓ Written {bytes_written} bytes to {}", final_path.display());
+                std::fs::rename(&tmp_path, &final_path)
+                    .or_else(|_| {
+                        // rename can fail across filesystems; fall back to copy+delete.
+                        std::fs::copy(&tmp_path, &final_path).map(|_| ())?;
+                        std::fs::remove_file(&tmp_path).ok();
+                        Ok::<(), std::io::Error>(())
+                    })
+                    .with_context(|| format!("cannot write output: {}", final_path.display()))?;
+                eprintln!(
+                    "✓ Written {bytes_written} bytes to {}",
+                    final_path.display()
+                );
             } else {
                 // No filename — dump temp file contents to stdout.
                 let data = std::fs::read(&tmp_path).context("read temp file")?;
@@ -1660,9 +1667,7 @@ async fn cmd_network_publish(
     // without full-file RAM buffering or IPC size limits.
     let abs_path = std::fs::canonicalize(path)
         .with_context(|| format!("cannot resolve path: {}", path.display()))?;
-    let file_len = std::fs::metadata(&abs_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let file_len = std::fs::metadata(&abs_path).map(|m| m.len()).unwrap_or(0);
 
     eprintln!(
         "Publishing {} ({} bytes) via local daemon...",
@@ -1798,7 +1803,9 @@ async fn cmd_wss_probe(
 
     match result {
         Ok(_) => {
-            eprintln!("\n✓ PASS — WSS connected and server returned a valid response ({elapsed:.2?})");
+            eprintln!(
+                "\n✓ PASS — WSS connected and server returned a valid response ({elapsed:.2?})"
+            );
             eprintln!("  TCP + WebSocket upgrade: OK");
             eprintln!("  This transport path is NOT blocked.");
         }
@@ -1812,7 +1819,10 @@ async fn cmd_wss_probe(
             // Data-phase error = connection worked, server just doesn't have shard 0
             eprintln!("\n✓ PASS — WSS connection established ({elapsed:.2?})");
             eprintln!("  TCP + WebSocket upgrade: OK");
-            eprintln!("  Server response (data-phase, expected for probe): {}", e.message);
+            eprintln!(
+                "  Server response (data-phase, expected for probe): {}",
+                e.message
+            );
             eprintln!("  Conclusion: this transport path IS functional.");
         }
     }
