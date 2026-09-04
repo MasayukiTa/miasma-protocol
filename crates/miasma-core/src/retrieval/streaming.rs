@@ -30,7 +30,9 @@ use std::pin::Pin;
 use futures::{stream, Stream, StreamExt};
 
 use crate::{
-    dissolution::{retrieve_segment, DissolutionManifest},
+    crypto::hash::ContentId,
+    dissolution::{retrieve_segment, DissolutionManifest, SegmentMeta},
+    pipeline::DissolutionParams,
     share::{MiasmaShare, ShareVerification},
     MiasmaError,
 };
@@ -103,6 +105,78 @@ impl<Src: ShareSource + Clone + Send + Sync + 'static> StreamingRetrievalCoordin
 
         Box::pin(s)
     }
+
+    /// Like `retrieve_streaming`, but for the network retrieval path where no
+    /// pre-built `DissolutionManifest` is available (the retriever never
+    /// dissolved the file itself -- it only knows the MID and the segment
+    /// count discovered from the DHT record).
+    ///
+    /// Segment metadata is derived lazily per segment from the first valid
+    /// share's own `original_len` field, exactly as
+    /// `RetrievalCoordinator::retrieve_segments` already does for the
+    /// non-streaming network path -- `offset_bytes` is unused by
+    /// `retrieve_segment` so it is filled with a placeholder.
+    ///
+    /// Unlike `retrieve_streaming`, the returned stream is `'static`: every
+    /// value it needs (`source`, `mid`, `params`) is cloned/copied up front
+    /// rather than borrowed, so it does not need to keep `self` alive --
+    /// letting the network coordinator build a short-lived
+    /// `StreamingRetrievalCoordinator` and return the stream from its own
+    /// method without a self-borrow lifetime conflict.
+    pub fn retrieve_streaming_by_mid(
+        &self,
+        mid: ContentId,
+        segment_count: u32,
+        params: DissolutionParams,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<u8>, MiasmaError>> + Send + 'static>> {
+        let source = self.source.clone();
+
+        let s = stream::iter(0..segment_count).then(move |seg_idx| {
+            let source = source.clone();
+            let mid = mid.clone();
+            async move {
+                let mut candidates = source.list_candidates(&mid).await;
+                candidates.shuffle(&mut rand::thread_rng());
+
+                let mut valid: Vec<MiasmaShare> = Vec::with_capacity(params.data_shards);
+
+                for addr in &candidates {
+                    if valid.len() >= params.data_shards {
+                        break;
+                    }
+                    match source.fetch(addr).await? {
+                        Some(share)
+                            if share.segment_index == seg_idx
+                                && ShareVerification::coarse_verify(&share, &mid) =>
+                        {
+                            valid.push(share);
+                        }
+                        _ => {}
+                    }
+                }
+
+                if valid.len() < params.data_shards {
+                    return Err(MiasmaError::InsufficientShares {
+                        need: params.data_shards,
+                        got: valid.len(),
+                    });
+                }
+
+                // Build a synthetic SegmentMeta from the first share's metadata
+                // (same technique as `RetrievalCoordinator::retrieve_segments`).
+                let meta = SegmentMeta {
+                    index: seg_idx,
+                    offset_bytes: 0, // not used by retrieve_segment
+                    plaintext_len: valid[0].original_len,
+                    share_count: params.total_shards as u16,
+                };
+
+                retrieve_segment(&mid, &valid, &meta, params)
+            }
+        });
+
+        Box::pin(s)
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -151,5 +225,47 @@ mod tests {
         }
 
         assert_eq!(recovered, data);
+    }
+
+    /// Phase 2.3: the network path has no pre-built manifest, only the MID
+    /// and a segment count discovered from a DHT record. Proves
+    /// `retrieve_streaming_by_mid` reconstructs a multi-segment file
+    /// byte-for-byte via that path, and that it actually yields more than
+    /// one segment (a single-segment pass would trivially "match" a small
+    /// file and hide a broken multi-segment loop).
+    #[tokio::test]
+    async fn streaming_by_mid_yields_all_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        let (coord, store) = make_streaming(&dir);
+
+        let params = DissolutionParams::default();
+        let data = vec![0xABu8; 600];
+        let segment_size = 200usize;
+
+        let (manifest, all_shares) = dissolve_file(&data, params, segment_size).unwrap();
+        assert!(
+            manifest.segments.len() > 1,
+            "test fixture must exercise the multi-segment loop"
+        );
+        for seg in &all_shares {
+            for s in seg {
+                store.put(s).unwrap();
+            }
+        }
+
+        let mut stream = coord.retrieve_streaming_by_mid(
+            manifest.mid.clone(),
+            manifest.segments.len() as u32,
+            params,
+        );
+        let mut recovered: Vec<u8> = Vec::new();
+        let mut segment_count = 0usize;
+        while let Some(chunk) = stream.next().await {
+            recovered.extend(chunk.unwrap());
+            segment_count += 1;
+        }
+
+        assert_eq!(recovered, data);
+        assert_eq!(segment_count, manifest.segments.len());
     }
 }
