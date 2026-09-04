@@ -139,9 +139,11 @@ cargo build --release
 cargo test --workspace
 ```
 
-The test suite includes 480 tests (268 core unit + 112 adversarial + 53 integration + 31 bridge + 16 desktop), with 0 failures.
+The test suite runs 780 tests with 0 failures: 463 core unit + 194 adversarial + 63 integration (`miasma-core`), 35 unit + 3 cross-process (`miasma-bridge`), 22 (`miasma-desktop`). The three `miasma-bridge` integration tests spawn the real compiled binary and move payload bytes over a loopback BitTorrent connection against an in-process seeder.
 
-One test (`p2p_kademlia_full_roundtrip`) is quarantined with `#[ignore]` due to timing sensitivity. It can be run manually and is also covered by `scripts/smoke-loopback.ps1`.
+Seven further tests carry `#[ignore]` and are excluded from that count: six `field_*` tests that need real external network I/O (Tor and shadowsocks reachability, large-file streaming over a live link) plus `retrieve_from_network_gives_up_on_nonexistent_record`.
+
+`p2p_kademlia_full_roundtrip` is no longer among them. It had been quarantined as flaky since it was written; the root cause turned out to be in the product, not the test — DHT PUT reported success as soon as the record hit the *local* Kademlia store, without waiting for network propagation, which a fixed sleep in the test could not reliably cover. With the PUT made to wait for a real acknowledgement, the test runs in the normal suite.
 
 ## Security Note
 
