@@ -59,6 +59,7 @@ Be explicit about what this system resists and what it does not.
 
 - Casual observation of network traffic (transport obfuscation, encrypted payloads)
 - Non-targeted surveillance (pseudonymous descriptors, epoch rotation, unlinkable credentials)
+- Content seizure via single-node compromise, **when the publisher had genuine peer availability at publish time**: erasure-coded shards are pushed to other admission-verified peers (`/miasma/share-store/1.0.0`), each holder reports its own dialable address, and a shard-holder-diversity cap keeps any one peer from ending up with more than it should -- taking the *original publisher* offline afterward does not make the content unavailable. Tested directly: `retrieve_from_network_succeeds_when_publisher_goes_offline_after_publish` retrieves successfully from remote holders alone after the publisher has fully shut down. See `docs/tasks/p2p-content-transfer-hardening.md`'s Phase 2.1 entry for exactly what's verified, by which tests, and the design review that shaped it.
 
 **Does not resist:**
 
@@ -67,7 +68,9 @@ Be explicit about what this system resists and what it does not.
 - Traffic analysis via timing (fixed-size padding prevents size correlation, but no constant-rate cover traffic)
 - Sybil attacks at scale (PoW admission raises cost but does not eliminate it)
 - Bootstrap trust circular dependency (first nodes in a deployment credential each other)
-- Content seizure via single node compromise: every published record currently lists only the publishing node as holder of all shards (erasure coding splits the content, but does not yet distribute the splits across peers) -- taking the publisher offline makes its content unavailable, the same failure mode as a regular server. Shard distribution to remote peers is in progress; see `docs/tasks/p2p-content-transfer-hardening.md`. This line moves back to "Resists" once that lands and the corresponding tests pass.
+- Content seizure via single node compromise **when published while effectively isolated**: `dissolve_and_publish`/`dissolve_and_publish_file` still succeed by default with zero or too few connected peers (an early-beta desktop user is not blocked from publishing just because no one else is online yet) -- in that case distribution is genuinely best-effort and may not happen at all, so the content is only as available as the publisher itself, same as a regular server. Callers that need the stronger guarantee enforced rather than merely attempted must opt in explicitly (`PublishOptions::strict`), which fails loudly instead of publishing a record that looks normal but isn't actually recoverable without the publisher.
+- Direct share-push reveals the publisher's real PeerId to every peer chosen to host a shard (retrieval already has onion/relay routing; the push path does not yet) -- a real, currently undocumented-elsewhere-until-now anonymity gap in the distribution mechanism itself, flagged during this phase's external design review.
+- True Kademlia-closest shard placement, fetch/audit-based holder reputation, storage retention leases, and automatic repair scheduling are all deferred follow-ups, not yet implemented -- current placement picks from currently-connected, admission-verified peers only.
 
 ## Platform Maturity
 

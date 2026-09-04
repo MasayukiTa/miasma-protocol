@@ -66,6 +66,65 @@ pub struct ShareFetchResponse {
     pub share: Option<MiasmaShare>,
 }
 
+// ─── Share-store wire types (Phase 2.1) ─────────────────────────────────────
+//
+// A *separate* protocol from `/miasma/share/1.0.0` (pull-only, above) rather
+// than an enum-extension of it -- per external design review (codex 5.6 sol
+// + claude fable, see docs/tasks/p2p-content-transfer-hardening.md): the
+// existing `ShareFetchRequest`/`ShareFetchResponse` types are deserialized
+// verbatim across five different transport paths (WSS, obfuscated QUIC, Tor/
+// shadowsocks, onion, direct payload), so changing their wire shape is not a
+// local change; a separate protocol also gives free push-capability
+// detection via libp2p protocol negotiation (a peer that never registers
+// `/miasma/share-store/1.0.0` is simply never selected as a push target) and
+// lets push and pull have independent rate limits / size caps in the future.
+
+/// Push a share to a remote peer, asking it to host it on the sender's behalf.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoreRequest {
+    pub share: MiasmaShare,
+}
+
+/// Response to a `StoreRequest`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum StoreResponse {
+    /// Accepted and persisted. `advertised_addrs` are the *holder's own*
+    /// externally-dialable addresses -- reported by the holder itself rather
+    /// than assumed by the pusher, since the holder is the only real
+    /// authority on its own reachability. This is what makes the resulting
+    /// `ShardLocation` genuinely dialable by a retriever who was never
+    /// connected to the original publisher.
+    Accepted {
+        address: String,
+        advertised_addrs: Vec<String>,
+    },
+    Rejected(StoreRejectReason),
+}
+
+/// Why an inbound `StoreRequest` was rejected.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum StoreRejectReason {
+    /// Sender has not completed PoW admission (`peer_registry::is_verified`).
+    NotVerified,
+    /// This node's hosted-share budget (separate from its own-content quota)
+    /// is full; see `LocalShareStore::put_hosted`.
+    QuotaExceeded,
+    /// Failed `ShareVerification::self_consistent` or other structural check.
+    Invalid,
+}
+
+impl std::fmt::Display for StoreRejectReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StoreRejectReason::NotVerified => write!(f, "peer not admission-verified"),
+            StoreRejectReason::QuotaExceeded => write!(f, "hosted-share quota exceeded"),
+            StoreRejectReason::Invalid => {
+                write!(f, "share failed structural/self-consistency check")
+            }
+        }
+    }
+}
+
 // ─── Admission wire types (ADR-004 Phase 3b) ────────────────────────────────
 
 /// PoW admission request — sent after Identify to exchange proof of work.
@@ -328,6 +387,11 @@ pub struct ShareCodec;
 /// clamps the segment size against this constant so that doesn't happen
 /// silently. `pub(crate)` so that clamp can reference the real wire limit
 /// instead of duplicating the number.
+///
+/// Also reused as-is by `ShareStoreCodec` (`/miasma/share-store/1.0.0`,
+/// Phase 2.1): `StoreRequest` wraps exactly one `MiasmaShare`, the same
+/// payload `ShareFetchResponse` carries, so the same cap applies without
+/// needing a second constant to keep in sync.
 pub(crate) const SHARE_MSG_MAX: usize = 8 * 1024 * 1024;
 /// Max message size for admission protocol (4 KiB — PoW proofs are tiny).
 const ADMISSION_MSG_MAX: usize = 4 * 1024;
@@ -378,6 +442,101 @@ impl request_response::Codec for ShareCodec {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("share exchange message too large: {len} bytes"),
+            ));
+        }
+        let mut buf = vec![0u8; len];
+        io.read_exact(&mut buf).await?;
+        bincode::deserialize(&buf)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
+    async fn write_request<T>(
+        &mut self,
+        _: &StreamProtocol,
+        io: &mut T,
+        req: Self::Request,
+    ) -> std::io::Result<()>
+    where
+        T: futures::AsyncWrite + Unpin + Send,
+    {
+        use futures::AsyncWriteExt;
+        let buf = bincode::serialize(&req)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        io.write_all(&(buf.len() as u32).to_le_bytes()).await?;
+        io.write_all(&buf).await?;
+        Ok(())
+    }
+
+    async fn write_response<T>(
+        &mut self,
+        _: &StreamProtocol,
+        io: &mut T,
+        res: Self::Response,
+    ) -> std::io::Result<()>
+    where
+        T: futures::AsyncWrite + Unpin + Send,
+    {
+        use futures::AsyncWriteExt;
+        let buf = bincode::serialize(&res)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        io.write_all(&(buf.len() as u32).to_le_bytes()).await?;
+        io.write_all(&buf).await?;
+        Ok(())
+    }
+}
+
+// ─── ShareStoreCodec ────────────────────────────────────────────────────────
+
+/// Bincode + 4-byte LE length-prefix codec for `/miasma/share-store/1.0.0`.
+#[derive(Clone, Default)]
+pub struct ShareStoreCodec;
+
+#[async_trait::async_trait]
+impl request_response::Codec for ShareStoreCodec {
+    type Protocol = StreamProtocol;
+    type Request = StoreRequest;
+    type Response = StoreResponse;
+
+    async fn read_request<T>(
+        &mut self,
+        _: &StreamProtocol,
+        io: &mut T,
+    ) -> std::io::Result<Self::Request>
+    where
+        T: futures::AsyncRead + Unpin + Send,
+    {
+        use futures::AsyncReadExt;
+        let mut len_buf = [0u8; 4];
+        io.read_exact(&mut len_buf).await?;
+        let len = u32::from_le_bytes(len_buf) as usize;
+        if len > SHARE_MSG_MAX {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("share store message too large: {len} bytes"),
+            ));
+        }
+        let mut buf = vec![0u8; len];
+        io.read_exact(&mut buf).await?;
+        bincode::deserialize(&buf)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
+    async fn read_response<T>(
+        &mut self,
+        _: &StreamProtocol,
+        io: &mut T,
+    ) -> std::io::Result<Self::Response>
+    where
+        T: futures::AsyncRead + Unpin + Send,
+    {
+        use futures::AsyncReadExt;
+        let mut len_buf = [0u8; 4];
+        io.read_exact(&mut len_buf).await?;
+        let len = u32::from_le_bytes(len_buf) as usize;
+        if len > SHARE_MSG_MAX {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("share store message too large: {len} bytes"),
             ));
         }
         let mut buf = vec![0u8; len];
@@ -670,6 +829,26 @@ pub enum DhtCommand {
     /// Get directed sharing relay fallback diagnostics.
     GetDirectedRelayStats {
         reply: oneshot::Sender<DirectedRelayStats>,
+    },
+    /// Push a share to `peer_id`, asking it to host it (Phase 2.1). `peer_id`
+    /// is expected to already be connected -- selection (`SelectStorageCandidates`
+    /// below) only ever returns connected, admission-verified peers, so unlike
+    /// `SendDirectedRequest` this does not need relay-circuit fallback for
+    /// not-yet-connected targets.
+    StoreShareOnPeer {
+        peer_id: PeerId,
+        share: MiasmaShare,
+        reply: oneshot::Sender<Result<StoreResponse, MiasmaError>>,
+    },
+    /// Rank currently-connected, admission-verified peers (excluding
+    /// `exclude`) as candidates to push shares to, best-first, via the
+    /// existing routing overlay's trust/reliability/IP-diversity scoring
+    /// (`RoutingTable::rank_peers`). Not true Kademlia K-closest-to-content-
+    /// key placement -- see the external design review's discussion of that
+    /// trade-off in `docs/tasks/p2p-content-transfer-hardening.md`.
+    SelectStorageCandidates {
+        exclude: Vec<PeerId>,
+        reply: oneshot::Sender<Vec<PeerId>>,
     },
 }
 
@@ -1139,6 +1318,39 @@ impl DhtHandle {
         self.recv_reply(rx, "connected_peers").await
     }
 
+    /// Push `share` to `peer_id`, asking it to host it (Phase 2.1).
+    pub async fn store_share_on_peer(
+        &self,
+        peer_id: PeerId,
+        share: MiasmaShare,
+    ) -> Result<StoreResponse, MiasmaError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::StoreShareOnPeer {
+                peer_id,
+                share,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
+        self.recv_reply(rx, "store_share_on_peer").await?
+    }
+
+    /// Rank currently-connected, admission-verified peers (excluding
+    /// `exclude`) as push-target candidates, best-first. See
+    /// `DhtCommand::SelectStorageCandidates`'s doc comment.
+    pub async fn select_storage_candidates(
+        &self,
+        exclude: Vec<PeerId>,
+    ) -> Result<Vec<PeerId>, MiasmaError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::SelectStorageCandidates { exclude, reply: tx })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
+        self.recv_reply(rx, "select_storage_candidates").await
+    }
+
     /// Poll until `peer_id` appears in the connected-peers set, or `timeout` elapses.
     ///
     /// Replaces the ad-hoc `sleep(Duration::from_millis(N))` calls this codebase (and
@@ -1279,6 +1491,8 @@ pub struct MiasmaBehaviour {
     pub(crate) dcutr: dcutr::Behaviour,
     /// Share fetch: `/miasma/share/1.0.0` request-response.
     pub(crate) share_exchange: request_response::Behaviour<ShareCodec>,
+    /// Share push: `/miasma/share-store/1.0.0` request-response (Phase 2.1).
+    pub(crate) share_store: request_response::Behaviour<ShareStoreCodec>,
     /// PoW admission: `/miasma/admission/1.0.0` request-response.
     pub(crate) admission: request_response::Behaviour<AdmissionCodec>,
     /// Credential exchange: `/miasma/credential/1.0.0` request-response.
@@ -1323,10 +1537,23 @@ pub struct MiasmaNode {
         request_response::OutboundRequestId,
         oneshot::Sender<Result<Option<MiasmaShare>, MiasmaError>>,
     >,
+    // Pending outbound share-store (push) requests (Phase 2.1).
+    pending_share_stores: HashMap<
+        request_response::OutboundRequestId,
+        oneshot::Sender<Result<StoreResponse, MiasmaError>>,
+    >,
     // Pending outbound admission requests: req_id → peer_id.
     pending_admissions: HashMap<request_response::OutboundRequestId, PeerId>,
-    /// Local share store — used to serve inbound `ShareFetchRequest`s.
+    /// Local share store — used to serve inbound `ShareFetchRequest`s and
+    /// `StoreRequest`s.
     local_store: Option<Arc<LocalShareStore>>,
+    /// This node's own externally-dialable listen addresses, as passed to
+    /// `MiasmaCoordinator::start` -- the same value used to build this
+    /// node's own `ShardLocation` entries when it publishes. Reported back
+    /// verbatim in `StoreResponse::Accepted.advertised_addrs` when this node
+    /// accepts a pushed share, since it is the only real authority on its
+    /// own reachability (see `StoreResponse`'s doc comment).
+    own_listen_addrs: Vec<String>,
     /// Optional channel to notify when a Kademlia PUT is acknowledged by remote peers.
     replication_success_tx: Option<mpsc::Sender<[u8; 32]>>,
     /// Optional channel to emit topology change events (peer connect/disconnect).
@@ -1529,8 +1756,10 @@ impl MiasmaNode {
             pending_puts: HashMap::new(),
             pending_gets: HashMap::new(),
             pending_share_fetches: HashMap::new(),
+            pending_share_stores: HashMap::new(),
             pending_admissions: HashMap::new(),
             local_store: None,
+            own_listen_addrs: Vec::new(),
             replication_success_tx: None,
             topology_tx: None,
             allow_local_addresses: allow_local,
@@ -1603,6 +1832,14 @@ impl MiasmaNode {
     /// Attach a local share store so this node can serve inbound shard requests.
     pub fn set_store(&mut self, store: Arc<LocalShareStore>) {
         self.local_store = Some(store);
+    }
+
+    /// Record this node's own externally-dialable listen addresses, so an
+    /// inbound `StoreRequest` can be acknowledged with `advertised_addrs`
+    /// that actually point back at this node (see `own_listen_addrs`'s doc
+    /// comment).
+    pub fn set_listen_addrs(&mut self, addrs: Vec<String>) {
+        self.own_listen_addrs = addrs;
     }
 
     /// Set a channel to receive notifications when a Kademlia PUT is acknowledged.
@@ -2206,6 +2443,33 @@ impl MiasmaNode {
                     no_relay_candidates: self.directed_no_relay_candidates,
                 });
             }
+            DhtCommand::StoreShareOnPeer {
+                peer_id,
+                share,
+                reply,
+            } => {
+                let req_id = self
+                    .swarm
+                    .behaviour_mut()
+                    .share_store
+                    .send_request(&peer_id, StoreRequest { share });
+                self.pending_share_stores.insert(req_id, reply);
+            }
+            DhtCommand::SelectStorageCandidates { exclude, reply } => {
+                let candidates: Vec<PeerId> = self
+                    .peer_registry
+                    .verified_peers()
+                    .into_iter()
+                    .filter(|p| !exclude.contains(p))
+                    .collect();
+                let peer_registry = &self.peer_registry;
+                let ranked = self.routing_table.rank_peers(&candidates, |id| {
+                    peer_registry
+                        .trust_of(id)
+                        .unwrap_or(super::address::AddressTrust::Claimed)
+                });
+                let _ = reply.send(ranked);
+            }
         }
     }
 
@@ -2462,6 +2726,9 @@ impl MiasmaNode {
             SwarmEvent::Behaviour(MiasmaBehaviourEvent::ShareExchange(ev)) => {
                 self.handle_share_exchange_event(ev);
             }
+            SwarmEvent::Behaviour(MiasmaBehaviourEvent::ShareStore(ev)) => {
+                self.handle_share_store_exchange_event(ev);
+            }
             SwarmEvent::Behaviour(MiasmaBehaviourEvent::Admission(ev)) => {
                 self.handle_admission_event(ev);
             }
@@ -2592,6 +2859,18 @@ impl MiasmaNode {
             // Auto-promote: in local mode, treat as verified.
             let fake_pow = self.local_pow.clone();
             self.peer_registry.on_admission_verified(peer_id, fake_pow);
+
+            // Also register with the routing overlay -- production mode does
+            // this in `promote_peer_to_verified`, but local mode's fast path
+            // never called it, so `RoutingTable::rank_peers` (and therefore
+            // `SelectStorageCandidates`, Phase 2.1) silently saw zero
+            // candidates for every peer in every loopback/test setup despite
+            // `peer_registry` correctly reporting them Verified. Caught
+            // while wiring Phase 2.1's peer-selection tests.
+            if let Some(first_addr) = addrs_to_use.first() {
+                let prefix = routing::ip_prefix_of(first_addr);
+                self.routing_table.add_peer(peer_id, prefix);
+            }
 
             if let Some(tx) = &self.topology_tx {
                 let _ = tx.try_send(super::types::TopologyEvent::PeerRoutable { peer_id });
@@ -3776,6 +4055,105 @@ impl MiasmaNode {
             request_response::Event::ResponseSent { .. } => {}
         }
     }
+
+    /// Handle `/miasma/share-store/1.0.0` events (Phase 2.1).
+    fn handle_share_store_exchange_event(
+        &mut self,
+        ev: request_response::Event<StoreRequest, StoreResponse>,
+    ) {
+        match ev {
+            // Inbound push: validate and (maybe) persist.
+            request_response::Event::Message {
+                peer,
+                message:
+                    request_response::Message::Request {
+                        request, channel, ..
+                    },
+                ..
+            } => {
+                let response = self.handle_inbound_store(peer, request.share);
+                let _ = self
+                    .swarm
+                    .behaviour_mut()
+                    .share_store
+                    .send_response(channel, response);
+            }
+            // Outbound response received: resolve pending future.
+            request_response::Event::Message {
+                message:
+                    request_response::Message::Response {
+                        request_id,
+                        response,
+                    },
+                ..
+            } => {
+                if let Some(reply) = self.pending_share_stores.remove(&request_id) {
+                    let _ = reply.send(Ok(response));
+                }
+            }
+            request_response::Event::OutboundFailure {
+                request_id, error, ..
+            } => {
+                warn!("Share store outbound failure: {error}");
+                if let Some(reply) = self.pending_share_stores.remove(&request_id) {
+                    let _ = reply.send(Err(MiasmaError::Network(error.to_string())));
+                }
+            }
+            request_response::Event::InboundFailure { error, .. } => {
+                warn!("Share store inbound failure: {error}");
+            }
+            request_response::Event::ResponseSent { .. } => {}
+        }
+    }
+
+    /// Validate and, if acceptable, persist a share pushed by `peer`.
+    ///
+    /// Runs synchronously in the swarm event-loop task, same as the existing
+    /// inbound `ShareFetchRequest` handler above (which already does a
+    /// synchronous decrypt-on-read from the same store) -- moving this to a
+    /// `spawn_blocking` worker with a results channel would reduce event-loop
+    /// stall time under load, but is a documented follow-up
+    /// (`docs/tasks/p2p-content-transfer-hardening.md`), not a blocker: it
+    /// does not change correctness, only latency under concurrent load this
+    /// project's expected network size does not yet need to worry about.
+    fn handle_inbound_store(&mut self, peer: PeerId, share: MiasmaShare) -> StoreResponse {
+        // 1. Authorization: only admission-verified peers may push shares.
+        // `coarse_verify` alone is not authorization -- it only proves the
+        // sender hashed its own bytes correctly, not that it's entitled to
+        // spend this node's storage (see `ShareVerification::self_consistent`'s
+        // doc comment).
+        if !self.peer_registry.is_verified(&peer) {
+            self.routing_table.record_failure(&peer);
+            return StoreResponse::Rejected(StoreRejectReason::NotVerified);
+        }
+
+        // 2. Cheap structural self-consistency check, before spending a disk
+        // write on the payload.
+        if !crate::share::ShareVerification::self_consistent(&share) {
+            self.routing_table.record_failure(&peer);
+            return StoreResponse::Rejected(StoreRejectReason::Invalid);
+        }
+
+        // 3. Persist to the hosted-quota pool (never evicts owned shares or
+        // other publishers' already-hosted shares -- see
+        // `LocalShareStore::put_hosted`'s doc comment).
+        let Some(store) = self.local_store.as_ref() else {
+            return StoreResponse::Rejected(StoreRejectReason::Invalid);
+        };
+        match store.put_hosted(&share) {
+            Ok(address) => {
+                self.routing_table.record_success(&peer);
+                StoreResponse::Accepted {
+                    address,
+                    advertised_addrs: self.own_listen_addrs.clone(),
+                }
+            }
+            Err(e) => {
+                debug!("inbound Store rejected (quota): {e}");
+                StoreResponse::Rejected(StoreRejectReason::QuotaExceeded)
+            }
+        }
+    }
 }
 
 // ─── Swarm builder ────────────────────────────────────────────────────────────
@@ -3850,6 +4228,14 @@ fn build_swarm(
                 request_response::Config::default().with_request_timeout(Duration::from_secs(60)),
             );
 
+            let share_store = request_response::Behaviour::<ShareStoreCodec>::new(
+                [(
+                    StreamProtocol::new("/miasma/share-store/1.0.0"),
+                    request_response::ProtocolSupport::Full,
+                )],
+                request_response::Config::default().with_request_timeout(Duration::from_secs(60)),
+            );
+
             let admission = request_response::Behaviour::<AdmissionCodec>::new(
                 [(
                     StreamProtocol::new("/miasma/admission/1.0.0"),
@@ -3909,6 +4295,7 @@ fn build_swarm(
                 relay: relay_client,
                 dcutr,
                 share_exchange,
+                share_store,
                 admission,
                 credential_exchange,
                 descriptor_exchange,
@@ -3930,4 +4317,103 @@ fn build_swarm(
         .map_err(|e| MiasmaError::Sss(format!("listen_on failed: {e}")))?;
 
     Ok(swarm)
+}
+
+#[cfg(test)]
+mod share_store_tests {
+    //! Unit tests for `MiasmaNode::handle_inbound_store` (Phase 2.1's inbound
+    //! `Store` authorization gate). This method touches no swarm/network
+    //! state -- only `peer_registry`, `routing_table`, and `local_store` --
+    //! so it's tested directly here rather than through a real 2-node
+    //! connection, which would only add timing flakiness without exercising
+    //! anything this doesn't already cover deterministically and instantly.
+    //! The positive "shares actually get pushed to and accepted by a real
+    //! remote peer" path is covered end-to-end by
+    //! `integration_test.rs`'s `dissolve_and_publish_distributes_to_connected_peers`
+    //! and its sibling -- those tests only pass because this gate correctly
+    //! lets a genuinely-verified peer's genuinely-consistent share through.
+    use super::*;
+    use crate::pipeline::{dissolve, DissolutionParams};
+
+    fn make_node() -> MiasmaNode {
+        let key = [0x55u8; 32];
+        MiasmaNode::new(&key, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap()
+    }
+
+    fn make_share() -> MiasmaShare {
+        let params = DissolutionParams {
+            data_shards: 2,
+            total_shards: 3,
+        };
+        let (_mid, shares) =
+            dissolve(b"node.rs handle_inbound_store unit test content", params).unwrap();
+        shares.into_iter().next().unwrap()
+    }
+
+    #[tokio::test]
+    async fn rejects_unverified_peer() {
+        let mut node = make_node();
+        let peer = PeerId::random();
+        // Deliberately never verified.
+        let response = node.handle_inbound_store(peer, make_share());
+        assert!(matches!(
+            response,
+            StoreResponse::Rejected(StoreRejectReason::NotVerified)
+        ));
+    }
+
+    #[tokio::test]
+    async fn rejects_tampered_share_even_from_a_verified_peer() {
+        let mut node = make_node();
+        let peer = PeerId::random();
+        node.peer_registry.on_connected(peer);
+        let fake_pow = node.local_pow.clone();
+        node.peer_registry.on_admission_verified(peer, fake_pow);
+
+        let mut share = make_share();
+        share.shard_data[0] ^= 0xFF; // shard_hash no longer matches
+
+        let response = node.handle_inbound_store(peer, share);
+        assert!(matches!(
+            response,
+            StoreResponse::Rejected(StoreRejectReason::Invalid)
+        ));
+    }
+
+    #[tokio::test]
+    async fn accepts_and_persists_from_a_verified_peer() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(
+            crate::store::LocalShareStore::open(dir.path(), 100)
+                .unwrap()
+                .with_hosted_quota_mb(10),
+        );
+
+        let mut node = make_node();
+        node.set_store(store.clone());
+        node.set_listen_addrs(vec!["/ip4/203.0.113.5/tcp/4001".to_string()]);
+
+        let peer = PeerId::random();
+        node.peer_registry.on_connected(peer);
+        let fake_pow = node.local_pow.clone();
+        node.peer_registry.on_admission_verified(peer, fake_pow);
+
+        let share = make_share();
+        let response = node.handle_inbound_store(peer, share.clone());
+        match response {
+            StoreResponse::Accepted {
+                address,
+                advertised_addrs,
+            } => {
+                assert!(store.contains(&address), "share not actually persisted");
+                assert_eq!(
+                    advertised_addrs,
+                    vec!["/ip4/203.0.113.5/tcp/4001".to_string()],
+                    "advertised_addrs must be the holder's own listen addrs, \
+                     not something the pusher supplied"
+                );
+            }
+            other => panic!("expected Accepted, got: {other:?}"),
+        }
+    }
 }

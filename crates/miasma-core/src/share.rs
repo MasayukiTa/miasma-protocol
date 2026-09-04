@@ -119,6 +119,28 @@ impl ShareVerification {
         computed == share.shard_hash
     }
 
+    /// Self-consistency check with no independent expected MID to compare
+    /// against -- the case for a node receiving an inbound
+    /// `/miasma/share-store/1.0.0` push from a peer it has no prior
+    /// relationship with or knowledge of the content for.
+    ///
+    /// This proves only that `shard_hash` really is `BLAKE3(shard_data)` for
+    /// whatever bytes the sender chose to send -- it is **not** authorization
+    /// and does **not** prove the share is a genuine Reed-Solomon/Shamir
+    /// output of real content (a share built entirely from random garbage
+    /// with a correctly-computed hash over that garbage passes trivially).
+    /// Authenticity of content ultimately comes from the retriever's own
+    /// full MID verification after reconstruction, not from anything a
+    /// storage-accepting peer can check up front. This check exists only to
+    /// reject obviously-malformed or bit-flipped envelopes cheaply, before
+    /// spending a disk write on them -- pair it with peer admission/quota
+    /// checks (see `network/node.rs`'s inbound `Store` handler) for the
+    /// actual resource-abuse mitigation.
+    pub fn self_consistent(share: &MiasmaShare) -> bool {
+        let computed = *blake3::hash(&share.shard_data).as_bytes();
+        computed == share.shard_hash
+    }
+
     /// Full verification — runs AFTER k shares are collected and K_enc is recovered.
     ///
     /// Recomputes BLAKE3 of the reconstructed plaintext and compares with MID.
@@ -171,6 +193,36 @@ mod tests {
         // Tamper with shard_data AFTER creation (shard_hash no longer matches).
         share.shard_data[0] ^= 0xFF;
         assert!(!ShareVerification::coarse_verify(&share, &mid));
+    }
+
+    #[test]
+    fn self_consistent_valid_share() {
+        let mid = ContentId::compute(b"test content", b"k=10,n=20,v=1");
+        let share = dummy_share(&mid, 0, vec![1, 2, 3, 4, 5]);
+        assert!(ShareVerification::self_consistent(&share));
+    }
+
+    #[test]
+    fn self_consistent_tampered_shard_data() {
+        let mid = ContentId::compute(b"test content", b"k=10,n=20,v=1");
+        let mut share = dummy_share(&mid, 0, vec![1, 2, 3, 4, 5]);
+        share.shard_data[0] ^= 0xFF;
+        assert!(!ShareVerification::self_consistent(&share));
+    }
+
+    #[test]
+    fn self_consistent_accepts_any_mid_prefix() {
+        // Unlike coarse_verify, self_consistent has no expected_mid to check
+        // against -- it must accept a share regardless of which content it
+        // claims to belong to, since that is exactly the "no prior
+        // relationship with this content" case it exists for.
+        let mid_a = ContentId::compute(b"content A", b"k=10,n=20,v=1");
+        let mid_b = ContentId::compute(b"content B", b"k=10,n=20,v=1");
+        let share = dummy_share(&mid_a, 0, vec![9, 9, 9]);
+        assert!(ShareVerification::self_consistent(&share));
+        // Sanity: coarse_verify against the *other* MID correctly rejects it,
+        // demonstrating the two checks are answering different questions.
+        assert!(!ShareVerification::coarse_verify(&share, &mid_b));
     }
 
     #[test]
