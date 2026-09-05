@@ -97,6 +97,57 @@ async fn dissolve_accepts_a_positional_torrent_file() {
     assert_bridge_produced_payload_mid(&out, &fx);
 }
 
+// ─── Manual fixture for the desktop GUI check ────────────────────────────────
+
+/// Holds the loopback seeder and stub tracker open so a human (or a
+/// computer-use session) can drive the real desktop app's Import buttons
+/// against them, instead of pulling an arbitrary torrent off the public swarm.
+///
+/// Writes the magnet URI, the `.torrent` path and the expected MID to
+/// `%MIASMA_GUI_FIXTURE_OUT%` (default: `<temp>/miasma_gui_fixture.txt`), then
+/// waits until a `.stop` file appears next to it, or 40 minutes elapse.
+///
+/// ```text
+/// cargo test --release -p miasma-bridge --test cli_import_roundtrip \
+///   -- --ignored --nocapture gui_fixture_seeder
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "manual fixture: holds a seeder open for the desktop GUI check"]
+async fn gui_fixture_seeder() {
+    let fx = Fixture::start().await;
+
+    let magnet = format!(
+        "magnet:?xt=urn:btih:{}&dn=payload.bin&tr={}",
+        fx.info_hash_hex,
+        urlencode(&fx.tracker_url)
+    );
+
+    let out = std::env::var_os("MIASMA_GUI_FIXTURE_OUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("miasma_gui_fixture.txt"));
+    let stop = out.with_extension("stop");
+    let _ = std::fs::remove_file(&stop);
+
+    let body = format!(
+        "magnet={magnet}\ntorrent={}\nexpected_mid={}\ntracker={}\n",
+        fx.torrent_path.display(),
+        fx.expected_mid,
+        fx.tracker_url
+    );
+    std::fs::write(&out, &body).expect("write fixture description");
+    println!(
+        "--- GUI fixture ready ---\n{body}stop_file={}",
+        stop.display()
+    );
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(40 * 60);
+    while !stop.exists() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    let _ = std::fs::remove_file(&stop);
+    println!("--- GUI fixture shutting down ---");
+}
+
 // ─── Assertions ──────────────────────────────────────────────────────────────
 
 fn assert_bridge_produced_payload_mid(out: &BridgeOutput, fx: &Fixture) {
