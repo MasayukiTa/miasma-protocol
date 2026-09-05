@@ -20,10 +20,18 @@ impl ReputationVerifier {
         }
     }
 
-    /// Verify a proof against the stored issuer key and threshold policy.
+    /// Threshold check only — **this performs no cryptographic verification.**
     ///
-    /// Returns `true` if the proof is cryptographically valid and satisfies
-    /// the minimum uptime threshold.  Phase 3: performs real BBS+ verification.
+    /// The doc comment here used to claim "performs real BBS+ verification".
+    /// It does not, and never has: the final expression is
+    /// `!proof.proof_bytes.is_empty()`, so any non-empty byte string is
+    /// accepted as a proof. The disclosed uptime value is likewise taken at
+    /// face value from the prover.
+    ///
+    /// This type is currently unintegrated. It must not be wired into any
+    /// authorization or trust decision while it remains a stub — a returned
+    /// `true` means "the claimed value cleared the threshold", not "the claim
+    /// was proved". See `docs/adr/006-bbs-plus-known-breaks.md`.
     pub fn verify(&self, proof: &ReputationProof, _nonce: &[u8]) -> bool {
         // Phase 3: real BBS+ PoK verification here.
         // Stub: just check the disclosed uptime value meets the threshold.

@@ -3097,13 +3097,23 @@ impl MiasmaNode {
         // In bootstrap mode, register this peer's PoW pubkey as a potential issuer.
         if self.issuer_registry.bootstrap_mode {
             self.issuer_registry.add_issuer(pow.pubkey);
-            // Also register their BBS+ issuer key (derived from same PoW pubkey seed).
-            // In bootstrap mode, we assume all verified peers are also BBS+ issuers.
-            let bbs_seed =
-                blake3::hash(&[b"miasma-bbs-issuer-v1".as_slice(), &pow.pubkey].concat());
-            let remote_bbs_key = BbsIssuerKey::from_seed(bbs_seed.as_bytes());
-            self.bbs_issuer_registry
-                .add_issuer(remote_bbs_key.pk_bytes());
+            // The peer's BBS+ issuer key is deliberately NOT registered here any
+            // more. It used to be derived as
+            //     BbsIssuerKey::from_seed(blake3("miasma-bbs-issuer-v1" || pow.pubkey))
+            // from the peer's *public* PoW key, while a node derives its own real
+            // issuer key from its *private* DHT signing key (see `MiasmaNode::new`).
+            // Two consequences, both bad:
+            //
+            //  - `BbsIssuerKey::from_seed` sets `sk = hash_to_scalar(seed)`, so
+            //    anyone who has seen a peer's PoW pubkey -- it is in the admission
+            //    handshake -- could recompute that registered issuer's *secret*
+            //    scalar and sign credentials that the registry accepts as genuine.
+            //    No forgery required; the key was simply public.
+            //  - The two derivations never agree, so the registry never actually
+            //    contained any peer's real issuer key.
+            //
+            // See docs/adr/006-bbs-plus-known-breaks.md. Real issuer-key
+            // distribution has to be designed, not derived from a public value.
         }
 
         // Initiate credential exchange: request a credential from the new peer,
