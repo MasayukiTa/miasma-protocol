@@ -21,7 +21,7 @@ The current public release is **v0.3.1-beta.1**, a Windows beta prerelease for t
   3. Rendezvous -- NAT'd nodes reachable through introduction points
   4. Onion -- content-blind 3-hop encryption (X25519 + XChaCha20-Poly1305 per hop)
   5. Onion + rendezvous -- content-blind retrieval from NAT'd holders
-- **BBS+ anonymous credentials** with within-epoch unlinkability (BLS12-381 pairing-based, selective disclosure, link-secret non-transferability)
+- **Pseudonymous Ed25519 credentials** with cross-epoch unlinkability (a BLS12-381 BBS+ scheme for within-epoch unlinkability also exists in the tree, but it is forgeable and is not used for any trust decision — see `docs/adr/006-bbs-plus-known-breaks.md`)
 - **Pseudonymous peer descriptors** with epoch rotation and churn tracking
 - **Active relay trust verification** -- relay probing (`/miasma/relay-probe/1.0.0`), forwarding verification through circuit addresses, evidence-based trust tiers (Claimed / Observed / Verified)
 - **Same-network peer discovery** -- mDNS for LAN discovery, with manual bootstrap fallback for restrictive networks
@@ -149,7 +149,9 @@ Seven further tests carry `#[ignore]` and are excluded from that count: six `fie
 
 This is a beta-stage networked system. It has not been externally audited.
 
-The protocol contains meaningful security work: Ed25519 DHT record verification, PoW admission, BBS+ credentials, onion encryption, relay trust verification, ACL-enforced key storage, and a completed security hotfix sprint (VULN-001 through VULN-005). But unknown peers, hostile environments, adversarial routing pressure, and long-term retention behavior all require more validation.
+The protocol contains meaningful security work: Ed25519 DHT record verification, PoW admission, onion encryption, relay trust verification, ACL-enforced key storage, and a completed security hotfix sprint (VULN-001 through VULN-005). But unknown peers, hostile environments, adversarial routing pressure, and long-term retention behavior all require more validation.
+
+One component is known-broken and disconnected rather than fixed: the self-written BBS+ credential scheme is forgeable in two independent ways, demonstrated by executable forgery tests in the repository. It no longer feeds any trust decision. The reasoning, the containment, and the conditions for re-enabling it are in `docs/adr/006-bbs-plus-known-breaks.md`. Every other cryptographic component uses reviewed library primitives in conventional compositions.
 
 Treat the current release as:
 

