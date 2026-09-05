@@ -12,12 +12,31 @@ each one constructs a forgery and asserts the verifier accepts it.
 
 ## Scope
 
-Only `network/bbs_credential.rs` is affected. Every other cryptographic
-component in this repository uses reviewed library primitives (`aes-gcm`,
+The two forgeries below are specific to `network/bbs_credential.rs`. Content
+dissolution, retrieval and onion routing are unaffected, and every cryptographic
+primitive in this repository comes from a reviewed library (`aes-gcm`,
 `chacha20poly1305`, `x25519-dalek`, `ed25519-dalek`, `blake3`, `hkdf`+`sha2`,
-`argon2`, `rustls`) in conventional compositions. Content dissolution,
-retrieval, onion routing and the Ed25519 credential scheme are unaffected by
-what follows.
+`argon2`, `rustls`) used in a conventional composition.
+
+**An earlier revision of this section claimed the Ed25519 credential scheme was
+unaffected. That was wrong**, and the correction matters more than the forgeries
+do:
+
+- A received descriptor is only checked with `verify_self()` — that it was
+  signed by the `signing_pubkey` its own sender embedded in it.
+  `credential::verify_presentation`, which checks the issuer, the issuer's
+  signature, the holder tag and the epoch, has one production call site, and it
+  is a holder checking a credential it was just issued. So the Ed25519 tier is
+  self-declared too.
+- Measured, not inferred: two nodes that admit each other end up holding **no
+  credential at all** (`credential_exchange_actually_stores_a_credential`), for
+  both schemes. A node registers its own issuer key as
+  `blake3("miasma-cred-issuer-v1" || dht_signing_key)` but registers every
+  remote peer by `pow.pubkey`, its identity key. Those never match, so every
+  genuinely issued credential is rejected as `UnknownIssuer`.
+
+The credential layer as a whole is therefore implemented, unit-tested, reported
+in CLI status — and has never once functioned end to end.
 
 ## Break 1 — generators have publicly computable discrete logs
 
@@ -87,13 +106,22 @@ scheme.
 
 ## Containment currently in place
 
-- `descriptor.bbs_tier()` is no longer read into `AdmissionSignals`
-  (`network/node.rs`); admission uses the Ed25519 credential tier only.
+- **No credential tier is trusted at admission.** `credential_tier` is `None`;
+  neither `bbs_tier()` nor the Ed25519 tier is read, because neither is
+  verified. An earlier revision of this document said admission had fallen back
+  to the Ed25519 tier — that was the mistake described under Scope, and it is
+  corrected in the code.
+- Descriptors no longer carry a BBS+ proof, and the BBS+ link secret is no
+  longer sent to issuers.
+- BBS+ issuer keys are no longer derived from a peer's public PoW key.
 - The README no longer advertises BBS+ credentials as a security property.
 
-A forged proof can still be attached to a descriptor and will still be counted
-by the `bbs_credentialed` metrics. That is cosmetic: the value is reported, not
-acted on.
+Still open, tracked rather than fixed: a peer may still attach an arbitrary
+`bbs_proof` to a descriptor, which is stored and counted by the
+`bbs_credentialed` metrics — so those counters now report attacker-supplied
+values and nothing else. `bbs_tier()` remains public. `path_selection` still
+reads the unverified Ed25519 tier, though a self-declared high tier does not
+appear to gain anything there.
 
 ## Conditions for re-enabling
 
@@ -109,4 +137,22 @@ acted on.
    scalars and context replay.
 6. One external review.
 
-Until all six hold, the scheme stays disconnected from trust decisions.
+Cryptographic correctness is necessary but not sufficient. The scheme must also
+be *deployed* correctly, which it never has been:
+
+7. Issuer public keys are transported and bound under the issuer's identity
+   signature, not derived by the recipient from a value the peer publishes.
+8. Presentations are verified when a descriptor is received, against a
+   verifier-supplied nonce rather than the prover's own PeerId, before any tier
+   influences admission or routing.
+9. An issuer trust model that is not "every peer that completed one PoW".
+
+And one architectural precondition, because without it the property BBS+ exists
+to provide is unreachable regardless of implementation quality: descriptors are
+signed by the long-term libp2p identity key and embed its verifying key, the
+pseudonym is fixed per epoch, and recipients record PeerId↔pseudonym. Until that
+carrier can hide identity, within-epoch unlinkability buys nothing — a point
+both external reviewers reached independently.
+
+Until all of the above hold, the scheme stays disconnected from trust
+decisions.
