@@ -2588,7 +2588,12 @@ impl MiasmaNode {
                         ephemeral_pubkey: self.credential_wallet.ephemeral_pubkey(),
                         holder_tag: self.credential_wallet.holder_tag(),
                         epoch: self.credential_wallet.epoch(),
-                        bbs_link_secret: Some(self.bbs_wallet.link_secret()),
+                        // The link secret is deliberately NOT sent. BBS+ requires the
+                        // holder to commit to m0 and the issuer to sign it blindly;
+                        // handing m0 over lets any issuer -- which in bootstrap mode is
+                        // every admitted peer -- present the credential as us, defeating
+                        // the non-transferability the link secret exists to provide.
+                        bbs_link_secret: None,
                     };
                     let req_id = self
                         .swarm
@@ -2943,17 +2948,24 @@ impl MiasmaNode {
         // Check if we have a credential for this peer (from a previous exchange).
         //
         // The BBS+ tier (`descriptor.bbs_tier()`) is deliberately NOT consulted
-        // here, even though it is the privacy-preserving one. The self-written
-        // BBS+ scheme is forgeable in two independent ways -- see the forgery
-        // tests in `network/bbs_credential.rs` and
-        // `docs/adr/006-bbs-plus-known-breaks.md` -- so any peer can assert any
-        // tier it likes, including Endorsed, which carries the largest admission
-        // bonus. Until the scheme is repaired and independently reviewed,
-        // admission runs on the Ed25519 credential alone.
-        let descriptor = self.descriptor_store.get_by_peer(peer_id);
-        let credential_tier = descriptor
-            .and_then(|d| d.credential.as_ref())
-            .map(|c| c.credential.body.tier);
+        // here, even though it is the privacy-preserving one: the self-written
+        // BBS+ scheme is forgeable, and `bbs_tier()` never verified the proof at
+        // all -- it read `proof.disclosed` and matched on the number.
+        //
+        // Neither is the Ed25519 tier, which an earlier revision of this comment
+        // wrongly described as the safe fallback. The only check a received
+        // descriptor gets is `verify_self()`, i.e. that it was signed by the
+        // `signing_pubkey` embedded in it by its own sender.
+        // `credential::verify_presentation` -- which is what actually checks the
+        // issuer, the issuer's signature, the holder tag and the epoch -- has
+        // exactly one production call site, and that is the holder checking a
+        // credential it was just issued. So `d.credential.body.tier` is a
+        // self-declared number too, and feeding it here bought an attacker the
+        // Endorsed bonus for the cost of typing it.
+        //
+        // No credential tier is trusted at admission until presentations are
+        // verified on receipt. See `docs/adr/006-bbs-plus-known-breaks.md`.
+        let credential_tier = None;
 
         // Evaluate using hybrid admission policy.
         let signals = AdmissionSignals {
@@ -3122,7 +3134,8 @@ impl MiasmaNode {
             ephemeral_pubkey: self.credential_wallet.ephemeral_pubkey(),
             holder_tag: self.credential_wallet.holder_tag(),
             epoch: self.credential_wallet.epoch(),
-            bbs_link_secret: Some(self.bbs_wallet.link_secret()),
+            // See above: never send m0 to an issuer.
+            bbs_link_secret: None,
         };
         let req_id = self
             .swarm
@@ -3159,11 +3172,12 @@ impl MiasmaNode {
             .credential_wallet
             .present(&self.local_peer_id.to_bytes());
 
-        // Attach a BBS+ proof if we hold a BBS+ credential.
-        // Default policy reveals tier only — sufficient for admission scoring.
-        let bbs_proof = self
-            .bbs_wallet
-            .present(&DisclosurePolicy::default(), &self.local_peer_id.to_bytes());
+        // No BBS+ proof is attached. The scheme is forgeable, nothing on the
+        // receiving side ever verified one, and the proof context used to be
+        // this node's own PeerId -- so it carried no privacy either. Publishing
+        // proofs only fed the `bbs_credentialed` counters and gave an attacker a
+        // sample to mint from. See `docs/adr/006-bbs-plus-known-breaks.md`.
+        let bbs_proof = None;
 
         // Determine reachability kind based on NAT status.
         // Public nodes use Direct; NAT'd nodes select introduction points
