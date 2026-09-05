@@ -269,7 +269,15 @@
   **CIはこの crate のテストを一度も実行していなかった**
   (`cargo build`のみ、既存35件が不可視)ため、Windows jobに
   `cargo test -p miasma-bridge`を追加。
-  未検証のまま残るのは、デスクトップGUIのImportボタンのクリックそのものだけ。
+  **デスクトップGUIの実機確認も完了(2026-09-05)——Import Magnet/Torrent File とも
+  初めて実際に動作**。ローカルseeder+スタブトラッカー(公開スウォーム不使用)に対し
+  release実ビルドのmiasma-desktop.exeをmagnet引数で起動し、eframeがAccessKit経由で
+  公開しているUIAツリーからインポートボタンをinvoke。`インポート完了。` と
+  `#1: miasma:GNNPs4SSb94hg...Uk9qmS3JqzCU` を確認し、そのMIDをCLIで取得したところ
+  204800バイト・SHA256が種データと完全一致した。.torrent側も同じMIDで完了し、
+  bridge-downloadsのmtimeが進んでいるので実際に再ダウンロードしている。
+  (画面キャプチャは環境側で禁止・request_accessは未インストールアプリを解決できないため
+  UIA経由。ピクセル推測より確実で、実際のButton要素のinvokeハンドラを叩いている。)
 - **Phase 3 追補(2026-09-05)**: 計画の残る完了基準を消化。`worker.rs`に
   `bridge_import_args`を切り出して**desktop→bridgeの引数契約を両側で固定**
   (空白を含むdata_dirが1引数のまま渡ることも検証)。`scripts/smoke-loopback.ps1`を
