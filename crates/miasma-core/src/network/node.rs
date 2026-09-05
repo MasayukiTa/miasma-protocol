@@ -2941,13 +2941,19 @@ impl MiasmaNode {
             .unwrap_or(false);
 
         // Check if we have a credential for this peer (from a previous exchange).
-        // Prefer BBS+ tier (privacy-preserving) over Ed25519 tier; fall back to Ed25519.
+        //
+        // The BBS+ tier (`descriptor.bbs_tier()`) is deliberately NOT consulted
+        // here, even though it is the privacy-preserving one. The self-written
+        // BBS+ scheme is forgeable in two independent ways -- see the forgery
+        // tests in `network/bbs_credential.rs` and
+        // `docs/adr/006-bbs-plus-known-breaks.md` -- so any peer can assert any
+        // tier it likes, including Endorsed, which carries the largest admission
+        // bonus. Until the scheme is repaired and independently reviewed,
+        // admission runs on the Ed25519 credential alone.
         let descriptor = self.descriptor_store.get_by_peer(peer_id);
-        let credential_tier = descriptor.and_then(|d| d.bbs_tier()).or_else(|| {
-            descriptor
-                .and_then(|d| d.credential.as_ref())
-                .map(|c| c.credential.body.tier)
-        });
+        let credential_tier = descriptor
+            .and_then(|d| d.credential.as_ref())
+            .map(|c| c.credential.body.tier);
 
         // Evaluate using hybrid admission policy.
         let signals = AdmissionSignals {
