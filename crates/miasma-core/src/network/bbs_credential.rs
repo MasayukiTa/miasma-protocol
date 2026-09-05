@@ -546,7 +546,27 @@ pub fn bbs_verify_proof(
     let resp_s = parse_scalar_proof(&proof.response_s)?;
 
     // Determine hidden indices.
+    //
+    // The disclosed indices come from an untrusted peer and are used below to
+    // index `gv[idx + 2]`, so they must be bounded before use: an index >= 5
+    // panicked the verifier. They must also be unique (a repeated index would
+    // be counted twice into `b_disclosed` while leaving `hidden` unchanged) and
+    // must never include 0, which is the link secret and is never disclosable.
     let disclosed_indices: Vec<usize> = proof.disclosed.iter().map(|&(i, _)| i).collect();
+    if disclosed_indices
+        .iter()
+        .any(|&i| i == 0 || i >= NUM_MESSAGES)
+    {
+        return Err(BbsError::InvalidProof);
+    }
+    {
+        let mut seen = disclosed_indices.clone();
+        seen.sort_unstable();
+        seen.dedup();
+        if seen.len() != disclosed_indices.len() {
+            return Err(BbsError::InvalidProof);
+        }
+    }
     let hidden: Vec<usize> = (0..NUM_MESSAGES)
         .filter(|i| !disclosed_indices.contains(i))
         .collect();
@@ -838,6 +858,38 @@ mod tests {
     // itself. These two build a proof the way an attacker would -- from the
     // values an attacker can actually obtain -- and are the only tests here
     // that can fail for a reason of *construction* rather than of encoding.
+
+    /// The disclosed index list arrives from an untrusted peer and is used to
+    /// index the generator vector. An out-of-range index panicked the verifier
+    /// (`gv[idx + 2]` with only 7 generators); duplicates were counted twice
+    /// into `b_disclosed`; index 0 is the link secret and must never be
+    /// disclosable at all.
+    #[test]
+    fn malformed_disclosed_indices_are_rejected_not_panicked() {
+        let issuer_key = BbsIssuerKey::generate();
+        let attrs = test_attributes();
+        let credential = BbsCredential {
+            attributes: attrs.clone(),
+            signature: BbsSignature::sign(&issuer_key, &attrs.to_messages()),
+            issuer_pk: issuer_key.pk_bytes().to_vec(),
+        };
+        let good = bbs_create_proof(&credential, &DisclosurePolicy::default(), b"ctx");
+        assert!(bbs_verify_proof(&good, &issuer_key.pk_bytes(), b"ctx").is_ok());
+
+        for bad in [
+            vec![(NUM_MESSAGES, 1u64)], // out of range: used to panic
+            vec![(0, 1u64)],            // link secret is never disclosable
+            vec![(1, 2u64), (1, 2u64)], // duplicate: double-counted
+        ] {
+            let mut proof = good.clone();
+            proof.disclosed = bad.clone();
+            assert_eq!(
+                bbs_verify_proof(&proof, &issuer_key.pk_bytes(), b"ctx"),
+                Err(BbsError::InvalidProof),
+                "disclosed={bad:?} must be rejected"
+            );
+        }
+    }
 
     /// Recompute each generator's discrete log with respect to the G1 base
     /// point, using only public values.
