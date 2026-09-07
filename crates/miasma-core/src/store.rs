@@ -827,7 +827,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path()).unwrap();
         // Write a 16-byte key (wrong length — should be 32).
-        std::fs::write(dir.path().join(MASTER_KEY_FILE), &[0xFFu8; 16]).unwrap();
+        std::fs::write(dir.path().join(MASTER_KEY_FILE), [0xFFu8; 16]).unwrap();
 
         let result = LocalShareStore::open(dir.path(), 100);
         assert!(result.is_err(), "wrong-length master.key should fail");
@@ -843,7 +843,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path()).unwrap();
         // Write an empty file.
-        std::fs::write(dir.path().join(MASTER_KEY_FILE), &[]).unwrap();
+        std::fs::write(dir.path().join(MASTER_KEY_FILE), []).unwrap();
 
         let result = LocalShareStore::open(dir.path(), 100);
         assert!(result.is_err(), "empty master.key should fail");
@@ -898,7 +898,7 @@ mod tests {
             .path()
             .join(SHARES_DIR)
             .join(format!("{addr}{SHARE_EXT}"));
-        std::fs::write(&share_path, &[0u8; 10]).unwrap();
+        std::fs::write(&share_path, [0u8; 10]).unwrap();
 
         let store2 = LocalShareStore::open(dir.path(), 100).unwrap();
         let result = store2.get(&addr);

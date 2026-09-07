@@ -85,7 +85,7 @@ pub(crate) fn max_segment_size_for(data_shards: usize) -> usize {
 /// Options controlling how strictly `dissolve_and_publish*_with_options`
 /// enforces real remote distribution before a publish is considered
 /// successful.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct PublishOptions {
     /// Minimum number of *distinct* shard slots that must be acknowledged by
     /// *remote* peers (i.e. not counting the publisher's own local copy)
@@ -100,14 +100,6 @@ pub struct PublishOptions {
     /// `PublishOptions::strict` to opt in to the phase's actual "resists
     /// single-node compromise" guarantee.
     pub min_remote_distinct_shards: usize,
-}
-
-impl Default for PublishOptions {
-    fn default() -> Self {
-        Self {
-            min_remote_distinct_shards: 0,
-        }
-    }
 }
 
 impl PublishOptions {

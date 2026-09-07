@@ -743,8 +743,8 @@ mod tests {
         // SNI extension body
         let sni_bytes = sni.as_bytes();
         let sni_name_len = sni_bytes.len() as u16;
-        let sni_list_len = (3 + sni_name_len) as u16; // type(1) + len(2) + name
-        let sni_ext_len = (2 + sni_list_len) as u16; // list_len(2) + list
+        let sni_list_len = 3 + sni_name_len; // type(1) + len(2) + name
+        let sni_ext_len = 2 + sni_list_len; // list_len(2) + list
 
         let mut sni_ext = Vec::new();
         sni_ext.extend_from_slice(&[0x00, 0x00]); // ext_type: server_name

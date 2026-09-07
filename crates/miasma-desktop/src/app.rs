@@ -1367,12 +1367,10 @@ impl MiasmaApp {
                                 | "ChallengeFailed"
                                 | "PasswordFailed"
                         );
-                        if !is_terminal {
-                            if ui.small_button(s.inbox_revoke_button).clicked() {
-                                let _ = self.worker.tx.try_send(WorkerCmd::DirectedRevoke {
-                                    envelope_id: item.envelope_id.clone(),
-                                });
-                            }
+                        if !is_terminal && ui.small_button(s.inbox_revoke_button).clicked() {
+                            let _ = self.worker.tx.try_send(WorkerCmd::DirectedRevoke {
+                                envelope_id: item.envelope_id.clone(),
+                            });
                         }
                     });
                     ui.add_space(4.0);
@@ -1497,12 +1495,10 @@ impl MiasmaApp {
                                 | "ChallengeFailed"
                                 | "PasswordFailed"
                         );
-                        if !is_terminal {
-                            if ui.small_button(s.outbox_revoke_button).clicked() {
-                                let _ = self.worker.tx.try_send(WorkerCmd::DirectedRevoke {
-                                    envelope_id: item.envelope_id.clone(),
-                                });
-                            }
+                        if !is_terminal && ui.small_button(s.outbox_revoke_button).clicked() {
+                            let _ = self.worker.tx.try_send(WorkerCmd::DirectedRevoke {
+                                envelope_id: item.envelope_id.clone(),
+                            });
                         }
                     });
                     ui.add_space(4.0);

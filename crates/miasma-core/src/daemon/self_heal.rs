@@ -241,19 +241,15 @@ pub fn cleanup_stale_state(data_dir: &std::path::Path) -> CleanupReport {
 
     // Remove stale port files (from crashed daemon)
     let port_file = data_dir.join(super::ipc::PORT_FILE);
-    if port_file.exists() {
-        if std::fs::remove_file(&port_file).is_ok() {
-            report.stale_port_file_removed = true;
-            tracing::info!("Removed stale port file: {}", port_file.display());
-        }
+    if port_file.exists() && std::fs::remove_file(&port_file).is_ok() {
+        report.stale_port_file_removed = true;
+        tracing::info!("Removed stale port file: {}", port_file.display());
     }
 
     let http_port_file = data_dir.join(super::ipc::HTTP_PORT_FILE);
-    if http_port_file.exists() {
-        if std::fs::remove_file(&http_port_file).is_ok() {
-            report.stale_http_port_file_removed = true;
-            tracing::info!("Removed stale HTTP port file: {}", http_port_file.display());
-        }
+    if http_port_file.exists() && std::fs::remove_file(&http_port_file).is_ok() {
+        report.stale_http_port_file_removed = true;
+        tracing::info!("Removed stale HTTP port file: {}", http_port_file.display());
     }
 
     report
