@@ -6483,7 +6483,7 @@ fn crash_recovery_store_index_corruption_rebuilds() {
             i,
             vec![i as u8; 64],
             vec![0xBB; 32],
-            [0u8; 12],
+            rand::random::<[u8; 12]>(),
             100,
             ts,
         );

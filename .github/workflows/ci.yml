@@ -167,30 +167,37 @@ jobs:
           --ignore RUSTSEC-2026-0119
           --ignore RUSTSEC-2026-0194
           --ignore RUSTSEC-2026-0195
-          --ignore RUSTSEC-2024-0398
           --ignore RUSTSEC-2026-0257
-        # RUSTSEC-2026-0118 (hickory-proto): NSEC3 closest-encloser proof
-        #   validation enters an unbounded loop on cross-zone responses.
-        #   No fixed release exists upstream yet.
-        # RUSTSEC-2026-0119 (hickory-proto): needs >=0.26.1 (currently
-        #   0.25.2, already bumped once by the libp2p 0.56 migration --
-        #   closer, but not there), pulled in via libp2p-mdns/
-        #   libp2p-request-response -- needs a further libp2p bump once one
-        #   ships against hickory-proto 0.26+.
+        # RUSTSEC-2026-0118 / -0119 (hickory-proto 0.25.2). Both need
+        #   hickory-proto >=0.26.1. It reaches this workspace from exactly
+        #   one place -- libp2p-mdns 0.48.0, which pins hickory-proto "0.25"
+        #   (`cargo tree -i hickory-proto`; libp2p-request-response does NOT
+        #   depend on it, contrary to an earlier note here). libp2p 0.56.0
+        #   is the newest release; rust-libp2p master has already moved its
+        #   workspace pin to hickory-proto 0.26 for the unreleased
+        #   libp2p-mdns 0.49.0, so this clears on the next libp2p release.
+        #   Neither advisory is reachable in what this workspace builds --
+        #   both facts are checkable, not assumed:
+        #     -0118 (NSEC3 closest-encloser validation loop) lives in
+        #       hickory-proto's `src/dnssec/`, which `src/lib.rs:55` gates
+        #       behind `dnssec-aws-lc-rs` / `dnssec-ring`. `cargo tree -e
+        #       features --workspace --all-features` enables only "std",
+        #       "mdns", "futures-io" and "socket2" -- the module is not
+        #       compiled at all.
+        #     -0119 (O(n^2) name compression) is in the message *encoder*.
+        #       libp2p-mdns never encodes through hickory: it builds every
+        #       outgoing packet by hand in `behaviour/iface/dns.rs`
+        #       (`append_u16`/`append_qname` into a Vec<u8>). Its only
+        #       non-test use of the crate is `Message::from_vec` at
+        #       `behaviour/iface/query.rs:55` -- decoding.
+        #   Re-check both claims when libp2p is bumped; the reachability
+        #   argument is version-specific, not permanent.
         # RUSTSEC-2026-0194 / -0195 (quick-xml): needs >=0.41.0. Two old
         #   versions (0.37.5, 0.39.2) are both in the graph from different
         #   transitive paths and need identifying + bumping individually.
-        # RUSTSEC-2024-0398 (sharks 0.5.0, "Bias of Polynomial Coefficients
-        #   in Secret Sharing"): no fixed release exists upstream. sharks
-        #   implements the Shamir's Secret Sharing scheme this project's
-        #   whole content-dissolution model is built on (see
-        #   Research-backed_Master_Design_Doc.md section 2) -- NOT a routine
-        #   ignore. Needs its own evaluation of whether the described
-        #   coefficient bias is exploitable in how this project uses sharks
-        #   (share generation only, never raw polynomial reconstruction
-        #   exposed to an adversary) before being accepted long-term, or a
-        #   switch to a different SSS crate (vsss-rs is already named as an
-        #   alternative for verifiable shares in the design doc).
+        # RUSTSEC-2024-0398 (sharks 0.5.0) is no longer ignored: the
+        #   dependency was replaced with `blahaj` 0.6, the fixed fork the
+        #   advisory itself points at. See docs/adr/011-sss-crate-swap.md.
         # RUSTSEC-2026-0257 (webbrowser): needs >=1.2.2. Transitive via the
         #   CLI's browser-launch helper; low severity, straightforward once
         #   touched together with its dependents' version requirements.
