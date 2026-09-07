@@ -11,9 +11,9 @@ use aes_gcm::{
     aead::{Aead, AeadCore, KeyInit, OsRng},
     Aes256Gcm, Key, Nonce,
 };
+use blahaj::{Share, Sharks};
 use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
 use serde::{Deserialize, Serialize};
-use sharks::{Share, Sharks};
 use wasm_bindgen::prelude::*;
 use zeroize::Zeroizing;
 
@@ -190,8 +190,8 @@ fn sss_split(secret: &[u8], k: u8, n: u8) -> Result<Vec<Vec<u8>>, MiasmaError> {
             "invalid parameters: k={k}, n={n} (require 0 < k <= n)"
         )));
     }
-    let sharks = Sharks(k);
-    let dealer = sharks.dealer(secret);
+    let sss = Sharks(k);
+    let dealer = sss.dealer(secret);
     let shares: Vec<Vec<u8>> = dealer.take(n as usize).map(|s| Vec::from(&s)).collect();
     Ok(shares)
 }
@@ -203,13 +203,13 @@ fn sss_combine(shares: &[Vec<u8>], k: u8) -> Result<Zeroizing<Vec<u8>>, MiasmaEr
             got: shares.len(),
         });
     }
-    let sharks = Sharks(k);
+    let sss = Sharks(k);
     let parsed: Result<Vec<Share>, _> = shares
         .iter()
         .map(|s| Share::try_from(s.as_slice()))
         .collect();
     let parsed = parsed.map_err(|e| MiasmaError::Sss(e.to_string()))?;
-    let secret = sharks
+    let secret = sss
         .recover(&parsed)
         .map_err(|e| MiasmaError::Sss(e.to_string()))?;
     Ok(Zeroizing::new(secret))

@@ -167,7 +167,16 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        MiasmaShare::new(mid, 0, slot, data, vec![0xAA; 32], [0u8; 12], 100, ts)
+        MiasmaShare::new(
+            mid,
+            0,
+            slot,
+            data,
+            vec![0xAA; 32],
+            rand::random::<[u8; 12]>(),
+            100,
+            ts,
+        )
     }
 
     #[test]

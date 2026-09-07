@@ -677,7 +677,7 @@ mod tests {
             idx,
             vec![idx as u8; 64],
             vec![0xAA; 32],
-            [0u8; 12],
+            rand::random::<[u8; 12]>(),
             100,
             ts,
         )
