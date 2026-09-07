@@ -731,7 +731,7 @@ mod tests {
             server: Some("1.2.3.4:8388".to_string()),
             password: Some(base64::Engine::encode(
                 &base64::engine::general_purpose::STANDARD,
-                &[0u8; 32],
+                [0u8; 32],
             )),
             cipher: "2022-blake3-aes-256-gcm".to_string(),
             ..Default::default()
@@ -762,7 +762,7 @@ mod tests {
             server: Some("1.2.3.4:8388".to_string()),
             password: Some(base64::Engine::encode(
                 &base64::engine::general_purpose::STANDARD,
-                &[0u8; 32],
+                [0u8; 32],
             )),
             cipher: "2022-blake3-aes-256-gcm".to_string(),
             local_addr: Some("127.0.0.1:1080".to_string()),
@@ -815,7 +815,7 @@ mod tests {
             server: Some("1.2.3.4:8388".to_string()),
             password: Some(base64::Engine::encode(
                 &base64::engine::general_purpose::STANDARD,
-                &[0u8; 16], // 16 bytes but AES-256 needs 32
+                [0u8; 16], // 16 bytes but AES-256 needs 32
             )),
             cipher: "2022-blake3-aes-256-gcm".to_string(),
             ..Default::default()
@@ -831,7 +831,7 @@ mod tests {
             server: Some("1.2.3.4:8388".to_string()),
             password: Some(base64::Engine::encode(
                 &base64::engine::general_purpose::STANDARD,
-                &[0u8; 16], // 16 bytes for AES-128
+                [0u8; 16], // 16 bytes for AES-128
             )),
             cipher: "2022-blake3-aes-128-gcm".to_string(),
             ..Default::default()
@@ -855,7 +855,7 @@ mod tests {
             server: Some("1.2.3.4:8388".to_string()),
             password: Some(base64::Engine::encode(
                 &base64::engine::general_purpose::STANDARD,
-                &[0u8; 32],
+                [0u8; 32],
             )),
             cipher: "2022-blake3-aes-256-gcm".to_string(),
             local_addr: Some("127.0.0.1:1080".to_string()),
@@ -893,7 +893,7 @@ mod tests {
             server: Some("1.2.3.4:8388".to_string()),
             password: Some(base64::Engine::encode(
                 &base64::engine::general_purpose::STANDARD,
-                &[0u8; 32],
+                [0u8; 32],
             )),
             ..Default::default()
         };
@@ -991,7 +991,7 @@ mod tests {
             server: Some("127.0.0.1:1".to_string()),
             password: Some(base64::Engine::encode(
                 &base64::engine::general_purpose::STANDARD,
-                &[0u8; 32],
+                [0u8; 32],
             )),
             timeout_secs: 2,
             ..Default::default()
@@ -1030,7 +1030,7 @@ mod tests {
             server: Some("127.0.0.1:1".to_string()),
             password: Some(base64::Engine::encode(
                 &base64::engine::general_purpose::STANDARD,
-                &[0u8; 32],
+                [0u8; 32],
             )),
             local_addr: Some("127.0.0.1:2".to_string()),
             timeout_secs: 2,

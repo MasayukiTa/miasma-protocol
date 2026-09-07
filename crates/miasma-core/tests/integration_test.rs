@@ -4102,7 +4102,7 @@ async fn field_ss_raw_diagnostic() {
         let ok = dec.decrypt_packet(&mut buf);
         println!(
             "Self-test: decrypt ok={ok}, plaintext matches={}",
-            &buf[..11] == plaintext
+            buf[..11] == plaintext
         );
     }
 

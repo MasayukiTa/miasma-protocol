@@ -2770,28 +2770,30 @@ impl MiasmaNode {
                 debug!("Relay client: {ev:?}");
             }
             SwarmEvent::Behaviour(MiasmaBehaviourEvent::Ping(_)) => {}
-            SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
-                if let Some(peer_id) = peer_id {
-                    debug!("Dial failed: {peer_id} ({error})");
-                    // Record dial failure in health monitor — more granular than
-                    // connection close (this fires when dial never completes).
-                    self.health_monitor
-                        .record_peer_failure(&peer_id.to_string());
-                    // Apply dial backoff for the failed peer.
-                    self.health_monitor
-                        .backoff
-                        .record_failure(&peer_id.to_string());
-                    // Track in reconnection scheduler.
-                    self.reconnection_metrics.record_attempt();
-                    let tripped = self
-                        .reconnection_scheduler
-                        .record_failure(&peer_id.to_bytes());
-                    if tripped {
-                        self.reconnection_metrics.record_circuit_breaker();
-                        debug!("Circuit breaker tripped for peer {peer_id}");
-                    } else {
-                        self.reconnection_metrics.record_failure();
-                    }
+            SwarmEvent::OutgoingConnectionError {
+                peer_id: Some(peer_id),
+                error,
+                ..
+            } => {
+                debug!("Dial failed: {peer_id} ({error})");
+                // Record dial failure in health monitor — more granular than
+                // connection close (this fires when dial never completes).
+                self.health_monitor
+                    .record_peer_failure(&peer_id.to_string());
+                // Apply dial backoff for the failed peer.
+                self.health_monitor
+                    .backoff
+                    .record_failure(&peer_id.to_string());
+                // Track in reconnection scheduler.
+                self.reconnection_metrics.record_attempt();
+                let tripped = self
+                    .reconnection_scheduler
+                    .record_failure(&peer_id.to_bytes());
+                if tripped {
+                    self.reconnection_metrics.record_circuit_breaker();
+                    debug!("Circuit breaker tripped for peer {peer_id}");
+                } else {
+                    self.reconnection_metrics.record_failure();
                 }
             }
             SwarmEvent::IncomingConnectionError { error, .. } => {
