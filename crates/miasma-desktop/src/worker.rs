@@ -151,7 +151,6 @@ pub struct DirectedInboxItem {
     pub challenge_code: Option<String>,
     pub created_at: u64,
     pub expires_at: u64,
-    pub retention_secs: u64,
     pub filename: Option<String>,
     pub file_size: u64,
 }
@@ -938,7 +937,6 @@ fn map_summary_items(items: Vec<miasma_core::directed::EnvelopeSummary>) -> Vec<
             challenge_code: item.challenge_code,
             created_at: item.created_at,
             expires_at: item.expires_at,
-            retention_secs: item.retention_secs,
             filename: item.filename,
             file_size: item.file_size,
         })
