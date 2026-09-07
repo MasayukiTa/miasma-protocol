@@ -109,12 +109,11 @@
   - 脅威モデルドキュメント整備 (README に概要あり、詳細版が必要)
   - 攻撃面の明示的列挙
   - 暗号実装のレビュー準備 (BBS+, onion, ECDH, AES-GCM)
-    - `sharks` 0.5.0 (RUSTSEC-2024-0398, "Bias of Polynomial Coefficients in
-      Secret Sharing") — upstream に修正版なし。content dissolution の核で
-      使っている Shamir's Secret Sharing 実装そのものが対象なので、監査の
-      優先項目として明示的に含めること。share生成のみでraw多項式復元を
-      攻撃者に晒していないため実害の有無は要検証、`vsss-rs`(verifiable
-      shares対応)への乗り換えも選択肢
+    - ~~`sharks` 0.5.0 (RUSTSEC-2024-0398)~~ ✅ 解消 (2026-09-07): advisory
+      自身が指す修正版フォーク `blahaj` 0.6.0 へ差し替え。ワイヤ形式は
+      バイト単位で同一 (両クレートをリンクした差分バイナリで実測)、
+      偏りの有無は `leading_coefficient_can_be_zero` で回帰固定。
+      詳細は docs/adr/011-sss-crate-swap.md
   - 監査会社選定・発注
 - **工数**: 監査準備 3-5日、監査自体 2-4週間 (外部依存)
 - **コスト**: 暗号+P2P プロトコル監査: $30,000-80,000 USD

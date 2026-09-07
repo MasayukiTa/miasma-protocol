@@ -23,7 +23,7 @@ tokio = { version = "1", features = ["full"] }
 # Cryptography
 blake3 = "1"
 aes-gcm = "0.10"
-sharks = "0.5"
+blahaj = "0.6"                   # Shamir Secret Sharing (maintained fork of `sharks`; fixes RUSTSEC-2024-0398)
 reed-solomon-simd = "3"
 rand = "0.8"
 zeroize = { version = "1", features = ["derive"] }

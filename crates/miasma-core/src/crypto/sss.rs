@@ -1,4 +1,4 @@
-use sharks::{Share, Sharks};
+use blahaj::{Share, Sharks};
 use zeroize::Zeroizing;
 
 use crate::MiasmaError;
@@ -18,8 +18,8 @@ pub fn sss_split(secret: &[u8], k: u8, n: u8) -> Result<Vec<Vec<u8>>, MiasmaErro
             "invalid parameters: k={k}, n={n} (require 0 < k <= n)"
         )));
     }
-    let sharks = Sharks(k);
-    let dealer = sharks.dealer(secret);
+    let sss = Sharks(k);
+    let dealer = sss.dealer(secret);
     let shares: Vec<Vec<u8>> = dealer.take(n as usize).map(|s| Vec::from(&s)).collect();
     Ok(shares)
 }
@@ -35,14 +35,14 @@ pub fn sss_combine(shares: &[Vec<u8>], k: u8) -> Result<Zeroizing<Vec<u8>>, Mias
             got: shares.len(),
         });
     }
-    let sharks = Sharks(k);
+    let sss = Sharks(k);
     let parsed: Result<Vec<Share>, _> = shares
         .iter()
         .map(|s| Share::try_from(s.as_slice()))
         .collect();
     let parsed = parsed.map_err(|e| MiasmaError::Sss(e.to_string()))?;
 
-    let secret = sharks
+    let secret = sss
         .recover(&parsed)
         .map_err(|e| MiasmaError::Sss(e.to_string()))?;
     Ok(Zeroizing::new(secret))
@@ -102,5 +102,48 @@ mod tests {
         assert_eq!(shares.len(), 20);
         let recovered = sss_combine(&shares[..10], k).unwrap();
         assert_eq!(recovered.as_slice(), SECRET);
+    }
+
+    /// Regression test for RUSTSEC-2024-0398 ("Bias of Polynomial Coefficients
+    /// in Secret Sharing").
+    ///
+    /// `sharks` 0.5.0 drew the non-constant polynomial coefficients from
+    /// `[1, 255]` instead of `[0, 255]`. With `k = 2` the polynomial is
+    /// `f(x) = a1*x + s`, so the share at `x = 1` carries `y = a1 + s`
+    /// (GF(256) addition is XOR). If `a1` can never be zero then `y` can
+    /// never equal `s` -- one byte value is excluded from every share, and an
+    /// attacker holding `k-1` shares of a repeatedly-shared secret can rule
+    /// out an exponential number of candidates (Cure53 estimated recovery
+    /// after 500-1500 re-shares of the same secret).
+    ///
+    /// This test asserts the *absence* of that exclusion: over `TRIALS`
+    /// splits of the same one-byte secret, `y == s` must occur at least once.
+    /// Under the fixed implementation it occurs with p = 1/256 per trial, so
+    /// a false failure has probability (255/256)^4000 ~= 2e-7. Under the
+    /// biased implementation it is impossible, so this test fails
+    /// deterministically.
+    #[test]
+    fn leading_coefficient_can_be_zero() {
+        const TRIALS: usize = 4000;
+        let secret = [0x5Au8];
+        let mut hits = 0usize;
+
+        for _ in 0..TRIALS {
+            let shares = sss_split(&secret, 2, 2).unwrap();
+            // Serialized share layout is [x, y_0, y_1, ...]; the dealer's
+            // first share is evaluated at x = 1.
+            assert_eq!(shares[0].len(), 2, "1-byte secret => 1-byte y");
+            assert_eq!(shares[0][0], 1, "first share must be at x = 1");
+            if shares[0][1] == secret[0] {
+                hits += 1;
+            }
+        }
+
+        assert!(
+            hits > 0,
+            "no share at x=1 ever equalled the secret across {TRIALS} splits: \
+             the leading coefficient is being drawn from [1,255], which is \
+             exactly RUSTSEC-2024-0398"
+        );
     }
 }

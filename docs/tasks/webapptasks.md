@@ -46,7 +46,7 @@ Browser (PWA)
 The `miasma-wasm` crate is **completely self-contained** — it does not depend on miasma-core. It reimplements the same cryptographic pipeline independently for browser compatibility:
 - AES-256-GCM (aes-gcm crate)
 - Reed-Solomon erasure coding (reed-solomon-simd)
-- Shamir Secret Sharing (sharks)
+- Shamir Secret Sharing (`blahaj`, the fixed fork of `sharks` -- see docs/adr/011-sss-crate-swap.md)
 - BLAKE3 content addressing (blake3)
 - Protocol-compatible share format (bincode + JSON)
 
