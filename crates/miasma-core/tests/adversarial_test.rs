@@ -412,19 +412,17 @@ fn routing_dilution_attack_mitigated_by_diversity() {
 
 // ─── Scenario 6: Hybrid admission gaming ────────────────────────────────────
 
-/// Attacker tries to minimise PoW cost by generating many low-difficulty
-/// peers and hoping credentials will compensate. The minimum PoW floor
-/// should prevent this.
+/// Attacker tries to minimise PoW cost while maximizing every remaining
+/// admission signal. The absolute PoW floor must reject before scoring.
 #[test]
 fn hybrid_admission_pow_floor_prevents_gaming() {
     let policy = HybridAdmissionPolicy::default();
 
-    // Attacker: PoW at 2 bits (below floor of 4), with a credential.
+    // Attacker: PoW at 2 bits with favorable diversity/reachability signals.
     let signals = AdmissionSignals {
         pow_difficulty: 2,
         unique_prefix: true,
         reachable: true,
-        credential_tier: Some(CredentialTier::Endorsed),
         resource_profile: ResourceProfile::Desktop,
     };
 
@@ -440,18 +438,16 @@ fn hybrid_admission_pow_floor_prevents_gaming() {
 }
 
 /// Attacker generates many mobile-profile peers to exploit the lower threshold.
-/// Even with the lower threshold, minimum PoW + lack of credentials should
-/// still require real work.
+/// The same absolute PoW floor still applies.
 #[test]
 fn hybrid_admission_mobile_sybil_still_costly() {
     let policy = HybridAdmissionPolicy::default();
 
-    // Mobile peer with minimum PoW (4 bits), no credential, not reachable.
+    // Mobile peer below the production 8-bit PoW floor, not reachable.
     let signals = AdmissionSignals {
         pow_difficulty: 4,
         unique_prefix: false,
         reachable: false,
-        credential_tier: None,
         resource_profile: ResourceProfile::Mobile,
     };
 
@@ -459,26 +455,24 @@ fn hybrid_admission_mobile_sybil_still_costly() {
     // 4*10 = 40 < 80 (mobile threshold)
     assert!(
         !decision.admitted,
-        "mobile sybil without credential should fail"
+        "mobile sybil below the PoW floor should fail"
     );
 }
 
-/// A credential must not lower the production PoW floor for mobile peers.
+/// Prefix diversity cannot bypass the production PoW floor for mobile peers.
 #[test]
-fn hybrid_admission_credential_does_not_bypass_mobile_pow_floor() {
+fn hybrid_admission_diversity_does_not_bypass_mobile_pow_floor() {
     let policy = HybridAdmissionPolicy::default();
 
     let signals = AdmissionSignals {
         pow_difficulty: 4,
         unique_prefix: true,
         reachable: false,
-        credential_tier: Some(CredentialTier::Verified),
         resource_profile: ResourceProfile::Mobile,
     };
 
     let decision = policy.evaluate(&signals);
     assert!(!decision.admitted);
-    assert_eq!(decision.breakdown.credential_bonus, 0);
     assert!(matches!(
         decision.rejection_reason,
         Some(HybridRejection::InsufficientMinPoW { .. })
@@ -722,10 +716,9 @@ fn hybrid_admission_constrained_device_min_pow() {
     let policy = HybridAdmissionPolicy::default();
 
     let signals = AdmissionSignals {
-        pow_difficulty: 3, // below 4-bit floor
+        pow_difficulty: 3, // below the 8-bit production floor
         unique_prefix: true,
         reachable: true,
-        credential_tier: Some(CredentialTier::Endorsed),
         resource_profile: ResourceProfile::Constrained,
     };
 
@@ -746,7 +739,6 @@ fn hybrid_admission_exact_desktop_threshold() {
         pow_difficulty: 10,
         unique_prefix: false,
         reachable: false,
-        credential_tier: None,
         resource_profile: ResourceProfile::Desktop,
     };
 
