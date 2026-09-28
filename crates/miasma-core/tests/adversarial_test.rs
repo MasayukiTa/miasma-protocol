@@ -412,17 +412,16 @@ fn routing_dilution_attack_mitigated_by_diversity() {
 
 // ─── Scenario 6: Hybrid admission gaming ────────────────────────────────────
 
-/// Attacker tries to minimise PoW cost while maximizing every remaining
-/// admission signal. The absolute PoW floor must reject before scoring.
+/// Attacker tries to minimise PoW cost while keeping a fresh prefix. The
+/// absolute PoW floor must reject before scoring.
 #[test]
 fn hybrid_admission_pow_floor_prevents_gaming() {
     let policy = HybridAdmissionPolicy::default();
 
-    // Attacker: PoW at 2 bits with favorable diversity/reachability signals.
+    // Attacker: PoW at 2 bits with a favorable diversity signal.
     let signals = AdmissionSignals {
         pow_difficulty: 2,
         unique_prefix: true,
-        reachable: true,
     };
 
     let decision = policy.evaluate(&signals);
@@ -445,7 +444,6 @@ fn hybrid_admission_low_pow_sybil_still_rejected() {
     let signals = AdmissionSignals {
         pow_difficulty: 4,
         unique_prefix: false,
-        reachable: false,
     };
 
     let decision = policy.evaluate(&signals);
@@ -461,7 +459,6 @@ fn hybrid_admission_diversity_does_not_bypass_pow_floor() {
     let signals = AdmissionSignals {
         pow_difficulty: 4,
         unique_prefix: true,
-        reachable: false,
     };
 
     let decision = policy.evaluate(&signals);
@@ -703,15 +700,14 @@ fn descriptor_pseudonym_hijack_requires_valid_signature() {
 
 // ─── Scenario 11: Hybrid admission boundary conditions ──────────────────────
 
-/// Maximum non-PoW signals still cannot bypass the absolute PoW floor.
+/// Prefix diversity still cannot bypass the absolute PoW floor.
 #[test]
-fn hybrid_admission_other_signals_cannot_bypass_min_pow() {
+fn hybrid_admission_diversity_cannot_bypass_min_pow() {
     let policy = HybridAdmissionPolicy::default();
 
     let signals = AdmissionSignals {
         pow_difficulty: 3, // below the 8-bit production floor
         unique_prefix: true,
-        reachable: true,
     };
 
     let decision = policy.evaluate(&signals);
@@ -730,7 +726,6 @@ fn hybrid_admission_exact_threshold() {
     let signals = AdmissionSignals {
         pow_difficulty: 10,
         unique_prefix: false,
-        reachable: false,
     };
 
     let decision = policy.evaluate(&signals);

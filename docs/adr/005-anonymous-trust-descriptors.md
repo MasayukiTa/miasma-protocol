@@ -112,7 +112,9 @@ mechanism, but the production first-contact path is deliberately narrower:
 - First-contact admission uses one threshold (100); self-declared device class
   cannot lower it. Resource profile remains descriptor/routing metadata only.
 - IP-prefix diversity can contribute to admission score.
-- Reachability contributes zero until an explicit external probe result is wired.
+- Reachability is absent from the first-contact admission API. The old
+  connection-implies-reachability shortcut was unsafe; any future liveness signal
+  needs a separately proven protocol rather than a boolean scoring knob.
 - Credential tier is absent from the first-contact admission API; there is no
   credential-weight knob to accidentally re-enable under bootstrap issuance.
 

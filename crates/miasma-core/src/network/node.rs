@@ -3006,10 +3006,6 @@ impl MiasmaNode {
         let signals = AdmissionSignals {
             pow_difficulty,
             unique_prefix,
-            // A connection/request proves the peer can reach us; it does not prove
-            // the externally-reachable liveness signal this bonus is meant to model.
-            // Keep the bonus at zero until an explicit probe result is wired here.
-            reachable: false,
         };
 
         let decision = self.admission_policy.evaluate(&signals);
