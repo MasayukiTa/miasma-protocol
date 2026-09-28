@@ -2,6 +2,14 @@
 
 ## Status: Accepted (Phase 4e+++ — unified relay trust, forwarding verification, pre-retrieval probing, security hotfix sprint, v0.2.0-beta.1 hardening)
 
+> Security repair note (2026-09-28): the Phase 4b BBS+ implementation and
+> descriptor BBS carrier described in the historical implementation log below
+> were deleted in `ac996f9` after confirmed forgeries. Current credential wire is
+> 1.2, descriptor wire is 1.2, production admission gives credential tier zero
+> score, and path selection does not use credential tier as relay authority.
+> Current descriptors remain associated with a verified libp2p identity; epoch
+> holder tags therefore do not provide network-level unlinkability. See ADR-006.
+
 ## Context
 
 ADR-004 established a routing trust model with PoW-gated admission, trust
@@ -50,11 +58,15 @@ Presentation:
     5. Tier meets minimum
 ```
 
-**Privacy properties:**
-- Cross-epoch unlinkability (new ephemeral key each epoch)
-- Issuer-holder separation (other peers don't learn PeerId)
-- Non-transferability (need ephemeral secret key)
-- Clear upgrade path to BBS+ for within-epoch unlinkability
+**Credential-layer properties and limits:**
+- The holder tag changes across epochs, reducing direct equality of the credential
+  identifier itself. This is not network-level unlinkability: the transport peer
+  identity remains visible to the recipient.
+- Presentation proves possession of the epoch-scoped ephemeral secret key.
+- Issuer signatures and verifier-generated context bind the accepted presentation.
+- The deleted hand-written BBS+ scheme is not an upgrade path. Any future
+  identity-hiding credential is a new protocol with a vetted implementation and
+  an identity-hiding carrier.
 
 **Credential tiers:**
 - `Observed` — passed Identify exchange
@@ -67,7 +79,7 @@ Replace raw (PeerId, Multiaddr) pairs with structured `PeerDescriptor`s:
 
 | Field | Purpose |
 |-------|---------|
-| `pseudonym` | BLAKE3 of ephemeral pubkey (unlinkable across epochs) |
+| `pseudonym` | BLAKE3 of ephemeral pubkey (rotates across epochs; network peer remains linkable) |
 | `reachability` | Direct, Relayed, or Rendezvous |
 | `addresses` | May be relay circuit addresses (not raw IPs) |
 | `capabilities` | can_store, can_relay, can_route, can_issue |
@@ -86,41 +98,24 @@ Three anonymity policies:
 - **Required**: refuse without sufficient hops
 
 Path construction enforces:
-- Trust-tier minimum for relay nodes
+- Credential tier is not used as relay authority in the current bootstrap issuer model
 - IP prefix diversity between consecutive hops
 - Preference for desktop/server nodes as relays
 - Exclusion of destination from relay set
 
 ### 4. Hybrid admission model
 
-Multi-signal Sybil resistance that accommodates mobile devices:
+`HybridAdmissionPolicy` retains multi-signal scoring as an explicit/testable
+mechanism, but the production first-contact path is deliberately narrower:
 
-```
-admission_score = pow_score + diversity_bonus + reachability_bonus + credential_bonus
+- PoW is verified and must meet the 8-bit absolute floor.
+- IP-prefix diversity can contribute to admission score.
+- Reachability contributes zero until an explicit external probe result is wired.
+- Credential and Endorsed bonuses are zero by default and the first-contact path
+  supplies no credential tier, avoiding circular or self-declared trust.
 
-  pow_score       = difficulty_bits × 10
-  diversity_bonus = 50 if prefix unique
-  reachability    = 30 if probe succeeded
-  credential      = 100 if valid Verified+ credential
-
-Thresholds:
-  Desktop:      100  (PoW at 10 bits alone suffices)
-  Mobile:        80  (PoW at 4 bits + credential = 140, passes)
-  Constrained:   60  (lowest bar, requires some combination)
-
-Hard floor: MIN_POW_DIFFICULTY = 4 bits (always required)
-```
-
-### 5. Adversarial simulation harness
-
-Integration-level attack simulations:
-- Sybil cluster (100 peers from same /16 → only 3 admitted)
-- Eclipse attempt (attacker diluted by trust ranking)
-- Poisoned descriptors (forged credentials rejected)
-- Credential replay (context binding prevents reuse)
-- Credential theft (holder tag mismatch without ephemeral key)
-- Routing pressure (unreliable attackers deprioritised)
-- Hybrid admission gaming (minimum PoW floor prevents zero-cost Sybil)
+A future re-enable of credential-derived admission weight requires a stronger
+issuer authority model and a non-circular pre-admission credential path.
 
 ## Implementation
 
@@ -521,7 +516,9 @@ ADR-004 tiers:     Claimed → Observed → Verified
 ADR-005 extension: Claimed → Observed → Verified → Endorsed (credential-backed)
 ```
 
-The anonymous credential layer sits *above* the existing admission system.
-A peer first passes ADR-004's admission (PoW + diversity), then optionally
-receives a credential that can be presented pseudonymously. The two systems
-are complementary, not replacements.
+The credential layer sits *above* the existing admission system. A peer first
+passes ADR-004 admission, then may receive a challenge-presentable credential.
+The credential authenticates an epoch-scoped holder tag and issuer statement,
+but the current transport/descriptor carrier still exposes the stable network
+peer identity to the recipient. It must not be described as anonymous or used as
+a stronger relay-trust authority while bootstrap issuance remains peer-to-peer.

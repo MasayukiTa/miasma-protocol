@@ -16,7 +16,8 @@
 /// ## Path construction
 ///
 /// 1. Gather candidate relay descriptors from the `DescriptorStore`
-/// 2. Filter by trust tier (prefer Verified+, require at minimum Observed)
+/// 2. Treat credential tier as non-authoritative until the issuer trust model
+///    is stronger than bootstrap peer-to-peer issuance
 /// 3. Apply diversity constraints (no two hops from the same /16)
 /// 4. Build path from source → relay(s) → destination
 /// 5. If anonymity is Required and insufficient relays exist, return an error
@@ -28,7 +29,6 @@
 /// module handles encryption and circuit management.
 use serde::{Deserialize, Serialize};
 
-use super::credential::CredentialTier;
 use super::descriptor::{DescriptorStore, PeerDescriptor, ResourceProfile};
 use super::routing::{ip_prefix_of, IpPrefix, RoutingTable};
 
@@ -65,8 +65,6 @@ pub struct PathConstraints {
     pub min_hops: u8,
     /// Maximum number of intermediate hops.
     pub max_hops: u8,
-    /// Minimum trust tier for relay nodes.
-    pub min_relay_tier: CredentialTier,
     /// Require IP prefix diversity between consecutive hops.
     pub enforce_hop_diversity: bool,
     /// Prefer desktop/server nodes as relays (better bandwidth).
@@ -78,7 +76,6 @@ impl Default for PathConstraints {
         Self {
             min_hops: 1,
             max_hops: 3,
-            min_relay_tier: CredentialTier::Observed,
             enforce_hop_diversity: true,
             prefer_desktop_relays: true,
         }
@@ -115,8 +112,6 @@ pub struct PathHop {
     pub address: String,
     /// IP prefix of this hop (for diversity checks).
     pub ip_prefix: IpPrefix,
-    /// Trust tier of this hop.
-    pub tier: Option<CredentialTier>,
     /// Resource profile of this hop.
     pub resource_profile: ResourceProfile,
 }
@@ -247,11 +242,11 @@ impl PathSelector {
             return Err(PathError::NoRelaysAvailable);
         }
 
-        // Credential presentations carried by descriptors are not yet verified on
-        // receipt. Until that verification path exists, path selection must treat
-        // every descriptor as credential-less rather than consuming self-declared
-        // tier data. `min_relay_tier` remains part of the constraints API for the
-        // future verified-credential path.
+        // Credential presentations can be cryptographically verified on receipt,
+        // but bootstrap mode still lets any verified peer issue a Verified
+        // credential to another verified peer. That is provenance, not a strong
+        // relay-trust authority. Do not expose or filter on credential tier until
+        // the issuer trust model is redesigned.
         let mut candidates: Vec<&PeerDescriptor> = relays.into_iter().collect();
 
         // Sort: prefer desktop relays, then by published_at (newer first).
@@ -295,15 +290,10 @@ impl PathSelector {
                 continue; // skip same-prefix relay
             }
 
-            // Do not surface an unverified descriptor credential as a trusted
-            // property of the selected hop.
-            let tier = None;
-
             hops.push(PathHop {
                 pseudonym: desc.pseudonym,
                 address: desc.addresses.first().cloned().unwrap_or_default(),
                 ip_prefix: prefix,
-                tier,
                 resource_profile: desc.resource_profile,
             });
             used_prefixes.insert(prefix);
