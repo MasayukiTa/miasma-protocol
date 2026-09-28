@@ -384,7 +384,7 @@ impl LocalShareStore {
     fn live_master_key(guard: &Option<Zeroizing<[u8; 32]>>) -> Result<&[u8; 32], MiasmaError> {
         guard
             .as_ref()
-            .map(|key| key.as_ref())
+            .map(|key| &**key)
             .ok_or_else(|| MiasmaError::Storage("store has been distress-wiped".into()))
     }
 
