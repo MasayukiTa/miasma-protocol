@@ -45,6 +45,8 @@ pub enum RejectionReason {
     InsufficientDifficulty,
     /// PoW pubkey did not match the peer's actual identity.
     PubkeyMismatch,
+    /// Remote peer explicitly rejected our admission request.
+    RemoteRejected,
 }
 
 impl std::fmt::Display for RejectionReason {
@@ -55,6 +57,9 @@ impl std::fmt::Display for RejectionReason {
             RejectionReason::MalformedPoW => write!(f, "malformed PoW proof"),
             RejectionReason::InsufficientDifficulty => write!(f, "insufficient PoW difficulty"),
             RejectionReason::PubkeyMismatch => write!(f, "PoW pubkey does not match peer identity"),
+            RejectionReason::RemoteRejected => {
+                write!(f, "remote peer rejected admission request")
+            }
         }
     }
 }
