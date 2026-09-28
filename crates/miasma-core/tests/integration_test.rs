@@ -1206,6 +1206,49 @@ async fn cli_smoke_loopback() {
 
     result.expect("cli_smoke_loopback timed out (30s)");
 }
+// Daemon distress wipe runtime shutdown regression.
+#[tokio::test(flavor = "multi_thread")]
+async fn daemon_wipe_returns_then_shuts_down_runtime() {
+    use miasma_core::daemon::ipc::{
+        daemon_request, ControlRequest, ControlResponse, HTTP_PORT_FILE, PORT_FILE,
+    };
+    use miasma_core::daemon::DaemonServer;
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(LocalShareStore::open(dir.path(), 100).unwrap());
+    let master_bytes = std::fs::read(dir.path().join("master.key")).unwrap();
+    let master_key: [u8; 32] = master_bytes.try_into().unwrap();
+    let node = MiasmaNode::new(&master_key, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+
+    let server = DaemonServer::start(node, store, dir.path().to_owned())
+        .await
+        .unwrap();
+    let data_dir = dir.path().to_owned();
+    let run_task = tokio::spawn(server.run());
+
+    let response = daemon_request(&data_dir, ControlRequest::Wipe)
+        .await
+        .expect("wipe request should receive a response before shutdown");
+    assert!(matches!(response, ControlResponse::Wiped));
+
+    timeout(Duration::from_secs(5), run_task)
+        .await
+        .expect("daemon must stop within wipe SLO")
+        .expect("daemon run task panicked")
+        .expect("daemon shutdown failed");
+
+    assert!(!data_dir.join("master.key").exists());
+    assert!(!data_dir.join(PORT_FILE).exists());
+    assert!(!data_dir.join(HTTP_PORT_FILE).exists());
+    assert!(
+        daemon_request(&data_dir, ControlRequest::Status)
+            .await
+            .is_err(),
+        "daemon must not continue serving after successful wipe"
+    );
+}
 
 // ── Test 21: Daemon IPC publish → get round-trip ──────────────────────────────
 //
