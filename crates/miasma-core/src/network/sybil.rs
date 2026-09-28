@@ -174,6 +174,15 @@ impl SignedDhtRecord {
         let msg = Self::signing_message(&self.key, &self.value, &self.signer_pubkey);
         verifying_key.verify(&msg, &sig).is_ok()
     }
+
+    /// Verify both the signature and the key under which the envelope was retrieved.
+    ///
+    /// A valid signature over key A must not be replayed as the value stored under
+    /// key B. Callers handling Kademlia records must use this method rather than
+    /// signature-only verification.
+    pub fn verify_for_key(&self, expected_key: &[u8]) -> bool {
+        self.key.as_slice() == expected_key && self.verify_signature()
+    }
 }
 
 // ─── Peer admission ─────────────────────────────────────────────────────────
@@ -279,6 +288,18 @@ mod tests {
             !record.verify_signature(),
             "wrong signer key must fail verification"
         );
+    }
+
+    #[test]
+    fn signed_record_cannot_be_transplanted_to_different_storage_key() {
+        let signing_key = SigningKey::from_bytes(&[0x42u8; 32]);
+        let record = SignedDhtRecord::sign(b"key-a".to_vec(), b"value".to_vec(), &signing_key);
+
+        assert!(record.verify_for_key(b"key-a"));
+        assert!(!record.verify_for_key(b"key-b"));
+        // Signature-only verification still succeeds because the envelope itself
+        // was not modified; the storage-key binding is the extra required check.
+        assert!(record.verify_signature());
     }
 
     #[test]
