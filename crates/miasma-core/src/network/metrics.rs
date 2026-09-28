@@ -1,13 +1,13 @@
 /// Freenet-style outcome metrics for measuring network health.
 ///
 /// These metrics quantify the protocol's effectiveness at its core goals:
-/// censorship resistance, identification difficulty, and trust resilience.
+/// censorship resistance, privacy-related topology signals, and trust resilience.
 /// They are computed from live network state rather than being abstract counters.
 ///
 /// # Metric categories
 ///
 /// - **Censorship resistance**: how hard is it for an adversary to suppress content?
-/// - **Identification difficulty**: how hard is it to link a user to their activity?
+/// - **Privacy diagnostics**: topology/churn signals; these are not proof of unlinkability.
 /// - **Trust health**: how robust is the admission/credential system against Sybils?
 use serde::{Deserialize, Serialize};
 
@@ -35,12 +35,10 @@ pub struct OutcomeMetrics {
     pub relay_peers_routable: usize,
 
     // ── Identification difficulty ────────────────────────────────────────
-    /// Fraction of peers using pseudonymous descriptors (non-direct reachability
-    /// or credentialed without raw PeerId binding).
-    pub pseudonymous_fraction: f64,
-
-    /// Pseudonym churn rate: fraction of current pseudonyms not seen in
-    /// the previous epoch. Higher churn = harder to build long-term profiles.
+    /// Pseudonym churn rate: fraction of current pseudonyms not seen in the
+    /// previous epoch. This measures identifier rotation only; current descriptors
+    /// remain bound to a verified network identity, so churn does not imply
+    /// network-level unlinkability.
     pub pseudonym_churn_rate: f64,
 
     /// Whether anonymous retrieval (relay routing) is available.
@@ -78,7 +76,6 @@ impl Default for OutcomeMetrics {
             relay_prefix_diversity: 0,
             relay_fraction: 0.0,
             relay_peers_routable: 0,
-            pseudonymous_fraction: 0.0,
             pseudonym_churn_rate: 0.0,
             onion_routing_available: false,
             credentialed_peer_fraction: 0.0,
@@ -129,17 +126,6 @@ impl OutcomeMetrics {
             }
         }
 
-        // Pseudonymous fraction: peers that are relayed or have credentials.
-        let pseudonymous_count = active
-            .iter()
-            .filter(|d| d.is_relayed() || d.credential.is_some())
-            .count();
-        let pseudonymous_fraction = if total_descriptors > 0 {
-            pseudonymous_count as f64 / total_descriptors as f64
-        } else {
-            0.0
-        };
-
         // Credentialed fraction (among active descriptors).
         let credentialed = active
             .iter()
@@ -188,7 +174,6 @@ impl OutcomeMetrics {
             relay_prefix_diversity: relay_prefixes.len(),
             relay_fraction,
             relay_peers_routable: desc_stats.relay_peers_routable,
-            pseudonymous_fraction,
             pseudonym_churn_rate: descriptor_store.churn_rate(),
             onion_routing_available: onion_enabled,
             credentialed_peer_fraction,

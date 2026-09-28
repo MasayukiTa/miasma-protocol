@@ -323,9 +323,6 @@ pub struct DaemonStatus {
     /// Fraction of peers with valid credentials.
     #[serde(default)]
     pub metric_credentialed_fraction: f64,
-    /// Fraction of peers using pseudonymous descriptors.
-    #[serde(default)]
-    pub metric_pseudonymous_fraction: f64,
     /// Multi-path content retrievability estimate (0.0–1.0).
     #[serde(default)]
     pub metric_multi_path_retrievability: f64,
