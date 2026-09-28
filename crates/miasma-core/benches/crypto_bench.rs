@@ -21,8 +21,8 @@ fn bench_blake3(c: &mut Criterion) {
 
 fn bench_aes_gcm(c: &mut Criterion) {
     let data = vec![0x42u8; MB_100];
-    let key = [0x11u8; 32];
-    let nonce = [0x22u8; 12];
+    let key = rand::random::<[u8; 32]>();
+    let nonce = rand::random::<[u8; 12]>();
     let ciphertext = encrypt_with_key(&data, &key, &nonce).unwrap();
 
     let mut g = c.benchmark_group("AES-256-GCM");
