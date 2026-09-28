@@ -217,7 +217,10 @@ fn validate_data_dir(data_dir: &str) -> Result<PathBuf, MiasmaFfiError> {
 
 /// Load config and open the share store. Returns `NotInitialized` if the node
 /// has not been initialised (`master.key` or `config.toml` missing).
-fn open_store(data_dir: &str) -> Result<(NodeConfig, Arc<LocalShareStore>), MiasmaFfiError> {
+fn open_store_inner(
+    data_dir: &str,
+    keep_transport_secrets: bool,
+) -> Result<(NodeConfig, Arc<LocalShareStore>), MiasmaFfiError> {
     let path = validate_data_dir(data_dir)?;
     let master_key_path = path.join("master.key");
     if !master_key_path.exists() {
@@ -225,7 +228,7 @@ fn open_store(data_dir: &str) -> Result<(NodeConfig, Arc<LocalShareStore>), Mias
             data_dir: data_dir.to_owned(),
         });
     }
-    let config = NodeConfig::load(&path).map_err(|e| {
+    let mut config = NodeConfig::load(&path).map_err(|e| {
         tracing::warn!("config load error: {e}");
         MiasmaFfiError::Other {
             msg: "failed to load config".into(),
@@ -237,7 +240,20 @@ fn open_store(data_dir: &str) -> Result<(NodeConfig, Arc<LocalShareStore>), Mias
             msg: "failed to open store".into(),
         }
     })?;
+    if !keep_transport_secrets {
+        config.transport.zeroize_secret_copies();
+    }
     Ok((config, Arc::new(store)))
+}
+
+fn open_store(data_dir: &str) -> Result<(NodeConfig, Arc<LocalShareStore>), MiasmaFfiError> {
+    open_store_inner(data_dir, false)
+}
+
+fn open_store_for_daemon(
+    data_dir: &str,
+) -> Result<(NodeConfig, Arc<LocalShareStore>), MiasmaFfiError> {
+    open_store_inner(data_dir, true)
 }
 
 // ─── Exported functions ───────────────────────────────────────────────────────
@@ -697,7 +713,7 @@ pub fn start_embedded_daemon(
     // Ensure node is initialised.
     initialize_node(data_dir.clone(), storage_mb, bandwidth_mb_day)?;
 
-    let (config, store) = open_store(&data_dir)?;
+    let (mut config, store) = open_store_for_daemon(&data_dir)?;
 
     // Read master key for node identity.
     let master_key_path = path.join("master.key");
@@ -712,11 +728,15 @@ pub fn start_embedded_daemon(
             }
         })?;
 
+    // Move the transport config into the daemon; do not duplicate persisted
+    // secret Strings into a second long-lived config object.
+    let transport_config = std::mem::take(&mut config.transport);
+
     // Start DaemonServer (binds IPC + HTTP bridge + transports).
     let rt = shared_runtime();
     let result = rt.block_on(async {
         let server =
-            DaemonServer::start_with_transport(node, store, path.clone(), config.transport.clone())
+            DaemonServer::start_with_transport(node, store, path.clone(), transport_config)
                 .await
                 .map_err(|e| {
                     tracing::warn!("daemon start error: {e}");

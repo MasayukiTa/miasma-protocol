@@ -2,7 +2,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::MiasmaError;
 
@@ -109,6 +109,31 @@ impl TransportConfig {
         }
         Ok(Some(secret))
     }
+
+    fn zeroize_option_string(value: &mut Option<String>) -> bool {
+        if let Some(mut secret) = value.take() {
+            secret.zeroize();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Erase secret String copies held by this in-memory transport config without
+    /// changing enablement semantics. Call only after runtime key material has
+    /// been extracted into dedicated zeroizing state.
+    pub fn zeroize_secret_copies(&mut self) {
+        Self::zeroize_option_string(&mut self.proxy_username);
+        Self::zeroize_option_string(&mut self.proxy_password);
+        Self::zeroize_option_string(&mut self.obfuscated_quic_secret);
+        Self::zeroize_option_string(&mut self.shadowsocks.password);
+    }
+}
+
+impl Drop for TransportConfig {
+    fn drop(&mut self) {
+        self.zeroize_secret_copies();
+    }
 }
 
 impl Default for StorageConfig {
@@ -135,8 +160,8 @@ impl NodeConfig {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let raw = std::fs::read_to_string(&path)?;
-        toml::from_str(&raw).map_err(|e| MiasmaError::Serialization(e.to_string()))
+        let raw = Zeroizing::new(std::fs::read_to_string(&path)?);
+        toml::from_str(raw.as_str()).map_err(|e| MiasmaError::Serialization(e.to_string()))
     }
 
     pub fn save(&self, data_dir: &Path) -> Result<(), MiasmaError> {
@@ -145,8 +170,9 @@ impl NodeConfig {
             .map_err(|e| MiasmaError::Serialization(format!("invalid transport config: {e}")))?;
         std::fs::create_dir_all(data_dir)?;
         let path = data_dir.join("config.toml");
-        let raw =
-            toml::to_string_pretty(self).map_err(|e| MiasmaError::Serialization(e.to_string()))?;
+        let raw = Zeroizing::new(
+            toml::to_string_pretty(self).map_err(|e| MiasmaError::Serialization(e.to_string()))?,
+        );
 
         // If persisted transport secrets are present, write with restricted
         // permissions from the start (Win32 DACL / Unix 0o600). If we're
@@ -180,14 +206,14 @@ impl NodeConfig {
     /// Scrub persisted transport credentials/secrets from this config, then save
     /// the sanitized version back to disk.
     pub fn scrub_credentials(&mut self, data_dir: &Path) -> Result<(), MiasmaError> {
-        self.transport.proxy_username = None;
-        self.transport.proxy_password = None;
-        if self.transport.obfuscated_quic_secret.take().is_some() {
+        TransportConfig::zeroize_option_string(&mut self.transport.proxy_username);
+        TransportConfig::zeroize_option_string(&mut self.transport.proxy_password);
+        if TransportConfig::zeroize_option_string(&mut self.transport.obfuscated_quic_secret) {
             self.transport.obfuscated_quic_enabled = false;
         }
-        if self.transport.shadowsocks.password.take().is_some()
-            && self.transport.shadowsocks.server.is_some()
-        {
+        let shadowsocks_secret_removed =
+            TransportConfig::zeroize_option_string(&mut self.transport.shadowsocks.password);
+        if shadowsocks_secret_removed && self.transport.shadowsocks.server.is_some() {
             // Native Shadowsocks cannot operate after its PSK is destroyed.
             self.transport.shadowsocks.enabled = false;
         }
