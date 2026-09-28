@@ -1482,66 +1482,13 @@ fn verify_pieces(data: &[u8], pieces_hash: &[u8], piece_length: usize) -> bool {
 
 #[allow(dead_code)]
 fn sha1_of(data: &[u8]) -> [u8; 20] {
-    // Minimal SHA1 — use the SHA-2 crate which is already a workspace dep.
-    // SHA1 is NOT in sha2, so we implement a tiny wrapper here.
-    // Note: sha1 is only used for verifying BT pieces, not for security.
-    sha1_compress(data)
-}
+    // BitTorrent v1 defines piece hashes as SHA-1. Use a maintained library
+    // implementation instead of carrying cryptographic primitive code here.
+    use sha1::{Digest, Sha1};
 
-/// Minimal SHA1 (FIPS 180-4) — used only for BT piece verification.
-#[allow(dead_code)]
-fn sha1_compress(data: &[u8]) -> [u8; 20] {
-    let mut h: [u32; 5] = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0];
-
-    // Pad message.
-    let mut msg = data.to_vec();
-    let bit_len = (data.len() as u64) * 8;
-    msg.push(0x80);
-    while msg.len() % 64 != 56 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&bit_len.to_be_bytes());
-
-    for chunk in msg.chunks(64) {
-        let mut w = [0u32; 80];
-        for i in 0..16 {
-            w[i] = u32::from_be_bytes(chunk[i * 4..i * 4 + 4].try_into().unwrap());
-        }
-        for i in 16..80 {
-            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
-        }
-        let (mut a, mut b, mut c, mut d, mut e) = (h[0], h[1], h[2], h[3], h[4]);
-        #[allow(clippy::needless_range_loop)]
-        for i in 0..80 {
-            let (f, k) = match i {
-                0..=19 => ((b & c) | ((!b) & d), 0x5A827999u32),
-                20..=39 => (b ^ c ^ d, 0x6ED9EBA1u32),
-                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1BBCDC),
-                _ => (b ^ c ^ d, 0xCA62C1D6u32),
-            };
-            let temp = a
-                .rotate_left(5)
-                .wrapping_add(f)
-                .wrapping_add(e)
-                .wrapping_add(k)
-                .wrapping_add(w[i]);
-            e = d;
-            d = c;
-            c = b.rotate_left(30);
-            b = a;
-            a = temp;
-        }
-        h[0] = h[0].wrapping_add(a);
-        h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c);
-        h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(e);
-    }
-
+    let digest = Sha1::digest(data);
     let mut out = [0u8; 20];
-    for (i, &val) in h.iter().enumerate() {
-        out[i * 4..i * 4 + 4].copy_from_slice(&val.to_be_bytes());
-    }
+    out.copy_from_slice(&digest);
     out
 }
 
@@ -1813,7 +1760,7 @@ mod tests {
             0xda, 0x39, 0xa3, 0xee, 0x5e, 0x6b, 0x4b, 0x0d, 0x32, 0x55, 0xbf, 0xef, 0x95, 0x60,
             0x18, 0x90, 0xaf, 0xd8, 0x07, 0x09,
         ];
-        assert_eq!(sha1_compress(&[]), expected);
+        assert_eq!(sha1_of(&[]), expected);
     }
 
     #[test]
@@ -1823,7 +1770,7 @@ mod tests {
             0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e, 0x25, 0x71, 0x78, 0x50,
             0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d,
         ];
-        assert_eq!(sha1_compress(b"abc"), expected);
+        assert_eq!(sha1_of(b"abc"), expected);
     }
 
     #[test]
