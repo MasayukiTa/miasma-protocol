@@ -31,8 +31,7 @@ pub use descriptor::{
     RelayObservation, RelayTrustTier, ResolvedIntroPoint, ResourceProfile,
 };
 pub use dht::{
-    BypassOnionDhtExecutor, DirectDhtExecutor, LiveOnionDhtExecutor, NetworkOnionDhtExecutor,
-    OnionAwareDhtExecutor,
+    BypassOnionDhtExecutor, DirectDhtExecutor, LiveOnionDhtExecutor, OnionAwareDhtExecutor,
 };
 pub use environment::{
     EnvironmentSnapshot, NetworkCapabilities, NetworkEnvironment, TransportRecommendation,
