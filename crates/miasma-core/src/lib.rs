@@ -57,7 +57,7 @@ pub use network::{
 };
 pub use onion::{
     CircuitId, CircuitManager, InProcessRelay, LiveOnionDhtExecutor, LiveOnionShareFetcher,
-    NetworkOnionDhtExecutor, OnionPacketBuilder, OnionShareFetcher,
+    OnionPacketBuilder, OnionShareFetcher,
 };
 pub use pipeline::{dissolve, retrieve, DissolutionParams};
 pub use retrieval::{
