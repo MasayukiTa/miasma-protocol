@@ -346,21 +346,17 @@ impl DaemonServer {
         // the network boundary.
         let (sharing_secret, sharing_pubkey) = {
             let master_key_path = data_dir.join("master.key");
-            match std::fs::read(&master_key_path) {
-                Ok(bytes) if bytes.len() == 32 => {
-                    let mut mk = [0u8; 32];
-                    mk.copy_from_slice(&bytes);
-                    match crate::crypto::keyderive::derive_sharing_key(&mk) {
-                        Ok(secret) => {
-                            let static_secret = x25519_dalek::StaticSecret::from(*secret);
-                            let pubkey = x25519_dalek::PublicKey::from(&static_secret);
-                            (*secret, *pubkey.as_bytes())
-                        }
-                        Err(_) => ([0u8; 32], [0u8; 32]),
-                    }
-                }
-                _ => ([0u8; 32], [0u8; 32]),
-            }
+            let master_bytes = std::fs::read(&master_key_path)
+                .with_context(|| format!("cannot read {}", master_key_path.display()))?;
+            let master_arr: [u8; 32] = master_bytes
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("{} has wrong length", master_key_path.display()))?;
+            let master_key = zeroize::Zeroizing::new(master_arr);
+            let secret = crate::crypto::keyderive::derive_sharing_key(master_key.as_ref())
+                .context("cannot derive directed-sharing key")?;
+            let static_secret = x25519_dalek::StaticSecret::from(*secret);
+            let pubkey = x25519_dalek::PublicKey::from(&static_secret);
+            (*secret, *pubkey.as_bytes())
         };
         node.set_directed_recipient_pubkey(sharing_pubkey);
 
