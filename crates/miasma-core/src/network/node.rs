@@ -2722,6 +2722,10 @@ impl MiasmaNode {
                 self.pending_peer_addrs.remove(&peer_id);
                 self.pending_admissions
                     .retain(|_, pending_peer| *pending_peer != peer_id);
+                self.pending_credential_reqs
+                    .retain(|_, pending_peer| *pending_peer != peer_id);
+                self.pending_descriptor_reqs
+                    .retain(|_, (pending_peer, _)| *pending_peer != peer_id);
                 // Track disconnection in health monitor and flap detector.
                 self.health_monitor
                     .record_peer_failure(&peer_id.to_string());
@@ -3161,6 +3165,10 @@ impl MiasmaNode {
     /// Promote a peer to Verified: add addresses to Kademlia, issue credential,
     /// publish descriptor, signal routable.
     fn promote_peer_to_verified(&mut self, peer_id: PeerId, pow: NodeIdPoW) {
+        if self.peer_registry.is_verified(&peer_id) {
+            debug!("admission.promote_already_verified peer={peer_id}");
+            return;
+        }
         self.peer_registry
             .on_admission_verified(peer_id, pow.clone());
 
@@ -3373,7 +3381,17 @@ impl MiasmaNode {
                     },
                 ..
             } => {
-                self.pending_credential_reqs.remove(&request_id);
+                let Some(expected_peer) = self.pending_credential_reqs.remove(&request_id) else {
+                    warn!("credential.rejected_untracked_response peer={peer}");
+                    return;
+                };
+                if expected_peer != peer {
+                    warn!(
+                        "credential.rejected_peer_mismatch expected={expected_peer} actual={peer}"
+                    );
+                    return;
+                }
+
                 let CredentialResponse {
                     credential: received_credential,
                     issuer_pubkey,
@@ -3448,7 +3466,16 @@ impl MiasmaNode {
                 error,
                 ..
             } => {
-                self.pending_credential_reqs.remove(&request_id);
+                let expected_peer = self.pending_credential_reqs.remove(&request_id);
+                if let Some(expected_peer) = expected_peer {
+                    if expected_peer != peer {
+                        warn!(
+                            "credential.outbound_failure_peer_mismatch expected={expected_peer} actual={peer}"
+                        );
+                    }
+                } else {
+                    warn!("credential.outbound_failure_untracked peer={peer}");
+                }
                 debug!("credential.outbound_failure peer={peer} error={error}");
             }
             request_response::Event::InboundFailure { peer, error, .. } => {
@@ -4839,6 +4866,36 @@ mod admission_pow_tests {
             node.verify_remote_pow(&peer_id, &pow),
             Ok(()),
             "unverified descriptor tier must not alter first-contact admission"
+        );
+    }
+
+    #[tokio::test]
+    async fn promotion_is_idempotent_across_inbound_and_outbound_acceptance() {
+        let mut node = make_node();
+        let peer_seed = rand::random::<[u8; 32]>();
+        let peer_key = ed25519_dalek::SigningKey::from_bytes(&peer_seed);
+        let peer_pubkey = peer_key.verifying_key().to_bytes();
+        let ed_pubkey = libp2p::identity::ed25519::PublicKey::try_from_bytes(&peer_pubkey).unwrap();
+        let peer_id = PeerId::from(libp2p::identity::PublicKey::from(ed_pubkey));
+        let pow = pow_with_exact_difficulty(peer_pubkey, node.admission_policy.min_pow as u32);
+
+        node.peer_registry.on_connected(peer_id);
+        node.peer_registry
+            .on_identify_identity(peer_id, peer_pubkey);
+        node.pending_peer_addrs
+            .insert(peer_id, vec!["/ip4/203.0.113.12/tcp/4001".parse().unwrap()]);
+
+        node.promote_peer_to_verified(peer_id, pow.clone());
+        assert!(node.peer_registry.is_verified(&peer_id));
+        let credential_requests_after_first = node.pending_credential_reqs.len();
+        assert_eq!(credential_requests_after_first, 1);
+
+        // The opposite admission direction can complete later. Re-processing the
+        // same verified peer must not start a second credential/descriptor cycle.
+        node.promote_peer_to_verified(peer_id, pow);
+        assert_eq!(
+            node.pending_credential_reqs.len(),
+            credential_requests_after_first
         );
     }
 
