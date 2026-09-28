@@ -58,7 +58,7 @@ bincode = "1"
 # Local store encryption (XChaCha20-Poly1305 — 192-bit nonce, safe for random nonce per file)
 chacha20poly1305 = "0.10"
 # Onion routing — X25519 ECDH
-x25519-dalek = { version = "2", features = ["static_secrets"] }
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 # Password hashing for directed sharing
 argon2 = "0.5"
 # DHT record signing — Ed25519

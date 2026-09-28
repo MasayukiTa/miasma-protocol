@@ -4084,10 +4084,6 @@ fn make_directed_test_envelope() -> DirectedEnvelope {
 
 /// 1. Full envelope crypto roundtrip:
 /// create_envelope → decrypt_envelope_payload → derive_content_key → decrypt_directed_content.
-///
-/// NOTE: finalize_envelope currently has a key-mismatch bug (uses sender static
-/// key instead of ephemeral key for ECDH), so we test the core crypto path
-/// without finalize. A separate test documents the finalize issue.
 #[test]
 fn directed_envelope_crypto_roundtrip() {
     let (sender_secret, _sender_pub, recipient_secret, recipient_pub) = directed_test_keys();
