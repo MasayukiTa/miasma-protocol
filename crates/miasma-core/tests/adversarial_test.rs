@@ -1353,7 +1353,7 @@ fn onion_relay_per_hop_content_blindness() {
         _ => panic!("R1 should forward"),
     };
 
-    // R2 peels — gets body but it's session_key || e2e_blob. Cannot read share request.
+    // R2 peels and gets only the serialized target-encrypted OnionLayer.
     let action2 = process_onion_layer(&r2_sec, packet.circuit_id, &inner_layer).unwrap();
     let (delivered_body, r2_return_key) = match action2 {
         OnionRelayAction::DeliverToTarget {
@@ -1362,22 +1362,26 @@ fn onion_relay_per_hop_content_blindness() {
         _ => panic!("R2 should deliver"),
     };
 
-    // Verify R2 cannot read the actual share request.
-    // The body starts with 32-byte session key followed by encrypted blob.
-    assert!(delivered_body.len() > 32);
-    // Try to deserialize as plaintext ShareFetchRequest — should fail.
+    // R2 cannot read either the share request or the response session key.
+    let e2e_layer: miasma_core::onion::packet::OnionLayer =
+        bincode::deserialize(&delivered_body).unwrap();
+    assert_ne!(
+        delivered_body.get(..32),
+        Some(&session_key[..]),
+        "response session key must not be exposed outside target encryption"
+    );
     assert!(
-        String::from_utf8(delivered_body[32..].to_vec()).is_err()
-            || !String::from_utf8_lossy(&delivered_body[32..]).contains("share"),
+        !String::from_utf8_lossy(&delivered_body).contains("GET share"),
         "R2 should not see plaintext share request"
     );
 
-    // Target decrypts e2e layer.
-    let session_key_recv: [u8; 32] = delivered_body[..32].try_into().unwrap();
-    let e2e_layer: miasma_core::onion::packet::OnionLayer =
-        bincode::deserialize(&delivered_body[32..]).unwrap();
+    // Only Target can peel the e2e layer and recover both request and response key.
     let e2e_payload = OnionLayerProcessor::peel(&target_sec, &e2e_layer).unwrap();
     assert_eq!(e2e_payload.data, share_request);
+    let session_key_recv = e2e_payload
+        .return_key
+        .expect("target-encrypted response key must be present");
+    assert_eq!(session_key_recv, *session_key);
 
     // Target responds with encrypted share data.
     let response = b"share data payload".to_vec();

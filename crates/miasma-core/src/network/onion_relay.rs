@@ -1,4 +1,4 @@
-/// Onion relay protocol — `/miasma/onion/1.0.0`.
+/// Onion relay protocol — `/miasma/onion/1.1.0`.
 ///
 /// # Wire protocol
 ///
@@ -31,7 +31,7 @@ pub const ONION_MSG_MAX: usize = 64 * 1024;
 
 // ─── Wire types ──────────────────────────────────────────────────────────────
 
-/// Request sent over the `/miasma/onion/1.0.0` protocol.
+/// Request sent over the `/miasma/onion/1.1.0` protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum OnionRelayRequest {
     /// Initial onion packet from Initiator → R1.
@@ -67,7 +67,7 @@ pub enum OnionRelayResponse {
 
 // ─── Codec ───────────────────────────────────────────────────────────────────
 
-/// Bincode + 4-byte LE length-prefix codec for `/miasma/onion/1.0.0`.
+/// Bincode + 4-byte LE length-prefix codec for `/miasma/onion/1.1.0`.
 #[derive(Clone, Default)]
 pub struct OnionRelayCodec;
 
@@ -214,8 +214,8 @@ pub fn process_onion_layer(
         }),
         Err(_) => {
             // R2 position: the data is the InnerPayload, extract the body.
-            // For e2e encrypted mode, the body contains session_key || e2e_blob.
-            // We pass through the raw data — the target decrypts.
+            // In e2e mode the body is only a serialized target-encrypted OnionLayer;
+            // the target-only response key remains inside that encrypted layer.
             let inner: crate::onion::packet::InnerPayload = bincode::deserialize(&payload.data)
                 .map_err(|e| {
                     crate::MiasmaError::Serialization(format!(
@@ -408,17 +408,17 @@ mod tests {
             _ => panic!("expected DeliverToTarget"),
         };
 
-        // Delivered body = session_key(32) || e2e_layer_bytes
-        assert!(delivered_body.len() > 32);
-        let recv_session_key: [u8; 32] = delivered_body[..32].try_into().unwrap();
-        assert_eq!(recv_session_key, *session_key);
-
-        // Target decrypts the e2e layer
+        // R2 sees only the serialized target-encrypted layer. In particular,
+        // the response session key is no longer exposed as a plaintext prefix.
         let e2e_layer: crate::onion::packet::OnionLayer =
-            bincode::deserialize(&delivered_body[32..]).unwrap();
+            bincode::deserialize(&delivered_body).unwrap();
+        assert_ne!(delivered_body.get(..32), Some(&session_key[..]));
+
+        // Target decrypts both the request and response key.
         let e2e_payload =
             crate::onion::packet::OnionLayerProcessor::peel(&target_sec, &e2e_layer).unwrap();
         assert!(e2e_payload.next_hop.is_none()); // final destination
         assert_eq!(e2e_payload.data, body);
+        assert_eq!(e2e_payload.return_key, Some(*session_key));
     }
 }

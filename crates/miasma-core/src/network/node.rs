@@ -1566,7 +1566,7 @@ pub struct MiasmaBehaviour {
     pub(crate) credential_exchange: request_response::Behaviour<CredentialCodec>,
     /// Descriptor exchange: `/miasma/descriptor/1.2.0` request-response.
     pub(crate) descriptor_exchange: request_response::Behaviour<DescriptorCodec>,
-    /// Onion relay: `/miasma/onion/1.0.0` request-response.
+    /// Onion relay: `/miasma/onion/1.1.0` request-response.
     pub(crate) onion_relay: request_response::Behaviour<OnionRelayCodec>,
     /// Relay probe: `/miasma/relay-probe/1.0.0` request-response.
     pub(crate) relay_probe: request_response::Behaviour<super::relay_probe::RelayProbeCodec>,
@@ -1578,10 +1578,22 @@ pub struct MiasmaBehaviour {
 
 // ─── MiasmaNode ───────────────────────────────────────────────────────────────
 
-// Select routing candidates after authenticated Identify. Peer-advertised
-// addresses use the normal untrusted filter. A private mDNS hint is exceptional:
-// it is accepted only if this exact address was the target of the authenticated
-// outbound connection that carried this Identify exchange.
+const ONION_REPLAY_FINGERPRINT_DOMAIN: &[u8] = b"miasma-onion-replay-layer-v1";
+
+/// Fingerprint the immutable encrypted onion layer, not the outer `CircuitId`.
+///
+/// `CircuitId` is response-routing metadata and is not authenticated by the
+/// layer's XChaCha20-Poly1305 tag. Including it in replay identity would let an
+/// attacker replay a captured ciphertext by changing only that outer ID.
+fn onion_layer_fingerprint(layer: &crate::onion::packet::OnionLayer) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(ONION_REPLAY_FINGERPRINT_DOMAIN);
+    hasher.update(&layer.ephemeral_pubkey);
+    hasher.update(&layer.nonce);
+    hasher.update(&layer.ciphertext);
+    *hasher.finalize().as_bytes()
+}
+
 fn take_peer_correlated<T>(
     pending: &mut HashMap<request_response::OutboundRequestId, (PeerId, T)>,
     request_id: &request_response::OutboundRequestId,
@@ -1603,6 +1615,10 @@ fn take_peer_correlated<T>(
     pending.remove(request_id).map(|(_, value)| value)
 }
 
+// Select routing candidates after authenticated Identify. Peer-advertised
+// addresses use the normal untrusted filter. A private mDNS hint is exceptional:
+// it is accepted only if this exact address was the target of the authenticated
+// outbound connection that carried this Identify exchange.
 fn select_identify_addresses(
     allow_local: bool,
     peer_id: &PeerId,
@@ -1754,9 +1770,9 @@ pub struct MiasmaNode {
         ),
     >,
     /// Bounded replay cache for onion packets.
-    /// Stores BLAKE3 hashes of recently seen (circuit_id || ephemeral_pubkey)
-    /// tuples. Prevents an attacker from replaying captured onion packets
-    /// to confirm circuit endpoints.
+    /// Stores domain-separated BLAKE3 fingerprints of the encrypted `OnionLayer`
+    /// (ephemeral pubkey + nonce + ciphertext). The outer CircuitId is deliberately
+    /// excluded because it is routing metadata, not authenticated layer content.
     onion_replay_cache: std::collections::VecDeque<[u8; 32]>,
     /// Pending directed sharing reply channels.
     pending_directed_replies: HashMap<
@@ -1931,15 +1947,11 @@ impl MiasmaNode {
     /// At ~32 bytes each, 4096 entries = ~128 KiB.
     const ONION_REPLAY_CACHE_SIZE: usize = 4096;
 
-    /// Check if an onion packet is a replay.  Returns `true` if the packet
-    /// has been seen before (and should be rejected).  Otherwise records it
-    /// and returns `false`.
-    fn onion_is_replay(&mut self, circuit_id: &[u8], ephemeral_pubkey: &[u8; 32]) -> bool {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(circuit_id);
-        hasher.update(ephemeral_pubkey);
-        let fp: [u8; 32] = *hasher.finalize().as_bytes();
-
+    /// Check if an encrypted onion layer is a replay. Returns `true` if the
+    /// exact authenticated layer bytes were seen before; otherwise records the
+    /// fingerprint and returns `false`.
+    fn onion_is_replay(&mut self, layer: &crate::onion::packet::OnionLayer) -> bool {
+        let fp = onion_layer_fingerprint(layer);
         if self.onion_replay_cache.contains(&fp) {
             return true;
         }
@@ -3802,7 +3814,7 @@ impl MiasmaNode {
                     OnionRelayRequest::Packet { circuit_id, layer }
                     | OnionRelayRequest::Forward { circuit_id, layer } => {
                         // Replay protection: reject packets we've already processed.
-                        if self.onion_is_replay(&circuit_id.0, &layer.ephemeral_pubkey) {
+                        if self.onion_is_replay(&layer) {
                             warn!("onion_relay: replayed packet detected, rejecting");
                             let _ = self.swarm.behaviour_mut().onion_relay.send_response(
                                 channel,
@@ -3898,7 +3910,8 @@ impl MiasmaNode {
                         }
                     }
                     OnionRelayRequest::Deliver { body, .. } => {
-                        // Target role: decrypt e2e body and process share request.
+                        // Target role: decrypt the target-addressed e2e layer. The
+                        // target enforces replay protection independently of R2.
                         let response = self.handle_onion_delivery(&body);
                         let _ = self
                             .swarm
@@ -4249,33 +4262,35 @@ impl MiasmaNode {
 
     /// Handle an onion delivery at the target node.
     ///
-    /// The body format is: `session_key(32) || e2e_encrypted_layer(OnionLayer)`.
-    /// The target decrypts the e2e layer with its onion static key to get the
-    /// share request, processes it, and returns the response encrypted with
-    /// the session key.
-    fn handle_onion_delivery(&self, body: &[u8]) -> OnionRelayResponse {
-        if body.len() <= 32 {
-            return OnionRelayResponse::Error("delivery body too short".into());
-        }
-
-        let session_key: [u8; 32] = match body[..32].try_into() {
-            Ok(k) => k,
-            Err(_) => return OnionRelayResponse::Error("invalid session key".into()),
-        };
-
-        // Deserialize the e2e OnionLayer.
-        let e2e_layer: crate::onion::packet::OnionLayer = match bincode::deserialize(&body[32..]) {
-            Ok(l) => l,
+    /// The body is a serialized target-encrypted `OnionLayer`. After peeling
+    /// it with the target's onion static key, `LayerPayload.data` contains the
+    /// share request and `LayerPayload.return_key` contains the target-only
+    /// response session key.
+    fn handle_onion_delivery(&mut self, body: &[u8]) -> OnionRelayResponse {
+        // R2 may see and forward these bytes, but they are only the serialized
+        // target-encrypted OnionLayer. The response session key lives inside its
+        // encrypted LayerPayload.return_key.
+        let e2e_layer: crate::onion::packet::OnionLayer = match bincode::deserialize(body) {
+            Ok(layer) => layer,
             Err(e) => return OnionRelayResponse::Error(format!("bad e2e layer: {e}")),
         };
 
-        // Decrypt with our onion static key.
+        // R2 is not trusted to suppress duplicates. A replayed Deliver request is
+        // rejected at the target even if it arrives under a different CircuitId.
+        if self.onion_is_replay(&e2e_layer) {
+            return OnionRelayResponse::Error("replayed e2e onion delivery".into());
+        }
+
         let payload = match crate::onion::packet::OnionLayerProcessor::peel(
             &self.onion_static_secret,
             &e2e_layer,
         ) {
-            Ok(p) => p,
+            Ok(payload) => payload,
             Err(e) => return OnionRelayResponse::Error(format!("e2e decrypt failed: {e}")),
+        };
+        let session_key = match payload.return_key {
+            Some(key) => key,
+            None => return OnionRelayResponse::Error("missing e2e response key".into()),
         };
 
         // payload.data is the share request body (tag byte + bincode ShareFetchRequest).
@@ -4284,7 +4299,8 @@ impl MiasmaNode {
             Err(e) => return OnionRelayResponse::Error(format!("share request failed: {e}")),
         };
 
-        // Encrypt the response with the session key for e2e return privacy.
+        // Encrypt the response with the target-only key before R2/R1 add their
+        // own return-path layers.
         match crate::onion::packet::encrypt_response(&session_key, &share_response) {
             Ok(encrypted) => OnionRelayResponse::Data(encrypted),
             Err(e) => OnionRelayResponse::Error(format!("response encrypt failed: {e}")),
@@ -4707,7 +4723,7 @@ fn build_swarm(
 
             let onion_relay = request_response::Behaviour::<OnionRelayCodec>::new(
                 [(
-                    StreamProtocol::new("/miasma/onion/1.0.0"),
+                    StreamProtocol::new("/miasma/onion/1.1.0"),
                     request_response::ProtocolSupport::Full,
                 )],
                 request_response::Config::default(),
@@ -4891,6 +4907,47 @@ mod admission_pow_tests {
             }
         }
         unreachable!("u64 nonce space exhausted")
+    }
+
+    #[test]
+    fn onion_replay_identity_is_bound_to_encrypted_layer_not_circuit_id() {
+        let mut node = make_node();
+        let layer = crate::onion::packet::OnionLayer {
+            ephemeral_pubkey: [0x11; 32],
+            nonce: [0x22; 24],
+            ciphertext: vec![0x33; 64],
+        };
+        let circuit_a = crate::onion::packet::CircuitId([0xA1; 16]);
+        let circuit_b = crate::onion::packet::CircuitId([0xB2; 16]);
+        assert_ne!(circuit_a, circuit_b);
+
+        // CircuitId is intentionally not an input to replay identity. A captured
+        // encrypted layer stays the same replay even if an attacker rewrites the
+        // unauthenticated outer routing ID.
+        assert!(!node.onion_is_replay(&layer));
+        assert!(node.onion_is_replay(&layer));
+    }
+
+    #[test]
+    fn onion_replay_fingerprint_changes_when_authenticated_layer_changes() {
+        let base = crate::onion::packet::OnionLayer {
+            ephemeral_pubkey: [0x11; 32],
+            nonce: [0x22; 24],
+            ciphertext: vec![0x33; 64],
+        };
+        let mut changed_nonce = base.clone();
+        changed_nonce.nonce[0] ^= 1;
+        let mut changed_ciphertext = base.clone();
+        changed_ciphertext.ciphertext[0] ^= 1;
+
+        assert_ne!(
+            onion_layer_fingerprint(&base),
+            onion_layer_fingerprint(&changed_nonce)
+        );
+        assert_ne!(
+            onion_layer_fingerprint(&base),
+            onion_layer_fingerprint(&changed_ciphertext)
+        );
     }
 
     #[test]
