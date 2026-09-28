@@ -133,20 +133,23 @@ fn atomic_write(path: &Path, data: &[u8]) -> Result<(), MiasmaError> {
 fn load_or_create_master_key(data_dir: &Path) -> Result<Zeroizing<[u8; 32]>, MiasmaError> {
     let key_path = data_dir.join(MASTER_KEY_FILE);
     if key_path.exists() {
-        let bytes = std::fs::read(&key_path)?;
-        let arr: [u8; 32] = bytes
-            .try_into()
-            .map_err(|_| MiasmaError::KeyDerivation("master.key has wrong length".into()))?;
+        let bytes = Zeroizing::new(std::fs::read(&key_path)?);
+        if bytes.len() != 32 {
+            return Err(MiasmaError::KeyDerivation(
+                "master.key has wrong length".into(),
+            ));
+        }
+        let mut arr = Zeroizing::new([0u8; 32]);
+        arr.copy_from_slice(&bytes);
         if arr.iter().all(|byte| *byte == 0) {
             return Err(MiasmaError::KeyDerivation(
                 "master.key is erased/all-zero; refusing known key material".into(),
             ));
         }
-        Ok(Zeroizing::new(arr))
+        Ok(arr)
     } else {
-        let key = XChaCha20Poly1305::generate_key(&mut OsRng);
         let mut arr = Zeroizing::new([0u8; 32]);
-        arr.as_mut().copy_from_slice(&key);
+        rand::RngCore::fill_bytes(&mut OsRng, arr.as_mut());
         std::fs::create_dir_all(data_dir)?;
 
         // Write the key via atomic_write_restricted: the file is created

@@ -220,7 +220,7 @@ pub fn create_envelope(
     retention: RetentionPeriod,
     plaintext: &[u8],
     filename: Option<String>,
-) -> Result<(DirectedEnvelope, Vec<u8>, [u8; 32]), MiasmaError> {
+) -> Result<(DirectedEnvelope, Vec<u8>, Zeroizing<[u8; 32]>), MiasmaError> {
     use rand::RngCore;
 
     let now = std::time::SystemTime::now()
@@ -232,12 +232,9 @@ pub fn create_envelope(
     let mut envelope_id = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut envelope_id);
 
-    // 2. Generate ephemeral X25519 keypair.
-    // Use StaticSecret (not EphemeralSecret) so finalize_envelope can
-    // reconstruct the shared secret using the stored ephemeral bytes.
-    let mut ephemeral_bytes = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut ephemeral_bytes);
-    let ephemeral_secret = x25519_dalek::StaticSecret::from(ephemeral_bytes);
+    // 2. Generate the ephemeral X25519 key directly inside StaticSecret so
+    // there is no additional raw private-key byte array to erase.
+    let ephemeral_secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
     let ephemeral_pubkey = x25519_dalek::PublicKey::from(&ephemeral_secret);
 
     // 3. ECDH shared secret.
@@ -301,7 +298,7 @@ pub fn create_envelope(
         retention_secs: retention.as_secs(),
     };
 
-    Ok((envelope, protected_data, *envelope_key))
+    Ok((envelope, protected_data, envelope_key))
 }
 
 /// Finalize the envelope after dissolution — sets the MID in the payload.
@@ -390,38 +387,6 @@ pub fn decrypt_directed_content(
     xchacha20_decrypt(directed_key, content_nonce, protected_data)
 }
 
-// ─── Password verification ──────────────────────────────────────────────────
-
-/// Verify a password attempt against the envelope.
-///
-/// This works by trying to derive the content key and decrypt a test block.
-/// Since we can't verify without the actual content, we instead verify that
-/// the derived key produces a valid AEAD decryption of a verification tag
-/// stored in the envelope payload.
-///
-/// For simplicity in v1, we trust the AEAD auth tag — if decryption succeeds
-/// with the derived key, the password is correct.
-pub fn verify_password(
-    _recipient_secret: &[u8; 32],
-    envelope: &DirectedEnvelope,
-    password: &str,
-) -> Result<bool, MiasmaError> {
-    // Try to derive the content key. If Argon2id succeeds and the ECDH
-    // is valid, we can check if the password produces a valid key by
-    // verifying the envelope payload can also be decrypted (the envelope
-    // key uses only ECDH, so if that works we know the ECDH is valid,
-    // and then we just need to verify the password hash matches).
-    let password_hash = hash_password(password, &envelope.password_salt)?;
-
-    // Create a verification tag: BLAKE3(ECDH_shared || password_hash)
-    // and compare with what the sender would have produced.
-    // Since the sender used this exact combination to encrypt the content,
-    // if the password is wrong, content decryption will fail (AEAD tag check).
-    // We return true here and let actual decryption verify correctness.
-    let _ = password_hash;
-    Ok(true) // Actual verification happens at content decryption time
-}
-
 // ─── Sharing key utilities ──────────────────────────────────────────────────
 
 /// Format a sharing key for display: "msk:" + base58(x25519_pubkey).
@@ -488,16 +453,16 @@ pub fn parse_sharing_contact(contact: &str) -> Result<([u8; 32], String), Miasma
 // ─── Crypto helpers ─────────────────────────────────────────────────────────
 
 /// Hash a password using Argon2id.
-fn hash_password(password: &str, salt: &[u8; 32]) -> Result<[u8; 32], MiasmaError> {
+fn hash_password(password: &str, salt: &[u8; 32]) -> Result<Zeroizing<[u8; 32]>, MiasmaError> {
     use argon2::{Algorithm, Argon2, Params, Version};
 
     let params = Params::new(ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST, Some(32))
         .map_err(|e| MiasmaError::Encryption(format!("argon2 params: {e}")))?;
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 
-    let mut output = [0u8; 32];
+    let mut output = Zeroizing::new([0u8; 32]);
     argon
-        .hash_password_into(password.as_bytes(), salt, &mut output)
+        .hash_password_into(password.as_bytes(), salt, output.as_mut())
         .map_err(|e| MiasmaError::Encryption(format!("argon2 hash: {e}")))?;
     Ok(output)
 }
@@ -507,7 +472,7 @@ fn derive_directed_key(
     shared_secret: &[u8],
     password_hash: &[u8; 32],
 ) -> Result<Zeroizing<[u8; 32]>, MiasmaError> {
-    let mut ikm = Vec::with_capacity(shared_secret.len() + 32);
+    let mut ikm = Zeroizing::new(Vec::with_capacity(shared_secret.len() + 32));
     ikm.extend_from_slice(shared_secret);
     ikm.extend_from_slice(password_hash);
 
@@ -516,7 +481,6 @@ fn derive_directed_key(
     hk.expand(DIRECTED_CONTENT_LABEL, key.as_mut())
         .map_err(|e| MiasmaError::KeyDerivation(e.to_string()))?;
 
-    zeroize::Zeroize::zeroize(&mut ikm);
     Ok(key)
 }
 
