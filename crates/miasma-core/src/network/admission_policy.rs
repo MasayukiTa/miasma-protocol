@@ -66,8 +66,10 @@ const THRESHOLD_MOBILE: u32 = 80;
 const THRESHOLD_CONSTRAINED: u32 = 60;
 
 /// Minimum PoW difficulty bits required regardless of other signals.
-/// Even with a credential, some PoW is required to prevent zero-cost Sybil.
-const MIN_POW_DIFFICULTY: u8 = 4;
+/// First-contact admission has no authenticated credential yet, so the floor
+/// must match the work honest nodes actually mine rather than the old 4-bit
+/// placeholder that only made sense for a future pre-authenticated credential path.
+const MIN_POW_DIFFICULTY: u8 = super::sybil::DEFAULT_POW_DIFFICULTY;
 
 // ─── Admission signals ──────────────────────────────────────────────────────
 
@@ -281,9 +283,16 @@ mod tests {
 
     fn policy_with_credential_scoring() -> HybridAdmissionPolicy {
         let mut p = HybridAdmissionPolicy::default();
+        p.min_pow = 4;
         p.credential_weight = 100;
         p.endorsed_weight = 50;
         p
+    }
+
+    #[test]
+    fn default_pow_floor_matches_honest_mining_difficulty() {
+        let p = policy();
+        assert_eq!(p.min_pow, super::super::sybil::DEFAULT_POW_DIFFICULTY);
     }
 
     #[test]
@@ -337,15 +346,15 @@ mod tests {
     fn default_quarantines_credential_bonus() {
         let p = policy();
         let signals = AdmissionSignals {
-            pow_difficulty: 4,
+            pow_difficulty: super::super::sybil::DEFAULT_POW_DIFFICULTY,
             unique_prefix: false,
             reachable: false,
             credential_tier: Some(CredentialTier::Endorsed),
-            resource_profile: ResourceProfile::Mobile,
+            resource_profile: ResourceProfile::Desktop,
         };
         let decision = p.evaluate(&signals);
         assert_eq!(decision.breakdown.credential_bonus, 0);
-        assert_eq!(decision.score, 40);
+        assert_eq!(decision.score, 80);
         assert!(!decision.admitted);
     }
 
