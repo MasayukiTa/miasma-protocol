@@ -341,28 +341,9 @@ impl DaemonServer {
             }
         }
 
-        // 7. Start the coordinator with all transports.
-        let coord = Arc::new(
-            MiasmaCoordinator::start_with_transports(
-                node,
-                store.clone(),
-                listen_addr_strings.clone(),
-                extra_transports,
-            )
-            .await,
-        );
-
-        // 8. Load the persistent replication queue.
-        let queue = Arc::new(Mutex::new(ReplicationQueue::load_or_create(&data_dir)?));
-
-        // 8b. Create shared rate limiter, health monitor, environment snapshot.
-        let rate_limiter = Arc::new(Mutex::new(rate_limit::RateLimiter::default()));
-        let health_monitor = Arc::new(Mutex::new(ConnectionHealthMonitor::default()));
-        let env_snapshot = Arc::new(Mutex::new(EnvironmentSnapshot::default()));
-
-        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
-
-        // 9. Derive sharing key from master.key for directed sharing.
+        // 7. Derive the directed-sharing keypair before moving the node into
+        // the coordinator, so inbound Invite requests can be recipient-bound at
+        // the network boundary.
         let (sharing_secret, sharing_pubkey) = {
             let master_key_path = data_dir.join("master.key");
             match std::fs::read(&master_key_path) {
@@ -381,6 +362,28 @@ impl DaemonServer {
                 _ => ([0u8; 32], [0u8; 32]),
             }
         };
+        node.set_directed_recipient_pubkey(sharing_pubkey);
+
+        // 8. Start the coordinator with all transports.
+        let coord = Arc::new(
+            MiasmaCoordinator::start_with_transports(
+                node,
+                store.clone(),
+                listen_addr_strings.clone(),
+                extra_transports,
+            )
+            .await,
+        );
+
+        // 9. Load the persistent replication queue.
+        let queue = Arc::new(Mutex::new(ReplicationQueue::load_or_create(&data_dir)?));
+
+        // 8b. Create shared rate limiter, health monitor, environment snapshot.
+        let rate_limiter = Arc::new(Mutex::new(rate_limit::RateLimiter::default()));
+        let health_monitor = Arc::new(Mutex::new(ConnectionHealthMonitor::default()));
+        let env_snapshot = Arc::new(Mutex::new(EnvironmentSnapshot::default()));
+
+        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         // 10. Bind HTTP bridge for web client access.
         let http_bridge_port = match http_bridge::HttpBridge::bind(

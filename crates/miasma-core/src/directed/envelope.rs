@@ -139,7 +139,9 @@ pub struct DirectedEnvelope {
     pub envelope_id: [u8; 32],
     /// Protocol version.
     pub version: u8,
-    /// Sender's X25519 sharing public key.
+    /// Sender's self-asserted X25519 sharing public key. This value is not an
+    /// authenticated sender identity; receivers must use the Invite transport
+    /// PeerId binding for that purpose.
     pub sender_pubkey: [u8; 32],
     /// Recipient's X25519 sharing public key.
     pub recipient_pubkey: [u8; 32],
