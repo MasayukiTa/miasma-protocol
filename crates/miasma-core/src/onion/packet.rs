@@ -274,6 +274,11 @@ impl OnionPacketBuilder {
         // ECDH.
         let recipient_pubkey = PublicKey::from(*recipient_static_pubkey);
         let shared = ephemeral_secret.diffie_hellman(&recipient_pubkey);
+        if !shared.was_contributory() {
+            return Err(MiasmaError::Encryption(
+                "non-contributory X25519 recipient public key".into(),
+            ));
+        }
 
         // Derive symmetric key.
         let enc_key = derive_enc_key(shared.as_bytes())?;
@@ -310,6 +315,11 @@ impl OnionLayerProcessor {
         let static_secret = StaticSecret::from(*relay_static_secret);
         let ephemeral_pubkey = PublicKey::from(layer.ephemeral_pubkey);
         let shared = static_secret.diffie_hellman(&ephemeral_pubkey);
+        if !shared.was_contributory() {
+            return Err(MiasmaError::Decryption(
+                "non-contributory X25519 ephemeral public key".into(),
+            ));
+        }
 
         // Derive symmetric key.
         let enc_key = derive_enc_key(shared.as_bytes())?;
@@ -499,6 +509,32 @@ mod tests {
 
         // Try to peel outer layer with R2's key — must fail.
         assert!(OnionLayerProcessor::peel(&r2_sec, &packet.layer).is_err());
+    }
+
+    #[test]
+    fn encrypt_layer_rejects_non_contributory_recipient_key() {
+        let err = OnionPacketBuilder::encrypt_layer(
+            &[0u8; 32],
+            LayerPayload {
+                next_hop: None,
+                data: b"secret".to_vec(),
+                return_key: None,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, MiasmaError::Encryption(_)));
+    }
+
+    #[test]
+    fn peel_rejects_non_contributory_ephemeral_key() {
+        let (relay_secret, _) = make_relay_keypair();
+        let layer = OnionLayer {
+            ephemeral_pubkey: [0u8; 32],
+            nonce: [0u8; 24],
+            ciphertext: vec![0u8; 16],
+        };
+        let err = OnionLayerProcessor::peel(&relay_secret, &layer).unwrap_err();
+        assert!(matches!(err, MiasmaError::Decryption(_)));
     }
 
     #[test]
