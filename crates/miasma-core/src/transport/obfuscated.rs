@@ -54,6 +54,7 @@ use quinn::Endpoint;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info, warn};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     network::node::{ShareFetchRequest, ShareFetchResponse},
@@ -187,6 +188,15 @@ impl ObfuscatedConfig {
 const AUTH_NONCE_LEN: usize = 32;
 const AUTH_TOKEN_LEN: usize = 32;
 const AUTH_HEADER_LEN: usize = AUTH_NONCE_LEN + AUTH_TOKEN_LEN;
+
+impl Drop for ObfuscatedConfig {
+    fn drop(&mut self) {
+        self.probe_secret.zeroize();
+        if let Some(server_key_der) = self.server_key_der.as_mut() {
+            server_key_der.zeroize();
+        }
+    }
+}
 
 /// Compute the BLAKE3-MAC token for the given nonce and probe_secret.
 fn compute_auth_token(probe_secret: &[u8; 32], nonce: &[u8; 32]) -> [u8; 32] {
@@ -423,19 +433,30 @@ impl ObfuscatedQuicServer {
     /// Run the server loop. Accepts connections and handles each one.
     /// Call via `tokio::spawn(server.run())`.
     pub async fn run(self) {
-        let probe_secret = self.config.probe_secret;
+        let probe_secret = Arc::new(Zeroizing::new(self.config.probe_secret));
         let fallback_url = self.config.fallback_url.clone();
-        let store = self.store;
+        let store = self.store.clone();
+        let mut connections = tokio::task::JoinSet::new();
 
         while let Some(incoming) = self.endpoint.accept().await {
+            while let Some(result) = connections.try_join_next() {
+                if let Err(e) = result {
+                    debug!("ObfuscatedQuic connection task join error: {e}");
+                }
+            }
             let store = store.clone();
             let fallback_url = fallback_url.clone();
-            tokio::spawn(async move {
+            let probe_secret = probe_secret.clone();
+            connections.spawn(async move {
                 match incoming.await {
                     Ok(conn) => {
-                        if let Err(e) =
-                            handle_obfuscated_connection(conn, &probe_secret, store, &fallback_url)
-                                .await
+                        if let Err(e) = handle_obfuscated_connection(
+                            conn,
+                            &**probe_secret,
+                            store,
+                            &fallback_url,
+                        )
+                        .await
                         {
                             debug!("ObfuscatedQuic connection error: {e}");
                         }

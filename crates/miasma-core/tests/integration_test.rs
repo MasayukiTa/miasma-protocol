@@ -1225,6 +1225,8 @@ async fn daemon_wipe_returns_then_shuts_down_runtime() {
     let server = DaemonServer::start(node, store, dir.path().to_owned())
         .await
         .unwrap();
+    let wss_port = server.wss_port();
+    assert!(wss_port != 0);
     let data_dir = dir.path().to_owned();
     let run_task = tokio::spawn(server.run());
 
@@ -1242,6 +1244,12 @@ async fn daemon_wipe_returns_then_shuts_down_runtime() {
     assert!(!data_dir.join("master.key").exists());
     assert!(!data_dir.join(PORT_FILE).exists());
     assert!(!data_dir.join(HTTP_PORT_FILE).exists());
+    assert!(
+        tokio::net::TcpStream::connect(("127.0.0.1", wss_port))
+            .await
+            .is_err(),
+        "WSS listener must close when the wiped daemon runtime exits"
+    );
     assert!(
         daemon_request(&data_dir, ControlRequest::Status)
             .await

@@ -259,15 +259,21 @@ impl WssShareServer {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(self.max_concurrent));
         let tls_acceptor = self.tls_acceptor.clone();
         let idle_timeout = self.idle_timeout;
+        let mut connections = tokio::task::JoinSet::new();
 
         loop {
+            while let Some(result) = connections.try_join_next() {
+                if let Err(e) = result {
+                    debug!("WSS connection task join error: {e}");
+                }
+            }
             match self.listener.accept().await {
                 Ok((tcp_stream, addr)) => {
                     let store = self.store.clone();
                     let sem = semaphore.clone();
                     let tls_acc = tls_acceptor.clone();
 
-                    tokio::spawn(async move {
+                    connections.spawn(async move {
                         // Acquire backpressure permit.
                         let _permit = match sem.acquire().await {
                             Ok(p) => p,
