@@ -1564,9 +1564,13 @@ async fn cmd_inbox(data_dir: &std::path::Path) -> Result<()> {
             for item in &items {
                 let age = format_age(item.created_at);
                 let expires = format_age(item.expires_at);
-                println!("  ID:        {}", item.envelope_id);
-                println!("  From:      {}", item.sender_pubkey);
-                println!("  State:     {:?}", item.state);
+                println!("  ID:          {}", item.envelope_id);
+                println!(
+                    "  From peer:   {}",
+                    item.sender_peer_id.as_deref().unwrap_or("<legacy/unbound>")
+                );
+                println!("  Claimed key: {}", item.sender_pubkey);
+                println!("  State:       {:?}", item.state);
                 println!("  Created:   {age}");
                 println!("  Expires:   {expires}");
                 if let Some(ref code) = item.challenge_code {

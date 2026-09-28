@@ -407,7 +407,10 @@ pub fn distress_wipe(data_dir: String) -> Result<(), MiasmaFfiError> {
 #[derive(uniffi::Record)]
 pub struct EnvelopeSummaryFfi {
     pub id: String,
+    /// Self-asserted sharing key from the envelope.
     pub sender_key: String,
+    /// Authenticated sender libp2p PeerId for incoming envelopes.
+    pub sender_peer_id: Option<String>,
     pub state: String,
     pub challenge_code: Option<String>,
     pub created_at: u64,
@@ -418,6 +421,7 @@ fn summary_to_ffi(s: directed::EnvelopeSummary) -> EnvelopeSummaryFfi {
     EnvelopeSummaryFfi {
         id: s.envelope_id,
         sender_key: s.sender_pubkey,
+        sender_peer_id: s.sender_peer_id,
         state: format!("{:?}", s.state),
         challenge_code: s.challenge_code,
         created_at: s.created_at,

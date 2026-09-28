@@ -1782,9 +1782,11 @@ pub struct MiasmaNode {
             oneshot::Sender<Result<DirectedResponse, MiasmaError>>,
         ),
     >,
-    /// Optional data directory for handling directed sharing Confirm requests.
-    /// When set, the node can verify challenge codes against the local inbox.
+    /// Optional data directory for handling directed sharing requests.
     directed_data_dir: Option<PathBuf>,
+    /// Local X25519 public key for directed sharing. Incoming Invite envelopes
+    /// must be addressed to this exact key before they are persisted.
+    directed_recipient_pubkey: Option<[u8; 32]>,
 
     // ── Bridge superhardening: connection health + flap detection ──────
     /// Connection health monitor — peer scoring, dial backoff, stale pruning.
@@ -1930,6 +1932,7 @@ impl MiasmaNode {
             ),
             pending_directed_replies: HashMap::new(),
             directed_data_dir: None,
+            directed_recipient_pubkey: None,
             health_monitor: super::connection_health::ConnectionHealthMonitor::default(),
             flap_detector: crate::daemon::self_heal::NetworkFlapDetector::default(),
             partial_failure: crate::daemon::self_heal::PartialFailureDetector::default(),
@@ -1988,6 +1991,13 @@ impl MiasmaNode {
     /// Set the data directory for handling directed sharing Confirm requests.
     pub fn set_directed_data_dir(&mut self, dir: PathBuf) {
         self.directed_data_dir = Some(dir);
+    }
+
+    /// Set the local recipient X25519 public key used by directed sharing.
+    pub fn set_directed_recipient_pubkey(&mut self, pubkey: [u8; 32]) {
+        if pubkey != [0u8; 32] {
+            self.directed_recipient_pubkey = Some(pubkey);
+        }
     }
 
     /// Allow loopback/private addresses (for local testing only).
@@ -4115,6 +4125,14 @@ impl MiasmaNode {
                                 "unsupported directed envelope version {}",
                                 envelope.version
                             ))
+                        } else if self.directed_recipient_pubkey.is_none() {
+                            DirectedResponse::Error(
+                                "local directed recipient key unavailable".into(),
+                            )
+                        } else if self.directed_recipient_pubkey != Some(envelope.recipient_pubkey)
+                        {
+                            warn!(peer = %peer, envelope_id = %id_hex, "directed.invite_rejected_wrong_recipient_key");
+                            DirectedResponse::Error("directed envelope recipient mismatch".into())
                         } else if let Some(ref data_dir) = self.directed_data_dir {
                             match crate::directed::DirectedInbox::open(data_dir) {
                                 Ok(inbox) => {
