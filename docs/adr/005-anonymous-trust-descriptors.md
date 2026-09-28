@@ -1,4 +1,4 @@
-# ADR-005: Credential Trust, Descriptor Routing, and Onion-Native Architecture
+﻿# ADR-005: Credential Trust, Descriptor Routing, and Onion-Native Architecture
 
 ## Status: Accepted (Phase 4e+++ — unified relay trust, forwarding verification, pre-retrieval probing, security hotfix sprint, v0.2.0-beta.1 hardening)
 
@@ -203,7 +203,7 @@ with a stronger issuer authority model and a non-circular pre-admission path.
       per-hop keying so relay peers cannot read share-fetch content.
       `OnionPacketBuilder::build_e2e()` wraps requests in 3 encryption layers:
       outer (R1), inner (R2), and end-to-end (Target).
-- [x] **Onion relay protocol**: `/miasma/onion/1.0.0` libp2p request-response
+- [x] **Onion relay protocol**: `/miasma/onion/1.1.0` libp2p request-response
       protocol. Three message types: `Packet` (Initiator→R1), `Forward`
       (R1→R2), `Deliver` (R2→Target). Each relay peels one layer and
       encrypts the response with its per-hop return_key before forwarding back.
@@ -439,6 +439,22 @@ Targeted fixes for concrete security bugs identified during review:
    `verify_restricted()` provides programmatic ACL verification used in
    unit tests and the `validate-acl.ps1` CI script.
 
+### 2026-09-28 onion confidentiality/replay repair
+
+- [x] **Response key no longer exposed to R2**: the earlier e2e builder placed
+      `session_key || serialized_e2e_layer` inside the R2-readable payload. R2
+      therefore learned the key used by Target to encrypt the end-to-end response.
+      `build_e2e()` now places that key in the Target-encrypted
+      `LayerPayload.return_key`; R2 receives only the serialized encrypted layer.
+      Protocol version was raised to `/miasma/onion/1.1.0` because the `Deliver.body` semantics changed and old/new peers are not wire-compatible.
+- [x] **Circuit-ID replay bypass removed**: the earlier replay fingerprint mixed
+      mutable, unauthenticated `CircuitId` with only the ephemeral public key. A
+      captured encrypted layer could be replayed under a new circuit ID. Replay
+      identity is now the encrypted layer bytes themselves, domain-separated.
+- [x] **Final delivery replay checked at Target**: R2 is not trusted to suppress
+      duplicate `Deliver` requests. Target applies the same layer fingerprint to
+      the e2e layer before processing the share request.
+
 ### v0.2.0-beta.1 hardening (completed)
 
 All items below were shipped before the beta cut:
@@ -449,8 +465,12 @@ All items below were shipped before the beta cut:
    a known limitation.
 
 2. **Onion replay protection**: bounded `VecDeque<[u8; 32]>` cache of
-   BLAKE3(circuit_id || ephemeral_pubkey) fingerprints (4096 entries).
-   Replayed packets rejected before `process_onion_layer`.
+   domain-separated BLAKE3 fingerprints over the immutable encrypted layer
+   (`ephemeral_pubkey || nonce || ciphertext`, 4096 entries). `CircuitId` is
+   deliberately excluded because it is outer routing metadata and is not AEAD-
+   authenticated. Packet/Forward layers and final Target delivery layers are
+   independently replay-checked, so changing only the circuit ID cannot bypass
+   replay detection.
 
 3. **Anti-gaming demotion**: `recompute_tier()` forces `Claimed` when
    a relay has ≥2 failures and <50% success rate, regardless of probe
