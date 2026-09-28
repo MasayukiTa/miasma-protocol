@@ -4,7 +4,8 @@
 ///
 /// First-contact admission only consumes signals available before the
 /// credential/descriptor exchange: verified PoW, observed IP-prefix diversity,
-/// externally probed reachability, and resource profile. Credential tier is
+/// and externally probed reachability. Credential tier and self-declared device
+/// class are deliberately absent. Credential tier is
 /// deliberately absent: bootstrap peers can issue credentials to one another,
 /// and those credentials are obtained only after admission. Reintroducing them
 /// here would recreate circular/self-issued trust and lower Sybil cost.
@@ -18,15 +19,10 @@
 /// diversity_bonus = 50 if prefix is unique, 0 otherwise
 /// reachability    = 30 only after an explicit external probe succeeds
 ///
-/// admission_threshold:
-///   Desktop:      100
-///   Mobile:        80
-///   Constrained:   60
+/// admission_threshold = 100
 /// ```
 use serde::{Deserialize, Serialize};
 use tracing::info;
-
-use super::descriptor::ResourceProfile;
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -40,13 +36,7 @@ const DIVERSITY_BONUS: u32 = 50;
 const REACHABILITY_BONUS: u32 = 30;
 
 /// Admission threshold for desktop peers.
-const THRESHOLD_DESKTOP: u32 = 100;
-
-/// Admission threshold for mobile peers (lower to accommodate PoW cost).
-const THRESHOLD_MOBILE: u32 = 80;
-
-/// Admission threshold for constrained devices.
-const THRESHOLD_CONSTRAINED: u32 = 60;
+const ADMISSION_THRESHOLD: u32 = 100;
 
 /// Minimum PoW difficulty bits required regardless of other signals.
 /// First-contact admission has no authenticated credential yet, so the floor
@@ -65,8 +55,6 @@ pub struct AdmissionSignals {
     pub unique_prefix: bool,
     /// Whether the peer responded to a reachability probe.
     pub reachable: bool,
-    /// Resource profile declared by the peer.
-    pub resource_profile: ResourceProfile,
 }
 
 /// Result of admission evaluation.
@@ -76,7 +64,7 @@ pub struct AdmissionDecision {
     pub admitted: bool,
     /// Total computed score.
     pub score: u32,
-    /// Threshold that was applied (depends on resource profile).
+    /// Threshold that was applied.
     pub threshold: u32,
     /// Breakdown of how the score was computed.
     pub breakdown: ScoreBreakdown,
@@ -124,10 +112,8 @@ pub struct HybridAdmissionPolicy {
     pub diversity_weight: u32,
     /// Bonus for observed reachability.
     pub reachability_weight: u32,
-    /// Threshold per resource profile.
-    pub threshold_desktop: u32,
-    pub threshold_mobile: u32,
-    pub threshold_constrained: u32,
+    /// First-contact admission threshold.
+    pub threshold: u32,
     /// Minimum PoW bits regardless of other signals.
     pub min_pow: u8,
 }
@@ -138,9 +124,7 @@ impl Default for HybridAdmissionPolicy {
             pow_weight: POW_POINTS_PER_BIT,
             diversity_weight: DIVERSITY_BONUS,
             reachability_weight: REACHABILITY_BONUS,
-            threshold_desktop: THRESHOLD_DESKTOP,
-            threshold_mobile: THRESHOLD_MOBILE,
-            threshold_constrained: THRESHOLD_CONSTRAINED,
+            threshold: ADMISSION_THRESHOLD,
             min_pow: MIN_POW_DIFFICULTY,
         }
     }
@@ -154,7 +138,7 @@ impl HybridAdmissionPolicy {
             return AdmissionDecision {
                 admitted: false,
                 score: 0,
-                threshold: self.threshold_for(signals.resource_profile),
+                threshold: self.threshold,
                 breakdown: ScoreBreakdown {
                     pow_score: 0,
                     diversity_bonus: 0,
@@ -179,7 +163,7 @@ impl HybridAdmissionPolicy {
             0
         };
         let total = pow_score + diversity_bonus + reachability_bonus;
-        let threshold = self.threshold_for(signals.resource_profile);
+        let threshold = self.threshold;
 
         let breakdown = ScoreBreakdown {
             pow_score,
@@ -212,14 +196,6 @@ impl HybridAdmissionPolicy {
             }
         }
     }
-
-    fn threshold_for(&self, profile: ResourceProfile) -> u32 {
-        match profile {
-            ResourceProfile::Desktop => self.threshold_desktop,
-            ResourceProfile::Mobile => self.threshold_mobile,
-            ResourceProfile::Constrained => self.threshold_constrained,
-        }
-    }
 }
 
 // ─── Diagnostics ────────────────────────────────────────────────────────────
@@ -228,9 +204,7 @@ impl HybridAdmissionPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdmissionPolicyStats {
     pub min_pow_bits: u8,
-    pub threshold_desktop: u32,
-    pub threshold_mobile: u32,
-    pub threshold_constrained: u32,
+    pub threshold: u32,
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -247,16 +221,16 @@ mod tests {
     fn default_pow_floor_matches_honest_mining_difficulty() {
         let p = policy();
         assert_eq!(p.min_pow, super::super::sybil::DEFAULT_POW_DIFFICULTY);
+        assert_eq!(p.threshold, ADMISSION_THRESHOLD);
     }
 
     #[test]
-    fn desktop_pow_only_admits_at_threshold() {
+    fn pow_only_admits_at_threshold() {
         let p = policy();
         let decision = p.evaluate(&AdmissionSignals {
             pow_difficulty: 10,
             unique_prefix: false,
             reachable: false,
-            resource_profile: ResourceProfile::Desktop,
         });
         assert!(decision.admitted);
         assert_eq!(decision.score, 100);
@@ -264,13 +238,12 @@ mod tests {
     }
 
     #[test]
-    fn desktop_default_pow_without_other_signal_rejects() {
+    fn default_pow_without_other_signal_rejects() {
         let p = policy();
         let decision = p.evaluate(&AdmissionSignals {
             pow_difficulty: super::super::sybil::DEFAULT_POW_DIFFICULTY,
             unique_prefix: false,
             reachable: false,
-            resource_profile: ResourceProfile::Desktop,
         });
         assert!(!decision.admitted);
         assert_eq!(decision.score, 80);
@@ -281,13 +254,12 @@ mod tests {
     }
 
     #[test]
-    fn desktop_default_pow_plus_diversity_admits() {
+    fn default_pow_plus_diversity_admits() {
         let p = policy();
         let decision = p.evaluate(&AdmissionSignals {
             pow_difficulty: super::super::sybil::DEFAULT_POW_DIFFICULTY,
             unique_prefix: true,
             reachable: false,
-            resource_profile: ResourceProfile::Desktop,
         });
         assert!(decision.admitted);
         assert_eq!(decision.score, 130);
@@ -301,7 +273,6 @@ mod tests {
             pow_difficulty: p.min_pow - 1,
             unique_prefix: true,
             reachable: true,
-            resource_profile: ResourceProfile::Constrained,
         });
         assert!(!decision.admitted);
         assert_eq!(decision.score, 0);
@@ -312,41 +283,12 @@ mod tests {
     }
 
     #[test]
-    fn mobile_default_pow_meets_mobile_threshold() {
-        let p = policy();
-        let decision = p.evaluate(&AdmissionSignals {
-            pow_difficulty: super::super::sybil::DEFAULT_POW_DIFFICULTY,
-            unique_prefix: false,
-            reachable: false,
-            resource_profile: ResourceProfile::Mobile,
-        });
-        assert!(decision.admitted);
-        assert_eq!(decision.score, 80);
-        assert_eq!(decision.threshold, 80);
-    }
-
-    #[test]
-    fn constrained_default_pow_meets_constrained_threshold() {
-        let p = policy();
-        let decision = p.evaluate(&AdmissionSignals {
-            pow_difficulty: super::super::sybil::DEFAULT_POW_DIFFICULTY,
-            unique_prefix: false,
-            reachable: false,
-            resource_profile: ResourceProfile::Constrained,
-        });
-        assert!(decision.admitted);
-        assert_eq!(decision.score, 80);
-        assert_eq!(decision.threshold, 60);
-    }
-
-    #[test]
     fn reachability_bonus_applied_only_when_signal_true() {
         let p = policy();
         let decision = p.evaluate(&AdmissionSignals {
             pow_difficulty: super::super::sybil::DEFAULT_POW_DIFFICULTY,
             unique_prefix: false,
             reachable: true,
-            resource_profile: ResourceProfile::Desktop,
         });
         assert!(decision.admitted);
         assert_eq!(decision.score, 110);
@@ -360,7 +302,6 @@ mod tests {
             pow_difficulty: super::super::sybil::DEFAULT_POW_DIFFICULTY,
             unique_prefix: true,
             reachable: true,
-            resource_profile: ResourceProfile::Desktop,
         });
         assert!(decision.admitted);
         assert_eq!(decision.score, 160);

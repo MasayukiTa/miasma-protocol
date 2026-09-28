@@ -3010,7 +3010,6 @@ impl MiasmaNode {
             // the externally-reachable liveness signal this bonus is meant to model.
             // Keep the bonus at zero until an explicit probe result is wired here.
             reachable: false,
-            resource_profile: ResourceProfile::Desktop, // default until descriptor received
         };
 
         let decision = self.admission_policy.evaluate(&signals);
