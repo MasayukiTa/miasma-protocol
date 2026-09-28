@@ -136,7 +136,9 @@ leading zero bits. Enforcement points:
 
 ### Phase 3b (this cycle — implemented)
 
-- [x] PoW proof exchange via `/miasma/admission/1.0.0` request-response protocol
+- [x] PoW proof exchange via `/miasma/admission/1.1.0` request-response protocol
+      with explicit responder acceptance; a valid responder PoW alone does not
+      promote the peer after the responder rejected the requester
 - [x] `PeerRegistry` trust-tier state machine: Claimed → Observed → Verified
 - [x] PoW-gated routing admission: peers are NOT added to Kademlia until
       they pass the admission handshake (Identify + PoW verification)
