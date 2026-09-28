@@ -18,10 +18,6 @@ use miasma_core::network::address::AddressTrust;
 use miasma_core::network::admission_policy::{
     AdmissionSignals, HybridAdmissionPolicy, HybridRejection,
 };
-use miasma_core::network::bbs_credential::{
-    bbs_create_proof, bbs_verify_proof, generate_link_secret, BbsCredentialAttributes,
-    BbsCredentialWallet, BbsIssuer, BbsIssuerKey, DisclosurePolicy,
-};
 use miasma_core::network::credential::{
     self, CredentialIssuer, CredentialPresentation, CredentialTier, EphemeralIdentity, CAP_ROUTE,
     CAP_STORE,
@@ -638,157 +634,6 @@ fn pow_sybil_cost_multiplier() {
     );
 }
 
-// ─── Scenario 9: BBS+ credential abuse ──────────────────────────────────────
-
-/// Attacker captures a valid BBS+ proof and tries to verify it with a
-/// different context. Context binding should make this fail.
-#[test]
-fn bbs_proof_context_replay() {
-    let issuer_key = BbsIssuerKey::from_seed(b"test-issuer-seed");
-    let issuer = BbsIssuer::new(issuer_key.clone());
-
-    let attrs = BbsCredentialAttributes {
-        link_secret: generate_link_secret(),
-        tier: CredentialTier::Verified,
-        capabilities: 3,
-        epoch: credential::current_epoch(),
-        nonce: 42,
-    };
-    let cred = issuer.issue(attrs);
-    let proof = bbs_create_proof(&cred, &DisclosurePolicy::default(), b"original-context");
-
-    // Replay with a different context.
-    let result = bbs_verify_proof(&proof, &issuer_key.pk_bytes(), b"different-context");
-    assert!(
-        result.is_err(),
-        "BBS+ proof replayed with wrong context should fail"
-    );
-}
-
-/// Attacker generates a BBS+ proof from an unknown issuer.
-/// Phase 4b: Schnorr proof checks message knowledge only. Issuer binding
-/// (pairing check) is Phase 4c. For now, verify that the Ed25519 credential
-/// system catches unknown issuers even if BBS+ doesn't yet.
-#[test]
-fn bbs_proof_unknown_issuer_ed25519_catches() {
-    let honest_issuer = test_issuer();
-    let attacker_key = ed25519_dalek::SigningKey::from_bytes(&[0xEE; 32]);
-    let attacker_issuer = CredentialIssuer::new(attacker_key);
-
-    let identity = EphemeralIdentity::generate(credential::current_epoch());
-    let forged = attacker_issuer.issue(
-        CredentialTier::Endorsed,
-        identity.epoch,
-        CAP_ROUTE | CAP_STORE,
-        identity.holder_tag(),
-    );
-    let presentation = CredentialPresentation::create(&forged, &identity, b"ctx");
-
-    // Ed25519 scheme correctly rejects unknown issuer.
-    let result = credential::verify_presentation(
-        &presentation,
-        b"ctx",
-        &[honest_issuer.pubkey_bytes()],
-        credential::current_epoch(),
-        CredentialTier::Verified,
-    );
-    assert_eq!(
-        result.unwrap_err(),
-        credential::CredentialError::UnknownIssuer,
-        "Ed25519 scheme catches unknown issuer"
-    );
-}
-
-/// BBS+ pairing check catches credential from wrong issuer.
-/// The pairing equation e(A', W) != e(A_bar, G2) when W is wrong.
-#[test]
-fn bbs_pairing_catches_wrong_issuer() {
-    let real_issuer_key = BbsIssuerKey::from_seed(b"real-issuer");
-    let attacker_issuer_key = BbsIssuerKey::from_seed(b"attacker-issuer");
-    let attacker = BbsIssuer::new(attacker_issuer_key);
-
-    let attrs = BbsCredentialAttributes {
-        link_secret: generate_link_secret(),
-        tier: CredentialTier::Endorsed,
-        capabilities: 0xFF,
-        epoch: credential::current_epoch(),
-        nonce: 1,
-    };
-    let cred = attacker.issue(attrs);
-    let proof = bbs_create_proof(&cred, &DisclosurePolicy::default(), b"ctx");
-
-    // Verify against the REAL issuer key — pairing check must fail.
-    let result = bbs_verify_proof(&proof, &real_issuer_key.pk_bytes(), b"ctx");
-    assert!(result.is_err(), "BBS+ pairing should catch wrong issuer");
-    assert_eq!(
-        result.unwrap_err(),
-        miasma_core::network::bbs_credential::BbsError::IssuerBindingFailed,
-    );
-}
-
-/// Attacker modifies disclosed tier in a BBS+ proof.
-/// The Schnorr proof should detect the inconsistency.
-#[test]
-fn bbs_proof_tampered_disclosed_tier() {
-    let issuer_key = BbsIssuerKey::from_seed(b"test-seed");
-    let issuer = BbsIssuer::new(issuer_key.clone());
-
-    let attrs = BbsCredentialAttributes {
-        link_secret: generate_link_secret(),
-        tier: CredentialTier::Observed, // actual tier = 1
-        capabilities: 1,
-        epoch: credential::current_epoch(),
-        nonce: 0,
-    };
-    let cred = issuer.issue(attrs);
-    let mut proof = bbs_create_proof(&cred, &DisclosurePolicy::default(), b"ctx");
-
-    // Tamper: change disclosed tier from Observed(1) to Endorsed(3).
-    for item in proof.disclosed.iter_mut() {
-        if item.0 == 1 {
-            item.1 = 3; // Endorsed
-        }
-    }
-
-    let result = bbs_verify_proof(&proof, &issuer_key.pk_bytes(), b"ctx");
-    assert!(
-        result.is_err(),
-        "tampered disclosed tier should break Schnorr proof"
-    );
-}
-
-/// BBS+ within-epoch unlinkability: two proofs from the same credential
-/// should not be correlatable.
-#[test]
-fn bbs_within_epoch_unlinkability() {
-    let issuer_key = BbsIssuerKey::from_seed(b"unlinkability-test");
-    let issuer = BbsIssuer::new(issuer_key.clone());
-
-    let attrs = BbsCredentialAttributes {
-        link_secret: generate_link_secret(),
-        tier: CredentialTier::Verified,
-        capabilities: 3,
-        epoch: credential::current_epoch(),
-        nonce: 99,
-    };
-    let cred = issuer.issue(attrs);
-
-    let proof1 = bbs_create_proof(&cred, &DisclosurePolicy::default(), b"ctx-1");
-    let proof2 = bbs_create_proof(&cred, &DisclosurePolicy::default(), b"ctx-2");
-
-    // Both proofs should verify.
-    assert!(bbs_verify_proof(&proof1, &issuer_key.pk_bytes(), b"ctx-1").is_ok());
-    assert!(bbs_verify_proof(&proof2, &issuer_key.pk_bytes(), b"ctx-2").is_ok());
-
-    // But they should look different (randomised A', A_bar, challenge, responses).
-    assert_ne!(proof1.a_prime, proof2.a_prime, "A' should differ");
-    assert_ne!(proof1.a_bar, proof2.a_bar, "A_bar should differ");
-    assert_ne!(
-        proof1.challenge, proof2.challenge,
-        "challenge should differ"
-    );
-}
-
 // ─── Scenario 10: Descriptor store flooding ─────────────────────────────────
 
 /// Attacker floods the descriptor store with thousands of descriptors.
@@ -1390,32 +1235,6 @@ fn wallet_rotation_invalidates_old_credentials() {
     );
 }
 
-/// BBS+ wallet pruning should remove credentials from expired epochs.
-#[test]
-fn bbs_wallet_prune_respects_epoch_boundary() {
-    let mut wallet = BbsCredentialWallet::new();
-    let seed = blake3::hash(b"test-issuer-seed");
-    let issuer_key = BbsIssuerKey::from_seed(seed.as_bytes());
-    let issuer = BbsIssuer::new(issuer_key);
-
-    // Issue credentials for epochs 10, 11, 12.
-    for epoch in 10..=12u64 {
-        let cred = issuer.issue(BbsCredentialAttributes {
-            link_secret: wallet.link_secret(),
-            tier: CredentialTier::Verified,
-            capabilities: CAP_STORE | CAP_ROUTE,
-            epoch,
-            nonce: rand::random(),
-        });
-        wallet.store(cred);
-    }
-    assert_eq!(wallet.credential_count(), 3);
-
-    // Prune before epoch 12: should remove epochs 10 and 11.
-    wallet.prune_before_epoch(12);
-    assert_eq!(wallet.credential_count(), 1, "only epoch 12 should survive");
-}
-
 // ─── Scenario 15: Outcome metrics under adversarial conditions ──────────
 
 /// Metrics should reflect high churn after epoch rotation with new peers.
@@ -1769,7 +1588,6 @@ fn descriptor_onion_pubkey_tamper_detection() {
         PeerCapabilities::default(),
         ResourceProfile::Desktop,
         None,
-        None,
         Some([0xAA; 32]), // onion pubkey
         1,
         &key,
@@ -1813,7 +1631,6 @@ fn descriptor_store_relay_onion_info_filtering() {
         },
         ResourceProfile::Desktop,
         None,
-        None,
         Some([0xAA; 32]),
         1,
         &key,
@@ -1833,7 +1650,6 @@ fn descriptor_store_relay_onion_info_filtering() {
         },
         ResourceProfile::Desktop,
         None,
-        None,
         None, // no onion pubkey
         1,
         &key,
@@ -1852,7 +1668,6 @@ fn descriptor_store_relay_onion_info_filtering() {
             ..PeerCapabilities::default()
         },
         ResourceProfile::Desktop,
-        None,
         None,
         Some([0xCC; 32]),
         1,
@@ -2095,7 +1910,6 @@ fn relay_onion_info_requires_pubkey_and_capability() {
         },
         ResourceProfile::Desktop,
         None,
-        None,
         Some([0x11; 32]),
         1,
         &key,
@@ -2134,7 +1948,6 @@ fn relay_onion_info_requires_pubkey_and_capability() {
             ..PeerCapabilities::default()
         },
         ResourceProfile::Desktop,
-        None,
         None,
         Some([0x33; 32]),
         1,
@@ -2735,7 +2548,6 @@ fn rendezvous_intro_onion_capable_preferred() {
         },
         ResourceProfile::Desktop,
         None,
-        None,
         Some([0xAA; 32]), // onion pubkey
         1,
         &key,
@@ -2756,7 +2568,6 @@ fn rendezvous_intro_onion_capable_preferred() {
             ..PeerCapabilities::default()
         },
         ResourceProfile::Desktop,
-        None,
         None,
         None, // no onion pubkey
         1,
@@ -2812,7 +2623,6 @@ fn rendezvous_no_onion_intro_falls_back() {
             },
             ResourceProfile::Desktop,
             None,
-            None,
             None, // no onion pubkey
             1,
             &key,
@@ -2850,7 +2660,6 @@ fn mixed_holders_direct_and_rendezvous_onion_pubkey() {
         PeerCapabilities::default(),
         ResourceProfile::Desktop,
         None,
-        None,
         Some([0xDD; 32]),
         1,
         &key,
@@ -2869,7 +2678,6 @@ fn mixed_holders_direct_and_rendezvous_onion_pubkey() {
         vec![],
         PeerCapabilities::default(),
         ResourceProfile::Desktop,
-        None,
         None,
         Some([0xEE; 32]),
         1,
@@ -2918,7 +2726,6 @@ fn rendezvous_broken_intro_with_fallback() {
             ..PeerCapabilities::default()
         },
         ResourceProfile::Desktop,
-        None,
         None,
         Some([0xFF; 32]), // onion capable
         1,
@@ -3030,7 +2837,6 @@ fn onion_rendezvous_requires_distinct_r1_r2() {
             ..PeerCapabilities::default()
         },
         ResourceProfile::Desktop,
-        None,
         None,
         Some([0xAA; 32]),
         1,
@@ -3536,7 +3342,6 @@ fn zero_onion_pubkey_rejected_by_relay_onion_info() {
         },
         ResourceProfile::Desktop,
         None,
-        None,
         Some([0u8; 32]), // zero key — must be rejected
         1,
         &key,
@@ -3600,7 +3405,6 @@ fn r1_eq_r2_impossible_with_single_relay() {
         },
         ResourceProfile::Desktop,
         None,
-        None,
         Some([0xCC; 32]),
         1,
         &key,
@@ -3640,7 +3444,6 @@ fn r1_neq_r2_satisfied_with_two_relays() {
                 ..PeerCapabilities::default()
             },
             ResourceProfile::Desktop,
-            None,
             None,
             Some([*onion_byte; 32]),
             1,
@@ -4062,7 +3865,6 @@ fn anti_gaming_demotion_on_failure_dominance() {
         },
         ResourceProfile::Desktop,
         None,
-        None,
         Some([0xEE; 32]),
         1,
         &key,
@@ -4104,7 +3906,6 @@ fn anti_gaming_does_not_demote_mostly_successful_relay() {
             ..PeerCapabilities::default()
         },
         ResourceProfile::Desktop,
-        None,
         None,
         Some([0xFF; 32]),
         1,
@@ -4175,7 +3976,6 @@ fn descriptor_store_relay_pseudonyms() {
         ResourceProfile::Desktop,
         None,
         None,
-        None,
         1,
         &key,
     ));
@@ -4193,7 +3993,6 @@ fn descriptor_store_relay_pseudonyms() {
             ..PeerCapabilities::default()
         },
         ResourceProfile::Desktop,
-        None,
         None,
         None,
         1,

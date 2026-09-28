@@ -5,7 +5,7 @@
 /// Share exchange: `/miasma/share/1.0.0` request-response protocol
 /// Admission: `/miasma/admission/1.0.0` PoW proof exchange (ADR-004)
 /// Credential: `/miasma/credential/1.2.0` credential exchange (ADR-005)
-/// Descriptor: `/miasma/descriptor/1.1.0` descriptor exchange (ADR-005)
+/// Descriptor: `/miasma/descriptor/1.2.0` descriptor exchange (ADR-005)
 /// NAT: AutoNAT + DCUtR + relay
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
@@ -324,7 +324,7 @@ impl request_response::Codec for CredentialCodec {
 /// Max message size for descriptor exchange (16 KiB).
 const DESCRIPTOR_MSG_MAX: usize = 16 * 1024;
 
-/// Bincode + 4-byte LE length-prefix codec for `/miasma/descriptor/1.1.0`.
+/// Bincode + 4-byte LE length-prefix codec for `/miasma/descriptor/1.2.0`.
 #[derive(Clone, Default)]
 pub struct DescriptorCodec;
 
@@ -1539,7 +1539,7 @@ pub struct MiasmaBehaviour {
     pub(crate) admission: request_response::Behaviour<AdmissionCodec>,
     /// Credential exchange: `/miasma/credential/1.2.0` request-response.
     pub(crate) credential_exchange: request_response::Behaviour<CredentialCodec>,
-    /// Descriptor exchange: `/miasma/descriptor/1.1.0` request-response.
+    /// Descriptor exchange: `/miasma/descriptor/1.2.0` request-response.
     pub(crate) descriptor_exchange: request_response::Behaviour<DescriptorCodec>,
     /// Onion relay: `/miasma/onion/1.0.0` request-response.
     pub(crate) onion_relay: request_response::Behaviour<OnionRelayCodec>,
@@ -3222,13 +3222,6 @@ impl MiasmaNode {
                 .present_from_issuer(issuer_pubkey, context)
         });
 
-        // No BBS+ proof is attached. The scheme is forgeable, nothing on the
-        // receiving side ever verified one, and the proof context used to be
-        // this node's own PeerId -- so it carried no privacy either. Publishing
-        // proofs only fed the `bbs_credentialed` counters and gave an attacker a
-        // sample to mint from. See `docs/adr/006-bbs-plus-known-breaks.md`.
-        let bbs_proof = None;
-
         // Determine reachability kind based on NAT status.
         // Public nodes use Direct; NAT'd nodes select introduction points
         // from the descriptor store and publish Rendezvous descriptors.
@@ -3260,7 +3253,6 @@ impl MiasmaNode {
             },
             self.resource_profile,
             credential_presentation,
-            bbs_proof,
             Some(self.onion_static_pubkey),
             self.credential_wallet.epoch(),
             &self.dht_signing_key,
@@ -3480,14 +3472,6 @@ impl MiasmaNode {
                 }
 
                 if let Some(mut desc) = response.descriptor {
-                    // BBS+ is quarantined: v1.1 accepts no BBS proof bytes at all.
-                    // Keeping attacker-supplied opaque proofs in the descriptor store
-                    // would make diagnostics count known-broken, unverified material.
-                    if desc.bbs_proof.is_some() {
-                        warn!("descriptor.rejected_bbs_quarantined peer={peer}");
-                        return;
-                    }
-
                     let identity_matches = self
                         .peer_registry
                         .verified_identity_pubkey(&peer)
@@ -4390,7 +4374,7 @@ fn build_swarm(
 
             let descriptor_exchange = request_response::Behaviour::<DescriptorCodec>::new(
                 [(
-                    StreamProtocol::new("/miasma/descriptor/1.1.0"),
+                    StreamProtocol::new("/miasma/descriptor/1.2.0"),
                     request_response::ProtocolSupport::Full,
                 )],
                 request_response::Config::default(),
