@@ -1159,7 +1159,7 @@ pub(crate) async fn process_request(
                 );
             };
             match process_directed_send(
-                secret.as_ref(),
+                &**secret,
                 &recipient_contact,
                 &data,
                 &password,
@@ -1205,7 +1205,7 @@ pub(crate) async fn process_request(
                 );
             };
             match process_directed_send(
-                secret.as_ref(),
+                &**secret,
                 &recipient_contact,
                 &data,
                 &password,
@@ -1250,14 +1250,8 @@ pub(crate) async fn process_request(
                     "directed sharing unavailable after distress wipe".into(),
                 );
             };
-            match process_directed_retrieve(
-                secret.as_ref(),
-                &envelope_id,
-                &password,
-                &coord,
-                &data_dir,
-            )
-            .await
+            match process_directed_retrieve(&**secret, &envelope_id, &password, &coord, &data_dir)
+                .await
             {
                 Ok((data, filename)) => ControlResponse::DirectedRetrieved { data, filename },
                 Err(e) => ControlResponse::Error(e.to_string()),
@@ -1275,14 +1269,8 @@ pub(crate) async fn process_request(
                     "directed sharing unavailable after distress wipe".into(),
                 );
             };
-            match process_directed_retrieve(
-                secret.as_ref(),
-                &envelope_id,
-                &password,
-                &coord,
-                &data_dir,
-            )
-            .await
+            match process_directed_retrieve(&**secret, &envelope_id, &password, &coord, &data_dir)
+                .await
             {
                 Ok((data, filename)) => {
                     // Write decrypted content to the requested output path.
