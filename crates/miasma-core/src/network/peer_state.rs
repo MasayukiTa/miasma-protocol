@@ -43,6 +43,8 @@ pub enum RejectionReason {
     MalformedPoW,
     /// PoW hash did not meet difficulty requirement.
     InsufficientDifficulty,
+    /// The peer's observed network prefix exceeded the routing diversity limit.
+    DiversityRejected,
     /// PoW pubkey did not match the peer's actual identity.
     PubkeyMismatch,
     /// Remote peer explicitly rejected our admission request.
@@ -56,6 +58,9 @@ impl std::fmt::Display for RejectionReason {
             RejectionReason::NoPoW => write!(f, "no PoW proof"),
             RejectionReason::MalformedPoW => write!(f, "malformed PoW proof"),
             RejectionReason::InsufficientDifficulty => write!(f, "insufficient PoW difficulty"),
+            RejectionReason::DiversityRejected => {
+                write!(f, "routing prefix diversity limit exceeded")
+            }
             RejectionReason::PubkeyMismatch => write!(f, "PoW pubkey does not match peer identity"),
             RejectionReason::RemoteRejected => {
                 write!(f, "remote peer rejected admission request")
