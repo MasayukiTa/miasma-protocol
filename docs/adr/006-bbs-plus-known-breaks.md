@@ -1,14 +1,16 @@
 # Known breaks in the BBS+ credential scheme
 
-**Status: the self-written BBS+ implementation is forgeable and is not used for
-any trust decision.** Do not re-enable it as an admission input until the
-conditions at the bottom of this document are met.
+**Status: the self-written BBS+ implementation was deleted on 2026-09-28
+(`ac996f9`) because it is forgeable and the current descriptor carrier cannot
+provide the unlinkability BBS was intended to add.** This ADR is retained as the
+historical security record. Do not restore the deleted implementation.
 
-Found and confirmed 2026-09-05. Both breaks are demonstrated by executable
-forgery tests in `crates/miasma-core/src/network/bbs_credential.rs`
+Found and confirmed 2026-09-05. Before deletion, both breaks were demonstrated
+by executable forgery tests in `crates/miasma-core/src/network/bbs_credential.rs`
 (`known_generator_dlogs_allow_attribute_forgery_without_the_issuer_key`,
-`pairing_check_is_not_bound_to_the_message_commitment`). They are theory-free:
-each one constructs a forgery and asserts the verifier accepts it.
+`pairing_check_is_not_bound_to_the_message_commitment`). Each constructed a
+forgery and asserted that the old verifier accepted it; the file and tests were
+removed with the implementation in `ac996f9`.
 
 ## Scope
 
@@ -104,26 +106,27 @@ This is the reason the repair plan builds the verification harness (reference
 vectors, differential testing, adversarial construction) *before* touching the
 scheme.
 
-## Containment currently in place
+## Resolution and containment
 
-- **No credential tier is trusted at admission.** `credential_tier` is `None`;
-  neither `bbs_tier()` nor the Ed25519 tier is read, because neither is
-  verified. An earlier revision of this document said admission had fallen back
-  to the Ed25519 tier — that was the mistake described under Scope, and it is
-  corrected in the code.
-- Descriptors no longer carry a BBS+ proof, and the BBS+ link secret is no
-  longer sent to issuers.
-- BBS+ issuer keys are no longer derived from a peer's public PoW key.
+- **No credential tier is trusted at admission.** Credential-derived bonuses are
+  zero in the production default, and first-contact admission cannot consume a
+  descriptor presentation that has not happened yet.
+- Descriptor presentations are challenge-bound and issuer-verified before local
+  verification provenance is attached. Raw wire tier claims are not routing or
+  metric trust inputs.
+- The complete `network/bbs_credential.rs` implementation, `bbs_tier()`, BBS
+  success telemetry, BBS public exports and BBS-only tests were deleted.
+- Descriptor protocol 1.2.0 removes the old `bbs_proof` wire field instead of
+  accepting/storing opaque known-broken proof bytes.
+- `bls12_381`, `ff`, `group` and the transitive `pairing` dependency were removed
+  from the credential implementation dependency chain.
 - The README no longer advertises BBS+ credentials as a security property.
 
-Still open, tracked rather than fixed: a peer may still attach an arbitrary
-`bbs_proof` to a descriptor, which is stored and counted by the
-`bbs_credentialed` metrics — so those counters now report attacker-supplied
-values and nothing else. `bbs_tier()` remains public. `path_selection` still
-reads the unverified Ed25519 tier, though a self-declared high tier does not
-appear to gain anything there.
+The remaining privacy limitation is architectural rather than a quarantined BBS
+bug: current descriptors are still associated with a verified network identity,
+so they do not provide network-level unlinkability.
 
-## Conditions for re-enabling
+## Conditions for any future BBS design
 
 1. Generators derived by real hash-to-curve (RFC 9380; `bls12_381` provides SSWU
    behind its `experimental` feature), under a fixed domain separation tag.
@@ -154,5 +157,6 @@ pseudonym is fixed per epoch, and recipients record PeerId↔pseudonym. Until th
 carrier can hide identity, within-epoch unlinkability buys nothing — a point
 both external reviewers reached independently.
 
-Until all of the above hold, the scheme stays disconnected from trust
-decisions.
+The deleted scheme is not to be re-enabled. If all of the above eventually hold,
+introduce the replacement as a new reviewed protocol and trust boundary rather
+than restoring the old implementation.
