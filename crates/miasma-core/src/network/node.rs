@@ -3004,7 +3004,10 @@ impl MiasmaNode {
         let signals = AdmissionSignals {
             pow_difficulty,
             unique_prefix,
-            reachable: true, // peer connected and sent us a message
+            // A connection/request proves the peer can reach us; it does not prove
+            // the externally-reachable liveness signal this bonus is meant to model.
+            // Keep the bonus at zero until an explicit probe result is wired here.
+            reachable: false,
             credential_tier,
             resource_profile: ResourceProfile::Desktop, // default until descriptor received
         };
@@ -4636,6 +4639,33 @@ mod admission_pow_tests {
     }
 
     #[tokio::test]
+    async fn first_contact_requires_default_pow_floor_and_no_fake_reachability_bonus() {
+        let mut node = make_node();
+        let peer_seed = rand::random::<[u8; 32]>();
+        let peer_key = ed25519_dalek::SigningKey::from_bytes(&peer_seed);
+        let peer_pubkey = peer_key.verifying_key().to_bytes();
+        let ed_pubkey = libp2p::identity::ed25519::PublicKey::try_from_bytes(&peer_pubkey).unwrap();
+        let peer_id = PeerId::from(libp2p::identity::PublicKey::from(ed_pubkey));
+        node.pending_peer_addrs
+            .insert(peer_id, vec!["/ip4/203.0.113.8/tcp/4001".parse().unwrap()]);
+
+        let weak =
+            pow_with_exact_difficulty(peer_pubkey, (node.admission_policy.min_pow - 1) as u32);
+        assert_eq!(
+            node.verify_remote_pow(&peer_id, &weak),
+            Err(RejectionReason::InsufficientDifficulty)
+        );
+
+        let honest_floor =
+            pow_with_exact_difficulty(peer_pubkey, node.admission_policy.min_pow as u32);
+        assert_eq!(
+            node.verify_remote_pow(&peer_id, &honest_floor),
+            Ok(()),
+            "8-bit PoW plus a genuinely unique prefix should admit without a fake reachability bonus"
+        );
+    }
+
+    #[tokio::test]
     async fn self_declared_endorsed_descriptor_buys_no_admission_score() {
         let mut node = make_node();
 
@@ -4646,8 +4676,8 @@ mod admission_pow_tests {
         let peer_id = PeerId::from(libp2p::identity::PublicKey::from(ed_pubkey));
         let pow = pow_with_exact_difficulty(peer_pubkey, node.admission_policy.min_pow as u32);
 
-        // No diversity bonus and only 4 bits of work gives 40 + 30 reachability
-        // = 70, below the desktop threshold of 100.
+        // No diversity or reachability bonus: the default 8-bit work floor gives
+        // 80 points, below the desktop threshold of 100.
         assert_eq!(
             node.verify_remote_pow(&peer_id, &pow),
             Err(RejectionReason::InsufficientDifficulty)
