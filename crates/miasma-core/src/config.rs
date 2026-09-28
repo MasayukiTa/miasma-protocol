@@ -116,20 +116,18 @@ impl NodeConfig {
         let raw =
             toml::to_string_pretty(self).map_err(|e| MiasmaError::Serialization(e.to_string()))?;
 
-        // If proxy credentials are present, write with restricted permissions
-        // from the start (Win32 DACL / Unix 0o600). If we're rewriting an
-        // already-restricted config after scrubbing credentials, keep using the
-        // restricted writer so Windows doesn't fail reopening the existing
-        // restricted file with a normal std::fs::write path.
-        let has_credentials =
-            self.transport.proxy_username.is_some() || self.transport.proxy_password.is_some();
+        // If persisted transport secrets are present, write with restricted
+        // permissions from the start (Win32 DACL / Unix 0o600). If we're
+        // rewriting an already-restricted config after scrubbing secrets, keep
+        // using the restricted writer so Windows can safely replace it.
+        let has_secrets = self.has_persisted_secrets();
         let was_restricted = if path.exists() {
             crate::secure_file::verify_restricted(&path).unwrap_or(false)
         } else {
             false
         };
 
-        if has_credentials || was_restricted {
+        if has_secrets || was_restricted {
             crate::secure_file::write_restricted(&path, raw.as_bytes())?;
         } else {
             std::fs::write(&path, raw)?;
@@ -137,11 +135,23 @@ impl NodeConfig {
         Ok(())
     }
 
-    /// Scrub credential fields (proxy username/password) from this config,
-    /// then save the scrubbed version back to disk.
+    /// Whether `config.toml` currently contains persisted secret material.
+    /// Paths to externally managed key files are not counted here because the
+    /// path itself is not the key material and may point outside the data dir.
+    pub fn has_persisted_secrets(&self) -> bool {
+        self.transport.proxy_username.is_some()
+            || self.transport.proxy_password.is_some()
+            || self.transport.obfuscated_quic_secret.is_some()
+            || self.transport.shadowsocks.password.is_some()
+    }
+
+    /// Scrub persisted transport credentials/secrets from this config, then save
+    /// the sanitized version back to disk.
     pub fn scrub_credentials(&mut self, data_dir: &Path) -> Result<(), MiasmaError> {
         self.transport.proxy_username = None;
         self.transport.proxy_password = None;
+        self.transport.obfuscated_quic_secret = None;
+        self.transport.shadowsocks.password = None;
         self.save(data_dir)
     }
 }

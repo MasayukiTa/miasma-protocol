@@ -605,17 +605,15 @@ impl LocalShareStore {
             }
         }
 
-        // Scrub proxy credentials from config.toml so they don't survive a wipe.
-        // A parse or save failure is part of wipe failure, never advisory.
+        // Scrub persisted transport secrets from config.toml so they do not
+        // survive a wipe. A parse/save failure is wipe failure, never advisory.
         let config_path = self.data_dir.join("config.toml");
         if config_path.exists() {
             match crate::config::NodeConfig::load(&self.data_dir) {
                 Ok(mut config) => {
-                    if config.transport.proxy_username.is_some()
-                        || config.transport.proxy_password.is_some()
-                    {
+                    if config.has_persisted_secrets() {
                         if let Err(e) = config.scrub_credentials(&self.data_dir) {
-                            cleanup_errors.push(format!("scrub proxy credentials: {e}"));
+                            cleanup_errors.push(format!("scrub transport secrets: {e}"));
                         }
                     }
                 }
