@@ -137,6 +137,10 @@ leading zero bits. Enforcement points:
 - [x] `PeerAddress` type with address classification and trust tiers
 - [x] `AddressClass` enum: Loopback, LinkLocal, Private, GlobalUnicast, Relay
 - [x] Address filtering in `handle_event` for Identify addresses
+- [x] mDNS is discovery-only: LAN addresses enter Kademlia only after an exact
+      authenticated outbound dial plus normal diversity/PoW admission
+- [x] DHT/descriptor/share-provided temporary dial addresses never mutate
+      Kademlia and reject loopback/private/link-local/DNS targets in production
 - [x] Replace stub `verify_signature()` with real Ed25519 verification
 - [x] Wire `verify_pow()` into the post-Identify admission handshake as a hard gate
 - [x] Design doc (this ADR)

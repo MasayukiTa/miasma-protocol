@@ -32,6 +32,9 @@ pub enum AddressClass {
     /// RFC 1918 (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) or
     /// ULA (`fc00::/7`) — only trusted from local bootstrap config.
     Private,
+    /// DNS name. Resolution can target private/loopback addresses, so DNS from
+    /// untrusted peer metadata is rejected unless a resolver re-validates the IP.
+    Dns,
     /// Public IPv4/IPv6 — the normal case for Internet peers.
     GlobalUnicast,
     /// `/p2p/<peer>/p2p-circuit` — relay-mediated address.
@@ -80,7 +83,7 @@ impl PeerAddress {
     pub fn is_routable_from_peer(&self) -> bool {
         match self.class {
             AddressClass::Loopback | AddressClass::LinkLocal => false,
-            AddressClass::Private => false, // Only local bootstrap may use private
+            AddressClass::Private | AddressClass::Dns => false,
             AddressClass::GlobalUnicast | AddressClass::Relay => true,
             AddressClass::Unknown => false,
         }
@@ -91,7 +94,10 @@ impl PeerAddress {
     pub fn is_routable_from_bootstrap(&self) -> bool {
         match self.class {
             AddressClass::Loopback | AddressClass::LinkLocal => false,
-            AddressClass::Private | AddressClass::GlobalUnicast | AddressClass::Relay => true,
+            AddressClass::Private
+            | AddressClass::Dns
+            | AddressClass::GlobalUnicast
+            | AddressClass::Relay => true,
             AddressClass::Unknown => false,
         }
     }
@@ -99,13 +105,9 @@ impl PeerAddress {
 
 /// Classify a multiaddr by extracting the IP component and checking its scope.
 pub fn classify_multiaddr(addr: &Multiaddr) -> AddressClass {
-    // Check for relay/circuit addresses first.
-    let addr_str = addr.to_string();
-    if addr_str.contains("/p2p-circuit") {
-        return AddressClass::Relay;
-    }
-
-    // Extract the IP address from the multiaddr.
+    // Validate the transport underlay before treating an address as a relay.
+    // Otherwise `/ip4/127.0.0.1/.../p2p-circuit` or DNS-to-private targets
+    // could bypass the SSRF filter merely by appending the circuit protocol.
     for proto in addr.iter() {
         match proto {
             libp2p::multiaddr::Protocol::Ip4(ip) => return classify_ipv4(ip),
@@ -113,15 +115,16 @@ pub fn classify_multiaddr(addr: &Multiaddr) -> AddressClass {
             libp2p::multiaddr::Protocol::Dns(_)
             | libp2p::multiaddr::Protocol::Dns4(_)
             | libp2p::multiaddr::Protocol::Dns6(_)
-            | libp2p::multiaddr::Protocol::Dnsaddr(_) => {
-                // DNS names are treated as global — resolution happens at connect time.
-                return AddressClass::GlobalUnicast;
-            }
+            | libp2p::multiaddr::Protocol::Dnsaddr(_) => return AddressClass::Dns,
             _ => continue,
         }
     }
 
-    AddressClass::Unknown
+    if addr.to_string().contains("/p2p-circuit") {
+        AddressClass::Relay
+    } else {
+        AddressClass::Unknown
+    }
 }
 
 fn classify_ipv4(ip: Ipv4Addr) -> AddressClass {
@@ -257,8 +260,35 @@ mod tests {
     fn classify_dns() {
         assert_eq!(
             classify_multiaddr(&ma("/dns4/example.com/tcp/4001")),
-            AddressClass::GlobalUnicast
+            AddressClass::Dns
         );
+    }
+
+    #[test]
+    fn dns_is_not_routable_from_untrusted_peer_but_is_allowed_for_bootstrap() {
+        let pa = PeerAddress::new(ma("/dns4/localhost/tcp/4001"), AddressTrust::Observed);
+        assert!(!pa.is_routable_from_peer());
+        assert!(pa.is_routable_from_bootstrap());
+    }
+
+    #[test]
+    fn relay_suffix_does_not_hide_unsafe_underlay() {
+        let relay = libp2p::PeerId::random();
+        let loopback = ma(&format!("/ip4/127.0.0.1/tcp/4001/p2p/{relay}/p2p-circuit"));
+        let private = ma(&format!("/ip4/10.0.0.9/tcp/4001/p2p/{relay}/p2p-circuit"));
+        let dns = ma(&format!("/dns4/localhost/tcp/4001/p2p/{relay}/p2p-circuit"));
+        assert_eq!(classify_multiaddr(&loopback), AddressClass::Loopback);
+        assert_eq!(classify_multiaddr(&private), AddressClass::Private);
+        assert_eq!(classify_multiaddr(&dns), AddressClass::Dns);
+    }
+
+    #[test]
+    fn bare_circuit_without_network_underlay_is_relay() {
+        // Locally constructed relay-circuit hints contain no attacker-selected
+        // IP/DNS underlay and are dialed through an already selected relay peer.
+        let relay = libp2p::PeerId::random();
+        let addr = ma(&format!("/p2p/{relay}/p2p-circuit"));
+        assert_eq!(classify_multiaddr(&addr), AddressClass::Relay);
     }
 
     #[test]
@@ -300,6 +330,7 @@ mod tests {
             ma("/ip4/10.0.0.1/tcp/4001"),
             ma("/ip4/8.8.8.8/tcp/4001"),
             ma("/ip4/1.2.3.4/tcp/4001"),
+            ma("/dns4/localhost/tcp/4001"),
         ];
         let filtered = filter_peer_addresses(&peer_id, &addrs);
         assert_eq!(filtered.len(), 2);
