@@ -3479,7 +3479,7 @@ impl MiasmaNode {
                     return;
                 }
 
-                if let Some(desc) = response.descriptor {
+                if let Some(mut desc) = response.descriptor {
                     // BBS+ is quarantined: v1.1 accepts no BBS proof bytes at all.
                     // Keeping attacker-supplied opaque proofs in the descriptor store
                     // would make diagnostics count known-broken, unverified material.
@@ -3518,6 +3518,9 @@ impl MiasmaNode {
                     if !credential_valid {
                         warn!("descriptor.rejected_invalid_credential peer={peer}");
                         return;
+                    }
+                    if desc.credential.is_some() {
+                        desc.mark_credential_verified();
                     }
 
                     self.descriptor_store

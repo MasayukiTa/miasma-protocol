@@ -838,7 +838,6 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
                 "  Credentialed peers:    {:.1}%",
                 s.metric_credentialed_fraction * 100.0
             );
-            println!("  BBS+ credentialed:     {}", s.metric_bbs_credentialed);
             println!(
                 "  Pseudonymous peers:    {:.1}%",
                 s.metric_pseudonymous_fraction * 100.0

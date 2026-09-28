@@ -11,7 +11,6 @@
 /// - **Trust health**: how robust is the admission/credential system against Sybils?
 use serde::{Deserialize, Serialize};
 
-use super::credential::CredentialTier;
 use super::descriptor::DescriptorStore;
 use super::peer_state::PeerRegistry;
 use super::routing::RoutingTable;
@@ -144,7 +143,7 @@ impl OutcomeMetrics {
         // Credentialed fraction (among active descriptors).
         let credentialed = active
             .iter()
-            .filter(|d| d.meets_tier(CredentialTier::Observed))
+            .filter(|d| d.has_verified_credential())
             .count();
         let credentialed_peer_fraction = if total_descriptors > 0 {
             credentialed as f64 / total_descriptors as f64
