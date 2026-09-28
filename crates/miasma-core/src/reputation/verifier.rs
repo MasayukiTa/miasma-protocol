@@ -20,30 +20,15 @@ impl ReputationVerifier {
         }
     }
 
-    /// Threshold check only — **this performs no cryptographic verification.**
+    /// Fail-closed until a real cryptographic verifier is implemented.
     ///
-    /// The doc comment here used to claim "performs real BBS+ verification".
-    /// It does not, and never has: the final expression is
-    /// `!proof.proof_bytes.is_empty()`, so any non-empty byte string is
-    /// accepted as a proof. The disclosed uptime value is likewise taken at
-    /// face value from the prover.
-    ///
-    /// This type is currently unintegrated. It must not be wired into any
-    /// authorization or trust decision while it remains a stub — a returned
-    /// `true` means "the claimed value cleared the threshold", not "the claim
-    /// was proved". See `docs/adr/006-bbs-plus-known-breaks.md`.
-    pub fn verify(&self, proof: &ReputationProof, _nonce: &[u8]) -> bool {
-        // Phase 3: real BBS+ PoK verification here.
-        // Stub: just check the disclosed uptime value meets the threshold.
-        if proof.disclosed_fields & 0b0001 == 0 {
-            return false; // uptime_score not disclosed
-        }
-        let disclosed_uptime = proof.disclosed_values.first().copied().unwrap_or(0) as u8;
-        if disclosed_uptime < self.min_uptime_threshold {
-            return false;
-        }
-        // Stub: accept all structurally valid proofs.
-        !proof.proof_bytes.is_empty()
+    /// The previous stub returned `true` for any non-empty `proof_bytes` once a
+    /// prover-controlled disclosed value cleared the threshold. That makes this
+    /// API unsafe to wire into authorization later by accident. Callers that
+    /// intentionally bootstrap-trust a local configuration must use
+    /// `allow_bypass()` explicitly instead.
+    pub fn verify(&self, _proof: &ReputationProof, _nonce: &[u8]) -> bool {
+        false
     }
 
     /// Convenience: bypass verification for nodes we bootstrap-trust.
@@ -60,11 +45,25 @@ mod tests {
     use crate::reputation::bbs_credential::ReputationCredential;
 
     #[test]
-    fn verifier_accepts_valid_proof() {
+    fn verifier_fails_closed_even_for_well_formed_stub_proof() {
         let cred = ReputationCredential::new(90, 100, 0, 0, 86400, b"key");
         let proof = ReputationProof::prove_uptime_threshold(&cred, 80, b"nonce").unwrap();
         let verifier = ReputationVerifier::new(b"key".to_vec(), 80);
-        assert!(verifier.verify(&proof, b"nonce"));
+        assert!(!verifier.verify(&proof, b"nonce"));
+    }
+
+    #[test]
+    fn bootstrap_bypass_is_explicit_and_separate_from_verify() {
+        let verifier = ReputationVerifier::new(Vec::new(), 0);
+        assert!(verifier.allow_bypass());
+
+        let fake_proof = ReputationProof {
+            disclosed_fields: 0b0001,
+            disclosed_values: vec![100],
+            proof_bytes: vec![0xFF],
+            claims_json: "{}".into(),
+        };
+        assert!(!verifier.verify(&fake_proof, b"nonce"));
     }
 
     #[test]
