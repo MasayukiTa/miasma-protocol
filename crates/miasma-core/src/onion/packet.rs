@@ -512,8 +512,7 @@ mod tests {
 
     #[test]
     fn response_encrypt_decrypt() {
-        let mut key = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut key);
+        let key = rand::random::<[u8; 32]>();
         let response = b"DHT response data".to_vec();
 
         let encrypted = encrypt_response(&key, &response).unwrap();

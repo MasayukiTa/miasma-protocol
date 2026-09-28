@@ -148,10 +148,8 @@ mod tests {
     use crate::onion::packet::{encrypt_response, CircuitId};
 
     fn dummy_return_path() -> ReturnPath {
-        let mut r2_r1_key = [0u8; 32];
-        let mut r1_init_key = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut r2_r1_key);
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut r1_init_key);
+        let r2_r1_key = rand::random::<[u8; 32]>();
+        let r1_init_key = rand::random::<[u8; 32]>();
         ReturnPath {
             circuit_id: CircuitId::random(),
             r2_addr: b"addr".to_vec(),
