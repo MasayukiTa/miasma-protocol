@@ -13,7 +13,7 @@ crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
 miasma-core = { path = "../miasma-core" }
-tokio    = { version = "1", features = ["rt-multi-thread", "sync"] }
+tokio    = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 uniffi   = { version = "0.28" }
 thiserror.workspace = true
 anyhow.workspace = true
