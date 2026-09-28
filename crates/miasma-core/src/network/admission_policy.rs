@@ -28,12 +28,16 @@
 /// pow_score       = difficulty_bits × 10   (e.g., 8 bits = 80)
 /// diversity_bonus = 50 if prefix is unique, 0 otherwise
 /// reachability    = 30 if peer responded to probe within timeout
-/// credential      = 100 if valid credential at Verified+ from known issuer
+/// credential      = 0 by default; non-zero only under explicit trusted-issuer policy
 ///
 /// admission_threshold:
 ///   Desktop:      100  (PoW at 10 bits alone suffices)
-///   Mobile:        80  (PoW at 4 bits + credential = 40+100 = 140, passes)
-///   Constrained:   60  (PoW at 4 bits + credential + reachability = 170)
+///   Mobile:        80
+///   Constrained:   60
+///
+/// Credential weights are intentionally disabled in `Default`. The scoring
+/// mechanism remains configurable for a future trust-anchor policy, but bootstrap
+/// peers must not lower one another's admission cost merely by issuing credentials.
 /// ```
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -51,12 +55,6 @@ const DIVERSITY_BONUS: u32 = 50;
 
 /// Bonus for observed reachability (peer responded to probe).
 const REACHABILITY_BONUS: u32 = 30;
-
-/// Bonus for holding a valid credential from a known issuer.
-const CREDENTIAL_BONUS: u32 = 100;
-
-/// Extra bonus for Endorsed-tier credential.
-const ENDORSED_BONUS: u32 = 50;
 
 /// Admission threshold for desktop peers.
 const THRESHOLD_DESKTOP: u32 = 100;
@@ -162,8 +160,11 @@ impl Default for HybridAdmissionPolicy {
             pow_weight: POW_POINTS_PER_BIT,
             diversity_weight: DIVERSITY_BONUS,
             reachability_weight: REACHABILITY_BONUS,
-            credential_weight: CREDENTIAL_BONUS,
-            endorsed_weight: ENDORSED_BONUS,
+            // Quarantined until issuer trust is narrower than bootstrap mode.
+            // A verified peer being allowed to issue a credential must not, by
+            // itself, make new Sybil identities cheaper to admit.
+            credential_weight: 0,
+            endorsed_weight: 0,
             threshold_desktop: THRESHOLD_DESKTOP,
             threshold_mobile: THRESHOLD_MOBILE,
             threshold_constrained: THRESHOLD_CONSTRAINED,
@@ -278,6 +279,13 @@ mod tests {
         HybridAdmissionPolicy::default()
     }
 
+    fn policy_with_credential_scoring() -> HybridAdmissionPolicy {
+        let mut p = HybridAdmissionPolicy::default();
+        p.credential_weight = 100;
+        p.endorsed_weight = 50;
+        p
+    }
+
     #[test]
     fn desktop_pow_only_admits() {
         let p = policy();
@@ -326,8 +334,24 @@ mod tests {
     }
 
     #[test]
-    fn mobile_credential_compensates_low_pow() {
+    fn default_quarantines_credential_bonus() {
         let p = policy();
+        let signals = AdmissionSignals {
+            pow_difficulty: 4,
+            unique_prefix: false,
+            reachable: false,
+            credential_tier: Some(CredentialTier::Endorsed),
+            resource_profile: ResourceProfile::Mobile,
+        };
+        let decision = p.evaluate(&signals);
+        assert_eq!(decision.breakdown.credential_bonus, 0);
+        assert_eq!(decision.score, 40);
+        assert!(!decision.admitted);
+    }
+
+    #[test]
+    fn mobile_credential_compensates_low_pow_when_explicitly_enabled() {
+        let p = policy_with_credential_scoring();
         let signals = AdmissionSignals {
             pow_difficulty: 4,
             unique_prefix: false,
@@ -343,7 +367,7 @@ mod tests {
 
     #[test]
     fn min_pow_enforced_even_with_credential() {
-        let p = policy();
+        let p = policy_with_credential_scoring();
         let signals = AdmissionSignals {
             pow_difficulty: 2, // below MIN_POW_DIFFICULTY (4)
             unique_prefix: true,
@@ -360,8 +384,8 @@ mod tests {
     }
 
     #[test]
-    fn endorsed_gets_extra_bonus() {
-        let p = policy();
+    fn endorsed_gets_extra_bonus_when_explicitly_enabled() {
+        let p = policy_with_credential_scoring();
         let signals_verified = AdmissionSignals {
             pow_difficulty: 4,
             unique_prefix: false,
@@ -379,7 +403,7 @@ mod tests {
         let d_verified = p.evaluate(&signals_verified);
         let d_endorsed = p.evaluate(&signals_endorsed);
         assert!(d_endorsed.score > d_verified.score);
-        assert_eq!(d_endorsed.score - d_verified.score, ENDORSED_BONUS);
+        assert_eq!(d_endorsed.score - d_verified.score, 50);
     }
 
     #[test]
@@ -414,8 +438,8 @@ mod tests {
     }
 
     #[test]
-    fn all_signals_combined() {
-        let p = policy();
+    fn all_signals_combined_with_explicit_credential_scoring() {
+        let p = policy_with_credential_scoring();
         let signals = AdmissionSignals {
             pow_difficulty: 8,
             unique_prefix: true,
@@ -430,8 +454,8 @@ mod tests {
     }
 
     #[test]
-    fn score_breakdown_correct() {
-        let p = policy();
+    fn score_breakdown_correct_with_explicit_credential_scoring() {
+        let p = policy_with_credential_scoring();
         let signals = AdmissionSignals {
             pow_difficulty: 8,
             unique_prefix: true,
@@ -447,8 +471,8 @@ mod tests {
     }
 
     #[test]
-    fn observed_credential_half_bonus() {
-        let p = policy();
+    fn observed_credential_half_bonus_when_explicitly_enabled() {
+        let p = policy_with_credential_scoring();
         let signals = AdmissionSignals {
             pow_difficulty: 8,
             unique_prefix: false,
@@ -457,6 +481,6 @@ mod tests {
             resource_profile: ResourceProfile::Desktop,
         };
         let decision = p.evaluate(&signals);
-        assert_eq!(decision.breakdown.credential_bonus, CREDENTIAL_BONUS / 2);
+        assert_eq!(decision.breakdown.credential_bonus, 50);
     }
 }
