@@ -4577,6 +4577,7 @@ dependencies = [
  "tracing-subscriber",
  "uniffi",
  "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]

@@ -1233,12 +1233,16 @@ async fn cmd_daemon(data_dir: &std::path::Path, bootstrap_addrs: &[String]) -> R
     if !master_key_path.exists() {
         bail!("Node not initialised. Run `miasma init` first.");
     }
-    let master_bytes = std::fs::read(&master_key_path).context("cannot read master.key")?;
-    let master_key: Zeroizing<[u8; 32]> = Zeroizing::new(
-        master_bytes
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("master.key has wrong length"))?,
-    );
+    let master_bytes =
+        Zeroizing::new(std::fs::read(&master_key_path).context("cannot read master.key")?);
+    if master_bytes.len() != 32 {
+        bail!("master.key has wrong length");
+    }
+    let mut master_key = Zeroizing::new([0u8; 32]);
+    master_key.copy_from_slice(&master_bytes);
+    if master_key.iter().all(|byte| *byte == 0) {
+        bail!("master.key is erased/all-zero");
+    }
 
     let store = Arc::new(
         LocalShareStore::open(data_dir, config.storage.quota_mb)

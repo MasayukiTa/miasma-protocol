@@ -352,12 +352,18 @@ impl DaemonServer {
         // the network boundary.
         let (sharing_secret, sharing_pubkey) = {
             let master_key_path = data_dir.join("master.key");
-            let master_bytes = std::fs::read(&master_key_path)
-                .with_context(|| format!("cannot read {}", master_key_path.display()))?;
-            let master_arr: [u8; 32] = master_bytes
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("{} has wrong length", master_key_path.display()))?;
-            let master_key = zeroize::Zeroizing::new(master_arr);
+            let master_bytes = zeroize::Zeroizing::new(
+                std::fs::read(&master_key_path)
+                    .with_context(|| format!("cannot read {}", master_key_path.display()))?,
+            );
+            if master_bytes.len() != 32 {
+                anyhow::bail!("{} has wrong length", master_key_path.display());
+            }
+            let mut master_key = zeroize::Zeroizing::new([0u8; 32]);
+            master_key.copy_from_slice(&master_bytes);
+            if master_key.iter().all(|byte| *byte == 0) {
+                anyhow::bail!("{} is erased/all-zero", master_key_path.display());
+            }
             let secret = crate::crypto::keyderive::derive_sharing_key(master_key.as_ref())
                 .context("cannot derive directed-sharing key")?;
             let static_secret = x25519_dalek::StaticSecret::from(*secret);
@@ -613,7 +619,7 @@ impl DaemonServer {
         ipc_handle.abort();
         rep_handle.abort();
         env_handle.abort();
-        if let Some(handle) = http_bridge_handle {
+        if let Some(handle) = self.http_bridge_handle.take() {
             handle.abort();
         }
 
