@@ -1,7 +1,7 @@
 Next task: make the actual content-transfer layer (publish → DHT → retrieve, and the BitTorrent bridge) work as reliably as it's claimed to, instead of leaving it at the state it was left in when this project was first built.
 
 Current state (as of this investigation, 2026-09-04):
-- The crypto/bypass-design layer (BBS+, AEAD, onion routing) has been reviewed separately and is solid.
+- AEAD/onion crypto was reviewed separately. The former hand-written BBS+ layer was later proven forgeable and deleted; see `docs/adr/006-bbs-plus-known-breaks.md`.
 - The actual content-transfer layer has serious, previously-undiagnosed gaps that undermine the project's core "censorship-resistant" claim:
   - `dissolve_and_publish` currently makes the publishing node the sole holder of every shard. There is no distribution to other peers. Taking the publisher offline makes its content unavailable -- no better than a regular server. Not listed anywhere in README's own "Does NOT resist" section until this was found (now moved there, see README.md).
   - DHT PUT returns success as soon as the record is written to the *local* Kademlia store, without waiting for network propagation -- a real publish/query race for any retriever not colocated with the publisher.
