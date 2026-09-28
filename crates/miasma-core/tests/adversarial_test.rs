@@ -3417,7 +3417,7 @@ fn min_hops_2_skips_single_hop_paths() {
 
 /// VULN-005 regression: distress_wipe scrubs proxy credentials from config.toml.
 #[test]
-fn distress_wipe_scrubs_proxy_credentials() {
+fn distress_wipe_scrubs_transport_secrets() {
     use miasma_core::config::NodeConfig;
     use miasma_core::store::LocalShareStore;
 
@@ -3427,6 +3427,8 @@ fn distress_wipe_scrubs_proxy_credentials() {
     let mut config = NodeConfig::default();
     config.transport.proxy_username = Some("admin".into());
     config.transport.proxy_password = Some("s3cret".into());
+    config.transport.obfuscated_quic_secret = Some("probe-secret".into());
+    config.transport.shadowsocks.password = Some("shadow-psk".into());
     config.save(dir.path()).unwrap();
 
     // Verify credentials are in the file.
@@ -3454,18 +3456,19 @@ fn distress_wipe_scrubs_proxy_credentials() {
         reloaded.transport.proxy_password.is_none(),
         "proxy_password must be scrubbed after distress wipe"
     );
+    assert!(reloaded.transport.obfuscated_quic_secret.is_none());
+    assert!(reloaded.transport.shadowsocks.password.is_none());
 
-    // Verify credentials are not in the raw file content.
+    // Verify secrets are not in the raw file content.
     let raw_after = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
-    assert!(
-        !raw_after.contains("s3cret"),
-        "proxy password must not appear in config.toml after wipe"
-    );
+    assert!(!raw_after.contains("s3cret"));
+    assert!(!raw_after.contains("probe-secret"));
+    assert!(!raw_after.contains("shadow-psk"));
 }
 
-/// VULN-005 regression: config scrub_credentials removes only credential fields.
+/// VULN-005 regression: config scrub removes persisted secrets but preserves ordinary transport settings.
 #[test]
-fn config_scrub_preserves_non_credential_fields() {
+fn config_scrub_preserves_non_secret_fields() {
     use miasma_core::config::NodeConfig;
 
     let dir = tempfile::tempdir().unwrap();
@@ -3475,6 +3478,8 @@ fn config_scrub_preserves_non_credential_fields() {
     config.transport.proxy_addr = Some("127.0.0.1:1080".into());
     config.transport.proxy_username = Some("user".into());
     config.transport.proxy_password = Some("pass".into());
+    config.transport.obfuscated_quic_secret = Some("probe-secret".into());
+    config.transport.shadowsocks.password = Some("shadow-psk".into());
     config.transport.wss_tls_enabled = true;
     config.save(dir.path()).unwrap();
 
@@ -3482,9 +3487,11 @@ fn config_scrub_preserves_non_credential_fields() {
     config.scrub_credentials(dir.path()).unwrap();
     let reloaded = NodeConfig::load(dir.path()).unwrap();
 
-    // Credentials gone.
+    // Persisted secrets gone.
     assert!(reloaded.transport.proxy_username.is_none());
     assert!(reloaded.transport.proxy_password.is_none());
+    assert!(reloaded.transport.obfuscated_quic_secret.is_none());
+    assert!(reloaded.transport.shadowsocks.password.is_none());
 
     // Other transport config preserved.
     assert_eq!(reloaded.transport.proxy_type.as_deref(), Some("socks5"));
@@ -3536,9 +3543,35 @@ fn config_with_credentials_is_restricted() {
     );
 }
 
-/// config.toml without credentials is NOT restricted (normal permissions).
+/// Non-proxy persisted transport secrets also require restricted config permissions.
 #[test]
-fn config_without_credentials_is_not_restricted() {
+fn config_with_non_proxy_secrets_is_restricted() {
+    use miasma_core::config::NodeConfig;
+    use miasma_core::secure_file;
+
+    let configurations: [fn(&mut NodeConfig); 2] = [
+        |config: &mut NodeConfig| {
+            config.transport.obfuscated_quic_secret = Some("probe-secret".into());
+        },
+        |config: &mut NodeConfig| {
+            config.transport.shadowsocks.password = Some("shadow-psk".into());
+        },
+    ];
+    for configure in configurations {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = NodeConfig::default();
+        configure(&mut config);
+        config.save(dir.path()).unwrap();
+        assert!(
+            secure_file::verify_restricted(&dir.path().join("config.toml")).unwrap(),
+            "config containing any persisted transport secret must be restricted"
+        );
+    }
+}
+
+/// config.toml without persisted secrets is NOT restricted (normal permissions).
+#[test]
+fn config_without_secrets_is_not_restricted() {
     use miasma_core::config::NodeConfig;
     use miasma_core::secure_file;
 
@@ -3584,9 +3617,9 @@ fn config_adding_credentials_restricts_existing_file() {
     );
 }
 
-/// Scrubbing credentials and re-saving removes the restriction.
+/// Scrubbing and re-saving removes all persisted secret values.
 #[test]
-fn config_scrub_then_save_removes_restriction() {
+fn config_scrub_then_save_removes_secrets() {
     use miasma_core::config::NodeConfig;
     use miasma_core::secure_file;
 
@@ -3596,6 +3629,8 @@ fn config_scrub_then_save_removes_restriction() {
     let mut config = NodeConfig::default();
     config.transport.proxy_username = Some("user".into());
     config.transport.proxy_password = Some("pass".into());
+    config.transport.obfuscated_quic_secret = Some("probe-secret".into());
+    config.transport.shadowsocks.password = Some("shadow-psk".into());
     config.save(dir.path()).unwrap();
 
     let config_path = dir.path().join("config.toml");
@@ -3610,6 +3645,8 @@ fn config_scrub_then_save_removes_restriction() {
     let reloaded = NodeConfig::load(dir.path()).unwrap();
     assert!(reloaded.transport.proxy_username.is_none());
     assert!(reloaded.transport.proxy_password.is_none());
+    assert!(reloaded.transport.obfuscated_quic_secret.is_none());
+    assert!(reloaded.transport.shadowsocks.password.is_none());
 }
 
 /// secure_file::write_restricted creates a file readable by the current user.
