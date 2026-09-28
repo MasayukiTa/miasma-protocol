@@ -1,48 +1,31 @@
-/// Hybrid admission policy — multi-signal Sybil resistance.
+/// Hybrid admission policy ? first-contact Sybil resistance.
 ///
 /// # Design
 ///
-/// A pure PoW admission model penalises resource-constrained devices (mobile,
-/// IoT) while providing only one axis of Sybil cost. This module implements
-/// a hybrid admission model that combines multiple signals:
-///
-/// 1. **PoW cost** — required, but difficulty can be lower for vouched peers.
-/// 2. **IP diversity** — enforced via the routing table's prefix limits.
-/// 3. **Observed reachability** — bonus for peers that respond to liveness probes.
-/// 4. **Trust credentials** — vouched peers can partially substitute PoW cost.
-/// 5. **Resource profile** — mobile/constrained devices get adjusted thresholds.
-///
-/// # Mobile friendliness
-///
-/// The key insight: mobile devices can't cheaply produce high-difficulty PoW,
-/// but they CAN be vouched for by desktop peers that have already been admitted.
-/// A credential from a known issuer substitutes for part of the PoW cost,
-/// keeping the total Sybil cost high without requiring every device to spend
-/// CPU.
+/// First-contact admission only consumes signals available before the
+/// credential/descriptor exchange: verified PoW, observed IP-prefix diversity,
+/// externally probed reachability, and resource profile. Credential tier is
+/// deliberately absent: bootstrap peers can issue credentials to one another,
+/// and those credentials are obtained only after admission. Reintroducing them
+/// here would recreate circular/self-issued trust and lower Sybil cost.
 ///
 /// # Scoring model
 ///
 /// ```text
-/// admission_score = pow_score + diversity_bonus + reachability_bonus + credential_bonus
+/// admission_score = pow_score + diversity_bonus + reachability_bonus
 ///
-/// pow_score       = difficulty_bits × 10   (e.g., 8 bits = 80)
+/// pow_score       = difficulty_bits ? 10
 /// diversity_bonus = 50 if prefix is unique, 0 otherwise
-/// reachability    = 30 if peer responded to probe within timeout
-/// credential      = 0 by default; non-zero only under explicit trusted-issuer policy
+/// reachability    = 30 only after an explicit external probe succeeds
 ///
 /// admission_threshold:
-///   Desktop:      100  (PoW at 10 bits alone suffices)
+///   Desktop:      100
 ///   Mobile:        80
 ///   Constrained:   60
-///
-/// Credential weights are intentionally disabled in `Default`. The scoring
-/// mechanism remains configurable for a future trust-anchor policy, but bootstrap
-/// peers must not lower one another's admission cost merely by issuing credentials.
 /// ```
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use super::credential::CredentialTier;
 use super::descriptor::ResourceProfile;
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -82,8 +65,6 @@ pub struct AdmissionSignals {
     pub unique_prefix: bool,
     /// Whether the peer responded to a reachability probe.
     pub reachable: bool,
-    /// Best credential tier presented, if any.
-    pub credential_tier: Option<CredentialTier>,
     /// Resource profile declared by the peer.
     pub resource_profile: ResourceProfile,
 }
@@ -109,7 +90,6 @@ pub struct ScoreBreakdown {
     pub pow_score: u32,
     pub diversity_bonus: u32,
     pub reachability_bonus: u32,
-    pub credential_bonus: u32,
 }
 
 /// Why a peer was rejected under the hybrid model.
@@ -144,10 +124,6 @@ pub struct HybridAdmissionPolicy {
     pub diversity_weight: u32,
     /// Bonus for observed reachability.
     pub reachability_weight: u32,
-    /// Bonus for valid credential.
-    pub credential_weight: u32,
-    /// Extra bonus for Endorsed tier.
-    pub endorsed_weight: u32,
     /// Threshold per resource profile.
     pub threshold_desktop: u32,
     pub threshold_mobile: u32,
@@ -162,11 +138,6 @@ impl Default for HybridAdmissionPolicy {
             pow_weight: POW_POINTS_PER_BIT,
             diversity_weight: DIVERSITY_BONUS,
             reachability_weight: REACHABILITY_BONUS,
-            // Quarantined until issuer trust is narrower than bootstrap mode.
-            // A verified peer being allowed to issue a credential must not, by
-            // itself, make new Sybil identities cheaper to admit.
-            credential_weight: 0,
-            endorsed_weight: 0,
             threshold_desktop: THRESHOLD_DESKTOP,
             threshold_mobile: THRESHOLD_MOBILE,
             threshold_constrained: THRESHOLD_CONSTRAINED,
@@ -188,7 +159,6 @@ impl HybridAdmissionPolicy {
                     pow_score: 0,
                     diversity_bonus: 0,
                     reachability_bonus: 0,
-                    credential_bonus: 0,
                 },
                 rejection_reason: Some(HybridRejection::InsufficientMinPoW {
                     required: self.min_pow,
@@ -208,26 +178,18 @@ impl HybridAdmissionPolicy {
         } else {
             0
         };
-        let credential_bonus = match signals.credential_tier {
-            Some(CredentialTier::Endorsed) => self.credential_weight + self.endorsed_weight,
-            Some(CredentialTier::Verified) => self.credential_weight,
-            Some(CredentialTier::Observed) => self.credential_weight / 2,
-            None => 0,
-        };
-
-        let total = pow_score + diversity_bonus + reachability_bonus + credential_bonus;
+        let total = pow_score + diversity_bonus + reachability_bonus;
         let threshold = self.threshold_for(signals.resource_profile);
 
         let breakdown = ScoreBreakdown {
             pow_score,
             diversity_bonus,
             reachability_bonus,
-            credential_bonus,
         };
 
         if total >= threshold {
             info!(
-                "admission.hybrid_admitted score={total} threshold={threshold} pow={} div={diversity_bonus} reach={reachability_bonus} cred={credential_bonus}",
+                "admission.hybrid_admitted score={total} threshold={threshold} pow={} div={diversity_bonus} reach={reachability_bonus}",
                 pow_score
             );
             AdmissionDecision {
@@ -281,14 +243,6 @@ mod tests {
         HybridAdmissionPolicy::default()
     }
 
-    fn policy_with_credential_scoring() -> HybridAdmissionPolicy {
-        let mut p = HybridAdmissionPolicy::default();
-        p.min_pow = 4;
-        p.credential_weight = 100;
-        p.endorsed_weight = 50;
-        p
-    }
-
     #[test]
     fn default_pow_floor_matches_honest_mining_difficulty() {
         let p = policy();
@@ -296,96 +250,61 @@ mod tests {
     }
 
     #[test]
-    fn desktop_pow_only_admits() {
+    fn desktop_pow_only_admits_at_threshold() {
         let p = policy();
-        let signals = AdmissionSignals {
+        let decision = p.evaluate(&AdmissionSignals {
             pow_difficulty: 10,
             unique_prefix: false,
             reachable: false,
-            credential_tier: None,
             resource_profile: ResourceProfile::Desktop,
-        };
-        let decision = p.evaluate(&signals);
-        // 10 * 10 = 100 >= 100
+        });
         assert!(decision.admitted);
         assert_eq!(decision.score, 100);
+        assert_eq!(decision.threshold, 100);
     }
 
     #[test]
-    fn desktop_low_pow_rejects() {
+    fn desktop_default_pow_without_other_signal_rejects() {
         let p = policy();
-        let signals = AdmissionSignals {
-            pow_difficulty: 8,
+        let decision = p.evaluate(&AdmissionSignals {
+            pow_difficulty: super::super::sybil::DEFAULT_POW_DIFFICULTY,
             unique_prefix: false,
             reachable: false,
-            credential_tier: None,
             resource_profile: ResourceProfile::Desktop,
-        };
-        let decision = p.evaluate(&signals);
-        // 8 * 10 = 80 < 100
+        });
         assert!(!decision.admitted);
+        assert_eq!(decision.score, 80);
+        assert!(matches!(
+            decision.rejection_reason,
+            Some(HybridRejection::ScoreBelowThreshold { .. })
+        ));
     }
 
     #[test]
-    fn desktop_pow_plus_diversity_admits() {
+    fn desktop_default_pow_plus_diversity_admits() {
         let p = policy();
-        let signals = AdmissionSignals {
-            pow_difficulty: 8,
+        let decision = p.evaluate(&AdmissionSignals {
+            pow_difficulty: super::super::sybil::DEFAULT_POW_DIFFICULTY,
             unique_prefix: true,
             reachable: false,
-            credential_tier: None,
             resource_profile: ResourceProfile::Desktop,
-        };
-        let decision = p.evaluate(&signals);
-        // 80 + 50 = 130 >= 100
+        });
         assert!(decision.admitted);
+        assert_eq!(decision.score, 130);
         assert_eq!(decision.breakdown.diversity_bonus, 50);
     }
 
     #[test]
-    fn default_quarantines_credential_bonus() {
+    fn min_pow_enforced_before_other_signals() {
         let p = policy();
-        let signals = AdmissionSignals {
-            pow_difficulty: super::super::sybil::DEFAULT_POW_DIFFICULTY,
-            unique_prefix: false,
-            reachable: false,
-            credential_tier: Some(CredentialTier::Endorsed),
-            resource_profile: ResourceProfile::Desktop,
-        };
-        let decision = p.evaluate(&signals);
-        assert_eq!(decision.breakdown.credential_bonus, 0);
-        assert_eq!(decision.score, 80);
-        assert!(!decision.admitted);
-    }
-
-    #[test]
-    fn mobile_credential_compensates_low_pow_when_explicitly_enabled() {
-        let p = policy_with_credential_scoring();
-        let signals = AdmissionSignals {
-            pow_difficulty: 4,
-            unique_prefix: false,
-            reachable: false,
-            credential_tier: Some(CredentialTier::Verified),
-            resource_profile: ResourceProfile::Mobile,
-        };
-        let decision = p.evaluate(&signals);
-        // 4*10 + 100 = 140 >= 80
-        assert!(decision.admitted);
-        assert_eq!(decision.breakdown.credential_bonus, 100);
-    }
-
-    #[test]
-    fn min_pow_enforced_even_with_credential() {
-        let p = policy_with_credential_scoring();
-        let signals = AdmissionSignals {
-            pow_difficulty: 2, // below MIN_POW_DIFFICULTY (4)
+        let decision = p.evaluate(&AdmissionSignals {
+            pow_difficulty: p.min_pow - 1,
             unique_prefix: true,
             reachable: true,
-            credential_tier: Some(CredentialTier::Endorsed),
-            resource_profile: ResourceProfile::Mobile,
-        };
-        let decision = p.evaluate(&signals);
+            resource_profile: ResourceProfile::Constrained,
+        });
         assert!(!decision.admitted);
+        assert_eq!(decision.score, 0);
         assert!(matches!(
             decision.rejection_reason,
             Some(HybridRejection::InsufficientMinPoW { .. })
@@ -393,104 +312,60 @@ mod tests {
     }
 
     #[test]
-    fn endorsed_gets_extra_bonus_when_explicitly_enabled() {
-        let p = policy_with_credential_scoring();
-        let signals_verified = AdmissionSignals {
-            pow_difficulty: 4,
-            unique_prefix: false,
-            reachable: false,
-            credential_tier: Some(CredentialTier::Verified),
-            resource_profile: ResourceProfile::Desktop,
-        };
-        let signals_endorsed = AdmissionSignals {
-            pow_difficulty: 4,
-            unique_prefix: false,
-            reachable: false,
-            credential_tier: Some(CredentialTier::Endorsed),
-            resource_profile: ResourceProfile::Desktop,
-        };
-        let d_verified = p.evaluate(&signals_verified);
-        let d_endorsed = p.evaluate(&signals_endorsed);
-        assert!(d_endorsed.score > d_verified.score);
-        assert_eq!(d_endorsed.score - d_verified.score, 50);
-    }
-
-    #[test]
-    fn constrained_lower_threshold() {
+    fn mobile_default_pow_meets_mobile_threshold() {
         let p = policy();
-        let signals = AdmissionSignals {
+        let decision = p.evaluate(&AdmissionSignals {
             pow_difficulty: super::super::sybil::DEFAULT_POW_DIFFICULTY,
             unique_prefix: false,
             reachable: false,
-            credential_tier: None,
-            resource_profile: ResourceProfile::Constrained,
-        };
-        let decision = p.evaluate(&signals);
-        // 8 * 10 = 80: enough for constrained (60), but not desktop (100).
+            resource_profile: ResourceProfile::Mobile,
+        });
         assert!(decision.admitted);
         assert_eq!(decision.score, 80);
+        assert_eq!(decision.threshold, 80);
     }
 
     #[test]
-    fn reachability_bonus_applied() {
+    fn constrained_default_pow_meets_constrained_threshold() {
         let p = policy();
-        let signals = AdmissionSignals {
-            pow_difficulty: 8,
+        let decision = p.evaluate(&AdmissionSignals {
+            pow_difficulty: super::super::sybil::DEFAULT_POW_DIFFICULTY,
+            unique_prefix: false,
+            reachable: false,
+            resource_profile: ResourceProfile::Constrained,
+        });
+        assert!(decision.admitted);
+        assert_eq!(decision.score, 80);
+        assert_eq!(decision.threshold, 60);
+    }
+
+    #[test]
+    fn reachability_bonus_applied_only_when_signal_true() {
+        let p = policy();
+        let decision = p.evaluate(&AdmissionSignals {
+            pow_difficulty: super::super::sybil::DEFAULT_POW_DIFFICULTY,
             unique_prefix: false,
             reachable: true,
-            credential_tier: None,
             resource_profile: ResourceProfile::Desktop,
-        };
-        let decision = p.evaluate(&signals);
-        // 80 + 30 = 110 >= 100
+        });
         assert!(decision.admitted);
+        assert_eq!(decision.score, 110);
         assert_eq!(decision.breakdown.reachability_bonus, 30);
     }
 
     #[test]
-    fn all_signals_combined_with_explicit_credential_scoring() {
-        let p = policy_with_credential_scoring();
-        let signals = AdmissionSignals {
-            pow_difficulty: 8,
+    fn score_breakdown_contains_only_pre_admission_signals() {
+        let p = policy();
+        let decision = p.evaluate(&AdmissionSignals {
+            pow_difficulty: super::super::sybil::DEFAULT_POW_DIFFICULTY,
             unique_prefix: true,
             reachable: true,
-            credential_tier: Some(CredentialTier::Endorsed),
             resource_profile: ResourceProfile::Desktop,
-        };
-        let decision = p.evaluate(&signals);
-        // 80 + 50 + 30 + 150 = 310
+        });
         assert!(decision.admitted);
-        assert_eq!(decision.score, 310);
-    }
-
-    #[test]
-    fn score_breakdown_correct_with_explicit_credential_scoring() {
-        let p = policy_with_credential_scoring();
-        let signals = AdmissionSignals {
-            pow_difficulty: 8,
-            unique_prefix: true,
-            reachable: true,
-            credential_tier: Some(CredentialTier::Verified),
-            resource_profile: ResourceProfile::Desktop,
-        };
-        let decision = p.evaluate(&signals);
+        assert_eq!(decision.score, 160);
         assert_eq!(decision.breakdown.pow_score, 80);
         assert_eq!(decision.breakdown.diversity_bonus, 50);
         assert_eq!(decision.breakdown.reachability_bonus, 30);
-        assert_eq!(decision.breakdown.credential_bonus, 100);
-    }
-
-    #[test]
-    fn observed_credential_half_bonus_when_explicitly_enabled() {
-        let p = policy_with_credential_scoring();
-        let signals = AdmissionSignals {
-            pow_difficulty: 8,
-            unique_prefix: false,
-            reachable: false,
-            credential_tier: Some(CredentialTier::Observed),
-            resource_profile: ResourceProfile::Desktop,
-        };
-        let decision = p.evaluate(&signals);
-        assert_eq!(decision.breakdown.credential_bonus, 50);
     }
 }

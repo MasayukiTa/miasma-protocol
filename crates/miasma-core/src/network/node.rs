@@ -2998,13 +2998,9 @@ impl MiasmaNode {
             })
             .unwrap_or(false);
 
-        // Admission intentionally does not consume credential tier. This PoW
-        // decision happens before the post-admission credential and challenged
-        // descriptor exchanges, so there is no verifier-authenticated presentation
-        // available for this connection yet. Feeding descriptor claims here would
-        // either reintroduce self-declared trust or create a circular admission
-        // dependency. Credential scoring remains quarantined in the default policy.
-        let credential_tier = None;
+        // Admission intentionally has no credential signal. This decision happens
+        // before the post-admission credential and challenged descriptor exchanges;
+        // reintroducing tier here would create circular or self-issued trust.
 
         // Evaluate using hybrid admission policy.
         let signals = AdmissionSignals {
@@ -3014,7 +3010,6 @@ impl MiasmaNode {
             // the externally-reachable liveness signal this bonus is meant to model.
             // Keep the bonus at zero until an explicit probe result is wired here.
             reachable: false,
-            credential_tier,
             resource_profile: ResourceProfile::Desktop, // default until descriptor received
         };
 

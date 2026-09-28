@@ -111,11 +111,11 @@ mechanism, but the production first-contact path is deliberately narrower:
 - PoW is verified and must meet the 8-bit absolute floor.
 - IP-prefix diversity can contribute to admission score.
 - Reachability contributes zero until an explicit external probe result is wired.
-- Credential and Endorsed bonuses are zero by default and the first-contact path
-  supplies no credential tier, avoiding circular or self-declared trust.
+- Credential tier is absent from the first-contact admission API; there is no
+  credential-weight knob to accidentally re-enable under bootstrap issuance.
 
-A future re-enable of credential-derived admission weight requires a stronger
-issuer authority model and a non-circular pre-admission credential path.
+Any future credential-assisted admission mechanism requires a separate design
+with a stronger issuer authority model and a non-circular pre-admission path.
 
 ## Implementation
 
