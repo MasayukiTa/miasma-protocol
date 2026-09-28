@@ -3,7 +3,7 @@
 /// Transport: TCP + QUIC for local loopback testing and production paths
 /// DHT: Kademlia via `DhtHandle` / `OnionAwareDhtExecutor` (ADR-002)
 /// Share exchange: `/miasma/share/1.0.0` request-response protocol
-/// Admission: `/miasma/admission/1.0.0` PoW proof exchange (ADR-004)
+/// Admission: `/miasma/admission/1.1.0` PoW proof exchange (ADR-004)
 /// Credential: `/miasma/credential/1.2.0` credential exchange (ADR-005)
 /// Descriptor: `/miasma/descriptor/1.2.0` descriptor exchange (ADR-005)
 /// NAT: AutoNAT + DCUtR + relay
@@ -135,6 +135,12 @@ pub struct AdmissionRequest {
 pub struct AdmissionResponse {
     /// The responding node's PoW proof.
     pub pow: NodeIdPoW,
+    /// Whether the responder admitted the requester. A valid responder PoW is
+    /// not sufficient for promotion unless this is true.
+    pub accepted: bool,
+    /// Responder's enforced minimum PoW floor. Diagnostic feedback only; callers
+    /// must not automatically mine arbitrary peer-requested work.
+    pub required_pow_floor: u8,
 }
 
 // ─── Credential exchange wire types (ADR-005 Phase 4b) ──────────────────────
@@ -624,7 +630,7 @@ impl request_response::Codec for ShareStoreCodec {
 
 // ─── AdmissionCodec ──────────────────────────────────────────────────────────
 
-/// Bincode + 4-byte LE length-prefix codec for `/miasma/admission/1.0.0`.
+/// Bincode + 4-byte LE length-prefix codec for `/miasma/admission/1.1.0`.
 #[derive(Clone, Default)]
 pub struct AdmissionCodec;
 
@@ -1535,7 +1541,7 @@ pub struct MiasmaBehaviour {
     pub(crate) share_exchange: request_response::Behaviour<ShareCodec>,
     /// Share push: `/miasma/share-store/1.0.0` request-response (Phase 2.1).
     pub(crate) share_store: request_response::Behaviour<ShareStoreCodec>,
-    /// PoW admission: `/miasma/admission/1.0.0` request-response.
+    /// PoW admission: `/miasma/admission/1.1.0` request-response.
     pub(crate) admission: request_response::Behaviour<AdmissionCodec>,
     /// Credential exchange: `/miasma/credential/1.2.0` request-response.
     pub(crate) credential_exchange: request_response::Behaviour<CredentialCodec>,
@@ -3025,6 +3031,22 @@ impl MiasmaNode {
         }
     }
 
+    /// Verify an admission response as a mutually accepted exchange.
+    ///
+    /// A responder proof demonstrates only the responder's work. Promotion also
+    /// requires explicit confirmation that the responder accepted our request;
+    /// otherwise one side can reject while the other still records Verified.
+    fn verify_remote_admission_response(
+        &self,
+        peer_id: &PeerId,
+        response: &AdmissionResponse,
+    ) -> Result<(), RejectionReason> {
+        if !response.accepted {
+            return Err(RejectionReason::RemoteRejected);
+        }
+        self.verify_remote_pow(peer_id, &response.pow)
+    }
+
     /// Handle admission protocol events.
     fn handle_admission_event(
         &mut self,
@@ -3047,6 +3069,8 @@ impl MiasmaNode {
                         // Respond with our own PoW.
                         let resp = AdmissionResponse {
                             pow: self.local_pow.clone(),
+                            accepted: true,
+                            required_pow_floor: self.admission_policy.min_pow,
                         };
                         let _ = self
                             .swarm
@@ -3063,6 +3087,8 @@ impl MiasmaNode {
                         // Still respond (protocol requires it) but peer won't be promoted.
                         let resp = AdmissionResponse {
                             pow: self.local_pow.clone(),
+                            accepted: false,
+                            required_pow_floor: self.admission_policy.min_pow,
                         };
                         let _ = self
                             .swarm
@@ -3083,13 +3109,16 @@ impl MiasmaNode {
                 ..
             } => {
                 self.pending_admissions.remove(&request_id);
-                match self.verify_remote_pow(&peer, &response.pow) {
+                match self.verify_remote_admission_response(&peer, &response) {
                     Ok(()) => {
                         info!("admission.verified peer={peer}");
                         self.promote_peer_to_verified(peer, response.pow);
                     }
                     Err(reason) => {
-                        warn!("admission.rejected peer={peer} reason={reason}");
+                        warn!(
+                            "admission.rejected peer={peer} reason={reason} remote_pow_floor={}",
+                            response.required_pow_floor
+                        );
                         self.peer_registry.record_rejection();
                     }
                 }
@@ -4358,7 +4387,7 @@ fn build_swarm(
 
             let admission = request_response::Behaviour::<AdmissionCodec>::new(
                 [(
-                    StreamProtocol::new("/miasma/admission/1.0.0"),
+                    StreamProtocol::new("/miasma/admission/1.1.0"),
                     request_response::ProtocolSupport::Full,
                 )],
                 request_response::Config::default(),
@@ -4597,6 +4626,39 @@ mod admission_pow_tests {
         assert_eq!(node.dht_signing_key.verifying_key().to_bytes(), pow.pubkey);
         assert!(sybil::verify_pow(&pow, node.admission_policy.min_pow));
         assert_eq!(node.verify_remote_pow(&peer, &pow), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn admission_response_requires_remote_acceptance() {
+        let mut node = make_node();
+        let peer_seed = rand::random::<[u8; 32]>();
+        let peer_key = ed25519_dalek::SigningKey::from_bytes(&peer_seed);
+        let peer_pubkey = peer_key.verifying_key().to_bytes();
+        let ed_pubkey = libp2p::identity::ed25519::PublicKey::try_from_bytes(&peer_pubkey).unwrap();
+        let peer_id = PeerId::from(libp2p::identity::PublicKey::from(ed_pubkey));
+        node.pending_peer_addrs
+            .insert(peer_id, vec!["/ip4/203.0.113.10/tcp/4001".parse().unwrap()]);
+        let pow = pow_with_exact_difficulty(peer_pubkey, node.admission_policy.min_pow as u32);
+
+        let rejected = AdmissionResponse {
+            pow: pow.clone(),
+            accepted: false,
+            required_pow_floor: node.admission_policy.min_pow,
+        };
+        assert_eq!(
+            node.verify_remote_admission_response(&peer_id, &rejected),
+            Err(RejectionReason::RemoteRejected)
+        );
+
+        let accepted = AdmissionResponse {
+            pow,
+            accepted: true,
+            required_pow_floor: node.admission_policy.min_pow,
+        };
+        assert_eq!(
+            node.verify_remote_admission_response(&peer_id, &accepted),
+            Ok(())
+        );
     }
 
     #[tokio::test]
