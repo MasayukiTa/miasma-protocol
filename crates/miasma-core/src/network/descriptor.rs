@@ -483,24 +483,6 @@ impl PeerDescriptor {
             .map(|c| c.credential.body.tier >= min_tier)
             .unwrap_or(false)
     }
-
-    /// Extract the credential tier from the BBS+ proof's disclosed attributes, if present.
-    ///
-    /// Returns `None` if no BBS+ proof is attached or if tier (index 1) is not disclosed.
-    pub fn bbs_tier(&self) -> Option<CredentialTier> {
-        let proof = self.bbs_proof.as_ref()?;
-        let tier_val = proof
-            .disclosed
-            .iter()
-            .find(|&&(idx, _)| idx == 1)
-            .map(|&(_, val)| val)?;
-        match tier_val {
-            1 => Some(CredentialTier::Observed),
-            2 => Some(CredentialTier::Verified),
-            3 => Some(CredentialTier::Endorsed),
-            _ => None,
-        }
-    }
 }
 
 // ─── Descriptor store ───────────────────────────────────────────────────────
