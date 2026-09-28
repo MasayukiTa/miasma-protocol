@@ -16,7 +16,7 @@ pub mod routing;
 pub mod sybil;
 pub mod types;
 
-pub use admission_policy::{AdmissionPolicyStats, HybridAdmissionPolicy};
+pub use admission_policy::AdmissionPolicy;
 pub use connection_health::{
     ConnectionHealthMonitor, ConnectionHealthSnapshot, DialBackoff, PeerConnectionScore,
     StaleAddressPruner,

@@ -480,15 +480,8 @@ impl RoutingTable {
             let old = self.current_difficulty;
             self.current_difficulty = recommended;
             info!(
-                "PoW difficulty adjusted: {} → {} bits (median network size: {})",
-                old,
-                recommended,
-                self.difficulty_observations
-                    .iter()
-                    .map(|(_, s)| *s)
-                    .sum::<usize>()
-                    .checked_div(self.difficulty_observations.len())
-                    .unwrap_or(0)
+                "PoW difficulty recommendation updated from {} to {} bits",
+                old, recommended
             );
             Some(recommended)
         } else {

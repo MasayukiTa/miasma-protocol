@@ -12,12 +12,10 @@
 /// 3. **Poisoned descriptors**: inject descriptors with forged credentials
 /// 4. **Credential replay**: present expired or stolen credentials
 /// 5. **Routing pressure**: dominate peer selection through fake reliability
-/// 6. **Hybrid admission gaming**: minimise admission cost while Sybiling
+/// 6. **Admission gaming**: minimise PoW cost while Sybiling
 use libp2p::PeerId;
 use miasma_core::network::address::AddressTrust;
-use miasma_core::network::admission_policy::{
-    AdmissionSignals, HybridAdmissionPolicy, HybridRejection,
-};
+use miasma_core::network::admission_policy::AdmissionPolicy;
 use miasma_core::network::credential::{
     self, CredentialIssuer, CredentialPresentation, CredentialTier, EphemeralIdentity, CAP_ROUTE,
     CAP_STORE,
@@ -410,63 +408,15 @@ fn routing_dilution_attack_mitigated_by_diversity() {
     assert_eq!(honest_in_top_3, 3, "honest peers should occupy top 3 spots");
 }
 
-// ─── Scenario 6: Hybrid admission gaming ────────────────────────────────────
+// ??? Scenario 6: Admission work-floor gaming ?????????????????????????????????
 
-/// Attacker tries to minimise PoW cost while keeping a fresh prefix. The
-/// absolute PoW floor must reject before scoring.
+/// No secondary signal may compensate for insufficient identity-generation work.
 #[test]
-fn hybrid_admission_pow_floor_prevents_gaming() {
-    let policy = HybridAdmissionPolicy::default();
-
-    // Attacker: PoW at 2 bits with a favorable diversity signal.
-    let signals = AdmissionSignals {
-        pow_difficulty: 2,
-        unique_prefix: true,
-    };
-
-    let decision = policy.evaluate(&signals);
-    assert!(
-        !decision.admitted,
-        "below minimum PoW should always be rejected"
-    );
-    assert!(matches!(
-        decision.rejection_reason,
-        Some(HybridRejection::InsufficientMinPoW { .. })
-    ));
-}
-
-/// Attacker generates many low-work peers. The same absolute PoW floor applies.
-#[test]
-fn hybrid_admission_low_pow_sybil_still_rejected() {
-    let policy = HybridAdmissionPolicy::default();
-
-    // Peer below the production 8-bit PoW floor, not reachable.
-    let signals = AdmissionSignals {
-        pow_difficulty: 4,
-        unique_prefix: false,
-    };
-
-    let decision = policy.evaluate(&signals);
-    // 4*10 = 40 < 80 (mobile threshold)
-    assert!(!decision.admitted, "sybil below the PoW floor should fail");
-}
-
-/// Prefix diversity cannot bypass the production PoW floor.
-#[test]
-fn hybrid_admission_diversity_does_not_bypass_pow_floor() {
-    let policy = HybridAdmissionPolicy::default();
-
-    let signals = AdmissionSignals {
-        pow_difficulty: 4,
-        unique_prefix: true,
-    };
-
-    let decision = policy.evaluate(&signals);
-    assert!(!decision.admitted);
-    assert!(matches!(
-        decision.rejection_reason,
-        Some(HybridRejection::InsufficientMinPoW { .. })
-    ));
+fn admission_pow_floor_prevents_gaming() {
+    let policy = AdmissionPolicy::default();
+    assert!(!policy.accepts_pow_difficulty(2));
+    assert!(!policy.accepts_pow_difficulty(policy.min_pow - 1));
+    assert!(policy.accepts_pow_difficulty(policy.min_pow));
 }
 
 // ─── Scenario 7: Path selection under adversarial relay set ─────────────────
@@ -698,41 +648,13 @@ fn descriptor_pseudonym_hijack_requires_valid_signature() {
     assert!(attacker_desc.verify_signature(&attacker_key.verifying_key()));
 }
 
-// ─── Scenario 11: Hybrid admission boundary conditions ──────────────────────
+// ??? Scenario 11: Admission work boundary ????????????????????????????????????
 
-/// Prefix diversity still cannot bypass the absolute PoW floor.
 #[test]
-fn hybrid_admission_diversity_cannot_bypass_min_pow() {
-    let policy = HybridAdmissionPolicy::default();
-
-    let signals = AdmissionSignals {
-        pow_difficulty: 3, // below the 8-bit production floor
-        unique_prefix: true,
-    };
-
-    let decision = policy.evaluate(&signals);
-    assert!(
-        !decision.admitted,
-        "peer below PoW floor should be rejected"
-    );
-}
-
-/// Peer at the exact first-contact threshold boundary.
-#[test]
-fn hybrid_admission_exact_threshold() {
-    let policy = HybridAdmissionPolicy::default();
-
-    // Threshold is 100. PoW=10 (10*10=100) lands exactly on it.
-    let signals = AdmissionSignals {
-        pow_difficulty: 10,
-        unique_prefix: false,
-    };
-
-    let decision = policy.evaluate(&signals);
-    assert!(
-        decision.admitted,
-        "peer at exact threshold should be admitted"
-    );
+fn admission_exact_pow_floor_is_accepted_by_policy() {
+    let policy = AdmissionPolicy::default();
+    assert!(policy.accepts_pow_difficulty(policy.min_pow));
+    assert!(!policy.accepts_pow_difficulty(policy.min_pow - 1));
 }
 
 // ─── Scenario 12: Path selection with hostile relay injection ────────────────

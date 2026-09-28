@@ -48,14 +48,13 @@ pub use dissolution::{
 pub use error::MiasmaError;
 pub use libp2p::{Multiaddr, PeerId};
 pub use network::{
-    AdmissionPolicyStats, AdmissionStats, AnonymityPolicy, BypassOnionDhtExecutor, CredentialStats,
+    AdmissionPolicy, AdmissionStats, AnonymityPolicy, BypassOnionDhtExecutor, CredentialStats,
     CredentialTier, CredentialWallet, DescriptorStats, DescriptorStore, DhtHandle,
-    DirectDhtExecutor, DiversityViolation, HybridAdmissionPolicy, IssuerRegistry,
-    MiasmaCoordinator, MiasmaNode, NetworkShareFetcher, NetworkShareSink, NodeType,
-    OnionAwareDhtExecutor, OutcomeMetrics, PathSelectionStats, PeerCapabilities, PeerDescriptor,
-    PeerRegistry, PublishOptions, PublishReport, ReachabilityKind, RejectionReason,
-    ResourceProfile, RoutingStats, ShareExchangeHandle, StoreRejectReason, StoreResponse,
-    TopologyEvent,
+    DirectDhtExecutor, DiversityViolation, IssuerRegistry, MiasmaCoordinator, MiasmaNode,
+    NetworkShareFetcher, NetworkShareSink, NodeType, OnionAwareDhtExecutor, OutcomeMetrics,
+    PathSelectionStats, PeerCapabilities, PeerDescriptor, PeerRegistry, PublishOptions,
+    PublishReport, ReachabilityKind, RejectionReason, ResourceProfile, RoutingStats,
+    ShareExchangeHandle, StoreRejectReason, StoreResponse, TopologyEvent,
 };
 pub use onion::{
     CircuitId, CircuitManager, InProcessRelay, LiveOnionDhtExecutor, LiveOnionShareFetcher,

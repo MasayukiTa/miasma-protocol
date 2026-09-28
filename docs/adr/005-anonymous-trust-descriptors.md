@@ -5,8 +5,8 @@
 > Security repair note (2026-09-28): the Phase 4b BBS+ implementation and
 > descriptor BBS carrier described in the historical implementation log below
 > were deleted in `ac996f9` after confirmed forgeries. Current credential wire is
-> 1.2, descriptor wire is 1.2, production admission gives credential tier zero
-> score, and path selection does not use credential tier as relay authority.
+> 1.2, descriptor wire is 1.2, first-contact admission has no credential-tier
+> input at all, and path selection does not use credential tier as relay authority.
 > Current descriptors remain associated with a verified libp2p identity; epoch
 > holder tags therefore do not provide network-level unlinkability. See ADR-006.
 
@@ -28,8 +28,9 @@ necessary but insufficient for a truly Freenet-like system because:
    default retrieval path is direct. Anonymity should be the design centre,
    not an optional add-on.
 
-4. **Single-axis Sybil resistance.** PoW alone penalises resource-constrained
-   devices (mobile) while providing only one cost axis for attackers.
+4. **Sybil resistance must not be compensating-score based.** PoW generation
+   cost and IP-prefix diversity are independent hard constraints. Device class,
+   reachability and post-admission credentials cannot lower either boundary.
 
 5. **No adversarial testing.** The trust model has unit tests but no
    simulation of realistic attack scenarios.
@@ -103,20 +104,24 @@ Path construction enforces:
 - Preference for desktop/server nodes as relays
 - Exclusion of destination from relay set
 
-### 4. Hybrid admission model
+### 4. Hard first-contact admission
 
-`HybridAdmissionPolicy` retains multi-signal scoring as an explicit/testable
-mechanism, but the production first-contact path is deliberately narrower:
+The earlier hybrid weighted-score design was removed during the 2026-09-28
+security repair. Its independent inputs could compensate for one another and its
+unused configuration knobs made insecure reactivation too easy. Current
+first-contact admission is deliberately non-compensating:
 
-- PoW is verified and must meet the 8-bit absolute floor.
-- First-contact admission uses one threshold (100); self-declared device class
-  cannot lower it. Resource profile remains descriptor/routing metadata only.
-- IP-prefix diversity can contribute to admission score.
-- Reachability is absent from the first-contact admission API. The old
-  connection-implies-reachability shortcut was unsafe; any future liveness signal
-  needs a separately proven protocol rather than a boolean scoring knob.
-- Credential tier is absent from the first-contact admission API; there is no
-  credential-weight knob to accidentally re-enable under bootstrap issuance.
+- Identify must first authenticate the peer identity and yield filtered/routable
+  addresses. An admission message that races ahead of Identify is rejected.
+- IPv4 /16 or IPv6 /48 diversity is a hard routing constraint and is re-checked
+  when admission completes to close the Identify-to-admission race window.
+- Identity-bound PoW must independently satisfy the common 8-bit bootstrap floor.
+- Credential tier, resource profile and reachability are absent from the
+  first-contact admission API. None can reduce the PoW or diversity requirement.
+
+The routing overlay may calculate a higher network-size-based PoW recommendation,
+but that is diagnostic only. Enforcing different locally observed floors would
+partition peers unless a network-wide negotiation/challenge protocol is added.
 
 Any future credential-assisted admission mechanism requires a separate design
 with a stronger issuer authority model and a non-circular pre-admission path.
@@ -134,35 +139,33 @@ with a stronger issuer authority model and a non-circular pre-admission path.
 - [x] `path_selection.rs`: `AnonymityPolicy`, `PathConstraints`, `PathHop`,
       `RoutingPath`, `PathSelector::select()` with diversity-enforced
       multi-hop path construction — 7 unit tests
-- [x] `admission_policy.rs`: `HybridAdmissionPolicy`, `AdmissionSignals`,
-      `AdmissionDecision`, `ScoreBreakdown`, mobile/desktop/constrained
-      thresholds, minimum PoW floor — 10 unit tests
-- [x] Adversarial simulation test suite (`adversarial_test.rs`):
-      17 tests covering Sybil clusters, eclipse resistance, poisoned
-      descriptors, credential replay/theft, routing pressure, hybrid
-      admission gaming, path selection under adversarial relay sets
+- [x] `admission_policy.rs`: explicit `AdmissionPolicy` with the common PoW
+      floor; routability and prefix diversity are independent hard gates in `node.rs`
+- [x] Adversarial simulation suite (`adversarial_test.rs`) covering Sybil
+      clusters, eclipse resistance, poisoned
+      descriptors, credential replay/theft, routing pressure, admission
+      work-floor gaming, path selection under adversarial relay sets
 - [x] Routing table overflow fix: `saturating_sub` for unreliable penalty
 - [x] Module wiring: all new modules in `network/mod.rs`, exported via `lib.rs`
 - [x] Design doc (this ADR)
 
-### Phase 4b (implemented)
+### Phase 4b (historical implementation; security-repaired)
 
-- [x] Wire credential issuance into admission flow: dual Ed25519+BBS+
-      issuance on `promote_peer_to_verified()`
-- [x] Wire descriptor publication: nodes build and exchange descriptors on
-      promotion, including credential presentations and BBS+ proofs
-- [x] Wire hybrid admission policy into `verify_remote_pow()`: replace
-      binary PoW check with multi-signal `HybridAdmissionPolicy.evaluate()`
-- [x] Credential exchange protocol: `/miasma/credential/1.0.0` with verified
-      storage (issuer signature + holder tag + epoch + BBS+ proof verification)
-- [x] Descriptor exchange protocol: `/miasma/descriptor/1.0.0` with self-verification,
-      stale rejection, capacity limits, periodic refresh and broadcast
-- [x] BBS+ credentials (bbs_credential.rs ~800 lines): BLS12-381 pairing-based
-      multi-message signatures, selective disclosure, within-epoch unlinkability,
-      link secret non-transferability, pairing verification LIVE
+- [x] Credential issuance is post-admission Ed25519 issuance; the broken BBS+
+      issuance/runtime was deleted in `ac996f9`
+- [x] Descriptor publication carries challenge-presentable credentials but no
+      BBS proof; descriptor wire is `/miasma/descriptor/1.2.0`
+- [x] First-contact admission was returned to hard Identify/diversity/PoW gates;
+      the former compensating weighted-scoring admission API was removed
+- [x] Credential exchange is `/miasma/credential/1.2.0`, with issuer identity
+      binding, epoch checks and challenged presentation verification
+- [x] Descriptor exchange uses self-signature + peer identity binding, stale
+      rejection, capacity limits, periodic refresh and broadcast
+- [x] The hand-written BBS+ implementation and its pairing dependencies were
+      deleted after executable forgeries were confirmed; see ADR-006
 - [x] DaemonStatus + CLI diagnostics: Trust & Anonymity + Network Health sections
 - [x] Epoch rotation: `maybe_rotate()` in event loop, credential re-request,
-      descriptor refresh, BBS+ wallet pruning
+      descriptor refresh, expired Ed25519 credential pruning
 - [x] End-to-end epoch rotation: wallet rotates identity, expired credentials
       pruned, descriptors refreshed and broadcast
 
@@ -473,8 +476,8 @@ All items below were shipped before the beta cut:
 ### Mobile readiness (design constraints)
 
 **Android** is the first-class mobile node target:
-- Full node participation with adaptive PoW (hybrid admission scores credential
-  bonus, allowing mobile min_pow=4 with credential to pass desktop thresholds)
+- Full-node participation uses the same first-contact PoW floor and diversity
+  gates as other nodes; a mobile device cannot self-declare a cheaper admission path
 - `ResourceProfile::Mobile` propagated in descriptors so the network assigns
   appropriate workloads
 - Background execution requires foreground service or WorkManager for epoch rotation
@@ -487,7 +490,7 @@ All items below were shipped before the beta cut:
 - Background execution limited by iOS (no long-lived daemon feasible)
 - No relay or storage capability advertised
 - Bandwidth and storage pressure are explicit constraints
-- Credential caching across app launches reduces re-admission cost
+- Credential caching across app launches reduces post-admission re-fetching; it does not bypass PoW admission
 
 ## Consequences
 
@@ -507,9 +510,10 @@ All items below were shipped before the beta cut:
   operations (R1, R2, Target) plus 3 XChaCha20-Poly1305 encrypt/decrypt
   per direction. At ~1 µs per ECDH on modern hardware, this adds <10 µs
   per shard fetch — negligible vs network latency.
-- **Mobile admission**: the hybrid model allows mobile devices to
-  participate with reduced PoW if they have a credential from a known
-  issuer. This explicitly trades some Sybil resistance for accessibility.
+- **Mobile admission**: mobile nodes use the same non-compensating admission
+  boundaries as other nodes. Resource profile influences workload/routing policy,
+  not identity-generation cost. Any future PoW offload mechanism must preserve
+  the identity-bound work requirement rather than replace it with a credential.
 
 ## Relationship to ADR-004
 

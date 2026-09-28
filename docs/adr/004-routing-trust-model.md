@@ -112,16 +112,23 @@ is derived from the master key via HKDF (already implemented in
 Node IDs must satisfy `BLAKE3(pubkey || nonce)` with `difficulty_bits`
 leading zero bits. Enforcement points:
 
-1. **Identify exchange:** remote peer must include PoW proof in Identify
-   `AgentVersion` or custom protocol extension. Peers without valid PoW
-   are not added to Kademlia.
+1. **Identify + admission handshake:** Identify first authenticates the peer
+   identity, filters routable addresses, and applies the routing-prefix diversity
+   hard limit. `/miasma/admission/1.1.0` then exchanges the identity-bound PoW.
+   Admission is a local trust decision on each side. A responder may promote a
+   requester after locally verifying its Identify-derived routing state and PoW;
+   the requester promotes the responder only when the response explicitly says
+   `accepted=true` and the responder's PoW verifies. This avoids treating any
+   returned PoW as acceptance without requiring a deadlock-prone three-way ack.
 
-2. **DHT record validation:** records signed by peers without valid PoW
-   are rejected.
+2. **DHT record validation:** published records carry an Ed25519 signature and
+   invalid signatures are rejected.
 
-3. **Graceful rollout:** initial difficulty is low (8 bits, ~256 hashes)
-   to avoid blocking honest nodes. Difficulty increases as the network
-   grows.
+3. **Graceful rollout:** the enforced first-contact floor is 8 bits (~256
+   hashes) to avoid blocking bootstrap. The routing overlay also computes an
+   8/12/16/20/24-bit network-size recommendation, but that value is diagnostic
+   only until peers have a network-wide negotiation/challenge mechanism. Local
+   observations must not silently create incompatible admission floors.
 
 ## Implementation plan
 
@@ -131,7 +138,7 @@ leading zero bits. Enforcement points:
 - [x] `AddressClass` enum: Loopback, LinkLocal, Private, GlobalUnicast, Relay
 - [x] Address filtering in `handle_event` for Identify addresses
 - [x] Replace stub `verify_signature()` with real Ed25519 verification
-- [x] Wire `verify_pow()` into Identify handler as a gating check
+- [x] Wire `verify_pow()` into the post-Identify admission handshake as a hard gate
 - [x] Design doc (this ADR)
 
 ### Phase 3b (this cycle — implemented)
@@ -165,9 +172,9 @@ leading zero bits. Enforcement points:
       (`INTERACTION_WINDOW = 200`, `UNRELIABLE_THRESHOLD = 0.3`)
 - [x] Peer ranking: `rank_peers()` scores by trust tier (Verified 300,
       Observed 100, Claimed 0), reliability, and diversity bonus
-- [x] Dynamic PoW difficulty adjustment: `observe_network_size()` feeds
-      median-based schedule (8/12/16/20/24 bits), `verify_remote_pow()`
-      uses `routing_table.current_difficulty()` instead of hardcoded constant
+- [x] Dynamic PoW difficulty recommendation: `observe_network_size()` feeds
+      the median-based 8/12/16/20/24-bit schedule for diagnostics. Admission
+      deliberately continues to enforce the common 8-bit bootstrap floor.
 - [x] Reliability tracking wired into Kademlia events: `record_success()`
       on PutRecord OK and valid GET signatures, `record_failure()` on
       invalid signatures
@@ -188,7 +195,8 @@ leading zero bits. Enforcement points:
 - [ ] Onion-aware routing descriptors
 - [ ] Relay registration and descriptor verification
 - [ ] Peer state persistence across restarts
-- [ ] Dynamic difficulty: wire ranking into share fetch path (coordinator)
+- [ ] Negotiated dynamic difficulty: define a peer-visible challenge/version
+      mechanism before any network-size recommendation can become an admission floor
 
 ## Consequences
 

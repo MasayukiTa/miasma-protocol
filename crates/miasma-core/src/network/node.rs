@@ -28,7 +28,7 @@ use tracing::{debug, info, warn};
 
 use crate::{crypto::keyderive::NodeKeys, share::MiasmaShare, store::LocalShareStore, MiasmaError};
 
-use super::admission_policy::{AdmissionSignals, HybridAdmissionPolicy};
+use super::admission_policy::AdmissionPolicy;
 use super::credential::{
     self, CredentialIssuer, CredentialPresentation, CredentialStats, CredentialTier,
     CredentialWallet, IssuerRegistry, SignedCredential, CAP_ROUTE, CAP_STORE,
@@ -1631,8 +1631,8 @@ pub struct MiasmaNode {
     issuer_registry: IssuerRegistry,
     /// Peer descriptor store (structured routing material).
     descriptor_store: DescriptorStore,
-    /// Hybrid admission policy (PoW + diversity + reachability + credential).
-    admission_policy: HybridAdmissionPolicy,
+    /// First-contact admission policy (hard PoW floor; diversity enforced separately).
+    admission_policy: AdmissionPolicy,
     /// This node's own resource profile.
     resource_profile: ResourceProfile,
     /// Pending credential requests: req_id → peer_id.
@@ -1804,7 +1804,7 @@ impl MiasmaNode {
             credential_wallet: CredentialWallet::new(),
             issuer_registry,
             descriptor_store: DescriptorStore::new(),
-            admission_policy: HybridAdmissionPolicy::default(),
+            admission_policy: AdmissionPolicy::default(),
             resource_profile: ResourceProfile::Desktop,
             nat_publicly_reachable: false,
             pending_credential_reqs: HashMap::new(),
@@ -2720,6 +2720,8 @@ impl MiasmaNode {
                 self.peer_registry.on_disconnected(&peer_id);
                 self.routing_table.remove_peer(&peer_id);
                 self.pending_peer_addrs.remove(&peer_id);
+                self.pending_admissions
+                    .retain(|_, pending_peer| *pending_peer != peer_id);
                 // Track disconnection in health monitor and flap detector.
                 self.health_monitor
                     .record_peer_failure(&peer_id.to_string());
@@ -2923,6 +2925,14 @@ impl MiasmaNode {
                 let _ = tx.try_send(super::types::TopologyEvent::PeerRoutable { peer_id });
             }
         } else {
+            // Identify may refresh more than once on a live connection. Do not
+            // restart admission for a peer that is already Verified. Reconnects
+            // are unaffected because ConnectionClosed removes the registry entry.
+            if self.peer_registry.is_verified(&peer_id) {
+                debug!("admission.identify_refresh_verified peer={peer_id}");
+                return;
+            }
+
             // Production mode: check IP diversity before proceeding.
             match self.routing_table.check_diversity(&addrs_to_use) {
                 Err(violation) => {
@@ -2942,6 +2952,18 @@ impl MiasmaNode {
             }
             self.pending_peer_addrs.insert(peer_id, addrs_to_use);
 
+            // Identify refreshes can arrive while the first admission request is
+            // still in flight. Refresh the held addresses above, but do not create
+            // multiple request IDs for the same peer.
+            if self
+                .pending_admissions
+                .values()
+                .any(|pending_peer| *pending_peer == peer_id)
+            {
+                debug!("admission.identify_refresh_pending peer={peer_id}");
+                return;
+            }
+
             // Initiate PoW admission exchange.
             let req = AdmissionRequest {
                 pow: self.local_pow.clone(),
@@ -2956,11 +2978,10 @@ impl MiasmaNode {
         }
     }
 
-    /// Verify a remote peer's PoW proof using the hybrid admission policy.
+    /// Verify a remote peer against the hard first-contact admission constraints.
     ///
-    /// Phase 4b: combines PoW, diversity, and credential signals instead of
-    /// binary PoW-only check. Credential and reachability signals are added
-    /// when available.
+    /// Identify/routability, prefix diversity, and identity-bound PoW are
+    /// independent hard requirements; none can compensate for another.
     fn verify_remote_pow(&self, peer_id: &PeerId, pow: &NodeIdPoW) -> Result<(), RejectionReason> {
         // Check that the PoW pubkey matches the peer's libp2p identity.
         let ed_pubkey = libp2p::identity::ed25519::PublicKey::try_from_bytes(&pow.pubkey)
@@ -2972,53 +2993,30 @@ impl MiasmaNode {
             return Err(RejectionReason::PubkeyMismatch);
         }
 
-        // Verify the PoW before any peer-controlled hash bytes reach scoring.
-        // This recomputes BLAKE3(pubkey || nonce), checks the claimed hash, and
-        // enforces the policy's absolute minimum difficulty.
+        // Admission must follow a successful Identify exchange. Production
+        // Identify stores only filtered/routable addresses here, after its first
+        // diversity check. Requiring this state prevents an admission request
+        // that races ahead of Identify from being promoted on PoW alone.
+        let addrs = self
+            .pending_peer_addrs
+            .get(peer_id)
+            .filter(|addrs| !addrs.is_empty())
+            .ok_or(RejectionReason::NoRoutableAddresses)?;
+
+        // Re-check diversity at the moment of admission. The prefix population
+        // may have changed since Identify; this is a hard constraint, not a score
+        // bonus that work from another axis can compensate for.
+        self.routing_table
+            .check_diversity(addrs)
+            .map_err(|_| RejectionReason::DiversityRejected)?;
+
+        // Recompute BLAKE3(pubkey || nonce), check the claimed hash, and enforce
+        // the absolute work floor. Never score or otherwise trust the wire hash.
         if !sybil::verify_pow(pow, self.admission_policy.min_pow) {
             return Err(RejectionReason::InsufficientDifficulty);
         }
 
-        // Derive the score input from a freshly recomputed hash, not the wire
-        // field. `verify_pow` already proved the two are equal; recomputing here
-        // makes the trust boundary explicit and prevents a future refactor from
-        // accidentally restoring claimed-hash scoring.
-        let verified_hash = sybil::recompute_pow_hash(pow);
-        let pow_difficulty = sybil::leading_zeros(&verified_hash).min(255) as u8;
-
-        // Check diversity: is this prefix unique?
-        let unique_prefix = self
-            .pending_peer_addrs
-            .get(peer_id)
-            .and_then(|addrs| addrs.first())
-            .map(|a| {
-                self.routing_table
-                    .check_diversity(std::slice::from_ref(a))
-                    .is_ok()
-            })
-            .unwrap_or(false);
-
-        // Admission intentionally has no credential signal. This decision happens
-        // before the post-admission credential and challenged descriptor exchanges;
-        // reintroducing tier here would create circular or self-issued trust.
-
-        // Evaluate using hybrid admission policy.
-        let signals = AdmissionSignals {
-            pow_difficulty,
-            unique_prefix,
-        };
-
-        let decision = self.admission_policy.evaluate(&signals);
-        if decision.admitted {
-            Ok(())
-        } else {
-            match decision.rejection_reason {
-                Some(super::admission_policy::HybridRejection::InsufficientMinPoW { .. }) => {
-                    Err(RejectionReason::InsufficientDifficulty)
-                }
-                _ => Err(RejectionReason::InsufficientDifficulty),
-            }
-        }
+        Ok(())
     }
 
     /// Verify an admission response as a mutually accepted exchange.
@@ -3062,14 +3060,25 @@ impl MiasmaNode {
                             accepted: true,
                             required_pow_floor: self.admission_policy.min_pow,
                         };
-                        let _ = self
+                        let response_sent = self
                             .swarm
                             .behaviour_mut()
                             .admission
-                            .send_response(channel, resp);
+                            .send_response(channel, resp)
+                            .is_ok();
 
-                        // Promote the peer to Verified and add to Kademlia.
-                        self.promote_peer_to_verified(peer, request.pow);
+                        // Admission is a local trust decision, not a three-way
+                        // consensus protocol. Once this node has verified the peer's
+                        // Identify-derived routability/diversity state and PoW, it may
+                        // promote that peer locally. The `accepted` response separately
+                        // prevents the requester from mistaking our PoW for acceptance.
+                        // Requiring reciprocal completion here would deadlock when the
+                        // two Identify events arrive in different orders.
+                        if response_sent && !self.peer_registry.is_verified(&peer) {
+                            self.promote_peer_to_verified(peer, request.pow);
+                        } else if !response_sent {
+                            warn!("admission.response_send_failed peer={peer}");
+                        }
                     }
                     Err(reason) => {
                         warn!("admission.rejected peer={peer} reason={reason}");
@@ -3098,7 +3107,19 @@ impl MiasmaNode {
                     },
                 ..
             } => {
-                self.pending_admissions.remove(&request_id);
+                let Some(expected_peer) = self.pending_admissions.remove(&request_id) else {
+                    warn!("admission.rejected_untracked_response peer={peer}");
+                    self.peer_registry.record_rejection();
+                    return;
+                };
+                if expected_peer != peer {
+                    warn!(
+                        "admission.rejected_peer_mismatch expected={expected_peer} actual={peer}"
+                    );
+                    self.peer_registry.record_rejection();
+                    return;
+                }
+
                 match self.verify_remote_admission_response(&peer, &response) {
                     Ok(()) => {
                         info!("admission.verified peer={peer}");
@@ -3119,7 +3140,14 @@ impl MiasmaNode {
                 error,
                 ..
             } => {
-                self.pending_admissions.remove(&request_id);
+                let expected_peer = self.pending_admissions.remove(&request_id);
+                if let Some(expected_peer) = expected_peer {
+                    if expected_peer != peer {
+                        warn!(
+                            "admission.outbound_failure_peer_mismatch expected={expected_peer} actual={peer}"
+                        );
+                    }
+                }
                 warn!("admission.outbound_failure peer={peer} error={error}");
                 self.peer_registry.record_rejection();
             }
@@ -4589,9 +4617,11 @@ mod admission_pow_tests {
 
     #[tokio::test]
     async fn admission_rejects_forged_all_zero_claimed_pow_hash() {
-        let node = make_node();
+        let mut node = make_node();
         let mut forged = node.local_pow.clone();
         let peer = peer_id_for_pow(&forged);
+        node.pending_peer_addrs
+            .insert(peer, vec!["/ip4/203.0.113.7/tcp/4001".parse().unwrap()]);
 
         // Before the regression fix this attacker-chosen value scored as 255
         // difficulty bits without doing any work.
@@ -4681,7 +4711,7 @@ mod admission_pow_tests {
     }
 
     #[tokio::test]
-    async fn first_contact_requires_default_pow_floor_and_no_fake_reachability_bonus() {
+    async fn first_contact_requires_identify_state_and_default_pow_floor() {
         let mut node = make_node();
         let peer_seed = rand::random::<[u8; 32]>();
         let peer_key = ed25519_dalek::SigningKey::from_bytes(&peer_seed);
@@ -4703,12 +4733,61 @@ mod admission_pow_tests {
         assert_eq!(
             node.verify_remote_pow(&peer_id, &honest_floor),
             Ok(()),
-            "8-bit PoW plus a genuinely unique prefix should admit without a fake reachability bonus"
+            "8-bit PoW should admit after Identify/routability and diversity prerequisites pass"
         );
     }
 
     #[tokio::test]
-    async fn self_declared_endorsed_descriptor_buys_no_admission_score() {
+    async fn admission_rejects_pow_before_identify_supplies_routable_addresses() {
+        let node = make_node();
+        let peer_seed = rand::random::<[u8; 32]>();
+        let peer_key = ed25519_dalek::SigningKey::from_bytes(&peer_seed);
+        let peer_pubkey = peer_key.verifying_key().to_bytes();
+        let ed_pubkey = libp2p::identity::ed25519::PublicKey::try_from_bytes(&peer_pubkey).unwrap();
+        let peer_id = PeerId::from(libp2p::identity::PublicKey::from(ed_pubkey));
+        let pow = pow_with_exact_difficulty(peer_pubkey, node.admission_policy.min_pow as u32);
+
+        assert_eq!(
+            node.verify_remote_pow(&peer_id, &pow),
+            Err(RejectionReason::NoRoutableAddresses)
+        );
+    }
+
+    #[tokio::test]
+    async fn admission_rechecks_prefix_diversity_as_a_hard_constraint() {
+        let mut node = make_node();
+        node.routing_table = RoutingTable::new(true);
+        let addr: Multiaddr = "/ip4/203.0.113.20/tcp/4001".parse().unwrap();
+        let prefix = routing::ip_prefix_of(&addr);
+
+        // Fill the /16 to the production cap after the hypothetical Identify
+        // check but before PoW admission completes. The admission re-check must
+        // catch this race instead of awarding a diversity score.
+        for _ in 0..3 {
+            let seed = rand::random::<[u8; 32]>();
+            let key = ed25519_dalek::SigningKey::from_bytes(&seed);
+            let pubkey = key.verifying_key().to_bytes();
+            let lp = libp2p::identity::ed25519::PublicKey::try_from_bytes(&pubkey).unwrap();
+            let id = PeerId::from(libp2p::identity::PublicKey::from(lp));
+            node.routing_table.add_peer(id, prefix.clone());
+        }
+
+        let peer_seed = rand::random::<[u8; 32]>();
+        let peer_key = ed25519_dalek::SigningKey::from_bytes(&peer_seed);
+        let peer_pubkey = peer_key.verifying_key().to_bytes();
+        let ed_pubkey = libp2p::identity::ed25519::PublicKey::try_from_bytes(&peer_pubkey).unwrap();
+        let peer_id = PeerId::from(libp2p::identity::PublicKey::from(ed_pubkey));
+        node.pending_peer_addrs.insert(peer_id, vec![addr]);
+        let pow = pow_with_exact_difficulty(peer_pubkey, node.admission_policy.min_pow as u32);
+
+        assert_eq!(
+            node.verify_remote_pow(&peer_id, &pow),
+            Err(RejectionReason::DiversityRejected)
+        );
+    }
+
+    #[tokio::test]
+    async fn self_declared_endorsed_descriptor_does_not_affect_admission() {
         let mut node = make_node();
 
         let peer_seed = rand::random::<[u8; 32]>();
@@ -4717,13 +4796,12 @@ mod admission_pow_tests {
         let ed_pubkey = libp2p::identity::ed25519::PublicKey::try_from_bytes(&peer_pubkey).unwrap();
         let peer_id = PeerId::from(libp2p::identity::PublicKey::from(ed_pubkey));
         let pow = pow_with_exact_difficulty(peer_pubkey, node.admission_policy.min_pow as u32);
+        node.pending_peer_addrs
+            .insert(peer_id, vec!["/ip4/203.0.113.11/tcp/4001".parse().unwrap()]);
 
-        // No diversity or reachability bonus: the default 8-bit work floor gives
-        // 80 points, below the desktop threshold of 100.
-        assert_eq!(
-            node.verify_remote_pow(&peer_id, &pow),
-            Err(RejectionReason::InsufficientDifficulty)
-        );
+        // With the actual first-contact prerequisites satisfied, an exact-floor
+        // PoW is sufficient. Descriptor content is deliberately not an input.
+        assert_eq!(node.verify_remote_pow(&peer_id, &pow), Ok(()));
 
         // Inject the strongest self-declared credential an attacker could write
         // into a descriptor. This bypasses the network handler on purpose: even
@@ -4759,8 +4837,8 @@ mod admission_pow_tests {
 
         assert_eq!(
             node.verify_remote_pow(&peer_id, &pow),
-            Err(RejectionReason::InsufficientDifficulty),
-            "unverified descriptor tier must contribute zero admission bonus"
+            Ok(()),
+            "unverified descriptor tier must not alter first-contact admission"
         );
     }
 
