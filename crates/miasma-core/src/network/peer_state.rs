@@ -21,6 +21,9 @@ pub struct PeerTrustState {
     pub trust: AddressTrust,
     /// Their PoW proof, once received and verified.
     pub pow: Option<NodeIdPoW>,
+    /// Ed25519 network-identity public key authenticated by Identify/PeerId and,
+    /// in production, confirmed again by PoW admission.
+    pub identity_pubkey: Option<[u8; 32]>,
     /// When the connection was established.
     pub connected_at: Instant,
     /// Whether Identify exchange completed and addresses passed filtering.
@@ -91,6 +94,7 @@ impl PeerRegistry {
         self.peers.entry(peer_id).or_insert_with(|| PeerTrustState {
             trust: AddressTrust::Claimed,
             pow: None,
+            identity_pubkey: None,
             connected_at: Instant::now(),
             identify_received: false,
             admission_verified: false,
@@ -108,10 +112,30 @@ impl PeerRegistry {
         }
     }
 
+    /// Record the authenticated Ed25519 network identity learned from Identify.
+    /// The caller must first verify that this public key maps to `peer_id`.
+    pub fn on_identify_identity(&mut self, peer_id: PeerId, identity_pubkey: [u8; 32]) {
+        self.on_identify(peer_id);
+        if let Some(state) = self.peers.get_mut(&peer_id) {
+            state.identity_pubkey = Some(identity_pubkey);
+        }
+    }
+
     /// Called after successful PoW admission exchange. Promotes to Verified.
     pub fn on_admission_verified(&mut self, peer_id: PeerId, pow: NodeIdPoW) {
         if let Some(state) = self.peers.get_mut(&peer_id) {
+            state.identity_pubkey = Some(pow.pubkey);
             state.pow = Some(pow);
+            state.admission_verified = true;
+            state.trust = AddressTrust::Verified;
+        }
+    }
+
+    /// Mark a loopback/development peer Verified after authenticated Identify.
+    /// No fake PoW is recorded: local mode skips the proof-of-work cost but still
+    /// preserves the remote peer's real identity key for later key binding.
+    pub fn on_local_admission_verified(&mut self, peer_id: PeerId) {
+        if let Some(state) = self.peers.get_mut(&peer_id) {
             state.admission_verified = true;
             state.trust = AddressTrust::Verified;
         }
@@ -137,6 +161,23 @@ impl PeerRegistry {
         self.peers
             .get(peer_id)
             .is_some_and(|s| s.trust == AddressTrust::Verified)
+    }
+
+    /// Return the authenticated Ed25519 identity key for a Verified peer.
+    pub fn verified_identity_pubkey(&self, peer_id: &PeerId) -> Option<[u8; 32]> {
+        self.peers
+            .get(peer_id)
+            .filter(|state| state.admission_verified)
+            .and_then(|state| state.identity_pubkey)
+    }
+
+    /// Return the PoW proof for a Verified peer when PoW was actually performed.
+    /// Loopback mode intentionally leaves this `None` instead of fabricating one.
+    pub fn verified_pow(&self, peer_id: &PeerId) -> Option<&NodeIdPoW> {
+        self.peers
+            .get(peer_id)
+            .filter(|state| state.admission_verified)
+            .and_then(|state| state.pow.as_ref())
     }
 
     /// Returns all peers at the Verified tier.
