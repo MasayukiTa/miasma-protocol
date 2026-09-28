@@ -4909,8 +4909,8 @@ mod admission_pow_tests {
         unreachable!("u64 nonce space exhausted")
     }
 
-    #[test]
-    fn onion_replay_identity_is_bound_to_encrypted_layer_not_circuit_id() {
+    #[tokio::test]
+    async fn onion_replay_identity_is_bound_to_encrypted_layer_not_circuit_id() {
         let mut node = make_node();
         let layer = crate::onion::packet::OnionLayer {
             ephemeral_pubkey: [0x11; 32],
