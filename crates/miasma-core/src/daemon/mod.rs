@@ -96,6 +96,9 @@ pub struct DaemonServer {
     /// Port the HTTP bridge is bound to (0 if not started).
     #[allow(dead_code)]
     http_bridge_port: u16,
+    /// HTTP bridge accept-loop task. Kept so daemon shutdown/distress wipe can
+    /// stop accepting new local requests and release its shared state.
+    http_bridge_handle: Option<JoinHandle<()>>,
     /// Shared X25519 sharing secret state. Distress wipe replaces the
     /// `Zeroizing` value with `None` after waiting for in-flight users.
     sharing_secret: SharingSecretState,
@@ -388,7 +391,7 @@ impl DaemonServer {
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         // 10. Bind HTTP bridge for web client access.
-        let http_bridge_port = match http_bridge::HttpBridge::bind(
+        let (http_bridge_port, http_bridge_handle) = match http_bridge::HttpBridge::bind(
             ipc::HTTP_BRIDGE_DEFAULT_PORT,
             coord.clone(),
             queue.clone(),
@@ -408,6 +411,7 @@ impl DaemonServer {
                 env_snapshot: env_snapshot.clone(),
                 shadowsocks_configured,
                 tor_configured,
+                daemon_shutdown_tx: shutdown_tx.clone(),
             },
         )
         .await
@@ -416,12 +420,11 @@ impl DaemonServer {
                 let port = bridge.port();
                 ipc::write_http_port_file(&data_dir, port).ok();
                 info!(port, "HTTP bridge started");
-                tokio::spawn(bridge.run());
-                port
+                (port, Some(tokio::spawn(bridge.run())))
             }
             Err(e) => {
                 warn!("HTTP bridge failed to start: {e}");
-                0
+                (0, None)
             }
         };
 
@@ -448,6 +451,7 @@ impl DaemonServer {
             proxy_type,
             obfs_quic_port,
             http_bridge_port,
+            http_bridge_handle,
             sharing_secret,
             sharing_pubkey,
             rate_limiter,
@@ -558,6 +562,7 @@ impl DaemonServer {
             env_snapshot: self.env_snapshot.clone(),
             shadowsocks_configured: self.shadowsocks_configured,
             tor_configured: self.tor_configured,
+            daemon_shutdown_tx: self.shutdown_tx.clone(),
         };
         let ipc_handle: JoinHandle<()> = tokio::spawn(async move {
             ipc_server_loop(
@@ -608,6 +613,9 @@ impl DaemonServer {
         ipc_handle.abort();
         rep_handle.abort();
         env_handle.abort();
+        if let Some(handle) = http_bridge_handle {
+            handle.abort();
+        }
 
         coord.shutdown().await;
         remove_port_file(&self.data_dir);
@@ -714,6 +722,10 @@ pub struct BridgeLiveState {
     pub env_snapshot: Arc<Mutex<EnvironmentSnapshot>>,
     pub shadowsocks_configured: bool,
     pub tor_configured: bool,
+    /// Outer daemon lifecycle signal. A successful distress wipe uses this to
+    /// terminate IPC/HTTP/network tasks so master-derived identity material in
+    /// the libp2p swarm is dropped as part of the wipe boundary.
+    pub daemon_shutdown_tx: mpsc::Sender<()>,
 }
 
 pub(crate) async fn process_request(
@@ -1125,7 +1137,10 @@ pub(crate) async fn process_request(
             *directed_key = None;
             match store_result {
                 Ok(_) => {
-                    info!("distress wipe executed via IPC; in-memory directed key erased");
+                    info!("distress wipe executed; in-memory keys erased; shutting down daemon");
+                    // The request handler is detached from the accept-loop task, so
+                    // the Wiped response can still be written after this signal.
+                    let _ = bridge_state.daemon_shutdown_tx.try_send(());
                     ControlResponse::Wiped
                 }
                 Err(e) => ControlResponse::Error(format!("wipe failed: {e}")),

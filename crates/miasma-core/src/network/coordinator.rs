@@ -401,6 +401,10 @@ pub struct MiasmaCoordinator {
     dht_handle: DhtHandle,
     share_handle: ShareExchangeHandle,
     shutdown_tx: mpsc::Sender<()>,
+    /// Background MiasmaNode event-loop task. Shutdown awaits this handle so
+    /// master-derived network identity/onion key state is dropped before the
+    /// coordinator reports shutdown complete.
+    node_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// This node's libp2p PeerId, embedded in published `DhtRecord`s.
     peer_id: PeerId,
     /// Announced listen addresses included in `DhtRecord.locations`.
@@ -438,7 +442,7 @@ impl MiasmaCoordinator {
         // on `MiasmaNode`).
         node.set_listen_addrs(listen_addrs.clone());
 
-        tokio::spawn(async move {
+        let node_task = tokio::spawn(async move {
             if let Err(e) = node.run().await {
                 error!("MiasmaNode event loop error: {e}");
             }
@@ -454,6 +458,7 @@ impl MiasmaCoordinator {
             dht_handle,
             share_handle,
             shutdown_tx,
+            node_task: tokio::sync::Mutex::new(Some(node_task)),
             peer_id,
             listen_addrs,
             transport_selector,
@@ -523,9 +528,15 @@ impl MiasmaCoordinator {
             .await
     }
 
-    /// Send a shutdown signal to the background node task.
+    /// Stop the background node task and wait until its swarm/key state is dropped.
     pub async fn shutdown(&self) {
         let _ = self.shutdown_tx.send(()).await;
+        let node_task = self.node_task.lock().await.take();
+        if let Some(node_task) = node_task {
+            if let Err(e) = node_task.await {
+                warn!("MiasmaNode task join failed during shutdown: {e}");
+            }
+        }
     }
 
     /// Return the number of currently connected peers.
