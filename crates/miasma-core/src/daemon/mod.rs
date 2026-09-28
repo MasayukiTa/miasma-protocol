@@ -1141,15 +1141,19 @@ pub(crate) async fn process_request(
             let store_result = store.distress_wipe();
             let mut directed_key = sharing_secret.write().await;
             *directed_key = None;
+            // Once key erasure starts, the runtime must not remain alive even
+            // if a later disk/config cleanup step fails. The detached request
+            // handler can still write the final Wiped/Error response.
+            let _ = bridge_state.daemon_shutdown_tx.try_send(());
             match store_result {
                 Ok(_) => {
                     info!("distress wipe executed; in-memory keys erased; shutting down daemon");
-                    // The request handler is detached from the accept-loop task, so
-                    // the Wiped response can still be written after this signal.
-                    let _ = bridge_state.daemon_shutdown_tx.try_send(());
                     ControlResponse::Wiped
                 }
-                Err(e) => ControlResponse::Error(format!("wipe failed: {e}")),
+                Err(e) => {
+                    warn!("distress wipe incomplete; runtime still shutting down: {e}");
+                    ControlResponse::Error(format!("wipe incomplete; daemon is shutting down: {e}"))
+                }
             }
         }
 
