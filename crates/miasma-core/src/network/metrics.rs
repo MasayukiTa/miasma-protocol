@@ -49,7 +49,7 @@ pub struct OutcomeMetrics {
     pub credentialed_peer_fraction: f64,
 
     /// Locally recommended future PoW difficulty. Diagnostic only; first-contact
-    /// admission currently enforces HybridAdmissionPolicy::min_pow.
+    /// admission currently enforces AdmissionPolicy::min_pow.
     pub current_pow_difficulty: u8,
 
     /// Ratio of verified peers to total connected peers.
