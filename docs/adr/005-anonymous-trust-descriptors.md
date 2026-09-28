@@ -109,6 +109,8 @@ Path construction enforces:
 mechanism, but the production first-contact path is deliberately narrower:
 
 - PoW is verified and must meet the 8-bit absolute floor.
+- First-contact admission uses one threshold (100); self-declared device class
+  cannot lower it. Resource profile remains descriptor/routing metadata only.
 - IP-prefix diversity can contribute to admission score.
 - Reachability contributes zero until an explicit external probe result is wired.
 - Credential tier is absent from the first-contact admission API; there is no
