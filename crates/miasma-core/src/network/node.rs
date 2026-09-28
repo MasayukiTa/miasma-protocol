@@ -913,6 +913,37 @@ pub struct DirectedRelayStats {
     pub no_relay_candidates: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DhtEnvelopeError {
+    UnsignedOrMalformed,
+    InvalidSignatureOrKeyMismatch,
+    InvalidInnerRecord,
+    InnerMidMismatch,
+}
+
+/// Decode and validate the signed Kademlia value for one requested MID key.
+///
+/// All three key views must agree:
+/// 1. outer Kademlia storage key (the `expected_key` argument),
+/// 2. `SignedDhtRecord.key` covered by the Ed25519 signature, and
+/// 3. `DhtRecord.mid_digest` inside the signed value.
+fn decode_signed_dht_record(
+    expected_key: &[u8],
+    envelope_bytes: &[u8],
+) -> Result<DhtRecord, DhtEnvelopeError> {
+    let signed: SignedDhtRecord =
+        bincode::deserialize(envelope_bytes).map_err(|_| DhtEnvelopeError::UnsignedOrMalformed)?;
+    if !signed.verify_for_key(expected_key) {
+        return Err(DhtEnvelopeError::InvalidSignatureOrKeyMismatch);
+    }
+    let record: DhtRecord =
+        bincode::deserialize(&signed.value).map_err(|_| DhtEnvelopeError::InvalidInnerRecord)?;
+    if record.dht_key().as_slice() != expected_key {
+        return Err(DhtEnvelopeError::InnerMidMismatch);
+    }
+    Ok(record)
+}
+
 /// Sender side of the DHT command channel.
 ///
 /// Wraps the low-level channel with typed `put`/`get_record` helpers that
@@ -1031,25 +1062,13 @@ impl DhtHandle {
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
         let raw_opt = self.recv_reply(rx, "get_record").await??;
         match raw_opt {
-            Some(bytes) => {
-                // Try to unwrap SignedDhtRecord envelope first, fall back to plain DhtRecord.
-                if let Ok(signed) = bincode::deserialize::<SignedDhtRecord>(&bytes) {
-                    if signed.verify_signature() {
-                        return Ok(Some(
-                            bincode::deserialize(&signed.value)
-                                .map_err(|e| MiasmaError::Serialization(e.to_string()))?,
-                        ));
-                    } else {
-                        warn!("DHT GET: record has invalid signature, rejecting");
-                        return Ok(None);
-                    }
+            Some(bytes) => match decode_signed_dht_record(&mid_digest, &bytes) {
+                Ok(record) => Ok(Some(record)),
+                Err(reason) => {
+                    warn!("DHT GET: signed record rejected reason={reason:?}");
+                    Ok(None)
                 }
-                // Fall back: plain DhtRecord (transition compatibility).
-                Ok(Some(
-                    bincode::deserialize(&bytes)
-                        .map_err(|e| MiasmaError::Serialization(e.to_string()))?,
-                ))
-            }
+            },
             None => Ok(None),
         }
     }
@@ -4345,31 +4364,29 @@ impl MiasmaNode {
                     }
                 }
                 kad::QueryResult::GetRecord(Ok(kad::GetRecordOk::FoundRecord(pr))) => {
-                    // Validate signature on retrieved records.
+                    // Fail closed: every network DHT value must be a signed envelope,
+                    // the signed key must equal the outer Kademlia key, and the inner
+                    // DhtRecord MID must equal that same key.
+                    let outer_key = pr.record.key.as_ref().to_vec();
                     let value = pr.record.value;
-                    let validated =
-                        if let Ok(signed) = bincode::deserialize::<SignedDhtRecord>(&value) {
-                            if signed.verify_signature() {
-                                // Record successful interaction for the peer that provided this record.
-                                if let Some(peer) = pr.peer {
-                                    self.routing_table.record_success(&peer);
-                                }
-                                Some(value)
-                            } else {
-                                warn!(
-                                    "dht.record_rejected reason=invalid_signature key={:?}",
-                                    pr.record.key
-                                );
-                                // Record failure for the peer that sent a bad record.
-                                if let Some(peer) = pr.peer {
-                                    self.routing_table.record_failure(&peer);
-                                }
-                                None
+                    let validated = match decode_signed_dht_record(&outer_key, &value) {
+                        Ok(_) => {
+                            if let Some(peer) = pr.peer {
+                                self.routing_table.record_success(&peer);
                             }
-                        } else {
-                            // Accept plain DhtRecord during transition period.
                             Some(value)
-                        };
+                        }
+                        Err(reason) => {
+                            warn!(
+                                "dht.record_rejected reason={reason:?} key={:?}",
+                                pr.record.key
+                            );
+                            if let Some(peer) = pr.peer {
+                                self.routing_table.record_failure(&peer);
+                            }
+                            None
+                        }
+                    };
 
                     if let Some(valid_value) = validated {
                         if let Some((reply, _)) = self.pending_gets.remove(&id) {
@@ -4874,6 +4891,66 @@ mod admission_pow_tests {
             }
         }
         unreachable!("u64 nonce space exhausted")
+    }
+
+    #[test]
+    fn signed_dht_envelope_validation_is_fail_closed_and_key_bound() {
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x51; 32]);
+        let expected_key = [0xA1; 32];
+        let record = DhtRecord {
+            mid_digest: expected_key,
+            data_shards: 2,
+            total_shards: 3,
+            version: 1,
+            locations: vec![],
+            published_at: 123,
+        };
+        let signed = SignedDhtRecord::sign(
+            expected_key.to_vec(),
+            bincode::serialize(&record).unwrap(),
+            &signing_key,
+        );
+        let envelope = bincode::serialize(&signed).unwrap();
+
+        assert_eq!(
+            decode_signed_dht_record(&expected_key, &envelope)
+                .unwrap()
+                .mid_digest,
+            expected_key
+        );
+        assert!(matches!(
+            decode_signed_dht_record(&[0xB2; 32], &envelope),
+            Err(DhtEnvelopeError::InvalidSignatureOrKeyMismatch)
+        ));
+        assert!(matches!(
+            decode_signed_dht_record(&expected_key, &bincode::serialize(&record).unwrap()),
+            Err(DhtEnvelopeError::UnsignedOrMalformed)
+        ));
+    }
+
+    #[test]
+    fn signed_dht_envelope_rejects_inner_mid_mismatch_even_with_valid_signature() {
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x52; 32]);
+        let outer_key = [0xC3; 32];
+        let inner = DhtRecord {
+            mid_digest: [0xD4; 32],
+            data_shards: 2,
+            total_shards: 3,
+            version: 1,
+            locations: vec![],
+            published_at: 456,
+        };
+        let signed = SignedDhtRecord::sign(
+            outer_key.to_vec(),
+            bincode::serialize(&inner).unwrap(),
+            &signing_key,
+        );
+        let envelope = bincode::serialize(&signed).unwrap();
+
+        assert!(matches!(
+            decode_signed_dht_record(&outer_key, &envelope),
+            Err(DhtEnvelopeError::InnerMidMismatch)
+        ));
     }
 
     #[tokio::test]
