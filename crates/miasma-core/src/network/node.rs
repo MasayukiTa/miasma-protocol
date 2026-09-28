@@ -4,7 +4,7 @@
 /// DHT: Kademlia via `DhtHandle` / `OnionAwareDhtExecutor` (ADR-002)
 /// Share exchange: `/miasma/share/1.0.0` request-response protocol
 /// Admission: `/miasma/admission/1.0.0` PoW proof exchange (ADR-004)
-/// Credential: `/miasma/credential/1.1.0` credential exchange (ADR-005)
+/// Credential: `/miasma/credential/1.2.0` credential exchange (ADR-005)
 /// Descriptor: `/miasma/descriptor/1.1.0` descriptor exchange (ADR-005)
 /// NAT: AutoNAT + DCUtR + relay
 use std::collections::HashMap;
@@ -29,10 +29,6 @@ use tracing::{debug, info, warn};
 use crate::{crypto::keyderive::NodeKeys, share::MiasmaShare, store::LocalShareStore, MiasmaError};
 
 use super::admission_policy::{AdmissionSignals, HybridAdmissionPolicy};
-use super::bbs_credential::{
-    bbs_create_proof, bbs_verify_proof, BbsCredential, BbsCredentialWallet, BbsIssuer,
-    BbsIssuerKey, BbsIssuerRegistry, DisclosurePolicy,
-};
 use super::credential::{
     self, CredentialIssuer, CredentialPresentation, CredentialStats, CredentialTier,
     CredentialWallet, IssuerRegistry, SignedCredential, CAP_ROUTE, CAP_STORE,
@@ -152,10 +148,6 @@ pub struct CredentialRequest {
     pub holder_tag: [u8; 32],
     /// Epoch for which the credential is requested.
     pub epoch: u64,
-    /// BBS+ link secret (needed for BBS+ credential issuance).
-    /// The issuer embeds this in the BBS+ credential so the holder can prove possession.
-    #[serde(default)]
-    pub bbs_link_secret: Option<[u8; 32]>,
 }
 
 /// Domain separator for binding a credential-issuer key to the peer's long-term
@@ -211,9 +203,6 @@ pub struct CredentialResponse {
     /// identity key. Receivers verify it against the already authenticated
     /// remote identity before trusting `issuer_pubkey`.
     pub issuer_binding_signature: Vec<u8>,
-    /// BBS+ credential (privacy-preserving, within-epoch unlinkable).
-    #[serde(default)]
-    pub bbs_credential: Option<BbsCredential>,
 }
 
 // ─── Descriptor exchange wire types (ADR-005 Phase 4b) ──────────────────────
@@ -242,7 +231,7 @@ pub struct DescriptorResponse {
 /// Max message size for credential exchange (8 KiB).
 const CREDENTIAL_MSG_MAX: usize = 8 * 1024;
 
-/// Bincode + 4-byte LE length-prefix codec for `/miasma/credential/1.1.0`.
+/// Bincode + 4-byte LE length-prefix codec for `/miasma/credential/1.2.0`.
 #[derive(Clone, Default)]
 pub struct CredentialCodec;
 
@@ -1548,7 +1537,7 @@ pub struct MiasmaBehaviour {
     pub(crate) share_store: request_response::Behaviour<ShareStoreCodec>,
     /// PoW admission: `/miasma/admission/1.0.0` request-response.
     pub(crate) admission: request_response::Behaviour<AdmissionCodec>,
-    /// Credential exchange: `/miasma/credential/1.1.0` request-response.
+    /// Credential exchange: `/miasma/credential/1.2.0` request-response.
     pub(crate) credential_exchange: request_response::Behaviour<CredentialCodec>,
     /// Descriptor exchange: `/miasma/descriptor/1.1.0` request-response.
     pub(crate) descriptor_exchange: request_response::Behaviour<DescriptorCodec>,
@@ -1630,14 +1619,6 @@ pub struct MiasmaNode {
     // ── Phase 4b: anonymous trust, descriptors, hybrid admission ────────
     /// This node's Ed25519 credential issuer (signs credentials for admitted peers).
     credential_issuer: CredentialIssuer,
-    /// This node's BBS+ credential issuer (privacy-preserving credentials).
-    bbs_issuer: BbsIssuer,
-    /// BBS+ issuer key (needed for key bytes in credential).
-    bbs_issuer_key: BbsIssuerKey,
-    /// BBS+ credential wallet (stores BBS+ credentials from other issuers).
-    bbs_wallet: BbsCredentialWallet,
-    /// Registry of known BBS+ issuer public keys.
-    bbs_issuer_registry: BbsIssuerRegistry,
     /// This node's credential wallet (holds credentials from other issuers).
     credential_wallet: CredentialWallet,
     /// Registry of known credential issuers (bootstrap: all verified = issuers).
@@ -1771,17 +1752,6 @@ impl MiasmaNode {
         );
         let credential_issuer = CredentialIssuer::new(cred_issuer_key);
 
-        // Derive BBS+ issuer key from the same DHT signing key (deterministic).
-        let bbs_seed = blake3::hash(
-            &[
-                b"miasma-bbs-issuer-v1".as_slice(),
-                dht_signing_key.as_bytes(),
-            ]
-            .concat(),
-        );
-        let bbs_issuer_key = BbsIssuerKey::from_seed(bbs_seed.as_bytes());
-        let bbs_issuer = BbsIssuer::new(bbs_issuer_key.clone());
-
         // Derive X25519 onion static key from the DHT signing key.
         let onion_static_secret = {
             let derived = crate::onion::packet::derive_onion_static_key(dht_signing_key.as_bytes())
@@ -1825,10 +1795,6 @@ impl MiasmaNode {
             routing_table: RoutingTable::new(!allow_local),
             event_tick: 0,
             credential_issuer,
-            bbs_issuer,
-            bbs_issuer_key,
-            bbs_wallet: BbsCredentialWallet::new(),
-            bbs_issuer_registry: BbsIssuerRegistry::new(),
             credential_wallet: CredentialWallet::new(),
             issuer_registry,
             descriptor_store: DescriptorStore::new(),
@@ -2221,9 +2187,6 @@ impl MiasmaNode {
                 let _ = reply.send(stats);
             }
             DhtCommand::GetCredentialStats { reply } => {
-                // Touch bbs_issuer_key to suppress dead-code warning;
-                // the key bytes will be served over BBS+ exchange in future.
-                let _bbs_pk_bytes = self.bbs_issuer_key.pk_bytes();
                 let stats = CredentialStats {
                     current_epoch: credential::current_epoch(),
                     held_credentials: self.credential_wallet.credential_count(),
@@ -2643,12 +2606,6 @@ impl MiasmaNode {
                         ephemeral_pubkey: self.credential_wallet.ephemeral_pubkey(),
                         holder_tag: self.credential_wallet.holder_tag(),
                         epoch: self.credential_wallet.epoch(),
-                        // The link secret is deliberately NOT sent. BBS+ requires the
-                        // holder to commit to m0 and the issuer to sign it blindly;
-                        // handing m0 over lets any issuer -- which in bootstrap mode is
-                        // every admitted peer -- present the credential as us, defeating
-                        // the non-transferability the link secret exists to provide.
-                        bbs_link_secret: None,
                     };
                     let req_id = self
                         .swarm
@@ -2657,9 +2614,6 @@ impl MiasmaNode {
                         .send_request(peer_id, cred_req);
                     self.pending_credential_reqs.insert(req_id, *peer_id);
                 }
-                // Also prune BBS+ credentials from expired epochs.
-                let min_epoch = self.credential_wallet.epoch().saturating_sub(1);
-                self.bbs_wallet.prune_before_epoch(min_epoch);
                 info!("credential.re_requested peers={}", verified_peers.len());
             }
             let pruned = self.descriptor_store.prune_stale();
@@ -3038,26 +2992,12 @@ impl MiasmaNode {
             })
             .unwrap_or(false);
 
-        // Check if we have a credential for this peer (from a previous exchange).
-        //
-        // The BBS+ tier (`descriptor.bbs_tier()`) is deliberately NOT consulted
-        // here, even though it is the privacy-preserving one: the self-written
-        // BBS+ scheme is forgeable, and `bbs_tier()` never verified the proof at
-        // all -- it read `proof.disclosed` and matched on the number.
-        //
-        // Neither is the Ed25519 tier, which an earlier revision of this comment
-        // wrongly described as the safe fallback. The only check a received
-        // descriptor gets is `verify_self()`, i.e. that it was signed by the
-        // `signing_pubkey` embedded in it by its own sender.
-        // `credential::verify_presentation` -- which is what actually checks the
-        // issuer, the issuer's signature, the holder tag and the epoch -- has
-        // exactly one production call site, and that is the holder checking a
-        // credential it was just issued. So `d.credential.body.tier` is a
-        // self-declared number too, and feeding it here bought an attacker the
-        // Endorsed bonus for the cost of typing it.
-        //
-        // No credential tier is trusted at admission until presentations are
-        // verified on receipt. See `docs/adr/006-bbs-plus-known-breaks.md`.
+        // Admission intentionally does not consume credential tier. This PoW
+        // decision happens before the post-admission credential and challenged
+        // descriptor exchanges, so there is no verifier-authenticated presentation
+        // available for this connection yet. Feeding descriptor claims here would
+        // either reintroduce self-declared trust or create a circular admission
+        // dependency. Credential scoring remains quarantined in the default policy.
         let credential_tier = None;
 
         // Evaluate using hybrid admission policy.
@@ -3209,8 +3149,6 @@ impl MiasmaNode {
             ephemeral_pubkey: self.credential_wallet.ephemeral_pubkey(),
             holder_tag: self.credential_wallet.holder_tag(),
             epoch: self.credential_wallet.epoch(),
-            // See above: never send m0 to an issuer.
-            bbs_link_secret: None,
         };
         let req_id = self
             .swarm
@@ -3237,7 +3175,6 @@ impl MiasmaNode {
             ephemeral_pubkey: self.credential_wallet.ephemeral_pubkey(),
             holder_tag: self.credential_wallet.holder_tag(),
             epoch: self.credential_wallet.epoch(),
-            bbs_link_secret: None,
         };
         let req_id = self
             .swarm
@@ -3370,7 +3307,6 @@ impl MiasmaNode {
                     None
                 };
 
-                let bbs_credential = None;
                 let issuer_pubkey = self.credential_issuer.pubkey_bytes();
                 let issuer_binding_signature =
                     sign_credential_issuer_binding(&self.dht_signing_key, &issuer_pubkey);
@@ -3378,7 +3314,6 @@ impl MiasmaNode {
                     credential,
                     issuer_pubkey,
                     issuer_binding_signature,
-                    bbs_credential,
                 };
                 let _ = self
                     .swarm
@@ -3401,7 +3336,6 @@ impl MiasmaNode {
                     credential: received_credential,
                     issuer_pubkey,
                     issuer_binding_signature,
-                    bbs_credential,
                 } = response;
 
                 let binding_valid = self
@@ -3465,37 +3399,6 @@ impl MiasmaNode {
                 // Issuer binding is now authenticated, so a descriptor
                 // presentation can be challenged and verified against a known key.
                 self.request_descriptor(peer);
-
-                // Verify and store BBS+ credential if present.
-                if let Some(bbs_cred) = bbs_credential {
-                    let issuer_pk = &bbs_cred.issuer_pk;
-                    if issuer_pk.len() == 96 {
-                        let mut pk_arr = [0u8; 96];
-                        pk_arr.copy_from_slice(issuer_pk);
-                        if self.bbs_issuer_registry.is_known(&pk_arr) {
-                            // Verify the BBS+ credential by creating and verifying a proof.
-                            let context = self.local_peer_id.to_bytes();
-                            let proof =
-                                bbs_create_proof(&bbs_cred, &DisclosurePolicy::default(), &context);
-                            match bbs_verify_proof(&proof, &pk_arr, &context) {
-                                Ok(disclosed) => {
-                                    let tier_val = disclosed
-                                        .iter()
-                                        .find(|&&(i, _)| i == 1)
-                                        .map(|&(_, v)| v)
-                                        .unwrap_or(0);
-                                    self.bbs_wallet.store(bbs_cred);
-                                    info!("bbs_credential.verified_and_stored peer={peer} tier_val={tier_val}");
-                                }
-                                Err(e) => {
-                                    warn!("bbs_credential.rejected peer={peer} error={e}");
-                                }
-                            }
-                        } else {
-                            debug!("bbs_credential.skipped peer={peer} reason=unknown_issuer");
-                        }
-                    }
-                }
             }
             request_response::Event::OutboundFailure {
                 request_id,
@@ -4473,7 +4376,7 @@ fn build_swarm(
 
             let credential_exchange = request_response::Behaviour::<CredentialCodec>::new(
                 [(
-                    StreamProtocol::new("/miasma/credential/1.1.0"),
+                    StreamProtocol::new("/miasma/credential/1.2.0"),
                     request_response::ProtocolSupport::Full,
                 )],
                 request_response::Config::default(),
