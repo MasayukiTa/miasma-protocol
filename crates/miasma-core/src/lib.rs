@@ -48,11 +48,10 @@ pub use dissolution::{
 pub use error::MiasmaError;
 pub use libp2p::{Multiaddr, PeerId};
 pub use network::{
-    AdmissionPolicyStats, AdmissionStats, AnonymityPolicy, BbsCredential, BbsError, BbsIssuer,
-    BbsIssuerKey, BbsPlusScheme, BbsProof, BypassOnionDhtExecutor, CredentialScheme,
-    CredentialStats, CredentialTier, CredentialWallet, DescriptorStats, DescriptorStore, DhtHandle,
-    DirectDhtExecutor, DisclosurePolicy, DiversityViolation, Ed25519Scheme, HybridAdmissionPolicy,
-    IssuerRegistry, MiasmaCoordinator, MiasmaNode, NetworkShareFetcher, NetworkShareSink, NodeType,
+    AdmissionPolicyStats, AdmissionStats, AnonymityPolicy, BypassOnionDhtExecutor, CredentialStats,
+    CredentialTier, CredentialWallet, DescriptorStats, DescriptorStore, DhtHandle,
+    DirectDhtExecutor, DiversityViolation, HybridAdmissionPolicy, IssuerRegistry,
+    MiasmaCoordinator, MiasmaNode, NetworkShareFetcher, NetworkShareSink, NodeType,
     OnionAwareDhtExecutor, OutcomeMetrics, PathSelectionStats, PeerCapabilities, PeerDescriptor,
     PeerRegistry, PublishOptions, PublishReport, ReachabilityKind, RejectionReason,
     ResourceProfile, RoutingStats, ShareExchangeHandle, StoreRejectReason, StoreResponse,

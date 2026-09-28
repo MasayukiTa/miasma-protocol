@@ -29,13 +29,13 @@
 /// - **Selective disclosure**: the credential reveals tier and capabilities
 ///   but not the holder's PeerId or network address.
 ///
-/// # Upgrade path to BBS+
+/// # Privacy boundary
 ///
 /// This scheme provides epoch-level unlinkability but presentations within
-/// an epoch are linkable (same holder_tag). True BBS+ signatures would give
-/// per-presentation unlinkability. The trait boundary (`CredentialScheme`) is
-/// designed to allow dropping in BBS+ once pairing-based crypto is available
-/// without changing the rest of the stack.
+/// an epoch are linkable (same holder_tag). A future identity-hiding credential
+/// carrier must use a vetted implementation and a protocol designed around its
+/// verifier-generated challenge; the removed hand-written BBS+ experiment is
+/// not a supported upgrade path.
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::{Signer, Verifier};

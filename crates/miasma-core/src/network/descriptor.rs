@@ -34,7 +34,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
 
-use super::bbs_credential::BbsProof;
 use super::credential::{CredentialPresentation, CredentialTier};
 
 // ─── Descriptor types ───────────────────────────────────────────────────────
@@ -296,11 +295,6 @@ pub struct PeerDescriptor {
     pub version: u64,
     /// Ed25519 public key of the descriptor signer (for self-verification).
     pub signing_pubkey: [u8; 32],
-    /// Optional BBS+ proof of credential possession (privacy-preserving trust signal).
-    /// Verifiers can extract the tier from disclosed attributes without linking
-    /// multiple descriptors to the same holder.
-    #[serde(default)]
-    pub bbs_proof: Option<BbsProof>,
     /// X25519 static public key for onion-layer encryption.
     /// Relay-capable and target nodes publish this so initiators can build
     /// per-hop encrypted onion packets.
@@ -323,31 +317,6 @@ impl PeerDescriptor {
         version: u64,
         signing_key: &ed25519_dalek::SigningKey,
     ) -> Self {
-        Self::new_signed_with_bbs(
-            pseudonym,
-            reachability,
-            addresses,
-            capabilities,
-            resource_profile,
-            credential,
-            None,
-            version,
-            signing_key,
-        )
-    }
-
-    /// Create a signed descriptor with an optional BBS+ proof attached.
-    pub fn new_signed_with_bbs(
-        pseudonym: [u8; 32],
-        reachability: ReachabilityKind,
-        addresses: Vec<String>,
-        capabilities: PeerCapabilities,
-        resource_profile: ResourceProfile,
-        credential: Option<CredentialPresentation>,
-        bbs_proof: Option<BbsProof>,
-        version: u64,
-        signing_key: &ed25519_dalek::SigningKey,
-    ) -> Self {
         Self::new_signed_full(
             pseudonym,
             reachability,
@@ -355,7 +324,6 @@ impl PeerDescriptor {
             capabilities,
             resource_profile,
             credential,
-            bbs_proof,
             None,
             version,
             signing_key,
@@ -370,7 +338,6 @@ impl PeerDescriptor {
         capabilities: PeerCapabilities,
         resource_profile: ResourceProfile,
         credential: Option<CredentialPresentation>,
-        bbs_proof: Option<BbsProof>,
         onion_pubkey: Option<[u8; 32]>,
         version: u64,
         signing_key: &ed25519_dalek::SigningKey,
@@ -393,7 +360,6 @@ impl PeerDescriptor {
             published_at,
             version,
             signing_pubkey: signing_key.verifying_key().to_bytes(),
-            bbs_proof,
             onion_pubkey,
             signature: Vec::new(),
         };
@@ -423,10 +389,6 @@ impl PeerDescriptor {
         // both presence/absence and bytes into the owner signature so a verified
         // presentation cannot be attached, removed, or replaced after signing.
         body.extend_from_slice(&bincode::serialize(&self.credential).unwrap_or_default());
-        // Include BBS+ proof bytes so tampering/removal is detected by signature.
-        if let Some(ref proof) = self.bbs_proof {
-            body.extend_from_slice(&bincode::serialize(proof).unwrap_or_default());
-        }
         // Include onion pubkey so tampering/removal is detected by signature.
         if let Some(ref opk) = self.onion_pubkey {
             body.extend_from_slice(opk);

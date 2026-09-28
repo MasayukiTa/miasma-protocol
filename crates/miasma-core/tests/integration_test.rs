@@ -3626,18 +3626,15 @@ fn routing_stats_serde_roundtrip() {
     assert_eq!(deserialized.diversity_rejections, 7);
 }
 
-// ─── Phase 4: Epoch rotation, credential lifecycle, and BBS+ integration ─────
+// ─── Phase 4: Epoch rotation and credential lifecycle ─────
 
-use miasma_core::network::bbs_credential::{
-    bbs_create_proof, bbs_verify_proof, generate_link_secret, BbsCredentialAttributes,
-};
 use miasma_core::network::credential::{
     current_epoch, verify_presentation, CredentialError, CredentialIssuer, EphemeralIdentity,
     CAP_RELAY, CAP_ROUTE, CAP_STORE,
 };
 use miasma_core::{
-    BbsIssuer, BbsIssuerKey, CredentialTier, CredentialWallet, DescriptorStore, DisclosurePolicy,
-    PeerCapabilities, PeerDescriptor, ReachabilityKind, ResourceProfile,
+    CredentialTier, CredentialWallet, DescriptorStore, PeerCapabilities, PeerDescriptor,
+    ReachabilityKind, ResourceProfile,
 };
 
 /// Test 43: CredentialWallet epoch rotation — stale credentials pruned and
@@ -3886,72 +3883,6 @@ fn credential_issuance_and_verification_roundtrip() {
     assert!(
         matches!(result.unwrap_err(), CredentialError::ExpiredEpoch { .. }),
         "presentation with epoch far in the past relative to verifier should fail"
-    );
-}
-
-/// Test 46: Full BBS+ credential issuance, selective-disclosure proof,
-/// and verification round-trip — including wrong-issuer and tampered-disclosure
-/// rejection.
-#[test]
-fn bbs_credential_issuance_and_proof_roundtrip() {
-    // Create a BBS+ issuer.
-    let issuer_key = BbsIssuerKey::from_seed(b"integration-test-bbs-issuer");
-    let issuer = BbsIssuer::new(issuer_key.clone());
-
-    // Issue a credential with specific attributes.
-    let link_secret = generate_link_secret();
-    let attributes = BbsCredentialAttributes {
-        link_secret,
-        tier: CredentialTier::Verified,
-        capabilities: CAP_STORE | CAP_ROUTE | CAP_RELAY,
-        epoch: current_epoch(),
-        nonce: 12345,
-    };
-    let credential = issuer.issue(attributes);
-
-    // Create a proof with selective disclosure (reveal tier only).
-    let policy = DisclosurePolicy::default(); // reveals tier (index 1)
-    let context = b"bbs-integration-test-verifier-challenge";
-    let proof = bbs_create_proof(&credential, &policy, context);
-
-    // Proof should disclose tier only.
-    assert_eq!(proof.disclosed.len(), 1);
-    assert_eq!(proof.disclosed[0].0, 1); // index 1 = tier
-    assert_eq!(proof.disclosed[0].1, CredentialTier::Verified as u64);
-
-    // Verify the proof with the correct issuer key.
-    let result = bbs_verify_proof(&proof, &issuer_key.pk_bytes(), context);
-    assert!(result.is_ok(), "valid BBS+ proof should verify: {result:?}");
-    let disclosed = result.unwrap();
-    assert_eq!(disclosed.len(), 1);
-    assert_eq!(disclosed[0].1, CredentialTier::Verified as u64);
-
-    // Verify the proof fails with a DIFFERENT issuer key (pairing check).
-    let wrong_key = BbsIssuerKey::from_seed(b"wrong-issuer-key-for-test");
-    let result = bbs_verify_proof(&proof, &wrong_key.pk_bytes(), context);
-    assert!(result.is_err(), "wrong issuer key should fail verification");
-    // The pairing check should catch this.
-    assert_eq!(
-        result.unwrap_err(),
-        miasma_core::network::bbs_credential::BbsError::IssuerBindingFailed,
-        "wrong issuer key should produce IssuerBindingFailed"
-    );
-
-    // Verify that tampered disclosure fails.
-    let mut tampered_proof = proof.clone();
-    // Change the disclosed tier value from Verified(2) to Endorsed(3).
-    tampered_proof.disclosed = vec![(1, CredentialTier::Endorsed as u64)];
-    let result = bbs_verify_proof(&tampered_proof, &issuer_key.pk_bytes(), context);
-    assert!(
-        result.is_err(),
-        "tampered disclosure should fail verification"
-    );
-
-    // Verify wrong context fails.
-    let result = bbs_verify_proof(&proof, &issuer_key.pk_bytes(), b"wrong-context");
-    assert!(
-        result.is_err(),
-        "wrong context should fail BBS+ verification"
     );
 }
 
