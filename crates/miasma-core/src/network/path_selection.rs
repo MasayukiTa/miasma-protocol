@@ -247,11 +247,12 @@ impl PathSelector {
             return Err(PathError::NoRelaysAvailable);
         }
 
-        // Filter by trust tier.
-        let mut candidates: Vec<&PeerDescriptor> = relays
-            .into_iter()
-            .filter(|d| d.meets_tier(constraints.min_relay_tier) || d.credential.is_none())
-            .collect();
+        // Credential presentations carried by descriptors are not yet verified on
+        // receipt. Until that verification path exists, path selection must treat
+        // every descriptor as credential-less rather than consuming self-declared
+        // tier data. `min_relay_tier` remains part of the constraints API for the
+        // future verified-credential path.
+        let mut candidates: Vec<&PeerDescriptor> = relays.into_iter().collect();
 
         // Sort: prefer desktop relays, then by published_at (newer first).
         if constraints.prefer_desktop_relays {
@@ -294,7 +295,9 @@ impl PathSelector {
                 continue; // skip same-prefix relay
             }
 
-            let tier = desc.credential.as_ref().map(|c| c.credential.body.tier);
+            // Do not surface an unverified descriptor credential as a trusted
+            // property of the selected hop.
+            let tier = None;
 
             hops.push(PathHop {
                 pseudonym: desc.pseudonym,

@@ -2932,8 +2932,19 @@ impl MiasmaNode {
             return Err(RejectionReason::PubkeyMismatch);
         }
 
-        // Compute PoW difficulty (leading_zeros returns u32, admission expects u8).
-        let pow_difficulty = sybil::leading_zeros(&pow.hash).min(255) as u8;
+        // Verify the PoW before any peer-controlled hash bytes reach scoring.
+        // This recomputes BLAKE3(pubkey || nonce), checks the claimed hash, and
+        // enforces the policy's absolute minimum difficulty.
+        if !sybil::verify_pow(pow, self.admission_policy.min_pow) {
+            return Err(RejectionReason::InsufficientDifficulty);
+        }
+
+        // Derive the score input from a freshly recomputed hash, not the wire
+        // field. `verify_pow` already proved the two are equal; recomputing here
+        // makes the trust boundary explicit and prevents a future refactor from
+        // accidentally restoring claimed-hash scoring.
+        let verified_hash = sybil::recompute_pow_hash(pow);
+        let pow_difficulty = sybil::leading_zeros(&verified_hash).min(255) as u8;
 
         // Check diversity: is this prefix unique?
         let unique_prefix = self
@@ -4447,5 +4458,46 @@ mod share_store_tests {
             }
             other => panic!("expected Accepted, got: {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod admission_pow_tests {
+    use super::*;
+
+    fn make_node() -> MiasmaNode {
+        let key = [0x5Au8; 32];
+        MiasmaNode::new(&key, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap()
+    }
+
+    fn peer_id_for_pow(pow: &NodeIdPoW) -> PeerId {
+        let ed_pubkey = libp2p::identity::ed25519::PublicKey::try_from_bytes(&pow.pubkey).unwrap();
+        PeerId::from(libp2p::identity::PublicKey::from(ed_pubkey))
+    }
+
+    #[test]
+    fn admission_rejects_forged_all_zero_claimed_pow_hash() {
+        let node = make_node();
+        let mut forged = node.local_pow.clone();
+        let peer = peer_id_for_pow(&forged);
+
+        // Before the regression fix this attacker-chosen value scored as 255
+        // difficulty bits without doing any work.
+        forged.nonce = 0;
+        forged.hash = [0u8; 32];
+
+        assert_eq!(
+            node.verify_remote_pow(&peer, &forged),
+            Err(RejectionReason::InsufficientDifficulty)
+        );
+    }
+
+    #[test]
+    fn admission_accepts_valid_pow_for_matching_identity() {
+        let node = make_node();
+        let pow = node.local_pow.clone();
+        let peer = peer_id_for_pow(&pow);
+
+        assert_eq!(node.verify_remote_pow(&peer, &pow), Ok(()));
     }
 }
