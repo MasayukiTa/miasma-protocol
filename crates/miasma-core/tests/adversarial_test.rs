@@ -5141,6 +5141,7 @@ fn directed_envelope_summary_json_roundtrip() {
     let summary = EnvelopeSummary {
         envelope_id: "abc123".to_string(),
         sender_pubkey: "sender_key".to_string(),
+        sender_peer_id: Some("12D3KooWAuthenticatedSender".to_string()),
         recipient_pubkey: "recipient_key".to_string(),
         state: EnvelopeState::Confirmed,
         created_at: 1000,

@@ -549,7 +549,9 @@ impl MiasmaApp {
                         .into_iter()
                         .map(|item| InboxItem {
                             envelope_id: item.envelope_id,
-                            sender: item.sender_pubkey,
+                            sender: item
+                                .sender_peer_id
+                                .unwrap_or_else(|| "<legacy/unbound>".to_string()),
                             recipient: item.recipient_pubkey,
                             state: item.state,
                             challenge_code: item.challenge_code,

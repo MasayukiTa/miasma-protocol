@@ -146,6 +146,7 @@ pub enum WorkerResult {
 pub struct DirectedInboxItem {
     pub envelope_id: String,
     pub sender_pubkey: String,
+    pub sender_peer_id: Option<String>,
     pub recipient_pubkey: String,
     pub state: String,
     pub challenge_code: Option<String>,
@@ -932,6 +933,7 @@ fn map_summary_items(items: Vec<miasma_core::directed::EnvelopeSummary>) -> Vec<
         .map(|item| DirectedInboxItem {
             envelope_id: item.envelope_id,
             sender_pubkey: item.sender_pubkey,
+            sender_peer_id: item.sender_peer_id,
             recipient_pubkey: item.recipient_pubkey,
             state: format!("{:?}", item.state),
             challenge_code: item.challenge_code,

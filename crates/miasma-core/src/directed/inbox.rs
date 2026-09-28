@@ -19,7 +19,12 @@ const MAX_ENVELOPES: usize = 10_000;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvelopeSummary {
     pub envelope_id: String,
+    /// Sender's self-asserted X25519 sharing key from the envelope.
     pub sender_pubkey: String,
+    /// Authenticated libp2p PeerId observed on the Invite transport. Present for
+    /// new incoming envelopes; legacy/unbound records have `None`.
+    #[serde(default)]
+    pub sender_peer_id: Option<String>,
     pub recipient_pubkey: String,
     pub state: EnvelopeState,
     pub created_at: u64,
@@ -242,9 +247,15 @@ impl DirectedInbox {
                         None
                     };
 
+                    let id_hex = env.id_hex();
                     summaries.push(EnvelopeSummary {
-                        envelope_id: env.id_hex(),
+                        envelope_id: id_hex.clone(),
                         sender_pubkey: super::envelope::format_sharing_key(&env.sender_pubkey),
+                        sender_peer_id: if is_incoming {
+                            self.load_incoming_peer_id(&id_hex)
+                        } else {
+                            None
+                        },
                         recipient_pubkey: super::envelope::format_sharing_key(
                             &env.recipient_pubkey,
                         ),
@@ -431,11 +442,19 @@ mod tests {
         env2.envelope_id = [0x02; 32];
         env2.created_at = 200;
         inbox.save_incoming(&env2).unwrap();
+        inbox
+            .bind_incoming_peer_id(&env2.id_hex(), "peer-authenticated")
+            .unwrap();
 
         let list = inbox.list_incoming();
         assert_eq!(list.len(), 2);
         // Sorted by created_at descending.
         assert!(list[0].created_at >= list[1].created_at);
+        assert_eq!(
+            list[0].sender_peer_id.as_deref(),
+            Some("peer-authenticated")
+        );
+        assert!(list[1].sender_peer_id.is_none());
     }
 
     #[test]
