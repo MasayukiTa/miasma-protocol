@@ -19,7 +19,7 @@ use libp2p::{
     identity::Keypair,
     kad::{self, store::MemoryStore, store::RecordStore},
     mdns, noise, ping, relay, request_response,
-    swarm::{NetworkBehaviour, SwarmEvent},
+    swarm::{ConnectionId, NetworkBehaviour, SwarmEvent},
     yamux, Multiaddr, PeerId, StreamProtocol, Swarm,
 };
 use serde::{Deserialize, Serialize};
@@ -1559,6 +1559,34 @@ pub struct MiasmaBehaviour {
 
 // ─── MiasmaNode ───────────────────────────────────────────────────────────────
 
+// Select routing candidates after authenticated Identify. Peer-advertised
+// addresses use the normal untrusted filter. A private mDNS hint is exceptional:
+// it is accepted only if this exact address was the target of the authenticated
+// outbound connection that carried this Identify exchange.
+fn select_identify_addresses(
+    allow_local: bool,
+    peer_id: &PeerId,
+    advertised: &[Multiaddr],
+    authenticated_dial_addr: Option<&Multiaddr>,
+    mdns_candidates: Option<&[Multiaddr]>,
+) -> Vec<Multiaddr> {
+    if allow_local {
+        return advertised.to_vec();
+    }
+
+    let mut accepted = super::address::filter_peer_addresses(peer_id, advertised);
+    if let (Some(dial_addr), Some(mdns_candidates)) = (authenticated_dial_addr, mdns_candidates) {
+        let authenticated_mdns = matches!(
+            super::address::classify_multiaddr(dial_addr),
+            super::address::AddressClass::Private | super::address::AddressClass::GlobalUnicast
+        ) && mdns_candidates.contains(dial_addr);
+        if authenticated_mdns && !accepted.contains(dial_addr) {
+            accepted.push(dial_addr.clone());
+        }
+    }
+    accepted
+}
+
 pub struct MiasmaNode {
     pub local_peer_id: PeerId,
     pub node_type: NodeType,
@@ -1617,6 +1645,15 @@ pub struct MiasmaNode {
     /// Addresses held per peer while awaiting admission verification.
     /// Once verified, these are promoted to Kademlia.
     pending_peer_addrs: HashMap<PeerId, Vec<Multiaddr>>,
+    /// Local-discovery dial candidates learned from mDNS. These are not trusted
+    /// routing material: they become eligible for Kademlia only after authenticated
+    /// Identify, diversity checks and PoW admission succeed.
+    mdns_peer_addrs: HashMap<PeerId, Vec<Multiaddr>>,
+    /// Actual remote address of each authenticated outbound connection. The
+    /// Identify event carries the same ConnectionId, allowing a private mDNS
+    /// hint to become routing material only after a successful Noise connection
+    /// to that exact address and peer identity.
+    authenticated_dial_addrs: HashMap<ConnectionId, (PeerId, Multiaddr)>,
     /// Routing overlay: trust preference, IP diversity, reliability tracking.
     routing_table: RoutingTable,
     /// Tick counter for periodic network-size observation (difficulty adjustment).
@@ -1798,6 +1835,8 @@ impl MiasmaNode {
             peer_registry: PeerRegistry::new(),
             dht_signing_key,
             pending_peer_addrs: HashMap::new(),
+            mdns_peer_addrs: HashMap::new(),
+            authenticated_dial_addrs: HashMap::new(),
             routing_table: RoutingTable::new(!allow_local),
             event_tick: 0,
             credential_issuer,
@@ -2251,16 +2290,8 @@ impl MiasmaNode {
                 return_key,
                 reply,
             } => {
-                // Register addresses so libp2p can dial the peer.
-                for addr_str in &addrs {
-                    if let Ok(addr) = addr_str.parse::<Multiaddr>() {
-                        self.swarm
-                            .behaviour_mut()
-                            .kademlia
-                            .add_address(&peer_id, addr.clone());
-                        self.swarm.add_peer_address(peer_id, addr.clone());
-                    }
-                }
+                // Register only address classes safe for untrusted metadata.
+                self.register_untrusted_dial_addresses(peer_id, &addrs);
                 let req_id = self
                     .swarm
                     .behaviour_mut()
@@ -2326,16 +2357,8 @@ impl MiasmaNode {
                 nonce,
                 reply,
             } => {
-                // Register addresses so libp2p can dial the peer.
-                for addr_str in &addrs {
-                    if let Ok(addr) = addr_str.parse::<Multiaddr>() {
-                        self.swarm
-                            .behaviour_mut()
-                            .kademlia
-                            .add_address(&peer_id, addr.clone());
-                        self.swarm.add_peer_address(peer_id, addr.clone());
-                    }
-                }
+                // Register only address classes safe for untrusted metadata.
+                self.register_untrusted_dial_addresses(peer_id, &addrs);
                 let req = super::relay_probe::ProbeRequest { nonce };
                 let req_id = self
                     .swarm
@@ -2403,10 +2426,6 @@ impl MiasmaNode {
                             let circuit_addr_str =
                                 format!("/p2p/{relay_id}/p2p-circuit/p2p/{peer_id}");
                             if let Ok(addr) = circuit_addr_str.parse::<Multiaddr>() {
-                                self.swarm
-                                    .behaviour_mut()
-                                    .kademlia
-                                    .add_address(&peer_id, addr.clone());
                                 self.swarm.add_peer_address(peer_id, addr);
                                 registered += 1;
                             }
@@ -2497,6 +2516,26 @@ impl MiasmaNode {
         }
     }
 
+    /// Register peer/descriptor supplied addresses for one-off protocol dialing
+    /// without mutating Kademlia. Production rejects loopback, private, link-local,
+    /// DNS and unknown addresses to prevent SSRF and routing-filter bypass.
+    fn register_untrusted_dial_addresses(&mut self, peer_id: PeerId, addrs: &[String]) -> usize {
+        let parsed: Vec<Multiaddr> = addrs
+            .iter()
+            .filter_map(|raw| raw.parse::<Multiaddr>().ok())
+            .collect();
+        let accepted = if self.allow_local_addresses {
+            parsed
+        } else {
+            super::address::filter_peer_addresses(&peer_id, &parsed)
+        };
+        let count = accepted.len();
+        for addr in accepted {
+            self.swarm.add_peer_address(peer_id, addr);
+        }
+        count
+    }
+
     fn handle_share_command(&mut self, cmd: ShareCommand) {
         let ShareCommand {
             peer_id,
@@ -2505,17 +2544,9 @@ impl MiasmaNode {
             reply,
         } = cmd;
 
-        // Register addresses with both Kademlia (routing) and share_exchange
-        // (address book used by request_response when it dials the peer).
-        for addr_str in &addrs {
-            if let Ok(addr) = addr_str.parse::<Multiaddr>() {
-                self.swarm
-                    .behaviour_mut()
-                    .kademlia
-                    .add_address(&peer_id, addr.clone());
-                self.swarm.add_peer_address(peer_id, addr.clone());
-            }
-        }
+        // DHT/share metadata is untrusted routing input. Filter it for SSRF and
+        // register it only as a one-off request_response dial hint.
+        self.register_untrusted_dial_addresses(peer_id, &addrs);
 
         let req_id = self
             .swarm
@@ -2672,15 +2703,7 @@ impl MiasmaNode {
                             let mut nonce = [0u8; 32];
                             rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
                             let req = super::relay_probe::ProbeRequest { nonce };
-                            for addr_str in &addrs {
-                                if let Ok(addr) = addr_str.parse::<Multiaddr>() {
-                                    self.swarm
-                                        .behaviour_mut()
-                                        .kademlia
-                                        .add_address(&peer_id, addr.clone());
-                                    self.swarm.add_peer_address(peer_id, addr.clone());
-                                }
-                            }
+                            self.register_untrusted_dial_addresses(peer_id, &addrs);
                             let _req_id = self
                                 .swarm
                                 .behaviour_mut()
@@ -2699,8 +2722,25 @@ impl MiasmaNode {
             SwarmEvent::NewListenAddr { address, .. } => {
                 info!("Listening on {address}");
             }
-            SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+            SwarmEvent::ConnectionEstablished {
+                peer_id,
+                connection_id,
+                endpoint,
+                ..
+            } => {
                 debug!("Connected: {peer_id}");
+                if endpoint.is_dialer() {
+                    let mut remote = endpoint.get_remote_address().clone();
+                    let has_peer_suffix = matches!(
+                        remote.iter().last(),
+                        Some(libp2p::multiaddr::Protocol::P2p(id)) if id == peer_id
+                    );
+                    if has_peer_suffix {
+                        let _ = remote.pop();
+                    }
+                    self.authenticated_dial_addrs
+                        .insert(connection_id, (peer_id, remote));
+                }
                 self.peer_registry.on_connected(peer_id);
                 // Track connection success in health monitor.
                 self.health_monitor.record_peer_success(
@@ -2715,39 +2755,55 @@ impl MiasmaNode {
                     let _ = tx.try_send(super::types::TopologyEvent::PeerConnected { peer_id });
                 }
             }
-            SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
-                debug!("Disconnected: {peer_id} ({cause:?})");
-                self.peer_registry.on_disconnected(&peer_id);
-                self.routing_table.remove_peer(&peer_id);
-                self.pending_peer_addrs.remove(&peer_id);
-                self.pending_admissions
-                    .retain(|_, pending_peer| *pending_peer != peer_id);
-                self.pending_credential_reqs
-                    .retain(|_, pending_peer| *pending_peer != peer_id);
-                self.pending_descriptor_reqs
-                    .retain(|_, (pending_peer, _)| *pending_peer != peer_id);
-                // Track disconnection in health monitor and flap detector.
-                self.health_monitor
-                    .record_peer_failure(&peer_id.to_string());
-                self.flap_detector.record_disconnect();
-                // Schedule reconnection with backoff.
-                let tripped = self
-                    .reconnection_scheduler
-                    .record_failure(&peer_id.to_bytes());
-                if tripped {
-                    self.reconnection_metrics.record_circuit_breaker();
-                    debug!("Circuit breaker tripped for peer {peer_id}");
-                }
-                if let Some(tx) = &self.topology_tx {
-                    let _ = tx.try_send(super::types::TopologyEvent::PeerDisconnected { peer_id });
+            SwarmEvent::ConnectionClosed {
+                peer_id,
+                connection_id,
+                num_established,
+                cause,
+                ..
+            } => {
+                debug!(
+                    "Disconnected: {peer_id} connection={connection_id:?} remaining={num_established} ({cause:?})"
+                );
+                self.authenticated_dial_addrs.remove(&connection_id);
+
+                // A peer may have multiple simultaneous libp2p connections. Do not
+                // erase Verified/routing/pending state merely because one path closed.
+                if num_established == 0 {
+                    self.peer_registry.on_disconnected(&peer_id);
+                    self.routing_table.remove_peer(&peer_id);
+                    self.pending_peer_addrs.remove(&peer_id);
+                    self.pending_admissions
+                        .retain(|_, pending_peer| *pending_peer != peer_id);
+                    self.pending_credential_reqs
+                        .retain(|_, pending_peer| *pending_peer != peer_id);
+                    self.pending_descriptor_reqs
+                        .retain(|_, (pending_peer, _)| *pending_peer != peer_id);
+                    // Track disconnection in health monitor and flap detector.
+                    self.health_monitor
+                        .record_peer_failure(&peer_id.to_string());
+                    self.flap_detector.record_disconnect();
+                    // Schedule reconnection with backoff.
+                    let tripped = self
+                        .reconnection_scheduler
+                        .record_failure(&peer_id.to_bytes());
+                    if tripped {
+                        self.reconnection_metrics.record_circuit_breaker();
+                        debug!("Circuit breaker tripped for peer {peer_id}");
+                    }
+                    if let Some(tx) = &self.topology_tx {
+                        let _ =
+                            tx.try_send(super::types::TopologyEvent::PeerDisconnected { peer_id });
+                    }
                 }
             }
             SwarmEvent::Behaviour(MiasmaBehaviourEvent::Identify(identify::Event::Received {
                 peer_id,
+                connection_id,
                 info,
                 ..
             })) => {
-                self.handle_identify(peer_id, info);
+                self.handle_identify(peer_id, connection_id, info);
             }
             SwarmEvent::Behaviour(MiasmaBehaviourEvent::Kademlia(ev)) => {
                 self.handle_kad_event(ev);
@@ -2827,10 +2883,11 @@ impl MiasmaNode {
         }
     }
 
-    /// Handle mDNS discovery events — add LAN peers directly to Kademlia.
+    /// Handle mDNS discovery events as untrusted local dial hints.
     ///
-    /// mDNS-discovered peers are on the local network, so their private
-    /// addresses are trusted and bypassed through the normal address filter.
+    /// mDNS is discovery, not authentication. A LAN peer must still complete the
+    /// same Identify/diversity/PoW admission path as an Internet peer before any
+    /// address is promoted into Kademlia.
     fn handle_mdns_event(&mut self, event: mdns::Event) {
         match event {
             mdns::Event::Discovered(peers) => {
@@ -2838,23 +2895,53 @@ impl MiasmaNode {
                     if peer_id == self.local_peer_id {
                         continue;
                     }
-                    info!("mDNS discovered: {peer_id} at {addr}");
-                    self.swarm
-                        .behaviour_mut()
-                        .kademlia
-                        .add_address(&peer_id, addr);
+                    let class = super::address::classify_multiaddr(&addr);
+                    if !matches!(
+                        class,
+                        super::address::AddressClass::Private
+                            | super::address::AddressClass::GlobalUnicast
+                    ) {
+                        debug!("mdns.rejected peer={peer_id} addr={addr} class={class:?}");
+                        continue;
+                    }
+
+                    info!("mDNS discovered dial candidate: {peer_id} at {addr}");
+                    let candidates = self.mdns_peer_addrs.entry(peer_id).or_default();
+                    if !candidates.contains(&addr) {
+                        candidates.push(addr.clone());
+                    }
+
+                    let p2p_addr = addr.with(libp2p::multiaddr::Protocol::P2p(peer_id));
+                    if let Err(error) = self.swarm.dial(p2p_addr) {
+                        debug!("mdns.dial_not_started peer={peer_id} error={error}");
+                    }
                 }
             }
             mdns::Event::Expired(peers) => {
                 for (peer_id, addr) in peers {
                     debug!("mDNS expired: {peer_id} at {addr}");
+                    let remove_peer =
+                        if let Some(candidates) = self.mdns_peer_addrs.get_mut(&peer_id) {
+                            candidates.retain(|candidate| candidate != &addr);
+                            candidates.is_empty()
+                        } else {
+                            false
+                        };
+                    if remove_peer {
+                        self.mdns_peer_addrs.remove(&peer_id);
+                    }
                 }
             }
         }
     }
 
     /// Handle Identify protocol completion for a peer.
-    fn handle_identify(&mut self, peer_id: PeerId, info: identify::Info) {
+    fn handle_identify(
+        &mut self,
+        peer_id: PeerId,
+        connection_id: ConnectionId,
+        info: identify::Info,
+    ) {
         // Identify runs over the authenticated libp2p connection. Record the
         // concrete Ed25519 identity key, but only after independently checking
         // that it derives the connection's `PeerId`.
@@ -2876,11 +2963,18 @@ impl MiasmaNode {
 
         // Filter addresses: reject loopback, link-local, private, unknown.
         // In local/test mode, skip filtering to allow loopback addresses.
-        let addrs_to_use = if self.allow_local_addresses {
-            info.listen_addrs.clone()
-        } else {
-            super::address::filter_peer_addresses(&peer_id, &info.listen_addrs)
-        };
+        let authenticated_dial_addr = self
+            .authenticated_dial_addrs
+            .get(&connection_id)
+            .and_then(|(dial_peer, addr)| (*dial_peer == peer_id).then_some(addr));
+        let mdns_candidates = self.mdns_peer_addrs.get(&peer_id).map(Vec::as_slice);
+        let addrs_to_use = select_identify_addresses(
+            self.allow_local_addresses,
+            &peer_id,
+            &info.listen_addrs,
+            authenticated_dial_addr,
+            mdns_candidates,
+        );
 
         if addrs_to_use.is_empty() {
             debug!("admission.rejected peer={peer_id} reason=no_routable_addresses");
@@ -4897,6 +4991,55 @@ mod admission_pow_tests {
             node.pending_credential_reqs.len(),
             credential_requests_after_first
         );
+    }
+
+    #[test]
+    fn identify_filters_private_dns_and_loopback_peer_metadata() {
+        let peer = PeerId::random();
+        let advertised = vec![
+            "/ip4/10.1.2.3/tcp/4001".parse().unwrap(),
+            "/ip4/127.0.0.1/tcp/4001".parse().unwrap(),
+            "/dns4/localhost/tcp/4001".parse().unwrap(),
+            "/ip4/203.0.113.9/tcp/4001".parse().unwrap(),
+        ];
+
+        let selected = select_identify_addresses(false, &peer, &advertised, None, None);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(
+            selected[0],
+            "/ip4/203.0.113.9/tcp/4001".parse::<Multiaddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn private_mdns_address_requires_exact_authenticated_outbound_dial() {
+        let peer = PeerId::random();
+        let mdns_addr: Multiaddr = "/ip4/192.168.50.12/tcp/4001".parse().unwrap();
+        let other_private: Multiaddr = "/ip4/192.168.50.13/tcp/4001".parse().unwrap();
+        let mdns = vec![mdns_addr.clone()];
+
+        let selected = select_identify_addresses(false, &peer, &[], Some(&mdns_addr), Some(&mdns));
+        assert_eq!(selected, vec![mdns_addr.clone()]);
+
+        let not_selected =
+            select_identify_addresses(false, &peer, &[], Some(&other_private), Some(&mdns));
+        assert!(not_selected.is_empty());
+    }
+
+    #[tokio::test]
+    async fn untrusted_protocol_dial_hints_reject_local_and_dns_targets() {
+        let master = [0x6Bu8; 32];
+        let mut node = MiasmaNode::new(&master, NodeType::Full, "/ip4/0.0.0.0/tcp/0").unwrap();
+        assert!(!node.allow_local_addresses);
+        let peer = PeerId::random();
+        let addrs = vec![
+            "/ip4/127.0.0.1/tcp/80".to_string(),
+            "/ip4/10.0.0.5/tcp/445".to_string(),
+            "/dns4/localhost/tcp/8080".to_string(),
+            "/ip4/203.0.113.20/tcp/4001".to_string(),
+        ];
+
+        assert_eq!(node.register_untrusted_dial_addresses(peer, &addrs), 1);
     }
 
     #[test]
