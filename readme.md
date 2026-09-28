@@ -21,8 +21,8 @@ The current public release is **v0.3.1-beta.1**, a Windows beta prerelease for t
   3. Rendezvous -- NAT'd nodes reachable through introduction points
   4. Onion -- content-blind 3-hop encryption (X25519 + XChaCha20-Poly1305 per hop)
   5. Onion + rendezvous -- content-blind retrieval from NAT'd holders
-- **Pseudonymous Ed25519 credentials** with cross-epoch unlinkability (a BLS12-381 BBS+ scheme for within-epoch unlinkability also exists in the tree, but it is forgeable and is not used for any trust decision — see `docs/adr/006-bbs-plus-known-breaks.md`)
-- **Pseudonymous peer descriptors** with epoch rotation and churn tracking
+- **Epoch-scoped Ed25519 credentials** with challenge-bound holder proof. Holder tags rotate, but the current descriptor carrier is bound to the verified libp2p PeerId and does **not** provide network-level unlinkability.
+- **Signed peer descriptors** with holder-tag rotation and churn tracking; production descriptors are explicitly bound to the verified libp2p identity.
 - **Active relay trust verification** -- relay probing (`/miasma/relay-probe/1.0.0`), forwarding verification through circuit addresses, evidence-based trust tiers (Claimed / Observed / Verified)
 - **Same-network peer discovery** -- mDNS for LAN discovery, with manual bootstrap fallback for restrictive networks
 - **Transport obfuscation**: WSS+TLS, ObfuscatedQuic+REALITY, SOCKS5 proxy support
@@ -36,7 +36,7 @@ The current public release is **v0.3.1-beta.1**, a Windows beta prerelease for t
 - Local encrypted storage with distress wipe
 - Multi-transport payload delivery across network conditions
 - Layered anonymity with content-blind onion routing
-- Pseudonymous trust without identity linkability across epochs
+- Challenge-bound credential verification and signed descriptor routing with explicit PeerId-linkability limits
 - Relay verification with passive observation, active probing, and forwarding verification
 - Operational diagnostics (CLI, desktop, JSON export)
 
@@ -151,7 +151,7 @@ This is a beta-stage networked system. It has not been externally audited.
 
 The protocol contains meaningful security work: Ed25519 DHT record verification, PoW admission, onion encryption, relay trust verification, ACL-enforced key storage, and a completed security hotfix sprint (VULN-001 through VULN-005). But unknown peers, hostile environments, adversarial routing pressure, and long-term retention behavior all require more validation.
 
-One component is known-broken and disconnected rather than fixed: the self-written BBS+ credential scheme is forgeable in two independent ways, demonstrated by executable forgery tests in the repository. It no longer feeds any trust decision. The reasoning, the containment, and the conditions for re-enabling it are in `docs/adr/006-bbs-plus-known-breaks.md`. Every other cryptographic component uses reviewed library primitives in conventional compositions.
+The former self-written BBS+ credential implementation was forgeable and was deleted on 2026-09-28. Its executable forgery evidence and deletion rationale are retained in `docs/adr/006-bbs-plus-known-breaks.md`; it is not present in the current trust path and must not be restored. Current cryptographic code uses maintained library primitives, but the protocol compositions remain beta-stage and externally unaudited.
 
 Treat the current release as:
 

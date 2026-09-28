@@ -15,7 +15,7 @@ Both variants share all backend code: storage, protocol, encryption, daemon IPC,
 
 - Storage model (content-addressed, encrypted, erasure-coded)
 - Protocol stack (libp2p, Kademlia DHT, relay, onion routing)
-- Anonymity stack (BBS+ credentials, descriptors, onion+rendezvous)
+- Privacy/routing stack (PeerId-bound credentials/descriptors, onion+rendezvous)
 - Daemon IPC (TCP loopback, ControlRequest/ControlResponse)
 - Key management (master.key, Win32 DACL)
 - Transport plane (WSS+TLS, ObfuscatedQuic+REALITY, SOCKS5 proxy)

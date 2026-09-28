@@ -184,15 +184,14 @@ with a stronger issuer authority model and a non-circular pre-admission path.
 - [x] **Pseudonym churn tracking**: `DescriptorStore` tracks epoch transitions,
       computes live churn rate (fraction of pseudonyms new this epoch).
       Wired into `OutcomeMetrics.pseudonym_churn_rate`.
-- [x] **Expanded outcome metrics**: `relay_peers_routable`, `bbs_credentialed_count`,
-      `stale_descriptor_count`, `descriptor_utilisation`, `pseudonym_churn_rate`
-      — all computed from live network state.
+- [x] **Expanded outcome metrics (historical)**: relay/descriptors/churn metrics were
+      wired into live network state. The former BBS-specific credential count was
+      removed with the broken BBS implementation on 2026-09-28.
 - [x] **DaemonStatus extended**: 5 new metric fields wired into CLI diagnostics.
-- [x] **Adversarial tests** (12 new, 45 total): epoch rotation churn tracking,
-      full pseudonym turnover, idempotent rotation, relay peer info routing,
-      relay exclusion, wallet rotation invalidation, BBS+ epoch pruning,
-      metrics under churn, BBS+ credentialed count, descriptor utilisation,
-      required path selection with descriptors, opportunistic relay preference.
+- [x] **Adversarial tests (historical Phase 4b set)**: covered epoch rotation,
+      descriptor utilisation, relay routing/exclusion and path selection. The old
+      BBS-specific tests were deleted with the known-broken implementation; current
+      credential tests exercise the Ed25519 challenge-bound path instead.
 - [x] **ADR-005 updated** to reflect Phase 4b+4c reality.
 - [x] **PathSelector wired into coordinator**: relay descriptors from
       `DescriptorStore` drive real retrieval routing decisions.

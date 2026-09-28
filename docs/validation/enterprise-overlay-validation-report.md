@@ -574,7 +574,7 @@ artifact until a macOS build environment is available.
 | **iOS build** | BOUNDED | Requires macOS + Xcode (not available) |
 | **mDNS peer discovery** | AUTOMATED-PROVEN | libp2p mdns feature, LAN bypass |
 | **Onion routing (4d/4e)** | AUTOMATED-PROVEN | 81 adversarial tests |
-| **BBS+ credentials** | AUTOMATED-PROVEN | Pairing verification, epoch rotation |
+| **Former BBS+ credentials** | REMOVED / KNOWN-BROKEN | Forgeable implementation deleted 2026-09-28; historical evidence retained in ADR-006 |
 | **Relay trust tiers** | AUTOMATED-PROVEN | 68 adversarial tests |
 
 ## Claims That MUST NOT Be Made

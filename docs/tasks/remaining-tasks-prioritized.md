@@ -108,7 +108,7 @@
 - **作業内容**:
   - 脅威モデルドキュメント整備 (README に概要あり、詳細版が必要)
   - 攻撃面の明示的列挙
-  - 暗号実装のレビュー準備 (BBS+, onion, ECDH, AES-GCM)
+  - Crypto review preparation: onion/X25519, XChaCha20-Poly1305, Ed25519 credential/descriptor binding, DHT record signatures
     - ~~`sharks` 0.5.0 (RUSTSEC-2024-0398)~~ ✅ 解消 (2026-09-07): advisory
       自身が指す修正版フォーク `blahaj` 0.6.0 へ差し替え。ワイヤ形式は
       バイト単位で同一 (両クレートをリンクした差分バイナリで実測)、
