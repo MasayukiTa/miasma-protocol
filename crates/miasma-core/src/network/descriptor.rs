@@ -394,7 +394,7 @@ impl PeerDescriptor {
 
         // Sign the descriptor body (everything except the signature field).
         let body_bytes = desc.body_bytes();
-        let message = blake3::hash(&[b"miasma-descriptor-v1".as_slice(), &body_bytes].concat());
+        let message = blake3::hash(&[b"miasma-descriptor-v2".as_slice(), &body_bytes].concat());
         let sig = signing_key.sign(message.as_bytes());
         desc.signature = sig.to_bytes().to_vec();
 
@@ -413,6 +413,10 @@ impl PeerDescriptor {
         body.extend_from_slice(&self.published_at.to_le_bytes());
         body.extend_from_slice(&self.version.to_le_bytes());
         body.extend_from_slice(&self.signing_pubkey);
+        // Credential presentations are security-relevant descriptor content. Bind
+        // both presence/absence and bytes into the owner signature so a verified
+        // presentation cannot be attached, removed, or replaced after signing.
+        body.extend_from_slice(&bincode::serialize(&self.credential).unwrap_or_default());
         // Include BBS+ proof bytes so tampering/removal is detected by signature.
         if let Some(ref proof) = self.bbs_proof {
             body.extend_from_slice(&bincode::serialize(proof).unwrap_or_default());
@@ -439,7 +443,7 @@ impl PeerDescriptor {
     pub fn verify_signature(&self, pubkey: &ed25519_dalek::VerifyingKey) -> bool {
         use ed25519_dalek::Verifier;
         let body_bytes = self.body_bytes();
-        let message = blake3::hash(&[b"miasma-descriptor-v1".as_slice(), &body_bytes].concat());
+        let message = blake3::hash(&[b"miasma-descriptor-v2".as_slice(), &body_bytes].concat());
         let sig_bytes: [u8; 64] = match self.signature.as_slice().try_into() {
             Ok(b) => b,
             Err(_) => return false,
@@ -1081,6 +1085,46 @@ mod tests {
         desc.addresses.push("/ip4/1.2.3.4/tcp/9999".to_string()); // tamper
         assert!(!desc.verify_signature(&key.verifying_key()));
         assert!(!desc.verify_self());
+    }
+
+    #[test]
+    fn descriptor_signature_binds_credential_presentation() {
+        use crate::network::credential::{
+            current_epoch, CredentialIssuer, CredentialPresentation, CredentialTier,
+            EphemeralIdentity, CAP_ROUTE,
+        };
+
+        let owner_seed = rand::random::<[u8; 32]>();
+        let owner_key = ed25519_dalek::SigningKey::from_bytes(&owner_seed);
+        let issuer_seed = rand::random::<[u8; 32]>();
+        let issuer = CredentialIssuer::new(ed25519_dalek::SigningKey::from_bytes(&issuer_seed));
+        let identity = EphemeralIdentity::generate(current_epoch());
+        let credential = issuer.issue(
+            CredentialTier::Verified,
+            identity.epoch,
+            CAP_ROUTE,
+            identity.holder_tag(),
+        );
+        let presentation =
+            CredentialPresentation::create(&credential, &identity, b"descriptor-challenge");
+
+        let mut desc = PeerDescriptor::new_signed(
+            identity.holder_tag(),
+            ReachabilityKind::Direct,
+            vec!["/ip4/8.8.8.8/tcp/4001".to_string()],
+            PeerCapabilities::default(),
+            ResourceProfile::Desktop,
+            Some(presentation),
+            1,
+            &owner_key,
+        );
+        assert!(desc.verify_self());
+
+        desc.credential.as_mut().unwrap().context_signature[0] ^= 0x01;
+        assert!(
+            !desc.verify_self(),
+            "descriptor owner signature must cover credential presentation bytes"
+        );
     }
 
     #[test]
