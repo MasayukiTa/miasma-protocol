@@ -594,33 +594,45 @@ impl LocalShareStore {
         // disk cleanup fails, this store instance remains fail-closed.
         *master_guard = None;
 
+        let mut cleanup_errors = Vec::new();
         let key_path = self.data_dir.join(MASTER_KEY_FILE);
-        let mut disk_error: Option<MiasmaError> = None;
         if key_path.exists() {
             let zeros = vec![0u8; 32];
             if let Err(e) = atomic_write(&key_path, &zeros) {
-                disk_error = Some(e);
+                cleanup_errors.push(format!("erase master.key: {e}"));
             } else if let Err(e) = std::fs::remove_file(&key_path) {
-                disk_error = Some(e.into());
+                cleanup_errors.push(format!("remove erased master.key: {e}"));
             }
         }
 
         // Scrub proxy credentials from config.toml so they don't survive a wipe.
+        // A parse or save failure is part of wipe failure, never advisory.
         let config_path = self.data_dir.join("config.toml");
         if config_path.exists() {
-            if let Ok(mut config) = crate::config::NodeConfig::load(&self.data_dir) {
-                if config.transport.proxy_username.is_some()
-                    || config.transport.proxy_password.is_some()
-                {
-                    let _ = config.scrub_credentials(&self.data_dir);
+            match crate::config::NodeConfig::load(&self.data_dir) {
+                Ok(mut config) => {
+                    if config.transport.proxy_username.is_some()
+                        || config.transport.proxy_password.is_some()
+                    {
+                        if let Err(e) = config.scrub_credentials(&self.data_dir) {
+                            cleanup_errors.push(format!("scrub proxy credentials: {e}"));
+                        }
+                    }
+                }
+                Err(e) => {
+                    cleanup_errors.push(format!("load config for proxy credential scrub: {e}"))
                 }
             }
         }
 
-        if let Some(e) = disk_error {
-            return Err(e);
+        if cleanup_errors.is_empty() {
+            Ok(())
+        } else {
+            Err(MiasmaError::Storage(format!(
+                "distress wipe incomplete: {}",
+                cleanup_errors.join("; ")
+            )))
         }
-        Ok(())
     }
 
     /// Return addresses of all shares whose `mid_prefix` matches `prefix`.
@@ -771,6 +783,24 @@ mod tests {
         let store2 = LocalShareStore::open(dir.path(), 100).unwrap();
         // Should fail to decrypt (different key).
         assert!(store2.get(&addr).is_err());
+    }
+
+    #[test]
+    fn distress_wipe_reports_config_scrub_failure_but_stays_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        let share = dummy_share(24);
+        let addr = store.put(&share).unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[transport\nproxy_password = \"still-secret\"",
+        )
+        .unwrap();
+
+        let err = store.distress_wipe().unwrap_err();
+        assert!(err.to_string().contains("distress wipe incomplete"));
+        assert!(!dir.path().join(MASTER_KEY_FILE).exists());
+        assert!(store.get(&addr).is_err(), "store must remain fail-closed");
     }
 
     #[test]
