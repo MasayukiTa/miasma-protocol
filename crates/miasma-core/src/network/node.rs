@@ -4105,80 +4105,180 @@ impl MiasmaNode {
                 // Challenge generation and confirmation happen locally via IPC.
                 match request {
                     DirectedRequest::Invite { envelope } => {
-                        info!(
-                            peer = %peer,
-                            envelope_id = %hex::encode(envelope.envelope_id),
-                            "directed.invite_received"
-                        );
-                        // Accept the envelope — the recipient will see it via `inbox`.
-                        // Store to the data directory's incoming dir.
-                        // Note: actual storage is handled by daemon IPC layer;
-                        // here we just acknowledge receipt over the wire.
                         let envelope_id = envelope.envelope_id;
-                        let _ = self.swarm.behaviour_mut().directed_sharing.send_response(
-                            channel,
-                            DirectedResponse::InviteAccepted { envelope_id },
-                        );
-                        // Notify daemon layer via topology event channel.
-                        if let Some(ref tx) = self.topology_tx {
-                            let _ = tx.try_send(
-                                super::types::TopologyEvent::DirectedEnvelopeReceived {
-                                    peer_id: peer,
-                                    envelope: Box::new(envelope),
-                                },
-                            );
-                        }
+                        let id_hex = hex::encode(envelope_id);
+                        let peer_text = peer.to_string();
+                        info!(peer = %peer, envelope_id = %id_hex, "directed.invite_received");
+
+                        let response = if envelope.version != 1 {
+                            DirectedResponse::Error(format!(
+                                "unsupported directed envelope version {}",
+                                envelope.version
+                            ))
+                        } else if let Some(ref data_dir) = self.directed_data_dir {
+                            match crate::directed::DirectedInbox::open(data_dir) {
+                                Ok(inbox) => {
+                                    if inbox.load_incoming(&id_hex).is_ok() {
+                                        if inbox.incoming_peer_is_bound(&id_hex, &peer_text) {
+                                            // Idempotent retransmit from the original sender. Do
+                                            // not enqueue it again or reset the local challenge.
+                                            DirectedResponse::InviteAccepted { envelope_id }
+                                        } else {
+                                            warn!(peer = %peer, envelope_id = %id_hex, "directed.invite_rejected_conflicting_sender");
+                                            DirectedResponse::Error(
+                                                "directed envelope id already exists".into(),
+                                            )
+                                        }
+                                    } else if let Some(ref tx) = self.topology_tx {
+                                        match inbox.bind_incoming_peer_id(&id_hex, &peer_text) {
+                                            Ok(()) => match tx.try_send(
+                                                super::types::TopologyEvent::DirectedEnvelopeReceived {
+                                                    peer_id: peer,
+                                                    envelope: Box::new(envelope),
+                                                },
+                                            ) {
+                                                Ok(()) => {
+                                                    DirectedResponse::InviteAccepted { envelope_id }
+                                                }
+                                                Err(e) => DirectedResponse::Error(format!(
+                                                    "directed invite queue unavailable: {e}"
+                                                )),
+                                            },
+                                            Err(_) => {
+                                                warn!(peer = %peer, envelope_id = %id_hex, "directed.invite_rejected_peer_binding_conflict");
+                                                DirectedResponse::Error(
+                                                    "directed envelope id already claimed".into(),
+                                                )
+                                            }
+                                        }
+                                    } else {
+                                        DirectedResponse::Error(
+                                            "directed invite persistence unavailable".into(),
+                                        )
+                                    }
+                                }
+                                Err(e) => DirectedResponse::Error(format!("open inbox: {e}")),
+                            }
+                        } else {
+                            DirectedResponse::Error(
+                                "directed invite persistence unavailable".into(),
+                            )
+                        };
+
+                        let _ = self
+                            .swarm
+                            .behaviour_mut()
+                            .directed_sharing
+                            .send_response(channel, response);
                     }
                     DirectedRequest::Confirm {
                         envelope_id,
                         challenge_code,
                     } => {
                         let id_hex = hex::encode(envelope_id);
+                        let peer_text = peer.to_string();
                         let response = if let Some(ref data_dir) = self.directed_data_dir {
                             match crate::directed::DirectedInbox::open(data_dir) {
-                                Ok(inbox) => match inbox.load_incoming(&id_hex) {
-                                    Ok(mut envelope) => {
-                                        if envelope.state
-                                            != crate::directed::EnvelopeState::ChallengeIssued
-                                        {
-                                            DirectedResponse::Error(format!(
-                                                "not in ChallengeIssued state (current: {:?})",
-                                                envelope.state
-                                            ))
-                                        } else if let Some(hash) = envelope.challenge_hash {
-                                            if crate::directed::verify_challenge(
-                                                &challenge_code,
-                                                &hash,
-                                            ) {
-                                                envelope.state =
-                                                    crate::directed::EnvelopeState::Confirmed;
-                                                let _ = inbox.save_incoming(&envelope);
-                                                inbox.cleanup_challenge(&id_hex);
-                                                info!(envelope_id = %id_hex, "directed.challenge_confirmed_via_p2p");
-                                                DirectedResponse::Confirmed { envelope_id }
-                                            } else {
-                                                envelope.challenge_attempts_remaining = envelope
-                                                    .challenge_attempts_remaining
-                                                    .saturating_sub(1);
-                                                if envelope.challenge_attempts_remaining == 0 {
+                                Ok(inbox) => {
+                                    if !inbox.incoming_peer_is_bound(&id_hex, &peer_text) {
+                                        warn!(peer = %peer, envelope_id = %id_hex, "directed.confirm_rejected_unbound_peer");
+                                        DirectedResponse::Error(
+                                            "unauthorized or unknown directed envelope".into(),
+                                        )
+                                    } else {
+                                        match inbox.load_incoming(&id_hex) {
+                                            Ok(mut envelope) => {
+                                                let now = std::time::SystemTime::now()
+                                                    .duration_since(std::time::UNIX_EPOCH)
+                                                    .unwrap_or_default()
+                                                    .as_secs();
+                                                if envelope.state
+                                                    != crate::directed::EnvelopeState::ChallengeIssued
+                                                {
+                                                    DirectedResponse::Error(format!(
+                                                        "not in ChallengeIssued state (current: {:?})",
+                                                        envelope.state
+                                                    ))
+                                                } else if envelope.challenge_attempts_remaining == 0 {
                                                     envelope.state = crate::directed::EnvelopeState::ChallengeFailed;
-                                                    inbox.cleanup_challenge(&id_hex);
-                                                }
-                                                let _ = inbox.save_incoming(&envelope);
-                                                DirectedResponse::ChallengeFailed {
-                                                    envelope_id,
-                                                    attempts_remaining: envelope
-                                                        .challenge_attempts_remaining,
+                                                    match inbox.save_incoming(&envelope) {
+                                                        Ok(()) => {
+                                                            inbox.cleanup_challenge(&id_hex);
+                                                            DirectedResponse::ChallengeFailed {
+                                                                envelope_id,
+                                                                attempts_remaining: 0,
+                                                            }
+                                                        }
+                                                        Err(e) => DirectedResponse::Error(format!(
+                                                            "persist exhausted challenge: {e}"
+                                                        )),
+                                                    }
+                                                } else if envelope.challenge_expires_at == 0
+                                                    || now > envelope.challenge_expires_at
+                                                {
+                                                    envelope.state = crate::directed::EnvelopeState::ChallengeFailed;
+                                                    match inbox.save_incoming(&envelope) {
+                                                        Ok(()) => {
+                                                            inbox.cleanup_challenge(&id_hex);
+                                                            DirectedResponse::Error("challenge expired".into())
+                                                        }
+                                                        Err(e) => DirectedResponse::Error(format!(
+                                                            "persist expired challenge: {e}"
+                                                        )),
+                                                    }
+                                                } else if let Some(hash) = envelope.challenge_hash {
+                                                    if crate::directed::verify_challenge(
+                                                        &challenge_code,
+                                                        &hash,
+                                                    ) {
+                                                        envelope.state =
+                                                            crate::directed::EnvelopeState::Confirmed;
+                                                        match inbox.save_incoming(&envelope) {
+                                                            Ok(()) => {
+                                                                inbox.cleanup_challenge(&id_hex);
+                                                                info!(envelope_id = %id_hex, peer = %peer, "directed.challenge_confirmed_via_p2p");
+                                                                DirectedResponse::Confirmed { envelope_id }
+                                                            }
+                                                            Err(e) => DirectedResponse::Error(format!(
+                                                                "persist confirmation: {e}"
+                                                            )),
+                                                        }
+                                                    } else {
+                                                        envelope.challenge_attempts_remaining = envelope
+                                                            .challenge_attempts_remaining
+                                                            .saturating_sub(1);
+                                                        let exhausted =
+                                                            envelope.challenge_attempts_remaining == 0;
+                                                        if exhausted {
+                                                            envelope.state = crate::directed::EnvelopeState::ChallengeFailed;
+                                                        }
+                                                        let attempts_remaining =
+                                                            envelope.challenge_attempts_remaining;
+                                                        match inbox.save_incoming(&envelope) {
+                                                            Ok(()) => {
+                                                                if exhausted {
+                                                                    inbox.cleanup_challenge(&id_hex);
+                                                                }
+                                                                DirectedResponse::ChallengeFailed {
+                                                                    envelope_id,
+                                                                    attempts_remaining,
+                                                                }
+                                                            }
+                                                            Err(e) => DirectedResponse::Error(format!(
+                                                                "persist challenge attempt: {e}"
+                                                            )),
+                                                        }
+                                                    }
+                                                } else {
+                                                    DirectedResponse::Error("no challenge hash set".into())
                                                 }
                                             }
-                                        } else {
-                                            DirectedResponse::Error("no challenge hash set".into())
+                                            Err(_) => DirectedResponse::Error(
+                                                "unauthorized or unknown directed envelope".into(),
+                                            ),
                                         }
                                     }
-                                    Err(e) => {
-                                        DirectedResponse::Error(format!("load envelope: {e}"))
-                                    }
-                                },
+                                }
                                 Err(e) => DirectedResponse::Error(format!("open inbox: {e}")),
                             }
                         } else {
@@ -4191,21 +4291,60 @@ impl MiasmaNode {
                             .send_response(channel, response);
                     }
                     DirectedRequest::SenderRevoke { envelope_id } => {
-                        info!(
-                            envelope_id = %hex::encode(envelope_id),
-                            "directed.revoke_received"
-                        );
+                        let id_hex = hex::encode(envelope_id);
+                        let peer_text = peer.to_string();
+                        let response = if let Some(ref data_dir) = self.directed_data_dir {
+                            match crate::directed::DirectedInbox::open(data_dir) {
+                                Ok(inbox) => {
+                                    if !inbox.incoming_peer_is_bound(&id_hex, &peer_text) {
+                                        warn!(peer = %peer, envelope_id = %id_hex, "directed.revoke_rejected_unbound_peer");
+                                        DirectedResponse::Error(
+                                            "unauthorized or unknown directed envelope".into(),
+                                        )
+                                    } else {
+                                        match inbox.load_incoming(&id_hex) {
+                                            Ok(mut envelope) => {
+                                                if envelope.state
+                                                    == crate::directed::EnvelopeState::SenderRevoked
+                                                {
+                                                    DirectedResponse::Revoked { envelope_id }
+                                                } else if envelope.state.is_terminal() {
+                                                    DirectedResponse::Error(format!(
+                                                        "cannot revoke terminal envelope (state: {:?})",
+                                                        envelope.state
+                                                    ))
+                                                } else {
+                                                    envelope.state = crate::directed::EnvelopeState::SenderRevoked;
+                                                    match inbox.save_incoming(&envelope) {
+                                                        Ok(()) => {
+                                                            inbox.cleanup_challenge(&id_hex);
+                                                            info!(peer = %peer, envelope_id = %id_hex, "directed.revoke_authorized");
+                                                            DirectedResponse::Revoked {
+                                                                envelope_id,
+                                                            }
+                                                        }
+                                                        Err(e) => DirectedResponse::Error(format!(
+                                                            "persist revoke: {e}"
+                                                        )),
+                                                    }
+                                                }
+                                            }
+                                            Err(_) => DirectedResponse::Error(
+                                                "unauthorized or unknown directed envelope".into(),
+                                            ),
+                                        }
+                                    }
+                                }
+                                Err(e) => DirectedResponse::Error(format!("open inbox: {e}")),
+                            }
+                        } else {
+                            DirectedResponse::Error("revoke not available (no data dir)".into())
+                        };
                         let _ = self
                             .swarm
                             .behaviour_mut()
                             .directed_sharing
-                            .send_response(channel, DirectedResponse::Revoked { envelope_id });
-                        if let Some(ref tx) = self.topology_tx {
-                            let _ =
-                                tx.try_send(super::types::TopologyEvent::DirectedRevokeReceived {
-                                    envelope_id,
-                                });
-                        }
+                            .send_response(channel, response);
                     }
                     DirectedRequest::StatusQuery { envelope_id } => {
                         // Status is handled via IPC.
