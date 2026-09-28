@@ -241,6 +241,11 @@ pub fn create_envelope(
     // 3. ECDH shared secret.
     let recipient_x25519 = x25519_dalek::PublicKey::from(*recipient_pubkey);
     let shared_secret = ephemeral_secret.diffie_hellman(&recipient_x25519);
+    if !shared_secret.was_contributory() {
+        return Err(MiasmaError::Encryption(
+            "non-contributory X25519 recipient public key".into(),
+        ));
+    }
 
     // 4. Generate password salt and hash password.
     let mut password_salt = [0u8; 32];
@@ -337,6 +342,11 @@ pub fn decrypt_envelope_payload(
     let recipient_static = x25519_dalek::StaticSecret::from(*recipient_secret);
     let ephemeral_pub = x25519_dalek::PublicKey::from(envelope.ephemeral_pubkey);
     let shared_secret = recipient_static.diffie_hellman(&ephemeral_pub);
+    if !shared_secret.was_contributory() {
+        return Err(MiasmaError::Encryption(
+            "non-contributory X25519 envelope public key".into(),
+        ));
+    }
 
     let envelope_key = derive_envelope_key(shared_secret.as_bytes())?;
     let payload_bytes = xchacha20_decrypt(
@@ -359,6 +369,11 @@ pub fn derive_content_key(
     let recipient_static = x25519_dalek::StaticSecret::from(*recipient_secret);
     let ephemeral_pub = x25519_dalek::PublicKey::from(envelope.ephemeral_pubkey);
     let shared_secret = recipient_static.diffie_hellman(&ephemeral_pub);
+    if !shared_secret.was_contributory() {
+        return Err(MiasmaError::Encryption(
+            "non-contributory X25519 envelope public key".into(),
+        ));
+    }
 
     let password_hash = hash_password(password, &envelope.password_salt)?;
     derive_directed_key(shared_secret.as_bytes(), &password_hash)
@@ -644,6 +659,39 @@ mod tests {
                 .unwrap();
         let result = decrypt_envelope_payload(&wrong_secret, &envelope);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn create_envelope_rejects_non_contributory_recipient_key() {
+        let (sender_secret, _, _, _) = test_keys();
+        let err = create_envelope(
+            &sender_secret,
+            &[0u8; 32],
+            "password",
+            RetentionPeriod::OneHour,
+            b"data",
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, MiasmaError::Encryption(_)));
+    }
+
+    #[test]
+    fn recipient_rejects_non_contributory_ephemeral_key() {
+        let (sender_secret, _, recipient_secret, recipient_pub) = test_keys();
+        let (mut envelope, _, _) = create_envelope(
+            &sender_secret,
+            &recipient_pub,
+            "password",
+            RetentionPeriod::OneHour,
+            b"data",
+            None,
+        )
+        .unwrap();
+        envelope.ephemeral_pubkey = [0u8; 32];
+
+        assert!(decrypt_envelope_payload(&recipient_secret, &envelope).is_err());
+        assert!(derive_content_key(&recipient_secret, &envelope, "password").is_err());
     }
 
     #[test]
