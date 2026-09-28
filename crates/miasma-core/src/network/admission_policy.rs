@@ -419,15 +419,16 @@ mod tests {
     fn constrained_lower_threshold() {
         let p = policy();
         let signals = AdmissionSignals {
-            pow_difficulty: 4,
-            unique_prefix: true,
+            pow_difficulty: super::super::sybil::DEFAULT_POW_DIFFICULTY,
+            unique_prefix: false,
             reachable: false,
             credential_tier: None,
             resource_profile: ResourceProfile::Constrained,
         };
         let decision = p.evaluate(&signals);
-        // 40 + 50 = 90 >= 60 (constrained threshold)
+        // 8 * 10 = 80: enough for constrained (60), but not desktop (100).
         assert!(decision.admitted);
+        assert_eq!(decision.score, 80);
     }
 
     #[test]

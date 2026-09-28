@@ -929,7 +929,6 @@ pub(crate) async fn process_request(
                     relayed_descriptors: 0,
                     rendezvous_descriptors: 0,
                     credentialed_descriptors: 0,
-                    bbs_credentialed_descriptors: 0,
                     stale_descriptors: 0,
                     pseudonym_churn_rate: 0.0,
                     relay_peers_routable: 0,
@@ -980,7 +979,6 @@ pub(crate) async fn process_request(
                 credential_issuers: cred_stats.known_issuers,
                 descriptor_total: desc_stats.total_descriptors,
                 descriptor_relays: desc_stats.relay_descriptors,
-                descriptor_bbs_credentialed: desc_stats.bbs_credentialed_descriptors,
                 path_available_relays: path_stats.available_relays,
                 path_relay_prefix_diversity: path_stats.relay_prefix_diversity,
                 anonymity_policy: coord.anonymity_policy().to_string(),
@@ -993,7 +991,6 @@ pub(crate) async fn process_request(
                 metric_rejection_rate: outcome.admission_rejection_rate,
                 metric_pseudonym_churn_rate: outcome.pseudonym_churn_rate,
                 metric_relay_peers_routable: outcome.relay_peers_routable,
-                metric_bbs_credentialed: outcome.bbs_credentialed_count,
                 metric_stale_descriptors: outcome.stale_descriptor_count,
                 metric_descriptor_utilisation: outcome.descriptor_utilisation,
                 metric_onion_relay_peers: desc_stats.relay_peers_routable, // peers with onion keys and PeerId mapping

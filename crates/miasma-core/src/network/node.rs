@@ -3425,9 +3425,9 @@ impl MiasmaNode {
         ev: request_response::Event<DescriptorRequest, DescriptorResponse>,
     ) {
         match ev {
-            // Inbound: peer sends metadata and asks us to answer its challenge.
+            // Inbound: peer asks us to answer its challenge.
             request_response::Event::Message {
-                peer,
+                peer: _,
                 message:
                     request_response::Message::Request {
                         request, channel, ..
@@ -4600,12 +4600,15 @@ mod admission_pow_tests {
 
     #[tokio::test]
     async fn admission_accepts_valid_pow_for_actual_node_identity() {
-        let node = make_node();
+        let mut node = make_node();
         let pow = node.local_pow.clone();
         let peer = node.local_peer_id;
+        node.pending_peer_addrs
+            .insert(peer, vec!["/ip4/203.0.113.9/tcp/4001".parse().unwrap()]);
 
         assert_eq!(peer_id_for_pow(&pow), peer);
         assert_eq!(node.dht_signing_key.verifying_key().to_bytes(), pow.pubkey);
+        assert!(sybil::verify_pow(&pow, node.admission_policy.min_pow));
         assert_eq!(node.verify_remote_pow(&peer, &pow), Ok(()));
     }
 
