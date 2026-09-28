@@ -423,7 +423,6 @@ fn hybrid_admission_pow_floor_prevents_gaming() {
         pow_difficulty: 2,
         unique_prefix: true,
         reachable: true,
-        resource_profile: ResourceProfile::Desktop,
     };
 
     let decision = policy.evaluate(&signals);
@@ -437,38 +436,32 @@ fn hybrid_admission_pow_floor_prevents_gaming() {
     ));
 }
 
-/// Attacker generates many mobile-profile peers to exploit the lower threshold.
-/// The same absolute PoW floor still applies.
+/// Attacker generates many low-work peers. The same absolute PoW floor applies.
 #[test]
-fn hybrid_admission_mobile_sybil_still_costly() {
+fn hybrid_admission_low_pow_sybil_still_rejected() {
     let policy = HybridAdmissionPolicy::default();
 
-    // Mobile peer below the production 8-bit PoW floor, not reachable.
+    // Peer below the production 8-bit PoW floor, not reachable.
     let signals = AdmissionSignals {
         pow_difficulty: 4,
         unique_prefix: false,
         reachable: false,
-        resource_profile: ResourceProfile::Mobile,
     };
 
     let decision = policy.evaluate(&signals);
     // 4*10 = 40 < 80 (mobile threshold)
-    assert!(
-        !decision.admitted,
-        "mobile sybil below the PoW floor should fail"
-    );
+    assert!(!decision.admitted, "sybil below the PoW floor should fail");
 }
 
-/// Prefix diversity cannot bypass the production PoW floor for mobile peers.
+/// Prefix diversity cannot bypass the production PoW floor.
 #[test]
-fn hybrid_admission_diversity_does_not_bypass_mobile_pow_floor() {
+fn hybrid_admission_diversity_does_not_bypass_pow_floor() {
     let policy = HybridAdmissionPolicy::default();
 
     let signals = AdmissionSignals {
         pow_difficulty: 4,
         unique_prefix: true,
         reachable: false,
-        resource_profile: ResourceProfile::Mobile,
     };
 
     let decision = policy.evaluate(&signals);
@@ -710,36 +703,34 @@ fn descriptor_pseudonym_hijack_requires_valid_signature() {
 
 // ─── Scenario 11: Hybrid admission boundary conditions ──────────────────────
 
-/// Constrained device with maximum possible signals still needs minimum PoW.
+/// Maximum non-PoW signals still cannot bypass the absolute PoW floor.
 #[test]
-fn hybrid_admission_constrained_device_min_pow() {
+fn hybrid_admission_other_signals_cannot_bypass_min_pow() {
     let policy = HybridAdmissionPolicy::default();
 
     let signals = AdmissionSignals {
         pow_difficulty: 3, // below the 8-bit production floor
         unique_prefix: true,
         reachable: true,
-        resource_profile: ResourceProfile::Constrained,
     };
 
     let decision = policy.evaluate(&signals);
     assert!(
         !decision.admitted,
-        "constrained device below PoW floor should be rejected"
+        "peer below PoW floor should be rejected"
     );
 }
 
-/// Desktop peer at exact threshold boundary.
+/// Peer at the exact first-contact threshold boundary.
 #[test]
-fn hybrid_admission_exact_desktop_threshold() {
+fn hybrid_admission_exact_threshold() {
     let policy = HybridAdmissionPolicy::default();
 
-    // Desktop threshold is 100. PoW=10 (10*10=100). Just PoW alone = threshold.
+    // Threshold is 100. PoW=10 (10*10=100) lands exactly on it.
     let signals = AdmissionSignals {
         pow_difficulty: 10,
         unique_prefix: false,
         reachable: false,
-        resource_profile: ResourceProfile::Desktop,
     };
 
     let decision = policy.evaluate(&signals);
