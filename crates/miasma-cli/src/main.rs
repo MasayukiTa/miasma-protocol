@@ -332,7 +332,7 @@ async fn main() -> Result<()> {
 
         Commands::Status => cmd_status(&data_dir).await,
 
-        Commands::Wipe { confirm } => cmd_wipe(&data_dir, confirm),
+        Commands::Wipe { confirm } => cmd_wipe(&data_dir, confirm).await,
 
         Commands::Config { key, value } => cmd_config(&data_dir, key.as_deref(), value.as_deref()),
 
@@ -439,9 +439,10 @@ fn cmd_dissolve(
     data_shards: usize,
     total_shards: usize,
 ) -> Result<()> {
-    let config = NodeConfig::load(data_dir).context("cannot load config")?;
-    let store = LocalShareStore::open(data_dir, config.storage.quota_mb)
-        .context("cannot open share store")?;
+    let mut config = NodeConfig::load(data_dir).context("cannot load config")?;
+    let quota_mb = config.storage.quota_mb;
+    config.transport.zeroize_secret_copies();
+    let store = LocalShareStore::open(data_dir, quota_mb).context("cannot open share store")?;
 
     // Read input file.
     let plaintext =
@@ -485,9 +486,10 @@ fn cmd_get(
 ) -> Result<()> {
     use miasma_core::crypto::hash::ContentId;
 
-    let config = NodeConfig::load(data_dir).context("cannot load config")?;
-    let store = LocalShareStore::open(data_dir, config.storage.quota_mb)
-        .context("cannot open share store")?;
+    let mut config = NodeConfig::load(data_dir).context("cannot load config")?;
+    let quota_mb = config.storage.quota_mb;
+    config.transport.zeroize_secret_copies();
+    let store = LocalShareStore::open(data_dir, quota_mb).context("cannot open share store")?;
 
     let mid = ContentId::from_str(mid_str).with_context(|| format!("invalid MID: {mid_str}"))?;
 
@@ -614,16 +616,17 @@ async fn cmd_status(data_dir: &std::path::Path) -> Result<()> {
         }
     }
     // Fallback: no daemon running
-    let config = NodeConfig::load(data_dir).context("cannot load config")?;
-    let store = LocalShareStore::open(data_dir, config.storage.quota_mb)
-        .context("cannot open share store")?;
+    let mut config = NodeConfig::load(data_dir).context("cannot load config")?;
+    let quota_mb = config.storage.quota_mb;
+    config.transport.zeroize_secret_copies();
+    let store = LocalShareStore::open(data_dir, quota_mb).context("cannot open share store")?;
     println!("Miasma Node Status (daemon not running)");
     println!("  Data dir:      {}", data_dir.display());
     println!("  Shares stored: {}", store.list().len());
     println!(
         "  Storage used:  {:.1} MiB / {} MiB",
         store.used_bytes() as f64 / 1024.0 / 1024.0,
-        config.storage.quota_mb
+        quota_mb
     );
     Ok(())
 }
@@ -632,14 +635,18 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
     use miasma_core::{daemon_request, ControlRequest, ControlResponse};
 
     let version = env!("CARGO_PKG_VERSION");
-    let config_ok = NodeConfig::load(data_dir);
-    let has_config = config_ok.is_ok();
+    let config_info = NodeConfig::load(data_dir).map(|mut config| {
+        let info = (config.storage.quota_mb, config.network.listen_addr.clone());
+        config.transport.zeroize_secret_copies();
+        info
+    });
+    let has_config = config_info.is_ok();
     let key_path = data_dir.join("master.key");
     let key_exists = key_path.exists();
 
     // Store info.
-    let (share_count, storage_used) = if let Ok(ref config) = config_ok {
-        if let Ok(store) = LocalShareStore::open(data_dir, config.storage.quota_mb) {
+    let (share_count, storage_used) = if let Ok((quota_mb, _)) = &config_info {
+        if let Ok(store) = LocalShareStore::open(data_dir, *quota_mb) {
             (store.list().len(), store.used_bytes())
         } else {
             (0, 0)
@@ -673,15 +680,9 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
         report.insert("share_count".into(), serde_json::json!(share_count));
         report.insert("storage_used_bytes".into(), serde_json::json!(storage_used));
 
-        if let Ok(ref config) = config_ok {
-            report.insert(
-                "storage_quota_mb".into(),
-                serde_json::json!(config.storage.quota_mb),
-            );
-            report.insert(
-                "listen_addr".into(),
-                serde_json::json!(config.network.listen_addr),
-            );
+        if let Ok((quota_mb, listen_addr)) = &config_info {
+            report.insert("storage_quota_mb".into(), serde_json::json!(quota_mb));
+            report.insert("listen_addr".into(), serde_json::json!(listen_addr));
         }
 
         report.insert(
@@ -747,9 +748,9 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
         );
         println!("Daemon log:      {}/daemon.log.*", data_dir.display());
 
-        if let Ok(ref config) = config_ok {
-            println!("Storage quota:   {} MiB", config.storage.quota_mb);
-            println!("Listen addr:     {}", config.network.listen_addr);
+        if let Ok((quota_mb, listen_addr)) = &config_info {
+            println!("Storage quota:   {quota_mb} MiB");
+            println!("Listen addr:     {listen_addr}");
         }
 
         println!("Shares stored:   {share_count}");
@@ -1092,7 +1093,10 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
     Ok(())
 }
 
-fn cmd_wipe(data_dir: &std::path::Path, confirm: bool) -> Result<()> {
+async fn cmd_wipe(data_dir: &std::path::Path, confirm: bool) -> Result<()> {
+    use miasma_core::daemon::ipc::PORT_FILE;
+    use miasma_core::{daemon_request, ControlRequest, ControlResponse};
+
     if !confirm {
         eprintln!(
             "ERROR: This command is irreversible. All stored shares will become unreadable.\n\
@@ -1101,33 +1105,71 @@ fn cmd_wipe(data_dir: &std::path::Path, confirm: bool) -> Result<()> {
         std::process::exit(1);
     }
 
-    let config = NodeConfig::load(data_dir).unwrap_or_default();
-    let store = LocalShareStore::open(data_dir, config.storage.quota_mb)
-        .context("cannot open share store")?;
-
     let t0 = std::time::Instant::now();
-    store.distress_wipe().context("wipe failed")?;
-    let elapsed = t0.elapsed();
+    let port_path = data_dir.join(PORT_FILE);
+    if port_path.exists() {
+        match daemon_request(data_dir, ControlRequest::Wipe).await {
+            Ok(ControlResponse::Wiped) => {}
+            Ok(ControlResponse::Error(e)) => {
+                bail!("wipe incomplete; daemon is shutting down: {e}");
+            }
+            Ok(other) => bail!("unexpected daemon wipe response: {other:?}"),
+            Err(e) => bail!(
+                "daemon.port exists but wipe IPC failed; refusing disk-only wipe while a daemon may still hold keys: {e}"
+            ),
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while port_path.exists() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        if port_path.exists() {
+            bail!("wipe response received but daemon runtime did not stop within 5s");
+        }
+    } else {
+        let mut config = NodeConfig::load(data_dir).unwrap_or_default();
+        let quota_mb = config.storage.quota_mb;
+        config.transport.zeroize_secret_copies();
+        let store = LocalShareStore::open(data_dir, quota_mb).context("cannot open share store")?;
+        store.distress_wipe().context("wipe failed")?;
+    }
 
     eprintln!(
-        "✓ Distress wipe complete in {:.0}ms. Master key deleted.",
-        elapsed.as_millis()
-    );
-    eprintln!(
-        "  All {} locally stored shares are permanently unreadable.",
-        store.list().len()
+        "Distress wipe complete in {:.0}ms. Key material erased and daemon stopped.",
+        t0.elapsed().as_millis()
     );
     Ok(())
 }
 
 fn cmd_config(data_dir: &std::path::Path, key: Option<&str>, value: Option<&str>) -> Result<()> {
     let mut config = NodeConfig::load(data_dir).context("cannot load config")?;
+    let result = cmd_config_loaded(data_dir, &mut config, key, value);
+    config.transport.zeroize_secret_copies();
+    result
+}
 
+fn cmd_config_loaded(
+    data_dir: &std::path::Path,
+    config: &mut NodeConfig,
+    key: Option<&str>,
+    value: Option<&str>,
+) -> Result<()> {
     match (key, value) {
         (None, _) => {
-            // Print all config.
-            let raw = toml::to_string_pretty(&config).context("cannot serialize config")?;
-            print!("{raw}");
+            // Never serialize persisted secrets to stdout. Move them out rather
+            // than cloning them into a redacted copy, then restore so the common
+            // zeroize-at-exit path can erase the original buffers.
+            let proxy_username = config.transport.proxy_username.take();
+            let proxy_password = config.transport.proxy_password.take();
+            let obfs_secret = config.transport.obfuscated_quic_secret.take();
+            let shadowsocks_password = config.transport.shadowsocks.password.take();
+            let raw_result = toml::to_string_pretty(&*config);
+            config.transport.proxy_username = proxy_username;
+            config.transport.proxy_password = proxy_password;
+            config.transport.obfuscated_quic_secret = obfs_secret;
+            config.transport.shadowsocks.password = shadowsocks_password;
+            let raw = Zeroizing::new(raw_result.context("cannot serialize config")?);
+            print!("{}", raw.as_str());
+            eprintln!("# persisted secret fields are omitted from config output");
         }
         (Some(k), None) => {
             // Read a specific key.
@@ -1218,7 +1260,17 @@ fn cmd_config(data_dir: &std::path::Path, key: Option<&str>, value: Option<&str>
                 _ => bail!("unknown config key: {k}"),
             }
             config.save(data_dir).context("cannot save config")?;
-            println!("✓ {k} = {v}");
+            let is_secret = matches!(
+                k,
+                "transport.proxy_username"
+                    | "transport.proxy_password"
+                    | "transport.obfuscated_quic_secret"
+            );
+            if is_secret {
+                println!("configured {k} = <redacted>");
+            } else {
+                println!("configured {k} = {v}");
+            }
         }
     }
     Ok(())
@@ -1227,7 +1279,7 @@ fn cmd_config(data_dir: &std::path::Path, key: Option<&str>, value: Option<&str>
 async fn cmd_daemon(data_dir: &std::path::Path, bootstrap_addrs: &[String]) -> Result<()> {
     use miasma_core::DaemonServer;
 
-    let config = NodeConfig::load(data_dir).context("cannot load config")?;
+    let mut config = NodeConfig::load(data_dir).context("cannot load config")?;
 
     let master_key_path = data_dir.join("master.key");
     if !master_key_path.exists() {
@@ -1252,14 +1304,11 @@ async fn cmd_daemon(data_dir: &std::path::Path, bootstrap_addrs: &[String]) -> R
     let node = MiasmaNode::new(&master_key, NodeType::Full, &config.network.listen_addr)
         .context("cannot create node")?;
 
-    let server = DaemonServer::start_with_transport(
-        node,
-        store,
-        data_dir.to_owned(),
-        config.transport.clone(),
-    )
-    .await
-    .context("daemon start failed")?;
+    let transport_config = std::mem::take(&mut config.transport);
+    let server =
+        DaemonServer::start_with_transport(node, store, data_dir.to_owned(), transport_config)
+            .await
+            .context("daemon start failed")?;
 
     // Print peer ID and bootstrap addresses.
     eprintln!("Peer ID: {}", server.peer_id());

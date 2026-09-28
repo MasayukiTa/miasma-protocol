@@ -3548,15 +3548,38 @@ fn config_with_credentials_is_restricted() {
     );
 }
 
+/// In-memory cleanup erases serialized secret copies without changing feature flags.
+#[test]
+fn transport_config_zeroize_secret_copies_preserves_semantics() {
+    use miasma_core::config::TransportConfig;
+
+    let mut config = TransportConfig::default();
+    config.proxy_username = Some("user".into());
+    config.proxy_password = Some("pass".into());
+    config.obfuscated_quic_enabled = true;
+    config.obfuscated_quic_secret = Some("11".repeat(32));
+    config.shadowsocks.enabled = true;
+    config.shadowsocks.server = Some("127.0.0.1:8388".into());
+    config.shadowsocks.password = Some("encoded-secret".into());
+
+    config.zeroize_secret_copies();
+
+    assert!(config.proxy_username.is_none());
+    assert!(config.proxy_password.is_none());
+    assert!(config.obfuscated_quic_secret.is_none());
+    assert!(config.shadowsocks.password.is_none());
+    assert!(config.obfuscated_quic_enabled);
+    assert!(config.shadowsocks.enabled);
+    assert_eq!(config.shadowsocks.server.as_deref(), Some("127.0.0.1:8388"));
+}
+
 /// ObfuscatedQuic authentication secret parsing is fail-closed and exact-width.
 #[test]
 fn obfuscated_quic_secret_validation_is_strict() {
     use miasma_core::config::TransportConfig;
 
-    let mut config = TransportConfig {
-        obfuscated_quic_enabled: true,
-        ..Default::default()
-    };
+    let mut config = TransportConfig::default();
+    config.obfuscated_quic_enabled = true;
     assert!(config.parsed_obfuscated_quic_secret().is_err());
 
     config.obfuscated_quic_secret = Some("not-hex".into());

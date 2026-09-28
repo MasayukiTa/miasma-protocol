@@ -144,7 +144,7 @@ impl DaemonServer {
         mut node: MiasmaNode,
         store: Arc<LocalShareStore>,
         data_dir: PathBuf,
-        transport_config: TransportConfig,
+        mut transport_config: TransportConfig,
     ) -> Result<Self> {
         // 1. Collect actual OS-assigned listen addresses.
         let addrs = node.collect_listen_addrs(400).await;
@@ -218,6 +218,28 @@ impl DaemonServer {
         node.set_directed_recipient_pubkey(sharing_pubkey);
 
         let queue = Arc::new(Mutex::new(ReplicationQueue::load_or_create(&data_dir)?));
+
+        // Consume the serialized Shadowsocks credential exactly once. The
+        // runtime transport keeps only a zeroizing decoded PSK.
+        let shadowsocks_transport = if transport_config.shadowsocks.enabled {
+            let shadowsocks_config = std::mem::take(&mut transport_config.shadowsocks);
+            match crate::transport::shadowsocks::ShadowsocksPayloadTransport::new(
+                shadowsocks_config,
+            ) {
+                Ok(transport) => Some(transport),
+                Err(e) => {
+                    warn!("Shadowsocks config invalid: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let shadowsocks_configured = shadowsocks_transport.is_some();
+
+        // The parsed/runtime forms above now own every secret that is actually
+        // needed. Erase serialized/base64/hex copies before any server is spawned.
+        transport_config.zeroize_secret_copies();
 
         // 6. Build extra transports based on config.
         let mut extra_transports: Vec<Box<dyn PayloadTransport>> = Vec::new();
@@ -354,23 +376,13 @@ impl DaemonServer {
         }
 
         // 6c. Shadowsocks transport (config-driven, always compiled).
-        let shadowsocks_configured = transport_config.shadowsocks.is_configured();
-        if shadowsocks_configured {
-            match crate::transport::shadowsocks::ShadowsocksPayloadTransport::new(
-                transport_config.shadowsocks.clone(),
-            ) {
-                Ok(transport) => {
-                    info!(
-                        server = ?transport.server_addr(),
-                        cipher = transport.cipher(),
-                        "Shadowsocks transport configured"
-                    );
-                    extra_transports.push(Box::new(transport));
-                }
-                Err(e) => {
-                    warn!("Shadowsocks config invalid: {e}");
-                }
-            }
+        if let Some(transport) = shadowsocks_transport {
+            info!(
+                server = ?transport.server_addr(),
+                cipher = transport.cipher(),
+                "Shadowsocks transport configured"
+            );
+            extra_transports.push(Box::new(transport));
         }
 
         // 6d. Tor transport (config-driven, always compiled).

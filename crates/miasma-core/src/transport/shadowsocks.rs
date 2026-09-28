@@ -25,6 +25,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, warn};
+use zeroize::{Zeroize, Zeroizing};
 
 use super::payload::{PayloadTransportError, PayloadTransportKind, TransportPhase};
 
@@ -129,11 +130,12 @@ impl ShadowsocksConfig {
             // Validate base64 PSK for AEAD-2022
             if self.is_aead_2022() {
                 let password = self.password.as_deref().unwrap();
-                let key_bytes =
+                let key_bytes = Zeroizing::new(
                     base64::Engine::decode(&base64::engine::general_purpose::STANDARD, password)
                         .map_err(|e| {
                             format!("password must be base64-encoded PSK for AEAD-2022: {e}")
-                        })?;
+                        })?,
+                );
                 let expected_len = resolve_cipher_kind(&self.cipher)
                     .map(|k| k.key_len())
                     .unwrap_or(32);
@@ -299,16 +301,16 @@ pub async fn connect_native(
     let (relay_read, relay_write) = tokio::io::split(relay_stream);
     let (tcp_read, tcp_write) = tcp.into_split();
 
-    let key_for_read = key.to_vec();
+    let key_for_read = Zeroizing::new(key.to_vec());
     let client_salt_for_read = client_salt.clone();
 
-    // Write relay: app plaintext → encrypt as SS chunks → TCP
-    tokio::spawn(async move {
+    // Keep both directions under one supervisor. Dropping the returned app
+    // stream ends the write relay; the supervisor then aborts the read relay so
+    // its PSK copy and cipher state cannot remain detached indefinitely.
+    let mut write_task = tokio::spawn(async move {
         ss_write_relay(relay_read, tcp_write, write_cipher, tag_len).await;
     });
-
-    // Read relay: TCP → decrypt SS chunks → app plaintext
-    tokio::spawn(async move {
+    let mut read_task = tokio::spawn(async move {
         ss_read_relay(
             tcp_read,
             relay_write,
@@ -319,6 +321,18 @@ pub async fn connect_native(
             tag_len,
         )
         .await;
+    });
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = &mut write_task => {
+                read_task.abort();
+                let _ = read_task.await;
+            }
+            _ = &mut read_task => {
+                write_task.abort();
+                let _ = write_task.await;
+            }
+        }
     });
 
     Ok(app_stream)
@@ -502,12 +516,38 @@ async fn ss_read_relay(
 /// enable/disable via `config.toml` `[transport.shadowsocks]` section.
 pub struct ShadowsocksPayloadTransport {
     config: ShadowsocksConfig,
+    /// Decoded native AEAD-2022 PSK. The serialized/base64 password is removed
+    /// from `config` immediately after construction.
+    native_key: Option<Zeroizing<Vec<u8>>>,
 }
 
 impl ShadowsocksPayloadTransport {
-    pub fn new(config: ShadowsocksConfig) -> Result<Self, String> {
-        config.validate()?;
-        Ok(Self { config })
+    pub fn new(mut config: ShadowsocksConfig) -> Result<Self, String> {
+        if let Err(e) = config.validate() {
+            if let Some(mut password) = config.password.take() {
+                password.zeroize();
+            }
+            return Err(e);
+        }
+
+        let native_configured = config.native_configured();
+        let mut encoded_password = config.password.take();
+        let native_key_result = if native_configured {
+            let password = encoded_password
+                .as_deref()
+                .expect("validated native password");
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, password)
+                .map(Zeroizing::new)
+                .map(Some)
+                .map_err(|e| format!("SS PSK decode: {e}"))
+        } else {
+            Ok(None)
+        };
+        if let Some(password) = encoded_password.as_mut() {
+            password.zeroize();
+        }
+        let native_key = native_key_result?;
+        Ok(Self { config, native_key })
     }
 
     /// The configured server address.
@@ -527,7 +567,7 @@ impl ShadowsocksPayloadTransport {
 
     /// Whether native AEAD-2022 mode is available.
     pub fn native_available(&self) -> bool {
-        self.config.native_configured()
+        self.native_key.is_some() && self.config.server.is_some() && self.config.is_aead_2022()
     }
 
     /// Whether external ss-local mode is available.
@@ -544,21 +584,19 @@ impl ShadowsocksPayloadTransport {
         segment_index: u32,
     ) -> Result<Option<crate::share::MiasmaShare>, PayloadTransportError> {
         let server = self.config.server.as_deref().unwrap();
-        let password = self.config.password.as_deref().unwrap();
+        let key = self
+            .native_key
+            .as_ref()
+            .ok_or_else(|| PayloadTransportError {
+                phase: TransportPhase::Session,
+                message: "SS native key unavailable".into(),
+            })?;
         let kind = resolve_cipher_kind(&self.config.cipher).unwrap();
         let timeout_dur = self.timeout();
-
-        // Decode base64 PSK
-        let key = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, password)
-            .map_err(|e| PayloadTransportError {
-                phase: TransportPhase::Session,
-                message: format!("SS PSK decode: {e}"),
-            })?;
-
         let (host, port) = super::websocket::parse_host_port(peer_addr, 443);
 
-        // Connect native AEAD-2022 tunnel
-        let tunnel = connect_native(server, &host, port, &key, kind, timeout_dur).await?;
+        // Connect native AEAD-2022 tunnel using only the zeroizing runtime key.
+        let tunnel = connect_native(server, &host, port, key.as_slice(), kind, timeout_dur).await?;
 
         // WebSocket upgrade over the tunnel
         let ws_url = format!("ws://{host}:{port}/static/v2/bundle.js");
@@ -900,6 +938,11 @@ mod tests {
         let t = ShadowsocksPayloadTransport::new(c).unwrap();
         assert!(t.native_available());
         assert!(!t.external_available());
+        assert!(
+            t.config.password.is_none(),
+            "base64 PSK copy must be erased"
+        );
+        assert_eq!(t.native_key.as_deref().map(Vec::len), Some(32));
         assert_eq!(t.cipher(), "2022-blake3-aes-256-gcm");
     }
 
