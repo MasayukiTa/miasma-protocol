@@ -5,7 +5,7 @@
 /// Share exchange: `/miasma/share/1.0.0` request-response protocol
 /// Admission: `/miasma/admission/1.0.0` PoW proof exchange (ADR-004)
 /// Credential: `/miasma/credential/1.1.0` credential exchange (ADR-005)
-/// Descriptor: `/miasma/descriptor/1.0.0` descriptor exchange (ADR-005)
+/// Descriptor: `/miasma/descriptor/1.1.0` descriptor exchange (ADR-005)
 /// NAT: AutoNAT + DCUtR + relay
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
@@ -221,8 +221,13 @@ pub struct CredentialResponse {
 /// Request a peer's descriptor.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DescriptorRequest {
-    /// Requester's own descriptor (reciprocal exchange).
-    pub descriptor: Option<PeerDescriptor>,
+    /// Fresh verifier-supplied challenge that the responder must bind into any
+    /// credential presentation returned in `DescriptorResponse`.
+    pub challenge: [u8; 32],
+    /// Credential issuer the verifier prefers for this presentation. In the
+    /// bootstrap trust model this is the verifier's own issuer key, which avoids
+    /// presenting an equally-ranked credential from an unrelated unknown issuer.
+    pub preferred_issuer_pubkey: [u8; 32],
 }
 
 /// Descriptor exchange response.
@@ -330,7 +335,7 @@ impl request_response::Codec for CredentialCodec {
 /// Max message size for descriptor exchange (16 KiB).
 const DESCRIPTOR_MSG_MAX: usize = 16 * 1024;
 
-/// Bincode + 4-byte LE length-prefix codec for `/miasma/descriptor/1.0.0`.
+/// Bincode + 4-byte LE length-prefix codec for `/miasma/descriptor/1.1.0`.
 #[derive(Clone, Default)]
 pub struct DescriptorCodec;
 
@@ -1545,7 +1550,7 @@ pub struct MiasmaBehaviour {
     pub(crate) admission: request_response::Behaviour<AdmissionCodec>,
     /// Credential exchange: `/miasma/credential/1.1.0` request-response.
     pub(crate) credential_exchange: request_response::Behaviour<CredentialCodec>,
-    /// Descriptor exchange: `/miasma/descriptor/1.0.0` request-response.
+    /// Descriptor exchange: `/miasma/descriptor/1.1.0` request-response.
     pub(crate) descriptor_exchange: request_response::Behaviour<DescriptorCodec>,
     /// Onion relay: `/miasma/onion/1.0.0` request-response.
     pub(crate) onion_relay: request_response::Behaviour<OnionRelayCodec>,
@@ -1646,7 +1651,7 @@ pub struct MiasmaNode {
     /// Pending credential requests: req_id → peer_id.
     pending_credential_reqs: HashMap<request_response::OutboundRequestId, PeerId>,
     /// Pending descriptor requests: req_id → peer_id.
-    pending_descriptor_reqs: HashMap<request_response::OutboundRequestId, PeerId>,
+    pending_descriptor_reqs: HashMap<request_response::OutboundRequestId, (PeerId, [u8; 32])>,
     /// Current AutoNAT status: true if publicly reachable (can relay for others).
     nat_publicly_reachable: bool,
     /// This node's X25519 static key for onion layer encryption/decryption.
@@ -1721,12 +1726,14 @@ impl MiasmaNode {
         let node_keys = NodeKeys::derive(master_key)?;
 
         let mut signing_bytes: [u8; 32] = *node_keys.dht_signing_key;
+
+        // Construct every long-term Ed25519 role from the same seed before
+        // handing the mutable buffer to libp2p. `ed25519_from_bytes` deliberately
+        // zeroizes its input on success; constructing `dht_signing_key` afterwards
+        // would silently create the all-zero Ed25519 identity instead.
+        let dht_signing_key = ed25519_dalek::SigningKey::from_bytes(&signing_bytes);
         let keypair = Keypair::ed25519_from_bytes(&mut signing_bytes)
             .map_err(|e| MiasmaError::KeyDerivation(e.to_string()))?;
-
-        // Derive Ed25519 signing key for DHT record signing.
-        let dht_signing_key = ed25519_dalek::SigningKey::from_bytes(&signing_bytes);
-        zeroize::Zeroize::zeroize(&mut signing_bytes);
 
         let local_peer_id = PeerId::from(keypair.public());
         info!("Miasma node: peer_id={local_peer_id}, type={node_type:?}");
@@ -2668,15 +2675,18 @@ impl MiasmaNode {
                 // Push to all connected peers.
                 let peers: Vec<_> = self.swarm.connected_peers().copied().collect();
                 for peer in peers {
+                    let challenge = rand::random::<[u8; 32]>();
                     let req = DescriptorRequest {
-                        descriptor: Some(desc.clone()),
+                        challenge,
+                        preferred_issuer_pubkey: self.credential_issuer.pubkey_bytes(),
                     };
                     let req_id = self
                         .swarm
                         .behaviour_mut()
                         .descriptor_exchange
                         .send_request(&peer, req);
-                    self.pending_descriptor_reqs.insert(req_id, peer);
+                    self.pending_descriptor_reqs
+                        .insert(req_id, (peer, challenge));
                 }
                 debug!(
                     "descriptor.refreshed pseudonym={}",
@@ -3210,17 +3220,9 @@ impl MiasmaNode {
         self.pending_credential_reqs.insert(req_id, peer_id);
 
         // ── Phase 4b: descriptor exchange ────────────────────────────────
-        // Build our own descriptor and send it to the new peer.
-        let our_desc = self.build_local_descriptor();
-        let desc_req = DescriptorRequest {
-            descriptor: Some(our_desc),
-        };
-        let req_id = self
-            .swarm
-            .behaviour_mut()
-            .descriptor_exchange
-            .send_request(&peer_id, desc_req);
-        self.pending_descriptor_reqs.insert(req_id, peer_id);
+        // Descriptor exchange begins after the credential response authenticates
+        // the remote issuer key, so challenged presentations always have a known
+        // issuer at verification time.
 
         // Signal that this peer is now routable.
         if let Some(tx) = &self.topology_tx {
@@ -3243,27 +3245,42 @@ impl MiasmaNode {
             .credential_exchange
             .send_request(&peer_id, cred_req);
         self.pending_credential_reqs.insert(req_id, peer_id);
+    }
 
-        let our_desc = self.build_local_descriptor();
-        let desc_req = DescriptorRequest {
-            descriptor: Some(our_desc),
+    /// Request a descriptor with a fresh verifier-controlled challenge.
+    fn request_descriptor(&mut self, peer_id: PeerId) {
+        let challenge = rand::random::<[u8; 32]>();
+        let req = DescriptorRequest {
+            challenge,
+            preferred_issuer_pubkey: self.credential_issuer.pubkey_bytes(),
         };
         let req_id = self
             .swarm
             .behaviour_mut()
             .descriptor_exchange
-            .send_request(&peer_id, desc_req);
-        self.pending_descriptor_reqs.insert(req_id, peer_id);
+            .send_request(&peer_id, req);
+        self.pending_descriptor_reqs
+            .insert(req_id, (peer_id, challenge));
     }
 
     /// Build this node's peer descriptor for publication.
     fn build_local_descriptor(&self) -> PeerDescriptor {
+        self.build_local_descriptor_for_context(None)
+    }
+
+    /// Build a descriptor whose credential presentation is bound to a challenge
+    /// supplied by the verifier. `None` produces a metadata-only descriptor.
+    fn build_local_descriptor_for_context(
+        &self,
+        presentation_context: Option<(&[u8], &[u8; 32])>,
+    ) -> PeerDescriptor {
         let pseudonym = self.credential_wallet.holder_tag();
         let addresses: Vec<String> = self.swarm.listeners().map(|a| a.to_string()).collect();
 
-        let credential_presentation = self
-            .credential_wallet
-            .present(&self.local_peer_id.to_bytes());
+        let credential_presentation = presentation_context.and_then(|(context, issuer_pubkey)| {
+            self.credential_wallet
+                .present_from_issuer(issuer_pubkey, context)
+        });
 
         // No BBS+ proof is attached. The scheme is forgeable, nothing on the
         // receiving side ever verified one, and the proof context used to be
@@ -3445,6 +3462,10 @@ impl MiasmaNode {
                         }
                     }
                 }
+                // Issuer binding is now authenticated, so a descriptor
+                // presentation can be challenged and verified against a known key.
+                self.request_descriptor(peer);
+
                 // Verify and store BBS+ credential if present.
                 if let Some(bbs_cred) = bbs_credential {
                     let issuer_pk = &bbs_cred.issuer_pk;
@@ -3498,7 +3519,7 @@ impl MiasmaNode {
         ev: request_response::Event<DescriptorRequest, DescriptorResponse>,
     ) {
         match ev {
-            // Inbound: peer sends us their descriptor.
+            // Inbound: peer sends metadata and asks us to answer its challenge.
             request_response::Event::Message {
                 peer,
                 message:
@@ -3507,20 +3528,19 @@ impl MiasmaNode {
                     },
                 ..
             } => {
-                // Store their descriptor if signature is valid.
-                if let Some(desc) = request.descriptor {
-                    if desc.verify_self() {
-                        self.descriptor_store
-                            .register_peer_pseudonym(peer, desc.pseudonym);
-                        if self.descriptor_store.upsert(desc) {
-                            debug!("descriptor.received peer={peer}");
-                        }
-                    } else {
-                        warn!("descriptor.rejected_invalid_signature peer={peer}");
-                    }
-                }
-                // Respond with our own descriptor.
-                let our_desc = self.build_local_descriptor();
+                let DescriptorRequest {
+                    challenge,
+                    preferred_issuer_pubkey,
+                } = request;
+
+                // Requests carry no peer-controlled descriptor. The only descriptor
+                // accepted into the store is a response to a locally-issued challenge.
+                // This avoids a same-version metadata descriptor racing ahead of its
+                // credential-bearing challenged form and makes provenance explicit.
+                let our_desc = self.build_local_descriptor_for_context(Some((
+                    &challenge,
+                    &preferred_issuer_pubkey,
+                )));
                 let resp = DescriptorResponse {
                     descriptor: Some(our_desc),
                 };
@@ -3530,7 +3550,7 @@ impl MiasmaNode {
                     .descriptor_exchange
                     .send_response(channel, resp);
             }
-            // Outbound: we received a descriptor from a peer.
+            // Outbound: verify the response against the challenge we generated.
             request_response::Event::Message {
                 peer,
                 message:
@@ -3540,16 +3560,64 @@ impl MiasmaNode {
                     },
                 ..
             } => {
-                self.pending_descriptor_reqs.remove(&request_id);
+                let Some((expected_peer, challenge)) =
+                    self.pending_descriptor_reqs.remove(&request_id)
+                else {
+                    warn!("descriptor.rejected_untracked_response peer={peer}");
+                    return;
+                };
+                if expected_peer != peer {
+                    warn!(
+                        "descriptor.rejected_peer_mismatch expected={expected_peer} actual={peer}"
+                    );
+                    return;
+                }
+
                 if let Some(desc) = response.descriptor {
-                    if desc.verify_self() {
-                        self.descriptor_store
-                            .register_peer_pseudonym(peer, desc.pseudonym);
-                        if self.descriptor_store.upsert(desc) {
-                            debug!("descriptor.received peer={peer}");
+                    // BBS+ is quarantined: v1.1 accepts no BBS proof bytes at all.
+                    // Keeping attacker-supplied opaque proofs in the descriptor store
+                    // would make diagnostics count known-broken, unverified material.
+                    if desc.bbs_proof.is_some() {
+                        warn!("descriptor.rejected_bbs_quarantined peer={peer}");
+                        return;
+                    }
+
+                    let identity_matches = self
+                        .peer_registry
+                        .verified_identity_pubkey(&peer)
+                        .is_some_and(|key| key == desc.signing_pubkey);
+                    if !desc.verify_self() || !identity_matches {
+                        warn!("descriptor.rejected_invalid_signature_or_identity peer={peer}");
+                        return;
+                    }
+
+                    let credential_valid = match &desc.credential {
+                        None => true,
+                        Some(presentation) => {
+                            if presentation.credential.body.holder_tag != desc.pseudonym {
+                                false
+                            } else {
+                                let issuers = self.issuer_registry.issuer_list();
+                                credential::verify_presentation(
+                                    presentation,
+                                    &challenge,
+                                    &issuers,
+                                    credential::current_epoch(),
+                                    CredentialTier::Observed,
+                                )
+                                .is_ok()
+                            }
                         }
-                    } else {
-                        warn!("descriptor.rejected_invalid_signature peer={peer}");
+                    };
+                    if !credential_valid {
+                        warn!("descriptor.rejected_invalid_credential peer={peer}");
+                        return;
+                    }
+
+                    self.descriptor_store
+                        .register_peer_pseudonym(peer, desc.pseudonym);
+                    if self.descriptor_store.upsert(desc) {
+                        debug!("descriptor.received_challenged peer={peer}");
                     }
                 }
             }
@@ -4413,7 +4481,7 @@ fn build_swarm(
 
             let descriptor_exchange = request_response::Behaviour::<DescriptorCodec>::new(
                 [(
-                    StreamProtocol::new("/miasma/descriptor/1.0.0"),
+                    StreamProtocol::new("/miasma/descriptor/1.1.0"),
                     request_response::ProtocolSupport::Full,
                 )],
                 request_response::Config::default(),
@@ -4591,6 +4659,22 @@ mod admission_pow_tests {
         PeerId::from(libp2p::identity::PublicKey::from(ed_pubkey))
     }
 
+    fn pow_with_exact_difficulty(pubkey: [u8; 32], difficulty: u32) -> NodeIdPoW {
+        for nonce in 0..u64::MAX {
+            let mut pow = NodeIdPoW {
+                pubkey,
+                nonce,
+                hash: [0u8; 32],
+            };
+            let hash = sybil::recompute_pow_hash(&pow);
+            if sybil::leading_zeros(&hash) == difficulty {
+                pow.hash = hash;
+                return pow;
+            }
+        }
+        unreachable!("u64 nonce space exhausted")
+    }
+
     #[tokio::test]
     async fn admission_rejects_forged_all_zero_claimed_pow_hash() {
         let node = make_node();
@@ -4609,12 +4693,100 @@ mod admission_pow_tests {
     }
 
     #[tokio::test]
-    async fn admission_accepts_valid_pow_for_matching_identity() {
+    async fn admission_accepts_valid_pow_for_actual_node_identity() {
         let node = make_node();
         let pow = node.local_pow.clone();
-        let peer = peer_id_for_pow(&pow);
+        let peer = node.local_peer_id;
 
+        assert_eq!(peer_id_for_pow(&pow), peer);
+        assert_eq!(node.dht_signing_key.verifying_key().to_bytes(), pow.pubkey);
         assert_eq!(node.verify_remote_pow(&peer, &pow), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn master_key_separates_all_long_term_identity_material() {
+        let key_a = rand::random::<[u8; 32]>();
+        let mut key_b = rand::random::<[u8; 32]>();
+        while key_b == key_a {
+            key_b = rand::random::<[u8; 32]>();
+        }
+
+        let node_a = MiasmaNode::new(&key_a, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+        let node_b = MiasmaNode::new(&key_b, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+
+        assert_ne!(node_a.local_peer_id, node_b.local_peer_id);
+        assert_ne!(
+            node_a.dht_signing_key.verifying_key().to_bytes(),
+            node_b.dht_signing_key.verifying_key().to_bytes()
+        );
+        assert_ne!(node_a.local_pow.pubkey, node_b.local_pow.pubkey);
+        assert_ne!(
+            node_a.credential_issuer.pubkey_bytes(),
+            node_b.credential_issuer.pubkey_bytes()
+        );
+        assert_ne!(node_a.onion_static_pubkey, node_b.onion_static_pubkey);
+
+        // The PoW/DHT key must be the actual libp2p identity, not a second key
+        // accidentally derived after libp2p zeroized the seed buffer.
+        assert_eq!(peer_id_for_pow(&node_a.local_pow), node_a.local_peer_id);
+        assert_eq!(peer_id_for_pow(&node_b.local_pow), node_b.local_peer_id);
+    }
+
+    #[tokio::test]
+    async fn self_declared_endorsed_descriptor_buys_no_admission_score() {
+        let mut node = make_node();
+
+        let peer_seed = rand::random::<[u8; 32]>();
+        let peer_key = ed25519_dalek::SigningKey::from_bytes(&peer_seed);
+        let peer_pubkey = peer_key.verifying_key().to_bytes();
+        let ed_pubkey = libp2p::identity::ed25519::PublicKey::try_from_bytes(&peer_pubkey).unwrap();
+        let peer_id = PeerId::from(libp2p::identity::PublicKey::from(ed_pubkey));
+        let pow = pow_with_exact_difficulty(peer_pubkey, node.admission_policy.min_pow as u32);
+
+        // No diversity bonus and only 4 bits of work gives 40 + 30 reachability
+        // = 70, below the desktop threshold of 100.
+        assert_eq!(
+            node.verify_remote_pow(&peer_id, &pow),
+            Err(RejectionReason::InsufficientDifficulty)
+        );
+
+        // Inject the strongest self-declared credential an attacker could write
+        // into a descriptor. This bypasses the network handler on purpose: even
+        // if malicious data somehow lands in the store, admission must not read it.
+        let ephemeral = credential::EphemeralIdentity::generate(credential::current_epoch());
+        let issuer_seed = rand::random::<[u8; 32]>();
+        let attacker_issuer =
+            CredentialIssuer::new(ed25519_dalek::SigningKey::from_bytes(&issuer_seed));
+        let forged_credential = attacker_issuer.issue(
+            CredentialTier::Endorsed,
+            ephemeral.epoch,
+            CAP_ROUTE,
+            ephemeral.holder_tag(),
+        );
+        let forged_presentation = CredentialPresentation::create(
+            &forged_credential,
+            &ephemeral,
+            b"attacker-controlled-context",
+        );
+        let forged_descriptor = PeerDescriptor::new_signed(
+            ephemeral.holder_tag(),
+            ReachabilityKind::Direct,
+            Vec::new(),
+            PeerCapabilities::default(),
+            ResourceProfile::Desktop,
+            Some(forged_presentation),
+            1,
+            &peer_key,
+        );
+        node.descriptor_store
+            .register_peer_pseudonym(peer_id, forged_descriptor.pseudonym);
+        assert!(node.descriptor_store.upsert(forged_descriptor));
+
+        assert_eq!(
+            node.verify_remote_pow(&peer_id, &pow),
+            Err(RejectionReason::InsufficientDifficulty),
+            "unverified descriptor tier must contribute zero admission bonus"
+        );
     }
 
     #[test]

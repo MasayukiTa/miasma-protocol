@@ -495,6 +495,32 @@ impl CredentialWallet {
         ))
     }
 
+    /// Create a presentation using a credential issued by a specific authority.
+    ///
+    /// Descriptor challenge/response uses this to prefer a credential issued by
+    /// the verifier itself, avoiding accidental selection of an equally-ranked
+    /// credential from an issuer the verifier does not know.
+    pub fn present_from_issuer(
+        &self,
+        issuer_pubkey: &[u8; 32],
+        context: &[u8],
+    ) -> Option<CredentialPresentation> {
+        let now = current_epoch();
+        let cred = self
+            .credentials
+            .values()
+            .filter(|credential| {
+                credential.issuer_pubkey == *issuer_pubkey
+                    && epoch_is_valid(credential.body.epoch, now)
+            })
+            .max_by_key(|credential| credential.body.tier)?;
+        Some(CredentialPresentation::create(
+            cred,
+            &self.identity,
+            context,
+        ))
+    }
+
     /// Number of stored credentials.
     pub fn credential_count(&self) -> usize {
         self.credentials.len()
@@ -601,6 +627,47 @@ mod tests {
         );
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), CredentialTier::Verified);
+    }
+
+    #[test]
+    fn wallet_presents_from_requested_issuer() {
+        let seed_a = rand::random::<[u8; 32]>();
+        let seed_b = rand::random::<[u8; 32]>();
+        let issuer_a = CredentialIssuer::new(ed25519_dalek::SigningKey::from_bytes(&seed_a));
+        let issuer_b = CredentialIssuer::new(ed25519_dalek::SigningKey::from_bytes(&seed_b));
+        let mut wallet = CredentialWallet::new();
+
+        let cred_a = issuer_a.issue(
+            CredentialTier::Verified,
+            wallet.epoch(),
+            CAP_ROUTE,
+            wallet.holder_tag(),
+        );
+        let cred_b = issuer_b.issue(
+            CredentialTier::Verified,
+            wallet.epoch(),
+            CAP_ROUTE,
+            wallet.holder_tag(),
+        );
+        wallet.store(cred_a);
+        wallet.store(cred_b);
+
+        let context = b"verifier-challenge";
+        let presentation = wallet
+            .present_from_issuer(&issuer_b.pubkey_bytes(), context)
+            .expect("credential from requested issuer should be present");
+        assert_eq!(
+            presentation.credential.issuer_pubkey,
+            issuer_b.pubkey_bytes()
+        );
+        assert!(verify_presentation(
+            &presentation,
+            context,
+            &[issuer_b.pubkey_bytes()],
+            current_epoch(),
+            CredentialTier::Observed,
+        )
+        .is_ok());
     }
 
     #[test]
