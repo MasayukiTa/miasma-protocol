@@ -1,6 +1,5 @@
 pub mod address;
 pub mod admission_policy;
-pub mod bbs_credential;
 pub mod connection_health;
 pub mod coordinator;
 pub mod credential;
@@ -18,10 +17,6 @@ pub mod sybil;
 pub mod types;
 
 pub use admission_policy::{AdmissionPolicyStats, HybridAdmissionPolicy};
-pub use bbs_credential::{
-    BbsCredential, BbsCredentialWallet, BbsError, BbsIssuer, BbsIssuerKey, BbsPlusScheme, BbsProof,
-    CredentialScheme, DisclosurePolicy, Ed25519Scheme,
-};
 pub use connection_health::{
     ConnectionHealthMonitor, ConnectionHealthSnapshot, DialBackoff, PeerConnectionScore,
     StaleAddressPruner,
