@@ -120,6 +120,10 @@ impl DirectedInbox {
         if path.exists() {
             std::fs::remove_file(&path).context("delete incoming envelope")?;
         }
+        let peer_path = self.incoming_dir.join(format!("{id_hex}.peer"));
+        if peer_path.exists() {
+            std::fs::remove_file(&peer_path).context("delete incoming peer binding")?;
+        }
         Ok(())
     }
 
@@ -279,6 +283,48 @@ impl DirectedInbox {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// Bind an incoming envelope to the authenticated libp2p PeerId that sent
+    /// the initial Invite. The binding is immutable: a different peer cannot
+    /// claim an existing envelope_id later.
+    pub fn bind_incoming_peer_id(&self, id_hex: &str, peer_id: &str) -> Result<()> {
+        use std::io::Write;
+
+        let path = self.incoming_dir.join(format!("{id_hex}.peer"));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => file
+                .write_all(peer_id.as_bytes())
+                .context("write incoming peer binding"),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let existing = std::fs::read_to_string(&path)
+                    .context("read existing incoming peer binding")?;
+                if existing.trim() == peer_id {
+                    Ok(())
+                } else {
+                    anyhow::bail!("incoming envelope is already bound to a different peer")
+                }
+            }
+            Err(e) => Err(e).context("create incoming peer binding"),
+        }
+    }
+
+    /// Load the authenticated sender PeerId for an incoming envelope.
+    pub fn load_incoming_peer_id(&self, id_hex: &str) -> Option<String> {
+        let path = self.incoming_dir.join(format!("{id_hex}.peer"));
+        std::fs::read_to_string(&path)
+            .ok()
+            .map(|s| s.trim().to_string())
+    }
+
+    /// Check whether a follow-up request comes from the PeerId bound by the
+    /// original Invite. Missing/corrupt sidecars fail closed.
+    pub fn incoming_peer_is_bound(&self, id_hex: &str, peer_id: &str) -> bool {
+        self.load_incoming_peer_id(id_hex).as_deref() == Some(peer_id)
+    }
+
     /// Store the recipient's PeerId alongside an outgoing envelope.
     /// Used to reconnect for challenge confirmation.
     pub fn save_outgoing_peer_id(&self, id_hex: &str, peer_id: &str) {
@@ -317,6 +363,33 @@ mod tests {
             challenge_expires_at: 0,
             retention_secs: 86400,
         }
+    }
+
+    #[test]
+    fn incoming_peer_binding_is_immutable() {
+        let tmp = TempDir::new().unwrap();
+        let inbox = DirectedInbox::open(tmp.path()).unwrap();
+        let id = hex::encode([0x42u8; 32]);
+
+        assert!(!inbox.incoming_peer_is_bound(&id, "peer-a"));
+        inbox.bind_incoming_peer_id(&id, "peer-a").unwrap();
+        inbox.bind_incoming_peer_id(&id, "peer-a").unwrap();
+        assert_eq!(inbox.load_incoming_peer_id(&id).as_deref(), Some("peer-a"));
+        assert!(inbox.bind_incoming_peer_id(&id, "peer-b").is_err());
+        assert_eq!(inbox.load_incoming_peer_id(&id).as_deref(), Some("peer-a"));
+    }
+
+    #[test]
+    fn deleting_incoming_envelope_removes_peer_binding() {
+        let tmp = TempDir::new().unwrap();
+        let inbox = DirectedInbox::open(tmp.path()).unwrap();
+        let env = make_test_envelope();
+        let id = env.id_hex();
+        inbox.save_incoming(&env).unwrap();
+        inbox.bind_incoming_peer_id(&id, "peer-a").unwrap();
+
+        inbox.delete_incoming(&id).unwrap();
+        assert!(inbox.load_incoming_peer_id(&id).is_none());
     }
 
     #[test]

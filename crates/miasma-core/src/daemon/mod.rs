@@ -1678,12 +1678,25 @@ async fn replication_engine(
                     TopologyEvent::DirectedEnvelopeReceived { peer_id, envelope } => {
                         match directed::DirectedInbox::open(&data_dir) {
                             Ok(inbox) => {
-                                // Save incoming envelope first.
-                                if let Err(e) = inbox.save_incoming(envelope) {
+                                // Save the envelope and bind it to the authenticated
+                                // libp2p sender. Follow-up Confirm/Revoke requests are
+                                // authorized against this immutable sidecar binding.
+                                let id_hex = envelope.id_hex();
+                                let peer_id_text = peer_id.to_string();
+                                let already_exists = inbox.load_incoming(&id_hex).is_ok();
+                                if already_exists {
+                                    if inbox.incoming_peer_is_bound(&id_hex, &peer_id_text) {
+                                        debug!(%peer_id, id = %id_hex, "duplicate directed invite ignored");
+                                    } else {
+                                        warn!(%peer_id, id = %id_hex, "directed invite rejected: existing envelope has no matching sender binding");
+                                    }
+                                } else if let Err(e) = inbox.bind_incoming_peer_id(&id_hex, &peer_id_text) {
+                                    warn!(%peer_id, "failed to bind incoming envelope sender: {e}");
+                                } else if let Err(e) = inbox.save_incoming(envelope) {
                                     warn!(%peer_id, "failed to save incoming envelope: {e}");
                                 } else {
-                                    // Generate challenge code and update envelope state.
-                                    let id_hex = envelope.id_hex();
+                                    // Generate challenge code and normalize security-sensitive
+                                    // state locally instead of trusting sender-supplied counters.
                                     let (code, hash) = directed::generate_challenge();
                                     inbox.save_challenge_code(&id_hex, &code).unwrap_or_else(|e| {
                                         warn!(id = %id_hex, "failed to save challenge code: {e}");
@@ -1691,6 +1704,9 @@ async fn replication_engine(
                                     if let Ok(mut env) = inbox.load_incoming(&id_hex) {
                                         env.state = directed::EnvelopeState::ChallengeIssued;
                                         env.challenge_hash = Some(hash);
+                                        env.challenge_attempts_remaining = directed::CHALLENGE_MAX_ATTEMPTS;
+                                        env.password_attempts_remaining =
+                                            directed::challenge::PASSWORD_MAX_ATTEMPTS;
                                         let now = std::time::SystemTime::now()
                                             .duration_since(std::time::UNIX_EPOCH)
                                             .unwrap_or_default()
