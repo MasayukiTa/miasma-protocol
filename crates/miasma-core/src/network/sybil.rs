@@ -48,13 +48,22 @@ pub struct NodeIdPoW {
 /// Will increase as network grows.
 pub const DEFAULT_POW_DIFFICULTY: u8 = 8;
 
-/// Verify that a `NodeIdPoW` satisfies the required difficulty.
-pub fn verify_pow(pow: &NodeIdPoW, difficulty_bits: u8) -> bool {
-    // Re-compute hash — never trust the claimed hash.
+/// Recompute the hash committed to by a `NodeIdPoW`.
+///
+/// Keep this helper next to `verify_pow` so callers that need the achieved
+/// difficulty can derive it from authenticated input rather than trusting the
+/// peer-supplied `hash` field.
+pub(crate) fn recompute_pow_hash(pow: &NodeIdPoW) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(&pow.pubkey);
     hasher.update(&pow.nonce.to_le_bytes());
-    let computed = *hasher.finalize().as_bytes();
+    *hasher.finalize().as_bytes()
+}
+
+/// Verify that a `NodeIdPoW` satisfies the required difficulty.
+pub fn verify_pow(pow: &NodeIdPoW, difficulty_bits: u8) -> bool {
+    // Re-compute hash; never trust the claimed hash.
+    let computed = recompute_pow_hash(pow);
 
     if computed != pow.hash {
         return false;
