@@ -58,6 +58,8 @@ use ipc::{
 };
 use replication::{PendingReplication, ReplicationQueue};
 
+pub(crate) type SharingSecretState = Arc<tokio::sync::RwLock<Option<zeroize::Zeroizing<[u8; 32]>>>>;
+
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -94,8 +96,9 @@ pub struct DaemonServer {
     /// Port the HTTP bridge is bound to (0 if not started).
     #[allow(dead_code)]
     http_bridge_port: u16,
-    /// X25519 sharing secret (derived from master key).
-    sharing_secret: [u8; 32],
+    /// Shared X25519 sharing secret state. Distress wipe replaces the
+    /// `Zeroizing` value with `None` after waiting for in-flight users.
+    sharing_secret: SharingSecretState,
     /// X25519 sharing public key.
     sharing_pubkey: [u8; 32],
     /// Rate limiter shared with HTTP bridge.
@@ -356,7 +359,10 @@ impl DaemonServer {
                 .context("cannot derive directed-sharing key")?;
             let static_secret = x25519_dalek::StaticSecret::from(*secret);
             let pubkey = x25519_dalek::PublicKey::from(&static_secret);
-            (*secret, *pubkey.as_bytes())
+            (
+                Arc::new(tokio::sync::RwLock::new(Some(secret))),
+                *pubkey.as_bytes(),
+            )
         };
         node.set_directed_recipient_pubkey(sharing_pubkey);
 
@@ -393,7 +399,7 @@ impl DaemonServer {
             proxy_configured,
             proxy_type.clone(),
             obfs_quic_port,
-            sharing_secret,
+            sharing_secret.clone(),
             sharing_pubkey,
             data_dir.clone(),
             BridgeLiveState {
@@ -543,7 +549,7 @@ impl DaemonServer {
         let ipc_proxy = self.proxy_configured;
         let ipc_proxy_type = self.proxy_type.clone();
         let ipc_obfs = self.obfs_quic_port;
-        let ipc_sharing_secret = self.sharing_secret;
+        let ipc_sharing_secret = self.sharing_secret.clone();
         let ipc_sharing_pubkey = self.sharing_pubkey;
         let ipc_data_dir = self.data_dir.clone();
         let ipc_bridge_state = BridgeLiveState {
@@ -623,7 +629,7 @@ async fn ipc_server_loop(
     proxy_configured: bool,
     proxy_type: Option<String>,
     obfs_quic_port: u16,
-    sharing_secret: [u8; 32],
+    sharing_secret: SharingSecretState,
     sharing_pubkey: [u8; 32],
     data_dir: PathBuf,
     bridge_state: BridgeLiveState,
@@ -641,7 +647,7 @@ async fn ipc_server_loop(
                 let pc = proxy_configured;
                 let pt = proxy_type.clone();
                 let oq = obfs_quic_port;
-                let ss = sharing_secret;
+                let ss = sharing_secret.clone();
                 let sp = sharing_pubkey;
                 let dd = data_dir.clone();
                 let bs = bridge_state.clone();
@@ -673,7 +679,7 @@ async fn handle_ipc_client(
     proxy_configured: bool,
     proxy_type: Option<String>,
     obfs_quic_port: u16,
-    sharing_secret: [u8; 32],
+    sharing_secret: SharingSecretState,
     sharing_pubkey: [u8; 32],
     data_dir: PathBuf,
     bridge_state: BridgeLiveState,
@@ -721,7 +727,7 @@ pub(crate) async fn process_request(
     proxy_configured: bool,
     proxy_type: Option<String>,
     obfs_quic_port: u16,
-    sharing_secret: [u8; 32],
+    sharing_secret: SharingSecretState,
     sharing_pubkey: [u8; 32],
     data_dir: PathBuf,
     bridge_state: BridgeLiveState,
@@ -1110,20 +1116,33 @@ pub(crate) async fn process_request(
             })
         }
 
-        ControlRequest::Wipe => match store.distress_wipe() {
-            Ok(_) => {
-                info!("distress wipe executed via IPC");
-                ControlResponse::Wiped
+        ControlRequest::Wipe => {
+            // Wipe store key material first, then take the exclusive directed-key
+            // lock. The write lock waits for every in-flight send/retrieve read
+            // guard before Zeroizing the final shared secret copy.
+            let store_result = store.distress_wipe();
+            let mut directed_key = sharing_secret.write().await;
+            *directed_key = None;
+            match store_result {
+                Ok(_) => {
+                    info!("distress wipe executed via IPC; in-memory directed key erased");
+                    ControlResponse::Wiped
+                }
+                Err(e) => ControlResponse::Error(format!("wipe failed: {e}")),
             }
-            Err(e) => ControlResponse::Error(format!("wipe failed: {e}")),
-        },
+        }
 
         // ── Directed sharing ────────────────────────────────────────────
         ControlRequest::SharingKey => {
-            let key = directed::format_sharing_key(&sharing_pubkey);
-            let contact =
-                directed::format_sharing_contact(&sharing_pubkey, &coord.peer_id().to_string());
-            ControlResponse::SharingKey { key, contact }
+            let key_guard = sharing_secret.read().await;
+            if key_guard.is_none() {
+                ControlResponse::Error("directed sharing unavailable after distress wipe".into())
+            } else {
+                let key = directed::format_sharing_key(&sharing_pubkey);
+                let contact =
+                    directed::format_sharing_contact(&sharing_pubkey, &coord.peer_id().to_string());
+                ControlResponse::SharingKey { key, contact }
+            }
         }
 
         ControlRequest::DirectedSend {
@@ -1133,8 +1152,14 @@ pub(crate) async fn process_request(
             retention_secs,
             filename,
         } => {
+            let key_guard = sharing_secret.read().await;
+            let Some(secret) = key_guard.as_ref() else {
+                return ControlResponse::Error(
+                    "directed sharing unavailable after distress wipe".into(),
+                );
+            };
             match process_directed_send(
-                &sharing_secret,
+                secret.as_ref(),
                 &recipient_contact,
                 &data,
                 &password,
@@ -1173,8 +1198,14 @@ pub(crate) async fn process_request(
                     .and_then(|n| n.to_str())
                     .map(|s| s.to_owned())
             });
+            let key_guard = sharing_secret.read().await;
+            let Some(secret) = key_guard.as_ref() else {
+                return ControlResponse::Error(
+                    "directed sharing unavailable after distress wipe".into(),
+                );
+            };
             match process_directed_send(
-                &sharing_secret,
+                secret.as_ref(),
                 &recipient_contact,
                 &data,
                 &password,
@@ -1213,8 +1244,14 @@ pub(crate) async fn process_request(
             envelope_id,
             password,
         } => {
+            let key_guard = sharing_secret.read().await;
+            let Some(secret) = key_guard.as_ref() else {
+                return ControlResponse::Error(
+                    "directed sharing unavailable after distress wipe".into(),
+                );
+            };
             match process_directed_retrieve(
-                &sharing_secret,
+                secret.as_ref(),
                 &envelope_id,
                 &password,
                 &coord,
@@ -1232,8 +1269,14 @@ pub(crate) async fn process_request(
             password,
             output_path,
         } => {
+            let key_guard = sharing_secret.read().await;
+            let Some(secret) = key_guard.as_ref() else {
+                return ControlResponse::Error(
+                    "directed sharing unavailable after distress wipe".into(),
+                );
+            };
             match process_directed_retrieve(
-                &sharing_secret,
+                secret.as_ref(),
                 &envelope_id,
                 &password,
                 &coord,

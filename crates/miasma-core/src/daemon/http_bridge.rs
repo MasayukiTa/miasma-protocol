@@ -107,7 +107,7 @@ struct BridgeState {
     proxy_configured: bool,
     proxy_type: Option<String>,
     obfs_quic_port: u16,
-    sharing_secret: [u8; 32],
+    sharing_secret: super::SharingSecretState,
     sharing_pubkey: [u8; 32],
     data_dir: std::path::PathBuf,
     /// Bridge superhardening live state (rate limiter, health monitor, env snapshot).
@@ -136,7 +136,7 @@ impl HttpBridge {
         proxy_configured: bool,
         proxy_type: Option<String>,
         obfs_quic_port: u16,
-        sharing_secret: [u8; 32],
+        sharing_secret: super::SharingSecretState,
         sharing_pubkey: [u8; 32],
         data_dir: std::path::PathBuf,
         bridge_live: BridgeLiveState,
