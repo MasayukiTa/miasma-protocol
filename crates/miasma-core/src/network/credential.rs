@@ -1,41 +1,42 @@
-/// Anonymous trust credentials for Miasma's admission and routing layers.
+/// Epoch-scoped trust credentials for Miasma's post-admission trust metadata.
 ///
 /// # Design
 ///
-/// Miasma needs peers to prove trust-tier membership without revealing their
-/// long-term PeerId. This module implements a pseudonymous credential system
-/// using ephemeral Ed25519 keypairs:
+/// This module implements signed credentials bound to an ephemeral Ed25519 key:
 ///
-/// 1. **Ephemeral identity** — each peer generates a fresh Ed25519 keypair per
-///    epoch (default: 1 hour). The `holder_tag = BLAKE3(ephemeral_pubkey)` acts
-///    as a pseudonym that is unlinkable across epochs.
+/// 1. **Ephemeral holder key** ? each wallet generates a fresh Ed25519 keypair per
+///    epoch (default: 1 hour). `holder_tag = BLAKE3(ephemeral_pubkey)` is the
+///    credential-local identifier for that epoch.
 ///
-/// 2. **Credential issuance** — when a peer passes admission (PoW + diversity),
-///    the admitting peer (issuer) signs a credential binding the holder's
-///    `holder_tag` to a trust tier and capability set.
+/// 2. **Credential issuance** ? after admission, an issuer signs a credential
+///    binding the holder tag to a trust tier and capability set.
 ///
-/// 3. **Credential presentation** — to prove tier membership, the holder shows
-///    the signed credential plus a context-bound signature from the ephemeral
-///    key, proving they own the pseudonym without revealing their PeerId.
+/// 3. **Credential presentation** ? the holder presents the signed credential plus
+///    a context-bound signature from the ephemeral key. This proves possession of
+///    the key behind `holder_tag` and binds the presentation to verifier context.
 ///
-/// # Privacy properties
+/// # Security properties
 ///
-/// - **Cross-epoch unlinkability**: new ephemeral key each epoch → different
-///   `holder_tag` → verifiers cannot link presentations across epochs.
-/// - **Issuer-holder separation**: the issuer knows the PeerId→holder_tag
-///   mapping (unavoidable — they admitted you), but other peers do not.
-/// - **Non-transferability**: presenting requires the ephemeral secret key,
-///   so stolen credentials cannot be used without the key.
-/// - **Selective disclosure**: the credential reveals tier and capabilities
-///   but not the holder's PeerId or network address.
+/// - **Issuer authenticity**: accepted credentials require a signature from a
+///   configured/known issuer key.
+/// - **Holder proof of possession**: presentation requires the ephemeral secret key.
+/// - **Epoch freshness**: verification rejects credentials outside the configured
+///   epoch window.
+/// - **Credential-local rotation**: holder tags change when the wallet rotates its
+///   ephemeral key.
 ///
 /// # Privacy boundary
 ///
-/// This scheme provides epoch-level unlinkability but presentations within
-/// an epoch are linkable (same holder_tag). A future identity-hiding credential
-/// carrier must use a vetted implementation and a protocol designed around its
-/// verifier-generated challenge; the removed hand-written BBS+ experiment is
-/// not a supported upgrade path.
+/// The rotating holder tag is not network-level anonymity or unlinkability. In the
+/// current production carrier, `PeerDescriptor` is signed by the verified long-term
+/// libp2p identity key and the receiver stores a `PeerId <-> pseudonym` mapping.
+/// Consequently a peer receiving the descriptor can correlate the credential holder
+/// tag with the transport PeerId, including across holder-tag rotations. The
+/// credential body is also presented as a whole; this is not selective disclosure.
+///
+/// Any future identity-hiding credential carrier is a new protocol design and must
+/// avoid that long-term identity binding. The removed hand-written BBS+ experiment
+/// is not a supported upgrade path.
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::{Signer, Verifier};
@@ -205,10 +206,11 @@ impl SignedCredential {
 
 // ─── Credential presentation ────────────────────────────────────────────────
 
-/// A credential presentation proves tier membership without revealing PeerId.
+/// A credential presentation proves possession of the epoch-scoped holder key
+/// and carries issuer-signed tier/capability metadata.
 ///
-/// The holder shows the signed credential plus proof they own the ephemeral
-/// key behind the `holder_tag`.
+/// This type does not by itself hide the transport identity. Privacy depends on
+/// the carrier; the current `PeerDescriptor` carrier is explicitly PeerId-bound.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredentialPresentation {
     /// The signed credential from the issuer.
