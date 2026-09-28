@@ -21,7 +21,6 @@ pub mod network;
 pub mod onion;
 pub mod pipeline;
 pub mod repair;
-pub mod reputation;
 pub mod retrieval;
 pub mod secure_file;
 pub mod share;
