@@ -29,6 +29,8 @@ rand = "0.8"
 zeroize = { version = "1", features = ["derive"] }
 hkdf = "0.12"
 sha2 = "0.10"
+# BitTorrent v1 piece hashes (protocol-mandated SHA-1; not a security choice)
+sha1 = "0.10"
 
 # Networking
 libp2p = { version = "0.56", features = [
