@@ -467,9 +467,9 @@ fn hybrid_admission_mobile_sybil_still_costly() {
     );
 }
 
-/// Legitimate mobile peer with a credential should be admitted.
+/// A credential must not lower the production PoW floor for mobile peers.
 #[test]
-fn hybrid_admission_legitimate_mobile_with_credential() {
+fn hybrid_admission_credential_does_not_bypass_mobile_pow_floor() {
     let policy = HybridAdmissionPolicy::default();
 
     let signals = AdmissionSignals {
@@ -481,11 +481,12 @@ fn hybrid_admission_legitimate_mobile_with_credential() {
     };
 
     let decision = policy.evaluate(&signals);
-    // 40 + 50 + 100 = 190 >= 80
-    assert!(
-        decision.admitted,
-        "legitimate mobile with credential should pass"
-    );
+    assert!(!decision.admitted);
+    assert_eq!(decision.breakdown.credential_bonus, 0);
+    assert!(matches!(
+        decision.rejection_reason,
+        Some(HybridRejection::InsufficientMinPoW { .. })
+    ));
 }
 
 // ─── Scenario 7: Path selection under adversarial relay set ─────────────────
