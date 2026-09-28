@@ -371,43 +371,164 @@ pub fn get_node_status(data_dir: String) -> Result<NodeStatusFfi, MiasmaFfiError
 
 /// Perform an emergency distress wipe.
 ///
-/// Zeroes and deletes the master key within seconds. All locally stored shares
-/// become permanently unreadable. The node directory remains so the app
-/// continues to appear normally installed.
-///
-/// This function is intentionally lenient — it proceeds with deletion even if
-/// the node was not fully initialized, to ensure residual files are cleaned.
+/// If a daemon is running, route the wipe through that daemon first so its
+/// in-memory store key, directed-sharing key, and master-derived network runtime
+/// are erased/shut down before success is reported. Residual wrapped key blobs
+/// and persisted transport secrets are then scrubbed locally.
 #[uniffi::export]
 pub fn distress_wipe(data_dir: String) -> Result<(), MiasmaFfiError> {
+    use miasma_core::daemon::ipc::{daemon_request, ControlRequest, ControlResponse, PORT_FILE};
+
     let path = validate_data_dir(&data_dir)?;
+    let port_path = path.join(PORT_FILE);
+    let embedded_shutdown = {
+        let guard = EMBEDDED_DAEMON.lock().unwrap();
+        guard.as_ref().map(|daemon| daemon.shutdown_tx.clone())
+    };
+    let embedded_owned = embedded_shutdown.is_some();
+    let mut errors = Vec::<String>::new();
+    let mut daemon_wipe_started = false;
 
-    // Try to wipe via store (zeroes master.key contents before deleting).
-    // If the store can't be opened (e.g., master.key already deleted),
-    // proceed with manual cleanup anyway.
-    if let Ok((_config, store)) = open_store(&data_dir) {
-        let _ = store.distress_wipe();
-    }
-
-    // Explicitly delete master.key and Keystore-wrapped blobs.
-    // These deletions are best-effort — we don't fail the wipe if some
-    // files are already gone.
-    let files_to_delete = ["master.key", "master.key.enc", "master.key.iv"];
-    for fname in &files_to_delete {
-        let fpath = path.join(fname);
-        if fpath.exists() {
-            // Overwrite with zeros before deleting (defense in depth).
-            if let Ok(metadata) = std::fs::metadata(&fpath) {
-                let zeros = vec![0u8; metadata.len() as usize];
-                let _ = std::fs::write(&fpath, &zeros);
+    if port_path.exists() {
+        let ipc_result = shared_runtime().block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                daemon_request(&path, ControlRequest::Wipe),
+            )
+            .await
+        });
+        match ipc_result {
+            Ok(Ok(ControlResponse::Wiped)) => daemon_wipe_started = true,
+            Ok(Ok(ControlResponse::Error(message))) => {
+                // The daemon's Wipe branch always shuts the runtime down after
+                // key erasure begins, even when later cleanup is incomplete.
+                daemon_wipe_started = true;
+                tracing::warn!("daemon distress wipe reported incomplete cleanup: {message}");
+                errors.push("daemon reported incomplete wipe cleanup".into());
             }
-            let _ = std::fs::remove_file(&fpath);
+            Ok(Ok(_)) => errors.push("daemon returned an unexpected wipe response".into()),
+            Ok(Err(e)) => {
+                tracing::warn!("daemon distress wipe IPC failed: {e}");
+                errors.push("could not confirm wipe with running daemon".into());
+            }
+            Err(_) => {
+                tracing::warn!("daemon distress wipe IPC timed out");
+                errors.push("daemon wipe timed out".into());
+            }
         }
     }
 
-    Ok(())
+    // If this process owns the daemon but IPC could not start its wipe, stop the
+    // runtime before touching the key file directly. Its LocalShareStore and
+    // swarm then drop their Zeroizing/master-derived state first.
+    if !daemon_wipe_started {
+        if let Some(shutdown_tx) = embedded_shutdown {
+            let _ = shutdown_tx.try_send(());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while is_daemon_running() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            if is_daemon_running() {
+                errors.push("embedded daemon did not stop before fallback wipe".into());
+            } else {
+                // If the only uncertainty was IPC connectivity, confirmed
+                // embedded-runtime shutdown resolves that in-memory risk.
+                errors.retain(|e| {
+                    e != "could not confirm wipe with running daemon"
+                        && e != "daemon wipe timed out"
+                });
+            }
+        }
+    }
+
+    // No daemon performed the store wipe: erase via a fresh store instance. An
+    // unreachable external daemon remains an error even if disk cleanup succeeds,
+    // because its in-memory master-derived keys cannot be proven destroyed here.
+    if !daemon_wipe_started {
+        match open_store(&data_dir) {
+            Ok((_config, store)) => {
+                if let Err(e) = store.distress_wipe() {
+                    tracing::warn!("fallback store distress wipe incomplete: {e}");
+                    errors.push("local store wipe incomplete".into());
+                }
+            }
+            Err(e) => tracing::debug!("fallback store open skipped during wipe: {e}"),
+        }
+    }
+
+    // Scrub persisted transport secrets even when master.key was already absent
+    // and LocalShareStore could not be opened.
+    let config_path = path.join("config.toml");
+    if config_path.exists() {
+        match NodeConfig::load(&path) {
+            Ok(mut config) => {
+                if config.has_persisted_secrets() {
+                    if let Err(e) = config.scrub_credentials(&path) {
+                        tracing::warn!("wipe transport-secret scrub failed: {e}");
+                        errors.push("transport-secret cleanup failed".into());
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("wipe could not parse config for secret scrub: {e}");
+                errors.push("transport config could not be scrubbed".into());
+            }
+        }
+    }
+
+    // Platform wrappers can leave encrypted key blobs alongside master.key.
+    // Erase-and-remove each one and treat any failure as incomplete wipe.
+    for fname in ["master.key", "master.key.enc", "master.key.iv"] {
+        let fpath = path.join(fname);
+        if !fpath.exists() {
+            continue;
+        }
+        match std::fs::metadata(&fpath) {
+            Ok(metadata) => {
+                let zeros = vec![0u8; metadata.len() as usize];
+                if let Err(e) = std::fs::write(&fpath, &zeros) {
+                    tracing::warn!("wipe overwrite failed for {fname}: {e}");
+                    errors.push(format!("could not overwrite {fname}"));
+                    continue;
+                }
+            }
+            Err(e) => {
+                tracing::warn!("wipe metadata failed for {fname}: {e}");
+                errors.push(format!("could not inspect {fname}"));
+                continue;
+            }
+        }
+        if let Err(e) = std::fs::remove_file(&fpath) {
+            tracing::warn!("wipe removal failed for {fname}: {e}");
+            errors.push(format!("could not remove {fname}"));
+        }
+    }
+
+    // Daemon Wipe returns its response before the outer run loop necessarily
+    // removes daemon.port. Wait for that synchronized runtime-shutdown boundary.
+    if daemon_wipe_started {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while (port_path.exists() || (embedded_owned && is_daemon_running()))
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        if port_path.exists() || (embedded_owned && is_daemon_running()) {
+            errors.push("daemon runtime did not stop after wipe".into());
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        tracing::warn!("distress wipe incomplete: {}", errors.join("; "));
+        Err(MiasmaFfiError::Other {
+            msg: "distress wipe incomplete".into(),
+        })
+    }
 }
 
-// ─── Directed sharing FFI ───────────────────────────────────────────────────
+// ??? Directed sharing FFI ???????????????????????????????????????????????????
 
 /// Envelope summary returned to the mobile UI.
 #[derive(uniffi::Record)]
