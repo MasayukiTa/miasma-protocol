@@ -3,9 +3,9 @@
 /// # Design
 ///
 /// First-contact admission only consumes signals available before the
-/// credential/descriptor exchange: verified PoW, observed IP-prefix diversity,
-/// and externally probed reachability. Credential tier and self-declared device
-/// class are deliberately absent. Credential tier is
+/// credential/descriptor exchange: verified PoW and observed IP-prefix diversity.
+/// Credential tier, self-declared device class, and reachability are deliberately
+/// absent. Credential tier is
 /// deliberately absent: bootstrap peers can issue credentials to one another,
 /// and those credentials are obtained only after admission. Reintroducing them
 /// here would recreate circular/self-issued trust and lower Sybil cost.
@@ -13,11 +13,10 @@
 /// # Scoring model
 ///
 /// ```text
-/// admission_score = pow_score + diversity_bonus + reachability_bonus
+/// admission_score = pow_score + diversity_bonus
 ///
 /// pow_score       = difficulty_bits ? 10
 /// diversity_bonus = 50 if prefix is unique, 0 otherwise
-/// reachability    = 30 only after an explicit external probe succeeds
 ///
 /// admission_threshold = 100
 /// ```
@@ -31,9 +30,6 @@ const POW_POINTS_PER_BIT: u32 = 10;
 
 /// Bonus for unique IP prefix (not already saturated).
 const DIVERSITY_BONUS: u32 = 50;
-
-/// Bonus for observed reachability (peer responded to probe).
-const REACHABILITY_BONUS: u32 = 30;
 
 /// Admission threshold for desktop peers.
 const ADMISSION_THRESHOLD: u32 = 100;
@@ -53,8 +49,6 @@ pub struct AdmissionSignals {
     pub pow_difficulty: u8,
     /// Whether the peer's IP prefix is unique (not saturated in routing table).
     pub unique_prefix: bool,
-    /// Whether the peer responded to a reachability probe.
-    pub reachable: bool,
 }
 
 /// Result of admission evaluation.
@@ -77,7 +71,6 @@ pub struct AdmissionDecision {
 pub struct ScoreBreakdown {
     pub pow_score: u32,
     pub diversity_bonus: u32,
-    pub reachability_bonus: u32,
 }
 
 /// Why a peer was rejected under the hybrid model.
@@ -110,8 +103,6 @@ pub struct HybridAdmissionPolicy {
     pub pow_weight: u32,
     /// Bonus for unique prefix.
     pub diversity_weight: u32,
-    /// Bonus for observed reachability.
-    pub reachability_weight: u32,
     /// First-contact admission threshold.
     pub threshold: u32,
     /// Minimum PoW bits regardless of other signals.
@@ -123,7 +114,6 @@ impl Default for HybridAdmissionPolicy {
         Self {
             pow_weight: POW_POINTS_PER_BIT,
             diversity_weight: DIVERSITY_BONUS,
-            reachability_weight: REACHABILITY_BONUS,
             threshold: ADMISSION_THRESHOLD,
             min_pow: MIN_POW_DIFFICULTY,
         }
@@ -142,7 +132,6 @@ impl HybridAdmissionPolicy {
                 breakdown: ScoreBreakdown {
                     pow_score: 0,
                     diversity_bonus: 0,
-                    reachability_bonus: 0,
                 },
                 rejection_reason: Some(HybridRejection::InsufficientMinPoW {
                     required: self.min_pow,
@@ -157,23 +146,17 @@ impl HybridAdmissionPolicy {
         } else {
             0
         };
-        let reachability_bonus = if signals.reachable {
-            self.reachability_weight
-        } else {
-            0
-        };
-        let total = pow_score + diversity_bonus + reachability_bonus;
+        let total = pow_score + diversity_bonus;
         let threshold = self.threshold;
 
         let breakdown = ScoreBreakdown {
             pow_score,
             diversity_bonus,
-            reachability_bonus,
         };
 
         if total >= threshold {
             info!(
-                "admission.hybrid_admitted score={total} threshold={threshold} pow={} div={diversity_bonus} reach={reachability_bonus}",
+                "admission.hybrid_admitted score={total} threshold={threshold} pow={} div={diversity_bonus}",
                 pow_score
             );
             AdmissionDecision {
@@ -230,7 +213,6 @@ mod tests {
         let decision = p.evaluate(&AdmissionSignals {
             pow_difficulty: 10,
             unique_prefix: false,
-            reachable: false,
         });
         assert!(decision.admitted);
         assert_eq!(decision.score, 100);
@@ -238,12 +220,11 @@ mod tests {
     }
 
     #[test]
-    fn default_pow_without_other_signal_rejects() {
+    fn default_pow_without_diversity_rejects() {
         let p = policy();
         let decision = p.evaluate(&AdmissionSignals {
             pow_difficulty: super::super::sybil::DEFAULT_POW_DIFFICULTY,
             unique_prefix: false,
-            reachable: false,
         });
         assert!(!decision.admitted);
         assert_eq!(decision.score, 80);
@@ -259,7 +240,6 @@ mod tests {
         let decision = p.evaluate(&AdmissionSignals {
             pow_difficulty: super::super::sybil::DEFAULT_POW_DIFFICULTY,
             unique_prefix: true,
-            reachable: false,
         });
         assert!(decision.admitted);
         assert_eq!(decision.score, 130);
@@ -267,12 +247,11 @@ mod tests {
     }
 
     #[test]
-    fn min_pow_enforced_before_other_signals() {
+    fn min_pow_enforced_before_diversity_bonus() {
         let p = policy();
         let decision = p.evaluate(&AdmissionSignals {
             pow_difficulty: p.min_pow - 1,
             unique_prefix: true,
-            reachable: true,
         });
         assert!(!decision.admitted);
         assert_eq!(decision.score, 0);
@@ -283,30 +262,15 @@ mod tests {
     }
 
     #[test]
-    fn reachability_bonus_applied_only_when_signal_true() {
-        let p = policy();
-        let decision = p.evaluate(&AdmissionSignals {
-            pow_difficulty: super::super::sybil::DEFAULT_POW_DIFFICULTY,
-            unique_prefix: false,
-            reachable: true,
-        });
-        assert!(decision.admitted);
-        assert_eq!(decision.score, 110);
-        assert_eq!(decision.breakdown.reachability_bonus, 30);
-    }
-
-    #[test]
-    fn score_breakdown_contains_only_pre_admission_signals() {
+    fn score_breakdown_contains_only_verified_work_and_prefix_diversity() {
         let p = policy();
         let decision = p.evaluate(&AdmissionSignals {
             pow_difficulty: super::super::sybil::DEFAULT_POW_DIFFICULTY,
             unique_prefix: true,
-            reachable: true,
         });
         assert!(decision.admitted);
-        assert_eq!(decision.score, 160);
+        assert_eq!(decision.score, 130);
         assert_eq!(decision.breakdown.pow_score, 80);
         assert_eq!(decision.breakdown.diversity_bonus, 50);
-        assert_eq!(decision.breakdown.reachability_bonus, 30);
     }
 }
