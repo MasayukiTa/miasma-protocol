@@ -530,8 +530,8 @@ mod tests {
         let (relay_secret, _) = make_relay_keypair();
         let layer = OnionLayer {
             ephemeral_pubkey: [0u8; 32],
-            nonce: [0u8; 24],
-            ciphertext: vec![0u8; 16],
+            nonce: rand::random::<[u8; 24]>(),
+            ciphertext: rand::random::<[u8; 16]>().to_vec(),
         };
         let err = OnionLayerProcessor::peel(&relay_secret, &layer).unwrap_err();
         assert!(matches!(err, MiasmaError::Decryption(_)));
