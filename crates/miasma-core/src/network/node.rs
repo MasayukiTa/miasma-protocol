@@ -1563,6 +1563,27 @@ pub struct MiasmaBehaviour {
 // addresses use the normal untrusted filter. A private mDNS hint is exceptional:
 // it is accepted only if this exact address was the target of the authenticated
 // outbound connection that carried this Identify exchange.
+fn take_peer_correlated<T>(
+    pending: &mut HashMap<request_response::OutboundRequestId, (PeerId, T)>,
+    request_id: &request_response::OutboundRequestId,
+    actual_peer: PeerId,
+    context: &str,
+) -> Option<T> {
+    let Some((expected_peer, _)) = pending.get(request_id) else {
+        return None;
+    };
+    if *expected_peer != actual_peer {
+        warn!(
+            request = ?request_id,
+            expected_peer = %expected_peer,
+            actual_peer = %actual_peer,
+            "{context}.peer_mismatch"
+        );
+        return None;
+    }
+    pending.remove(request_id).map(|(_, value)| value)
+}
+
 fn select_identify_addresses(
     allow_local: bool,
     peer_id: &PeerId,
@@ -1611,12 +1632,15 @@ pub struct MiasmaNode {
     // Pending outbound share-fetch requests.
     pending_share_fetches: HashMap<
         request_response::OutboundRequestId,
-        oneshot::Sender<Result<Option<MiasmaShare>, MiasmaError>>,
+        (
+            PeerId,
+            oneshot::Sender<Result<Option<MiasmaShare>, MiasmaError>>,
+        ),
     >,
     // Pending outbound share-store (push) requests (Phase 2.1).
     pending_share_stores: HashMap<
         request_response::OutboundRequestId,
-        oneshot::Sender<Result<StoreResponse, MiasmaError>>,
+        (PeerId, oneshot::Sender<Result<StoreResponse, MiasmaError>>),
     >,
     // Pending outbound admission requests: req_id → peer_id.
     pending_admissions: HashMap<request_response::OutboundRequestId, PeerId>,
@@ -1683,23 +1707,32 @@ pub struct MiasmaNode {
     /// X25519 public key derived from onion_static_secret (published in descriptors).
     onion_static_pubkey: [u8; 32],
     /// Pending onion relay requests: req_id → relay return key (for response encryption).
-    pending_onion_relays: HashMap<request_response::OutboundRequestId, [u8; 32]>,
+    pending_onion_relays: HashMap<request_response::OutboundRequestId, (PeerId, [u8; 32])>,
     /// Pending onion relay reply channels: req_id → reply sender.
     pending_onion_replies: HashMap<
         request_response::OutboundRequestId,
-        oneshot::Sender<Result<OnionRelayResponse, MiasmaError>>,
+        (
+            PeerId,
+            oneshot::Sender<Result<OnionRelayResponse, MiasmaError>>,
+        ),
     >,
     /// Inbound onion relay response channels: req_id → inbound channel.
     /// When we're a relay and make a sub-request (R1→R2 or R2→Target),
     /// we store the inbound channel here so we can relay the response back.
     pending_onion_inbound_channels: HashMap<
         request_response::OutboundRequestId,
-        request_response::ResponseChannel<OnionRelayResponse>,
+        (
+            PeerId,
+            request_response::ResponseChannel<OnionRelayResponse>,
+        ),
     >,
     /// Pending relay probe reply channels.
     pending_probe_replies: HashMap<
         request_response::OutboundRequestId,
-        oneshot::Sender<Option<super::relay_probe::ProbeResponse>>,
+        (
+            PeerId,
+            oneshot::Sender<Option<super::relay_probe::ProbeResponse>>,
+        ),
     >,
     /// Bounded replay cache for onion packets.
     /// Stores BLAKE3 hashes of recently seen (circuit_id || ephemeral_pubkey)
@@ -1709,7 +1742,10 @@ pub struct MiasmaNode {
     /// Pending directed sharing reply channels.
     pending_directed_replies: HashMap<
         request_response::OutboundRequestId,
-        oneshot::Sender<Result<DirectedResponse, MiasmaError>>,
+        (
+            PeerId,
+            oneshot::Sender<Result<DirectedResponse, MiasmaError>>,
+        ),
     >,
     /// Optional data directory for handling directed sharing Confirm requests.
     /// When set, the node can verify challenge codes against the local inbox.
@@ -2300,9 +2336,10 @@ impl MiasmaNode {
                 // Store both the return_key and the reply channel.
                 // We use pending_onion_relays for the return_key;
                 // store the reply sender in a separate map keyed by req_id.
-                self.pending_onion_relays.insert(req_id, return_key);
+                self.pending_onion_relays
+                    .insert(req_id, (peer_id, return_key));
                 // We need to store the reply sender too — let's use the pending_onion_replies map.
-                self.pending_onion_replies.insert(req_id, reply);
+                self.pending_onion_replies.insert(req_id, (peer_id, reply));
             }
             DhtCommand::GetOnionPubkey { reply } => {
                 let _ = reply.send(self.onion_static_pubkey);
@@ -2365,7 +2402,7 @@ impl MiasmaNode {
                     .behaviour_mut()
                     .relay_probe
                     .send_request(&peer_id, req);
-                self.pending_probe_replies.insert(req_id, reply);
+                self.pending_probe_replies.insert(req_id, (peer_id, reply));
             }
             DhtCommand::RecordProbeSuccess { pseudonym } => {
                 self.descriptor_store.record_probe_success(&pseudonym);
@@ -2445,7 +2482,8 @@ impl MiasmaNode {
                     .behaviour_mut()
                     .directed_sharing
                     .send_request(&peer_id, request);
-                self.pending_directed_replies.insert(req_id, reply);
+                self.pending_directed_replies
+                    .insert(req_id, (peer_id, reply));
             }
             DhtCommand::GetConnectedPeers { reply } => {
                 let peers: Vec<(PeerId, Vec<Multiaddr>)> = self
@@ -2496,7 +2534,7 @@ impl MiasmaNode {
                     .behaviour_mut()
                     .share_store
                     .send_request(&peer_id, StoreRequest { share });
-                self.pending_share_stores.insert(req_id, reply);
+                self.pending_share_stores.insert(req_id, (peer_id, reply));
             }
             DhtCommand::SelectStorageCandidates { exclude, reply } => {
                 let candidates: Vec<PeerId> = self
@@ -2553,7 +2591,7 @@ impl MiasmaNode {
             .behaviour_mut()
             .share_exchange
             .send_request(&peer_id, request);
-        self.pending_share_fetches.insert(req_id, reply);
+        self.pending_share_fetches.insert(req_id, (peer_id, reply));
     }
 
     fn handle_event(&mut self, event: SwarmEvent<MiasmaBehaviourEvent>) {
@@ -2778,6 +2816,20 @@ impl MiasmaNode {
                     self.pending_credential_reqs
                         .retain(|_, pending_peer| *pending_peer != peer_id);
                     self.pending_descriptor_reqs
+                        .retain(|_, (pending_peer, _)| *pending_peer != peer_id);
+                    self.pending_share_fetches
+                        .retain(|_, (pending_peer, _)| *pending_peer != peer_id);
+                    self.pending_share_stores
+                        .retain(|_, (pending_peer, _)| *pending_peer != peer_id);
+                    self.pending_onion_relays
+                        .retain(|_, (pending_peer, _)| *pending_peer != peer_id);
+                    self.pending_onion_replies
+                        .retain(|_, (pending_peer, _)| *pending_peer != peer_id);
+                    self.pending_onion_inbound_channels
+                        .retain(|_, (pending_peer, _)| *pending_peer != peer_id);
+                    self.pending_probe_replies
+                        .retain(|_, (pending_peer, _)| *pending_peer != peer_id);
+                    self.pending_directed_replies
                         .retain(|_, (pending_peer, _)| *pending_peer != peer_id);
                     // Track disconnection in health monitor and flap detector.
                     self.health_monitor
@@ -3779,9 +3831,11 @@ impl MiasmaNode {
                                     .send_request(&next_peer, fwd_req);
                                 // Store the return_key so we can encrypt the response,
                                 // and store the inbound channel so we can relay the response back.
-                                self.pending_onion_relays.insert(req_id, return_key);
+                                self.pending_onion_relays
+                                    .insert(req_id, (next_peer, return_key));
                                 // Store the inbound response channel for this relay request.
-                                self.pending_onion_inbound_channels.insert(req_id, channel);
+                                self.pending_onion_inbound_channels
+                                    .insert(req_id, (next_peer, channel));
                             }
                             Ok(super::onion_relay::OnionRelayAction::DeliverToTarget {
                                 target_peer_id,
@@ -3810,8 +3864,10 @@ impl MiasmaNode {
                                     .behaviour_mut()
                                     .onion_relay
                                     .send_request(&target, deliver_req);
-                                self.pending_onion_relays.insert(req_id, return_key);
-                                self.pending_onion_inbound_channels.insert(req_id, channel);
+                                self.pending_onion_relays
+                                    .insert(req_id, (target, return_key));
+                                self.pending_onion_inbound_channels
+                                    .insert(req_id, (target, channel));
                             }
                             Err(e) => {
                                 warn!("onion_relay: peel failed: {e}");
@@ -3834,6 +3890,7 @@ impl MiasmaNode {
                 }
             }
             request_response::Event::Message {
+                peer,
                 message:
                     request_response::Message::Response {
                         request_id,
@@ -3841,12 +3898,18 @@ impl MiasmaNode {
                     },
                 ..
             } => {
-                // Response from a sub-request (R1→R2 or R2→Target).
-                if let Some(return_key) = self.pending_onion_relays.remove(&request_id) {
-                    if let Some(inbound_channel) =
-                        self.pending_onion_inbound_channels.remove(&request_id)
-                    {
-                        // We're a relay: encrypt the response with our return_key and forward back.
+                if let Some(return_key) = take_peer_correlated(
+                    &mut self.pending_onion_relays,
+                    &request_id,
+                    peer,
+                    "onion_relay.response",
+                ) {
+                    if let Some(inbound_channel) = take_peer_correlated(
+                        &mut self.pending_onion_inbound_channels,
+                        &request_id,
+                        peer,
+                        "onion_relay.inbound_channel",
+                    ) {
                         let relay_response = match response {
                             OnionRelayResponse::Data(data) => {
                                 match super::onion_relay::encrypt_relay_response(&return_key, &data)
@@ -3864,12 +3927,20 @@ impl MiasmaNode {
                             .behaviour_mut()
                             .onion_relay
                             .send_response(inbound_channel, relay_response);
-                    } else if let Some(reply) = self.pending_onion_replies.remove(&request_id) {
-                        // We're the initiator: return the response to the coordinator.
+                    } else if let Some(reply) = take_peer_correlated(
+                        &mut self.pending_onion_replies,
+                        &request_id,
+                        peer,
+                        "onion_relay.reply",
+                    ) {
                         let _ = reply.send(Ok(response));
                     }
-                } else if let Some(reply) = self.pending_onion_replies.remove(&request_id) {
-                    // Initiator path: no return_key stored (direct delivery response).
+                } else if let Some(reply) = take_peer_correlated(
+                    &mut self.pending_onion_replies,
+                    &request_id,
+                    peer,
+                    "onion_relay.reply",
+                ) {
                     let _ = reply.send(Ok(response));
                 }
             }
@@ -3880,15 +3951,29 @@ impl MiasmaNode {
                 ..
             } => {
                 warn!("onion_relay.outbound_failure peer={peer} error={error}");
-                // Clean up and propagate error.
-                self.pending_onion_relays.remove(&request_id);
-                if let Some(channel) = self.pending_onion_inbound_channels.remove(&request_id) {
+                let _ = take_peer_correlated(
+                    &mut self.pending_onion_relays,
+                    &request_id,
+                    peer,
+                    "onion_relay.failure",
+                );
+                if let Some(channel) = take_peer_correlated(
+                    &mut self.pending_onion_inbound_channels,
+                    &request_id,
+                    peer,
+                    "onion_relay.failure_channel",
+                ) {
                     let _ = self.swarm.behaviour_mut().onion_relay.send_response(
                         channel,
                         OnionRelayResponse::Error(format!("relay outbound failure: {error}")),
                     );
                 }
-                if let Some(reply) = self.pending_onion_replies.remove(&request_id) {
+                if let Some(reply) = take_peer_correlated(
+                    &mut self.pending_onion_replies,
+                    &request_id,
+                    peer,
+                    "onion_relay.failure_reply",
+                ) {
                     let _ = reply.send(Err(MiasmaError::Network(format!(
                         "onion relay outbound failure: {error}"
                     ))));
@@ -3930,6 +4015,7 @@ impl MiasmaNode {
                 );
             }
             request_response::Event::Message {
+                peer,
                 message:
                     request_response::Message::Response {
                         request_id,
@@ -3937,15 +4023,27 @@ impl MiasmaNode {
                     },
                 ..
             } => {
-                // Outbound: deliver to pending probe channel.
-                if let Some(reply) = self.pending_probe_replies.remove(&request_id) {
+                if let Some(reply) = take_peer_correlated(
+                    &mut self.pending_probe_replies,
+                    &request_id,
+                    peer,
+                    "relay_probe.response",
+                ) {
                     let _ = reply.send(Some(response));
                 }
             }
             request_response::Event::OutboundFailure {
-                request_id, error, ..
+                request_id,
+                peer,
+                error,
+                ..
             } => {
-                if let Some(reply) = self.pending_probe_replies.remove(&request_id) {
+                if let Some(reply) = take_peer_correlated(
+                    &mut self.pending_probe_replies,
+                    &request_id,
+                    peer,
+                    "relay_probe.failure",
+                ) {
                     let _ = reply.send(None);
                 }
                 tracing::debug!("relay probe outbound failure: {error}");
@@ -4088,6 +4186,7 @@ impl MiasmaNode {
                 }
             }
             request_response::Event::Message {
+                peer,
                 message:
                     request_response::Message::Response {
                         request_id,
@@ -4095,14 +4194,27 @@ impl MiasmaNode {
                     },
                 ..
             } => {
-                if let Some(reply) = self.pending_directed_replies.remove(&request_id) {
+                if let Some(reply) = take_peer_correlated(
+                    &mut self.pending_directed_replies,
+                    &request_id,
+                    peer,
+                    "directed.response",
+                ) {
                     let _ = reply.send(Ok(response));
                 }
             }
             request_response::Event::OutboundFailure {
-                request_id, error, ..
+                request_id,
+                peer,
+                error,
+                ..
             } => {
-                if let Some(reply) = self.pending_directed_replies.remove(&request_id) {
+                if let Some(reply) = take_peer_correlated(
+                    &mut self.pending_directed_replies,
+                    &request_id,
+                    peer,
+                    "directed.failure",
+                ) {
                     let _ = reply.send(Err(MiasmaError::Network(format!(
                         "directed sharing outbound failure: {error}"
                     ))));
@@ -4318,6 +4430,7 @@ impl MiasmaNode {
             }
             // Outbound response received: resolve pending future.
             request_response::Event::Message {
+                peer,
                 message:
                     request_response::Message::Response {
                         request_id,
@@ -4325,15 +4438,28 @@ impl MiasmaNode {
                     },
                 ..
             } => {
-                if let Some(reply) = self.pending_share_fetches.remove(&request_id) {
+                if let Some(reply) = take_peer_correlated(
+                    &mut self.pending_share_fetches,
+                    &request_id,
+                    peer,
+                    "share_fetch.response",
+                ) {
                     let _ = reply.send(Ok(response.share));
                 }
             }
             request_response::Event::OutboundFailure {
-                request_id, error, ..
+                request_id,
+                peer,
+                error,
+                ..
             } => {
                 warn!("Share fetch outbound failure: {error}");
-                if let Some(reply) = self.pending_share_fetches.remove(&request_id) {
+                if let Some(reply) = take_peer_correlated(
+                    &mut self.pending_share_fetches,
+                    &request_id,
+                    peer,
+                    "share_fetch.failure",
+                ) {
                     let _ = reply.send(Err(MiasmaError::Network(error.to_string())));
                 }
             }
@@ -4368,6 +4494,7 @@ impl MiasmaNode {
             }
             // Outbound response received: resolve pending future.
             request_response::Event::Message {
+                peer,
                 message:
                     request_response::Message::Response {
                         request_id,
@@ -4375,15 +4502,28 @@ impl MiasmaNode {
                     },
                 ..
             } => {
-                if let Some(reply) = self.pending_share_stores.remove(&request_id) {
+                if let Some(reply) = take_peer_correlated(
+                    &mut self.pending_share_stores,
+                    &request_id,
+                    peer,
+                    "share_store.response",
+                ) {
                     let _ = reply.send(Ok(response));
                 }
             }
             request_response::Event::OutboundFailure {
-                request_id, error, ..
+                request_id,
+                peer,
+                error,
+                ..
             } => {
                 warn!("Share store outbound failure: {error}");
-                if let Some(reply) = self.pending_share_stores.remove(&request_id) {
+                if let Some(reply) = take_peer_correlated(
+                    &mut self.pending_share_stores,
+                    &request_id,
+                    peer,
+                    "share_store.failure",
+                ) {
                     let _ = reply.send(Err(MiasmaError::Network(error.to_string())));
                 }
             }
@@ -4734,6 +4874,37 @@ mod admission_pow_tests {
             }
         }
         unreachable!("u64 nonce space exhausted")
+    }
+
+    #[tokio::test]
+    async fn peer_correlated_pending_state_rejects_wrong_peer_without_consuming() {
+        let mut node = make_node();
+        let expected = PeerId::random();
+        let wrong = PeerId::random();
+        let req_id = node.swarm.behaviour_mut().relay_probe.send_request(
+            &expected,
+            crate::network::relay_probe::ProbeRequest { nonce: [0xA5; 32] },
+        );
+        let (tx, _rx) = oneshot::channel::<Option<crate::network::relay_probe::ProbeResponse>>();
+        node.pending_probe_replies.insert(req_id, (expected, tx));
+
+        assert!(take_peer_correlated(
+            &mut node.pending_probe_replies,
+            &req_id,
+            wrong,
+            "test.pending",
+        )
+        .is_none());
+        assert!(node.pending_probe_replies.contains_key(&req_id));
+
+        assert!(take_peer_correlated(
+            &mut node.pending_probe_replies,
+            &req_id,
+            expected,
+            "test.pending",
+        )
+        .is_some());
+        assert!(!node.pending_probe_replies.contains_key(&req_id));
     }
 
     #[tokio::test]
