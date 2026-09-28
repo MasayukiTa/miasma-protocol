@@ -664,10 +664,11 @@ mod tests {
     #[test]
     fn create_envelope_rejects_non_contributory_recipient_key() {
         let (sender_secret, _, _, _) = test_keys();
+        let password = format!("test-{}", rand::random::<u64>());
         let err = create_envelope(
             &sender_secret,
             &[0u8; 32],
-            "password",
+            &password,
             RetentionPeriod::OneHour,
             b"data",
             None,
@@ -679,10 +680,11 @@ mod tests {
     #[test]
     fn recipient_rejects_non_contributory_ephemeral_key() {
         let (sender_secret, _, recipient_secret, recipient_pub) = test_keys();
+        let password = format!("test-{}", rand::random::<u64>());
         let (mut envelope, _, _) = create_envelope(
             &sender_secret,
             &recipient_pub,
-            "password",
+            &password,
             RetentionPeriod::OneHour,
             b"data",
             None,
@@ -691,7 +693,7 @@ mod tests {
         envelope.ephemeral_pubkey = [0u8; 32];
 
         assert!(decrypt_envelope_payload(&recipient_secret, &envelope).is_err());
-        assert!(derive_content_key(&recipient_secret, &envelope, "password").is_err());
+        assert!(derive_content_key(&recipient_secret, &envelope, &password).is_err());
     }
 
     #[test]
