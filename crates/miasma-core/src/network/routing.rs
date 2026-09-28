@@ -215,7 +215,8 @@ pub struct RoutingTable {
     diversity_enabled: bool,
     /// Cumulative count of diversity-based rejections.
     diversity_rejections: u64,
-    /// Current PoW difficulty for the network.
+    /// Locally recommended future PoW difficulty. This is diagnostic only;
+    /// admission does not enforce it until a network-wide negotiation exists.
     current_difficulty: u8,
     /// Peer count observations for difficulty adjustment.
     difficulty_observations: Vec<(Instant, usize)>,
@@ -471,8 +472,8 @@ impl RoutingTable {
         }
     }
 
-    /// Update the current difficulty if the recommended value differs.
-    /// Returns the new difficulty if it changed.
+    /// Update the locally cached recommendation if the observed-size schedule changes.
+    /// Returns the new recommendation if it changed. This does not change admission.
     pub fn maybe_adjust_difficulty(&mut self) -> Option<u8> {
         let recommended = self.recommended_difficulty();
         if recommended != self.current_difficulty {
@@ -495,7 +496,7 @@ impl RoutingTable {
         }
     }
 
-    /// Current effective PoW difficulty.
+    /// Current locally recommended PoW difficulty (not the enforced admission floor).
     pub fn current_difficulty(&self) -> u8 {
         self.current_difficulty
     }
@@ -516,7 +517,7 @@ pub struct RoutingStats {
     pub max_prefix_concentration: usize,
     /// Cumulative diversity-based rejections.
     pub diversity_rejections: u64,
-    /// Current PoW difficulty in bits.
+    /// Locally recommended PoW difficulty in bits; not necessarily enforced.
     pub current_difficulty: u8,
 }
 

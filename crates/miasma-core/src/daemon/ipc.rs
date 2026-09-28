@@ -286,7 +286,7 @@ pub struct DaemonStatus {
     /// Routing overlay: cumulative diversity-based rejections.
     #[serde(default)]
     pub routing_diversity_rejections: u64,
-    /// Routing overlay: current PoW difficulty in bits.
+    /// Routing overlay: locally recommended PoW difficulty in bits (diagnostic only).
     #[serde(default)]
     pub routing_pow_difficulty: u8,
 
@@ -306,9 +306,6 @@ pub struct DaemonStatus {
     /// Relay-capable descriptors stored.
     #[serde(default)]
     pub descriptor_relays: usize,
-    /// Descriptors carrying a BBS+ proof.
-    #[serde(default)]
-    pub descriptor_bbs_credentialed: usize,
     /// Number of relay descriptors available for path selection.
     #[serde(default)]
     pub path_available_relays: usize,
@@ -332,7 +329,7 @@ pub struct DaemonStatus {
     /// Multi-path content retrievability estimate (0.0–1.0).
     #[serde(default)]
     pub metric_multi_path_retrievability: f64,
-    /// Current PoW difficulty (bits).
+    /// Locally recommended PoW difficulty (bits); admission may enforce a different floor.
     #[serde(default)]
     pub metric_pow_difficulty: u8,
     /// Peer verification ratio (verified / total).
@@ -347,9 +344,6 @@ pub struct DaemonStatus {
     /// Relay peers routable for circuit construction.
     #[serde(default)]
     pub metric_relay_peers_routable: usize,
-    /// BBS+-credentialed descriptors (within-epoch unlinkability).
-    #[serde(default)]
-    pub metric_bbs_credentialed: usize,
     /// Stale descriptors in store.
     #[serde(default)]
     pub metric_stale_descriptors: usize,

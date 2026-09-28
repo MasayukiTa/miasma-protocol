@@ -1469,55 +1469,6 @@ fn outcome_metrics_reflect_churn() {
     );
 }
 
-/// Metrics should track BBS+ credentialed descriptors.
-#[test]
-fn outcome_metrics_bbs_credentialed_count() {
-    let key = ed25519_dalek::SigningKey::from_bytes(&[0x42u8; 32]);
-    let mut store = DescriptorStore::new();
-    let peer_registry = PeerRegistry::new();
-    let routing_table = RoutingTable::new(true);
-
-    // Add a descriptor without BBS+ proof.
-    store.upsert(PeerDescriptor::new_signed(
-        [0x01; 32],
-        ReachabilityKind::Direct,
-        vec!["/ip4/1.1.1.1/tcp/4001".into()],
-        PeerCapabilities::default(),
-        ResourceProfile::Desktop,
-        None,
-        1,
-        &key,
-    ));
-
-    // Add a descriptor with a BBS+ proof.
-    let bbs_seed = blake3::hash(b"bbs-test-seed");
-    let bbs_key = BbsIssuerKey::from_seed(bbs_seed.as_bytes());
-    let bbs_issuer = BbsIssuer::new(bbs_key);
-    let link_secret = generate_link_secret();
-    let bbs_cred = bbs_issuer.issue(BbsCredentialAttributes {
-        link_secret,
-        tier: CredentialTier::Verified,
-        capabilities: CAP_STORE | CAP_ROUTE,
-        epoch: 1,
-        nonce: rand::random(),
-    });
-    let bbs_proof = bbs_create_proof(&bbs_cred, &DisclosurePolicy::default(), b"metrics-test");
-    store.upsert(PeerDescriptor::new_signed_with_bbs(
-        [0x02; 32],
-        ReachabilityKind::Direct,
-        vec!["/ip4/2.2.2.2/tcp/4001".into()],
-        PeerCapabilities::default(),
-        ResourceProfile::Desktop,
-        None,
-        Some(bbs_proof),
-        1,
-        &key,
-    ));
-
-    let m = OutcomeMetrics::compute(&store, &peer_registry, &routing_table, false);
-    assert_eq!(m.bbs_credentialed_count, 1);
-}
-
 // ─── Scenario 16: Descriptor store capacity under epoch churn ────────────
 
 /// Under rapid epoch rotation with churn, stale pruning should keep the

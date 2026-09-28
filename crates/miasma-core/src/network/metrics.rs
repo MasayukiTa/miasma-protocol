@@ -47,14 +47,12 @@ pub struct OutcomeMetrics {
     /// Whether anonymous retrieval (relay routing) is available.
     pub onion_routing_available: bool,
 
-    /// Number of BBS+-credentialed descriptors (within-epoch unlinkability).
-    pub bbs_credentialed_count: usize,
-
     // ── Trust health ────────────────────────────────────────────────────
     /// Fraction of connected peers that hold a valid credential at ≥ Observed tier.
     pub credentialed_peer_fraction: f64,
 
-    /// Current PoW difficulty (dynamic, in bits). Higher = more expensive to Sybil.
+    /// Locally recommended future PoW difficulty. Diagnostic only; first-contact
+    /// admission currently enforces HybridAdmissionPolicy::min_pow.
     pub current_pow_difficulty: u8,
 
     /// Ratio of verified peers to total connected peers.
@@ -84,7 +82,6 @@ impl Default for OutcomeMetrics {
             pseudonymous_fraction: 0.0,
             pseudonym_churn_rate: 0.0,
             onion_routing_available: false,
-            bbs_credentialed_count: 0,
             credentialed_peer_fraction: 0.0,
             current_pow_difficulty: 8,
             verification_ratio: 0.0,
@@ -184,9 +181,6 @@ impl OutcomeMetrics {
 
         let current_difficulty = routing_table.current_difficulty();
 
-        // BBS+ credentialed count.
-        let bbs_credentialed = active.iter().filter(|d| d.bbs_proof.is_some()).count();
-
         // Stale descriptor count and utilisation.
         let desc_stats = descriptor_store.stats();
 
@@ -198,7 +192,6 @@ impl OutcomeMetrics {
             pseudonymous_fraction,
             pseudonym_churn_rate: descriptor_store.churn_rate(),
             onion_routing_available: onion_enabled,
-            bbs_credentialed_count: bbs_credentialed,
             credentialed_peer_fraction,
             current_pow_difficulty: current_difficulty,
             verification_ratio,

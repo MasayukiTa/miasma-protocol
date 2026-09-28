@@ -35,7 +35,7 @@ use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
 
 use super::bbs_credential::BbsProof;
-use super::credential::{CredentialPresentation, CredentialTier};
+use super::credential::CredentialPresentation;
 
 // ─── Descriptor types ───────────────────────────────────────────────────────
 
@@ -475,14 +475,6 @@ impl PeerDescriptor {
             .as_secs();
         now.saturating_sub(self.published_at)
     }
-
-    /// Whether the descriptor has a valid credential at or above the given tier.
-    pub fn meets_tier(&self, min_tier: CredentialTier) -> bool {
-        self.credential
-            .as_ref()
-            .map(|c| c.credential.body.tier >= min_tier)
-            .unwrap_or(false)
-    }
 }
 
 // ─── Descriptor store ───────────────────────────────────────────────────────
@@ -710,14 +702,6 @@ impl DescriptorStore {
         self.descriptors
             .values()
             .filter(|d| d.is_relay() && is_fresh(d))
-            .collect()
-    }
-
-    /// Return all descriptors meeting a minimum tier.
-    pub fn descriptors_at_tier(&self, min_tier: CredentialTier) -> Vec<&PeerDescriptor> {
-        self.descriptors
-            .values()
-            .filter(|d| d.meets_tier(min_tier) && is_fresh(d))
             .collect()
     }
 
@@ -961,11 +945,6 @@ impl DescriptorStore {
             .values()
             .filter(|d| d.credential.is_some())
             .count();
-        let bbs_credentialed = self
-            .descriptors
-            .values()
-            .filter(|d| d.bbs_proof.is_some())
-            .count();
         let stale = self.descriptors.values().filter(|d| !is_fresh(d)).count();
         let rendezvous_count = self
             .descriptors
@@ -982,7 +961,6 @@ impl DescriptorStore {
             relayed_descriptors: relayed_count,
             rendezvous_descriptors: rendezvous_count,
             credentialed_descriptors: credentialed,
-            bbs_credentialed_descriptors: bbs_credentialed,
             stale_descriptors: stale,
             pseudonym_churn_rate: self.churn_rate(),
             relay_peers_routable,
@@ -1014,7 +992,6 @@ pub struct DescriptorStats {
     pub relayed_descriptors: usize,
     pub rendezvous_descriptors: usize,
     pub credentialed_descriptors: usize,
-    pub bbs_credentialed_descriptors: usize,
     pub stale_descriptors: usize,
     /// Pseudonym churn rate: fraction of current pseudonyms not seen last epoch.
     pub pseudonym_churn_rate: f64,
