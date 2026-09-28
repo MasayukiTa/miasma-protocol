@@ -35,7 +35,7 @@ use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
 
 use super::bbs_credential::BbsProof;
-use super::credential::CredentialPresentation;
+use super::credential::{CredentialPresentation, CredentialTier};
 
 // ─── Descriptor types ───────────────────────────────────────────────────────
 
@@ -283,8 +283,13 @@ pub struct PeerDescriptor {
     pub capabilities: PeerCapabilities,
     /// Resource profile hint.
     pub resource_profile: ResourceProfile,
-    /// Optional credential presentation (proves tier without revealing PeerId).
+    /// Optional credential presentation received on the wire.
     pub credential: Option<CredentialPresentation>,
+    /// Local verification provenance. Never serialized or signed: a descriptor
+    /// received from the wire starts false and is set only after the local node
+    /// verifies the presentation against its own challenge and issuer registry.
+    #[serde(skip)]
+    credential_verified: bool,
     /// When this descriptor was published (Unix timestamp).
     pub published_at: u64,
     /// Descriptor version (monotonically increasing per pseudonym).
@@ -384,6 +389,7 @@ impl PeerDescriptor {
             capabilities,
             resource_profile,
             credential,
+            credential_verified: false,
             published_at,
             version,
             signing_pubkey: signing_key.verifying_key().to_bytes(),
@@ -474,6 +480,27 @@ impl PeerDescriptor {
             .unwrap_or_default()
             .as_secs();
         now.saturating_sub(self.published_at)
+    }
+
+    /// Mark this descriptor's credential as locally verified.
+    ///
+    /// This is intentionally crate-private: external callers cannot manufacture
+    /// verification provenance.
+    pub(crate) fn mark_credential_verified(&mut self) {
+        self.credential_verified = self.credential.is_some();
+    }
+
+    /// Return the verified credential tier, never the raw wire claim.
+    pub fn verified_credential_tier(&self) -> Option<CredentialTier> {
+        if !self.credential_verified {
+            return None;
+        }
+        self.credential.as_ref().map(|c| c.credential.body.tier)
+    }
+
+    /// Whether this descriptor carries a locally verified credential.
+    pub fn has_verified_credential(&self) -> bool {
+        self.verified_credential_tier().is_some()
     }
 }
 
@@ -943,7 +970,7 @@ impl DescriptorStore {
         let credentialed = self
             .descriptors
             .values()
-            .filter(|d| d.credential.is_some())
+            .filter(|d| d.has_verified_credential())
             .count();
         let stale = self.descriptors.values().filter(|d| !is_fresh(d)).count();
         let rendezvous_count = self
@@ -1084,6 +1111,61 @@ mod tests {
             !desc.verify_self(),
             "descriptor owner signature must cover credential presentation bytes"
         );
+    }
+
+    #[test]
+    fn credential_verification_provenance_is_local_only() {
+        use crate::network::credential::{
+            current_epoch, CredentialIssuer, CredentialPresentation, CredentialTier,
+            EphemeralIdentity, CAP_ROUTE,
+        };
+
+        let owner_seed = rand::random::<[u8; 32]>();
+        let owner_key = ed25519_dalek::SigningKey::from_bytes(&owner_seed);
+        let issuer_seed = rand::random::<[u8; 32]>();
+        let issuer = CredentialIssuer::new(ed25519_dalek::SigningKey::from_bytes(&issuer_seed));
+        let identity = EphemeralIdentity::generate(current_epoch());
+        let credential = issuer.issue(
+            CredentialTier::Verified,
+            identity.epoch,
+            CAP_ROUTE,
+            identity.holder_tag(),
+        );
+        let presentation =
+            CredentialPresentation::create(&credential, &identity, b"descriptor-challenge");
+
+        let desc = PeerDescriptor::new_signed(
+            identity.holder_tag(),
+            ReachabilityKind::Direct,
+            vec!["/ip4/8.8.8.8/tcp/4001".to_string()],
+            PeerCapabilities::default(),
+            ResourceProfile::Desktop,
+            Some(presentation),
+            1,
+            &owner_key,
+        );
+        assert_eq!(desc.verified_credential_tier(), None);
+        assert!(!desc.has_verified_credential());
+
+        let bytes = bincode::serialize(&desc).unwrap();
+        let mut received: PeerDescriptor = bincode::deserialize(&bytes).unwrap();
+        assert!(received.credential.is_some());
+        assert_eq!(received.verified_credential_tier(), None);
+        assert!(received.verify_self());
+
+        received.mark_credential_verified();
+        assert_eq!(
+            received.verified_credential_tier(),
+            Some(CredentialTier::Verified)
+        );
+        assert!(received.has_verified_credential());
+        assert!(received.verify_self());
+
+        // Local trust provenance must never survive wire serialization.
+        let forwarded = bincode::serialize(&received).unwrap();
+        let forwarded: PeerDescriptor = bincode::deserialize(&forwarded).unwrap();
+        assert_eq!(forwarded.verified_credential_tier(), None);
+        assert!(!forwarded.has_verified_credential());
     }
 
     #[test]
