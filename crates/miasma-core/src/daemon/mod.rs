@@ -87,12 +87,16 @@ pub struct DaemonServer {
     wss_port: u16,
     /// Whether WSS TLS is enabled.
     wss_tls_enabled: bool,
+    /// WSS accept-loop task. Aborted and awaited during daemon shutdown/wipe.
+    wss_server_handle: Option<JoinHandle<()>>,
     /// Whether a proxy is configured.
     proxy_configured: bool,
     /// Proxy type string (e.g. "socks5", "http_connect").
     proxy_type: Option<String>,
     /// Port the ObfuscatedQuic server is bound to (0 if not started).
     obfs_quic_port: u16,
+    /// ObfuscatedQuic accept-loop task. Aborted and awaited on shutdown/wipe.
+    obfs_server_handle: Option<JoinHandle<()>>,
     /// Port the HTTP bridge is bound to (0 if not started).
     #[allow(dead_code)]
     http_bridge_port: u16,
@@ -163,8 +167,57 @@ impl DaemonServer {
             .context("cannot bind IPC listener")?;
         let control_port = listener.local_addr()?.port();
 
-        // 5. Persist the port so CLI clients can discover the daemon.
-        write_port_file(&data_dir, control_port)?;
+        // Resolve all fallible daemon-owned security state before spawning any
+        // auxiliary server task. A later startup error must not detach a server.
+        let parsed_obfs_probe_secret = transport_config
+            .parsed_obfuscated_quic_secret()
+            .map_err(anyhow::Error::msg)?;
+        let preflight_obfs_config = if transport_config.obfuscated_quic_enabled {
+            let probe_secret = parsed_obfs_probe_secret
+                .as_ref()
+                .context("ObfuscatedQuic enabled without a parsed probe secret")?;
+            Some(crate::transport::obfuscated::ObfuscatedConfig::new(
+                **probe_secret,
+                transport_config
+                    .obfuscated_quic_sni
+                    .as_deref()
+                    .unwrap_or("cdn.example.com"),
+                transport_config
+                    .obfuscated_quic_fallback_url
+                    .as_deref()
+                    .unwrap_or("https://cdn.example.com"),
+                crate::transport::obfuscated::BrowserFingerprint::Chrome124,
+            ))
+        } else {
+            None
+        };
+
+        let (sharing_secret, sharing_pubkey) = {
+            let master_key_path = data_dir.join("master.key");
+            let master_bytes = zeroize::Zeroizing::new(
+                std::fs::read(&master_key_path)
+                    .with_context(|| format!("cannot read {}", master_key_path.display()))?,
+            );
+            if master_bytes.len() != 32 {
+                anyhow::bail!("{} has wrong length", master_key_path.display());
+            }
+            let mut master_key = zeroize::Zeroizing::new([0u8; 32]);
+            master_key.copy_from_slice(&master_bytes);
+            if master_key.iter().all(|byte| *byte == 0) {
+                anyhow::bail!("{} is erased/all-zero", master_key_path.display());
+            }
+            let secret = crate::crypto::keyderive::derive_sharing_key(master_key.as_ref())
+                .context("cannot derive directed-sharing key")?;
+            let static_secret = x25519_dalek::StaticSecret::from(*secret);
+            let pubkey = x25519_dalek::PublicKey::from(&static_secret);
+            (
+                Arc::new(tokio::sync::RwLock::new(Some(secret))),
+                *pubkey.as_bytes(),
+            )
+        };
+        node.set_directed_recipient_pubkey(sharing_pubkey);
+
+        let queue = Arc::new(Mutex::new(ReplicationQueue::load_or_create(&data_dir)?));
 
         // 6. Build extra transports based on config.
         let mut extra_transports: Vec<Box<dyn PayloadTransport>> = Vec::new();
@@ -175,19 +228,31 @@ impl DaemonServer {
             tls_enabled: wss_tls_enabled,
             ..Default::default()
         };
-        // Load TLS cert/key from config paths.
-        if wss_tls_enabled {
-            if let Some(ref cert_path) = transport_config.wss_cert_pem_path {
-                wss_config.tls_cert_pem =
-                    Some(std::fs::read(cert_path).context("reading WSS TLS cert")?);
+        // Keep server private-key bytes out of the client transport config.
+        // The source PEM buffer is zeroized immediately after server bind.
+        let wss_cert_pem = if wss_tls_enabled {
+            match transport_config.wss_cert_pem_path.as_deref() {
+                Some(cert_path) => Some(std::fs::read(cert_path).context("reading WSS TLS cert")?),
+                None => None,
             }
-            if let Some(ref key_path) = transport_config.wss_key_pem_path {
-                wss_config.tls_key_pem =
-                    Some(std::fs::read(key_path).context("reading WSS TLS key")?);
+        } else {
+            None
+        };
+        let wss_key_pem = if wss_tls_enabled {
+            match transport_config.wss_key_pem_path.as_deref() {
+                Some(key_path) => Some(zeroize::Zeroizing::new(
+                    std::fs::read(key_path).context("reading WSS TLS key")?,
+                )),
+                None => None,
             }
-            if let Some(ref sni) = transport_config.wss_sni {
-                wss_config.sni_override = Some(sni.clone());
-            }
+        } else {
+            None
+        };
+        // Publish the control port only after every fallible preflight step has
+        // succeeded. A failed start must never leave a stale daemon.port file.
+        write_port_file(&data_dir, control_port)?;
+        if let Some(ref sni) = transport_config.wss_sni {
+            wss_config.sni_override = Some(sni.clone());
         }
         // Configure proxy if present.
         let proxy_configured = transport_config.proxy_type.is_some();
@@ -197,7 +262,7 @@ impl DaemonServer {
                 use crate::transport::websocket::{ProxyConfig as WssProxyConfig, ProxyKind};
                 let kind = match pt.as_str() {
                     "socks5" => ProxyKind::Socks5,
-                    _ => ProxyKind::Socks5, // default to socks5
+                    _ => ProxyKind::Socks5,
                 };
                 wss_config.proxy = Some(WssProxyConfig {
                     addr: addr.clone(),
@@ -206,85 +271,65 @@ impl DaemonServer {
             }
         }
 
-        let wss_port = if wss_tls_enabled {
-            // Bind TLS-enabled WSS server.
+        let (wss_port, wss_server_handle) = if wss_tls_enabled {
+            let cert_pem: &[u8] = wss_cert_pem.as_deref().unwrap_or_default();
+            let key_pem: &[u8] = wss_key_pem
+                .as_ref()
+                .map(|pem| pem.as_slice())
+                .unwrap_or_default();
             match crate::transport::websocket::WssShareServer::bind_tls(
                 store.clone(),
                 0,
-                &wss_config.tls_cert_pem.clone().unwrap_or_default(),
-                &wss_config.tls_key_pem.clone().unwrap_or_default(),
+                cert_pem,
+                key_pem,
             )
             .await
             {
                 Ok(server) => {
                     let port = server.port;
-                    tokio::spawn(server.run());
+                    let handle = tokio::spawn(server.run());
                     info!(
                         wss_port = port,
                         tls = true,
                         "WSS share server started (TLS)"
                     );
-                    // Add WSS transport to fallback chain.
                     let mut client_config = wss_config.clone();
                     client_config.port = port;
                     extra_transports.push(Box::new(
                         crate::transport::websocket::WssPayloadTransport::new(client_config),
                     ));
-                    port
+                    (port, Some(handle))
                 }
                 Err(e) => {
                     warn!("WSS TLS share server failed to start: {e}");
-                    0
+                    (0, None)
                 }
             }
         } else {
-            // Plain WSS server (no TLS).
             match crate::transport::websocket::WssShareServer::bind(store.clone(), 0).await {
                 Ok(server) => {
                     let port = server.port;
-                    tokio::spawn(server.run());
+                    let handle = tokio::spawn(server.run());
                     info!(wss_port = port, "WSS share server started");
                     let mut client_config = wss_config.clone();
                     client_config.port = port;
                     extra_transports.push(Box::new(
                         crate::transport::websocket::WssPayloadTransport::new(client_config),
                     ));
-                    port
+                    (port, Some(handle))
                 }
                 Err(e) => {
                     warn!("WSS share server failed to start: {e}");
-                    0
+                    (0, None)
                 }
             }
         };
+        drop(wss_key_pem);
 
         // 6b. ObfuscatedQuic server.
         let mut obfs_quic_port = 0u16;
-        if transport_config.obfuscated_quic_enabled {
-            // Parse hex-encoded probe secret (32 bytes = 64 hex chars).
-            let probe_secret = {
-                let hex_str = transport_config
-                    .obfuscated_quic_secret
-                    .as_deref()
-                    .unwrap_or("0000000000000000000000000000000000000000000000000000000000000000");
-                let bytes = hex::decode(hex_str).unwrap_or_else(|_| vec![0u8; 32]);
-                let mut arr = [0u8; 32];
-                let len = bytes.len().min(32);
-                arr[..len].copy_from_slice(&bytes[..len]);
-                arr
-            };
-            let obfs_config = crate::transport::obfuscated::ObfuscatedConfig::new(
-                probe_secret,
-                transport_config
-                    .obfuscated_quic_sni
-                    .as_deref()
-                    .unwrap_or("cdn.example.com"),
-                transport_config
-                    .obfuscated_quic_fallback_url
-                    .as_deref()
-                    .unwrap_or("https://cdn.example.com"),
-                crate::transport::obfuscated::BrowserFingerprint::Chrome124,
-            );
+        let mut obfs_server_handle: Option<JoinHandle<()>> = None;
+        if let Some(obfs_config) = preflight_obfs_config {
             match crate::transport::obfuscated::ObfuscatedQuicServer::bind(
                 store.clone(),
                 0,
@@ -294,9 +339,8 @@ impl DaemonServer {
             {
                 Ok(server) => {
                     obfs_quic_port = server.port;
-                    tokio::spawn(server.run());
+                    obfs_server_handle = Some(tokio::spawn(server.run()));
                     info!(port = obfs_quic_port, "ObfuscatedQuic server started");
-                    // Add to fallback chain.
                     extra_transports.push(Box::new(
                         crate::transport::obfuscated::ObfuscatedQuicPayloadTransport::new(
                             obfs_config,
@@ -347,35 +391,8 @@ impl DaemonServer {
             }
         }
 
-        // 7. Derive the directed-sharing keypair before moving the node into
-        // the coordinator, so inbound Invite requests can be recipient-bound at
-        // the network boundary.
-        let (sharing_secret, sharing_pubkey) = {
-            let master_key_path = data_dir.join("master.key");
-            let master_bytes = zeroize::Zeroizing::new(
-                std::fs::read(&master_key_path)
-                    .with_context(|| format!("cannot read {}", master_key_path.display()))?,
-            );
-            if master_bytes.len() != 32 {
-                anyhow::bail!("{} has wrong length", master_key_path.display());
-            }
-            let mut master_key = zeroize::Zeroizing::new([0u8; 32]);
-            master_key.copy_from_slice(&master_bytes);
-            if master_key.iter().all(|byte| *byte == 0) {
-                anyhow::bail!("{} is erased/all-zero", master_key_path.display());
-            }
-            let secret = crate::crypto::keyderive::derive_sharing_key(master_key.as_ref())
-                .context("cannot derive directed-sharing key")?;
-            let static_secret = x25519_dalek::StaticSecret::from(*secret);
-            let pubkey = x25519_dalek::PublicKey::from(&static_secret);
-            (
-                Arc::new(tokio::sync::RwLock::new(Some(secret))),
-                *pubkey.as_bytes(),
-            )
-        };
-        node.set_directed_recipient_pubkey(sharing_pubkey);
-
-        // 8. Start the coordinator with all transports.
+        // 7. Start the coordinator with all transports. All fallible daemon-owned
+        // preflight work has already completed before auxiliary task spawn.
         let coord = Arc::new(
             MiasmaCoordinator::start_with_transports(
                 node,
@@ -386,10 +403,7 @@ impl DaemonServer {
             .await,
         );
 
-        // 9. Load the persistent replication queue.
-        let queue = Arc::new(Mutex::new(ReplicationQueue::load_or_create(&data_dir)?));
-
-        // 8b. Create shared rate limiter, health monitor, environment snapshot.
+        // 8. Create shared rate limiter, health monitor, environment snapshot.
         let rate_limiter = Arc::new(Mutex::new(rate_limit::RateLimiter::default()));
         let health_monitor = Arc::new(Mutex::new(ConnectionHealthMonitor::default()));
         let env_snapshot = Arc::new(Mutex::new(EnvironmentSnapshot::default()));
@@ -453,9 +467,11 @@ impl DaemonServer {
             control_port,
             wss_port,
             wss_tls_enabled,
+            wss_server_handle,
             proxy_configured,
             proxy_type,
             obfs_quic_port,
+            obfs_server_handle,
             http_bridge_port,
             http_bridge_handle,
             sharing_secret,
@@ -619,8 +635,16 @@ impl DaemonServer {
         ipc_handle.abort();
         rep_handle.abort();
         env_handle.abort();
-        if let Some(handle) = self.http_bridge_handle.take() {
+        for handle in [
+            self.wss_server_handle.take(),
+            self.obfs_server_handle.take(),
+            self.http_bridge_handle.take(),
+        ]
+        .into_iter()
+        .flatten()
+        {
             handle.abort();
+            let _ = handle.await;
         }
 
         coord.shutdown().await;

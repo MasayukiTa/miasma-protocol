@@ -2,6 +2,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::MiasmaError;
 
@@ -82,6 +83,34 @@ pub struct TransportConfig {
     pub tor: crate::transport::tor::TorConfig,
 }
 
+impl TransportConfig {
+    /// Parse the ObfuscatedQuic probe secret using the same fail-closed rules
+    /// everywhere. Disabled transport returns `Ok(None)` without interpreting a
+    /// stale configured value.
+    pub fn parsed_obfuscated_quic_secret(&self) -> Result<Option<Zeroizing<[u8; 32]>>, String> {
+        if !self.obfuscated_quic_enabled {
+            return Ok(None);
+        }
+        let hex_secret = self
+            .obfuscated_quic_secret
+            .as_deref()
+            .ok_or_else(|| "ObfuscatedQuic enabled but probe secret is missing".to_string())?;
+        let decoded = Zeroizing::new(
+            hex::decode(hex_secret)
+                .map_err(|_| "ObfuscatedQuic probe secret must be valid hex".to_string())?,
+        );
+        if decoded.len() != 32 {
+            return Err("ObfuscatedQuic probe secret must be exactly 32 bytes".into());
+        }
+        let mut secret = Zeroizing::new([0u8; 32]);
+        secret.copy_from_slice(&decoded);
+        if secret.iter().all(|byte| *byte == 0) {
+            return Err("ObfuscatedQuic probe secret must not be all-zero".into());
+        }
+        Ok(Some(secret))
+    }
+}
+
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
@@ -111,6 +140,9 @@ impl NodeConfig {
     }
 
     pub fn save(&self, data_dir: &Path) -> Result<(), MiasmaError> {
+        self.transport
+            .parsed_obfuscated_quic_secret()
+            .map_err(|e| MiasmaError::Serialization(format!("invalid transport config: {e}")))?;
         std::fs::create_dir_all(data_dir)?;
         let path = data_dir.join("config.toml");
         let raw =
@@ -150,8 +182,15 @@ impl NodeConfig {
     pub fn scrub_credentials(&mut self, data_dir: &Path) -> Result<(), MiasmaError> {
         self.transport.proxy_username = None;
         self.transport.proxy_password = None;
-        self.transport.obfuscated_quic_secret = None;
-        self.transport.shadowsocks.password = None;
+        if self.transport.obfuscated_quic_secret.take().is_some() {
+            self.transport.obfuscated_quic_enabled = false;
+        }
+        if self.transport.shadowsocks.password.take().is_some()
+            && self.transport.shadowsocks.server.is_some()
+        {
+            // Native Shadowsocks cannot operate after its PSK is destroyed.
+            self.transport.shadowsocks.enabled = false;
+        }
         self.save(data_dir)
     }
 }

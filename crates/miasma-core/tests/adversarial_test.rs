@@ -3478,7 +3478,10 @@ fn config_scrub_preserves_non_secret_fields() {
     config.transport.proxy_addr = Some("127.0.0.1:1080".into());
     config.transport.proxy_username = Some("user".into());
     config.transport.proxy_password = Some("pass".into());
-    config.transport.obfuscated_quic_secret = Some("probe-secret".into());
+    config.transport.obfuscated_quic_enabled = true;
+    config.transport.obfuscated_quic_secret = Some("11".repeat(32));
+    config.transport.shadowsocks.enabled = true;
+    config.transport.shadowsocks.server = Some("127.0.0.1:8388".into());
     config.transport.shadowsocks.password = Some("shadow-psk".into());
     config.transport.wss_tls_enabled = true;
     config.save(dir.path()).unwrap();
@@ -3491,9 +3494,11 @@ fn config_scrub_preserves_non_secret_fields() {
     assert!(reloaded.transport.proxy_username.is_none());
     assert!(reloaded.transport.proxy_password.is_none());
     assert!(reloaded.transport.obfuscated_quic_secret.is_none());
+    assert!(!reloaded.transport.obfuscated_quic_enabled);
     assert!(reloaded.transport.shadowsocks.password.is_none());
+    assert!(!reloaded.transport.shadowsocks.enabled);
 
-    // Other transport config preserved.
+    // Other non-secret transport config preserved.
     assert_eq!(reloaded.transport.proxy_type.as_deref(), Some("socks5"));
     assert_eq!(
         reloaded.transport.proxy_addr.as_deref(),
@@ -3541,6 +3546,34 @@ fn config_with_credentials_is_restricted() {
         restricted,
         "config.toml with proxy credentials must be restricted to current user"
     );
+}
+
+/// ObfuscatedQuic authentication secret parsing is fail-closed and exact-width.
+#[test]
+fn obfuscated_quic_secret_validation_is_strict() {
+    use miasma_core::config::TransportConfig;
+
+    let mut config = TransportConfig {
+        obfuscated_quic_enabled: true,
+        ..Default::default()
+    };
+    assert!(config.parsed_obfuscated_quic_secret().is_err());
+
+    config.obfuscated_quic_secret = Some("not-hex".into());
+    assert!(config.parsed_obfuscated_quic_secret().is_err());
+
+    config.obfuscated_quic_secret = Some("11".repeat(31));
+    assert!(config.parsed_obfuscated_quic_secret().is_err());
+
+    config.obfuscated_quic_secret = Some("00".repeat(32));
+    assert!(config.parsed_obfuscated_quic_secret().is_err());
+
+    config.obfuscated_quic_secret = Some("11".repeat(32));
+    let parsed = config
+        .parsed_obfuscated_quic_secret()
+        .unwrap()
+        .expect("enabled config should yield a secret");
+    assert_eq!(&*parsed, &[0x11u8; 32]);
 }
 
 /// Non-proxy persisted transport secrets also require restricted config permissions.
