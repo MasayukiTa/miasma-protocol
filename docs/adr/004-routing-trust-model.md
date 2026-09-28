@@ -107,6 +107,23 @@ Domain separation prevents cross-protocol signature reuse. The signing key
 is derived from the master key via HKDF (already implemented in
 `keyderive.rs` as `LABEL_DHT_SIGN`).
 
+GET validation is fail-closed. A network record is accepted only when all of the
+following hold:
+
+1. the value deserializes as `SignedDhtRecord` (plain/unsigned values are rejected),
+2. the Ed25519 signature is valid,
+3. the signed `SignedDhtRecord.key` exactly equals the outer Kademlia storage key,
+4. the signed inner `DhtRecord.mid_digest` equals that same storage key.
+
+This closes unsigned fallback and cross-key transplant attacks. It does **not**
+by itself authorize the signer to publish metadata for a particular MID. The
+current MID commits to content+dissolution parameters, not to a publisher key,
+so an attacker can still create a different self-signed metadata record for a
+known MID. Likewise, the envelope has no monotonic sequence/freshness rule that
+survives restart. Publisher authorization and replay resolution therefore remain
+protocol-design work; the current signature should be read as integrity and
+signer attribution, not ownership of the MID namespace.
+
 ### PoW enforcement
 
 Node IDs must satisfy `BLAKE3(pubkey || nonce)` with `difficulty_bits`
@@ -155,8 +172,9 @@ leading zero bits. Enforcement points:
       they pass the admission handshake (Identify + PoW verification)
 - [x] `AdmissionCodec` wire protocol with size limits (4 KiB)
 - [x] `SignedDhtRecord` envelope for DHT PUT: all published records are signed
-- [x] DHT GET signature validation: records with invalid signatures rejected
-- [x] Transition compatibility: unsigned legacy records accepted on GET
+- [x] DHT GET validation is fail-closed: unsigned/malformed records, invalid
+      signatures, outer?signed key mismatch, and signed-key?inner-MID mismatch are rejected
+- [x] Legacy unsigned GET fallback removed; network DHT records must use `SignedDhtRecord`
 - [x] Admission diagnostics in `DaemonStatus`: verified/observed peers, rejection count
 - [x] `verify_remote_pow()`: validates PoW pubkey matches peer identity
 - [x] Structured admission logging: `admission.requested`, `admission.verified`,
@@ -210,5 +228,9 @@ leading zero bits. Enforcement points:
   not prohibitively so. This is a tradeoff for network bootstrapping.
 - DHT record publishing requires the signing key. Nodes that have been
   wiped cannot publish records until they re-derive keys via `init`.
+- Signed DHT records currently authenticate the signer but do not establish that
+  signer as the authoritative publisher for the MID, and do not yet provide a
+  persistent anti-replay ordering rule. A future mutable-record protocol must
+  bind publisher authority and monotonic freshness without weakening content-addressing.
 - Backward-incompatible: old nodes without PoW proofs will be rejected
   once enforcement is enabled. Migration requires re-init.
