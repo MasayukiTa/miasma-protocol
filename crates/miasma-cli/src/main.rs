@@ -839,10 +839,6 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
                 s.metric_credentialed_fraction * 100.0
             );
             println!(
-                "  Pseudonymous peers:    {:.1}%",
-                s.metric_pseudonymous_fraction * 100.0
-            );
-            println!(
                 "  Pseudonym churn:       {:.1}%",
                 s.metric_pseudonym_churn_rate * 100.0
             );

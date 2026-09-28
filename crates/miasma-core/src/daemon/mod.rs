@@ -984,7 +984,6 @@ pub(crate) async fn process_request(
                 anonymity_policy: coord.anonymity_policy().to_string(),
                 metric_relay_prefix_diversity: outcome.relay_prefix_diversity,
                 metric_credentialed_fraction: outcome.credentialed_peer_fraction,
-                metric_pseudonymous_fraction: outcome.pseudonymous_fraction,
                 metric_multi_path_retrievability: outcome.multi_path_retrievability,
                 metric_pow_difficulty: outcome.current_pow_difficulty,
                 metric_verification_ratio: outcome.verification_ratio,
