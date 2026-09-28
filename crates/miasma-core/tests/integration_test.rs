@@ -4800,27 +4800,11 @@ async fn forced_transport_failure_fallback_evidence() {
 
 // ─── Credential layer: does it work at all? ─────────────────────────────────
 //
-// External review (claude fable) predicted, from code reading alone, that no
-// credential of either scheme has ever been stored end to end -- because a
-// node registers its own issuer key as
-//     blake3("miasma-cred-issuer-v1" || dht_signing_key)  -> derived key
-// but registers every *remote* peer as `pow.pubkey`, the identity verifying
-// key. Those are different keys, so `verify_presentation`'s "is this issuer
-// known?" step should reject every genuinely issued credential.
-//
-// That is a prediction about running behaviour, so it gets measured rather
-// than argued. Two nodes admit each other and exchange credentials; if the
-// layer works, at least one of them ends up holding one.
-//
-// If this test is red, the trust layer has never functioned in production and
-// the credential bonus in admission was only ever reachable by self-declaring
-// a tier -- which is why `credential_tier` is currently pinned to `None`.
+// The issuer-key mismatch this test originally characterised is repaired: the
+// response carries the real issuer public key plus a signature by the peer's
+// authenticated network identity. Both peers must now store a remote credential.
 
-/// Two nodes, mutual admission, then: did either actually store a credential?
-///
-/// Answer, measured: no. This is a characterisation test — it asserts the
-/// current broken behaviour on purpose. See the assertion for why and for
-/// what to do when the defect is fixed.
+/// Two nodes mutually verify identity-bound issuer keys and store credentials.
 #[tokio::test(flavor = "multi_thread")]
 async fn credential_exchange_actually_stores_a_credential() {
     use std::time::Duration;
@@ -4853,41 +4837,23 @@ async fn credential_exchange_actually_stores_a_credential() {
                 sb.held_credentials,
                 sb.known_issuers,
             );
-            if sa.held_credentials > 0 || sb.held_credentials > 0 {
+            if sa.held_credentials > 0 && sb.held_credentials > 0 {
                 break;
             }
         }
 
         let (a_held, a_issuers, b_held, b_issuers) = last;
 
-        // MEASURED 2026-09-05: A held=0 known_issuers=1,
-        //                      B held=0 known_issuers=1.
-        //
-        // The assertion below is deliberately inverted: it pins a known defect
-        // rather than asserting the behaviour we want. A node registers its own
-        // issuer key as `blake3("miasma-cred-issuer-v1" || dht_signing_key)`
-        // but registers every remote peer as `pow.pubkey`, the identity
-        // verifying key. Those are different keys, so `verify_presentation`
-        // rejects every genuinely issued credential as `UnknownIssuer` and
-        // nothing is ever stored.
-        //
-        // Pinning it keeps the fact executable instead of living in a document,
-        // and makes a fix announce itself: **when the issuer registry is fixed
-        // this test will fail, and the correct response is to invert it back to
-        // `assert!(a_held > 0 || b_held > 0)` and delete this comment.**
-        assert_eq!(
-            (a_held, b_held),
-            (0, 0),
-            "credential exchange stored something (A: held={a_held} \
-             known_issuers={a_issuers}, B: held={b_held} \
-             known_issuers={b_issuers}). If the issuer registry was fixed, \
-             invert this assertion to require a credential instead of pinning \
-             its absence. See docs/adr/006-bbs-plus-known-breaks.md."
+        assert!(
+            a_held > 0 && b_held > 0,
+            "credential exchange did not store a remote credential on both nodes \
+             (A: held={a_held} known_issuers={a_issuers}, B: held={b_held} \
+             known_issuers={b_issuers})"
         );
         assert!(
-            a_issuers > 0 && b_issuers > 0,
-            "neither node registered an issuer, so this test is not measuring \
-             what it claims to (A: {a_issuers}, B: {b_issuers})"
+            a_issuers >= 2 && b_issuers >= 2,
+            "each node should know its own issuer plus the identity-bound remote \
+             issuer (A: {a_issuers}, B: {b_issuers})"
         );
     })
     .await;

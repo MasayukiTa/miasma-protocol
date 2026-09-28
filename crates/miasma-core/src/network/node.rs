@@ -4,7 +4,7 @@
 /// DHT: Kademlia via `DhtHandle` / `OnionAwareDhtExecutor` (ADR-002)
 /// Share exchange: `/miasma/share/1.0.0` request-response protocol
 /// Admission: `/miasma/admission/1.0.0` PoW proof exchange (ADR-004)
-/// Credential: `/miasma/credential/1.0.0` credential exchange (ADR-005)
+/// Credential: `/miasma/credential/1.1.0` credential exchange (ADR-005)
 /// Descriptor: `/miasma/descriptor/1.0.0` descriptor exchange (ADR-005)
 /// NAT: AutoNAT + DCUtR + relay
 use std::collections::HashMap;
@@ -30,8 +30,8 @@ use crate::{crypto::keyderive::NodeKeys, share::MiasmaShare, store::LocalShareSt
 
 use super::admission_policy::{AdmissionSignals, HybridAdmissionPolicy};
 use super::bbs_credential::{
-    bbs_create_proof, bbs_verify_proof, BbsCredential, BbsCredentialAttributes,
-    BbsCredentialWallet, BbsIssuer, BbsIssuerKey, BbsIssuerRegistry, DisclosurePolicy,
+    bbs_create_proof, bbs_verify_proof, BbsCredential, BbsCredentialWallet, BbsIssuer,
+    BbsIssuerKey, BbsIssuerRegistry, DisclosurePolicy,
 };
 use super::credential::{
     self, CredentialIssuer, CredentialPresentation, CredentialStats, CredentialTier,
@@ -158,11 +158,59 @@ pub struct CredentialRequest {
     pub bbs_link_secret: Option<[u8; 32]>,
 }
 
+/// Domain separator for binding a credential-issuer key to the peer's long-term
+/// network identity. The signature is made by the same Ed25519 key that admission
+/// proves belongs to the remote `PeerId`.
+const CREDENTIAL_ISSUER_BINDING_DOMAIN: &[u8] = b"miasma-cred-issuer-binding-v1";
+
+fn credential_issuer_binding_message(issuer_pubkey: &[u8; 32]) -> [u8; 32] {
+    *blake3::hash(&[CREDENTIAL_ISSUER_BINDING_DOMAIN, issuer_pubkey.as_slice()].concat()).as_bytes()
+}
+
+fn sign_credential_issuer_binding(
+    identity_key: &ed25519_dalek::SigningKey,
+    issuer_pubkey: &[u8; 32],
+) -> Vec<u8> {
+    use ed25519_dalek::Signer as _;
+    identity_key
+        .sign(&credential_issuer_binding_message(issuer_pubkey))
+        .to_bytes()
+        .to_vec()
+}
+
+fn verify_credential_issuer_binding(
+    identity_pubkey: &[u8; 32],
+    issuer_pubkey: &[u8; 32],
+    signature: &[u8],
+) -> bool {
+    use ed25519_dalek::Verifier as _;
+
+    let Ok(verifying_key) = ed25519_dalek::VerifyingKey::from_bytes(identity_pubkey) else {
+        return false;
+    };
+    let Ok(signature_bytes) = <[u8; 64]>::try_from(signature) else {
+        return false;
+    };
+    let signature = ed25519_dalek::Signature::from_bytes(&signature_bytes);
+    verifying_key
+        .verify(
+            &credential_issuer_binding_message(issuer_pubkey),
+            &signature,
+        )
+        .is_ok()
+}
+
 /// Credential exchange response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredentialResponse {
     /// The signed credential (Ed25519), or None if the peer is not eligible.
     pub credential: Option<SignedCredential>,
+    /// The responder's actual credential-issuer public key.
+    pub issuer_pubkey: [u8; 32],
+    /// Signature over `issuer_pubkey` by the responder's long-term network
+    /// identity key. Receivers verify it against the already authenticated
+    /// remote identity before trusting `issuer_pubkey`.
+    pub issuer_binding_signature: Vec<u8>,
     /// BBS+ credential (privacy-preserving, within-epoch unlinkable).
     #[serde(default)]
     pub bbs_credential: Option<BbsCredential>,
@@ -189,7 +237,7 @@ pub struct DescriptorResponse {
 /// Max message size for credential exchange (8 KiB).
 const CREDENTIAL_MSG_MAX: usize = 8 * 1024;
 
-/// Bincode + 4-byte LE length-prefix codec for `/miasma/credential/1.0.0`.
+/// Bincode + 4-byte LE length-prefix codec for `/miasma/credential/1.1.0`.
 #[derive(Clone, Default)]
 pub struct CredentialCodec;
 
@@ -1495,7 +1543,7 @@ pub struct MiasmaBehaviour {
     pub(crate) share_store: request_response::Behaviour<ShareStoreCodec>,
     /// PoW admission: `/miasma/admission/1.0.0` request-response.
     pub(crate) admission: request_response::Behaviour<AdmissionCodec>,
-    /// Credential exchange: `/miasma/credential/1.0.0` request-response.
+    /// Credential exchange: `/miasma/credential/1.1.0` request-response.
     pub(crate) credential_exchange: request_response::Behaviour<CredentialCodec>,
     /// Descriptor exchange: `/miasma/descriptor/1.0.0` request-response.
     pub(crate) descriptor_exchange: request_response::Behaviour<DescriptorCodec>,
@@ -2831,6 +2879,25 @@ impl MiasmaNode {
 
     /// Handle Identify protocol completion for a peer.
     fn handle_identify(&mut self, peer_id: PeerId, info: identify::Info) {
+        // Identify runs over the authenticated libp2p connection. Record the
+        // concrete Ed25519 identity key, but only after independently checking
+        // that it derives the connection's `PeerId`.
+        let ed_pubkey = match info.public_key.clone().try_into_ed25519() {
+            Ok(key) => key,
+            Err(_) => {
+                warn!("admission.rejected peer={peer_id} reason=non_ed25519_identity");
+                self.peer_registry.record_rejection();
+                return;
+            }
+        };
+        let identity_pubkey = ed_pubkey.to_bytes();
+        let identified_peer_id = PeerId::from(libp2p::identity::PublicKey::from(ed_pubkey));
+        if identified_peer_id != peer_id {
+            warn!("admission.rejected peer={peer_id} reason=identify_identity_mismatch");
+            self.peer_registry.record_rejection();
+            return;
+        }
+
         // Filter addresses: reject loopback, link-local, private, unknown.
         // In local/test mode, skip filtering to allow loopback addresses.
         let addrs_to_use = if self.allow_local_addresses {
@@ -2845,8 +2912,9 @@ impl MiasmaNode {
             return;
         }
 
-        // Promote to Observed in peer registry.
-        self.peer_registry.on_identify(peer_id);
+        // Promote to Observed and retain the authenticated identity key.
+        self.peer_registry
+            .on_identify_identity(peer_id, identity_pubkey);
 
         if self.allow_local_addresses {
             // Local mode: skip PoW admission, add directly to Kademlia and
@@ -2863,9 +2931,9 @@ impl MiasmaNode {
                     .autonat
                     .add_server(peer_id, Some(first_addr.clone()));
             }
-            // Auto-promote: in local mode, treat as verified.
-            let fake_pow = self.local_pow.clone();
-            self.peer_registry.on_admission_verified(peer_id, fake_pow);
+            // Auto-promote: local mode skips PoW cost, but does not fabricate a
+            // remote proof. The real remote identity key came from Identify above.
+            self.peer_registry.on_local_admission_verified(peer_id);
 
             // Also register with the routing overlay -- production mode does
             // this in `promote_peer_to_verified`, but local mode's fast path
@@ -2878,6 +2946,8 @@ impl MiasmaNode {
                 let prefix = routing::ip_prefix_of(first_addr);
                 self.routing_table.add_peer(peer_id, prefix);
             }
+
+            self.start_post_admission_exchanges(peer_id);
 
             if let Some(tx) = &self.topology_tx {
                 let _ = tx.try_send(super::types::TopologyEvent::PeerRoutable { peer_id });
@@ -3119,27 +3189,9 @@ impl MiasmaNode {
         }
 
         // ── Phase 4b: credential issuance ────────────────────────────────
-        // In bootstrap mode, register this peer's PoW pubkey as a potential issuer.
-        if self.issuer_registry.bootstrap_mode {
-            self.issuer_registry.add_issuer(pow.pubkey);
-            // The peer's BBS+ issuer key is deliberately NOT registered here any
-            // more. It used to be derived as
-            //     BbsIssuerKey::from_seed(blake3("miasma-bbs-issuer-v1" || pow.pubkey))
-            // from the peer's *public* PoW key, while a node derives its own real
-            // issuer key from its *private* DHT signing key (see `MiasmaNode::new`).
-            // Two consequences, both bad:
-            //
-            //  - `BbsIssuerKey::from_seed` sets `sk = hash_to_scalar(seed)`, so
-            //    anyone who has seen a peer's PoW pubkey -- it is in the admission
-            //    handshake -- could recompute that registered issuer's *secret*
-            //    scalar and sign credentials that the registry accepts as genuine.
-            //    No forgery required; the key was simply public.
-            //  - The two derivations never agree, so the registry never actually
-            //    contained any peer's real issuer key.
-            //
-            // See docs/adr/006-bbs-plus-known-breaks.md. Real issuer-key
-            // distribution has to be designed, not derived from a public value.
-        }
+        // Do not infer a credential issuer key from the peer's PoW identity.
+        // The actual issuer key is registered only after CredentialResponse carries
+        // an identity-bound issuer key that verifies against this peer.
 
         // Initiate credential exchange: request a credential from the new peer,
         // and they can request one from us via the protocol.
@@ -3174,6 +3226,34 @@ impl MiasmaNode {
         if let Some(tx) = &self.topology_tx {
             let _ = tx.try_send(super::types::TopologyEvent::PeerRoutable { peer_id });
         }
+    }
+
+    /// Start post-admission exchanges for the loopback development fast path.
+    /// Production starts the same exchanges from `promote_peer_to_verified`.
+    fn start_post_admission_exchanges(&mut self, peer_id: PeerId) {
+        let cred_req = CredentialRequest {
+            ephemeral_pubkey: self.credential_wallet.ephemeral_pubkey(),
+            holder_tag: self.credential_wallet.holder_tag(),
+            epoch: self.credential_wallet.epoch(),
+            bbs_link_secret: None,
+        };
+        let req_id = self
+            .swarm
+            .behaviour_mut()
+            .credential_exchange
+            .send_request(&peer_id, cred_req);
+        self.pending_credential_reqs.insert(req_id, peer_id);
+
+        let our_desc = self.build_local_descriptor();
+        let desc_req = DescriptorRequest {
+            descriptor: Some(our_desc),
+        };
+        let req_id = self
+            .swarm
+            .behaviour_mut()
+            .descriptor_exchange
+            .send_request(&peer_id, desc_req);
+        self.pending_descriptor_reqs.insert(req_id, peer_id);
     }
 
     /// Build this node's peer descriptor for publication.
@@ -3245,36 +3325,42 @@ impl MiasmaNode {
                     },
                 ..
             } => {
-                // Only issue credentials to verified peers.
-                let (credential, bbs_credential) = if self.peer_registry.is_verified(&peer) {
+                let current_epoch = credential::current_epoch();
+                let holder_tag_valid =
+                    credential::compute_holder_tag(&request.ephemeral_pubkey) == request.holder_tag;
+                let request_epoch_valid = credential::epoch_is_valid(request.epoch, current_epoch);
+                let peer_eligible =
+                    self.peer_registry.is_verified(&peer) || self.allow_local_addresses;
+                let credential = if peer_eligible && holder_tag_valid && request_epoch_valid {
                     let cred = self.credential_issuer.issue(
                         CredentialTier::Verified,
                         request.epoch,
                         CAP_STORE | CAP_ROUTE,
                         request.holder_tag,
                     );
-                    // Issue BBS+ credential with the requester's link secret.
-                    let bbs_cred = request.bbs_link_secret.map(|link_secret| {
-                        self.bbs_issuer.issue(BbsCredentialAttributes {
-                            link_secret,
-                            tier: CredentialTier::Verified,
-                            capabilities: CAP_STORE | CAP_ROUTE,
-                            epoch: request.epoch,
-                            nonce: rand::random(),
-                        })
-                    });
                     info!(
-                        "credential.issued peer={peer} tier=Verified epoch={} ed25519=true bbs+={}",
-                        request.epoch,
-                        bbs_cred.is_some()
+                        "credential.issued peer={peer} tier=Verified epoch={} ed25519=true",
+                        request.epoch
                     );
-                    (Some(cred), bbs_cred)
+                    Some(cred)
                 } else {
-                    debug!("credential.denied peer={peer} reason=not_verified");
-                    (None, None)
+                    debug!(
+                        "credential.denied peer={peer} verified={} holder_tag_valid={} epoch_valid={}",
+                        peer_eligible,
+                        holder_tag_valid,
+                        request_epoch_valid
+                    );
+                    None
                 };
+
+                let bbs_credential = None;
+                let issuer_pubkey = self.credential_issuer.pubkey_bytes();
+                let issuer_binding_signature =
+                    sign_credential_issuer_binding(&self.dht_signing_key, &issuer_pubkey);
                 let resp = CredentialResponse {
                     credential,
+                    issuer_pubkey,
+                    issuer_binding_signature,
                     bbs_credential,
                 };
                 let _ = self
@@ -3294,7 +3380,37 @@ impl MiasmaNode {
                 ..
             } => {
                 self.pending_credential_reqs.remove(&request_id);
-                if let Some(cred) = response.credential {
+                let CredentialResponse {
+                    credential: received_credential,
+                    issuer_pubkey,
+                    issuer_binding_signature,
+                    bbs_credential,
+                } = response;
+
+                let binding_valid = self
+                    .peer_registry
+                    .verified_identity_pubkey(&peer)
+                    .is_some_and(|identity_pubkey| {
+                        verify_credential_issuer_binding(
+                            &identity_pubkey,
+                            &issuer_pubkey,
+                            &issuer_binding_signature,
+                        )
+                    });
+                if !binding_valid {
+                    warn!("credential.rejected peer={peer} error=invalid_issuer_identity_binding");
+                    return;
+                }
+
+                if self.issuer_registry.bootstrap_mode {
+                    self.issuer_registry.add_issuer(issuer_pubkey);
+                }
+
+                if let Some(cred) = received_credential {
+                    if cred.issuer_pubkey != issuer_pubkey {
+                        warn!("credential.rejected peer={peer} error=issuer_key_mismatch");
+                        return;
+                    }
                     // Verify the credential before storing:
                     // 1. Check issuer is known
                     // 2. Check issuer signature is valid
@@ -3330,7 +3446,7 @@ impl MiasmaNode {
                     }
                 }
                 // Verify and store BBS+ credential if present.
-                if let Some(bbs_cred) = response.bbs_credential {
+                if let Some(bbs_cred) = bbs_credential {
                     let issuer_pk = &bbs_cred.issuer_pk;
                     if issuer_pk.len() == 96 {
                         let mut pk_arr = [0u8; 96];
@@ -4289,7 +4405,7 @@ fn build_swarm(
 
             let credential_exchange = request_response::Behaviour::<CredentialCodec>::new(
                 [(
-                    StreamProtocol::new("/miasma/credential/1.0.0"),
+                    StreamProtocol::new("/miasma/credential/1.1.0"),
                     request_response::ProtocolSupport::Full,
                 )],
                 request_response::Config::default(),
@@ -4475,8 +4591,8 @@ mod admission_pow_tests {
         PeerId::from(libp2p::identity::PublicKey::from(ed_pubkey))
     }
 
-    #[test]
-    fn admission_rejects_forged_all_zero_claimed_pow_hash() {
+    #[tokio::test]
+    async fn admission_rejects_forged_all_zero_claimed_pow_hash() {
         let node = make_node();
         let mut forged = node.local_pow.clone();
         let peer = peer_id_for_pow(&forged);
@@ -4492,12 +4608,34 @@ mod admission_pow_tests {
         );
     }
 
-    #[test]
-    fn admission_accepts_valid_pow_for_matching_identity() {
+    #[tokio::test]
+    async fn admission_accepts_valid_pow_for_matching_identity() {
         let node = make_node();
         let pow = node.local_pow.clone();
         let peer = peer_id_for_pow(&pow);
 
         assert_eq!(node.verify_remote_pow(&peer, &pow), Ok(()));
+    }
+
+    #[test]
+    fn credential_issuer_binding_rejects_key_substitution() {
+        let identity_seed = rand::random::<[u8; 32]>();
+        let identity_key = ed25519_dalek::SigningKey::from_bytes(&identity_seed);
+        let identity_pubkey = identity_key.verifying_key().to_bytes();
+        let issuer_pubkey = rand::random::<[u8; 32]>();
+        let signature = sign_credential_issuer_binding(&identity_key, &issuer_pubkey);
+
+        assert!(verify_credential_issuer_binding(
+            &identity_pubkey,
+            &issuer_pubkey,
+            &signature
+        ));
+
+        let substituted_issuer = rand::random::<[u8; 32]>();
+        assert!(!verify_credential_issuer_binding(
+            &identity_pubkey,
+            &substituted_issuer,
+            &signature
+        ));
     }
 }
