@@ -302,24 +302,18 @@
 - **工数**: 3-5日
 - **ブロッカー**: macOS 開発環境
 
-### P2-2: Onion Phase 2 — 実リレーノード経由ルーティング ✅ COMPLETE (2026-04-01)
+### P2-2: Onion Phase 2 - real-relay routing [PARTIAL / CORRECTED 2026-09-28]
 
-- **種別**: プロトコル/コア
-- **現状**: **完了** — Phase 2 ネットワーク実装完成
-- **実装内容**:
-  - **`NetworkOnionDhtExecutor`** (`executor.rs`): `OnionAwareDhtExecutor` の Phase 2 実装
-    - `DhtHandle::relay_onion_info()` からリレーディレクトリ取得
-    - `OnionPacketBuilder::build()` で 2-hop パケット構築
-    - `DhtHandle::send_onion_request()` で実 libp2p 経由送信 (R1→R2→Target)
-    - `decrypt_response()` で 2層応答復号
-    - `put()` / `get()` で DHT PUT/GET をオニオンラップ
-  - **coordinator の retrieve_via_onion() はすでに Phase 2 パス使用** (既存確認):
-    - `send_onion_request()` → 実 libp2p QUIC → R1 → Forward → R2 → Deliver → Target
-    - `OnionPacketBuilder::build_e2e()` で E2E 暗号化
-    - 3層応答復号 (r1_return_key, r2_return_key, session_key)
-  - **exports**: `NetworkOnionDhtExecutor` を lib.rs, network/mod.rs, network/dht.rs からエクスポート
-  - **テスト**: `onion_phase2_network_executor_type_exists` — 型検証 + trait bound 確認
-- **残作業**: 実ネットワーク上での 3ノードトポロジ検証 (P2-8 に統合)
+- Type: protocol / core / security
+- Current state: production share retrieval uses the real libp2p onion-relay path. The previously documented `NetworkOnionDhtExecutor`, however, was only a scaffold: it inserted the literal bytes `dht-target` where R2 requires a valid libp2p `PeerId`, so real forwarding could not succeed.
+- 2026-09-28 correction:
+  - Removed the non-functional `NetworkOnionDhtExecutor` and its public re-exports.
+  - Removed `onion_phase2_network_executor_type_exists`, which only proved that the scaffold type compiled.
+  - Kept `LiveOnionDhtExecutor` strictly as an in-process crypto/path simulation and documented that it provides no network anonymity.
+  - Production retrieval remains `DhtHandle::send_onion_request()` -> R1 -> R2 -> Target over the real network path.
+- Remaining work:
+  - Anonymous production DHT PUT/GET is not implemented. If required, design target selection, publisher authorization, signed-record semantics, and failure handling as a real protocol rather than reviving the scaffold.
+  - Multi-node adversarial topology validation on a real network is still required.
 
 ### P2-3: ブートストラップ信頼の本番化
 

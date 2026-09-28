@@ -114,10 +114,6 @@ impl OnionAwareDhtExecutor for DirectDhtExecutor {
 /// Re-exported from `onion::executor::LiveOnionDhtExecutor`.
 pub use crate::onion::executor::LiveOnionDhtExecutor;
 
-/// Phase 2 DHT executor — sends onion-wrapped queries through real relay peers.
-/// Re-exported from `onion::executor::NetworkOnionDhtExecutor`.
-pub use crate::onion::executor::NetworkOnionDhtExecutor;
-
 #[cfg(test)]
 mod tests {
     use super::*;

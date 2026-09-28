@@ -6186,21 +6186,6 @@ fn crash_recovery_directed_envelope_corrupt_json() {
     let _items = inbox.list_incoming();
 }
 
-/// Onion Phase 2: NetworkOnionDhtExecutor instantiation (no panic).
-#[test]
-fn onion_phase2_network_executor_type_exists() {
-    // Verify the Phase 2 executor type is exported and constructible with the
-    // correct API surface. We can't test with a real DhtHandle here (needs a
-    // running node), but we verify the type compiles and is accessible.
-    fn _assert_dht_executor_trait<T: miasma_core::network::OnionAwareDhtExecutor>() {}
-    // Both Phase 1 and Phase 2 implement OnionAwareDhtExecutor.
-    _assert_dht_executor_trait::<miasma_core::LiveOnionDhtExecutor>();
-    // Phase 2 type is visible.
-    let _: fn(
-        std::sync::Arc<miasma_core::network::node::DhtHandle>,
-    ) -> miasma_core::NetworkOnionDhtExecutor = miasma_core::NetworkOnionDhtExecutor::new;
-}
-
 /// ADR-010: DirectedRelayStats serde roundtrip and default values.
 #[test]
 fn directed_relay_stats_serde_and_defaults() {
