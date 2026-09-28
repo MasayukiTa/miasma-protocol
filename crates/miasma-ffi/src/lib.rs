@@ -65,11 +65,14 @@ fn shared_runtime() -> &'static tokio::runtime::Runtime {
 
 // ─── Embedded daemon state ───────────────────────────────────────────────────
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use tokio::sync::mpsc;
 
 /// State of the embedded daemon (started via `start_embedded_daemon`).
 struct EmbeddedDaemon {
+    /// Monotonic generation used to avoid an old exiting task clearing a newer daemon.
+    generation: u64,
     /// HTTP bridge port on 127.0.0.1.
     http_port: u16,
     /// Peer ID (libp2p).
@@ -82,6 +85,7 @@ struct EmbeddedDaemon {
 
 /// Global singleton for the embedded daemon.
 static EMBEDDED_DAEMON: Mutex<Option<EmbeddedDaemon>> = Mutex::new(None);
+static EMBEDDED_DAEMON_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 // ─── Exported types ──────────────────────────────────────────────────────────
 
@@ -566,6 +570,7 @@ pub fn start_embedded_daemon(
         }
     }
 
+    let generation = EMBEDDED_DAEMON_GENERATION.fetch_add(1, Ordering::Relaxed);
     let path = validate_data_dir(&data_dir)?;
 
     // Ensure node is initialised.
@@ -604,16 +609,15 @@ pub fn start_embedded_daemon(
         let shutdown_handle = server.shutdown_handle();
 
         // Derive sharing contact for this daemon.
-        let sharing_contact =
-            {
-                let secret = miasma_core::crypto::keyderive::derive_sharing_key(&master_key)
-                    .map_err(|e| MiasmaFfiError::Other {
-                        msg: format!("{e}"),
-                    })?;
-                let static_secret = x25519_dalek::StaticSecret::from(*secret);
-                let pubkey = x25519_dalek::PublicKey::from(&static_secret);
-                directed::format_sharing_contact(pubkey.as_bytes(), &peer_id)
-            };
+        let sharing_contact = {
+            let secret = miasma_core::crypto::keyderive::derive_sharing_key(master_key.as_ref())
+                .map_err(|e| MiasmaFfiError::Other {
+                    msg: format!("{e}"),
+                })?;
+            let static_secret = x25519_dalek::StaticSecret::from(*secret);
+            let pubkey = x25519_dalek::PublicKey::from(&static_secret);
+            directed::format_sharing_contact(pubkey.as_bytes(), &peer_id)
+        };
 
         // Add bootstrap peers from config.
         for addr_str in &config.network.bootstrap_peers {
@@ -636,28 +640,37 @@ pub fn start_embedded_daemon(
             let _ = server.bootstrap_dht().await;
         }
 
-        // Spawn the daemon event loop in the background.
-        let _daemon_handle = tokio::spawn(async move {
-            if let Err(e) = server.run().await {
-                tracing::warn!("embedded daemon exited: {e}");
-            }
-        });
-
-        Ok::<_, MiasmaFfiError>((http_port, peer_id, sharing_contact, shutdown_handle))
+        Ok::<_, MiasmaFfiError>((server, http_port, peer_id, sharing_contact, shutdown_handle))
     })?;
 
-    let (http_port, peer_id, sharing_contact, shutdown_tx) = result;
+    let (server, http_port, peer_id, sharing_contact, shutdown_tx) = result;
 
-    // Store the daemon state.
+    // Publish state before spawning the run task so an immediate task exit can
+    // never race ahead of registration. The generation protects a later restart
+    // from being cleared by an older task finishing late.
     {
         let mut guard = EMBEDDED_DAEMON.lock().unwrap();
         *guard = Some(EmbeddedDaemon {
+            generation,
             http_port,
             peer_id: peer_id.clone(),
             sharing_contact: sharing_contact.clone(),
             shutdown_tx,
         });
     }
+
+    rt.spawn(async move {
+        if let Err(e) = server.run().await {
+            tracing::warn!("embedded daemon exited: {e}");
+        }
+        let mut guard = EMBEDDED_DAEMON.lock().unwrap();
+        if guard
+            .as_ref()
+            .is_some_and(|daemon| daemon.generation == generation)
+        {
+            guard.take();
+        }
+    });
 
     tracing::info!(
         http_port,
