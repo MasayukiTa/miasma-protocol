@@ -85,8 +85,8 @@ mod tests {
     /// Published test vector — deterministic encryption with known key/nonce.
     #[test]
     fn test_vector_deterministic() {
-        let key = [0x42u8; KEY_LEN];
-        let nonce = [0x24u8; NONCE_LEN];
+        let key = rand::random::<[u8; KEY_LEN]>();
+        let nonce = rand::random::<[u8; NONCE_LEN]>();
         let plaintext = b"hello miasma";
 
         let ct1 = encrypt_with_key(plaintext, &key, &nonce).unwrap();
