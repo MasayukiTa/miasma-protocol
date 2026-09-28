@@ -23,9 +23,10 @@ Recipient-targeted sharing requires:
    cryptographically unrecoverable, even though encrypted shards may persist
    on the network.
 
-The existing anonymous trust layer (ADR-005) provides the transport
-infrastructure (onion routing, relay circuits, descriptor-based peer
-discovery) but has no concept of sender-to-recipient encrypted delivery.
+The credential/descriptor and onion-routing layer (ADR-005) provides transport
+infrastructure (onion routing, relay circuits, descriptor-based peer discovery)
+but the current descriptor carrier is PeerId-bound and has no concept of
+sender-to-recipient encrypted delivery.
 
 ## Decision
 
@@ -327,8 +328,9 @@ Deletion in a distributed system is honest but not absolute:
 - **Desktop**: directed sharing UI with contact entry, password input,
   challenge display (recipient) / challenge entry (sender), and status
   tracking through the envelope lifecycle.
-- **Mobile (future)**: same protocol over libp2p; credential-backed
-  admission (ADR-005) reduces re-admission cost on reconnect.
+- **Mobile (future)**: same protocol over libp2p. Reconnect admission uses the
+  same hard Identify/diversity/PoW gates as other peers; post-admission
+  credentials do not reduce first-contact or re-admission cost.
 
 ## Relationship to other ADRs
 
@@ -336,8 +338,8 @@ Deletion in a distributed system is honest but not absolute:
   same Reed-Solomon erasure coding and MID-addressed shard storage. The
   directed layer adds an outer encryption envelope on top of the standard
   share mechanism.
-- **ADR-005 (Anonymous Trust)**: share content retrieval uses the relay/onion
-  infrastructure from ADR-005. The directed sharing control plane uses raw
+- **ADR-005 (Credential/Descriptor Routing)**: share content retrieval uses the
+  relay/onion infrastructure from ADR-005. The directed sharing control plane uses raw
   libp2p request-response; relay circuit fallback for the control plane is
   implemented per ADR-010 Part 2.
 - **ADR-010 (Directed Sharing Transport Architecture)**: defines the product

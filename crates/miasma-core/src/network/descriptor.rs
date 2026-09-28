@@ -24,7 +24,7 @@
 /// # Relationship to existing address model
 ///
 /// Descriptors wrap the existing `Multiaddr` infrastructure but add:
-/// - Credential binding (prove tier without revealing PeerId)
+/// - Credential binding (challenge-verified tier metadata; current carrier remains PeerId-bound)
 /// - Relay indirection (reach a peer without knowing their real address)
 /// - Capability advertisement (what the peer can do for you)
 /// - Staleness tracking (when was this descriptor last confirmed valid)
@@ -300,8 +300,10 @@ pub struct PeerDescriptor {
     /// per-hop encrypted onion packets.
     #[serde(default)]
     pub onion_pubkey: Option<[u8; 32]>,
-    /// Ed25519 signature over the descriptor body (by the descriptor owner).
-    /// For pseudonymous descriptors, this is signed by the ephemeral key.
+    /// Ed25519 signature over the descriptor body using the constructor-supplied key.
+    /// Production descriptors use the verified long-term libp2p identity key; the
+    /// receiver requires that key to match the connected PeerId. Current descriptors
+    /// therefore do not provide identity hiding or network-level unlinkability.
     pub signature: Vec<u8>,
 }
 

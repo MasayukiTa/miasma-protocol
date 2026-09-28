@@ -1,4 +1,4 @@
-/// Miasma libp2p node — Phase 4b live-wired anonymous trust and descriptor routing.
+/// Miasma libp2p node ? credential exchange, descriptor routing, and onion transport.
 ///
 /// Transport: TCP + QUIC for local loopback testing and production paths
 /// DHT: Kademlia via `DhtHandle` / `OnionAwareDhtExecutor` (ADR-002)
@@ -1683,7 +1683,7 @@ pub struct MiasmaNode {
     /// Tick counter for periodic network-size observation (difficulty adjustment).
     event_tick: u64,
 
-    // ── Phase 4b: anonymous trust, descriptors, hybrid admission ────────
+    // ?? Credential exchange and descriptor routing ?????????????????????
     /// This node's Ed25519 credential issuer (signs credentials for admitted peers).
     credential_issuer: CredentialIssuer,
     /// This node's credential wallet (holds credentials from other issuers).

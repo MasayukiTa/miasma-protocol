@@ -1,4 +1,4 @@
-# ADR-005: Anonymous Trust Layer, Descriptor Routing, and Onion-Native Architecture
+# ADR-005: Credential Trust, Descriptor Routing, and Onion-Native Architecture
 
 ## Status: Accepted (Phase 4e+++ — unified relay trust, forwarding verification, pre-retrieval probing, security hotfix sprint, v0.2.0-beta.1 hardening)
 
@@ -7,8 +7,11 @@
 > were deleted in `ac996f9` after confirmed forgeries. Current credential wire is
 > 1.2, descriptor wire is 1.2, first-contact admission has no credential-tier
 > input at all, and path selection does not use credential tier as relay authority.
-> Current descriptors remain associated with a verified libp2p identity; epoch
-> holder tags therefore do not provide network-level unlinkability. See ADR-006.
+> Current descriptors remain associated with a verified libp2p identity: production
+> signs them with the long-term DHT/libp2p identity key, receivers require that key
+> to match the connected PeerId, and `DescriptorStore` records PeerId?holder-tag
+> mappings. Epoch holder tags therefore do not provide network-level unlinkability.
+> Identity hiding remains a future carrier/protocol design, not a property of v1.2.
 
 ## Context
 
@@ -37,7 +40,7 @@ necessary but insufficient for a truly Freenet-like system because:
 
 ## Decision
 
-### 1. Anonymous credential layer
+### 1. Epoch-scoped credential layer
 
 Implement a pseudonymous credential system using epoch-scoped ephemeral
 Ed25519 keypairs:
