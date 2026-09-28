@@ -30,6 +30,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use zeroize::Zeroizing;
+
 use miasma_core::{
     config::{NetworkConfig, NodeConfig, StorageConfig},
     daemon::DaemonServer,
@@ -429,6 +431,30 @@ fn summary_to_ffi(s: directed::EnvelopeSummary) -> EnvelopeSummaryFfi {
     }
 }
 
+fn read_master_key_zeroizing(
+    master_key_path: &std::path::Path,
+) -> Result<Zeroizing<[u8; 32]>, MiasmaFfiError> {
+    let bytes = Zeroizing::new(std::fs::read(master_key_path).map_err(|e| {
+        tracing::warn!("read master.key: {e}");
+        MiasmaFfiError::Other {
+            msg: "failed to read master key".into(),
+        }
+    })?);
+    if bytes.len() != 32 {
+        return Err(MiasmaFfiError::Other {
+            msg: "invalid master key length".into(),
+        });
+    }
+    let mut key = Zeroizing::new([0u8; 32]);
+    key.copy_from_slice(&bytes);
+    if key.iter().all(|byte| *byte == 0) {
+        return Err(MiasmaFfiError::Other {
+            msg: "master key is erased/all-zero".into(),
+        });
+    }
+    Ok(key)
+}
+
 /// Get this node's sharing key (formatted as `msk:<base58>`).
 ///
 /// The sharing key is derived deterministically from the master key,
@@ -442,23 +468,13 @@ pub fn get_sharing_key(data_dir: String) -> Result<String, MiasmaFfiError> {
             data_dir: data_dir.to_owned(),
         });
     }
-    let master_key = std::fs::read(&master_key_path).map_err(|e| {
-        tracing::warn!("read master.key: {e}");
-        MiasmaFfiError::Other {
-            msg: "failed to read master key".into(),
-        }
-    })?;
-    if master_key.len() < 32 {
-        return Err(MiasmaFfiError::Other {
-            msg: "invalid master key".into(),
-        });
-    }
-    let key_array: [u8; 32] = master_key[..32].try_into().unwrap();
-    let secret = miasma_core::crypto::keyderive::derive_sharing_key(&key_array).map_err(|e| {
-        MiasmaFfiError::Other {
-            msg: format!("{e}"),
-        }
-    })?;
+    let master_key = read_master_key_zeroizing(&master_key_path)?;
+    let secret =
+        miasma_core::crypto::keyderive::derive_sharing_key(master_key.as_ref()).map_err(|e| {
+            MiasmaFfiError::Other {
+                msg: format!("{e}"),
+            }
+        })?;
     let static_secret = x25519_dalek::StaticSecret::from(*secret);
     let pubkey = x25519_dalek::PublicKey::from(&static_secret);
     Ok(directed::format_sharing_key(pubkey.as_bytes()))
@@ -559,18 +575,7 @@ pub fn start_embedded_daemon(
 
     // Read master key for node identity.
     let master_key_path = path.join("master.key");
-    let master_bytes = std::fs::read(&master_key_path).map_err(|e| {
-        tracing::warn!("read master.key: {e}");
-        MiasmaFfiError::Other {
-            msg: "failed to read master key".into(),
-        }
-    })?;
-    let master_key: [u8; 32] =
-        master_bytes[..32]
-            .try_into()
-            .map_err(|_| MiasmaFfiError::Other {
-                msg: "invalid master key length".into(),
-            })?;
+    let master_key = read_master_key_zeroizing(&master_key_path)?;
 
     // Create MiasmaNode with full networking.
     let node =

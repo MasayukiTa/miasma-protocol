@@ -534,7 +534,7 @@ impl MiasmaCoordinator {
         let node_task = self.node_task.lock().await.take();
         if let Some(node_task) = node_task {
             if let Err(e) = node_task.await {
-                warn!("MiasmaNode task join failed during shutdown: {e}");
+                tracing::warn!("MiasmaNode task join failed during shutdown: {e}");
             }
         }
     }
