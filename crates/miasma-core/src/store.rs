@@ -137,6 +137,11 @@ fn load_or_create_master_key(data_dir: &Path) -> Result<Zeroizing<[u8; 32]>, Mia
         let arr: [u8; 32] = bytes
             .try_into()
             .map_err(|_| MiasmaError::KeyDerivation("master.key has wrong length".into()))?;
+        if arr.iter().all(|byte| *byte == 0) {
+            return Err(MiasmaError::KeyDerivation(
+                "master.key is erased/all-zero; refusing known key material".into(),
+            ));
+        }
         Ok(Zeroizing::new(arr))
     } else {
         let key = XChaCha20Poly1305::generate_key(&mut OsRng);
@@ -292,7 +297,10 @@ fn rebuild_index(data_dir: &Path, shares_dir: &Path) {
 pub struct LocalShareStore {
     data_dir: PathBuf,
     shares_dir: PathBuf,
-    master_key: Zeroizing<[u8; 32]>,
+    /// In-memory master key. `None` means distress wipe has completed for this
+    /// process. Key-dependent operations hold this lock until completion so a
+    /// completed wipe cannot race with an in-flight decrypt/write.
+    master_key: std::sync::Mutex<Option<Zeroizing<[u8; 32]>>>,
     /// Quota in bytes for `Owned` shares (produced by this node's own
     /// dissolutions).
     quota_bytes: u64,
@@ -345,7 +353,7 @@ impl LocalShareStore {
         Ok(Self {
             data_dir: data_dir.to_path_buf(),
             shares_dir,
-            master_key,
+            master_key: std::sync::Mutex::new(Some(master_key)),
             quota_bytes: quota_mb * 1024 * 1024,
             hosted_quota_bytes: 0,
             write_lock: std::sync::Mutex::new(()),
@@ -365,6 +373,21 @@ impl LocalShareStore {
         self
     }
 
+    fn lock_master_key(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, Option<Zeroizing<[u8; 32]>>>, MiasmaError> {
+        self.master_key
+            .lock()
+            .map_err(|_| MiasmaError::Storage("master key lock poisoned".into()))
+    }
+
+    fn live_master_key(guard: &Option<Zeroizing<[u8; 32]>>) -> Result<&[u8; 32], MiasmaError> {
+        guard
+            .as_ref()
+            .map(|key| key.as_ref())
+            .ok_or_else(|| MiasmaError::Storage("store has been distress-wiped".into()))
+    }
+
     /// Content-address of a share: `BLAKE3(bincode(share))` as lowercase hex.
     pub fn address_of(share: &MiasmaShare) -> Result<String, MiasmaError> {
         let bytes = share.to_bytes()?;
@@ -378,7 +401,12 @@ impl LocalShareStore {
     /// If quota is exceeded, evicts LRU entries (owned entries only) until
     /// space is available.
     pub fn put(&self, share: &MiasmaShare) -> Result<String, MiasmaError> {
-        let _guard = self.write_lock.lock().unwrap();
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| MiasmaError::Storage("store write lock poisoned".into()))?;
+        let master_guard = self.lock_master_key()?;
+        let master_key = Self::live_master_key(&master_guard)?;
         let address = Self::address_of(share)?;
         let file_path = self.share_path(&address);
 
@@ -390,7 +418,7 @@ impl LocalShareStore {
         self.evict_if_needed_locked(size, &address)?;
 
         // Derive per-file key and encrypt.
-        let file_key = derive_file_key(&self.master_key, &address)?;
+        let file_key = derive_file_key(master_key, &address)?;
         let blob = encrypt_share(&file_key, &plaintext)?;
 
         atomic_write(&file_path, &blob)?;
@@ -428,7 +456,12 @@ impl LocalShareStore {
     /// replaced rather than left to coexist ambiguously with the new one --
     /// see `HostedTuple`'s doc comment.
     pub fn put_hosted(&self, share: &MiasmaShare) -> Result<String, MiasmaError> {
-        let _guard = self.write_lock.lock().unwrap();
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| MiasmaError::Storage("store write lock poisoned".into()))?;
+        let master_guard = self.lock_master_key()?;
+        let master_key = Self::live_master_key(&master_guard)?;
         let address = Self::address_of(share)?;
         let file_path = self.share_path(&address);
 
@@ -473,7 +506,7 @@ impl LocalShareStore {
             index.remove(old_addr);
         }
 
-        let file_key = derive_file_key(&self.master_key, &address)?;
+        let file_key = derive_file_key(master_key, &address)?;
         let blob = encrypt_share(&file_key, &plaintext)?;
         atomic_write(&file_path, &blob)?;
 
@@ -502,10 +535,12 @@ impl LocalShareStore {
 
     /// Retrieve a share by its content address.
     pub fn get(&self, address: &str) -> Result<MiasmaShare, MiasmaError> {
+        let master_guard = self.lock_master_key()?;
+        let master_key = Self::live_master_key(&master_guard)?;
         let file_path = self.share_path(address);
         let blob = std::fs::read(&file_path)?;
 
-        let file_key = derive_file_key(&self.master_key, address)?;
+        let file_key = derive_file_key(master_key, address)?;
         let plaintext = decrypt_share(&file_key, &blob)?;
         let share = MiasmaShare::from_bytes(&plaintext)?;
 
@@ -546,12 +581,28 @@ impl LocalShareStore {
     ///
     /// Returns `Ok(())` on success.
     pub fn distress_wipe(&self) -> Result<(), MiasmaError> {
+        // Serialize against writers. Readers serialize on the master-key lock;
+        // waiting for it here guarantees no pre-wipe decrypt remains in flight
+        // when this method returns.
+        let _write_guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| MiasmaError::Storage("store write lock poisoned".into()))?;
+        let mut master_guard = self.lock_master_key()?;
+
+        // Dropping `Zeroizing` immediately erases the in-process key. Even if
+        // disk cleanup fails, this store instance remains fail-closed.
+        *master_guard = None;
+
         let key_path = self.data_dir.join(MASTER_KEY_FILE);
-        // Zero-fill before deletion for defense against data recovery tools.
+        let mut disk_error: Option<MiasmaError> = None;
         if key_path.exists() {
             let zeros = vec![0u8; 32];
-            let _ = atomic_write(&key_path, &zeros);
-            std::fs::remove_file(&key_path)?;
+            if let Err(e) = atomic_write(&key_path, &zeros) {
+                disk_error = Some(e);
+            } else if let Err(e) = std::fs::remove_file(&key_path) {
+                disk_error = Some(e.into());
+            }
         }
 
         // Scrub proxy credentials from config.toml so they don't survive a wipe.
@@ -566,6 +617,9 @@ impl LocalShareStore {
             }
         }
 
+        if let Some(e) = disk_error {
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -723,8 +777,20 @@ mod tests {
     fn distress_wipe_removes_master_key() {
         let dir = tempfile::tempdir().unwrap();
         let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        let share = dummy_share(22);
+        let addr = store.put(&share).unwrap();
+        assert!(store.get(&addr).is_ok());
+
         store.distress_wipe().unwrap();
         assert!(!dir.path().join(MASTER_KEY_FILE).exists());
+        assert!(
+            store.get(&addr).is_err(),
+            "same process must not decrypt after wipe"
+        );
+        assert!(
+            store.put(&dummy_share(23)).is_err(),
+            "same process must not write after wipe"
+        );
     }
 
     #[test]
