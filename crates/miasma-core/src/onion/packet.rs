@@ -15,6 +15,7 @@ use hkdf::Hkdf;
 use rand::RngCore as _;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use std::fmt;
 use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
@@ -61,7 +62,7 @@ impl CircuitId {
 ///
 /// The recipient uses their static X25519 private key + `ephemeral_pubkey`
 /// to derive the symmetric key, then decrypts `ciphertext` with the `nonce`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OnionLayer {
     /// Initiator's ephemeral X25519 public key for this hop.
     pub ephemeral_pubkey: [u8; X25519_KEY_LEN],
@@ -71,8 +72,18 @@ pub struct OnionLayer {
     pub ciphertext: Vec<u8>,
 }
 
+impl fmt::Debug for OnionLayer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OnionLayer")
+            .field("ephemeral_pubkey", &"<redacted>")
+            .field("nonce", &"<redacted>")
+            .field("ciphertext_len", &self.ciphertext.len())
+            .finish()
+    }
+}
+
 /// Plaintext content inside a decrypted onion layer.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct LayerPayload {
     /// `Some(peer_id_bytes)` → forward the inner data to this peer.
     /// `None` → we are the final destination, `data` is the actual message.
@@ -88,8 +99,18 @@ pub struct LayerPayload {
     pub return_key: Option<[u8; 32]>,
 }
 
+impl fmt::Debug for LayerPayload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LayerPayload")
+            .field("next_hop_len", &self.next_hop.as_ref().map(Vec::len))
+            .field("data_len", &self.data.len())
+            .field("return_key_configured", &self.return_key.is_some())
+            .finish()
+    }
+}
+
 /// A 2-hop onion-wrapped packet ready to send to Relay1.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OnionPacket {
     /// Ephemeral circuit identifier (used for response routing).
     pub circuit_id: CircuitId,
@@ -97,11 +118,20 @@ pub struct OnionPacket {
     pub layer: OnionLayer,
 }
 
+impl fmt::Debug for OnionPacket {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OnionPacket")
+            .field("circuit_id", &self.circuit_id)
+            .field("layer", &self.layer)
+            .finish()
+    }
+}
+
 /// A return-path token embedded in the innermost layer payload.
 ///
 /// Allows Target to send a response back through R2→R1→Initiator without
 /// knowing the initiator's address. Each circuit gets a unique token.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ReturnPath {
     /// Circuit ID that the response must carry.
     pub circuit_id: CircuitId,
@@ -113,13 +143,33 @@ pub struct ReturnPath {
     pub r1_init_key: [u8; 32],
 }
 
+impl fmt::Debug for ReturnPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReturnPath")
+            .field("circuit_id", &self.circuit_id)
+            .field("r2_addr_len", &self.r2_addr.len())
+            .field("r2_r1_key", &"<redacted>")
+            .field("r1_init_key", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Final destination payload (inner content of the innermost layer).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct InnerPayload {
     /// Return path for the response.
     pub return_path: ReturnPath,
     /// Actual query or message data.
     pub body: Vec<u8>,
+}
+
+impl fmt::Debug for InnerPayload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InnerPayload")
+            .field("return_path", &self.return_path)
+            .field("body_len", &self.body.len())
+            .finish()
+    }
 }
 
 // ─── OnionPacketBuilder ───────────────────────────────────────────────────────
@@ -454,6 +504,58 @@ pub fn derive_onion_static_key(master_key: &[u8]) -> Result<Zeroizing<[u8; 32]>,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn onion_debug_redacts_plaintext_and_return_keys() {
+        let payload = LayerPayload {
+            next_hop: Some(vec![1, 2, 3]),
+            data: b"plaintext-sensitive".to_vec(),
+            return_key: Some([0xAB; 32]),
+        };
+        let rendered = format!("{payload:?}");
+        assert!(!rendered.contains("plaintext-sensitive"));
+        assert!(!rendered.contains("171, 171"));
+        assert!(rendered.contains("data_len: 19"));
+        assert!(rendered.contains("return_key_configured: true"));
+
+        let path = ReturnPath {
+            circuit_id: CircuitId([7; CIRCUIT_ID_LEN]),
+            r2_addr: vec![4, 5, 6],
+            r2_r1_key: [0xCD; 32],
+            r1_init_key: [0xEF; 32],
+        };
+        let rendered = format!("{path:?}");
+        assert!(!rendered.contains("205, 205"));
+        assert!(!rendered.contains("239, 239"));
+        assert!(rendered.contains("<redacted>"));
+    }
+
+    #[test]
+    fn onion_layer_and_inner_payload_debug_emit_lengths_only() {
+        let layer = OnionLayer {
+            ephemeral_pubkey: [0x11; X25519_KEY_LEN],
+            nonce: [0x22; 24],
+            ciphertext: vec![9, 8, 7, 6],
+        };
+        let rendered = format!("{layer:?}");
+        assert!(!rendered.contains("[9, 8, 7, 6]"));
+        assert!(!rendered.contains("17, 17"));
+        assert!(!rendered.contains("34, 34"));
+        assert!(rendered.contains("ciphertext_len: 4"));
+
+        let inner = InnerPayload {
+            return_path: ReturnPath {
+                circuit_id: CircuitId([1; CIRCUIT_ID_LEN]),
+                r2_addr: vec![2, 3],
+                r2_r1_key: [4; 32],
+                r1_init_key: [5; 32],
+            },
+            body: b"private-query-body".to_vec(),
+        };
+        let rendered = format!("{inner:?}");
+        assert!(!rendered.contains("private-query-body"));
+        assert!(rendered.contains("body_len: 18"));
+    }
     use x25519_dalek::StaticSecret;
 
     fn make_relay_keypair() -> ([u8; 32], [u8; 32]) {
