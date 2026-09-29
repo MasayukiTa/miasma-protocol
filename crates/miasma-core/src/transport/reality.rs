@@ -50,6 +50,7 @@ use subtle::ConstantTimeEq;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
+use zeroize::Zeroizing;
 
 use crate::MiasmaError;
 
@@ -515,7 +516,7 @@ struct RelaySession {
 /// Uses QUIC Initial packet decryption to classify connections before the TLS
 /// handshake completes.
 pub struct RealityDispatcher {
-    probe_secret: [u8; 32],
+    probe_secret: Zeroizing<[u8; 32]>,
     /// Port of the internal `ObfuscatedQuicServer` (bound to 127.0.0.1).
     internal_port: u16,
     /// Resolved socket address of the fallback real server.
@@ -529,7 +530,7 @@ impl RealityDispatcher {
     /// server (e.g., `104.16.0.0:443` for cloudflare.com).
     pub fn new(probe_secret: [u8; 32], internal_port: u16, fallback_addr: SocketAddr) -> Self {
         Self {
-            probe_secret,
+            probe_secret: Zeroizing::new(probe_secret),
             internal_port,
             fallback_addr,
         }
@@ -540,14 +541,20 @@ impl RealityDispatcher {
     /// This method loops indefinitely, routing each UDP datagram to the
     /// appropriate upstream. Call via `tokio::spawn(dispatcher.run(bind_addr))`.
     pub async fn run(self, bind_addr: SocketAddr) -> Result<(), MiasmaError> {
+        let Self {
+            probe_secret,
+            internal_port,
+            fallback_addr,
+        } = self;
+        let probe_secret = Arc::new(probe_secret);
         let external =
             Arc::new(UdpSocket::bind(bind_addr).await.map_err(|e| {
                 MiasmaError::Sss(format!("RealityDispatcher bind {bind_addr}: {e}"))
             })?);
         info!(
             addr = %bind_addr,
-            internal_port = self.internal_port,
-            fallback = %self.fallback_addr,
+            internal_port,
+            fallback = %fallback_addr,
             "RealityDispatcher listening"
         );
 
@@ -579,16 +586,14 @@ impl RealityDispatcher {
             }
 
             // New connection — classify
-            let probe_secret = self.probe_secret;
-            let internal_port = self.internal_port;
-            let fallback_addr = self.fallback_addr;
+            let probe_secret = probe_secret.clone();
             let external2 = external.clone();
             let sessions2 = sessions.clone();
 
             tokio::spawn(async move {
                 let authenticated = match try_extract_sni(&data) {
                     Some(sni) => {
-                        let ok = check_reality_auth(&sni, &probe_secret);
+                        let ok = check_reality_auth(&sni, &**probe_secret);
                         debug!(
                             src = %src,
                             sni = %sni,
