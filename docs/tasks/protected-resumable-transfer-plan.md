@@ -478,6 +478,72 @@ Each entry says what was actually run. Machine: Windows 11, slim debug profile (
   A reader that decodes a pipe as cp932 (Windows PowerShell 5.1 with the default code page) will
   garble Japanese output; that is the reader's decoding, not the bytes.
 
+### Stage B + D — Transfers tab, `miasma-desktop` (2026-09-30)
+
+- **Built.** `WorkerCmd::{TransferStartReceive, TransferStartPublish, TransferResumePublish, TransferPoll,
+  TransferCancel}` over the existing IPC (the same requests the CLI issues; passwords and paths are
+  redacted in `Debug`, passwords are `Zeroizing` in the worker and zeroized in the form after submit;
+  `TransferResumePublish` reads `k/n` from the send journal so a resume passes the parameters the
+  transfer began with). `src/transfers.rs` is the screen: list (running first; arrow, name, bar,
+  percent, bytes, rate, ETA, state chip), detail pane (segment strip with a marker at the resume
+  position, MID with copy, phase, timing split, pieces, retries, last error), buttons *Stop (keep
+  progress)* / *Resume* (asks for the password again, then re-issues the start request) / *Start over*
+  (two-step, `restart: true`), and a Receive form and a Send form (one primary button each). Send has
+  the k/n table with the measured storage factor and tolerated losses and the CLI default (10/20)
+  preselected; Easy shows Fastest / Balanced / Safest = 10/10, 10/12, 10/20. The honest hint under
+  the Send form says the receiver must reach the sender and the sender must stay online. Polling is
+  once a second only while the tab is visible or a job runs (one poll to learn the state after
+  connecting); a poll that finds the daemon down says so on the screen and asks the worker to
+  reconnect. Strings: `TransferStrings` in `locale.rs`, En/Ja/ZhCn, tested field by field.
+- **Ran.** `cargo test -p miasma-desktop`: **76 passed** (was 45): byte/rate/ETA formatting incl. zero,
+  NaN, `u64::MAX`; percent with unknown total; strip bucketing (1600 segments -> 400 cells of 4, partial
+  bucket in flight, resume marker only when consistent, `u32::MAX`); chip mapping; sort order; preset
+  table equals the section 6 phase 5 table; Easy mapping; resume re-issues the same request; poll
+  gating; every locale string non-empty and placeholders kept; Debug redaction of the new commands.
+  A test caught a real `u32` overflow in the strip for a huge `segments_total`. `cargo test -p
+  miasma-core --lib transfer::` still passes (74). `cargo fmt --all -- --check` is clean for the crate
+  (CI's lint job had failed on formatting only). clippy: only the two known `worker.rs` dead-code warnings.
+- **Saw (ui-tour, mock data, both modes x dark/light x En/Ja, 56 frames of the Transfers tab):** Meiryo
+  everywhere, no tofu, no clipped text or buttons, chips and the strip legible, calm layout in the
+  m365 palette; the 100 GiB job at 37 % with a 1600-segment strip and a resume marker, paused with the
+  password prompt, failed with the error text, stopped, complete, empty list. Fixed after looking: form
+  labels were centred against tall rows (now top-aligned fixed column), a selected row's bar track
+  vanished in dark mode, the *stopped* chip was too dim, the list showed only 4 rows, redundancy rows
+  were too tall.
+- **Ran for real, through the desktop window** (real `miasma-desktop.exe` on the private desktop,
+  real mouse and key messages via bgdesk, `--data-dir` throwaway, node A = CLI daemon, node B = the
+  desktop's own auto-launched daemon; 40 MB, `k=2 n=3`, three segments, password-protected; the
+  window's own frames were saved with the new `MIASMA_UI_SNAP` mode of the `ui-tour` feature):
+  typed MID, path and password into the Receive form and pressed *Start receiving*; the list showed
+  `gui_recv.bin` running at 39.9 % / 15.9 MiB of 40.0 MiB, 837 KiB/s, ETA, one green cell and one blue
+  cell in the strip; **killed B's daemon after segment 1**; the window said the background service is
+  not running and dimmed the last state, the worker relaunched the daemon, and the row became *Paused*
+  at 39.9 % with the resume marker; *Resume*, the password, *Resume* again: it ran on, finished, and
+  **the SHA256 of the output equals the input** (`246F3340...986608`), the `.part` file gone. Done twice
+  (the second time with the final build; times 08:00-08:06 JST, about 42 s of transfer after the resume).
+  Also from the Send form: 20 MiB with a password and 10/12 went hashing -> segment -> *Complete*, MID
+  shown and copyable. The received file of the send was **not** verified (see below).
+- **Found through the GUI and fixed** (each would have passed every unit test):
+  1. `worker.rs`: `get_status` returns the *rewritten* "Not connected..." text and the `GetStatus`
+     handler tested it with `is_daemon_down`, which only knew the raw wording. A dead daemon was never
+     noticed: no relaunch, the header stayed "Connected". Fixed at the source (one constant, matched
+     by `is_daemon_down`, with a round-trip test).
+  2. `miasma-core/src/transfer/jobs.rs`: `start_receive` never set the status `name` (documented as
+     the output path), so a live receive showed an empty path in `miasma transfers` and a blank row in
+     the window until a journal existed. One line; confirmed in the running window.
+  3. Layout and wording found by looking: see the ui-tour paragraph.
+- **Not verified.** macOS (no Mac). A real ~100 GB transfer (the 100 GiB job in the tour is mock data).
+  The Browse buttons (native file dialogs cannot be driven on the private desktop; paths were typed).
+  That a receiver can fetch what the *GUI's Send form* published (node A never reached node B in the
+  minute I tried). **Loopback connectivity is flaky in this build and it matters to whoever tests:**
+  between the 30 s bootstrap redials two loopback nodes were connected only for about ten seconds
+  (`Connected peers` 1 then 0), and a receive started while disconnected failed after 6 lookup attempts
+  with `no record found` (seen in the window as a *Failed* row with that text). The runs above started
+  the transfer while the peer was up (a script waited for `Connected peers >= 1` and then clicked).
+  Once a transfer is fetching pieces the link held; after a daemon restart the same window applies.
+  Not investigated (network layer, not this task). Also seen: `elapsed_secs` keeps growing for a failed
+  job (the daemon reports time since the job began, not since it stopped).
+
 ## 7. Decisions and open questions
 
 - D1 Manifest lives in the record trailer, not a second DHT key. (Reason in §2.2.)
