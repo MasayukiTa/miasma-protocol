@@ -45,17 +45,23 @@ PASS=0
 FAIL=0
 
 cleanup() {
+    result=$?
     echo ""
     echo "=== Cleanup ==="
-    kill "$DAEMON_A_PID" "$DAEMON_B_PID" 2>/dev/null || true
-    wait "$DAEMON_A_PID" "$DAEMON_B_PID" 2>/dev/null || true
-    rm -rf "$DIR_A" "$DIR_B" /tmp/miasma-loopback-payload-*.txt /tmp/miasma-loopback-retrieved-*.txt
+    for pid in "$DAEMON_A_PID" "$DAEMON_B_PID"; do
+        if [ "$pid" -gt 0 ]; then
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+        fi
+    done
+    rm -rf "$DIR_A" "$DIR_B"
     echo "Temp dirs and daemons cleaned up."
     echo ""
     echo "=== Results: $PASS passed, $FAIL failed ==="
     if [ "$FAIL" -gt 0 ]; then
         exit 1
     fi
+    exit "$result"
 }
 trap cleanup EXIT
 
@@ -68,8 +74,8 @@ DAEMON_B_PID=0
 # ── Step 1: Initialize two nodes ─────────────────────────────────────────────
 echo ""
 echo "=== Step 1: Initialize nodes ==="
-"$CLI" --data-dir "$DIR_A" init >/dev/null 2>&1 && pass "Node A initialized" || fail "Node A init"
-"$CLI" --data-dir "$DIR_B" init >/dev/null 2>&1 && pass "Node B initialized" || fail "Node B init"
+"$CLI" --data-dir "$DIR_A" init --listen-addr /ip4/127.0.0.1/udp/0/quic-v1 >/dev/null 2>&1 && pass "Node A initialized" || fail "Node A init"
+"$CLI" --data-dir "$DIR_B" init --listen-addr /ip4/127.0.0.1/udp/0/quic-v1 >/dev/null 2>&1 && pass "Node B initialized" || fail "Node B init"
 
 # ── Step 2: Start daemon A ───────────────────────────────────────────────────
 echo ""
@@ -90,13 +96,13 @@ echo ""
 echo "=== Step 3: Get bootstrap address ==="
 STATUS_A=$("$CLI" --data-dir "$DIR_A" status 2>&1)
 
-PEER_ID_A=$(echo "$STATUS_A" | grep -oP '12D3Koo\w+' | head -1)
+PEER_ID_A=$(echo "$STATUS_A" | sed -nE 's/.*(12D3Koo[[:alnum:]]+).*/\1/p' | head -1)
 # Get the loopback listen address
-LISTEN_ADDR=$(echo "$STATUS_A" | grep -oP '/ip4/127\.0\.0\.1/udp/\d+/quic-v1' | head -1)
+LISTEN_ADDR=$(echo "$STATUS_A" | sed -nE 's@.*(/ip4/127\.0\.0\.1/udp/[0-9]+/quic-v1).*@\1@p' | head -1)
 
 if [ -z "$LISTEN_ADDR" ]; then
     # Fallback: extract port from 0.0.0.0 address and construct loopback
-    PORT=$(echo "$STATUS_A" | grep -oP '/ip4/0\.0\.0\.0/udp/\K\d+' | head -1)
+    PORT=$(echo "$STATUS_A" | sed -nE 's@.*/ip4/0\.0\.0\.0/udp/([0-9]+).*@\1@p' | head -1)
     if [ -n "$PORT" ]; then
         LISTEN_ADDR="/ip4/127.0.0.1/udp/$PORT/quic-v1"
     fi
@@ -128,8 +134,8 @@ fi
 # ── Step 5: Verify peer connectivity ─────────────────────────────────────────
 echo ""
 echo "=== Step 5: Verify connectivity ==="
-PEERS_A=$("$CLI" --data-dir "$DIR_A" status 2>&1 | grep -oP 'Connected peers:\s+\K\d+')
-PEERS_B=$("$CLI" --data-dir "$DIR_B" status 2>&1 | grep -oP 'Connected peers:\s+\K\d+')
+PEERS_A=$("$CLI" --data-dir "$DIR_A" status 2>&1 | sed -nE 's/.*Connected peers:[[:space:]]*([0-9]+).*/\1/p')
+PEERS_B=$("$CLI" --data-dir "$DIR_B" status 2>&1 | sed -nE 's/.*Connected peers:[[:space:]]*([0-9]+).*/\1/p')
 
 echo "  Node A peers: ${PEERS_A:-0}"
 echo "  Node B peers: ${PEERS_B:-0}"
@@ -148,12 +154,12 @@ fi
 # ── Step 6: Publish content on Node A ────────────────────────────────────────
 echo ""
 echo "=== Step 6: Publish on Node A ==="
-PAYLOAD_FILE="/tmp/miasma-loopback-payload-$$.txt"
+PAYLOAD_FILE="$DIR_A/payload.txt"
 TEST_CONTENT="Miasma P2P loopback test $(date -u +%Y-%m-%dT%H:%M:%SZ) pid=$$"
 echo "$TEST_CONTENT" > "$PAYLOAD_FILE"
 
 PUBLISH_OUT=$("$CLI" --data-dir "$DIR_A" network-publish "$PAYLOAD_FILE" 2>&1)
-MID=$(echo "$PUBLISH_OUT" | grep -oP 'miasma:\S+' | head -1)
+MID=$(echo "$PUBLISH_OUT" | sed -nE 's/.*(miasma:[^[:space:]]+).*/\1/p' | head -1)
 
 if [ -n "$MID" ]; then
     pass "Content published: $MID"
@@ -169,7 +175,7 @@ sleep 3
 # ── Step 7: Retrieve on Node B ───────────────────────────────────────────────
 echo ""
 echo "=== Step 7: Retrieve on Node B ==="
-RETRIEVED_FILE="/tmp/miasma-loopback-retrieved-$$.txt"
+RETRIEVED_FILE="$DIR_B/retrieved.txt"
 RETRIEVE_OUT=$("$CLI" --data-dir "$DIR_B" network-get "$MID" --output "$RETRIEVED_FILE" 2>&1)
 
 if [ -f "$RETRIEVED_FILE" ]; then
@@ -183,8 +189,8 @@ fi
 # ── Step 8: Verify integrity ─────────────────────────────────────────────────
 echo ""
 echo "=== Step 8: Verify integrity ==="
-ORIGINAL_HASH=$(sha256sum "$PAYLOAD_FILE" | awk '{print $1}')
-RETRIEVED_HASH=$(sha256sum "$RETRIEVED_FILE" | awk '{print $1}')
+ORIGINAL_HASH=$(shasum -a 256 "$PAYLOAD_FILE" | awk '{print $1}')
+RETRIEVED_HASH=$(shasum -a 256 "$RETRIEVED_FILE" | awk '{print $1}')
 
 echo "  Original:  $ORIGINAL_HASH"
 echo "  Retrieved: $RETRIEVED_HASH"
