@@ -86,6 +86,11 @@ impl TransferRegistry {
                 }
             }
             let p = TransferProgress::new(id.clone());
+            // A receive's `name` is its output path (documented on `TransferStatus::name`). Until
+            // this was set, a live receive reported an empty name (only one read back from its
+            // journal had it), so `miasma transfers` printed `receive <mid> -> ` and a job that
+            // failed before writing a journal could not say where it was going.
+            p.set_name(output_path.to_string_lossy());
             jobs.insert(id.clone(), p.clone());
             p
         };

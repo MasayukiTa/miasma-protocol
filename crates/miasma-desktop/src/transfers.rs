@@ -401,10 +401,6 @@ pub struct TransfersUi {
     /// Ids started with a password in this session (the daemon does not tell us).
     known_protected: HashSet<String>,
     pending_protected: bool,
-    /// Where a receive was told to save, by id. The daemon reports a receive's path only once it
-    /// has read the manifest, so a job that fails earlier has an empty name.
-    known_paths: std::collections::HashMap<String, String>,
-    pending_path: Option<String>,
     /// The start request in flight came from a "new transfer" form (so the form is cleared when
     /// it is accepted), not from the Resume button.
     from_form: bool,
@@ -436,8 +432,6 @@ impl Default for TransfersUi {
             resume_password: String::new(),
             restart_confirm: false,
             known_protected: HashSet::new(),
-            known_paths: std::collections::HashMap::new(),
-            pending_path: None,
             pending_protected: false,
             from_form: false,
             copied_at: None,
@@ -517,13 +511,6 @@ impl TransfersUi {
         if self.mock {
             return;
         }
-        for j in &mut list {
-            if j.name.is_empty() {
-                if let Some(p) = self.known_paths.get(&transfer_id(j)) {
-                    j.name = p.clone();
-                }
-            }
-        }
         sort_jobs(&mut list);
         self.jobs = list;
         self.loaded = true;
@@ -559,9 +546,6 @@ impl TransfersUi {
         if self.pending_protected {
             self.known_protected.insert(id.clone());
         }
-        if let Some(path) = self.pending_path.take() {
-            self.known_paths.insert(id.clone(), path);
-        }
         self.pending_protected = false;
         self.form_error = None;
         if self.from_form {
@@ -582,7 +566,6 @@ impl TransfersUi {
 
     pub fn on_error(&mut self, message: String) {
         self.pending_protected = false;
-        self.pending_path = None;
         self.from_form = false;
         self.form_error = Some(message);
     }
@@ -770,7 +753,8 @@ impl TransfersUi {
                         if job.resumed_from_segment == 0 {
                             ui.label(t.resumed_fresh);
                         } else {
-                            ui.label(job.resumed_from_segment.to_string());
+                            // 1-based, like the caption under the strip.
+                            ui.label((job.resumed_from_segment + 1).to_string());
                         }
                         ui.end_row();
 
@@ -937,8 +921,8 @@ impl TransfersUi {
                 return;
             }
             if job.name.is_empty() {
-                // Failed before the daemon had a save location to report (and this window did
-                // not start it): there is nothing to resume, only a new start from the form.
+                // Without a path there is nothing to start again into (an older daemon reported
+                // none for a live receive): only a new start from the form is possible.
                 ui.label(egui::RichText::new(t.no_path_hint).color(pal().muted));
                 return;
             }
@@ -966,7 +950,11 @@ impl TransfersUi {
         if self.resume_open {
             ui.label(egui::RichText::new(if protected { t.resume_pw_required } else { t.resume_pw_optional }).small().color(pal().muted));
             ui.horizontal(|ui| {
-                ui.label(t.password_label);
+                ui.label(if protected {
+                    t.password_short
+                } else {
+                    t.password_label
+                });
                 ui.add(
                     egui::TextEdit::singleline(&mut self.resume_password)
                         .password(true)
@@ -1125,7 +1113,6 @@ impl TransfersUi {
             } else {
                 let password = (!self.recv_password.is_empty()).then(|| self.recv_password.clone());
                 self.pending_protected = password.is_some();
-                self.pending_path = Some(self.recv_path.trim().to_owned());
                 self.from_form = true;
                 self.recv_password.zeroize();
                 self.form_error = None;
@@ -1213,6 +1200,8 @@ impl TransfersUi {
     }
 
     fn redundancy_picker(&mut self, ui: &mut egui::Ui, t: &TransferStrings, easy: bool) {
+        // Tight rows: five presets should not push the send button off the screen.
+        ui.spacing_mut().item_spacing.y = 1.0;
         if easy {
             // A preset picked in Technical mode that has no plain name selects none of the three.
             let current = EasyChoice::from_preset_index(self.send_preset);
@@ -1820,26 +1809,17 @@ mod tests {
     }
 
     #[test]
-    fn a_job_without_a_reported_name_gets_the_path_it_was_started_with() {
-        // Found in the real window: a receive that fails while looking up the record has an
-        // empty name, so its row was blank and "resume" had no path to resume into.
+    fn a_job_with_no_name_is_titled_by_its_mid() {
+        // The daemon used to report an empty name for a live receive (fixed in `jobs.rs`); a row
+        // must still never be blank.
         let mut r = status(TransferKind::Receive, TransferState::Failed);
+        assert_eq!(title_of(&r), "big.iso");
         r.name = String::new();
         assert_eq!(title_of(&r), "miasma:abc");
         r.mid = "miasma:0123456789abcdefghijklmnopqrstuvwxyz".into();
         assert_eq!(title_of(&r), "miasma:0123456789abcdefg...");
         r.mid = String::new();
         assert_eq!(title_of(&r), "-");
-
-        let mut ui = TransfersUi::default();
-        r.mid = "miasma:abc".into();
-        ui.form = NewForm::Receive;
-        ui.pending_path = Some(r"C:\out\file.bin".into());
-        ui.from_form = true;
-        ui.on_started("miasma:abc".into());
-        ui.on_list(vec![r]);
-        assert_eq!(ui.jobs[0].name, r"C:\out\file.bin");
-        assert_eq!(title_of(&ui.jobs[0]), "file.bin");
     }
 
     #[test]
