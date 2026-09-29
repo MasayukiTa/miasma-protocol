@@ -8,8 +8,9 @@
 use eframe::egui;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::locale::{self, Locale, Strings};
+use crate::locale::{self, Locale, Strings, TransferStrings};
 use crate::theme::{self, Palette, ThemeMode};
+use crate::transfers::TransfersUi;
 use crate::variant::ProductMode;
 use crate::worker::{DaemonState, WorkerCmd, WorkerHandle, WorkerResult};
 use crate::LaunchIntent;
@@ -60,6 +61,7 @@ fn pal() -> Palette {
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Tab {
+    Transfers,
     Store,
     Retrieve,
     Send,
@@ -121,6 +123,9 @@ pub struct MiasmaApp {
     proxy_type: Option<String>,
     obfs_quic_port: u16,
     transport_statuses: Vec<crate::worker::TransportStatusInfo>,
+
+    // Transfers screen (resumable large-file transfers)
+    transfers: TransfersUi,
 
     // Send panel (directed sharing)
     send_contact: String,
@@ -251,6 +256,8 @@ impl MiasmaApp {
             last_status_poll: now,
             launch_attempts: 0,
 
+            transfers: TransfersUi::default(),
+
             // Directed sharing
             send_contact: String::new(),
             send_password: String::new(),
@@ -270,6 +277,11 @@ impl MiasmaApp {
     /// Current locale string table.
     fn s(&self) -> &'static Strings {
         locale::strings(self.locale)
+    }
+
+    /// Transfers screen string table.
+    fn tr(&self) -> &'static TransferStrings {
+        locale::transfer_strings(self.locale)
     }
 
     fn set_msg(&mut self, kind: MsgKind, msg: impl Into<String>) {
@@ -476,6 +488,28 @@ impl MiasmaApp {
                             file_size: item.file_size,
                         })
                         .collect();
+                }
+                WorkerResult::TransferList(list) => self.transfers.on_list(list),
+                WorkerResult::TransferPollFailed {
+                    message,
+                    daemon_down,
+                } => {
+                    // The worker owns reconnecting; ask it to look (and relaunch) now instead
+                    // of waiting for the 30 s status poll.
+                    if self.transfers.on_poll_failed(message, daemon_down) {
+                        let _ = self.worker.tx.try_send(WorkerCmd::GetStatus);
+                    }
+                }
+                WorkerResult::TransferStarted { id } => {
+                    self.transfers.on_started(id);
+                    self.set_msg(MsgKind::Success, self.tr().started);
+                }
+                WorkerResult::TransferCancelRequested => {
+                    self.transfers.poll_soon();
+                    self.set_msg(MsgKind::Info, self.tr().stop_requested);
+                }
+                WorkerResult::TransferError(e) => {
+                    self.transfers.on_error(e);
                 }
                 WorkerResult::Err(e) => {
                     self.busy = false;
@@ -864,6 +898,15 @@ impl MiasmaApp {
     }
 
     // ── Retrieve panel ───────────────────────────────────────────────────
+
+    fn transfers_panel(&mut self, ui: &mut egui::Ui) {
+        let t = self.tr();
+        let easy = self.mode.is_easy();
+        let connected = self.daemon_state == DaemonState::Connected;
+        for cmd in self.transfers.show(ui, t, easy, connected) {
+            let _ = self.worker.tx.try_send(cmd);
+        }
+    }
 
     fn retrieve_panel(&mut self, ui: &mut egui::Ui) {
         let s = self.s();
@@ -2499,7 +2542,7 @@ impl MiasmaApp {
 
 // ─── UI helpers ─────────────────────────────────────────────────────────────
 
-fn section_heading(ui: &mut egui::Ui, text: &str) {
+pub(crate) fn section_heading(ui: &mut egui::Ui, text: &str) {
     ui.label(
         egui::RichText::new(text)
             .size(18.0)
@@ -2512,13 +2555,13 @@ fn section_heading(ui: &mut egui::Ui, text: &str) {
 }
 
 /// The one primary action of a screen: accent fill, white text. Everything else stays neutral.
-fn primary_button<'a>(text: impl Into<egui::WidgetText>) -> egui::Button<'a> {
+pub(crate) fn primary_button<'a>(text: impl Into<egui::WidgetText>) -> egui::Button<'a> {
     let text: egui::WidgetText = text.into();
     egui::Button::new(text.color(pal().on_accent())).fill(pal().accent_fill)
 }
 
 /// A destructive action (delete, wipe): neutral button, danger-coloured text.
-fn danger_button<'a>(text: impl Into<String>) -> egui::Button<'a> {
+pub(crate) fn danger_button<'a>(text: impl Into<String>) -> egui::Button<'a> {
     egui::Button::new(
         egui::RichText::new(text)
             .color(pal().danger)
@@ -2595,7 +2638,7 @@ fn inbox_state_display<'a>(
     }
 }
 
-fn card_frame() -> egui::Frame {
+pub(crate) fn card_frame() -> egui::Frame {
     egui::Frame::none()
         .inner_margin(egui::Margin::same(14.0))
         .rounding(8.0)
@@ -2759,6 +2802,14 @@ impl eframe::App for MiasmaApp {
             self.last_status_poll = std::time::Instant::now();
         }
 
+        // Transfers: about once a second while that tab is showing or a transfer is running.
+        if self.daemon_state == DaemonState::Connected
+            && self.transfers.poll_due(self.tab == Tab::Transfers)
+            && self.worker.tx.try_send(WorkerCmd::TransferPoll).is_ok()
+        {
+            self.transfers.note_polled();
+        }
+
         let s = self.s();
         let easy = self.mode.is_easy();
 
@@ -2792,6 +2843,8 @@ impl eframe::App for MiasmaApp {
                     } else {
                         s.tab_retrieve
                     };
+                    let tr_label = if easy { self.tr().tab_easy } else { self.tr().tab };
+                    nav_tab(ui, &mut self.tab, Tab::Transfers, tr_label);
                     nav_tab(ui, &mut self.tab, Tab::Store, store_label);
                     nav_tab(ui, &mut self.tab, Tab::Retrieve, retrieve_label);
                     let send_label = if easy { s.tab_send_easy } else { s.tab_send };
@@ -2859,6 +2912,7 @@ impl eframe::App for MiasmaApp {
                 .show(ui, |ui| {
                     ui.add_space(4.0);
                     match self.tab {
+                        Tab::Transfers => self.transfers_panel(ui),
                         Tab::Store => self.store_panel(ui),
                         Tab::Retrieve => self.retrieve_panel(ui),
                         Tab::Send => self.send_panel(ui),
