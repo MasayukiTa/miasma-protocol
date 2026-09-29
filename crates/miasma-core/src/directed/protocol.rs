@@ -7,6 +7,7 @@
 //! 4. Recipient sends `StatusQuery` → Returns current envelope state
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::envelope::{DirectedEnvelope, EnvelopeState};
@@ -17,7 +18,7 @@ pub const DIRECTED_MSG_MAX: usize = 32 * 1024;
 // ─── Wire types ──────────────────────────────────────────────────────────────
 
 /// Request sent over `/miasma/directed/1.0.0`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum DirectedRequest {
     /// Sender invites recipient to receive a directed share.
     Invite { envelope: DirectedEnvelope },
@@ -30,6 +31,30 @@ pub enum DirectedRequest {
     SenderRevoke { envelope_id: [u8; 32] },
     /// Query the current state of an envelope.
     StatusQuery { envelope_id: [u8; 32] },
+}
+
+impl fmt::Debug for DirectedRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Invite { envelope } => f
+                .debug_struct("Invite")
+                .field("envelope_id", &hex::encode(envelope.envelope_id))
+                .finish(),
+            Self::Confirm { envelope_id, .. } => f
+                .debug_struct("Confirm")
+                .field("envelope_id", &hex::encode(envelope_id))
+                .field("challenge_code", &"<redacted>")
+                .finish(),
+            Self::SenderRevoke { envelope_id } => f
+                .debug_struct("SenderRevoke")
+                .field("envelope_id", &hex::encode(envelope_id))
+                .finish(),
+            Self::StatusQuery { envelope_id } => f
+                .debug_struct("StatusQuery")
+                .field("envelope_id", &hex::encode(envelope_id))
+                .finish(),
+        }
+    }
 }
 
 impl Zeroize for DirectedRequest {
@@ -165,6 +190,18 @@ impl libp2p::request_response::Codec for DirectedCodec {
 #[cfg(test)]
 mod secret_lifetime_tests {
     use super::*;
+
+    #[test]
+    fn directed_request_debug_redacts_challenge_code() {
+        let req = DirectedRequest::Confirm {
+            envelope_id: [0x42; 32],
+            challenge_code: "ABCD-EFGH-sensitive".into(),
+        };
+        let rendered = format!("{req:?}");
+        assert!(rendered.contains("Confirm"));
+        assert!(rendered.contains("<redacted>"));
+        assert!(!rendered.contains("ABCD-EFGH-sensitive"));
+    }
 
     #[test]
     fn confirm_request_zeroizes_challenge_code() {
