@@ -273,7 +273,8 @@ impl NodeConfig {
 
 /// Return the default Miasma data directory.
 ///
-/// - Linux/macOS: `~/.local/share/miasma`
+/// - Linux:       `~/.local/share/miasma`
+/// - macOS:       `~/Library/Application Support/miasma`
 /// - Windows:     `%APPDATA%\miasma`
 pub fn default_data_dir() -> PathBuf {
     directories::ProjectDirs::from("", "", "miasma")
