@@ -313,8 +313,10 @@ pub struct LocalShareStore {
     /// content for can never evict this node's own shares, or another
     /// publisher's already-hosted shares, just by pushing enough shares of
     /// its own -- see `put_hosted`'s reject-rather-than-evict behaviour.
-    /// Zero by default (a node must opt in via `with_hosted_quota_mb` to
-    /// accept any pushed shares at all).
+    /// Raw `open` keeps this at zero; production callers apply their configured
+    /// hosted-share policy via `open_with_quotas`. This keeps low-level/test
+    /// callers fail-closed while shipped node defaults actually participate in
+    /// distributed hosting.
     hosted_quota_bytes: u64,
     /// Serializes every index read-modify-write sequence across all mutating
     /// methods, so two concurrent writers (e.g. a local dissolve and an
@@ -361,6 +363,19 @@ impl LocalShareStore {
             hosted_quota_bytes: 0,
             write_lock: std::sync::Mutex::new(()),
         })
+    }
+
+    /// Open the store using both owned-share and hosted-share quotas.
+    ///
+    /// This is the production constructor. Keeping hosted quota explicit here
+    /// prevents remote shares from sharing/evicting the owned quota while also
+    /// avoiding the raw `open` default of rejecting every inbound share.
+    pub fn open_with_quotas(
+        data_dir: &Path,
+        quota_mb: u64,
+        hosted_quota_mb: u64,
+    ) -> Result<Self, MiasmaError> {
+        Ok(Self::open(data_dir, quota_mb)?.with_hosted_quota_mb(hosted_quota_mb))
     }
 
     /// Opt this store in to accepting inbound-hosted shares (from
@@ -766,6 +781,21 @@ mod tests {
             100,
             ts,
         )
+    }
+
+    #[test]
+    fn default_node_config_accepts_hosted_share() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = crate::config::NodeConfig::default();
+        let store = LocalShareStore::open_with_quotas(
+            dir.path(),
+            config.storage.quota_mb,
+            config.storage.hosted_quota_mb,
+        )
+        .unwrap();
+        let share = dummy_share(31);
+        let address = store.put_hosted(&share).unwrap();
+        assert!(store.contains(&address));
     }
 
     #[test]
