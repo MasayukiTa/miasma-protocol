@@ -64,6 +64,31 @@ scripts/transfer-e2e.sh                       # 1台の中で 2 ノードを立�
 `transfer-e2e.sh` は、パスワード付き公開 → 誤り/無しのパスワードの拒否 → **受信側デーモンを
 kill -9** → 再起動 → 再開 → SHA256 一致、さらに**送信側デーモンを kill -9** → 再開、までを確認します。
 
+### 2-1b. Rust を入れずに、ビルド済みを受け取る場合(Apple シリコンの Mac)
+
+Mac の持ち主に Rust を入れてもらうのは負担が大きいので、CI(`macos-cli-transfer` ジョブ)が
+リリースビルドを作ります。PR の Actions 画面 → そのジョブ → Artifacts の `miasma-macos-arm64`
+(14 日で消えます。ダウンロードには GitHub ログインが必要なので、**あなたが取って相手に渡します**)。
+中身は `miasma-macos.tar.gz`(`miasma`、`miasma-desktop`、`transfer-e2e.sh`、この手順書)。
+作った CI 上で `transfer-e2e.sh` が PASS したバイナリです(実際に相手の Mac で動くかは別。下の確認 1〜3 で確かめる)。
+
+相手の Mac で:
+
+```bash
+cd ~/Downloads
+shasum -a 256 miasma-macos.tar.gz           # こちらが控えた値(CI のログに出る)と一致すること
+tar -xzf miasma-macos.tar.gz && cd miasma-macos
+xattr -dr com.apple.quarantine .            # 署名なしのため、ダウンロード印を外す(初回だけ)
+./miasma --help                              # 1) 起動すること
+./transfer-e2e.sh --cli ./miasma             # 2) 1台の中で 2 ノード。PASS が出ること
+```
+
+- 「開発元を検証できない」と出たら、上の `xattr` を実行していません(または、システム設定 → プライバシーとセキュリティ → 「このまま開く」)。
+- 初めて `daemon` を起動すると、**着信接続を許可するか**のダイアログが出ます。**許可**します。
+- **外付け SSD** を使うとき、ターミナルが外付けドライブに触る許可を求められたら許可します(システム設定 → プライバシーとセキュリティ → ファイルとフォルダ / フルディスクアクセス)。
+- GUI(`./miasma-desktop`)も同じフォルダにあります。`.app` ではないので、ターミナルから起動します。
+- Intel の Mac では動きません(アーム版のみ)。相手の Mac が Intel かは `uname -m` で確認(`arm64` ならよい)。
+
 ### 2-2. Windows でも同じ自己診断をする
 
 ```powershell
