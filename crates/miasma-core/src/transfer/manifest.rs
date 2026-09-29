@@ -537,20 +537,22 @@ mod tests {
 
     #[test]
     fn a_password_manifest_carries_only_public_parameters() {
-        let (prot, _key) = PasswordProtection::create_with_cost("secret-pw", 64, 1, 1).unwrap();
+        let pw = crate::transfer::protection::random_test_password();
+        let (prot, _key) = PasswordProtection::create_with_cost(&pw, 64, 1, 1).unwrap();
         let mut m = build(256, 2, 50);
         m.protection = Protection::Password(prot);
         m.validate().unwrap();
         let bytes = m.to_bytes().unwrap();
         assert!(
-            !bytes.windows(9).any(|w| w == b"secret-pw"),
+            !bytes.windows(pw.len()).any(|w| w == pw.as_bytes()),
             "the password must not appear in the encoded manifest"
         );
     }
 
     #[test]
     fn hostile_argon2_cost_in_a_manifest_fails_validation() {
-        let (mut prot, _) = PasswordProtection::create_with_cost("pw", 64, 1, 1).unwrap();
+        let pw = crate::transfer::protection::random_test_password();
+        let (mut prot, _) = PasswordProtection::create_with_cost(&pw, 64, 1, 1).unwrap();
         prot.m_kib = 4 * 1024 * 1024;
         let mut m = build(256, 2, 50);
         m.protection = Protection::Password(prot);
