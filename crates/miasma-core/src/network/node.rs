@@ -942,6 +942,27 @@ fn decode_signed_dht_record(
     Ok(record)
 }
 
+/// As [`decode_signed_dht_record`], also decoding the transfer-manifest trailer.
+///
+/// Same three key checks. A damaged trailer maps to `InvalidInnerRecord` so the
+/// whole record is refused; see `DhtHandle::get_record_with_manifest`.
+fn decode_signed_record_and_manifest(
+    expected_key: &[u8],
+    envelope_bytes: &[u8],
+) -> Result<(DhtRecord, Option<crate::transfer::TransferManifest>), DhtEnvelopeError> {
+    let signed: SignedDhtRecord =
+        bincode::deserialize(envelope_bytes).map_err(|_| DhtEnvelopeError::UnsignedOrMalformed)?;
+    if !signed.verify_for_key(expected_key) {
+        return Err(DhtEnvelopeError::InvalidSignatureOrKeyMismatch);
+    }
+    let (record, manifest) = crate::transfer::decode_record_value(&signed.value)
+        .map_err(|_| DhtEnvelopeError::InvalidInnerRecord)?;
+    if record.dht_key().as_slice() != expected_key {
+        return Err(DhtEnvelopeError::InnerMidMismatch);
+    }
+    Ok((record, manifest))
+}
+
 /// Sender side of the DHT command channel.
 ///
 /// Wraps the low-level channel with typed `put`/`get_record` helpers that
@@ -1004,9 +1025,20 @@ impl DhtHandle {
 
     /// Publish a `DhtRecord` to Kademlia.
     pub async fn put(&self, record: DhtRecord) -> Result<(), MiasmaError> {
+        self.put_with_manifest(record, None).await
+    }
+
+    /// Publish a `DhtRecord`, optionally carrying a transfer manifest as a
+    /// framed trailer inside the same signed value (see `transfer::manifest`).
+    ///
+    /// The size budget applies to the record *and* its manifest together.
+    pub async fn put_with_manifest(
+        &self,
+        record: DhtRecord,
+        manifest: Option<&crate::transfer::TransferManifest>,
+    ) -> Result<(), MiasmaError> {
         let key = record.mid_digest.to_vec();
-        let value =
-            bincode::serialize(&record).map_err(|e| MiasmaError::Serialization(e.to_string()))?;
+        let value = crate::transfer::encode_record_value(&record, manifest)?;
         if value.len() >= DHT_INNER_RECORD_MAX_BYTES {
             return Err(MiasmaError::Dht(format!(
                 "DHT record metadata too large: {} bytes (limit < {} bytes)",
@@ -1084,6 +1116,39 @@ impl DhtHandle {
         match raw_opt {
             Some(bytes) => match decode_signed_dht_record(&mid_digest, &bytes) {
                 Ok(record) => Ok(Some(record)),
+                Err(reason) => {
+                    warn!("DHT GET: signed record rejected reason={reason:?}");
+                    Ok(None)
+                }
+            },
+            None => Ok(None),
+        }
+    }
+
+    /// As [`get_record`](Self::get_record), also returning the transfer
+    /// manifest carried by the record, if any.
+    ///
+    /// `Ok(Some((record, None)))` is a legacy record with no manifest. A record
+    /// whose manifest trailer is present but damaged is rejected outright
+    /// (`Ok(None)`, logged) rather than returned as manifest-less: otherwise
+    /// corrupting the trailer would silently turn a protected transfer into an
+    /// unprotected-looking one.
+    pub async fn get_record_with_manifest(
+        &self,
+        mid_digest: [u8; 32],
+    ) -> Result<Option<(DhtRecord, Option<crate::transfer::TransferManifest>)>, MiasmaError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::Get {
+                key: mid_digest.to_vec(),
+                reply: tx,
+            })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
+        let raw_opt = self.recv_reply(rx, "get_record_with_manifest").await??;
+        match raw_opt {
+            Some(bytes) => match decode_signed_record_and_manifest(&mid_digest, &bytes) {
+                Ok(pair) => Ok(Some(pair)),
                 Err(reason) => {
                     warn!("DHT GET: signed record rejected reason={reason:?}");
                     Ok(None)
@@ -4636,20 +4701,17 @@ impl MiasmaNode {
                     },
                 ..
             } => {
+                // Found through the store's index, then exactly one decryption.
+                // This used to decrypt every share in the store to read its
+                // header (`search_by_mid_prefix`) and then decrypt candidates
+                // again -- O(shares stored) full decryptions and index rewrites
+                // per request, which made one fetch cost seconds at a handful
+                // of shares and hours at 100 GiB.
                 let share = self.local_store.as_ref().and_then(|store| {
                     let prefix: [u8; 8] = request.mid_digest[..8].try_into().ok()?;
-                    let candidates = store.search_by_mid_prefix(&prefix);
-                    candidates.iter().find_map(|addr| {
-                        store.get(addr).ok().and_then(|s| {
-                            if s.slot_index == request.slot_index
-                                && s.segment_index == request.segment_index
-                            {
-                                Some(s)
-                            } else {
-                                None
-                            }
-                        })
-                    })
+                    let addr =
+                        store.find_piece(&prefix, request.segment_index, request.slot_index)?;
+                    store.get_untouched(&addr).ok()
                 });
                 let response = ShareFetchResponse { share };
                 let _ = self

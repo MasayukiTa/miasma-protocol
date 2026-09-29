@@ -860,6 +860,77 @@ pub(crate) async fn process_request(
             }
         }
 
+        ControlRequest::PublishFileProtected {
+            file_path,
+            data_shards,
+            total_shards,
+            password,
+        } => {
+            // Wiped from memory when this arm ends.
+            let password = Zeroizing::new(password);
+            let params = DissolutionParams {
+                data_shards: data_shards as usize,
+                total_shards: total_shards as usize,
+            };
+            let path = std::path::Path::new(&file_path);
+            match coord
+                .dissolve_and_publish_file_protected(
+                    path,
+                    params,
+                    crate::network::PublishOptions::default(),
+                    password.as_str(),
+                )
+                .await
+            {
+                Ok(report) => ControlResponse::Published {
+                    mid: report.mid.to_string(),
+                },
+                Err(e) => ControlResponse::Error(e.to_string()),
+            }
+        }
+
+        ControlRequest::TransferStartReceive {
+            mid,
+            output_path,
+            password,
+            restart,
+        } => {
+            let password = password.map(Zeroizing::new);
+            match crate::crypto::hash::ContentId::from_str(&mid) {
+                Ok(content_id) => {
+                    let registry = crate::transfer::jobs::registry_for(&data_dir);
+                    let id = registry.start_receive(
+                        coord.clone(),
+                        content_id,
+                        PathBuf::from(output_path),
+                        password,
+                        restart,
+                    );
+                    ControlResponse::TransferStarted { id }
+                }
+                Err(e) => ControlResponse::Error(format!("invalid MID: {e}")),
+            }
+        }
+
+        ControlRequest::TransferStatus { id } => {
+            match crate::transfer::jobs::registry_for(&data_dir).status(&id) {
+                Some(status) => ControlResponse::TransferStatus(status),
+                None => ControlResponse::Error(format!("no such transfer: {id}")),
+            }
+        }
+
+        ControlRequest::TransferList => {
+            ControlResponse::TransferList(crate::transfer::jobs::registry_for(&data_dir).list())
+        }
+
+        ControlRequest::TransferCancel { id } => {
+            if crate::transfer::jobs::registry_for(&data_dir).cancel(&id) {
+                ControlResponse::TransferCancelled
+            } else {
+                ControlResponse::Error(format!("no running transfer: {id}"))
+            }
+        }
+
         ControlRequest::Get {
             mid,
             data_shards,

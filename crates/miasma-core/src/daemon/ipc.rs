@@ -61,6 +61,18 @@ pub enum ControlRequest {
         data_shards: u8,
         total_shards: u8,
     },
+    /// As `PublishFile`, with a password mixed into the content encryption key
+    /// (see `transfer::protection`). The receiver must supply the same
+    /// password; the MID and every shard alone cannot decrypt the content.
+    ///
+    /// A separate variant rather than a new field on `PublishFile`, so existing
+    /// callers keep constructing `PublishFile` unchanged.
+    PublishFileProtected {
+        file_path: String,
+        data_shards: u8,
+        total_shards: u8,
+        password: String,
+    },
     /// Retrieve content by MID string from the P2P network.
     Get {
         mid: String,
@@ -84,6 +96,28 @@ pub enum ControlRequest {
         /// Absolute path where reconstructed content should be written.
         output_path: String,
     },
+    /// Start (or resume) receiving `mid` into `output_path` as a background
+    /// transfer, and return at once with its id.
+    ///
+    /// Unlike `GetToFile` this is verified piece by piece against the transfer
+    /// manifest, is resumable after any interruption (a `<output>.part` file and
+    /// a journal are kept), and reports progress through `TransferStatus`. A
+    /// password is required exactly when the transfer was published with one.
+    TransferStartReceive {
+        mid: String,
+        /// Absolute path of the finished file. It only appears once the
+        /// whole-file MID has been verified.
+        output_path: String,
+        password: Option<String>,
+        /// Discard any partial transfer and start over.
+        restart: bool,
+    },
+    /// Progress of one transfer, by the id `TransferStartReceive` returned.
+    TransferStatus { id: String },
+    /// Every transfer, including paused ones left by an earlier daemon process.
+    TransferList,
+    /// Stop a running transfer at its next safe point, keeping it resumable.
+    TransferCancel { id: String },
     /// Return daemon status metrics.
     Status,
     /// Distress-wipe: destroy the master key so all shares become unreadable.
@@ -190,6 +224,36 @@ impl fmt::Debug for ControlRequest {
                 .field("file_path", &"<redacted>")
                 .field("data_shards", data_shards)
                 .field("total_shards", total_shards)
+                .finish(),
+            Self::TransferStartReceive {
+                mid,
+                password,
+                restart,
+                ..
+            } => f
+                .debug_struct("TransferStartReceive")
+                .field("mid", mid)
+                .field("output_path", &"<redacted>")
+                .field("password", &password.as_ref().map(|_| "<redacted>"))
+                .field("restart", restart)
+                .finish(),
+            Self::TransferStatus { id } => {
+                f.debug_struct("TransferStatus").field("id", id).finish()
+            }
+            Self::TransferList => f.write_str("TransferList"),
+            Self::TransferCancel { id } => {
+                f.debug_struct("TransferCancel").field("id", id).finish()
+            }
+            Self::PublishFileProtected {
+                data_shards,
+                total_shards,
+                ..
+            } => f
+                .debug_struct("PublishFileProtected")
+                .field("file_path", &"<redacted>")
+                .field("data_shards", data_shards)
+                .field("total_shards", total_shards)
+                .field("password", &"<redacted>")
                 .finish(),
             Self::Get {
                 mid,
@@ -300,6 +364,14 @@ pub enum ControlResponse {
         /// Number of bytes written.
         bytes_written: u64,
     },
+    /// A background transfer was started (or was already running).
+    TransferStarted {
+        id: String,
+    },
+    TransferStatus(crate::transfer::TransferStatus),
+    TransferList(Vec<crate::transfer::TransferStatus>),
+    /// The cancel request was accepted; the transfer stops at its next safe point.
+    TransferCancelled,
     Status(DaemonStatus),
     /// Distress wipe completed successfully.
     Wiped,
@@ -364,6 +436,15 @@ impl fmt::Debug for ControlResponse {
                 .field("output_path", &"<redacted>")
                 .field("bytes_written", bytes_written)
                 .finish(),
+            Self::TransferStarted { id } => {
+                f.debug_struct("TransferStarted").field("id", id).finish()
+            }
+            Self::TransferStatus(status) => f.debug_tuple("TransferStatus").field(status).finish(),
+            Self::TransferList(list) => f
+                .debug_struct("TransferList")
+                .field("count", &list.len())
+                .finish(),
+            Self::TransferCancelled => f.write_str("TransferCancelled"),
             Self::Status(status) => f.debug_tuple("Status").field(status).finish(),
             Self::Wiped => f.write_str("Wiped"),
             Self::Error(message) => f.debug_tuple("Error").field(message).finish(),

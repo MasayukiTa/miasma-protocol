@@ -132,6 +132,17 @@ enum Commands {
         /// Bootstrap peer multiaddrs (repeatable).
         #[arg(long)]
         bootstrap: Vec<String>,
+        /// Protect the content with a password read from the first line of FILE.
+        ///
+        /// The password is an encryption factor: the receiver needs it in
+        /// addition to the MID, and the MID plus every shard cannot decrypt
+        /// without it. It is never taken from the command line, where it would
+        /// show in process listings and shell history.
+        #[arg(long, value_name = "FILE", conflicts_with = "password_stdin")]
+        password_file: Option<PathBuf>,
+        /// Read the password from the first line of standard input.
+        #[arg(long)]
+        password_stdin: bool,
     },
 
     /// Export a full diagnostic report for troubleshooting.
@@ -229,6 +240,33 @@ enum Commands {
         /// Bootstrap peer multiaddrs (repeatable).
         #[arg(long)]
         bootstrap: Vec<String>,
+        /// The password, read from the first line of FILE. Required exactly when
+        /// the content was published with `--password-file` / `--password-stdin`.
+        #[arg(long, value_name = "FILE", conflicts_with = "password_stdin")]
+        password_file: Option<PathBuf>,
+        /// Read the password from the first line of standard input.
+        #[arg(long)]
+        password_stdin: bool,
+        /// Discard any partial transfer and start over. By default a transfer
+        /// that was interrupted (Ctrl-C, crash, lost holder) resumes.
+        #[arg(long)]
+        restart: bool,
+        /// Start the transfer in the daemon and return at once. Watch it with
+        /// `miasma transfers`.
+        #[arg(long)]
+        no_wait: bool,
+    },
+
+    /// List transfers: running, paused, and finished, including ones an earlier
+    /// daemon process left behind (those can be resumed by running the same
+    /// `network-get` again).
+    Transfers,
+
+    /// Stop a running transfer at its next safe point. The partial file is kept
+    /// and the transfer can be resumed.
+    TransferCancel {
+        /// The MID of the transfer (`miasma:<base58>`).
+        mid: String,
     },
 
     /// Probe WebSocket/WSS connectivity to a URL.
@@ -364,7 +402,20 @@ async fn main() -> Result<()> {
             data_shards,
             total_shards,
             bootstrap,
-        } => cmd_network_publish(&data_dir, &path, data_shards, total_shards, &bootstrap).await,
+            password_file,
+            password_stdin,
+        } => {
+            let password = read_transfer_password(password_file.as_deref(), password_stdin)?;
+            cmd_network_publish(
+                &data_dir,
+                &path,
+                data_shards,
+                total_shards,
+                &bootstrap,
+                password.as_ref().map(|p| p.as_str()),
+            )
+            .await
+        }
 
         Commands::NetworkGet {
             mid,
@@ -372,7 +423,12 @@ async fn main() -> Result<()> {
             data_shards,
             total_shards,
             bootstrap,
+            password_file,
+            password_stdin,
+            restart,
+            no_wait,
         } => {
+            let password = read_transfer_password(password_file.as_deref(), password_stdin)?;
             cmd_network_get(
                 &data_dir,
                 &mid,
@@ -380,9 +436,15 @@ async fn main() -> Result<()> {
                 data_shards,
                 total_shards,
                 &bootstrap,
+                password.as_ref().map(|p| p.as_str()),
+                restart,
+                no_wait,
             )
             .await
         }
+
+        Commands::Transfers => cmd_transfers(&data_dir).await,
+        Commands::TransferCancel { mid } => cmd_transfer_cancel(&data_dir, &mid).await,
 
         Commands::WssProbe {
             url,
@@ -1710,12 +1772,42 @@ fn format_age(epoch_secs: u64) -> String {
 
 // ─── network-publish ──────────────────────────────────────────────────────────
 
+/// Read a transfer password from a file or from stdin: the first line, without
+/// its line ending. Never from argv, where it would show in process listings.
+///
+/// Only the line ending is stripped; spaces are part of the password.
+fn read_transfer_password(
+    file: Option<&std::path::Path>,
+    from_stdin: bool,
+) -> Result<Option<Zeroizing<String>>> {
+    let raw = match (file, from_stdin) {
+        (Some(path), _) => Zeroizing::new(
+            std::fs::read_to_string(path)
+                .with_context(|| format!("cannot read password file {}", path.display()))?,
+        ),
+        (None, true) => {
+            let mut line = Zeroizing::new(String::new());
+            std::io::stdin()
+                .read_line(&mut line)
+                .context("cannot read the password from standard input")?;
+            line
+        }
+        (None, false) => return Ok(None),
+    };
+    let first = raw.lines().next().unwrap_or("");
+    if first.is_empty() {
+        bail!("the password is empty; refusing to publish with no protection");
+    }
+    Ok(Some(Zeroizing::new(first.to_owned())))
+}
+
 async fn cmd_network_publish(
     data_dir: &std::path::Path,
     path: &std::path::Path,
     data_shards: usize,
     total_shards: usize,
     _bootstrap_addrs: &[String], // ignored: daemon handles bootstrap
+    password: Option<&str>,
 ) -> Result<()> {
     use miasma_core::{daemon_request, ControlRequest, ControlResponse};
 
@@ -1732,16 +1824,27 @@ async fn cmd_network_publish(
         file_len
     );
 
-    let req = ControlRequest::PublishFile {
-        file_path: abs_path.to_string_lossy().into_owned(),
-        data_shards: data_shards as u8,
-        total_shards: total_shards as u8,
+    let req = match password {
+        Some(pw) => ControlRequest::PublishFileProtected {
+            file_path: abs_path.to_string_lossy().into_owned(),
+            data_shards: data_shards as u8,
+            total_shards: total_shards as u8,
+            password: pw.to_owned(),
+        },
+        None => ControlRequest::PublishFile {
+            file_path: abs_path.to_string_lossy().into_owned(),
+            data_shards: data_shards as u8,
+            total_shards: total_shards as u8,
+        },
     };
 
     match daemon_request(data_dir, req).await? {
         ControlResponse::Published { mid } => {
             println!("{mid}");
             eprintln!("Published. MID: {mid}");
+            if password.is_some() {
+                eprintln!("  Password-protected: the receiver needs the MID and the password.");
+            }
             eprintln!("  Retrieve: miasma network-get {mid} -o output.bin");
             Ok(())
         }
@@ -1759,41 +1862,28 @@ async fn cmd_network_get(
     data_shards: usize,
     total_shards: usize,
     _bootstrap_addrs: &[String], // ignored: daemon handles bootstrap
+    password: Option<&str>,
+    restart: bool,
+    no_wait: bool,
 ) -> Result<()> {
     use miasma_core::{daemon_request, ControlRequest, ControlResponse};
 
-    eprintln!("Requesting {mid_str} from local daemon...");
-
-    // With an output path, use the file-path variant so the daemon streams
-    // reconstructed segments straight to disk instead of buffering the whole
-    // file twice (once in the daemon, once again as base64-inflated JSON over
-    // IPC). Without one (stdout pipe), there is no path to stream to, so fall
-    // back to the byte-returning `Get`.
+    // To a file: a background transfer in the daemon, verified piece by piece,
+    // resumable, with progress. (The daemon still serves the older `GetToFile`
+    // for callers that want the single blocking request.)
     if let Some(path) = output {
-        let abs_path = if path.is_absolute() {
-            path.to_owned()
-        } else {
-            std::env::current_dir().unwrap_or_default().join(path)
-        };
-        let req = ControlRequest::GetToFile {
-            mid: mid_str.to_owned(),
-            data_shards: data_shards as u8,
-            total_shards: total_shards as u8,
-            output_path: abs_path.to_string_lossy().to_string(),
-        };
-        return match daemon_request(data_dir, req).await? {
-            ControlResponse::RetrievedToFile {
-                output_path,
-                bytes_written,
-            } => {
-                eprintln!("Written {bytes_written} bytes to {output_path}");
-                Ok(())
-            }
-            ControlResponse::Error(e) => bail!("daemon error: {e}"),
-            other => bail!("unexpected response: {other:?}"),
-        };
+        return cmd_network_get_transfer(data_dir, mid_str, path, password, restart, no_wait).await;
+    }
+    if password.is_some() {
+        bail!(
+            "a password only applies when receiving to a file: pass -o/--output. \
+             (Protected content is never written to stdout.)"
+        );
     }
 
+    eprintln!("Requesting {mid_str} from local daemon...");
+
+    // No output path: there is nothing to stream to, so use the byte-returning `Get`.
     let req = ControlRequest::Get {
         mid: mid_str.to_owned(),
         data_shards: data_shards as u8,
@@ -1809,6 +1899,238 @@ async fn cmd_network_get(
             Ok(())
         }
         ControlResponse::Error(e) => bail!("daemon error: {e}"),
+        other => bail!("unexpected response: {other:?}"),
+    }
+}
+
+// ─── transfers (background receive, progress, resume) ────────────────────────
+
+/// `1.5 GiB`, `312 MiB`, `4 KiB`, `17 B`.
+fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = n as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u < UNITS.len() - 1 {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", UNITS[u])
+    }
+}
+
+fn human_duration(secs: u64) -> String {
+    format!(
+        "{:02}:{:02}:{:02}",
+        secs / 3600,
+        (secs / 60) % 60,
+        secs % 60
+    )
+}
+
+/// One line describing a transfer's progress. Pure, so it can be tested.
+fn format_progress(s: &miasma_core::transfer::TransferStatus) -> String {
+    use miasma_core::transfer::Phase;
+
+    match s.phase {
+        Phase::Preparing => return "looking up the record and manifest...".to_owned(),
+        Phase::Verifying => {
+            return format!(
+                "verifying the partial file already on disk: {}",
+                human_bytes(s.bytes_done)
+            )
+        }
+        Phase::Finalizing => return "checking the whole file against its MID...".to_owned(),
+        _ => {}
+    }
+
+    let pct = if s.bytes_total > 0 {
+        (s.bytes_done as f64 / s.bytes_total as f64 * 100.0).min(100.0)
+    } else if s.segments_total > 0 {
+        s.segments_done as f64 / s.segments_total as f64 * 100.0
+    } else {
+        0.0
+    };
+    let width = 24usize;
+    let filled = ((pct / 100.0) * width as f64).round() as usize;
+    let bar: String = "#".repeat(filled.min(width)) + &"-".repeat(width - filled.min(width));
+
+    let size = if s.bytes_total > 0 {
+        format!(
+            "{} / {}",
+            human_bytes(s.bytes_done),
+            human_bytes(s.bytes_total)
+        )
+    } else {
+        human_bytes(s.bytes_done)
+    };
+    let rate = if s.rate_bps > 0.0 {
+        format!("{}/s", human_bytes(s.rate_bps as u64))
+    } else {
+        "-".to_owned()
+    };
+    let eta = s.eta_secs.map_or("--:--:--".to_owned(), human_duration);
+
+    // Where the time is going: what the speed experiment needs to read off.
+    let spent = (s.fetch_ms + s.decode_ms + s.write_ms).max(1) as f64;
+    let split = format!(
+        "fetch {:.0}% decode {:.0}% write {:.0}%",
+        s.fetch_ms as f64 / spent * 100.0,
+        s.decode_ms as f64 / spent * 100.0,
+        s.write_ms as f64 / spent * 100.0
+    );
+
+    let mut line = format!(
+        "[{bar}] {pct:5.1}%  seg {}/{}  {size}  {rate}  ETA {eta}  ({split})",
+        s.segments_done, s.segments_total
+    );
+    if s.pieces_rejected > 0 {
+        line.push_str(&format!("  rejected pieces: {}", s.pieces_rejected));
+    }
+    if s.segment_retries > 0 {
+        line.push_str(&format!("  retries: {}", s.segment_retries));
+    }
+    line
+}
+
+async fn cmd_network_get_transfer(
+    data_dir: &std::path::Path,
+    mid_str: &str,
+    path: &std::path::Path,
+    password: Option<&str>,
+    restart: bool,
+    no_wait: bool,
+) -> Result<()> {
+    use miasma_core::transfer::TransferState;
+    use miasma_core::{daemon_request, ControlRequest, ControlResponse};
+
+    let abs_path = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(path)
+    };
+
+    let id = match daemon_request(
+        data_dir,
+        ControlRequest::TransferStartReceive {
+            mid: mid_str.to_owned(),
+            output_path: abs_path.to_string_lossy().into_owned(),
+            password: password.map(str::to_owned),
+            restart,
+        },
+    )
+    .await?
+    {
+        ControlResponse::TransferStarted { id } => id,
+        ControlResponse::Error(e) => bail!("daemon error: {e}"),
+        other => bail!("unexpected response: {other:?}"),
+    };
+
+    eprintln!("Receiving {id}");
+    eprintln!("  -> {}", abs_path.display());
+    eprintln!(
+        "  The daemon keeps going if you press Ctrl-C. Run the same command to watch or resume it."
+    );
+    if no_wait {
+        eprintln!("  Started. Check it with: miasma transfers");
+        return Ok(());
+    }
+
+    let mut last_line_len = 0usize;
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let status =
+            match daemon_request(data_dir, ControlRequest::TransferStatus { id: id.clone() })
+                .await?
+            {
+                ControlResponse::TransferStatus(s) => s,
+                ControlResponse::Error(e) => bail!("daemon error: {e}"),
+                other => bail!("unexpected response: {other:?}"),
+            };
+
+        let line = format_progress(&status);
+        // Overwrite the previous line in place.
+        eprint!("\r{line:<width$}", width = last_line_len);
+        last_line_len = last_line_len.max(line.len());
+
+        match status.state {
+            TransferState::Running => continue,
+            TransferState::Complete => {
+                eprintln!();
+                eprintln!(
+                    "Done: {} in {:.1}s. Written to {}",
+                    human_bytes(status.bytes_done),
+                    status.elapsed_secs,
+                    abs_path.display()
+                );
+                return Ok(());
+            }
+            TransferState::Paused => {
+                eprintln!();
+                bail!(
+                    "paused: {}\n  The partial file and progress are kept. Run the same command to resume.",
+                    status.last_error.as_deref().unwrap_or("no reason recorded")
+                );
+            }
+            TransferState::Cancelled => {
+                eprintln!();
+                bail!("cancelled. Run the same command to resume.");
+            }
+            TransferState::Failed => {
+                eprintln!();
+                bail!(
+                    "{}",
+                    status.last_error.as_deref().unwrap_or("transfer failed")
+                );
+            }
+        }
+    }
+}
+
+async fn cmd_transfers(data_dir: &std::path::Path) -> Result<()> {
+    use miasma_core::{daemon_request, ControlRequest, ControlResponse};
+
+    let list = match daemon_request(data_dir, ControlRequest::TransferList).await? {
+        ControlResponse::TransferList(l) => l,
+        ControlResponse::Error(e) => bail!("daemon error: {e}"),
+        other => bail!("unexpected response: {other:?}"),
+    };
+    if list.is_empty() {
+        eprintln!("No transfers.");
+        return Ok(());
+    }
+    for s in &list {
+        println!("{}", s.mid);
+        println!("  {:?}  {}", s.state, format_progress(s));
+        if let Some(e) = &s.last_error {
+            println!("  last error: {e}");
+        }
+        if s.resumable {
+            println!(
+                "  resumable: run `miasma network-get {} -o <file>` again",
+                s.mid
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_transfer_cancel(data_dir: &std::path::Path, mid: &str) -> Result<()> {
+    use miasma_core::{daemon_request, ControlRequest, ControlResponse};
+
+    match daemon_request(
+        data_dir,
+        ControlRequest::TransferCancel { id: mid.to_owned() },
+    )
+    .await?
+    {
+        ControlResponse::TransferCancelled => {
+            eprintln!("Cancel requested; it stops at the next safe point and stays resumable.");
+            Ok(())
+        }
+        ControlResponse::Error(e) => bail!("{e}"),
         other => bail!("unexpected response: {other:?}"),
     }
 }
@@ -1937,5 +2259,168 @@ fn cleanup_old_logs(dir: &std::path::Path, prefix: &str, keep: usize) {
     logs.sort_by(|a, b| b.1.cmp(&a.1));
     for (path, _) in logs.into_iter().skip(keep) {
         let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod transfer_password_tests {
+    use super::read_transfer_password;
+
+    fn file_with(contents: &str) -> tempfile::TempPath {
+        let path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn no_source_means_no_password() {
+        assert!(read_transfer_password(None, false).unwrap().is_none());
+    }
+
+    #[test]
+    fn only_the_line_ending_is_stripped() {
+        let unix = file_with("hunter2\n");
+        let windows = file_with("hunter2\r\n");
+        let bare = file_with("hunter2");
+        for p in [&unix, &windows, &bare] {
+            let got = read_transfer_password(Some(p.as_ref()), false)
+                .unwrap()
+                .unwrap();
+            assert_eq!(got.as_str(), "hunter2");
+        }
+    }
+
+    #[test]
+    fn spaces_are_part_of_the_password() {
+        let p = file_with("  two words and a trailing space \n");
+        let got = read_transfer_password(Some(p.as_ref()), false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.as_str(), "  two words and a trailing space ");
+    }
+
+    #[test]
+    fn only_the_first_line_is_used() {
+        let p = file_with("first\nsecond\n");
+        let got = read_transfer_password(Some(p.as_ref()), false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.as_str(), "first");
+    }
+
+    #[test]
+    fn an_empty_password_is_refused() {
+        for body in ["", "\n", "\r\n"] {
+            let p = file_with(body);
+            assert!(
+                read_transfer_password(Some(p.as_ref()), false).is_err(),
+                "{body:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_file_is_an_error_not_no_password() {
+        let missing = std::path::Path::new("definitely/not/here.txt");
+        assert!(read_transfer_password(Some(missing), false).is_err());
+    }
+}
+
+#[cfg(test)]
+mod transfer_progress_tests {
+    use super::{format_progress, human_bytes, human_duration};
+    use miasma_core::transfer::{Phase, TransferState, TransferStatus};
+
+    fn status() -> TransferStatus {
+        TransferStatus {
+            mid: "miasma:x".into(),
+            phase: Phase::Transferring,
+            state: TransferState::Running,
+            segments_done: 27,
+            segments_total: 64,
+            bytes_done: 27 * 64 * 1024 * 1024,
+            bytes_total: 64 * 64 * 1024 * 1024,
+            rate_bps: 85.0 * 1_048_576.0,
+            eta_secs: Some(42),
+            elapsed_secs: 20.0,
+            fetch_ms: 6_000,
+            decode_ms: 800,
+            write_ms: 3_200,
+            pieces_fetched: 270,
+            pieces_rejected: 0,
+            segment_retries: 0,
+            resumed_from_segment: 0,
+            last_error: None,
+            resumable: false,
+        }
+    }
+
+    #[test]
+    fn sizes_are_binary_and_human() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(17), "17 B");
+        assert_eq!(human_bytes(1024), "1.0 KiB");
+        assert_eq!(human_bytes(64 * 1024 * 1024), "64.0 MiB");
+        assert_eq!(human_bytes(100 * 1024 * 1024 * 1024), "100.0 GiB");
+    }
+
+    #[test]
+    fn durations_are_hh_mm_ss() {
+        assert_eq!(human_duration(0), "00:00:00");
+        assert_eq!(human_duration(42), "00:00:42");
+        assert_eq!(human_duration(3_725), "01:02:05");
+    }
+
+    #[test]
+    fn a_running_transfer_shows_percent_segments_size_rate_eta_and_where_time_goes() {
+        let line = format_progress(&status());
+        assert!(line.contains("42.2%"), "{line}");
+        assert!(line.contains("seg 27/64"), "{line}");
+        assert!(line.contains("1.7 GiB / 4.0 GiB"), "{line}");
+        assert!(line.contains("85.0 MiB/s"), "{line}");
+        assert!(line.contains("ETA 00:00:42"), "{line}");
+        assert!(line.contains("fetch 60% decode 8% write 32%"), "{line}");
+        assert!(!line.contains("rejected"), "{line}");
+        assert!(!line.contains("retries"), "{line}");
+    }
+
+    #[test]
+    fn rejected_pieces_and_retries_are_called_out_only_when_they_happen() {
+        let mut s = status();
+        s.pieces_rejected = 3;
+        s.segment_retries = 2;
+        let line = format_progress(&s);
+        assert!(line.contains("rejected pieces: 3"), "{line}");
+        assert!(line.contains("retries: 2"), "{line}");
+    }
+
+    #[test]
+    fn other_phases_say_what_is_happening_instead_of_a_bar() {
+        let mut s = status();
+        s.phase = Phase::Preparing;
+        assert!(format_progress(&s).contains("looking up"));
+        s.phase = Phase::Verifying;
+        assert!(format_progress(&s).contains("verifying"));
+        s.phase = Phase::Finalizing;
+        assert!(format_progress(&s).contains("MID"));
+    }
+
+    #[test]
+    fn an_unknown_total_still_renders() {
+        // A legacy record has no manifest, so no byte total.
+        let mut s = status();
+        s.bytes_total = 0;
+        let line = format_progress(&s);
+        assert!(line.contains("seg 27/64"), "{line}");
+        assert!(line.contains("1.7 GiB"), "{line}");
+    }
+
+    #[test]
+    fn a_complete_transfer_is_a_full_bar_and_never_over_100() {
+        let mut s = status();
+        s.bytes_done = s.bytes_total + 12345;
+        let line = format_progress(&s);
+        assert!(line.contains("100.0%"), "{line}");
+        assert!(line.contains(&"#".repeat(24)), "{line}");
     }
 }

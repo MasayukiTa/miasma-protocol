@@ -579,4 +579,89 @@ mod tests {
         assert!(len < 2 * 1024 * 1024, "manifest is {len} bytes");
         assert!(len < MANIFEST_MAX_BYTES);
     }
+
+    /// The whole signed value — worst-case record *plus* manifest — for a
+    /// 100 GiB file must stay under the DHT's hard cap. The record half is built
+    /// the way `network::node`'s own 100 GiB budget test builds it (four dial
+    /// addresses per holder, deliberately more than the normal one), so this is
+    /// that test with the manifest added.
+    #[test]
+    fn hundred_gib_record_plus_manifest_fits_the_dht_value_cap() {
+        use crate::network::{
+            node::{DHT_INNER_RECORD_MAX_BYTES, DHT_RECORD_MAX_VALUE_BYTES},
+            sybil::SignedDhtRecord,
+            types::ShardLocation,
+        };
+
+        let params = DissolutionParams::default();
+        let seg = crate::dissolution::DEFAULT_SEGMENT_SIZE as u32;
+        let total: u64 = 100 * 1024 * 1024 * 1024;
+        let segments = 1600u32;
+
+        let addrs = vec![
+            "/ip4/203.0.113.10/udp/4001/quic-v1".to_string(),
+            "/ip4/203.0.113.10/tcp/4001".to_string(),
+            "/ip6/2001:db8::10/udp/4001/quic-v1".to_string(),
+            "/dns4/node.example.net/tcp/443/wss".to_string(),
+        ];
+        let peer = libp2p::PeerId::random().to_bytes();
+        let mut locations = Vec::new();
+        for s in 0..segments {
+            for slot in 0..params.total_shards {
+                locations.push(ShardLocation {
+                    peer_id_bytes: peer.clone(),
+                    shard_index: slot as u16,
+                    segment_index: s,
+                    addrs: addrs.clone(),
+                });
+            }
+        }
+        let the_mid = ContentId::compute(b"budget", &params.to_param_bytes());
+        let mid_digest = *the_mid.as_bytes();
+        let rec = DhtRecord {
+            mid_digest,
+            data_shards: params.data_shards as u8,
+            total_shards: params.total_shards as u8,
+            version: 1,
+            locations,
+            published_at: 0,
+        };
+
+        let mut m = TransferManifest::new(&the_mid, params, seg, total, Protection::None);
+        for i in 0..segments {
+            m.push_segment(SegmentEntry {
+                index: i,
+                plaintext_len: seg,
+                plain_hash: [i as u8; 32],
+                piece_ids: vec![[i as u8; 32]; params.total_shards],
+            })
+            .unwrap();
+        }
+
+        let value = encode_record_value(&rec, Some(&m)).unwrap();
+        let record_only = bincode::serialize(&rec).unwrap().len();
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x5A; 32]);
+        let envelope = bincode::serialize(&SignedDhtRecord::sign(
+            rec.dht_key(),
+            value.clone(),
+            &signing_key,
+        ))
+        .unwrap();
+        println!(
+            "100 GiB: record {record_only} B + manifest {} B = value {} B, envelope {} B \
+             (inner cap {DHT_INNER_RECORD_MAX_BYTES}, value cap {DHT_RECORD_MAX_VALUE_BYTES})",
+            value.len() - record_only,
+            value.len(),
+            envelope.len()
+        );
+        assert!(value.len() < DHT_INNER_RECORD_MAX_BYTES);
+        assert!(envelope.len() < DHT_RECORD_MAX_VALUE_BYTES);
+
+        // And it still decodes, both ways.
+        let (r2, m2) = decode_record_value(&value).unwrap();
+        assert_eq!(r2.locations.len(), 32_000);
+        assert_eq!(m2.unwrap().segments.len(), 1600);
+        let legacy: DhtRecord = bincode::deserialize(&value).unwrap();
+        assert_eq!(legacy.locations.len(), 32_000);
+    }
 }

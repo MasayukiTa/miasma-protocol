@@ -1,7 +1,7 @@
 # Protected, resumable large-file transfer — plan and running log
 
 Branch: `work/resumable-protected-transfer` (based on `work/large-file-release-gate`).
-Started: 2026-09-29. Status: **Phase 1 (primitives) done; Phases 2-6 not started.** See §6 for what was actually run.
+Started: 2026-09-29. Status: **Phases 1-3 done (primitives, publish side, receive engine + CLI). Phase 4 (sender progress/resume), 5 (redundancy experiment), 6 (runbook) not started.** See §6 for what was actually run.
 
 ## 0. 要約 (Japanese summary for the owner)
 
@@ -24,8 +24,16 @@ Nothing in this section was run; every item is from reading the code.
 1. **Retrieval has no progress and no resume.** `daemon/mod.rs` `GetToFile` writes straight to
    the output path, returns one response at the very end, and on *any* error — including the final
    whole-file MID mismatch — deletes the output. A failure at 99 GB restarts from zero.
-2. **One bad fetch kills the transfer.** `retrieval/streaming.rs` does `source.fetch(addr).await?`
-   inside the per-segment loop, so the first transport error aborts the whole stream.
+2. **A segment that cannot reach `k` valid pieces ends the transfer, and there is no retry at that
+   level.** `retrieval/streaming.rs` walks the candidate list once; `FallbackShareSource::fetch`
+   turns a failed transport into `Ok(None)` (so one dead holder does not abort — `?` only fires
+   on a malformed locator), but if fewer than `k` valid pieces turn up the stream yields
+   `InsufficientShares` and `GetToFile` deletes the output. *(Corrected 2026-09-29: an earlier
+   version of this line said a single transport error aborts the stream; reading
+   `retrieval/transport_source.rs` shows it does not.)*
+   Also read from that file, unmeasured: `list_candidates_for_segment` calls `self.dht.get(mid)`
+   every time, so a 1600-segment transfer performs 1600 DHT GETs of a ~8 MB record. The new receive
+   engine fetches the record once.
 3. **Pieces are not individually identified by the receiver.** Each `MiasmaShare` carries its own
    `shard_hash`, but the receiver has no list of *expected* piece IDs, so a holder can serve any
    self-consistent junk and it is only caught after RS decode + AEAD fail.
@@ -35,6 +43,11 @@ Nothing in this section was run; every item is from reading the code.
 5. **Redundancy is fixed by default at 2.0×** (`k=10, n=20`). For a 100 GiB file that is
    205,051 MiB (200.24 GiB) of owned-share quota; the sender needs ≈300 GiB free.
    `rs_encode` rejects `n <= k`, so redundancy cannot go below `n = k + 1`.
+7. **Serving one piece cost O(pieces in the store) full decryptions.** *(Found by measurement while
+   building Phase 3; see §6.)* `search_by_mid_prefix` decrypted every stored share to read its header,
+   the serving handler then decrypted candidates again, and each `get` rewrote the whole index file.
+   For a 100 GiB publish that is 32,000 shares — about 200 GiB of decryption per fetch request on the
+   sender. Nothing else in this plan can matter until that is gone.
 6. **The receiver must already know `k` and `n`.** The MID is `BLAKE3(plaintext ‖ "k=..,n=..,v=1")`
    and the MID string does not carry them; `GetToFile` takes them from CLI flags (default 10/20).
    Changing redundancy is therefore unusable until the receiver can learn it from the record.
@@ -190,9 +203,11 @@ appends the trailer; `DhtHandle::get_record_with_manifest`; `PublishFile` gains
 `password`/`data_shards`/`total_shards`.
 *Accept:* 2-node loopback publish → record carries the manifest; legacy get still works.
 
-**Phase 3 — receive engine.** New module `transfer/receive.rs`; piece-ID verification; per-piece
-error tolerance; retries; `.part`/journal/resume; progress; IPC + CLI (`--password-file`,
-`--resume`/`--restart`).
+**Phase 3 — receive engine.** New module `transfer/receive.rs`; piece-ID verification; segment-level
+retry with backoff; `.part`/journal/resume; progress; IPC + CLI (`--password-file`,
+`--resume`/`--restart`). The engine is generic over a `PieceSource` trait so it is unit-tested
+with a fault-injecting source (junk pieces, dead holders, a source that dies mid-transfer, a
+corrupted `.part`), and it fetches the record and manifest **once** rather than per segment.
 *Accept (loopback, 2 daemons):* wrong password rejected before data transfer; junk piece rejected
 and the next candidate used; kill the receiver mid-transfer → resume completes with a byte-identical
 file and does **not** re-fetch completed segments (asserted via a fetch counter); MID mismatch ⇒
@@ -219,6 +234,69 @@ here use `CARGO_INCREMENTAL=0`, `CARGO_PROFILE_DEV_DEBUG=0` and the `vcvars64` w
 `miasma-core` test build is **0.93 GB** in `target/`, against 10-17 GB for a default debug build. A build failure with `os error 1455` / `LNK1102` /
 `LNK1140` means the disk is full, not that the code is wrong. Tests that need real volume run on
 the owner's Mac + external SSD, not here.
+
+### Phase 2 — publish side (2026-09-29)
+
+- `publish_file_inner` always emits a manifest (piece IDs + per-segment hashes) alongside the
+  record; `dissolve_and_publish_file_protected` adds the password. New IPC `PublishFileProtected`
+  (a separate variant so existing `PublishFile` callers are untouched); CLI `network-publish
+  --password-file FILE | --password-stdin` (never argv). `DhtHandle::put_with_manifest` /
+  `get_record_with_manifest`; a damaged trailer refuses the whole record instead of reading as
+  "unprotected".
+- **Measured** (unit test `hundred_gib_record_plus_manifest_fits_the_dht_value_cap`): for a 100 GiB
+  file at `k=10, n=20`, worst-case record 6,912,051 B + manifest 1,100,868 B = **8,012,919 B**
+  value (8,013,071 B signed envelope) against caps of 16,711,680 B and 16,777,216 B.
+- **Ran, two real nodes on loopback:** the manifest read back from the *second* node matches every
+  share the publisher stored (piece ID = shard hash, per slot); a pre-manifest decoder still reads
+  the record; a protected publish is unreadable through the ordinary read path and, with the
+  password, reassembles byte-identical from the stored shares; an empty password is refused.
+
+### Phase 3 — receive engine (2026-09-29)
+
+- `transfer::receive` (engine over a `PieceSource` trait), `progress`, `journal`, `jobs`
+  (background jobs, one registry per data directory), `network` (real transport adapter,
+  record + manifest fetched **once**). IPC `TransferStartReceive / TransferStatus /
+  TransferList / TransferCancel`; CLI `network-get -o` now starts a job and draws a progress line,
+  with `--password-file/--password-stdin/--restart/--no-wait`, plus `miasma transfers` and
+  `miasma transfer-cancel`.
+- **Ran, fault-injecting source (14 engine tests):** completes byte-for-byte with and without a
+  password; wrong password refused with **zero** pieces fetched; junk pieces (self-consistent and
+  inconsistent) rejected by ID and the next holder used; a segment with too few good pieces
+  pauses with the partial file and journal kept; resume does **not** re-fetch segments already
+  on disk; a byte flipped inside a partial segment is detected and only from that segment on is
+  redone; a journal for a different manifest is ignored; `--restart` discards; cancel stops at a
+  safe point and resumes; a publisher that lies about the MID (every piece and segment check
+  passes) never gets an output file, part file or journal; a record with no manifest still
+  transfers and resumes but refuses a password; empty file, exact multiples of the segment size,
+  and `n == k` all work.
+- **Ran, two real nodes over the network:** wrong password refused; cancel after segment 0
+  (`Cancelled{next_segment: 1}`), then the second run reports `resumed_from_segment == 1` and the
+  output is byte-identical. **Ran, two real daemons over IPC:** start/status/list/cancel, a failed
+  job ends `Failed` (not `Running` forever), an unknown or finished id cannot be cancelled.
+- **Ran:** the full `miasma-core` suite (lib, adversarial, integration, and the new files) and
+  the CLI tests, all green.
+
+### Finding: one fetch cost seconds, and would cost hours at 100 GiB (2026-09-29)
+
+Measured with `measure_single_piece_fetch_latency_on_loopback` (two nodes, loopback, **debug
+build**), a single piece fetch took **15.6-22.7 s regardless of size** — 17.8-22.7 s for a 32 KiB
+shard, 15.6-18.3 s for an 8 MiB shard — while the record lookup took 20-26 ms. A cost that ignores
+the size is not bandwidth. Cause (read in `store.rs` and the serving handler in `node.rs`): serving
+a request called `search_by_mid_prefix`, which decrypts **every** stored share to read its header,
+then decrypted candidates again, and each `get` rewrote the index. Cost per request grew with the
+number of shares in the store.
+
+Fix: each index entry now records its piece key `(mid_prefix, segment, slot)`; the handler uses
+`find_piece` (index lookup, no decryption, parsed index cached against the file's stamp, newest
+generation wins) and `get_untouched` (no index rewrite). Stores written before this get their keys
+filled in once, lazily. **After**, same probe: **26-61 ms** for the 32 KiB shard and **4.9-5.6 s**
+for the 8 MiB shard. The remaining ~5 s is one 8 MiB share through unoptimized decrypt + hash +
+bincode in a debug build (~1.5 MB/s); a release build was **not** measured. Side effect, measured:
+`integration_test` went from 212 s to 75 s and `transfer_publish_test` from 124 s to 78 s.
+
+Still open in the same file, **not** changed (the owner wants to measure speed on a real run first):
+`put` re-parses and rewrites the whole JSON index per share, so publishing is quadratic in the
+share count (estimate ~0.24 TB of JSON work for 100 GiB; not measured).
 
 ### Incident: the Windows Search index filled the disk (2026-09-29, 20:1x)
 
@@ -280,6 +358,11 @@ Each entry says what was actually run. Machine: Windows 11, slim debug profile (
 - D3 Sender resume needs the password again on restart; it is never stored.
 - Open: default preset for `network-publish` once Phase 5 has data (kept at 10/20 until then).
 - Open: whether shard distribution to third peers (hosted quota) is wanted for this use case.
+- **Requested 2026-09-29, deferred ("later is fine"): Japanese text.** Scope not yet stated;
+  assumed to cover the user-facing strings this work adds — CLI progress line and errors
+  (`wrong password`, `paused, run again to resume`, ...), desktop locale entries, and the runbook.
+  The strings are kept in one place per surface so this is a translation pass, not a refactor.
+  To confirm with the owner which surfaces are wanted before doing it.
 
 ## 8. Working rules for this branch
 
