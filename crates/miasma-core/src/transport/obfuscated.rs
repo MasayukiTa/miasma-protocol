@@ -133,7 +133,7 @@ pub struct ObfuscatedConfig {
     pub server_cert_der: Option<Vec<u8>>,
 
     /// DER-encoded private key (PKCS#8). If `None`, generated with the cert.
-    pub server_key_der: Option<Vec<u8>>,
+    pub server_key_der: Option<Zeroizing<Vec<u8>>>,
 
     /// Enable true REALITY mode.
     ///
@@ -192,9 +192,6 @@ const AUTH_HEADER_LEN: usize = AUTH_NONCE_LEN + AUTH_TOKEN_LEN;
 impl Drop for ObfuscatedConfig {
     fn drop(&mut self) {
         self.probe_secret.zeroize();
-        if let Some(server_key_der) = self.server_key_der.as_mut() {
-            server_key_der.zeroize();
-        }
     }
 }
 
