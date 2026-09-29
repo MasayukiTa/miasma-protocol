@@ -50,7 +50,6 @@ pub struct ProbeResponse {
 #[derive(Clone, Default)]
 pub struct RelayProbeCodec;
 
-#[async_trait::async_trait]
 impl libp2p::request_response::Codec for RelayProbeCodec {
     type Protocol = libp2p::StreamProtocol;
     type Request = ProbeRequest;
