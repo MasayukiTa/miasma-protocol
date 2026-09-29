@@ -46,6 +46,7 @@
 ///   supplied via `ObfuscatedConfig`).
 /// - Client skips certificate verification (authentication is via
 ///   `probe_secret`, not PKI).
+use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -111,7 +112,7 @@ impl BrowserFingerprint {
 // ─── Configuration ────────────────────────────────────────────────────────────
 
 /// Configuration for the obfuscated QUIC transport.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ObfuscatedConfig {
     /// 32-byte shared secret.  Clients embed this in the TLS handshake;
     /// servers use it to distinguish Miasma clients from active probers.
@@ -144,6 +145,23 @@ pub struct ObfuscatedConfig {
     /// connections to the real HTTPS server at `fallback_url` — so active probers
     /// receive the genuine TLS certificate of the fallback site.
     pub reality_mode: bool,
+}
+
+impl fmt::Debug for ObfuscatedConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ObfuscatedConfig")
+            .field("probe_secret", &"<redacted>")
+            .field("fingerprint", &self.fingerprint)
+            .field("fallback_url", &self.fallback_url)
+            .field("sni", &self.sni)
+            .field(
+                "server_cert_der_len",
+                &self.server_cert_der.as_ref().map(Vec::len),
+            )
+            .field("server_key_der_configured", &self.server_key_der.is_some())
+            .field("reality_mode", &self.reality_mode)
+            .finish()
+    }
 }
 
 impl ObfuscatedConfig {
@@ -905,6 +923,24 @@ impl PluggableTransport for ObfuscatedQuicTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn obfuscated_config_debug_redacts_secret_material() {
+        let mut cfg = ObfuscatedConfig::new(
+            [0xAB; 32],
+            "cdn.example.com",
+            "https://cdn.example.com",
+            BrowserFingerprint::Chrome124,
+        );
+        cfg.server_key_der = Some(Zeroizing::new(vec![0xCD; 32]));
+        let probe_debug = format!("{:?}", cfg.probe_secret);
+        let key_debug = format!("{:?}", cfg.server_key_der.as_ref().unwrap());
+        let rendered = format!("{cfg:?}");
+        assert!(!rendered.contains(&probe_debug));
+        assert!(!rendered.contains(&key_debug));
+        assert!(rendered.contains("probe_secret: \"<redacted>\""));
+        assert!(rendered.contains("server_key_der_configured: true"));
+    }
 
     // --- Existing tests (preserved) ---
 
