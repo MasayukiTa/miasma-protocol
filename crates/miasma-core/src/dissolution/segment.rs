@@ -62,11 +62,10 @@ pub fn dissolve_segment_with(
     let (ciphertext, k_enc, nonce) = match password_key {
         None => encrypt(segment_data)?,
         Some(unlocked) => {
-            use rand::RngCore as _;
+            use rand::{Rng as _, RngCore as _};
             let mut k_enc = Zeroizing::new([0u8; KEY_LEN]);
             rand::rngs::OsRng.fill_bytes(k_enc.as_mut());
-            let mut nonce = [0u8; NONCE_LEN];
-            rand::rngs::OsRng.fill_bytes(&mut nonce);
+            let nonce: [u8; NONCE_LEN] = rand::rngs::OsRng.gen();
             let k_seg = unlocked.segment_key(k_enc.as_ref(), mid, segment_index)?;
             let ciphertext = encrypt_with_key(segment_data, &k_seg, &nonce)?;
             (ciphertext, k_enc, nonce)
