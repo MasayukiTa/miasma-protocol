@@ -14,7 +14,7 @@ use miasma_core::{
     DissolutionParams, MiasmaNode, NodeType,
 };
 use tracing::info;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 // ─── CLI definition ───────────────────────────────────────────────────────────
 
@@ -1603,7 +1603,7 @@ async fn cmd_inbox(data_dir: &std::path::Path) -> Result<()> {
     use miasma_core::{daemon_request, ControlRequest, ControlResponse};
 
     match daemon_request(data_dir, ControlRequest::DirectedInbox).await? {
-        ControlResponse::DirectedInboxList(items) => {
+        ControlResponse::DirectedInboxList(mut items) => {
             if items.is_empty() {
                 println!("Inbox is empty.");
                 return Ok(());
@@ -1631,6 +1631,11 @@ async fn cmd_inbox(data_dir: &std::path::Path) -> Result<()> {
                     eprintln!("  → Share this code with the sender for confirmation.");
                 }
                 println!();
+            }
+            for item in &mut items {
+                if let Some(code) = item.challenge_code.as_mut() {
+                    code.zeroize();
+                }
             }
         }
         ControlResponse::Error(e) => bail!("inbox error: {e}"),
