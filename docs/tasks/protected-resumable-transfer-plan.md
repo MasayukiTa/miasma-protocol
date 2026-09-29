@@ -438,6 +438,24 @@ Each entry says what was actually run. Machine: Windows 11, slim debug profile (
 - **Not yet run:** integration tests (`cargo test -p miasma-core --tests`), the wasm crate (it has its own copy of the RS code and still rejects `n == k`; deliberately
   left alone — the browser build is not part of this transfer path).
 
+### Stage A — theme and fonts, `miasma-desktop` (2026-09-30)
+
+- `theme.rs` (tokens from §9, `ThemeMode` System/Light/Dark in `desktop-prefs.toml`, missing field = System,
+  selector in Settings), `fonts.rs` (per-OS discovery, Meiryo first, never bundled), all `const` colours and
+  inline literals in `app.rs` replaced; status is chip + text colour, no full-card fills, accent only on primary
+  buttons. New `--data-dir <path>` launch flag so a throwaway instance never touches real data.
+- **Ran:** `cargo test -p miasma-desktop` — 45 passed, 0 failed (theme: token table, WCAG contrast text/muted >= 4.5
+  on bg/surface/surface_subtle/selected in both modes, white on accent_fill >= 4.5; fonts: tempdir discovery; prefs
+  from an old file load as System).
+- **Saw in the running window:** the log shows Meiryo (`C:\WINDOWS\Fonts\meiryo.ttc`) first in the proportional chain.
+  A GL window cannot be captured with `PrintWindow` from a private desktop (white frame), so the app itself renders
+  screenshots: cargo feature `ui-tour` (developer only, `src/app/tour.rs`, env `MIASMA_UI_TOUR=<dir>`) walked
+  theme x En/Ja x all 7 tabs plus 3 connection states (40 frames) with no tofu and no clipped buttons. Real
+  mouse messages on the Settings selector wrote `locale = "ja"`, `theme = "dark"` and `theme = "system"` to the prefs
+  file; System resolved to light, matching the OS.
+- Not verified: macOS (no Mac here; the discovery tables are data + a tempdir test), Meiryo vs. the fallback chain
+  when Meiryo is absent, the `Import` tab (needs a magnet/torrent launch argument).
+
 ## 7. Decisions and open questions
 
 - D1 Manifest lives in the record trailer, not a second DHT key. (Reason in §2.2.)
