@@ -9,7 +9,10 @@ use std::{sync::Arc, time::Duration};
 
 use miasma_core::{
     dissolution::{segment::retrieve_segment_with, SegmentMeta},
-    transfer::{PieceSource, Protection, ReceiveOutcome, TransferProgress, TransferState},
+    transfer::{
+        publish::{PublishOutcome, PublishSpec},
+        PieceSource, Protection, ReceiveOutcome, TransferProgress, TransferState,
+    },
     DissolutionParams, LocalShareStore, MiasmaCoordinator, MiasmaError, MiasmaNode, Multiaddr,
     NodeType, PublishOptions,
 };
@@ -21,6 +24,10 @@ use tokio::time::timeout;
 /// at `k = 2` without needing a 64 MiB fixture.
 const MAX_SEGMENT_K2: usize = (8 * 1024 * 1024 - 4096) * 2;
 const TWO_SEGMENT_LEN: usize = MAX_SEGMENT_K2 + 64 * 1024;
+/// Two segments where the second is big enough (4 MiB) that a cancel requested when
+/// the first finishes is always seen before the second does: with a 64 KiB second
+/// segment the whole run can finish inside one polling interval.
+const SEND_TEST_LEN: usize = MAX_SEGMENT_K2 + 4 * 1024 * 1024;
 
 fn params() -> DissolutionParams {
     DissolutionParams {
@@ -296,18 +303,7 @@ async fn a_protected_transfer_is_received_over_the_network_and_resumes_after_a_c
 
         // First attempt: cancel as soon as segment 0 is safely on disk.
         let progress = TransferProgress::new(mid.to_string());
-        let watcher = {
-            let p = progress.clone();
-            tokio::spawn(async move {
-                loop {
-                    if p.snapshot().segments_done >= 1 {
-                        p.cancel();
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                }
-            })
-        };
+        progress.stop_after_segments(1);
         let first = b
             .receive_file(
                 &mid,
@@ -319,7 +315,6 @@ async fn a_protected_transfer_is_received_over_the_network_and_resumes_after_a_c
             )
             .await
             .unwrap();
-        watcher.abort();
         assert_eq!(first, ReceiveOutcome::Cancelled { next_segment: 1 });
         assert_eq!(progress.snapshot().state, TransferState::Cancelled);
         assert!(!out.exists(), "no output name until the file is whole");
@@ -422,4 +417,259 @@ async fn measure_single_piece_fetch_latency_on_loopback() {
             got.is_some()
         );
     }
+}
+
+// ─── Not pushing to a peer that has said "no room" ──────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_with_no_hosted_quota_is_refused_once_not_once_per_share() {
+    timeout(Duration::from_secs(180), async {
+        // B is connected to A and has the default hosted quota of zero, so it
+        // refuses every pushed share. 2 segments x 3 shares = 6 shares in all.
+        let (a, _store_a, b) = connected_pair(0x71, 0x72).await;
+        // Give A time to see B as an admitted, connected peer: pushes only go to those.
+        b.wait_until_peer_connected(*a.peer_id(), Duration::from_secs(10))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        let data = content(TWO_SEGMENT_LEN);
+        let path = write_temp(&data);
+        let report = a
+            .dissolve_and_publish_file_with_options(&path, params(), PublishOptions::default())
+            .await
+            .unwrap();
+
+        let (attempted, refused) = a.push_counts();
+        println!("pushes attempted {attempted}, refused {refused}");
+        assert!(
+            refused <= 1,
+            "a peer that refused for lack of quota must not be offered every share again              (attempted {attempted}, refused {refused})"
+        );
+        assert!(
+            attempted <= 2,
+            "at most the refused push plus one raced in flight (attempted {attempted})"
+        );
+
+        // The publish itself is unaffected: the publisher keeps every share.
+        let (_rec, manifest) = b
+            .dht_handle()
+            .get_record_with_manifest(*report.mid.as_bytes())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(manifest.is_some());
+    })
+    .await
+    .expect("timed out");
+}
+
+// ─── Publishing with progress, cancel and resume ────────────────────────────
+
+fn send_spec(
+    path: &std::path::Path,
+    password: Option<&str>,
+    journal_dir: &std::path::Path,
+) -> PublishSpec {
+    PublishSpec {
+        file_path: path.to_path_buf(),
+        params: params(),
+        options: PublishOptions::default(),
+        password: password.map(|p| zeroize::Zeroizing::new(p.to_owned())),
+        journal_dir: Some(journal_dir.to_path_buf()),
+        restart: false,
+    }
+}
+
+fn no_send_journal_left(dir: &std::path::Path) -> bool {
+    std::fs::read_dir(dir)
+        .map(|it| {
+            it.flatten()
+                .all(|e| !e.file_name().to_string_lossy().starts_with("send-"))
+        })
+        .unwrap_or(true)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancelled_publish_resumes_and_the_result_is_a_working_transfer() {
+    timeout(Duration::from_secs(600), async {
+        let (a, store_a, b) = connected_pair(0x81, 0x82).await;
+        let data = content(SEND_TEST_LEN);
+        let path = write_temp(&data);
+        let journals = tempfile::tempdir().unwrap().keep();
+        let password = "send-side-secret";
+
+        // First run: stop as soon as segment 0 is on disk.
+        let p1 = TransferProgress::for_send(path.to_string_lossy());
+        p1.stop_after_segments(1);
+        let first = a
+            .publish_file_job(
+                send_spec(&path, Some(password), &journals),
+                Some(p1.clone()),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(first, PublishOutcome::Cancelled { next_segment: 1 }),
+            "expected Cancelled at segment 1, got {first:?}"
+        );
+        let s1 = p1.snapshot();
+        assert_eq!(s1.state, TransferState::Cancelled);
+        assert!(s1.resumable, "a cancelled publish keeps its journal");
+        assert!(
+            !s1.mid.is_empty(),
+            "the MID is known once the file is hashed"
+        );
+        let stored_before: std::collections::HashSet<String> = store_a.list().into_iter().collect();
+        assert_eq!(stored_before.len(), 3, "segment 0 = 3 shares");
+
+        // A wrong password on resume fails before any work is redone.
+        let wrong = a
+            .publish_file_job(send_spec(&path, Some("nope"), &journals), None)
+            .await;
+        assert!(
+            matches!(wrong, Err(MiasmaError::WrongPassword)),
+            "{wrong:?}"
+        );
+
+        // Second run, right password: finishes, without redoing segment 0.
+        let p2 = TransferProgress::for_send(path.to_string_lossy());
+        let second = a
+            .publish_file_job(
+                send_spec(&path, Some(password), &journals),
+                Some(p2.clone()),
+            )
+            .await
+            .unwrap();
+        let report = match second {
+            PublishOutcome::Complete(r) => r,
+            _ => panic!("the resumed publish must complete"),
+        };
+        let s2 = p2.snapshot();
+        assert_eq!(s2.state, TransferState::Complete);
+        assert_eq!(s2.resumed_from_segment, 1, "segment 0 must not be redone");
+        assert_eq!(s2.segments_done, 2);
+        assert_eq!(s2.bytes_done, SEND_TEST_LEN as u64);
+        // Segment 0's shares are exactly the ones the first run stored.
+        let stored_after: std::collections::HashSet<String> = store_a.list().into_iter().collect();
+        assert!(stored_before.is_subset(&stored_after));
+        assert_eq!(stored_after.len(), 6);
+        assert!(
+            no_send_journal_left(&journals),
+            "a finished publish removes its journal"
+        );
+
+        // The record and manifest are complete and consistent...
+        let (_rec, manifest) = b
+            .dht_handle()
+            .get_record_with_manifest(*report.mid.as_bytes())
+            .await
+            .unwrap()
+            .unwrap();
+        let manifest = manifest.unwrap();
+        manifest.validate().unwrap();
+        assert_eq!(manifest.segments.len(), 2);
+        assert_eq!(
+            manifest.segments[0].plain_hash,
+            *blake3::hash(&data[..MAX_SEGMENT_K2]).as_bytes()
+        );
+
+        // ...and the other node can actually receive the file, byte for byte.
+        let dir = tempfile::tempdir().unwrap().keep();
+        let out = dir.join("payload.bin");
+        let outcome = b
+            .receive_file(
+                &report.mid,
+                &out,
+                Some(zeroize::Zeroizing::new(password.to_owned())),
+                &dir.join("transfers"),
+                false,
+                TransferProgress::new(report.mid.to_string()),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ReceiveOutcome::Complete { .. }));
+        assert_eq!(std::fs::read(&out).unwrap(), data);
+    })
+    .await
+    .expect("timed out");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_publish_is_not_resumed_if_the_source_changed_or_a_share_went_missing() {
+    timeout(Duration::from_secs(600), async {
+        let (a, store_a, _b) = connected_pair(0x91, 0x92).await;
+        let data = content(SEND_TEST_LEN);
+        let path = write_temp(&data);
+
+        // ── The source file changes between runs. ───────────────────────────
+        let journals = tempfile::tempdir().unwrap().keep();
+        let p1 = TransferProgress::for_send(path.to_string_lossy());
+        p1.stop_after_segments(1);
+        let first = a
+            .publish_file_job(send_spec(&path, None, &journals), Some(p1.clone()))
+            .await
+            .unwrap();
+        assert!(
+            matches!(first, PublishOutcome::Cancelled { next_segment: 1 }),
+            "the first run must stop after segment 0, got {first:?}"
+        );
+        let first_mid = p1.snapshot().mid;
+        assert!(
+            !no_send_journal_left(&journals),
+            "the stopped publish must have left a journal to (not) resume from"
+        );
+
+        // Same length, different bytes (and a new modification time).
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut changed = data.clone();
+        changed[10] ^= 0xFF;
+        std::fs::write(&path, &changed).unwrap();
+
+        let p2 = TransferProgress::for_send(path.to_string_lossy());
+        let outcome = a
+            .publish_file_job(send_spec(&path, None, &journals), Some(p2.clone()))
+            .await
+            .unwrap();
+        assert!(matches!(outcome, PublishOutcome::Complete(_)));
+        let s2 = p2.snapshot();
+        assert_eq!(
+            s2.resumed_from_segment, 0,
+            "a changed source must start over"
+        );
+        assert_ne!(s2.mid, first_mid, "the MID follows the new content");
+
+        // ── A share of a finished segment is gone from the local store. ─────
+        let path2 = write_temp(&content(SEND_TEST_LEN + 4096));
+        let journals2 = tempfile::tempdir().unwrap().keep();
+        let p3 = TransferProgress::for_send(path2.to_string_lossy());
+        p3.stop_after_segments(1);
+        let third = a
+            .publish_file_job(send_spec(&path2, None, &journals2), Some(p3.clone()))
+            .await
+            .unwrap();
+        assert!(
+            matches!(third, PublishOutcome::Cancelled { next_segment: 1 }),
+            "got {third:?}"
+        );
+        let mid3 = miasma_core::ContentId::from_str(&p3.snapshot().mid).unwrap();
+        let victim = store_a
+            .find_piece(&mid3.prefix(), 0, 1)
+            .expect("segment 0 slot 1 was stored");
+        store_a.delete(&victim).unwrap();
+
+        let p4 = TransferProgress::for_send(path2.to_string_lossy());
+        let outcome = a
+            .publish_file_job(send_spec(&path2, None, &journals2), Some(p4.clone()))
+            .await
+            .unwrap();
+        assert!(matches!(outcome, PublishOutcome::Complete(_)));
+        assert_eq!(
+            p4.snapshot().resumed_from_segment,
+            0,
+            "a segment with a missing share must be redone, not trusted"
+        );
+    })
+    .await
+    .expect("timed out");
 }

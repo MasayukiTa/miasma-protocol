@@ -20,9 +20,20 @@ use zeroize::Zeroizing;
 
 use super::{
     journal::ReceiveJournal,
-    progress::{Phase, TransferProgress, TransferState, TransferStatus},
+    progress::{Phase, TransferKind, TransferProgress, TransferState, TransferStatus},
+    publish::PublishSpec,
+    publish_journal::PublishJournal,
 };
-use crate::{crypto::hash::ContentId, network::MiasmaCoordinator};
+use crate::{
+    crypto::hash::ContentId,
+    network::{MiasmaCoordinator, PublishOptions},
+    pipeline::DissolutionParams,
+};
+
+/// The id of a send: the source path, prefixed so it can never collide with a MID.
+pub fn send_id(source: &Path) -> String {
+    format!("send:{}", source.to_string_lossy())
+}
 
 pub struct TransferRegistry {
     data_dir: PathBuf,
@@ -107,13 +118,66 @@ impl TransferRegistry {
         id
     }
 
+    /// Start (or resume) publishing the file at `file_path` in the background.
+    ///
+    /// Idempotent while a send of the same file is running. Otherwise it resumes
+    /// from the journal in [`journal_dir`](Self::journal_dir) unless `restart`.
+    pub fn start_publish(
+        &self,
+        coord: Arc<MiasmaCoordinator>,
+        file_path: PathBuf,
+        params: DissolutionParams,
+        password: Option<Zeroizing<String>>,
+        restart: bool,
+    ) -> String {
+        let id = send_id(&file_path);
+        let progress = {
+            let mut jobs = self.jobs.lock().unwrap();
+            if let Some(existing) = jobs.get(&id) {
+                if existing.snapshot().state == TransferState::Running {
+                    return id;
+                }
+            }
+            let p = TransferProgress::for_send(file_path.to_string_lossy());
+            jobs.insert(id.clone(), p.clone());
+            p
+        };
+
+        let spec = PublishSpec {
+            file_path,
+            params,
+            options: PublishOptions::default(),
+            password,
+            journal_dir: Some(self.journal_dir()),
+            restart,
+        };
+        let watched = progress.clone();
+        let task = tokio::spawn(async move {
+            // The outcome is recorded in `progress` by the engine itself.
+            let _ = coord.publish_file_job(spec, Some(progress)).await;
+        });
+        tokio::spawn(async move {
+            if let Err(e) = task.await {
+                watched.set_state(
+                    TransferState::Failed,
+                    Some(format!("publish task ended abnormally: {e}")),
+                    true,
+                );
+            }
+        });
+        id
+    }
+
     /// Current status of one transfer: the live job if there is one, otherwise
     /// a paused transfer known only from its journal.
     pub fn status(&self, id: &str) -> Option<TransferStatus> {
         if let Some(p) = self.jobs.lock().unwrap().get(id) {
             return Some(p.snapshot());
         }
-        self.journal_statuses().into_iter().find(|s| s.mid == id)
+        self.journal_statuses().into_iter().find(|s| match s.kind {
+            TransferKind::Receive => s.mid == id,
+            TransferKind::Send => send_id(Path::new(&s.name)) == id,
+        })
     }
 
     /// Every transfer: live jobs first, then journals with no live job.
@@ -125,13 +189,17 @@ impl TransferRegistry {
             .values()
             .map(|p| p.snapshot())
             .collect();
-        let live: std::collections::HashSet<String> = out.iter().map(|s| s.mid.clone()).collect();
+        let key = |s: &TransferStatus| match s.kind {
+            TransferKind::Receive => s.mid.clone(),
+            TransferKind::Send => send_id(Path::new(&s.name)),
+        };
+        let live: std::collections::HashSet<String> = out.iter().map(key).collect();
         out.extend(
             self.journal_statuses()
                 .into_iter()
-                .filter(|s| !live.contains(&s.mid)),
+                .filter(|s| !live.contains(&key(s))),
         );
-        out.sort_by(|a, b| a.mid.cmp(&b.mid));
+        out.sort_by_key(key);
         out
     }
 
@@ -152,15 +220,58 @@ impl TransferRegistry {
         let Ok(entries) = std::fs::read_dir(self.journal_dir()) else {
             return Vec::new();
         };
-        entries
-            .flatten()
-            .filter(|e| {
-                let n = e.file_name().to_string_lossy().to_string();
-                n.starts_with("recv-") && n.ends_with(".json")
-            })
-            .filter_map(|e| ReceiveJournal::load(&e.path()))
-            .map(|j| status_from_journal(&j))
-            .collect()
+        let mut out = Vec::new();
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with("recv-") && name.ends_with(".json") {
+                if let Some(j) = ReceiveJournal::load(&e.path()) {
+                    out.push(status_from_journal(&j));
+                }
+            } else if name.starts_with("send-") && name.ends_with(".jsonl") {
+                if let Some(j) = PublishJournal::load(&e.path()) {
+                    out.push(status_from_publish_journal(&j));
+                }
+            }
+        }
+        out
+    }
+}
+
+/// What a send journal alone can tell you.
+pub fn status_from_publish_journal(j: &PublishJournal) -> TransferStatus {
+    let seg = j.header.segment_size as u64;
+    let total_segments = if j.header.file_len == 0 {
+        1
+    } else {
+        j.header.file_len.div_ceil(seg) as u32
+    };
+    let done_bytes: u64 = j
+        .segments
+        .iter()
+        .map(|r| r.entry.plaintext_len as u64)
+        .sum();
+    TransferStatus {
+        mid: j.header.mid.clone(),
+        kind: TransferKind::Send,
+        name: j.header.path.clone(),
+        phase: Phase::Transferring,
+        state: TransferState::Paused,
+        segments_done: j.segments.len() as u32,
+        segments_total: total_segments,
+        bytes_done: done_bytes,
+        bytes_total: j.header.file_len,
+        rate_bps: 0.0,
+        eta_secs: None,
+        elapsed_secs: 0.0,
+        fetch_ms: 0,
+        decode_ms: 0,
+        write_ms: 0,
+        pieces_fetched: 0,
+        pieces_rejected: 0,
+        segment_retries: 0,
+        resumed_from_segment: j.segments.len() as u32,
+        last_error: None,
+        resumable: true,
     }
 }
 
@@ -168,6 +279,8 @@ impl TransferRegistry {
 pub fn status_from_journal(j: &ReceiveJournal) -> TransferStatus {
     TransferStatus {
         mid: j.mid.clone(),
+        kind: TransferKind::Receive,
+        name: j.output_path.clone(),
         phase: Phase::Transferring,
         state: TransferState::Paused,
         segments_done: j.next_segment,

@@ -18,12 +18,21 @@ use serde::{Deserialize, Serialize};
 pub enum Phase {
     /// Fetching the record and manifest, checking the password.
     Preparing,
+    /// Sending only: reading the whole source file once to compute its MID.
+    Hashing,
     /// Re-reading an existing partial file to confirm what it holds.
     Verifying,
     Transferring,
     /// Whole-file MID check and the final rename.
     Finalizing,
     Done,
+}
+
+/// Which way a transfer goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransferKind {
+    Receive,
+    Send,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,7 +49,11 @@ pub enum TransferState {
 /// A point-in-time copy of a transfer's progress. Plain data; safe to serialize.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TransferStatus {
+    /// The MID. For a send it is empty until the source file has been hashed.
     pub mid: String,
+    pub kind: TransferKind,
+    /// A receive's output path, or a send's source path.
+    pub name: String,
     pub phase: Phase,
     pub state: TransferState,
     pub segments_done: u32,
@@ -53,6 +66,8 @@ pub struct TransferStatus {
     pub rate_bps: f64,
     pub eta_secs: Option<u64>,
     pub elapsed_secs: f64,
+    /// Where the time went. Receive: fetching pieces / RS+decrypt / writing the
+    /// file. Send: pushing to peers / encrypting+RS+SSS / storing locally.
     pub fetch_ms: u64,
     pub decode_ms: u64,
     pub write_ms: u64,
@@ -69,6 +84,8 @@ pub struct TransferStatus {
 }
 
 struct Inner {
+    mid: String,
+    name: String,
     phase: Phase,
     state: TransferState,
     last_error: Option<String>,
@@ -79,7 +96,7 @@ struct Inner {
 
 /// Shared, thread-safe progress cell. Cheap to update from the engine.
 pub struct TransferProgress {
-    mid: String,
+    kind: TransferKind,
     started: Instant,
     inner: Mutex<Inner>,
     segments_done: AtomicU32,
@@ -96,14 +113,28 @@ pub struct TransferProgress {
     segment_retries: AtomicU64,
     resumed_from: AtomicU32,
     cancel: AtomicBool,
+    /// Cancel by itself once this many segments are done (`0` = never).
+    stop_after: AtomicU32,
 }
 
 impl TransferProgress {
+    /// A receive of `mid`.
     pub fn new(mid: impl Into<String>) -> Arc<Self> {
+        Self::build(TransferKind::Receive, mid.into(), String::new())
+    }
+
+    /// A send of the file at `source`. The MID is set once it is known.
+    pub fn for_send(source: impl Into<String>) -> Arc<Self> {
+        Self::build(TransferKind::Send, String::new(), source.into())
+    }
+
+    fn build(kind: TransferKind, mid: String, name: String) -> Arc<Self> {
         Arc::new(Self {
-            mid: mid.into(),
+            kind,
             started: Instant::now(),
             inner: Mutex::new(Inner {
+                mid,
+                name,
                 phase: Phase::Preparing,
                 state: TransferState::Running,
                 last_error: None,
@@ -123,7 +154,16 @@ impl TransferProgress {
             segment_retries: AtomicU64::new(0),
             resumed_from: AtomicU32::new(0),
             cancel: AtomicBool::new(false),
+            stop_after: AtomicU32::new(0),
         })
+    }
+
+    pub fn set_mid(&self, mid: impl Into<String>) {
+        self.inner.lock().unwrap().mid = mid.into();
+    }
+
+    pub fn set_name(&self, name: impl Into<String>) {
+        self.inner.lock().unwrap().name = name.into();
     }
 
     pub fn set_phase(&self, phase: Phase) {
@@ -174,7 +214,11 @@ impl TransferProgress {
         decode: std::time::Duration,
         write: std::time::Duration,
     ) {
-        self.segments_done.fetch_add(1, Ordering::Relaxed);
+        let done = self.segments_done.fetch_add(1, Ordering::Relaxed) + 1;
+        let limit = self.stop_after.load(Ordering::Relaxed);
+        if limit > 0 && done >= limit {
+            self.cancel();
+        }
         self.bytes_done.fetch_add(bytes, Ordering::Relaxed);
         self.session_bytes.fetch_add(bytes, Ordering::Relaxed);
         self.fetch_ns
@@ -195,6 +239,13 @@ impl TransferProgress {
 
     pub fn segment_retry(&self) {
         self.segment_retries.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Stop by itself, at the next safe point, once `segments` segments are done
+    /// (counting any resumed prefix). Deterministic, unlike polling for progress
+    /// and cancelling from outside, which can lose a race with a fast segment.
+    pub fn stop_after_segments(&self, segments: u32) {
+        self.stop_after.store(segments, Ordering::Relaxed);
     }
 
     /// Ask the engine to stop at the next safe point. The partial file and
@@ -231,7 +282,9 @@ impl TransferProgress {
         };
 
         TransferStatus {
-            mid: self.mid.clone(),
+            mid: g.mid.clone(),
+            kind: self.kind,
+            name: g.name.clone(),
             phase: g.phase,
             state: g.state,
             segments_done: self.segments_done.load(Ordering::Relaxed),
@@ -297,6 +350,32 @@ mod tests {
             "rate must not include the resumed prefix"
         );
         assert!(s.eta_secs.is_some());
+    }
+
+    #[test]
+    fn stop_after_segments_cancels_exactly_when_that_many_are_done() {
+        let p = TransferProgress::new("miasma:x");
+        p.stop_after_segments(2);
+        let d = Duration::ZERO;
+        p.on_segment_done(10, d, d, d);
+        assert!(!p.is_cancelled(), "one segment is not enough");
+        p.on_segment_done(10, d, d, d);
+        assert!(p.is_cancelled(), "two segments trip it");
+    }
+
+    #[test]
+    fn stop_after_counts_a_resumed_prefix_and_zero_means_never() {
+        let p = TransferProgress::new("miasma:x");
+        p.set_resumed(3, 300);
+        p.stop_after_segments(4);
+        p.on_segment_done(100, Duration::ZERO, Duration::ZERO, Duration::ZERO);
+        assert!(p.is_cancelled(), "3 resumed + 1 new = 4");
+
+        let q = TransferProgress::new("miasma:y");
+        for _ in 0..50 {
+            q.on_segment_done(1, Duration::ZERO, Duration::ZERO, Duration::ZERO);
+        }
+        assert!(!q.is_cancelled(), "0 disables the hook");
     }
 
     #[test]
