@@ -22,6 +22,7 @@ use miasma_core::{
     daemon_request, pipeline::DissolutionParams, read_port_file, ControlRequest, ControlResponse,
 };
 use tracing::{info, warn};
+use zeroize::Zeroizing;
 
 // ─── Protocol ─────────────────────────────────────────────────────────────────
 
@@ -142,7 +143,7 @@ pub enum WorkerResult {
 }
 
 /// Directed inbox/outbox item for display.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct DirectedInboxItem {
     pub envelope_id: String,
     pub sender_pubkey: String,
@@ -345,28 +346,41 @@ fn worker_thread(
                 recipient_contact,
                 password,
                 retention,
-            } => rt.block_on(do_directed_send(
-                &data_dir,
-                &file_path,
-                &recipient_contact,
-                &password,
-                &retention,
-            )),
+            } => {
+                let password = Zeroizing::new(password);
+                rt.block_on(do_directed_send(
+                    &data_dir,
+                    &file_path,
+                    &recipient_contact,
+                    password.as_str(),
+                    &retention,
+                ))
+            }
             WorkerCmd::DirectedRetrieve {
                 envelope_id,
                 password,
-            } => rt.block_on(do_directed_retrieve(&data_dir, &envelope_id, &password)),
+            } => {
+                let password = Zeroizing::new(password);
+                rt.block_on(do_directed_retrieve(
+                    &data_dir,
+                    &envelope_id,
+                    password.as_str(),
+                ))
+            }
             WorkerCmd::DirectedRevoke { envelope_id } => {
                 rt.block_on(do_directed_revoke(&data_dir, &envelope_id))
             }
             WorkerCmd::DirectedConfirm {
                 envelope_id,
                 challenge_code,
-            } => rt.block_on(do_directed_confirm(
-                &data_dir,
-                &envelope_id,
-                &challenge_code,
-            )),
+            } => {
+                let challenge_code = Zeroizing::new(challenge_code);
+                rt.block_on(do_directed_confirm(
+                    &data_dir,
+                    &envelope_id,
+                    challenge_code.as_str(),
+                ))
+            }
             WorkerCmd::DirectedInbox => rt.block_on(do_directed_inbox(&data_dir)),
             WorkerCmd::DirectedOutbox => rt.block_on(do_directed_outbox(&data_dir)),
         };

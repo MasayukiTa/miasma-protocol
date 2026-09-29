@@ -257,6 +257,13 @@ impl ControlResponse {
     pub(super) fn zeroize_sensitive_material(&mut self) {
         match self {
             Self::Retrieved { data } | Self::DirectedRetrieved { data, .. } => data.zeroize(),
+            Self::DirectedInboxList(items) | Self::DirectedOutboxList(items) => {
+                for item in items {
+                    if let Some(code) = item.challenge_code.as_mut() {
+                        code.zeroize();
+                    }
+                }
+            }
             _ => {}
         }
     }

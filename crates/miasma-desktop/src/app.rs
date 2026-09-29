@@ -6,6 +6,7 @@
 /// Supports two product modes (Technical / Easy) and three locales (EN / JA / ZH-CN).
 /// Both modes share all backend code; only UI presentation differs.
 use eframe::egui;
+use zeroize::Zeroize;
 
 use crate::locale::{self, Locale, Strings};
 use crate::variant::ProductMode;
@@ -299,7 +300,6 @@ enum ImportState {
 }
 
 /// An entry in the directed sharing inbox/outbox.
-#[derive(Clone)]
 struct InboxItem {
     envelope_id: String,
     sender: String,
@@ -310,6 +310,14 @@ struct InboxItem {
     expires_at: String,
     filename: Option<String>,
     file_size: u64,
+}
+
+impl Drop for InboxItem {
+    fn drop(&mut self) {
+        if let Some(code) = self.challenge_code.as_mut() {
+            code.zeroize();
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -495,6 +503,7 @@ impl MiasmaApp {
                 }
                 WorkerResult::DirectedSent { envelope_id } => {
                     self.busy = false;
+                    self.send_password.zeroize();
                     self.last_envelope_id = Some(envelope_id);
                     self.set_msg(MsgKind::Success, self.s().send_success);
                     // Auto-refresh outbox to show new item.
@@ -506,6 +515,7 @@ impl MiasmaApp {
                     bytes_written,
                 } => {
                     self.busy = false;
+                    self.inbox_retrieve_password.zeroize();
                     // Content is in temp_path — let user choose save location.
                     let fname = filename.as_deref().unwrap_or("directed_content.bin");
                     if let Some(path) = rfd::FileDialog::new().set_file_name(fname).save_file() {
@@ -540,7 +550,7 @@ impl MiasmaApp {
                 }
                 WorkerResult::DirectedConfirmed => {
                     self.busy = false;
-                    self.outbox_confirm_code.clear();
+                    self.outbox_confirm_code.zeroize();
                     self.set_msg(MsgKind::Success, self.s().outbox_confirm_success);
                     let _ = self.worker.tx.try_send(WorkerCmd::DirectedOutbox);
                 }
@@ -2780,6 +2790,14 @@ fn epoch_timestamp() -> String {
 }
 
 // ─── eframe::App impl ──────────────────────────────────────────────────────
+
+impl Drop for MiasmaApp {
+    fn drop(&mut self) {
+        self.send_password.zeroize();
+        self.inbox_retrieve_password.zeroize();
+        self.outbox_confirm_code.zeroize();
+    }
+}
 
 impl eframe::App for MiasmaApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
