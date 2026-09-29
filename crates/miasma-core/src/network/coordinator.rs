@@ -92,7 +92,8 @@ pub(crate) fn estimated_local_share_storage_bytes(
     file_len: u64,
     params: DissolutionParams,
 ) -> Result<u64, MiasmaError> {
-    if params.data_shards == 0 || params.total_shards <= params.data_shards {
+    // `total_shards == data_shards` (no parity) is valid; see `rs_encode`.
+    if params.data_shards == 0 || params.total_shards < params.data_shards {
         return Err(MiasmaError::ReedSolomon(format!(
             "invalid parameters: data_shards={}, total_shards={}",
             params.data_shards, params.total_shards
