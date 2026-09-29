@@ -908,9 +908,7 @@ pub(crate) async fn process_request(
                                             Ok(bytes) => {
                                                 content_hasher.update(&bytes);
                                                 match file.write_all(&bytes).await {
-                                                    Ok(_) => {
-                                                        bytes_written += bytes.len() as u64
-                                                    }
+                                                    Ok(_) => bytes_written += bytes.len() as u64,
                                                     Err(e) => {
                                                         write_err = Some(format!(
                                                             "cannot write to {output_path}: {e}"
@@ -932,7 +930,8 @@ pub(crate) async fn process_request(
                                     // bytes are already flowing to disk. A mismatch is a hard
                                     // failure and the partial output is removed below.
                                     if write_err.is_none() {
-                                        let actual_mid = finalize_streamed_mid(content_hasher, params);
+                                        let actual_mid =
+                                            finalize_streamed_mid(content_hasher, params);
                                         if actual_mid != content_id {
                                             write_err = Some(format!(
                                                 "streamed retrieval MID mismatch: expected {}, got {}",
@@ -2051,7 +2050,6 @@ async fn environment_detector_loop(
     }
 }
 
-
 #[cfg(test)]
 mod large_file_stream_integrity_tests {
     use super::*;
@@ -2059,12 +2057,7 @@ mod large_file_stream_integrity_tests {
     #[test]
     fn streamed_mid_matches_chunked_content() {
         let params = DissolutionParams::default();
-        let chunks: [&[u8]; 4] = [
-            b"chunk-one-",
-            b"chunk-two-",
-            b"chunk-three-",
-            b"chunk-four",
-        ];
+        let chunks: [&[u8]; 4] = [b"chunk-one-", b"chunk-two-", b"chunk-three-", b"chunk-four"];
         let full = chunks.concat();
         let expected = crate::crypto::hash::ContentId::compute(&full, &params.to_param_bytes());
 
