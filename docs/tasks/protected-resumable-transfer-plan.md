@@ -1,7 +1,7 @@
 # Protected, resumable large-file transfer — plan and running log
 
 Branch: `work/resumable-protected-transfer` (based on `work/large-file-release-gate`).
-Started: 2026-09-29. Status: **Phase 0 (plan) — nothing below is implemented yet.**
+Started: 2026-09-29. Status: **Phase 1 (primitives) done; Phases 2-6 not started.** See §6 for what was actually run.
 
 ## 0. 要約 (Japanese summary for the owner)
 
@@ -215,9 +215,21 @@ password/manifest design.
 
 C: is 237 GB total with ~5 GB free; a normal debug build of this workspace is 10–17 GB. Builds
 here use `CARGO_INCREMENTAL=0`, `CARGO_PROFILE_DEV_DEBUG=0` and the `vcvars64` wrapper (Git's GNU
-`link.exe` shadows MSVC's otherwise). A build failure with `os error 1455` / `LNK1102` /
+`link.exe` shadows MSVC's otherwise). **Measured:** with those two settings the whole
+`miasma-core` test build is **0.93 GB** in `target/`, against 10-17 GB for a default debug build. A build failure with `os error 1455` / `LNK1102` /
 `LNK1140` means the disk is full, not that the code is wrong. Tests that need real volume run on
 the owner's Mac + external SSD, not here.
+
+### Incident: the Windows Search index filled the disk (2026-09-29, 20:1x)
+
+While a clippy build ran, free space on C: fell from 3.8 GB to under 0.6 GB in a few minutes
+(about 17 MB/s) although this worktree's `target/` was only ~1.1 GB. `searchindexer` was the
+writer. Its database, `C:\ProgramData\Microsoft\Search\Data\Applications\Windows\Windows.db`,
+is **18.45 GB** (measured). The indexer was stopped through an elevated, user-approved
+`Stop-Service WSearch` (start type left `Automatic`); free space went from ~0.6 GB back to
+4.68 GB and stayed flat. `target/` is marked not-content-indexed (`attrib +I`) here.
+**Not done, needs the owner's decision:** exclude the repo folders (and every `target`) from
+Indexing Options, and whether to rebuild the 18 GB index. `Start-Service WSearch` restores it.
 
 ## 5. Not measured yet
 
@@ -230,7 +242,34 @@ the owner's Mac + external SSD, not here.
 
 ## 6. Results log
 
-(empty — filled as phases complete; each entry carries the commit id and what was actually run.)
+Each entry says what was actually run. Machine: Windows 11, slim debug profile (§4).
+
+### Phase 1 — primitives (2026-09-29)
+
+- Added `transfer::protection` (Argon2id + HKDF, `key_check`, bounds on untrusted Argon2
+  parameters), `transfer::manifest` (`TransferManifest`, `SegmentEntry`, record trailer
+  framing), `dissolve_segment_with` / `retrieve_segment_with` (the old functions now call
+  them with `None`), and `n == k` (no parity) in `rs_encode`/`rs_decode` and in the
+  publish-preflight estimator.
+- **Ran:** `cargo test -p miasma-core --lib` — 516 passed, 0 failed, 1 ignored (the ignored one
+  is a measurement of the default Argon2id cost; a debug build is not representative, so it is
+  not reported here). 34 of those are new.
+- **Measured:** the manifest for 100 GiB at `k=10, n=20` (1600 segments x 20 pieces) encodes
+  to **1,100,859 bytes**, matching the 1.1 MB estimate in §2.2.
+- Behavioural facts now pinned by tests: a protected segment cannot be read with the MID and
+  every shard but no password (AEAD failure); it cannot be replayed as another segment index;
+  loss tolerance is exactly `n - k` for `k=10` and `n` in {10, 11, 12, 15, 20}, and one more
+  loss fails as `InsufficientShares`; a damaged or spliced trailer is an error, never a
+  silent downgrade to "unprotected"; a pre-manifest decoder still reads a record that carries a
+  trailer.
+- **clippy** (`cargo clippy -p miasma-core --all-targets -- -D warnings`): no findings in any file this
+  phase touched. It reports 8 findings in files this work does not touch — `daemon/mod.rs`
+  (4x `explicit_auto_deref` on `&**secret`), `network/node.rs` (`question_mark` at ~1623,
+  `clone_on_copy` on `IpPrefix` at ~5405), `transport/obfuscated.rs`, `transport/reality.rs`.
+  They are not from this branch and were left alone: other sessions are editing `daemon/mod.rs`
+  and `node.rs`, and CI runs clippy advisory-only. Worth a separate cleanup commit.
+- **Not yet run:** integration tests (`cargo test -p miasma-core --tests`), the wasm crate (it has its own copy of the RS code and still rejects `n == k`; deliberately
+  left alone — the browser build is not part of this transfer path).
 
 ## 7. Decisions and open questions
 
