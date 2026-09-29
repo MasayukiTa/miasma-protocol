@@ -7,6 +7,7 @@
 //! 4. Recipient sends `StatusQuery` → Returns current envelope state
 
 use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, Zeroizing};
 
 use super::envelope::{DirectedEnvelope, EnvelopeState};
 
@@ -29,6 +30,14 @@ pub enum DirectedRequest {
     SenderRevoke { envelope_id: [u8; 32] },
     /// Query the current state of an envelope.
     StatusQuery { envelope_id: [u8; 32] },
+}
+
+impl Zeroize for DirectedRequest {
+    fn zeroize(&mut self) {
+        if let Self::Confirm { challenge_code, .. } = self {
+            challenge_code.zeroize();
+        }
+    }
 }
 
 /// Response to a `DirectedRequest`.
@@ -85,9 +94,9 @@ impl libp2p::request_response::Codec for DirectedCodec {
                 "directed msg too large",
             ));
         }
-        let mut buf = vec![0u8; len];
-        io.read_exact(&mut buf).await?;
-        bincode::deserialize(&buf)
+        let mut buf = Zeroizing::new(vec![0u8; len]);
+        io.read_exact(buf.as_mut_slice()).await?;
+        bincode::deserialize(buf.as_slice())
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 
@@ -109,9 +118,9 @@ impl libp2p::request_response::Codec for DirectedCodec {
                 "directed response too large",
             ));
         }
-        let mut buf = vec![0u8; len];
-        io.read_exact(&mut buf).await?;
-        bincode::deserialize(&buf)
+        let mut buf = Zeroizing::new(vec![0u8; len]);
+        io.read_exact(buf.as_mut_slice()).await?;
+        bincode::deserialize(buf.as_slice())
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 
@@ -119,16 +128,19 @@ impl libp2p::request_response::Codec for DirectedCodec {
         &mut self,
         _: &libp2p::StreamProtocol,
         io: &mut T,
-        req: Self::Request,
+        mut req: Self::Request,
     ) -> std::io::Result<()>
     where
         T: futures::AsyncWrite + Unpin + Send,
     {
         use futures::AsyncWriteExt;
-        let buf = bincode::serialize(&req)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let serialized = bincode::serialize(&req);
+        req.zeroize();
+        let buf = Zeroizing::new(
+            serialized.map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
+        );
         io.write_all(&(buf.len() as u32).to_le_bytes()).await?;
-        io.write_all(&buf).await
+        io.write_all(buf.as_slice()).await
     }
 
     async fn write_response<T>(
@@ -141,9 +153,31 @@ impl libp2p::request_response::Codec for DirectedCodec {
         T: futures::AsyncWrite + Unpin + Send,
     {
         use futures::AsyncWriteExt;
-        let buf = bincode::serialize(&res)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let buf = Zeroizing::new(
+            bincode::serialize(&res)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
+        );
         io.write_all(&(buf.len() as u32).to_le_bytes()).await?;
-        io.write_all(&buf).await
+        io.write_all(buf.as_slice()).await
+    }
+}
+
+#[cfg(test)]
+mod secret_lifetime_tests {
+    use super::*;
+
+    #[test]
+    fn confirm_request_zeroizes_challenge_code() {
+        let mut req = DirectedRequest::Confirm {
+            envelope_id: [0x42; 32],
+            challenge_code: "ABCD-EFGH".into(),
+        };
+        req.zeroize();
+        match req {
+            DirectedRequest::Confirm { challenge_code, .. } => {
+                assert!(challenge_code.is_empty())
+            }
+            _ => unreachable!(),
+        }
     }
 }
