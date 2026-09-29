@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use super::envelope::{DirectedEnvelope, EnvelopeState};
 
@@ -65,16 +66,20 @@ impl DirectedInbox {
     /// Save an outgoing envelope (sender side).
     pub fn save_outgoing(&self, envelope: &DirectedEnvelope) -> Result<()> {
         let path = self.outgoing_path(&envelope.id_hex());
-        let json = serde_json::to_vec_pretty(envelope).context("serialize envelope")?;
-        std::fs::write(&path, &json).context("write outgoing envelope")?;
+        let json =
+            Zeroizing::new(serde_json::to_vec_pretty(envelope).context("serialize envelope")?);
+        crate::secure_file::atomic_write_restricted(&path, json.as_slice())
+            .context("write outgoing envelope")?;
         Ok(())
     }
 
     /// Load an outgoing envelope by hex ID.
     pub fn load_outgoing(&self, id_hex: &str) -> Result<DirectedEnvelope> {
         let path = self.outgoing_path(id_hex);
-        let json = std::fs::read(&path).with_context(|| format!("read outgoing {id_hex}"))?;
-        serde_json::from_slice(&json).context("deserialize envelope")
+        let json = Zeroizing::new(
+            std::fs::read(&path).with_context(|| format!("read outgoing {id_hex}"))?,
+        );
+        serde_json::from_slice(json.as_slice()).context("deserialize envelope")
     }
 
     /// List all outgoing envelopes.
@@ -102,16 +107,20 @@ impl DirectedInbox {
         if !path.exists() {
             self.check_limit(&self.incoming_dir, "inbox")?;
         }
-        let json = serde_json::to_vec_pretty(envelope).context("serialize envelope")?;
-        std::fs::write(&path, &json).context("write incoming envelope")?;
+        let json =
+            Zeroizing::new(serde_json::to_vec_pretty(envelope).context("serialize envelope")?);
+        crate::secure_file::atomic_write_restricted(&path, json.as_slice())
+            .context("write incoming envelope")?;
         Ok(())
     }
 
     /// Load an incoming envelope by hex ID.
     pub fn load_incoming(&self, id_hex: &str) -> Result<DirectedEnvelope> {
         let path = self.incoming_path(id_hex);
-        let json = std::fs::read(&path).with_context(|| format!("read incoming {id_hex}"))?;
-        serde_json::from_slice(&json).context("deserialize envelope")
+        let json = Zeroizing::new(
+            std::fs::read(&path).with_context(|| format!("read incoming {id_hex}"))?,
+        );
+        serde_json::from_slice(json.as_slice()).context("deserialize envelope")
     }
 
     /// List all incoming envelopes.
@@ -169,13 +178,19 @@ impl DirectedInbox {
                         continue;
                     }
                     if let Ok(json) = std::fs::read(&path) {
-                        if let Ok(mut env) = serde_json::from_slice::<DirectedEnvelope>(&json) {
+                        let json = Zeroizing::new(json);
+                        if let Ok(mut env) =
+                            serde_json::from_slice::<DirectedEnvelope>(json.as_slice())
+                        {
                             if env.is_expired(now_secs) && !env.state.is_terminal() {
                                 env.state = EnvelopeState::Expired;
-                                let _ = std::fs::write(
-                                    &path,
-                                    serde_json::to_vec_pretty(&env).unwrap_or_default(),
-                                );
+                                if let Ok(serialized) = serde_json::to_vec_pretty(&env) {
+                                    let serialized = Zeroizing::new(serialized);
+                                    let _ = crate::secure_file::atomic_write_restricted(
+                                        &path,
+                                        serialized.as_slice(),
+                                    );
+                                }
                             }
                             // Clean up challenge file for terminal envelopes.
                             if env.state.is_terminal() {
@@ -238,7 +253,8 @@ impl DirectedInbox {
                 continue;
             }
             if let Ok(json) = std::fs::read(&path) {
-                if let Ok(env) = serde_json::from_slice::<DirectedEnvelope>(&json) {
+                let json = Zeroizing::new(json);
+                if let Ok(env) = serde_json::from_slice::<DirectedEnvelope>(json.as_slice()) {
                     // Try to load the challenge code for incoming envelopes.
                     let challenge_code = if is_incoming {
                         let challenge_path = path.with_extension("challenge");
@@ -278,7 +294,8 @@ impl DirectedInbox {
     /// This is stored separately so it's only on the recipient's machine.
     pub fn save_challenge_code(&self, id_hex: &str, code: &str) -> Result<()> {
         let path = self.incoming_dir.join(format!("{id_hex}.challenge"));
-        std::fs::write(&path, code).context("write challenge code")?;
+        crate::secure_file::atomic_write_restricted(&path, code.as_bytes())
+            .context("write challenge code")?;
         Ok(())
     }
 
@@ -484,6 +501,16 @@ mod tests {
         inbox
             .save_challenge_code(&env.id_hex(), "ABCD-1234")
             .unwrap();
+
+        #[cfg(any(windows, unix))]
+        {
+            let envelope_path = inbox.incoming_path(&env.id_hex());
+            let challenge_path = inbox
+                .incoming_dir
+                .join(format!("{}.challenge", env.id_hex()));
+            assert!(crate::secure_file::verify_restricted(&envelope_path).unwrap());
+            assert!(crate::secure_file::verify_restricted(&challenge_path).unwrap());
+        }
 
         let code = inbox.load_challenge_code(&env.id_hex());
         assert_eq!(code, Some("ABCD-1234".to_string()));
