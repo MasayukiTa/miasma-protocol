@@ -493,3 +493,73 @@ Each has a reason it was left; none blocks a first cross-machine transfer.
   variants and one dispatch call so merges stay mechanical.
 - Stage files explicitly (never `git add -A`); commit small; push after each phase; read CI.
 - No commit trailer attributing Claude (owner's standing rule).
+
+## 9. GUI, Japanese and theme (decided with the owner 2026-09-30)
+
+Owner decisions (answers to the three questions asked after §7b):
+
+1. CI: add a macOS job that builds `miasma-cli` + `miasma-desktop` and runs `transfer-e2e.sh`. Done
+   in `.github/workflows/ci.yml` (job `macos-cli-transfer`, commit de83d98). It only runs on a PR into
+   `main`; **the PR itself could not be opened from this session (the tool permission was denied), so
+   the owner opens it** or allows `gh pr create`.
+2. GUI on **both** sides (macOS sender and Windows receiver). The desktop app is the same egui binary,
+   so the transfer screen must work on macOS too. Corollary: `configure_fonts` hard-codes
+   `C:\Windows\Fonts`, so on macOS every Japanese glyph is a tofu box — a font discovery per OS is part
+   of this work, not an extra.
+3. Theme: **whole app**, not just the new screen.
+
+Requested language and look:
+
+- Japanese, and the font is **Meiryo** (owner's preference). Meiryo ships with Windows and cannot be
+  redistributed, so it is read from the system, never bundled. macOS has no Meiryo by default; the
+  chain falls back to Hiragino Sans, then the egui default. Proportional chain becomes
+  Meiryo → Yu Gothic → Microsoft YaHei → MS Gothic (Windows) / Hiragino Sans → PingFang (macOS).
+  Segoe UI is no longer first (Meiryo has its own Latin glyphs). Monospace: Consolas → MS Gothic /
+  Menlo → Hiragino.
+- Look: **uTorrent's layout with the m365-copilot-companion-mcp palette** (`ui/Theme.cs` there).
+  Layout: transfer list on top (name, direction, progress bar, speed, ETA, state chip); detail pane
+  below (segment strip showing which segments are done / in flight / pending, fetch/decode/write
+  split, resume position, last error, Pause/Resume/Cancel). Palette: warm neutrals, accent orange
+  **only** on the single primary action, status as a small chip and as text colour — **never a coloured
+  left rail or a full-card fill** (Theme.cs says the owner has disliked that repeatedly). Only the colour
+  values are used; no code is copied.
+
+Token table (light / dark), from Theme.cs:
+
+| token | light | dark | use |
+|---|---|---|---|
+| bg | #F7F6F2 | #111111 | app background |
+| surface | #FFFFFF | #181818 | cards, panels |
+| surface_subtle | #F4F4F2 | #202020 | inputs, selected row base |
+| selected | #E7E5DE | #2C2C2C | selected row |
+| border | #D8D6CF | #2E2E2E | 1 px borders |
+| border_strong | #D4D4D0 | #3A3A3A | hover / active border |
+| text | #18181B | #F4F4F5 | body |
+| muted | #5F5F66 | #A1A1AA | secondary text |
+| faint | #6B6B73 | #71717A | meta text |
+| accent | #C4400D | #F97316 | the primary action only |
+| accent_fill | #C4400D | #C2410C | fill carrying white text |
+| success | #15803D | #22C55E | done |
+| warning | #B45309 | #F59E0B | paused / needs attention |
+| danger | #B91C1C | #EF4444 | error |
+| info | #2563EB | #60A5FA | running |
+
+Stages (each ends with a build, `cargo test -p miasma-desktop`, and a look at the running window):
+
+- **A. Theme + fonts** (`crates/miasma-desktop`): a `theme` module with the tokens, light/dark/system
+  selectable in Settings and persisted with the other prefs; replace the `const` colours and the
+  ~20 inline `Color32::from_rgb` in `app.rs`; per-OS font discovery with the chains above; log which
+  fonts loaded.
+- **B. Transfers screen**: worker commands over the existing IPC (`TransferStartReceive`,
+  `TransferStartPublish`, `TransferList`, `TransferCancel`), polled about once a second while a
+  transfer is active; password entry never logged (Debug redaction like `DirectedSend`); k/n picker
+  with the measured redundancy table; resume shown as the default action for paused jobs.
+- **C. Japanese for CLI messages**: language from `MIASMA_LANG`, else the OS locale; English stays
+  the default; one message table.
+- **D. Japanese for the new desktop strings** (En/Ja/ZhCn entries for everything in B). CLAUDE.md:
+  "a string table is not finished localization" — the check is the running window with Meiryo, not
+  the table.
+
+Blocker found before starting: C: had 1.4 GB free (target 3.5 GB, Windows Search running again), too
+little to build the desktop. Cleanup was handed to a sonnet subagent under the runbook rules (never
+Windows logs, never sibling worktrees).
