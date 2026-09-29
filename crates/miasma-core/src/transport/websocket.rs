@@ -414,7 +414,8 @@ where
 ///   with configurable SNI override and custom CA support.
 /// - **Timeouts**: Connect, read, and write operations are individually bounded.
 /// - **Backpressure**: Response size is checked against `max_response_bytes`.
-/// - **Proxy**: When `config.proxy` is set, connects via SOCKS5 proxy.
+/// - **Proxy**: Supports authenticated SOCKS5 and HTTP CONNECT at runtime.
+///   `config.proxy` remains the legacy unauthenticated SOCKS5 path.
 ///
 /// # Usage in fallback chain
 /// ```text
@@ -424,11 +425,30 @@ where
 /// ```
 pub struct WssPayloadTransport {
     config: WebSocketConfig,
+    runtime_proxy: Option<super::proxy::ProxyConfig>,
 }
 
 impl WssPayloadTransport {
     pub fn new(config: WebSocketConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            runtime_proxy: None,
+        }
+    }
+
+    /// Construct a WSS transport with the credential-aware runtime proxy.
+    ///
+    /// `WebSocketConfig::proxy` is retained for API compatibility with the
+    /// original unauthenticated SOCKS5 path. Daemon configuration uses this
+    /// runtime form so SOCKS5 authentication and HTTP CONNECT work as declared.
+    pub fn new_with_runtime_proxy(
+        config: WebSocketConfig,
+        runtime_proxy: Option<super::proxy::ProxyConfig>,
+    ) -> Self {
+        Self {
+            config,
+            runtime_proxy,
+        }
     }
 }
 
@@ -459,9 +479,22 @@ impl PayloadTransport for WssPayloadTransport {
             format!("{scheme}://{host}:{port}{}", self.config.ws_path)
         };
 
-        // 1. Establish TCP connection (optionally through proxy).
-        let tcp_stream = if let Some(ref proxy) = self.config.proxy {
-            // SOCKS5 proxy path.
+        // 1. Establish TCP connection (optionally through proxy). The daemon
+        // uses `runtime_proxy`, which supports SOCKS5 credentials and HTTP CONNECT.
+        // `config.proxy` remains as the legacy unauthenticated SOCKS5 API.
+        let tcp_stream = if let Some(ref proxy) = self.runtime_proxy {
+            tokio::time::timeout(connect_timeout, proxy.connect(host.as_str(), port))
+                .await
+                .map_err(|_| PayloadTransportError {
+                    phase: TransportPhase::Session,
+                    message: format!("WSS {} proxy connect timeout", proxy.display_name()),
+                })?
+                .map_err(|e| PayloadTransportError {
+                    phase: TransportPhase::Session,
+                    message: format!("WSS {} proxy connect: {e}", proxy.display_name()),
+                })?
+        } else if let Some(ref proxy) = self.config.proxy {
+            // Legacy unauthenticated SOCKS5 proxy path.
             let proxy_stream = tokio::time::timeout(
                 connect_timeout,
                 tokio_socks::tcp::Socks5Stream::connect(&*proxy.addr, (host.as_str(), port)),
