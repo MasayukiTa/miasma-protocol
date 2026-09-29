@@ -12,6 +12,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::locale::Locale;
+use crate::theme::ThemeMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -38,16 +39,18 @@ impl ProductMode {
 
 const PREFS_FILE: &str = "desktop-prefs.toml";
 
-/// Persisted desktop preferences (mode + locale).
+/// Persisted desktop preferences (mode + locale + theme).
 ///
 /// Stored as `desktop-prefs.toml` in the data directory.
 /// Survives restart, upgrade, and reinstall (data dir is preserved).
+/// Every field has a default, so a file written by an older version (without `theme`) loads.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 #[derive(Default)]
 pub struct DesktopPrefs {
     pub mode: ProductMode,
     pub locale: Locale,
+    pub theme: ThemeMode,
 }
 
 impl DesktopPrefs {
@@ -161,11 +164,50 @@ mod tests {
         let prefs = DesktopPrefs {
             mode: ProductMode::Technical,
             locale: Locale::Ja,
+            theme: ThemeMode::Light,
         };
         let toml_str = toml::to_string_pretty(&prefs).unwrap();
         let back: DesktopPrefs = toml::from_str(&toml_str).unwrap();
         assert_eq!(back.mode, ProductMode::Technical);
         assert_eq!(back.locale, Locale::Ja);
+        assert_eq!(back.theme, ThemeMode::Light);
+    }
+
+    #[test]
+    fn prefs_file_from_before_the_theme_field_loads_as_system() {
+        let tmp = std::env::temp_dir().join("miasma-test-prefs-old-format");
+        let _ = std::fs::create_dir_all(&tmp);
+        // Exactly what an older build wrote: mode and locale, no theme.
+        std::fs::write(
+            tmp.join(PREFS_FILE),
+            "mode = \"technical\"\nlocale = \"ja\"\n",
+        )
+        .unwrap();
+        let prefs = DesktopPrefs::load(&tmp);
+        assert_eq!(prefs.mode, ProductMode::Technical);
+        assert_eq!(prefs.locale, Locale::Ja);
+        assert_eq!(prefs.theme, ThemeMode::System);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn prefs_theme_survives_save_and_load() {
+        let tmp = std::env::temp_dir().join("miasma-test-prefs-theme");
+        let _ = std::fs::create_dir_all(&tmp);
+        for t in [ThemeMode::System, ThemeMode::Light, ThemeMode::Dark] {
+            let prefs = DesktopPrefs {
+                theme: t,
+                ..Default::default()
+            };
+            prefs.save(&tmp);
+            assert_eq!(DesktopPrefs::load(&tmp).theme, t);
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn prefs_default_theme_is_system() {
+        assert_eq!(DesktopPrefs::default().theme, ThemeMode::System);
     }
 
     #[test]
@@ -185,6 +227,7 @@ mod tests {
         let prefs = DesktopPrefs {
             mode: ProductMode::Technical,
             locale: Locale::ZhCn,
+            ..Default::default()
         };
         prefs.save(&tmp);
         let loaded = DesktopPrefs::load(&tmp);
@@ -221,10 +264,12 @@ mod tests {
         let prefs_easy = DesktopPrefs {
             mode: ProductMode::Easy,
             locale: Locale::En,
+            ..Default::default()
         };
         let prefs_tech = DesktopPrefs {
             mode: ProductMode::Technical,
             locale: Locale::En,
+            ..Default::default()
         };
 
         // CLI wins over everything
