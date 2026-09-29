@@ -174,16 +174,94 @@ struct Step {
     transfers: Option<TransfersView>,
 }
 
+/// `MIASMA_UI_SNAP=<dir>`: leave the app alone and only save what it draws, every
+/// `MIASMA_UI_SNAP_SECS` seconds (default 5), as `<dir>/snap_<n>.ppm`. Used to look at a real
+/// session (real daemon, real clicks) that cannot be screenshotted from outside.
+/// `MIASMA_UI_SNAP_SIZE=1000x1400` resizes the window once at the start.
+struct Snap {
+    out: PathBuf,
+    every: std::time::Duration,
+    size: Option<(f32, f32)>,
+    last: std::time::Instant,
+    n: u32,
+    requested: bool,
+    sized: bool,
+}
+
+impl Snap {
+    fn drive(&mut self, ctx: &egui::Context) {
+        ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        if !self.sized {
+            self.sized = true;
+            if let Some((w, h)) = self.size {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
+            }
+        }
+        if !self.requested && self.last.elapsed() >= self.every {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
+            self.requested = true;
+        }
+        if self.requested {
+            let shot = ctx.input(|i| {
+                i.events.iter().find_map(|e| match e {
+                    egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                    _ => None,
+                })
+            });
+            if let Some(img) = shot {
+                let [w, h] = img.size;
+                let mut data = format!("P6\n{w} {h}\n255\n").into_bytes();
+                for p in &img.pixels {
+                    data.extend_from_slice(&[p.r(), p.g(), p.b()]);
+                }
+                let _ = std::fs::write(self.out.join(format!("snap_{:04}.ppm", self.n)), data);
+                self.n += 1;
+                self.last = std::time::Instant::now();
+                self.requested = false;
+            }
+        }
+    }
+}
+
 pub struct Tour {
     out: PathBuf,
     steps: Vec<Step>,
     idx: usize,
     frames_in_step: u32,
     requested: bool,
+    snap: Option<Snap>,
 }
 
 impl Tour {
     pub fn from_env() -> Option<Self> {
+        if let Some(dir) = std::env::var_os("MIASMA_UI_SNAP") {
+            let out = PathBuf::from(dir);
+            let _ = std::fs::create_dir_all(&out);
+            let secs = std::env::var("MIASMA_UI_SNAP_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(5);
+            let size = std::env::var("MIASMA_UI_SNAP_SIZE").ok().and_then(|v| {
+                let (w, h) = v.split_once('x')?;
+                Some((w.parse().ok()?, h.parse().ok()?))
+            });
+            return Some(Self {
+                out: out.clone(),
+                steps: Vec::new(),
+                idx: 0,
+                frames_in_step: 0,
+                requested: false,
+                snap: Some(Snap {
+                    out,
+                    every: std::time::Duration::from_secs(secs),
+                    size,
+                    last: std::time::Instant::now(),
+                    n: 0,
+                    requested: false,
+                    sized: false,
+                }),
+            });
+        }
         let out = PathBuf::from(std::env::var_os("MIASMA_UI_TOUR")?);
         let _ = std::fs::create_dir_all(&out);
         let mut steps = Vec::new();
@@ -263,11 +341,16 @@ impl Tour {
             idx: 0,
             frames_in_step: 0,
             requested: false,
+            snap: None,
         })
     }
 
     /// Call once per frame before drawing. Returns true when the tour is finished.
     pub fn drive(&mut self, app: &mut MiasmaApp, ctx: &egui::Context) -> bool {
+        if let Some(snap) = &mut self.snap {
+            snap.drive(ctx);
+            return false;
+        }
         let Some(step) = self.steps.get(self.idx) else {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return true;
