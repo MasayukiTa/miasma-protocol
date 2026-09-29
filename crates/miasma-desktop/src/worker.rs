@@ -71,6 +71,35 @@ pub enum WorkerCmd {
     DirectedInbox,
     /// List outbox.
     DirectedOutbox,
+    /// Start (or resume, by issuing the same request again) a verified, resumable
+    /// receive in the daemon. Returns at once; progress comes from [`Self::TransferPoll`].
+    TransferStartReceive {
+        mid: String,
+        output_path: PathBuf,
+        /// `None` when the transfer is not password-protected. Never stored.
+        password: Option<String>,
+        /// Discard any partial transfer and start over.
+        restart: bool,
+    },
+    /// Start (or resume) a resumable send of a file in the daemon.
+    TransferStartPublish {
+        file_path: PathBuf,
+        password: Option<String>,
+        data_shards: u8,
+        total_shards: u8,
+        restart: bool,
+    },
+    /// Resume a stopped send: `k`/`n` are read from its journal so the daemon
+    /// sees the same parameters the transfer began with.
+    TransferResumePublish {
+        file_path: PathBuf,
+        password: Option<String>,
+    },
+    /// Ask the daemon for every transfer (running ones and paused ones left by
+    /// an earlier daemon process).
+    TransferPoll,
+    /// Stop a running transfer at its next safe point; its progress is kept.
+    TransferCancel { id: String },
 }
 
 impl fmt::Debug for WorkerCmd {
@@ -112,6 +141,35 @@ impl fmt::Debug for WorkerCmd {
                 .finish(),
             Self::DirectedInbox => f.write_str("DirectedInbox"),
             Self::DirectedOutbox => f.write_str("DirectedOutbox"),
+            // Paths and passwords are never printed, exactly as for `DirectedSend`.
+            Self::TransferStartReceive { mid, restart, .. } => f
+                .debug_struct("TransferStartReceive")
+                .field("mid", mid)
+                .field("output_path", &"<redacted>")
+                .field("password", &"<redacted>")
+                .field("restart", restart)
+                .finish(),
+            Self::TransferStartPublish {
+                data_shards,
+                total_shards,
+                restart,
+                ..
+            } => f
+                .debug_struct("TransferStartPublish")
+                .field("file_path", &"<redacted>")
+                .field("password", &"<redacted>")
+                .field("data_shards", data_shards)
+                .field("total_shards", total_shards)
+                .field("restart", restart)
+                .finish(),
+            Self::TransferResumePublish { .. } => f
+                .debug_struct("TransferResumePublish")
+                .field("file_path", &"<redacted>")
+                .field("password", &"<redacted>")
+                .finish(),
+            Self::TransferPoll => f.write_str("TransferPoll"),
+            // A send's id embeds the source path.
+            Self::TransferCancel { .. } => f.write_str("TransferCancel(<redacted>)"),
         }
     }
 }
@@ -186,6 +244,17 @@ pub enum WorkerResult {
     DirectedInboxList(Vec<DirectedInboxItem>),
     /// Outbox listing.
     DirectedOutboxList(Vec<DirectedInboxItem>),
+    /// Every transfer the daemon knows (running, and paused from journals).
+    TransferList(Vec<miasma_core::transfer::TransferStatus>),
+    /// The transfer list could not be read. `daemon_down` means the background
+    /// service is not reachable (as opposed to it answering with an error).
+    TransferPollFailed { message: String, daemon_down: bool },
+    /// The daemon accepted a start request; it now runs the transfer itself.
+    TransferStarted { id: String },
+    /// The daemon accepted a cancel request.
+    TransferCancelRequested,
+    /// A start or cancel request was refused or failed.
+    TransferError(String),
     /// Any error.
     Err(String),
 }
@@ -270,6 +339,22 @@ impl fmt::Debug for WorkerResult {
                 .debug_struct("DirectedOutboxList")
                 .field("items", items)
                 .finish(),
+            // Transfer names are file paths, so only the count is printed.
+            Self::TransferList(list) => f
+                .debug_struct("TransferList")
+                .field("count", &list.len())
+                .finish(),
+            Self::TransferPollFailed {
+                message,
+                daemon_down,
+            } => f
+                .debug_struct("TransferPollFailed")
+                .field("message", message)
+                .field("daemon_down", daemon_down)
+                .finish(),
+            Self::TransferStarted { .. } => f.write_str("TransferStarted(<redacted>)"),
+            Self::TransferCancelRequested => f.write_str("TransferCancelRequested"),
+            Self::TransferError(message) => f.debug_tuple("TransferError").field(message).finish(),
             Self::Err(message) => f.debug_tuple("Err").field(message).finish(),
         }
     }
@@ -534,6 +619,58 @@ fn worker_thread(
             }
             WorkerCmd::DirectedInbox => rt.block_on(do_directed_inbox(&data_dir)),
             WorkerCmd::DirectedOutbox => rt.block_on(do_directed_outbox(&data_dir)),
+            WorkerCmd::TransferStartReceive {
+                mid,
+                output_path,
+                password,
+                restart,
+            } => {
+                let password = password.map(Zeroizing::new);
+                rt.block_on(do_transfer_start_receive(
+                    &data_dir,
+                    &mid,
+                    &output_path,
+                    password.as_ref().map(|p| p.as_str()),
+                    restart,
+                ))
+            }
+            WorkerCmd::TransferStartPublish {
+                file_path,
+                password,
+                data_shards,
+                total_shards,
+                restart,
+            } => {
+                let password = password.map(Zeroizing::new);
+                rt.block_on(do_transfer_start_publish(
+                    &data_dir,
+                    &file_path,
+                    password.as_ref().map(|p| p.as_str()),
+                    data_shards,
+                    total_shards,
+                    restart,
+                    true,
+                ))
+            }
+            WorkerCmd::TransferResumePublish {
+                file_path,
+                password,
+            } => {
+                let password = password.map(Zeroizing::new);
+                let (k, n) = journal_shard_params(&data_dir, &file_path)
+                    .unwrap_or((DEFAULT_SEND_K, DEFAULT_SEND_N));
+                rt.block_on(do_transfer_start_publish(
+                    &data_dir,
+                    &file_path,
+                    password.as_ref().map(|p| p.as_str()),
+                    k,
+                    n,
+                    false,
+                    false,
+                ))
+            }
+            WorkerCmd::TransferPoll => rt.block_on(do_transfer_poll(&data_dir)),
+            WorkerCmd::TransferCancel { id } => rt.block_on(do_transfer_cancel(&data_dir, &id)),
         };
 
         if tx.send(res).is_err() {
@@ -1192,6 +1329,115 @@ async fn do_directed_outbox(data_dir: &Path) -> WorkerResult {
     }
 }
 
+// ─── Resumable transfers (daemon-side jobs) ─────────────────────────────────
+//
+// The daemon runs the transfer; these calls only start, list and cancel it, so none of them
+// waits for the transfer itself. The requests are the same ones the CLI issues
+// (`network-get -o`, `network-publish`, `transfers`, `transfer-cancel`).
+
+/// `miasma network-publish` default (`--data-shards` / `--total-shards`).
+pub const DEFAULT_SEND_K: u8 = 10;
+pub const DEFAULT_SEND_N: u8 = 20;
+
+async fn do_transfer_start_receive(
+    data_dir: &Path,
+    mid: &str,
+    output_path: &Path,
+    password: Option<&str>,
+    restart: bool,
+) -> WorkerResult {
+    let abs = if output_path.is_absolute() {
+        output_path.to_owned()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(output_path)
+    };
+    let req = ControlRequest::TransferStartReceive {
+        mid: mid.trim().to_owned(),
+        output_path: abs.to_string_lossy().into_owned(),
+        password: password.filter(|p| !p.is_empty()).map(str::to_owned),
+        restart,
+    };
+    transfer_started(daemon_request(data_dir, req).await)
+}
+
+async fn do_transfer_start_publish(
+    data_dir: &Path,
+    file_path: &Path,
+    password: Option<&str>,
+    data_shards: u8,
+    total_shards: u8,
+    restart: bool,
+    canonicalize: bool,
+) -> WorkerResult {
+    // A resume keeps the path the journal recorded; a new send resolves it the way the CLI does,
+    // so the same file started from either place is the same transfer.
+    let path = if canonicalize {
+        if !file_path.exists() {
+            return WorkerResult::TransferError(format!("File not found: {}", file_path.display()));
+        }
+        std::fs::canonicalize(file_path).unwrap_or_else(|_| file_path.to_owned())
+    } else {
+        file_path.to_owned()
+    };
+    let req = ControlRequest::TransferStartPublish {
+        file_path: path.to_string_lossy().into_owned(),
+        data_shards,
+        total_shards,
+        password: password.filter(|p| !p.is_empty()).map(str::to_owned),
+        restart,
+    };
+    transfer_started(daemon_request(data_dir, req).await)
+}
+
+fn transfer_started(res: anyhow::Result<ControlResponse>) -> WorkerResult {
+    match res {
+        Ok(ControlResponse::TransferStarted { id }) => WorkerResult::TransferStarted { id },
+        Ok(ControlResponse::Error(e)) => WorkerResult::TransferError(e),
+        Ok(other) => WorkerResult::TransferError(format!("Unexpected response: {other:?}")),
+        Err(e) => WorkerResult::TransferError(daemon_error(&e)),
+    }
+}
+
+async fn do_transfer_poll(data_dir: &Path) -> WorkerResult {
+    match daemon_request(data_dir, ControlRequest::TransferList).await {
+        Ok(ControlResponse::TransferList(list)) => WorkerResult::TransferList(list),
+        Ok(ControlResponse::Error(message)) => WorkerResult::TransferPollFailed {
+            message,
+            daemon_down: false,
+        },
+        Ok(other) => WorkerResult::TransferPollFailed {
+            message: format!("Unexpected response: {other:?}"),
+            daemon_down: false,
+        },
+        Err(e) => WorkerResult::TransferPollFailed {
+            daemon_down: is_daemon_down(&format!("{e:#}")),
+            message: daemon_error(&e),
+        },
+    }
+}
+
+async fn do_transfer_cancel(data_dir: &Path, id: &str) -> WorkerResult {
+    match daemon_request(
+        data_dir,
+        ControlRequest::TransferCancel { id: id.to_owned() },
+    )
+    .await
+    {
+        Ok(ControlResponse::TransferCancelled) => WorkerResult::TransferCancelRequested,
+        Ok(ControlResponse::Error(e)) => WorkerResult::TransferError(e),
+        Ok(other) => WorkerResult::TransferError(format!("Unexpected response: {other:?}")),
+        Err(e) => WorkerResult::TransferError(daemon_error(&e)),
+    }
+}
+
+/// `(k, n)` a stopped send began with, read from its journal in `<data_dir>/transfers`.
+fn journal_shard_params(data_dir: &Path, source: &Path) -> Option<(u8, u8)> {
+    use miasma_core::transfer::publish_journal::{publish_journal_path, PublishJournal};
+    let path = publish_journal_path(&data_dir.join("transfers"), source);
+    let j = PublishJournal::load(&path)?;
+    Some((j.header.data_shards, j.header.total_shards))
+}
+
 fn parse_retention(s: &str) -> Result<u64, String> {
     let s = s.trim().to_lowercase();
     if let Some(h) = s.strip_suffix('h') {
@@ -1252,6 +1498,83 @@ mod tests {
         };
         let rendered = format!("{confirm:?}");
         assert!(!rendered.contains("ABCD-SECRET"));
+    }
+
+    #[test]
+    fn transfer_commands_debug_shows_no_password_or_path() {
+        let recv = WorkerCmd::TransferStartReceive {
+            mid: "miasma:visible-mid".into(),
+            output_path: std::path::PathBuf::from("C:/private/out-secret.iso"),
+            password: Some("password-sensitive".into()),
+            restart: false,
+        };
+        let rendered = format!("{recv:?}");
+        assert!(!rendered.contains("password-sensitive"));
+        assert!(!rendered.contains("out-secret"));
+        assert!(rendered.contains("miasma:visible-mid"));
+
+        let publish = WorkerCmd::TransferStartPublish {
+            file_path: std::path::PathBuf::from("C:/private/src-secret.iso"),
+            password: Some("password-sensitive".into()),
+            data_shards: 10,
+            total_shards: 12,
+            restart: false,
+        };
+        let rendered = format!("{publish:?}");
+        assert!(!rendered.contains("password-sensitive"));
+        assert!(!rendered.contains("src-secret"));
+        assert!(rendered.contains("total_shards: 12"));
+
+        let resume = WorkerCmd::TransferResumePublish {
+            file_path: std::path::PathBuf::from("C:/private/src-secret.iso"),
+            password: Some("password-sensitive".into()),
+        };
+        let rendered = format!("{resume:?}");
+        assert!(!rendered.contains("password-sensitive"));
+        assert!(!rendered.contains("src-secret"));
+
+        // A send's id embeds the source path.
+        let cancel = WorkerCmd::TransferCancel {
+            id: "send:C:/private/src-secret.iso".into(),
+        };
+        assert!(!format!("{cancel:?}").contains("src-secret"));
+        assert_eq!(format!("{:?}", WorkerCmd::TransferPoll), "TransferPoll");
+    }
+
+    #[test]
+    fn transfer_results_debug_shows_no_paths() {
+        let started = WorkerResult::TransferStarted {
+            id: "send:C:/private/src-secret.iso".into(),
+        };
+        assert!(!format!("{started:?}").contains("src-secret"));
+
+        let status = miasma_core::transfer::TransferStatus {
+            mid: "miasma:x".into(),
+            kind: miasma_core::transfer::TransferKind::Send,
+            name: "C:/private/src-secret.iso".into(),
+            phase: miasma_core::transfer::Phase::Transferring,
+            state: miasma_core::transfer::TransferState::Running,
+            segments_done: 0,
+            segments_total: 1,
+            bytes_done: 0,
+            bytes_total: 1,
+            rate_bps: 0.0,
+            eta_secs: None,
+            elapsed_secs: 0.0,
+            fetch_ms: 0,
+            decode_ms: 0,
+            write_ms: 0,
+            pieces_fetched: 0,
+            pieces_rejected: 0,
+            segment_retries: 0,
+            resumed_from_segment: 0,
+            last_error: None,
+            resumable: false,
+        };
+        let listed = WorkerResult::TransferList(vec![status]);
+        let rendered = format!("{listed:?}");
+        assert!(!rendered.contains("src-secret"));
+        assert!(rendered.contains("count: 1"));
     }
 
     #[test]
