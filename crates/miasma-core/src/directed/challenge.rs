@@ -19,6 +19,7 @@
 
 use rand::Rng;
 use subtle::ConstantTimeEq;
+use zeroize::Zeroizing;
 
 /// Challenge code TTL in seconds (5 minutes).
 pub const CHALLENGE_TTL_SECS: u64 = 300;
@@ -38,13 +39,12 @@ const CHALLENGE_ALPHABET: &[u8] = b"23456789ABCDEFGHJKMNPQRSTUVWXYZ";
 /// Returns the raw code string (e.g. "ABCD-1234") and its BLAKE3 hash.
 pub fn generate_challenge() -> (String, [u8; 32]) {
     let mut rng = rand::thread_rng();
-    let mut chars = Vec::with_capacity(8);
+    let mut raw = Zeroizing::new(String::with_capacity(8));
     for _ in 0..8 {
         let idx = rng.gen_range(0..CHALLENGE_ALPHABET.len());
-        chars.push(CHALLENGE_ALPHABET[idx] as char);
+        raw.push(CHALLENGE_ALPHABET[idx] as char);
     }
 
-    let raw: String = chars.iter().collect();
     let formatted = format!("{}-{}", &raw[..4], &raw[4..]);
     let hash = *blake3::hash(formatted.as_bytes()).as_bytes();
 
@@ -55,7 +55,7 @@ pub fn generate_challenge() -> (String, [u8; 32]) {
 ///
 /// The `input` should be in "XXXX-XXXX" format or will be normalized.
 pub fn verify_challenge(input: &str, expected_hash: &[u8; 32]) -> bool {
-    let normalized = normalize_challenge(input);
+    let normalized = Zeroizing::new(normalize_challenge(input));
     let input_hash = blake3::hash(normalized.as_bytes());
     input_hash.as_bytes().ct_eq(expected_hash).into()
 }

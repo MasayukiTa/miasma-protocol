@@ -4193,6 +4193,7 @@ impl MiasmaNode {
                         envelope_id,
                         challenge_code,
                     } => {
+                        let challenge_code = zeroize::Zeroizing::new(challenge_code);
                         let id_hex = hex::encode(envelope_id);
                         let peer_text = peer.to_string();
                         let response = if let Some(ref data_dir) = self.directed_data_dir {
@@ -4246,7 +4247,7 @@ impl MiasmaNode {
                                                     }
                                                 } else if let Some(hash) = envelope.challenge_hash {
                                                     if crate::directed::verify_challenge(
-                                                        &challenge_code,
+                                                        challenge_code.as_str(),
                                                         &hash,
                                                     ) {
                                                         envelope.state =
