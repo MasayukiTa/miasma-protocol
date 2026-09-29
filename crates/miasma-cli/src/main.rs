@@ -411,6 +411,7 @@ fn cmd_init(
         storage: StorageConfig {
             quota_mb: storage_mb,
             bandwidth_mb_day,
+            ..StorageConfig::default()
         },
         network: NetworkConfig {
             listen_addr: listen_addr.into(),
@@ -426,6 +427,7 @@ fn cmd_init(
     println!("✓ Miasma node initialised");
     println!("  Data dir:         {}", data_dir.display());
     println!("  Storage quota:    {} MiB", storage_mb);
+    println!("  Hosted quota:     {} MiB", config.storage.hosted_quota_mb);
     println!("  Bandwidth quota:  {} MiB/day", bandwidth_mb_day);
     println!("  Listen addr:      {listen_addr}");
     println!();
@@ -618,15 +620,19 @@ async fn cmd_status(data_dir: &std::path::Path) -> Result<()> {
     // Fallback: no daemon running
     let mut config = NodeConfig::load(data_dir).context("cannot load config")?;
     let quota_mb = config.storage.quota_mb;
+    let hosted_quota_mb = config.storage.hosted_quota_mb;
     config.transport.zeroize_secret_copies();
-    let store = LocalShareStore::open(data_dir, quota_mb).context("cannot open share store")?;
+    let store = LocalShareStore::open_with_quotas(data_dir, quota_mb, hosted_quota_mb)
+        .context("cannot open share store")?;
     println!("Miasma Node Status (daemon not running)");
     println!("  Data dir:      {}", data_dir.display());
     println!("  Shares stored: {}", store.list().len());
     println!(
-        "  Storage used:  {:.1} MiB / {} MiB",
-        store.used_bytes() as f64 / 1024.0 / 1024.0,
-        quota_mb
+        "  Storage used:  {:.1} MiB / {} MiB owned + {:.1} MiB / {} MiB hosted",
+        store.used_owned_bytes() as f64 / 1024.0 / 1024.0,
+        quota_mb,
+        store.used_hosted_bytes() as f64 / 1024.0 / 1024.0,
+        hosted_quota_mb,
     );
     Ok(())
 }
@@ -636,7 +642,11 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
 
     let version = env!("CARGO_PKG_VERSION");
     let config_info = NodeConfig::load(data_dir).map(|mut config| {
-        let info = (config.storage.quota_mb, config.network.listen_addr.clone());
+        let info = (
+            config.storage.quota_mb,
+            config.storage.hosted_quota_mb,
+            config.network.listen_addr.clone(),
+        );
         config.transport.zeroize_secret_copies();
         info
     });
@@ -645,15 +655,23 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
     let key_exists = key_path.exists();
 
     // Store info.
-    let (share_count, storage_used) = if let Ok((quota_mb, _)) = &config_info {
-        if let Ok(store) = LocalShareStore::open(data_dir, *quota_mb) {
-            (store.list().len(), store.used_bytes())
+    let (share_count, storage_used, owned_storage_used, hosted_storage_used) =
+        if let Ok((quota_mb, hosted_quota_mb, _)) = &config_info {
+            if let Ok(store) =
+                LocalShareStore::open_with_quotas(data_dir, *quota_mb, *hosted_quota_mb)
+            {
+                (
+                    store.list().len(),
+                    store.used_bytes(),
+                    store.used_owned_bytes(),
+                    store.used_hosted_bytes(),
+                )
+            } else {
+                (0, 0, 0, 0)
+            }
         } else {
-            (0, 0)
-        }
-    } else {
-        (0, 0)
-    };
+            (0, 0, 0, 0)
+        };
 
     // Daemon IPC.
     let daemon_resp = daemon_request(data_dir, ControlRequest::Status).await;
@@ -679,9 +697,21 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
         );
         report.insert("share_count".into(), serde_json::json!(share_count));
         report.insert("storage_used_bytes".into(), serde_json::json!(storage_used));
+        report.insert(
+            "owned_storage_used_bytes".into(),
+            serde_json::json!(owned_storage_used),
+        );
+        report.insert(
+            "hosted_storage_used_bytes".into(),
+            serde_json::json!(hosted_storage_used),
+        );
 
-        if let Ok((quota_mb, listen_addr)) = &config_info {
+        if let Ok((quota_mb, hosted_quota_mb, listen_addr)) = &config_info {
             report.insert("storage_quota_mb".into(), serde_json::json!(quota_mb));
+            report.insert(
+                "hosted_storage_quota_mb".into(),
+                serde_json::json!(hosted_quota_mb),
+            );
             report.insert("listen_addr".into(), serde_json::json!(listen_addr));
         }
 
@@ -748,15 +778,17 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
         );
         println!("Daemon log:      {}/daemon.log.*", data_dir.display());
 
-        if let Ok((quota_mb, listen_addr)) = &config_info {
+        if let Ok((quota_mb, hosted_quota_mb, listen_addr)) = &config_info {
             println!("Storage quota:   {quota_mb} MiB");
+            println!("Hosted quota:    {hosted_quota_mb} MiB");
             println!("Listen addr:     {listen_addr}");
         }
 
         println!("Shares stored:   {share_count}");
         println!(
-            "Storage used:    {:.1} MiB",
-            storage_used as f64 / 1024.0 / 1024.0
+            "Storage used:    {:.1} MiB owned + {:.1} MiB hosted",
+            owned_storage_used as f64 / 1024.0 / 1024.0,
+            hosted_storage_used as f64 / 1024.0 / 1024.0
         );
 
         println!();
@@ -1175,6 +1207,7 @@ fn cmd_config_loaded(
             // Read a specific key.
             match k {
                 "storage.quota_mb" => println!("{}", config.storage.quota_mb),
+                "storage.hosted_quota_mb" => println!("{}", config.storage.hosted_quota_mb),
                 "storage.bandwidth_mb_day" => println!("{}", config.storage.bandwidth_mb_day),
                 "network.listen_addr" => println!("{}", config.network.listen_addr),
                 "network.bootstrap_peers" => {
@@ -1211,6 +1244,9 @@ fn cmd_config_loaded(
             match k {
                 "storage.quota_mb" => {
                     config.storage.quota_mb = v.parse().context("expected integer")?;
+                }
+                "storage.hosted_quota_mb" => {
+                    config.storage.hosted_quota_mb = v.parse().context("expected integer")?;
                 }
                 "storage.bandwidth_mb_day" => {
                     config.storage.bandwidth_mb_day = v.parse().context("expected integer")?;
@@ -1297,8 +1333,12 @@ async fn cmd_daemon(data_dir: &std::path::Path, bootstrap_addrs: &[String]) -> R
     }
 
     let store = Arc::new(
-        LocalShareStore::open(data_dir, config.storage.quota_mb)
-            .context("cannot open share store")?,
+        LocalShareStore::open_with_quotas(
+            data_dir,
+            config.storage.quota_mb,
+            config.storage.hosted_quota_mb,
+        )
+        .context("cannot open share store")?,
     );
 
     let node = MiasmaNode::new(&master_key, NodeType::Full, &config.network.listen_addr)
