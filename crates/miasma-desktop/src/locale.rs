@@ -1046,9 +1046,584 @@ static ZH_CN: Strings = Strings {
     node_init_msg: "初始化完成。",
 };
 
+// ─── Transfers screen ───────────────────────────────────────────────────────
+//
+// Kept apart from `Strings` so the tests can list every field of this screen and check each
+// one, in every locale, for emptiness. `{name}` placeholders are filled by `transfers::fill`.
+
+/// Strings of the Transfers screen (`transfers.rs`).
+pub struct TransferStrings {
+    pub tab: &'static str,
+    pub tab_easy: &'static str,
+    pub heading: &'static str,
+    pub heading_easy: &'static str,
+    pub desc: &'static str,
+    pub desc_easy: &'static str,
+
+    // Direction and state.
+    pub send: &'static str,
+    pub receive: &'static str,
+    pub st_running: &'static str,
+    pub st_paused: &'static str,
+    pub st_complete: &'static str,
+    pub st_failed: &'static str,
+    pub st_cancelled: &'static str,
+
+    // List.
+    pub empty: &'static str,
+    pub empty_easy: &'static str,
+    pub offline_note: &'static str,
+    pub stale_note: &'static str,
+    pub select_hint: &'static str,
+    pub eta: &'static str,
+    /// Suffix after a number of days in an ETA ("2d 03:20:11").
+    pub day: &'static str,
+
+    // Detail.
+    pub mid_label: &'static str,
+    pub mid_label_easy: &'static str,
+    pub copy: &'static str,
+    pub copied: &'static str,
+    pub phase_label: &'static str,
+    pub ph_preparing: &'static str,
+    pub ph_hashing: &'static str,
+    pub ph_verifying: &'static str,
+    pub ph_transferring: &'static str,
+    pub ph_finalizing: &'static str,
+    pub ph_done: &'static str,
+    pub elapsed_label: &'static str,
+    pub segments_label: &'static str,
+    pub segment_word: &'static str,
+    pub strip_unknown: &'static str,
+    pub strip_done: &'static str,
+    pub strip_inflight: &'static str,
+    pub strip_pending: &'static str,
+    /// `{n}`: the segment this session resumed from.
+    pub strip_resumed: &'static str,
+    /// `{n}`: segments drawn as one cell.
+    pub strip_per_cell: &'static str,
+    pub resumed_label: &'static str,
+    pub resumed_fresh: &'static str,
+    pub split_label: &'static str,
+    /// `{a}` `{b}` `{c}`: percent of time fetching / decoding / writing.
+    pub split_recv: &'static str,
+    /// `{a}` `{b}` `{c}`: percent of time pushing / encoding / storing.
+    pub split_send: &'static str,
+    pub pieces_label: &'static str,
+    /// `{ok}` `{bad}`
+    pub pieces_fmt: &'static str,
+    pub retries_label: &'static str,
+    pub error_label: &'static str,
+
+    // Easy-mode sentences. `{pct}` `{eta}`
+    pub easy_running: &'static str,
+    pub easy_running_eta: &'static str,
+    pub easy_paused: &'static str,
+    pub easy_complete: &'static str,
+    pub easy_failed: &'static str,
+
+    // Buttons and prompts.
+    pub btn_stop: &'static str,
+    pub btn_resume: &'static str,
+    pub btn_try_again: &'static str,
+    pub btn_restart: &'static str,
+    pub btn_keep: &'static str,
+    pub restart_confirm: &'static str,
+    pub restart_yes: &'static str,
+    pub resume_go: &'static str,
+    pub resume_pw_optional: &'static str,
+    pub resume_pw_required: &'static str,
+
+    // New transfer.
+    pub new_heading: &'static str,
+    pub forms_offline: &'static str,
+    pub recv_path_label: &'static str,
+    pub recv_path_hint: &'static str,
+    pub send_path_label: &'static str,
+    pub send_path_hint: &'static str,
+    pub browse: &'static str,
+    pub password_label: &'static str,
+    pub password_note: &'static str,
+    pub confirm_label: &'static str,
+    pub mismatch: &'static str,
+    pub recv_button: &'static str,
+    pub send_button: &'static str,
+    pub err_mid: &'static str,
+    pub started: &'static str,
+    pub stop_requested: &'static str,
+    pub send_hint: &'static str,
+
+    // Redundancy.
+    pub red_label: &'static str,
+    pub red_label_easy: &'static str,
+    /// `{kn}` `{x}` `{loss}`
+    pub red_row: &'static str,
+    pub red_default: &'static str,
+    pub easy_fast: &'static str,
+    pub easy_fast_desc: &'static str,
+    pub easy_bal: &'static str,
+    pub easy_bal_desc: &'static str,
+    pub easy_safe: &'static str,
+    pub easy_safe_desc: &'static str,
+}
+
+impl TransferStrings {
+    /// Every field with its name, for the completeness test.
+    #[cfg(test)]
+    fn all(&self) -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("tab", self.tab),
+            ("tab_easy", self.tab_easy),
+            ("heading", self.heading),
+            ("heading_easy", self.heading_easy),
+            ("desc", self.desc),
+            ("desc_easy", self.desc_easy),
+            ("send", self.send),
+            ("receive", self.receive),
+            ("st_running", self.st_running),
+            ("st_paused", self.st_paused),
+            ("st_complete", self.st_complete),
+            ("st_failed", self.st_failed),
+            ("st_cancelled", self.st_cancelled),
+            ("empty", self.empty),
+            ("empty_easy", self.empty_easy),
+            ("offline_note", self.offline_note),
+            ("stale_note", self.stale_note),
+            ("select_hint", self.select_hint),
+            ("eta", self.eta),
+            ("day", self.day),
+            ("mid_label", self.mid_label),
+            ("mid_label_easy", self.mid_label_easy),
+            ("copy", self.copy),
+            ("copied", self.copied),
+            ("phase_label", self.phase_label),
+            ("ph_preparing", self.ph_preparing),
+            ("ph_hashing", self.ph_hashing),
+            ("ph_verifying", self.ph_verifying),
+            ("ph_transferring", self.ph_transferring),
+            ("ph_finalizing", self.ph_finalizing),
+            ("ph_done", self.ph_done),
+            ("elapsed_label", self.elapsed_label),
+            ("segments_label", self.segments_label),
+            ("segment_word", self.segment_word),
+            ("strip_unknown", self.strip_unknown),
+            ("strip_done", self.strip_done),
+            ("strip_inflight", self.strip_inflight),
+            ("strip_pending", self.strip_pending),
+            ("strip_resumed", self.strip_resumed),
+            ("strip_per_cell", self.strip_per_cell),
+            ("resumed_label", self.resumed_label),
+            ("resumed_fresh", self.resumed_fresh),
+            ("split_label", self.split_label),
+            ("split_recv", self.split_recv),
+            ("split_send", self.split_send),
+            ("pieces_label", self.pieces_label),
+            ("pieces_fmt", self.pieces_fmt),
+            ("retries_label", self.retries_label),
+            ("error_label", self.error_label),
+            ("easy_running", self.easy_running),
+            ("easy_running_eta", self.easy_running_eta),
+            ("easy_paused", self.easy_paused),
+            ("easy_complete", self.easy_complete),
+            ("easy_failed", self.easy_failed),
+            ("btn_stop", self.btn_stop),
+            ("btn_resume", self.btn_resume),
+            ("btn_try_again", self.btn_try_again),
+            ("btn_restart", self.btn_restart),
+            ("btn_keep", self.btn_keep),
+            ("restart_confirm", self.restart_confirm),
+            ("restart_yes", self.restart_yes),
+            ("resume_go", self.resume_go),
+            ("resume_pw_optional", self.resume_pw_optional),
+            ("resume_pw_required", self.resume_pw_required),
+            ("new_heading", self.new_heading),
+            ("forms_offline", self.forms_offline),
+            ("recv_path_label", self.recv_path_label),
+            ("recv_path_hint", self.recv_path_hint),
+            ("send_path_label", self.send_path_label),
+            ("send_path_hint", self.send_path_hint),
+            ("browse", self.browse),
+            ("password_label", self.password_label),
+            ("password_note", self.password_note),
+            ("confirm_label", self.confirm_label),
+            ("mismatch", self.mismatch),
+            ("recv_button", self.recv_button),
+            ("send_button", self.send_button),
+            ("err_mid", self.err_mid),
+            ("started", self.started),
+            ("stop_requested", self.stop_requested),
+            ("send_hint", self.send_hint),
+            ("red_label", self.red_label),
+            ("red_label_easy", self.red_label_easy),
+            ("red_row", self.red_row),
+            ("red_default", self.red_default),
+            ("easy_fast", self.easy_fast),
+            ("easy_fast_desc", self.easy_fast_desc),
+            ("easy_bal", self.easy_bal),
+            ("easy_bal_desc", self.easy_bal_desc),
+            ("easy_safe", self.easy_safe),
+            ("easy_safe_desc", self.easy_safe_desc),
+        ]
+    }
+}
+
+pub fn transfer_strings(locale: Locale) -> &'static TransferStrings {
+    match locale {
+        Locale::En => &TR_EN,
+        Locale::Ja => &TR_JA,
+        Locale::ZhCn => &TR_ZH_CN,
+    }
+}
+
+static TR_EN: TransferStrings = TransferStrings {
+    tab: "Transfers",
+    tab_easy: "Transfers",
+    heading: "Transfers",
+    heading_easy: "Transfers",
+    desc: "Large files are sent and received by the background service. They can be stopped and resumed, and this list shows exactly how far each one has got.",
+    desc_easy: "Send or receive large files here. You can stop a transfer and continue it later from where it stopped.",
+
+    send: "Send",
+    receive: "Receive",
+    st_running: "Running",
+    st_paused: "Paused",
+    st_complete: "Complete",
+    st_failed: "Failed",
+    st_cancelled: "Stopped",
+
+    empty: "No transfers yet. Start one below.",
+    empty_easy: "Nothing is being sent or received. Start a transfer below.",
+    offline_note: "The background service is not running, so the list cannot be updated.",
+    stale_note: "Showing the last known state.",
+    select_hint: "Select a transfer to see its details.",
+    eta: "ETA",
+    day: "d",
+
+    mid_label: "MID",
+    mid_label_easy: "Content ID",
+    copy: "Copy",
+    copied: "Copied",
+    phase_label: "Phase",
+    ph_preparing: "Getting ready",
+    ph_hashing: "Reading the file",
+    ph_verifying: "Checking what is already saved",
+    ph_transferring: "Transferring",
+    ph_finalizing: "Finishing up",
+    ph_done: "Done",
+    elapsed_label: "Elapsed",
+    segments_label: "Segments",
+    segment_word: "Segment",
+    strip_unknown: "The number of segments is not known yet.",
+    strip_done: "done",
+    strip_inflight: "in progress",
+    strip_pending: "waiting",
+    strip_resumed: "resumed from segment {n}",
+    strip_per_cell: "{n} segments per cell",
+    resumed_label: "Resumed from segment",
+    resumed_fresh: "started from the beginning",
+    split_label: "Time split",
+    split_recv: "fetch {a}%   decode {b}%   write {c}%",
+    split_send: "push to peers {a}%   encode {b}%   store locally {c}%",
+    pieces_label: "Pieces",
+    pieces_fmt: "{ok} received, {bad} rejected",
+    retries_label: "Segment retries",
+    error_label: "Last error",
+
+    easy_running: "{pct} done.",
+    easy_running_eta: "{pct} done, about {eta} left.",
+    easy_paused: "Stopped at {pct}. Your progress is saved; you can continue where it left off.",
+    easy_complete: "Finished.",
+    easy_failed: "This did not finish. See the message below, then try again.",
+
+    btn_stop: "Stop (keep progress)",
+    btn_resume: "Resume",
+    btn_try_again: "Try again",
+    btn_restart: "Start over",
+    btn_keep: "Cancel",
+    restart_confirm: "Discard the saved progress and start from the beginning?",
+    restart_yes: "Discard and start over",
+    resume_go: "Resume",
+    resume_pw_optional: "The password is never saved, so it is asked for again. Leave it empty if the transfer has no password.",
+    resume_pw_required: "This transfer was started with a password. Enter the same password to continue.",
+
+    new_heading: "New transfer",
+    forms_offline: "Start the background service first (see the top of the window).",
+    recv_path_label: "Save to",
+    recv_path_hint: "Where to write the finished file",
+    send_path_label: "File",
+    send_path_hint: "The file to send",
+    browse: "Browse...",
+    password_label: "Password (optional)",
+    password_note: "Used as part of the encryption key. It is not stored: keep it, you will need it to resume.",
+    confirm_label: "Confirm password",
+    mismatch: "The two passwords do not match.",
+    recv_button: "Start receiving",
+    send_button: "Start sending",
+    err_mid: "A MID starts with \"miasma:\".",
+    started: "Transfer started.",
+    stop_requested: "Stopping at the next safe point. Progress is kept.",
+    send_hint: "The receiver must be able to reach this computer, and this computer must stay on and online until the receiver has finished: other computers do not keep a copy by default.",
+
+    red_label: "Redundancy",
+    red_label_easy: "Protection",
+    red_row: "{kn}   {x} storage   tolerates {loss} lost pieces",
+    red_default: "(default)",
+    easy_fast: "Fastest",
+    easy_fast_desc: "Least disk space and time. There are no spare pieces, so damage cannot be repaired.",
+    easy_bal: "Balanced",
+    easy_bal_desc: "A little spare: up to 2 damaged pieces per part can be repaired.",
+    easy_safe: "Safest",
+    easy_safe_desc: "Uses twice the disk space. Up to 10 damaged pieces per part can be repaired.",
+};
+
+static TR_JA: TransferStrings = TransferStrings {
+    tab: "転送",
+    tab_easy: "ファイル転送",
+    heading: "転送",
+    heading_easy: "ファイル転送",
+    desc: "大きなファイルの送受信はバックグラウンドで行われます。途中で止めても続きから再開でき、この一覧でそれぞれの進み具合を正確に確認できます。",
+    desc_easy: "大きなファイルをここで送ったり受け取ったりできます。途中で止めても、あとで続きから再開できます。",
+
+    send: "送信",
+    receive: "受信",
+    st_running: "転送中",
+    st_paused: "一時停止",
+    st_complete: "完了",
+    st_failed: "失敗",
+    st_cancelled: "停止",
+
+    empty: "転送はまだありません。下から開始できます。",
+    empty_easy: "送信も受信もしていません。下から転送を始めてください。",
+    offline_note: "バックグラウンドのサービスが動いていないため、一覧を更新できません。",
+    stale_note: "最後に確認できた状態を表示しています。",
+    select_hint: "詳細を見たい転送を選んでください。",
+    eta: "残り",
+    day: "日",
+
+    mid_label: "MID",
+    mid_label_easy: "コンテンツID",
+    copy: "コピー",
+    copied: "コピーしました",
+    phase_label: "段階",
+    ph_preparing: "準備中",
+    ph_hashing: "ファイルを読み込み中",
+    ph_verifying: "保存済みの部分を確認中",
+    ph_transferring: "転送中",
+    ph_finalizing: "仕上げ中",
+    ph_done: "完了",
+    elapsed_label: "経過時間",
+    segments_label: "セグメント",
+    segment_word: "セグメント",
+    strip_unknown: "セグメント数はまだ分かっていません。",
+    strip_done: "完了",
+    strip_inflight: "処理中",
+    strip_pending: "待機中",
+    strip_resumed: "セグメント{n}から再開",
+    strip_per_cell: "1マス = {n}セグメント",
+    resumed_label: "再開位置",
+    resumed_fresh: "最初から開始",
+    split_label: "時間の内訳",
+    split_recv: "取得 {a}%   復号 {b}%   書き込み {c}%",
+    split_send: "相手へ送信 {a}%   暗号化・分割 {b}%   ローカル保存 {c}%",
+    pieces_label: "ピース",
+    pieces_fmt: "受信 {ok}個 / 不一致で破棄 {bad}個",
+    retries_label: "セグメントの再試行",
+    error_label: "最後のエラー",
+
+    easy_running: "{pct} 完了しました。",
+    easy_running_eta: "{pct} 完了、残り約 {eta} です。",
+    easy_paused: "{pct} で止まっています。進み具合は保存されているので、続きから再開できます。",
+    easy_complete: "完了しました。",
+    easy_failed: "最後まで終わりませんでした。下のメッセージを確認して、もう一度お試しください。",
+
+    btn_stop: "進捗を保ったまま停止",
+    btn_resume: "続きから再開",
+    btn_try_again: "もう一度試す",
+    btn_restart: "最初からやり直す",
+    btn_keep: "キャンセル",
+    restart_confirm: "保存済みの進捗を捨てて、最初からやり直しますか？",
+    restart_yes: "捨てて最初からやり直す",
+    resume_go: "再開する",
+    resume_pw_optional: "パスワードは保存されないため、もう一度入力が必要です。パスワードを付けていない転送は空のままにしてください。",
+    resume_pw_required: "この転送はパスワード付きで開始されました。続けるには同じパスワードを入力してください。",
+
+    new_heading: "新しい転送",
+    forms_offline: "先にバックグラウンドのサービスを起動してください（画面の上部を参照）。",
+    recv_path_label: "保存先",
+    recv_path_hint: "完成したファイルの保存先",
+    send_path_label: "ファイル",
+    send_path_hint: "送信するファイル",
+    browse: "参照...",
+    password_label: "パスワード（任意）",
+    password_note: "暗号化の鍵の一部として使われます。保存されないので、再開に必要です。控えておいてください。",
+    confirm_label: "パスワード（確認）",
+    mismatch: "2つのパスワードが一致しません。",
+    recv_button: "受信を開始",
+    send_button: "送信を開始",
+    err_mid: "MIDは「miasma:」で始まります。",
+    started: "転送を開始しました。",
+    stop_requested: "次の区切りで停止します。進捗は保たれます。",
+    send_hint: "受信側からこのコンピュータへ接続できる必要があります。受信が終わるまで、このコンピュータの電源とネットワークを維持してください。既定では他のコンピュータに複製は残りません。",
+
+    red_label: "冗長度",
+    red_label_easy: "保護レベル",
+    red_row: "{kn}   保存容量 {x}   欠けても復元できるピース数 {loss}",
+    red_default: "（既定）",
+    easy_fast: "最速",
+    easy_fast_desc: "ディスク容量と時間が最小です。予備がないため、破損は修復できません。",
+    easy_bal: "標準",
+    easy_bal_desc: "少し予備があり、各部分で最大2ピースの破損まで修復できます。",
+    easy_safe: "最も安全",
+    easy_safe_desc: "ディスク容量が2倍になります。各部分で最大10ピースの破損まで修復できます。",
+};
+
+static TR_ZH_CN: TransferStrings = TransferStrings {
+    tab: "传输",
+    tab_easy: "文件传输",
+    heading: "传输",
+    heading_easy: "文件传输",
+    desc: "大文件由后台服务收发。传输可以中途停止并继续，此列表会准确显示每个传输的进度。",
+    desc_easy: "在这里发送或接收大文件。可以随时停止，之后从中断处继续。",
+
+    send: "发送",
+    receive: "接收",
+    st_running: "传输中",
+    st_paused: "已暂停",
+    st_complete: "已完成",
+    st_failed: "失败",
+    st_cancelled: "已停止",
+
+    empty: "还没有传输。可以在下方开始。",
+    empty_easy: "当前没有发送或接收。请在下方开始传输。",
+    offline_note: "后台服务未运行，无法更新列表。",
+    stale_note: "显示的是最近一次获取的状态。",
+    select_hint: "选择一个传输以查看详情。",
+    eta: "剩余",
+    day: "天",
+
+    mid_label: "MID",
+    mid_label_easy: "内容ID",
+    copy: "复制",
+    copied: "已复制",
+    phase_label: "阶段",
+    ph_preparing: "准备中",
+    ph_hashing: "正在读取文件",
+    ph_verifying: "正在检查已保存的部分",
+    ph_transferring: "传输中",
+    ph_finalizing: "正在收尾",
+    ph_done: "完成",
+    elapsed_label: "已用时间",
+    segments_label: "分段",
+    segment_word: "分段",
+    strip_unknown: "分段数量暂未确定。",
+    strip_done: "已完成",
+    strip_inflight: "处理中",
+    strip_pending: "等待中",
+    strip_resumed: "从第{n}段继续",
+    strip_per_cell: "每格 {n} 段",
+    resumed_label: "继续位置",
+    resumed_fresh: "从头开始",
+    split_label: "耗时分布",
+    split_recv: "获取 {a}%   解码 {b}%   写入 {c}%",
+    split_send: "发送给对端 {a}%   编码 {b}%   本地存储 {c}%",
+    pieces_label: "分片",
+    pieces_fmt: "已接收 {ok} 个，校验不符丢弃 {bad} 个",
+    retries_label: "分段重试次数",
+    error_label: "最近的错误",
+
+    easy_running: "已完成 {pct}。",
+    easy_running_eta: "已完成 {pct}，大约还需 {eta}。",
+    easy_paused: "已在 {pct} 处停止。进度已保存，可以从中断处继续。",
+    easy_complete: "已完成。",
+    easy_failed: "未能完成。请查看下方的信息，然后重试。",
+
+    btn_stop: "停止（保留进度）",
+    btn_resume: "继续",
+    btn_try_again: "重试",
+    btn_restart: "重新开始",
+    btn_keep: "取消",
+    restart_confirm: "放弃已保存的进度并从头开始吗？",
+    restart_yes: "放弃并重新开始",
+    resume_go: "继续",
+    resume_pw_optional: "密码不会被保存，因此需要再次输入。如果此传输没有设置密码，请留空。",
+    resume_pw_required: "此传输是带密码开始的。请输入相同的密码以继续。",
+
+    new_heading: "新建传输",
+    forms_offline: "请先启动后台服务（见窗口顶部）。",
+    recv_path_label: "保存到",
+    recv_path_hint: "完成后文件的保存位置",
+    send_path_label: "文件",
+    send_path_hint: "要发送的文件",
+    browse: "浏览...",
+    password_label: "密码（可选）",
+    password_note: "会作为加密密钥的一部分使用。密码不会被保存，继续传输时需要，请妥善记下。",
+    confirm_label: "确认密码",
+    mismatch: "两次输入的密码不一致。",
+    recv_button: "开始接收",
+    send_button: "开始发送",
+    err_mid: "MID 以“miasma:”开头。",
+    started: "传输已开始。",
+    stop_requested: "将在下一个安全点停止，进度会保留。",
+    send_hint: "接收方必须能够连接到这台电脑，并且在接收完成之前，这台电脑要保持开机和联网：默认情况下其他电脑不会保存副本。",
+
+    red_label: "冗余度",
+    red_label_easy: "保护级别",
+    red_row: "{kn}   占用空间 {x}   可容忍丢失 {loss} 个分片",
+    red_default: "（默认）",
+    easy_fast: "最快",
+    easy_fast_desc: "占用磁盘空间和时间最少。没有备用分片，损坏后无法修复。",
+    easy_bal: "均衡",
+    easy_bal_desc: "有少量备用：每部分最多可修复 2 个损坏的分片。",
+    easy_safe: "最安全",
+    easy_safe_desc: "占用两倍磁盘空间。每部分最多可修复 10 个损坏的分片。",
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_transfer_string_exists_in_every_locale() {
+        for lang in Locale::ALL {
+            let t = transfer_strings(lang);
+            for (name, value) in t.all() {
+                assert!(!value.trim().is_empty(), "{lang:?} transfers.{name} is empty");
+            }
+        }
+    }
+
+    #[test]
+    fn transfer_placeholders_survive_translation() {
+        // A translation that drops a placeholder would silently show a blank in the UI.
+        type Getter = fn(&TransferStrings) -> &'static str;
+        let need: [(&str, Getter, &[&str]); 8] = [
+            ("strip_resumed", |t| t.strip_resumed, &["{n}"]),
+            ("strip_per_cell", |t| t.strip_per_cell, &["{n}"]),
+            ("split_recv", |t| t.split_recv, &["{a}", "{b}", "{c}"]),
+            ("split_send", |t| t.split_send, &["{a}", "{b}", "{c}"]),
+            ("pieces_fmt", |t| t.pieces_fmt, &["{ok}", "{bad}"]),
+            ("easy_running", |t| t.easy_running, &["{pct}"]),
+            ("easy_running_eta", |t| t.easy_running_eta, &["{pct}", "{eta}"]),
+            ("red_row", |t| t.red_row, &["{kn}", "{x}", "{loss}"]),
+        ];
+        for lang in Locale::ALL {
+            let t = transfer_strings(lang);
+            for (name, get, holes) in need {
+                for h in holes {
+                    assert!(get(t).contains(h), "{lang:?} transfers.{name} lost {h}");
+                }
+            }
+            assert!(t.easy_paused.contains("{pct}"), "{lang:?} easy_paused lost {{pct}}");
+        }
+    }
+
+    #[test]
+    fn transfer_easy_and_technical_wording_differs_in_english() {
+        let t = transfer_strings(Locale::En);
+        assert_ne!(t.mid_label, t.mid_label_easy);
+        assert_ne!(t.red_label, t.red_label_easy);
+    }
+
 
     #[test]
     fn all_locales_return_non_empty_strings() {

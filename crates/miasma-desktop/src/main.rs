@@ -21,6 +21,7 @@ mod app;
 mod fonts;
 pub mod locale;
 mod theme;
+mod transfers;
 pub mod variant;
 mod worker;
 
