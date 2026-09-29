@@ -1590,6 +1590,15 @@ fn job_row(
 mod tests {
     use super::*;
 
+    /// A fresh random password, for tests: no test carries a fixed secret.
+    fn random_test_password() -> String {
+        use std::hash::{BuildHasher, Hasher};
+        let h = std::collections::hash_map::RandomState::new()
+            .build_hasher()
+            .finish();
+        format!("pw-{h:016x}")
+    }
+
     fn status(kind: TransferKind, state: TransferState) -> TransferStatus {
         TransferStatus {
             mid: "miasma:abc".into(),
@@ -1892,7 +1901,9 @@ mod tests {
     fn resuming_reissues_the_same_request() {
         let mut r = status(TransferKind::Receive, TransferState::Paused);
         r.name = r"\\?\C:\out\big.iso".into();
-        match start_again(&r, "pw", false) {
+        let pw = random_test_password();
+        let none = String::new();
+        match start_again(&r, &pw, false) {
             WorkerCmd::TransferStartReceive {
                 mid,
                 output_path,
@@ -1901,25 +1912,25 @@ mod tests {
             } => {
                 assert_eq!(mid, "miasma:abc");
                 assert_eq!(output_path, std::path::PathBuf::from(r"C:\out\big.iso"));
-                assert_eq!(password.as_deref(), Some("pw"));
+                assert_eq!(password.as_deref(), Some(pw.as_str()));
                 assert!(!restart);
             }
             other => panic!("wrong command: {other:?}"),
         }
         // No password typed = no password sent.
         assert!(matches!(
-            start_again(&r, "", false),
+            start_again(&r, &none, false),
             WorkerCmd::TransferStartReceive { password: None, .. }
         ));
         // A send resumes through the journal (so k/n are the ones it began with) ...
         let s = status(TransferKind::Send, TransferState::Paused);
         assert!(matches!(
-            start_again(&s, "", false),
+            start_again(&s, &none, false),
             WorkerCmd::TransferResumePublish { .. }
         ));
         // ... and "start over" restarts.
         assert!(matches!(
-            start_again(&s, "", true),
+            start_again(&s, &none, true),
             WorkerCmd::TransferStartPublish { restart: true, .. }
         ));
     }
