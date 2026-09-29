@@ -620,34 +620,36 @@ impl TransfersUi {
     fn list_card(&mut self, ui: &mut egui::Ui, t: &TransferStrings, easy: bool) {
         let stale = self.poll_error.as_ref().is_some_and(|(_, down)| *down);
         let mut clicked: Option<String> = None;
-        card_frame().inner_margin(egui::Margin::same(6.0)).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            if self.jobs.is_empty() {
-                ui.add_space(14.0);
-                ui.vertical_centered(|ui| {
-                    ui.label(
-                        egui::RichText::new(if easy { t.empty_easy } else { t.empty })
-                            .color(pal().muted),
-                    );
-                });
-                ui.add_space(14.0);
-                return;
-            }
-            egui::ScrollArea::vertical()
-                .id_source("transfer_list")
-                .max_height(ROW_H * 5.0 + 8.0)
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    for job in &self.jobs {
-                        let id = transfer_id(job);
-                        let selected = self.selected.as_deref() == Some(id.as_str());
-                        if job_row(ui, t, job, selected, stale) {
-                            clicked = Some(id);
+        card_frame()
+            .inner_margin(egui::Margin::same(6.0))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                if self.jobs.is_empty() {
+                    ui.add_space(14.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            egui::RichText::new(if easy { t.empty_easy } else { t.empty })
+                                .color(pal().muted),
+                        );
+                    });
+                    ui.add_space(14.0);
+                    return;
+                }
+                egui::ScrollArea::vertical()
+                    .id_source("transfer_list")
+                    .max_height(ROW_H * 5.0 + 8.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        for job in &self.jobs {
+                            let id = transfer_id(job);
+                            let selected = self.selected.as_deref() == Some(id.as_str());
+                            if job_row(ui, t, job, selected, stale) {
+                                clicked = Some(id);
+                            }
                         }
-                    }
-                });
-        });
+                    });
+            });
         if let Some(id) = clicked {
             self.select_id(Some(id));
         }
@@ -800,10 +802,18 @@ impl TransfersUi {
             running,
             job.resumed_from_segment,
         );
-        ui.label(egui::RichText::new(t.segments_label).small().color(pal().muted));
+        ui.label(
+            egui::RichText::new(t.segments_label)
+                .small()
+                .color(pal().muted),
+        );
         ui.add_space(2.0);
         if strip.cells.is_empty() {
-            ui.label(egui::RichText::new(t.strip_unknown).small().color(pal().faint));
+            ui.label(
+                egui::RichText::new(t.strip_unknown)
+                    .small()
+                    .color(pal().faint),
+            );
             return;
         }
         let p = pal();
@@ -948,7 +958,15 @@ impl TransfersUi {
         });
 
         if self.resume_open {
-            ui.label(egui::RichText::new(if protected { t.resume_pw_required } else { t.resume_pw_optional }).small().color(pal().muted));
+            ui.label(
+                egui::RichText::new(if protected {
+                    t.resume_pw_required
+                } else {
+                    t.resume_pw_optional
+                })
+                .small()
+                .color(pal().muted),
+            );
             ui.horizontal(|ui| {
                 ui.label(if protected {
                     t.password_short
@@ -978,7 +996,11 @@ impl TransfersUi {
 
         if self.restart_confirm {
             ui.label(egui::RichText::new(t.restart_confirm).color(pal().danger));
-            ui.label(egui::RichText::new(t.resume_pw_optional).small().color(pal().muted));
+            ui.label(
+                egui::RichText::new(t.resume_pw_optional)
+                    .small()
+                    .color(pal().muted),
+            );
             ui.horizontal(|ui| {
                 ui.label(t.password_label);
                 ui.add(
@@ -1097,12 +1119,15 @@ impl TransfersUi {
                     .password(true)
                     .desired_width(240.0),
             );
-            ui.label(egui::RichText::new(t.password_note).small().color(pal().faint));
+            ui.label(
+                egui::RichText::new(t.password_note)
+                    .small()
+                    .color(pal().faint),
+            );
         });
         ui.add_space(8.0);
-        let ready = connected
-            && !self.recv_mid.trim().is_empty()
-            && !self.recv_path.trim().is_empty();
+        let ready =
+            connected && !self.recv_mid.trim().is_empty() && !self.recv_path.trim().is_empty();
         if ui
             .add_enabled(ready, primary_button(t.recv_button))
             .clicked()
@@ -1154,7 +1179,11 @@ impl TransfersUi {
                     .password(true)
                     .desired_width(240.0),
             );
-            ui.label(egui::RichText::new(t.password_note).small().color(pal().faint));
+            ui.label(
+                egui::RichText::new(t.password_note)
+                    .small()
+                    .color(pal().faint),
+            );
         });
         form_row(ui, t.confirm_label, |ui| {
             ui.add(
@@ -1351,7 +1380,12 @@ fn draw_chip(ui: &mut egui::Ui, color: egui::Color32, text: &str) {
         .rounding(4.0)
         .fill(color.linear_multiply(0.15))
         .show(ui, |ui| {
-            ui.label(egui::RichText::new(text).small().strong().color(chip_fg(color)));
+            ui.label(
+                egui::RichText::new(text)
+                    .small()
+                    .strong()
+                    .color(chip_fg(color)),
+            );
         });
 }
 
@@ -1404,8 +1438,10 @@ fn job_row(
     stale: bool,
 ) -> bool {
     let p = pal();
-    let (rect, resp) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_H), egui::Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), ROW_H),
+        egui::Sense::click(),
+    );
     let painter = ui.painter_at(rect);
     if selected {
         painter.rect_filled(rect, 6.0, p.selected);
@@ -1490,7 +1526,8 @@ fn job_row(
     if let Some(pm) = pm {
         let w = bar.width() * pm as f32 / 1000.0;
         if w > 0.5 {
-            let fill_rect = egui::Rect::from_min_size(bar.min, egui::vec2(w.max(3.0), bar.height()));
+            let fill_rect =
+                egui::Rect::from_min_size(bar.min, egui::vec2(w.max(3.0), bar.height()));
             painter.rect_filled(fill_rect, 4.0, if stale { p.faint } else { color });
         }
     }
@@ -1587,7 +1624,10 @@ mod tests {
         assert_eq!(format_bytes(1536), "1.5 KiB");
         assert_eq!(format_bytes(40 * 1024 * 1024), "40.0 MiB");
         assert_eq!(format_bytes(100 * 1024 * 1024 * 1024), "100.0 GiB");
-        assert_eq!(format_bytes(37 * 1024 * 1024 * 1024 + 512 * 1024 * 1024), "37.5 GiB");
+        assert_eq!(
+            format_bytes(37 * 1024 * 1024 * 1024 + 512 * 1024 * 1024),
+            "37.5 GiB"
+        );
         // 1 MiB - 1 byte stays in KiB and never rounds up into a wrong unit.
         assert_eq!(format_bytes(1024 * 1024 - 1), "1023.9 KiB");
     }
@@ -1618,7 +1658,10 @@ mod tests {
         assert_eq!(format_eta(Some(3661), "d"), "01:01:01");
         assert_eq!(format_eta(Some(86_399), "d"), "23:59:59");
         assert_eq!(format_eta(Some(86_400), "d"), "1d 00:00:00");
-        assert_eq!(format_eta(Some(2 * 86_400 + 3 * 3600 + 20 * 60 + 11), "日"), "2日 03:20:11");
+        assert_eq!(
+            format_eta(Some(2 * 86_400 + 3 * 3600 + 20 * 60 + 11), "日"),
+            "2日 03:20:11"
+        );
         assert_eq!(format_eta(Some(u64::MAX), "d"), ">999d");
     }
 
@@ -1631,8 +1674,14 @@ mod tests {
         assert_eq!(permille(500, 100, TransferState::Running), Some(1000));
         // 37 % of 100 GiB, no float rounding.
         let total = 100u64 << 30;
-        assert_eq!(permille(total / 100 * 37, total, TransferState::Running), Some(370));
-        assert_eq!(permille(u64::MAX, u64::MAX, TransferState::Running), Some(1000));
+        assert_eq!(
+            permille(total / 100 * 37, total, TransferState::Running),
+            Some(370)
+        );
+        assert_eq!(
+            permille(u64::MAX, u64::MAX, TransferState::Running),
+            Some(1000)
+        );
         assert_eq!(format_permille(Some(370)), "37.0%");
         assert_eq!(format_permille(Some(1000)), "100.0%");
         assert_eq!(format_permille(None), "-");
@@ -1674,9 +1723,18 @@ mod tests {
         assert_eq!(s.per_cell, 4);
         assert_eq!(s.cells.len(), 400);
         // 592 / 4 = 148 whole buckets done, the 149th holds segment 592 and is in flight.
-        assert_eq!(s.cells.iter().filter(|c| **c == CellState::Done).count(), 148);
+        assert_eq!(
+            s.cells.iter().filter(|c| **c == CellState::Done).count(),
+            148
+        );
         assert_eq!(s.cells[148], CellState::InFlight);
-        assert_eq!(s.cells.iter().filter(|c| **c == CellState::InFlight).count(), 1);
+        assert_eq!(
+            s.cells
+                .iter()
+                .filter(|c| **c == CellState::InFlight)
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1824,7 +1882,10 @@ mod tests {
 
     #[test]
     fn fill_replaces_every_placeholder() {
-        assert_eq!(fill("{a} of {b} ({a})", &[("a", "1"), ("b", "2")]), "1 of 2 (1)");
+        assert_eq!(
+            fill("{a} of {b} ({a})", &[("a", "1"), ("b", "2")]),
+            "1 of 2 (1)"
+        );
     }
 
     #[test]
@@ -1873,11 +1934,17 @@ mod tests {
         assert!(!ui.poll_due(true), "one request at a time");
         ui.on_list(vec![status(TransferKind::Receive, TransferState::Paused)]);
         ui.last_poll = Instant::now() - Duration::from_secs(5);
-        assert!(!ui.poll_due(false), "hidden and nothing running: no polling");
+        assert!(
+            !ui.poll_due(false),
+            "hidden and nothing running: no polling"
+        );
         assert!(ui.poll_due(true));
         ui.on_list(vec![status(TransferKind::Receive, TransferState::Running)]);
         ui.last_poll = Instant::now() - Duration::from_secs(5);
-        assert!(ui.poll_due(false), "a running job keeps it polling while hidden");
+        assert!(
+            ui.poll_due(false),
+            "a running job keeps it polling while hidden"
+        );
         ui.last_poll = Instant::now();
         assert!(!ui.poll_due(true), "about once a second");
     }
