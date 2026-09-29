@@ -1133,6 +1133,7 @@ pub struct TransferStrings {
     pub resume_go: &'static str,
     pub resume_pw_optional: &'static str,
     pub resume_pw_required: &'static str,
+    pub no_path_hint: &'static str,
 
     // New transfer.
     pub new_heading: &'static str,
@@ -1236,6 +1237,7 @@ impl TransferStrings {
             ("resume_go", self.resume_go),
             ("resume_pw_optional", self.resume_pw_optional),
             ("resume_pw_required", self.resume_pw_required),
+            ("no_path_hint", self.no_path_hint),
             ("new_heading", self.new_heading),
             ("forms_offline", self.forms_offline),
             ("recv_path_label", self.recv_path_label),
@@ -1345,6 +1347,7 @@ static TR_EN: TransferStrings = TransferStrings {
     resume_go: "Resume",
     resume_pw_optional: "The password is never saved, so it is asked for again. Leave it empty if the transfer has no password.",
     resume_pw_required: "This transfer was started with a password. Enter the same password to continue.",
+    no_path_hint: "The save location is not known any more. Start the transfer again from the form below.",
 
     new_heading: "New transfer",
     forms_offline: "Start the background service first (see the top of the window).",
@@ -1446,6 +1449,7 @@ static TR_JA: TransferStrings = TransferStrings {
     resume_go: "再開する",
     resume_pw_optional: "パスワードは保存されないため、もう一度入力が必要です。パスワードを付けていない転送は空のままにしてください。",
     resume_pw_required: "この転送はパスワード付きで開始されました。続けるには同じパスワードを入力してください。",
+    no_path_hint: "保存先が分からなくなりました。下のフォームからもう一度転送を開始してください。",
 
     new_heading: "新しい転送",
     forms_offline: "先にバックグラウンドのサービスを起動してください（画面の上部を参照）。",
@@ -1547,6 +1551,7 @@ static TR_ZH_CN: TransferStrings = TransferStrings {
     resume_go: "继续",
     resume_pw_optional: "密码不会被保存，因此需要再次输入。如果此传输没有设置密码，请留空。",
     resume_pw_required: "此传输是带密码开始的。请输入相同的密码以继续。",
+    no_path_hint: "已不知道保存位置。请从下方表单重新开始传输。",
 
     new_heading: "新建传输",
     forms_offline: "请先启动后台服务（见窗口顶部）。",
