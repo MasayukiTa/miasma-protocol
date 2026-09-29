@@ -80,6 +80,55 @@ pub(crate) fn max_segment_size_for(data_shards: usize) -> usize {
     (SHARE_MSG_MAX - SHARE_WIRE_OVERHEAD_BYTES).saturating_mul(data_shards.max(1))
 }
 
+/// Conservative upper bound for the publisher's local encrypted-share
+/// footprint for one streamed file.
+///
+/// Every plaintext segment is AEAD-encrypted, Reed-Solomon expanded from k to
+/// n shards, wrapped in a MiasmaShare, then encrypted again by LocalShareStore.
+/// The 8 KiB/share allowance intentionally overestimates bincode, SSS fragment,
+/// hashes, nonces, and store-AEAD overhead. The goal is fail-closed capacity
+/// planning, not a byte-perfect prediction.
+pub(crate) fn estimated_local_share_storage_bytes(
+    file_len: u64,
+    params: DissolutionParams,
+) -> Result<u64, MiasmaError> {
+    if params.data_shards == 0 || params.total_shards < params.data_shards {
+        return Err(MiasmaError::InvalidParams);
+    }
+
+    const PER_SHARE_OVERHEAD: u128 = 8 * 1024;
+    const CONTENT_AEAD_TAG: u128 = 16;
+
+    let segment_size =
+        DEFAULT_SEGMENT_SIZE.min(max_segment_size_for(params.data_shards)) as u64;
+    let segment_count = if file_len == 0 {
+        1
+    } else {
+        file_len.div_ceil(segment_size)
+    };
+
+    let mut remaining = file_len;
+    let mut total: u128 = 0;
+    for _ in 0..segment_count {
+        let chunk_len = remaining.min(segment_size);
+        remaining = remaining.saturating_sub(chunk_len);
+
+        let encrypted_len = chunk_len as u128 + CONTENT_AEAD_TAG;
+        let shard_len = encrypted_len.div_ceil(params.data_shards as u128);
+        total = total
+            .checked_add(shard_len.saturating_mul(params.total_shards as u128))
+            .and_then(|value| {
+                value.checked_add(
+                    PER_SHARE_OVERHEAD.saturating_mul(params.total_shards as u128),
+                )
+            })
+            .ok_or_else(|| MiasmaError::Storage("share footprint estimate overflow".into()))?;
+    }
+
+    u64::try_from(total)
+        .map_err(|_| MiasmaError::Storage("share footprint exceeds u64".into()))
+}
+
 // ─── Publish options / report (Phase 2.1) ──────────────────────────────────
 
 /// Options controlling how strictly `dissolve_and_publish*_with_options`
@@ -665,6 +714,23 @@ impl MiasmaCoordinator {
 
         let file = std::fs::File::open(file_path)?;
         let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+
+        // A streaming implementation still needs durable storage for the n
+        // generated shares. Refuse before doing any work if this single file
+        // cannot fit in the owned-share budget; otherwise LRU eviction could
+        // delete earlier segments of the same publish and still leave a
+        // normal-looking DHT record behind.
+        let required_bytes = estimated_local_share_storage_bytes(file_len, params)?;
+        let quota_bytes = self.store.owned_quota_bytes();
+        if required_bytes > quota_bytes {
+            return Err(MiasmaError::Storage(format!(
+                "file publish requires approximately {} MiB of owned-share quota for k={}, n={} redundancy, but storage.quota_mb provides {} MiB; increase storage.quota_mb before publishing this file",
+                required_bytes.div_ceil(1024 * 1024),
+                params.data_shards,
+                params.total_shards,
+                quota_bytes / (1024 * 1024)
+            )));
+        }
 
         // 1. Compute MID by streaming through file (no full-file buffer).
         let param_bytes = params.to_param_bytes();
@@ -2253,5 +2319,29 @@ mod segment_sizing_tests {
                 SHARE_MSG_MAX
             );
         }
+    }
+}
+
+
+#[cfg(test)]
+mod large_file_storage_preflight_tests {
+    use super::*;
+
+    #[test]
+    fn hundred_gib_storage_estimate_is_about_two_hundred_gib() {
+        let params = DissolutionParams::default();
+        let hundred_gib = 100_u64 * 1024 * 1024 * 1024;
+        let estimate = estimated_local_share_storage_bytes(hundred_gib, params).unwrap();
+
+        assert!(estimate > 200_u64 * 1024 * 1024 * 1024);
+        assert!(estimate < 201_u64 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn ten_gib_default_quota_cannot_hold_hundred_gib_publish() {
+        let params = DissolutionParams::default();
+        let estimate =
+            estimated_local_share_storage_bytes(100_u64 * 1024 * 1024 * 1024, params).unwrap();
+        assert!(estimate > 10_240_u64 * 1024 * 1024);
     }
 }
