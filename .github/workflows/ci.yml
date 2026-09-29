@@ -112,6 +112,24 @@ jobs:
       - name: Build Apple-relevant crates
         run: cargo build -p miasma-core -p miasma-ffi -p miasma-wasm --locked
 
+      - name: Test macOS desktop and bridge
+        run: cargo test -p miasma-desktop -p miasma-bridge --locked
+
+      - name: Package macOS desktop and CLI
+        run: bash scripts/build-macos.sh
+
+      - name: Test macOS peer-to-peer loopback
+        run: bash scripts/smoke-loopback.sh
+
+      - name: Archive macOS app
+        run: ditto -c -k --keepParent dist/Miasma.app dist/Miasma-macOS.zip
+
+      - name: Upload macOS archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: Miasma-macOS
+          path: dist/Miasma-macOS.zip
+
   cross-compile-arm64:
     name: Cross-compile ARM64
     runs-on: ubuntu-latest
