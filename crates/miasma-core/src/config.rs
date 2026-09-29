@@ -1,5 +1,8 @@
 /// Node configuration — persisted to `{data_dir}/config.toml`.
-use std::path::{Path, PathBuf};
+use std::{
+    fmt,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, Zeroizing};
@@ -33,7 +36,7 @@ pub struct NetworkConfig {
 }
 
 /// Transport-layer configuration for restrictive networks.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct TransportConfig {
     /// Enable TLS on the WSS share server and client connections.
     #[serde(default)]
@@ -81,6 +84,33 @@ pub struct TransportConfig {
     /// Tor transport configuration.
     #[serde(default)]
     pub tor: crate::transport::tor::TorConfig,
+}
+
+impl fmt::Debug for TransportConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TransportConfig")
+            .field("wss_tls_enabled", &self.wss_tls_enabled)
+            .field("wss_sni", &self.wss_sni)
+            .field("wss_cert_pem_path", &self.wss_cert_pem_path)
+            .field("wss_key_pem_path", &self.wss_key_pem_path)
+            .field("proxy_type", &self.proxy_type)
+            .field("proxy_addr", &self.proxy_addr)
+            .field("proxy_username_configured", &self.proxy_username.is_some())
+            .field("proxy_password_configured", &self.proxy_password.is_some())
+            .field("obfuscated_quic_enabled", &self.obfuscated_quic_enabled)
+            .field("obfuscated_quic_sni", &self.obfuscated_quic_sni)
+            .field(
+                "obfuscated_quic_secret_configured",
+                &self.obfuscated_quic_secret.is_some(),
+            )
+            .field(
+                "obfuscated_quic_fallback_url",
+                &self.obfuscated_quic_fallback_url,
+            )
+            .field("shadowsocks", &self.shadowsocks)
+            .field("tor", &self.tor)
+            .finish()
+    }
 }
 
 impl TransportConfig {
@@ -246,4 +276,29 @@ pub fn read_stamped_version(data_dir: &Path) -> Option<String> {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+#[cfg(test)]
+mod debug_redaction_tests {
+    use super::*;
+
+    #[test]
+    fn transport_config_debug_redacts_secrets() {
+        let mut cfg = TransportConfig::default();
+        cfg.proxy_username = Some("debug-user-value".into());
+        cfg.proxy_password = Some("debug-password-value".into());
+        cfg.obfuscated_quic_secret = Some("debug-probe-value".into());
+        cfg.shadowsocks.password = Some("debug-shadow-value".into());
+        let rendered = format!("{cfg:?}");
+        for value in [
+            "debug-user-value",
+            "debug-password-value",
+            "debug-probe-value",
+            "debug-shadow-value",
+        ] {
+            assert!(!rendered.contains(value));
+        }
+        assert!(rendered.contains("proxy_password_configured: true"));
+        assert!(rendered.contains("obfuscated_quic_secret_configured: true"));
+    }
 }
