@@ -299,10 +299,19 @@ impl Tour {
                 let views = [
                     ("big", view("backup-100GiB", NewForm::Receive, false, false)),
                     ("send", view("wedding-4K", NewForm::Send, false, false)),
-                    ("paused", view("lecture-archive", NewForm::Receive, true, false)),
+                    (
+                        "paused",
+                        view("lecture-archive", NewForm::Receive, true, false),
+                    ),
                     ("failed", view("contract-scan", NewForm::Send, false, false)),
-                    ("stopped", view("photos-2025", NewForm::Receive, false, false)),
-                    ("complete", view("thesis-final", NewForm::Receive, false, false)),
+                    (
+                        "stopped",
+                        view("photos-2025", NewForm::Receive, false, false),
+                    ),
+                    (
+                        "complete",
+                        view("thesis-final", NewForm::Receive, false, false),
+                    ),
                     ("empty", view("", NewForm::Receive, false, true)),
                 ];
                 for (vname, v) in views {

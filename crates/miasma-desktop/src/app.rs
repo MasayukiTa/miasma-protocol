@@ -723,7 +723,11 @@ impl MiasmaApp {
                                 );
                                 ui.painter().rect_filled(rect, 2.0, pal().selected);
                                 let fill_width = (pct as f32 / 100.0).min(1.0) * bar_width;
-                                let fill_color = if pct > 90.0 { pal().warning } else { pal().info };
+                                let fill_color = if pct > 90.0 {
+                                    pal().warning
+                                } else {
+                                    pal().info
+                                };
                                 let fill_rect = egui::Rect::from_min_size(
                                     rect.min,
                                     egui::vec2(fill_width, 4.0),
@@ -731,7 +735,9 @@ impl MiasmaApp {
                                 ui.painter().rect_filled(fill_rect, 2.0, fill_color);
                             } else {
                                 ui.label(
-                                    egui::RichText::new(s.dashboard_no_data).color(pal().muted).small(),
+                                    egui::RichText::new(s.dashboard_no_data)
+                                        .color(pal().muted)
+                                        .small(),
                                 );
                             }
                         });
@@ -749,7 +755,11 @@ impl MiasmaApp {
                                     .color(pal().muted)
                                     .small(),
                             );
-                            let peer_color = if self.peer_count > 0 { pal().success } else { pal().warning };
+                            let peer_color = if self.peer_count > 0 {
+                                pal().success
+                            } else {
+                                pal().warning
+                            };
                             ui.label(
                                 egui::RichText::new(self.peer_count.to_string())
                                     .size(18.0)
@@ -1255,7 +1265,10 @@ impl MiasmaApp {
                         // Timestamps.
                         ui.horizontal(|ui| {
                             ui.colored_label(pal().muted, format!("Created: {}", item.created_at));
-                            ui.colored_label(pal().muted, format!("  Expires: {}", item.expires_at));
+                            ui.colored_label(
+                                pal().muted,
+                                format!("  Expires: {}", item.expires_at),
+                            );
                         });
 
                         // Challenge code display (recipient shows this to sender out-of-band).
@@ -1398,7 +1411,10 @@ impl MiasmaApp {
                         // Timestamps.
                         ui.horizontal(|ui| {
                             ui.colored_label(pal().muted, format!("Created: {}", item.created_at));
-                            ui.colored_label(pal().muted, format!("  Expires: {}", item.expires_at));
+                            ui.colored_label(
+                                pal().muted,
+                                format!("  Expires: {}", item.expires_at),
+                            );
                         });
 
                         // Sender confirmation: if ChallengeIssued, show challenge code entry.
@@ -1517,7 +1533,11 @@ impl MiasmaApp {
         card_frame().show(ui, |ui| {
             ui.add_enabled_ui(self.daemon_state == DaemonState::Connected, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(s.wipe_label).color(pal().danger).strong());
+                    ui.label(
+                        egui::RichText::new(s.wipe_label)
+                            .color(pal().danger)
+                            .strong(),
+                    );
                     ui.label(egui::RichText::new(s.wipe_desc).color(pal().muted).small());
                 });
                 ui.add_space(4.0);
@@ -1543,7 +1563,11 @@ impl MiasmaApp {
             if self.peer_count > 0 {
                 (pal().success, s.status_ready, s.status_hint_ready)
             } else {
-                (pal().warning, s.status_state_connected, s.status_hint_no_peers)
+                (
+                    pal().warning,
+                    s.status_state_connected,
+                    s.status_hint_no_peers,
+                )
             }
         } else {
             (pal().danger, s.status_not_ready, s.status_hint_not_ready)
@@ -1674,7 +1698,11 @@ impl MiasmaApp {
                         ui.label(egui::RichText::new(s.status_peers).color(pal().muted));
                         let peer_text = self.peer_count.to_string();
                         if self.peer_count > 0 {
-                            ui.label(egui::RichText::new(peer_text).size(15.0).color(pal().success));
+                            ui.label(
+                                egui::RichText::new(peer_text)
+                                    .size(15.0)
+                                    .color(pal().success),
+                            );
                         } else {
                             ui.label(egui::RichText::new(peer_text).size(15.0));
                         }
@@ -1701,7 +1729,11 @@ impl MiasmaApp {
                                 );
                                 ui.painter().rect_filled(rect, 2.0, pal().selected);
                                 let fill_width = (pct as f32 / 100.0).min(1.0) * bar_width;
-                                let fill_color = if pct > 90.0 { pal().warning } else { pal().info };
+                                let fill_color = if pct > 90.0 {
+                                    pal().warning
+                                } else {
+                                    pal().info
+                                };
                                 let fill_rect = egui::Rect::from_min_size(
                                     rect.min,
                                     egui::vec2(fill_width, 4.0),
@@ -1789,7 +1821,11 @@ impl MiasmaApp {
 
         // ── Storage & replication ─────────────────────────────────────
         card_frame().show(ui, |ui| {
-            ui.label(egui::RichText::new(s.status_storage).strong().color(pal().text));
+            ui.label(
+                egui::RichText::new(s.status_storage)
+                    .strong()
+                    .color(pal().text),
+            );
             ui.add_space(4.0);
 
             egui::Grid::new("storage_grid")
@@ -1843,7 +1879,10 @@ impl MiasmaApp {
                             ),
                         );
                     } else if self.replicated_count > 0 {
-                        ui.colored_label(pal().success, format!("{} replicated", self.replicated_count));
+                        ui.colored_label(
+                            pal().success,
+                            format!("{} replicated", self.replicated_count),
+                        );
                     } else {
                         ui.colored_label(pal().muted, "—");
                     }
@@ -1870,7 +1909,11 @@ impl MiasmaApp {
                 ui.horizontal_wrapped(|ui| {
                     if self.wss_port > 0 {
                         let tls = if self.wss_tls_enabled { "TLS" } else { "plain" };
-                        tag_label(ui, pal().success, &format!("WSS :{} ({tls})", self.wss_port));
+                        tag_label(
+                            ui,
+                            pal().success,
+                            &format!("WSS :{} ({tls})", self.wss_port),
+                        );
                     }
                     if self.obfs_quic_port > 0 {
                         tag_label(
@@ -2004,7 +2047,11 @@ impl MiasmaApp {
 
             ui.add_space(12.0);
 
-            ui.label(egui::RichText::new(s.settings_mode).strong().color(pal().text));
+            ui.label(
+                egui::RichText::new(s.settings_mode)
+                    .strong()
+                    .color(pal().text),
+            );
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 let is_easy = self.mode.is_easy();
@@ -2057,7 +2104,11 @@ impl MiasmaApp {
 
         // ── Paths card ───────────────────────────────────────────────
         card_frame().show(ui, |ui| {
-            ui.label(egui::RichText::new(s.settings_paths).strong().color(pal().text));
+            ui.label(
+                egui::RichText::new(s.settings_paths)
+                    .strong()
+                    .color(pal().text),
+            );
             ui.add_space(4.0);
 
             egui::Grid::new("paths_grid")
@@ -2116,7 +2167,11 @@ impl MiasmaApp {
 
         // ── About card (How it works) ────────────────────────────────
         card_frame().show(ui, |ui| {
-            ui.label(egui::RichText::new(s.settings_how).strong().color(pal().text));
+            ui.label(
+                egui::RichText::new(s.settings_how)
+                    .strong()
+                    .color(pal().text),
+            );
             ui.add_space(4.0);
             let line1 = if easy {
                 s.settings_how_line1_easy
@@ -2135,7 +2190,11 @@ impl MiasmaApp {
             ui.label(
                 egui::RichText::new(&self.data_dir_display).font(egui::FontId::monospace(11.0)),
             );
-            ui.label(egui::RichText::new(s.settings_preserved).color(pal().muted).small());
+            ui.label(
+                egui::RichText::new(s.settings_preserved)
+                    .color(pal().muted)
+                    .small(),
+            );
         });
 
         ui.add_space(8.0);
@@ -2334,7 +2393,11 @@ impl MiasmaApp {
             }
             ImportState::Complete => {
                 card_frame().show(ui, |ui| {
-                    ui.label(egui::RichText::new(s.import_complete).strong().color(pal().success));
+                    ui.label(
+                        egui::RichText::new(s.import_complete)
+                            .strong()
+                            .color(pal().success),
+                    );
                     ui.add_space(8.0);
 
                     for (i, mid) in self.import_mids.clone().iter().enumerate() {
@@ -2562,11 +2625,7 @@ pub(crate) fn primary_button<'a>(text: impl Into<egui::WidgetText>) -> egui::But
 
 /// A destructive action (delete, wipe): neutral button, danger-coloured text.
 pub(crate) fn danger_button<'a>(text: impl Into<String>) -> egui::Button<'a> {
-    egui::Button::new(
-        egui::RichText::new(text)
-            .color(pal().danger)
-            .strong(),
-    )
+    egui::Button::new(egui::RichText::new(text).color(pal().danger).strong())
 }
 
 fn format_epoch(epoch_secs: u64) -> String {
@@ -2675,11 +2734,8 @@ fn nav_tab(ui: &mut egui::Ui, current: &mut Tab, tab: Tab, label: &str) {
         *current = tab;
     }
     if resp.hovered() && !is_active {
-        ui.painter().rect_filled(
-            resp.rect,
-            4.0,
-            pal().text.gamma_multiply(0.06),
-        );
+        ui.painter()
+            .rect_filled(resp.rect, 4.0, pal().text.gamma_multiply(0.06));
     }
 }
 
@@ -2843,7 +2899,11 @@ impl eframe::App for MiasmaApp {
                     } else {
                         s.tab_retrieve
                     };
-                    let tr_label = if easy { self.tr().tab_easy } else { self.tr().tab };
+                    let tr_label = if easy {
+                        self.tr().tab_easy
+                    } else {
+                        self.tr().tab
+                    };
                     nav_tab(ui, &mut self.tab, Tab::Transfers, tr_label);
                     nav_tab(ui, &mut self.tab, Tab::Store, store_label);
                     nav_tab(ui, &mut self.tab, Tab::Retrieve, retrieve_label);
