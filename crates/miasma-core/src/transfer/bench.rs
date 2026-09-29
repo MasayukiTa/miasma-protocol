@@ -123,7 +123,9 @@ fn bench_one(
     let mid = ContentId::compute(data, &params.to_param_bytes());
     // The password path is the one that will be used; its cost per segment is one
     // HKDF, so it does not skew the comparison.
-    let (_, key) = PasswordProtection::create_with_cost("redundancy-bench", 64, 1, 1)?;
+    // The password is throwaway (nothing is stored or shared), so use a random one.
+    let password = format!("bench-{:032x}", rand::random::<u128>());
+    let (_, key) = PasswordProtection::create_with_cost(&password, 64, 1, 1)?;
 
     // Stage attribution on the first segment (the real dissolve below is what is
     // reported as the total).
