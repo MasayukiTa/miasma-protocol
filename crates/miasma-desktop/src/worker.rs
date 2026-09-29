@@ -1031,9 +1031,7 @@ async fn do_wipe(data_dir: &Path) -> WorkerResult {
 fn daemon_error(e: &anyhow::Error) -> String {
     let msg = format!("{e:#}");
     if is_daemon_down(&msg) {
-        "Not connected. Click the Start button above to restart.\n\
-         If the problem persists, try closing all Miasma windows and starting again."
-            .to_string()
+        DAEMON_DOWN_MESSAGE.to_string()
     } else if msg.contains("Cannot find miasma.exe") || msg.contains("Cannot find miasma") {
         "Cannot find the Miasma backend.\n\
          If installed: try reinstalling from the MSI.\n\
@@ -1184,8 +1182,19 @@ fn parse_mids_from_stdout(stdout: &str) -> Vec<String> {
         .collect()
 }
 
+/// What the user is told when the daemon cannot be reached.
+const DAEMON_DOWN_MESSAGE: &str = "Not connected. Click the Start button above to restart.\n\
+     If the problem persists, try closing all Miasma windows and starting again.";
+
+/// True for a raw "daemon unreachable" error *and* for the message `daemon_error` turns it into.
+///
+/// The second half matters: `get_status` returns the already-rewritten message, and the
+/// auto-relaunch in the `GetStatus` handler tests that message. Matching only the raw wording
+/// meant a daemon that died was never noticed: no relaunch, and the header kept saying
+/// "Connected" (seen in the running window when a transfer's daemon was killed).
 fn is_daemon_down(msg: &str) -> bool {
-    msg.contains("daemon.port not found")
+    msg == DAEMON_DOWN_MESSAGE
+        || msg.contains("daemon.port not found")
         || msg.contains("cannot connect to daemon")
         || msg.contains("Daemon not running")
 }
@@ -1498,6 +1507,22 @@ mod tests {
         };
         let rendered = format!("{confirm:?}");
         assert!(!rendered.contains("ABCD-SECRET"));
+    }
+
+    #[test]
+    fn a_dead_daemon_is_recognised_after_the_error_has_been_rewritten() {
+        // `get_status` returns `daemon_error(..)`, and the GetStatus handler then asks
+        // `is_daemon_down` about that text to decide whether to relaunch the daemon.
+        for raw in [
+            "cannot connect to daemon at 127.0.0.1:49783",
+            "daemon.port not found in the data dir",
+            "Daemon not running",
+        ] {
+            let shown = super::daemon_error(&anyhow::anyhow!(raw));
+            assert!(super::is_daemon_down(raw), "{raw}");
+            assert!(super::is_daemon_down(&shown), "rewritten form of {raw}");
+        }
+        assert!(!super::is_daemon_down("invalid MID"));
     }
 
     #[test]
