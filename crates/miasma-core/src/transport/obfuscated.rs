@@ -432,8 +432,9 @@ impl ObfuscatedQuicServer {
 
     /// Run the server loop. Accepts connections and handles each one.
     /// Call via `tokio::spawn(server.run())`.
-    pub async fn run(self) {
+    pub async fn run(mut self) {
         let probe_secret = Arc::new(Zeroizing::new(self.config.probe_secret));
+        self.config.probe_secret.zeroize();
         let fallback_url = self.config.fallback_url.clone();
         let store = self.store.clone();
         let mut connections = tokio::task::JoinSet::new();
