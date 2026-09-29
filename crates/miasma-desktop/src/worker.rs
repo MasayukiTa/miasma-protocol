@@ -1358,7 +1358,9 @@ async fn do_transfer_start_receive(
     let abs = if output_path.is_absolute() {
         output_path.to_owned()
     } else {
-        std::env::current_dir().unwrap_or_default().join(output_path)
+        std::env::current_dir()
+            .unwrap_or_default()
+            .join(output_path)
     };
     let req = ControlRequest::TransferStartReceive {
         mid: mid.trim().to_owned(),

@@ -1598,7 +1598,10 @@ mod tests {
         for lang in Locale::ALL {
             let t = transfer_strings(lang);
             for (name, value) in t.all() {
-                assert!(!value.trim().is_empty(), "{lang:?} transfers.{name} is empty");
+                assert!(
+                    !value.trim().is_empty(),
+                    "{lang:?} transfers.{name} is empty"
+                );
             }
         }
     }
@@ -1614,7 +1617,11 @@ mod tests {
             ("split_send", |t| t.split_send, &["{a}", "{b}", "{c}"]),
             ("pieces_fmt", |t| t.pieces_fmt, &["{ok}", "{bad}"]),
             ("easy_running", |t| t.easy_running, &["{pct}"]),
-            ("easy_running_eta", |t| t.easy_running_eta, &["{pct}", "{eta}"]),
+            (
+                "easy_running_eta",
+                |t| t.easy_running_eta,
+                &["{pct}", "{eta}"],
+            ),
             ("red_row", |t| t.red_row, &["{kn}", "{x}", "{loss}"]),
         ];
         for lang in Locale::ALL {
@@ -1624,7 +1631,10 @@ mod tests {
                     assert!(get(t).contains(h), "{lang:?} transfers.{name} lost {h}");
                 }
             }
-            assert!(t.easy_paused.contains("{pct}"), "{lang:?} easy_paused lost {{pct}}");
+            assert!(
+                t.easy_paused.contains("{pct}"),
+                "{lang:?} easy_paused lost {{pct}}"
+            );
         }
     }
 
@@ -1634,7 +1644,6 @@ mod tests {
         assert_ne!(t.mid_label, t.mid_label_easy);
         assert_ne!(t.red_label, t.red_label_easy);
     }
-
 
     #[test]
     fn all_locales_return_non_empty_strings() {

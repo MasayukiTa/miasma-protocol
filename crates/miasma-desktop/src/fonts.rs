@@ -401,7 +401,10 @@ mod tests {
     #[test]
     fn japanese_named_hiragino_file_is_found() {
         let d = tmpdir("hiragino-ja");
-        touch(&d, "\u{30D2}\u{30E9}\u{30AE}\u{30CE}\u{89D2}\u{30B4}\u{30B7}\u{30C3}\u{30AF} W3.ttc");
+        touch(
+            &d,
+            "\u{30D2}\u{30E9}\u{30AE}\u{30CE}\u{89D2}\u{30B4}\u{30B7}\u{30C3}\u{30AF} W3.ttc",
+        );
         let (found, _) = discover(std::slice::from_ref(&d), MACOS_SPECS);
         assert!(found.iter().any(|f| f.name == "Hiragino Sans"));
         let _ = std::fs::remove_dir_all(&d);
@@ -435,7 +438,10 @@ mod tests {
             chain_of(WINDOWS_PROPORTIONAL, &found),
             ["Meiryo", "MS Gothic"]
         );
-        assert_eq!(chain_of(WINDOWS_MONOSPACE, &found), ["Consolas", "MS Gothic"]);
+        assert_eq!(
+            chain_of(WINDOWS_MONOSPACE, &found),
+            ["Consolas", "MS Gothic"]
+        );
     }
 
     #[test]

@@ -372,7 +372,11 @@ mod tests {
     #[test]
     fn visuals_follow_the_palette() {
         for dark in [true, false] {
-            let p = if dark { Palette::dark() } else { Palette::light() };
+            let p = if dark {
+                Palette::dark()
+            } else {
+                Palette::light()
+            };
             let v = p.visuals(dark);
             assert_eq!(v.dark_mode, dark);
             assert_eq!(v.panel_fill, p.bg);
