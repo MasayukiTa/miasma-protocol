@@ -4,7 +4,10 @@
 //! - `{data_dir}/directed/incoming/{envelope_id_hex}.json`
 //! - `{data_dir}/directed/outgoing/{envelope_id_hex}.json`
 
-use std::path::{Path, PathBuf};
+use std::{
+    fmt,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -17,7 +20,7 @@ use super::envelope::{DirectedEnvelope, EnvelopeState};
 const MAX_ENVELOPES: usize = 10_000;
 
 /// Summary of an envelope for listing (avoids loading full envelope).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct EnvelopeSummary {
     pub envelope_id: String,
     /// Sender's self-asserted X25519 sharing key from the envelope.
@@ -40,6 +43,27 @@ pub struct EnvelopeSummary {
     /// Original file size.
     #[serde(default)]
     pub file_size: u64,
+}
+
+impl fmt::Debug for EnvelopeSummary {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EnvelopeSummary")
+            .field("envelope_id", &self.envelope_id)
+            .field("sender_pubkey", &self.sender_pubkey)
+            .field("sender_peer_id", &self.sender_peer_id)
+            .field("recipient_pubkey", &self.recipient_pubkey)
+            .field("state", &self.state)
+            .field("created_at", &self.created_at)
+            .field("expires_at", &self.expires_at)
+            .field("retention_secs", &self.retention_secs)
+            .field(
+                "challenge_code",
+                &self.challenge_code.as_ref().map(|_| "<redacted>"),
+            )
+            .field("filename", &self.filename.as_ref().map(|_| "<redacted>"))
+            .field("file_size", &self.file_size)
+            .finish()
+    }
 }
 
 /// Local directed share storage.
@@ -370,6 +394,28 @@ impl DirectedInbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn envelope_summary_debug_redacts_challenge_and_filename() {
+        let summary = EnvelopeSummary {
+            envelope_id: "env".into(),
+            sender_pubkey: "sender".into(),
+            sender_peer_id: Some("peer".into()),
+            recipient_pubkey: "recipient".into(),
+            state: EnvelopeState::ChallengeIssued,
+            created_at: 1,
+            expires_at: 2,
+            retention_secs: 3,
+            challenge_code: Some("ABCD-SECRET".into()),
+            filename: Some("private-name.txt".into()),
+            file_size: 4,
+        };
+        let rendered = format!("{summary:?}");
+        assert!(rendered.contains("EnvelopeSummary"));
+        assert!(!rendered.contains("ABCD-SECRET"));
+        assert!(!rendered.contains("private-name.txt"));
+        assert!(rendered.contains("<redacted>"));
+    }
     use tempfile::TempDir;
 
     fn make_test_envelope() -> DirectedEnvelope {
