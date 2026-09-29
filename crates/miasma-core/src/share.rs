@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 use crate::{
     crypto::hash::{ContentId, MID_PREFIX_LEN},
@@ -21,7 +22,7 @@ use crate::{
 /// Full MAC verification (K_tag derived from K_enc) is only possible after k
 /// shares are collected. This is an intentional design constraint, not a bug.
 /// See docs/adr/003-share-integrity.md for full rationale.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct MiasmaShare {
     /// Protocol version (currently 1).
     pub version: u8,
@@ -55,6 +56,23 @@ pub struct MiasmaShare {
 
     /// Unix timestamp (seconds) when this share was created.
     pub timestamp: u64,
+}
+
+impl fmt::Debug for MiasmaShare {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MiasmaShare")
+            .field("version", &self.version)
+            .field("mid_prefix", &self.mid_prefix)
+            .field("segment_index", &self.segment_index)
+            .field("slot_index", &self.slot_index)
+            .field("shard_data_len", &self.shard_data.len())
+            .field("key_share_len", &self.key_share.len())
+            .field("shard_hash", &self.shard_hash)
+            .field("nonce", &self.nonce)
+            .field("original_len", &self.original_len)
+            .field("timestamp", &self.timestamp)
+            .finish()
+    }
 }
 
 impl MiasmaShare {
@@ -160,6 +178,26 @@ impl ShareVerification {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn share_debug_redacts_key_fragment() {
+        let mid = ContentId::compute(b"debug-content", b"params");
+        let share = MiasmaShare::new(
+            &mid,
+            0,
+            1,
+            vec![1, 2, 3, 4],
+            vec![101, 102, 103, 104, 105],
+            [7; 12],
+            4,
+            1,
+        );
+        let key_debug = format!("{:?}", share.key_share);
+        let rendered = format!("{share:?}");
+        assert!(!rendered.contains(&key_debug));
+        assert!(rendered.contains("key_share_len: 5"));
+        assert!(rendered.contains("shard_data_len: 4"));
+    }
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn dummy_share(mid: &ContentId, slot: u16, data: Vec<u8>) -> MiasmaShare {
