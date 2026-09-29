@@ -35,6 +35,7 @@ use anyhow::{Context, Result};
 use libp2p::PeerId;
 use tokio::{net::TcpListener, sync::mpsc, task::JoinHandle, time::Duration};
 use tracing::{debug, info, warn};
+use zeroize::Zeroizing;
 
 use crate::{
     config::TransportConfig,
@@ -735,7 +736,7 @@ async fn handle_ipc_client(
     bridge_state: BridgeLiveState,
 ) -> Result<()> {
     let req: ControlRequest = read_frame(&mut stream).await?;
-    let resp = process_request(
+    let mut resp = process_request(
         req,
         coord,
         queue,
@@ -752,7 +753,9 @@ async fn handle_ipc_client(
         bridge_state,
     )
     .await;
-    write_frame(&mut stream, &resp).await?;
+    let write_result = write_frame(&mut stream, &resp).await;
+    resp.zeroize_sensitive_material();
+    write_result?;
     Ok(())
 }
 
@@ -792,11 +795,21 @@ pub(crate) async fn process_request(
             data_shards,
             total_shards,
         } => {
+            let data = Zeroizing::new(data);
             let params = DissolutionParams {
                 data_shards: data_shards as usize,
                 total_shards: total_shards as usize,
             };
-            match publish_content(&data, params, &coord, &queue, &store, &listen_addrs).await {
+            match publish_content(
+                data.as_slice(),
+                params,
+                &coord,
+                &queue,
+                &store,
+                &listen_addrs,
+            )
+            .await
+            {
                 Ok(mid) => ControlResponse::Published { mid },
                 Err(e) => ControlResponse::Error(e.to_string()),
             }
@@ -1213,6 +1226,8 @@ pub(crate) async fn process_request(
             retention_secs,
             filename,
         } => {
+            let data = Zeroizing::new(data);
+            let password = Zeroizing::new(password);
             let key_guard = sharing_secret.read().await;
             let Some(secret) = key_guard.as_ref() else {
                 return ControlResponse::Error(
@@ -1222,8 +1237,8 @@ pub(crate) async fn process_request(
             match process_directed_send(
                 &**secret,
                 &recipient_contact,
-                &data,
-                &password,
+                data.as_slice(),
+                password.as_str(),
                 retention_secs,
                 filename,
                 &coord,
@@ -1246,9 +1261,10 @@ pub(crate) async fn process_request(
             retention_secs,
             filename,
         } => {
+            let password = Zeroizing::new(password);
             // Read the file directly — avoids JSON Vec<u8> bloat over IPC.
             let data = match std::fs::read(&file_path) {
-                Ok(d) => d,
+                Ok(d) => Zeroizing::new(d),
                 Err(e) => {
                     return ControlResponse::Error(format!("cannot read file {file_path}: {e}"))
                 }
@@ -1268,8 +1284,8 @@ pub(crate) async fn process_request(
             match process_directed_send(
                 &**secret,
                 &recipient_contact,
-                &data,
-                &password,
+                data.as_slice(),
+                password.as_str(),
                 retention_secs,
                 fname,
                 &coord,
@@ -1288,31 +1304,41 @@ pub(crate) async fn process_request(
         ControlRequest::DirectedConfirm {
             envelope_id,
             challenge_code,
-        } => match process_directed_confirm(
-            &envelope_id,
-            &challenge_code,
-            &data_dir,
-            &coord,
-            &listen_addrs,
-        )
-        .await
-        {
-            Ok(_) => ControlResponse::DirectedConfirmed,
-            Err(e) => ControlResponse::Error(e.to_string()),
-        },
+        } => {
+            let challenge_code = Zeroizing::new(challenge_code);
+            match process_directed_confirm(
+                &envelope_id,
+                challenge_code.as_str(),
+                &data_dir,
+                &coord,
+                &listen_addrs,
+            )
+            .await
+            {
+                Ok(_) => ControlResponse::DirectedConfirmed,
+                Err(e) => ControlResponse::Error(e.to_string()),
+            }
+        }
 
         ControlRequest::DirectedRetrieve {
             envelope_id,
             password,
         } => {
+            let password = Zeroizing::new(password);
             let key_guard = sharing_secret.read().await;
             let Some(secret) = key_guard.as_ref() else {
                 return ControlResponse::Error(
                     "directed sharing unavailable after distress wipe".into(),
                 );
             };
-            match process_directed_retrieve(&**secret, &envelope_id, &password, &coord, &data_dir)
-                .await
+            match process_directed_retrieve(
+                &**secret,
+                &envelope_id,
+                password.as_str(),
+                &coord,
+                &data_dir,
+            )
+            .await
             {
                 Ok((data, filename)) => ControlResponse::DirectedRetrieved { data, filename },
                 Err(e) => ControlResponse::Error(e.to_string()),
@@ -1324,18 +1350,26 @@ pub(crate) async fn process_request(
             password,
             output_path,
         } => {
+            let password = Zeroizing::new(password);
             let key_guard = sharing_secret.read().await;
             let Some(secret) = key_guard.as_ref() else {
                 return ControlResponse::Error(
                     "directed sharing unavailable after distress wipe".into(),
                 );
             };
-            match process_directed_retrieve(&**secret, &envelope_id, &password, &coord, &data_dir)
-                .await
+            match process_directed_retrieve(
+                &**secret,
+                &envelope_id,
+                password.as_str(),
+                &coord,
+                &data_dir,
+            )
+            .await
             {
                 Ok((data, filename)) => {
+                    let data = Zeroizing::new(data);
                     // Write decrypted content to the requested output path.
-                    match std::fs::write(&output_path, &data) {
+                    match std::fs::write(&output_path, data.as_slice()) {
                         Ok(_) => ControlResponse::DirectedRetrievedToFile {
                             output_path,
                             filename,
