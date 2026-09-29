@@ -92,15 +92,17 @@ pub(crate) fn estimated_local_share_storage_bytes(
     file_len: u64,
     params: DissolutionParams,
 ) -> Result<u64, MiasmaError> {
-    if params.data_shards == 0 || params.total_shards < params.data_shards {
-        return Err(MiasmaError::InvalidParams);
+    if params.data_shards == 0 || params.total_shards <= params.data_shards {
+        return Err(MiasmaError::ReedSolomon(format!(
+            "invalid parameters: data_shards={}, total_shards={}",
+            params.data_shards, params.total_shards
+        )));
     }
 
     const PER_SHARE_OVERHEAD: u128 = 8 * 1024;
     const CONTENT_AEAD_TAG: u128 = 16;
 
-    let segment_size =
-        DEFAULT_SEGMENT_SIZE.min(max_segment_size_for(params.data_shards)) as u64;
+    let segment_size = DEFAULT_SEGMENT_SIZE.min(max_segment_size_for(params.data_shards)) as u64;
     let segment_count = if file_len == 0 {
         1
     } else {
@@ -118,15 +120,12 @@ pub(crate) fn estimated_local_share_storage_bytes(
         total = total
             .checked_add(shard_len.saturating_mul(params.total_shards as u128))
             .and_then(|value| {
-                value.checked_add(
-                    PER_SHARE_OVERHEAD.saturating_mul(params.total_shards as u128),
-                )
+                value.checked_add(PER_SHARE_OVERHEAD.saturating_mul(params.total_shards as u128))
             })
             .ok_or_else(|| MiasmaError::Storage("share footprint estimate overflow".into()))?;
     }
 
-    u64::try_from(total)
-        .map_err(|_| MiasmaError::Storage("share footprint exceeds u64".into()))
+    u64::try_from(total).map_err(|_| MiasmaError::Storage("share footprint exceeds u64".into()))
 }
 
 // ─── Publish options / report (Phase 2.1) ──────────────────────────────────
@@ -2321,7 +2320,6 @@ mod segment_sizing_tests {
         }
     }
 }
-
 
 #[cfg(test)]
 mod large_file_storage_preflight_tests {
