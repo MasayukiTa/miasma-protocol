@@ -6,14 +6,27 @@
 //!
 //! * [`protection`] — password as an encryption factor (Argon2id → HKDF).
 //! * [`manifest`] — the per-piece index that travels with the DHT record.
+//! * [`receive`] — the verified, resumable receive engine.
+//! * [`progress`] — live status of a transfer.
+//! * [`journal`] — the small file that lets a stopped transfer resume.
 
+pub mod jobs;
+pub mod journal;
 pub mod manifest;
+pub mod network;
+pub mod progress;
 pub mod protection;
+pub mod receive;
 
 pub use manifest::{
     decode_record_value, encode_record_value, PieceId, SegmentEntry, TransferManifest,
 };
+pub use progress::{Phase, TransferProgress, TransferState, TransferStatus};
 pub use protection::{PasswordProtection, Protection, UnlockedKey};
+pub use receive::{run_receive, PieceSource, ReceiveOutcome, ReceiveSpec, RetryConfig};
+
+#[cfg(test)]
+mod receive_tests;
 
 #[cfg(test)]
 mod tests {
