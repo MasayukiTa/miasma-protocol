@@ -32,7 +32,7 @@ use super::payload::{PayloadTransportError, PayloadTransportKind, TransportPhase
 // ─── Configuration ──────────────────────────────────────────────────────────
 
 /// Shadowsocks transport configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ShadowsocksConfig {
     /// Whether Shadowsocks transport is enabled.
     #[serde(default)]
@@ -52,6 +52,19 @@ pub struct ShadowsocksConfig {
     /// Connection timeout in seconds.
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
+}
+
+impl fmt::Debug for ShadowsocksConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ShadowsocksConfig")
+            .field("enabled", &self.enabled)
+            .field("server", &self.server)
+            .field("password_configured", &self.password.is_some())
+            .field("cipher", &self.cipher)
+            .field("local_addr", &self.local_addr)
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
 }
 
 impl Default for ShadowsocksConfig {
@@ -752,6 +765,19 @@ impl super::payload::PayloadTransport for ShadowsocksPayloadTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shadowsocks_config_debug_redacts_password() {
+        let cfg = ShadowsocksConfig {
+            enabled: true,
+            server: Some("127.0.0.1:8388".into()),
+            password: Some("debug-shadow-value".into()),
+            ..Default::default()
+        };
+        let rendered = format!("{cfg:?}");
+        assert!(!rendered.contains("debug-shadow-value"));
+        assert!(rendered.contains("password_configured: true"));
+    }
 
     #[test]
     fn config_default() {
