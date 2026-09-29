@@ -286,6 +286,21 @@
   `p2p_kademlia_full_roundtrip`を「タイミング過敏で#[ignore]」と書いていた記述を
   訂正(Phase 1以降は非ignore。真因はテストのflakeでなくfire-and-forget PUTという製品欠陥)。
 
+### P1-8: 大容量ファイルの保護付き・再開可能な転送(実装済み、2台間の実機検証は未)
+
+- **種別**: 機能・信頼性・性能
+- **現状**: 計画・実測・残件は `docs/tasks/protected-resumable-transfer-plan.md`、
+  macOS→Windows の手順は `docs/tasks/macos-to-windows-large-transfer-runbook.md`。
+  ブランチ `work/resumable-protected-transfer`(CI は PR を開くまで走らない)。
+- **入ったもの**: ピースごとの ID を持つ manifest、MID+パスワード(暗号化の一要素)、
+  受信・送信の進捗表示と再開(強制終了後も)、冗長度の実験ハーネス(`redundancy-bench`)、
+  ストアのピース検索を O(保存個数) の全復号から索引引きへ(1取得 15〜23秒 → 26〜61ms、
+  デバッグビルド)。
+- **未実施**: 2台の別マシン間の転送、Mac での CLI ビルド、100 GiB の実走、リリースビルドでの
+  速度実測。
+- **持ち越し**: 預かり枠の設定キー無し(readme に注記済み)、ストア索引の全書き直し(個数に比例)、
+  UI・FFI の進捗/再開、日本語化。詳細は計画書 §7b。
+
 ---
 
 ## P2 — Medium (プロダクションリリース前)

@@ -1894,6 +1894,15 @@ async fn cmd_network_publish(
     let status = watch_transfer(data_dir, &id).await?;
     println!("{}", status.mid);
     eprintln!("Published. MID: {}", status.mid);
+    // Elapsed includes hashing the file and, on a resume, only this session.
+    if status.elapsed_secs > 0.0 {
+        eprintln!(
+            "  {} in {:.1}s ({}/s average)",
+            human_bytes(file_len),
+            status.elapsed_secs,
+            human_bytes((file_len as f64 / status.elapsed_secs) as u64)
+        );
+    }
     if password.is_some() {
         eprintln!("  Password-protected: the receiver needs the MID and the password.");
     }
@@ -2183,6 +2192,16 @@ async fn cmd_network_get_transfer(
         status.elapsed_secs,
         abs_path.display()
     );
+    // This session only: a resumed transfer's earlier segments are not counted.
+    if status.rate_bps > 0.0 {
+        eprintln!(
+            "  {}/s average this session  (fetch {} ms, decode {} ms, write {} ms)",
+            human_bytes(status.rate_bps as u64),
+            status.fetch_ms,
+            status.decode_ms,
+            status.write_ms
+        );
+    }
     Ok(())
 }
 
@@ -2267,19 +2286,41 @@ async fn cmd_transfers(data_dir: &std::path::Path) -> Result<()> {
         return Ok(());
     }
     for s in &list {
-        println!("{}", s.mid);
+        println!("{}", transfer_heading(s));
         println!("  {:?}  {}", s.state, format_progress(s));
         if let Some(e) = &s.last_error {
             println!("  last error: {e}");
         }
         if s.resumable {
-            println!(
-                "  resumable: run `miasma network-get {} -o <file>` again",
-                s.mid
-            );
+            println!("  resumable: {}", resume_hint(s));
         }
     }
     Ok(())
+}
+
+/// First line of a transfer in `miasma transfers`: which way it goes and what it is.
+fn transfer_heading(s: &miasma_core::transfer::TransferStatus) -> String {
+    use miasma_core::transfer::TransferKind;
+    match s.kind {
+        TransferKind::Receive => format!("receive  {}  ->  {}", s.mid, s.name),
+        TransferKind::Send if s.mid.is_empty() => format!("send     {}", s.name),
+        TransferKind::Send => format!("send     {}  ({})", s.name, s.mid),
+    }
+}
+
+/// The command that resumes a paused transfer.
+fn resume_hint(s: &miasma_core::transfer::TransferStatus) -> String {
+    use miasma_core::transfer::TransferKind;
+    match s.kind {
+        TransferKind::Receive => format!(
+            "run `miasma network-get {} -o {}` again (same password)",
+            s.mid, s.name
+        ),
+        TransferKind::Send => format!(
+            "run `miasma network-publish {}` again with the same options (same password)",
+            s.name
+        ),
+    }
 }
 
 async fn cmd_transfer_cancel(data_dir: &std::path::Path, mid: &str) -> Result<()> {
@@ -2615,6 +2656,65 @@ mod transfer_progress_tests {
         let line = format_progress(&s);
         assert!(line.contains("100.0%"), "{line}");
         assert!(line.contains(&"#".repeat(24)), "{line}");
+    }
+}
+
+#[cfg(test)]
+mod transfers_listing {
+    use super::{resume_hint, transfer_heading};
+    use miasma_core::transfer::{Phase, TransferKind, TransferState, TransferStatus};
+
+    fn status(kind: TransferKind, mid: &str, name: &str) -> TransferStatus {
+        TransferStatus {
+            mid: mid.into(),
+            kind,
+            name: name.into(),
+            phase: Phase::Transferring,
+            state: TransferState::Paused,
+            segments_done: 1,
+            segments_total: 3,
+            bytes_done: 1,
+            bytes_total: 3,
+            rate_bps: 0.0,
+            eta_secs: None,
+            elapsed_secs: 0.0,
+            fetch_ms: 0,
+            decode_ms: 0,
+            write_ms: 0,
+            pieces_fetched: 0,
+            pieces_rejected: 0,
+            segment_retries: 0,
+            resumed_from_segment: 0,
+            last_error: None,
+            resumable: true,
+        }
+    }
+
+    #[test]
+    fn a_receive_is_headed_by_its_mid_and_output() {
+        let s = status(TransferKind::Receive, "miasma:abc", "D:/recv/file.bin");
+        assert_eq!(
+            transfer_heading(&s),
+            "receive  miasma:abc  ->  D:/recv/file.bin"
+        );
+        let hint = resume_hint(&s);
+        assert!(
+            hint.contains("network-get miasma:abc -o D:/recv/file.bin"),
+            "{hint}"
+        );
+    }
+
+    #[test]
+    fn a_send_is_headed_by_its_file_and_shows_the_mid_once_known() {
+        let hashing = status(TransferKind::Send, "", "/data/big.bin");
+        assert_eq!(transfer_heading(&hashing), "send     /data/big.bin");
+        let known = status(TransferKind::Send, "miasma:xyz", "/data/big.bin");
+        assert_eq!(
+            transfer_heading(&known),
+            "send     /data/big.bin  (miasma:xyz)"
+        );
+        let hint = resume_hint(&known);
+        assert!(hint.contains("network-publish /data/big.bin"), "{hint}");
     }
 }
 
