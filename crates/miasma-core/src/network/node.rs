@@ -241,7 +241,6 @@ const CREDENTIAL_MSG_MAX: usize = 8 * 1024;
 #[derive(Clone, Default)]
 pub struct CredentialCodec;
 
-#[async_trait::async_trait]
 impl request_response::Codec for CredentialCodec {
     type Protocol = StreamProtocol;
     type Request = CredentialRequest;
@@ -334,7 +333,6 @@ const DESCRIPTOR_MSG_MAX: usize = 16 * 1024;
 #[derive(Clone, Default)]
 pub struct DescriptorCodec;
 
-#[async_trait::async_trait]
 impl request_response::Codec for DescriptorCodec {
     type Protocol = StreamProtocol;
     type Request = DescriptorRequest;
@@ -444,7 +442,6 @@ pub(crate) const SHARE_MSG_MAX: usize = 8 * 1024 * 1024;
 /// Max message size for admission protocol (4 KiB — PoW proofs are tiny).
 const ADMISSION_MSG_MAX: usize = 4 * 1024;
 
-#[async_trait::async_trait]
 impl request_response::Codec for ShareCodec {
     type Protocol = StreamProtocol;
     type Request = ShareFetchRequest;
@@ -539,7 +536,6 @@ impl request_response::Codec for ShareCodec {
 #[derive(Clone, Default)]
 pub struct ShareStoreCodec;
 
-#[async_trait::async_trait]
 impl request_response::Codec for ShareStoreCodec {
     type Protocol = StreamProtocol;
     type Request = StoreRequest;
@@ -634,7 +630,6 @@ impl request_response::Codec for ShareStoreCodec {
 #[derive(Clone, Default)]
 pub struct AdmissionCodec;
 
-#[async_trait::async_trait]
 impl request_response::Codec for AdmissionCodec {
     type Protocol = StreamProtocol;
     type Request = AdmissionRequest;
