@@ -7,7 +7,7 @@
 //! file to discover the port, connect, send a request, receive a response,
 //! and close the connection.
 
-use std::path::Path;
+use std::{fmt, path::Path};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -43,7 +43,7 @@ pub const HTTP_BRIDGE_DEFAULT_PORT: u16 = 17842;
 // ─── Wire types ───────────────────────────────────────────────────────────────
 
 /// Request from a CLI client to the local daemon.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub enum ControlRequest {
     /// Dissolve `data` into shares and publish a DHT record.
     Publish {
@@ -168,6 +168,105 @@ pub enum ControlRequest {
     DirectedOutbox,
 }
 
+impl fmt::Debug for ControlRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Publish {
+                data,
+                data_shards,
+                total_shards,
+            } => f
+                .debug_struct("Publish")
+                .field("data_len", &data.len())
+                .field("data_shards", data_shards)
+                .field("total_shards", total_shards)
+                .finish(),
+            Self::PublishFile {
+                data_shards,
+                total_shards,
+                ..
+            } => f
+                .debug_struct("PublishFile")
+                .field("file_path", &"<redacted>")
+                .field("data_shards", data_shards)
+                .field("total_shards", total_shards)
+                .finish(),
+            Self::Get {
+                mid,
+                data_shards,
+                total_shards,
+            } => f
+                .debug_struct("Get")
+                .field("mid", mid)
+                .field("data_shards", data_shards)
+                .field("total_shards", total_shards)
+                .finish(),
+            Self::GetToFile {
+                mid,
+                data_shards,
+                total_shards,
+                ..
+            } => f
+                .debug_struct("GetToFile")
+                .field("mid", mid)
+                .field("data_shards", data_shards)
+                .field("total_shards", total_shards)
+                .field("output_path", &"<redacted>")
+                .finish(),
+            Self::Status => f.write_str("Status"),
+            Self::Wipe => f.write_str("Wipe"),
+            Self::SharingKey => f.write_str("SharingKey"),
+            Self::DirectedSend {
+                data,
+                retention_secs,
+                filename,
+                ..
+            } => f
+                .debug_struct("DirectedSend")
+                .field("recipient_contact", &"<redacted>")
+                .field("data_len", &data.len())
+                .field("password", &"<redacted>")
+                .field("retention_secs", retention_secs)
+                .field("filename_configured", &filename.is_some())
+                .finish(),
+            Self::DirectedSendFile {
+                retention_secs,
+                filename,
+                ..
+            } => f
+                .debug_struct("DirectedSendFile")
+                .field("recipient_contact", &"<redacted>")
+                .field("file_path", &"<redacted>")
+                .field("password", &"<redacted>")
+                .field("retention_secs", retention_secs)
+                .field("filename_configured", &filename.is_some())
+                .finish(),
+            Self::DirectedConfirm { envelope_id, .. } => f
+                .debug_struct("DirectedConfirm")
+                .field("envelope_id", envelope_id)
+                .field("challenge_code", &"<redacted>")
+                .finish(),
+            Self::DirectedRetrieve { envelope_id, .. } => f
+                .debug_struct("DirectedRetrieve")
+                .field("envelope_id", envelope_id)
+                .field("password", &"<redacted>")
+                .finish(),
+            Self::DirectedRetrieveToFile { envelope_id, .. } => f
+                .debug_struct("DirectedRetrieveToFile")
+                .field("envelope_id", envelope_id)
+                .field("password", &"<redacted>")
+                .field("output_path", &"<redacted>")
+                .finish(),
+            Self::DirectedRevoke { envelope_id } => f
+                .debug_struct("DirectedRevoke")
+                .field("envelope_id", envelope_id)
+                .finish(),
+            Self::DirectedInbox => f.write_str("DirectedInbox"),
+            Self::DirectedOutbox => f.write_str("DirectedOutbox"),
+        }
+    }
+}
+
 impl Zeroize for ControlRequest {
     fn zeroize(&mut self) {
         match self {
@@ -186,7 +285,7 @@ impl Zeroize for ControlRequest {
 }
 
 /// Response from the daemon to a CLI client.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub enum ControlResponse {
     Published {
         mid: String,
@@ -250,6 +349,60 @@ pub enum ControlResponse {
 
     /// Outbox listing (outgoing directed shares).
     DirectedOutboxList(Vec<crate::directed::EnvelopeSummary>),
+}
+
+impl fmt::Debug for ControlResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Published { mid } => f.debug_struct("Published").field("mid", mid).finish(),
+            Self::Retrieved { data } => f
+                .debug_struct("Retrieved")
+                .field("data_len", &data.len())
+                .finish(),
+            Self::RetrievedToFile { bytes_written, .. } => f
+                .debug_struct("RetrievedToFile")
+                .field("output_path", &"<redacted>")
+                .field("bytes_written", bytes_written)
+                .finish(),
+            Self::Status(status) => f.debug_tuple("Status").field(status).finish(),
+            Self::Wiped => f.write_str("Wiped"),
+            Self::Error(message) => f.debug_tuple("Error").field(message).finish(),
+            Self::SharingKey { .. } => f
+                .debug_struct("SharingKey")
+                .field("key", &"<redacted>")
+                .field("contact", &"<redacted>")
+                .finish(),
+            Self::DirectedSent { envelope_id } => f
+                .debug_struct("DirectedSent")
+                .field("envelope_id", envelope_id)
+                .finish(),
+            Self::DirectedConfirmed => f.write_str("DirectedConfirmed"),
+            Self::DirectedRetrieved { data, filename } => f
+                .debug_struct("DirectedRetrieved")
+                .field("data_len", &data.len())
+                .field("filename_configured", &filename.is_some())
+                .finish(),
+            Self::DirectedRetrievedToFile {
+                filename,
+                bytes_written,
+                ..
+            } => f
+                .debug_struct("DirectedRetrievedToFile")
+                .field("output_path", &"<redacted>")
+                .field("filename_configured", &filename.is_some())
+                .field("bytes_written", bytes_written)
+                .finish(),
+            Self::DirectedRevoked => f.write_str("DirectedRevoked"),
+            Self::DirectedInboxList(items) => f
+                .debug_struct("DirectedInboxList")
+                .field("items", &items.len())
+                .finish(),
+            Self::DirectedOutboxList(items) => f
+                .debug_struct("DirectedOutboxList")
+                .field("items", &items.len())
+                .finish(),
+        }
+    }
 }
 
 impl ControlResponse {
@@ -688,6 +841,49 @@ pub async fn daemon_request(data_dir: &Path, req: ControlRequest) -> Result<Cont
     write_result?;
     let resp: ControlResponse = read_frame(&mut stream).await?;
     Ok(resp)
+}
+
+#[cfg(test)]
+mod debug_redaction_tests {
+    use super::*;
+
+    #[test]
+    fn control_request_debug_redacts_secret_and_payload() {
+        let request = ControlRequest::DirectedSend {
+            recipient_contact: "recipient-sensitive".into(),
+            data: b"plaintext-sensitive".to_vec(),
+            password: "password-sensitive".into(),
+            retention_secs: 60,
+            filename: Some("private-name.txt".into()),
+        };
+        let rendered = format!("{request:?}");
+        assert!(rendered.contains("DirectedSend"));
+        assert!(rendered.contains("data_len: 19"));
+        assert!(!rendered.contains("recipient-sensitive"));
+        assert!(!rendered.contains("plaintext-sensitive"));
+        assert!(!rendered.contains("password-sensitive"));
+        assert!(!rendered.contains("private-name.txt"));
+    }
+
+    #[test]
+    fn control_response_debug_redacts_plaintext_and_sharing_identity() {
+        let retrieved = ControlResponse::DirectedRetrieved {
+            data: b"plaintext-sensitive".to_vec(),
+            filename: Some("private-name.txt".into()),
+        };
+        let rendered = format!("{retrieved:?}");
+        assert!(rendered.contains("DirectedRetrieved"));
+        assert!(rendered.contains("data_len: 19"));
+        assert!(!rendered.contains("plaintext-sensitive"));
+        assert!(!rendered.contains("private-name.txt"));
+
+        let sharing = ControlResponse::SharingKey {
+            key: "msk:sensitive-key".into(),
+            contact: "msk:sensitive-key@peer".into(),
+        };
+        let rendered = format!("{sharing:?}");
+        assert!(!rendered.contains("sensitive-key"));
+    }
 }
 
 #[cfg(test)]
