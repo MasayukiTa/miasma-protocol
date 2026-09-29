@@ -17,7 +17,10 @@ use futures::StreamExt as _;
 use libp2p::{
     autonat, dcutr, identify,
     identity::Keypair,
-    kad::{self, store::MemoryStore, store::RecordStore},
+    kad::{
+        self,
+        store::{MemoryStore, MemoryStoreConfig, RecordStore},
+    },
     mdns, noise, ping, relay, request_response,
     swarm::{ConnectionId, NetworkBehaviour, SwarmEvent},
     yamux, Multiaddr, PeerId, StreamProtocol, Swarm,
@@ -952,6 +955,21 @@ pub struct DhtHandle {
 /// event loop cannot process a command in this window something is stuck.
 const DHT_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Exclusive upper bound for the signed Kademlia record value.
+///
+/// Large-file publishing keeps file bytes segmented, but one DHT record still
+/// carries the location metadata for every segment. 16 MiB is enough for the
+/// 100 GiB/default-sharding release gate while remaining a hard inbound memory
+/// bound instead of accepting arbitrarily large records.
+pub(crate) const DHT_RECORD_MAX_VALUE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Leave room for the signing envelope around the serialized DhtRecord.
+pub(crate) const DHT_INNER_RECORD_MAX_BYTES: usize = DHT_RECORD_MAX_VALUE_BYTES - 64 * 1024;
+
+/// Kademlia protobuf packet budget. This must exceed the record-store limit
+/// because protocol framing and peer metadata sit outside the record value.
+const DHT_MAX_PACKET_SIZE: usize = DHT_RECORD_MAX_VALUE_BYTES + 1024 * 1024;
+
 impl DhtHandle {
     /// Create a DhtHandle from a raw channel sender (for testing).
     pub fn from_sender(tx: mpsc::Sender<DhtCommand>) -> Self {
@@ -989,6 +1007,13 @@ impl DhtHandle {
         let key = record.mid_digest.to_vec();
         let value =
             bincode::serialize(&record).map_err(|e| MiasmaError::Serialization(e.to_string()))?;
+        if value.len() >= DHT_INNER_RECORD_MAX_BYTES {
+            return Err(MiasmaError::Dht(format!(
+                "DHT record metadata too large: {} bytes (limit < {} bytes)",
+                value.len(),
+                DHT_INNER_RECORD_MAX_BYTES
+            )));
+        }
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(DhtCommand::Put {
@@ -2194,7 +2219,21 @@ impl MiasmaNode {
             DhtCommand::Put { key, value, reply } => {
                 // Wrap the raw value in a SignedDhtRecord envelope.
                 let signed = SignedDhtRecord::sign(key.clone(), value, &self.dht_signing_key);
-                let signed_bytes = bincode::serialize(&signed).unwrap_or_default();
+                let signed_bytes = match bincode::serialize(&signed) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        let _ = reply.send(Err(MiasmaError::Serialization(e.to_string())));
+                        return;
+                    }
+                };
+                if signed_bytes.len() >= DHT_RECORD_MAX_VALUE_BYTES {
+                    let _ = reply.send(Err(MiasmaError::Dht(format!(
+                        "signed DHT record too large: {} bytes (limit < {} bytes)",
+                        signed_bytes.len(),
+                        DHT_RECORD_MAX_VALUE_BYTES
+                    ))));
+                    return;
+                }
 
                 let record = kad::Record {
                     key: kad::RecordKey::new(&key),
@@ -2204,12 +2243,18 @@ impl MiasmaNode {
                 };
                 // Always store locally first so remote peers can retrieve the
                 // record via GET even if no other peers are reachable yet.
-                let _ = self
+                if let Err(e) = self
                     .swarm
                     .behaviour_mut()
                     .kademlia
                     .store_mut()
-                    .put(record.clone());
+                    .put(record.clone())
+                {
+                    let _ = reply.send(Err(MiasmaError::Dht(format!(
+                        "local DHT record store rejected value: {e:?}"
+                    ))));
+                    return;
+                }
                 // A lone node with no connected peers yet has nowhere to replicate
                 // to: `put_record`'s Quorum::One would fail immediately with
                 // `QuorumFailed { success: [], .. }` since there is no peer to
@@ -4788,7 +4833,13 @@ fn build_swarm(
         .with_relay_client(noise::Config::new, yamux::Config::default)
         .map_err(|e| MiasmaError::Sss(format!("relay client init failed: {e}")))?
         .with_behaviour(|key: &Keypair, relay_client| {
-            let store = MemoryStore::new(local_peer_id);
+            let store = MemoryStore::with_config(
+                local_peer_id,
+                MemoryStoreConfig {
+                    max_value_bytes: DHT_RECORD_MAX_VALUE_BYTES,
+                    ..Default::default()
+                },
+            );
             let mut kad_config = kad::Config::new(StreamProtocol::new("/miasma/kad/1.0.0"));
             // Explicit rather than silently inherited from libp2p-kad's own defaults --
             // these are conservative starting points for a small, early-deployment
@@ -4808,6 +4859,10 @@ fn build_swarm(
                 // and its churn characteristics are still small and unmeasured.
                 .set_publication_interval(Some(Duration::from_secs(20 * 60)))
                 .set_provider_publication_interval(Some(Duration::from_secs(20 * 60)))
+                // Upstream's packet limit is far below the metadata generated by
+                // 100 GiB-class segmented files. Keep it aligned with the bounded
+                // MemoryStore value limit above.
+                .set_max_packet_size(DHT_MAX_PACKET_SIZE)
                 // Was: upstream default 48h. Shorter TTL trades some availability for
                 // faster staleness recovery until real content lifetimes are known.
                 .set_record_ttl(Some(Duration::from_secs(24 * 60 * 60)));
@@ -5519,5 +5574,71 @@ mod admission_pow_tests {
             &substituted_issuer,
             &signature
         ));
+    }
+}
+
+#[cfg(test)]
+mod large_file_dht_budget_tests {
+    use super::*;
+
+    #[test]
+    fn hundred_gib_default_metadata_fits_dht_budget() {
+        const HUNDRED_GIB: u64 = 100 * 1024 * 1024 * 1024;
+        let params = crate::pipeline::DissolutionParams::default();
+        let segment_size = crate::dissolution::DEFAULT_SEGMENT_SIZE as u64;
+        let segment_count = HUNDRED_GIB.div_ceil(segment_size) as u32;
+        assert_eq!(segment_count, 1600);
+
+        // Four representative dial addresses per holder is deliberately more
+        // metadata than the normal single-listener path, giving the release
+        // gate useful headroom without allocating any file payload.
+        let addrs = vec![
+            "/ip4/203.0.113.10/udp/4001/quic-v1".to_string(),
+            "/ip4/203.0.113.10/tcp/4001".to_string(),
+            "/ip6/2001:db8::10/udp/4001/quic-v1".to_string(),
+            "/dns4/node.example.net/tcp/443/wss".to_string(),
+        ];
+        let peer_id_bytes = PeerId::random().to_bytes();
+        let location_count = segment_count as usize * params.total_shards;
+        let mut locations = Vec::with_capacity(location_count);
+
+        for segment_index in 0..segment_count {
+            for shard_index in 0..params.total_shards {
+                locations.push(crate::network::types::ShardLocation {
+                    peer_id_bytes: peer_id_bytes.clone(),
+                    shard_index: shard_index as u16,
+                    segment_index,
+                    addrs: addrs.clone(),
+                });
+            }
+        }
+        assert_eq!(locations.len(), 32_000);
+
+        let record = DhtRecord {
+            mid_digest: [0xA5; 32],
+            data_shards: params.data_shards as u8,
+            total_shards: params.total_shards as u8,
+            version: 1,
+            locations,
+            published_at: 0,
+        };
+        let inner = bincode::serialize(&record).unwrap();
+        assert!(
+            inner.len() < DHT_INNER_RECORD_MAX_BYTES,
+            "100 GiB DHT metadata is {} bytes; inner budget is < {} bytes",
+            inner.len(),
+            DHT_INNER_RECORD_MAX_BYTES
+        );
+
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x5A; 32]);
+        let signed = SignedDhtRecord::sign(record.dht_key(), inner, &signing_key);
+        let envelope = bincode::serialize(&signed).unwrap();
+        assert!(
+            envelope.len() < DHT_RECORD_MAX_VALUE_BYTES,
+            "100 GiB signed DHT metadata is {} bytes; record budget is < {} bytes",
+            envelope.len(),
+            DHT_RECORD_MAX_VALUE_BYTES
+        );
+        assert!(envelope.len() < DHT_MAX_PACKET_SIZE);
     }
 }

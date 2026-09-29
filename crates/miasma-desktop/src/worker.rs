@@ -132,8 +132,14 @@ pub enum DaemonState {
 pub enum WorkerResult {
     /// Dissolution succeeded: MID string.
     Dissolved { mid: String },
-    /// Retrieval succeeded: raw plaintext bytes.
+    /// Retrieval succeeded: raw plaintext bytes (small/in-memory path).
     Retrieved { mid: String, data: Vec<u8> },
+    /// Retrieval succeeded through the streaming file path.
+    RetrievedToFile {
+        mid: String,
+        temp_path: PathBuf,
+        bytes_written: u64,
+    },
     /// Daemon status snapshot.
     Status {
         peer_id: String,
@@ -192,6 +198,14 @@ impl fmt::Debug for WorkerResult {
                 .debug_struct("Retrieved")
                 .field("mid", mid)
                 .field("data_len", &data.len())
+                .finish(),
+            Self::RetrievedToFile {
+                mid, bytes_written, ..
+            } => f
+                .debug_struct("RetrievedToFile")
+                .field("mid", mid)
+                .field("temp_path", &"<redacted>")
+                .field("bytes_written", bytes_written)
                 .finish(),
             Self::Status {
                 peer_id,
@@ -394,11 +408,10 @@ fn worker_thread(
             WorkerCmd::DissolveText(text) => {
                 rt.block_on(publish_bytes(text.as_bytes(), &data_dir, params))
             }
-            WorkerCmd::DissolveFile(path) => match std::fs::read(&path) {
-                Ok(data) => rt.block_on(publish_bytes(&data, &data_dir, params)),
-                Err(e) => WorkerResult::Err(format!("Read file: {e}")),
-            },
-            WorkerCmd::Retrieve(mid_str) => rt.block_on(retrieve_mid(&mid_str, &data_dir, params)),
+            WorkerCmd::DissolveFile(path) => rt.block_on(publish_file(&path, &data_dir, params)),
+            WorkerCmd::Retrieve(mid_str) => {
+                rt.block_on(retrieve_mid_to_file(&mid_str, &data_dir, params))
+            }
             WorkerCmd::GetStatus => {
                 let status = rt.block_on(get_status(&data_dir));
                 // Update connection state based on result.
@@ -761,6 +774,66 @@ async fn retrieve_mid(mid_str: &str, data_dir: &Path, params: DissolutionParams)
         Ok(ControlResponse::Error(e)) => WorkerResult::Err(e),
         Ok(other) => WorkerResult::Err(format!("Unexpected response: {other:?}")),
         Err(e) => WorkerResult::Err(daemon_error(&e)),
+    }
+}
+
+async fn publish_file(path: &Path, data_dir: &Path, params: DissolutionParams) -> WorkerResult {
+    let req = ControlRequest::PublishFile {
+        file_path: path.to_string_lossy().into_owned(),
+        data_shards: params.data_shards as u8,
+        total_shards: params.total_shards as u8,
+    };
+    match daemon_request(data_dir, req).await {
+        Ok(ControlResponse::Published { mid }) => WorkerResult::Dissolved { mid },
+        Ok(ControlResponse::Error(e)) => WorkerResult::Err(e),
+        Ok(other) => WorkerResult::Err(format!("Unexpected response: {other:?}")),
+        Err(e) => WorkerResult::Err(daemon_error(&e)),
+    }
+}
+
+fn retrieval_temp_path() -> PathBuf {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "miasma-retrieve-{}-{nonce}.tmp",
+        std::process::id()
+    ))
+}
+
+async fn retrieve_mid_to_file(
+    mid_str: &str,
+    data_dir: &Path,
+    params: DissolutionParams,
+) -> WorkerResult {
+    let temp_path = retrieval_temp_path();
+    let req = ControlRequest::GetToFile {
+        mid: mid_str.to_string(),
+        data_shards: params.data_shards as u8,
+        total_shards: params.total_shards as u8,
+        output_path: temp_path.to_string_lossy().into_owned(),
+    };
+    match daemon_request(data_dir, req).await {
+        Ok(ControlResponse::RetrievedToFile { bytes_written, .. }) => {
+            WorkerResult::RetrievedToFile {
+                mid: mid_str.to_string(),
+                temp_path,
+                bytes_written,
+            }
+        }
+        Ok(ControlResponse::Error(e)) => {
+            let _ = std::fs::remove_file(&temp_path);
+            WorkerResult::Err(e)
+        }
+        Ok(other) => {
+            let _ = std::fs::remove_file(&temp_path);
+            WorkerResult::Err(format!("Unexpected response: {other:?}"))
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&temp_path);
+            WorkerResult::Err(daemon_error(&e))
+        }
     }
 }
 
@@ -1145,6 +1218,15 @@ mod tests {
     use std::path::Path;
 
     const MAGNET: &str = "magnet:?xt=urn:btih:abcdef0123456789abcdef0123456789abcdef01";
+
+    #[test]
+    fn retrieval_temp_path_is_unique_enough_for_sequential_calls() {
+        let first = super::retrieval_temp_path();
+        std::thread::sleep(std::time::Duration::from_nanos(1));
+        let second = super::retrieval_temp_path();
+        assert_ne!(first, second);
+        assert_eq!(first.extension().and_then(|e| e.to_str()), Some("tmp"));
+    }
 
     #[test]
     fn worker_debug_redacts_sensitive_material() {
