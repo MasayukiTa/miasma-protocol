@@ -28,6 +28,7 @@ use futures::SinkExt;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
+use zeroize::Zeroizing;
 
 use crate::{
     network::node::{ShareFetchRequest, ShareFetchResponse},
@@ -83,7 +84,7 @@ pub struct WebSocketConfig {
     pub tls_cert_pem: Option<Vec<u8>>,
 
     /// Server TLS private key in PEM format.
-    pub tls_key_pem: Option<Vec<u8>>,
+    pub tls_key_pem: Option<Zeroizing<Vec<u8>>>,
 
     /// Custom CA certificate in PEM for client-side verification.
     /// If `None`, webpki-roots (Mozilla CA bundle) is used.
