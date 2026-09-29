@@ -132,7 +132,28 @@ scripts/               Build, package, sign, smoke test, soak test scripts
 
 ## Building
 
-Requires Rust toolchain (stable) and a Windows environment for the desktop and installer targets.
+Requires Rust toolchain (stable). The MSI installer requires Windows; the desktop GUI can also be built as a native macOS app.
+
+### macOS
+
+Install the Xcode Command Line Tools (`xcode-select --install`) and stable Rust
+from [rustup.rs](https://rustup.rs), then run:
+
+```sh
+bash scripts/build-macos.sh
+open dist/Miasma.app
+```
+
+The app bundles the GUI, daemon/CLI, and BitTorrent bridge together, so Finder
+launches do not depend on your shell's PATH. You can copy `Miasma.app` to
+Applications. It is built for the current Mac's architecture (Apple Silicon or
+Intel) and signed locally, without Apple notarization. Data and logs are stored
+in `~/Library/Application Support/miasma`.
+
+The bundled CLI is available as `dist/Miasma.app/Contents/MacOS/miasma`.
+Set `MIASMA_MACOS_OUTPUT` to change the output directory.
+
+### Other builds
 
 ```
 cargo build --release
