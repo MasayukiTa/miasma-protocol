@@ -456,6 +456,28 @@ Each entry says what was actually run. Machine: Windows 11, slim debug profile (
 - Not verified: macOS (no Mac here; the discovery tables are data + a tempdir test), Meiryo vs. the fallback chain
   when Meiryo is absent, the `Import` tab (needs a magnet/torrent launch argument).
 
+### Stage C — Japanese CLI messages (2026-09-30)
+
+- All text of the transfer commands (progress line, `transfers`, publish/receive/cancel messages,
+  the two password errors, the redundancy-bench table and hints) is in one table,
+  `crates/miasma-cli/src/i18n.rs` (`Msg`, each variant has `en` and `ja`). English is the default
+  and byte-identical to before (a golden test pins every message).
+- Language: `--lang en|ja`, else env `MIASMA_LANG` (`ja`/`ja_JP`/`ja-JP`, any case; another value
+  means English), else the OS UI language (Windows `GetUserDefaultUILanguage`, declared directly
+  against kernel32, no new dependency), else `LC_ALL`/`LC_MESSAGES`/`LANG`, else English.
+- **Consequence for scripts:** on a Japanese-UI machine the CLI now answers in Japanese by default,
+  so anything that greps the English wording must pin it. `scripts/transfer-e2e.{sh,ps1}` set
+  `MIASMA_LANG=en` (they grep `wrong password`, `password`, `Paused`, `resumable`, `^send`,
+  `seg N/M`). `smoke-loopback.*` and `validate-bridge-connectivity.ps1` match only `miasma:...`
+  and `MID: ...`, which Japanese keeps.
+- Only the two password errors coming from the daemon are translated (matched on `miasma-core`'s
+  message text; a test ties the needles to `MiasmaError`). Other daemon errors and tracing logs stay
+  English. The `Error:` prefix that anyhow prints for a failing command is not translated.
+- Console: Rust's std writes to a real console as UTF-16, and to a pipe or file as UTF-8, so no
+  `SetConsoleOutputCP` call is made (it would change the user's console after the program exits).
+  A reader that decodes a pipe as cp932 (Windows PowerShell 5.1 with the default code page) will
+  garble Japanese output; that is the reader's decoding, not the bytes.
+
 ## 7. Decisions and open questions
 
 - D1 Manifest lives in the record trailer, not a second DHT key. (Reason in §2.2.)
