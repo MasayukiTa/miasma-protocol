@@ -23,7 +23,11 @@ pub fn rs_encode(
     data_shards: usize,
     total_shards: usize,
 ) -> Result<Vec<Vec<u8>>, MiasmaError> {
-    if total_shards <= data_shards || data_shards == 0 {
+    // `total_shards == data_shards` is allowed: a plain split with no parity, so
+    // any lost or corrupt shard loses the segment. That is a deliberate
+    // low-redundancy setting for transfers where the holder is the sender and a
+    // bad piece is re-fetched, not reconstructed.
+    if total_shards < data_shards || data_shards == 0 {
         return Err(MiasmaError::ReedSolomon(format!(
             "invalid parameters: data_shards={data_shards}, total_shards={total_shards}"
         )));
@@ -39,6 +43,11 @@ pub fn rs_encode(
     // Zero-pad so data divides evenly into data_shards.
     let mut padded = data.to_vec();
     padded.resize(shard_len * data_shards, 0);
+
+    // `reed-solomon-simd` cannot be asked for zero recovery shards.
+    if recovery_shards == 0 {
+        return Ok(padded.chunks(shard_len).map(|c| c.to_vec()).collect());
+    }
 
     let mut encoder = ReedSolomonEncoder::new(data_shards, recovery_shards, shard_len)
         .map_err(|e| MiasmaError::ReedSolomon(e.to_string()))?;
@@ -74,7 +83,7 @@ pub fn rs_decode(
     total_shards: usize,
     original_len: usize,
 ) -> Result<Vec<u8>, MiasmaError> {
-    if total_shards <= data_shards || data_shards == 0 {
+    if total_shards < data_shards || data_shards == 0 {
         return Err(MiasmaError::ReedSolomon(format!(
             "invalid parameters: data_shards={data_shards}, total_shards={total_shards}"
         )));

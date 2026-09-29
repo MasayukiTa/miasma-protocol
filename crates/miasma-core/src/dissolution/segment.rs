@@ -8,13 +8,14 @@ use zeroize::Zeroizing;
 
 use crate::{
     crypto::{
-        aead::{decrypt, encrypt, KEY_LEN, NONCE_LEN},
+        aead::{decrypt, encrypt, encrypt_with_key, KEY_LEN, NONCE_LEN},
         hash::ContentId,
         rs::{rs_decode, rs_encode},
         sss::{sss_combine, sss_split},
     },
     pipeline::DissolutionParams,
     share::{MiasmaShare, ShareVerification},
+    transfer::protection::UnlockedKey,
     MiasmaError,
 };
 
@@ -37,8 +38,40 @@ pub fn dissolve_segment(
     offset_bytes: u64,
     params: DissolutionParams,
 ) -> Result<(SegmentMeta, Vec<MiasmaShare>), MiasmaError> {
+    dissolve_segment_with(segment_data, mid, segment_index, offset_bytes, params, None)
+}
+
+/// As [`dissolve_segment`], optionally mixing a password-derived key into the
+/// segment's AES-256-GCM key (see `transfer::protection`).
+///
+/// With `password_key == None` this is exactly [`dissolve_segment`]: the
+/// per-segment random `K_enc` is used directly as the AES key. With `Some`, the
+/// shards and key shares are produced the same way (`K_enc` is still random and
+/// Shamir-split) but the ciphertext is encrypted under
+/// `HKDF(K_enc, salt = pw_key, info = label || mid || segment_index)`, so `K_enc`
+/// alone — which any `k` holders can reconstruct — no longer decrypts anything.
+pub fn dissolve_segment_with(
+    segment_data: &[u8],
+    mid: &ContentId,
+    segment_index: u32,
+    offset_bytes: u64,
+    params: DissolutionParams,
+    password_key: Option<&UnlockedKey>,
+) -> Result<(SegmentMeta, Vec<MiasmaShare>), MiasmaError> {
     // 1. Encrypt segment plaintext → (ciphertext, K_enc, nonce).
-    let (ciphertext, k_enc, nonce) = encrypt(segment_data)?;
+    let (ciphertext, k_enc, nonce) = match password_key {
+        None => encrypt(segment_data)?,
+        Some(unlocked) => {
+            use rand::RngCore as _;
+            let mut k_enc = Zeroizing::new([0u8; KEY_LEN]);
+            rand::rngs::OsRng.fill_bytes(k_enc.as_mut());
+            let mut nonce = [0u8; NONCE_LEN];
+            rand::rngs::OsRng.fill_bytes(&mut nonce);
+            let k_seg = unlocked.segment_key(k_enc.as_ref(), mid, segment_index)?;
+            let ciphertext = encrypt_with_key(segment_data, &k_seg, &nonce)?;
+            (ciphertext, k_enc, nonce)
+        }
+    };
 
     // 2. RS encode ciphertext → n shards.
     let shards = rs_encode(&ciphertext, params.data_shards, params.total_shards)?;
@@ -96,6 +129,20 @@ pub fn retrieve_segment(
     meta: &SegmentMeta,
     params: DissolutionParams,
 ) -> Result<Vec<u8>, MiasmaError> {
+    retrieve_segment_with(mid, shares, meta, params, None)
+}
+
+/// As [`retrieve_segment`] for a segment produced by [`dissolve_segment_with`].
+///
+/// `password_key` must be `Some` exactly when the segment was dissolved with
+/// one. A wrong key surfaces as an AEAD [`MiasmaError::Decryption`] error.
+pub fn retrieve_segment_with(
+    mid: &ContentId,
+    shares: &[MiasmaShare],
+    meta: &SegmentMeta,
+    params: DissolutionParams,
+    password_key: Option<&UnlockedKey>,
+) -> Result<Vec<u8>, MiasmaError> {
     // 1. Coarse-verify and filter to shares for this segment.
     let valid: Vec<&MiasmaShare> = shares
         .iter()
@@ -142,6 +189,12 @@ pub fn retrieve_segment(
     }
     let mut key = Zeroizing::new([0u8; KEY_LEN]);
     key.copy_from_slice(k_enc.as_slice());
+
+    // 3b. Password-protected segments: the AES key is derived from K_enc *and*
+    // the password, not K_enc alone.
+    if let Some(unlocked) = password_key {
+        key = unlocked.segment_key(key.as_ref(), mid, meta.index)?;
+    }
 
     // 4. AES-256-GCM decrypt.
     decrypt(&ciphertext, &key, &nonce)
