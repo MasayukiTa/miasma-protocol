@@ -14,6 +14,7 @@
 /// - Auto-launches daemon if not running (with stale port-file detection)
 /// - Tracks daemon ownership: if desktop launched it, kills on exit
 /// - All operations go through daemon IPC; if daemon not reachable, returns clear error
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::mpsc;
@@ -26,7 +27,6 @@ use zeroize::Zeroizing;
 
 // ─── Protocol ─────────────────────────────────────────────────────────────────
 
-#[derive(Debug)]
 pub enum WorkerCmd {
     /// Dissolve a UTF-8 string.
     DissolveText(String),
@@ -73,6 +73,49 @@ pub enum WorkerCmd {
     DirectedOutbox,
 }
 
+impl fmt::Debug for WorkerCmd {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DissolveText(text) => f
+                .debug_struct("DissolveText")
+                .field("text_len", &text.len())
+                .finish(),
+            Self::DissolveFile(_) => f.write_str("DissolveFile(<redacted-path>)"),
+            Self::Retrieve(mid) => f.debug_tuple("Retrieve").field(mid).finish(),
+            Self::GetStatus => f.write_str("GetStatus"),
+            Self::Init => f.write_str("Init"),
+            Self::StartDaemon => f.write_str("StartDaemon"),
+            Self::Wipe => f.write_str("Wipe"),
+            Self::ImportMagnet(_) => f.write_str("ImportMagnet(<redacted>)"),
+            Self::ImportTorrentFile(_) => f.write_str("ImportTorrentFile(<redacted-path>)"),
+            Self::GetSharingKey => f.write_str("GetSharingKey"),
+            Self::DirectedSend { retention, .. } => f
+                .debug_struct("DirectedSend")
+                .field("file_path", &"<redacted>")
+                .field("recipient_contact", &"<redacted>")
+                .field("password", &"<redacted>")
+                .field("retention", retention)
+                .finish(),
+            Self::DirectedRetrieve { envelope_id, .. } => f
+                .debug_struct("DirectedRetrieve")
+                .field("envelope_id", envelope_id)
+                .field("password", &"<redacted>")
+                .finish(),
+            Self::DirectedRevoke { envelope_id } => f
+                .debug_struct("DirectedRevoke")
+                .field("envelope_id", envelope_id)
+                .finish(),
+            Self::DirectedConfirm { envelope_id, .. } => f
+                .debug_struct("DirectedConfirm")
+                .field("envelope_id", envelope_id)
+                .field("challenge_code", &"<redacted>")
+                .finish(),
+            Self::DirectedInbox => f.write_str("DirectedInbox"),
+            Self::DirectedOutbox => f.write_str("DirectedOutbox"),
+        }
+    }
+}
+
 /// Connection state visible to the UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DaemonState {
@@ -86,7 +129,6 @@ pub enum DaemonState {
     Connected,
 }
 
-#[derive(Debug)]
 pub enum WorkerResult {
     /// Dissolution succeeded: MID string.
     Dissolved { mid: String },
@@ -142,8 +184,84 @@ pub enum WorkerResult {
     Err(String),
 }
 
+impl fmt::Debug for WorkerResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Dissolved { mid } => f.debug_struct("Dissolved").field("mid", mid).finish(),
+            Self::Retrieved { mid, data } => f
+                .debug_struct("Retrieved")
+                .field("mid", mid)
+                .field("data_len", &data.len())
+                .finish(),
+            Self::Status {
+                peer_id,
+                peer_count,
+                share_count,
+                used_mb,
+                quota_mb,
+                pending_replication,
+                replicated_count,
+                listen_addrs,
+                wss_port,
+                wss_tls_enabled,
+                proxy_configured,
+                proxy_type,
+                obfs_quic_port,
+                transport_statuses,
+            } => f
+                .debug_struct("Status")
+                .field("peer_id", peer_id)
+                .field("peer_count", peer_count)
+                .field("share_count", share_count)
+                .field("used_mb", used_mb)
+                .field("quota_mb", quota_mb)
+                .field("pending_replication", pending_replication)
+                .field("replicated_count", replicated_count)
+                .field("listen_addr_count", &listen_addrs.len())
+                .field("wss_port", wss_port)
+                .field("wss_tls_enabled", wss_tls_enabled)
+                .field("proxy_configured", proxy_configured)
+                .field("proxy_type", proxy_type)
+                .field("obfs_quic_port", obfs_quic_port)
+                .field("transport_statuses", transport_statuses)
+                .finish(),
+            Self::Wiped => f.write_str("Wiped"),
+            Self::StateChanged(state) => f.debug_tuple("StateChanged").field(state).finish(),
+            Self::Initialized => f.write_str("Initialized"),
+            Self::ImportStarted { name } => {
+                f.debug_struct("ImportStarted").field("name", name).finish()
+            }
+            Self::ImportComplete { mids } => f
+                .debug_struct("ImportComplete")
+                .field("mids", mids)
+                .finish(),
+            Self::SharingKey { .. } => f.write_str("SharingKey(<redacted>)"),
+            Self::DirectedSent { envelope_id } => f
+                .debug_struct("DirectedSent")
+                .field("envelope_id", envelope_id)
+                .finish(),
+            Self::DirectedRetrieved { bytes_written, .. } => f
+                .debug_struct("DirectedRetrieved")
+                .field("temp_path", &"<redacted>")
+                .field("filename", &"<redacted>")
+                .field("bytes_written", bytes_written)
+                .finish(),
+            Self::DirectedRevoked => f.write_str("DirectedRevoked"),
+            Self::DirectedConfirmed => f.write_str("DirectedConfirmed"),
+            Self::DirectedInboxList(items) => f
+                .debug_struct("DirectedInboxList")
+                .field("items", items)
+                .finish(),
+            Self::DirectedOutboxList(items) => f
+                .debug_struct("DirectedOutboxList")
+                .field("items", items)
+                .finish(),
+            Self::Err(message) => f.debug_tuple("Err").field(message).finish(),
+        }
+    }
+}
+
 /// Directed inbox/outbox item for display.
-#[derive(Debug)]
 pub struct DirectedInboxItem {
     pub envelope_id: String,
     pub sender_pubkey: String,
@@ -155,6 +273,26 @@ pub struct DirectedInboxItem {
     pub expires_at: u64,
     pub filename: Option<String>,
     pub file_size: u64,
+}
+
+impl fmt::Debug for DirectedInboxItem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DirectedInboxItem")
+            .field("envelope_id", &self.envelope_id)
+            .field("sender_pubkey", &self.sender_pubkey)
+            .field("sender_peer_id", &self.sender_peer_id)
+            .field("recipient_pubkey", &self.recipient_pubkey)
+            .field("state", &self.state)
+            .field(
+                "challenge_code",
+                &self.challenge_code.as_ref().map(|_| "<redacted>"),
+            )
+            .field("created_at", &self.created_at)
+            .field("expires_at", &self.expires_at)
+            .field("filename", &self.filename.as_ref().map(|_| "<redacted>"))
+            .field("file_size", &self.file_size)
+            .finish()
+    }
 }
 
 /// Transport readiness info for desktop display.
@@ -1000,11 +1138,84 @@ fn parse_retention(s: &str) -> Result<u64, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{bridge_import_args, parse_mids_from_stdout};
+    use super::{
+        bridge_import_args, parse_mids_from_stdout, DirectedInboxItem, WorkerCmd, WorkerResult,
+    };
     use std::ffi::OsString;
     use std::path::Path;
 
     const MAGNET: &str = "magnet:?xt=urn:btih:abcdef0123456789abcdef0123456789abcdef01";
+
+    #[test]
+    fn worker_debug_redacts_sensitive_material() {
+        let cmd = WorkerCmd::DirectedSend {
+            file_path: std::path::PathBuf::from("C:/private/secret.txt"),
+            recipient_contact: "recipient-sensitive".into(),
+            password: "password-sensitive".into(),
+            retention: "1d".into(),
+        };
+        let rendered = format!("{cmd:?}");
+        assert!(!rendered.contains("C:/private/secret.txt"));
+        assert!(!rendered.contains("recipient-sensitive"));
+        assert!(!rendered.contains("password-sensitive"));
+
+        let text = WorkerCmd::DissolveText("plaintext-sensitive".into());
+        let rendered = format!("{text:?}");
+        assert!(!rendered.contains("plaintext-sensitive"));
+        assert!(rendered.contains("text_len"));
+
+        let confirm = WorkerCmd::DirectedConfirm {
+            envelope_id: "env".into(),
+            challenge_code: "ABCD-SECRET".into(),
+        };
+        let rendered = format!("{confirm:?}");
+        assert!(!rendered.contains("ABCD-SECRET"));
+    }
+
+    #[test]
+    fn worker_result_debug_redacts_plaintext_and_directed_metadata() {
+        let result = WorkerResult::Retrieved {
+            mid: "miasma:test".into(),
+            data: b"plaintext-sensitive".to_vec(),
+        };
+        let rendered = format!("{result:?}");
+        assert!(!rendered.contains("plaintext-sensitive"));
+        assert!(rendered.contains("data_len: 19"));
+
+        let sharing = WorkerResult::SharingKey {
+            contact: "msk:sensitive-contact@peer".into(),
+        };
+        assert!(!format!("{sharing:?}").contains("sensitive-contact"));
+
+        let directed = WorkerResult::DirectedRetrieved {
+            temp_path: std::path::PathBuf::from("C:/private/decrypted.tmp"),
+            filename: Some("private-name.txt".into()),
+            bytes_written: 42,
+        };
+        let rendered = format!("{directed:?}");
+        assert!(!rendered.contains("C:/private/decrypted.tmp"));
+        assert!(!rendered.contains("private-name.txt"));
+    }
+
+    #[test]
+    fn directed_inbox_item_debug_redacts_challenge_and_filename() {
+        let item = DirectedInboxItem {
+            envelope_id: "env".into(),
+            sender_pubkey: "sender".into(),
+            sender_peer_id: Some("peer".into()),
+            recipient_pubkey: "recipient".into(),
+            state: "ChallengeIssued".into(),
+            challenge_code: Some("ABCD-SECRET".into()),
+            created_at: 1,
+            expires_at: 2,
+            filename: Some("private-name.txt".into()),
+            file_size: 3,
+        };
+        let rendered = format!("{item:?}");
+        assert!(!rendered.contains("ABCD-SECRET"));
+        assert!(!rendered.contains("private-name.txt"));
+        assert!(rendered.contains("<redacted>"));
+    }
 
     fn os(items: &[&str]) -> Vec<OsString> {
         items.iter().map(OsString::from).collect()
