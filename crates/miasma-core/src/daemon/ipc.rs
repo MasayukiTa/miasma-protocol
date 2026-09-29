@@ -15,6 +15,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
+use zeroize::{Zeroize, Zeroizing};
 
 /// Maximum JSON frame body size (256 MiB).
 ///
@@ -167,6 +168,23 @@ pub enum ControlRequest {
     DirectedOutbox,
 }
 
+impl Zeroize for ControlRequest {
+    fn zeroize(&mut self) {
+        match self {
+            Self::Publish { data, .. } => data.zeroize(),
+            Self::DirectedSend { data, password, .. } => {
+                data.zeroize();
+                password.zeroize();
+            }
+            Self::DirectedSendFile { password, .. }
+            | Self::DirectedRetrieve { password, .. }
+            | Self::DirectedRetrieveToFile { password, .. } => password.zeroize(),
+            Self::DirectedConfirm { challenge_code, .. } => challenge_code.zeroize(),
+            _ => {}
+        }
+    }
+}
+
 /// Response from the daemon to a CLI client.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ControlResponse {
@@ -232,6 +250,16 @@ pub enum ControlResponse {
 
     /// Outbox listing (outgoing directed shares).
     DirectedOutboxList(Vec<crate::directed::EnvelopeSummary>),
+}
+
+impl ControlResponse {
+    /// Erase plaintext response bodies after they have been serialized to IPC.
+    pub(super) fn zeroize_sensitive_material(&mut self) {
+        match self {
+            Self::Retrieved { data } | Self::DirectedRetrieved { data, .. } => data.zeroize(),
+            _ => {}
+        }
+    }
 }
 
 /// Snapshot of daemon state — returned for `miasma status` and IPC calls.
@@ -565,13 +593,16 @@ pub struct TransportStatus {
 
 /// Serialize `value` to JSON and write a 4-byte LE length-prefixed frame.
 pub async fn write_frame(stream: &mut TcpStream, value: &impl Serialize) -> Result<()> {
-    let body = serde_json::to_vec(value).context("frame serialize")?;
+    let body = Zeroizing::new(serde_json::to_vec(value).context("frame serialize")?);
     let len = body.len() as u32;
     stream
         .write_all(&len.to_le_bytes())
         .await
         .context("write frame length")?;
-    stream.write_all(&body).await.context("write frame body")?;
+    stream
+        .write_all(body.as_slice())
+        .await
+        .context("write frame body")?;
     Ok(())
 }
 
@@ -586,12 +617,12 @@ pub async fn read_frame<T: for<'de> Deserialize<'de>>(stream: &mut TcpStream) ->
     if len > FRAME_MAX {
         bail!("IPC frame too large: {len} bytes (max {FRAME_MAX})");
     }
-    let mut buf = vec![0u8; len];
+    let mut buf = Zeroizing::new(vec![0u8; len]);
     stream
-        .read_exact(&mut buf)
+        .read_exact(buf.as_mut_slice())
         .await
         .context("read frame body")?;
-    serde_json::from_slice(&buf).context("frame deserialize")
+    serde_json::from_slice(buf.as_slice()).context("frame deserialize")
 }
 
 // ─── Port file helpers ────────────────────────────────────────────────────────
@@ -635,6 +666,7 @@ pub fn read_port_file(data_dir: &Path) -> Result<u16> {
 
 /// Connect to the local daemon, send one request, and return the response.
 pub async fn daemon_request(data_dir: &Path, req: ControlRequest) -> Result<ControlResponse> {
+    let mut req = Zeroizing::new(req);
     let port = read_port_file(data_dir)?;
     let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
         .await
@@ -644,7 +676,60 @@ pub async fn daemon_request(data_dir: &Path, req: ControlRequest) -> Result<Cont
                  is the miasma daemon still running?"
             )
         })?;
-    write_frame(&mut stream, &req).await?;
+    let write_result = write_frame(&mut stream, &*req).await;
+    req.zeroize();
+    write_result?;
     let resp: ControlResponse = read_frame(&mut stream).await?;
     Ok(resp)
+}
+
+#[cfg(test)]
+mod secret_lifetime_tests {
+    use super::*;
+
+    #[test]
+    fn control_request_zeroizes_sensitive_material() {
+        let mut password_req = ControlRequest::DirectedRetrieve {
+            envelope_id: "id".into(),
+            password: "super-secret".into(),
+        };
+        password_req.zeroize();
+        match password_req {
+            ControlRequest::DirectedRetrieve { password, .. } => assert!(password.is_empty()),
+            _ => unreachable!(),
+        }
+
+        let mut challenge_req = ControlRequest::DirectedConfirm {
+            envelope_id: "id".into(),
+            challenge_code: "1234-5678".into(),
+        };
+        challenge_req.zeroize();
+        match challenge_req {
+            ControlRequest::DirectedConfirm { challenge_code, .. } => {
+                assert!(challenge_code.is_empty())
+            }
+            _ => unreachable!(),
+        }
+
+        let mut publish_req = ControlRequest::Publish {
+            data: vec![1, 2, 3, 4],
+            data_shards: 2,
+            total_shards: 3,
+        };
+        publish_req.zeroize();
+        match publish_req {
+            ControlRequest::Publish { data, .. } => assert!(data.is_empty()),
+            _ => unreachable!(),
+        }
+
+        let mut response = ControlResponse::DirectedRetrieved {
+            data: vec![9, 8, 7],
+            filename: None,
+        };
+        response.zeroize_sensitive_material();
+        match response {
+            ControlResponse::DirectedRetrieved { data, .. } => assert!(data.is_empty()),
+            _ => unreachable!(),
+        }
+    }
 }
