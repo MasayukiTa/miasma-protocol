@@ -1823,7 +1823,8 @@ async fn replication_engine(
                                     // Generate challenge code and normalize security-sensitive
                                     // state locally instead of trusting sender-supplied counters.
                                     let (code, hash) = directed::generate_challenge();
-                                    inbox.save_challenge_code(&id_hex, &code).unwrap_or_else(|e| {
+                                    let code = Zeroizing::new(code);
+                                    inbox.save_challenge_code(&id_hex, code.as_str()).unwrap_or_else(|e| {
                                         warn!(id = %id_hex, "failed to save challenge code: {e}");
                                     });
                                     if let Ok(mut env) = inbox.load_incoming(&id_hex) {
