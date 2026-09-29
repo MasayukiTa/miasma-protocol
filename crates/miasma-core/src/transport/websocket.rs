@@ -22,7 +22,7 @@
 /// requires PEM cert/key via `bind_tls()`. The client uses webpki-roots
 /// (Mozilla CA bundle) by default, or a custom CA if `custom_ca_pem` is set.
 /// SNI can be overridden via `sni_override` for DPI resistance.
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
 use futures::SinkExt;
 use tokio::net::TcpListener;
@@ -66,7 +66,7 @@ pub enum ProxyKind {
 // ─── Configuration ────────────────────────────────────────────────────────────
 
 /// Configuration for the WebSocket transport.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct WebSocketConfig {
     /// TLS SNI / Host header value.  Defaults to the target peer's domain/IP.
     pub sni_override: Option<String>,
@@ -117,6 +117,34 @@ pub struct WebSocketConfig {
     /// connectivity testing through MITM proxies (e.g. corporate TLS
     /// inspection). Never set this in production.
     pub accept_invalid_certs: bool,
+}
+
+impl fmt::Debug for WebSocketConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WebSocketConfig")
+            .field("sni_override", &self.sni_override)
+            .field("ws_path", &self.ws_path)
+            .field("port", &self.port)
+            .field("tls_enabled", &self.tls_enabled)
+            .field(
+                "tls_cert_pem_len",
+                &self.tls_cert_pem.as_ref().map(Vec::len),
+            )
+            .field("tls_key_pem_configured", &self.tls_key_pem.is_some())
+            .field(
+                "custom_ca_pem_len",
+                &self.custom_ca_pem.as_ref().map(Vec::len),
+            )
+            .field("connect_timeout_ms", &self.connect_timeout_ms)
+            .field("read_timeout_ms", &self.read_timeout_ms)
+            .field("write_timeout_ms", &self.write_timeout_ms)
+            .field("idle_timeout_ms", &self.idle_timeout_ms)
+            .field("max_concurrent", &self.max_concurrent)
+            .field("max_response_bytes", &self.max_response_bytes)
+            .field("proxy", &self.proxy)
+            .field("accept_invalid_certs", &self.accept_invalid_certs)
+            .finish()
+    }
 }
 
 impl Default for WebSocketConfig {
@@ -880,6 +908,18 @@ impl PluggableTransport for WebSocketTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn websocket_config_debug_redacts_tls_key() {
+        let cfg = WebSocketConfig {
+            tls_key_pem: Some(Zeroizing::new(b"debug-tls-key-value".to_vec())),
+            ..Default::default()
+        };
+        let key_debug = format!("{:?}", cfg.tls_key_pem.as_ref().unwrap());
+        let rendered = format!("{cfg:?}");
+        assert!(!rendered.contains(&key_debug));
+        assert!(rendered.contains("tls_key_pem_configured: true"));
+    }
     use crate::pipeline::{dissolve, DissolutionParams};
 
     #[test]
