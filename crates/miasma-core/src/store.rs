@@ -659,6 +659,24 @@ impl LocalShareStore {
             .sum()
     }
 
+    /// Configured byte budget for locally-owned shares.
+    ///
+    /// Large streaming publishes use this for a preflight check so a file
+    /// cannot silently evict its own earlier segments while it is still being
+    /// published.
+    pub fn owned_quota_bytes(&self) -> u64 {
+        self.quota_bytes
+    }
+
+    /// Current byte usage by locally-owned shares only.
+    pub fn used_owned_bytes(&self) -> u64 {
+        load_index(&self.data_dir)
+            .values()
+            .filter(|entry| entry.origin == ShareOrigin::Owned)
+            .map(|entry| entry.size_bytes)
+            .sum()
+    }
+
     // ── private helpers ────────────────────────────────────────────────────
 
     fn share_path(&self, address: &str) -> PathBuf {
