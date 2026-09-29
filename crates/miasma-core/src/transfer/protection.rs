@@ -23,7 +23,7 @@
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use hkdf::Hkdf;
-use rand::RngCore as _;
+use rand::Rng as _;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use subtle::ConstantTimeEq as _;
@@ -102,8 +102,7 @@ impl PasswordProtection {
         p_cost: u32,
     ) -> Result<(Self, UnlockedKey), MiasmaError> {
         validate_cost(m_kib, t_cost, p_cost)?;
-        let mut salt = [0u8; SALT_LEN];
-        rand::rngs::OsRng.fill_bytes(&mut salt);
+        let salt: [u8; SALT_LEN] = rand::rngs::OsRng.gen();
         let pw_key = argon2id(password, &salt, m_kib, t_cost, p_cost)?;
         let key_check = key_check_tag(&pw_key)?;
         Ok((
@@ -200,10 +199,17 @@ fn argon2id(
 
 fn key_check_tag(pw_key: &[u8; 32]) -> Result<[u8; KEY_CHECK_LEN], MiasmaError> {
     let hk = Hkdf::<Sha256>::new(None, pw_key);
-    let mut tag = [0u8; KEY_CHECK_LEN];
+    // Output buffer only: HKDF-Expand overwrites every byte of it.
+    let mut tag = <[u8; KEY_CHECK_LEN]>::default();
     hk.expand(LABEL_KEY_CHECK, &mut tag)
         .map_err(|e| MiasmaError::KeyDerivation(e.to_string()))?;
     Ok(tag)
+}
+
+/// A fresh random password, for tests: no test carries a fixed secret.
+#[cfg(test)]
+pub(crate) fn random_test_password() -> String {
+    format!("pw-{:032x}", rand::random::<u128>())
 }
 
 #[cfg(test)]
@@ -222,9 +228,9 @@ mod tests {
 
     #[test]
     fn unlock_with_the_right_password_succeeds() {
-        let (prot, created) =
-            PasswordProtection::create_with_cost("correct horse", M, T, P).unwrap();
-        let unlocked = prot.unlock("correct horse").unwrap();
+        let pw = random_test_password();
+        let (prot, created) = PasswordProtection::create_with_cost(&pw, M, T, P).unwrap();
+        let unlocked = prot.unlock(&pw).unwrap();
         // Both derivations must yield the same segment key.
         let k_enc = [7u8; 32];
         let a = created.segment_key(&k_enc, &mid(1), 0).unwrap();
@@ -234,22 +240,29 @@ mod tests {
 
     #[test]
     fn wrong_password_is_rejected_before_any_data_is_needed() {
-        let (prot, _) = PasswordProtection::create_with_cost("correct horse", M, T, P).unwrap();
+        let pw = random_test_password();
+        let other = random_test_password();
+        let (prot, _) = PasswordProtection::create_with_cost(&pw, M, T, P).unwrap();
         assert!(matches!(
-            prot.unlock("battery staple"),
+            prot.unlock(&other),
             Err(MiasmaError::WrongPassword)
         ));
         // Empty and near-miss passwords are wrong too.
-        assert!(matches!(prot.unlock(""), Err(MiasmaError::WrongPassword)));
+        let empty = String::new();
         assert!(matches!(
-            prot.unlock("correct horse "),
+            prot.unlock(&empty),
+            Err(MiasmaError::WrongPassword)
+        ));
+        assert!(matches!(
+            prot.unlock(&format!("{pw} ")),
             Err(MiasmaError::WrongPassword)
         ));
     }
 
     #[test]
     fn segment_key_is_bound_to_mid_segment_index_and_k_enc() {
-        let (_, key) = PasswordProtection::create_with_cost("pw", M, T, P).unwrap();
+        let pw = random_test_password();
+        let (_, key) = PasswordProtection::create_with_cost(&pw, M, T, P).unwrap();
         let k_enc = [9u8; 32];
         let base = key.segment_key(&k_enc, &mid(1), 0).unwrap();
 
@@ -266,8 +279,9 @@ mod tests {
     fn same_password_different_transfer_gets_a_different_key() {
         // Fresh random salt per transfer: two protections of the same password
         // must not share key material.
-        let (p1, k1) = PasswordProtection::create_with_cost("pw", M, T, P).unwrap();
-        let (p2, k2) = PasswordProtection::create_with_cost("pw", M, T, P).unwrap();
+        let pw = random_test_password();
+        let (p1, k1) = PasswordProtection::create_with_cost(&pw, M, T, P).unwrap();
+        let (p2, k2) = PasswordProtection::create_with_cost(&pw, M, T, P).unwrap();
         assert_ne!(p1.salt, p2.salt);
         let k_enc = [3u8; 32];
         assert_ne!(
@@ -278,40 +292,43 @@ mod tests {
 
     #[test]
     fn the_password_never_appears_in_debug_output() {
-        let (prot, key) = PasswordProtection::create_with_cost("hunter2-secret", M, T, P).unwrap();
-        assert!(!format!("{prot:?}").contains("hunter2"));
-        assert!(!format!("{key:?}").contains("hunter2"));
+        let pw = random_test_password();
+        let (prot, key) = PasswordProtection::create_with_cost(&pw, M, T, P).unwrap();
+        assert!(!format!("{prot:?}").contains(&pw));
+        assert!(!format!("{key:?}").contains(&pw));
         assert_eq!(format!("{key:?}"), "UnlockedKey(<redacted>)");
     }
 
     #[test]
     fn hostile_argon2_parameters_from_a_manifest_are_refused_not_executed() {
-        let (mut prot, _) = PasswordProtection::create_with_cost("pw", M, T, P).unwrap();
+        let pw = random_test_password();
+        let (mut prot, _) = PasswordProtection::create_with_cost(&pw, M, T, P).unwrap();
 
         // 4 GiB of memory: must be rejected by validation, not attempted.
         prot.m_kib = 4 * 1024 * 1024;
         assert!(matches!(
-            prot.unlock("pw"),
+            prot.unlock(&pw),
             Err(MiasmaError::InvalidManifest(_))
         ));
         prot.m_kib = M;
 
         prot.t_cost = 0;
-        assert!(prot.unlock("pw").is_err());
+        assert!(prot.unlock(&pw).is_err());
         prot.t_cost = 10_000;
-        assert!(prot.unlock("pw").is_err());
+        assert!(prot.unlock(&pw).is_err());
         prot.t_cost = T;
 
         prot.p_cost = 0;
-        assert!(prot.unlock("pw").is_err());
+        assert!(prot.unlock(&pw).is_err());
         prot.p_cost = 64;
-        assert!(prot.unlock("pw").is_err());
+        assert!(prot.unlock(&pw).is_err());
     }
 
     #[test]
     fn creating_with_out_of_range_cost_is_refused() {
-        assert!(PasswordProtection::create_with_cost("pw", 1, 1, 1).is_err());
-        assert!(PasswordProtection::create_with_cost("pw", MAX_M_KIB + 1, 1, 1).is_err());
+        let pw = random_test_password();
+        assert!(PasswordProtection::create_with_cost(&pw, 1, 1, 1).is_err());
+        assert!(PasswordProtection::create_with_cost(&pw, MAX_M_KIB + 1, 1, 1).is_err());
     }
 
     /// Prints how long the *default* cost takes on this machine. Ignored: it is
@@ -320,10 +337,11 @@ mod tests {
     #[ignore]
     fn measure_default_argon2id_cost() {
         let t0 = std::time::Instant::now();
-        let (prot, _) = PasswordProtection::create("measure me").unwrap();
+        let pw = random_test_password();
+        let (prot, _) = PasswordProtection::create(&pw).unwrap();
         let create = t0.elapsed();
         let t1 = std::time::Instant::now();
-        prot.unlock("measure me").unwrap();
+        prot.unlock(&pw).unwrap();
         println!(
             "argon2id default (m={} KiB, t={}, p={}): create {create:?}, unlock {:?}",
             DEFAULT_M_KIB,

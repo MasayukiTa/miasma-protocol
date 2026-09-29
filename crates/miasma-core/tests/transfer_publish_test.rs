@@ -36,6 +36,11 @@ fn params() -> DissolutionParams {
     }
 }
 
+/// A fresh random password: no test carries a fixed secret.
+fn random_password() -> String {
+    format!("pw-{:032x}", rand::random::<u128>())
+}
+
 /// Deterministic, non-repeating-looking content so a segment mix-up is visible.
 fn content(len: usize) -> Vec<u8> {
     let mut x: u32 = 0x9E37_79B9;
@@ -146,7 +151,8 @@ async fn a_password_protected_publish_needs_the_password_and_the_manifest_carrie
         let (a, store_a, b) = connected_pair(0xA8, 0xB8).await;
         let data = content(TWO_SEGMENT_LEN);
         let path = write_temp(&data);
-        let password = "correct-horse-battery-staple";
+        let password = random_password();
+        let password = password.as_str();
 
         let report = a
             .dissolve_and_publish_file_protected(
@@ -178,7 +184,7 @@ async fn a_password_protected_publish_needs_the_password_and_the_manifest_carrie
 
         // Wrong password is caught from the manifest alone, before any data.
         assert!(matches!(
-            prot.unlock("not-the-password"),
+            prot.unlock(&random_password()),
             Err(MiasmaError::WrongPassword)
         ));
 
@@ -226,8 +232,9 @@ async fn an_empty_password_is_refused_rather_than_protecting_nothing() {
     timeout(Duration::from_secs(60), async {
         let (a, _store, _b) = connected_pair(0xA9, 0xB9).await;
         let path = write_temp(&content(1024));
+        let empty = String::new();
         let err = a
-            .dissolve_and_publish_file_protected(&path, params(), PublishOptions::default(), "")
+            .dissolve_and_publish_file_protected(&path, params(), PublishOptions::default(), &empty)
             .await
             .unwrap_err();
         assert!(
@@ -267,7 +274,8 @@ async fn a_protected_transfer_is_received_over_the_network_and_resumes_after_a_c
         let (a, _store_a, b) = connected_pair(0xC1, 0xD1).await;
         let data = content(TWO_SEGMENT_LEN);
         let path = write_temp(&data);
-        let password = "over-the-wire";
+        let password = random_password();
+        let password = password.as_str();
 
         let report = a
             .dissolve_and_publish_file_protected(

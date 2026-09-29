@@ -66,10 +66,11 @@ mod tests {
     fn a_protected_segment_round_trips_with_the_right_password() {
         let p = params(4, 6);
         let mid = ContentId::compute(PLAIN, &p.to_param_bytes());
-        let (prot, key) = PasswordProtection::create_with_cost("pw", 64, 1, 1).unwrap();
+        let pw = protection::random_test_password();
+        let (prot, key) = PasswordProtection::create_with_cost(&pw, 64, 1, 1).unwrap();
         let (m, shares) = dissolve_segment_with(PLAIN, &mid, 0, 0, p, Some(&key)).unwrap();
 
-        let unlocked = prot.unlock("pw").unwrap();
+        let unlocked = prot.unlock(&pw).unwrap();
         let out = retrieve_segment_with(&mid, &shares, &m, p, Some(&unlocked)).unwrap();
         assert_eq!(out, PLAIN);
     }
@@ -78,7 +79,8 @@ mod tests {
     fn a_protected_segment_is_unreadable_with_the_mid_and_every_shard_but_no_password() {
         let p = params(4, 6);
         let mid = ContentId::compute(PLAIN, &p.to_param_bytes());
-        let (_, key) = PasswordProtection::create_with_cost("pw", 64, 1, 1).unwrap();
+        let pw = protection::random_test_password();
+        let (_, key) = PasswordProtection::create_with_cost(&pw, 64, 1, 1).unwrap();
         let (m, shares) = dissolve_segment_with(PLAIN, &mid, 0, 0, p, Some(&key)).unwrap();
 
         // The plain retrieval path: MID + all shards, no password.
@@ -90,8 +92,10 @@ mod tests {
     fn a_key_from_a_different_password_does_not_decrypt() {
         let p = params(4, 6);
         let mid = ContentId::compute(PLAIN, &p.to_param_bytes());
-        let (_, key) = PasswordProtection::create_with_cost("right", 64, 1, 1).unwrap();
-        let (_, wrong) = PasswordProtection::create_with_cost("wrong", 64, 1, 1).unwrap();
+        let right_pw = protection::random_test_password();
+        let wrong_pw = protection::random_test_password();
+        let (_, key) = PasswordProtection::create_with_cost(&right_pw, 64, 1, 1).unwrap();
+        let (_, wrong) = PasswordProtection::create_with_cost(&wrong_pw, 64, 1, 1).unwrap();
         let (m, shares) = dissolve_segment_with(PLAIN, &mid, 0, 0, p, Some(&key)).unwrap();
         assert!(retrieve_segment_with(&mid, &shares, &m, p, Some(&wrong)).is_err());
     }
@@ -102,7 +106,8 @@ mod tests {
         // index, so the derived AES key differs and decryption fails.
         let p = params(4, 6);
         let mid = ContentId::compute(PLAIN, &p.to_param_bytes());
-        let (_, key) = PasswordProtection::create_with_cost("pw", 64, 1, 1).unwrap();
+        let pw = protection::random_test_password();
+        let (_, key) = PasswordProtection::create_with_cost(&pw, 64, 1, 1).unwrap();
         let (_, mut shares) = dissolve_segment_with(PLAIN, &mid, 0, 0, p, Some(&key)).unwrap();
         for s in &mut shares {
             s.segment_index = 1;
@@ -123,7 +128,8 @@ mod tests {
             PLAIN
         );
         // ...and giving it a password that was never used breaks it, as it should.
-        let (_, key) = PasswordProtection::create_with_cost("pw", 64, 1, 1).unwrap();
+        let pw = protection::random_test_password();
+        let (_, key) = PasswordProtection::create_with_cost(&pw, 64, 1, 1).unwrap();
         assert!(retrieve_segment_with(&mid, &shares, &m, p, Some(&key)).is_err());
     }
 
@@ -133,11 +139,12 @@ mod tests {
         for (k, n) in [(10, 10), (10, 11), (10, 12), (10, 15), (10, 20)] {
             let p = params(k, n);
             let mid = ContentId::compute(PLAIN, &p.to_param_bytes());
-            let (prot, key) = PasswordProtection::create_with_cost("pw", 64, 1, 1).unwrap();
+            let pw = protection::random_test_password();
+            let (prot, key) = PasswordProtection::create_with_cost(&pw, 64, 1, 1).unwrap();
             let (m, shares) = dissolve_segment_with(PLAIN, &mid, 0, 0, p, Some(&key)).unwrap();
             assert_eq!(shares.len(), n, "k={k} n={n}");
 
-            let unlocked = prot.unlock("pw").unwrap();
+            let unlocked = prot.unlock(&pw).unwrap();
             let out = retrieve_segment_with(&mid, &shares, &m, p, Some(&unlocked)).unwrap();
             assert_eq!(out, PLAIN, "k={k} n={n}");
         }
