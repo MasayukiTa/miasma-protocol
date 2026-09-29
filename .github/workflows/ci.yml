@@ -112,6 +112,27 @@ jobs:
       - name: Build Apple-relevant crates
         run: cargo build -p miasma-core -p miasma-ffi -p miasma-wasm --locked
 
+  macos-cli-transfer:
+    name: CLI + desktop build and transfer e2e (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build CLI and desktop
+        run: cargo build -p miasma-cli -p miasma-desktop --locked
+
+      # Real binary, two loopback nodes, a daemon killed mid-transfer on each
+      # side. The same script the macOS sender runs before a cross-machine test.
+      - name: Transfer end-to-end (protected, resumable)
+        run: scripts/transfer-e2e.sh --cli target/debug/miasma
+
   cross-compile-arm64:
     name: Cross-compile ARM64
     runs-on: ubuntu-latest
