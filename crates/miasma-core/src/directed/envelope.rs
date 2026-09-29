@@ -26,6 +26,7 @@
 //!   the wrong recipient.
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use zeroize::Zeroizing;
 
 use crate::MiasmaError;
@@ -112,7 +113,7 @@ impl RetentionPeriod {
 
 /// The envelope payload — encrypted to the recipient.
 /// Contains everything needed to retrieve and decrypt the content.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct EnvelopePayload {
     /// MID of the protected (double-encrypted) content on the network.
     pub mid: String,
@@ -128,12 +129,25 @@ pub struct EnvelopePayload {
     pub file_size: u64,
 }
 
+impl fmt::Debug for EnvelopePayload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EnvelopePayload")
+            .field("mid", &"<redacted>")
+            .field("data_shards", &self.data_shards)
+            .field("total_shards", &self.total_shards)
+            .field("content_nonce", &"<redacted>")
+            .field("filename_configured", &self.filename.is_some())
+            .field("file_size", &self.file_size)
+            .finish()
+    }
+}
+
 /// A directed share envelope.
 ///
 /// This is the full envelope stored on both sender and recipient sides.
 /// The `encrypted_payload` field is encrypted to the recipient using ECDH;
 /// only the recipient with the correct password can derive the content key.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DirectedEnvelope {
     /// Unique envelope identifier (random 32 bytes).
     pub envelope_id: [u8; 32],
@@ -170,6 +184,35 @@ pub struct DirectedEnvelope {
     pub challenge_expires_at: u64,
     /// Retention period in seconds (for display).
     pub retention_secs: u64,
+}
+
+impl fmt::Debug for DirectedEnvelope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DirectedEnvelope")
+            .field("envelope_id", &hex::encode(self.envelope_id))
+            .field("version", &self.version)
+            .field("sender_pubkey", &"<redacted>")
+            .field("recipient_pubkey", &"<redacted>")
+            .field("ephemeral_pubkey", &"<redacted>")
+            .field("encrypted_payload_len", &self.encrypted_payload.len())
+            .field("payload_nonce", &"<redacted>")
+            .field("password_salt", &"<redacted>")
+            .field("expires_at", &self.expires_at)
+            .field("created_at", &self.created_at)
+            .field("state", &self.state)
+            .field("challenge_hash_configured", &self.challenge_hash.is_some())
+            .field(
+                "password_attempts_remaining",
+                &self.password_attempts_remaining,
+            )
+            .field(
+                "challenge_attempts_remaining",
+                &self.challenge_attempts_remaining,
+            )
+            .field("challenge_expires_at", &self.challenge_expires_at)
+            .field("retention_secs", &self.retention_secs)
+            .finish()
+    }
 }
 
 impl DirectedEnvelope {
@@ -527,6 +570,59 @@ fn xchacha20_decrypt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn envelope_payload_debug_redacts_mid_filename_and_nonce() {
+        let payload = EnvelopePayload {
+            mid: "miasma:private-mid".into(),
+            data_shards: 3,
+            total_shards: 5,
+            content_nonce: [0xAB; 24],
+            filename: Some("private-name.txt".into()),
+            file_size: 42,
+        };
+        let rendered = format!("{payload:?}");
+        assert!(!rendered.contains("private-mid"));
+        assert!(!rendered.contains("private-name.txt"));
+        assert!(!rendered.contains("171, 171"));
+        assert!(rendered.contains("filename_configured: true"));
+    }
+
+    #[test]
+    fn envelope_debug_redacts_challenge_hash_and_crypto_material() {
+        let env = DirectedEnvelope {
+            envelope_id: [1; 32],
+            version: 1,
+            sender_pubkey: [2; 32],
+            recipient_pubkey: [3; 32],
+            ephemeral_pubkey: [4; 32],
+            encrypted_payload: vec![5, 6, 7, 8],
+            payload_nonce: [9; 24],
+            password_salt: [10; 32],
+            expires_at: 20,
+            created_at: 10,
+            state: EnvelopeState::ChallengeIssued,
+            challenge_hash: Some([11; 32]),
+            password_attempts_remaining: 2,
+            challenge_attempts_remaining: 2,
+            challenge_expires_at: 15,
+            retention_secs: 10,
+        };
+        let rendered = format!("{env:?}");
+        for raw in [
+            "[2, 2, 2",
+            "[3, 3, 3",
+            "[4, 4, 4",
+            "[5, 6, 7, 8]",
+            "[9, 9, 9",
+            "[10, 10, 10",
+            "[11, 11, 11",
+        ] {
+            assert!(!rendered.contains(raw));
+        }
+        assert!(rendered.contains("encrypted_payload_len: 4"));
+        assert!(rendered.contains("challenge_hash_configured: true"));
+    }
 
     fn test_keys() -> ([u8; 32], [u8; 32], [u8; 32], [u8; 32]) {
         let sender_secret_raw =
