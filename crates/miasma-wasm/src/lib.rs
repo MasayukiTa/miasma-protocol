@@ -5,7 +5,7 @@
 
 #![allow(clippy::type_complexity)]
 
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt};
 
 use aes_gcm::{
     aead::{Aead, AeadCore, KeyInit, OsRng},
@@ -93,7 +93,7 @@ impl ContentId {
 
 // ── MiasmaShare ────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct MiasmaShare {
     pub version: u8,
     pub mid_prefix: [u8; MID_PREFIX_LEN],
@@ -105,6 +105,23 @@ pub struct MiasmaShare {
     pub nonce: [u8; 12],
     pub original_len: u32,
     pub timestamp: u64,
+}
+
+impl fmt::Debug for MiasmaShare {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MiasmaShare")
+            .field("version", &self.version)
+            .field("mid_prefix", &self.mid_prefix)
+            .field("segment_index", &self.segment_index)
+            .field("slot_index", &self.slot_index)
+            .field("shard_data_len", &self.shard_data.len())
+            .field("key_share_len", &self.key_share.len())
+            .field("shard_hash", &self.shard_hash)
+            .field("nonce", &self.nonce)
+            .field("original_len", &self.original_len)
+            .field("timestamp", &self.timestamp)
+            .finish()
+    }
 }
 
 impl MiasmaShare {
@@ -818,6 +835,26 @@ pub fn protocol_version() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn share_debug_redacts_key_fragment() {
+        let mid = ContentId::compute(b"debug-content", b"params");
+        let share = MiasmaShare::new(
+            &mid,
+            0,
+            1,
+            vec![1, 2, 3, 4],
+            vec![101, 102, 103, 104, 105],
+            [7; 12],
+            4,
+            1,
+        );
+        let key_debug = format!("{:?}", share.key_share);
+        let rendered = format!("{share:?}");
+        assert!(!rendered.contains(&key_debug));
+        assert!(rendered.contains("key_share_len: 5"));
+        assert!(rendered.contains("shard_data_len: 4"));
+    }
 
     const TEST_CONTENT: &[u8] = b"Miasma dissolution pipeline test content. \
         This is a realistic-length payload that exercises all pipeline stages. \
