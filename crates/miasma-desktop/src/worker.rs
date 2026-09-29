@@ -200,9 +200,7 @@ impl fmt::Debug for WorkerResult {
                 .field("data_len", &data.len())
                 .finish(),
             Self::RetrievedToFile {
-                mid,
-                bytes_written,
-                ..
+                mid, bytes_written, ..
             } => f
                 .debug_struct("RetrievedToFile")
                 .field("mid", mid)
@@ -410,9 +408,7 @@ fn worker_thread(
             WorkerCmd::DissolveText(text) => {
                 rt.block_on(publish_bytes(text.as_bytes(), &data_dir, params))
             }
-            WorkerCmd::DissolveFile(path) => {
-                rt.block_on(publish_file(&path, &data_dir, params))
-            }
+            WorkerCmd::DissolveFile(path) => rt.block_on(publish_file(&path, &data_dir, params)),
             WorkerCmd::Retrieve(mid_str) => {
                 rt.block_on(retrieve_mid_to_file(&mid_str, &data_dir, params))
             }
