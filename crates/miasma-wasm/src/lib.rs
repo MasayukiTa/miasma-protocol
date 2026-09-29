@@ -839,13 +839,15 @@ mod tests {
     #[test]
     fn share_debug_redacts_key_fragment() {
         let mid = ContentId::compute(b"debug-content", b"params");
+        let generated_nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let nonce: [u8; NONCE_LEN] = generated_nonce[..].try_into().unwrap();
         let share = MiasmaShare::new(
             &mid,
             0,
             1,
             vec![1, 2, 3, 4],
             vec![101, 102, 103, 104, 105],
-            [7; 12],
+            nonce,
             4,
             1,
         );
