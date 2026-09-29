@@ -14,6 +14,9 @@ use crate::variant::ProductMode;
 use crate::worker::{DaemonState, WorkerCmd, WorkerHandle, WorkerResult};
 use crate::LaunchIntent;
 
+#[cfg(feature = "ui-tour")]
+mod tour;
+
 // ─── Style and colours ──────────────────────────────────────────────────────
 //
 // Fonts are discovered per OS in `fonts.rs` (Meiryo first, read from the system, never bundled).
@@ -80,6 +83,8 @@ pub struct MiasmaApp {
     theme_mode: ThemeMode,
     /// Which palette is currently applied to egui (None until the first frame is styled).
     applied_dark: Option<bool>,
+    #[cfg(feature = "ui-tour")]
+    tour: Option<tour::Tour>,
     data_dir: std::path::PathBuf,
 
     // Connection state
@@ -210,6 +215,8 @@ impl MiasmaApp {
             locale,
             theme_mode,
             applied_dark: Some(dark),
+            #[cfg(feature = "ui-tour")]
+            tour: tour::Tour::from_env(),
             data_dir: data_dir.clone(),
             daemon_state: DaemonState::Stopped,
             last_error: None,
@@ -2725,6 +2732,13 @@ impl Drop for MiasmaApp {
 
 impl eframe::App for MiasmaApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        #[cfg(feature = "ui-tour")]
+        if let Some(mut t) = self.tour.take() {
+            if !t.drive(self, ctx) {
+                self.tour = Some(t);
+            }
+        }
+
         // Theme: resolve the choice against the OS theme every frame (cheap), and re-apply when
         // it changed. eframe itself resets the visuals when the OS theme flips, so also
         // re-apply if the panel colour is no longer ours.
