@@ -10,18 +10,21 @@
 //! * [`progress`] — live status of a transfer.
 //! * [`journal`] — the small file that lets a stopped transfer resume.
 
+pub mod bench;
 pub mod jobs;
 pub mod journal;
 pub mod manifest;
 pub mod network;
 pub mod progress;
 pub mod protection;
+pub mod publish;
+pub mod publish_journal;
 pub mod receive;
 
 pub use manifest::{
     decode_record_value, encode_record_value, PieceId, SegmentEntry, TransferManifest,
 };
-pub use progress::{Phase, TransferProgress, TransferState, TransferStatus};
+pub use progress::{Phase, TransferKind, TransferProgress, TransferState, TransferStatus};
 pub use protection::{PasswordProtection, Protection, UnlockedKey};
 pub use receive::{run_receive, PieceSource, ReceiveOutcome, ReceiveSpec, RetryConfig};
 

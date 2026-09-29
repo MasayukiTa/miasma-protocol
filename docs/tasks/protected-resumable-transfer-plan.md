@@ -1,7 +1,7 @@
 # Protected, resumable large-file transfer — plan and running log
 
 Branch: `work/resumable-protected-transfer` (based on `work/large-file-release-gate`).
-Started: 2026-09-29. Status: **Phases 1-3 done (primitives, publish side, receive engine + CLI). Phase 4 (sender progress/resume), 5 (redundancy experiment), 6 (runbook) not started.** See §6 for what was actually run.
+Started: 2026-09-29. Status: **Phases 1-5 done (primitives, publish side, receive engine, sender progress/resume, redundancy harness). Phase 6 (macOS runbook, readme) in progress.** See §6 for what was actually run.
 
 ## 0. 要約 (Japanese summary for the owner)
 
@@ -213,8 +213,10 @@ and the next candidate used; kill the receiver mid-transfer → resume completes
 file and does **not** re-fetch completed segments (asserted via a fetch counter); MID mismatch ⇒
 `Failed` and no output file; progress fields monotonic and reach 100 %.
 
-**Phase 4 — sender progress and resume.** *Accept:* kill the publisher mid-publish → restart
-skips completed segments and produces a record whose manifest matches the file.
+**Phase 4 — sender progress and resume.** *Accept:* stop the publisher mid-publish → restart
+skips completed segments and produces a record whose manifest matches the file. *(Met; see §6.
+Stopped by cancel, not by killing the process: a hard kill is covered only by the journal's
+half-written-line handling in unit tests, not by an end-to-end test.)*
 
 **Phase 5 — redundancy experiment.** `#[ignore]` harness printing, for each preset, on a
 fixed-size buffer: stored bytes, dissolve MiB/s, recover MiB/s, and loss tolerance verified by
@@ -276,6 +278,60 @@ the owner's Mac + external SSD, not here.
 - **Ran:** the full `miasma-core` suite (lib, adversarial, integration, and the new files) and
   the CLI tests, all green.
 
+### Phase 4 — sender progress and resume (2026-09-29)
+
+- `transfer::publish` is the send engine (the old streaming publish moved into it; the
+  blocking `dissolve_and_publish_file*` now delegate with no journal, so their behaviour is
+  unchanged). With a journal directory it reports progress, honours cancel, and resumes.
+  `transfer::publish_journal` is an **append-only** log — one line per finished segment, never a
+  rewrite — that tolerates a half-written last line. IPC `TransferStartPublish`; `network-publish`
+  now starts a background transfer, draws the same progress line (hashing, dissolve, store+push),
+  and gains `--restart` / `--no-wait`.
+- What a resume trusts: nothing unchecked. The source must have the same length and modification
+  time; every finished segment is re-read and compared with its recorded hash; every one of its
+  shares must still be in the local store; a wrong or missing password fails before any work.
+  The first segment that fails a check, and everything after it, is done again. Locations of the
+  publisher's own copies are rebuilt from the daemon's *current* addresses (they can change on
+  restart); only pieces another peer accepted are journalled.
+- **Ran, two real nodes:** cancel after segment 0 (`Cancelled{next_segment: 1}`); a wrong password
+  on resume is refused; the resumed run reports `resumed_from_segment == 1`, does not redo segment 0
+  (its shares are exactly the ones already stored, 6 in all afterwards), removes its journal, and
+  the second node then receives the file byte-for-byte. A changed source file, and a deleted local
+  share, each make the resume start over (`resumed_from_segment == 0`).
+- **A correction to my own earlier tests.** The first version of these cancel tests stopped a
+  transfer by polling from another task, which can lose a race with a fast segment; two of them
+  passed while checking nothing (one did not assert the cancel outcome at all, so "the changed file
+  is not resumed" held only because there was nothing to resume). The receive-side cancel/resume
+  test committed in `e28a26b` had the same race and passed by luck. All of them now use
+  `TransferProgress::stop_after_segments`, which cancels deterministically, and every one asserts
+  its cancel outcome.
+- **Wasted upload stopped.** A peer that answers "quota exceeded" is no longer offered the rest of
+  the shares (`PushState`, 10-minute memory). Measured on a 6-share publish with a connected peer
+  that has no hosted quota: **1 push attempted, 1 refused** (before: every share was pushed and
+  refused after the whole payload had been sent).
+
+### Phase 5 — redundancy experiment (2026-09-29)
+
+`miasma redundancy-bench [--size-mib N] [--preset k/n ...] [--store-dir DIR]` runs the real dissolve
+and recover code in memory for each setting and prints a table. **Two columns are exact on any
+machine and build, and were measured here** (64 MiB per setting, 6.4 MiB shards at `k=10`):
+
+| k/n | stored per byte, nominal / measured | lost pieces tolerated | `n-k` lost recovers, `n-k+1` fails cleanly |
+|---|---|---|---|
+| 10/10 | 1.00x / 1.000x | 0 | verified |
+| 10/11 | 1.10x / 1.100x | 1 | verified |
+| 10/12 | 1.20x / 1.200x | 2 | verified |
+| 10/15 | 1.50x / 1.500x | 5 | verified |
+| 10/20 | 2.00x / 2.000x | 10 | verified |
+
+Per-share overhead (headers, hashes, key share) does not show at this shard size. **Throughput was
+not measured meaningfully:** this machine's build is unoptimized (about 3 MiB/s, of which AES-GCM
+alone took 17-24 s per 64 MiB), so those figures say nothing about a release build. Reed-Solomon
+time does grow with the number of parity pieces (55 ms at 10/10 which is a plain split, against
+4.3 s at 10/20, same unoptimized build), which is the only trend worth carrying over. Run it in
+release on the sending machine — with `--store-dir` on the external SSD to include local disk and
+at-rest encryption — before choosing a default.
+
 ### Finding: one fetch cost seconds, and would cost hours at 100 GiB (2026-09-29)
 
 Measured with `measure_single_piece_fetch_latency_on_loopback` (two nodes, loopback, **debug
@@ -296,7 +352,13 @@ bincode in a debug build (~1.5 MB/s); a release build was **not** measured. Side
 
 Still open in the same file, **not** changed (the owner wants to measure speed on a real run first):
 `put` re-parses and rewrites the whole JSON index per share, so publishing is quadratic in the
-share count (estimate ~0.24 TB of JSON work for 100 GiB; not measured).
+share count. **Measured** (`measure_put_cost_growth`, debug build, 64-byte shares so the index
+dominates): average cost of one `put` was 26 ms with 250 shares stored, 46 ms at 1,000, 74 ms at
+2,000 and 123 ms at 4,000, while the index file grew 0.06 -> 0.98 MB — cost per put rising in
+proportion to the store size. At 32,000 shares (a 100 GiB publish at `k=10, n=20`) the index is
+about 8 MB and a put would cost roughly 8x the 4,000-share figure in the same build. A release
+build is much faster and was **not** measured; if it still matters on a real run, the fix is an
+append-only index log (the send journal above is the same shape), not a bigger cache.
 
 ### Incident: the Windows Search index filled the disk (2026-09-29, 20:1x)
 
