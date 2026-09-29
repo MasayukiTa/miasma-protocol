@@ -6,7 +6,7 @@
 /// Supports two product modes (Technical / Easy) and three locales (EN / JA / ZH-CN).
 /// Both modes share all backend code; only UI presentation differs.
 use eframe::egui;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::locale::{self, Locale, Strings};
 use crate::variant::ProductMode;
@@ -300,24 +300,17 @@ enum ImportState {
 }
 
 /// An entry in the directed sharing inbox/outbox.
+#[derive(Clone)]
 struct InboxItem {
     envelope_id: String,
     sender: String,
     recipient: String,
     state: String,
-    challenge_code: Option<String>,
+    challenge_code: Option<std::sync::Arc<Zeroizing<String>>>,
     created_at: String,
     expires_at: String,
     filename: Option<String>,
     file_size: u64,
-}
-
-impl Drop for InboxItem {
-    fn drop(&mut self) {
-        if let Some(code) = self.challenge_code.as_mut() {
-            code.zeroize();
-        }
-    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -564,7 +557,9 @@ impl MiasmaApp {
                                 .unwrap_or_else(|| "<legacy/unbound>".to_string()),
                             recipient: item.recipient_pubkey,
                             state: item.state,
-                            challenge_code: item.challenge_code,
+                            challenge_code: item
+                                .challenge_code
+                                .map(|code| std::sync::Arc::new(Zeroizing::new(code))),
                             created_at: format_epoch(item.created_at),
                             expires_at: format_epoch(item.expires_at),
                             filename: item.filename,
@@ -580,7 +575,9 @@ impl MiasmaApp {
                             sender: item.sender_pubkey,
                             recipient: item.recipient_pubkey,
                             state: item.state,
-                            challenge_code: item.challenge_code,
+                            challenge_code: item
+                                .challenge_code
+                                .map(|code| std::sync::Arc::new(Zeroizing::new(code))),
                             created_at: format_epoch(item.created_at),
                             expires_at: format_epoch(item.expires_at),
                             filename: item.filename,
@@ -1313,9 +1310,12 @@ impl MiasmaApp {
                         // Challenge code display (recipient shows this to sender out-of-band).
                         if let Some(ref code) = item.challenge_code {
                             ui.horizontal(|ui| {
-                                ui.colored_label(GREEN, format!("{} {}", s.inbox_challenge, code));
+                                ui.colored_label(
+                                    GREEN,
+                                    format!("{} {}", s.inbox_challenge, code.as_str()),
+                                );
                                 if ui.small_button(s.copy).clicked() {
-                                    ui.output_mut(|o| o.copied_text = code.clone());
+                                    ui.output_mut(|o| o.copied_text = code.as_str().to_owned());
                                 }
                             });
                         }
