@@ -169,6 +169,10 @@ pub struct Strings {
     pub settings_mode_easy: &'static str,
     pub settings_mode_desc_technical: &'static str,
     pub settings_mode_desc_easy: &'static str,
+    pub settings_theme: &'static str,
+    pub settings_theme_system: &'static str,
+    pub settings_theme_light: &'static str,
+    pub settings_theme_dark: &'static str,
 
     // ── Import (magnet / .torrent) ──
     pub tab_import: &'static str,
@@ -429,6 +433,10 @@ static EN: Strings = Strings {
     settings_mode_easy: "Easy",
     settings_mode_desc_technical: "Full diagnostics, transport details, protocol visibility",
     settings_mode_desc_easy: "Simplified interface, less technical detail",
+    settings_theme: "Appearance",
+    settings_theme_system: "System",
+    settings_theme_light: "Light",
+    settings_theme_dark: "Dark",
 
     tab_import: "Import",
     import_heading: "Import Content",
@@ -673,6 +681,10 @@ static JA: Strings = Strings {
     settings_mode_easy: "かんたん",
     settings_mode_desc_technical: "診断情報、トランスポート詳細、プロトコル表示",
     settings_mode_desc_easy: "シンプルな表示、技術的詳細を非表示",
+    settings_theme: "外観",
+    settings_theme_system: "システム設定に合わせる",
+    settings_theme_light: "ライト",
+    settings_theme_dark: "ダーク",
 
     tab_import: "インポート",
     import_heading: "コンテンツのインポート",
@@ -917,6 +929,10 @@ static ZH_CN: Strings = Strings {
     settings_mode_easy: "简易版",
     settings_mode_desc_technical: "完整诊断信息、传输详情、协议可见",
     settings_mode_desc_easy: "简化界面，隐藏技术细节",
+    settings_theme: "外观",
+    settings_theme_system: "跟随系统",
+    settings_theme_light: "浅色",
+    settings_theme_dark: "深色",
 
     tab_import: "导入",
     import_heading: "导入内容",
@@ -1080,6 +1096,14 @@ mod tests {
                 "{lang:?} settings_language empty"
             );
             assert!(!s.settings_mode.is_empty(), "{lang:?} settings_mode empty");
+            for (name, v) in [
+                ("settings_theme", s.settings_theme),
+                ("settings_theme_system", s.settings_theme_system),
+                ("settings_theme_light", s.settings_theme_light),
+                ("settings_theme_dark", s.settings_theme_dark),
+            ] {
+                assert!(!v.is_empty(), "{lang:?} {name} empty");
+            }
             // Import strings.
             assert!(!s.tab_import.is_empty(), "{lang:?} tab_import empty");
             assert!(
