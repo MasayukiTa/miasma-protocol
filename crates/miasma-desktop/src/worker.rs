@@ -86,7 +86,7 @@ pub enum DaemonState {
     Connected,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum WorkerResult {
     /// Dissolution succeeded: MID string.
     Dissolved { mid: String },
