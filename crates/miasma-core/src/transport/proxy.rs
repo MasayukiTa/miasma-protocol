@@ -104,6 +104,30 @@ impl Drop for ProxyConfig {
 }
 
 impl ProxyConfig {
+    pub fn socks5(
+        addr: impl Into<String>,
+        username: Option<String>,
+        password: Option<String>,
+    ) -> Self {
+        Self::Socks5 {
+            addr: addr.into(),
+            username,
+            password,
+        }
+    }
+
+    pub fn http_connect(
+        addr: impl Into<String>,
+        username: Option<String>,
+        password: Option<String>,
+    ) -> Self {
+        Self::HttpConnect {
+            addr: addr.into(),
+            username,
+            password,
+        }
+    }
+
     /// Short name for logging/metrics.
     pub fn display_name(&self) -> &'static str {
         match self {
