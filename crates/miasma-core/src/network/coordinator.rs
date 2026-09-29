@@ -28,7 +28,7 @@ use tracing::error;
 use crate::{
     crypto::hash::ContentId,
     daemon::replication::RetryPolicy,
-    dissolution::{dissolve_segment, ShareDistributor, ShareSink, DEFAULT_SEGMENT_SIZE},
+    dissolution::{ShareDistributor, ShareSink, DEFAULT_SEGMENT_SIZE},
     network::{
         credential::CredentialStats,
         descriptor::{DescriptorStats, PeerDescriptor, ReachabilityKind},
@@ -621,6 +621,17 @@ impl MiasmaCoordinator {
         &self.peer_id
     }
 
+    /// The DHT handle, for callers that need record-level access (for example
+    /// reading a record together with its transfer manifest).
+    pub fn dht_handle(&self) -> &DhtHandle {
+        &self.dht_handle
+    }
+
+    /// The payload transport selector, for the receive engine's piece fetches.
+    pub(crate) fn transport_selector(&self) -> Arc<PayloadTransportSelector> {
+        self.transport_selector.clone()
+    }
+
     /// Dissolve `data` into shares, store them locally, distribute them to
     /// other peers on a best-effort basis, and publish the `DhtRecord`.
     ///
@@ -710,7 +721,47 @@ impl MiasmaCoordinator {
         params: DissolutionParams,
         options: PublishOptions,
     ) -> Result<PublishReport, MiasmaError> {
+        self.publish_file_inner(file_path, params, options, None)
+            .await
+    }
+
+    /// Like `dissolve_and_publish_file_with_options`, with the password as an
+    /// encryption factor: every segment's AES key is derived from the
+    /// per-segment random key *and* the password (see
+    /// `transfer::protection`), so the MID and every shard are not enough to
+    /// decrypt. The receiver must supply the same password.
+    ///
+    /// The password is never stored or logged; only its public Argon2id
+    /// parameters, salt and a wrong-password check tag go into the manifest.
+    pub async fn dissolve_and_publish_file_protected(
+        &self,
+        file_path: &std::path::Path,
+        params: DissolutionParams,
+        options: PublishOptions,
+        password: &str,
+    ) -> Result<PublishReport, MiasmaError> {
+        self.publish_file_inner(file_path, params, options, Some(password))
+            .await
+    }
+
+    /// Shared body of the streaming file publish. Always emits a transfer
+    /// manifest (piece IDs + per-segment hashes) alongside the record, whether
+    /// or not a password is used, so every published file can be verified
+    /// piece by piece and resumed.
+    async fn publish_file_inner(
+        &self,
+        file_path: &std::path::Path,
+        params: DissolutionParams,
+        options: PublishOptions,
+        password: Option<&str>,
+    ) -> Result<PublishReport, MiasmaError> {
         use std::io::{BufReader, Read, Seek, SeekFrom};
+
+        if matches!(password, Some("")) {
+            return Err(MiasmaError::InvalidManifest(
+                "an empty password would protect nothing; refusing".into(),
+            ));
+        }
 
         let file = std::fs::File::open(file_path)?;
         let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
@@ -744,6 +795,30 @@ impl MiasmaCoordinator {
         // (see `max_segment_size_for`'s doc comment) -- default `data_shards`
         // never triggers this, so this is a no-op for every existing caller.
         let segment_size = DEFAULT_SEGMENT_SIZE.min(max_segment_size_for(params.data_shards));
+
+        // Password KDF (Argon2id, deliberately slow) off the async thread.
+        let (protection, password_key) = match password {
+            None => (crate::transfer::Protection::None, None),
+            Some(pw) => {
+                let pw = zeroize::Zeroizing::new(pw.to_owned());
+                let (prot, key) = tokio::task::spawn_blocking(move || {
+                    crate::transfer::PasswordProtection::create(pw.as_str())
+                })
+                .await
+                .map_err(|e| MiasmaError::Encryption(format!("password KDF task: {e}")))??;
+                (crate::transfer::Protection::Password(prot), Some(key))
+            }
+        };
+
+        // The index a receiver gets before any data: every piece's ID.
+        let mut manifest = crate::transfer::TransferManifest::new(
+            &mid,
+            params,
+            segment_size as u32,
+            file_len,
+            protection,
+        );
+
         let mut segment_buf = vec![0u8; segment_size];
         let mut seg_idx: u32 = 0;
         let mut offset: u64 = 0;
@@ -766,7 +841,18 @@ impl MiasmaCoordinator {
             }
 
             let chunk = &segment_buf[..filled];
-            let (_meta, shares) = dissolve_segment(chunk, &mid, seg_idx, offset, params)?;
+            let (_meta, shares) = crate::dissolution::segment::dissolve_segment_with(
+                chunk,
+                &mid,
+                seg_idx,
+                offset,
+                params,
+                password_key.as_ref(),
+            )?;
+            // Record this segment's piece IDs before the shares are handed off.
+            manifest.push_segment(crate::transfer::SegmentEntry::from_dissolved(
+                seg_idx, chunk, &shares,
+            )?)?;
 
             let (mut locations, remote_distinct) =
                 self.store_locally_and_distribute(shares, params).await?;
@@ -794,7 +880,16 @@ impl MiasmaCoordinator {
             }
         }
 
-        // 3. Publish DHT record with all shard locations.
+        // The manifest must describe exactly the bytes that were dissolved. If the
+        // file grew or shrank while it was being read, `validate` catches it here,
+        // before anything is announced.
+        manifest.validate().map_err(|e| {
+            MiasmaError::InvalidManifest(format!(
+                "source file changed while publishing, or manifest inconsistent: {e}"
+            ))
+        })?;
+
+        // 3. Publish DHT record with all shard locations, carrying the manifest.
         let record = DhtRecord {
             mid_digest: *mid.as_bytes(),
             data_shards: params.data_shards as u8,
@@ -807,7 +902,9 @@ impl MiasmaCoordinator {
                 .as_secs(),
         };
 
-        self.dht_handle.put(record).await?;
+        self.dht_handle
+            .put_with_manifest(record, Some(&manifest))
+            .await?;
 
         tracing::info!(
             "Published {} ({} bytes, {} segments) via streaming dissolution",
