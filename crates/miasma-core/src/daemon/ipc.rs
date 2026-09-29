@@ -112,7 +112,18 @@ pub enum ControlRequest {
         /// Discard any partial transfer and start over.
         restart: bool,
     },
-    /// Progress of one transfer, by the id `TransferStartReceive` returned.
+    /// Start (or resume) publishing a file as a background transfer, and return
+    /// at once with its id. Progress, resume and cancel work as for a receive;
+    /// a stopped publish resumes from its journal unless `restart` is set.
+    TransferStartPublish {
+        file_path: String,
+        data_shards: u8,
+        total_shards: u8,
+        password: Option<String>,
+        restart: bool,
+    },
+    /// Progress of one transfer, by the id `TransferStartReceive` /
+    /// `TransferStartPublish` returned.
     TransferStatus { id: String },
     /// Every transfer, including paused ones left by an earlier daemon process.
     TransferList,
@@ -234,6 +245,20 @@ impl fmt::Debug for ControlRequest {
                 .debug_struct("TransferStartReceive")
                 .field("mid", mid)
                 .field("output_path", &"<redacted>")
+                .field("password", &password.as_ref().map(|_| "<redacted>"))
+                .field("restart", restart)
+                .finish(),
+            Self::TransferStartPublish {
+                data_shards,
+                total_shards,
+                password,
+                restart,
+                ..
+            } => f
+                .debug_struct("TransferStartPublish")
+                .field("file_path", &"<redacted>")
+                .field("data_shards", data_shards)
+                .field("total_shards", total_shards)
                 .field("password", &password.as_ref().map(|_| "<redacted>"))
                 .field("restart", restart)
                 .finish(),

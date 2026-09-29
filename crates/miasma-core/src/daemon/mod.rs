@@ -912,6 +912,29 @@ pub(crate) async fn process_request(
             }
         }
 
+        ControlRequest::TransferStartPublish {
+            file_path,
+            data_shards,
+            total_shards,
+            password,
+            restart,
+        } => {
+            let password = password.map(Zeroizing::new);
+            let params = DissolutionParams {
+                data_shards: data_shards as usize,
+                total_shards: total_shards as usize,
+            };
+            let registry = crate::transfer::jobs::registry_for(&data_dir);
+            let id = registry.start_publish(
+                coord.clone(),
+                PathBuf::from(file_path),
+                params,
+                password,
+                restart,
+            );
+            ControlResponse::TransferStarted { id }
+        }
+
         ControlRequest::TransferStatus { id } => {
             match crate::transfer::jobs::registry_for(&data_dir).status(&id) {
                 Some(status) => ControlResponse::TransferStatus(status),

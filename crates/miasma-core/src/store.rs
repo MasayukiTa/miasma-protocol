@@ -1389,4 +1389,41 @@ mod tests {
         let addr = store.put_hosted(&piece(2, 3, 7)).unwrap();
         assert_eq!(store.find_piece(&prefix(), 2, 3), Some(addr));
     }
+
+    /// Measurement, not a correctness test: how the cost of one `put` grows with
+    /// the number of shares already stored. Every `put` re-reads and rewrites the
+    /// whole JSON index, so this should grow linearly with the store size (and a
+    /// whole publish quadratically). Run with:
+    /// `cargo test -p miasma-core --lib -- --ignored --nocapture measure_put_cost`
+    #[test]
+    #[ignore]
+    fn measure_put_cost_growth() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100_000).unwrap();
+        let mut n = 0u32;
+        let mut last = std::time::Instant::now();
+        for checkpoint in [250u32, 500, 1000, 2000, 4000] {
+            let batch_start = n;
+            let t = std::time::Instant::now();
+            while n < checkpoint {
+                store
+                    .put(&piece(n / 20, (n % 20) as u16, (n % 251) as u8))
+                    .unwrap();
+                n += 1;
+            }
+            let per_put = t.elapsed().as_secs_f64() * 1e3 / (n - batch_start) as f64;
+            let idx = std::fs::metadata(dir.path().join(INDEX_FILE))
+                .unwrap()
+                .len();
+            println!(
+                "[measure] shares {:>5}: avg {:>7.2} ms/put over the last {:>4}, index file {:>6.2} MB",
+                n,
+                per_put,
+                n - batch_start,
+                idx as f64 / 1e6
+            );
+            last = std::time::Instant::now();
+        }
+        let _ = last;
+    }
 }
