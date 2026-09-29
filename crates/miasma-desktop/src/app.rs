@@ -237,6 +237,7 @@ pub struct MiasmaApp {
     mid_input: String,
     retrieved_summary: Option<String>,
     save_data: Option<Vec<u8>>,
+    save_file_path: Option<std::path::PathBuf>,
 
     // Import panel (magnet/torrent)
     import_intent: Option<LaunchIntent>,
@@ -355,6 +356,7 @@ impl MiasmaApp {
             mid_input: String::new(),
             retrieved_summary: None,
             save_data: None,
+            save_file_path: None,
             import_intent,
             import_state,
             import_mids: Vec::new(),
@@ -426,9 +428,26 @@ impl MiasmaApp {
                 }
                 WorkerResult::Retrieved { mid, data } => {
                     self.busy = false;
+                    if let Some(old) = self.save_file_path.take() {
+                        let _ = std::fs::remove_file(old);
+                    }
                     let size = format_size(data.len() as u64);
                     self.retrieved_summary = Some(format!("{size}  — {}", truncate_mid(&mid),));
                     self.save_data = Some(data);
+                    self.set_msg(MsgKind::Success, self.s().retrieve_success);
+                }
+                WorkerResult::RetrievedToFile {
+                    mid,
+                    temp_path,
+                    bytes_written,
+                } => {
+                    self.busy = false;
+                    if let Some(old) = self.save_file_path.replace(temp_path) {
+                        let _ = std::fs::remove_file(old);
+                    }
+                    self.save_data = None;
+                    let size = format_size(bytes_written);
+                    self.retrieved_summary = Some(format!("{size}  — {}", truncate_mid(&mid),));
                     self.set_msg(MsgKind::Success, self.s().retrieve_success);
                 }
                 WorkerResult::Status {
@@ -467,6 +486,9 @@ impl MiasmaApp {
                     self.busy = false;
                     self.last_mid = None;
                     self.save_data = None;
+                    if let Some(path) = self.save_file_path.take() {
+                        let _ = std::fs::remove_file(path);
+                    }
                     self.show_wipe_confirm = false;
                     self.set_msg(MsgKind::Error, self.s().wipe_done);
                 }
@@ -1065,7 +1087,7 @@ impl MiasmaApp {
                 ui.label(&summary);
                 ui.add_space(6.0);
 
-                if self.save_data.is_some() {
+                if self.save_data.is_some() || self.save_file_path.is_some() {
                     let save_btn = if easy {
                         egui::Button::new(
                             egui::RichText::new(s.retrieve_save_button)
@@ -1082,7 +1104,28 @@ impl MiasmaApp {
                             .set_file_name("retrieved.bin")
                             .save_file()
                         {
-                            if let Some(data) = &self.save_data {
+                            if let Some(temp_path) = self.save_file_path.clone() {
+                                let result = std::fs::rename(&temp_path, &path).or_else(|_| {
+                                    std::fs::copy(&temp_path, &path).map(|_| ())?;
+                                    std::fs::remove_file(&temp_path).ok();
+                                    Ok::<(), std::io::Error>(())
+                                });
+                                match result {
+                                    Ok(()) => {
+                                        self.save_file_path = None;
+                                        self.set_msg(
+                                            MsgKind::Success,
+                                            format!("{} {}", s.retrieve_saved, path.display()),
+                                        );
+                                    }
+                                    Err(e) => {
+                                        self.set_msg(
+                                            MsgKind::Error,
+                                            format!("{} {e}", s.retrieve_save_failed),
+                                        );
+                                    }
+                                }
+                            } else if let Some(data) = &self.save_data {
                                 match std::fs::write(&path, data) {
                                     Ok(_) => {
                                         self.set_msg(
@@ -2796,6 +2839,9 @@ impl Drop for MiasmaApp {
         self.send_password.zeroize();
         self.inbox_retrieve_password.zeroize();
         self.outbox_confirm_code.zeroize();
+        if let Some(path) = self.save_file_path.take() {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
