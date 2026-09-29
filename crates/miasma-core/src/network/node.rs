@@ -964,8 +964,7 @@ const DHT_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30
 pub(crate) const DHT_RECORD_MAX_VALUE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Leave room for the signing envelope around the serialized DhtRecord.
-pub(crate) const DHT_INNER_RECORD_MAX_BYTES: usize =
-    DHT_RECORD_MAX_VALUE_BYTES - 64 * 1024;
+pub(crate) const DHT_INNER_RECORD_MAX_BYTES: usize = DHT_RECORD_MAX_VALUE_BYTES - 64 * 1024;
 
 /// Kademlia protobuf packet budget. This must exceed the record-store limit
 /// because protocol framing and peer metadata sit outside the record value.
@@ -5577,7 +5576,6 @@ mod admission_pow_tests {
         ));
     }
 }
-
 
 #[cfg(test)]
 mod large_file_dht_budget_tests {
