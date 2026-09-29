@@ -1655,10 +1655,9 @@ async fn dissolve_and_publish_file_multi_segment_network_retrieval_is_fast() {
 // test), but that shards genuinely land on *other* peers, and that content
 // survives the *original publisher* going offline entirely.
 
-/// Spawn a node/coordinator for the Phase 2.1 tests, with `hosted_quota_mb`
-/// controlling whether it can accept pushed shares at all (`0` = cannot --
-/// see `LocalShareStore::with_hosted_quota_mb`'s doc comment on why that's
-/// the safe default).
+/// Spawn a node/coordinator for Phase 2.1 tests with an explicit low-level
+/// hosted quota. Raw `LocalShareStore::open` remains fail-closed at zero;
+/// shipped node configuration uses `open_with_quotas` with a positive default.
 async fn spawn_phase21_node(
     key_byte: u8,
     hosted_quota_mb: u64,
@@ -1678,6 +1677,81 @@ async fn spawn_phase21_node(
     let listen_addr_str = addrs[0].to_string();
     let coord = MiasmaCoordinator::start(node, store.clone(), vec![listen_addr_str]).await;
     (coord, store)
+}
+
+/// Spawn exactly as a shipped node does: quotas come from `NodeConfig::default`
+/// and are applied through the production store constructor.
+async fn spawn_phase21_default_config_node(
+    key_byte: u8,
+) -> (MiasmaCoordinator, Arc<LocalShareStore>) {
+    let dir = tempfile::tempdir().unwrap().keep();
+    let config = miasma_core::config::NodeConfig::default();
+    let store = Arc::new(
+        LocalShareStore::open_with_quotas(
+            &dir,
+            config.storage.quota_mb,
+            config.storage.hosted_quota_mb,
+        )
+        .unwrap(),
+    );
+    let key = [key_byte; 32];
+    let mut node = MiasmaNode::new(&key, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+    let addrs = node.collect_listen_addrs(400).await;
+    let listen_addr_str = addrs[0].to_string();
+    let coord = MiasmaCoordinator::start(node, store.clone(), vec![listen_addr_str]).await;
+    (coord, store)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn default_config_accepts_remote_distribution() {
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let result = timeout(Duration::from_secs(30), async {
+        let (coord_a, _store_a) = spawn_phase21_node(0xA0, 0).await;
+        let (coord_b, store_b) = spawn_phase21_default_config_node(0xB0).await;
+
+        let peer_id_a = *coord_a.peer_id();
+        let peer_id_b = *coord_b.peer_id();
+        let addr_a: Multiaddr = coord_a.listen_addrs()[0].parse().unwrap();
+
+        coord_b.add_bootstrap_peer(peer_id_a, addr_a).await.unwrap();
+        coord_b.bootstrap_dht().await.unwrap();
+        coord_b
+            .wait_until_peer_connected(peer_id_a, Duration::from_secs(10))
+            .await
+            .unwrap();
+        coord_a
+            .wait_until_peer_connected(peer_id_b, Duration::from_secs(10))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let params = DissolutionParams {
+            data_shards: 1,
+            total_shards: 2,
+        };
+        let report = coord_a
+            .dissolve_and_publish_with_options(
+                b"default hosted quota must accept remote shares",
+                params,
+                PublishOptions::strict(params),
+            )
+            .await
+            .expect("default-config peer should accept required remote placement");
+
+        assert_eq!(report.remote_distinct_shards_per_segment, vec![1]);
+        assert!(
+            store_b.used_hosted_bytes() > 0,
+            "default-config peer accepted no hosted share"
+        );
+
+        coord_a.shutdown().await;
+        coord_b.shutdown().await;
+    })
+    .await;
+
+    result.expect("default_config_accepts_remote_distribution timed out (30s)");
 }
 
 #[tokio::test(flavor = "multi_thread")]
