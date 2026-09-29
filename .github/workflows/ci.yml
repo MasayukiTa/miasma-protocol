@@ -163,35 +163,12 @@ jobs:
         # this repo layout, so these are passed as flags.)
         run: >
           cargo audit
-          --ignore RUSTSEC-2026-0118
-          --ignore RUSTSEC-2026-0119
           --ignore RUSTSEC-2026-0194
           --ignore RUSTSEC-2026-0195
           --ignore RUSTSEC-2026-0257
-        # RUSTSEC-2026-0118 / -0119 (hickory-proto 0.25.2). Both need
-        #   hickory-proto >=0.26.1. It reaches this workspace from exactly
-        #   one place -- libp2p-mdns 0.48.0, which pins hickory-proto "0.25"
-        #   (`cargo tree -i hickory-proto`; libp2p-request-response does NOT
-        #   depend on it, contrary to an earlier note here). libp2p 0.56.0
-        #   is the newest release; rust-libp2p master has already moved its
-        #   workspace pin to hickory-proto 0.26 for the unreleased
-        #   libp2p-mdns 0.49.0, so this clears on the next libp2p release.
-        #   Neither advisory is reachable in what this workspace builds --
-        #   both facts are checkable, not assumed:
-        #     -0118 (NSEC3 closest-encloser validation loop) lives in
-        #       hickory-proto's `src/dnssec/`, which `src/lib.rs:55` gates
-        #       behind `dnssec-aws-lc-rs` / `dnssec-ring`. `cargo tree -e
-        #       features --workspace --all-features` enables only "std",
-        #       "mdns", "futures-io" and "socket2" -- the module is not
-        #       compiled at all.
-        #     -0119 (O(n^2) name compression) is in the message *encoder*.
-        #       libp2p-mdns never encodes through hickory: it builds every
-        #       outgoing packet by hand in `behaviour/iface/dns.rs`
-        #       (`append_u16`/`append_qname` into a Vec<u8>). Its only
-        #       non-test use of the crate is `Message::from_vec` at
-        #       `behaviour/iface/query.rs:55` -- decoding.
-        #   Re-check both claims when libp2p is bumped; the reachability
-        #   argument is version-specific, not permanent.
+        # RUSTSEC-2026-0118 / -0119 are no longer ignored: libp2p 0.57.0
+        #   pulls libp2p-mdns 0.49.0 and hickory-proto 0.26.3, beyond the
+        #   vulnerable 0.25.x line.
         # RUSTSEC-2026-0194 / -0195 (quick-xml): needs >=0.41.0. Two old
         #   versions (0.37.5, 0.39.2) are both in the graph from different
         #   transitive paths and need identifying + bumping individually.

@@ -71,7 +71,6 @@ pub enum OnionRelayResponse {
 #[derive(Clone, Default)]
 pub struct OnionRelayCodec;
 
-#[async_trait::async_trait]
 impl libp2p::request_response::Codec for OnionRelayCodec {
     type Protocol = libp2p::StreamProtocol;
     type Request = OnionRelayRequest;

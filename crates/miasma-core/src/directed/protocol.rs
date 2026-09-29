@@ -95,7 +95,6 @@ pub enum DirectedResponse {
 #[derive(Clone, Default)]
 pub struct DirectedCodec;
 
-#[async_trait::async_trait]
 impl libp2p::request_response::Codec for DirectedCodec {
     type Protocol = libp2p::StreamProtocol;
     type Request = DirectedRequest;
