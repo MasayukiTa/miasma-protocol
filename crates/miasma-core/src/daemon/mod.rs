@@ -68,6 +68,17 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+/// Finalize the same full-content MID used by publish_file while consuming a
+/// retrieval stream incrementally. This keeps 100 GB-class verification O(1)
+/// in memory.
+fn finalize_streamed_mid(
+    mut hasher: blake3::Hasher,
+    params: DissolutionParams,
+) -> crate::crypto::hash::ContentId {
+    hasher.update(&params.to_param_bytes());
+    crate::crypto::hash::ContentId::from_digest(*hasher.finalize().as_bytes())
+}
+
 /// Maximum number of concurrent DHT announce operations per replication cycle.
 const MAX_CONCURRENT_ANNOUNCES: usize = 8;
 
@@ -891,23 +902,46 @@ pub(crate) async fn process_request(
                                 Ok(mut file) => {
                                     let mut bytes_written: u64 = 0;
                                     let mut write_err: Option<String> = None;
+                                    let mut content_hasher = blake3::Hasher::new();
                                     while let Some(chunk) = stream.next().await {
                                         match chunk {
-                                            Ok(bytes) => match file.write_all(&bytes).await {
-                                                Ok(_) => bytes_written += bytes.len() as u64,
-                                                Err(e) => {
-                                                    write_err = Some(format!(
-                                                        "cannot write to {output_path}: {e}"
-                                                    ));
-                                                    break;
+                                            Ok(bytes) => {
+                                                content_hasher.update(&bytes);
+                                                match file.write_all(&bytes).await {
+                                                    Ok(_) => {
+                                                        bytes_written += bytes.len() as u64
+                                                    }
+                                                    Err(e) => {
+                                                        write_err = Some(format!(
+                                                            "cannot write to {output_path}: {e}"
+                                                        ));
+                                                        break;
+                                                    }
                                                 }
-                                            },
+                                            }
                                             Err(e) => {
                                                 write_err = Some(e.to_string());
                                                 break;
                                             }
                                         }
                                     }
+                                    // The streaming network path reconstructs and authenticates
+                                    // each segment independently, but it intentionally cannot
+                                    // verify the full-file MID itself without buffering the
+                                    // whole file. Verify the complete plaintext here while the
+                                    // bytes are already flowing to disk. A mismatch is a hard
+                                    // failure and the partial output is removed below.
+                                    if write_err.is_none() {
+                                        let actual_mid = finalize_streamed_mid(content_hasher, params);
+                                        if actual_mid != content_id {
+                                            write_err = Some(format!(
+                                                "streamed retrieval MID mismatch: expected {}, got {}",
+                                                content_id.to_string(),
+                                                actual_mid.to_string()
+                                            ));
+                                        }
+                                    }
+
                                     // Explicit flush before declaring success: tokio::fs::File
                                     // writes are dispatched to a blocking-pool thread, so a
                                     // caller reading the file back immediately after this
@@ -2014,5 +2048,42 @@ async fn environment_detector_loop(
         }
 
         *env_snapshot.lock().unwrap() = new_snap;
+    }
+}
+
+
+#[cfg(test)]
+mod large_file_stream_integrity_tests {
+    use super::*;
+
+    #[test]
+    fn streamed_mid_matches_chunked_content() {
+        let params = DissolutionParams::default();
+        let chunks: [&[u8]; 4] = [
+            b"chunk-one-",
+            b"chunk-two-",
+            b"chunk-three-",
+            b"chunk-four",
+        ];
+        let full = chunks.concat();
+        let expected = crate::crypto::hash::ContentId::compute(&full, &params.to_param_bytes());
+
+        let mut hasher = blake3::Hasher::new();
+        for chunk in chunks {
+            hasher.update(chunk);
+        }
+        let streamed = finalize_streamed_mid(hasher, params);
+        assert_eq!(streamed, expected);
+    }
+
+    #[test]
+    fn streamed_mid_detects_content_change() {
+        let params = DissolutionParams::default();
+        let expected =
+            crate::crypto::hash::ContentId::compute(b"expected", &params.to_param_bytes());
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"tampered");
+        assert_ne!(finalize_streamed_mid(hasher, params), expected);
     }
 }
