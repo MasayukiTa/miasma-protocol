@@ -27,8 +27,10 @@ pub fn encrypt(
         .encrypt(&nonce, plaintext)
         .map_err(|e| MiasmaError::Encryption(e.to_string()))?;
 
-    let mut nonce_arr = [0u8; NONCE_LEN];
-    nonce_arr.copy_from_slice(&nonce);
+    let nonce_arr: [u8; NONCE_LEN] = nonce
+        .as_slice()
+        .try_into()
+        .expect("AES-256-GCM nonce length is fixed");
 
     Ok((ciphertext, key, nonce_arr))
 }
