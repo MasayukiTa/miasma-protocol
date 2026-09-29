@@ -1,7 +1,7 @@
 # Protected, resumable large-file transfer — plan and running log
 
 Branch: `work/resumable-protected-transfer` (based on `work/large-file-release-gate`).
-Started: 2026-09-29. Status: **Phases 1-5 done (primitives, publish side, receive engine, sender progress/resume, redundancy harness). Phase 6 (macOS runbook, readme) in progress.** See §6 for what was actually run.
+Started: 2026-09-29. Status: **Phases 1-6 done on this machine. Nothing has yet been run between two physical machines, and `miasma-cli` has not been built on macOS.** See §6 for what was actually run and §7b for what was left.
 
 ## 0. 要約 (Japanese summary for the owner)
 
@@ -332,6 +332,33 @@ time does grow with the number of parity pieces (55 ms at 10/10 which is a plain
 release on the sending machine — with `--store-dir` on the external SSD to include local disk and
 at-rest encryption — before choosing a default.
 
+### Phase 6 — runbook and a real-binary check (2026-09-29)
+
+- `docs/tasks/macos-to-windows-large-transfer-runbook.md` (Japanese): disk arithmetic per size and
+  `k/n`, build and self-check on each machine, the redundancy measurement, connecting the two, the
+  256 MiB -> 4 GiB -> 20 GiB -> 100 GiB ramp with an interruption drill, a results table, known
+  limits, troubleshooting. `scripts/transfer-e2e.ps1` (ran) and `scripts/transfer-e2e.sh` (macOS
+  default bash 3.2; **syntax-checked only, not run on a Mac**).
+- **Ran, the real `miasma.exe` (debug build), two daemons on loopback, 40 MB at `k=2, n=3` (three
+  segments), password-protected — all 20 checks passed in 212 s:** publish prints a MID; a wrong and a
+  missing password are each refused with a clear message and leave no output or `.part` file; the
+  receiver's daemon was **killed (`Stop-Process -Force`) after the first segment**, restarted,
+  `miasma transfers` then showed the transfer paused and resumable with one segment safe on disk,
+  the same `network-get` finished it and the SHA256 matched, and the `.part` file was gone; the
+  same was then done to the **sender's** daemon mid-publish (restart, `transfers` shows the send
+  paused, the same `network-publish` completes) and the second node received that file with a
+  matching SHA256.
+- **Found by that run and fixed:** `miasma transfers` did not show a send's file name, so nothing
+  could tell which line was which. It now heads each entry `receive <mid> -> <path>` or
+  `send <path> (<mid>)` and prints the command that resumes it. The first run of the script sat in
+  its wait loop for exactly this reason.
+- What the CLI prints (debug build, so the rate says nothing about a release build):
+  `[####################----] 80.0%  seg 2/3  32.0 MiB / 40.0 MiB  963.4 KiB/s  ETA 00:00:09  (store+push 72% dissolve 28%)`
+  for a send and `(fetch 71% decode 28% write 1%)` for a receive, then a final line with elapsed
+  time and the average.
+- **A correction to something I told the owner earlier:** `miasma config` takes flags, so the quota is
+  set with `miasma config --key storage.quota_mb --value <MiB>`, not the positional form I wrote.
+
 ### Finding: one fetch cost seconds, and would cost hours at 100 GiB (2026-09-29)
 
 Measured with `measure_single_piece_fetch_latency_on_loopback` (two nodes, loopback, **debug
@@ -425,6 +452,39 @@ Each entry says what was actually run. Machine: Windows 11, slim debug profile (
   (`wrong password`, `paused, run again to resume`, ...), desktop locale entries, and the runbook.
   The strings are kept in one place per surface so this is a translation pass, not a refactor.
   To confirm with the owner which surfaces are wanted before doing it.
+
+## 7b. Follow-ups this work found but did not do
+
+Each has a reason it was left; none blocks a first cross-machine transfer.
+
+1. **Hosted-share quota has no configuration key** (`with_hosted_quota_mb` is called only from
+   tests), so peers refuse every pushed share and the sender is the sole holder. A config key, a
+   default, and a test that runs with the *default* config are needed before the readme's
+   "resists content seizure via single-node compromise" line can be relied on. The readme now
+   carries a caveat pointing here.
+2. **The local share store's index is rewritten in full on every `put`** — cost per put grew from
+   26 ms (250 shares) to 123 ms (4,000) in a debug build. Fix: an append-only index log (the send
+   journal is the same shape). Left until a real run shows it matters.
+3. **`ShareFetchRequest` carries no expected piece ID**, so if the same content was published twice
+   (fresh key each time) the holder serves the newest generation and a receiver holding the older
+   manifest would reject it with no way to ask for the other. `find_piece` picks the newest;
+   republishing is the workaround. Fixing it means extending the wire request.
+4. **Recipient-key binding.** The owner asked for MID + password; the password binds only the
+   *encryption*, so anyone with the MID can still download ciphertext. `directed`'s ECDH binding is
+   not in the streaming path.
+5. **Desktop UI and FFI** still use `PublishFile` / `GetToFile` and show no progress or resume. The
+   IPC they need already exists (`TransferStart*`, `TransferStatus`, `TransferList`,
+   `TransferCancel`).
+6. **Sequential fetch.** The receive engine still fetches one piece at a time and does not overlap
+   decode with the network. Deliberately not optimised: the owner will measure first, and the
+   per-phase timings are in `TransferStatus` for that.
+7. **CI does not run on work branches** (`push` is `main`/`develop` only; PRs into `main` are
+   covered). Everything here was run locally (`cargo test -p miasma-core -p miasma-cli`, fmt,
+   clippy); the first CI run happens when a PR is opened.
+8. **macOS.** `miasma-cli` has never been built or run on macOS in CI. `scripts/transfer-e2e.sh`
+   is written for the macOS default bash (3.2) and was syntax-checked here but **not run on a Mac**.
+9. **Japanese text** (requested, deferred): CLI messages and the desktop locale for the strings this
+   work adds. The macOS-to-Windows runbook is written in Japanese.
 
 ## 8. Working rules for this branch
 
