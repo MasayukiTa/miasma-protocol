@@ -249,17 +249,17 @@ impl DaemonServer {
             (None, None) => None,
             (None, Some(_)) => anyhow::bail!("proxy address configured without proxy type"),
             (Some(_), None) => anyhow::bail!("proxy type configured without proxy address"),
-            (Some("socks5"), Some(addr)) => Some(crate::transport::proxy::ProxyConfig::Socks5 {
-                addr: addr.to_owned(),
-                username: transport_config.proxy_username.take(),
-                password: transport_config.proxy_password.take(),
-            }),
+            (Some("socks5"), Some(addr)) => Some(crate::transport::proxy::ProxyConfig::socks5(
+                addr,
+                transport_config.proxy_username.take(),
+                transport_config.proxy_password.take(),
+            )),
             (Some("http-connect"), Some(addr)) | (Some("http_connect"), Some(addr)) => {
-                Some(crate::transport::proxy::ProxyConfig::HttpConnect {
-                    addr: addr.to_owned(),
-                    username: transport_config.proxy_username.take(),
-                    password: transport_config.proxy_password.take(),
-                })
+                Some(crate::transport::proxy::ProxyConfig::http_connect(
+                    addr,
+                    transport_config.proxy_username.take(),
+                    transport_config.proxy_password.take(),
+                ))
             }
             (Some(other), Some(_)) => anyhow::bail!("unsupported proxy type '{other}'"),
         };
