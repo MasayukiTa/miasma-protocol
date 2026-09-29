@@ -37,7 +37,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$REPO = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
+# This script matches the CLI's English wording ("wrong password", "Paused", "seg N/M", ...).
+# The CLI follows the OS language by default, so pin it; child processes inherit it.
+$env:MIASMA_LANG = "en"
+$REPO =Split-Path -Parent (Split-Path -Parent $PSCommandPath)
 
 if (-not $Cli) {
     foreach ($c in @("target\release\miasma.exe", "target\debug\miasma.exe")) {

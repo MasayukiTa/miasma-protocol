@@ -20,6 +20,10 @@
 
 set -u
 
+# This script greps the CLI's English wording ("wrong password", "Paused", "seg N/M", ...).
+# The CLI follows the OS language by default, so pin it.
+export MIASMA_LANG=en
+
 CLI=""
 SIZE_MB=40
 K=2
