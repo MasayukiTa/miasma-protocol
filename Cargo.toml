@@ -62,7 +62,7 @@ x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 # Password hashing for directed sharing
 argon2 = "0.5"
 # DHT record signing — Ed25519
-ed25519-dalek = { version = "2", features = ["rand_core"] }
+ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
 
 # Config
 toml = "0.8"

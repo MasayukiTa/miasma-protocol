@@ -1822,14 +1822,13 @@ impl MiasmaNode {
     ) -> Result<Self, MiasmaError> {
         let node_keys = NodeKeys::derive(master_key)?;
 
-        let mut signing_bytes: [u8; 32] = *node_keys.dht_signing_key;
+        let mut signing_bytes = zeroize::Zeroizing::new(*node_keys.dht_signing_key);
 
         // Construct every long-term Ed25519 role from the same seed before
-        // handing the mutable buffer to libp2p. `ed25519_from_bytes` deliberately
-        // zeroizes its input on success; constructing `dht_signing_key` afterwards
-        // would silently create the all-zero Ed25519 identity instead.
+        // handing the mutable buffer to libp2p. The wrapper guarantees cleanup
+        // even if keypair construction fails; libp2p also clears the input on success.
         let dht_signing_key = ed25519_dalek::SigningKey::from_bytes(&signing_bytes);
-        let keypair = Keypair::ed25519_from_bytes(&mut signing_bytes)
+        let keypair = Keypair::ed25519_from_bytes(signing_bytes.as_mut())
             .map_err(|e| MiasmaError::KeyDerivation(e.to_string()))?;
 
         let local_peer_id = PeerId::from(keypair.public());

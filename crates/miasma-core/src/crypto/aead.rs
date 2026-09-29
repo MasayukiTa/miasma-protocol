@@ -18,21 +18,19 @@ pub const NONCE_LEN: usize = 12;
 pub fn encrypt(
     plaintext: &[u8],
 ) -> Result<(Vec<u8>, Zeroizing<[u8; KEY_LEN]>, [u8; NONCE_LEN]), MiasmaError> {
-    let key = Aes256Gcm::generate_key(&mut OsRng);
+    let mut key = Zeroizing::new([0u8; KEY_LEN]);
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, key.as_mut());
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
 
-    let cipher = Aes256Gcm::new(&key);
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.as_ref()));
     let ciphertext = cipher
         .encrypt(&nonce, plaintext)
         .map_err(|e| MiasmaError::Encryption(e.to_string()))?;
 
-    let mut key_arr = Zeroizing::new([0u8; KEY_LEN]);
-    key_arr.as_mut().copy_from_slice(&key);
-
     let mut nonce_arr = [0u8; NONCE_LEN];
     nonce_arr.copy_from_slice(&nonce);
 
-    Ok((ciphertext, key_arr, nonce_arr))
+    Ok((ciphertext, key, nonce_arr))
 }
 
 /// Encrypt `plaintext` with a **caller-supplied** key and nonce.

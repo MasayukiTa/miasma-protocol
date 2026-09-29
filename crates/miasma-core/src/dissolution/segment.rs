@@ -4,6 +4,7 @@
 /// Segments share the same MID (derived from the full file) so that all
 /// shares for a file can be routed and verified under a single identifier.
 use std::time::{SystemTime, UNIX_EPOCH};
+use zeroize::Zeroizing;
 
 use crate::{
     crypto::{
@@ -128,13 +129,19 @@ pub fn retrieve_segment(
     )?;
 
     // 3. SSS combine key shares → K_enc.
-    let key_shares: Vec<Vec<u8>> = selected.iter().map(|s| s.key_share.clone()).collect();
-    let k_enc = sss_combine(&key_shares, params.data_shards as u8)?;
+    let key_shares = Zeroizing::new(
+        selected
+            .iter()
+            .map(|s| s.key_share.clone())
+            .collect::<Vec<Vec<u8>>>(),
+    );
+    let k_enc = sss_combine(key_shares.as_slice(), params.data_shards as u8)?;
 
-    let key: [u8; KEY_LEN] = k_enc
-        .as_slice()
-        .try_into()
-        .map_err(|_| MiasmaError::Sss("recovered K_enc has wrong length".into()))?;
+    if k_enc.len() != KEY_LEN {
+        return Err(MiasmaError::Sss("recovered K_enc has wrong length".into()));
+    }
+    let mut key = Zeroizing::new([0u8; KEY_LEN]);
+    key.copy_from_slice(k_enc.as_slice());
 
     // 4. AES-256-GCM decrypt.
     decrypt(&ciphertext, &key, &nonce)

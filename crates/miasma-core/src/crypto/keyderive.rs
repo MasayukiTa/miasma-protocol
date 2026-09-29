@@ -28,10 +28,13 @@ pub struct NodeKeys {
 impl NodeKeys {
     /// Derive all node keys from a master key using HKDF-SHA256.
     pub fn derive(master_key: &[u8]) -> Result<Self, MiasmaError> {
+        let node_id = hkdf_derive(master_key, LABEL_NODE_ID)?;
         Ok(Self {
-            node_id: hkdf_derive(master_key, LABEL_NODE_ID)?,
-            dht_signing_key: Zeroizing::new(hkdf_derive(master_key, LABEL_DHT_SIGN)?),
-            session_key: Zeroizing::new(hkdf_derive(master_key, LABEL_SESSION)?),
+            // node_id is a public identifier; only secret-derived key material
+            // remains zeroizing after derivation.
+            node_id: *node_id,
+            dht_signing_key: hkdf_derive(master_key, LABEL_DHT_SIGN)?,
+            session_key: hkdf_derive(master_key, LABEL_SESSION)?,
         })
     }
 }
@@ -41,7 +44,7 @@ impl NodeKeys {
 /// This key is persistent (does not rotate with epochs) and is shared
 /// out-of-band with potential senders.
 pub fn derive_sharing_key(master_key: &[u8]) -> Result<Zeroizing<[u8; 32]>, MiasmaError> {
-    Ok(Zeroizing::new(hkdf_derive(master_key, LABEL_SHARING)?))
+    hkdf_derive(master_key, LABEL_SHARING)
 }
 
 /// Derive a MAC key (K_tag) from an encryption key (K_enc).
@@ -52,14 +55,14 @@ pub fn derive_sharing_key(master_key: &[u8]) -> Result<Zeroizing<[u8; 32]>, Mias
 /// MAC verification is impossible — coarse verification (shard_hash + mid_prefix)
 /// must be used instead. This constraint is intentional, not a bug.
 pub fn derive_mac_key(k_enc: &[u8]) -> Result<Zeroizing<[u8; 32]>, MiasmaError> {
-    Ok(Zeroizing::new(hkdf_derive(k_enc, LABEL_MAC)?))
+    hkdf_derive(k_enc, LABEL_MAC)
 }
 
 /// Internal HKDF-SHA256 helper: expand `ikm` with `info` label into 32 bytes.
-fn hkdf_derive(ikm: &[u8], info: &[u8]) -> Result<[u8; 32], MiasmaError> {
+fn hkdf_derive(ikm: &[u8], info: &[u8]) -> Result<Zeroizing<[u8; 32]>, MiasmaError> {
     let hk = Hkdf::<Sha256>::new(None, ikm);
-    let mut out = [0u8; 32];
-    hk.expand(info, &mut out)
+    let mut out = Zeroizing::new([0u8; 32]);
+    hk.expand(info, out.as_mut())
         .map_err(|e| MiasmaError::KeyDerivation(e.to_string()))?;
     Ok(out)
 }
