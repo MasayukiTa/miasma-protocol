@@ -238,6 +238,33 @@ impl DaemonServer {
         };
         let shadowsocks_configured = shadowsocks_transport.is_some();
 
+        // Convert serialized proxy credentials into the runtime proxy before
+        // zeroizing the config copies. Reject partial/unknown proxy settings
+        // instead of silently downgrading them to unauthenticated SOCKS5.
+        let proxy_type = transport_config.proxy_type.clone();
+        let mut runtime_proxy = match (
+            proxy_type.as_deref(),
+            transport_config.proxy_addr.as_deref(),
+        ) {
+            (None, None) => None,
+            (None, Some(_)) => anyhow::bail!("proxy address configured without proxy type"),
+            (Some(_), None) => anyhow::bail!("proxy type configured without proxy address"),
+            (Some("socks5"), Some(addr)) => Some(crate::transport::proxy::ProxyConfig::Socks5 {
+                addr: addr.to_owned(),
+                username: transport_config.proxy_username.take(),
+                password: transport_config.proxy_password.take(),
+            }),
+            (Some("http-connect"), Some(addr)) | (Some("http_connect"), Some(addr)) => {
+                Some(crate::transport::proxy::ProxyConfig::HttpConnect {
+                    addr: addr.to_owned(),
+                    username: transport_config.proxy_username.take(),
+                    password: transport_config.proxy_password.take(),
+                })
+            }
+            (Some(other), Some(_)) => anyhow::bail!("unsupported proxy type '{other}'"),
+        };
+        let proxy_configured = runtime_proxy.is_some();
+
         // The parsed/runtime forms above now own every secret that is actually
         // needed. Erase serialized/base64/hex copies before any server is spawned.
         transport_config.zeroize_secret_copies();
@@ -277,23 +304,6 @@ impl DaemonServer {
         if let Some(ref sni) = transport_config.wss_sni {
             wss_config.sni_override = Some(sni.clone());
         }
-        // Configure proxy if present.
-        let proxy_configured = transport_config.proxy_type.is_some();
-        let proxy_type = transport_config.proxy_type.clone();
-        if let Some(ref pt) = transport_config.proxy_type {
-            if let Some(ref addr) = transport_config.proxy_addr {
-                use crate::transport::websocket::{ProxyConfig as WssProxyConfig, ProxyKind};
-                let kind = match pt.as_str() {
-                    "socks5" => ProxyKind::Socks5,
-                    _ => ProxyKind::Socks5,
-                };
-                wss_config.proxy = Some(WssProxyConfig {
-                    addr: addr.clone(),
-                    kind,
-                });
-            }
-        }
-
         let (wss_port, wss_server_handle) = if wss_tls_enabled {
             let cert_pem: &[u8] = wss_cert_pem.as_deref().unwrap_or_default();
             let key_pem: &[u8] = wss_key_pem
@@ -319,7 +329,10 @@ impl DaemonServer {
                     let mut client_config = wss_config.clone();
                     client_config.port = port;
                     extra_transports.push(Box::new(
-                        crate::transport::websocket::WssPayloadTransport::new(client_config),
+                        crate::transport::websocket::WssPayloadTransport::new_with_runtime_proxy(
+                            client_config,
+                            runtime_proxy.take(),
+                        ),
                     ));
                     (port, Some(handle))
                 }
@@ -337,7 +350,10 @@ impl DaemonServer {
                     let mut client_config = wss_config.clone();
                     client_config.port = port;
                     extra_transports.push(Box::new(
-                        crate::transport::websocket::WssPayloadTransport::new(client_config),
+                        crate::transport::websocket::WssPayloadTransport::new_with_runtime_proxy(
+                            client_config,
+                            runtime_proxy.take(),
+                        ),
                     ));
                     (port, Some(handle))
                 }
