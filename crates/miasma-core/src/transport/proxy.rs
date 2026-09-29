@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::payload::TransportPhase;
 
@@ -33,7 +34,7 @@ impl std::error::Error for ProxyError {}
 // ─── Config ─────────────────────────────────────────────────────────────────
 
 /// Proxy configuration for outbound connections.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum ProxyConfig {
     /// SOCKS5 proxy (RFC 1928).
     Socks5 {
@@ -53,6 +54,53 @@ pub enum ProxyConfig {
         /// Optional password for Proxy-Authorization Basic.
         password: Option<String>,
     },
+}
+
+impl fmt::Debug for ProxyConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Socks5 {
+                addr,
+                username,
+                password,
+            } => f
+                .debug_struct("Socks5")
+                .field("addr", addr)
+                .field("username_configured", &username.is_some())
+                .field("password_configured", &password.is_some())
+                .finish(),
+            Self::HttpConnect {
+                addr,
+                username,
+                password,
+            } => f
+                .debug_struct("HttpConnect")
+                .field("addr", addr)
+                .field("username_configured", &username.is_some())
+                .field("password_configured", &password.is_some())
+                .finish(),
+        }
+    }
+}
+
+impl Drop for ProxyConfig {
+    fn drop(&mut self) {
+        match self {
+            Self::Socks5 {
+                username, password, ..
+            }
+            | Self::HttpConnect {
+                username, password, ..
+            } => {
+                if let Some(username) = username.as_mut() {
+                    username.zeroize();
+                }
+                if let Some(password) = password.as_mut() {
+                    password.zeroize();
+                }
+            }
+        }
+    }
 }
 
 impl ProxyConfig {
@@ -116,15 +164,20 @@ impl ProxyConfig {
                             message: format!("TCP connect to proxy {addr}: {e}"),
                         })?;
 
-                // Build the CONNECT request.
+                // Build the CONNECT request. It may contain Proxy-Authorization,
+                // so keep the entire buffer zeroizing until the write completes.
                 let target = format!("{target_host}:{target_port}");
-                let mut request = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n");
+                let mut request =
+                    Zeroizing::new(format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n"));
 
-                // Add Proxy-Authorization if credentials are present.
+                // Add Proxy-Authorization if credentials are present. Both the
+                // user:password form and its Base64 encoding are sensitive.
                 if let (Some(user), Some(pass)) = (username.as_deref(), password.as_deref()) {
-                    let credentials = format!("{user}:{pass}");
-                    let encoded = base64_encode_basic(&credentials);
-                    request.push_str(&format!("Proxy-Authorization: Basic {encoded}\r\n"));
+                    let credentials = Zeroizing::new(format!("{user}:{pass}"));
+                    let encoded = Zeroizing::new(base64_encode_basic(credentials.as_str()));
+                    request.push_str("Proxy-Authorization: Basic ");
+                    request.push_str(encoded.as_str());
+                    request.push_str("\r\n");
                 }
                 request.push_str("\r\n");
 
@@ -241,6 +294,20 @@ mod tests {
         let json = serde_json::to_string(&http).unwrap();
         let back: ProxyConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.display_name(), "http-connect");
+    }
+
+    #[test]
+    fn proxy_config_debug_redacts_credentials() {
+        let cfg = ProxyConfig::HttpConnect {
+            addr: "proxy.example:8080".into(),
+            username: Some("alice-sensitive".into()),
+            password: Some("password-sensitive".into()),
+        };
+        let rendered = format!("{cfg:?}");
+        assert!(!rendered.contains("alice-sensitive"));
+        assert!(!rendered.contains("password-sensitive"));
+        assert!(rendered.contains("username_configured: true"));
+        assert!(rendered.contains("password_configured: true"));
     }
 
     /// Start a minimal mock HTTP CONNECT proxy on loopback, connect through it
