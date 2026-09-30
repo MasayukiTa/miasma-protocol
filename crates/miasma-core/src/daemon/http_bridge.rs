@@ -16,9 +16,14 @@
 //!
 //! # Security
 //!
-//! Binds only to `127.0.0.1` — unreachable from the network.  Same trust
-//! model as the IPC listener: if you can reach localhost, you are the user.
-//! CORS `Access-Control-Allow-Origin: *` is safe under this constraint.
+//! Binds only to `127.0.0.1` — unreachable from the network.  Reaching
+//! localhost is not a credential, so every endpoint except `GET /api/ping`
+//! (liveness only) requires the daemon's control token as
+//! `Authorization: Bearer <token>`; the token is in `<data_dir>/daemon.token`
+//! (see `control_auth`).  A missing `Origin` header no longer grants access:
+//! non-browser clients authenticate like everyone else, and browser origins
+//! that are not localhost are still refused.  `POST /api/wipe` is two-step:
+//! without a body it returns a challenge, `{"confirm": "<challenge>"}` wipes.
 
 use std::sync::{Arc, Mutex};
 
@@ -237,6 +242,23 @@ async fn handle(
         )));
     }
 
+    // Authentication — everything but the liveness probe needs the token.
+    if !(req.method() == Method::GET && req.uri().path() == "/api/ping") {
+        let presented = req
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .unwrap_or("");
+        if let Err(delay) = state.bridge_live.control_auth.check(presented) {
+            tokio::time::sleep(delay).await;
+            return Ok(cors(json_error(
+                StatusCode::UNAUTHORIZED,
+                "unauthorized: missing or invalid control token",
+            )));
+        }
+    }
+
     // Rate limiting — check before routing
     let method_str = req.method().as_str().to_string();
     let path_str = req.uri().path().to_string();
@@ -270,7 +292,10 @@ async fn handle(
             Err(e) => json_error(StatusCode::BAD_REQUEST, &e.to_string()),
         },
 
-        (Method::POST, "/api/wipe") => handle_wipe(state).await,
+        (Method::POST, "/api/wipe") => match read_body(req).await {
+            Ok(body) => handle_wipe(body, state).await,
+            Err(e) => json_error(StatusCode::BAD_REQUEST, &e.to_string()),
+        },
 
         // ── Directed sharing endpoints ──────────────────────────────────
         (Method::GET, "/api/sharing-key") => handle_sharing_key(state).await,
@@ -389,10 +414,36 @@ async fn handle_retrieve(body: Bytes, state: BridgeState) -> Response<Full<Bytes
     }
 }
 
-async fn handle_wipe(state: BridgeState) -> Response<Full<Bytes>> {
-    let resp = bridge_request(state, ControlRequest::Wipe).await;
+#[derive(Deserialize, Default)]
+struct WipeBody {
+    #[serde(default)]
+    confirm: Option<String>,
+}
+
+#[derive(Serialize)]
+struct WipeChallengeResponse {
+    challenge: String,
+}
+
+async fn handle_wipe(body: Bytes, state: BridgeState) -> Response<Full<Bytes>> {
+    let parsed: WipeBody = if body.is_empty() {
+        WipeBody::default()
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(b) => b,
+            Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("invalid JSON: {e}")),
+        }
+    };
+    let req = match parsed.confirm {
+        Some(nonce) => ControlRequest::WipeConfirm { nonce },
+        None => ControlRequest::Wipe,
+    };
+    let resp = bridge_request(state, req).await;
 
     match resp {
+        ControlResponse::WipeChallenge { nonce } => {
+            json_ok(&WipeChallengeResponse { challenge: nonce })
+        }
         ControlResponse::Wiped => json_ok(&OkResponse { ok: true }),
         ControlResponse::Error(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
         _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "unexpected response"),
@@ -623,7 +674,7 @@ fn cors(mut resp: Response<Full<Bytes>>) -> Response<Full<Bytes>> {
     );
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_HEADERS,
-        "Content-Type".parse().unwrap(),
+        "Content-Type, Authorization".parse().unwrap(),
     );
     resp
 }

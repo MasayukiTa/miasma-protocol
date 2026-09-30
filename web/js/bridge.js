@@ -148,7 +148,7 @@ export class MiasmaBridge {
 
     if (this._mode === MODE_HTTP) {
       try {
-        const resp = await fetch(`${HTTP_BRIDGE_URL}/api/publish`, {
+        const resp = await bridgeFetch(`${HTTP_BRIDGE_URL}/api/publish`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ data: b64, data_shards: k, total_shards: n }),
@@ -194,7 +194,7 @@ export class MiasmaBridge {
 
     if (this._mode === MODE_HTTP) {
       try {
-        const resp = await fetch(`${HTTP_BRIDGE_URL}/api/retrieve`, {
+        const resp = await bridgeFetch(`${HTTP_BRIDGE_URL}/api/retrieve`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ mid, data_shards: k, total_shards: n }),
@@ -220,8 +220,16 @@ export class MiasmaBridge {
 
     if (this._mode === MODE_HTTP) {
       try {
-        const resp = await fetch(`${HTTP_BRIDGE_URL}/api/wipe`, {
+        // Two steps: the first call returns a challenge, the second echoes it.
+        const first = await bridgeFetch(`${HTTP_BRIDGE_URL}/api/wipe`, {
           method: 'POST',
+        });
+        const challenge = (await first.json()).challenge;
+        if (!challenge) return false;
+        const resp = await bridgeFetch(`${HTTP_BRIDGE_URL}/api/wipe`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ confirm: challenge }),
         });
         const result = await resp.json();
         return result.ok === true;
@@ -246,7 +254,7 @@ export class MiasmaBridge {
 
     if (this._mode === MODE_HTTP) {
       try {
-        const resp = await fetch(`${HTTP_BRIDGE_URL}/api/sharing-key`, {
+        const resp = await bridgeFetch(`${HTTP_BRIDGE_URL}/api/sharing-key`, {
           method: 'GET',
         });
         if (!resp.ok) return null;
@@ -289,7 +297,7 @@ export class MiasmaBridge {
 
     if (this._mode === MODE_HTTP) {
       try {
-        const resp = await fetch(`${HTTP_BRIDGE_URL}/api/directed/send`, {
+        const resp = await bridgeFetch(`${HTTP_BRIDGE_URL}/api/directed/send`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -330,7 +338,7 @@ export class MiasmaBridge {
 
     if (this._mode === MODE_HTTP) {
       try {
-        const resp = await fetch(`${HTTP_BRIDGE_URL}/api/directed/confirm`, {
+        const resp = await bridgeFetch(`${HTTP_BRIDGE_URL}/api/directed/confirm`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ envelope_id: envelopeId, challenge_code: challengeCode }),
@@ -369,7 +377,7 @@ export class MiasmaBridge {
 
     if (this._mode === MODE_HTTP) {
       try {
-        const resp = await fetch(`${HTTP_BRIDGE_URL}/api/directed/retrieve`, {
+        const resp = await bridgeFetch(`${HTTP_BRIDGE_URL}/api/directed/retrieve`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ envelope_id: envelopeId, password }),
@@ -401,7 +409,7 @@ export class MiasmaBridge {
 
     if (this._mode === MODE_HTTP) {
       try {
-        const resp = await fetch(`${HTTP_BRIDGE_URL}/api/directed/revoke`, {
+        const resp = await bridgeFetch(`${HTTP_BRIDGE_URL}/api/directed/revoke`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ envelope_id: envelopeId }),
@@ -428,7 +436,7 @@ export class MiasmaBridge {
 
     if (this._mode === MODE_HTTP) {
       try {
-        const resp = await fetch(`${HTTP_BRIDGE_URL}/api/directed/inbox`, {
+        const resp = await bridgeFetch(`${HTTP_BRIDGE_URL}/api/directed/inbox`, {
           method: 'GET',
         });
         if (!resp.ok) return [];
@@ -453,7 +461,7 @@ export class MiasmaBridge {
 
     if (this._mode === MODE_HTTP) {
       try {
-        const resp = await fetch(`${HTTP_BRIDGE_URL}/api/directed/outbox`, {
+        const resp = await bridgeFetch(`${HTTP_BRIDGE_URL}/api/directed/outbox`, {
           method: 'GET',
         });
         if (!resp.ok) return [];
@@ -511,9 +519,35 @@ export class MiasmaBridge {
 
 // ── Utility ──────────────────────────────────────────────────────────────────
 
+// The daemon's HTTP bridge requires its control token (contents of
+// <data_dir>/daemon.token) as a Bearer credential on everything except
+// /api/ping. A page cannot read that file: paste the token once with
+// setControlToken() (it is kept in this browser's localStorage only).
+const TOKEN_KEY = 'miasma_control_token';
+
+export function setControlToken(token) {
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, String(token).trim());
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch (_) { /* storage unavailable */ }
+}
+
+function controlToken() {
+  try { return localStorage.getItem(TOKEN_KEY) || ''; } catch (_) { return ''; }
+}
+
+function bridgeFetch(url, options) {
+  const opts = Object.assign({}, options);
+  const token = controlToken();
+  if (token && !url.endsWith('/api/ping')) {
+    opts.headers = Object.assign({}, opts.headers, { Authorization: `Bearer ${token}` });
+  }
+  return fetch(url, opts);
+}
+
 function fetchWithTimeout(url, options, timeoutMs) {
   return Promise.race([
-    fetch(url, options),
+    bridgeFetch(url, options),
     new Promise((_, reject) =>
       setTimeout(() => reject(new Error('timeout')), timeoutMs)
     ),

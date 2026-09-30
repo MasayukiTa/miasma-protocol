@@ -1210,7 +1210,7 @@ async fn cli_smoke_loopback() {
 #[tokio::test(flavor = "multi_thread")]
 async fn daemon_wipe_returns_then_shuts_down_runtime() {
     use miasma_core::daemon::ipc::{
-        daemon_request, ControlRequest, ControlResponse, HTTP_PORT_FILE, PORT_FILE,
+        daemon_request, daemon_wipe, ControlRequest, ControlResponse, HTTP_PORT_FILE, PORT_FILE,
     };
     use miasma_core::daemon::DaemonServer;
     use std::time::Duration;
@@ -1230,7 +1230,7 @@ async fn daemon_wipe_returns_then_shuts_down_runtime() {
     let data_dir = dir.path().to_owned();
     let run_task = tokio::spawn(server.run());
 
-    let response = daemon_request(&data_dir, ControlRequest::Wipe)
+    let response = daemon_wipe(&data_dir)
         .await
         .expect("wipe request should receive a response before shutdown");
     assert!(matches!(response, ControlResponse::Wiped));
@@ -1679,6 +1679,28 @@ async fn spawn_phase21_node(
     (coord, store)
 }
 
+/// Spawn a node whose share store is opened exactly as the daemon opens it:
+/// from a `config.toml` in the data dir, through `NodeConfig::load` and
+/// `LocalShareStore::open_configured`. `config_toml == None` means no config
+/// file at all (a fresh node with the built-in defaults).
+async fn spawn_configured_node(
+    key_byte: u8,
+    config_toml: Option<&str>,
+) -> (MiasmaCoordinator, Arc<LocalShareStore>) {
+    let dir = tempfile::tempdir().unwrap().keep();
+    if let Some(text) = config_toml {
+        std::fs::write(dir.join("config.toml"), text).unwrap();
+    }
+    let config = miasma_core::NodeConfig::load(&dir).unwrap();
+    let store = Arc::new(LocalShareStore::open_configured(&dir, &config.storage).unwrap());
+    let key = [key_byte; 32];
+    let mut node = MiasmaNode::new(&key, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+    let addrs = node.collect_listen_addrs(400).await;
+    let listen_addr_str = addrs[0].to_string();
+    let coord = MiasmaCoordinator::start(node, store.clone(), vec![listen_addr_str]).await;
+    (coord, store)
+}
+
 /// Spawn exactly as a shipped node does: quotas come from `NodeConfig::default`
 /// and are applied through the production store constructor.
 async fn spawn_phase21_default_config_node(
@@ -1700,6 +1722,206 @@ async fn spawn_phase21_default_config_node(
     let listen_addr_str = addrs[0].to_string();
     let coord = MiasmaCoordinator::start(node, store.clone(), vec![listen_addr_str]).await;
     (coord, store)
+}
+
+#[test]
+fn hosted_quota_defaults_to_the_shipped_default_including_for_configs_written_before_the_key_existed(
+) {
+    let default_mb = miasma_core::config::DEFAULT_HOSTED_QUOTA_MB;
+
+    // Built-in default.
+    assert_eq!(
+        miasma_core::config::StorageConfig::default().hosted_quota_mb,
+        default_mb
+    );
+
+    // A config.toml from before `hosted_quota_mb` existed must still load, and
+    // must get the shipped default (not an error, not zero).
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("config.toml"),
+        "[storage]\nquota_mb = 100\nbandwidth_mb_day = 1024\n",
+    )
+    .unwrap();
+    let config = miasma_core::NodeConfig::load(dir.path()).unwrap();
+    assert_eq!(config.storage.hosted_quota_mb, default_mb);
+    let store = LocalShareStore::open_configured(dir.path(), &config.storage).unwrap();
+    assert_eq!(store.hosted_quota_bytes(), default_mb * 1024 * 1024);
+
+    // With the key set, the value reaches the store, in MiB.
+    let dir2 = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir2.path().join("config.toml"),
+        "[storage]\nquota_mb = 100\nbandwidth_mb_day = 1024\nhosted_quota_mb = 7\n",
+    )
+    .unwrap();
+    let config2 = miasma_core::NodeConfig::load(dir2.path()).unwrap();
+    let store2 = LocalShareStore::open_configured(dir2.path(), &config2.storage).unwrap();
+    assert_eq!(store2.hosted_quota_bytes(), 7 * 1024 * 1024);
+
+    // An explicit 0 is honoured: the operator opted out of hosting.
+    let dir3 = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir3.path().join("config.toml"),
+        "[storage]
+quota_mb = 100
+bandwidth_mb_day = 1024
+hosted_quota_mb = 0
+",
+    )
+    .unwrap();
+    let config3 = miasma_core::NodeConfig::load(dir3.path()).unwrap();
+    let store3 = LocalShareStore::open_configured(dir3.path(), &config3.storage).unwrap();
+    assert_eq!(store3.hosted_quota_bytes(), 0);
+}
+
+/// Opt-out path: a node whose `config.toml` sets `hosted_quota_mb = 0` refuses
+/// a pushed share, so the publisher stays the sole holder.
+#[tokio::test(flavor = "multi_thread")]
+async fn zero_hosted_quota_node_refuses_pushed_shares() {
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let result = timeout(Duration::from_secs(60), async {
+        let (coord_a, _store_a) = spawn_configured_node(0xA5, None).await;
+        let (coord_b, store_b) = spawn_configured_node(
+            0xB5,
+            Some(
+                "[storage]
+quota_mb = 100
+bandwidth_mb_day = 1024
+hosted_quota_mb = 0
+",
+            ),
+        )
+        .await;
+        let peer_id_a = *coord_a.peer_id();
+        let peer_id_b = *coord_b.peer_id();
+        let addr_a: Multiaddr = coord_a.listen_addrs()[0].parse().unwrap();
+
+        coord_b.add_bootstrap_peer(peer_id_a, addr_a).await.unwrap();
+        coord_b.bootstrap_dht().await.unwrap();
+        coord_b
+            .wait_until_peer_connected(peer_id_a, Duration::from_secs(10))
+            .await
+            .unwrap();
+        coord_a
+            .wait_until_peer_connected(peer_id_b, Duration::from_secs(10))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        let params = DissolutionParams {
+            data_shards: 2,
+            total_shards: 3,
+        };
+        coord_a
+            .dissolve_and_publish_with_options(
+                b"zero hosted quota must refuse pushed shares",
+                params,
+                PublishOptions::default(),
+            )
+            .await
+            .expect("publish succeeds; the publisher keeps every share");
+
+        let (attempted, refused) = coord_a.push_counts();
+        assert!(
+            attempted >= 1 && refused >= 1,
+            "A must have tried to push and been refused (attempted {attempted}, refused {refused})"
+        );
+        assert_eq!(store_b.hosted_quota_bytes(), 0);
+        assert_eq!(
+            store_b.used_hosted_bytes(),
+            0,
+            "a node with hosted_quota_mb = 0 must hold no pushed shares"
+        );
+
+        coord_a.shutdown().await;
+        coord_b.shutdown().await;
+    })
+    .await;
+
+    result.expect("zero_hosted_quota_node_refuses_pushed_shares timed out (60s)");
+}
+
+/// The opt-in path end to end through the *configuration*: B sets
+/// `storage.hosted_quota_mb` in its config.toml, holds A's pushed shares, A
+/// goes offline, and C (never connected to A) retrieves the content from B.
+#[tokio::test(flavor = "multi_thread")]
+async fn node_with_hosted_quota_key_holds_shares_and_serves_after_publisher_leaves() {
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let result = timeout(Duration::from_secs(60), async {
+        let (coord_a, _store_a) = spawn_configured_node(0xA6, None).await;
+        let (coord_b, store_b) = spawn_configured_node(
+            0xB6,
+            Some("[storage]\nquota_mb = 100\nbandwidth_mb_day = 1024\nhosted_quota_mb = 50\n"),
+        )
+        .await;
+        let peer_id_a = *coord_a.peer_id();
+        let peer_id_b = *coord_b.peer_id();
+        let addr_a: Multiaddr = coord_a.listen_addrs()[0].parse().unwrap();
+        let addr_b: Multiaddr = coord_b.listen_addrs()[0].parse().unwrap();
+
+        coord_b.add_bootstrap_peer(peer_id_a, addr_a).await.unwrap();
+        coord_b.bootstrap_dht().await.unwrap();
+        coord_b
+            .wait_until_peer_connected(peer_id_a, Duration::from_secs(10))
+            .await
+            .unwrap();
+        coord_a
+            .wait_until_peer_connected(peer_id_b, Duration::from_secs(10))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        let content = b"hosted quota key: B holds it, A leaves, C still reads it";
+        // A places at most one share per peer, and B is the only peer, so
+        // B can hold exactly one share per segment. With k = 1 that one share
+        // is enough for C to reconstruct; with k = 2 it would not be (see
+        // `dissolve_and_publish_distributes_to_connected_peers` for two hosts).
+        let params = DissolutionParams {
+            data_shards: 1,
+            total_shards: 2,
+        };
+        let report = coord_a
+            .dissolve_and_publish_with_options(content, params, PublishOptions::strict(params))
+            .await
+            .expect("publish should reach the strict remote-distribution requirement via B");
+        let mid = report.mid;
+
+        assert!(
+            store_b.used_hosted_bytes() > 0,
+            "B was configured with hosted_quota_mb and must hold pushed shares"
+        );
+
+        // A goes away entirely.
+        coord_a.shutdown().await;
+
+        // C only ever talks to B.
+        let (coord_c, _store_c) = spawn_configured_node(0xC6, None).await;
+        coord_c.add_bootstrap_peer(peer_id_b, addr_b).await.unwrap();
+        coord_c.bootstrap_dht().await.unwrap();
+        coord_c
+            .wait_until_peer_connected(peer_id_b, Duration::from_secs(10))
+            .await
+            .unwrap();
+
+        let recovered = coord_c
+            .retrieve_from_network(&mid, params)
+            .await
+            .expect("C must retrieve from B with the publisher offline");
+        assert_eq!(recovered.as_slice(), content as &[u8]);
+
+        coord_b.shutdown().await;
+        coord_c.shutdown().await;
+    })
+    .await;
+
+    result.expect(
+        "node_with_hosted_quota_key_holds_shares_and_serves_after_publisher_leaves timed out (60s)",
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

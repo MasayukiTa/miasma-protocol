@@ -18,6 +18,7 @@
 //!  └──────────────┘   └──────────────┘
 //! ```
 
+pub mod control_auth;
 pub mod http_bridge;
 pub mod ipc;
 pub mod rate_limit;
@@ -130,6 +131,8 @@ pub struct DaemonServer {
     shadowsocks_configured: bool,
     /// Whether Tor is configured.
     tor_configured: bool,
+    /// Control-channel token and wipe-challenge state.
+    control_auth: Arc<control_auth::ControlAuth>,
     // Single-consumer resources moved into run():
     listener: Option<TcpListener>,
     rep_success_rx: Option<mpsc::Receiver<[u8; 32]>>,
@@ -311,7 +314,16 @@ impl DaemonServer {
         };
         // Publish the control port only after every fallible preflight step has
         // succeeded. A failed start must never leave a stale daemon.port file.
-        write_port_file(&data_dir, control_port)?;
+        // The control token is written first: clients wait for daemon.port and
+        // then read the token, so it must already be there.
+        let control_auth = Arc::new(control_auth::ControlAuth::new(
+            control_auth::ControlToken::generate(),
+        ));
+        control_auth::write_token_file(&data_dir, control_auth.token())?;
+        if let Err(e) = write_port_file(&data_dir, control_port) {
+            control_auth::remove_token_file(&data_dir);
+            return Err(e);
+        }
         if let Some(ref sni) = transport_config.wss_sni {
             wss_config.sni_override = Some(sni.clone());
         }
@@ -472,6 +484,7 @@ impl DaemonServer {
                 shadowsocks_configured,
                 tor_configured,
                 daemon_shutdown_tx: shutdown_tx.clone(),
+                control_auth: control_auth.clone(),
             },
         )
         .await
@@ -524,6 +537,7 @@ impl DaemonServer {
             listener: Some(listener),
             rep_success_rx: Some(rep_rx),
             topology_rx: Some(topo_rx),
+            control_auth,
             shutdown_tx,
             shutdown_rx: Some(shutdown_rx),
         })
@@ -625,6 +639,7 @@ impl DaemonServer {
             shadowsocks_configured: self.shadowsocks_configured,
             tor_configured: self.tor_configured,
             daemon_shutdown_tx: self.shutdown_tx.clone(),
+            control_auth: self.control_auth.clone(),
         };
         let ipc_handle: JoinHandle<()> = tokio::spawn(async move {
             ipc_server_loop(
@@ -689,6 +704,7 @@ impl DaemonServer {
 
         coord.shutdown().await;
         remove_port_file(&self.data_dir);
+        control_auth::remove_token_file(&self.data_dir);
         ipc::remove_http_port_file(&self.data_dir);
         Ok(())
     }
@@ -762,6 +778,43 @@ async fn handle_ipc_client(
     data_dir: PathBuf,
     bridge_state: BridgeLiveState,
 ) -> Result<()> {
+    // Authenticate before anything else is parsed: the first frame must be a
+    // small ControlAuth frame carrying the token. Any other first frame, a
+    // wrong token, or a slow peer is answered with an error (after a delay
+    // that grows with consecutive failures) and disconnected without a
+    // request ever being deserialised or processed.
+    let auth_result = tokio::time::timeout(
+        control_auth::PRE_AUTH_TIMEOUT,
+        ipc::read_frame_limited::<ipc::ControlAuth>(&mut stream, control_auth::PRE_AUTH_FRAME_MAX),
+    )
+    .await;
+    let denial = match auth_result {
+        Ok(Ok(hello)) => {
+            let hello = Zeroizing::new(hello);
+            bridge_state.control_auth.check(&hello.token).err()
+        }
+        // Not an auth frame / oversize / timeout: count it as a failure too.
+        _ => Some(
+            bridge_state
+                .control_auth
+                .check("")
+                .err()
+                .unwrap_or(std::time::Duration::from_millis(100)),
+        ),
+    };
+    if let Some(delay) = denial {
+        tokio::time::sleep(delay).await;
+        let _ = write_frame(
+            &mut stream,
+            &ControlResponse::Error(
+                "unauthorized: missing or invalid control token (see daemon.token in the data dir)"
+                    .into(),
+            ),
+        )
+        .await;
+        let _ = tokio::io::AsyncWriteExt::shutdown(&mut stream).await;
+        return Ok(());
+    }
     let req: ControlRequest = read_frame(&mut stream).await?;
     let mut resp = process_request(
         req,
@@ -798,6 +851,9 @@ pub struct BridgeLiveState {
     /// terminate IPC/HTTP/network tasks so master-derived identity material in
     /// the libp2p swarm is dropped as part of the wipe boundary.
     pub daemon_shutdown_tx: mpsc::Sender<()>,
+    /// Control token (checked on every IPC connection and HTTP bridge request)
+    /// and the outstanding `Wipe` confirmation challenge.
+    pub control_auth: Arc<control_auth::ControlAuth>,
 }
 
 pub(crate) async fn process_request(
@@ -896,13 +952,17 @@ pub(crate) async fn process_request(
             restart,
         } => {
             let password = password.map(Zeroizing::new);
+            let output_path = match control_auth::validate_output_path(&output_path) {
+                Ok(p) => p,
+                Err(e) => return ControlResponse::Error(format!("output path rejected: {e}")),
+            };
             match crate::crypto::hash::ContentId::from_str(&mid) {
                 Ok(content_id) => {
                     let registry = crate::transfer::jobs::registry_for(&data_dir);
                     let id = registry.start_receive(
                         coord.clone(),
                         content_id,
-                        PathBuf::from(output_path),
+                        output_path,
                         password,
                         restart,
                     );
@@ -1326,7 +1386,20 @@ pub(crate) async fn process_request(
             })
         }
 
-        ControlRequest::Wipe => {
+        ControlRequest::Wipe => ControlResponse::WipeChallenge {
+            nonce: bridge_state.control_auth.issue_wipe_challenge(),
+        },
+
+        ControlRequest::WipeConfirm { nonce } => {
+            let nonce = Zeroizing::new(nonce);
+            if !bridge_state
+                .control_auth
+                .consume_wipe_challenge(nonce.as_str())
+            {
+                return ControlResponse::Error(
+                    "wipe not confirmed: missing, expired or wrong confirmation nonce".into(),
+                );
+            }
             // Wipe store key material first, then take the exclusive directed-key
             // lock. The write lock waits for every in-flight send/retrieve read
             // guard before Zeroizing the final shared secret copy.

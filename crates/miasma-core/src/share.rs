@@ -6,6 +6,10 @@ use crate::{
     MiasmaError,
 };
 
+/// Domain-separation string of [`MiasmaShare::piece_commitment`]. Changing the
+/// encoding requires changing this string and the manifest version.
+pub const PIECE_COMMITMENT_DOMAIN: &str = "miasma-piece-commitment-v2";
+
 /// A single Miasma share — the atomic unit distributed across network nodes.
 ///
 /// One `MiasmaShare` contains:
@@ -103,6 +107,40 @@ impl MiasmaShare {
         }
     }
 
+    /// The piece commitment: a domain-separated BLAKE3 over *everything in the
+    /// share that decides whether it can be used*, not just the ciphertext.
+    ///
+    /// ```text
+    /// BLAKE3_derive_key("miasma-piece-commitment-v2")(
+    ///     version:u8 || mid:32 || segment:u32le || slot:u16le || original_len:u32le
+    ///     || len(shard_data):u64le || shard_data
+    ///     || len(key_share):u64le  || key_share
+    ///     || nonce:12 )
+    /// ```
+    ///
+    /// `shard_hash` alone (`BLAKE3(shard_data)`) leaves `key_share`, `nonce` and
+    /// `original_len` unprotected, so a holder could flip any of them and the
+    /// piece still matched its listed ID; the receiver then stopped at `k`
+    /// accepted pieces and failed at AEAD time with no spare tried. The manifest
+    /// lists this commitment per slot instead, so such a piece is refused the
+    /// moment it arrives.
+    ///
+    /// `mid` is the full-file MID digest (the share only carries its prefix).
+    pub fn piece_commitment(&self, mid: &ContentId) -> [u8; 32] {
+        let mut h = blake3::Hasher::new_derive_key(PIECE_COMMITMENT_DOMAIN);
+        h.update(&[self.version]);
+        h.update(mid.as_bytes());
+        h.update(&self.segment_index.to_le_bytes());
+        h.update(&self.slot_index.to_le_bytes());
+        h.update(&self.original_len.to_le_bytes());
+        h.update(&(self.shard_data.len() as u64).to_le_bytes());
+        h.update(&self.shard_data);
+        h.update(&(self.key_share.len() as u64).to_le_bytes());
+        h.update(&self.key_share);
+        h.update(&self.nonce);
+        *h.finalize().as_bytes()
+    }
+
     /// Serialize to bytes (bincode).
     pub fn to_bytes(&self) -> Result<Vec<u8>, MiasmaError> {
         bincode::serialize(self).map_err(|e| MiasmaError::Serialization(e.to_string()))
@@ -135,6 +173,20 @@ impl ShareVerification {
         // 2. Shard hash check.
         let computed = *blake3::hash(&share.shard_data).as_bytes();
         computed == share.shard_hash
+    }
+
+    /// Verify a fetched piece against the commitment the manifest lists for its
+    /// slot. This is the check that must gate a piece into the set of `k`:
+    /// it covers `key_share`, `nonce`, `original_len` and position as well as the
+    /// ciphertext (see [`MiasmaShare::piece_commitment`]). `coarse_verify` alone
+    /// cannot do this because it has no independent value to compare against.
+    pub fn verify_piece(
+        share: &MiasmaShare,
+        expected_mid: &ContentId,
+        expected_commitment: &[u8; 32],
+    ) -> bool {
+        Self::coarse_verify(share, expected_mid)
+            && share.piece_commitment(expected_mid) == *expected_commitment
     }
 
     /// Self-consistency check with no independent expected MID to compare

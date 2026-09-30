@@ -115,7 +115,7 @@ async fn a_published_file_carries_a_manifest_that_matches_what_was_stored() {
         assert_eq!(manifest.protection, Protection::None);
         manifest.validate().unwrap();
 
-        // Every listed piece ID must be the shard hash of a share A actually holds.
+        // Every listed piece ID must be the piece commitment of a share A actually holds.
         let mut checked = 0;
         for addr in store_a.list() {
             let share = store_a.get(&addr).unwrap();
@@ -123,9 +123,11 @@ async fn a_published_file_carries_a_manifest_that_matches_what_was_stored() {
                 .expected_piece(share.segment_index, share.slot_index)
                 .expect("every stored share must be listed in the manifest");
             assert_eq!(
-                *expected, share.shard_hash,
+                *expected,
+                share.piece_commitment(&report.mid),
                 "piece ID for segment {} slot {} does not match the stored shard",
-                share.segment_index, share.slot_index
+                share.segment_index,
+                share.slot_index
             );
             checked += 1;
         }

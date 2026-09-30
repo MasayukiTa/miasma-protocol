@@ -69,14 +69,14 @@ for the whole transfer. That is a separate fix and does not block a 1:1 transfer
 
 ```text
 TransferManifest {
-    version:      u8,                    // 1
+    version:      u8,                    // 2 (see Security fixes 1)
     mid:          [u8; 32],              // must equal the record's mid_digest
     data_shards:  u8,   total_shards: u8,
     segment_size: u32,  total_bytes:  u64,
     protection:   Protection,            // None | Password { argon2: {m_kib,t,p}, salt:[u8;16], key_check:[u8;16] }
     segments:     Vec<SegmentEntry>,     // ordered by index
 }
-SegmentEntry { index: u32, plaintext_len: u32, plain_hash: [u8;32], piece_ids: Vec<[u8;32]> /* n */ }
+SegmentEntry { index: u32, plaintext_len: u32, plain_hash: [u8;32], piece_ids: Vec<[u8;32]> /* n; v2: whole-share commitment, not BLAKE3(shard_data) */ }
 ```
 
 Size: `32 + 4 + 4 + n*32` per segment ⇒ ≈ 0.7 KB at `n = 20`; 1600 segments ≈ 1.1 MB.
@@ -612,6 +612,136 @@ Each entry says what was actually run. Machine: Windows 11, slim debug profile (
   1 h idle timeout a public node holds idle inbound connections for an hour (`libp2p::connection_limits` is the
   follow-up if that matters).
 
+### Security fixes 1 (2026-09-30, branch `security/fix-transfer-layer`)
+
+Three findings from the adversarial review of the transfer layer, fixed at the root.
+
+**1. Unbounded record counts (C-02, medium).** A manifest-less DHT record (any peer that knows a MID can
+sign one) made the receiver compute `segment_count = max(segment_index) + 1` and allocate a table of
+that size: `u32::MAX - 1` asked for about 103 GB and aborted the daemon, `u32::MAX` overflowed, tens of
+millions burned hundreds of MB.
+- Fix: `DhtRecord::validate()` (`network/types.rs`) runs before any count is used. Checked
+  `segment_index` below `MAX_SEGMENTS = 65_536` (64 MiB segments x 65 536 = 4 TiB), `0 < k <= n`,
+  shard index `< n`, locations bounded by `min(2^20, MAX_SEGMENTS * n)` (one DHT value is 16 MiB and the
+  smallest location ~22 bytes, so 2^20 is above any genuine record), address count/length and peer-id
+  length bounded. Rejects, never clamps; error is `InvalidManifest("invalid record: ...")`.
+- Called at every boundary: `decode_signed_dht_record` and `decode_signed_record_and_manifest` in
+  `network/node.rs` (a bad record is refused as `InvalidInnerRecord`), `run_receive`, both
+  `retrieve_from_network*` segment-count sites in `network/coordinator.rs` (the same `max() + 1` pattern),
+  and `encode_record_value` (never publish what receivers refuse).
+- Other unbounded numbers found and bounded: `TransferManifest.segment_size` (now `<= 64 MiB`,
+  it sized the per-segment decode buffer) and segment count (`<= MAX_SEGMENTS`); on the manifest-less
+  path a piece's `original_len` (a holder could claim 4 GiB, which `retrieve_segment_with` turned into a
+  buffer) is refused above 64 MiB.
+- Not changed: `retrieval/coordinator.rs`, `streaming.rs` take their counts from callers that now validate.
+
+**2. Piece commitment did not cover the key material (C-07, low-medium).** `PieceId = BLAKE3(shard_data)`,
+so a holder could flip `key_share`, `nonce` or `original_len`; the piece still passed verification, the
+receiver stopped at `k` accepted pieces, decryption failed and no spare holder was tried: one hostile
+holder per segment killed the transfer.
+- (a) Fix: `MiasmaShare::piece_commitment(mid)` = domain-separated BLAKE3
+  (`derive_key("miasma-piece-commitment-v2")`) over `version | MID | segment | slot | original_len |
+  len+shard_data | len+key_share | nonce`. The manifest lists it per slot (`SegmentEntry::from_dissolved`
+  now takes the MID) and the receiver checks it on arrival (`ShareVerification::verify_piece`).
+- **Manifest version 1 -> 2, no compatibility.** Beta software: a v1 manifest (trailer or struct) is
+  refused with `InvalidManifest("manifest version 1 is no longer supported ... publish the file again")`;
+  only one format is kept. The publish-journal version is bumped too (its saved entries hold v1 IDs), so an
+  old journal restarts the publish. Records published by an older build must be published again.
+- (b) Resilience: if the first `k` verified pieces still fail to decode (only possible without a manifest,
+  or from a lying publisher) the receiver fetches up to 4 spare pieces and retries with one piece swapped
+  at a time, at most 16 decode attempts per segment; the piece swapped out of the combination that decodes
+  is recorded as suspect (segment, slot, holder) and is not reused in the run. Otherwise the first error
+  is returned. Two simultaneous bad pieces are not searched for beyond that cap. The unprotected
+  `dissolve_segment_with` / `retrieve_segment_with` path is unchanged.
+
+**3. Argon2 ceiling (low).** The untrusted-manifest ceiling was 256 MiB / t=10 / p=4. `create` produces
+64 MiB / t=3 / p=1 and nothing in the CLI or desktop picks another cost, so the ceiling is now
+128 MiB / t=6 / p=2, refused before any KDF work.
+
+**Tests.** New `crates/miasma-core/tests/adversarial_transfer_test.rs` (14 tests): tampered key_share /
+nonce (protected) / original_len are refused and a spare holder completes the transfer, commitment
+covers every field, legacy-record recovery from spares and its bound, hostile segment indexes
+(`u32::MAX - 1`, `u32::MAX`, 10 000 000, `MAX_SEGMENTS`) rejected in milliseconds, malformed records,
+v1 manifest refused with the clear message, segment_size bound, unchecked `original_len`, Argon2 cap
+before KDF work. Plus one unit test in `transfer/protection.rs`. Passwords are generated at run time.
+Still open from the same review (not transfer layer or design work): DHT records are not publisher-
+authenticated (a MID holder can sign a record), the protection mode is not part of the MID, unauthenticated
+daemon IPC, hosted-share tuple replacement.
+
+### Security fixes 2 (2026-09-30, branch `security/fix-transfer-layer`)
+
+Share hosting and the onion replay cache.
+
+**1. Hosted-share replacement by any peer (C-03, high).** The `(mid_prefix, segment, slot)` tuple is public,
+so `put_hosted` deleting "the older generation" let any admitted peer replace another publisher's share with
+self-consistent garbage. Fix (`store.rs`, `network/node.rs`): a hosted entry records the authenticated
+principal (the libp2p `PeerId` of the sender) in the store index (`hosted_principal`, `#[serde(default)]`, so
+an old `store_index.json` loads with principal = unknown). `LocalShareStore::put_hosted_by(share, principal)`
+replaces an existing entry of the same tuple only for the same principal; anyone else, and any unknown
+owner, is refused with `HostedRefusal::NotOwner`, which reaches the pusher as
+`StoreRejectReason::NotOwner`. Pushing identical bytes is acknowledged without touching the entry, so it can
+neither take over nor evict. `put_hosted(share)` stays as the no-principal entry point (unknown owner; it
+cannot replace or be replaced). The pusher's `PushState` remembers a `NotOwner` answer per (peer, piece) and
+stops offering that piece to that peer, without blacklisting the peer. Legacy hosted entries (unknown owner)
+cannot be repaired by a new push; the old copy has to be removed first.
+
+**2. Hosted quota monopoly (C-08, medium).** Under the global cap, one principal may hold at most
+`max(25% of the hosted quota, min(quota, 16 MiB))` (`HOSTED_PRINCIPAL_SHARE_PERCENT`,
+`HOSTED_PRINCIPAL_FLOOR_BYTES`, `hosted_principal_budget_bytes()`); unknown/legacy entries share one bucket.
+Over budget gives `HostedRefusal::PrincipalBudgetExceeded` / `StoreRejectReason::PrincipalBudgetExceeded`
+(a standing refusal in `PushState`). Default hosted quota is still 0. No new config key. Note that the floor
+means a quota of 16 MiB or less gives a single principal the whole pool; the fairness only bites above that.
+
+**3. Onion replay cache poisoning (C-10, medium).** `onion_is_replay` is now read-only and runs before
+decryption; the fingerprint is recorded (`onion_record_authenticated`) only after the AEAD peel succeeds, at
+both the relay and the delivery site. Failed authentications are counted per sender
+(64 per 10 s, at most 1024 tracked senders); past that, that sender's layers are dropped before any
+decryption. Invalid ciphertext can no longer mutate the replay state.
+
+**Tests.** New `crates/miasma-core/tests/adversarial_storage_test.rs` (9 tests): other principal cannot
+replace or evict, unknown principal neither replaces nor is replaced, same principal can republish,
+identical bytes do not transfer ownership, per-principal budget stops one peer while another still stores,
+unknown owners share a bucket, small quota stays usable, default quota refuses, a pre-principal
+`store_index.json` loads. In `network/node.rs`: a valid layer is processed once, 5000 unique invalid layers
+follow, and the replay is still rejected; a single sender's failed decryptions are capped.
+
+### Security fixes 3 (2026-09-30, branch `security/fix-transfer-layer`)
+
+The local control channel (C-05 / F3, S-02). Before this, any process that could open a loopback TCP
+connection was served: a raw client got `Status` and then `Wipe` (master key erased) with no secret, and
+`PublishFile` / `TransferStartReceive` let it choose file paths. The HTTP bridge treated a missing `Origin`
+as "not a browser, allow".
+
+- **Token.** At each start the daemon draws a 256-bit token from `OsRng` and writes it to
+  `<data_dir>/daemon.token` before it writes `daemon.port`. A stale file is unlinked and replaced; the file is
+  deleted at clean shutdown (and by `cleanup_stale_state`). Unix: created with mode 0600 (no
+  widen-then-narrow). Windows: created empty, then `icacls` drops inheritance and grants the current user
+  only, then the secret is written; if `icacls` fails the daemon warns and keeps going with the data
+  directory's own ACL (not verified by the daemon). New module `daemon/control_auth.rs`.
+- **IPC.** The first frame of every connection is a `ControlAuth { token }` frame (max 4 KiB, 5 s timeout),
+  compared in constant time. Anything else, or a wrong token, gets an `unauthorized` error and a close before
+  any request is deserialised. Failures are delayed 100 ms doubling to 3 s, reset by a success.
+  `daemon_request` reads the token file itself, so the CLI, desktop worker, FFI and tests needed no change
+  beyond `Wipe`.
+- **Wipe.** `Wipe` now only returns `WipeChallenge { nonce }` (single use, 30 s, replaced by a newer one);
+  `WipeConfirm { nonce }` wipes. `daemon_wipe()` performs both; CLI, desktop, FFI and the integration test
+  use it.
+- **HTTP bridge.** Everything except `GET /api/ping` needs `Authorization: Bearer <token>` regardless of
+  `Origin`; `POST /api/wipe` is two-step (`{"confirm": <challenge>}`). `web/js/bridge.js` sends the token
+  from `localStorage['miasma_control_token']` (set with `setControlToken()`); a page cannot read the file, so
+  the token must be pasted once. Mobile bridge clients do not send it yet (see P1-9 in
+  `remaining-tasks-prioritized.md`).
+- **S-02.** `ControlRequest::zeroize` now wipes the passwords of `PublishFileProtected`,
+  `TransferStartReceive`, `TransferStartPublish` (and the `WipeConfirm` nonce). `daemon_request` zeroizes the
+  request after writing it.
+- **Path policy.** `TransferStartReceive` output paths must be absolute and free of `..`
+  (`PathPolicyError`, returned as `output path rejected: ...`). CLI and desktop resolve paths lexically first
+  (`absolutize_lexical`). This is not a sandbox.
+- **Tests.** `crates/miasma-core/tests/adversarial_ipc_test.rs` (11 tests) plus unit tests in
+  `control_auth.rs`.
+- **Limits.** Any process running as the same user can read the token. Not done: OS-authenticated IPC
+  (named pipe / Unix socket with peer credentials), a token for the mobile bridge clients.
+
 ## 7. Decisions and open questions
 
 - D1 Manifest lives in the record trailer, not a second DHT key. (Reason in §2.2.)
@@ -631,11 +761,19 @@ Each entry says what was actually run. Machine: Windows 11, slim debug profile (
 
 Each has a reason it was left; none blocks a first cross-machine transfer.
 
-1. **Hosted-share quota has no configuration key** (`with_hosted_quota_mb` is called only from
-   tests), so peers refuse every pushed share and the sender is the sole holder. A config key, a
-   default, and a test that runs with the *default* config are needed before the readme's
-   "resists content seizure via single-node compromise" line can be relied on. The readme now
-   carries a caveat pointing here.
+1. **Hosted-share quota has no configuration key** — **DONE 2026-09-30 (key added; default follows main: 1024 MiB).**
+   `storage.hosted_quota_mb` (`StorageConfig`, `#[serde(default = ...)]` so old `config.toml` files still
+   load with the default) is read/written by `miasma config --key ...`, reaches the store through
+   `LocalShareStore::open_configured` at daemon start, and is printed by `miasma status` when the
+   daemon is not running. **The default is `DEFAULT_HOSTED_QUOTA_MB` = 1024 (main's "enable hosted share quota by default", merged into this branch's earlier opt-in-0 wiring)**; 0 opts out. Accepting other
+   people's shares still costs disk up to that cap (storage-exhaustion bound), which the readme caveat notes. Tests:
+   `zero_hosted_quota_node_refuses_pushed_shares` (`hosted_quota_mb = 0`: push attempted and refused, nothing
+   hosted) and `default_config_accepts_remote_distribution` (default config accepts) and `node_with_hosted_quota_key_holds_shares_and_serves_after_publisher_leaves` (B has the
+   key in `config.toml`, A pushes, A shuts down, C retrieves from B; k=1 because A places one share
+   per peer and B is the only host). **Still not designed:** eviction of hosted shares when the quota
+   is full (a full quota just refuses), and per-peer limits (one publisher can fill the whole hosted
+   quota). Not verified across real machines. The running daemon's status has no quota field, so it is
+   not shown there.
 2. **The local share store's index is rewritten in full on every `put`** — cost per put grew from
    26 ms (250 shares) to 123 ms (4,000) in a debug build. Fix: an append-only index log (the send
    journal is the same shape). Left until a real run shows it matters.
@@ -681,6 +819,10 @@ Owner decisions (answers to the three questions asked after §7b):
    `C:\Windows\Fonts`, so on macOS every Japanese glyph is a tofu box — a font discovery per OS is part
    of this work, not an extra.
 3. Theme: **whole app**, not just the new screen.
+4. Test scope (2026-09-30): the owner has no drive with >= 100 GiB free on the Windows receiver and
+   judges a 256 MB test enough to prove a split transfer is received. The cross-machine ramp is now
+   256 MiB -> 1 GiB -> 4 GiB; the 20/100 GiB steps and their disk arithmetic are kept in the runbook's
+   appendix A ("if more disk becomes available"). 100 GiB behaviour therefore stays **unmeasured**.
 
 Requested language and look:
 
