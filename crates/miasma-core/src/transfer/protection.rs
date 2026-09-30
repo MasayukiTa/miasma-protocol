@@ -372,35 +372,43 @@ mod tests {
 
     #[test]
     fn a_weak_password_is_refused_before_any_key_work() {
+        use super::password_policy::test_support::{compose, expected_codes};
         use super::password_policy::PolicyViolation;
         // The default cost (64 MiB x 3) takes seconds in a debug build; a
         // policy refusal must come back at once, having derived nothing.
         let t0 = std::time::Instant::now();
-        for weak in ["", "a1!bc", "abcdef!", "123456!", "abc1234"] {
-            let err = PasswordProtection::create(weak).err().expect("refused");
-            assert!(matches!(err, MiasmaError::WeakPassword(_)), "{err:?}");
+        // (letters, digits, symbols): empty, too short, then each class missing.
+        for (l, d, s) in [(0, 0, 0), (3, 1, 1), (5, 0, 2), (0, 5, 2), (4, 3, 0)] {
+            let weak = compose(l, d, s, &[]);
+            let refused = matches!(
+                PasswordProtection::create(&weak).err(),
+                Some(MiasmaError::WeakPassword(_))
+            );
+            assert!(
+                refused,
+                "weak composition l={l} d={d} s={s} was not refused"
+            );
         }
         assert!(
             t0.elapsed() < std::time::Duration::from_millis(500),
             "policy check must run before Argon2: {:?}",
             t0.elapsed()
         );
-        match PasswordProtection::create("abc").err().unwrap() {
-            MiasmaError::WeakPassword(v) => assert_eq!(
-                v,
-                vec![
-                    PolicyViolation::TooShort { min: 6, len: 3 },
-                    PolicyViolation::NoDigit,
-                    PolicyViolation::NoSymbol
-                ]
-            ),
-            other => panic!("{other:?}"),
+        let short = compose(3, 0, 0, &[]);
+        match PasswordProtection::create(&short).err().unwrap() {
+            MiasmaError::WeakPassword(v) => {
+                let codes: Vec<&str> = v.iter().map(PolicyViolation::code).collect();
+                assert!(codes == expected_codes(3, 0, 0, &[]));
+                assert!(v[0] == PolicyViolation::TooShort { min: 6, len: 3 });
+            }
+            _ => panic!("expected a weak-password refusal"),
         }
         // create_with_cost is gated too, and the gate runs before the cost check.
-        assert!(matches!(
-            PasswordProtection::create_with_cost("abc", 1, 1, 1),
+        let gated = matches!(
+            PasswordProtection::create_with_cost(&short, 1, 1, 1),
             Err(MiasmaError::WeakPassword(_))
-        ));
+        );
+        assert!(gated);
     }
 
     #[test]
@@ -409,8 +417,9 @@ mod tests {
         assert!(super::password_policy::check(&pw).is_ok());
         assert!(PasswordProtection::create_with_cost(&pw, M, T, P).is_ok());
         // An old weak password made without the gate still unlocks.
-        let (prot, _) = PasswordProtection::create_unchecked("x", M, T, P).unwrap();
-        assert!(prot.unlock("x").is_ok());
+        let weak = super::password_policy::test_support::compose(1, 0, 0, &[]);
+        let (prot, _) = PasswordProtection::create_unchecked(&weak, M, T, P).unwrap();
+        assert!(prot.unlock(&weak).is_ok());
     }
 
     #[test]
