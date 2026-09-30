@@ -23,6 +23,7 @@
 //!   error, because there is nothing to protect it with.
 
 use std::{
+    collections::HashSet,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::Arc,
@@ -35,14 +36,14 @@ use zeroize::Zeroizing;
 
 use super::{
     journal::{journal_path, now_secs, part_path_for, ReceiveJournal, JOURNAL_VERSION},
-    manifest::TransferManifest,
+    manifest::{SegmentEntry, TransferManifest, MAX_SEGMENT_SIZE},
     progress::{Phase, TransferProgress, TransferState},
     protection::{Protection, UnlockedKey},
 };
 use crate::{
     crypto::hash::ContentId,
     dissolution::{segment::retrieve_segment_with, SegmentMeta},
-    network::types::{DhtRecord, ShardLocation},
+    network::types::{DhtRecord, ShardLocation, MAX_SEGMENTS},
     pipeline::DissolutionParams,
     share::{MiasmaShare, ShareVerification},
     MiasmaError,
@@ -162,6 +163,9 @@ async fn run_inner<S: PieceSource + ?Sized>(
             "the record is not for the requested MID".into(),
         ));
     }
+    // The record comes from the network. Nothing in it may size an allocation or
+    // a loop until it has been bounded (C-02).
+    record.validate()?;
     let params = match &manifest {
         Some(m) => {
             m.validate()?;
@@ -207,12 +211,19 @@ async fn run_inner<S: PieceSource + ?Sized>(
     // ── 3. Candidates per segment, data shards first (no RS reconstruction). ─
     let segment_count: u32 = match &manifest {
         Some(m) => m.segments.len() as u32,
+        // `record.validate()` bounded every index below MAX_SEGMENTS, so this
+        // cannot overflow or ask for an absurd table; the checks stay so that
+        // remains true if that ever changes.
         None => record
             .locations
             .iter()
             .map(|l| l.segment_index)
             .max()
-            .map_or(1, |m| m + 1),
+            .map_or(Some(1), |m| m.checked_add(1))
+            .filter(|&c| c <= MAX_SEGMENTS)
+            .ok_or_else(|| {
+                MiasmaError::InvalidManifest("invalid record: segment table too large".into())
+            })?,
     };
     let total_bytes = manifest.as_ref().map_or(0, |m| m.total_bytes);
     progress.set_totals(segment_count, total_bytes);
@@ -314,6 +325,8 @@ async fn run_inner<S: PieceSource + ?Sized>(
     progress.set_phase(Phase::Transferring);
 
     // ── 5. The transfer loop. ───────────────────────────────────────────────
+    // Pieces that verified but then failed to decode; never reused in this run.
+    let mut suspects: HashSet<(u32, u16, Vec<u8>)> = HashSet::new();
     for seg in next_segment..segment_count {
         if progress.is_cancelled() {
             journal.save(&jpath)?;
@@ -321,13 +334,14 @@ async fn run_inner<S: PieceSource + ?Sized>(
         }
 
         let entry = manifest.as_ref().map(|m| &m.segments[seg as usize]);
-        let expected_len = entry.map(|e| e.plaintext_len);
 
-        // Fetch k valid pieces, retrying the whole segment with backoff.
+        // Collect k verified pieces, retrying the whole segment with backoff.
+        // Verified pieces are kept across attempts.
         let fetch_started = Instant::now();
         let mut attempt: u32 = 0;
-        let pieces = loop {
-            match fetch_segment_pieces(
+        let mut pool: Vec<PooledPiece> = Vec::new();
+        loop {
+            match fill_pool(
                 source,
                 &mid,
                 seg,
@@ -335,10 +349,12 @@ async fn run_inner<S: PieceSource + ?Sized>(
                 k,
                 manifest.as_ref(),
                 progress,
+                &suspects,
+                &mut pool,
             )
             .await
             {
-                Ok(p) => break p,
+                Ok(()) => break,
                 Err(MiasmaError::InsufficientShares { need, got }) => {
                     attempt += 1;
                     if progress.is_cancelled() {
@@ -362,37 +378,26 @@ async fn run_inner<S: PieceSource + ?Sized>(
                 }
                 Err(e) => return Err(e),
             }
-        };
+        }
         let fetch_time = fetch_started.elapsed();
 
-        // Reassemble and decrypt off the async threads.
+        // Reassemble and decrypt off the async threads. If the first k verified
+        // pieces still do not decode (only possible without a manifest, or from
+        // a lying publisher), try other pieces before giving up.
         let decode_started = Instant::now();
-        let plaintext_len = expected_len.unwrap_or_else(|| pieces[0].original_len);
-        let meta = SegmentMeta {
-            index: seg,
-            offset_bytes: 0,
-            plaintext_len,
-            share_count: params.total_shards as u16,
+        let ctx = SegmentCtx {
+            mid: &mid,
+            seg,
+            candidates: &candidates[seg as usize],
+            k,
+            params,
+            key: key.as_ref(),
+            entry,
+            manifest: manifest.as_ref(),
         };
-        let mid_c = mid.clone();
-        let key_c = key.clone();
-        let plaintext = tokio::task::spawn_blocking(move || {
-            retrieve_segment_with(&mid_c, &pieces, &meta, params, key_c.as_deref())
-        })
-        .await
-        .map_err(|e| MiasmaError::Decryption(format!("decode task: {e}")))??;
+        let plaintext =
+            decode_with_fallback(source, &ctx, progress, &mut suspects, &mut pool).await?;
         let decode_time = decode_started.elapsed();
-
-        if let Some(e) = entry {
-            if plaintext.len() != e.plaintext_len as usize
-                || *blake3::hash(&plaintext).as_bytes() != e.plain_hash
-            {
-                return Err(MiasmaError::InvalidManifest(format!(
-                    "segment {seg} does not match its manifest hash; the manifest and the \
-                     pieces disagree"
-                )));
-            }
-        }
 
         // Append, make it durable, then journal it.
         let write_started = Instant::now();
@@ -441,20 +446,52 @@ async fn run_inner<S: PieceSource + ?Sized>(
     Ok(ReceiveOutcome::Complete { bytes: bytes_done })
 }
 
-/// Collect `k` pieces for one segment, refusing any that do not match the manifest.
-async fn fetch_segment_pieces<S: PieceSource + ?Sized>(
+/// A piece that passed verification, with the holder it came from.
+struct PooledPiece {
+    share: MiasmaShare,
+    peer: Vec<u8>,
+}
+
+/// Verified pieces fetched beyond `k` when the first `k` fail to decode.
+const RECOVERY_EXTRA_PIECES: usize = 4;
+/// Decode attempts per segment (the first plus piece swaps) before giving up.
+const MAX_DECODE_ATTEMPTS: usize = 16;
+
+/// Everything `decode_with_fallback` needs to know about one segment.
+struct SegmentCtx<'a> {
+    mid: &'a ContentId,
+    seg: u32,
+    candidates: &'a [(u16, ShardLocation)],
+    k: usize,
+    params: DissolutionParams,
+    key: Option<&'a Arc<UnlockedKey>>,
+    entry: Option<&'a SegmentEntry>,
+    manifest: Option<&'a TransferManifest>,
+}
+
+/// Top `pool` up to `want` verified pieces, refusing any that do not match the
+/// manifest. Slots already in the pool and pieces previously found suspect are
+/// skipped; a rejected piece leaves the slot open for the next holder listed.
+#[allow(clippy::too_many_arguments)]
+async fn fill_pool<S: PieceSource + ?Sized>(
     source: &S,
     mid: &ContentId,
     seg: u32,
     candidates: &[(u16, ShardLocation)],
-    k: usize,
+    want: usize,
     manifest: Option<&TransferManifest>,
     progress: &Arc<TransferProgress>,
-) -> Result<Vec<MiasmaShare>, MiasmaError> {
-    let mut valid: Vec<MiasmaShare> = Vec::with_capacity(k);
+    suspects: &HashSet<(u32, u16, Vec<u8>)>,
+    pool: &mut Vec<PooledPiece>,
+) -> Result<(), MiasmaError> {
     for (slot, holder) in candidates {
-        if valid.len() >= k || progress.is_cancelled() {
+        if pool.len() >= want || progress.is_cancelled() {
             break;
+        }
+        if pool.iter().any(|p| p.share.slot_index == *slot)
+            || suspects.contains(&(seg, *slot, holder.peer_id_bytes.clone()))
+        {
+            continue;
         }
         let fetched = match source.fetch_piece(mid, seg, *slot, holder).await {
             Ok(Some(share)) => share,
@@ -463,18 +500,148 @@ async fn fetch_segment_pieces<S: PieceSource + ?Sized>(
         };
         if piece_is_acceptable(&fetched, mid, seg, *slot, manifest) {
             progress.piece_fetched();
-            valid.push(fetched);
+            pool.push(PooledPiece {
+                share: fetched,
+                peer: holder.peer_id_bytes.clone(),
+            });
         } else {
             progress.piece_rejected();
         }
     }
-    if valid.len() < k {
+    if pool.len() < want {
         return Err(MiasmaError::InsufficientShares {
-            need: k,
-            got: valid.len(),
+            need: want,
+            got: pool.len(),
         });
     }
-    Ok(valid)
+    Ok(())
+}
+
+/// A decode failure that a different set of pieces could cure.
+fn is_recoverable(e: &MiasmaError) -> bool {
+    matches!(
+        e,
+        MiasmaError::Decryption(_)
+            | MiasmaError::ReedSolomon(_)
+            | MiasmaError::Sss(_)
+            | MiasmaError::InvalidManifest(_)
+    )
+}
+
+/// Decode one combination of pieces and check it against the manifest, off the
+/// async threads.
+async fn decode_once(
+    ctx: &SegmentCtx<'_>,
+    pieces: Vec<MiasmaShare>,
+) -> Result<Vec<u8>, MiasmaError> {
+    let plaintext_len = match ctx.entry {
+        Some(e) => e.plaintext_len,
+        // No manifest: the most common `original_len` among the pieces.
+        None => most_common_len(&pieces),
+    };
+    let meta = SegmentMeta {
+        index: ctx.seg,
+        offset_bytes: 0,
+        plaintext_len,
+        share_count: ctx.params.total_shards as u16,
+    };
+    let mid = ctx.mid.clone();
+    let key = ctx.key.cloned();
+    let params = ctx.params;
+    let expected = ctx.entry.map(|e| (e.plaintext_len, e.plain_hash));
+    let seg = ctx.seg;
+    tokio::task::spawn_blocking(move || {
+        let plaintext = retrieve_segment_with(&mid, &pieces, &meta, params, key.as_deref())?;
+        if let Some((len, hash)) = expected {
+            if plaintext.len() != len as usize || *blake3::hash(&plaintext).as_bytes() != hash {
+                return Err(MiasmaError::InvalidManifest(format!(
+                    "segment {seg} does not match its manifest hash; the manifest and the \
+                     pieces disagree"
+                )));
+            }
+        }
+        Ok(plaintext)
+    })
+    .await
+    .map_err(|e| MiasmaError::Decryption(format!("decode task: {e}")))?
+}
+
+fn most_common_len(pieces: &[MiasmaShare]) -> u32 {
+    let mut best = (0usize, pieces.first().map_or(0, |p| p.original_len));
+    for p in pieces {
+        let n = pieces
+            .iter()
+            .filter(|q| q.original_len == p.original_len)
+            .count();
+        if n > best.0 {
+            best = (n, p.original_len);
+        }
+    }
+    best.1
+}
+
+/// Decode the segment from the pool. If the first `k` pieces fail in a way other
+/// pieces could cure, fetch a few spares and retry with one piece swapped at a
+/// time (bounded by [`MAX_DECODE_ATTEMPTS`]). The piece swapped out of the
+/// combination that finally decodes is recorded as suspect and is not reused in
+/// this run. If nothing works, the first error is returned.
+async fn decode_with_fallback<S: PieceSource + ?Sized>(
+    source: &S,
+    ctx: &SegmentCtx<'_>,
+    progress: &Arc<TransferProgress>,
+    suspects: &mut HashSet<(u32, u16, Vec<u8>)>,
+    pool: &mut Vec<PooledPiece>,
+) -> Result<Vec<u8>, MiasmaError> {
+    let k = ctx.k;
+    pool.sort_by_key(|p| p.share.slot_index);
+    let pick = |pool: &[PooledPiece], idx: &[usize]| -> Vec<MiasmaShare> {
+        idx.iter().map(|&i| pool[i].share.clone()).collect()
+    };
+
+    let base: Vec<usize> = (0..k).collect();
+    let first_err = match decode_once(ctx, pick(pool, &base)).await {
+        Ok(pt) => return Ok(pt),
+        Err(e) if is_recoverable(&e) => e,
+        Err(e) => return Err(e),
+    };
+
+    // Spare pieces from other slots/holders. Falling short is not an error here:
+    // whatever could be fetched is tried.
+    let _ = fill_pool(
+        source,
+        ctx.mid,
+        ctx.seg,
+        ctx.candidates,
+        k + RECOVERY_EXTRA_PIECES,
+        ctx.manifest,
+        progress,
+        suspects,
+        pool,
+    )
+    .await;
+
+    let mut attempts = 1usize;
+    for spare in k..pool.len() {
+        for out in 0..k {
+            if attempts >= MAX_DECODE_ATTEMPTS || progress.is_cancelled() {
+                return Err(first_err);
+            }
+            attempts += 1;
+            let mut idx = base.clone();
+            idx[out] = spare;
+            match decode_once(ctx, pick(pool, &idx)).await {
+                Ok(pt) => {
+                    let bad = &pool[out];
+                    suspects.insert((ctx.seg, bad.share.slot_index, bad.peer.clone()));
+                    progress.piece_rejected();
+                    return Ok(pt);
+                }
+                Err(e) if is_recoverable(&e) => {}
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    Err(first_err)
 }
 
 fn piece_is_acceptable(
@@ -491,14 +658,16 @@ fn piece_is_acceptable(
         return false;
     }
     match manifest {
-        // The piece must be exactly the one the index lists for this slot.
-        Some(m) => {
-            m.expected_piece(seg, slot) == Some(&share.shard_hash)
-                && m.segments
-                    .get(seg as usize)
-                    .is_some_and(|e| e.plaintext_len == share.original_len)
-        }
-        None => true,
+        // The piece must be exactly the one the index lists for this slot: the
+        // commitment covers key_share, nonce and original_len too, so a piece
+        // whose ciphertext is right but whose key material was flipped is
+        // refused here and a spare holder is used instead.
+        Some(m) => m
+            .expected_piece(seg, slot)
+            .is_some_and(|expected| ShareVerification::verify_piece(share, mid, expected)),
+        // No manifest, nothing to compare against; at least keep an unchecked
+        // length from sizing the decode buffer.
+        None => share.original_len <= MAX_SEGMENT_SIZE,
     }
 }
 

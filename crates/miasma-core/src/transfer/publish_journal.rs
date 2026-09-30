@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use super::{manifest::SegmentEntry, protection::Protection};
 use crate::{network::types::ShardLocation, MiasmaError};
 
-pub const PUBLISH_JOURNAL_VERSION: u8 = 1;
+pub const PUBLISH_JOURNAL_VERSION: u8 = 2;
 
 /// First line: what is being published, and how.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

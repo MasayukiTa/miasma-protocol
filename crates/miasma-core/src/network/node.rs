@@ -948,6 +948,11 @@ fn decode_signed_dht_record(
     if record.dht_key().as_slice() != expected_key {
         return Err(DhtEnvelopeError::InnerMidMismatch);
     }
+    // Any peer that knows the MID can sign a record: bound its counts here so no
+    // consumer sizes an allocation from an unchecked one.
+    record
+        .validate()
+        .map_err(|_| DhtEnvelopeError::InvalidInnerRecord)?;
     Ok(record)
 }
 
@@ -969,6 +974,9 @@ fn decode_signed_record_and_manifest(
     if record.dht_key().as_slice() != expected_key {
         return Err(DhtEnvelopeError::InnerMidMismatch);
     }
+    record
+        .validate()
+        .map_err(|_| DhtEnvelopeError::InvalidInnerRecord)?;
     Ok((record, manifest))
 }
 
