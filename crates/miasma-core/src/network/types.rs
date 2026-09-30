@@ -17,7 +17,7 @@ pub enum NodeType {
 }
 
 /// Location of a single shard on the network.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShardLocation {
     /// libp2p PeerId bytes (32-byte Ed25519 public key, or full peer ID).
     pub peer_id_bytes: Vec<u8>,
