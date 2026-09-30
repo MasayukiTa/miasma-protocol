@@ -297,7 +297,8 @@ async fn a_password_protected_transfer_completes_with_the_password() {
 #[tokio::test]
 async fn an_old_transfer_with_a_weak_password_is_still_receivable() {
     // Published before the password policy: one character, no digit or symbol.
-    let weak = "x";
+    let weak_pw = super::password_policy::test_support::compose(1, 0, 0, &[]);
+    let weak = weak_pw.as_str();
     assert!(super::password_policy::check(weak).is_err());
     assert!(PasswordProtection::create_with_cost(weak, 64, 1, 1).is_err());
     let w = world(5_000, 4, 6, Some(weak));
