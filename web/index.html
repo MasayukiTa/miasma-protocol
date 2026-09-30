@@ -113,6 +113,17 @@
             <p data-i18n="outbox_desc">Directed shares you have sent to others</p>
           </div>
         </button>
+        <button class="action-card card-transfers" data-view="transfers">
+          <div class="card-icon">
+            <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M7 19V5M7 5L3 9M7 5l4 4"/><path d="M17 5v14M17 19l-4-4M17 19l4-4"/>
+            </svg>
+          </div>
+          <div class="card-text">
+            <h2 data-i18n="tf_nav">Transfers</h2>
+            <p data-i18n="tf_nav_desc">Large files with progress, stop and resume</p>
+          </div>
+        </button>
       </div>
       <div class="scope-notice" id="scope-notice">
         <p data-i18n="scope_notice">This is a local-only tool. Shares stay in your browser. There is no network connectivity, peer discovery, or cloud storage. To move shares between devices, use Export / Import.</p>
@@ -427,6 +438,120 @@
         <div id="outbox-list"></div>
         <p id="outbox-empty" class="hidden empty-note" data-i18n="outbox_empty">No items in outbox</p>
       </div>
+    </div>
+
+    <!-- Transfers View -->
+    <div id="view-transfers" class="view">
+      <div class="view-header">
+        <button class="btn-back" data-view="home">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+        </button>
+        <h1 data-i18n="tf_heading">Transfers</h1>
+      </div>
+      <p class="view-lead" data-i18n="tf_desc">Large files are sent and received by the background service.</p>
+
+      <div id="tf-offline" class="notice tf-notice hidden" role="status"></div>
+      <div class="notice tf-notice" data-i18n="tf_send_hint">Use the desktop app or the CLI to send large files.</div>
+
+      <section class="tf-card" aria-label="Transfers">
+        <div id="tf-headings" class="tf-headings hidden" aria-hidden="true">
+          <span></span>
+          <span data-i18n="tf_col_name">Name</span>
+          <span data-i18n="tf_col_progress">Progress</span>
+          <span data-i18n="tf_col_size">Size</span>
+          <span data-i18n="tf_col_speed">Speed</span>
+          <span data-i18n="tf_col_eta">ETA</span>
+          <span data-i18n="tf_col_state">State</span>
+        </div>
+        <div id="tf-list" class="tf-list" role="listbox"></div>
+        <p id="tf-empty" class="empty-note hidden" data-i18n="tf_empty">No transfers yet. Start one below.</p>
+      </section>
+
+      <section class="tf-card tf-detail" aria-live="off">
+        <p id="tf-select-hint" class="empty-note" data-i18n="tf_select_hint">Select a transfer to see its details.</p>
+        <div id="tf-detail-body" class="hidden">
+          <div class="tf-detail-head">
+            <h2 id="tf-d-title"></h2>
+            <span id="tf-d-chip" class="chip"></span>
+          </div>
+          <p class="tf-sub"><span id="tf-d-direction"></span> <code id="tf-d-path" class="tf-path"></code></p>
+
+          <div class="tf-mid">
+            <span class="tf-label" data-i18n="tf_mid_label">MID</span>
+            <code id="tf-d-mid"></code>
+            <button id="tf-d-copy" class="btn-copy" data-i18n="copy">Copy</button>
+          </div>
+
+          <div class="tf-bigbar">
+            <div class="tf-track"><div id="tf-d-fill" class="tf-fill"></div></div>
+            <span id="tf-d-pct" class="tf-pct"></span>
+          </div>
+
+          <dl class="tf-meta">
+            <div><dt data-i18n="tf_phase_label">Phase</dt><dd id="tf-d-phase"></dd></div>
+            <div><dt data-i18n="tf_elapsed_label">Elapsed</dt><dd id="tf-d-elapsed"></dd></div>
+            <div><dt data-i18n="tf_col_size">Size</dt><dd id="tf-d-bytes"></dd></div>
+            <div><dt data-i18n="tf_col_speed">Speed</dt><dd id="tf-d-speed"></dd></div>
+            <div><dt data-i18n="tf_col_eta">ETA</dt><dd id="tf-d-eta"></dd></div>
+          </dl>
+
+          <div class="tf-strip-block">
+            <div class="tf-label"><span data-i18n="tf_segments_label">Segments</span> <span id="tf-d-segcount" class="text-muted"></span></div>
+            <div id="tf-d-strip" class="tf-strip" role="img"></div>
+            <div id="tf-d-legend" class="tf-legend"></div>
+          </div>
+
+          <dl class="tf-meta">
+            <div><dt data-i18n="tf_resumed_label">Resumed from segment</dt><dd id="tf-d-resumed"></dd></div>
+            <div class="wide"><dt data-i18n="tf_split_label">Time split</dt><dd id="tf-d-split"></dd></div>
+            <div><dt data-i18n="tf_pieces_label">Pieces</dt><dd id="tf-d-pieces"></dd></div>
+            <div><dt data-i18n="tf_retries_label">Segment retries</dt><dd id="tf-d-retries"></dd></div>
+          </dl>
+
+          <p id="tf-d-error" class="tf-error hidden"><span class="tf-label" data-i18n="tf_error_label">Last error</span> <span id="tf-d-error-text" class="text-danger"></span></p>
+
+          <div class="tf-actions">
+            <button id="tf-d-stop" class="btn-secondary hidden" data-i18n="tf_btn_stop">Stop (keep progress)</button>
+          </div>
+
+          <div id="tf-d-resume" class="tf-resume hidden">
+            <p class="tf-sub" data-i18n="tf_resume_pw_optional">The password is never saved, so it is asked for again.</p>
+            <div class="tf-resume-row">
+              <input type="password" id="tf-d-password" autocomplete="off" spellcheck="false">
+              <button id="tf-d-resume-btn" class="btn-secondary strong" data-i18n="tf_btn_resume">Resume</button>
+              <button id="tf-d-restart-btn" class="btn-secondary" data-i18n="tf_btn_restart">Start over</button>
+            </div>
+            <div id="tf-d-restart-confirm" class="tf-restart-confirm hidden">
+              <p data-i18n="tf_restart_confirm">Discard the saved progress and start from the beginning?</p>
+              <div class="tf-resume-row">
+                <button id="tf-d-restart-yes" class="btn-danger" data-i18n="tf_restart_yes">Discard and start over</button>
+                <button id="tf-d-restart-no" class="btn-secondary" data-i18n="tf_btn_keep">Cancel</button>
+              </div>
+            </div>
+          </div>
+          <p id="tf-d-send-hint" class="tf-sub hidden" data-i18n="tf_send_resume_hint">A send is resumed from the desktop app.</p>
+          <p id="tf-d-nopath" class="tf-sub hidden" data-i18n="tf_no_path_hint">The save location is not known any more.</p>
+        </div>
+      </section>
+
+      <section class="tf-card tf-form">
+        <h2 data-i18n="tf_new_heading">Receive a file</h2>
+        <p id="tf-forms-offline" class="tf-sub hidden" data-i18n="tf_forms_offline">Connect to the daemon first.</p>
+        <div class="field">
+          <label for="tf-mid" data-i18n="tf_mid_input_label">MID</label>
+          <input type="text" id="tf-mid" class="mono" placeholder="miasma:..." spellcheck="false" autocomplete="off">
+        </div>
+        <div class="field">
+          <label for="tf-path" data-i18n="tf_recv_path_label">Save to</label>
+          <input type="text" id="tf-path" class="mono" spellcheck="false" autocomplete="off" data-i18n-placeholder="tf_recv_path_hint" placeholder="Absolute path of the finished file">
+        </div>
+        <div class="field">
+          <label for="tf-pw" data-i18n="tf_password_label">Password (optional)</label>
+          <input type="password" id="tf-pw" autocomplete="new-password" spellcheck="false">
+          <p class="tf-sub" data-i18n="tf_password_note">Used as part of the encryption key. It is not stored.</p>
+        </div>
+        <button id="tf-start" class="btn-primary" data-i18n="tf_recv_button">Start receiving</button>
+      </section>
     </div>
 
     <!-- Settings View -->

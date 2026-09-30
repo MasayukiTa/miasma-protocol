@@ -4,42 +4,118 @@
 //! No test writes a literal password: secrets are drawn from the OS RNG at run
 //! time.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, Mutex, OnceLock},
+    time::Duration,
+};
 
-use miasma_core::daemon::{control_auth, DaemonServer};
+use miasma_core::daemon::{
+    control_auth,
+    ipc::{daemon_request, ControlRequest, ControlResponse},
+    DaemonServer,
+};
 use miasma_core::network::types::NodeType;
-use miasma_core::{network::node::MiasmaNode, LocalShareStore};
+use miasma_core::{network::node::MiasmaNode, LocalShareStore, Multiaddr};
 use rand::{rngs::OsRng, Rng};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
     task::JoinHandle,
 };
+use tracing_subscriber::{fmt::MakeWriter, EnvFilter};
+
+/// Everything the daemons log while these tests run, so a test can assert that a
+/// password never reaches a log line.
+#[derive(Clone, Default)]
+struct LogCapture(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogCapture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> MakeWriter<'a> for LogCapture {
+    type Writer = LogCapture;
+    fn make_writer(&'a self) -> LogCapture {
+        self.clone()
+    }
+}
+
+fn logs() -> &'static LogCapture {
+    static LOGS: OnceLock<LogCapture> = OnceLock::new();
+    LOGS.get_or_init(|| {
+        let capture = LogCapture::default();
+        // miasma_core at trace: the most a debug build of the daemon would ever say.
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::new("miasma_core=trace,warn"))
+            .with_ansi(false)
+            .with_writer(capture.clone())
+            .try_init();
+        capture
+    })
+}
+
+fn captured_logs() -> String {
+    String::from_utf8_lossy(&logs().0.lock().unwrap()).into_owned()
+}
 
 struct TestDaemon {
     dir: tempfile::TempDir,
     http_port: u16,
+    /// Address another daemon can bootstrap from.
+    addr: String,
     shutdown: tokio::sync::mpsc::Sender<()>,
     run: JoinHandle<anyhow::Result<()>>,
 }
 
 async fn start_daemon() -> TestDaemon {
+    start_daemon_keyed(None, None).await
+}
+
+async fn start_daemon_keyed(key: Option<u8>, bootstrap: Option<&str>) -> TestDaemon {
+    let _ = logs();
     let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(LocalShareStore::open(dir.path(), 100).unwrap());
-    let master: [u8; 32] = std::fs::read(dir.path().join("master.key"))
-        .unwrap()
-        .try_into()
-        .unwrap();
+    let store = Arc::new(LocalShareStore::open(dir.path(), 1000).unwrap());
+    let master: [u8; 32] = match key {
+        Some(k) => [k; 32],
+        None => std::fs::read(dir.path().join("master.key"))
+            .unwrap()
+            .try_into()
+            .unwrap(),
+    };
     let node = MiasmaNode::new(&master, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
     let server = DaemonServer::start(node, store, dir.path().to_owned())
         .await
         .unwrap();
+    let addr = format!("{}/p2p/{}", server.listen_addrs()[0], server.peer_id());
+    if let Some(peer) = bootstrap {
+        use libp2p::multiaddr::Protocol;
+        let mut a: Multiaddr = peer.parse().unwrap();
+        let id: libp2p::PeerId = a
+            .iter()
+            .find_map(|p| match p {
+                Protocol::P2p(id) => Some(id),
+                _ => None,
+            })
+            .unwrap();
+        if matches!(a.iter().last(), Some(Protocol::P2p(_))) {
+            a.pop();
+        }
+        server.add_bootstrap_peer(id, a).await.unwrap();
+        server.bootstrap_dht().await.unwrap();
+    }
     let http_port = server.http_bridge_port();
     let shutdown = server.shutdown_handle();
     let run = tokio::spawn(server.run());
     TestDaemon {
         dir,
         http_port,
+        addr,
         shutdown,
         run,
     }
@@ -235,4 +311,421 @@ async fn the_token_is_never_offered_to_a_caller_that_lacks_it() {
     assert!(r.starts_with("HTTP/1.1 401"), "{r:.200}");
     assert!(!r.contains(&tok) && !r.contains(&wrong));
     d.stop().await;
+}
+
+// ─── Transfers over HTTP ─────────────────────────────────────────────────────
+
+fn body_of(response: &str) -> &str {
+    response
+        .split_once("\r\n\r\n")
+        .map(|(_, b)| b)
+        .unwrap_or("")
+}
+
+fn json_of(response: &str) -> serde_json::Value {
+    serde_json::from_str(body_of(response)).unwrap_or_else(|e| panic!("not JSON ({e}): {response}"))
+}
+
+/// Percent-encode everything but unreserved characters (a send id holds a path).
+fn enc(s: &str) -> String {
+    s.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_transfer_endpoint_needs_the_token() {
+    let d = start_daemon().await;
+    let wrong = random_secret();
+    let body = r#"{"mid":"miasma:x","output_path":"/x"}"#;
+    for (method, path) in [
+        ("GET", "/api/transfers"),
+        ("GET", "/api/transfers/miasma%3Aabc"),
+        ("POST", "/api/transfers/receive"),
+        ("POST", "/api/transfers/miasma%3Aabc/cancel"),
+    ] {
+        let r = http(d.http_port, method, path, None, body).await;
+        assert!(r.starts_with("HTTP/1.1 401"), "{method} {path}: {r:.200}");
+        let r = http(d.http_port, method, path, Some(&wrong), body).await;
+        assert!(r.starts_with("HTTP/1.1 401"), "{method} {path}: {r:.200}");
+    }
+    d.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn transfer_requests_that_are_wrong_are_refused_clearly_and_start_nothing() {
+    let d = start_daemon().await;
+    let tok = d.token();
+    let out_dir = tempfile::tempdir().unwrap();
+    let out = out_dir.path().join("never.bin");
+    let out = out.to_string_lossy().replace('\\', "\\\\");
+
+    // Nothing yet.
+    let r = http(d.http_port, "GET", "/api/transfers", Some(&tok), "").await;
+    assert!(r.starts_with("HTTP/1.1 200"), "{r:.200}");
+    assert_eq!(json_of(&r), serde_json::json!([]));
+
+    // Unknown transfer: status is 404, cancel is 409 (nothing running to stop).
+    let r = http(
+        d.http_port,
+        "GET",
+        "/api/transfers/miasma%3Anope",
+        Some(&tok),
+        "",
+    )
+    .await;
+    assert!(r.starts_with("HTTP/1.1 404"), "{r:.200}");
+    let r = http(
+        d.http_port,
+        "POST",
+        "/api/transfers/miasma%3Anope/cancel",
+        Some(&tok),
+        "",
+    )
+    .await;
+    assert!(r.starts_with("HTTP/1.1 409"), "{r:.200}");
+    let r = http(d.http_port, "GET", "/api/transfers/%zz", Some(&tok), "").await;
+    assert!(r.starts_with("HTTP/1.1 400"), "{r:.200}");
+
+    // Wrong shapes of route.
+    for (method, path) in [
+        ("DELETE", "/api/transfers"),
+        ("GET", "/api/transfersx"),
+        ("GET", "/api/transfers/a/b/c"),
+        ("POST", "/api/transfers"),
+    ] {
+        let r = http(d.http_port, method, path, Some(&tok), "").await;
+        assert!(r.starts_with("HTTP/1.1 404"), "{method} {path}: {r:.200}");
+    }
+
+    // A receive that the output-path policy or the MID check refuses.
+    let bad_bodies = [
+        (
+            r#"{"mid":"miasma:abc","output_path":"relative/x.bin"}"#.to_string(),
+            "output path rejected",
+        ),
+        (
+            format!(r#"{{"mid":"miasma:abc","output_path":"{out}/../x.bin"}}"#),
+            "output path rejected",
+        ),
+        (
+            format!(r#"{{"mid":"not-a-mid","output_path":"{out}"}}"#),
+            "invalid MID",
+        ),
+        (r#"{"mid":"miasma:abc"}"#.to_string(), "invalid JSON body"),
+        ("not json".to_string(), "invalid JSON body"),
+    ];
+    for (body, needle) in &bad_bodies {
+        let r = http(
+            d.http_port,
+            "POST",
+            "/api/transfers/receive",
+            Some(&tok),
+            body,
+        )
+        .await;
+        assert!(r.starts_with("HTTP/1.1 400"), "{body}: {r:.300}");
+        assert!(r.contains(needle), "{body}: {r:.300}");
+    }
+    // A password of the wrong type is refused without quoting it back.
+    let secret_number = 1_234_567_891u64;
+    let body =
+        format!(r#"{{"mid":"miasma:abc","output_path":"{out}","password":{secret_number}}}"#);
+    let r = http(
+        d.http_port,
+        "POST",
+        "/api/transfers/receive",
+        Some(&tok),
+        &body,
+    )
+    .await;
+    assert!(r.starts_with("HTTP/1.1 400"), "{r:.300}");
+    assert!(
+        !r.contains(&secret_number.to_string()),
+        "the value was echoed: {r}"
+    );
+
+    // Over-long fields.
+    let long = "a".repeat(5000);
+    let body = format!(r#"{{"mid":"miasma:abc","output_path":"/{long}"}}"#);
+    let r = http(
+        d.http_port,
+        "POST",
+        "/api/transfers/receive",
+        Some(&tok),
+        &body,
+    )
+    .await;
+    assert!(r.starts_with("HTTP/1.1 400"), "{r:.200}");
+
+    // Still nothing started, nothing written.
+    let r = http(d.http_port, "GET", "/api/transfers", Some(&tok), "").await;
+    assert_eq!(json_of(&r), serde_json::json!([]));
+    assert!(!out_dir.path().join("never.bin").exists());
+    d.stop().await;
+}
+
+async fn poll_until_not_running(port: u16, tok: &str, id: &str) -> serde_json::Value {
+    let path = format!("/api/transfers/{}", enc(id));
+    // About what the web client does (once a second): the read limit is 2 a second.
+    for _ in 0..120 {
+        let r = http(port, "GET", &path, Some(tok), "").await;
+        if r.starts_with("HTTP/1.1 429") {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            continue;
+        }
+        assert!(r.starts_with("HTTP/1.1 200"), "{r:.300}");
+        let v = json_of(&r);
+        if v["state"] != "Running" {
+            return v;
+        }
+        tokio::time::sleep(Duration::from_millis(700)).await;
+    }
+    panic!("transfer {id} still running after 90 s");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_protected_transfer_is_received_over_http_and_the_password_never_leaks() {
+    tokio::time::timeout(Duration::from_secs(240), async {
+        let a = start_daemon_keyed(Some(0x61), None).await;
+        let a_tok = a.token();
+
+        // A publishes a password-protected file (drawn at run time, never a literal).
+        let password = random_secret();
+        let wrong_password = random_secret();
+        let src_dir = tempfile::tempdir().unwrap();
+        let src = src_dir.path().join("payload.bin");
+        let data: Vec<u8> = (0..300_000u32).map(|i| (i * 37 % 251) as u8).collect();
+        std::fs::write(&src, &data).unwrap();
+        let mid = match daemon_request(
+            a.dir.path(),
+            ControlRequest::PublishFileProtected {
+                file_path: src.to_string_lossy().into_owned(),
+                data_shards: 2,
+                total_shards: 3,
+                password: password.clone(),
+            },
+        )
+        .await
+        .unwrap()
+        {
+            ControlResponse::Published { mid } => mid,
+            other => panic!("unexpected: {other:?}"),
+        };
+
+        let b = start_daemon_keyed(Some(0x62), Some(&a.addr)).await;
+        let b_tok = b.token();
+        tokio::time::sleep(Duration::from_millis(2000)).await;
+
+        let out_dir = tempfile::tempdir().unwrap();
+        let out = out_dir.path().join("got.bin");
+        let out_json = out.to_string_lossy().replace('\\', "\\\\");
+        let mut every_response = String::new();
+
+        let receive = |password: Option<&str>| {
+            let pw = match password {
+                Some(p) => format!(r#","password":"{p}""#),
+                None => String::new(),
+            };
+            format!(r#"{{"mid":"{mid}","output_path":"{out_json}"{pw}}}"#)
+        };
+
+        // Wrong password: the job ends Failed, before any piece is fetched.
+        let r = http(
+            b.http_port,
+            "POST",
+            "/api/transfers/receive",
+            Some(&b_tok),
+            &receive(Some(&wrong_password)),
+        )
+        .await;
+        every_response.push_str(&r);
+        assert!(r.starts_with("HTTP/1.1 200"), "{r:.300}");
+        assert_eq!(json_of(&r)["id"], serde_json::json!(mid));
+        let s = poll_until_not_running(b.http_port, &b_tok, &mid).await;
+        assert_eq!(s["state"], "Failed", "{s}");
+        assert!(
+            s["last_error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("wrong password"),
+            "{s}"
+        );
+        assert_eq!(s["pieces_fetched"], 0);
+        every_response.push_str(&s.to_string());
+        assert!(!out.exists());
+
+        // No password: a distinct message.
+        let r = http(
+            b.http_port,
+            "POST",
+            "/api/transfers/receive",
+            Some(&b_tok),
+            &receive(None),
+        )
+        .await;
+        every_response.push_str(&r);
+        let s = poll_until_not_running(b.http_port, &b_tok, &mid).await;
+        assert_eq!(s["state"], "Failed", "{s}");
+        assert!(
+            s["last_error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("password-protected"),
+            "{s}"
+        );
+
+        // Right password: the same request again is the resume.
+        let r = http(
+            b.http_port,
+            "POST",
+            "/api/transfers/receive",
+            Some(&b_tok),
+            &receive(Some(&password)),
+        )
+        .await;
+        every_response.push_str(&r);
+        assert!(r.starts_with("HTTP/1.1 200"), "{r:.300}");
+        let s = poll_until_not_running(b.http_port, &b_tok, &mid).await;
+        every_response.push_str(&s.to_string());
+        assert_eq!(s["state"], "Complete", "{s}");
+        assert_eq!(s["kind"], "Receive");
+        assert_eq!(s["id"], serde_json::json!(mid));
+        assert_eq!(s["bytes_done"], data.len());
+        assert_eq!(s["bytes_total"], data.len());
+        assert_eq!(std::fs::read(&out).unwrap(), data);
+
+        // The list has it, with its id; a finished transfer cannot be cancelled.
+        let r = http(b.http_port, "GET", "/api/transfers", Some(&b_tok), "").await;
+        every_response.push_str(&r);
+        let list = json_of(&r);
+        let entry = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["id"] == serde_json::json!(mid))
+            .expect("the receive is listed");
+        assert_eq!(entry["state"], "Complete");
+        let r = http(
+            b.http_port,
+            "POST",
+            &format!("/api/transfers/{}/cancel", enc(&mid)),
+            Some(&b_tok),
+            "",
+        )
+        .await;
+        assert!(r.starts_with("HTTP/1.1 409"), "{r:.200}");
+
+        // A's own send is listed with a `send:<path>` id that survives percent-encoding.
+        let r = http(a.http_port, "GET", "/api/transfers", Some(&a_tok), "").await;
+        let sends: Vec<_> = json_of(&r)
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|t| t["kind"] == "Send")
+            .cloned()
+            .collect();
+        if let Some(send) = sends.first() {
+            let id = send["id"].as_str().unwrap().to_owned();
+            assert!(id.starts_with("send:"), "{id}");
+            let r = http(
+                a.http_port,
+                "GET",
+                &format!("/api/transfers/{}", enc(&id)),
+                Some(&a_tok),
+                "",
+            )
+            .await;
+            assert!(r.starts_with("HTTP/1.1 200"), "{r:.300}");
+            assert_eq!(json_of(&r)["id"], serde_json::json!(id));
+        }
+
+        // The password is in no response and in no log line.
+        let logged = captured_logs();
+        for secret in [&password, &wrong_password] {
+            assert!(
+                !every_response.contains(secret.as_str()),
+                "a response contains a password"
+            );
+            assert!(
+                !logged.contains(secret.as_str()),
+                "a log line contains a password"
+            );
+        }
+        assert!(
+            !logged.is_empty(),
+            "the log capture saw nothing: the check above proves nothing"
+        );
+
+        let _ = a.shutdown.send(()).await;
+        let _ = b.shutdown.send(()).await;
+    })
+    .await
+    .expect("timed out");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_running_receive_can_be_stopped_over_http() {
+    tokio::time::timeout(Duration::from_secs(120), async {
+        // A knows the file; C is not connected to A, so its receive cannot finish.
+        let a = start_daemon_keyed(Some(0x63), None).await;
+        let src_dir = tempfile::tempdir().unwrap();
+        let src = src_dir.path().join("payload.bin");
+        std::fs::write(&src, vec![7u8; 200_000]).unwrap();
+        let mid = match daemon_request(
+            a.dir.path(),
+            ControlRequest::PublishFile {
+                file_path: src.to_string_lossy().into_owned(),
+                data_shards: 2,
+                total_shards: 3,
+            },
+        )
+        .await
+        .unwrap()
+        {
+            ControlResponse::Published { mid } => mid,
+            other => panic!("unexpected: {other:?}"),
+        };
+        let c = start_daemon_keyed(Some(0x64), None).await;
+        let tok = c.token();
+        let out_dir = tempfile::tempdir().unwrap();
+        let out = out_dir
+            .path()
+            .join("got.bin")
+            .to_string_lossy()
+            .replace('\\', "\\\\");
+        let body = format!(r#"{{"mid":"{mid}","output_path":"{out}"}}"#);
+
+        let r = http(
+            c.http_port,
+            "POST",
+            "/api/transfers/receive",
+            Some(&tok),
+            &body,
+        )
+        .await;
+        assert!(r.starts_with("HTTP/1.1 200"), "{r:.300}");
+        let cancel_path = format!("/api/transfers/{}/cancel", enc(&mid));
+        let r = http(c.http_port, "POST", &cancel_path, Some(&tok), "").await;
+        // Either it was still running and is now stopping, or it had already ended
+        // (nothing to fetch from): never anything else.
+        assert!(
+            r.starts_with("HTTP/1.1 200") || r.starts_with("HTTP/1.1 409"),
+            "{r:.300}"
+        );
+        let s = poll_until_not_running(c.http_port, &tok, &mid).await;
+        assert_ne!(s["state"], "Running");
+        assert_ne!(s["state"], "Complete", "it cannot have completed: {s}");
+
+        let _ = a.shutdown.send(()).await;
+        let _ = c.shutdown.send(()).await;
+    })
+    .await
+    .expect("timed out");
 }
