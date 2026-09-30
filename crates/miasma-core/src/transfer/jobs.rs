@@ -19,6 +19,7 @@ use std::{
 use zeroize::Zeroizing;
 
 use super::{
+    direct::{receive_file_via, ViaConfig},
     journal::ReceiveJournal,
     progress::{Phase, TransferKind, TransferProgress, TransferState, TransferStatus},
     publish::PublishSpec,
@@ -69,6 +70,9 @@ impl TransferRegistry {
     /// same id and starts nothing. A finished, failed, paused or cancelled job
     /// is replaced by the new run — which resumes from its journal unless
     /// `restart` is set.
+    ///
+    /// With `via` the pieces (and the record) come from those WebSocket
+    /// endpoints and the DHT is not consulted; without it, from the network.
     pub fn start_receive(
         &self,
         coord: Arc<MiasmaCoordinator>,
@@ -76,6 +80,7 @@ impl TransferRegistry {
         output_path: PathBuf,
         password: Option<Zeroizing<String>>,
         restart: bool,
+        via: Option<ViaConfig>,
     ) -> String {
         let id = mid.to_string();
         let progress = {
@@ -99,16 +104,32 @@ impl TransferRegistry {
         let watched = progress.clone();
         let task = tokio::spawn(async move {
             // The outcome is recorded in `progress` by the engine itself.
-            let _ = coord
-                .receive_file(
-                    &mid,
-                    &output_path,
-                    password,
-                    &journal_dir,
-                    restart,
-                    progress,
-                )
-                .await;
+            let _ = match via {
+                Some(via) => {
+                    receive_file_via(
+                        &via,
+                        &mid,
+                        &output_path,
+                        password,
+                        &journal_dir,
+                        restart,
+                        progress,
+                    )
+                    .await
+                }
+                None => {
+                    coord
+                        .receive_file(
+                            &mid,
+                            &output_path,
+                            password,
+                            &journal_dir,
+                            restart,
+                            progress,
+                        )
+                        .await
+                }
+            };
         });
         // If the task panics the progress cell would say Running forever.
         tokio::spawn(async move {

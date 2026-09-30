@@ -550,6 +550,11 @@
           <input type="password" id="tf-pw" autocomplete="new-password" spellcheck="false">
           <p class="tf-sub" data-i18n="tf_password_note">Used as part of the encryption key. It is not stored.</p>
         </div>
+        <div class="field">
+          <label for="tf-via" data-i18n="tf_via_label">Via URL (optional)</label>
+          <input type="text" id="tf-via" class="mono" spellcheck="false" autocomplete="off" data-i18n-placeholder="tf_via_hint" placeholder="wss://... from the sender">
+          <p class="tf-sub" data-i18n="tf_via_note">Fetch straight from the sender's tunnel URL instead of the network. Leave empty normally.</p>
+        </div>
         <button id="tf-start" class="btn-primary" data-i18n="tf_recv_button">Start receiving</button>
       </section>
     </div>

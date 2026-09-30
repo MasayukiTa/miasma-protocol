@@ -12,22 +12,32 @@
 ///   close
 /// ```
 ///
-/// # Wire format
-/// Each WebSocket binary message contains a single bincode-encoded frame:
-/// - Client → Server: `ShareFetchRequest` (38 bytes typical)
-/// - Server → Client: `ShareFetchResponse` (variable, up to ~1 MiB)
+/// # Wire format (version 1)
+/// Each WebSocket binary message is `[WS_WIRE_VERSION] ++ bincode(message)`:
+/// - Client → Server: [`WsRequest`], either `Share(ShareFetchRequest)` or
+///   `Record { mid_digest }` (a few dozen bytes).
+/// - Server → Client: the matching [`WsResponse`]: a share (up to
+///   `SHARE_MSG_MAX`, 8 MiB) or the record value with its manifest trailer
+///   (at most [`WS_RECORD_MAX_BYTES`]).
+///
+/// A connection carries many request/response pairs, strictly one at a time and
+/// in order, up to [`WS_MAX_REQUESTS_PER_CONNECTION`]; the server then closes it
+/// and the client dials again. Beta software: this replaces the earlier
+/// unversioned single-request format; both ends must be the same build family.
 ///
 /// # TLS support
 /// When `tls_enabled` is true, connections use rustls for TLS. The server
 /// requires PEM cert/key via `bind_tls()`. The client uses webpki-roots
 /// (Mozilla CA bundle) by default, or a custom CA if `custom_ca_pem` is set.
 /// SNI can be overridden via `sni_override` for DPI resistance.
-use std::{fmt, sync::Arc};
+use std::{fmt, sync::Arc, time::Duration};
 
+use bincode::Options as _;
 use futures::SinkExt;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::net::TcpListener;
-use tokio_tungstenite::tungstenite::Message;
-use tracing::{debug, error, info, warn};
+use tokio_tungstenite::tungstenite::{protocol::WebSocketConfig as WsProtocolConfig, Message};
+use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
 use crate::{
@@ -169,19 +179,128 @@ impl Default for WebSocketConfig {
     }
 }
 
+// ─── Wire protocol ───────────────────────────────────────────────────────────
+
+/// First byte of every message. A peer that sends anything else is dropped.
+pub const WS_WIRE_VERSION: u8 = 1;
+
+/// Largest request the server reads. A request is a few dozen bytes; this is
+/// also the WebSocket frame/message limit it enforces on inbound frames, so a
+/// peer that declares a bigger frame is refused before any of it is buffered.
+pub const WS_REQUEST_MAX_BYTES: usize = 1024;
+
+/// Largest record value (record + manifest trailer) the server will send. The
+/// same bound the DHT applies when a record is published, so anything that can
+/// be published can be served; the manifest alone is at most 8 MiB.
+pub const WS_RECORD_MAX_BYTES: usize = 16 * 1024 * 1024 - 64 * 1024;
+
+/// Largest message a client accepts (frame and message limit). Above a share
+/// (8 MiB) and a record ([`WS_RECORD_MAX_BYTES`]), below the 64 MiB library default.
+pub const WS_MAX_MESSAGE_BYTES: usize = 17 * 1024 * 1024;
+
+/// Requests served on one connection before the server closes it.
+pub const WS_MAX_REQUESTS_PER_CONNECTION: usize = 512;
+
+/// Ping/pong frames tolerated per connection (they do not count as requests, but
+/// they must not keep a connection alive for ever either).
+const WS_MAX_CONTROL_FRAMES: usize = 64;
+
+/// What a client may ask of a Miasma WebSocket endpoint. There is deliberately
+/// nothing else: no control operation, no listing, no store or daemon access.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum WsRequest {
+    /// One share, by (MID, segment, slot).
+    Share(ShareFetchRequest),
+    /// The record and manifest for a MID, as the DHT would hold them.
+    Record { mid_digest: [u8; 32] },
+}
+
+/// The answer to one [`WsRequest`], in the same variant.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum WsResponse {
+    Share(ShareFetchResponse),
+    /// `None` for an unknown MID; no detail is given.
+    Record {
+        value: Option<Vec<u8>>,
+    },
+}
+
+/// Bincode configuration for the wire: fixed-width integers, no trailing bytes,
+/// and a size limit so a declared length can never size an allocation past it.
+fn wire_codec(limit: usize) -> impl bincode::Options {
+    bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .reject_trailing_bytes()
+        .with_limit(limit as u64)
+}
+
+/// `[WS_WIRE_VERSION] ++ bincode(message)`.
+pub fn encode_ws_message<T: Serialize>(message: &T) -> Result<Vec<u8>, String> {
+    let body = wire_codec(WS_MAX_MESSAGE_BYTES)
+        .serialize(message)
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::with_capacity(body.len() + 1);
+    out.push(WS_WIRE_VERSION);
+    out.extend_from_slice(&body);
+    Ok(out)
+}
+
+/// Decode a message of at most `limit` bytes. Any deviation (wrong version,
+/// trailing bytes, unknown variant, over-long declared length) is an error.
+pub fn decode_ws_message<T: DeserializeOwned>(bytes: &[u8], limit: usize) -> Result<T, String> {
+    match bytes.split_first() {
+        Some((&WS_WIRE_VERSION, body)) if bytes.len() <= limit => wire_codec(limit)
+            .deserialize(body)
+            .map_err(|e| e.to_string()),
+        Some((&WS_WIRE_VERSION, _)) => Err("message too large".into()),
+        Some(_) => Err("unsupported wire version".into()),
+        None => Err("empty message".into()),
+    }
+}
+
+/// WebSocket frame/message limits for one side.
+pub(crate) fn ws_limits(max: usize) -> WsProtocolConfig {
+    WsProtocolConfig {
+        max_message_size: Some(max),
+        max_frame_size: Some(max),
+        ..Default::default()
+    }
+}
+
+/// Where the server gets a MID's record from. The daemon implements this over
+/// its own DHT store, so an endpoint can answer `Record` for what it published.
+#[async_trait::async_trait]
+pub trait RecordProvider: Send + Sync {
+    /// The record value (record + manifest trailer) held locally for the MID.
+    async fn record_value(&self, mid_digest: [u8; 32]) -> Option<Vec<u8>>;
+}
+
+#[async_trait::async_trait]
+impl RecordProvider for crate::network::node::DhtHandle {
+    async fn record_value(&self, mid_digest: [u8; 32]) -> Option<Vec<u8>> {
+        self.local_record_value(mid_digest).await
+    }
+}
+
 // ─── WSS Share Server ────────────────────────────────────────────────────────
 
-/// WebSocket server that serves share fetch requests from a `LocalShareStore`.
+/// WebSocket server that serves share and record requests from a
+/// `LocalShareStore` and a [`RecordProvider`].
 ///
 /// Runs as a tokio task alongside the daemon. Each incoming connection goes
 /// through:
-/// 1. TCP accept (with semaphore-based backpressure)
-/// 2. Optional TLS handshake (if `bind_tls` was used)
-/// 3. WebSocket upgrade
-/// 4. Single request-response cycle (ShareFetchRequest → ShareFetchResponse)
+/// 1. TCP accept; over the concurrency cap the connection is closed at once
+///    (nothing is queued, so a flood cannot pile up tasks or sockets)
+/// 2. Optional TLS handshake (if `bind_tls` was used), time-limited
+/// 3. WebSocket upgrade, time-limited, with request-sized frame limits
+/// 4. Up to `max_requests` request/response cycles, each read time-limited
 /// 5. Close (releasing the semaphore permit)
+///
+/// It serves only [`WsRequest`]. It holds no reference to the daemon's control
+/// channel, token or IPC, so nothing that arrives here can reach them.
 pub struct WssShareServer {
     store: Arc<LocalShareStore>,
+    records: Option<Arc<dyn RecordProvider>>,
     listener: TcpListener,
     /// The port this server bound to (useful when port=0).
     pub port: u16,
@@ -189,8 +308,22 @@ pub struct WssShareServer {
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
     /// Maximum concurrent connections.
     max_concurrent: usize,
-    /// Idle timeout per connection.
-    idle_timeout: std::time::Duration,
+    /// How long the server waits for the next message (or the handshake).
+    idle_timeout: Duration,
+    /// How long one response may take to be written.
+    write_timeout: Duration,
+    /// Requests served per connection.
+    max_requests: usize,
+}
+
+/// What one connection handler needs; cheap to clone per connection.
+#[derive(Clone)]
+struct ServeCtx {
+    store: Arc<LocalShareStore>,
+    records: Option<Arc<dyn RecordProvider>>,
+    idle_timeout: Duration,
+    write_timeout: Duration,
+    max_requests: usize,
 }
 
 impl WssShareServer {
@@ -207,11 +340,14 @@ impl WssShareServer {
         info!("WSS share server bound on 127.0.0.1:{bound_port}");
         Ok(Self {
             store,
+            records: None,
             listener,
             port: bound_port,
             tls_acceptor: None,
             max_concurrent: 64,
-            idle_timeout: std::time::Duration::from_millis(120_000),
+            idle_timeout: Duration::from_millis(120_000),
+            write_timeout: Duration::from_millis(60_000),
+            max_requests: WS_MAX_REQUESTS_PER_CONNECTION,
         })
     }
 
@@ -262,11 +398,14 @@ impl WssShareServer {
         info!("WSS share server (TLS) bound on 127.0.0.1:{bound_port}");
         Ok(Self {
             store,
+            records: None,
             listener,
             port: bound_port,
             tls_acceptor: Some(tls_acceptor),
             max_concurrent: 64,
-            idle_timeout: std::time::Duration::from_millis(120_000),
+            idle_timeout: Duration::from_millis(120_000),
+            write_timeout: Duration::from_millis(60_000),
+            max_requests: WS_MAX_REQUESTS_PER_CONNECTION,
         })
     }
 
@@ -277,8 +416,21 @@ impl WssShareServer {
     }
 
     /// Set idle timeout (builder pattern).
-    pub fn with_idle_timeout(mut self, timeout: std::time::Duration) -> Self {
+    pub fn with_idle_timeout(mut self, timeout: Duration) -> Self {
         self.idle_timeout = timeout;
+        self
+    }
+
+    /// Set the number of requests served per connection (builder pattern).
+    pub fn with_max_requests_per_connection(mut self, max: usize) -> Self {
+        self.max_requests = max.max(1);
+        self
+    }
+
+    /// Let this endpoint answer [`WsRequest::Record`] from `records`. Without a
+    /// provider every record request is answered "unknown".
+    pub fn with_record_provider(mut self, records: Arc<dyn RecordProvider>) -> Self {
+        self.records = Some(records);
         self
     }
 
@@ -287,7 +439,13 @@ impl WssShareServer {
     pub async fn run(self) {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(self.max_concurrent));
         let tls_acceptor = self.tls_acceptor.clone();
-        let idle_timeout = self.idle_timeout;
+        let ctx = ServeCtx {
+            store: self.store.clone(),
+            records: self.records.clone(),
+            idle_timeout: self.idle_timeout,
+            write_timeout: self.write_timeout,
+            max_requests: self.max_requests,
+        };
         let mut connections = tokio::task::JoinSet::new();
 
         loop {
@@ -298,47 +456,44 @@ impl WssShareServer {
             }
             match self.listener.accept().await {
                 Ok((tcp_stream, addr)) => {
-                    let store = self.store.clone();
-                    let sem = semaphore.clone();
+                    // Over the cap: close now. Nothing waits for a slot, so a
+                    // flood of connections holds no task and no buffer.
+                    let permit = match semaphore.clone().try_acquire_owned() {
+                        Ok(p) => p,
+                        Err(_) => {
+                            debug!("WSS at capacity, dropping connection from {addr}");
+                            drop(tcp_stream);
+                            continue;
+                        }
+                    };
+                    let ctx = ctx.clone();
                     let tls_acc = tls_acceptor.clone();
 
                     connections.spawn(async move {
-                        // Acquire backpressure permit.
-                        let _permit = match sem.acquire().await {
-                            Ok(p) => p,
-                            Err(_) => {
-                                debug!("WSS semaphore closed, dropping connection from {addr}");
-                                return;
-                            }
-                        };
-
-                        let result = tokio::time::timeout(idle_timeout, async {
-                            if let Some(acceptor) = tls_acc {
-                                // TLS path: handshake then WebSocket over TLS stream.
-                                match acceptor.accept(tcp_stream).await {
-                                    Ok(tls_stream) => {
-                                        handle_wss_connection_tls(tls_stream, store).await
-                                    }
-                                    Err(e) => {
-                                        debug!("WSS TLS handshake from {addr} failed: {e}");
-                                        Ok(())
-                                    }
+                        let _permit = permit;
+                        let result = if let Some(acceptor) = tls_acc {
+                            // TLS path: handshake (time-limited), then WebSocket over TLS.
+                            match tokio::time::timeout(
+                                ctx.idle_timeout,
+                                acceptor.accept(tcp_stream),
+                            )
+                            .await
+                            {
+                                Ok(Ok(tls_stream)) => serve_connection(tls_stream, &ctx).await,
+                                Ok(Err(e)) => {
+                                    debug!("WSS TLS handshake from {addr} failed: {e}");
+                                    Ok(())
                                 }
-                            } else {
-                                // Plain WS path.
-                                handle_wss_connection(tcp_stream, store).await
+                                Err(_) => {
+                                    debug!("WSS TLS handshake from {addr} timed out");
+                                    Ok(())
+                                }
                             }
-                        })
-                        .await;
-
-                        match result {
-                            Ok(Ok(())) => {}
-                            Ok(Err(e)) => {
-                                debug!("WSS connection from {addr} error: {e}");
-                            }
-                            Err(_) => {
-                                debug!("WSS connection from {addr} timed out (idle)");
-                            }
+                        } else {
+                            serve_connection(tcp_stream, &ctx).await
+                        };
+                        if let Err(e) = result {
+                            debug!("WSS connection from {addr} ended: {e}");
                         }
                         // _permit dropped here, releasing the semaphore slot.
                     });
@@ -351,81 +506,107 @@ impl WssShareServer {
     }
 }
 
-/// Handle a single plain WebSocket connection: read request, look up share, send response.
-async fn handle_wss_connection(
-    stream: tokio::net::TcpStream,
-    store: Arc<LocalShareStore>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let ws_stream = tokio_tungstenite::accept_async(stream).await?;
-    handle_ws_stream(ws_stream, store).await
+type ServeResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+/// Upgrade one accepted stream and serve it. The upgrade is time-limited and the
+/// frame limits are request-sized from the first byte after the upgrade.
+async fn serve_connection<S>(stream: S, ctx: &ServeCtx) -> ServeResult
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let ws_stream = tokio::time::timeout(
+        ctx.idle_timeout,
+        tokio_tungstenite::accept_async_with_config(stream, Some(ws_limits(WS_REQUEST_MAX_BYTES))),
+    )
+    .await
+    .map_err(|_| "WebSocket upgrade timed out")??;
+    handle_ws_stream(ws_stream, ctx).await
 }
 
-/// Handle a single TLS WebSocket connection.
-async fn handle_wss_connection_tls(
-    stream: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
-    store: Arc<LocalShareStore>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let ws_stream = tokio_tungstenite::accept_async(stream).await?;
-    handle_ws_stream(ws_stream, store).await
+/// Answer one request. Never fails and never says why it has nothing: an unknown
+/// MID, a missing share and a record over the size cap all look the same.
+async fn answer_request(request: WsRequest, ctx: &ServeCtx) -> WsResponse {
+    match request {
+        WsRequest::Share(request) => {
+            let store = ctx.store.clone();
+            // Found through the store's index (no decryption), then exactly one
+            // decryption: the cost of a request must not grow with the number of
+            // shares stored. Store reads decrypt, so they stay off the async threads.
+            let share = tokio::task::spawn_blocking(move || {
+                let prefix: [u8; 8] = request.mid_digest[..8].try_into().ok()?;
+                let addr = store.find_piece(&prefix, request.segment_index, request.slot_index)?;
+                store.get_untouched(&addr).ok().filter(|s| {
+                    s.mid_prefix == prefix
+                        && s.slot_index == request.slot_index
+                        && s.segment_index == request.segment_index
+                })
+            })
+            .await
+            .ok()
+            .flatten();
+            WsResponse::Share(ShareFetchResponse { share })
+        }
+        WsRequest::Record { mid_digest } => {
+            let value = match &ctx.records {
+                Some(records) => records
+                    .record_value(mid_digest)
+                    .await
+                    .filter(|v| v.len() <= WS_RECORD_MAX_BYTES),
+                None => None,
+            };
+            WsResponse::Record { value }
+        }
+    }
 }
 
-/// Common WebSocket handler logic for both plain and TLS streams.
+/// The request loop for one upgraded connection, plain or TLS.
 async fn handle_ws_stream<S>(
     ws_stream: tokio_tungstenite::WebSocketStream<S>,
-    store: Arc<LocalShareStore>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    ctx: &ServeCtx,
+) -> ServeResult
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     use futures::StreamExt;
 
     let (mut write, mut read) = ws_stream.split();
+    let mut served = 0usize;
+    let mut control_frames = 0usize;
 
-    // Read one binary message.
-    let msg = match read.next().await {
-        Some(Ok(Message::Binary(data))) => data,
-        Some(Ok(Message::Close(_))) | None => return Ok(()),
-        Some(Ok(other)) => {
-            debug!("WSS: unexpected message type: {other:?}");
-            return Ok(());
-        }
-        Some(Err(e)) => return Err(e.into()),
-    };
-
-    // Deserialize request.
-    let request: ShareFetchRequest = match bincode::deserialize(&msg) {
-        Ok(r) => r,
-        Err(e) => {
-            error!("WSS: failed to deserialize request: {e}");
-            return Ok(());
-        }
-    };
-
-    // Look up the share.
-    let prefix: [u8; 8] = match request.mid_digest[..8].try_into() {
-        Ok(p) => p,
-        Err(_) => {
-            error!("WSS: invalid mid_digest length in request");
-            return Ok(());
-        }
-    };
-    let candidates = store.search_by_mid_prefix(&prefix);
-    let share: Option<MiasmaShare> = candidates.iter().find_map(|addr| {
-        store.get(addr).ok().and_then(|s| {
-            if s.slot_index == request.slot_index && s.segment_index == request.segment_index {
-                Some(s)
-            } else {
-                None
+    while served < ctx.max_requests {
+        let msg = match tokio::time::timeout(ctx.idle_timeout, read.next()).await {
+            // Idle: the client is gone or has nothing more to ask.
+            Err(_) => return Ok(()),
+            Ok(None) | Ok(Some(Ok(Message::Close(_)))) => return Ok(()),
+            Ok(Some(Ok(Message::Binary(data)))) => data,
+            Ok(Some(Ok(Message::Ping(_) | Message::Pong(_)))) => {
+                control_frames += 1;
+                if control_frames > WS_MAX_CONTROL_FRAMES {
+                    return Ok(());
+                }
+                continue;
             }
-        })
-    });
+            // Text or a raw frame: not this protocol. Close without a word.
+            Ok(Some(Ok(_))) => return Ok(()),
+            Ok(Some(Err(e))) => return Err(e.into()),
+        };
 
-    // Serialize and send response.
-    let response = ShareFetchResponse { share };
-    let body = bincode::serialize(&response)?;
-    write.send(Message::Binary(body)).await?;
+        // A request that does not parse ends the connection; nothing about it
+        // (not even that it was malformed) is echoed back.
+        let request: WsRequest = match decode_ws_message(&msg, WS_REQUEST_MAX_BYTES) {
+            Ok(r) => r,
+            Err(_) => return Ok(()),
+        };
+        served += 1;
 
-    // Close.
+        let response = answer_request(request, ctx).await;
+        let body = encode_ws_message(&response)?;
+        tokio::time::timeout(ctx.write_timeout, write.send(Message::Binary(body)))
+            .await
+            .map_err(|_| "response write timed out")??;
+    }
+
+    // Per-connection request limit reached: the client dials again.
     write.close().await.ok();
     Ok(())
 }
@@ -574,7 +755,7 @@ impl PayloadTransport for WssPayloadTransport {
             // WebSocket upgrade over TLS stream.
             let ws_upgrade_timeout = std::cmp::min(connect_timeout, read_timeout);
             let ws_result = tokio::select! {
-                res = tokio_tungstenite::client_async(&url, tls_stream) => {
+                res = tokio_tungstenite::client_async_with_config(&url, tls_stream, Some(ws_limits(WS_MAX_MESSAGE_BYTES))) => {
                     res.map_err(|e| PayloadTransportError {
                         phase: TransportPhase::Session,
                         message: format!("WSS upgrade over TLS to {url}: {e}"),
@@ -607,7 +788,7 @@ impl PayloadTransport for WssPayloadTransport {
             // be cancel-safe with timeout() on all platforms.
             let ws_upgrade_timeout = std::cmp::min(connect_timeout, read_timeout);
             let ws_result = tokio::select! {
-                res = tokio_tungstenite::client_async(&url, tcp_stream) => {
+                res = tokio_tungstenite::client_async_with_config(&url, tcp_stream, Some(ws_limits(WS_MAX_MESSAGE_BYTES))) => {
                     res.map_err(|e| PayloadTransportError {
                         phase: TransportPhase::Session,
                         message: format!("WSS connect to {url}: {e}"),
@@ -758,12 +939,12 @@ where
     let (mut write, mut read) = ws_stream.split();
 
     // Send request with write timeout.
-    let request = ShareFetchRequest {
+    let request = WsRequest::Share(ShareFetchRequest {
         mid_digest,
         slot_index,
         segment_index,
-    };
-    let body = bincode::serialize(&request).map_err(|e| PayloadTransportError {
+    });
+    let body = encode_ws_message(&request).map_err(|e| PayloadTransportError {
         phase: TransportPhase::Data,
         message: format!("serialize request: {e}"),
     })?;
@@ -822,13 +1003,19 @@ where
     }
 
     // Deserialize.
-    let response: ShareFetchResponse =
-        bincode::deserialize(&data).map_err(|e| PayloadTransportError {
+    let response: WsResponse =
+        decode_ws_message(&data, max_response_bytes).map_err(|e| PayloadTransportError {
             phase: TransportPhase::Data,
             message: format!("deserialize response: {e}"),
         })?;
 
-    Ok(response.share)
+    match response {
+        WsResponse::Share(r) => Ok(r.share),
+        WsResponse::Record { .. } => Err(PayloadTransportError {
+            phase: TransportPhase::Data,
+            message: "deserialize response: a record answered a share request".into(),
+        }),
+    }
 }
 
 /// Parse "host:port" from a peer address string.
@@ -1124,5 +1311,295 @@ mod tests {
             parse_host_port("ws://127.0.0.1:9999/path", 443),
             ("127.0.0.1".into(), 9999)
         );
+    }
+}
+
+// ─── Protocol and hardening tests ────────────────────────────────────────────
+
+#[cfg(test)]
+mod protocol_tests {
+    use super::*;
+    use crate::{
+        pipeline::{dissolve, DissolutionParams},
+        transport::ws_direct::WsDirectClient,
+    };
+    use futures::StreamExt;
+
+    /// A record provider that hands out fixed bytes for one MID.
+    struct FixedRecord {
+        mid: [u8; 32],
+        value: Vec<u8>,
+    }
+
+    #[async_trait::async_trait]
+    impl RecordProvider for FixedRecord {
+        async fn record_value(&self, mid_digest: [u8; 32]) -> Option<Vec<u8>> {
+            (mid_digest == self.mid).then(|| self.value.clone())
+        }
+    }
+
+    async fn start(server: WssShareServer) -> u16 {
+        let port = server.port;
+        tokio::spawn(server.run());
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        port
+    }
+
+    fn empty_store() -> (tempfile::TempDir, Arc<LocalShareStore>) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(LocalShareStore::open(dir.path(), 100).unwrap());
+        (dir, store)
+    }
+
+    async fn raw_ws(port: u16) -> tokio_tungstenite::WebSocketStream<tokio::net::TcpStream> {
+        let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        tokio_tungstenite::client_async(format!("ws://127.0.0.1:{port}/"), tcp)
+            .await
+            .unwrap()
+            .0
+    }
+
+    /// True once the server has ended the conversation (close frame, EOF or reset).
+    async fn ends_without_answer(
+        ws: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    ) -> bool {
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), ws.next()).await {
+                Ok(None) | Ok(Some(Err(_))) | Ok(Some(Ok(Message::Close(_)))) => return true,
+                Ok(Some(Ok(Message::Ping(_) | Message::Pong(_)))) => continue,
+                Ok(Some(Ok(_))) => return false,
+                Err(_) => return false,
+            }
+        }
+    }
+
+    #[test]
+    fn wire_messages_round_trip_and_reject_every_deviation() {
+        let req = WsRequest::Record {
+            mid_digest: [7u8; 32],
+        };
+        let bytes = encode_ws_message(&req).unwrap();
+        assert_eq!(bytes[0], WS_WIRE_VERSION);
+        assert!(matches!(
+            decode_ws_message::<WsRequest>(&bytes, WS_REQUEST_MAX_BYTES),
+            Ok(WsRequest::Record { .. })
+        ));
+
+        // Wrong version, empty, trailing bytes, truncated, over the limit.
+        let mut wrong_version = bytes.clone();
+        wrong_version[0] = WS_WIRE_VERSION.wrapping_add(1);
+        assert!(decode_ws_message::<WsRequest>(&wrong_version, 1024).is_err());
+        assert!(decode_ws_message::<WsRequest>(&[], 1024).is_err());
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(decode_ws_message::<WsRequest>(&trailing, 1024).is_err());
+        assert!(decode_ws_message::<WsRequest>(&bytes[..bytes.len() - 1], 1024).is_err());
+        assert!(decode_ws_message::<WsRequest>(&bytes, bytes.len() - 1).is_err());
+        // An unknown variant.
+        let mut unknown = bytes.clone();
+        unknown[1..5].copy_from_slice(&99u32.to_le_bytes());
+        assert!(decode_ws_message::<WsRequest>(&unknown, 1024).is_err());
+    }
+
+    #[test]
+    fn a_declared_length_cannot_size_an_allocation() {
+        // Record response: variant 1, Some, then a Vec<u8> claiming u64::MAX bytes.
+        let mut evil = vec![WS_WIRE_VERSION];
+        evil.extend_from_slice(&1u32.to_le_bytes());
+        evil.push(1);
+        evil.extend_from_slice(&u64::MAX.to_le_bytes());
+        assert!(decode_ws_message::<WsResponse>(&evil, WS_MAX_MESSAGE_BYTES).is_err());
+
+        // Same for a share response with a huge declared payload.
+        let mut evil = vec![WS_WIRE_VERSION];
+        evil.extend_from_slice(&0u32.to_le_bytes());
+        evil.push(1);
+        evil.extend_from_slice(&[0xFF; 64]);
+        assert!(decode_ws_message::<WsResponse>(&evil, WS_MAX_MESSAGE_BYTES).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_record_is_served_and_an_unknown_mid_gets_none() {
+        let (_dir, store) = empty_store();
+        let known = [0x42u8; 32];
+        let value = vec![9u8; 5000];
+        let server = WssShareServer::bind(store, 0)
+            .await
+            .unwrap()
+            .with_record_provider(Arc::new(FixedRecord {
+                mid: known,
+                value: value.clone(),
+            }));
+        let port = start(server).await;
+        let client = WsDirectClient::new(&format!("ws://127.0.0.1:{port}"), None).unwrap();
+
+        assert_eq!(client.fetch_record(known).await.unwrap(), Some(value));
+        assert_eq!(client.fetch_record([0x43u8; 32]).await.unwrap(), None);
+        // Many requests over one connection.
+        for _ in 0..20 {
+            assert!(client.fetch_record(known).await.unwrap().is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn without_a_provider_or_over_the_cap_a_record_is_none() {
+        let (_dir, store) = empty_store();
+        let mid = [0x51u8; 32];
+
+        // No provider at all.
+        let port = start(WssShareServer::bind(store.clone(), 0).await.unwrap()).await;
+        let client = WsDirectClient::new(&format!("ws://127.0.0.1:{port}"), None).unwrap();
+        assert_eq!(client.fetch_record(mid).await.unwrap(), None);
+
+        // A provider whose value exceeds the cap: refused, indistinguishable from "unknown".
+        let server = WssShareServer::bind(store, 0)
+            .await
+            .unwrap()
+            .with_record_provider(Arc::new(FixedRecord {
+                mid,
+                value: vec![0u8; WS_RECORD_MAX_BYTES + 1],
+            }));
+        let port = start(server).await;
+        let client = WsDirectClient::new(&format!("ws://127.0.0.1:{port}"), None).unwrap();
+        assert_eq!(client.fetch_record(mid).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn shares_and_records_share_a_connection_and_a_request_limit_redials() {
+        let (_dir, store) = empty_store();
+        let (mid, shares) = dissolve(
+            b"direct receive protocol test payload",
+            DissolutionParams {
+                data_shards: 2,
+                total_shards: 3,
+            },
+        )
+        .unwrap();
+        for s in &shares {
+            store.put(s).unwrap();
+        }
+        let server = WssShareServer::bind(store, 0)
+            .await
+            .unwrap()
+            .with_max_requests_per_connection(2);
+        let port = start(server).await;
+        let client = WsDirectClient::new(&format!("ws://127.0.0.1:{port}"), None).unwrap();
+
+        // Far more requests than one connection serves: each is answered, the
+        // client dials again when the server closes.
+        for round in 0..7u16 {
+            let slot = round % 3;
+            let share = client
+                .fetch_share(*mid.as_bytes(), 0, slot)
+                .await
+                .unwrap()
+                .expect("share present");
+            assert_eq!(share.slot_index, slot);
+        }
+        assert!(client
+            .fetch_share(*mid.as_bytes(), 0, 9)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn malformed_and_hostile_frames_end_the_connection_without_an_answer() {
+        let (_dir, store) = empty_store();
+        let port = start(WssShareServer::bind(store, 0).await.unwrap()).await;
+
+        // Garbage binary.
+        let mut ws = raw_ws(port).await;
+        ws.send(Message::Binary(vec![0xFF; 40])).await.unwrap();
+        assert!(ends_without_answer(&mut ws).await);
+
+        // The right version byte, then garbage.
+        let mut ws = raw_ws(port).await;
+        let mut m = vec![WS_WIRE_VERSION];
+        m.extend_from_slice(&[0xAB; 60]);
+        ws.send(Message::Binary(m)).await.unwrap();
+        assert!(ends_without_answer(&mut ws).await);
+
+        // A text message (for example a JSON control request): not this protocol.
+        let mut ws = raw_ws(port).await;
+        ws.send(Message::Text(
+            r#"{"cmd":"Shutdown","token":"x"}"#.to_owned(),
+        ))
+        .await
+        .unwrap();
+        assert!(ends_without_answer(&mut ws).await);
+
+        // A frame far above the request limit: refused on its header, closed.
+        let mut ws = raw_ws(port).await;
+        let _ = ws.send(Message::Binary(vec![1u8; 2 * 1024 * 1024])).await;
+        assert!(ends_without_answer(&mut ws).await);
+
+        // The server is unharmed and still answers a good request.
+        let client = WsDirectClient::new(&format!("ws://127.0.0.1:{port}"), None).unwrap();
+        assert_eq!(client.fetch_record([1u8; 32]).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn connections_over_the_cap_are_closed_and_slots_are_reused() {
+        let (_dir, store) = empty_store();
+        let server = WssShareServer::bind(store, 0)
+            .await
+            .unwrap()
+            .with_max_concurrent(2);
+        let port = start(server).await;
+
+        // Two idle upgraded connections fill the cap.
+        let a = raw_ws(port).await;
+        let b = raw_ws(port).await;
+
+        // The third is closed at once: it never completes the upgrade.
+        let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let third = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio_tungstenite::client_async(format!("ws://127.0.0.1:{port}/"), tcp),
+        )
+        .await
+        .expect("the server must answer or close promptly, not queue");
+        assert!(third.is_err(), "a connection over the cap must be refused");
+
+        // Free a slot: service resumes.
+        drop(a);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let client = WsDirectClient::new(&format!("ws://127.0.0.1:{port}"), None).unwrap();
+        assert_eq!(client.fetch_record([2u8; 32]).await.unwrap(), None);
+        drop(b);
+    }
+
+    #[tokio::test]
+    async fn a_silent_connection_is_dropped_after_the_idle_timeout() {
+        let (_dir, store) = empty_store();
+        let server = WssShareServer::bind(store, 0)
+            .await
+            .unwrap()
+            .with_idle_timeout(Duration::from_millis(300));
+        let port = start(server).await;
+
+        let mut ws = raw_ws(port).await;
+        let started = std::time::Instant::now();
+        assert!(ends_without_answer(&mut ws).await);
+        assert!(started.elapsed() < Duration::from_secs(4));
+
+        // A peer that never even completes the upgrade is dropped too.
+        let mut tcp = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let mut buf = Vec::new();
+        let n = tokio::time::timeout(
+            Duration::from_secs(4),
+            tokio::io::AsyncReadExt::read_to_end(&mut tcp, &mut buf),
+        )
+        .await
+        .expect("server must close a stalled handshake")
+        .unwrap_or(0);
+        assert_eq!(n, 0);
     }
 }
