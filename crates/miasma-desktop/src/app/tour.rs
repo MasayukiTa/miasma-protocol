@@ -64,6 +64,9 @@ fn mock(kind: TransferKind, mid: &str, name: &str, state: TransferState) -> Tran
         resumed_from_segment: 0,
         last_error: None,
         resumable: false,
+        share_id: None,
+        share_id_checked: false,
+        publisher_authenticated: false,
     }
 }
 
