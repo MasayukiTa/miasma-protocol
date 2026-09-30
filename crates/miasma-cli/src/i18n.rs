@@ -283,6 +283,15 @@ pub enum Msg {
     RetrieveHint {
         mid: String,
     },
+    /// The ID to give the receiver: binds the publisher, the protection state
+    /// and the content. Printed in addition to (never instead of) the MID line.
+    ShareIdLine {
+        id: String,
+    },
+    ShareIdHint,
+    ShareIdNeedsOutput,
+    /// A receive started from a bare MID: it cannot tell who published.
+    UnauthenticatedMid,
 
     // ---- network-get -o ----
     PasswordOnlyToFile,
@@ -488,6 +497,14 @@ impl Msg {
                 "  Password-protected: the receiver needs the MID and the password.".into()
             }
             RetrieveHint { mid } => format!("  Retrieve: miasma network-get {mid} -o output.bin"),
+            ShareIdLine { id } => format!("Share ID: {id}"),
+            ShareIdHint => "  Give the receiver the Share ID (and the password): it also lets them \
+                            check who published the file, which the MID alone cannot."
+                .into(),
+            ShareIdNeedsOutput => "a share ID is verified while receiving to a file: pass -o/--output \
+                                   (writing to stdout takes the MID, which cannot check who published)."
+                .into(),
+            UnauthenticatedMid => "publisher not authenticated: use the share ID".into(),
 
             PasswordOnlyToFile => "a password only applies when receiving to a file: pass -o/--output. \
                                    (Protected content is never written to stdout.)"
@@ -674,6 +691,10 @@ Anyone who has this link can control this node until the daemon restarts: do not
                 "  パスワードで保護されています。受信する人には MID とパスワードの両方が必要です。".into()
             }
             RetrieveHint { mid } => format!("  受信するには: miasma network-get {mid} -o output.bin"),
+            ShareIdLine { id } => format!("共有ID: {id}"),
+            ShareIdHint => "  受信する人には共有ID(とパスワード)を渡してください。共有IDがあれば、誰が公開したファイルかも確認できます(MIDだけでは確認できません)。".into(),
+            ShareIdNeedsOutput => "共有IDの確認はファイルへ受信するときに行われます。-o/--output を指定してください(標準出力へ書き出すにはMIDを使いますが、MIDでは発行元を確認できません)。".into(),
+            UnauthenticatedMid => "発行元は確認されていません。共有IDを使ってください".into(),
 
             PasswordOnlyToFile => "パスワードはファイルへ受信するときだけ使えます。-o/--output を指定してください。(保護されたデータを標準出力へ書き出すことはありません。)".into(),
             Receiving { id } => format!("受信しています: {id}"),
@@ -886,6 +907,10 @@ mod tests {
             PublishedStats { .. } => "PublishedStats",
             PasswordProtectedNote => "PasswordProtectedNote",
             RetrieveHint { .. } => "RetrieveHint",
+            ShareIdLine { .. } => "ShareIdLine",
+            ShareIdHint => "ShareIdHint",
+            ShareIdNeedsOutput => "ShareIdNeedsOutput",
+            UnauthenticatedMid => "UnauthenticatedMid",
             PasswordOnlyToFile => "PasswordOnlyToFile",
             Receiving { .. } => "Receiving",
             ReceiveTo { .. } => "ReceiveTo",
@@ -1034,6 +1059,22 @@ mod tests {
             (
                 RetrieveHint { mid: s("miasma:abc") },
                 "  Retrieve: miasma network-get miasma:abc -o output.bin",
+            ),
+            (
+                ShareIdLine { id: s("miasma-share:abc") },
+                "Share ID: miasma-share:abc",
+            ),
+            (
+                ShareIdHint,
+                "  Give the receiver the Share ID (and the password): it also lets them check who published the file, which the MID alone cannot.",
+            ),
+            (
+                ShareIdNeedsOutput,
+                "a share ID is verified while receiving to a file: pass -o/--output (writing to stdout takes the MID, which cannot check who published).",
+            ),
+            (
+                UnauthenticatedMid,
+                "publisher not authenticated: use the share ID",
             ),
             (
                 PasswordOnlyToFile,
