@@ -98,7 +98,7 @@ Windows is the current shipping beta. It proves:
 Browser-based dissolution and retrieval. Protocol-compatible with miasma-core v1. Security-audited (all CRITICAL/HIGH/MEDIUM fixed). Supports EN, JA, ZH-CN.
 
 **Network modes** (detected automatically):
-- **Desktop**: Connects to the local daemon via HTTP bridge (`localhost:17842`). Full P2P network access — dissolve publishes to DHT, retrieve fetches from peers.
+- **Desktop**: Connects to the local daemon via HTTP bridge. Full P2P network access — dissolve publishes to DHT, retrieve fetches from peers. The bridge needs the daemon's control token, so open the client with the link that `miasma web` prints (`miasma web --open` opens it in your browser): the daemon serves the client itself, and the token travels in the URL fragment, which the browser never sends to a server. The Transfers screen lists large transfers with progress, Stop and Resume, and receives a file to a path on the daemon's computer; large files are sent from the desktop app or the CLI.
 - **Android WebView**: Loaded inside the Android app with a JavaScript bridge to native FFI. Currently local-only (FFI networking not yet exposed).
 - **iOS WKWebView**: Loaded inside the iOS app with a message handler bridge. Currently local-only.
 - **Standalone browser**: Falls back to local-only WASM. Shares stay in IndexedDB, transferred manually via `.miasma` export/import.

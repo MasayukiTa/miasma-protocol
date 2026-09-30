@@ -727,9 +727,9 @@ as "not a browser, allow".
   `WipeConfirm { nonce }` wipes. `daemon_wipe()` performs both; CLI, desktop, FFI and the integration test
   use it.
 - **HTTP bridge.** Everything except `GET /api/ping` needs `Authorization: Bearer <token>` regardless of
-  `Origin`; `POST /api/wipe` is two-step (`{"confirm": <challenge>}`). `web/js/bridge.js` sends the token
-  from `localStorage['miasma_control_token']` (set with `setControlToken()`); a page cannot read the file, so
-  the token must be pasted once. Mobile bridge clients do not send it yet (see P1-9 in
+  `Origin`; `POST /api/wipe` is two-step (`{"confirm": <challenge>}`). `web/js/bridge.js` sent the token
+  from `localStorage['miasma_control_token']`, pasted by hand (**superseded**: `miasma web` prints a launch
+  link, see "Web client" below). Mobile bridge clients do not send it yet (see P1-9 in
   `remaining-tasks-prioritized.md`).
 - **S-02.** `ControlRequest::zeroize` now wipes the passwords of `PublishFileProtected`,
   `TransferStartReceive`, `TransferStartPublish` (and the `WipeConfirm` nonce). `daemon_request` zeroizes the
@@ -741,6 +741,127 @@ as "not a browser, allow".
   `control_auth.rs`.
 - **Limits.** Any process running as the same user can read the token. Not done: OS-authenticated IPC
   (named pipe / Unix socket with peer credentials), a token for the mobile bridge clients.
+
+### Web client (2026-09-30, branch `feature/web-transfers`)
+
+Three changes to the browser client (`web/`, a PWA), asked for together. Commits: `8634e68` (token flow),
+`55ea70f` (design), and the Transfers screen (this section is committed with it).
+
+**1. Token flow — the client was broken by the IPC hardening above.** Every `/api` call except `/api/ping`
+needs `Authorization: Bearer <daemon.token>`, and a page cannot read that file, so the client only worked
+after a hand-pasted token. Now:
+
+- `miasma web [--open] [--web-url URL]` (crates/miasma-cli, `web_link.rs`) reads `daemon.http` and
+  `daemon.token` and prints `http://127.0.0.1:<bridge port>/#token=<token>` on stdout (the link alone;
+  the explanation goes to stderr, EN/JA). The token is in the URL *fragment*, which a browser never sends
+  to a server, so it is not in the bridge's request path, logs or `Referer`. `--open` hands the link to the
+  OS (Windows `rundll32 url.dll,FileProtocolHandler` with `CREATE_NO_WINDOW`, so no console flashes and
+  `&` in a `--web-url` link is not parsed by `cmd`; macOS `open`; Linux `xdg-open`).
+- The page reads the fragment once (`bridge.js`, at module load), keeps the token in `sessionStorage` (dies
+  with the tab, not shared with other tabs, not on disk; an old `localStorage` copy is deleted) and strips it
+  from the address bar with `history.replaceState`. A `bridge=` address in the fragment is honoured only if it
+  is loopback, and `miasma web --web-url` only accepts a loopback page: the token is never put in a link to
+  another computer.
+- Auth is unchanged: the bridge does not serve the token to a caller without it, the Origin gate is
+  unchanged, wipe stays two-step. A 401 shows a banner (EN/JA/ZH): "run `miasma web` and open the link it
+  prints" (`missing` = page not opened from a link; `rejected` = the token changed because the daemon
+  restarted). Publish/retrieve no longer fall back silently to local-only shares when the token is refused.
+
+Topologies (all found in the code, none assumed):
+
+| Topology | Works? | How |
+|---|---|---|
+| **Daemon serves the client itself** (new; `daemon/web_assets.rs` compiles `web/` into the daemon, public, no token; `GET /` is the app) | yes, the default | `miasma web`; one origin, one port, no CORS; the service worker is same-origin |
+| **Your own static server on localhost** (`python -m http.server` in `web/`, any port) | yes | `miasma web --web-url http://localhost:8080` puts `&bridge=http://127.0.0.1:<port>` in the fragment; the page is cross-origin to the bridge, allowed because the Origin gate accepts any localhost port and the CORS preflight allows `Authorization` (CSP `connect-src` now allows loopback ports) |
+| **Hosted static site** (GitHub Pages, any https origin) | **no** | the bridge refuses non-localhost origins (403), so the page falls back to local-only WASM mode. That is deliberate: loosening the Origin gate would let any web page drive the daemon. Not changed |
+| Android/iOS WebView bridge (`window.miasma`) | unchanged, not exercised | has no transfer calls; the Transfers screen says it needs the daemon |
+
+Desktop "Open web view" action: **skipped** (not trivial: a button in `app.rs`, three locale tables and the
+completeness tests for a launcher that `miasma web --open` already is).
+
+**2. Design.** Same tokens as the desktop (§9), light / dark / system in Settings (remembered in
+`localStorage`, guarded; `js/theme.js` is a classic script in `<head>` so there is no flash; System follows
+`prefers-color-scheme`); dark redefined with `:root:not([data-theme="light"])` under the media query and
+again for `[data-theme="dark"]`. Font stack `Meiryo, "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic",
+"Microsoft YaHei", "PingFang SC", system-ui, sans-serif`, nothing bundled or linked. Accent orange only on
+the primary action (Dissolve / Retrieve / Send / Start receiving, and a modal's confirm); status is a chip and
+coloured text; no coloured rails, no status-filled cards (the old `scope-notice` left rail and the filled
+security notice are gone); the particle animation and glows are removed. `--faint` and `--danger` are lighter
+in dark than the desktop's #71717A / #EF4444 because those are 3.9:1 and 4.3:1 as text; the desktop keeps its
+values. `web/tests/contrast.test.mjs` (`node --test web/tests/*.test.mjs`, also in the Web/WASM CI job)
+pins the palette to the §9 table and checks 4.5:1 for every text/background pair in both themes.
+
+**3. Transfers screen.** Authenticated bridge endpoints (`http_bridge.rs`, same Bearer token, same
+`process_request` handlers as the CLI/desktop, same output-path policy):
+
+| Endpoint | |
+|---|---|
+| `GET /api/transfers` | `TransferList`, each entry with an `id` (MID for a receive, `send:<path>` for a send) |
+| `GET /api/transfers/<id>` | `TransferStatus` (id percent-encoded) |
+| `POST /api/transfers/receive` | `{mid, output_path, password?, restart?}`; `output_path` is on the **daemon's** computer; absolute, no `..` |
+| `POST /api/transfers/<id>/cancel` | stop at the next safe point, keeping the partial file |
+
+Errors map to 400 (bad body, MID or path), 404 (no such transfer), 409 (nothing running to stop). The
+password is redacted in `Debug`, moved into the request that zeroizes it, the body buffer is overwritten when
+the bridge is its only owner (best effort: hyper may hold other copies), a serde error never quotes the body,
+and it is not in any response or log line (asserted with a capture of the daemon's own `trace` output). GET
+transfers are a `ReadApi` for the rate limiter (120/min): the screen polls once a second, so two tabs fit.
+
+The screen (`js/transfers.js`, pure helpers in `js/format.js` with `web/tests/format.test.mjs`) mirrors the
+desktop tab: rows with direction, name, progress bar, bytes, speed, ETA and a state chip; a detail pane with
+MID and copy, the segment strip (done / in progress striped / waiting, a tick where this session resumed, cells
+bucketed above 400 segments), fetch/decode/write split, pieces received/rejected, retries and the last error;
+Stop; Resume (the same receive again, asking for the password again) and Start over (confirmed); a Receive
+form. It does **not** start large publishes (a browser has no file path to give the daemon) and says: use the
+desktop app or the CLI to send large files. Polling is once a second while the screen is open and the tab
+visible, every 3 s / 5 s only while a job runs elsewhere / in a hidden tab, and not at all otherwise. Sizes go
+through BigInt (u64 up to 2^53 exact in JSON), a zero total or rate never divides. Strings are in `i18n.js`
+(EN/JA/ZH), Japanese wording reused from the desktop's `TransferStrings`. A Windows path is drawn in the
+monospace font because Meiryo shows a backslash as a yen sign.
+
+**What was checked, and in what.** A real headless Edge (the private `bgedge`, Edge 154 on Windows 11; nothing
+on the owner's screen), two throwaway nodes on loopback (debug build), a 60 MB password-protected file
+(k=2, n=3, 4 segments):
+
+- token flow without a paste: launch link -> connected chip, URL back to `/`, no banner; a tab opened without
+  the link -> "not opened with its link" banner; a wrong token -> "no longer accepts" banner; the
+  `--web-url` topology from `http://localhost:<port>` -> connected (CORS + `Authorization` preflight);
+- Transfers: a real running receive, progress advancing (0 -> 53.3 % -> 79.9 %), speed 0.4-0.7 MiB/s, ETA;
+  Stop (state `Cancelled`, 3/4 segments, 47.9 MiB kept in `.part`); Resume with a wrong password ->
+  `Failed`, "Wrong password."; Resume with the right one -> `Complete`, `resumed_from_segment = 3`, 22 s;
+  **SHA256 of the result equals the source** (`B30DA73D...5DF3E`);
+- themes: all six combinations of OS scheme x chosen mode resolve as intended (computed `--bg`, body colour,
+  `color-scheme`, `<meta theme-color>`); light, dark, Japanese and English screenshots looked at, at 1280 px
+  and at 390 px (the phone width is an emulated viewport in desktop Edge, not a phone). On all eight screens at
+  390, 320 and 1280 px no element sticks out of the viewport and `scrollWidth == clientWidth` (measured over
+  CDP with Playwright against the same headless Edge, with a transfer listed);
+- last, on the *shipped* form of the page (the assets compiled into the daemon; SHA256 of the served files equals
+  the working tree): a 34 MB protected receive through the form, Complete, **SHA256 equal**;
+- fonts: computed `font-family` is the chain above; the font that actually drew Japanese text was Meiryo,
+  and with Meiryo removed from the chain Yu Gothic, then Microsoft YaHei (CDP `getPlatformFontsForNode`).
+
+Tests: `miasma-core` lib 586 passed / 2 ignored (582 + 3 in `web_assets` + 1 in `rate_limit`),
+`web_bridge_test` 8 (new: client served without a token, no traversal, foreign origin refused, token never
+offered, every transfers endpoint 401 without it, bad requests refused and nothing started, a protected
+transfer received over HTTP with wrong / missing / right password and no password in any response or log line,
+a running receive stopped), `adversarial_test` 186, `integration_test` 71 / 7 ignored,
+`adversarial_transfer_test` 13, `adversarial_storage_test` 9, `adversarial_ipc_test` 11, `transfer_ipc_test`
+1, `transfer_publish_test` 8 / 1 ignored, `miasma-cli` 35 + 5 (`web_command`: link on stdout, fragment only,
+JA, `--web-url`, refuses a remote page, no daemon), `miasma-desktop` 76, `miasma-wasm` 30 + 4 and its
+`wasm32-unknown-unknown` build, JS `node --test` 25 (palette and contrast 9, formatters 16), `cargo fmt --all
+-- --check` clean, and no clippy warning in any file this work touched (the ones clippy reports are old).
+
+**Not verified.** Safari and iOS (nothing of the client was run there); Firefox; a real phone, touch, and the Hiragino / PingFang fallbacks on macOS (only
+proven that the chain falls through on Windows); System mode against a real OS dark-mode toggle (media query
+emulated); **the service worker after an upgrade**: the cache name is bumped to `miasma-web-v5` and the worker
+skips `/api/` and other origins, but no browser that held `v4` was tried, and a tab that is already open
+keeps running the old script until it is reloaded; a link opened with `miasma web --open` on macOS and
+Linux (Windows only reasoned about; the daemon-served page was checked by opening the link with `bgedge`);
+the Android/iOS WebView bridges; receives of many GiB (the screen was exercised on 60 MB; the strip and the
+formatters have unit tests for 100 000 segments and 2^64-1 bytes). Known limits: anyone who has the link
+controls the node until the daemon restarts (it is printed, and with `--open` it is briefly on the
+`rundll32` command line, readable by the same user who can read `daemon.token` anyway); the token sits in
+`sessionStorage` where any script on the bridge's origin can read it (same trust as the page itself).
 
 ## 7. Decisions and open questions
 

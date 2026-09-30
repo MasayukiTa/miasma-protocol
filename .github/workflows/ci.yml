@@ -94,6 +94,10 @@ jobs:
       - name: Test wasm crate
         run: cargo test -p miasma-wasm --locked
 
+      # Design tokens (contrast, palette) and the client's pure functions.
+      - name: Web client JS tests (node, no dependencies)
+        run: node --test web/tests/*.test.mjs
+
       - name: Build wasm target
         run: cargo build -p miasma-wasm --target wasm32-unknown-unknown --locked
 
