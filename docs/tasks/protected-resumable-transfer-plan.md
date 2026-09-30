@@ -69,14 +69,14 @@ for the whole transfer. That is a separate fix and does not block a 1:1 transfer
 
 ```text
 TransferManifest {
-    version:      u8,                    // 1
+    version:      u8,                    // 2 (see Security fixes 1)
     mid:          [u8; 32],              // must equal the record's mid_digest
     data_shards:  u8,   total_shards: u8,
     segment_size: u32,  total_bytes:  u64,
     protection:   Protection,            // None | Password { argon2: {m_kib,t,p}, salt:[u8;16], key_check:[u8;16] }
     segments:     Vec<SegmentEntry>,     // ordered by index
 }
-SegmentEntry { index: u32, plaintext_len: u32, plain_hash: [u8;32], piece_ids: Vec<[u8;32]> /* n */ }
+SegmentEntry { index: u32, plaintext_len: u32, plain_hash: [u8;32], piece_ids: Vec<[u8;32]> /* n; v2: whole-share commitment, not BLAKE3(shard_data) */ }
 ```
 
 Size: `32 + 4 + 4 + n*32` per segment ⇒ ≈ 0.7 KB at `n = 20`; 1600 segments ≈ 1.1 MB.
@@ -611,6 +611,62 @@ Each entry says what was actually run. Machine: Windows 11, slim debug profile (
   not by the idle timeout, and that path is not exercised by a test. No inbound connection limit exists; with a
   1 h idle timeout a public node holds idle inbound connections for an hour (`libp2p::connection_limits` is the
   follow-up if that matters).
+
+### Security fixes 1 (2026-09-30, branch `security/fix-transfer-layer`)
+
+Three findings from the adversarial review of the transfer layer, fixed at the root.
+
+**1. Unbounded record counts (C-02, medium).** A manifest-less DHT record (any peer that knows a MID can
+sign one) made the receiver compute `segment_count = max(segment_index) + 1` and allocate a table of
+that size: `u32::MAX - 1` asked for about 103 GB and aborted the daemon, `u32::MAX` overflowed, tens of
+millions burned hundreds of MB.
+- Fix: `DhtRecord::validate()` (`network/types.rs`) runs before any count is used. Checked
+  `segment_index` below `MAX_SEGMENTS = 65_536` (64 MiB segments x 65 536 = 4 TiB), `0 < k <= n`,
+  shard index `< n`, locations bounded by `min(2^20, MAX_SEGMENTS * n)` (one DHT value is 16 MiB and the
+  smallest location ~22 bytes, so 2^20 is above any genuine record), address count/length and peer-id
+  length bounded. Rejects, never clamps; error is `InvalidManifest("invalid record: ...")`.
+- Called at every boundary: `decode_signed_dht_record` and `decode_signed_record_and_manifest` in
+  `network/node.rs` (a bad record is refused as `InvalidInnerRecord`), `run_receive`, both
+  `retrieve_from_network*` segment-count sites in `network/coordinator.rs` (the same `max() + 1` pattern),
+  and `encode_record_value` (never publish what receivers refuse).
+- Other unbounded numbers found and bounded: `TransferManifest.segment_size` (now `<= 64 MiB`,
+  it sized the per-segment decode buffer) and segment count (`<= MAX_SEGMENTS`); on the manifest-less
+  path a piece's `original_len` (a holder could claim 4 GiB, which `retrieve_segment_with` turned into a
+  buffer) is refused above 64 MiB.
+- Not changed: `retrieval/coordinator.rs`, `streaming.rs` take their counts from callers that now validate.
+
+**2. Piece commitment did not cover the key material (C-07, low-medium).** `PieceId = BLAKE3(shard_data)`,
+so a holder could flip `key_share`, `nonce` or `original_len`; the piece still passed verification, the
+receiver stopped at `k` accepted pieces, decryption failed and no spare holder was tried: one hostile
+holder per segment killed the transfer.
+- (a) Fix: `MiasmaShare::piece_commitment(mid)` = domain-separated BLAKE3
+  (`derive_key("miasma-piece-commitment-v2")`) over `version | MID | segment | slot | original_len |
+  len+shard_data | len+key_share | nonce`. The manifest lists it per slot (`SegmentEntry::from_dissolved`
+  now takes the MID) and the receiver checks it on arrival (`ShareVerification::verify_piece`).
+- **Manifest version 1 -> 2, no compatibility.** Beta software: a v1 manifest (trailer or struct) is
+  refused with `InvalidManifest("manifest version 1 is no longer supported ... publish the file again")`;
+  only one format is kept. The publish-journal version is bumped too (its saved entries hold v1 IDs), so an
+  old journal restarts the publish. Records published by an older build must be published again.
+- (b) Resilience: if the first `k` verified pieces still fail to decode (only possible without a manifest,
+  or from a lying publisher) the receiver fetches up to 4 spare pieces and retries with one piece swapped
+  at a time, at most 16 decode attempts per segment; the piece swapped out of the combination that decodes
+  is recorded as suspect (segment, slot, holder) and is not reused in the run. Otherwise the first error
+  is returned. Two simultaneous bad pieces are not searched for beyond that cap. The unprotected
+  `dissolve_segment_with` / `retrieve_segment_with` path is unchanged.
+
+**3. Argon2 ceiling (low).** The untrusted-manifest ceiling was 256 MiB / t=10 / p=4. `create` produces
+64 MiB / t=3 / p=1 and nothing in the CLI or desktop picks another cost, so the ceiling is now
+128 MiB / t=6 / p=2, refused before any KDF work.
+
+**Tests.** New `crates/miasma-core/tests/adversarial_transfer_test.rs` (14 tests): tampered key_share /
+nonce (protected) / original_len are refused and a spare holder completes the transfer, commitment
+covers every field, legacy-record recovery from spares and its bound, hostile segment indexes
+(`u32::MAX - 1`, `u32::MAX`, 10 000 000, `MAX_SEGMENTS`) rejected in milliseconds, malformed records,
+v1 manifest refused with the clear message, segment_size bound, unchecked `original_len`, Argon2 cap
+before KDF work. Plus one unit test in `transfer/protection.rs`. Passwords are generated at run time.
+Still open from the same review (not transfer layer or design work): DHT records are not publisher-
+authenticated (a MID holder can sign a record), the protection mode is not part of the MID, unauthenticated
+daemon IPC, hosted-share tuple replacement.
 
 ## 7. Decisions and open questions
 
