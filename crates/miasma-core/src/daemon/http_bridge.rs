@@ -18,6 +18,8 @@
 //! | GET    | `/api/transfers/<id>`        | One transfer's status                  |
 //! | POST   | `/api/transfers/receive`     | Start or resume a receive (`mid`, `output_path` on the daemon's computer, optional `password`) |
 //! | POST   | `/api/transfers/<id>/cancel` | Stop a running transfer, keeping it resumable |
+//! | POST   | `/api/transfers/<id>/remove` | Remove a finished transfer from the list (optional `{"discard_partial": true}`); 409 if running, paused or holding partial data |
+//! | POST   | `/api/transfers/clear-finished` | Remove every finished transfer that has no partial data |
 //!
 //! # Security
 //!
@@ -784,7 +786,105 @@ async fn route_transfers(
             Some(id) => handle_transfer_cancel(id, state).await,
             None => json_error(StatusCode::BAD_REQUEST, "bad transfer id"),
         },
+        (&Method::POST, ["clear-finished"]) => handle_transfer_clear_finished(state).await,
+        (&Method::POST, [id, "remove"]) if !id.is_empty() => match percent_decode(id) {
+            Some(id) => match read_body(req).await {
+                Ok(body) => handle_transfer_remove(id, body, state).await,
+                Err(e) => json_error(StatusCode::BAD_REQUEST, &e.to_string()),
+            },
+            None => json_error(StatusCode::BAD_REQUEST, "bad transfer id"),
+        },
         _ => json_error(StatusCode::NOT_FOUND, "not found"),
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct TransferRemoveRequest {
+    /// Also delete the partial data of a failed/cancelled transfer.
+    #[serde(default)]
+    discard_partial: bool,
+}
+
+#[derive(Serialize)]
+struct TransferRemovedResponse {
+    ok: bool,
+    removed: u32,
+    kept_partial: u32,
+}
+
+fn remove_refusal_response(reason: crate::transfer::jobs::RemoveRefusal) -> Response<Full<Bytes>> {
+    use crate::transfer::jobs::RemoveRefusal as R;
+    match reason {
+        R::NotFound => json_error(StatusCode::NOT_FOUND, "no such transfer"),
+        R::Running => json_error(
+            StatusCode::CONFLICT,
+            "transfer is still running: cancel it first",
+        ),
+        R::Paused => json_error(
+            StatusCode::CONFLICT,
+            "transfer is paused and can be resumed: it is not finished",
+        ),
+        R::HasPartialData => json_error(
+            StatusCode::CONFLICT,
+            "transfer has partial data: removing it needs discard_partial",
+        ),
+    }
+}
+
+async fn handle_transfer_remove(
+    id: String,
+    body: Bytes,
+    state: BridgeState,
+) -> Response<Full<Bytes>> {
+    // An empty body means the default (keep partial data).
+    let opts = if body.iter().all(|b| b.is_ascii_whitespace()) {
+        TransferRemoveRequest::default()
+    } else {
+        match serde_json::from_slice::<TransferRemoveRequest>(&body) {
+            Ok(o) => o,
+            Err(_) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid JSON body: expected {\"discard_partial\": bool}",
+                )
+            }
+        }
+    };
+    match bridge_request(
+        state,
+        ControlRequest::TransferRemove {
+            id,
+            discard_partial: opts.discard_partial,
+        },
+    )
+    .await
+    {
+        ControlResponse::TransferRemoved {
+            removed,
+            kept_partial,
+        } => json_ok(&TransferRemovedResponse {
+            ok: true,
+            removed,
+            kept_partial,
+        }),
+        ControlResponse::TransferRemoveRefused { reason, .. } => remove_refusal_response(reason),
+        ControlResponse::Error(e) => json_error(transfer_error_status(&e), &e),
+        _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "unexpected response"),
+    }
+}
+
+async fn handle_transfer_clear_finished(state: BridgeState) -> Response<Full<Bytes>> {
+    match bridge_request(state, ControlRequest::TransferClearFinished).await {
+        ControlResponse::TransferRemoved {
+            removed,
+            kept_partial,
+        } => json_ok(&TransferRemovedResponse {
+            ok: true,
+            removed,
+            kept_partial,
+        }),
+        ControlResponse::Error(e) => json_error(transfer_error_status(&e), &e),
+        _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "unexpected response"),
     }
 }
 
