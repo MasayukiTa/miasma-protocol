@@ -505,10 +505,12 @@ export class MiasmaBridge {
    * DAEMON's computer. The password goes in the request body only: never in the URL,
    * never stored here. Returns the transfer id.
    */
-  async transferReceive({ mid, outputPath, password, restart }) {
+  async transferReceive({ mid, outputPath, password, restart, via }) {
     if (this._mode !== MODE_HTTP) throw transferError('unsupported');
     const body = { mid, output_path: outputPath, restart: !!restart };
     if (password) body.password = password;
+    // Direct receive: fetch from the sender's tunnel URL(s) instead of the DHT.
+    if (Array.isArray(via) && via.length) body.via = via;
     let resp;
     try {
       resp = await bridgeFetch(`${bridgeBase}/api/transfers/receive`, {
