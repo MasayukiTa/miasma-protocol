@@ -311,8 +311,9 @@ impl WsDirectClient {
         self.endpoint.authority()
     }
 
-    /// The record value (record + manifest trailer) for `mid_digest`, or `None`
-    /// if the endpoint has none.
+    /// The signed record envelope for `mid_digest` (see
+    /// `RecordProvider::record_value`), or `None` if the endpoint has none. The
+    /// bytes are untrusted: open them with `transfer::open_signed_record`.
     pub async fn fetch_record(
         &self,
         mid_digest: [u8; 32],
