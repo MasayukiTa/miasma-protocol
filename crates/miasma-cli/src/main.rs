@@ -279,9 +279,14 @@ enum Commands {
 
     /// Retrieve and reconstruct content from the P2P network by MID.
     NetworkGet {
-        /// Miasma Content ID (format: `miasma:<base58>`).
+        /// The Share ID the sender gave you (`miasma-share:<base58>`), which also
+        /// verifies who published the file; or a bare MID (`miasma:<base58>`),
+        /// which cannot.
+        #[arg(value_name = "SHARE_ID_OR_MID")]
         mid: String,
-        /// Write reconstructed content to this file. If omitted, writes to stdout.
+        /// Write reconstructed content to this file, or into this folder (the
+        /// file then keeps the name it had when it was sent). If omitted, writes
+        /// to stdout.
         #[arg(long, short = 'o')]
         output: Option<PathBuf>,
         /// Number of data shards (k) used during dissolution.
@@ -707,14 +712,15 @@ fn cmd_get(
     data_shards: usize,
     total_shards: usize,
 ) -> Result<()> {
-    use miasma_core::crypto::hash::ContentId;
-
     let mut config = NodeConfig::load(data_dir).context("cannot load config")?;
     let quota_mb = config.storage.quota_mb;
     config.transport.zeroize_secret_copies();
     let store = LocalShareStore::open(data_dir, quota_mb).context("cannot open share store")?;
 
-    let mid = ContentId::from_str(mid_str).with_context(|| format!("invalid MID: {mid_str}"))?;
+    // A MID or a share ID (only the content part matters for a local retrieve).
+    let mid = miasma_core::transfer::parse_transfer_id(mid_str)
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .mid();
 
     let params = DissolutionParams {
         data_shards,
@@ -2157,6 +2163,18 @@ async fn cmd_network_publish(
         }
         .t()
     );
+    // The thing to give the receiver: a separate line, the MID lines above stay
+    // exactly as scripts expect them.
+    if let Some(share_id) = &status.share_id {
+        eprintln!(
+            "{}",
+            Msg::ShareIdLine {
+                id: share_id.clone()
+            }
+            .t()
+        );
+        eprintln!("{}", Msg::ShareIdHint.t());
+    }
     Ok(())
 }
 
@@ -2191,6 +2209,17 @@ async fn cmd_network_get(
     }
     if password.is_some() {
         bail!("{}", Msg::PasswordOnlyToFile.t());
+    }
+
+    // A share ID is only verified by the piece-by-piece receive to a file;
+    // this byte-returning path cannot authenticate the publisher, so say so
+    // instead of quietly dropping the check.
+    if miasma_core::transfer::parse_transfer_id(mid_str)
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .share_id()
+        .is_some()
+    {
+        bail!("{}", Msg::ShareIdNeedsOutput.t());
     }
 
     eprintln!("Requesting {mid_str} from local daemon...");
@@ -2448,6 +2477,10 @@ async fn cmd_network_get_transfer(
 ) -> Result<()> {
     use miasma_core::{daemon_request, ControlRequest, ControlResponse};
 
+    // One parse of what was typed, before any network work: a mistyped share ID
+    // stops here with a precise message. A bare MID is accepted, with a warning.
+    let target =
+        miasma_core::transfer::parse_transfer_id(mid_str).map_err(|e| anyhow::anyhow!("{e}"))?;
     let abs_path = miasma_core::daemon::control_auth::absolutize_lexical(path);
     // The CA is read here and sent as text: the daemon never opens a path that a
     // client names.
@@ -2487,6 +2520,9 @@ async fn cmd_network_get_transfer(
         }
         .t()
     );
+    if target.share_id().is_none() {
+        eprintln!("{}", Msg::UnauthenticatedMid.t());
+    }
     if !via.is_empty() {
         eprintln!(
             "{}",
@@ -2503,12 +2539,19 @@ async fn cmd_network_get_transfer(
     }
 
     let status = watch_transfer(data_dir, &id).await?;
+    // Into a folder the file lands under the name the sender's file had: say
+    // where it really went.
+    let written = if status.name.is_empty() {
+        abs_path.display().to_string()
+    } else {
+        status.name.clone()
+    };
     eprintln!(
         "{}",
         Msg::ReceiveDone {
             size: human_bytes(status.bytes_done),
             secs: status.elapsed_secs,
-            path: abs_path.display().to_string(),
+            path: written,
         }
         .t()
     );
@@ -2733,12 +2776,11 @@ fn resume_hint_in(s: &miasma_core::transfer::TransferStatus, lang: Lang) -> Stri
 async fn cmd_transfer_cancel(data_dir: &std::path::Path, mid: &str) -> Result<()> {
     use miasma_core::{daemon_request, ControlRequest, ControlResponse};
 
-    match daemon_request(
-        data_dir,
-        ControlRequest::TransferCancel { id: mid.to_owned() },
-    )
-    .await?
-    {
+    // A transfer is known by its MID; accept the share ID that started it too.
+    let id = miasma_core::transfer::parse_transfer_id(mid)
+        .map(|t| t.mid().to_string())
+        .unwrap_or_else(|_| mid.to_owned());
+    match daemon_request(data_dir, ControlRequest::TransferCancel { id }).await? {
         ControlResponse::TransferCancelled => {
             eprintln!("{}", Msg::CancelRequested.t());
             Ok(())
@@ -3101,6 +3143,9 @@ mod transfer_progress_tests {
             resumed_from_segment: 0,
             last_error: None,
             resumable: false,
+            share_id: None,
+            share_id_checked: false,
+            publisher_authenticated: false,
         }
     }
 
@@ -3236,6 +3281,9 @@ mod transfers_listing {
             resumed_from_segment: 0,
             last_error: None,
             resumable: true,
+            share_id: None,
+            share_id_checked: false,
+            publisher_authenticated: false,
         }
     }
 
