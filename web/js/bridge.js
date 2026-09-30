@@ -2,7 +2,9 @@
 //
 // Detects the runtime environment and routes API calls accordingly:
 //   1. WebView bridge (Android/iOS) — window.miasma injected by native host
-//   2. HTTP bridge (Desktop) — daemon's HTTP API on localhost:17842
+//   2. HTTP bridge (Desktop) — the daemon's HTTP API on 127.0.0.1. Found, in
+//      this order, at: the address a launch link named, the page's own origin
+//      (the daemon serves this client itself), the default port 17842.
 //   3. Local-only (Standalone browser) — WASM-only, no network
 //
 // The bridge provides a unified async API regardless of backend.
@@ -12,7 +14,7 @@ const MODE_HTTP = 'http';
 const MODE_LOCAL = 'local';
 
 const HTTP_BRIDGE_PORT = 17842;
-const HTTP_BRIDGE_URL = `http://127.0.0.1:${HTTP_BRIDGE_PORT}`;
+const DEFAULT_BRIDGE_URL = `http://127.0.0.1:${HTTP_BRIDGE_PORT}`;
 const PING_TIMEOUT_MS = 2000;
 const STATUS_POLL_MS = 30000;
 
@@ -45,20 +47,17 @@ export class MiasmaBridge {
     }
 
     // 2. Check for desktop HTTP bridge
-    try {
-      const resp = await fetchWithTimeout(`${HTTP_BRIDGE_URL}/api/ping`, {
-        method: 'GET',
-      }, PING_TIMEOUT_MS);
-      if (resp.ok) {
-        const data = await resp.json();
-        if (data.ok) {
-          this._mode = MODE_HTTP;
-          this._connected = true;
-          this._startPolling();
-          return;
-        }
-      }
-    } catch (_) { /* fall through */ }
+    const found = await findBridge();
+    if (found) {
+      bridgeBase = found;
+      this._mode = MODE_HTTP;
+      // Reachable is not the same as allowed in: /api/ping needs no token, the
+      // rest does. status() records whether the token was accepted.
+      this._connected = false;
+      await this.status();
+      this._startPolling();
+      return;
+    }
 
     // 3. Fallback to local-only WASM
     this._mode = MODE_LOCAL;
@@ -93,7 +92,7 @@ export class MiasmaBridge {
 
     if (this._mode === MODE_HTTP) {
       try {
-        const resp = await fetchWithTimeout(`${HTTP_BRIDGE_URL}/api/status`, {
+        const resp = await fetchWithTimeout(`${bridgeBase}/api/status`, {
           method: 'GET',
         }, 5000);
         if (resp.ok) {
@@ -148,15 +147,18 @@ export class MiasmaBridge {
 
     if (this._mode === MODE_HTTP) {
       try {
-        const resp = await bridgeFetch(`${HTTP_BRIDGE_URL}/api/publish`, {
+        const resp = await bridgeFetch(`${bridgeBase}/api/publish`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ data: b64, data_shards: k, total_shards: n }),
         });
+        if (resp.status === 401) throw new BridgeAuthError(authState);
         const result = await resp.json();
         if (result.error) throw new Error(result.error);
         return { mid: result.mid, networkPublished: true };
       } catch (e) {
+        // A refused token is not a reason to quietly produce local-only shares.
+        if (e && e.code === 'auth') throw e;
         console.warn('HTTP publish failed, falling back to WASM:', e);
         return this._dissolveLocal(data, k, n);
       }
@@ -194,15 +196,17 @@ export class MiasmaBridge {
 
     if (this._mode === MODE_HTTP) {
       try {
-        const resp = await bridgeFetch(`${HTTP_BRIDGE_URL}/api/retrieve`, {
+        const resp = await bridgeFetch(`${bridgeBase}/api/retrieve`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ mid, data_shards: k, total_shards: n }),
         });
+        if (resp.status === 401) throw new BridgeAuthError(authState);
         const result = await resp.json();
         if (result.error) throw new Error(result.error);
         return base64ToArrayBuffer(result.data);
       } catch (e) {
+        if (e && e.code === 'auth') throw e;
         throw new Error(`Network retrieval failed: ${e.message}`);
       }
     }
@@ -221,12 +225,12 @@ export class MiasmaBridge {
     if (this._mode === MODE_HTTP) {
       try {
         // Two steps: the first call returns a challenge, the second echoes it.
-        const first = await bridgeFetch(`${HTTP_BRIDGE_URL}/api/wipe`, {
+        const first = await bridgeFetch(`${bridgeBase}/api/wipe`, {
           method: 'POST',
         });
         const challenge = (await first.json()).challenge;
         if (!challenge) return false;
-        const resp = await bridgeFetch(`${HTTP_BRIDGE_URL}/api/wipe`, {
+        const resp = await bridgeFetch(`${bridgeBase}/api/wipe`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ confirm: challenge }),
@@ -254,7 +258,7 @@ export class MiasmaBridge {
 
     if (this._mode === MODE_HTTP) {
       try {
-        const resp = await bridgeFetch(`${HTTP_BRIDGE_URL}/api/sharing-key`, {
+        const resp = await bridgeFetch(`${bridgeBase}/api/sharing-key`, {
           method: 'GET',
         });
         if (!resp.ok) return null;
@@ -297,7 +301,7 @@ export class MiasmaBridge {
 
     if (this._mode === MODE_HTTP) {
       try {
-        const resp = await bridgeFetch(`${HTTP_BRIDGE_URL}/api/directed/send`, {
+        const resp = await bridgeFetch(`${bridgeBase}/api/directed/send`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -338,7 +342,7 @@ export class MiasmaBridge {
 
     if (this._mode === MODE_HTTP) {
       try {
-        const resp = await bridgeFetch(`${HTTP_BRIDGE_URL}/api/directed/confirm`, {
+        const resp = await bridgeFetch(`${bridgeBase}/api/directed/confirm`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ envelope_id: envelopeId, challenge_code: challengeCode }),
@@ -377,7 +381,7 @@ export class MiasmaBridge {
 
     if (this._mode === MODE_HTTP) {
       try {
-        const resp = await bridgeFetch(`${HTTP_BRIDGE_URL}/api/directed/retrieve`, {
+        const resp = await bridgeFetch(`${bridgeBase}/api/directed/retrieve`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ envelope_id: envelopeId, password }),
@@ -409,7 +413,7 @@ export class MiasmaBridge {
 
     if (this._mode === MODE_HTTP) {
       try {
-        const resp = await bridgeFetch(`${HTTP_BRIDGE_URL}/api/directed/revoke`, {
+        const resp = await bridgeFetch(`${bridgeBase}/api/directed/revoke`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ envelope_id: envelopeId }),
@@ -436,7 +440,7 @@ export class MiasmaBridge {
 
     if (this._mode === MODE_HTTP) {
       try {
-        const resp = await bridgeFetch(`${HTTP_BRIDGE_URL}/api/directed/inbox`, {
+        const resp = await bridgeFetch(`${bridgeBase}/api/directed/inbox`, {
           method: 'GET',
         });
         if (!resp.ok) return [];
@@ -461,7 +465,7 @@ export class MiasmaBridge {
 
     if (this._mode === MODE_HTTP) {
       try {
-        const resp = await bridgeFetch(`${HTTP_BRIDGE_URL}/api/directed/outbox`, {
+        const resp = await bridgeFetch(`${bridgeBase}/api/directed/outbox`, {
           method: 'GET',
         });
         if (!resp.ok) return [];
@@ -521,28 +525,158 @@ export class MiasmaBridge {
 
 // The daemon's HTTP bridge requires its control token (contents of
 // <data_dir>/daemon.token) as a Bearer credential on everything except
-// /api/ping. A page cannot read that file: paste the token once with
-// setControlToken() (it is kept in this browser's localStorage only).
+// /api/ping. A page cannot read that file, so `miasma web` prints a launch
+// link with the token in its URL fragment:
+//
+//   http://127.0.0.1:<port>/#token=<hex>[&bridge=http://127.0.0.1:<port>]
+//
+// A fragment is never sent to any server. The page reads it once at load, keeps
+// it in sessionStorage (gone when the tab closes; unlike localStorage it is not
+// shared with other tabs or kept on disk) and removes it from the address bar.
+// `bridge=` is honoured only for a loopback address: the token must never be
+// sent to a remote host because a link said so.
 const TOKEN_KEY = 'miasma_control_token';
+const BRIDGE_KEY = 'miasma_bridge_url';
+const TOKEN_SHAPE = /^[0-9a-fA-F]{16,128}$/;
 
-export function setControlToken(token) {
+let bridgeBase = DEFAULT_BRIDGE_URL;
+
+function sessionGet(key) {
+  try { return sessionStorage.getItem(key) || ''; } catch (_) { return ''; }
+}
+
+function sessionSet(key, value) {
   try {
-    if (token) localStorage.setItem(TOKEN_KEY, String(token).trim());
-    else localStorage.removeItem(TOKEN_KEY);
-  } catch (_) { /* storage unavailable */ }
+    if (value) sessionStorage.setItem(key, value);
+    else sessionStorage.removeItem(key);
+  } catch (_) { /* storage unavailable: the token then lives for this page load only */ }
+}
+
+// Held in memory too, so a browser that refuses sessionStorage still works until reload.
+let memoryToken = '';
+
+/** True for http(s) URLs whose host is this computer. */
+export function isLoopbackUrl(value) {
+  let u;
+  try { u = new URL(value); } catch (_) { return false; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+  if (u.username || u.password) return false;
+  return u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '[::1]';
+}
+
+/**
+ * Take the token (and optional bridge address) out of a launch-link fragment.
+ * Returns what was found; the caller stores it and clears the address bar.
+ */
+export function parseLaunchFragment(hash) {
+  const out = { token: '', bridge: '' };
+  if (!hash || hash.length < 2) return out;
+  const params = new URLSearchParams(hash.replace(/^#/, ''));
+  const token = (params.get('token') || '').trim();
+  if (TOKEN_SHAPE.test(token)) out.token = token;
+  const bridge = (params.get('bridge') || '').trim();
+  if (bridge && isLoopbackUrl(bridge)) out.bridge = bridge.replace(/\/+$/, '');
+  return out;
+}
+
+function consumeLaunchFragment() {
+  // The old build kept the token in localStorage, which outlives the tab and is
+  // shared by every tab of this origin. Do not leave a secret behind there.
+  try { localStorage.removeItem(TOKEN_KEY); } catch (_) { /* ignore */ }
+
+  let hash = '';
+  try { hash = window.location.hash; } catch (_) { return; }
+  const found = parseLaunchFragment(hash);
+  if (found.token) { memoryToken = found.token; sessionSet(TOKEN_KEY, found.token); }
+  if (found.bridge) sessionSet(BRIDGE_KEY, found.bridge);
+  if (found.token || found.bridge || /token=/.test(hash)) {
+    try {
+      window.history.replaceState(window.history.state, '', window.location.pathname + window.location.search);
+    } catch (_) { /* ignore */ }
+  }
+}
+
+consumeLaunchFragment();
+
+/** Set the token by hand (for example from a console); kept for this tab only. */
+export function setControlToken(token) {
+  const t = token ? String(token).trim() : '';
+  memoryToken = t;
+  sessionSet(TOKEN_KEY, t);
 }
 
 function controlToken() {
-  try { return localStorage.getItem(TOKEN_KEY) || ''; } catch (_) { return ''; }
+  return memoryToken || sessionGet(TOKEN_KEY);
 }
 
-function bridgeFetch(url, options) {
+// ── Auth state ───────────────────────────────────────────────────────────────
+// 'unknown' until a request needing the token has been answered.
+//   ok        the daemon accepted the token
+//   missing   no token in this tab (the page was not opened from a launch link)
+//   rejected  a token is present but the daemon refused it (it changes at every
+//             daemon start, so a link from an earlier run stops working)
+let authState = 'unknown';
+const authListeners = new Set();
+
+export function getAuthState() { return authState; }
+
+export function onAuthChange(fn) {
+  authListeners.add(fn);
+  return () => authListeners.delete(fn);
+}
+
+function setAuthState(next) {
+  if (next === authState) return;
+  authState = next;
+  for (const fn of authListeners) {
+    try { fn(next); } catch (_) { /* a listener must not break requests */ }
+  }
+}
+
+/** Thrown where a silent fallback would hide that the token is the problem. */
+export class BridgeAuthError extends Error {
+  constructor(state) {
+    super(state === 'rejected' ? 'control token rejected' : 'control token missing');
+    this.name = 'BridgeAuthError';
+    this.code = 'auth';
+    this.state = state;
+  }
+}
+
+async function findBridge() {
+  const candidates = [];
+  const stored = sessionGet(BRIDGE_KEY);
+  if (stored && isLoopbackUrl(stored)) candidates.push(stored);
+  // The daemon serves this client itself: the page's own origin is the bridge.
+  if (window.location.protocol === 'http:' || window.location.protocol === 'https:') {
+    if (isLoopbackUrl(window.location.origin)) candidates.push(window.location.origin);
+  }
+  candidates.push(DEFAULT_BRIDGE_URL);
+  for (const base of [...new Set(candidates)]) {
+    try {
+      const resp = await fetchWithTimeout(`${base}/api/ping`, { method: 'GET' }, PING_TIMEOUT_MS);
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data && data.ok === true) return base;
+      }
+    } catch (_) { /* try the next one */ }
+  }
+  return '';
+}
+
+async function bridgeFetch(url, options) {
   const opts = Object.assign({}, options);
+  const isPing = url.endsWith('/api/ping');
   const token = controlToken();
-  if (token && !url.endsWith('/api/ping')) {
+  if (token && !isPing) {
     opts.headers = Object.assign({}, opts.headers, { Authorization: `Bearer ${token}` });
   }
-  return fetch(url, opts);
+  const resp = await fetch(url, opts);
+  if (!isPing) {
+    if (resp.status === 401) setAuthState(token ? 'rejected' : 'missing');
+    else if (resp.ok) setAuthState('ok');
+  }
+  return resp;
 }
 
 function fetchWithTimeout(url, options, timeoutMs) {

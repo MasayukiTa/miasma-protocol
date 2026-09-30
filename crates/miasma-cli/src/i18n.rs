@@ -321,6 +321,16 @@ pub enum Msg {
     PresetOutOfRange {
         s: String,
     },
+
+    // ---- web ----
+    WebNoBridge {
+        detail: String,
+    },
+    WebLinkNote,
+    WebOpening,
+    WebOpenFailed {
+        e: String,
+    },
 }
 
 impl Msg {
@@ -457,6 +467,15 @@ impl Msg {
             PresetBadK { s } => format!("bad k in '{s}'"),
             PresetBadN { s } => format!("bad n in '{s}'"),
             PresetOutOfRange { s } => format!("'{s}': need 1 <= k <= n <= 255"),
+
+            WebNoBridge { detail } => format!(
+                "the web bridge of the daemon is not available: {detail}
+  start it with `miasma daemon`"
+            ),
+            WebLinkNote => "Open the link above in a browser on this computer. The token is in the part after '#', which the browser never sends to the server and keeps for this tab only.
+Anyone who has this link can control this node until the daemon restarts: do not share it or paste it into chat.".into(),
+            WebOpening => "Opening it in the default browser...".into(),
+            WebOpenFailed { e } => format!("could not open the browser ({e}); open the link by hand"),
         }
     }
 
@@ -593,6 +612,15 @@ impl Msg {
             PresetBadK { s } => format!("'{s}' の k が正しくありません"),
             PresetBadN { s } => format!("'{s}' の n が正しくありません"),
             PresetOutOfRange { s } => format!("'{s}': 1 <= k <= n <= 255 にしてください"),
+
+            WebNoBridge { detail } => format!(
+                "デーモンのWebブリッジを利用できません: {detail}
+  `miasma daemon` で起動してください"
+            ),
+            WebLinkNote => "上のリンクを、このコンピュータのブラウザで開いてください。トークンは「#」より後ろにあり、ブラウザはそれをサーバへ送らず、このタブの間だけ保持します。
+このリンクを持つ人は、デーモンが再起動されるまでこのノードを操作できます。共有したりチャットに貼り付けたりしないでください。".into(),
+            WebOpening => "既定のブラウザで開いています...".into(),
+            WebOpenFailed { e } => format!("ブラウザを開けませんでした（{e}）。リンクを手で開いてください"),
         }
     }
 }
@@ -711,6 +739,10 @@ mod tests {
             PresetBadK { .. } => "PresetBadK",
             PresetBadN { .. } => "PresetBadN",
             PresetOutOfRange { .. } => "PresetOutOfRange",
+            WebNoBridge { .. } => "WebNoBridge",
+            WebLinkNote => "WebLinkNote",
+            WebOpening => "WebOpening",
+            WebOpenFailed { .. } => "WebOpenFailed",
         }
     }
 
@@ -894,6 +926,21 @@ mod tests {
             (
                 PresetOutOfRange { s: s("0/5") },
                 "'0/5': need 1 <= k <= n <= 255",
+            ),
+            (
+                WebNoBridge { detail: s("no daemon.http") },
+                "the web bridge of the daemon is not available: no daemon.http
+  start it with `miasma daemon`",
+            ),
+            (
+                WebLinkNote,
+                "Open the link above in a browser on this computer. The token is in the part after '#', which the browser never sends to the server and keeps for this tab only.
+Anyone who has this link can control this node until the daemon restarts: do not share it or paste it into chat.",
+            ),
+            (WebOpening, "Opening it in the default browser..."),
+            (
+                WebOpenFailed { e: s("boom") },
+                "could not open the browser (boom); open the link by hand",
             ),
         ]
     }

@@ -8,6 +8,7 @@
 //!
 //! | Method | Path            | Description                              |
 //! |--------|-----------------|------------------------------------------|
+//! | GET    | `/`, `/js/...`  | The web client itself (public, no token) |
 //! | GET    | `/api/ping`     | Connection liveness check                |
 //! | GET    | `/api/status`   | Full `DaemonStatus` snapshot             |
 //! | POST   | `/api/publish`  | Dissolve + publish (base64 data)         |
@@ -24,6 +25,14 @@
 //! non-browser clients authenticate like everyone else, and browser origins
 //! that are not localhost are still refused.  `POST /api/wipe` is two-step:
 //! without a body it returns a challenge, `{"confirm": "<challenge>"}` wipes.
+//!
+//! The web client (`web/`) is compiled in (`web_assets`) and served from the
+//! bridge's own origin.  Those files are public code and need no token; `miasma
+//! web` prints a link `http://127.0.0.1:<port>/#token=<token>` whose fragment the
+//! page reads once, keeps in `sessionStorage` and strips from the URL.  A URL
+//! fragment is never sent to the server, so the token does not appear in this
+//! process's request path, in logs, or in `Referer`.  The bridge never hands the
+//! token to a caller that does not already hold it.
 
 use std::sync::{Arc, Mutex};
 
@@ -240,6 +249,13 @@ async fn handle(
             StatusCode::FORBIDDEN,
             "origin not allowed",
         )));
+    }
+
+    // The web client's own files: public code, no token, but the same Origin gate.
+    if req.method() == Method::GET {
+        if let Some(asset) = super::web_assets::lookup(req.uri().path()) {
+            return Ok(static_response(asset));
+        }
     }
 
     // Authentication — everything but the liveness probe needs the token.
@@ -660,6 +676,20 @@ fn json_error(status: StatusCode, msg: &str) -> Response<Full<Bytes>> {
         .status(status)
         .header(header::CONTENT_TYPE, "application/json")
         .body(Full::new(Bytes::from(body)))
+        .unwrap()
+}
+
+fn static_response(asset: &'static super::web_assets::Asset) -> Response<Full<Bytes>> {
+    // `no-cache` so a new daemon build is picked up on the next load; the client's
+    // service worker keeps its own versioned cache for offline use.
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, asset.content_type)
+        .header(header::CACHE_CONTROL, "no-cache")
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(header::REFERRER_POLICY, "no-referrer")
+        .header(header::X_FRAME_OPTIONS, "DENY")
+        .body(Full::new(Bytes::from_static(asset.body)))
         .unwrap()
 }
 

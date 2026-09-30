@@ -1,7 +1,7 @@
 // Miasma Web — Service Worker
 // Provides offline support via Cache API
 
-const CACHE_NAME = 'miasma-web-v4';
+const CACHE_NAME = 'miasma-web-v5';
 const PRECACHE_ASSETS = [
   'index.html',
   'css/style.css',
@@ -45,6 +45,9 @@ self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
 
   const url = new URL(event.request.url);
+
+  // Never touch the daemon's API (it carries the control token) or any other origin.
+  if (url.origin !== self.location.origin || url.pathname.startsWith('/api/')) return;
 
   // WASM/JS assets: stale-while-revalidate (serve cached, update in background)
   if (REVALIDATE_ASSETS.some(a => url.pathname.endsWith('/' + a) || url.pathname.endsWith(a))) {
