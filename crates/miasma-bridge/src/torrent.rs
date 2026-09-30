@@ -10,7 +10,8 @@ use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use librqbit::{
-    AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent, Session, SessionOptions,
+    AddTorrent, AddTorrentOptions, AddTorrentResponse, ConnectionOptions, DhtSessionConfig,
+    ManagedTorrent, Session, SessionOptions,
 };
 use tracing::{debug, info};
 
@@ -127,10 +128,24 @@ impl MiasmaSession {
         };
         let download_limit = std::num::NonZeroU32::new(config.download_rate_limit_bps);
 
+        let dht = if config.disable_dht {
+            None
+        } else {
+            Some(DhtSessionConfig {
+                // Bridge sessions are ephemeral: keep DHT enabled but never
+                // persist its routing state/port between invocations.
+                persistence: None,
+                ..Default::default()
+            })
+        };
+        let connect = proxy_url.map(|proxy_url| ConnectionOptions {
+            proxy_url: Some(proxy_url),
+            ..Default::default()
+        });
+
         let opts = SessionOptions {
-            disable_dht: config.disable_dht,
-            disable_dht_persistence: true, // bridge sessions are ephemeral
-            socks_proxy_url: proxy_url,
+            dht,
+            connect,
             ratelimits: librqbit::limits::LimitsConfig {
                 upload_bps: upload_limit,
                 download_bps: download_limit,
@@ -247,7 +262,7 @@ impl MiasmaSession {
                     let progress = DownloadProgress {
                         downloaded_bytes: stats.progress_bytes,
                         total_bytes: stats.total_bytes,
-                        peers: live.map_or(0, |l| l.snapshot.peer_stats.live),
+                        peers: live.map_or(0, |l| l.snapshot.peer_stats.live as usize),
                         download_speed_mbps: live.map_or(0.0, |l| l.download_speed.mbps),
                         finished: stats.finished,
                     };

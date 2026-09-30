@@ -59,7 +59,7 @@ Be explicit about what this system resists and what it does not.
 
 - Casual observation of network traffic (transport obfuscation, encrypted payloads)
 - Non-targeted surveillance (pseudonymous descriptors, epoch rotation, unlinkable credentials)
-- Content seizure via single-node compromise, **when the publisher had genuine peer availability at publish time**: erasure-coded shards are pushed to other admission-verified peers (`/miasma/share-store/1.0.0`), each holder reports its own dialable address, and a shard-holder-diversity cap keeps any one peer from ending up with more than it should -- taking the *original publisher* offline afterward does not make the content unavailable. Tested directly: `retrieve_from_network_succeeds_when_publisher_goes_offline_after_publish` retrieves successfully from remote holders alone after the publisher has fully shut down. See `docs/tasks/p2p-content-transfer-hardening.md`'s Phase 2.1 entry for exactly what's verified, by which tests, and the design review that shaped it.
+- Content seizure via single-node compromise, **when the publisher had genuine peer availability at publish time**: erasure-coded shards are pushed to other admission-verified peers (`/miasma/share-store/1.0.0`), each holder reports its own dialable address, and a shard-holder-diversity cap keeps any one peer from ending up with more than it should -- taking the *original publisher* offline afterward does not make the content unavailable. Tested directly: `retrieve_from_network_succeeds_when_publisher_goes_offline_after_publish` retrieves successfully from remote holders alone after the publisher has fully shut down. See `docs/tasks/p2p-content-transfer-hardening.md`'s Phase 2.1 entry for exactly what's verified, by which tests, and the design review that shaped it. **Caveat: this holds only while the peers have hosting enabled.** A node's hosted-share quota (`storage.hosted_quota_mb`) defaults to 1024 MiB, so a default node accepts pushed shares and the publisher is not the sole holder (`default_config_accepts_remote_distribution`). An operator can opt out with `miasma config --key storage.hosted_quota_mb --value 0` (takes effect when the daemon starts); `zero_hosted_quota_node_refuses_pushed_shares` pins that a node configured to 0 refuses every pushed share (`pushes attempted 1, refused 1`), and `node_with_hosted_quota_key_holds_shares_and_serves_after_publisher_leaves` exercises a configured quota end to end. Hosted shares are accepted only from the authenticated pusher. Not designed yet: eviction of hosted shares and per-peer limits (a full hosted quota just refuses further pushes, and one publisher can fill the whole pool). See `docs/tasks/protected-resumable-transfer-plan.md` §1.
 
 **Does not resist:**
 
@@ -98,7 +98,7 @@ Windows is the current shipping beta. It proves:
 Browser-based dissolution and retrieval. Protocol-compatible with miasma-core v1. Security-audited (all CRITICAL/HIGH/MEDIUM fixed). Supports EN, JA, ZH-CN.
 
 **Network modes** (detected automatically):
-- **Desktop**: Connects to the local daemon via HTTP bridge (`localhost:17842`). Full P2P network access — dissolve publishes to DHT, retrieve fetches from peers.
+- **Desktop**: Connects to the local daemon via HTTP bridge. Full P2P network access — dissolve publishes to DHT, retrieve fetches from peers. The bridge needs the daemon's control token, so open the client with the link that `miasma web` prints (`miasma web --open` opens it in your browser): the daemon serves the client itself, and the token travels in the URL fragment, which the browser never sends to a server. The Transfers screen lists large transfers with progress, Stop and Resume, and receives a file to a path on the daemon's computer; large files are sent from the desktop app or the CLI.
 - **Android WebView**: Loaded inside the Android app with a JavaScript bridge to native FFI. Currently local-only (FFI networking not yet exposed).
 - **iOS WKWebView**: Loaded inside the iOS app with a message handler bridge. Currently local-only.
 - **Standalone browser**: Falls back to local-only WASM. Shares stay in IndexedDB, transferred manually via `.miasma` export/import.
@@ -168,7 +168,7 @@ Seven further tests carry `#[ignore]` and are excluded from that count: six `fie
 
 ## Security Note
 
-This is a beta-stage networked system. It has not been externally audited.
+This is a beta-stage networked system. It has not been externally audited. The specific limits known today are listed in [SECURITY.md](SECURITY.md#known-security-limits-beta).
 
 The protocol contains meaningful security work: Ed25519 DHT record verification, PoW admission, onion encryption, relay trust verification, ACL-enforced key storage, and a completed security hotfix sprint (VULN-001 through VULN-005). But unknown peers, hostile environments, adversarial routing pressure, and long-term retention behavior all require more validation.
 

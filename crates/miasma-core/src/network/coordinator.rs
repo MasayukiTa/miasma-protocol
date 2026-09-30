@@ -28,7 +28,7 @@ use tracing::error;
 use crate::{
     crypto::hash::ContentId,
     daemon::replication::RetryPolicy,
-    dissolution::{dissolve_segment, ShareDistributor, ShareSink, DEFAULT_SEGMENT_SIZE},
+    dissolution::{ShareDistributor, ShareSink, DEFAULT_SEGMENT_SIZE},
     network::{
         credential::CredentialStats,
         descriptor::{DescriptorStats, PeerDescriptor, ReachabilityKind},
@@ -80,6 +80,55 @@ pub(crate) fn max_segment_size_for(data_shards: usize) -> usize {
     (SHARE_MSG_MAX - SHARE_WIRE_OVERHEAD_BYTES).saturating_mul(data_shards.max(1))
 }
 
+/// Conservative upper bound for the publisher's local encrypted-share
+/// footprint for one streamed file.
+///
+/// Every plaintext segment is AEAD-encrypted, Reed-Solomon expanded from k to
+/// n shards, wrapped in a MiasmaShare, then encrypted again by LocalShareStore.
+/// The 8 KiB/share allowance intentionally overestimates bincode, SSS fragment,
+/// hashes, nonces, and store-AEAD overhead. The goal is fail-closed capacity
+/// planning, not a byte-perfect prediction.
+pub(crate) fn estimated_local_share_storage_bytes(
+    file_len: u64,
+    params: DissolutionParams,
+) -> Result<u64, MiasmaError> {
+    // `total_shards == data_shards` (no parity) is valid; see `rs_encode`.
+    if params.data_shards == 0 || params.total_shards < params.data_shards {
+        return Err(MiasmaError::ReedSolomon(format!(
+            "invalid parameters: data_shards={}, total_shards={}",
+            params.data_shards, params.total_shards
+        )));
+    }
+
+    const PER_SHARE_OVERHEAD: u128 = 8 * 1024;
+    const CONTENT_AEAD_TAG: u128 = 16;
+
+    let segment_size = DEFAULT_SEGMENT_SIZE.min(max_segment_size_for(params.data_shards)) as u64;
+    let segment_count = if file_len == 0 {
+        1
+    } else {
+        file_len.div_ceil(segment_size)
+    };
+
+    let mut remaining = file_len;
+    let mut total: u128 = 0;
+    for _ in 0..segment_count {
+        let chunk_len = remaining.min(segment_size);
+        remaining = remaining.saturating_sub(chunk_len);
+
+        let encrypted_len = chunk_len as u128 + CONTENT_AEAD_TAG;
+        let shard_len = encrypted_len.div_ceil(params.data_shards as u128);
+        total = total
+            .checked_add(shard_len.saturating_mul(params.total_shards as u128))
+            .and_then(|value| {
+                value.checked_add(PER_SHARE_OVERHEAD.saturating_mul(params.total_shards as u128))
+            })
+            .ok_or_else(|| MiasmaError::Storage("share footprint estimate overflow".into()))?;
+    }
+
+    u64::try_from(total).map_err(|_| MiasmaError::Storage("share footprint exceeds u64".into()))
+}
+
 // ─── Publish options / report (Phase 2.1) ──────────────────────────────────
 
 /// Options controlling how strictly `dissolve_and_publish*_with_options`
@@ -126,6 +175,87 @@ pub struct PublishReport {
     pub remote_distinct_shards_per_segment: Vec<usize>,
 }
 
+// ─── Push bookkeeping ───────────────────────────────────────────────────────
+
+/// How long a peer that answered "quota exceeded" is left alone before it is
+/// offered a share again (it may have raised its hosted quota since).
+const PUSH_REFUSAL_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// What this node has learned about pushing shares to other peers, shared by
+/// every `NetworkShareSink` it creates.
+///
+/// Without it, a peer that has no hosted-share quota (the default for every
+/// node) was sent every share of every segment of a publish and refused each
+/// one *after* receiving the whole payload: roughly twice the file size in
+/// wasted upload for a 1:1 transfer. Now the first refusal ends the pushing to
+/// that peer for [`PUSH_REFUSAL_TTL`].
+#[derive(Default)]
+pub struct PushState {
+    refused: Mutex<std::collections::HashMap<PeerId, std::time::Instant>>,
+    /// `(peer, piece)` pairs where the peer answered "held for another
+    /// publisher": that one piece is not offered to that peer again for
+    /// [`PUSH_REFUSAL_TTL`], but the peer stays usable for other pieces.
+    piece_conflicts:
+        Mutex<std::collections::HashMap<(PeerId, [u8; 8], u32, u16), std::time::Instant>>,
+    attempted: std::sync::atomic::AtomicU64,
+    refused_count: std::sync::atomic::AtomicU64,
+}
+
+impl PushState {
+    /// Peers currently not worth offering shares to.
+    fn refusing_peers(&self) -> Vec<PeerId> {
+        let mut map = self.refused.lock().unwrap();
+        map.retain(|_, at| at.elapsed() < PUSH_REFUSAL_TTL);
+        map.keys().copied().collect()
+    }
+
+    /// Peers that must not be offered this particular piece.
+    fn conflicting_peers_for(&self, share: &MiasmaShare) -> Vec<PeerId> {
+        let mut map = self.piece_conflicts.lock().unwrap();
+        map.retain(|_, at| at.elapsed() < PUSH_REFUSAL_TTL);
+        map.keys()
+            .filter(|(_, prefix, seg, slot)| {
+                *prefix == share.mid_prefix
+                    && *seg == share.segment_index
+                    && *slot == share.slot_index
+            })
+            .map(|(peer, ..)| *peer)
+            .collect()
+    }
+
+    fn note_piece_conflict(&self, peer: PeerId, piece: ([u8; 8], u32, u16)) {
+        self.refused_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.piece_conflicts
+            .lock()
+            .unwrap()
+            .insert((peer, piece.0, piece.1, piece.2), std::time::Instant::now());
+    }
+
+    fn note_refused(&self, peer: PeerId) {
+        self.refused_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.refused
+            .lock()
+            .unwrap()
+            .insert(peer, std::time::Instant::now());
+    }
+
+    fn note_attempt(&self) {
+        self.attempted
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// `(pushes attempted, pushes refused)` since this node started.
+    pub fn counts(&self) -> (u64, u64) {
+        (
+            self.attempted.load(std::sync::atomic::Ordering::Relaxed),
+            self.refused_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+}
+
 // ─── NetworkShareSink (Phase 2.1) ───────────────────────────────────────────
 
 /// `ShareSink` that pushes shares to real remote peers via
@@ -167,6 +297,8 @@ pub struct NetworkShareSink {
     /// `MiasmaCoordinator::store_locally_and_distribute`), so this never
     /// needs an explicit reset.
     per_holder_count: Mutex<HashMap<PeerId, usize>>,
+    /// Shared across segments (and publishes) so a refusal is remembered.
+    push_state: Arc<PushState>,
 }
 
 impl NetworkShareSink {
@@ -176,7 +308,15 @@ impl NetworkShareSink {
             total_shards: params.total_shards,
             data_shards: params.data_shards,
             per_holder_count: Mutex::new(HashMap::new()),
+            push_state: Arc::new(PushState::default()),
         }
+    }
+
+    /// Share push bookkeeping with other sinks (the coordinator gives every
+    /// segment's sink the same one).
+    pub fn with_push_state(mut self, state: Arc<PushState>) -> Self {
+        self.push_state = state;
+        self
     }
 
     /// No holder may exclusively hold more than this many of one segment's
@@ -193,7 +333,7 @@ impl ShareSink for NetworkShareSink {
 
     async fn store(&self, share: MiasmaShare) -> Result<ShardLocation, MiasmaError> {
         let cap = self.per_holder_cap();
-        let at_cap: Vec<PeerId> = {
+        let mut at_cap: Vec<PeerId> = {
             let counts = self.per_holder_count.lock().unwrap();
             counts
                 .iter()
@@ -201,6 +341,9 @@ impl ShareSink for NetworkShareSink {
                 .map(|(peer, _)| *peer)
                 .collect()
         };
+        // Peers that already said "no room" are not offered this share either.
+        at_cap.extend(self.push_state.refusing_peers());
+        at_cap.extend(self.push_state.conflicting_peers_for(&share));
 
         let mut candidates = self.dht_handle.select_storage_candidates(at_cap).await?;
         if candidates.is_empty() {
@@ -218,7 +361,9 @@ impl ShareSink for NetworkShareSink {
 
         let slot_index = share.slot_index;
         let segment_index = share.segment_index;
+        let piece_for_conflict = (share.mid_prefix, segment_index, slot_index);
 
+        self.push_state.note_attempt();
         match self.dht_handle.store_share_on_peer(peer_id, share).await? {
             super::node::StoreResponse::Accepted {
                 advertised_addrs, ..
@@ -236,9 +381,26 @@ impl ShareSink for NetworkShareSink {
                     addrs: advertised_addrs,
                 })
             }
-            super::node::StoreResponse::Rejected(reason) => Err(MiasmaError::Network(format!(
-                "peer {peer_id} rejected share store: {reason}"
-            ))),
+            super::node::StoreResponse::Rejected(reason) => {
+                // A full quota (global or this node's per-peer budget for us) is
+                // a standing answer; "held for another publisher" is standing
+                // for that one piece only; anything else may be transient (not
+                // yet admitted) and is retried on the next share.
+                match reason {
+                    super::node::StoreRejectReason::QuotaExceeded
+                    | super::node::StoreRejectReason::PrincipalBudgetExceeded => {
+                        self.push_state.note_refused(peer_id);
+                    }
+                    super::node::StoreRejectReason::NotOwner => {
+                        self.push_state
+                            .note_piece_conflict(peer_id, piece_for_conflict);
+                    }
+                    _ => {}
+                }
+                Err(MiasmaError::Network(format!(
+                    "peer {peer_id} rejected share store: {reason}"
+                )))
+            }
         }
     }
 }
@@ -417,6 +579,8 @@ pub struct MiasmaCoordinator {
     relay_routing_enabled: bool,
     /// Per-anonymity-mode retrieval tracking.
     retrieval_stats: Arc<Mutex<RetrievalStats>>,
+    /// Which peers have refused pushed shares, and how many pushes went out.
+    push_state: Arc<PushState>,
 }
 
 impl MiasmaCoordinator {
@@ -465,6 +629,7 @@ impl MiasmaCoordinator {
             anonymity_policy: AnonymityPolicy::default(),
             relay_routing_enabled: false,
             retrieval_stats: Arc::new(Mutex::new(RetrievalStats::default())),
+            push_state: Arc::new(PushState::default()),
         }
     }
 
@@ -572,6 +737,38 @@ impl MiasmaCoordinator {
         &self.peer_id
     }
 
+    /// The DHT handle, for callers that need record-level access (for example
+    /// reading a record together with its transfer manifest).
+    pub fn dht_handle(&self) -> &DhtHandle {
+        &self.dht_handle
+    }
+
+    /// The local share store, for the send engine.
+    pub(crate) fn share_store(&self) -> &Arc<LocalShareStore> {
+        &self.store
+    }
+
+    /// This node's PeerId bytes, as announced in `ShardLocation`s.
+    pub(crate) fn local_peer_bytes(&self) -> Vec<u8> {
+        self.peer_id.to_bytes()
+    }
+
+    /// The addresses this node currently announces for its own copies.
+    pub(crate) fn local_announce_addrs(&self) -> Vec<String> {
+        self.listen_addrs.clone()
+    }
+
+    /// `(pushes attempted, pushes refused)` to other peers since this node
+    /// started. A healthy 1:1 transfer shows at most one refusal per peer.
+    pub fn push_counts(&self) -> (u64, u64) {
+        self.push_state.counts()
+    }
+
+    /// The payload transport selector, for the receive engine's piece fetches.
+    pub(crate) fn transport_selector(&self) -> Arc<PayloadTransportSelector> {
+        self.transport_selector.clone()
+    }
+
     /// Dissolve `data` into shares, store them locally, distribute them to
     /// other peers on a best-effort basis, and publish the `DhtRecord`.
     ///
@@ -661,99 +858,58 @@ impl MiasmaCoordinator {
         params: DissolutionParams,
         options: PublishOptions,
     ) -> Result<PublishReport, MiasmaError> {
-        use std::io::{BufReader, Read, Seek, SeekFrom};
+        self.publish_file_inner(file_path, params, options, None)
+            .await
+    }
 
-        let file = std::fs::File::open(file_path)?;
-        let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    /// Like `dissolve_and_publish_file_with_options`, with the password as an
+    /// encryption factor: every segment's AES key is derived from the
+    /// per-segment random key *and* the password (see
+    /// `transfer::protection`), so the MID and every shard are not enough to
+    /// decrypt. The receiver must supply the same password.
+    ///
+    /// The password is never stored or logged; only its public Argon2id
+    /// parameters, salt and a wrong-password check tag go into the manifest.
+    pub async fn dissolve_and_publish_file_protected(
+        &self,
+        file_path: &std::path::Path,
+        params: DissolutionParams,
+        options: PublishOptions,
+        password: &str,
+    ) -> Result<PublishReport, MiasmaError> {
+        self.publish_file_inner(file_path, params, options, Some(password))
+            .await
+    }
 
-        // 1. Compute MID by streaming through file (no full-file buffer).
-        let param_bytes = params.to_param_bytes();
-        let mut reader = BufReader::new(&file);
-        let mid = ContentId::compute_from_reader(&mut reader, &param_bytes)?;
+    /// The streaming file publish, delegated to the resumable send engine
+    /// (`transfer::publish`) with no journal: the same blocking behaviour this
+    /// method always had, plus the manifest and the optional password. Always
+    /// emits a transfer manifest (piece IDs + per-segment hashes) alongside the
+    /// record, whether or not a password is used.
+    async fn publish_file_inner(
+        &self,
+        file_path: &std::path::Path,
+        params: DissolutionParams,
+        options: PublishOptions,
+        password: Option<&str>,
+    ) -> Result<PublishReport, MiasmaError> {
+        use crate::transfer::publish::{PublishOutcome, PublishSpec};
 
-        // 2. Rewind and dissolve per-segment.
-        reader.seek(SeekFrom::Start(0))?;
-
-        // Clamp against the share-exchange wire cap for small data_shards counts
-        // (see `max_segment_size_for`'s doc comment) -- default `data_shards`
-        // never triggers this, so this is a no-op for every existing caller.
-        let segment_size = DEFAULT_SEGMENT_SIZE.min(max_segment_size_for(params.data_shards));
-        let mut segment_buf = vec![0u8; segment_size];
-        let mut seg_idx: u32 = 0;
-        let mut offset: u64 = 0;
-        let mut all_locations: Vec<ShardLocation> = Vec::new();
-        let mut remote_distinct_per_segment: Vec<usize> = Vec::new();
-
-        loop {
-            let mut filled = 0;
-            // Read one segment worth of data.
-            while filled < segment_size {
-                let n = reader.read(&mut segment_buf[filled..segment_size])?;
-                if n == 0 {
-                    break;
-                }
-                filled += n;
-            }
-
-            if filled == 0 && seg_idx > 0 {
-                break; // No more data, and we've processed at least one segment.
-            }
-
-            let chunk = &segment_buf[..filled];
-            let (_meta, shares) = dissolve_segment(chunk, &mid, seg_idx, offset, params)?;
-
-            let (mut locations, remote_distinct) =
-                self.store_locally_and_distribute(shares, params).await?;
-            if remote_distinct < options.min_remote_distinct_shards {
-                return Err(MiasmaError::InsufficientShares {
-                    need: options.min_remote_distinct_shards,
-                    got: remote_distinct,
-                });
-            }
-            all_locations.append(&mut locations);
-            remote_distinct_per_segment.push(remote_distinct);
-
-            offset += filled as u64;
-            seg_idx += 1;
-
-            if file_len > 0 {
-                let pct = (offset as f64 / file_len as f64 * 100.0).min(100.0);
-                tracing::info!(
-                    "Publishing: segment {seg_idx} done, {offset}/{file_len} bytes ({pct:.0}%)"
-                );
-            }
-
-            if filled < segment_size {
-                break; // Last segment was shorter than full.
+        let spec = PublishSpec {
+            file_path: file_path.to_path_buf(),
+            params,
+            options,
+            password: password.map(|p| zeroize::Zeroizing::new(p.to_owned())),
+            journal_dir: None,
+            restart: false,
+        };
+        match self.publish_file_job(spec, None).await? {
+            PublishOutcome::Complete(report) => Ok(report),
+            PublishOutcome::Paused { reason, .. } => Err(MiasmaError::Storage(reason)),
+            PublishOutcome::Cancelled { .. } => {
+                Err(MiasmaError::Network("publish cancelled".into()))
             }
         }
-
-        // 3. Publish DHT record with all shard locations.
-        let record = DhtRecord {
-            mid_digest: *mid.as_bytes(),
-            data_shards: params.data_shards as u8,
-            total_shards: params.total_shards as u8,
-            version: 1,
-            locations: all_locations,
-            published_at: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-        };
-
-        self.dht_handle.put(record).await?;
-
-        tracing::info!(
-            "Published {} ({} bytes, {} segments) via streaming dissolution",
-            mid.to_string(),
-            file_len,
-            seg_idx,
-        );
-
-        Ok(PublishReport {
-            mid,
-            remote_distinct_shards_per_segment: remote_distinct_per_segment,
-        })
     }
 
     /// Store one segment's shares locally (publisher redundancy -- always
@@ -765,7 +921,7 @@ impl MiasmaCoordinator {
     /// actually accepted) and the count of distinct shard slots a *remote*
     /// peer acknowledged (excludes the local copy -- this is the number
     /// `PublishOptions::min_remote_distinct_shards` is compared against).
-    async fn store_locally_and_distribute(
+    pub(crate) async fn store_locally_and_distribute(
         &self,
         shares: Vec<MiasmaShare>,
         params: DissolutionParams,
@@ -790,7 +946,8 @@ impl MiasmaCoordinator {
             })
             .collect();
 
-        let sink = NetworkShareSink::new(self.dht_handle.clone(), params);
+        let sink = NetworkShareSink::new(self.dht_handle.clone(), params)
+            .with_push_state(self.push_state.clone());
         let distributor = ShareDistributor::new(sink, params.data_shards);
         let result = distributor.distribute_segment(shares).await;
         let remote_distinct = result.succeeded.len();
@@ -892,12 +1049,17 @@ impl MiasmaCoordinator {
         let max_seg = {
             let dht = DirectDhtExecutor::new(self.dht_handle.clone());
             match OnionAwareDhtExecutor::get(&dht, mid).await? {
-                Some(record) => record
-                    .locations
-                    .iter()
-                    .map(|l| l.segment_index)
-                    .max()
-                    .unwrap_or(0),
+                Some(record) => {
+                    // The record is network input: bound every index before
+                    // `max_seg + 1` sizes a loop (C-02).
+                    record.validate()?;
+                    record
+                        .locations
+                        .iter()
+                        .map(|l| l.segment_index)
+                        .max()
+                        .unwrap_or(0)
+                }
                 None => 0,
             }
         };
@@ -952,12 +1114,17 @@ impl MiasmaCoordinator {
         let max_seg = {
             let dht = DirectDhtExecutor::new(self.dht_handle.clone());
             match OnionAwareDhtExecutor::get(&dht, mid).await? {
-                Some(record) => record
-                    .locations
-                    .iter()
-                    .map(|l| l.segment_index)
-                    .max()
-                    .unwrap_or(0),
+                Some(record) => {
+                    // The record is network input: bound every index before
+                    // `max_seg + 1` sizes a loop (C-02).
+                    record.validate()?;
+                    record
+                        .locations
+                        .iter()
+                        .map(|l| l.segment_index)
+                        .max()
+                        .unwrap_or(0)
+                }
                 None => 0,
             }
         };
@@ -2253,5 +2420,28 @@ mod segment_sizing_tests {
                 SHARE_MSG_MAX
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod large_file_storage_preflight_tests {
+    use super::*;
+
+    #[test]
+    fn hundred_gib_storage_estimate_is_about_two_hundred_gib() {
+        let params = DissolutionParams::default();
+        let hundred_gib = 100_u64 * 1024 * 1024 * 1024;
+        let estimate = estimated_local_share_storage_bytes(hundred_gib, params).unwrap();
+
+        assert!(estimate > 200_u64 * 1024 * 1024 * 1024);
+        assert!(estimate < 201_u64 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn ten_gib_default_quota_cannot_hold_hundred_gib_publish() {
+        let params = DissolutionParams::default();
+        let estimate =
+            estimated_local_share_storage_bytes(100_u64 * 1024 * 1024 * 1024, params).unwrap();
+        assert!(estimate > 10_240_u64 * 1024 * 1024);
     }
 }
