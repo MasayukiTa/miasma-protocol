@@ -749,7 +749,7 @@ fn detect_state(data_dir: &Path, rt: &tokio::runtime::Runtime) -> DaemonState {
         )
         .await
     }) {
-        Ok(Ok(_)) => DaemonState::Connected,
+        Ok(Ok(ControlResponse::Status(_))) => DaemonState::Connected,
         _ => {
             // Port file is stale — remove it.
             info!("Stale daemon.port (port {port}), removing");
@@ -1020,7 +1020,7 @@ async fn get_status(data_dir: &Path) -> WorkerResult {
 }
 
 async fn do_wipe(data_dir: &Path) -> WorkerResult {
-    match daemon_request(data_dir, ControlRequest::Wipe).await {
+    match miasma_core::daemon_wipe(data_dir).await {
         Ok(ControlResponse::Wiped) => WorkerResult::Wiped,
         Ok(ControlResponse::Error(e)) => WorkerResult::Err(e),
         Ok(other) => WorkerResult::Err(format!("Unexpected response: {other:?}")),
@@ -1356,13 +1356,7 @@ async fn do_transfer_start_receive(
     password: Option<&str>,
     restart: bool,
 ) -> WorkerResult {
-    let abs = if output_path.is_absolute() {
-        output_path.to_owned()
-    } else {
-        std::env::current_dir()
-            .unwrap_or_default()
-            .join(output_path)
-    };
+    let abs = miasma_core::daemon::control_auth::absolutize_lexical(output_path);
     let req = ControlRequest::TransferStartReceive {
         mid: mid.trim().to_owned(),
         output_path: abs.to_string_lossy().into_owned(),

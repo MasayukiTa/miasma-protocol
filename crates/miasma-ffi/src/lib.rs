@@ -394,7 +394,7 @@ pub fn get_node_status(data_dir: String) -> Result<NodeStatusFfi, MiasmaFfiError
 /// and persisted transport secrets are then scrubbed locally.
 #[uniffi::export]
 pub fn distress_wipe(data_dir: String) -> Result<(), MiasmaFfiError> {
-    use miasma_core::daemon::ipc::{daemon_request, ControlRequest, ControlResponse, PORT_FILE};
+    use miasma_core::daemon::ipc::{daemon_wipe, ControlResponse, PORT_FILE};
 
     let path = validate_data_dir(&data_dir)?;
     let port_path = path.join(PORT_FILE);
@@ -408,11 +408,7 @@ pub fn distress_wipe(data_dir: String) -> Result<(), MiasmaFfiError> {
 
     if port_path.exists() {
         let ipc_result = shared_runtime().block_on(async {
-            tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                daemon_request(&path, ControlRequest::Wipe),
-            )
-            .await
+            tokio::time::timeout(std::time::Duration::from_secs(5), daemon_wipe(&path)).await
         });
         match ipc_result {
             Ok(Ok(ControlResponse::Wiped)) => daemon_wipe_started = true,

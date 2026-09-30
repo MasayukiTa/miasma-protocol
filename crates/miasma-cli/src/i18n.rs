@@ -135,6 +135,14 @@ pub fn localize_daemon_error(e: &str, lang: Lang) -> String {
         if e.contains(CORE_PASSWORD_REQUIRED) {
             return Msg::PasswordRequired.text(lang);
         }
+        // Control-channel refusals from the daemon (miasma-core daemon module).
+        if e.starts_with("unauthorized:") {
+            return "制御トークンが無効か未指定です（データディレクトリの daemon.token を確認してください）".to_owned();
+        }
+        if e.starts_with("output path rejected:") {
+            return "出力先は絶対パスで指定してください（'..' を含めることはできません）"
+                .to_owned();
+        }
     }
     e.to_owned()
 }
