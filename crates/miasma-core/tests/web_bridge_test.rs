@@ -140,6 +140,12 @@ fn random_secret() -> String {
     hex::encode(raw)
 }
 
+/// A run-time password that satisfies the publish password policy (a digit,
+/// letters and a symbol): the OS-random hex is wrapped in a fixed shape.
+fn random_policy_password() -> String {
+    format!("pw-1-{}", random_secret())
+}
+
 /// One raw HTTP/1.1 exchange. `origin` adds an `Origin` header.
 async fn http_with(
     port: u16,
@@ -499,8 +505,8 @@ async fn a_protected_transfer_is_received_over_http_and_the_password_never_leaks
         let a_tok = a.token();
 
         // A publishes a password-protected file (drawn at run time, never a literal).
-        let password = random_secret();
-        let wrong_password = random_secret();
+        let password = random_policy_password();
+        let wrong_password = random_policy_password();
         let src_dir = tempfile::tempdir().unwrap();
         let src = src_dir.path().join("payload.bin");
         let data: Vec<u8> = (0..300_000u32).map(|i| (i * 37 % 251) as u8).collect();

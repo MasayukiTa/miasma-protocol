@@ -179,15 +179,23 @@ try {
     Check (Wait-Peers $DIR_B 60) "node B is connected to node A before the first transfer"
 
     $pwFile = Join-Path $TMP "password.txt"
-    [IO.File]::WriteAllText($pwFile, "e2e-correct-horse`n")
+    # The publish password is generated at run time (and meets the password policy).
+    $gen = Run-Cli @("password-generate")
+    if ($gen.Code -ne 0 -or -not $gen.Out.Trim()) { throw "password-generate failed" }
+    [IO.File]::WriteAllText($pwFile, ($gen.Out.Trim() + "`n"))
+    # A receiver's wrong guess may be anything: the policy applies to publishing only.
     $badPw = Join-Path $TMP "wrong.txt"
     [IO.File]::WriteAllText($badPw, "not-the-password`n")
+    $weakPw = Join-Path $TMP "weak.txt"
+    [IO.File]::WriteAllText($weakPw, "weak`n")
 
     # ---- 1. publish -------------------------------------------------------------------
     Write-Host "`n[1] Publish $SizeMB MB, password-protected, k=$K n=$N" -ForegroundColor Cyan
     $src1 = Join-Path $TMP "payload1.bin"
     New-TestFile $src1 $SizeMB
     $hash1 = Sha $src1
+    $weak = Run-Cli @("--data-dir", $DIR_A, "network-publish", $src1, "--password-file", $weakPw)
+    Check ($weak.Code -ne 0 -and ($weak.Err + $weak.Out) -match "not accepted for a new protected transfer") "a weak publish password is refused"
     $pub = Run-Cli @("--data-dir", $DIR_A, "network-publish", $src1, "--data-shards", "$K", "--total-shards", "$N", "--password-file", $pwFile)
     $mid1 = ($pub.Out -split "\r?\n" | Where-Object { $_ -match "^miasma:" } | Select-Object -First 1)
     Check ($pub.Code -eq 0 -and $mid1) "network-publish succeeded and printed a MID"
