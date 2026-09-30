@@ -17,7 +17,11 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use miasma_core::transfer::{jobs::send_id, Phase, TransferKind, TransferState, TransferStatus};
+use miasma_core::transfer::{
+    jobs::send_id,
+    password_policy::{self, PolicyViolation, Strength},
+    Phase, TransferKind, TransferState, TransferStatus,
+};
 use zeroize::Zeroize;
 
 use crate::app::{card_frame, danger_button, primary_button, section_heading};
@@ -455,6 +459,9 @@ pub struct TransfersUi {
     send_path: String,
     send_password: String,
     send_confirm: String,
+    /// The password the Generate button just made, shown in clear so it can be stored. Cleared
+    /// when the field is edited away from it, or when the send starts.
+    send_generated: Option<String>,
     send_preset: usize,
 
     /// Detail-pane prompts for the selected transfer.
@@ -498,6 +505,7 @@ impl Default for TransfersUi {
             send_path: String::new(),
             send_password: String::new(),
             send_confirm: String::new(),
+            send_generated: None,
             send_preset: DEFAULT_PRESET,
             resume_open: false,
             resume_password: String::new(),
@@ -524,7 +532,21 @@ impl TransfersUi {
         self.recv_password.zeroize();
         self.send_password.zeroize();
         self.send_confirm.zeroize();
+        self.send_generated.zeroize();
+        self.send_generated = None;
         self.resume_password.zeroize();
+    }
+
+    /// The Generate button: a strong random password goes into both password fields and is
+    /// remembered so the form can show it once in clear.
+    fn generate_send_password(&mut self) {
+        let pw = password_policy::generate(password_policy::GENERATE_DEFAULT_LEN);
+        self.send_password.zeroize();
+        self.send_confirm.zeroize();
+        self.send_generated.zeroize();
+        self.send_password = pw.as_str().to_owned();
+        self.send_confirm = pw.as_str().to_owned();
+        self.send_generated = Some(pw.as_str().to_owned());
     }
 
     /// Fixed data for the developer tour: the list is shown as given and never polled.
@@ -820,8 +842,12 @@ impl TransfersUi {
                 ui.add_space(4.0);
                 ui.add(
                     egui::Label::new(
-                        egui::RichText::new(format!("{}: {}", t.error_label, err))
-                            .color(pal().danger),
+                        egui::RichText::new(format!(
+                            "{}: {}",
+                            t.error_label,
+                            localize_job_error(t, err)
+                        ))
+                        .color(pal().danger),
                     )
                     .wrap(true),
                 );
@@ -1412,18 +1438,55 @@ impl TransfersUi {
                 }
             });
         });
+        // Generate fills both fields; done after the row so the closure borrows stay simple.
+        let mut generate = false;
         form_row(ui, t.password_label, |ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.send_password)
-                    .password(true)
-                    .desired_width(240.0),
-            );
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.send_password)
+                        .password(true)
+                        .desired_width(240.0),
+                );
+                if ui.button(t.pw_generate).clicked() {
+                    generate = true;
+                }
+            });
             ui.label(
-                egui::RichText::new(t.password_note)
+                egui::RichText::new(t.pw_policy_note)
                     .small()
                     .color(pal().faint),
             );
         });
+        if generate {
+            self.generate_send_password();
+        }
+        // The generated password is shown in clear only while it is still what is in the field.
+        if self.send_generated.as_deref() != Some(self.send_password.as_str()) {
+            self.send_generated.zeroize();
+            self.send_generated = None;
+        }
+        if let Some(pw) = self.send_generated.clone() {
+            form_row(ui, "", |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(egui::RichText::new(pw.as_str()).monospace());
+                    let copied = self
+                        .copied_at
+                        .is_some_and(|c| c.elapsed() < Duration::from_secs(2));
+                    if ui
+                        .small_button(if copied { t.copied } else { t.copy })
+                        .clicked()
+                    {
+                        ui.output_mut(|o| o.copied_text = pw.clone());
+                        self.copied_at = Some(Instant::now());
+                    }
+                });
+                ui.label(
+                    egui::RichText::new(t.pw_generated_note)
+                        .small()
+                        .color(pal().muted),
+                );
+            });
+        }
         form_row(ui, t.confirm_label, |ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.send_confirm)
@@ -1441,8 +1504,28 @@ impl TransfersUi {
         if mismatch && !self.send_confirm.is_empty() {
             ui.label(egui::RichText::new(t.mismatch).small().color(pal().danger));
         }
+        // The same rule the daemon enforces: a weak password blocks the button and says why;
+        // a compliant but short one only gets a warning.
+        let pw_state = send_password_state(&self.send_password);
+        match &pw_state {
+            SendPassword::Weak(v) => {
+                ui.label(
+                    egui::RichText::new(weak_password_text(t, &violation_codes(v)))
+                        .small()
+                        .color(pal().danger),
+                );
+            }
+            SendPassword::Short => {
+                ui.label(
+                    egui::RichText::new(t.pw_short_warning)
+                        .small()
+                        .color(pal().muted),
+                );
+            }
+            SendPassword::Unprotected | SendPassword::Good => {}
+        }
         ui.add_space(8.0);
-        let ready = connected && !self.send_path.trim().is_empty() && !mismatch;
+        let ready = send_ready(connected, &self.send_path, mismatch, &pw_state);
         if ui
             .add_enabled(ready, primary_button(t.send_button))
             .clicked()
@@ -1452,6 +1535,8 @@ impl TransfersUi {
             self.from_form = true;
             self.send_password.zeroize();
             self.send_confirm.zeroize();
+            self.send_generated.zeroize();
+            self.send_generated = None;
             self.form_error = None;
             let preset = PRESETS[self.send_preset.min(PRESETS.len() - 1)];
             cmds.push(WorkerCmd::TransferStartPublish {
@@ -1505,6 +1590,70 @@ impl TransfersUi {
                 }
             }
         }
+    }
+}
+
+// ─── Pure: the send password ────────────────────────────────────────────────
+
+/// What the send form knows about the password in its field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SendPassword {
+    /// Empty: the transfer is not protected (passwords stay optional).
+    Unprotected,
+    /// Not acceptable for a new protected transfer; the button stays disabled.
+    Weak(Vec<PolicyViolation>),
+    /// Acceptable but under 12 characters: a warning, not a block.
+    Short,
+    Good,
+}
+
+/// The publish-side policy, evaluated on the field. The daemon applies the same rule and is the
+/// authority; this only spares a round trip and lets the message be localised.
+fn send_password_state(password: &str) -> SendPassword {
+    if password.is_empty() {
+        return SendPassword::Unprotected;
+    }
+    match password_policy::check(password) {
+        Err(v) => SendPassword::Weak(v),
+        Ok(()) => match password_policy::strength_hint(password) {
+            Strength::Short => SendPassword::Short,
+            Strength::Ok => SendPassword::Good,
+        },
+    }
+}
+
+/// Whether the Start sending button is enabled.
+fn send_ready(connected: bool, path: &str, mismatch: bool, pw: &SendPassword) -> bool {
+    connected && !path.trim().is_empty() && !mismatch && !matches!(pw, SendPassword::Weak(_))
+}
+
+fn violation_codes(v: &[PolicyViolation]) -> Vec<&'static str> {
+    v.iter().map(PolicyViolation::code).collect()
+}
+
+fn violation_text(t: &TransferStrings, code: &str) -> Option<&'static str> {
+    Some(match code {
+        "too_short" => t.pw_err_too_short,
+        "too_long" => t.pw_err_too_long,
+        "no_digit" => t.pw_err_no_digit,
+        "no_letter" => t.pw_err_no_letter,
+        "no_symbol" => t.pw_err_no_symbol,
+        _ => return None,
+    })
+}
+
+/// `Password not accepted: it is shorter than 6 characters; it has no digit`.
+fn weak_password_text(t: &TransferStrings, codes: &[&str]) -> String {
+    let reasons: Vec<&str> = codes.iter().filter_map(|c| violation_text(t, c)).collect();
+    format!("{} {}", t.pw_weak_prefix, reasons.join(t.pw_err_sep))
+}
+
+/// A job's last error for display: the daemon's weak-password refusal (`weak password:
+/// too_short,no_symbol`) is shown in the UI language; any other text is passed through.
+fn localize_job_error(t: &TransferStrings, err: &str) -> String {
+    match password_policy::parse_codes(err) {
+        Some(codes) => weak_password_text(t, &codes),
+        None => err.to_owned(),
     }
 }
 
@@ -1844,7 +1993,96 @@ mod tests {
         let h = std::collections::hash_map::RandomState::new()
             .build_hasher()
             .finish();
-        format!("pw-{h:016x}")
+        // Always satisfies the password policy: a digit, letters and a symbol.
+        format!("pw-1{h:016x}")
+    }
+
+    // ── The send password policy and Generate ───────────────────────────────
+
+    #[test]
+    fn a_weak_send_password_disables_the_button_and_explains_why() {
+        use crate::locale::{transfer_strings, Locale};
+        let weak = SendPassword::Weak(match send_password_state("abc") {
+            SendPassword::Weak(v) => v,
+            other => panic!("{other:?}"),
+        });
+        assert!(!send_ready(true, "C:\\f.bin", false, &weak));
+        // Everything else ready: only the password blocks it.
+        assert!(send_ready(true, "C:\\f.bin", false, &SendPassword::Good));
+        assert!(send_ready(true, "C:\\f.bin", false, &SendPassword::Short));
+        assert!(send_ready(
+            true,
+            "C:\\f.bin",
+            false,
+            &SendPassword::Unprotected
+        ));
+        // The other gates are unchanged.
+        assert!(!send_ready(false, "C:\\f.bin", false, &SendPassword::Good));
+        assert!(!send_ready(true, "  ", false, &SendPassword::Good));
+        assert!(!send_ready(true, "C:\\f.bin", true, &SendPassword::Good));
+
+        let SendPassword::Weak(v) = &weak else {
+            unreachable!()
+        };
+        for lang in Locale::ALL {
+            let t = transfer_strings(lang);
+            let msg = weak_password_text(t, &violation_codes(v));
+            assert!(msg.starts_with(t.pw_weak_prefix), "{lang:?}: {msg}");
+            assert!(msg.contains(t.pw_err_too_short), "{lang:?}: {msg}");
+            assert!(msg.contains(t.pw_err_no_digit), "{lang:?}: {msg}");
+            assert!(msg.contains(t.pw_err_no_symbol), "{lang:?}: {msg}");
+            assert!(!msg.contains(t.pw_err_no_letter), "{lang:?}: {msg}");
+        }
+    }
+
+    #[test]
+    fn the_send_password_states_follow_the_policy() {
+        assert_eq!(send_password_state(""), SendPassword::Unprotected);
+        assert!(matches!(
+            send_password_state("a1!bc"),
+            SendPassword::Weak(_)
+        ));
+        assert!(matches!(
+            send_password_state("abc 123 "),
+            SendPassword::Weak(_)
+        ));
+        assert_eq!(send_password_state("a1!bcd"), SendPassword::Short);
+        assert_eq!(send_password_state("a1!bcdefghi"), SendPassword::Short);
+        assert_eq!(send_password_state("a1!bcdefghij"), SendPassword::Good);
+    }
+
+    #[test]
+    fn generate_fills_both_fields_with_a_compliant_password_and_shows_it_once() {
+        let mut ui = TransfersUi::default();
+        ui.generate_send_password();
+        assert_eq!(ui.send_password, ui.send_confirm);
+        assert_eq!(
+            ui.send_generated.as_deref(),
+            Some(ui.send_password.as_str())
+        );
+        assert_eq!(ui.send_password.chars().count(), 16);
+        assert!(password_policy::check(&ui.send_password).is_ok());
+        assert_eq!(send_password_state(&ui.send_password), SendPassword::Good);
+        // A new press makes a different one.
+        let first = ui.send_password.clone();
+        ui.generate_send_password();
+        assert_ne!(first, ui.send_password);
+        // Wiped with the rest of the form's secrets.
+        ui.zeroize_passwords();
+        assert!(ui.send_generated.is_none());
+        assert!(ui.send_password.is_empty());
+    }
+
+    #[test]
+    fn a_daemon_weak_password_error_is_shown_in_the_ui_language() {
+        use crate::locale::{transfer_strings, Locale};
+        let ja = transfer_strings(Locale::Ja);
+        let shown = localize_job_error(ja, "weak password: too_short,no_symbol");
+        assert!(shown.starts_with(ja.pw_weak_prefix), "{shown}");
+        assert!(shown.contains(ja.pw_err_no_symbol), "{shown}");
+        // Anything else is untouched.
+        assert_eq!(localize_job_error(ja, "disk full"), "disk full");
+        assert_eq!(localize_job_error(ja, "wrong password"), "wrong password");
     }
 
     fn status(kind: TransferKind, state: TransferState) -> TransferStatus {
