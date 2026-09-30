@@ -183,6 +183,41 @@ impl SignedDhtRecord {
     pub fn verify_for_key(&self, expected_key: &[u8]) -> bool {
         self.key.as_slice() == expected_key && self.verify_signature()
     }
+
+    /// As [`verify_for_key`](Self::verify_for_key), and additionally require
+    /// that the signer is exactly `expected_signer`.
+    ///
+    /// `verify_for_key` only proves the record is signed by *some* key, the one
+    /// the record itself carries, so anyone who knows a DHT key can produce a
+    /// "valid" record for it. A receiver that knows who the publisher must be
+    /// (from a share ID) uses this to accept only that publisher's record.
+    pub fn verify_for_key_and_signer(
+        &self,
+        expected_key: &[u8],
+        expected_signer: &[u8; 32],
+    ) -> Result<(), RecordAuthError> {
+        if self.key.as_slice() != expected_key {
+            return Err(RecordAuthError::KeyMismatch);
+        }
+        if !self.verify_signature() {
+            return Err(RecordAuthError::BadSignature);
+        }
+        if &self.signer_pubkey != expected_signer {
+            return Err(RecordAuthError::WrongSigner);
+        }
+        Ok(())
+    }
+}
+
+/// Why a signed record was refused by [`SignedDhtRecord::verify_for_key_and_signer`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordAuthError {
+    /// The envelope was signed for a different DHT key.
+    KeyMismatch,
+    /// The signature does not verify against the key the record carries.
+    BadSignature,
+    /// Validly signed, but not by the publisher that was expected.
+    WrongSigner,
 }
 
 // ─── Peer admission ─────────────────────────────────────────────────────────
@@ -300,6 +335,38 @@ mod tests {
         // Signature-only verification still succeeds because the envelope itself
         // was not modified; the storage-key binding is the extra required check.
         assert!(record.verify_signature());
+    }
+
+    #[test]
+    fn only_the_expected_signer_passes_the_signer_check() {
+        let honest = SigningKey::from_bytes(&[0x42u8; 32]);
+        let attacker = SigningKey::from_bytes(&[0x43u8; 32]);
+        let honest_pub = honest.verifying_key().to_bytes();
+        let by_honest = SignedDhtRecord::sign(b"k".to_vec(), b"v".to_vec(), &honest);
+        let by_attacker = SignedDhtRecord::sign(b"k".to_vec(), b"v".to_vec(), &attacker);
+
+        assert_eq!(
+            by_honest.verify_for_key_and_signer(b"k", &honest_pub),
+            Ok(())
+        );
+        // Both are "valid" for the key; only the signer tells them apart (C-01).
+        assert!(by_attacker.verify_for_key(b"k"));
+        assert_eq!(
+            by_attacker.verify_for_key_and_signer(b"k", &honest_pub),
+            Err(RecordAuthError::WrongSigner)
+        );
+        assert_eq!(
+            by_honest.verify_for_key_and_signer(b"other", &honest_pub),
+            Err(RecordAuthError::KeyMismatch)
+        );
+        // Claiming the honest key without its signature is a bad signature,
+        // not a match.
+        let mut forged = by_attacker.clone();
+        forged.signer_pubkey = honest_pub;
+        assert_eq!(
+            forged.verify_for_key_and_signer(b"k", &honest_pub),
+            Err(RecordAuthError::BadSignature)
+        );
     }
 
     #[test]

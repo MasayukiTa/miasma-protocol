@@ -480,6 +480,14 @@
           <p id="tf-d-error" class="tf-error hidden"><span class="tf-label" data-i18n="tf_error_label">Last error</span> <span id="tf-d-error-text" class="text-danger"></span></p>
           <p class="tf-sub"><span id="tf-d-direction"></span> <code id="tf-d-path" class="tf-path"></code></p>
 
+          <div class="tf-mid hidden" id="tf-share-row">
+            <span class="tf-label" data-i18n="tf_share_id_label">Share ID</span>
+            <code id="tf-d-share"></code>
+            <button id="tf-d-share-copy" class="btn-copy" data-i18n="copy">Copy</button>
+          </div>
+          <p id="tf-d-share-note" class="tf-sub hidden" data-i18n="tf_share_id_send_note">Give this Share ID (and the password) to the receiver. It also lets them check who published the file.</p>
+          <p id="tf-d-publisher" class="tf-sub hidden"></p>
+
           <div class="tf-mid">
             <span class="tf-label" data-i18n="tf_mid_label">MID</span>
             <code id="tf-d-mid"></code>
@@ -553,13 +561,13 @@
         <h2 data-i18n="tf_new_heading">Receive a file</h2>
         <p id="tf-forms-offline" class="tf-sub hidden" data-i18n="tf_forms_offline">Connect to the daemon first.</p>
         <div class="field">
-          <label for="tf-mid" data-i18n="tf_mid_input_label">MID</label>
-          <input type="text" id="tf-mid" class="mono" placeholder="miasma:..." spellcheck="false" autocomplete="off">
+          <label for="tf-mid" data-i18n="tf_mid_input_label">Share ID (or MID)</label>
+          <input type="text" id="tf-mid" class="mono" placeholder="miasma-share:..." spellcheck="false" autocomplete="off">
         </div>
         <div class="field">
           <label for="tf-path" data-i18n="tf_recv_path_label">Save to</label>
           <input type="text" id="tf-path" class="mono" spellcheck="false" autocomplete="off" data-i18n-placeholder="tf_recv_path_hint" placeholder="Absolute path of the finished file">
-          <p class="tf-sub" data-i18n="tf_recv_path_note">Include the file name, for example received.bin. A folder alone is refused.</p>
+          <p class="tf-sub" data-i18n="tf_recv_path_note">Include the file name, for example received.bin, or give a folder: the file is then saved inside it under the name it had when it was sent.</p>
         </div>
         <div class="field">
           <label for="tf-pw" data-i18n="tf_password_label">Password (optional)</label>

@@ -1672,6 +1672,9 @@ mod tests {
             resumed_from_segment: 0,
             last_error: None,
             resumable: false,
+            share_id: None,
+            share_id_checked: false,
+            publisher_authenticated: false,
         };
         let listed = WorkerResult::TransferList(vec![status]);
         let rendered = format!("{listed:?}");

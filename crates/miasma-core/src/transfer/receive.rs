@@ -36,9 +36,10 @@ use zeroize::Zeroizing;
 
 use super::{
     journal::{journal_path, now_secs, part_path_for, ReceiveJournal, JOURNAL_VERSION},
-    manifest::{SegmentEntry, TransferManifest, MAX_SEGMENT_SIZE},
+    manifest::{sanitize_file_name, SegmentEntry, TransferManifest, MAX_SEGMENT_SIZE},
     progress::{Phase, TransferProgress, TransferState},
     protection::{Protection, UnlockedKey},
+    share_id::{ShareId, ShareMismatch},
 };
 use crate::{
     crypto::hash::ContentId,
@@ -100,6 +101,13 @@ pub struct ReceiveSpec {
     /// Discard any partial transfer and start over.
     pub restart: bool,
     pub retry: RetryConfig,
+    /// The share ID the person supplied, if any. When set, the record's signer,
+    /// the manifest's publisher, the protection state and the MID must all match
+    /// it before a single piece is fetched (see [`ShareId::check_record`]).
+    pub expect: Option<ShareId>,
+    /// The key that verifiably signed the record envelope, when the caller knows
+    /// it (both network paths do). Must equal the manifest's `publisher`.
+    pub record_signer: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,6 +161,8 @@ async fn run_inner<S: PieceSource + ?Sized>(
         journal_dir,
         restart,
         retry,
+        expect,
+        record_signer,
     } = spec;
 
     progress.set_phase(Phase::Preparing);
@@ -170,6 +180,29 @@ async fn run_inner<S: PieceSource + ?Sized>(
     // The record comes from the network. Nothing in it may size an allocation or
     // a loop until it has been bounded (C-02).
     record.validate()?;
+    // Who published it, before the manifest is trusted for anything: with a
+    // share ID the record must be signed by exactly the ID's publisher, carry a
+    // manifest that names that publisher, and agree on protection and MID (C-01,
+    // C-06). Without one, the record is accepted unauthenticated.
+    if let Some(id) = &expect {
+        if id.mid_bytes() != mid.as_bytes() {
+            return Err(MiasmaError::ShareMismatch(ShareMismatch::MidMismatch));
+        }
+        id.check_record(
+            &record.mid_digest,
+            record_signer.as_ref(),
+            manifest.as_ref(),
+        )
+        .map_err(MiasmaError::ShareMismatch)?;
+        progress.set_publisher_authenticated(true);
+    } else if let (Some(m), Some(signer)) = (&manifest, &record_signer) {
+        if &m.publisher != signer {
+            return Err(MiasmaError::InvalidManifest(
+                "the manifest names a different publisher than the one that signed the record"
+                    .into(),
+            ));
+        }
+    }
     let params = match &manifest {
         Some(m) => {
             m.validate()?;
@@ -329,6 +362,7 @@ async fn run_inner<S: PieceSource + ?Sized>(
         started_at,
         updated_at: now_secs(),
         last_error: None,
+        share_id: expect.map(|s| s.to_string()),
     };
     journal.save(&jpath)?;
 
@@ -467,6 +501,41 @@ async fn run_inner<S: PieceSource + ?Sized>(
 /// says what was refused and where.
 fn io_context(what: &str, path: &Path, e: &std::io::Error) -> MiasmaError {
     MiasmaError::Storage(format!("{what} {}: {:?}: {e}", path.display(), e.kind()))
+}
+
+/// Where a receive into `chosen` writes: `chosen` itself, unless it is an
+/// existing folder, in which case the file goes inside it under the name the
+/// transfer carries. The name is untrusted manifest text and is sanitised again
+/// here; an existing file is never overwritten. The engine itself stays strict
+/// ([`check_output_target`] refuses a folder); this is the layer above it.
+pub fn resolve_output_target(
+    chosen: &Path,
+    manifest: Option<&TransferManifest>,
+) -> Result<PathBuf, MiasmaError> {
+    if !chosen.is_dir() {
+        return Ok(chosen.to_path_buf());
+    }
+    let name = manifest
+        .and_then(|m| m.name.as_deref())
+        .and_then(sanitize_file_name);
+    let Some(name) = name else {
+        return Err(MiasmaError::Storage(format!(
+            "the output path {} is a folder and this transfer does not carry a file name: \
+             give a file name inside it (for example {})",
+            chosen.display(),
+            chosen.join("received.bin").display()
+        )));
+    };
+    let target = chosen.join(&name);
+    // `symlink_metadata`: a dangling link at that name is taken too.
+    if std::fs::symlink_metadata(&target).is_ok() {
+        return Err(MiasmaError::Storage(format!(
+            "{} already exists; refusing to overwrite it (choose another folder or a file \
+             name)",
+            target.display()
+        )));
+    }
+    Ok(target)
 }
 
 /// Check, before any network work, that `output` can be written: it must not be

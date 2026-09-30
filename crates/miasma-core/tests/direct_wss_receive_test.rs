@@ -584,6 +584,8 @@ async fn when_every_piece_is_tampered_nothing_is_written_and_the_transfer_pauses
                     base_delay: Duration::from_millis(10),
                     max_delay: Duration::from_millis(20),
                 },
+                expect: None,
+                record_signer: None,
             },
             progress.clone(),
         )
