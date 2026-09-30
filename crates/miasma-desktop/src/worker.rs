@@ -700,11 +700,7 @@ fn do_init(data_dir: &Path) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("cannot create data dir: {e}"))?;
 
     let config = NodeConfig {
-        storage: StorageConfig {
-            quota_mb: 10_240,
-            bandwidth_mb_day: 1_024,
-            hosted_quota_mb: 0,
-        },
+        storage: StorageConfig::default(),
         network: NetworkConfig {
             listen_addr: "/ip4/0.0.0.0/udp/0/quic-v1".into(),
             bootstrap_peers: vec![],
