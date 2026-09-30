@@ -916,7 +916,7 @@ impl TransfersUi {
 
                     // The MID: in Technical mode always; in Easy mode only where there is no
                     // Share ID to give instead (a receive, or a send from an older daemon).
-                    if !easy || job.share_id.as_deref().map_or(true, str::is_empty) {
+                    if !easy || job.share_id.as_deref().is_none_or(str::is_empty) {
                         let mid_label = if easy { t.mid_label_easy } else { t.mid_label };
                         ui.label(egui::RichText::new(mid_label).color(pal().muted));
                         ui.horizontal_wrapped(|ui| {

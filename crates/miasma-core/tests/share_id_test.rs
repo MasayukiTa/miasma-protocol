@@ -185,10 +185,7 @@ async fn receive_via(
 ) -> (Result<ReceiveOutcome, MiasmaError>, Arc<TransferProgress>) {
     let work = tempfile::tempdir().unwrap();
     let progress = TransferProgress::new(id.mid().to_string());
-    let via = ViaConfig {
-        urls,
-        ca_pem: None,
-    };
+    let via = ViaConfig { urls, ca_pem: None };
     let r = receive_file_via_id(
         &via,
         id,
@@ -383,7 +380,9 @@ async fn a_share_id_naming_another_publisher_finds_nothing_to_accept() {
         let (mid, _) = honest.publish(&path, None).await;
 
         // Same content, but the ID claims a different publisher.
-        let other = SigningKey::from_bytes(&[0xAC; 32]).verifying_key().to_bytes();
+        let other = SigningKey::from_bytes(&[0xAC; 32])
+            .verifying_key()
+            .to_bytes();
         let wrong = ShareId::new(&mid, other, false);
         let out = tempfile::tempdir().unwrap().path().join("never.bin");
         let (r, _) = receive_via(vec![honest.url()], &TransferId::Share(wrong), &out, None).await;
@@ -580,7 +579,9 @@ async fn a_mistyped_share_id_is_refused_before_any_network_work() {
     timeout(Duration::from_secs(60), async {
         let d = start_daemon(0x7B).await;
         let mid = ContentId::compute(b"x", &params().to_param_bytes());
-        let key = SigningKey::from_bytes(&[0xAE; 32]).verifying_key().to_bytes();
+        let key = SigningKey::from_bytes(&[0xAE; 32])
+            .verifying_key()
+            .to_bytes();
         let good = ShareId::new(&mid, key, true).to_string();
         let out_dir = tempfile::tempdir().unwrap();
         let out = out_dir.path().join("x.bin");
@@ -651,7 +652,10 @@ async fn daemons_publish_reports_the_share_id_and_a_folder_target_gets_the_origi
         };
         let sent = finished(&a, &id).await;
         assert_eq!(sent.state, TransferState::Complete, "{:?}", sent.last_error);
-        let share_text = sent.share_id.clone().expect("the send reports its share ID");
+        let share_text = sent
+            .share_id
+            .clone()
+            .expect("the send reports its share ID");
         let share: ShareId = share_text.parse().unwrap();
         assert_eq!(share.mid().to_string(), sent.mid);
         assert!(!share.protected());
@@ -715,7 +719,12 @@ async fn daemons_publish_reports_the_share_id_and_a_folder_target_gets_the_origi
             other => panic!("unexpected: {other:?}"),
         };
         let by_mid = finished(&b, &rid3).await;
-        assert_eq!(by_mid.state, TransferState::Complete, "{:?}", by_mid.last_error);
+        assert_eq!(
+            by_mid.state,
+            TransferState::Complete,
+            "{:?}",
+            by_mid.last_error
+        );
         assert!(!by_mid.publisher_authenticated);
         assert!(!by_mid.share_id_checked);
         assert_eq!(std::fs::read(&out).unwrap(), data);
@@ -774,7 +783,9 @@ async fn over_the_dht_only_the_named_publishers_record_is_accepted() {
             .expect("the publisher's record");
         assert_eq!(found.signer, publisher);
         assert_eq!(found.manifest.unwrap().publisher, publisher);
-        let stranger = SigningKey::from_bytes(&[0xAF; 32]).verifying_key().to_bytes();
+        let stranger = SigningKey::from_bytes(&[0xAF; 32])
+            .verifying_key()
+            .to_bytes();
         assert!(b
             .dht_handle()
             .get_signed_record(mid_bytes, Some(stranger))
@@ -798,7 +809,10 @@ async fn over_the_dht_only_the_named_publishers_record_is_accepted() {
             )
             .await
             .unwrap();
-        assert!(matches!(outcome, ReceiveOutcome::Complete { .. }), "{outcome:?}");
+        assert!(
+            matches!(outcome, ReceiveOutcome::Complete { .. }),
+            "{outcome:?}"
+        );
         assert_eq!(std::fs::read(&out).unwrap(), data);
         let s = progress.snapshot();
         assert!(s.publisher_authenticated && s.share_id_checked);
