@@ -164,7 +164,7 @@ pub fn localize_daemon_error(e: &str, lang: Lang) -> String {
         if let Some(at) = e.find("cannot reach the sender over iroh") {
             let detail = &e[at..];
             let why = if detail.contains("not connected to a relay server") {
-                "この PC が iroh のリレーサーバに接続できていません。プロキシ（環境変数 HTTPS_PROXY）や社内ネットワークの制限が原因の可能性があります。"
+                "この PC が iroh のリレーサーバに接続できていません。プロキシ（環境変数 HTTPS_PROXY）や社内ネットワークの制限が原因の可能性があります。リレーの TLS 証明書が信頼されていない可能性もあります（TLS 検査を行うプロキシの内側にいる場合は、そのプロキシの CA を OS の証明書ストアにインストールするか --ca-cert を指定してください）。"
             } else if detail.contains("no connection within") {
                 "時間内に送信者へ接続できませんでした。送信者のデーモンが起動していて iroh が有効か（transport.iroh_mode）、送信者がオンラインかを確認してください。"
             } else {
