@@ -12,9 +12,9 @@
 //!   fresh TCP + TLS + upgrade per piece would be mostly overhead); a connection
 //!   the server has closed (idle, or its request limit) is replaced
 //!   transparently, once, before an error is reported.
-//! * For `wss://` the certificate is verified against the operating-system trust
-//!   store (which is where a corporate TLS-inspection CA lives) plus an optional
-//!   extra CA. There is no way to switch verification off here. Everything sent
+//! * For `wss://` the certificate is verified by the operating system's own
+//!   verifier (which knows the public CAs and a corporate TLS-inspection CA) plus
+//!   an optional extra CA. There is no way to switch verification off here. Everything sent
 //!   is AES-GCM ciphertext checked against the manifest's piece commitments, so a
 //!   party that does terminate the TLS (the tunnel provider, an inspecting
 //!   proxy) sees ciphertext and the request metadata only.
@@ -28,7 +28,7 @@ use tokio::{
     sync::Mutex,
 };
 use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use super::websocket::{
     decode_ws_message, encode_ws_message, ws_limits, WsRequest, WsResponse, WS_MAX_MESSAGE_BYTES,
@@ -190,58 +190,85 @@ impl WsEndpoint {
     }
 }
 
-/// The TLS client configuration for `wss://`: the operating system's trusted
-/// roots, plus `extra_ca_pem` if given. Verification is always on.
+/// The TLS client configuration for `wss://`: the operating system's own
+/// certificate verification, plus `extra_ca_pem` if given. Verification is always
+/// on; there is no way to turn it off here.
 ///
-/// If the platform store cannot be read at all, the bundled Mozilla roots are
-/// used instead (a Cloudflare tunnel's certificate chains to a public root); an
-/// unreadable *extra* CA is an error, never silently ignored.
+/// "The operating system's verification" is `rustls-platform-verifier`: Windows
+/// CryptoAPI, Apple's Security framework, or WebPKI over the platform's roots
+/// elsewhere. It is used instead of loading the OS roots into a rustls store
+/// because the two differ where it matters. Windows keeps its public roots
+/// (which a Cloudflare tunnel's certificate chains to) out of the enumerable
+/// root store until a chain needs them, and it distributes a corporate
+/// TLS-inspection root by policy; only the OS verifier sees both. A real run
+/// through a Cloudflare quick tunnel failed with `UnknownIssuer` against a store
+/// loaded with `rustls-native-certs`, and that is why.
+///
+/// An unreadable *extra* CA is an error, never silently ignored. (Android's
+/// verifier needs the host app to hand it a JVM, which this library does not
+/// have; there the bundled Mozilla roots plus the extra CA are used.)
 pub fn build_tls_connector(
     extra_ca_pem: Option<&[u8]>,
 ) -> Result<tokio_rustls::TlsConnector, MiasmaError> {
     // Ensure the ring crypto provider is installed (idempotent).
     let _ = rustls::crypto::ring::default_provider().install_default();
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
 
-    let mut roots = rustls::RootCertStore::empty();
-    let native = rustls_native_certs::load_native_certs();
-    for cert in native.certs {
-        // A single unparsable system certificate must not disable the rest.
-        let _ = roots.add(cert);
-    }
-    if !native.errors.is_empty() {
-        debug!(
-            "{} error(s) reading the system certificate store",
-            native.errors.len()
-        );
-    }
-    if roots.is_empty() {
-        warn!("no usable system root certificates; using the bundled Mozilla roots");
-        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    }
-
+    let mut extra: Vec<rustls::pki_types::CertificateDer<'static>> = Vec::new();
     if let Some(pem) = extra_ca_pem {
         if pem.len() > MAX_CA_PEM_BYTES {
             return Err(MiasmaError::Network("the CA file is too large".into()));
         }
-        let certs = rustls_pemfile::certs(&mut &*pem)
+        extra = rustls_pemfile::certs(&mut &*pem)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| MiasmaError::Network(format!("the CA file is not valid PEM: {e}")))?;
-        if certs.is_empty() {
+        if extra.is_empty() {
             return Err(MiasmaError::Network(
                 "the CA file contains no certificate".into(),
             ));
         }
-        for cert in certs {
-            roots.add(cert).map_err(|e| {
-                MiasmaError::Network(format!("the CA file has an unusable certificate: {e}"))
-            })?;
-        }
     }
 
-    let config = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .map_err(|e| MiasmaError::Network(format!("TLS protocol versions: {e}")))?;
+    let config = client_config(builder, provider, extra)?;
     Ok(tokio_rustls::TlsConnector::from(Arc::new(config)))
+}
+
+#[cfg(not(target_os = "android"))]
+fn client_config(
+    builder: rustls::ConfigBuilder<rustls::ClientConfig, rustls::WantsVerifier>,
+    provider: Arc<rustls::crypto::CryptoProvider>,
+    extra: Vec<rustls::pki_types::CertificateDer<'static>>,
+) -> Result<rustls::ClientConfig, MiasmaError> {
+    use rustls_platform_verifier::Verifier;
+    let verifier = if extra.is_empty() {
+        Verifier::new(provider)
+    } else {
+        Verifier::new_with_extra_roots(extra, provider)
+    }
+    .map_err(|e| MiasmaError::Network(format!("cannot start the OS certificate verifier: {e}")))?;
+    Ok(builder
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(verifier))
+        .with_no_client_auth())
+}
+
+#[cfg(target_os = "android")]
+fn client_config(
+    builder: rustls::ConfigBuilder<rustls::ClientConfig, rustls::WantsVerifier>,
+    _provider: Arc<rustls::crypto::CryptoProvider>,
+    extra: Vec<rustls::pki_types::CertificateDer<'static>>,
+) -> Result<rustls::ClientConfig, MiasmaError> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    for cert in extra {
+        roots.add(cert).map_err(|e| {
+            MiasmaError::Network(format!("the CA file has an unusable certificate: {e}"))
+        })?;
+    }
+    Ok(builder.with_root_certificates(roots).with_no_client_auth())
 }
 
 /// A client for one endpoint, with connection reuse.
