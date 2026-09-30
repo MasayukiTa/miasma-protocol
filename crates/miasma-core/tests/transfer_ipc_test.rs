@@ -114,6 +114,8 @@ async fn a_receive_job_reports_status_completes_and_a_wrong_password_fails_clean
                 output_path: out.to_string_lossy().into_owned(),
                 password: Some("wrong".into()),
                 restart: false,
+                via: vec![],
+                via_ca_pem: None,
             },
         )
         .await
@@ -147,6 +149,8 @@ async fn a_receive_job_reports_status_completes_and_a_wrong_password_fails_clean
                 output_path: out.to_string_lossy().into_owned(),
                 password: None,
                 restart: false,
+                via: vec![],
+                via_ca_pem: None,
             },
         )
         .await
@@ -170,6 +174,8 @@ async fn a_receive_job_reports_status_completes_and_a_wrong_password_fails_clean
                 output_path: out.to_string_lossy().into_owned(),
                 password: Some("ipc-secret".into()),
                 restart: false,
+                via: vec![],
+                via_ca_pem: None,
             },
         )
         .await

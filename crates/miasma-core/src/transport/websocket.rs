@@ -529,14 +529,16 @@ async fn answer_request(request: WsRequest, ctx: &ServeCtx) -> WsResponse {
     match request {
         WsRequest::Share(request) => {
             let store = ctx.store.clone();
-            // Store reads decrypt on disk-backed data: keep them off the async threads.
+            // Found through the store's index (no decryption), then exactly one
+            // decryption: the cost of a request must not grow with the number of
+            // shares stored. Store reads decrypt, so they stay off the async threads.
             let share = tokio::task::spawn_blocking(move || {
                 let prefix: [u8; 8] = request.mid_digest[..8].try_into().ok()?;
-                store.search_by_mid_prefix(&prefix).iter().find_map(|addr| {
-                    store.get(addr).ok().filter(|s| {
-                        s.slot_index == request.slot_index
-                            && s.segment_index == request.segment_index
-                    })
+                let addr = store.find_piece(&prefix, request.segment_index, request.slot_index)?;
+                store.get_untouched(&addr).ok().filter(|s| {
+                    s.mid_prefix == prefix
+                        && s.slot_index == request.slot_index
+                        && s.segment_index == request.segment_index
                 })
             })
             .await

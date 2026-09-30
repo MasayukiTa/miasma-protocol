@@ -571,6 +571,12 @@ impl DaemonServer {
         self.wss_port
     }
 
+    /// Whether the WSS share server terminates TLS itself. `false` means plain
+    /// WS, meant to sit behind a tunnel that terminates TLS.
+    pub fn wss_tls_enabled(&self) -> bool {
+        self.wss_tls_enabled
+    }
+
     /// Port the HTTP bridge is listening on (0 if not started).
     #[allow(dead_code)]
     pub fn http_bridge_port(&self) -> u16 {
@@ -958,12 +964,22 @@ pub(crate) async fn process_request(
             output_path,
             password,
             restart,
+            via,
+            via_ca_pem,
         } => {
             let password = password.map(Zeroizing::new);
             let output_path = match control_auth::validate_output_path(&output_path) {
                 Ok(p) => p,
                 Err(e) => return ControlResponse::Error(format!("output path rejected: {e}")),
             };
+            // Refuse a bad endpoint list now, with a clear message, rather than
+            // starting a job that can only fail.
+            let via = crate::transfer::direct::ViaConfig::from_request(via, via_ca_pem);
+            if let Some(v) = &via {
+                if let Err(e) = v.build_clients() {
+                    return ControlResponse::Error(e.to_string());
+                }
+            }
             match crate::crypto::hash::ContentId::from_str(&mid) {
                 Ok(content_id) => {
                     let registry = crate::transfer::jobs::registry_for(&data_dir);
@@ -973,6 +989,7 @@ pub(crate) async fn process_request(
                         output_path,
                         password,
                         restart,
+                        via,
                     );
                     ControlResponse::TransferStarted { id }
                 }

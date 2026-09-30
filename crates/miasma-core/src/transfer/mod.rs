@@ -7,10 +7,12 @@
 //! * [`protection`] — password as an encryption factor (Argon2id → HKDF).
 //! * [`manifest`] — the per-piece index that travels with the DHT record.
 //! * [`receive`] — the verified, resumable receive engine.
+//! * [`direct`] — the same engine fed from a WebSocket endpoint (`--via`), no DHT.
 //! * [`progress`] — live status of a transfer.
 //! * [`journal`] — the small file that lets a stopped transfer resume.
 
 pub mod bench;
+pub mod direct;
 pub mod jobs;
 pub mod journal;
 pub mod manifest;

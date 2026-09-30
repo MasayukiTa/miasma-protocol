@@ -138,6 +138,16 @@ pub enum ControlRequest {
         password: Option<String>,
         /// Discard any partial transfer and start over.
         restart: bool,
+        /// `wss://` / `ws://` endpoints to fetch the record and every piece
+        /// from instead of the DHT (a sender's WebSocket server behind an
+        /// outbound tunnel). Empty: the ordinary network receive. Absent in
+        /// requests from older clients, which then behave as before.
+        #[serde(default)]
+        via: Vec<String>,
+        /// Extra CA certificate(s) in PEM text, trusted in addition to the
+        /// operating-system store, for the `via` endpoints.
+        #[serde(default)]
+        via_ca_pem: Option<String>,
     },
     /// Start (or resume) publishing a file as a background transfer, and return
     /// at once with its id. Progress, resume and cancel work as for a receive;
@@ -272,6 +282,8 @@ impl fmt::Debug for ControlRequest {
                 mid,
                 password,
                 restart,
+                via,
+                via_ca_pem,
                 ..
             } => f
                 .debug_struct("TransferStartReceive")
@@ -279,6 +291,8 @@ impl fmt::Debug for ControlRequest {
                 .field("output_path", &"<redacted>")
                 .field("password", &password.as_ref().map(|_| "<redacted>"))
                 .field("restart", restart)
+                .field("via_endpoints", &via.len())
+                .field("via_ca_pem", &via_ca_pem.as_ref().map(|_| "<present>"))
                 .finish(),
             Self::TransferStartPublish {
                 data_shards,
