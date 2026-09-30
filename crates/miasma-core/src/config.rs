@@ -19,25 +19,31 @@ pub struct NodeConfig {
     pub transport: TransportConfig,
 }
 
+pub const DEFAULT_HOSTED_QUOTA_MB: u64 = 1_024;
+
+fn default_hosted_quota_mb() -> u64 {
+    DEFAULT_HOSTED_QUOTA_MB
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageConfig {
     /// Maximum storage for held shares, in MiB.
     pub quota_mb: u64,
-    /// Maximum outbound bandwidth for share serving, in MiB/day.
-    pub bandwidth_mb_day: u64,
-    /// Maximum storage for shares pushed to this node by *other* publishers
-    /// (hosted shares), in MiB. Separate from `quota_mb`, which bounds the
-    /// node's own published shares.
+    /// Maximum storage for shares hosted on behalf of remote publishers, in MiB.
+    /// Kept separate from the node's owned-share quota so remote traffic cannot
+    /// evict locally published shares.
     ///
-    /// **Default 0 = this node refuses every pushed share.** That is
-    /// deliberate: accepting other peoples' shares by default lets any peer
-    /// fill the disk, so hosting is opt-in. Set it on a helper node (e.g.
-    /// `miasma config --key storage.hosted_quota_mb --value 2048`) to let it
-    /// hold shares for a publisher that may go offline. Takes effect when the
+    /// Defaults to `DEFAULT_HOSTED_QUOTA_MB` (also for a `config.toml` written
+    /// before the key existed) so the shipped node takes part in distributed
+    /// hosting. It is a hard cap, not an opt-in switch: set
+    /// `miasma config --key storage.hosted_quota_mb --value 0` to refuse every
+    /// pushed share, or a larger value on a helper node. Takes effect when the
     /// daemon starts. There is no eviction and no per-peer limit yet: once the
     /// quota is full, further pushes are refused.
-    #[serde(default)]
+    #[serde(default = "default_hosted_quota_mb")]
     pub hosted_quota_mb: u64,
+    /// Maximum outbound bandwidth for share serving, in MiB/day.
+    pub bandwidth_mb_day: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,8 +189,8 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             quota_mb: 10_240, // 10 GiB desktop default
+            hosted_quota_mb: DEFAULT_HOSTED_QUOTA_MB,
             bandwidth_mb_day: 1_024,
-            hosted_quota_mb: 0, // opt-in; see the field's doc comment
         }
     }
 }
@@ -295,6 +301,26 @@ pub fn read_stamped_version(data_dir: &Path) -> Option<String> {
 #[cfg(test)]
 mod debug_redaction_tests {
     use super::*;
+
+    #[test]
+    fn storage_config_defaults_to_positive_hosted_quota() {
+        let storage = StorageConfig::default();
+        assert_eq!(storage.hosted_quota_mb, DEFAULT_HOSTED_QUOTA_MB);
+        assert!(storage.hosted_quota_mb > 0);
+    }
+
+    #[test]
+    fn legacy_storage_config_gets_hosted_quota_default() {
+        let storage: StorageConfig = toml::from_str(
+            "quota_mb = 2048
+bandwidth_mb_day = 512
+",
+        )
+        .unwrap();
+        assert_eq!(storage.quota_mb, 2_048);
+        assert_eq!(storage.bandwidth_mb_day, 512);
+        assert_eq!(storage.hosted_quota_mb, DEFAULT_HOSTED_QUOTA_MB);
+    }
 
     #[test]
     fn transport_config_debug_redacts_secrets() {

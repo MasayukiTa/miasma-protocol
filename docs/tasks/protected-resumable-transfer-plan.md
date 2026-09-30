@@ -761,14 +761,14 @@ as "not a browser, allow".
 
 Each has a reason it was left; none blocks a first cross-machine transfer.
 
-1. **Hosted-share quota has no configuration key** — **DONE 2026-09-30 (key added; default stays off).**
-   `storage.hosted_quota_mb` (`StorageConfig`, `#[serde(default)]` so old `config.toml` files still
-   load) is read/written by `miasma config --key ...`, reaches the store through
+1. **Hosted-share quota has no configuration key** — **DONE 2026-09-30 (key added; default follows main: 1024 MiB).**
+   `storage.hosted_quota_mb` (`StorageConfig`, `#[serde(default = ...)]` so old `config.toml` files still
+   load with the default) is read/written by `miasma config --key ...`, reaches the store through
    `LocalShareStore::open_configured` at daemon start, and is printed by `miasma status` when the
-   daemon is not running. **The default is 0 (owner decision: opt-in)**, because accepting other
-   people's shares by default is a storage-exhaustion vector; the readme caveat says so. Tests:
-   `default_config_node_refuses_pushed_shares` (default config: push attempted and refused, nothing
-   hosted) and `node_with_hosted_quota_key_holds_shares_and_serves_after_publisher_leaves` (B has the
+   daemon is not running. **The default is `DEFAULT_HOSTED_QUOTA_MB` = 1024 (main's "enable hosted share quota by default", merged into this branch's earlier opt-in-0 wiring)**; 0 opts out. Accepting other
+   people's shares still costs disk up to that cap (storage-exhaustion bound), which the readme caveat notes. Tests:
+   `zero_hosted_quota_node_refuses_pushed_shares` (`hosted_quota_mb = 0`: push attempted and refused, nothing
+   hosted) and `default_config_accepts_remote_distribution` (default config accepts) and `node_with_hosted_quota_key_holds_shares_and_serves_after_publisher_leaves` (B has the
    key in `config.toml`, A pushes, A shuts down, C retrieves from B; k=1 because A places one share
    per peer and B is the only host). **Still not designed:** eviction of hosted shares when the quota
    is full (a full quota just refuses), and per-peer limits (one publisher can fill the whole hosted
