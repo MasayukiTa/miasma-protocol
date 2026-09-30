@@ -126,6 +126,26 @@ function Wait-Segments([string]$dir, [string]$match, [int]$atLeast, [int]$timeou
     return $false
 }
 
+# "Connected peers: N" from `miasma status`, or -1 when the daemon does not answer.
+function Peers-Of([string]$dir) {
+    $r = Run-Cli @("--data-dir", $dir, "status")
+    foreach ($line in ($r.Out -split "\r?\n")) {
+        if ($line -match "Connected peers:\s*(\d+)") { return [int]$Matches[1] }
+    }
+    return -1
+}
+
+# Wait until the node at $dir is connected to at least one peer. This is what the runbook
+# tells the user to do before starting a transfer, so the script does the same.
+function Wait-Peers([string]$dir, [int]$timeoutSec) {
+    $deadline = (Get-Date).AddSeconds($timeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        if ((Peers-Of $dir) -ge 1) { return $true }
+        Start-Sleep -Milliseconds 500
+    }
+    return $false
+}
+
 function New-TestFile([string]$path, [int]$mb) {
     $rng = New-Object System.Security.Cryptography.RNGCryptoServiceProvider
     $fs = [IO.File]::Create($path)
@@ -154,7 +174,7 @@ try {
     if (-not $bootstrap) { throw "could not read node A's listen address" }
     Write-Host "  Node A: $bootstrap"
     $daemonB = Start-Daemon $DIR_B $bootstrap
-    Start-Sleep -Seconds 5
+    Check (Wait-Peers $DIR_B 60) "node B is connected to node A before the first transfer"
 
     $pwFile = Join-Path $TMP "password.txt"
     [IO.File]::WriteAllText($pwFile, "e2e-correct-horse`n")
@@ -193,8 +213,8 @@ try {
     Check (Test-Path "$recv.part") "the partial file is kept"
 
     $daemonB = Start-Daemon $DIR_B $bootstrap
-    Start-Sleep -Seconds 5
-    $listed = (Run-Cli @("--data-dir", $DIR_B, "transfers")).Out
+    Check (Wait-Peers $DIR_B 60) "after the restart, node B is connected to node A again"
+    $listed =(Run-Cli @("--data-dir", $DIR_B, "transfers")).Out
     Check ($listed -match "Paused" -and $listed -match "resumable") "after the restart, 'transfers' shows it paused and resumable"
     $doneBefore = Segments-Done $DIR_B $mid1
     Write-Host "  Segments already safe on disk: $doneBefore"
@@ -207,26 +227,42 @@ try {
 
     # ---- 4. sender killed mid-publish -----------------------------------------------------
     Write-Host "`n[4] Sender: kill A's daemon after the first segment, restart, resume" -ForegroundColor Cyan
-    $src2 = Join-Path $TMP "payload2.bin"
-    New-TestFile $src2 $SizeMB
-    $hash2 = Sha $src2
-    $args2 = @("--data-dir", $DIR_A, "network-publish", $src2, "--data-shards", "$K", "--total-shards", "$N", "--password-file", $pwFile)
-    $s2 = Run-Cli ($args2 + @("--no-wait"))
-    Check ($s2.Code -eq 0) "network-publish --no-wait started the publish"
-    $reached = Wait-Segments $DIR_A "payload2.bin" 1 900
-    Check $reached "the first segment was published"
-    Kill-Daemon $daemonA $DIR_A
-    Write-Host "  A's daemon killed."
+    # The kill has to land while the send is still running. On a fast machine a small file can
+    # finish between the poll that sees segment 1 and the kill; the job is then complete, its
+    # journal is gone, and there is nothing to resume (seen on a fast CI runner). That is a
+    # property of the machine, not a defect, so retry with a file twice as large (each attempt
+    # uses its own file name) until the kill provably came mid-send.
+    $sizeMB2 = $SizeMB
+    $paused = $false
+    $hash2 = $null; $args2 = $null; $listedA = ""
+    for ($try = 1; $try -le 4 -and -not $paused; $try++) {
+        $name2 = "payload2-$try.bin"
+        $src2 = Join-Path $TMP $name2
+        New-TestFile $src2 $sizeMB2
+        $hash2 = Sha $src2
+        $args2 = @("--data-dir", $DIR_A, "network-publish", $src2, "--data-shards", "$K", "--total-shards", "$N", "--password-file", $pwFile)
+        $s2 = Run-Cli ($args2 + @("--no-wait"))
+        Check ($s2.Code -eq 0) "network-publish --no-wait started the publish ($sizeMB2 MB)"
+        $reached = Wait-Segments $DIR_A $name2 1 900
+        Check $reached "the first segment was published"
+        Kill-Daemon $daemonA $DIR_A
+        Write-Host "  A's daemon killed."
 
-    $daemonA = Start-Daemon $DIR_A ""
-    Start-Sleep -Seconds 3
-    $listedA = (Run-Cli @("--data-dir", $DIR_A, "transfers")).Out
-    Check (($listedA -match "(?m)^send") -and $listedA -match "Paused") "after the restart, 'transfers' shows the send paused"
+        $daemonA = Start-Daemon $DIR_A ""
+        Start-Sleep -Seconds 3
+        $listedA = (Run-Cli @("--data-dir", $DIR_A, "transfers")).Out
+        $paused = (($listedA -match "(?m)^send") -and $listedA -match "Paused")
+        if (-not $paused -and $try -lt 4) {
+            Write-Host "  the send finished before the kill landed at $sizeMB2 MB; retrying with $($sizeMB2 * 2) MB"
+            $sizeMB2 = $sizeMB2 * 2
+        }
+    }
+    Check $paused "after the restart, 'transfers' shows the send paused"
     $pub2 = Run-Cli $args2
     $mid2 = ($pub2.Out -split "\r?\n" | Where-Object { $_ -match "^miasma:" } | Select-Object -First 1)
     Check ($pub2.Code -eq 0 -and $mid2) "running the same network-publish again completed and printed a MID"
 
-    Start-Sleep -Seconds 3
+    Check (Wait-Peers $DIR_B 60) "node B is connected to the restarted node A before it starts receiving"
     $recv2 = Join-Path $TMP "received2.bin"
     $g2 = Run-Cli @("--data-dir", $DIR_B, "network-get", $mid2, "-o", $recv2, "--password-file", $pwFile)
     Check ($g2.Code -eq 0) "node B received the resumed publish"
