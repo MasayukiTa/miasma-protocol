@@ -165,6 +165,10 @@ enum Commands {
         /// addition to the MID, and the MID plus every shard cannot decrypt
         /// without it. It is never taken from the command line, where it would
         /// show in process listings and shell history.
+        ///
+        /// A new password needs at least 6 characters with a digit, a letter
+        /// (a-z, A-Z) and a symbol (a space does not count). That is still weak
+        /// for a short one: make a strong one with `miasma password-generate`.
         #[arg(long, value_name = "FILE", conflicts_with = "password_stdin")]
         password_file: Option<PathBuf>,
         /// Read the password from the first line of standard input.
@@ -179,6 +183,19 @@ enum Commands {
         /// `miasma transfers`; the MID is shown there once the file is hashed.
         #[arg(long)]
         no_wait: bool,
+    },
+
+    /// Generate a strong random password for `network-publish --password-file`.
+    ///
+    /// Prints the password alone on stdout (16 random characters by default,
+    /// always with a digit, a letter and a symbol). Nothing is saved: store it
+    /// yourself. A password you pick by hand is accepted too if it has 6+
+    /// characters with a digit, a letter and a symbol, but that is still weak
+    /// (anyone holding the manifest can guess offline); use this instead.
+    PasswordGenerate {
+        /// Number of characters (12 to 64).
+        #[arg(long, default_value_t = 16, value_parser = clap::value_parser!(u8).range(12..=64))]
+        length: u8,
     },
 
     /// Export a full diagnostic report for troubleshooting.
@@ -522,6 +539,9 @@ async fn main() -> Result<()> {
             no_wait,
         } => {
             let password = read_transfer_password(password_file.as_deref(), password_stdin)?;
+            if let Some(pw) = &password {
+                check_publish_password(pw)?;
+            }
             cmd_network_publish(
                 &data_dir,
                 &path,
@@ -533,6 +553,13 @@ async fn main() -> Result<()> {
                 no_wait,
             )
             .await
+        }
+
+        Commands::PasswordGenerate { length } => {
+            let pw = miasma_core::transfer::password_policy::generate(length as usize);
+            println!("{}", pw.as_str());
+            eprintln!("{}", Msg::PasswordGeneratedNote.t());
+            Ok(())
         }
 
         Commands::NetworkGet {
@@ -2012,6 +2039,27 @@ fn read_transfer_password(
         bail!("{}", Msg::PasswordEmpty.t());
     }
     Ok(Some(Zeroizing::new(first.to_owned())))
+}
+
+/// The password policy for a *new* protected transfer, checked here so the
+/// person gets the message in their language before anything is sent to the
+/// daemon (which enforces the same rule). Never used on the receive side.
+/// A compliant but short password only draws a warning.
+fn check_publish_password(pw: &str) -> Result<()> {
+    use miasma_core::transfer::password_policy::{check, codes, strength_hint, Strength};
+    if let Err(v) = check(pw) {
+        bail!(
+            "{}",
+            Msg::WeakPassword {
+                codes: codes(&v).split(',').map(str::to_owned).collect(),
+            }
+            .t()
+        );
+    }
+    if strength_hint(pw) == Strength::Short {
+        eprintln!("{}", Msg::PasswordShortWarning.t());
+    }
+    Ok(())
 }
 
 async fn cmd_network_publish(
