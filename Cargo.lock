@@ -4870,6 +4870,7 @@ dependencies = [
  "libp2p",
  "miasma-core",
  "serde_json",
+ "tempfile",
  "tokio",
  "toml 0.8.23",
  "tracing",

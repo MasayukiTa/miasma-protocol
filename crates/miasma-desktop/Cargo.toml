@@ -6,6 +6,10 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[features]
+# Developer-only: walk theme x language x tab and save screenshots (see src/app/tour.rs).
+ui-tour = []
+
 [[bin]]
 name = "miasma-desktop"
 path = "src/main.rs"

@@ -112,6 +112,49 @@ jobs:
       - name: Build Apple-relevant crates
         run: cargo build -p miasma-core -p miasma-ffi -p miasma-wasm --locked
 
+  macos-cli-transfer:
+    name: CLI + desktop build and transfer e2e (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # Release build: the same binaries that are handed to a person who has no
+      # Rust toolchain (see the artifact step below).
+      - name: Build CLI and desktop (release)
+        run: cargo build --release -p miasma-cli -p miasma-desktop --locked
+
+      # Real binary, two loopback nodes, a daemon killed mid-transfer on each
+      # side. The same script the macOS sender runs before a cross-machine test.
+      - name: Transfer end-to-end (protected, resumable)
+        run: scripts/transfer-e2e.sh --cli target/release/miasma
+
+      # Zip artifacts lose the executable bit, so ship a tar.gz inside it.
+      # The binaries are unsigned: on the receiving Mac, remove the quarantine
+      # flag once (see docs/tasks/macos-to-windows-large-transfer-runbook.md).
+      - name: Package macOS binaries
+        run: |
+          mkdir -p dist/miasma-macos
+          cp target/release/miasma target/release/miasma-desktop dist/miasma-macos/
+          cp scripts/transfer-e2e.sh dist/miasma-macos/
+          cp docs/tasks/macos-to-windows-large-transfer-runbook.md dist/miasma-macos/
+          tar -czf dist/miasma-macos.tar.gz -C dist miasma-macos
+          shasum -a 256 dist/miasma-macos.tar.gz
+
+      - name: Upload macOS binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: miasma-macos-arm64
+          path: dist/miasma-macos.tar.gz
+          retention-days: 14
+          if-no-files-found: error
+
   cross-compile-arm64:
     name: Cross-compile ARM64
     runs-on: ubuntu-latest

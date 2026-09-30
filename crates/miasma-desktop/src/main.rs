@@ -18,7 +18,10 @@
 //! ```
 
 mod app;
+mod fonts;
 pub mod locale;
+mod theme;
+mod transfers;
 pub mod variant;
 mod worker;
 
@@ -67,9 +70,23 @@ fn parse_launch_intent() -> LaunchIntent {
     LaunchIntent::Normal
 }
 
+/// `--data-dir <path>` if given (used to run a throwaway instance that must not touch the real
+/// data), otherwise the platform default.
+fn resolve_data_dir() -> std::path::PathBuf {
+    let args: Vec<String> = std::env::args().collect();
+    for (i, arg) in args.iter().enumerate() {
+        if arg == "--data-dir" {
+            if let Some(val) = args.get(i + 1) {
+                return std::path::PathBuf::from(val);
+            }
+        }
+    }
+    miasma_core::default_data_dir()
+}
+
 fn main() -> eframe::Result<()> {
     // Logging: stderr + file in data dir.
-    let data_dir = miasma_core::default_data_dir();
+    let data_dir = resolve_data_dir();
     let _ = std::fs::create_dir_all(&data_dir);
     let file_appender = tracing_appender::rolling::daily(&data_dir, "desktop.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
@@ -97,6 +114,7 @@ fn main() -> eframe::Result<()> {
     let cli_mode = variant::parse_cli_mode();
     let mode = variant::resolve_mode(cli_mode, &prefs);
     let locale = prefs.locale;
+    let theme = prefs.theme;
 
     // Parse launch intent (magnet URI or .torrent file).
     let intent = parse_launch_intent();
@@ -127,6 +145,10 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Miasma",
         native_options,
-        Box::new(move |cc| Box::new(app::MiasmaApp::new(cc, mode, locale, intent))),
+        Box::new(move |cc| {
+            Box::new(app::MiasmaApp::new(
+                cc, mode, locale, theme, data_dir, intent,
+            ))
+        }),
     )
 }

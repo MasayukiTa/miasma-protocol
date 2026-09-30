@@ -25,6 +25,7 @@ pub mod retrieval;
 pub mod secure_file;
 pub mod share;
 pub mod store;
+pub mod transfer;
 pub mod transport;
 
 pub use config::{default_data_dir, NodeConfig, TransportConfig};

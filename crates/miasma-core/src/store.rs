@@ -86,9 +86,44 @@ struct IndexEntry {
     /// they age out via normal hosted-quota pressure instead).
     #[serde(default)]
     hosted_tuple: Option<HostedTuple>,
+    /// Which piece this share is, for *every* entry (owned or hosted): the same
+    /// `(mid_prefix, segment, slot)` triple as `hosted_tuple`.
+    ///
+    /// It exists so a piece can be found by index lookup instead of by
+    /// decrypting stored shares one after another to read their headers, which
+    /// is what serving a fetch request used to do -- O(shares in the store)
+    /// full decryptions per request. `None` for entries written before this
+    /// field existed; `find_piece` fills those in lazily, once.
+    #[serde(default)]
+    piece: Option<PieceKey>,
+}
+
+/// See [`IndexEntry::piece`]. Same shape as [`HostedTuple`].
+type PieceKey = HostedTuple;
+
+impl PieceKey {
+    fn of(share: &MiasmaShare) -> Self {
+        Self {
+            mid_prefix: share.mid_prefix,
+            segment_index: share.segment_index,
+            slot_index: share.slot_index,
+        }
+    }
 }
 
 type StoreIndex = HashMap<String, IndexEntry>;
+
+/// A parsed copy of the index plus the file stamp it was read at. Lets
+/// read-only lookups skip re-parsing a multi-megabyte JSON file per request.
+struct CachedIndex {
+    stamp: Option<(SystemTime, u64)>,
+    index: std::sync::Arc<StoreIndex>,
+}
+
+fn index_stamp(data_dir: &Path) -> Option<(SystemTime, u64)> {
+    let m = std::fs::metadata(data_dir.join(INDEX_FILE)).ok()?;
+    Some((m.modified().ok()?, m.len()))
+}
 
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -273,6 +308,8 @@ fn rebuild_index(data_dir: &Path, shares_dir: &Path) {
                     // eviction sooner than ideal; never a security issue).
                     origin: ShareOrigin::Owned,
                     hosted_tuple: None,
+                    // Filled in lazily by `find_piece`.
+                    piece: None,
                 },
             );
         }
@@ -323,6 +360,8 @@ pub struct LocalShareStore {
     /// inbound network `Store` request) can never interleave and corrupt or
     /// silently drop an update to `store_index.json`.
     write_lock: std::sync::Mutex<()>,
+    /// Parsed index for read-only piece lookups; see [`CachedIndex`].
+    index_cache: std::sync::Mutex<Option<CachedIndex>>,
 }
 
 impl LocalShareStore {
@@ -362,6 +401,7 @@ impl LocalShareStore {
             quota_bytes: quota_mb * 1024 * 1024,
             hosted_quota_bytes: 0,
             write_lock: std::sync::Mutex::new(()),
+            index_cache: std::sync::Mutex::new(None),
         })
     }
 
@@ -450,6 +490,7 @@ impl LocalShareStore {
                 last_accessed_secs: now_secs(),
                 origin: ShareOrigin::Owned,
                 hosted_tuple: None,
+                piece: Some(PieceKey::of(share)),
             },
         );
         save_index(&self.data_dir, &index)?;
@@ -535,6 +576,7 @@ impl LocalShareStore {
                 last_accessed_secs: now_secs(),
                 origin: ShareOrigin::Hosted,
                 hosted_tuple: Some(tuple),
+                piece: Some(PieceKey::of(share)),
             },
         );
         save_index(&self.data_dir, &index)?;
@@ -553,14 +595,7 @@ impl LocalShareStore {
 
     /// Retrieve a share by its content address.
     pub fn get(&self, address: &str) -> Result<MiasmaShare, MiasmaError> {
-        let master_guard = self.lock_master_key()?;
-        let master_key = Self::live_master_key(&master_guard)?;
-        let file_path = self.share_path(address);
-        let blob = std::fs::read(&file_path)?;
-
-        let file_key = derive_file_key(master_key, address)?;
-        let plaintext = decrypt_share(&file_key, &blob)?;
-        let share = MiasmaShare::from_bytes(&plaintext)?;
+        let share = self.get_untouched(address)?;
 
         // Update last_accessed.
         let mut index = load_index(&self.data_dir);
@@ -570,6 +605,123 @@ impl LocalShareStore {
         }
 
         Ok(share)
+    }
+
+    /// As [`get`](Self::get) but without recording the access.
+    ///
+    /// `get` re-reads and rewrites the whole index file on every call to bump
+    /// `last_accessed`. That is right for LRU bookkeeping and wrong for a hot
+    /// read path (serving a fetch request), where it is O(index size) extra
+    /// work per share and turns every read into a write.
+    pub fn get_untouched(&self, address: &str) -> Result<MiasmaShare, MiasmaError> {
+        let master_guard = self.lock_master_key()?;
+        let master_key = Self::live_master_key(&master_guard)?;
+        let file_path = self.share_path(address);
+        let blob = std::fs::read(&file_path)?;
+
+        let file_key = derive_file_key(master_key, address)?;
+        let plaintext = decrypt_share(&file_key, &blob)?;
+        MiasmaShare::from_bytes(&plaintext)
+    }
+
+    /// The parsed index, re-read only when the file has changed.
+    fn index_snapshot(&self) -> std::sync::Arc<StoreIndex> {
+        let stamp = index_stamp(&self.data_dir);
+        let mut cache = self.index_cache.lock().unwrap();
+        if let (Some(c), Some(_)) = (cache.as_ref(), stamp) {
+            if c.stamp == stamp {
+                return c.index.clone();
+            }
+        }
+        let index = std::sync::Arc::new(load_index(&self.data_dir));
+        *cache = Some(CachedIndex {
+            stamp,
+            index: index.clone(),
+        });
+        index
+    }
+
+    /// The address of the share for exactly `(mid_prefix, segment, slot)`, found
+    /// through the index with **no decryption**.
+    ///
+    /// This replaces `search_by_mid_prefix` + `get` on the fetch-serving path,
+    /// which decrypted every share in the store to read its header: one fetch
+    /// request cost O(shares stored) full decryptions and index rewrites. For a
+    /// 100 GiB publish that is 32,000 shares, ~200 GiB of decryption per
+    /// request.
+    ///
+    /// If several generations of the same piece exist (the same content
+    /// published twice gets a fresh key each time) the most recently written one
+    /// is returned. Entries written before piece keys existed are identified by
+    /// decrypting them once; the answer is recorded so it is never repeated.
+    pub fn find_piece(
+        &self,
+        mid_prefix: &[u8; 8],
+        segment_index: u32,
+        slot_index: u16,
+    ) -> Option<String> {
+        let want = PieceKey {
+            mid_prefix: *mid_prefix,
+            segment_index,
+            slot_index,
+        };
+        let pick = |index: &StoreIndex| {
+            index
+                .iter()
+                .filter(|(_, e)| e.piece == Some(want))
+                .max_by_key(|(_, e)| e.last_accessed_secs)
+                .map(|(addr, _)| addr.clone())
+        };
+
+        if let Some(addr) = pick(&self.index_snapshot()) {
+            return Some(addr);
+        }
+
+        // Not in the cached view: the cache may simply be stale, so look once at
+        // the file itself before concluding the piece is not here.
+        let fresh = load_index(&self.data_dir);
+        if let Some(addr) = pick(&fresh) {
+            return Some(addr);
+        }
+        if fresh.values().all(|e| e.piece.is_some()) {
+            return None;
+        }
+        self.backfill_pieces(&want)
+    }
+
+    /// One-time migration for entries with no piece key: decrypt each, record its
+    /// key in the index, and return the address matching `want`, if any.
+    fn backfill_pieces(&self, want: &PieceKey) -> Option<String> {
+        let _guard = self.write_lock.lock().ok()?;
+        let mut index = load_index(&self.data_dir);
+        let unknown: Vec<String> = index
+            .iter()
+            .filter(|(_, e)| e.piece.is_none())
+            .map(|(a, _)| a.clone())
+            .collect();
+        let mut found: Option<(String, u64)> = None;
+        let mut changed = false;
+        for addr in unknown {
+            let Ok(share) = self.get_untouched(&addr) else {
+                continue;
+            };
+            let key = PieceKey::of(&share);
+            if let Some(e) = index.get_mut(&addr) {
+                e.piece = Some(key);
+                changed = true;
+                if key == *want
+                    && found
+                        .as_ref()
+                        .is_none_or(|(_, t)| e.last_accessed_secs >= *t)
+                {
+                    found = Some((addr.clone(), e.last_accessed_secs));
+                }
+            }
+        }
+        if changed {
+            let _ = save_index(&self.data_dir, &index);
+        }
+        found.map(|(a, _)| a)
     }
 
     /// Check if a share with the given address exists.
@@ -1087,5 +1239,221 @@ mod tests {
         let addr = store.put(&dummy_share(70)).unwrap();
         assert_eq!(store.list().len(), 1);
         assert!(store.list().contains(&addr));
+    }
+
+    // ── find_piece: index lookup instead of decrypting the whole store ───────
+
+    fn piece(seg: u32, slot: u16, payload: u8) -> MiasmaShare {
+        let mid = ContentId::compute(b"piece lookup", b"k=10,n=20,v=1");
+        MiasmaShare::new(
+            &mid,
+            seg,
+            slot,
+            vec![payload; 64],
+            vec![0xAA; 32],
+            rand::random::<[u8; 12]>(),
+            100,
+            1,
+        )
+    }
+
+    fn prefix() -> [u8; 8] {
+        ContentId::compute(b"piece lookup", b"k=10,n=20,v=1").prefix()
+    }
+
+    fn index_json(dir: &Path) -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(dir.join(INDEX_FILE)).unwrap()).unwrap()
+    }
+
+    fn write_index_json(dir: &Path, v: &serde_json::Value) {
+        std::fs::write(dir.join(INDEX_FILE), serde_json::to_string(v).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn find_piece_locates_each_share_by_its_tuple() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        let a = store.put(&piece(0, 0, 1)).unwrap();
+        let b = store.put(&piece(0, 1, 2)).unwrap();
+        let c = store.put(&piece(1, 0, 3)).unwrap();
+
+        assert_eq!(store.find_piece(&prefix(), 0, 0), Some(a));
+        assert_eq!(store.find_piece(&prefix(), 0, 1), Some(b));
+        assert_eq!(store.find_piece(&prefix(), 1, 0), Some(c.clone()));
+        // Segment and slot are not interchangeable.
+        assert_eq!(store.find_piece(&prefix(), 0, 2), None);
+        assert_eq!(store.find_piece(&prefix(), 2, 0), None);
+        // Nor is a different MID.
+        assert_eq!(store.find_piece(&[9u8; 8], 1, 0), None);
+
+        let got = store.get_untouched(&c).unwrap();
+        assert_eq!((got.segment_index, got.slot_index), (1, 0));
+    }
+
+    #[test]
+    fn a_lookup_neither_decrypts_other_shares_nor_writes_the_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        let mut target = String::new();
+        for slot in 0..20u16 {
+            let addr = store.put(&piece(0, slot, slot as u8)).unwrap();
+            if slot == 7 {
+                target = addr;
+            }
+        }
+        // Destroy every other share file: the old scan decrypted all of them and
+        // would have choked. An index lookup must not need them at all.
+        for addr in store.list() {
+            if addr != target {
+                std::fs::write(
+                    dir.path()
+                        .join(SHARES_DIR)
+                        .join(format!("{addr}{SHARE_EXT}")),
+                    b"x",
+                )
+                .unwrap();
+            }
+        }
+        let before = std::fs::read(dir.path().join(INDEX_FILE)).unwrap();
+        for _ in 0..50 {
+            let addr = store.find_piece(&prefix(), 0, 7).expect("must be found");
+            assert_eq!(addr, target);
+            assert_eq!(store.get_untouched(&addr).unwrap().slot_index, 7);
+        }
+        let after = std::fs::read(dir.path().join(INDEX_FILE)).unwrap();
+        assert_eq!(before, after, "serving reads must not rewrite the index");
+    }
+
+    #[test]
+    fn get_untouched_leaves_last_accessed_alone_but_get_still_updates_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        let addr = store.put(&piece(0, 0, 1)).unwrap();
+
+        // Age the entry so a touch is visible.
+        let mut v = index_json(dir.path());
+        v[&addr]["last_accessed_secs"] = serde_json::json!(5);
+        write_index_json(dir.path(), &v);
+
+        store.get_untouched(&addr).unwrap();
+        assert_eq!(index_json(dir.path())[&addr]["last_accessed_secs"], 5);
+
+        store.get(&addr).unwrap();
+        assert!(
+            index_json(dir.path())[&addr]["last_accessed_secs"]
+                .as_u64()
+                .unwrap()
+                > 5
+        );
+    }
+
+    #[test]
+    fn find_piece_prefers_the_newest_generation() {
+        // The same content published twice gets a fresh key each time, so the same
+        // (mid, segment, slot) can be stored under two addresses.
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        let old = store.put(&piece(0, 0, 1)).unwrap();
+        let new = store.put(&piece(0, 0, 2)).unwrap();
+        assert_ne!(old, new);
+
+        let mut v = index_json(dir.path());
+        v[&old]["last_accessed_secs"] = serde_json::json!(100);
+        v[&new]["last_accessed_secs"] = serde_json::json!(200);
+        write_index_json(dir.path(), &v);
+
+        let fresh = LocalShareStore::open(dir.path(), 100).unwrap();
+        assert_eq!(fresh.find_piece(&prefix(), 0, 0), Some(new));
+    }
+
+    #[test]
+    fn entries_from_before_piece_keys_are_found_and_recorded_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        let a = store.put(&piece(0, 0, 1)).unwrap();
+        let b = store.put(&piece(3, 5, 2)).unwrap();
+
+        // Rewrite the index the way an older version would have: no `piece`.
+        let mut v = index_json(dir.path());
+        for addr in [&a, &b] {
+            v[addr].as_object_mut().unwrap().remove("piece");
+        }
+        write_index_json(dir.path(), &v);
+        assert!(index_json(dir.path())[&a].get("piece").is_none());
+
+        let fresh = LocalShareStore::open(dir.path(), 100).unwrap();
+        assert_eq!(fresh.find_piece(&prefix(), 3, 5), Some(b.clone()));
+        // The answer was recorded for *both* legacy entries, not just the match.
+        let after = index_json(dir.path());
+        assert!(
+            !after[&a]["piece"].is_null(),
+            "legacy entry a was backfilled"
+        );
+        assert!(
+            !after[&b]["piece"].is_null(),
+            "legacy entry b was backfilled"
+        );
+        assert_eq!(fresh.find_piece(&prefix(), 0, 0), Some(a));
+    }
+
+    #[test]
+    fn find_piece_survives_a_reopen_and_sees_another_instances_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = LocalShareStore::open(dir.path(), 100).unwrap();
+        let a = first.put(&piece(0, 0, 1)).unwrap();
+        assert_eq!(first.find_piece(&prefix(), 0, 0), Some(a));
+
+        // A second handle on the same directory writes a new piece; the first
+        // handle's cached view must not hide it.
+        let second = LocalShareStore::open(dir.path(), 100).unwrap();
+        let b = second.put(&piece(4, 4, 9)).unwrap();
+        assert_eq!(first.find_piece(&prefix(), 4, 4), Some(b));
+    }
+
+    #[test]
+    fn hosted_shares_are_findable_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100)
+            .unwrap()
+            .with_hosted_quota_mb(10);
+        let addr = store.put_hosted(&piece(2, 3, 7)).unwrap();
+        assert_eq!(store.find_piece(&prefix(), 2, 3), Some(addr));
+    }
+
+    /// Measurement, not a correctness test: how the cost of one `put` grows with
+    /// the number of shares already stored. Every `put` re-reads and rewrites the
+    /// whole JSON index, so this should grow linearly with the store size (and a
+    /// whole publish quadratically). Run with:
+    /// `cargo test -p miasma-core --lib -- --ignored --nocapture measure_put_cost`
+    #[test]
+    #[ignore]
+    fn measure_put_cost_growth() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100_000).unwrap();
+        let mut n = 0u32;
+        let mut last = std::time::Instant::now();
+        for checkpoint in [250u32, 500, 1000, 2000, 4000] {
+            let batch_start = n;
+            let t = std::time::Instant::now();
+            while n < checkpoint {
+                store
+                    .put(&piece(n / 20, (n % 20) as u16, (n % 251) as u8))
+                    .unwrap();
+                n += 1;
+            }
+            let per_put = t.elapsed().as_secs_f64() * 1e3 / (n - batch_start) as f64;
+            let idx = std::fs::metadata(dir.path().join(INDEX_FILE))
+                .unwrap()
+                .len();
+            println!(
+                "[measure] shares {:>5}: avg {:>7.2} ms/put over the last {:>4}, index file {:>6.2} MB",
+                n,
+                per_put,
+                n - batch_start,
+                idx as f64 / 1e6
+            );
+            last = std::time::Instant::now();
+        }
+        let _ = last;
     }
 }
