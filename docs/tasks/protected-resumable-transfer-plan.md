@@ -118,6 +118,22 @@ Passwords never appear in `Debug` output, logs, argv or the journal. CLI reads
 `--password-file` or prompts without echo; the IPC request follows the existing `DirectedSend`
 redaction pattern.
 
+**Password policy (publish side only).** A password set for a new protected transfer must have at
+least 6 characters (Unicode scalar values, at most 1024) with an ASCII digit, an ASCII letter
+(`a-z`/`A-Z`) and an ASCII symbol (punctuation; a space is not a symbol and non-ASCII characters
+satisfy none of the classes). Passwords stay optional. `PasswordProtection::create` refuses a weak
+one with `weak password: too_short,no_symbol` (stable codes) before any Argon2 work, so every
+surface (CLI `network-publish`, daemon `PublishFileProtected`/`TransferStartPublish`, desktop Send
+form) is covered; the receive side never checks, so an older weak-password transfer stays
+receivable, and directed `send --password` is a separate feature left as it was. Honestly: a
+policy-compliant 6-character password is still weak (about 38 bits if random over 94 characters,
+roughly 5 years at 1,000 guesses/s; a human-chosen one is far weaker) and `key_check` is an offline
+verifier, so anyone holding the manifest can brute-force offline, with Argon2id only slowing it.
+The recommended path is the generator (`miasma password-generate`, the desktop Generate button:
+16 OS-random characters, about 100 bits); a compliant password under 12 characters gets a soft
+warning, not a block. `web/js/password_policy.js` mirrors the rule and is tested against the same
+vector file as the Rust code; the web has no protected-publish form yet.
+
 ### 2.4 Redundancy
 
 - `k` and `n` become publish parameters (CLI `--data-shards/--total-shards`, `--redundancy <preset>`).
