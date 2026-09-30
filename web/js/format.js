@@ -195,6 +195,19 @@ export function buildStrip(total, done, running, resumedFrom) {
   return { cells, perCell, resumeCell };
 }
 
+/**
+ * What a person typed to name a transfer, judged by its prefix only: 'share' for a share ID
+ * (`miasma-share:...`), 'mid' for a bare MID (`miasma:...`), '' for anything else. The checksum
+ * (which catches a mistyped character) is verified by the daemon before any network work; it is
+ * a BLAKE3 hash this page does not carry.
+ */
+export function transferIdKind(text) {
+  const s = String(text || '').trim();
+  if (s.startsWith('miasma-share:') && s.length > 'miasma-share:'.length) return 'share';
+  if (s.startsWith('miasma:') && s.length > 'miasma:'.length) return 'mid';
+  return '';
+}
+
 /** Map an error string from the bridge to a locale key, when it is one a person can act on. */
 export function errorKey(message) {
   const m = String(message || '');
@@ -205,6 +218,7 @@ export function errorKey(message) {
   if (m.includes('transfer is still running')) return 'tf_err_remove_running';
   if (m.includes('transfer is paused')) return 'tf_err_remove_paused';
   if (m.startsWith('invalid MID')) return 'tf_err_mid';
+  if (m.startsWith('invalid share ID')) return 'tf_err_share_id';
   if (m.includes('wrong password')) return 'tf_err_wrong_password';
   if (m.includes('a password is required') || m.includes('password-protected')) return 'tf_err_password_required';
   return '';
