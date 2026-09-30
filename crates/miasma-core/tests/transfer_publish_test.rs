@@ -38,7 +38,8 @@ fn params() -> DissolutionParams {
 
 /// A fresh random password: no test carries a fixed secret.
 fn random_password() -> String {
-    format!("pw-{:032x}", rand::random::<u128>())
+    // Always satisfies the password policy: a digit, letters and a symbol.
+    format!("pw-1{:032x}", rand::random::<u128>())
 }
 
 /// Deterministic, non-repeating-looking content so a segment mix-up is visible.
@@ -507,7 +508,8 @@ async fn a_cancelled_publish_resumes_and_the_result_is_a_working_transfer() {
         let data = content(SEND_TEST_LEN);
         let path = write_temp(&data);
         let journals = tempfile::tempdir().unwrap().keep();
-        let password = "send-side-secret";
+        let password_owned = random_password();
+        let password = password_owned.as_str();
 
         // First run: stop as soon as segment 0 is on disk.
         let p1 = TransferProgress::for_send(path.to_string_lossy());
