@@ -80,6 +80,9 @@ pub enum WorkerCmd {
         password: Option<String>,
         /// Discard any partial transfer and start over.
         restart: bool,
+        /// `wss://` / `ws://` endpoints to fetch from directly instead of the network. Empty for
+        /// the ordinary receive. The desktop trusts the operating system's certificate store.
+        via: Vec<String>,
     },
     /// Start (or resume) a resumable send of a file in the daemon.
     TransferStartPublish {
@@ -624,6 +627,7 @@ fn worker_thread(
                 output_path,
                 password,
                 restart,
+                via,
             } => {
                 let password = password.map(Zeroizing::new);
                 rt.block_on(do_transfer_start_receive(
@@ -632,6 +636,7 @@ fn worker_thread(
                     &output_path,
                     password.as_ref().map(|p| p.as_str()),
                     restart,
+                    via,
                 ))
             }
             WorkerCmd::TransferStartPublish {
@@ -1351,6 +1356,7 @@ async fn do_transfer_start_receive(
     output_path: &Path,
     password: Option<&str>,
     restart: bool,
+    via: Vec<String>,
 ) -> WorkerResult {
     let abs = miasma_core::daemon::control_auth::absolutize_lexical(output_path);
     let req = ControlRequest::TransferStartReceive {
@@ -1358,6 +1364,8 @@ async fn do_transfer_start_receive(
         output_path: abs.to_string_lossy().into_owned(),
         password: password.filter(|p| !p.is_empty()).map(str::to_owned),
         restart,
+        via,
+        via_ca_pem: None,
     };
     transfer_started(daemon_request(data_dir, req).await)
 }
@@ -1525,6 +1533,7 @@ mod tests {
             output_path: std::path::PathBuf::from("C:/private/out-secret.iso"),
             password: Some("password-sensitive".into()),
             restart: false,
+            via: Vec::new(),
         };
         let rendered = format!("{recv:?}");
         assert!(!rendered.contains("password-sensitive"));
