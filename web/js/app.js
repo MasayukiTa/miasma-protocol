@@ -78,6 +78,7 @@ function showView(name) {
     view.classList.add('active');
     currentView = name;
   }
+  document.getElementById('app').classList.toggle('wide', name === 'transfers');
   if (name === 'home') updateStats();
   if (name === 'settings') updateSettingsView();
   if (name === 'dissolve') {
@@ -113,10 +114,23 @@ function setupEventListeners() {
   document.getElementById('btn-lang').addEventListener('click', () => {
     const cycle = { en: 'ja', ja: 'zh', zh: 'en' };
     setLang(cycle[getLang()] || 'en');
+    onLanguageChanged();
   });
   document.querySelectorAll('.lang-btn').forEach(btn => {
-    btn.addEventListener('click', () => setLang(btn.dataset.lang));
+    btn.addEventListener('click', () => { setLang(btn.dataset.lang); onLanguageChanged(); });
   });
+
+  // Theme (light / dark / system)
+  const theme = window.MiasmaTheme;
+  if (theme) {
+    const mark = () => document.querySelectorAll('.theme-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.themeMode === theme.mode());
+    });
+    document.querySelectorAll('.theme-btn').forEach(btn => {
+      btn.addEventListener('click', () => { theme.set(btn.dataset.themeMode); mark(); });
+    });
+    mark();
+  }
 
   // Input mode toggle
   document.getElementById('btn-text-mode').addEventListener('click', () => {
@@ -281,12 +295,8 @@ async function handleDissolve() {
   const result = document.getElementById('dissolve-result');
 
   btn.disabled = true;
-  btn.classList.add('dissolving');
   progress.classList.remove('hidden');
   result.classList.add('hidden');
-
-  // Start dissolve particle animation
-  startDissolveAnimation();
 
   // Allow UI to update before heavy WASM computation
   await new Promise(r => setTimeout(r, 50));
@@ -320,57 +330,12 @@ async function handleDissolve() {
 
     progress.classList.add('hidden');
     result.classList.remove('hidden');
-
-    // Success pulse on result
-    result.style.animation = 'none';
-    result.offsetHeight;
-    result.style.animation = '';
   } catch (e) {
     console.error('Dissolve failed:', e);
     showToast(e && e.code === 'auth' ? authMessage() : t('error_dissolve_failed'), 'error');
     progress.classList.add('hidden');
   } finally {
     btn.disabled = false;
-    btn.classList.remove('dissolving');
-    stopDissolveAnimation();
-  }
-}
-
-// ── Dissolve Animation ────────────────────────────────────────────
-
-let animationContainer = null;
-let animationFrame = null;
-
-function startDissolveAnimation() {
-  if (animationContainer) stopDissolveAnimation();
-
-  animationContainer = document.createElement('div');
-  animationContainer.className = 'dissolve-particles';
-  document.getElementById('view-dissolve').appendChild(animationContainer);
-
-  const particles = 24;
-  for (let i = 0; i < particles; i++) {
-    const p = document.createElement('div');
-    p.className = 'particle';
-    const angle = (i / particles) * Math.PI * 2;
-    const delay = (i / particles) * 1.5;
-    const distance = 40 + Math.random() * 80;
-    p.style.setProperty('--angle', angle + 'rad');
-    p.style.setProperty('--distance', distance + 'px');
-    p.style.setProperty('--delay', delay + 's');
-    p.style.setProperty('--size', (2 + Math.random() * 4) + 'px');
-    animationContainer.appendChild(p);
-  }
-}
-
-function stopDissolveAnimation() {
-  if (animationContainer) {
-    animationContainer.remove();
-    animationContainer = null;
-  }
-  if (animationFrame) {
-    cancelAnimationFrame(animationFrame);
-    animationFrame = null;
   }
 }
 
@@ -726,17 +691,17 @@ async function handleDirectedSend() {
 
 function inboxStateBadge(state) {
   const map = {
-    'Pending': { label: t('inbox_pending'), color: 'var(--warning, #f0b432)' },
-    'ChallengeIssued': { label: t('inbox_challenge_issued'), color: 'var(--warning, #f0b432)' },
-    'Confirmed': { label: t('inbox_confirmed'), color: 'var(--success)' },
-    'Retrieved': { label: t('inbox_retrieved'), color: 'var(--success)' },
-    'Expired': { label: t('inbox_expired'), color: 'var(--text-dim)' },
-    'SenderRevoked': { label: t('inbox_sender_revoked'), color: 'var(--danger)' },
-    'RecipientDeleted': { label: t('inbox_revoked'), color: 'var(--text-dim)' },
-    'ChallengeFailed': { label: t('inbox_challenge_failed'), color: 'var(--danger)' },
-    'PasswordFailed': { label: t('inbox_password_failed'), color: 'var(--danger)' },
+    'Pending': { label: t('inbox_pending'), tone: 'warning' },
+    'ChallengeIssued': { label: t('inbox_challenge_issued'), tone: 'warning' },
+    'Confirmed': { label: t('inbox_confirmed'), tone: 'success' },
+    'Retrieved': { label: t('inbox_retrieved'), tone: 'success' },
+    'Expired': { label: t('inbox_expired'), tone: 'faint' },
+    'SenderRevoked': { label: t('inbox_sender_revoked'), tone: 'danger' },
+    'RecipientDeleted': { label: t('inbox_revoked'), tone: 'faint' },
+    'ChallengeFailed': { label: t('inbox_challenge_failed'), tone: 'danger' },
+    'PasswordFailed': { label: t('inbox_password_failed'), tone: 'danger' },
   };
-  return map[state] || { label: state, color: 'var(--text-dim)' };
+  return map[state] || { label: state, tone: 'faint' };
 }
 
 async function refreshInbox() {
@@ -768,25 +733,22 @@ async function refreshInbox() {
 
       const idSpan = document.createElement('code');
       idSpan.textContent = (item.envelope_id || '').substring(0, 16) + '...';
-      idSpan.style.fontSize = '0.75rem';
+      idSpan.className = 'text-muted';
       header.appendChild(idSpan);
 
       // State badge
       const state = item.state || 'Pending';
       const badgeInfo = inboxStateBadge(state);
       const badge = document.createElement('span');
-      badge.className = 'share-badge';
+      badge.className = 'chip chip-' + badgeInfo.tone;
       badge.textContent = badgeInfo.label;
-      badge.style.background = badgeInfo.color;
       header.appendChild(badge);
       card.appendChild(header);
 
       // Sender
       if (item.sender_pubkey) {
         const senderRow = document.createElement('div');
-        senderRow.className = 'source-desc';
-        senderRow.style.fontSize = '0.75rem';
-        senderRow.style.color = 'var(--text-dim)';
+        senderRow.className = 'source-desc small';
         senderRow.textContent = 'From: ' + (item.sender_pubkey || '').substring(0, 20) + '...';
         card.appendChild(senderRow);
       }
@@ -806,15 +768,11 @@ async function refreshInbox() {
       if (item.challenge_code) {
         const challengeRow = document.createElement('div');
         challengeRow.className = 'setting-row';
-        challengeRow.style.marginTop = '0.5rem';
         const label = document.createElement('span');
         label.textContent = t('inbox_challenge') + ': ';
-        label.style.color = 'var(--success)';
-        label.style.fontWeight = 'bold';
         const code = document.createElement('code');
+        code.className = 'challenge-code';
         code.textContent = item.challenge_code;
-        code.style.fontSize = '1.1rem';
-        code.style.letterSpacing = '0.1rem';
         challengeRow.appendChild(label);
         challengeRow.appendChild(code);
         card.appendChild(challengeRow);
@@ -823,20 +781,17 @@ async function refreshInbox() {
       // Terminal state messages
       if (state === 'Expired') {
         const msg = document.createElement('div');
-        msg.style.color = 'var(--danger)';
-        msg.style.marginTop = '0.5rem';
+        msg.className = 'source-row text-danger';
         msg.textContent = t('inbox_expired');
         card.appendChild(msg);
       } else if (state === 'SenderRevoked') {
         const msg = document.createElement('div');
-        msg.style.color = 'var(--danger)';
-        msg.style.marginTop = '0.5rem';
+        msg.className = 'source-row text-danger';
         msg.textContent = t('inbox_sender_revoked');
         card.appendChild(msg);
       } else if (state === 'PasswordFailed') {
         const msg = document.createElement('div');
-        msg.style.color = 'var(--danger)';
-        msg.style.marginTop = '0.5rem';
+        msg.className = 'source-row text-danger';
         msg.textContent = t('inbox_attempts_exhausted');
         card.appendChild(msg);
       }
@@ -846,25 +801,15 @@ async function refreshInbox() {
                           'Expired', 'ChallengeFailed', 'PasswordFailed'].includes(state);
       if (state === 'Confirmed') {
         const retrieveForm = document.createElement('div');
-        retrieveForm.style.marginTop = '0.5rem';
-        retrieveForm.style.display = 'flex';
-        retrieveForm.style.gap = '0.5rem';
-        retrieveForm.style.alignItems = 'center';
+        retrieveForm.className = 'source-row';
 
         const pwLabel = document.createElement('label');
         pwLabel.textContent = t('inbox_password_label') + ':';
-        pwLabel.style.fontSize = '0.85rem';
         retrieveForm.appendChild(pwLabel);
 
         const pwInput = document.createElement('input');
         pwInput.type = 'password';
         pwInput.placeholder = t('inbox_password_label');
-        pwInput.style.flex = '1';
-        pwInput.style.padding = '0.3rem 0.5rem';
-        pwInput.style.borderRadius = '4px';
-        pwInput.style.border = '1px solid var(--border)';
-        pwInput.style.background = 'var(--bg)';
-        pwInput.style.color = 'var(--text)';
         retrieveForm.appendChild(pwInput);
 
         const retrieveBtn = document.createElement('button');
@@ -901,7 +846,6 @@ async function refreshInbox() {
       if (!isTerminal) {
         const actions = document.createElement('div');
         actions.className = 'import-actions';
-        actions.style.marginTop = '0.5rem';
         const revokeBtn = document.createElement('button');
         revokeBtn.className = 'btn-small';
         revokeBtn.textContent = t('inbox_revoke');
@@ -939,17 +883,17 @@ async function handleDirectedRevoke(envelopeId) {
 
 function outboxStateBadge(state) {
   const map = {
-    'Pending': { label: t('outbox_waiting'), color: 'var(--warning, #f0b432)' },
-    'ChallengeIssued': { label: t('outbox_confirm_label'), color: 'var(--warning, #f0b432)' },
-    'Confirmed': { label: t('outbox_confirmed'), color: 'var(--success)' },
-    'Retrieved': { label: t('outbox_retrieved'), color: 'var(--success)' },
-    'Expired': { label: t('outbox_expired'), color: 'var(--text-dim)' },
-    'SenderRevoked': { label: t('outbox_revoked'), color: 'var(--danger)' },
-    'RecipientDeleted': { label: t('outbox_revoked'), color: 'var(--text-dim)' },
-    'ChallengeFailed': { label: t('outbox_challenge_failed'), color: 'var(--danger)' },
-    'PasswordFailed': { label: t('outbox_password_failed'), color: 'var(--danger)' },
+    'Pending': { label: t('outbox_waiting'), tone: 'warning' },
+    'ChallengeIssued': { label: t('outbox_confirm_label'), tone: 'warning' },
+    'Confirmed': { label: t('outbox_confirmed'), tone: 'success' },
+    'Retrieved': { label: t('outbox_retrieved'), tone: 'success' },
+    'Expired': { label: t('outbox_expired'), tone: 'faint' },
+    'SenderRevoked': { label: t('outbox_revoked'), tone: 'danger' },
+    'RecipientDeleted': { label: t('outbox_revoked'), tone: 'faint' },
+    'ChallengeFailed': { label: t('outbox_challenge_failed'), tone: 'danger' },
+    'PasswordFailed': { label: t('outbox_password_failed'), tone: 'danger' },
   };
-  return map[state] || { label: state, color: 'var(--text-dim)' };
+  return map[state] || { label: state, tone: 'faint' };
 }
 
 async function refreshOutbox() {
@@ -981,25 +925,22 @@ async function refreshOutbox() {
 
       const idSpan = document.createElement('code');
       idSpan.textContent = (item.envelope_id || '').substring(0, 16) + '...';
-      idSpan.style.fontSize = '0.75rem';
+      idSpan.className = 'text-muted';
       header.appendChild(idSpan);
 
       // State badge
       const state = item.state || 'Pending';
       const badgeInfo = outboxStateBadge(state);
       const badge = document.createElement('span');
-      badge.className = 'share-badge';
+      badge.className = 'chip chip-' + badgeInfo.tone;
       badge.textContent = badgeInfo.label;
-      badge.style.background = badgeInfo.color;
       header.appendChild(badge);
       card.appendChild(header);
 
       // Recipient
       if (item.recipient_pubkey) {
         const recipRow = document.createElement('div');
-        recipRow.className = 'source-desc';
-        recipRow.style.fontSize = '0.75rem';
-        recipRow.style.color = 'var(--text-dim)';
+        recipRow.className = 'source-desc small';
         recipRow.textContent = t('outbox_to') + ': ' + (item.recipient_pubkey || '').substring(0, 20) + '...';
         card.appendChild(recipRow);
       }
@@ -1018,27 +959,16 @@ async function refreshOutbox() {
       // Sender confirmation: challenge code entry for ChallengeIssued state
       if (state === 'ChallengeIssued') {
         const confirmForm = document.createElement('div');
-        confirmForm.style.marginTop = '0.5rem';
-        confirmForm.style.display = 'flex';
-        confirmForm.style.gap = '0.5rem';
-        confirmForm.style.alignItems = 'center';
+        confirmForm.className = 'source-row';
 
         const codeLabel = document.createElement('label');
         codeLabel.textContent = t('outbox_confirm_label') + ':';
-        codeLabel.style.fontSize = '0.85rem';
         confirmForm.appendChild(codeLabel);
 
         const codeInput = document.createElement('input');
         codeInput.type = 'text';
         codeInput.placeholder = t('outbox_confirm_hint');
-        codeInput.style.flex = '1';
-        codeInput.style.padding = '0.3rem 0.5rem';
-        codeInput.style.borderRadius = '4px';
-        codeInput.style.border = '1px solid var(--border)';
-        codeInput.style.background = 'var(--bg)';
-        codeInput.style.color = 'var(--text)';
-        codeInput.style.fontFamily = 'monospace';
-        codeInput.style.letterSpacing = '0.1rem';
+        codeInput.className = 'challenge-code';
         confirmForm.appendChild(codeInput);
 
         const confirmBtn = document.createElement('button');
@@ -1071,9 +1001,7 @@ async function refreshOutbox() {
       // Pending state hint
       if (state === 'Pending') {
         const hint = document.createElement('div');
-        hint.style.color = 'var(--warning, #f0b432)';
-        hint.style.marginTop = '0.5rem';
-        hint.style.fontSize = '0.85rem';
+        hint.className = 'source-row text-warning';
         hint.textContent = t('outbox_waiting');
         card.appendChild(hint);
       }
@@ -1084,7 +1012,6 @@ async function refreshOutbox() {
       if (!isTerminal) {
         const actions = document.createElement('div');
         actions.className = 'import-actions';
-        actions.style.marginTop = '0.5rem';
         const revokeBtn = document.createElement('button');
         revokeBtn.className = 'btn-small';
         revokeBtn.textContent = t('outbox_revoke');
@@ -1225,6 +1152,12 @@ function decodeBase58(str) {
 
 // ── Token / connection banner ─────────────────────────────────────
 
+/** Text that is set from code, not by data-i18n, has to be redrawn in the new language. */
+function onLanguageChanged() {
+  updateConnectionUI();
+  updateAuthBanner();
+}
+
 /** Why the daemon refuses this page, and what to do about it. */
 function authMessage() {
   return t(getAuthState() === 'rejected' ? 'auth_rejected' : 'auth_missing');
@@ -1260,9 +1193,11 @@ function updateConnectionUI() {
   if (isConnected) {
     dot.classList.add('connected');
     dot.title = t('connection_connected');
+    dot.textContent = t('conn_chip_connected');
   } else {
     dot.classList.add('local');
     dot.title = t('connection_local');
+    dot.textContent = t('conn_chip_local');
   }
 
   // Scope notice: update text based on connection state
