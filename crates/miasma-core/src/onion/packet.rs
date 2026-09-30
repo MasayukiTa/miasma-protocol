@@ -310,7 +310,7 @@ impl OnionPacketBuilder {
     /// The `data` field within the payload is padded to `ONION_PAD_TARGET`
     /// bytes before encryption so that all onion packets have a uniform
     /// ciphertext size, preventing packet-size correlation across hops.
-    fn encrypt_layer(
+    pub(crate) fn encrypt_layer(
         recipient_static_pubkey: &[u8; X25519_KEY_LEN],
         mut payload: LayerPayload,
     ) -> Result<OnionLayer, MiasmaError> {

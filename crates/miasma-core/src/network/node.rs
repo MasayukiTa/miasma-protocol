@@ -111,6 +111,13 @@ pub enum StoreRejectReason {
     /// This node's hosted-share budget (separate from its own-content quota)
     /// is full; see `LocalShareStore::put_hosted`.
     QuotaExceeded,
+    /// The sender already holds its per-principal share of this node's hosted
+    /// budget (`LocalShareStore::hosted_principal_budget_bytes`). Standing, like
+    /// `QuotaExceeded`, but only for this sender.
+    PrincipalBudgetExceeded,
+    /// A different principal already hosts this `(mid_prefix, segment, slot)`;
+    /// the sender may not replace it. Specific to one piece, not to the peer.
+    NotOwner,
     /// Failed `ShareVerification::self_consistent` or other structural check.
     Invalid,
 }
@@ -120,6 +127,12 @@ impl std::fmt::Display for StoreRejectReason {
         match self {
             StoreRejectReason::NotVerified => write!(f, "peer not admission-verified"),
             StoreRejectReason::QuotaExceeded => write!(f, "hosted-share quota exceeded"),
+            StoreRejectReason::PrincipalBudgetExceeded => {
+                write!(f, "per-peer hosted-share budget exceeded")
+            }
+            StoreRejectReason::NotOwner => {
+                write!(f, "piece is hosted for a different publisher")
+            }
             StoreRejectReason::Invalid => {
                 write!(f, "share failed structural/self-consistency check")
             }
@@ -1926,7 +1939,14 @@ pub struct MiasmaNode {
     /// Stores domain-separated BLAKE3 fingerprints of the encrypted `OnionLayer`
     /// (ephemeral pubkey + nonce + ciphertext). The outer CircuitId is deliberately
     /// excluded because it is routing metadata, not authenticated layer content.
+    ///
+    /// Only layers that *authenticated* (their AEAD peel succeeded) are ever
+    /// recorded here, so unauthenticated input cannot evict a genuine entry.
     onion_replay_cache: std::collections::VecDeque<[u8; 32]>,
+    /// Per-sender count of onion layers that failed authentication in the
+    /// current window: bounds the AEAD work an unauthenticated flood can cause,
+    /// separately from (and without touching) the replay cache.
+    onion_auth_failures: HashMap<PeerId, (std::time::Instant, u32)>,
     /// Pending directed sharing reply channels.
     pending_directed_replies: HashMap<
         request_response::OutboundRequestId,
@@ -2083,6 +2103,7 @@ impl MiasmaNode {
             pending_onion_replies: HashMap::new(),
             pending_onion_inbound_channels: HashMap::new(),
             pending_probe_replies: HashMap::new(),
+            onion_auth_failures: HashMap::new(),
             onion_replay_cache: std::collections::VecDeque::with_capacity(
                 Self::ONION_REPLAY_CACHE_SIZE,
             ),
@@ -2107,19 +2128,74 @@ impl MiasmaNode {
     /// At ~32 bytes each, 4096 entries = ~128 KiB.
     const ONION_REPLAY_CACHE_SIZE: usize = 4096;
 
-    /// Check if an encrypted onion layer is a replay. Returns `true` if the
-    /// exact authenticated layer bytes were seen before; otherwise records the
-    /// fingerprint and returns `false`.
-    fn onion_is_replay(&mut self, layer: &crate::onion::packet::OnionLayer) -> bool {
+    /// Failed onion authentications one sender may cause per window before its
+    /// further layers are dropped without attempting decryption.
+    const ONION_AUTH_FAILURE_LIMIT: u32 = 64;
+    /// Length of the failure-counting window.
+    const ONION_AUTH_FAILURE_WINDOW: Duration = Duration::from_secs(10);
+    /// Upper bound on tracked senders (expired entries are dropped, then the
+    /// map is reset, when it would grow past this).
+    const ONION_AUTH_FAILURE_MAX_SENDERS: usize = 1024;
+
+    /// Whether this exact encrypted layer was already accepted (authenticated
+    /// and peeled). Read-only: the caller must not treat "not seen" as
+    /// "authentic". Call [`onion_record_authenticated`](Self::onion_record_authenticated)
+    /// only after the layer decrypted successfully.
+    fn onion_is_replay(&self, layer: &crate::onion::packet::OnionLayer) -> bool {
+        self.onion_replay_cache
+            .contains(&onion_layer_fingerprint(layer))
+    }
+
+    /// Remember an onion layer that has just authenticated, FIFO-evicting the
+    /// oldest entry when full. Never call this before the AEAD peel succeeded:
+    /// inserting unauthenticated fingerprints lets an attacker flush genuine
+    /// ones out of the bounded cache and replay a captured layer.
+    fn onion_record_authenticated(&mut self, layer: &crate::onion::packet::OnionLayer) {
         let fp = onion_layer_fingerprint(layer);
         if self.onion_replay_cache.contains(&fp) {
-            return true;
+            return;
         }
         if self.onion_replay_cache.len() >= Self::ONION_REPLAY_CACHE_SIZE {
             self.onion_replay_cache.pop_front();
         }
         self.onion_replay_cache.push_back(fp);
-        false
+    }
+
+    /// True when `peer` has already caused its allowance of failed onion
+    /// authentications in the current window; its layers are then dropped
+    /// before any decryption is attempted.
+    fn onion_sender_throttled(&mut self, peer: &PeerId) -> bool {
+        match self.onion_auth_failures.get(peer) {
+            Some((start, n)) if start.elapsed() < Self::ONION_AUTH_FAILURE_WINDOW => {
+                *n >= Self::ONION_AUTH_FAILURE_LIMIT
+            }
+            Some(_) => {
+                self.onion_auth_failures.remove(peer);
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// Count one failed onion authentication against `peer`.
+    fn onion_note_auth_failure(&mut self, peer: &PeerId) {
+        if !self.onion_auth_failures.contains_key(peer)
+            && self.onion_auth_failures.len() >= Self::ONION_AUTH_FAILURE_MAX_SENDERS
+        {
+            self.onion_auth_failures
+                .retain(|_, (start, _)| start.elapsed() < Self::ONION_AUTH_FAILURE_WINDOW);
+            if self.onion_auth_failures.len() >= Self::ONION_AUTH_FAILURE_MAX_SENDERS {
+                self.onion_auth_failures.clear();
+            }
+        }
+        let entry = self
+            .onion_auth_failures
+            .entry(*peer)
+            .or_insert_with(|| (std::time::Instant::now(), 0));
+        if entry.0.elapsed() >= Self::ONION_AUTH_FAILURE_WINDOW {
+            *entry = (std::time::Instant::now(), 0);
+        }
+        entry.1 = entry.1.saturating_add(1);
     }
 
     /// Attach a local share store so this node can serve inbound shard requests.
@@ -4027,7 +4103,18 @@ impl MiasmaNode {
                 match request {
                     OnionRelayRequest::Packet { circuit_id, layer }
                     | OnionRelayRequest::Forward { circuit_id, layer } => {
-                        // Replay protection: reject packets we've already processed.
+                        // Cheap checks before any decryption. Replay state is
+                        // read-only here: a layer is recorded only after it
+                        // authenticates (below), so unauthenticated input can
+                        // never evict a genuine fingerprint.
+                        if self.onion_sender_throttled(&peer) {
+                            warn!("onion_relay: sender exceeded failed-layer allowance, dropping");
+                            let _ = self.swarm.behaviour_mut().onion_relay.send_response(
+                                channel,
+                                OnionRelayResponse::Error("onion layer rate limited".into()),
+                            );
+                            return;
+                        }
                         if self.onion_is_replay(&layer) {
                             warn!("onion_relay: replayed packet detected, rejecting");
                             let _ = self.swarm.behaviour_mut().onion_relay.send_response(
@@ -4038,11 +4125,16 @@ impl MiasmaNode {
                         }
 
                         // Peel one onion layer using our static key.
-                        match super::onion_relay::process_onion_layer(
+                        let peeled = super::onion_relay::process_onion_layer(
                             &self.onion_static_secret,
                             circuit_id,
                             &layer,
-                        ) {
+                        );
+                        match &peeled {
+                            Ok(_) => self.onion_record_authenticated(&layer),
+                            Err(_) => self.onion_note_auth_failure(&peer),
+                        }
+                        match peeled {
                             Ok(super::onion_relay::OnionRelayAction::ForwardToNext {
                                 next_hop_peer_id,
                                 circuit_id,
@@ -4126,7 +4218,7 @@ impl MiasmaNode {
                     OnionRelayRequest::Deliver { body, .. } => {
                         // Target role: decrypt the target-addressed e2e layer. The
                         // target enforces replay protection independently of R2.
-                        let response = self.handle_onion_delivery(&body);
+                        let response = self.handle_onion_delivery(&peer, &body);
                         let _ = self
                             .swarm
                             .behaviour_mut()
@@ -4628,7 +4720,7 @@ impl MiasmaNode {
     /// it with the target's onion static key, `LayerPayload.data` contains the
     /// share request and `LayerPayload.return_key` contains the target-only
     /// response session key.
-    fn handle_onion_delivery(&mut self, body: &[u8]) -> OnionRelayResponse {
+    fn handle_onion_delivery(&mut self, peer: &PeerId, body: &[u8]) -> OnionRelayResponse {
         // R2 may see and forward these bytes, but they are only the serialized
         // target-encrypted OnionLayer. The response session key lives inside its
         // encrypted LayerPayload.return_key.
@@ -4639,6 +4731,11 @@ impl MiasmaNode {
 
         // R2 is not trusted to suppress duplicates. A replayed Deliver request is
         // rejected at the target even if it arrives under a different CircuitId.
+        // The check is read-only; the layer is recorded only once it has
+        // authenticated, and unauthenticated failures are rate-limited per sender.
+        if self.onion_sender_throttled(peer) {
+            return OnionRelayResponse::Error("onion layer rate limited".into());
+        }
         if self.onion_is_replay(&e2e_layer) {
             return OnionRelayResponse::Error("replayed e2e onion delivery".into());
         }
@@ -4647,8 +4744,14 @@ impl MiasmaNode {
             &self.onion_static_secret,
             &e2e_layer,
         ) {
-            Ok(payload) => payload,
-            Err(e) => return OnionRelayResponse::Error(format!("e2e decrypt failed: {e}")),
+            Ok(payload) => {
+                self.onion_record_authenticated(&e2e_layer);
+                payload
+            }
+            Err(e) => {
+                self.onion_note_auth_failure(peer);
+                return OnionRelayResponse::Error(format!("e2e decrypt failed: {e}"));
+            }
         };
         let session_key = match payload.return_key {
             Some(key) => key,
@@ -4954,13 +5057,16 @@ impl MiasmaNode {
             return StoreResponse::Rejected(StoreRejectReason::Invalid);
         }
 
-        // 3. Persist to the hosted-quota pool (never evicts owned shares or
-        // other publishers' already-hosted shares -- see
-        // `LocalShareStore::put_hosted`'s doc comment).
+        // 3. Persist to the hosted-quota pool. The sender's `PeerId` is
+        // authenticated by the transport and is the principal the entry is
+        // recorded under: only that principal may later replace it, and it is
+        // charged against its own per-principal budget. A different peer
+        // pushing the same `(mid_prefix, segment, slot)` is refused, never
+        // stored and never evicting -- see `LocalShareStore::put_hosted_by`.
         let Some(store) = self.local_store.as_ref() else {
             return StoreResponse::Rejected(StoreRejectReason::Invalid);
         };
-        match store.put_hosted(&share) {
+        match store.put_hosted_by(&share, &peer.to_string()) {
             Ok(address) => {
                 self.routing_table.record_success(&peer);
                 StoreResponse::Accepted {
@@ -4968,8 +5074,18 @@ impl MiasmaNode {
                     advertised_addrs: self.own_listen_addrs.clone(),
                 }
             }
+            Err(crate::store::HostedPutError::Refused(reason)) => {
+                debug!("inbound Store from {peer} refused: {reason}");
+                StoreResponse::Rejected(match reason {
+                    crate::store::HostedRefusal::QuotaExceeded => StoreRejectReason::QuotaExceeded,
+                    crate::store::HostedRefusal::PrincipalBudgetExceeded => {
+                        StoreRejectReason::PrincipalBudgetExceeded
+                    }
+                    crate::store::HostedRefusal::NotOwner => StoreRejectReason::NotOwner,
+                })
+            }
             Err(e) => {
-                debug!("inbound Store rejected (quota): {e}");
+                debug!("inbound Store failed: {e}");
                 StoreResponse::Rejected(StoreRejectReason::QuotaExceeded)
             }
         }
@@ -5456,7 +5572,113 @@ mod admission_pow_tests {
         // encrypted layer stays the same replay even if an attacker rewrites the
         // unauthenticated outer routing ID.
         assert!(!node.onion_is_replay(&layer));
+        node.onion_record_authenticated(&layer);
         assert!(node.onion_is_replay(&layer));
+    }
+
+    /// C-10: the replay cache used to be filled before authentication, so 4096+
+    /// unique invalid layers evicted a captured valid layer's fingerprint and
+    /// it could be replayed. Now only authenticated layers are recorded.
+    #[tokio::test]
+    async fn invalid_onion_layers_cannot_flush_a_valid_layers_replay_entry() {
+        use rand::RngCore as _;
+        let mut node = make_node();
+        let mut rng = rand::thread_rng();
+
+        let mut return_key = [0u8; 32];
+        rng.fill_bytes(&mut return_key);
+        let mut request = vec![0x10u8];
+        request.extend_from_slice(b"not a real share request");
+        let valid = crate::onion::packet::OnionPacketBuilder::encrypt_layer(
+            &node.onion_static_pubkey,
+            crate::onion::packet::LayerPayload {
+                next_hop: None,
+                data: request,
+                return_key: Some(return_key),
+            },
+        )
+        .unwrap();
+        let body = bincode::serialize(&valid).unwrap();
+
+        // The genuine layer authenticates (it then fails later as a malformed
+        // share request, which is irrelevant here) and is recorded.
+        let sender = PeerId::random();
+        match node.handle_onion_delivery(&sender, &body) {
+            OnionRelayResponse::Error(m) => {
+                assert!(!m.contains("decrypt") && !m.contains("replayed"), "{m}")
+            }
+            OnionRelayResponse::Data(_) => {}
+        }
+        assert!(node.onion_is_replay(&valid));
+        assert_eq!(node.onion_replay_cache.len(), 1);
+
+        // 5000 unique invalid layers, spread over senders so that none of them
+        // hits its own failure allowance.
+        let mut invalid_sender = PeerId::random();
+        for i in 0..5000u32 {
+            if i % 32 == 0 {
+                invalid_sender = PeerId::random();
+            }
+            let mut pk = [0u8; 32];
+            let mut nonce = [0u8; 24];
+            let mut ct = vec![0u8; 64];
+            rng.fill_bytes(&mut pk);
+            rng.fill_bytes(&mut nonce);
+            rng.fill_bytes(&mut ct);
+            let junk = crate::onion::packet::OnionLayer {
+                ephemeral_pubkey: pk,
+                nonce,
+                ciphertext: ct,
+            };
+            match node.handle_onion_delivery(&invalid_sender, &bincode::serialize(&junk).unwrap()) {
+                OnionRelayResponse::Error(m) => assert!(m.contains("decrypt"), "{m}"),
+                OnionRelayResponse::Data(_) => panic!("junk layer produced data"),
+            }
+        }
+        assert_eq!(
+            node.onion_replay_cache.len(),
+            1,
+            "unauthenticated layers must not enter the replay cache"
+        );
+
+        // The captured valid layer is still recognised as a replay.
+        match node.handle_onion_delivery(&sender, &body) {
+            OnionRelayResponse::Error(m) => assert!(m.contains("replayed"), "{m}"),
+            OnionRelayResponse::Data(_) => panic!("replayed layer was processed again"),
+        }
+    }
+
+    #[tokio::test]
+    async fn one_sender_cannot_force_unbounded_failed_onion_decryptions() {
+        use rand::RngCore as _;
+        let mut node = make_node();
+        let attacker = PeerId::random();
+        let mut rng = rand::thread_rng();
+        let mut saw_throttle = false;
+        for i in 0..(MiasmaNode::ONION_AUTH_FAILURE_LIMIT + 10) {
+            let mut junk = crate::onion::packet::OnionLayer {
+                ephemeral_pubkey: [0u8; 32],
+                nonce: [0u8; 24],
+                ciphertext: vec![0u8; 64],
+            };
+            rng.fill_bytes(&mut junk.ephemeral_pubkey);
+            rng.fill_bytes(&mut junk.nonce);
+            rng.fill_bytes(&mut junk.ciphertext);
+            let r = node.handle_onion_delivery(&attacker, &bincode::serialize(&junk).unwrap());
+            let OnionRelayResponse::Error(m) = r else {
+                panic!("junk layer produced data");
+            };
+            if i < MiasmaNode::ONION_AUTH_FAILURE_LIMIT {
+                assert!(m.contains("decrypt"), "{m}");
+            } else {
+                assert!(m.contains("rate limited"), "{m}");
+                saw_throttle = true;
+            }
+        }
+        assert!(saw_throttle);
+        // Another sender is unaffected, and nothing entered the replay cache.
+        assert!(!node.onion_sender_throttled(&PeerId::random()));
+        assert!(node.onion_replay_cache.is_empty());
     }
 
     #[test]
