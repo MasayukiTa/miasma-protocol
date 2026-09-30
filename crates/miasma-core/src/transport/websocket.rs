@@ -529,9 +529,24 @@ where
 /// Answer one request. Never fails and never says why it has nothing: an unknown
 /// MID, a missing share and a record over the size cap all look the same.
 async fn answer_request(request: WsRequest, ctx: &ServeCtx) -> WsResponse {
+    handle_direct_request(&ctx.store, ctx.records.as_ref(), request).await
+}
+
+/// The transport-independent half of every direct endpoint: what a share or
+/// record request is answered with, given the local store and record provider.
+/// The WebSocket server and the iroh server both call exactly this, so the size
+/// caps and the answers (and what they do not reveal) are identical on both.
+///
+/// Never fails and never says why it has nothing: an unknown MID, a missing
+/// share and a record over [`WS_RECORD_MAX_BYTES`] all look the same.
+pub async fn handle_direct_request(
+    store: &Arc<LocalShareStore>,
+    records: Option<&Arc<dyn RecordProvider>>,
+    request: WsRequest,
+) -> WsResponse {
     match request {
         WsRequest::Share(request) => {
-            let store = ctx.store.clone();
+            let store = store.clone();
             // Found through the store's index (no decryption), then exactly one
             // decryption: the cost of a request must not grow with the number of
             // shares stored. Store reads decrypt, so they stay off the async threads.
@@ -550,7 +565,7 @@ async fn answer_request(request: WsRequest, ctx: &ServeCtx) -> WsResponse {
             WsResponse::Share(ShareFetchResponse { share })
         }
         WsRequest::Record { mid_digest } => {
-            let value = match &ctx.records {
+            let value = match records {
                 Some(records) => records
                     .record_value(mid_digest)
                     .await
