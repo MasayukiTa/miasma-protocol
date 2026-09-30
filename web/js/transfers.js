@@ -16,6 +16,7 @@
 import {
   formatBytes, formatRate, formatEta, permille, formatPermille, timeSplit, fill, plainPath,
   titleOf, transferId, chipTone, sortJobs, canResume, buildStrip, errorKey,
+  canRemove, removeNeedsDiscard, clearable,
 } from './format.js';
 
 const POLL_VISIBLE_MS = 1000;   // screen open, tab visible
@@ -74,6 +75,7 @@ export function createTransfers({ bridge, t, showToast, copyToClipboard, authMes
   let authFailed = false;
   let everLoaded = false;
   let restartArmed = false;
+  let discardArmed = false;   // asking whether to discard a stopped transfer's partial data
   const rows = new Map();    // id -> row element
   let stripSignature = '';
 
@@ -213,6 +215,7 @@ export function createTransfers({ bridge, t, showToast, copyToClipboard, authMes
         rows.delete(id);
       }
     }
+    el('tf-toolbar').classList.toggle('hidden', !jobs.some(clearable));
     el('tf-empty').classList.toggle('hidden', order.length > 0 || (!everLoaded && offline));
     el('tf-headings').classList.toggle('hidden', order.length === 0);
     el('tf-list').classList.toggle('hidden', order.length === 0);
@@ -228,6 +231,7 @@ export function createTransfers({ bridge, t, showToast, copyToClipboard, authMes
     if (selectedId !== id) {
       selectedId = id;
       restartArmed = false;
+      discardArmed = false;
       el('tf-d-password').value = '';
       stripSignature = '';
     }
@@ -329,6 +333,19 @@ export function createTransfers({ bridge, t, showToast, copyToClipboard, authMes
     el('tf-d-nopath').classList.toggle('hidden', send || !canResume(job.state) || !!job.name);
     el('tf-d-restart-confirm').classList.toggle('hidden', !restartArmed);
     el('tf-d-restart-btn').classList.toggle('hidden', restartArmed);
+
+    // Removing a finished transfer: neutral buttons, and a line saying what is not deleted.
+    const removable = canRemove(job);
+    el('tf-d-remove').classList.toggle('hidden', !removable);
+    if (removable) {
+      const needsDiscard = removeNeedsDiscard(job);
+      let note = 'tf_remove_note_plain';
+      if (needsDiscard) note = 'tf_remove_note_partial';
+      else if (job.state === 'Complete') note = send ? 'tf_remove_note_send' : 'tf_remove_note_recv';
+      detailText('tf-d-remove-note', t(note));
+      el('tf-d-discard-confirm').classList.toggle('hidden', !discardArmed);
+      el('tf-d-remove-btn').classList.toggle('hidden', discardArmed);
+    }
   }
 
   // ── Rendering: the whole screen ─────────────────────────────────
@@ -345,6 +362,9 @@ export function createTransfers({ bridge, t, showToast, copyToClipboard, authMes
 
     el('tf-forms-offline').classList.toggle('hidden', connected && !offline);
     for (const id of ['tf-mid', 'tf-path', 'tf-pw', 'tf-via', 'tf-start']) el(id).disabled = !connected;
+    el('tf-clear').disabled = !connected;
+    el('tf-clear').title = t('tf_clear_finished_hint');
+    el('tf-d-remove-btn').disabled = !connected;
 
     renderList();
     renderDetail();
@@ -367,6 +387,42 @@ export function createTransfers({ bridge, t, showToast, copyToClipboard, authMes
     } catch (e) {
       showToast(explain(e), 'error');
     }
+    poll();
+  }
+
+  /** Take the selected finished transfer off the list (and its partial data, if asked). */
+  async function removeSelected(discardPartial) {
+    const job = selectedJob();
+    if (!job || !canRemove(job)) return;
+    const id = transferId(job);
+    try {
+      await bridge.transferRemove(id, discardPartial);
+      showToast(t('tf_removed'), 'success');
+      // Gone from this page at once; the daemon's next list is what stays.
+      jobs = jobs.filter((j) => transferId(j) !== id);
+      selectedId = null;
+      discardArmed = false;
+    } catch (e) {
+      // It holds partial data the list did not know about: ask before discarding.
+      if (e && e.code === 'http' && /discard_partial/.test(e.message || '')) {
+        discardArmed = true;
+      } else {
+        showToast(explain(e), 'error');
+      }
+    }
+    render();
+    poll();
+  }
+
+  async function clearFinished() {
+    try {
+      await bridge.transferClearFinished();
+      showToast(t('tf_cleared'), 'success');
+      jobs = jobs.filter((j) => !clearable(j));
+    } catch (e) {
+      showToast(explain(e), 'error');
+    }
+    render();
     poll();
   }
 
@@ -438,6 +494,13 @@ export function createTransfers({ bridge, t, showToast, copyToClipboard, authMes
   el('tf-d-restart-no').addEventListener('click', () => { restartArmed = false; renderDetail(); });
   el('tf-d-restart-yes').addEventListener('click', () => resume(true));
   el('tf-d-password').addEventListener('keydown', (e) => { if (e.key === 'Enter') resume(false); });
+  el('tf-d-remove-btn').addEventListener('click', () => {
+    const job = selectedJob();
+    if (job && removeNeedsDiscard(job)) { discardArmed = true; renderDetail(); } else removeSelected(false);
+  });
+  el('tf-d-discard-yes').addEventListener('click', () => removeSelected(true));
+  el('tf-d-discard-no').addEventListener('click', () => { discardArmed = false; renderDetail(); });
+  el('tf-clear').addEventListener('click', clearFinished);
   el('tf-start').addEventListener('click', submitForm);
   for (const id of ['tf-mid', 'tf-path', 'tf-pw', 'tf-via']) {
     el(id).addEventListener('keydown', (e) => { if (e.key === 'Enter') submitForm(); });
