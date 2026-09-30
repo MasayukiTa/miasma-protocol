@@ -35,6 +35,10 @@ use crate::{
 
 const SEG: usize = 1024;
 
+/// The publisher the fixtures' manifests name. No signature is involved at the
+/// engine level: the caller hands the engine the key that verifiably signed.
+const TEST_PUBLISHER: [u8; 32] = [0x77; 32];
+
 fn content(len: usize) -> Vec<u8> {
     let mut x: u32 = 0x1234_5678;
     (0..len)
@@ -97,7 +101,14 @@ fn world_with(
         }
     };
 
-    let mut manifest = TransferManifest::new(&mid, params, SEG as u32, len as u64, protection);
+    let mut manifest = TransferManifest::new(
+        &mid,
+        TEST_PUBLISHER,
+        params,
+        SEG as u32,
+        len as u64,
+        protection,
+    );
     let mut shares = HashMap::new();
     let mut locations = Vec::new();
 
@@ -244,6 +255,8 @@ impl Run {
             journal_dir: self.journals(),
             restart,
             retry: quick_retry(),
+            expect: None,
+            record_signer: None,
         }
     }
     fn journal(&self, w: &World) -> Option<ReceiveJournal> {
@@ -671,4 +684,180 @@ async fn a_record_for_a_different_mid_is_refused() {
     spec.record = other.record.clone();
     let err = run_receive(&src, spec, progress(&w)).await.unwrap_err();
     assert!(matches!(err, MiasmaError::InvalidMid(_)), "{err:?}");
+}
+
+// ─── Share ID: who published it, before any piece ────────────────────────────
+
+use super::share_id::{ShareId, ShareMismatch};
+
+fn share_spec(run: &Run, w: &World, protected: bool, password: Option<&str>) -> ReceiveSpec {
+    let mut spec = run.spec(w, password, false);
+    spec.expect = Some(ShareId::new(&w.mid, TEST_PUBLISHER, protected));
+    spec.record_signer = Some(TEST_PUBLISHER);
+    spec
+}
+
+fn mismatch(err: MiasmaError) -> ShareMismatch {
+    match err {
+        MiasmaError::ShareMismatch(m) => m,
+        other => panic!("expected a share mismatch, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_matching_share_id_authenticates_the_publisher_and_completes() {
+    let w = world(3_000, 4, 6, None);
+    let src = MockSource::new(&w);
+    let run = Run::new();
+    let p = progress(&w);
+    let outcome = run_receive(&src, share_spec(&run, &w, false, None), p.clone())
+        .await
+        .unwrap();
+    assert_eq!(outcome, ReceiveOutcome::Complete { bytes: 3_000 });
+    assert_eq!(std::fs::read(run.out()).unwrap(), w.data);
+    assert!(p.snapshot().publisher_authenticated);
+}
+
+#[tokio::test]
+async fn a_bare_mid_still_completes_but_is_not_authenticated() {
+    let w = world(3_000, 4, 6, None);
+    let src = MockSource::new(&w);
+    let run = Run::new();
+    let p = progress(&w);
+    run_receive(&src, run.spec(&w, None, false), p.clone())
+        .await
+        .unwrap();
+    let s = p.snapshot();
+    assert_eq!(s.state, TransferState::Complete);
+    assert!(!s.publisher_authenticated);
+    assert!(!s.share_id_checked);
+}
+
+#[tokio::test]
+async fn a_record_signed_by_another_key_is_refused_before_any_piece() {
+    let w = world(3_000, 4, 6, None);
+    let src = MockSource::new(&w);
+    let run = Run::new();
+    let mut spec = share_spec(&run, &w, false, None);
+    spec.record_signer = Some([0x99; 32]);
+    let p = progress(&w);
+    let err = run_receive(&src, spec, p.clone()).await.unwrap_err();
+    assert_eq!(mismatch(err), ShareMismatch::WrongSigner);
+    assert_eq!(src.fetch_count(), 0, "no piece may be fetched");
+    assert!(!p.snapshot().publisher_authenticated);
+}
+
+#[tokio::test]
+async fn an_unsigned_or_unknown_signer_is_refused_with_a_share_id() {
+    let w = world(3_000, 4, 6, None);
+    let src = MockSource::new(&w);
+    let run = Run::new();
+    let mut spec = share_spec(&run, &w, false, None);
+    spec.record_signer = None;
+    let err = run_receive(&src, spec, progress(&w)).await.unwrap_err();
+    assert_eq!(mismatch(err), ShareMismatch::WrongSigner);
+}
+
+#[tokio::test]
+async fn a_manifest_naming_another_publisher_is_refused() {
+    let mut w = world(3_000, 4, 6, None);
+    w.manifest.as_mut().unwrap().publisher = [0x11; 32];
+    let src = MockSource::new(&w);
+    let run = Run::new();
+    let err = run_receive(&src, share_spec(&run, &w, false, None), progress(&w))
+        .await
+        .unwrap_err();
+    assert_eq!(mismatch(err), ShareMismatch::ManifestPublisher);
+    assert_eq!(src.fetch_count(), 0);
+}
+
+#[tokio::test]
+async fn an_unprotected_record_against_a_protected_share_id_is_a_downgrade() {
+    // C-06: an old unprotected record for the same content, replayed against a
+    // protected transfer.
+    let w = world(3_000, 4, 6, None);
+    let src = MockSource::new(&w);
+    let run = Run::new();
+    let err = run_receive(&src, share_spec(&run, &w, true, None), progress(&w))
+        .await
+        .unwrap_err();
+    assert_eq!(mismatch(err), ShareMismatch::ProtectionDowngrade);
+    assert_eq!(src.fetch_count(), 0);
+}
+
+#[tokio::test]
+async fn a_protected_record_against_an_unprotected_share_id_is_refused() {
+    let pw = super::protection::random_test_password();
+    let w = world(3_000, 4, 6, Some(&pw));
+    let src = MockSource::new(&w);
+    let run = Run::new();
+    let err = run_receive(&src, share_spec(&run, &w, false, Some(&pw)), progress(&w))
+        .await
+        .unwrap_err();
+    assert_eq!(mismatch(err), ShareMismatch::ProtectionUpgrade);
+    assert_eq!(src.fetch_count(), 0);
+}
+
+#[tokio::test]
+async fn a_share_id_for_other_content_is_refused() {
+    let w = world(3_000, 4, 6, None);
+    let other = world(3_100, 4, 6, None);
+    let src = MockSource::new(&w);
+    let run = Run::new();
+    let mut spec = share_spec(&run, &w, false, None);
+    spec.expect = Some(ShareId::new(&other.mid, TEST_PUBLISHER, false));
+    let err = run_receive(&src, spec, progress(&w)).await.unwrap_err();
+    assert_eq!(mismatch(err), ShareMismatch::MidMismatch);
+}
+
+#[tokio::test]
+async fn a_share_id_needs_a_manifest() {
+    let w = world_with(3_000, 4, 6, None, false, None);
+    let src = MockSource::new(&w);
+    let run = Run::new();
+    let err = run_receive(&src, share_spec(&run, &w, false, None), progress(&w))
+        .await
+        .unwrap_err();
+    assert_eq!(mismatch(err), ShareMismatch::ManifestMissing);
+}
+
+#[tokio::test]
+async fn even_without_a_share_id_the_manifest_must_name_the_signer() {
+    let w = world(3_000, 4, 6, None);
+    let src = MockSource::new(&w);
+    let run = Run::new();
+    let mut spec = run.spec(&w, None, false);
+    spec.record_signer = Some([0x42; 32]);
+    let err = run_receive(&src, spec, progress(&w)).await.unwrap_err();
+    assert!(matches!(err, MiasmaError::InvalidManifest(_)), "{err:?}");
+}
+
+#[test]
+fn a_folder_target_takes_the_manifest_name_and_never_overwrites() {
+    use super::receive::resolve_output_target;
+    let w = world(100, 4, 6, None);
+    let dir = tempfile::tempdir().unwrap();
+    let mut m = w.manifest.clone().unwrap();
+
+    // A file path is used as given.
+    let file = dir.path().join("explicit.bin");
+    assert_eq!(resolve_output_target(&file, Some(&m)).unwrap(), file);
+
+    // A folder plus a name gives <folder>/<name>; the name is sanitised again.
+    m.name = Some("../../evil\\report.pdf".into());
+    let got = resolve_output_target(dir.path(), Some(&m)).unwrap();
+    assert_eq!(got, dir.path().join("report.pdf"));
+
+    // An existing file is refused, and is left as it was.
+    std::fs::write(&got, b"mine").unwrap();
+    let err = resolve_output_target(dir.path(), Some(&m)).unwrap_err();
+    assert!(err.to_string().contains("refusing to overwrite"), "{err}");
+    assert_eq!(std::fs::read(&got).unwrap(), b"mine");
+
+    // No usable name: a clear error, nothing invented.
+    m.name = None;
+    assert!(resolve_output_target(dir.path(), Some(&m)).is_err());
+    m.name = Some("CON".into());
+    assert!(resolve_output_target(dir.path(), Some(&m)).is_err());
+    assert!(resolve_output_target(dir.path(), None).is_err());
 }
