@@ -89,7 +89,10 @@ fn world_with(
     let (protection, key) = match password {
         None => (Protection::None, None),
         Some(pw) => {
-            let (p, key) = PasswordProtection::create_with_cost(pw, 64, 1, 1).unwrap();
+            // Unchecked on purpose: these fixtures are transfers published
+            // before the password policy existed (weak passwords such as
+            // "pw"). The receive side must never enforce the policy.
+            let (p, key) = PasswordProtection::create_unchecked(pw, 64, 1, 1).unwrap();
             (Protection::Password(p), Some(key))
         }
     };
@@ -285,6 +288,22 @@ async fn a_password_protected_transfer_completes_with_the_password() {
     let src = MockSource::new(&w);
     let run = Run::new();
     let outcome = run_receive(&src, run.spec(&w, Some("pw-1"), false), progress(&w))
+        .await
+        .unwrap();
+    assert!(matches!(outcome, ReceiveOutcome::Complete { .. }));
+    assert_eq!(std::fs::read(run.out()).unwrap(), w.data);
+}
+
+#[tokio::test]
+async fn an_old_transfer_with_a_weak_password_is_still_receivable() {
+    // Published before the password policy: one character, no digit or symbol.
+    let weak = "x";
+    assert!(super::password_policy::check(weak).is_err());
+    assert!(PasswordProtection::create_with_cost(weak, 64, 1, 1).is_err());
+    let w = world(5_000, 4, 6, Some(weak));
+    let src = MockSource::new(&w);
+    let run = Run::new();
+    let outcome = run_receive(&src, run.spec(&w, Some(weak), false), progress(&w))
         .await
         .unwrap();
     assert!(matches!(outcome, ReceiveOutcome::Complete { .. }));
