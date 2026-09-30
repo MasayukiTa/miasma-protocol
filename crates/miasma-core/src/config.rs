@@ -32,6 +32,14 @@ pub struct StorageConfig {
     /// Maximum storage for shares hosted on behalf of remote publishers, in MiB.
     /// Kept separate from the node's owned-share quota so remote traffic cannot
     /// evict locally published shares.
+    ///
+    /// Defaults to `DEFAULT_HOSTED_QUOTA_MB` (also for a `config.toml` written
+    /// before the key existed) so the shipped node takes part in distributed
+    /// hosting. It is a hard cap, not an opt-in switch: set
+    /// `miasma config --key storage.hosted_quota_mb --value 0` to refuse every
+    /// pushed share, or a larger value on a helper node. Takes effect when the
+    /// daemon starts. There is no eviction and no per-peer limit yet: once the
+    /// quota is full, further pushes are refused.
     #[serde(default = "default_hosted_quota_mb")]
     pub hosted_quota_mb: u64,
     /// Maximum outbound bandwidth for share serving, in MiB/day.

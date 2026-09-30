@@ -6,6 +6,12 @@
 //! bound port number to `<data_dir>/daemon.port`. CLI clients read that
 //! file to discover the port, connect, send a request, receive a response,
 //! and close the connection.
+//!
+//! Authentication: the daemon also writes a random per-start control token to
+//! `<data_dir>/daemon.token` (see `control_auth`). The first frame of every
+//! connection must be a [`ControlAuth`] frame carrying that token; a peer that
+//! sends anything else, or a wrong token, gets an error and is disconnected
+//! without any request being parsed or processed.
 
 use std::{fmt, path::Path};
 
@@ -41,6 +47,27 @@ pub const HTTP_PORT_FILE: &str = "daemon.http";
 pub const HTTP_BRIDGE_DEFAULT_PORT: u16 = 17842;
 
 // ─── Wire types ───────────────────────────────────────────────────────────────
+
+/// First frame of every control connection: proves the peer can read the
+/// daemon's token file.
+#[derive(Serialize, Deserialize)]
+pub struct ControlAuth {
+    pub token: String,
+}
+
+impl Zeroize for ControlAuth {
+    fn zeroize(&mut self) {
+        self.token.zeroize();
+    }
+}
+
+impl fmt::Debug for ControlAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ControlAuth")
+            .field("token", &"<redacted>")
+            .finish()
+    }
+}
 
 /// Request from a CLI client to the local daemon.
 #[derive(Serialize, Deserialize)]
@@ -131,8 +158,13 @@ pub enum ControlRequest {
     TransferCancel { id: String },
     /// Return daemon status metrics.
     Status,
-    /// Distress-wipe: destroy the master key so all shares become unreadable.
+    /// Distress-wipe, step 1: ask for a confirmation challenge. Nothing is
+    /// destroyed; the daemon answers `WipeChallenge` and remembers the nonce
+    /// (single use, short lived).
     Wipe,
+    /// Distress-wipe, step 2: destroy the master key so all shares become
+    /// unreadable. Only honoured with the nonce the daemon issued for `Wipe`.
+    WipeConfirm { nonce: String },
 
     // ── Directed sharing ────────────────────────────────────────────────
     /// Get this node's sharing key (X25519 pubkey + PeerId).
@@ -304,6 +336,10 @@ impl fmt::Debug for ControlRequest {
                 .finish(),
             Self::Status => f.write_str("Status"),
             Self::Wipe => f.write_str("Wipe"),
+            Self::WipeConfirm { .. } => f
+                .debug_struct("WipeConfirm")
+                .field("nonce", &"<redacted>")
+                .finish(),
             Self::SharingKey => f.write_str("SharingKey"),
             Self::DirectedSend {
                 data,
@@ -360,6 +396,14 @@ impl Zeroize for ControlRequest {
     fn zeroize(&mut self) {
         match self {
             Self::Publish { data, .. } => data.zeroize(),
+            Self::PublishFileProtected { password, .. } => password.zeroize(),
+            Self::TransferStartReceive { password, .. }
+            | Self::TransferStartPublish { password, .. } => {
+                if let Some(p) = password.as_mut() {
+                    p.zeroize();
+                }
+            }
+            Self::WipeConfirm { nonce } => nonce.zeroize(),
             Self::DirectedSend { data, password, .. } => {
                 data.zeroize();
                 password.zeroize();
@@ -400,6 +444,11 @@ pub enum ControlResponse {
     Status(DaemonStatus),
     /// Distress wipe completed successfully.
     Wiped,
+    /// Answer to `Wipe`: the nonce to echo in `WipeConfirm` within its
+    /// lifetime. The key is still intact.
+    WipeChallenge {
+        nonce: String,
+    },
     Error(String),
 
     // ── Directed sharing ────────────────────────────────────────────────
@@ -472,6 +521,10 @@ impl fmt::Debug for ControlResponse {
             Self::TransferCancelled => f.write_str("TransferCancelled"),
             Self::Status(status) => f.debug_tuple("Status").field(status).finish(),
             Self::Wiped => f.write_str("Wiped"),
+            Self::WipeChallenge { .. } => f
+                .debug_struct("WipeChallenge")
+                .field("nonce", &"<redacted>")
+                .finish(),
             Self::Error(message) => f.debug_tuple("Error").field(message).finish(),
             Self::SharingKey { .. } => f
                 .debug_struct("SharingKey")
@@ -874,14 +927,23 @@ pub async fn write_frame(stream: &mut TcpStream, value: &impl Serialize) -> Resu
 
 /// Read a 4-byte LE length-prefixed JSON frame and deserialize it.
 pub async fn read_frame<T: for<'de> Deserialize<'de>>(stream: &mut TcpStream) -> Result<T> {
+    read_frame_limited(stream, FRAME_MAX).await
+}
+
+/// As [`read_frame`], with a caller-chosen size cap (used for the small,
+/// pre-authentication first frame).
+pub async fn read_frame_limited<T: for<'de> Deserialize<'de>>(
+    stream: &mut TcpStream,
+    max: usize,
+) -> Result<T> {
     let mut len_buf = [0u8; 4];
     stream
         .read_exact(&mut len_buf)
         .await
         .context("read frame length")?;
     let len = u32::from_le_bytes(len_buf) as usize;
-    if len > FRAME_MAX {
-        bail!("IPC frame too large: {len} bytes (max {FRAME_MAX})");
+    if len > max {
+        bail!("IPC frame too large: {len} bytes (max {max})");
     }
     let mut buf = Zeroizing::new(vec![0u8; len]);
     stream
@@ -931,8 +993,13 @@ pub fn read_port_file(data_dir: &Path) -> Result<u16> {
 // ─── Client helper ────────────────────────────────────────────────────────────
 
 /// Connect to the local daemon, send one request, and return the response.
+///
+/// Reads `<data_dir>/daemon.token` and presents it as the first frame. The
+/// request (and with it any password it carries) is wiped once it has been
+/// written, whether or not the write succeeded.
 pub async fn daemon_request(data_dir: &Path, req: ControlRequest) -> Result<ControlResponse> {
     let mut req = Zeroizing::new(req);
+    let token = super::control_auth::read_token_file(data_dir)?;
     let port = read_port_file(data_dir)?;
     let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
         .await
@@ -942,11 +1009,31 @@ pub async fn daemon_request(data_dir: &Path, req: ControlRequest) -> Result<Cont
                  is the miasma daemon still running?"
             )
         })?;
-    let write_result = write_frame(&mut stream, &*req).await;
+    let mut hello = Zeroizing::new(ControlAuth {
+        token: token.as_str().to_owned(),
+    });
+    let hello_result = write_frame(&mut stream, &*hello).await;
+    hello.zeroize();
+    let write_result = match hello_result {
+        Ok(()) => write_frame(&mut stream, &*req).await,
+        Err(e) => Err(e),
+    };
     req.zeroize();
     write_result?;
     let resp: ControlResponse = read_frame(&mut stream).await?;
     Ok(resp)
+}
+
+/// Distress-wipe through the two-step confirmation exchange: `Wipe` returns a
+/// daemon-issued challenge, `WipeConfirm` echoes it. Returns the final
+/// response (`Wiped` or `Error`).
+pub async fn daemon_wipe(data_dir: &Path) -> Result<ControlResponse> {
+    match daemon_request(data_dir, ControlRequest::Wipe).await? {
+        ControlResponse::WipeChallenge { nonce } => {
+            daemon_request(data_dir, ControlRequest::WipeConfirm { nonce }).await
+        }
+        other => Ok(other),
+    }
 }
 
 #[cfg(test)]

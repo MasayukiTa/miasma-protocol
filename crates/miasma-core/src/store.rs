@@ -40,6 +40,89 @@ const SHARES_DIR: &str = "shares";
 const INDEX_FILE: &str = "store_index.json";
 const SHARE_EXT: &str = ".ms";
 
+/// Share of the hosted quota one principal may hold, in percent.
+///
+/// The hosted budget is one pool; without a per-principal limit a single
+/// admitted peer can fill all of it and deny every later publisher. A quarter
+/// means at least four distinct principals must cooperate to exhaust the pool,
+/// while a single publisher can still park a meaningful amount of data.
+pub const HOSTED_PRINCIPAL_SHARE_PERCENT: u64 = 25;
+
+/// Lower bound of the per-principal hosted budget, applied as
+/// `min(hosted quota, HOSTED_PRINCIPAL_FLOOR_BYTES)`.
+///
+/// A percentage alone makes a small quota unusable (25% of 20 MiB is 5 MiB,
+/// less than one 4 MiB-segment publish of a few pieces). 16 MiB lets one
+/// publisher place a full segment set on a small node, and the `min` with the
+/// quota keeps the budget from ever exceeding the pool itself.
+pub const HOSTED_PRINCIPAL_FLOOR_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Why [`LocalShareStore::put_hosted_by`] refused a share. Reaches the pusher
+/// as a `StoreRejectReason`, so its `PushState` can tell a standing refusal
+/// (budget) from a per-piece one (ownership).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostedRefusal {
+    /// The global hosted budget is full.
+    QuotaExceeded,
+    /// The pushing principal already holds its share of the hosted budget.
+    PrincipalBudgetExceeded,
+    /// A different principal holds this `(mid_prefix, segment, slot)`.
+    NotOwner,
+}
+
+impl std::fmt::Display for HostedRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::QuotaExceeded => write!(f, "hosted share storage quota exceeded"),
+            Self::PrincipalBudgetExceeded => {
+                write!(f, "per-principal hosted share budget exceeded")
+            }
+            Self::NotOwner => write!(f, "hosted piece is held by another principal"),
+        }
+    }
+}
+
+/// Error of [`LocalShareStore::put_hosted_by`].
+#[derive(Debug)]
+pub enum HostedPutError {
+    /// The store declined the share for a policy reason.
+    Refused(HostedRefusal),
+    /// I/O, crypto or serialization failure.
+    Store(MiasmaError),
+}
+
+impl From<HostedRefusal> for HostedPutError {
+    fn from(r: HostedRefusal) -> Self {
+        Self::Refused(r)
+    }
+}
+
+impl From<MiasmaError> for HostedPutError {
+    fn from(e: MiasmaError) -> Self {
+        Self::Store(e)
+    }
+}
+
+impl From<HostedPutError> for MiasmaError {
+    fn from(e: HostedPutError) -> Self {
+        match e {
+            HostedPutError::Refused(r) => MiasmaError::Storage(r.to_string()),
+            HostedPutError::Store(e) => e,
+        }
+    }
+}
+
+impl std::fmt::Display for HostedPutError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(r) => r.fmt(f),
+            Self::Store(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for HostedPutError {}
+
 // ─── LRU index ───────────────────────────────────────────────────────────────
 
 /// Who a stored share belongs to.
@@ -67,7 +150,10 @@ pub enum ShareOrigin {
 /// (fresh key, fresh RS/SSS output) and a different content address. Content
 /// addressing (`BLAKE3(bincode(share))`) means those generations would
 /// otherwise coexist forever instead of the newer one replacing the older --
-/// see the "hosted put replaces same-tuple entry" logic in `put_hosted`.
+/// see the "hosted put replaces same-tuple entry" logic in `put_hosted_by`.
+///
+/// The tuple is public and carries no identity, so it is *not* ownership: a
+/// replacement is only allowed for the principal that stored the old entry.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 struct HostedTuple {
     mid_prefix: [u8; 8],
@@ -96,6 +182,14 @@ struct IndexEntry {
     /// field existed; `find_piece` fills those in lazily, once.
     #[serde(default)]
     piece: Option<PieceKey>,
+    /// For `Hosted` entries: the authenticated principal (the transport-level
+    /// peer id) that pushed the share. `None` means unknown -- entries written
+    /// before this field existed, or pushed through [`LocalShareStore::put_hosted`]
+    /// without a principal. An unknown owner never matches anyone, so its entry
+    /// is neither replaced nor claimed by a later push; its bytes are accounted
+    /// to one shared "unknown" bucket.
+    #[serde(default)]
+    hosted_principal: Option<String>,
 }
 
 /// See [`IndexEntry::piece`]. Same shape as [`HostedTuple`].
@@ -310,6 +404,7 @@ fn rebuild_index(data_dir: &Path, shares_dir: &Path) {
                     hosted_tuple: None,
                     // Filled in lazily by `find_piece`.
                     piece: None,
+                    hosted_principal: None,
                 },
             );
         }
@@ -427,8 +522,25 @@ impl LocalShareStore {
     /// `put_hosted` always rejects -- a node must opt in to hosting other
     /// publishers' shares, not have it happen implicitly.
     pub fn with_hosted_quota_mb(mut self, hosted_quota_mb: u64) -> Self {
-        self.hosted_quota_bytes = hosted_quota_mb * 1024 * 1024;
+        self.hosted_quota_bytes = hosted_quota_mb.saturating_mul(1024 * 1024);
         self
+    }
+
+    /// Open the store the way a daemon does: owned quota from
+    /// `storage.quota_mb`, hosted quota from `storage.hosted_quota_mb`
+    /// (`0` refuses every pushed share). Thin wrapper over
+    /// `open_with_quotas` that takes the parsed `StorageConfig`, so a test can
+    /// drive it with a `config.toml`.
+    pub fn open_configured(
+        data_dir: &Path,
+        storage: &crate::config::StorageConfig,
+    ) -> Result<Self, MiasmaError> {
+        Self::open_with_quotas(data_dir, storage.quota_mb, storage.hosted_quota_mb)
+    }
+
+    /// Configured hosted-share budget in bytes (`0` = refuse all pushed shares).
+    pub fn hosted_quota_bytes(&self) -> u64 {
+        self.hosted_quota_bytes
     }
 
     fn lock_master_key(
@@ -491,6 +603,7 @@ impl LocalShareStore {
                 origin: ShareOrigin::Owned,
                 hosted_tuple: None,
                 piece: Some(PieceKey::of(share)),
+                hosted_principal: None,
             },
         );
         save_index(&self.data_dir, &index)?;
@@ -498,23 +611,54 @@ impl LocalShareStore {
         Ok(address)
     }
 
-    /// Store a share on behalf of a remote publisher (hosted quota), as
-    /// accepted via inbound `/miasma/share-store/1.0.0`. Returns its content
-    /// address.
+    /// Store a share on behalf of a remote publisher whose identity is not
+    /// known (hosted quota). Returns its content address.
     ///
-    /// Unlike `put`, this **never evicts** owned shares or other publishers'
-    /// hosted shares to make room -- a peer merely being helped with
-    /// distribution must not be able to push its way past what it was
-    /// allocated. When the hosted budget would be exceeded, returns
-    /// `Err(MiasmaError::Storage(..))` (reject, not evict).
-    ///
-    /// If an existing hosted entry already occupies the same
-    /// `(mid_prefix, segment_index, slot_index)` tuple as `share` (a newer
-    /// generation from `redistribute_segment`'s repair path, or from the
-    /// same content being re-dissolved and re-pushed), that older entry is
-    /// replaced rather than left to coexist ambiguously with the new one --
-    /// see `HostedTuple`'s doc comment.
+    /// The share is recorded with an *unknown* principal: it is accounted to
+    /// the shared "unknown" bucket and can neither be replaced by, nor replace,
+    /// any other entry with the same `(mid_prefix, segment_index, slot_index)`
+    /// tuple. Network code must use [`put_hosted_by`](Self::put_hosted_by) with
+    /// the authenticated peer id instead.
     pub fn put_hosted(&self, share: &MiasmaShare) -> Result<String, MiasmaError> {
+        self.put_hosted_inner(share, None)
+            .map_err(MiasmaError::from)
+    }
+
+    /// Store a share pushed by the authenticated principal `principal` (the
+    /// transport-level peer id of the sender). Returns its content address.
+    ///
+    /// Unlike `put`, this **never evicts** owned shares or hosted shares of
+    /// other principals to make room. Refusals are typed ([`HostedRefusal`]):
+    ///
+    /// * [`HostedRefusal::NotOwner`] -- another principal (or an unknown one)
+    ///   already holds this `(mid_prefix, segment_index, slot_index)` tuple.
+    ///   The tuple is public and carries no identity, so it cannot express
+    ///   ownership; only the principal that stored an entry may replace it.
+    /// * [`HostedRefusal::QuotaExceeded`] -- the global hosted budget is full.
+    /// * [`HostedRefusal::PrincipalBudgetExceeded`] -- this principal already
+    ///   holds its fraction of the hosted budget
+    ///   ([`hosted_principal_budget_bytes`](Self::hosted_principal_budget_bytes)).
+    ///
+    /// A share whose bytes are already stored is acknowledged without touching
+    /// the entry, so a second principal pushing identical bytes can neither
+    /// take over nor evict the first one's copy.
+    ///
+    /// A newer generation of the same tuple pushed by the *same* principal (a
+    /// republish, or `redistribute_segment`'s repair path) replaces the older
+    /// one rather than coexisting ambiguously -- see `HostedTuple`.
+    pub fn put_hosted_by(
+        &self,
+        share: &MiasmaShare,
+        principal: &str,
+    ) -> Result<String, HostedPutError> {
+        self.put_hosted_inner(share, Some(principal))
+    }
+
+    fn put_hosted_inner(
+        &self,
+        share: &MiasmaShare,
+        principal: Option<&str>,
+    ) -> Result<String, HostedPutError> {
         let _guard = self
             .write_lock
             .lock()
@@ -528,39 +672,52 @@ impl LocalShareStore {
         let size = plaintext.len() as u64;
 
         let mut index = load_index(&self.data_dir);
-        let already_present = index.contains_key(&address);
+        if index.contains_key(&address) {
+            // Identical bytes are already stored: idempotent. Never change the
+            // recorded owner or origin of an existing entry.
+            return Ok(address);
+        }
 
         let tuple = HostedTuple {
             mid_prefix: share.mid_prefix,
             segment_index: share.segment_index,
             slot_index: share.slot_index,
         };
-        let conflicting_old = index
+        // An unknown principal (`None`) never owns anything.
+        let owned_by_caller =
+            |e: &IndexEntry| principal.is_some() && e.hosted_principal.as_deref() == principal;
+        let conflicting: Vec<(String, u64, bool)> = index
             .iter()
-            .find(|(addr, e)| {
-                addr.as_str() != address
-                    && e.origin == ShareOrigin::Hosted
-                    && e.hosted_tuple == Some(tuple)
-            })
-            .map(|(addr, e)| (addr.clone(), e.size_bytes));
+            .filter(|(_, e)| e.origin == ShareOrigin::Hosted && e.hosted_tuple == Some(tuple))
+            .map(|(addr, e)| (addr.clone(), e.size_bytes, owned_by_caller(e)))
+            .collect();
+        if conflicting.iter().any(|(_, _, mine)| !mine) {
+            return Err(HostedRefusal::NotOwner.into());
+        }
+        let freed: u64 = conflicting.iter().map(|(_, sz, _)| *sz).sum();
 
-        if !already_present {
-            let current_hosted: u64 = index
-                .values()
-                .filter(|e| e.origin == ShareOrigin::Hosted)
-                .map(|e| e.size_bytes)
-                .sum();
-            let freed_by_replacement = conflicting_old.as_ref().map(|(_, sz)| *sz).unwrap_or(0);
-            if current_hosted + size - freed_by_replacement > self.hosted_quota_bytes {
-                return Err(MiasmaError::Storage(
-                    "hosted share storage quota exceeded".into(),
-                ));
-            }
+        let hosted_total: u64 = index
+            .values()
+            .filter(|e| e.origin == ShareOrigin::Hosted)
+            .map(|e| e.size_bytes)
+            .sum();
+        if hosted_total.saturating_sub(freed) + size > self.hosted_quota_bytes {
+            return Err(HostedRefusal::QuotaExceeded.into());
+        }
+        // `None` matches `None`: unknown/legacy entries share one bucket.
+        let held_by_principal: u64 = index
+            .values()
+            .filter(|e| {
+                e.origin == ShareOrigin::Hosted && e.hosted_principal.as_deref() == principal
+            })
+            .map(|e| e.size_bytes)
+            .sum();
+        if held_by_principal.saturating_sub(freed) + size > self.hosted_principal_budget_bytes() {
+            return Err(HostedRefusal::PrincipalBudgetExceeded.into());
         }
 
-        // Replace an older generation of the same (mid, segment, slot) tuple
-        // rather than let both coexist.
-        if let Some((old_addr, _)) = &conflicting_old {
+        // Replace the caller's own older generation of this tuple.
+        for (old_addr, _, _) in &conflicting {
             let _ = std::fs::remove_file(self.share_path(old_addr));
             index.remove(old_addr);
         }
@@ -577,11 +734,23 @@ impl LocalShareStore {
                 origin: ShareOrigin::Hosted,
                 hosted_tuple: Some(tuple),
                 piece: Some(PieceKey::of(share)),
+                hosted_principal: principal.map(str::to_owned),
             },
         );
         save_index(&self.data_dir, &index)?;
 
         Ok(address)
+    }
+
+    /// The most hosted bytes one principal (one pushing peer; all unknown
+    /// owners together) may hold: see [`HOSTED_PRINCIPAL_SHARE_PERCENT`] and
+    /// [`HOSTED_PRINCIPAL_FLOOR_BYTES`].
+    pub fn hosted_principal_budget_bytes(&self) -> u64 {
+        let fraction = self
+            .hosted_quota_bytes
+            .saturating_mul(HOSTED_PRINCIPAL_SHARE_PERCENT)
+            / 100;
+        fraction.max(self.hosted_quota_bytes.min(HOSTED_PRINCIPAL_FLOOR_BYTES))
     }
 
     /// Current total size of `Hosted`-origin share blobs in bytes.

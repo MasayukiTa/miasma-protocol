@@ -89,7 +89,7 @@ function Start-Daemon([string]$dir, [string]$bootstrap) {
     Remove-Item $portFile -ErrorAction SilentlyContinue
     $a = "--data-dir `"$dir`" daemon"
     if ($bootstrap) { $a += " --bootstrap $bootstrap" }
-    $p = Start-Process -FilePath $Cli -ArgumentList $a -PassThru `
+    $p = Start-Process -FilePath $Cli -ArgumentList $a -PassThru -WindowStyle Hidden `
         -RedirectStandardOutput (Join-Path $dir ("stdout-" + (Get-Random) + ".log")) `
         -RedirectStandardError (Join-Path $dir ("stderr-" + (Get-Random) + ".log"))
     $script:Procs += $p

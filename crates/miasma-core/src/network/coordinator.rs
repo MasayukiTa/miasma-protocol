@@ -192,6 +192,11 @@ const PUSH_REFUSAL_TTL: std::time::Duration = std::time::Duration::from_secs(600
 #[derive(Default)]
 pub struct PushState {
     refused: Mutex<std::collections::HashMap<PeerId, std::time::Instant>>,
+    /// `(peer, piece)` pairs where the peer answered "held for another
+    /// publisher": that one piece is not offered to that peer again for
+    /// [`PUSH_REFUSAL_TTL`], but the peer stays usable for other pieces.
+    piece_conflicts:
+        Mutex<std::collections::HashMap<(PeerId, [u8; 8], u32, u16), std::time::Instant>>,
     attempted: std::sync::atomic::AtomicU64,
     refused_count: std::sync::atomic::AtomicU64,
 }
@@ -202,6 +207,29 @@ impl PushState {
         let mut map = self.refused.lock().unwrap();
         map.retain(|_, at| at.elapsed() < PUSH_REFUSAL_TTL);
         map.keys().copied().collect()
+    }
+
+    /// Peers that must not be offered this particular piece.
+    fn conflicting_peers_for(&self, share: &MiasmaShare) -> Vec<PeerId> {
+        let mut map = self.piece_conflicts.lock().unwrap();
+        map.retain(|_, at| at.elapsed() < PUSH_REFUSAL_TTL);
+        map.keys()
+            .filter(|(_, prefix, seg, slot)| {
+                *prefix == share.mid_prefix
+                    && *seg == share.segment_index
+                    && *slot == share.slot_index
+            })
+            .map(|(peer, ..)| *peer)
+            .collect()
+    }
+
+    fn note_piece_conflict(&self, peer: PeerId, piece: ([u8; 8], u32, u16)) {
+        self.refused_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.piece_conflicts
+            .lock()
+            .unwrap()
+            .insert((peer, piece.0, piece.1, piece.2), std::time::Instant::now());
     }
 
     fn note_refused(&self, peer: PeerId) {
@@ -315,6 +343,7 @@ impl ShareSink for NetworkShareSink {
         };
         // Peers that already said "no room" are not offered this share either.
         at_cap.extend(self.push_state.refusing_peers());
+        at_cap.extend(self.push_state.conflicting_peers_for(&share));
 
         let mut candidates = self.dht_handle.select_storage_candidates(at_cap).await?;
         if candidates.is_empty() {
@@ -332,6 +361,7 @@ impl ShareSink for NetworkShareSink {
 
         let slot_index = share.slot_index;
         let segment_index = share.segment_index;
+        let piece_for_conflict = (share.mid_prefix, segment_index, slot_index);
 
         self.push_state.note_attempt();
         match self.dht_handle.store_share_on_peer(peer_id, share).await? {
@@ -352,10 +382,20 @@ impl ShareSink for NetworkShareSink {
                 })
             }
             super::node::StoreResponse::Rejected(reason) => {
-                // Only a full quota is a standing answer; anything else may be
-                // transient (not yet admitted) and is retried on the next share.
-                if reason == super::node::StoreRejectReason::QuotaExceeded {
-                    self.push_state.note_refused(peer_id);
+                // A full quota (global or this node's per-peer budget for us) is
+                // a standing answer; "held for another publisher" is standing
+                // for that one piece only; anything else may be transient (not
+                // yet admitted) and is retried on the next share.
+                match reason {
+                    super::node::StoreRejectReason::QuotaExceeded
+                    | super::node::StoreRejectReason::PrincipalBudgetExceeded => {
+                        self.push_state.note_refused(peer_id);
+                    }
+                    super::node::StoreRejectReason::NotOwner => {
+                        self.push_state
+                            .note_piece_conflict(peer_id, piece_for_conflict);
+                    }
+                    _ => {}
                 }
                 Err(MiasmaError::Network(format!(
                     "peer {peer_id} rejected share store: {reason}"
@@ -1009,12 +1049,17 @@ impl MiasmaCoordinator {
         let max_seg = {
             let dht = DirectDhtExecutor::new(self.dht_handle.clone());
             match OnionAwareDhtExecutor::get(&dht, mid).await? {
-                Some(record) => record
-                    .locations
-                    .iter()
-                    .map(|l| l.segment_index)
-                    .max()
-                    .unwrap_or(0),
+                Some(record) => {
+                    // The record is network input: bound every index before
+                    // `max_seg + 1` sizes a loop (C-02).
+                    record.validate()?;
+                    record
+                        .locations
+                        .iter()
+                        .map(|l| l.segment_index)
+                        .max()
+                        .unwrap_or(0)
+                }
                 None => 0,
             }
         };
@@ -1069,12 +1114,17 @@ impl MiasmaCoordinator {
         let max_seg = {
             let dht = DirectDhtExecutor::new(self.dht_handle.clone());
             match OnionAwareDhtExecutor::get(&dht, mid).await? {
-                Some(record) => record
-                    .locations
-                    .iter()
-                    .map(|l| l.segment_index)
-                    .max()
-                    .unwrap_or(0),
+                Some(record) => {
+                    // The record is network input: bound every index before
+                    // `max_seg + 1` sizes a loop (C-02).
+                    record.validate()?;
+                    record
+                        .locations
+                        .iter()
+                        .map(|l| l.segment_index)
+                        .max()
+                        .unwrap_or(0)
+                }
                 None => 0,
             }
         };
