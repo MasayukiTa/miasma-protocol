@@ -147,7 +147,7 @@ Seven further tests carry `#[ignore]` and are excluded from that count: six `fie
 
 ## Security Note
 
-This is a beta-stage networked system. It has not been externally audited.
+This is a beta-stage networked system. It has not been externally audited. The specific limits known today are listed in [SECURITY.md](SECURITY.md#known-security-limits-beta).
 
 The protocol contains meaningful security work: Ed25519 DHT record verification, PoW admission, onion encryption, relay trust verification, ACL-enforced key storage, and a completed security hotfix sprint (VULN-001 through VULN-005). But unknown peers, hostile environments, adversarial routing pressure, and long-term retention behavior all require more validation.
 
