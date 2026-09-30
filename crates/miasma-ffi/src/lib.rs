@@ -732,7 +732,11 @@ pub fn start_embedded_daemon(
 
     // Move the transport config into the daemon; do not duplicate persisted
     // secret Strings into a second long-lived config object.
-    let transport_config = std::mem::take(&mut config.transport);
+    let mut transport_config = std::mem::take(&mut config.transport);
+    // The iroh direct transport (receive by share ID alone) is a desktop feature
+    // for now: its battery, background-network and relay behaviour on mobile has
+    // not been validated, so the embedded daemon does not start it.
+    transport_config.iroh_mode = miasma_core::config::IrohMode::Off;
 
     // Start DaemonServer (binds IPC + HTTP bridge + transports).
     let rt = shared_runtime();
