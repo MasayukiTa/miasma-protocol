@@ -863,6 +863,145 @@ controls the node until the daemon restarts (it is printed, and with `--open` it
 `rundll32` command line, readable by the same user who can read `daemon.token` anyway); the token sits in
 `sessionStorage` where any script on the bridge's origin can read it (same trust as the page itself).
 
+### Direct receive over WSS (2026-09-30, branch `feature/direct-wss-receive`)
+
+**Problem.** A receiver on a managed network (GlobalProtect) blocks QUIC and raw TCP, so the DHT lookup for the
+record and manifest fails before a single share is fetched; and the sender has no open port. The WebSocket
+share server the daemon already runs was proven reachable through an outbound `cloudflared tunnel` from such a
+machine (`scripts/wss-probe-windows.ps1`, 2026-03-31), but it carried shares only.
+
+**What was built.**
+
+- **Protocol** (`transport/websocket.rs`). One versioned request/response pair per message:
+  `[WS_WIRE_VERSION = 1] ++ bincode(WsRequest::{Share(ShareFetchRequest), Record{mid_digest}})` and
+  `WsResponse::{Share, Record{value: Option<Vec<u8>>}}`. `Record` returns exactly the value
+  `transfer::decode_record_value` reads (record + manifest trailer), `None` for an unknown MID (no detail).
+  The old unversioned single-request format is **replaced** (beta; both ends must be the same build family);
+  the legacy `WssPayloadTransport` (used by the daemon's own fallback chain, Shadowsocks and Tor) speaks the new
+  format through the same `wss_request_response`, and its tests pass unchanged. A connection carries up to
+  512 requests one after another; the server then closes it and the client dials again.
+- **Sender side.** The daemon already starts a plain-WS server on 127.0.0.1 (no TLS: the tunnel terminates it).
+  New: `miasma daemon --wss-port N` / config key `transport.wss_port` (fixed port; default stays a free port),
+  the daemon prints the exact command (`cloudflared tunnel --url http://127.0.0.1:<port>`) at start, and the
+  server answers `Record` from the daemon's own DHT record store (`DhtHandle::local_record_value`: local store
+  only, signature and key checked, no network query). `miasma tunnel` runs an *already installed* `cloudflared`
+  (found on PATH; `CREATE_NO_WINDOW` on Windows), reads the printed `https://*.trycloudflare.com` from its
+  stderr and prints `wss://...` (stdout) for the receiver. It never downloads or installs anything; if the
+  program is missing it prints the install hint and stops.
+- **Receiver** (`transfer/direct.rs`, `transport/ws_direct.rs`). `network-get <MID> -o FILE --via URL
+  [--via URL2] [--ca-cert FILE]`. The daemon reads the record and manifest from the first endpoint that has
+  them, then asks the endpoint for every piece by `(MID, segment, slot)` and feeds the **unchanged** receive
+  engine through the `PieceSource` trait: pieces are verified against the manifest commitments as they arrive,
+  the journal, resume, spare-piece retry and progress are the production ones. No DHT lookup, no libp2p peer,
+  no bootstrap is needed. A wrong password is refused before any piece is fetched, as before.
+- **Connection reuse.** One small pool of open connections per endpoint (a share is up to 8 MiB), so the TCP +
+  TLS + upgrade cost is paid once, not per piece; a connection the server closed is replaced transparently
+  once before an error is reported.
+- **TLS trust.** `wss://` is verified by the operating system's own verifier (`rustls-platform-verifier`
+  0.7, already in `Cargo.lock` through quinn, now a direct dependency of `miasma-core`; CryptoAPI on Windows)
+  plus the optional `--ca-cert` PEM added as an extra root (sent to the daemon as text, so the daemon never
+  opens a path a client names). There is **no** switch to turn verification off in this path. (First tried:
+  loading the OS roots into a rustls store with `rustls-native-certs`. A real run through a Cloudflare quick
+  tunnel failed with `UnknownIssuer` on this machine: Windows keeps its public roots out of the enumerable
+  root store until a chain needs them, and distributes a corporate inspection root by policy; only the OS
+  verifier sees both. Replaced. Android has no JVM handle in this library and uses the bundled Mozilla roots
+  plus the extra CA.) A corporate TLS-inspection CA is normally already in the OS store;
+  otherwise pass it with `--ca-cert`. A refused certificate fails at once (no retries) with a message naming
+  both fixes. Whoever does terminate the TLS (Cloudflare, an inspecting proxy) sees AES-GCM ciphertext,
+  the MID and request metadata only; piece commitments and the whole-file MID check are unchanged.
+- **Surfaces.** IPC `TransferStartReceive` gains `via: Vec<String>` and `via_ca_pem: Option<String>` (both
+  `serde(default)`: older clients parse and behave as before); `POST /api/transfers/receive` accepts them
+  (a bad list is a 400); the desktop Transfers receive form has a "Via URL" field in Technical mode only (EN/JA/ZH;
+  Easy mode shows nothing new; Resume in the same session goes back to the same endpoint); the web receive
+  form has the same field. CLI text is in `i18n.rs` (EN/JA); no existing English string changed.
+
+**Hostile-reviewer pass (own change).**
+
+- *Record oracle / amplifier.* A `Record` request is a few dozen bytes and can be answered with up to
+  `WS_RECORD_MAX_BYTES` (16 MiB - 64 KiB, the DHT's own publish bound); a share request with up to 8 MiB.
+  The MID is the capability (same as the DHT): without it every answer is the same tiny `None`; with it, the
+  cost is bandwidth, bounded per connection (512 requests) and overall (64 connections, over the cap the
+  connection is closed at once, nothing is queued). No per-IP limit is possible behind a tunnel (every
+  connection comes from 127.0.0.1); a leaked MID + URL is a bandwidth cost, not a data leak beyond the
+  ciphertext the DHT would hand out anyway.
+- *A pre-existing amplifier fixed on the way.* The WS server found a share with `search_by_mid_prefix` + `get`,
+  which decrypts **every share in the store** to read its header on **each request** (the libp2p path was
+  fixed for this, see the finding above; the WS path was not). It now uses `find_piece` (index) + one
+  decryption. Measured on the sender's store in a debug build: 8 MiB share fetch went from ~19 s to ~5 s
+  with 6 shares stored, and no longer grows with the store.
+- *Attacker-controlled sizes.* The server's WebSocket frame and message limits are the request size (1 KiB),
+  so an oversized frame is refused on its header before any of it is buffered (tungstenite's default is 16 / 64
+  MiB); the client's are 17 MiB. bincode runs with a byte limit and `reject_trailing_bytes`, so a declared
+  length cannot size an allocation (regression test: a `Vec<u8>` claiming `u64::MAX` bytes). The HTTP upgrade
+  is bounded by tungstenite's 64 KiB header check and by our timeout; TLS handshake, upgrade and every idle wait
+  are time-limited; ping/pong frames do not keep a connection alive for ever.
+- *No path to control.* The server is built from a share store and a `RecordProvider` and nothing else: no
+  IPC port, no token, no daemon handle. Anything that is not a well-formed binary request (text such as a JSON
+  control request, garbage, wrong version, trailing bytes, unknown variant) ends the connection with no reply
+  and no echo of the input. Errors the client shows never contain server-supplied text.
+- *Passwords.* Never on this wire: the manifest carries only the Argon2 parameters and verifier as before; the
+  IPC `Debug` for the new fields prints counts only.
+- *Client side.* `--via` URLs are `ws://` / `wss://` only, at most 4, no credentials in the URL (refused and
+  not echoed), length-bounded; a hostile endpoint can send at most 17 MiB per message, and everything it says
+  goes through the same record validation and piece verification as a DHT answer. The daemon dials whatever
+  URL a *token-holding* control client gives it, which is no new power (that client can already publish and
+  fetch through the daemon).
+- Tests for these are in `transport/websocket.rs::protocol_tests` and `tests/direct_wss_receive_test.rs`.
+
+**Measured (this machine, debug build, loopback; a debug build's crypto is ~20x slower than release).**
+
+- Whole receive, 16.8 MB, 2 segments, k=2 n=3, sender and receiver in one process over `ws://127.0.0.1`:
+  15.3 s = 1.1 MB/s. The time is the sender's store read + decrypt (3.0 s per 8 MiB share in this debug
+  build) and per-byte serde of `Vec<u8>` in an unoptimised build, not the socket. Empty request/response on
+  a pooled connection: 0.8 ms. A release build was not measured (no room for a second target directory).
+- The wire alone (an 8 MiB answer, no store behind it): 1.9 s pooled vs 2.05 s with a new connection each time
+  in the debug build, so reuse saved about 0.16 s per piece there and the difference is mostly noise next to
+  the serde cost. Reuse is kept because over a tunnel it also saves a TLS handshake and an upgrade round trip
+  per piece (each an RTT to Cloudflare); that part was not isolated.
+- **Through a real Cloudflare quick tunnel** (`miasma tunnel` -> cloudflared 2026 build from Program Files,
+  `wss://<random-words>.trycloudflare.com`, sender and receiver both on this Windows machine, debug build,
+  24 MiB password-protected file, 2 segments): `network-get --via` completed in 40.9 s, 814.7 KiB/s average
+  this session (fetch 20.3 s, decode 8.8 s, write 0.5 s), **SHA256 equal**. Most of that is the debug build's
+  crypto on both ends; the tunnel itself was not the limit. The first attempt of the same run failed with
+  `UnknownIssuer` (above) and is what led to the platform verifier.
+
+**Checked with the real binary.** `scripts/transfer-e2e.ps1` with the new step 5 (a third node with no bootstrap, `Connected peers: 0`,
+receives with `--via ws://127.0.0.1:<port>`; wrong/missing password refused, no output left):
+`=== PASS ===` on the first complete run (debug build, 40 MB, k=2 n=3), no flake in step [4] that time.
+Also found by running the real binary: the debug `miasma.exe` died with a stack overflow on **every command,
+even `--version`**, once the new options were added (the 4 `web_command` tests failed with it). Windows gives
+the main thread 1 MiB and a debug build's `clap` parse plus `main` needs just over that; `crates/miasma-cli/build.rs`
+now reserves 8 MiB (`/STACK`) for the binary on MSVC targets. Measured with `editbin`: 1.125 MiB was enough
+for the commands tried, so the margin before was a few KiB. Unit tests could not have caught this (they run
+on 2 MiB threads).
+
+**Tests.** Green on the final code: `miasma-core` lib 597 passed / 2 ignored (586 + 11: 8 protocol and hardening
+tests in `transport/websocket.rs`, 3 in `transport/ws_direct.rs`); the new `direct_wss_receive_test` 10 passed / 1
+ignored (the measurement above); `web_bridge_test` 9 (8 + one for `via`); `adversarial_storage_test` 9;
+`adversarial_ipc_test` 11; `transfer_ipc_test` 1; `node --test web/tests/*.test.mjs` 25; `cargo fmt --all --
+--check` clean. Written and compiled, but **not run to completion on the final commit**: `miasma-cli` (7 new unit
+tests: the flags, the URL scan, the PATH lookup; its 42 unit tests passed before the stack fix, the 5 `web_command`
+tests failed then with the stack overflow above and were not re-run after it) and `miasma-desktop` (1 new test).
+**Never run in this session**: `adversarial_test` (186), `integration_test` (71 / 7 ignored, the one holding the
+old WSS fallback tests), `adversarial_transfer_test` (13), `transfer_publish_test` (8 / 1), `miasma-wasm`, and
+`cargo clippy --workspace --all-targets`. Reason: C: went from 2.7 GB to under 100 MB free in minutes for reasons
+outside this work, the build directory of this worktree was emptied while builds were running (`error writing
+dependencies ... os error 3`), and a rebuild needs about 4 GB. They need one run on a machine with room before
+merge; nothing in the diff is known to break them, but that is not the same as having run them.
+
+**Not verified.** GlobalProtect with real corporate TLS inspection and the owner's PC (the Cloudflare run above was on this
+machine, which is itself managed, but that does not prove the owner's GlobalProtect path or its inspection
+root); a Mac sender (`miasma daemon` + `cloudflared`, no macOS build was run); a release-build throughput
+figure; concurrent pieces (the engine fetches one piece at a time, so a high-latency tunnel is latency-bound:
+about 1 RTT + size/bandwidth per piece); a second full e2e run; the desktop and web
+forms were compiled and unit-tested (Debug redaction, resume goes back to its endpoint) but not driven in a
+window or browser. Known limits: the sender's DHT record store is in memory, so after a sender daemon restart
+its older records are gone for `--via` exactly as for the DHT (the e2e step 5 uses the record published after
+the restart); a `miasma tunnel` process that is force-killed leaves `cloudflared` running (Ctrl-C stops it; a
+Windows job object would fix that, not done); `--via` is not remembered across a desktop restart (the daemon
+journal has no field for it, so re-issue the same command to resume); no HTTP proxy support in the direct
+client (the daemon's SOCKS5/HTTP-CONNECT proxy settings are not applied to `--via`).
+
 ## 7. Decisions and open questions
 
 - D1 Manifest lives in the record trailer, not a second DHT key. (Reason in §2.2.)
