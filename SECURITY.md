@@ -32,6 +32,17 @@ before relying on it:
   record held by peers can be replaced by another signer, and a bare-MID
   receiver can be pointed at unavailable or junk locations). The publisher key
   is the node identity key and cannot be rotated or revoked yet.
+- The iroh direct transport (receive by share ID and password alone, no address
+  or open port) uses n0's public discovery service and relays by default
+  (`transport.iroh_mode = n0`). While the daemon runs, n0 learns this node's
+  endpoint ID (which is its publisher key, so also what its share IDs contain),
+  its home relay and its IP addresses, and anyone who holds a share ID can look
+  the node up the same way; n0's relay sees connection metadata and ciphertext
+  only. Nothing else is sent to n0. Turn it off with
+  `miasma config --key transport.iroh_mode --value off` (or `miasma daemon
+  --no-iroh`), or use your own relay with `transport.iroh_mode = custom`. A
+  public relay is for reaching the sender, not for bulk transfer (measured about
+  1 MiB/s); large files need a direct path or a self-hosted relay.
 - Hosted-share storage (keeping shares for other peers) is opt-in; the default
   quota is 0.
 - The obfuscated QUIC and REALITY transports do not authenticate the server and
