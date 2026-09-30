@@ -43,4 +43,17 @@ pub enum MiasmaError {
 
     #[error("storage error: {0}")]
     Storage(String),
+
+    /// The password for a protected transfer did not match its `key_check`.
+    /// Raised before any piece has been fetched.
+    #[error("wrong password")]
+    WrongPassword,
+
+    /// A transfer manifest is internally inconsistent or out of bounds.
+    #[error("invalid transfer manifest: {0}")]
+    InvalidManifest(String),
+
+    /// The transfer is password-protected and no password was supplied.
+    #[error("this transfer is password-protected; a password is required")]
+    PasswordRequired,
 }
