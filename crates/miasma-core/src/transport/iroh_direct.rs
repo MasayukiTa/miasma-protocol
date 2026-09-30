@@ -397,10 +397,7 @@ pub fn node_for(data_dir: &Path) -> Option<Arc<IrohNode>> {
 }
 
 pub(crate) fn register_node(data_dir: &Path, node: Arc<IrohNode>) {
-    nodes()
-        .lock()
-        .unwrap()
-        .insert(data_dir.to_path_buf(), node);
+    nodes().lock().unwrap().insert(data_dir.to_path_buf(), node);
 }
 
 pub(crate) fn unregister_node(data_dir: &Path) -> Option<Arc<IrohNode>> {
@@ -731,11 +728,9 @@ impl IrohDirectClient {
         for ip in &self.direct_addrs {
             addr = addr.with_ip_addr(*ip);
         }
-        let attempt = tokio::time::timeout(
-            self.connect_timeout,
-            self.endpoint.connect(addr, IROH_ALPN),
-        )
-        .await;
+        let attempt =
+            tokio::time::timeout(self.connect_timeout, self.endpoint.connect(addr, IROH_ALPN))
+                .await;
         match attempt {
             Ok(Ok(conn)) => {
                 // TLS already proved the peer holds the key it presented; say it
@@ -783,9 +778,8 @@ impl IrohDirectClient {
 
 /// One request and its response on an open connection.
 async fn exchange(conn: &Connection, message: &[u8]) -> Result<WsResponse, IrohClientError> {
-    let broken = |what: &str, e: &dyn std::fmt::Display| {
-        IrohClientError::Connection(format!("{what}: {e}"))
-    };
+    let broken =
+        |what: &str, e: &dyn std::fmt::Display| IrohClientError::Connection(format!("{what}: {e}"));
     let (mut tx, mut rx) = conn
         .open_bi()
         .await
