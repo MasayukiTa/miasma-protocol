@@ -640,9 +640,29 @@ impl ControlResponse {
     }
 }
 
+/// State of the iroh direct transport, as `miasma status` shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IrohStatus {
+    /// `n0` or `custom`.
+    pub mode: String,
+    /// The endpoint ID (hex), equal to the publisher key in this node's share IDs.
+    pub endpoint_id: String,
+    /// The home relay this endpoint uses (or last tried), if any.
+    pub home_relay: Option<String>,
+    /// Whether the relay connection is up.
+    pub relay_connected: bool,
+    /// Why it is not, when it is not.
+    pub last_error: Option<String>,
+    /// Whether n0's discovery service is used.
+    pub discovery: bool,
+}
+
 /// Snapshot of daemon state — returned for `miasma status` and IPC calls.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonStatus {
+    /// The iroh direct transport; `None` when it is off or not compiled in.
+    #[serde(default)]
+    pub iroh: Option<IrohStatus>,
     pub peer_id: String,
     pub listen_addrs: Vec<String>,
     pub peer_count: usize,

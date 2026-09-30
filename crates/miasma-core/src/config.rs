@@ -54,9 +54,85 @@ pub struct NetworkConfig {
     pub bootstrap_peers: Vec<String>,
 }
 
+/// How the iroh direct transport (receive by share ID alone) is set up.
+///
+/// * `n0`: the default. Number 0's public relays and its discovery service
+///   (DNS/pkarr) are used, so a receiver finds the sender from the share ID
+///   alone. The sender's endpoint ID, home relay and IP addresses are published
+///   to n0's discovery service while the daemon runs; see SECURITY.md.
+/// * `custom`: only the relays in `iroh_relay_urls` (your own), nothing of n0's
+///   unless `iroh_discovery` is on.
+/// * `off`: no iroh endpoint is started and none is used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IrohMode {
+    #[default]
+    N0,
+    Custom,
+    Off,
+}
+
+impl IrohMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::N0 => "n0",
+            Self::Custom => "custom",
+            Self::Off => "off",
+        }
+    }
+}
+
+impl std::str::FromStr for IrohMode {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "n0" => Ok(Self::N0),
+            "custom" => Ok(Self::Custom),
+            "off" => Ok(Self::Off),
+            other => Err(format!(
+                "unknown iroh mode '{other}': expected n0, custom or off"
+            )),
+        }
+    }
+}
+
+impl fmt::Display for IrohMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Seconds a receive waits to reach a sender over iroh before it tries the next
+/// source.
+pub const DEFAULT_IROH_CONNECT_TIMEOUT_SECS: u64 = 25;
+
+fn default_iroh_connect_timeout_secs() -> u64 {
+    DEFAULT_IROH_CONNECT_TIMEOUT_SECS
+}
+
 /// Transport-layer configuration for restrictive networks.
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TransportConfig {
+    /// iroh direct transport: `n0` (default), `custom` or `off`. See
+    /// [`IrohMode`]. Takes effect when the daemon starts.
+    #[serde(default)]
+    pub iroh_mode: IrohMode,
+    /// Relay URLs (`https://...`) for `custom` mode, and extra relay hints for
+    /// dialing in every mode.
+    #[serde(default)]
+    pub iroh_relay_urls: Vec<String>,
+    /// Publish this node's address to, and look senders up in, n0's discovery
+    /// service (`n0` mode always; `custom` mode if true). With it off a receiver
+    /// can only reach senders through `iroh_relay_urls`.
+    #[serde(default = "default_true")]
+    pub iroh_discovery: bool,
+    /// How long one receive tries to reach a sender over iroh, in seconds.
+    #[serde(default = "default_iroh_connect_timeout_secs")]
+    pub iroh_connect_timeout_secs: u64,
     /// Port for the WebSocket share server, on 127.0.0.1. `0` (the default)
     /// picks a free port each start. Set a fixed port to expose the server
     /// through an outbound tunnel, e.g. `cloudflared tunnel --url
@@ -112,9 +188,39 @@ pub struct TransportConfig {
     pub tor: crate::transport::tor::TorConfig,
 }
 
+impl Default for TransportConfig {
+    fn default() -> Self {
+        Self {
+            iroh_mode: IrohMode::default(),
+            iroh_relay_urls: Vec::new(),
+            iroh_discovery: true,
+            iroh_connect_timeout_secs: DEFAULT_IROH_CONNECT_TIMEOUT_SECS,
+            wss_port: 0,
+            wss_tls_enabled: false,
+            wss_sni: None,
+            wss_cert_pem_path: None,
+            wss_key_pem_path: None,
+            proxy_type: None,
+            proxy_addr: None,
+            proxy_username: None,
+            proxy_password: None,
+            obfuscated_quic_enabled: false,
+            obfuscated_quic_sni: None,
+            obfuscated_quic_secret: None,
+            obfuscated_quic_fallback_url: None,
+            shadowsocks: Default::default(),
+            tor: Default::default(),
+        }
+    }
+}
+
 impl fmt::Debug for TransportConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TransportConfig")
+            .field("iroh_mode", &self.iroh_mode)
+            .field("iroh_relay_urls", &self.iroh_relay_urls)
+            .field("iroh_discovery", &self.iroh_discovery)
+            .field("iroh_connect_timeout_secs", &self.iroh_connect_timeout_secs)
             .field("wss_port", &self.wss_port)
             .field("wss_tls_enabled", &self.wss_tls_enabled)
             .field("wss_sni", &self.wss_sni)
@@ -329,6 +435,33 @@ bandwidth_mb_day = 512
         assert_eq!(storage.quota_mb, 2_048);
         assert_eq!(storage.bandwidth_mb_day, 512);
         assert_eq!(storage.hosted_quota_mb, DEFAULT_HOSTED_QUOTA_MB);
+    }
+
+    #[test]
+    fn an_old_config_without_iroh_keys_gets_the_defaults() {
+        let t: TransportConfig = toml::from_str("wss_port = 7\n").unwrap();
+        assert_eq!(t.wss_port, 7);
+        assert_eq!(t.iroh_mode, IrohMode::N0);
+        assert!(t.iroh_relay_urls.is_empty());
+        assert!(t.iroh_discovery);
+        assert_eq!(
+            t.iroh_connect_timeout_secs,
+            DEFAULT_IROH_CONNECT_TIMEOUT_SECS
+        );
+        let d = TransportConfig::default();
+        assert_eq!(d.iroh_mode, IrohMode::N0);
+        assert!(d.iroh_discovery);
+    }
+
+    #[test]
+    fn iroh_mode_parses_and_round_trips_through_toml() {
+        assert_eq!("off".parse::<IrohMode>().unwrap(), IrohMode::Off);
+        assert_eq!(" Custom ".parse::<IrohMode>().unwrap(), IrohMode::Custom);
+        assert!("everything".parse::<IrohMode>().is_err());
+        let t: TransportConfig = toml::from_str("iroh_mode = \"off\"\n").unwrap();
+        assert_eq!(t.iroh_mode, IrohMode::Off);
+        let text = toml::to_string_pretty(&t).unwrap();
+        assert!(text.contains("iroh_mode = \"off\""), "{text}");
     }
 
     #[test]

@@ -132,6 +132,11 @@ enum Commands {
         /// `transport.wss_tls_enabled` off.
         #[arg(long, value_name = "PORT")]
         wss_port: Option<u16>,
+        /// Do not start the iroh endpoint for this run (receive by share ID alone
+        /// needs it; also the config key `transport.iroh_mode = off`). Nothing is
+        /// then published to n0's discovery service.
+        #[arg(long)]
+        no_iroh: bool,
     },
 
     /// Expose this node's WebSocket share server through `cloudflared` (which
@@ -508,7 +513,8 @@ async fn main() -> Result<()> {
         Commands::Daemon {
             bootstrap,
             wss_port,
-        } => cmd_daemon(&data_dir, &bootstrap, wss_port).await,
+            no_iroh,
+        } => cmd_daemon(&data_dir, &bootstrap, wss_port, no_iroh).await,
 
         Commands::Tunnel { port } => cmd_tunnel(&data_dir, port).await,
 
@@ -806,6 +812,20 @@ async fn cmd_status(data_dir: &std::path::Path) -> Result<()> {
                 };
                 println!("  WSS share server:    127.0.0.1:{}{}", s.wss_port, tls_tag);
             }
+            match &s.iroh {
+                Some(i) => println!(
+                    "  {}",
+                    Msg::StatusIroh {
+                        mode: i.mode.clone(),
+                        endpoint: i.endpoint_id.chars().take(12).collect(),
+                        relay: i.home_relay.clone(),
+                        connected: i.relay_connected,
+                        error: i.last_error.clone(),
+                    }
+                    .t()
+                ),
+                None => println!("  {}", Msg::StatusIrohOff.t()),
+            }
             if s.obfs_quic_port > 0 {
                 println!("  ObfuscatedQuic:      127.0.0.1:{}", s.obfs_quic_port);
             }
@@ -964,6 +984,10 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
                 serde_json::json!(s.replicated_count),
             );
             report.insert("wss_port".into(), serde_json::json!(s.wss_port));
+            report.insert(
+                "iroh".into(),
+                serde_json::to_value(&s.iroh).unwrap_or(serde_json::Value::Null),
+            );
             report.insert(
                 "wss_tls_enabled".into(),
                 serde_json::json!(s.wss_tls_enabled),
@@ -1447,6 +1471,16 @@ fn cmd_config_loaded(
                         println!("{peer}");
                     }
                 }
+                "transport.iroh_mode" => println!("{}", config.transport.iroh_mode),
+                "transport.iroh_relay_urls" => {
+                    for url in &config.transport.iroh_relay_urls {
+                        println!("{url}");
+                    }
+                }
+                "transport.iroh_discovery" => println!("{}", config.transport.iroh_discovery),
+                "transport.iroh_connect_timeout_secs" => {
+                    println!("{}", config.transport.iroh_connect_timeout_secs)
+                }
                 "transport.wss_port" => println!("{}", config.transport.wss_port),
                 "transport.wss_tls_enabled" => println!("{}", config.transport.wss_tls_enabled),
                 "transport.wss_sni" => {
@@ -1496,6 +1530,32 @@ fn cmd_config_loaded(
                     } else {
                         config.network.bootstrap_peers.push(v.into());
                     }
+                }
+                "transport.iroh_mode" => {
+                    config.transport.iroh_mode = v
+                        .parse::<miasma_core::config::IrohMode>()
+                        .map_err(anyhow::Error::msg)?;
+                }
+                "transport.iroh_relay_urls" => {
+                    // Like network.bootstrap_peers: one URL is added per call,
+                    // an empty value clears the list.
+                    if v.is_empty() {
+                        config.transport.iroh_relay_urls.clear();
+                    } else if v.starts_with("https://") || v.starts_with("http://") {
+                        config.transport.iroh_relay_urls.push(v.into());
+                    } else {
+                        bail!("expected a relay URL starting with https://");
+                    }
+                }
+                "transport.iroh_discovery" => {
+                    config.transport.iroh_discovery = v.parse().context("expected bool")?;
+                }
+                "transport.iroh_connect_timeout_secs" => {
+                    let secs: u64 = v.parse().context("expected a number of seconds")?;
+                    if !(1..=600).contains(&secs) {
+                        bail!("expected 1-600 seconds");
+                    }
+                    config.transport.iroh_connect_timeout_secs = secs;
                 }
                 "transport.wss_port" => {
                     config.transport.wss_port =
@@ -1556,12 +1616,22 @@ async fn cmd_daemon(
     data_dir: &std::path::Path,
     bootstrap_addrs: &[String],
     wss_port: Option<u16>,
+    no_iroh: bool,
 ) -> Result<()> {
     use miasma_core::DaemonServer;
 
     let mut config = NodeConfig::load(data_dir).context("cannot load config")?;
     if let Some(port) = wss_port {
         config.transport.wss_port = port;
+    }
+    if no_iroh {
+        config.transport.iroh_mode = miasma_core::config::IrohMode::Off;
+    }
+    // What the n0 preset shares is said before anything is published.
+    if config.transport.iroh_mode == miasma_core::config::IrohMode::N0
+        && config.transport.iroh_discovery
+    {
+        eprintln!("{}", Msg::DaemonIrohNotice.t());
     }
     let wanted_wss_port = config.transport.wss_port;
 
@@ -3146,6 +3216,7 @@ mod transfer_progress_tests {
             share_id: None,
             share_id_checked: false,
             publisher_authenticated: false,
+            path: None,
         }
     }
 
@@ -3284,6 +3355,7 @@ mod transfers_listing {
             share_id: None,
             share_id_checked: false,
             publisher_authenticated: false,
+            path: None,
         }
     }
 

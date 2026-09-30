@@ -313,6 +313,12 @@ export function createTransfers({ bridge, t, showToast, copyToClipboard, authMes
     pub.classList.toggle('hidden', !showPub);
     pub.classList.toggle('tf-warn', showPub && !job.publisher_authenticated);
     detailText('tf-d-publisher', showPub ? t(job.publisher_authenticated ? 'tf_publisher_verified' : 'tf_publisher_unverified') : '');
+    // A receive over iroh says how the data travels: a public relay is much slower than a direct path.
+    const pathEl = el('tf-d-path');
+    const showPath = !send && (job.path === 'direct' || job.path === 'relay');
+    pathEl.classList.toggle('hidden', !showPath);
+    pathEl.classList.toggle('tf-warn', showPath && job.path === 'relay');
+    detailText('tf-d-path', showPath ? t(job.path === 'direct' ? 'tf_path_direct' : 'tf_path_relay') : '');
 
     setFill(el('tf-d-fill'), pm, job.state);
     detailText('tf-d-pct', formatPermille(pm));

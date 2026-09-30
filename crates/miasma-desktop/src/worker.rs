@@ -1675,6 +1675,7 @@ mod tests {
             share_id: None,
             share_id_checked: false,
             publisher_authenticated: false,
+            path: None,
         };
         let listed = WorkerResult::TransferList(vec![status]);
         let rendered = format!("{listed:?}");
