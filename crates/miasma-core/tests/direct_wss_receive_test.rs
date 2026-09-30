@@ -51,7 +51,8 @@ fn params() -> DissolutionParams {
 
 /// A fresh random password: no test carries a fixed secret.
 fn random_password() -> String {
-    format!("pw-{:032x}", rand::random::<u128>())
+    // Always satisfies the password policy: a digit, letters and a symbol.
+    format!("pw-1{:032x}", rand::random::<u128>())
 }
 
 /// Deterministic, non-repeating-looking content so a segment mix-up is visible.
