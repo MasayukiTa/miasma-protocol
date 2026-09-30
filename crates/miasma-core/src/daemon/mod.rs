@@ -972,6 +972,11 @@ pub(crate) async fn process_request(
                 Ok(p) => p,
                 Err(e) => return ControlResponse::Error(format!("output path rejected: {e}")),
             };
+            // A folder, or a place that cannot be written, is refused now rather
+            // than as a Failed row after the network work.
+            if let Err(e) = crate::transfer::receive::check_output_target(&output_path) {
+                return ControlResponse::Error(format!("output path rejected: {e}"));
+            }
             // Refuse a bad endpoint list now, with a clear message, rather than
             // starting a job that can only fail.
             let via = crate::transfer::direct::ViaConfig::from_request(via, via_ca_pem);
@@ -1036,6 +1041,26 @@ pub(crate) async fn process_request(
                 ControlResponse::TransferCancelled
             } else {
                 ControlResponse::Error(format!("no running transfer: {id}"))
+            }
+        }
+
+        ControlRequest::TransferRemove {
+            id,
+            discard_partial,
+        } => match crate::transfer::jobs::registry_for(&data_dir).remove(&id, discard_partial) {
+            Ok(()) => ControlResponse::TransferRemoved {
+                removed: 1,
+                kept_partial: 0,
+            },
+            Err(reason) => ControlResponse::TransferRemoveRefused { id, reason },
+        },
+
+        ControlRequest::TransferClearFinished => {
+            let (removed, kept_partial) =
+                crate::transfer::jobs::registry_for(&data_dir).clear_finished();
+            ControlResponse::TransferRemoved {
+                removed,
+                kept_partial,
             }
         }
 

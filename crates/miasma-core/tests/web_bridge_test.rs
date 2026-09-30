@@ -349,6 +349,8 @@ async fn every_transfer_endpoint_needs_the_token() {
         ("GET", "/api/transfers/miasma%3Aabc"),
         ("POST", "/api/transfers/receive"),
         ("POST", "/api/transfers/miasma%3Aabc/cancel"),
+        ("POST", "/api/transfers/miasma%3Aabc/remove"),
+        ("POST", "/api/transfers/clear-finished"),
     ] {
         let r = http(d.http_port, method, path, None, body).await;
         assert!(r.starts_with("HTTP/1.1 401"), "{method} {path}: {r:.200}");
@@ -798,5 +800,150 @@ async fn a_via_receive_is_passed_through_and_a_bad_via_is_refused_clearly() {
         panic!("expected the request to be accepted: {r:.300}");
     }
     assert!(!out_dir.path().join("via.bin").exists());
+    d.stop().await;
+}
+
+// ─── Removing finished transfers over HTTP ───────────────────────────────────
+
+/// Put a receive job in `state` into the daemon's registry; returns its id.
+fn inject_job(
+    d: &TestDaemon,
+    tag: &str,
+    state: miasma_core::transfer::TransferState,
+    resumable: bool,
+) -> String {
+    let id = miasma_core::ContentId::compute(tag.as_bytes(), b"p").to_string();
+    let p = miasma_core::transfer::TransferProgress::new(id.clone());
+    p.set_name(d.dir.path().join(format!("{tag}.bin")).to_string_lossy());
+    if state != miasma_core::transfer::TransferState::Running {
+        p.set_state(state, None, resumable);
+    }
+    miasma_core::transfer::jobs::registry_for(d.dir.path()).insert_for_tests(&id, p);
+    id
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_finished_transfer_is_removed_over_http_and_a_running_one_is_refused() {
+    use miasma_core::transfer::TransferState as S;
+    let d = start_daemon().await;
+    let tok = d.token();
+    let done = inject_job(&d, "http-done", S::Complete, false);
+    let running = inject_job(&d, "http-running", S::Running, false);
+    let paused = inject_job(&d, "http-paused", S::Paused, true);
+    let partial = inject_job(&d, "http-partial", S::Cancelled, true);
+    // Cancelled with a journal on disk: needs discard_partial.
+    let reg = miasma_core::transfer::jobs::registry_for(d.dir.path());
+    std::fs::create_dir_all(reg.journal_dir()).unwrap();
+    let out = d.dir.path().join("http-partial.bin");
+    let mid = miasma_core::ContentId::compute(b"http-partial", b"p");
+    miasma_core::transfer::journal::ReceiveJournal {
+        version: miasma_core::transfer::journal::JOURNAL_VERSION,
+        mid: mid.to_string(),
+        output_path: out.to_string_lossy().into_owned(),
+        part_path: miasma_core::transfer::journal::part_path_for(&out)
+            .to_string_lossy()
+            .into_owned(),
+        data_shards: 2,
+        total_shards: 3,
+        segment_count: 2,
+        total_bytes: 2000,
+        manifest_hash: None,
+        next_segment: 1,
+        bytes_done: 1000,
+        started_at: 1,
+        updated_at: 2,
+        last_error: None,
+    }
+    .save(&miasma_core::transfer::journal::journal_path(
+        &reg.journal_dir(),
+        &mid,
+    ))
+    .unwrap();
+
+    let url = |id: &str| format!("/api/transfers/{}/remove", enc(id));
+
+    // Refusals: 409, and the job is still listed.
+    for id in [&running, &paused, &partial] {
+        let r = http(d.http_port, "POST", &url(id), Some(&tok), "").await;
+        assert!(r.starts_with("HTTP/1.1 409"), "{id}: {r:.300}");
+    }
+    let r = http(d.http_port, "GET", "/api/transfers", Some(&tok), "").await;
+    assert_eq!(json_of(&r).as_array().unwrap().len(), 4, "{r}");
+
+    // An unknown id is a 404, and a malformed body a 400.
+    let r = http(d.http_port, "POST", &url("miasma:nope"), Some(&tok), "").await;
+    assert!(r.starts_with("HTTP/1.1 404"), "{r:.300}");
+    let r = http(d.http_port, "POST", &url(&done), Some(&tok), "{nope").await;
+    assert!(r.starts_with("HTTP/1.1 400"), "{r:.300}");
+
+    // The finished one goes, and stays gone on the next poll.
+    let r = http(d.http_port, "POST", &url(&done), Some(&tok), "").await;
+    assert!(r.starts_with("HTTP/1.1 200"), "{r:.300}");
+    assert_eq!(json_of(&r)["removed"], 1);
+    let r = http(d.http_port, "GET", "/api/transfers", Some(&tok), "").await;
+    let list = json_of(&r);
+    assert!(list
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|t| t["id"] != done.as_str()));
+    let r = http(d.http_port, "POST", &url(&done), Some(&tok), "").await;
+    assert!(r.starts_with("HTTP/1.1 404"), "{r:.300}");
+
+    // Discarding the cancelled one is explicit.
+    let r = http(
+        d.http_port,
+        "POST",
+        &url(&partial),
+        Some(&tok),
+        r#"{"discard_partial":true}"#,
+    )
+    .await;
+    assert!(r.starts_with("HTTP/1.1 200"), "{r:.300}");
+    assert!(!miasma_core::transfer::journal::journal_path(&reg.journal_dir(), &mid).exists());
+
+    // Clear-finished with nothing finished left removes nothing.
+    let r = http(
+        d.http_port,
+        "POST",
+        "/api/transfers/clear-finished",
+        Some(&tok),
+        "",
+    )
+    .await;
+    assert!(r.starts_with("HTTP/1.1 200"), "{r:.300}");
+    assert_eq!(json_of(&r)["removed"], 0);
+    let r = http(d.http_port, "GET", "/api/transfers", Some(&tok), "").await;
+    assert_eq!(json_of(&r).as_array().unwrap().len(), 2, "{r}");
+    d.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clear_finished_over_http_removes_finished_rows_only() {
+    use miasma_core::transfer::TransferState as S;
+    let d = start_daemon().await;
+    let tok = d.token();
+    let a = inject_job(&d, "clr-done", S::Complete, false);
+    let b = inject_job(&d, "clr-failed", S::Failed, false);
+    let keep = inject_job(&d, "clr-running", S::Running, false);
+    let r = http(
+        d.http_port,
+        "POST",
+        "/api/transfers/clear-finished",
+        Some(&tok),
+        "",
+    )
+    .await;
+    assert!(r.starts_with("HTTP/1.1 200"), "{r:.300}");
+    assert_eq!(json_of(&r)["removed"], 2);
+    let r = http(d.http_port, "GET", "/api/transfers", Some(&tok), "").await;
+    let ids: Vec<String> = json_of(&r)
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(ids, vec![keep]);
+    assert!(!ids.contains(&a) && !ids.contains(&b));
     d.stop().await;
 }

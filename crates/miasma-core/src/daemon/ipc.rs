@@ -166,6 +166,18 @@ pub enum ControlRequest {
     TransferList,
     /// Stop a running transfer at its next safe point, keeping it resumable.
     TransferCancel { id: String },
+    /// Take one finished (Complete, Failed or Cancelled) transfer off the
+    /// dashboard. A running or paused one is refused. A failed/cancelled one
+    /// that still holds partial data is refused unless `discard_partial` is set,
+    /// which deletes that partial data. A finished receive's output file, a
+    /// send's source file and the shares a send published are never touched.
+    TransferRemove {
+        id: String,
+        #[serde(default)]
+        discard_partial: bool,
+    },
+    /// Remove every finished transfer that has no partial data to lose.
+    TransferClearFinished,
     /// Return daemon status metrics.
     Status,
     /// Distress-wipe, step 1: ask for a confirmation challenge. Nothing is
@@ -315,6 +327,15 @@ impl fmt::Debug for ControlRequest {
             Self::TransferCancel { id } => {
                 f.debug_struct("TransferCancel").field("id", id).finish()
             }
+            Self::TransferRemove {
+                id,
+                discard_partial,
+            } => f
+                .debug_struct("TransferRemove")
+                .field("id", id)
+                .field("discard_partial", discard_partial)
+                .finish(),
+            Self::TransferClearFinished => f.write_str("TransferClearFinished"),
             Self::PublishFileProtected {
                 data_shards,
                 total_shards,
@@ -455,6 +476,17 @@ pub enum ControlResponse {
     TransferList(Vec<crate::transfer::TransferStatus>),
     /// The cancel request was accepted; the transfer stops at its next safe point.
     TransferCancelled,
+    /// Finished transfers were removed from the dashboard. `kept_partial` counts
+    /// finished ones left alone because removing them would delete partial data.
+    TransferRemoved {
+        removed: u32,
+        kept_partial: u32,
+    },
+    /// A remove was refused, and why.
+    TransferRemoveRefused {
+        id: String,
+        reason: crate::transfer::jobs::RemoveRefusal,
+    },
     Status(DaemonStatus),
     /// Distress wipe completed successfully.
     Wiped,
@@ -533,6 +565,19 @@ impl fmt::Debug for ControlResponse {
                 .field("count", &list.len())
                 .finish(),
             Self::TransferCancelled => f.write_str("TransferCancelled"),
+            Self::TransferRemoved {
+                removed,
+                kept_partial,
+            } => f
+                .debug_struct("TransferRemoved")
+                .field("removed", removed)
+                .field("kept_partial", kept_partial)
+                .finish(),
+            Self::TransferRemoveRefused { id, reason } => f
+                .debug_struct("TransferRemoveRefused")
+                .field("id", id)
+                .field("reason", reason)
+                .finish(),
             Self::Status(status) => f.debug_tuple("Status").field(status).finish(),
             Self::Wiped => f.write_str("Wiped"),
             Self::WipeChallenge { .. } => f
