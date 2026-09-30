@@ -3,9 +3,11 @@
 import { t, getLang, setLang, applyTranslations } from './i18n.js';
 import { initDB, saveShares, getSharesByMidPrefix, getShareCount, getMidCount, getStorageEstimate, clearAll } from './storage.js';
 import { MiasmaBridge, getAuthState, onAuthChange } from './bridge.js';
+import { createTransfers } from './transfers.js';
 
 let wasm = null;
 let bridge = null;
+let transfers = null;
 let currentView = 'loading';
 let dissolveResult = null;
 let retrieveShares = [];
@@ -52,6 +54,7 @@ async function init() {
     await bridge.init(wasm);
     bridge.onStateChange = onBridgeStateChange;
     onAuthChange(updateAuthBanner);
+    transfers = createTransfers({ bridge, t, showToast, copyToClipboard, authMessage });
 
     showView('home');
     setupEventListeners();
@@ -79,6 +82,10 @@ function showView(name) {
     currentView = name;
   }
   document.getElementById('app').classList.toggle('wide', name === 'transfers');
+  if (transfers) {
+    if (name === 'transfers') transfers.show();
+    else transfers.hide();
+  }
   if (name === 'home') updateStats();
   if (name === 'settings') updateSettingsView();
   if (name === 'dissolve') {
@@ -1156,6 +1163,7 @@ function decodeBase58(str) {
 function onLanguageChanged() {
   updateConnectionUI();
   updateAuthBanner();
+  if (transfers) transfers.refresh();
 }
 
 /** Why the daemon refuses this page, and what to do about it. */
