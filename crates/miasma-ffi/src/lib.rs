@@ -234,7 +234,12 @@ fn open_store_inner(
             msg: "failed to load config".into(),
         }
     })?;
-    let store = LocalShareStore::open(&path, config.storage.quota_mb).map_err(|e| {
+    let store = LocalShareStore::open_with_quotas(
+        &path,
+        config.storage.quota_mb,
+        config.storage.hosted_quota_mb,
+    )
+    .map_err(|e| {
         tracing::warn!("store open error: {e}");
         MiasmaFfiError::Other {
             msg: "failed to open store".into(),
@@ -280,7 +285,7 @@ pub fn initialize_node(
         storage: StorageConfig {
             quota_mb: storage_mb,
             bandwidth_mb_day,
-            hosted_quota_mb: 0,
+            ..StorageConfig::default()
         },
         network: NetworkConfig {
             listen_addr: "/ip4/0.0.0.0/udp/0/quic-v1".into(),
