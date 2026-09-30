@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import {
   formatBytes, formatRate, formatEta, permille, formatPermille, timeSplit, fill, plainPath,
   fileNameOf, titleOf, transferId, chipTone, sortJobs, canResume, buildStrip, MAX_STRIP_CELLS, errorKey,
-  isFinished, canRemove, removeNeedsDiscard, clearable,
+  isFinished, canRemove, removeNeedsDiscard, clearable, transferIdKind,
 } from '../js/format.js';
 
 test('formatBytes: units, truncation, and no float rounding for big sizes', () => {
@@ -175,6 +175,21 @@ test('removal rules: only finished rows go, partial data needs a discard', () =>
   assert.equal(clearable(j('Complete')), true);
   assert.equal(clearable(j('Failed', true)), false);
   assert.equal(clearable(j('Running')), false);
+});
+
+test('transferIdKind: a share ID, a bare MID, or nothing, by prefix', () => {
+  assert.equal(transferIdKind('miasma-share:3vQB7B6MrGQZaxCuFg4oh'), 'share');
+  assert.equal(transferIdKind('  miasma-share:3vQB  '), 'share');
+  assert.equal(transferIdKind('miasma:3vQB7B6MrGQZaxCuFg4oh'), 'mid');
+  // Nothing after the prefix, another prefix, or not text at all.
+  for (const bad of ['miasma:', 'miasma-share:', 'share:abc', 'hello', '', '   ', null, undefined, 42]) {
+    assert.equal(transferIdKind(bad), '');
+  }
+});
+
+test('errorKey: a mistyped share ID and a bad MID map to their own messages', () => {
+  assert.equal(errorKey('invalid share ID: the share ID checksum does not match: a character was probably mistyped'), 'tf_err_share_id');
+  assert.equal(errorKey('invalid MID: expected a share ID (miasma-share:...) or a MID (miasma:...)'), 'tf_err_mid');
 });
 
 test('errorKey: a folder target and a refused remove have their own messages', () => {
