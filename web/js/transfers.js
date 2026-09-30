@@ -16,7 +16,7 @@
 import {
   formatBytes, formatRate, formatEta, permille, formatPermille, timeSplit, fill, plainPath,
   titleOf, transferId, chipTone, sortJobs, canResume, buildStrip, errorKey,
-  canRemove, removeNeedsDiscard, clearable,
+  canRemove, removeNeedsDiscard, clearable, transferIdKind,
 } from './format.js';
 import { parseWeakPasswordCodes } from './password_policy.js';
 
@@ -302,6 +302,17 @@ export function createTransfers({ bridge, t, showToast, copyToClipboard, authMes
     detailText('tf-d-path', job.name ? plainPath(job.name) : '');
     detailText('tf-d-mid', job.mid || '-');
     el('tf-d-copy').disabled = !job.mid;
+    // The Share ID is what to give the receiver (it also lets them check who published it).
+    const shareId = job.share_id || '';
+    el('tf-share-row').classList.toggle('hidden', !shareId);
+    detailText('tf-d-share', shareId);
+    el('tf-d-share-note').classList.toggle('hidden', !(shareId && send));
+    // A receive says whether the publisher was authenticated.
+    const pub = el('tf-d-publisher');
+    const showPub = !send && !!job.mid;
+    pub.classList.toggle('hidden', !showPub);
+    pub.classList.toggle('tf-warn', showPub && !job.publisher_authenticated);
+    detailText('tf-d-publisher', showPub ? t(job.publisher_authenticated ? 'tf_publisher_verified' : 'tf_publisher_unverified') : '');
 
     setFill(el('tf-d-fill'), pm, job.state);
     detailText('tf-d-pct', formatPermille(pm));
@@ -462,7 +473,8 @@ export function createTransfers({ bridge, t, showToast, copyToClipboard, authMes
     const pwInput = el('tf-d-password');
     const password = pwInput.value;
     const via = viaById.get(job.mid);
-    const ok = await startReceive({ mid: job.mid, outputPath: plainPath(job.name), password, restart, via });
+    // The share ID it was started from, so a resume keeps verifying the publisher.
+    const ok = await startReceive({ mid: job.share_id || job.mid, outputPath: plainPath(job.name), password, restart, via });
     if (ok) {
       pwInput.value = '';
       restartArmed = false;
@@ -474,7 +486,7 @@ export function createTransfers({ bridge, t, showToast, copyToClipboard, authMes
     const mid = el('tf-mid').value.trim();
     const path = el('tf-path').value.trim();
     const pw = el('tf-pw');
-    if (!mid.startsWith('miasma:')) { showToast(t('tf_err_mid'), 'error'); return; }
+    if (!transferIdKind(mid)) { showToast(t('tf_err_mid'), 'error'); return; }
     if (!path) { showToast(t('tf_err_no_path'), 'error'); return; }
     const viaUrl = el('tf-via').value.trim();
     const button = el('tf-start');
@@ -499,6 +511,10 @@ export function createTransfers({ bridge, t, showToast, copyToClipboard, authMes
   el('tf-d-copy').addEventListener('click', () => {
     const job = selectedJob();
     if (job && job.mid) copyToClipboard(job.mid, t('copied'));
+  });
+  el('tf-d-share-copy').addEventListener('click', () => {
+    const job = selectedJob();
+    if (job && job.share_id) copyToClipboard(job.share_id, t('copied'));
   });
   el('tf-d-resume-btn').addEventListener('click', () => resume(false));
   el('tf-d-restart-btn').addEventListener('click', () => { restartArmed = true; renderDetail(); });
