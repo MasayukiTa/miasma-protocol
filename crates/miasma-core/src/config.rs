@@ -25,6 +25,19 @@ pub struct StorageConfig {
     pub quota_mb: u64,
     /// Maximum outbound bandwidth for share serving, in MiB/day.
     pub bandwidth_mb_day: u64,
+    /// Maximum storage for shares pushed to this node by *other* publishers
+    /// (hosted shares), in MiB. Separate from `quota_mb`, which bounds the
+    /// node's own published shares.
+    ///
+    /// **Default 0 = this node refuses every pushed share.** That is
+    /// deliberate: accepting other peoples' shares by default lets any peer
+    /// fill the disk, so hosting is opt-in. Set it on a helper node (e.g.
+    /// `miasma config --key storage.hosted_quota_mb --value 2048`) to let it
+    /// hold shares for a publisher that may go offline. Takes effect when the
+    /// daemon starts. There is no eviction and no per-peer limit yet: once the
+    /// quota is full, further pushes are refused.
+    #[serde(default)]
+    pub hosted_quota_mb: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,6 +184,7 @@ impl Default for StorageConfig {
         Self {
             quota_mb: 10_240, // 10 GiB desktop default
             bandwidth_mb_day: 1_024,
+            hosted_quota_mb: 0, // opt-in; see the field's doc comment
         }
     }
 }

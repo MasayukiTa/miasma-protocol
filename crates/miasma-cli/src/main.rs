@@ -105,7 +105,8 @@ enum Commands {
 
     /// Get or set configuration values.
     Config {
-        /// Config key to read or write (e.g. `storage.quota_mb`).
+        /// Config key to read or write (e.g. `storage.quota_mb`,
+        /// `storage.hosted_quota_mb`).
         #[arg(long)]
         key: Option<String>,
         /// Value to set. If omitted, prints current value.
@@ -521,6 +522,7 @@ fn cmd_init(
         storage: StorageConfig {
             quota_mb: storage_mb,
             bandwidth_mb_day,
+            hosted_quota_mb: 0,
         },
         network: NetworkConfig {
             listen_addr: listen_addr.into(),
@@ -737,6 +739,10 @@ async fn cmd_status(data_dir: &std::path::Path) -> Result<()> {
         "  Storage used:  {:.1} MiB / {} MiB",
         store.used_bytes() as f64 / 1024.0 / 1024.0,
         quota_mb
+    );
+    println!(
+        "  Hosted quota:  {} MiB (storage.hosted_quota_mb; 0 = refuse shares pushed by others)",
+        config.storage.hosted_quota_mb
     );
     Ok(())
 }
@@ -1286,6 +1292,7 @@ fn cmd_config_loaded(
             match k {
                 "storage.quota_mb" => println!("{}", config.storage.quota_mb),
                 "storage.bandwidth_mb_day" => println!("{}", config.storage.bandwidth_mb_day),
+                "storage.hosted_quota_mb" => println!("{}", config.storage.hosted_quota_mb),
                 "network.listen_addr" => println!("{}", config.network.listen_addr),
                 "network.bootstrap_peers" => {
                     for peer in &config.network.bootstrap_peers {
@@ -1324,6 +1331,9 @@ fn cmd_config_loaded(
                 }
                 "storage.bandwidth_mb_day" => {
                     config.storage.bandwidth_mb_day = v.parse().context("expected integer")?;
+                }
+                "storage.hosted_quota_mb" => {
+                    config.storage.hosted_quota_mb = v.parse().context("expected integer")?;
                 }
                 "network.listen_addr" => {
                     config.network.listen_addr = v.into();
@@ -1406,8 +1416,10 @@ async fn cmd_daemon(data_dir: &std::path::Path, bootstrap_addrs: &[String]) -> R
         bail!("master.key is erased/all-zero");
     }
 
+    // `hosted_quota_mb` defaults to 0: the node refuses shares pushed by other
+    // publishers unless the operator opted in via `storage.hosted_quota_mb`.
     let store = Arc::new(
-        LocalShareStore::open(data_dir, config.storage.quota_mb)
+        LocalShareStore::open_configured(data_dir, &config.storage)
             .context("cannot open share store")?,
     );
 

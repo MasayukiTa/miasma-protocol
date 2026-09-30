@@ -703,6 +703,7 @@ fn do_init(data_dir: &Path) -> anyhow::Result<()> {
         storage: StorageConfig {
             quota_mb: 10_240,
             bandwidth_mb_day: 1_024,
+            hosted_quota_mb: 0,
         },
         network: NetworkConfig {
             listen_addr: "/ip4/0.0.0.0/udp/0/quic-v1".into(),

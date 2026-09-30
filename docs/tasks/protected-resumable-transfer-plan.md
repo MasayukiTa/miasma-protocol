@@ -631,11 +631,19 @@ Each entry says what was actually run. Machine: Windows 11, slim debug profile (
 
 Each has a reason it was left; none blocks a first cross-machine transfer.
 
-1. **Hosted-share quota has no configuration key** (`with_hosted_quota_mb` is called only from
-   tests), so peers refuse every pushed share and the sender is the sole holder. A config key, a
-   default, and a test that runs with the *default* config are needed before the readme's
-   "resists content seizure via single-node compromise" line can be relied on. The readme now
-   carries a caveat pointing here.
+1. **Hosted-share quota has no configuration key** — **DONE 2026-09-30 (key added; default stays off).**
+   `storage.hosted_quota_mb` (`StorageConfig`, `#[serde(default)]` so old `config.toml` files still
+   load) is read/written by `miasma config --key ...`, reaches the store through
+   `LocalShareStore::open_configured` at daemon start, and is printed by `miasma status` when the
+   daemon is not running. **The default is 0 (owner decision: opt-in)**, because accepting other
+   people's shares by default is a storage-exhaustion vector; the readme caveat says so. Tests:
+   `default_config_node_refuses_pushed_shares` (default config: push attempted and refused, nothing
+   hosted) and `node_with_hosted_quota_key_holds_shares_and_serves_after_publisher_leaves` (B has the
+   key in `config.toml`, A pushes, A shuts down, C retrieves from B; k=1 because A places one share
+   per peer and B is the only host). **Still not designed:** eviction of hosted shares when the quota
+   is full (a full quota just refuses), and per-peer limits (one publisher can fill the whole hosted
+   quota). Not verified across real machines. The running daemon's status has no quota field, so it is
+   not shown there.
 2. **The local share store's index is rewritten in full on every `put`** — cost per put grew from
    26 ms (250 shares) to 123 ms (4,000) in a debug build. Fix: an append-only index log (the send
    journal is the same shape). Left until a real run shows it matters.
@@ -681,6 +689,10 @@ Owner decisions (answers to the three questions asked after §7b):
    `C:\Windows\Fonts`, so on macOS every Japanese glyph is a tofu box — a font discovery per OS is part
    of this work, not an extra.
 3. Theme: **whole app**, not just the new screen.
+4. Test scope (2026-09-30): the owner has no drive with >= 100 GiB free on the Windows receiver and
+   judges a 256 MB test enough to prove a split transfer is received. The cross-machine ramp is now
+   256 MiB -> 1 GiB -> 4 GiB; the 20/100 GiB steps and their disk arithmetic are kept in the runbook's
+   appendix A ("if more disk becomes available"). 100 GiB behaviour therefore stays **unmeasured**.
 
 Requested language and look:
 
