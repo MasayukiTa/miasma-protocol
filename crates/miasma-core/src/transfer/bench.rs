@@ -124,7 +124,7 @@ fn bench_one(
     // The password path is the one that will be used; its cost per segment is one
     // HKDF, so it does not skew the comparison.
     // The password is throwaway (nothing is stored or shared), so use a random one.
-    let password = format!("bench-{:032x}", rand::random::<u128>());
+    let password = format!("bench-1{:032x}", rand::random::<u128>());
     let (_, key) = PasswordProtection::create_with_cost(&password, 64, 1, 1)?;
 
     // Stage attribution on the first segment (the real dissolve below is what is

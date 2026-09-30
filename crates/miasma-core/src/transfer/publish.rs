@@ -209,6 +209,13 @@ impl MiasmaCoordinator {
                 r.key.clone(),
             ),
             None => {
+                // A new protected transfer needs a password that meets the
+                // policy; refuse now, before hashing the whole file. (A
+                // resumed publish keeps the protection it already has.)
+                if let Some(pw) = password.as_ref() {
+                    super::password_policy::check(pw.as_str())
+                        .map_err(MiasmaError::WeakPassword)?;
+                }
                 progress.set_phase(Phase::Hashing);
                 let Some(mid) = hash_file(&file_path, params, file_len, progress.clone()).await?
                 else {

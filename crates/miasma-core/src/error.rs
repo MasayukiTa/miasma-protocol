@@ -56,4 +56,11 @@ pub enum MiasmaError {
     /// The transfer is password-protected and no password was supplied.
     #[error("this transfer is password-protected; a password is required")]
     PasswordRequired,
+
+    /// A password chosen for a *new* protected transfer does not meet the
+    /// policy. Raised on the publish side only, before any KDF work or file
+    /// I/O. The text is `weak password: ` plus comma-separated stable codes
+    /// (`too_short,no_symbol`), which clients parse and localise.
+    #[error("weak password: {}", crate::transfer::password_policy::codes(.0))]
+    WeakPassword(Vec<crate::transfer::password_policy::PolicyViolation>),
 }
