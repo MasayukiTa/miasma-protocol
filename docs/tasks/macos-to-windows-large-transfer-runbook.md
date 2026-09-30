@@ -3,6 +3,12 @@
 対象ブランチ: `work/resumable-protected-transfer`。設計と根拠は
 [`protected-resumable-transfer-plan.md`](protected-resumable-transfer-plan.md)、実測値はその §6。
 
+**スコープ変更(オーナー決定 2026-09-30)。** Windows 受信側に 100 GiB 以上の空きがあるドライブが
+無いため、**このテストは 256 MiB → 1 GiB → 4 GiB の3段階までとします**(オーナーがディスクを
+足さない限り、4 GiB で止めます)。「分割された転送が受信できること」の証明には 256 MiB で足りる、
+というのがオーナーの判断です。20 GiB と 100 GiB の段階と、その容量計算は削除せず、末尾の
+**付録 A「ディスクが増えた場合(任意)」**に残してあります。
+
 **このテストが初の「別々の2台のあいだの転送」です。** これまでの検証は全て1台のマシン上(loopback)
 でした。Mac で `miasma` がビルドできて動くかどうかも、まだ誰も確かめていません(CI が macOS で
 ビルドするのは core・ffi・wasm だけで、CLI は含まれません)。下の手順は、その未確認部分を
@@ -12,12 +18,24 @@
 
 | 要件 | どう確かめるか |
 |---|---|
-| 分割され、各ピースが個別の ID を持つ | 受信側が全ピースを manifest の ID と照合する(`pieces_rejected` が 0 のはず) |
+| 分割され、各ピースが個別の ID を持つ | 256 MiB は 4 セグメントに分かれる。受信側が全ピースを manifest の ID と照合する(`pieces_rejected` が 0 のはず) |
 | MID とパスワードの両方で縛る | パスワード無し/誤りは、**データを1つも取得する前に**拒否される |
 | 冗長度を下げて試す | `redundancy-bench` と、実転送で `k/n` を変えて比較する |
 | 進捗が分かる | `network-get` / `network-publish` の進捗行、`miasma transfers` |
-| 再開できる | 強制終了(kill -9)しても、同じコマンドを再実行すれば続きから |
-| 速度 | 各段階で MB/s を記録し、外挿する(**実測していない値は信用しない**) |
+| 再開できる | 強制終了(kill -9)しても、同じコマンドを再実行すれば続きから(受信側・送信側の両方) |
+| 速度 | 各段階で MB/s を記録する。**外挿は 4 GiB までの実測値の範囲にとどめる**(実測していない値は信用しない。100 GiB の所要時間は、実測していないので約束しない) |
+
+### 0b. 256 MiB での成功条件
+
+次の 6 点がすべて満たされれば、256 MiB の段階は成功です(1 GiB・4 GiB も同じ条件で、サイズだけ変える)。
+
+1. **分割**: 4 セグメント(256 MiB ÷ 64 MiB)に分かれ、進捗行が `seg N/4` で進む。
+2. **ピースごとの検証**: 受信側の `pieces_rejected` が 0(全ピースが manifest の ID と一致)。
+3. **誤パスワードの拒否**: 誤ったパスワード・パスワード無しが、データを1つも取得する前に拒否される。
+4. **中断と再開(両側)**: 受信側デーモンの `kill -9` → 再起動 → 再実行で、`seg N/M` が 0 に戻らず続きから進む。
+   送信側デーモンの停止 → 受信側が `paused: ... valid pieces` で止まる → 送信側を再起動 → 再実行で再開。
+5. **SHA256 一致**: 送信元と受信ファイルのハッシュが一致する。
+6. **速度の実測**: 公開と受信それぞれの平均 MB/s と、fetch / decode / write の内訳を記録表に書く。
 
 ## 1. 前提とディスク計算
 
@@ -33,19 +51,19 @@
 | ファイル | k/n | 保存クォータ(MiB) | 送信側の空き(元ファイル込み) | セグメント数 |
 |---|---|---|---|---|
 | 256 MiB | 10/12 | 308 | 0.55 GiB | 4 |
+| 1 GiB | 10/12 | 1,231(手計算) | 2.20 GiB | 16 |
 | 4 GiB | 10/12 | 4,922 | 8.81 GiB | 64 |
-| 20 GiB | 10/12 | 24,607 | 44.03 GiB | 320 |
-| 100 GiB | 10/10 | 102,526 | 200.12 GiB | 1,600 |
-| 100 GiB | **10/12** | **123,031** | **220.15 GiB** | 1,600 |
-| 100 GiB | 10/20(既定) | 205,051 | 300.24 GiB | 1,600 |
+
+(20 GiB / 100 GiB の行は付録 A に移しました。)
 
 - **受信側**: 出力ファイルと同じボリュームに、ファイルサイズ + 数 MB(`.part` は完成時に
-  リネームされるだけなので、追加の 1 倍は要りません)。100 GiB なら 100 GiB 以上の空き。
-- 既定の保存クォータは **10,240 MiB** です。20 GiB 以上では**必ず上げてください**(足りないと
-  公開は何も始まる前に拒否されます)。設定は**フラグ形式**です:
+  リネームされるだけなので、追加の 1 倍は要りません)。この 3 段階なら最大でも 4 GiB 強です。
+- 既定の保存クォータは **10,240 MiB** です。**この 3 段階(最大 4,922 MiB)では既定のままで足ります**。
+  20 GiB 以上(付録 A)では必ず上げてください(足りないと公開は何も始まる前に拒否されます)。
+  設定は**フラグ形式**です:
 
 ```bash
-miasma --data-dir /Volumes/SSD/miasma-data config --key storage.quota_mb --value 123031
+miasma --data-dir /Volumes/SSD/miasma-data config --key storage.quota_mb --value 10240
 miasma --data-dir /Volumes/SSD/miasma-data config --key storage.quota_mb      # 確認
 ```
 
@@ -124,7 +142,7 @@ rm -rf /Volumes/SSD/bench
 # --- Mac (送信側) ---
 D=/Volumes/SSD/miasma-data
 miasma --data-dir $D init --listen-addr /ip4/0.0.0.0/tcp/4001
-miasma --data-dir $D config --key storage.quota_mb --value <表の保存クォータ>
+miasma --data-dir $D config --key storage.quota_mb --value <表の保存クォータ>   # 4 GiB までは既定 10240 のままでよい
 miasma --data-dir $D daemon                   # 前面で動かす。別ターミナルで以降を実行
 miasma --data-dir $D status                   # "Listen addr:" に LAN の IP と PeerId が出る
 ```
@@ -153,28 +171,34 @@ miasma --data-dir $D status                   # peer が 1 になること
 - つながらない場合は、Mac 側の `status` の peer 数、両側の `daemon` のログ、ファイアウォールを確認。
   **Windows→Mac が通れば十分**です(受信側が接続する側)。
 
-### 2-5. 段階を上げて転送する(256 MiB → 4 GiB → 20 GiB → 100 GiB)
+### 2-5. 段階を上げて転送する(256 MiB → 1 GiB → 4 GiB。ここで止める)
 
 各段階で同じことを行い、記録表(§3)を埋めます。**前の段階が通ってから次へ。**
+最初の 256 MiB で §0b の成功条件が満たされれば、分割転送が受信できたことの証明としては十分です
+(オーナー決定)。1 GiB・4 GiB は、速度の傾向を見るための追加です。
 
 ```bash
 # --- Mac: ダミーファイルとパスワード ---
-head -c $((4*1024*1024*1024)) /dev/urandom > /Volumes/SSD/test-4g.bin     # 段階に合わせてサイズを変える
+head -c $((256*1024*1024)) /dev/urandom > /Volumes/SSD/test-256m.bin      # 段階に合わせてサイズを変える(1 GiB = 1024*1024*1024)
 printf '%s\n' 'ここに強いパスワード' > /Volumes/SSD/pw.txt
-shasum -a 256 /Volumes/SSD/test-4g.bin
+shasum -a 256 /Volumes/SSD/test-256m.bin
 
 # --- Mac: 公開(進捗行が出る。完了時に MID と平均速度が出る) ---
-miasma --data-dir $D network-publish /Volumes/SSD/test-4g.bin \
+miasma --data-dir $D network-publish /Volumes/SSD/test-256m.bin \
     --data-shards 10 --total-shards 12 --password-file /Volumes/SSD/pw.txt
 ```
 
 ```powershell
 # --- Windows: パスワードファイルを安全な手段で渡してから ---
-miasma --data-dir $D network-get <MID> -o D:\recv\test-4g.bin --password-file D:\pw.txt
-Get-FileHash D:\recv\test-4g.bin -Algorithm SHA256        # Mac の値と一致すること
+miasma --data-dir $D network-get <MID> -o D:\recv\test-256m.bin --password-file D:\pw.txt
+Get-FileHash D:\recv\test-256m.bin -Algorithm SHA256      # Mac の値と一致すること
 ```
 
-**中断ドリル(4 GiB の段階で必ず行う):**
+**誤パスワードの確認(256 MiB で必ず行う):** 正しいパスワードで受信する前に、別のパスワードのファイル(または
+`--password-file` 無し)で同じ `network-get` を実行し、`wrong password` /
+`this transfer is password-protected` でデータ取得前に拒否されることを確かめます。
+
+**中断ドリル(256 MiB の段階で必ず行う。1 GiB・4 GiB は任意):**
 
 1. 受信中に Ctrl-C → `miasma transfers` でデーモン側の転送が続いていることを確認。
 2. 受信側デーモンを `kill -9`(Windows は `Stop-Process -Force`)→ 再起動 → 同じ `network-get` を
@@ -189,21 +213,30 @@ Get-FileHash D:\recv\test-4g.bin -Algorithm SHA256        # Mac の値と一致�
 同じ手順を役割を入れ替えて行います。**Windows が送信側になるので、Windows の受信ポートを
 Mac から届くようにしてください**(Windows Defender ファイアウォールの許可)。
 
-### 2-7. 100 GiB
+### 2-7. (任意)第三のノードにシェアを預からせる
 
-- 事前確認: 送信側の空き(表)、保存クォータ、受信側の空き 100 GiB 以上。
-- 送信 Mac がスリープしないこと: `caffeinate -dimsu -w <daemonのPID>`。Windows も電源プランでスリープなし。
-- 所要時間は、**20 GiB の段階で実測した MB/s** から `100 GiB / 実測値` で見積もってください。
-- 止まったら(`paused: ...`)**同じコマンドを再実行するだけ**です。原因が空き容量なら、空けてから再実行。
+**Mac → Windows のこのテストには不要です。** 既定では、他のピアは押し込まれたシェアを預かりません
+(送信側だけが保持者)。預かり枠は、ヘルパーノード側で明示的に有効にします(既定 0 = 無効。
+他人のシェアを既定で受け入れると保存容量を食い尽くされる恐れがあるため、オプトインです):
+
+```bash
+miasma --data-dir $H config --key storage.hosted_quota_mb --value 2048   # ヘルパーノードで。再起動後に有効
+miasma --data-dir $H config --key storage.hosted_quota_mb                # 確認(2048)。デーモン停止中の `status` にも "Hosted quota:" が出る
+```
+
+これを設定したノードが公開者から押し込まれたシェアを保持し、公開者が落ちても第三者がそこから
+取得できます(自動テストで確認済み。実機の複数マシンでは未検証)。追い出し(eviction)や
+ピアごとの上限は未設計です。
 
 ## 3. 記録表(段階ごとに 1 行)
 
 | 段階 | k/n | ハッシュ時間 | 公開: 所要 / 平均MB/s | 受信: 所要 / 平均MB/s | 受信の fetch / decode / write (ms) | rejected / retries | SHA256 一致 | 備考 |
 |---|---|---|---|---|---|---|---|---|
 | 256 MiB | | | | | | | | |
+| 1 GiB | | | | | | | | |
 | 4 GiB | | | | | | | | |
-| 20 GiB | | | | | | | | |
-| 100 GiB | | | | | | | | |
+
+(付録 A の 20 GiB / 100 GiB の行は、その段階を行うときに足してください。)
 
 進捗行の `(fetch X% decode Y% write Z%)` が、時間がどこに使われているかを示します
 (送信は `store+push` と `dissolve`)。**fetch が支配的なら通信/ディスク読み出し、decode なら CPU、
@@ -213,8 +246,10 @@ write なら受信側ディスク**です。最初に測るべきはこの内訳
 
 - **Mac ビルドは未確認**(§2-1 で確かめる)。CI は macOS で CLI をビルドしていません。
 - **別々の2台の間の転送は、リポジトリ全体で初めて**です。
-- **他のピアはシェアを預かりません**(預かり枠が本番で 0 で、設定項目がありません)。送信側が
-  常にオンラインである必要があります。この修正は別件として計画書に記録済みです。
+- **他のピアは既定ではシェアを預かりません**(`storage.hosted_quota_mb` は既定 0。§2-7)。この
+  テストでは送信側が常にオンラインである必要があります。
+- **100 GiB は実行しません**(受信側に空きが無いため。付録 A)。100 GiB での所要時間・DHT レコードの
+  複製・ストア索引の書き込み時間は、この範囲では**未測定のまま**です。
 - **DHT レコードは 100 GiB で約 8 MB**(16.7 MB の上限に対して余裕あり。**シリアライズ後の大きさは
   テスト済みですが、実際の Kademlia が 8 MB のレコードを複製できるかは未確認**です)。
   `network-get` が「no record found」になる場合はここを疑い、報告してください。
@@ -241,3 +276,24 @@ write なら受信側ディスク**です。最初に測るべきはこの内訳
 | 転送状況を見たい | `miasma transfers`(停止中のものも、前回のデーモンの分も出る) |
 | 止めたい | `miasma transfer-cancel <MID>`(部分ファイルは残り、再開可能) |
 | 最初からやり直したい | `network-get ... --restart` / `network-publish ... --restart` |
+
+## 付録 A. ディスクが増えた場合(任意): 20 GiB と 100 GiB
+
+**オーナー決定(2026-09-30)により、通常は実行しません。** 受信側に 100 GiB 以上の空きが用意できた
+場合だけ、4 GiB の段階が通ったあとに行います。計算は §1 と同じ式(`estimated_local_share_storage_bytes`)で、
+そのまま正しい値です。
+
+| ファイル | k/n | 保存クォータ(MiB) | 送信側の空き(元ファイル込み) | セグメント数 |
+|---|---|---|---|---|
+| 20 GiB | 10/12 | 24,607 | 44.03 GiB | 320 |
+| 100 GiB | 10/10 | 102,526 | 200.12 GiB | 1,600 |
+| 100 GiB | **10/12** | **123,031** | **220.15 GiB** | 1,600 |
+| 100 GiB | 10/20(既定) | 205,051 | 300.24 GiB | 1,600 |
+
+- **受信側**: 100 GiB なら出力ファイルと同じボリュームに 100 GiB 以上の空き。
+- 20 GiB 以上では既定の保存クォータ(10,240 MiB)では足りないので、表の値に上げます:
+  `miasma --data-dir /Volumes/SSD/miasma-data config --key storage.quota_mb --value 123031`
+- 送信 Mac がスリープしないこと: `caffeinate -dimsu -w <daemonのPID>`。Windows も電源プランでスリープなし。
+- 所要時間は、**20 GiB の段階で実測した MB/s** から `100 GiB / 実測値` で見積もってください。
+- 止まったら(`paused: ...`)**同じコマンドを再実行するだけ**です。原因が空き容量なら、空けてから再実行。
+- 記録表に `20 GiB` / `100 GiB` の行を足して同じ項目を記録します。
