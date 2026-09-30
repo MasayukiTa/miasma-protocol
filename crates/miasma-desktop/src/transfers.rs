@@ -226,6 +226,68 @@ pub fn can_resume(state: TransferState) -> bool {
     )
 }
 
+/// Complete, Failed or Cancelled: nothing more will happen to it on its own.
+pub fn is_finished(state: TransferState) -> bool {
+    matches!(
+        state,
+        TransferState::Complete | TransferState::Failed | TransferState::Cancelled
+    )
+}
+
+/// A finished row can be taken off the list. A running or paused one cannot: paused keeps its
+/// journal so it can resume, and starting it over is the existing "Start over" action.
+pub fn can_remove(job: &TransferStatus) -> bool {
+    is_finished(job.state)
+}
+
+/// Removing this row would throw away partial data (a stopped transfer that can still resume),
+/// so it needs an explicit "Discard and remove".
+pub fn remove_needs_discard(job: &TransferStatus) -> bool {
+    is_finished(job.state) && job.resumable
+}
+
+/// Finished rows that "Clear finished" takes off without losing anything.
+pub fn clearable(job: &TransferStatus) -> bool {
+    is_finished(job.state) && !job.resumable
+}
+
+/// "Clear finished" is shown only when it would do something.
+pub fn show_clear_finished(jobs: &[TransferStatus]) -> bool {
+    jobs.iter().any(clearable)
+}
+
+/// The file name offered when the person has not chosen one: `received-<first 8 characters of the
+/// MID digest>.bin`, or `received.bin` when no MID has been typed yet. The manifest carries no
+/// original name, so the receiver cannot know it.
+pub fn suggested_file_name(mid: &str) -> String {
+    let digest: String = mid
+        .trim()
+        .strip_prefix("miasma:")
+        .unwrap_or("")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(8)
+        .collect();
+    if digest.is_empty() {
+        "received.bin".to_owned()
+    } else {
+        format!("received-{digest}.bin")
+    }
+}
+
+/// The path a receive will write to. A typed path that is an existing folder gets the suggested
+/// file name appended, so a folder picked by mistake still ends up a file. Returns the path and
+/// whether the file name was added.
+pub fn effective_receive_path(typed: &str, mid: &str) -> (String, bool) {
+    let typed = typed.trim();
+    if !typed.is_empty() && std::path::Path::new(typed).is_dir() {
+        let joined = std::path::Path::new(typed).join(suggested_file_name(mid));
+        (joined.to_string_lossy().into_owned(), true)
+    } else {
+        (typed.to_owned(), false)
+    }
+}
+
 // ─── Pure: the segment strip ────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -399,6 +461,8 @@ pub struct TransfersUi {
     resume_open: bool,
     resume_password: String,
     restart_confirm: bool,
+    /// The selected stopped transfer holds partial data: asking whether to discard it.
+    discard_confirm: bool,
 
     /// Ids started with a password in this session (the daemon does not tell us).
     known_protected: HashSet<String>,
@@ -438,6 +502,7 @@ impl Default for TransfersUi {
             resume_open: false,
             resume_password: String::new(),
             restart_confirm: false,
+            discard_confirm: false,
             known_protected: HashSet::new(),
             pending_protected: false,
             known_via: HashMap::new(),
@@ -492,6 +557,7 @@ impl TransfersUi {
             self.selected = id;
             self.resume_open = false;
             self.restart_confirm = false;
+            self.discard_confirm = false;
             self.resume_password.zeroize();
         }
     }
@@ -584,6 +650,30 @@ impl TransfersUi {
         self.form_error = Some(message);
     }
 
+    /// Take rows off the list at once, so a poll already in flight cannot show them again for a
+    /// moment. The daemon's answer to the next poll is what stays.
+    fn drop_rows(&mut self, keep: impl Fn(&TransferStatus) -> bool) {
+        self.jobs.retain(keep);
+    }
+
+    /// The daemon declined a remove.
+    pub fn on_remove_refused(
+        &mut self,
+        reason: miasma_core::transfer::jobs::RemoveRefusal,
+        t: &TransferStrings,
+    ) {
+        use miasma_core::transfer::jobs::RemoveRefusal as R;
+        self.poll_soon();
+        match reason {
+            // It holds partial data the list did not know about: ask before discarding.
+            R::HasPartialData => self.discard_confirm = true,
+            R::Running => self.form_error = Some(t.err_remove_running.to_owned()),
+            R::Paused => self.form_error = Some(t.err_remove_paused.to_owned()),
+            // Already gone: the next poll shows that.
+            R::NotFound => {}
+        }
+    }
+
     /// Ask for an immediate re-read (after a stop request).
     pub fn poll_soon(&mut self) {
         self.last_poll = Instant::now() - POLL_EVERY;
@@ -623,6 +713,21 @@ impl TransfersUi {
             ui.add_space(6.0);
         }
 
+        if show_clear_finished(&self.jobs) {
+            ui.horizontal(|ui| {
+                // Neutral: the one accent action on this screen is Start receiving / sending.
+                let btn = egui::Button::new(t.btn_clear_finished);
+                if ui
+                    .add_enabled(connected, btn)
+                    .on_hover_text(t.clear_finished_hint)
+                    .clicked()
+                {
+                    cmds.push(WorkerCmd::TransferClearFinished);
+                    self.drop_rows(|j| !clearable(j));
+                }
+            });
+            ui.add_space(4.0);
+        }
         self.list_card(ui, t, easy);
         ui.add_space(8.0);
         self.detail_card(ui, t, easy, connected, &mut cmds);
@@ -710,6 +815,17 @@ impl TransfersUi {
                         .color(pal().faint),
                 );
             }
+            // Why it stopped, directly under the title: this is what the person needs first.
+            if let Some(err) = &job.last_error {
+                ui.add_space(4.0);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!("{}: {}", t.error_label, err))
+                            .color(pal().danger),
+                    )
+                    .wrap(true),
+                );
+            }
             ui.add_space(8.0);
 
             if easy {
@@ -792,18 +908,16 @@ impl TransfersUi {
                         ui.label(job.segment_retries.to_string());
                         ui.end_row();
                     }
-
-                    if let Some(err) = &job.last_error {
-                        ui.label(egui::RichText::new(t.error_label).color(pal().muted));
-                        ui.label(egui::RichText::new(err.as_str()).color(pal().danger));
-                        ui.end_row();
-                    }
                 });
 
-            // A finished transfer has nothing to press.
+            // A completed transfer has nothing to resume.
             if job.state != TransferState::Complete {
                 ui.add_space(10.0);
                 self.detail_buttons(ui, t, &job, &id, connected, cmds);
+            }
+            if can_remove(&job) {
+                ui.add_space(10.0);
+                self.remove_section(ui, t, &job, &id, connected, cmds);
             }
         });
     }
@@ -1049,6 +1163,67 @@ impl TransfersUi {
         }
     }
 
+    /// Take a finished transfer off the list. Neutral buttons: the detail pane's accent action is
+    /// Resume. The line under it says what is and is not deleted.
+    fn remove_section(
+        &mut self,
+        ui: &mut egui::Ui,
+        t: &TransferStrings,
+        job: &TransferStatus,
+        id: &str,
+        connected: bool,
+        cmds: &mut Vec<WorkerCmd>,
+    ) {
+        let needs_discard = remove_needs_discard(job);
+        if self.discard_confirm {
+            ui.label(egui::RichText::new(t.discard_confirm).color(pal().danger));
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(connected, danger_button(t.discard_yes))
+                    .clicked()
+                {
+                    cmds.push(WorkerCmd::TransferRemove {
+                        id: id.to_owned(),
+                        discard_partial: true,
+                    });
+                    self.discard_confirm = false;
+                    let gone = id.to_owned();
+                    self.drop_rows(|j| transfer_id(j) != gone);
+                    self.selected = None;
+                }
+                if ui.button(t.btn_keep).clicked() {
+                    self.discard_confirm = false;
+                }
+            });
+            return;
+        }
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(connected, egui::Button::new(t.btn_remove))
+                .clicked()
+            {
+                if needs_discard {
+                    self.discard_confirm = true;
+                } else {
+                    cmds.push(WorkerCmd::TransferRemove {
+                        id: id.to_owned(),
+                        discard_partial: false,
+                    });
+                    let gone = id.to_owned();
+                    self.drop_rows(|j| transfer_id(j) != gone);
+                    self.selected = None;
+                }
+            }
+            let note = match (job.state, job.kind, needs_discard) {
+                (_, _, true) => t.remove_note_partial,
+                (TransferState::Complete, TransferKind::Send, _) => t.remove_note_send,
+                (TransferState::Complete, TransferKind::Receive, _) => t.remove_note_recv,
+                _ => t.remove_note_plain,
+            };
+            ui.label(egui::RichText::new(note).small().color(pal().muted));
+        });
+    }
+
     fn new_card(
         &mut self,
         ui: &mut egui::Ui,
@@ -1131,12 +1306,34 @@ impl TransfersUi {
                         .desired_width((ui.available_width() - 110.0).max(120.0)),
                 );
                 if ui.button(t.browse).clicked() {
-                    if let Some(p) = rfd::FileDialog::new().save_file() {
+                    // A Save-As dialog with a name already filled in, so what comes back is a
+                    // file path even when the person only picks a folder.
+                    let mut dialog =
+                        rfd::FileDialog::new().set_file_name(suggested_file_name(&self.recv_mid));
+                    let current = std::path::Path::new(self.recv_path.trim());
+                    let start = if current.is_dir() {
+                        Some(current)
+                    } else {
+                        current.parent().filter(|p| p.is_dir())
+                    };
+                    if let Some(dir) = start {
+                        dialog = dialog.set_directory(dir);
+                    }
+                    if let Some(p) = dialog.save_file() {
                         self.recv_path = p.to_string_lossy().into_owned();
                     }
                 }
             });
         });
+        // A typed or picked folder is turned into a file inside it; say so before starting.
+        let (final_path, added_name) = effective_receive_path(&self.recv_path, &self.recv_mid);
+        if added_name {
+            ui.label(
+                egui::RichText::new(fill(t.recv_folder_note, &[("path", &final_path)]))
+                    .small()
+                    .color(pal().warning),
+            );
+        }
         form_row(ui, t.password_label, |ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.recv_password)
@@ -1184,7 +1381,7 @@ impl TransfersUi {
                 self.pending_via = via.clone();
                 cmds.push(WorkerCmd::TransferStartReceive {
                     mid,
-                    output_path: self.recv_path.trim().into(),
+                    output_path: final_path.into(),
                     password,
                     restart: false,
                     via: via.into_iter().collect(),
@@ -2060,5 +2257,119 @@ mod tests {
         // A vanished selection falls back to the first row.
         ui.on_list(vec![status(TransferKind::Receive, TransferState::Paused)]);
         assert_eq!(ui.selected.as_deref(), Some("miasma:abc"));
+    }
+
+    // ── Removing finished transfers ─────────────────────────────────────────
+
+    fn job(state: TransferState, resumable: bool) -> TransferStatus {
+        let mut j = status(TransferKind::Receive, state);
+        j.resumable = resumable;
+        j
+    }
+
+    #[test]
+    fn only_finished_rows_can_be_removed_and_partial_data_needs_a_discard() {
+        use TransferState::*;
+        for (state, resumable, can, discard) in [
+            (Complete, false, true, false),
+            (Failed, false, true, false),
+            (Cancelled, false, true, false),
+            (Failed, true, true, true),
+            (Cancelled, true, true, true),
+            (Running, false, false, false),
+            (Paused, true, false, false),
+        ] {
+            let j = job(state, resumable);
+            assert_eq!(can_remove(&j), can, "{state:?}/{resumable}");
+            assert_eq!(remove_needs_discard(&j), discard, "{state:?}/{resumable}");
+        }
+    }
+
+    #[test]
+    fn clear_finished_shows_only_when_something_can_be_cleared_without_loss() {
+        use TransferState::*;
+        assert!(!show_clear_finished(&[]));
+        // Nothing finished, or only rows that hold partial data or are still alive.
+        assert!(!show_clear_finished(&[
+            job(Running, false),
+            job(Paused, true)
+        ]));
+        assert!(!show_clear_finished(&[job(Cancelled, true)]));
+        // One clearable row is enough.
+        assert!(show_clear_finished(&[
+            job(Running, false),
+            job(Complete, false)
+        ]));
+        assert!(show_clear_finished(&[job(Failed, false)]));
+    }
+
+    #[test]
+    fn a_removed_row_does_not_come_back_until_the_daemon_says_so() {
+        let mut ui = TransfersUi::default();
+        let mut done = job(TransferState::Complete, false);
+        done.mid = "miasma:done".into();
+        let mut live = job(TransferState::Running, false);
+        live.mid = "miasma:live".into();
+        ui.on_list(vec![done.clone(), live.clone()]);
+        ui.drop_rows(|j| !clearable(j));
+        assert_eq!(ui.jobs.len(), 1);
+        assert_eq!(ui.jobs[0].mid, "miasma:live");
+        // The daemon's next list is authoritative.
+        ui.on_list(vec![live]);
+        assert_eq!(ui.jobs.len(), 1);
+    }
+
+    #[test]
+    fn a_refused_remove_asks_to_discard_or_says_why() {
+        use miasma_core::transfer::jobs::RemoveRefusal as R;
+        let t = crate::locale::transfer_strings(crate::locale::Locale::En);
+        let mut ui = TransfersUi::default();
+        ui.on_remove_refused(R::HasPartialData, t);
+        assert!(ui.discard_confirm);
+        ui.on_remove_refused(R::Running, t);
+        assert_eq!(ui.form_error.as_deref(), Some(t.err_remove_running));
+        ui.on_remove_refused(R::Paused, t);
+        assert_eq!(ui.form_error.as_deref(), Some(t.err_remove_paused));
+    }
+
+    // ── A receive needs a file name ─────────────────────────────────────────
+
+    #[test]
+    fn the_suggested_file_name_comes_from_the_mid_digest() {
+        assert_eq!(
+            suggested_file_name("miasma:3vQB7B6MrGQZaxCuFg4oh"),
+            "received-3vQB7B6M.bin"
+        );
+        assert_eq!(suggested_file_name("  miasma:abc  "), "received-abc.bin");
+        // No MID yet, or not a MID: a fixed name, never a path fragment.
+        assert_eq!(suggested_file_name(""), "received.bin");
+        assert_eq!(suggested_file_name("nonsense"), "received.bin");
+        let hostile = suggested_file_name("miasma:../../etc/passwd");
+        assert!(
+            !hostile.contains('/') && !hostile.contains(".."),
+            "{hostile}"
+        );
+    }
+
+    #[test]
+    fn a_folder_is_turned_into_a_file_inside_it_and_a_file_path_is_kept() {
+        let dir = std::env::temp_dir().join(format!("miasma-desktop-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let folder = dir.to_string_lossy().into_owned();
+        let (path, added) = effective_receive_path(&folder, "miasma:3vQB7B6MrGQZ");
+        assert!(added);
+        assert_eq!(
+            std::path::Path::new(&path),
+            dir.join("received-3vQB7B6M.bin")
+        );
+
+        let file = dir.join("mine.bin").to_string_lossy().into_owned();
+        assert_eq!(effective_receive_path(&file, "miasma:x"), (file, false));
+        // Empty stays empty (the Start button is disabled for it).
+        assert_eq!(
+            effective_receive_path("  ", "miasma:x"),
+            (String::new(), false)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
