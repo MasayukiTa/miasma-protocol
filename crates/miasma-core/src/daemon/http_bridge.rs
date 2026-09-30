@@ -688,6 +688,14 @@ struct TransferReceiveRequest {
     /// Discard any partial transfer and start over.
     #[serde(default)]
     restart: bool,
+    /// `wss://` / `ws://` endpoints to receive from directly instead of over
+    /// the DHT (a sender's tunnelled WebSocket server). Absent or empty: the
+    /// ordinary network receive.
+    #[serde(default)]
+    via: Vec<String>,
+    /// Extra CA certificate(s), PEM text, for the `via` endpoints.
+    #[serde(default)]
+    via_ca_pem: Option<String>,
 }
 
 // The password is never printed, whatever formats this.
@@ -698,6 +706,7 @@ impl std::fmt::Debug for TransferReceiveRequest {
             .field("output_path", &"<redacted>")
             .field("password", &self.password.as_ref().map(|_| "<redacted>"))
             .field("restart", &self.restart)
+            .field("via_endpoints", &self.via.len())
             .finish()
     }
 }
@@ -735,7 +744,11 @@ fn percent_decode(s: &str) -> Option<String> {
 
 /// HTTP status for an error string the request handlers produce.
 fn transfer_error_status(e: &str) -> StatusCode {
-    if e.starts_with("output path rejected") || e.starts_with("invalid MID") {
+    if e.starts_with("output path rejected")
+        || e.starts_with("invalid MID")
+        // A bad `via` list (scheme, credentials in the URL, too many, too long).
+        || e.contains("--via")
+    {
         StatusCode::BAD_REQUEST
     } else if e.starts_with("no such transfer") {
         StatusCode::NOT_FOUND
@@ -827,6 +840,16 @@ async fn handle_transfer_receive(body: Bytes, state: BridgeState) -> Response<Fu
     if let Some(Err(e)) = checks.into_iter().find(|c| c.is_err()) {
         return json_error(StatusCode::BAD_REQUEST, &e);
     }
+    if req.via.len() > crate::transfer::direct::MAX_VIA_ENDPOINTS {
+        return json_error(StatusCode::BAD_REQUEST, "too many \"via\" endpoints");
+    }
+    for url in &req.via {
+        if let Err(e) =
+            validate_field_length("via", url, crate::transport::ws_direct::MAX_WS_URL_LEN)
+        {
+            return json_error(StatusCode::BAD_REQUEST, &e);
+        }
+    }
 
     // An empty password field means "no password".
     let password = req.password.take().filter(|p| !p.is_empty());
@@ -835,6 +858,8 @@ async fn handle_transfer_receive(body: Bytes, state: BridgeState) -> Response<Fu
         output_path: std::mem::take(&mut req.output_path),
         password,
         restart: req.restart,
+        via: std::mem::take(&mut req.via),
+        via_ca_pem: req.via_ca_pem.take(),
     };
     // The output-path policy (absolute, no `..`) and the MID check are the
     // daemon's own, the same as for the CLI and the desktop app.

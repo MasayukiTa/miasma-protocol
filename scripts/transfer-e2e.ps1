@@ -12,6 +12,8 @@
          same `network-get` again resumes it. The result must match by SHA256.
       4. Node A publishes a second file; ITS daemon is killed after the first segment;
          restarted; running the same `network-publish` resumes it, and B receives the result.
+      5. A third node C, started with no bootstrap, receives that file with `network-get --via
+         ws://127.0.0.1:<port>` (A's WebSocket share server), no DHT lookup; SHA256 must match.
 
     ASCII only on purpose (the file may be run on a machine that reads it in a legacy code page).
 
@@ -267,6 +269,31 @@ try {
     $g2 = Run-Cli @("--data-dir", $DIR_B, "network-get", $mid2, "-o", $recv2, "--password-file", $pwFile)
     Check ($g2.Code -eq 0) "node B received the resumed publish"
     Check ((Test-Path $recv2) -and ((Sha $recv2) -eq $hash2)) "the resumed publish's file matches the original (SHA256)"
+
+    # ---- 5. direct receive over a WebSocket endpoint, no DHT ------------------------------
+    Write-Host "`n[5] Direct receive: node C has no bootstrap and uses only --via ws://127.0.0.1:<port>" -ForegroundColor Cyan
+    # This is the path for a receiver behind a firewall that blocks QUIC and raw TCP: the sender
+    # exposes its plain-WS share server (normally through an outbound tunnel such as
+    # `cloudflared tunnel --url http://127.0.0.1:<port>`); the receiver needs only that URL.
+    $DIR_C = Join-Path $TMP "node-c"
+    New-Item -ItemType Directory -Force -Path $DIR_C | Out-Null
+    Run-Cli @("--data-dir", $DIR_C, "init", "--listen-addr", "/ip4/127.0.0.1/tcp/$($PORT_B + 1)") | Out-Null
+    $daemonC = Start-Daemon $DIR_C ""
+    $wssPort = $null
+    foreach ($line in ((Run-Cli @("--data-dir", $DIR_A, "status")).Out -split "\r?\n")) {
+        if ($line -match "WSS share server:\s*127\.0\.0\.1:(\d+)") { $wssPort = $Matches[1]; break }
+    }
+    Check ($wssPort) "node A reports its WebSocket share server port ($wssPort)"
+    $peersC = Peers-Of $DIR_C
+    Write-Host "  Node C connected peers before the transfer: $peersC (no bootstrap was given)"
+    $recv3 = Join-Path $TMP "received3.bin"
+    $g3 = Run-Cli @("--data-dir", $DIR_C, "network-get", $mid2, "-o", $recv3, "--password-file", $pwFile, "--via", "ws://127.0.0.1:$wssPort")
+    Check ($g3.Code -eq 0) "network-get --via completed on a node with no bootstrap"
+    Check (($g3.Err + $g3.Out) -match "Fetching directly") "the receive said it fetched directly from the endpoint"
+    Check ((Test-Path $recv3) -and ((Sha $recv3) -eq $hash2)) "the directly received file matches the original (SHA256)"
+    $noPw = Run-Cli @("--data-dir", $DIR_C, "network-get", $mid2, "-o", (Join-Path $TMP "should-not-exist3.bin"), "--via", "ws://127.0.0.1:$wssPort")
+    Check ($noPw.Code -ne 0 -and ($noPw.Err + $noPw.Out) -match "password") "direct receive without the password is refused"
+    Check (-not (Test-Path (Join-Path $TMP "should-not-exist3.bin"))) "the refused direct receive left no output"
 }
 catch {
     Write-Host ("ERROR: " + $_.Exception.Message) -ForegroundColor Red
