@@ -15,10 +15,13 @@ use tracing::warn;
 use zeroize::Zeroizing;
 
 use super::{
-    decode_record_value,
+    open_signed_record,
     progress::{Phase, TransferProgress, TransferState},
-    receive::{run_receive, PieceSource, ReceiveOutcome, ReceiveSpec, RetryConfig},
-    TransferManifest,
+    receive::{
+        resolve_output_target, run_receive, PieceSource, ReceiveOutcome, ReceiveSpec, RetryConfig,
+    },
+    share_id::{ShareMismatch, TransferId},
+    FetchedRecord, SignedRecordError, TransferManifest,
 };
 use crate::{
     crypto::hash::ContentId,
@@ -131,22 +134,52 @@ impl PieceSource for WsPieceSource {
 
 /// Read and check the record and manifest for `mid` from the endpoints.
 ///
-/// * The first endpoint that has a record wins.
+/// * The first endpoint that has a usable record wins.
 /// * Unreachable endpoints are retried with backoff, a few times.
 /// * A refused TLS certificate fails at once: retrying cannot change it.
 /// * If every reachable endpoint says it has no record, that is the answer.
+///
+/// This form cannot tell who signed the record: see
+/// [`fetch_verified_record_via`].
 pub async fn fetch_record_and_manifest_via(
     clients: &[Arc<WsDirectClient>],
     mid: &ContentId,
 ) -> Result<(DhtRecord, Option<TransferManifest>), MiasmaError> {
+    fetch_verified_record_via(clients, mid, None)
+        .await
+        .map(|f| (f.record, f.manifest))
+}
+
+/// As [`fetch_record_and_manifest_via`], over the signed record envelope each
+/// endpoint serves, returning the signer.
+///
+/// With `expected_signer` (from a share ID) an endpoint whose record is signed
+/// by any other key is skipped and the next endpoint is asked, so a hostile
+/// endpoint listed first cannot decide the result (C-01). If no endpoint has the
+/// publisher's record, the error says a record was refused for its signer.
+pub async fn fetch_verified_record_via(
+    clients: &[Arc<WsDirectClient>],
+    mid: &ContentId,
+    expected_signer: Option<&[u8; 32]>,
+) -> Result<FetchedRecord, MiasmaError> {
     let retry = RetryConfig::default();
     let mut last_transient: Option<WsClientError> = None;
 
     for attempt in 1..=RECORD_ATTEMPTS {
         let mut all_answered = true;
+        let mut refused: Option<MiasmaError> = None;
         for client in clients {
             match client.fetch_record(*mid.as_bytes()).await {
-                Ok(Some(value)) => return decode_checked(&value, mid),
+                Ok(Some(envelope)) => {
+                    match open_signed_record(mid.as_bytes(), &envelope, expected_signer) {
+                        Ok(found) => return Ok(found),
+                        Err(e) => {
+                            warn!("record from {} refused: {e:?}", client.display_addr());
+                            // Keep the first reason; the next endpoint may still be honest.
+                            refused.get_or_insert_with(|| record_refusal(e));
+                        }
+                    }
+                }
                 Ok(None) => {}
                 Err(e) if e.is_permanent() => return Err(e.into()),
                 Err(e) => {
@@ -156,11 +189,13 @@ pub async fn fetch_record_and_manifest_via(
             }
         }
         if all_answered {
-            return Err(MiasmaError::Network(
-                "the sender has no record for this MID; check the MID and that the sender's \
-                 daemon is running with the file published"
-                    .into(),
-            ));
+            return Err(refused.unwrap_or_else(|| {
+                MiasmaError::Network(
+                    "the sender has no record for this ID; check the ID and that the sender's \
+                     daemon is running with the file published"
+                        .into(),
+                )
+            }));
         }
         if attempt < RECORD_ATTEMPTS {
             tokio::time::sleep(retry.delay_for(attempt)).await;
@@ -171,21 +206,23 @@ pub async fn fetch_record_and_manifest_via(
         .unwrap_or_else(|| MiasmaError::Network("no endpoint could be reached".into())))
 }
 
-/// Decode a record value and refuse it unless it is for `mid` and valid. The
-/// engine checks again; this keeps a wrong answer from being reported as a
-/// transfer state.
-fn decode_checked(
-    value: &[u8],
-    mid: &ContentId,
-) -> Result<(DhtRecord, Option<TransferManifest>), MiasmaError> {
-    let (record, manifest) = decode_record_value(value)?;
-    if record.mid_digest != *mid.as_bytes() {
-        return Err(MiasmaError::InvalidMid(
+/// What to tell the person when an endpoint's record was refused.
+fn record_refusal(e: SignedRecordError) -> MiasmaError {
+    match e {
+        SignedRecordError::WrongSigner => MiasmaError::ShareMismatch(ShareMismatch::WrongSigner),
+        SignedRecordError::InvalidInner(msg) => MiasmaError::InvalidManifest(msg),
+        SignedRecordError::InnerMidMismatch => MiasmaError::InvalidMid(
             "the endpoint answered with a record for a different MID".into(),
-        ));
+        ),
+        SignedRecordError::ManifestPublisher => MiasmaError::InvalidManifest(
+            "the manifest names a different publisher than the one that signed the record".into(),
+        ),
+        SignedRecordError::Malformed | SignedRecordError::BadSignature => MiasmaError::Network(
+            "the endpoint answered with a record that is not validly signed (is it running the \
+             same Miasma version?)"
+                .into(),
+        ),
     }
-    record.validate()?;
-    Ok((record, manifest))
 }
 
 /// Receive `mid` into `output_path` from the `via` endpoints: the direct
@@ -200,27 +237,65 @@ pub async fn receive_file_via(
     restart: bool,
     progress: Arc<TransferProgress>,
 ) -> Result<ReceiveOutcome, MiasmaError> {
+    receive_file_via_id(
+        via,
+        &TransferId::Mid(mid.clone()),
+        output_path,
+        password,
+        journal_dir,
+        restart,
+        progress,
+    )
+    .await
+}
+
+/// As [`receive_file_via`], for what the person typed: a share ID is checked
+/// against the record's signer, the manifest's publisher and its protection
+/// state before any piece is fetched; a bare MID is accepted unauthenticated.
+/// `output_path` may be an existing folder (see
+/// `MiasmaCoordinator::receive_file_id`).
+pub async fn receive_file_via_id(
+    via: &ViaConfig,
+    target: &TransferId,
+    output_path: &Path,
+    password: Option<Zeroizing<String>>,
+    journal_dir: &Path,
+    restart: bool,
+    progress: Arc<TransferProgress>,
+) -> Result<ReceiveOutcome, MiasmaError> {
     progress.set_phase(Phase::Preparing);
     let fail = |e: MiasmaError| {
         progress.set_state(TransferState::Failed, Some(e.to_string()), false);
         e
     };
+    let mid = target.mid();
+    let expect = target.share_id().copied();
+    if let Some(id) = &expect {
+        progress.set_share_id(Some(id.to_string()));
+        progress.set_share_id_checked(true);
+    }
     let clients = via.build_clients().map_err(fail)?;
-    let (record, manifest) = fetch_record_and_manifest_via(&clients, mid)
+    let fetched = fetch_verified_record_via(&clients, &mid, expect.as_ref().map(|s| s.publisher()))
         .await
         .map_err(fail)?;
+    let output = resolve_output_target(output_path, fetched.manifest.as_ref()).map_err(fail)?;
+    if output != output_path {
+        progress.set_name(output.to_string_lossy());
+    }
     let source = WsPieceSource::new(clients);
     run_receive(
         &source,
         ReceiveSpec {
-            mid: mid.clone(),
-            record,
-            manifest,
+            mid,
+            record: fetched.record,
+            manifest: fetched.manifest,
             password,
-            output_path: output_path.to_path_buf(),
+            output_path: output,
             journal_dir: journal_dir.to_path_buf(),
             restart,
             retry: RetryConfig::default(),
+            expect,
+            record_signer: Some(fetched.signer),
         },
         progress,
     )
