@@ -729,3 +729,74 @@ async fn a_running_receive_can_be_stopped_over_http() {
     .await
     .expect("timed out");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_via_receive_is_passed_through_and_a_bad_via_is_refused_clearly() {
+    let d = start_daemon().await;
+    let tok = d.token();
+    let out_dir = tempfile::tempdir().unwrap();
+    let out = out_dir
+        .path()
+        .join("via.bin")
+        .to_string_lossy()
+        .replace('\\', "\\\\");
+    let mid = "miasma:abc";
+
+    // Refused before anything starts, without echoing credentials.
+    let too_many: Vec<String> = (0..9).map(|i| format!("wss://h{i}.example.com")).collect();
+    let bad_vias = [
+        serde_json::json!(["https://example.com"]),
+        serde_json::json!(["wss://user:hunter2@example.com"]),
+        serde_json::json!(["not a url"]),
+        serde_json::json!(too_many),
+        serde_json::json!("wss://not-a-list.example.com"),
+    ];
+    for via in &bad_vias {
+        let body = format!(r#"{{"mid":"{mid}","output_path":"{out}","via":{via}}}"#);
+        let r = http(
+            d.http_port,
+            "POST",
+            "/api/transfers/receive",
+            Some(&tok),
+            &body,
+        )
+        .await;
+        assert!(r.starts_with("HTTP/1.1 400"), "{via}: {r:.300}");
+        assert!(!r.contains("hunter2"), "credentials echoed: {r:.300}");
+    }
+    let r = http(d.http_port, "GET", "/api/transfers", Some(&tok), "").await;
+    assert_eq!(
+        json_of(&r),
+        serde_json::json!([]),
+        "nothing may have started"
+    );
+
+    // A good `via` reaches the daemon and is used: the job fails on the endpoint
+    // (nothing listens on port 1), not by looking the record up in the DHT.
+    let mid = miasma_core::ContentId::compute(b"via test", b"params").to_string();
+    let body = format!(r#"{{"mid":"{mid}","output_path":"{out}","via":["ws://127.0.0.1:1"]}}"#);
+    let r = http(
+        d.http_port,
+        "POST",
+        "/api/transfers/receive",
+        Some(&tok),
+        &body,
+    )
+    .await;
+    if r.starts_with("HTTP/1.1 200") {
+        let id = json_of(&r)["id"].as_str().unwrap().to_owned();
+        let s = poll_until_not_running(d.http_port, &tok, &id).await;
+        assert_eq!(s["state"], "Failed", "{s}");
+        assert!(
+            s["last_error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("cannot reach"),
+            "{s}"
+        );
+    } else {
+        panic!("expected the request to be accepted: {r:.300}");
+    }
+    assert!(!out_dir.path().join("via.bin").exists());
+    d.stop().await;
+}

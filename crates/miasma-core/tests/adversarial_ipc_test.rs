@@ -125,6 +125,8 @@ async fn raw_tcp_without_token_gets_no_service_and_no_state_change() {
                 output_path: d.path().join("stolen.bin").to_string_lossy().into_owned(),
                 password: None,
                 restart: false,
+                via: vec![],
+                via_ca_pem: None,
             },
         )
         .await,
@@ -384,6 +386,8 @@ async fn transfer_receive_refuses_relative_and_dotdot_output_paths() {
                 output_path: bad.clone(),
                 password: None,
                 restart: false,
+                via: vec![],
+                via_ca_pem: None,
             },
         )
         .await
@@ -419,6 +423,8 @@ fn password_bearing_requests_zeroize_their_secrets() {
         output_path: "o".into(),
         password: Some(random_secret()),
         restart: false,
+        via: vec![],
+        via_ca_pem: None,
     };
     receive.zeroize();
     match receive {
