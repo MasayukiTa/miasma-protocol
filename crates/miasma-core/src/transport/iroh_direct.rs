@@ -117,6 +117,28 @@ fn proxy_env_is_set() -> bool {
         .any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()))
 }
 
+/// Who is trusted to vouch for the relay, pkarr and DNS-over-HTTPS servers.
+///
+/// The OS certificate store (through `rustls-platform-verifier`, the same
+/// verifier the `wss://` direct path uses), plus `extra_roots` (`--ca-cert`). A
+/// TLS-inspecting proxy whose CA is installed in the OS therefore works without
+/// any setting. These roots only authenticate iroh's HTTPS services; the peer
+/// itself is authenticated by its key, not by any CA.
+///
+/// Android is the one platform where rustls-platform-verifier cannot take extra
+/// roots, so there the bundled Mozilla roots plus `extra_roots` are used (as
+/// for `wss://`).
+#[cfg(not(target_os = "android"))]
+pub fn ca_tls_config(extra_roots: Vec<rustls::pki_types::CertificateDer<'static>>) -> CaTlsConfig {
+    CaTlsConfig::system().with_extra_roots(extra_roots)
+}
+
+/// See the non-Android variant.
+#[cfg(target_os = "android")]
+pub fn ca_tls_config(extra_roots: Vec<rustls::pki_types::CertificateDer<'static>>) -> CaTlsConfig {
+    CaTlsConfig::embedded().with_extra_roots(extra_roots)
+}
+
 /// The endpoint builder for `settings`.
 ///
 /// `seed` is the endpoint's identity: the raw Ed25519 seed. `None` makes a fresh
@@ -161,20 +183,24 @@ pub fn endpoint_builder(
     if settings.proxy_from_env {
         b = b.proxy_from_env();
     }
-    if let Some(pem) = &settings.ca_pem {
-        if pem.len() > MAX_CA_PEM_BYTES {
-            return Err(MiasmaError::Network("the CA file is too large".into()));
+    let extra_roots = match &settings.ca_pem {
+        Some(pem) => {
+            if pem.len() > MAX_CA_PEM_BYTES {
+                return Err(MiasmaError::Network("the CA file is too large".into()));
+            }
+            let certs = rustls_pemfile::certs(&mut &pem[..])
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| MiasmaError::Network(format!("the CA file is not valid PEM: {e}")))?;
+            if certs.is_empty() {
+                return Err(MiasmaError::Network(
+                    "the CA file contains no certificate".into(),
+                ));
+            }
+            certs
         }
-        let certs = rustls_pemfile::certs(&mut &pem[..])
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| MiasmaError::Network(format!("the CA file is not valid PEM: {e}")))?;
-        if certs.is_empty() {
-            return Err(MiasmaError::Network(
-                "the CA file contains no certificate".into(),
-            ));
-        }
-        b = b.ca_tls_config(CaTlsConfig::embedded().with_extra_roots(certs));
-    }
+        None => Vec::new(),
+    };
+    b = b.ca_tls_config(ca_tls_config(extra_roots));
     if let Some(seed) = seed {
         b = b.secret_key(SecretKey::from_bytes(seed));
         b = b.alpns(vec![IROH_ALPN.to_vec()]);
@@ -831,5 +857,75 @@ pub fn log_privacy_notice(settings: &IrohSettings) {
             "iroh discovery via n0 is enabled: your endpoint id and addresses are published to \
              n0; disable with transport.iroh_mode=off"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+
+    use super::ca_tls_config;
+
+    const HOST: &str = "relay.miasma-test.invalid";
+
+    /// A CA and a leaf certificate for `HOST` signed by it.
+    fn ca_and_leaf() -> (CertificateDer<'static>, CertificateDer<'static>) {
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let mut ca_params = rcgen::CertificateParams::new(Vec::new()).unwrap();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::CrlSign,
+        ];
+        ca_params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "miasma test ca");
+        let ca = ca_params.self_signed(&ca_key).unwrap();
+
+        let leaf_key = rcgen::KeyPair::generate().unwrap();
+        let leaf_params = rcgen::CertificateParams::new(vec![HOST.to_string()]).unwrap();
+        let leaf = leaf_params.signed_by(&leaf_key, &ca, &ca_key).unwrap();
+        (ca.der().clone(), leaf.der().clone())
+    }
+
+    fn verify(
+        extra: Vec<CertificateDer<'static>>,
+        leaf: &CertificateDer<'static>,
+        host: &str,
+    ) -> Result<(), rustls::Error> {
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let verifier = ca_tls_config(extra)
+            .server_cert_verifier(provider)
+            .expect("the platform verifier starts");
+        let name = ServerName::try_from(host.to_string()).unwrap();
+        verifier
+            .verify_server_cert(leaf, &[], &name, &[], UnixTime::now())
+            .map(|_| ())
+    }
+
+    #[test]
+    fn a_certificate_from_an_unknown_ca_is_refused() {
+        let (_ca, leaf) = ca_and_leaf();
+        assert!(verify(Vec::new(), &leaf, HOST).is_err());
+        // An unrelated extra root does not help.
+        let (other_ca, _) = ca_and_leaf();
+        assert!(verify(vec![other_ca], &leaf, HOST).is_err());
+    }
+
+    #[test]
+    fn a_certificate_from_a_ca_given_as_extra_root_is_accepted() {
+        let (ca, leaf) = ca_and_leaf();
+        verify(vec![ca.clone()], &leaf, HOST).expect("the extra root vouches for the leaf");
+        // ...but only for the name it was issued to.
+        assert!(verify(vec![ca], &leaf, "other.miasma-test.invalid").is_err());
+    }
+
+    #[test]
+    fn a_fully_qualified_name_with_a_trailing_dot_is_verified_like_the_plain_one() {
+        let (ca, leaf) = ca_and_leaf();
+        let dotted = format!("{HOST}.");
+        verify(vec![ca], &leaf, &dotted).expect("trailing-dot host name");
     }
 }
