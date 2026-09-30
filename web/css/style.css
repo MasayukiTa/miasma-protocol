@@ -1255,6 +1255,8 @@ input.mono { font-size: 0.85rem; }
 
 .tf-error { font-size: 0.85rem; }
 .tf-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.tf-toolbar { display: flex; justify-content: flex-end; margin-bottom: 8px; }
+.tf-remove { border-top: 1px solid var(--border); padding-top: 14px; margin-top: 14px; }
 
 .tf-resume { border-top: 1px solid var(--border); padding-top: 14px; }
 .tf-resume-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
