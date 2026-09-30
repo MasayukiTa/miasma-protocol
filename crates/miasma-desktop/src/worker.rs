@@ -827,9 +827,8 @@ fn auto_launch_daemon(data_dir: &Path, rt: &tokio::runtime::Runtime) -> anyhow::
 
     let miasma_exe = find_miasma_exe().ok_or_else(|| {
         anyhow::anyhow!(
-            "Cannot find miasma.exe.\n\
-             If installed: check that the installation is intact (reinstall if needed).\n\
-             If portable: place miasma.exe next to miasma-desktop.exe."
+            "Cannot find miasma backend.\n\
+             Reinstall the complete application, keeping the backend next to the desktop executable."
         )
     })?;
 
@@ -1036,8 +1035,11 @@ fn daemon_error(e: &anyhow::Error) -> String {
         DAEMON_DOWN_MESSAGE.to_string()
     } else if msg.contains("Cannot find miasma.exe") || msg.contains("Cannot find miasma") {
         "Cannot find the Miasma backend.\n\
-         If installed: try reinstalling from the MSI.\n\
-         If portable: make sure miasma.exe is in the same folder as miasma-desktop.exe."
+         Reinstall the complete application, keeping the backend next to the desktop executable."
+            .to_string()
+    } else if msg.contains("spawn daemon") && cfg!(target_os = "macos") {
+        "Could not start the backend process.\n\
+         Try rebuilding or reinstalling the complete Miasma.app bundle."
             .to_string()
     } else if msg.contains("spawn daemon") {
         "Could not start the backend process.\n\
