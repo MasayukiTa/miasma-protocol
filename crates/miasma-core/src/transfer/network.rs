@@ -64,6 +64,11 @@ impl PieceSource for TransportPieceSource {
 /// a moment to become visible to a fresh node.
 const RECORD_LOOKUP_ATTEMPTS: u32 = 6;
 
+/// How long a receive waits for the link to its configured bootstrap peers
+/// before it gives up with "not connected". Longer than the redial backoff cap
+/// (30 s) so at least one backed-off redial fits inside it.
+const PEER_CONNECT_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
 impl MiasmaCoordinator {
     /// The production [`PieceSource`]: fetches pieces through this node's
     /// payload transports. Public so a latency/throughput probe can time single
@@ -73,18 +78,31 @@ impl MiasmaCoordinator {
     }
 
     /// Read the record and manifest for `mid` from the DHT, retrying with backoff.
+    ///
+    /// Every attempt first makes sure the node has a link to the network (see
+    /// `DhtHandle::ensure_connected`): a lookup on an empty routing table answers
+    /// "not found" at once, so without the wait the attempts are spent before the
+    /// link to the sender is back and the receive fails with `no record found`
+    /// although the record exists. If the configured bootstrap peers stay
+    /// unreachable, one last lookup is still made (the record may be held locally)
+    /// and then the error names the unreachable bootstrap addresses.
     pub async fn fetch_record_and_manifest(
         &self,
         mid: &ContentId,
     ) -> Result<(DhtRecord, Option<TransferManifest>), MiasmaError> {
         let retry = RetryConfig::default();
         for attempt in 1..=RECORD_LOOKUP_ATTEMPTS {
+            let link = self.dht_handle().ensure_connected(PEER_CONNECT_WAIT).await;
             if let Some(found) = self
                 .dht_handle()
                 .get_record_with_manifest(*mid.as_bytes())
                 .await?
             {
                 return Ok(found);
+            }
+            if let Err(unreachable) = link {
+                // Waited the full bound already; more lookups cannot succeed.
+                return Err(unreachable);
             }
             if attempt < RECORD_LOOKUP_ATTEMPTS {
                 tokio::time::sleep(retry.delay_for(attempt)).await;
