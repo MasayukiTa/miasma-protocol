@@ -30,7 +30,8 @@ use miasma_core::{
 const SEG: usize = 1024;
 
 fn random_password() -> String {
-    format!("pw-{:032x}", rand::random::<u128>())
+    // Always satisfies the password policy: a digit, letters and a symbol.
+    format!("pw-1{:032x}", rand::random::<u128>())
 }
 
 fn content(len: usize) -> Vec<u8> {
