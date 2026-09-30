@@ -454,6 +454,9 @@
       <div class="notice tf-notice" data-i18n="tf_send_hint">Use the desktop app or the CLI to send large files.</div>
 
       <section class="tf-card" aria-label="Transfers">
+        <div id="tf-toolbar" class="tf-toolbar hidden">
+          <button id="tf-clear" class="btn-secondary" data-i18n="tf_btn_clear_finished">Clear finished</button>
+        </div>
         <div id="tf-headings" class="tf-headings hidden" aria-hidden="true">
           <span></span>
           <span data-i18n="tf_col_name">Name</span>
@@ -474,6 +477,7 @@
             <h2 id="tf-d-title"></h2>
             <span id="tf-d-chip" class="chip"></span>
           </div>
+          <p id="tf-d-error" class="tf-error hidden"><span class="tf-label" data-i18n="tf_error_label">Last error</span> <span id="tf-d-error-text" class="text-danger"></span></p>
           <p class="tf-sub"><span id="tf-d-direction"></span> <code id="tf-d-path" class="tf-path"></code></p>
 
           <div class="tf-mid">
@@ -508,8 +512,6 @@
             <div><dt data-i18n="tf_retries_label">Segment retries</dt><dd id="tf-d-retries"></dd></div>
           </dl>
 
-          <p id="tf-d-error" class="tf-error hidden"><span class="tf-label" data-i18n="tf_error_label">Last error</span> <span id="tf-d-error-text" class="text-danger"></span></p>
-
           <div class="tf-actions">
             <button id="tf-d-stop" class="btn-secondary hidden" data-i18n="tf_btn_stop">Stop (keep progress)</button>
           </div>
@@ -530,6 +532,19 @@
             </div>
           </div>
           <p id="tf-d-send-hint" class="tf-sub hidden" data-i18n="tf_send_resume_hint">A send is resumed from the desktop app.</p>
+          <div id="tf-d-remove" class="tf-remove hidden">
+            <div class="tf-actions">
+              <button id="tf-d-remove-btn" class="btn-secondary" data-i18n="tf_btn_remove">Remove from list</button>
+            </div>
+            <p id="tf-d-remove-note" class="tf-sub"></p>
+            <div id="tf-d-discard-confirm" class="tf-restart-confirm hidden">
+              <p data-i18n="tf_discard_confirm">Discard the partial data and remove this transfer? This cannot be undone.</p>
+              <div class="tf-resume-row">
+                <button id="tf-d-discard-yes" class="btn-danger" data-i18n="tf_discard_yes">Discard and remove</button>
+                <button id="tf-d-discard-no" class="btn-secondary" data-i18n="tf_btn_keep">Cancel</button>
+              </div>
+            </div>
+          </div>
           <p id="tf-d-nopath" class="tf-sub hidden" data-i18n="tf_no_path_hint">The save location is not known any more.</p>
         </div>
       </section>
@@ -544,6 +559,7 @@
         <div class="field">
           <label for="tf-path" data-i18n="tf_recv_path_label">Save to</label>
           <input type="text" id="tf-path" class="mono" spellcheck="false" autocomplete="off" data-i18n-placeholder="tf_recv_path_hint" placeholder="Absolute path of the finished file">
+          <p class="tf-sub" data-i18n="tf_recv_path_note">Include the file name, for example received.bin. A folder alone is refused.</p>
         </div>
         <div class="field">
           <label for="tf-pw" data-i18n="tf_password_label">Password (optional)</label>

@@ -508,6 +508,14 @@ impl MiasmaApp {
                     self.transfers.poll_soon();
                     self.set_msg(MsgKind::Info, self.tr().stop_requested);
                 }
+                WorkerResult::TransferRemoved { .. } => {
+                    self.transfers.poll_soon();
+                    self.set_msg(MsgKind::Info, self.tr().removed_msg);
+                }
+                WorkerResult::TransferRemoveRefused(reason) => {
+                    let t = self.tr();
+                    self.transfers.on_remove_refused(reason, t);
+                }
                 WorkerResult::TransferError(e) => {
                     self.transfers.on_error(e);
                 }

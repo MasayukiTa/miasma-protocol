@@ -143,6 +143,29 @@ export function canResume(state) {
   return state === 'Paused' || state === 'Cancelled' || state === 'Failed';
 }
 
+/** Complete, Failed or Cancelled: nothing more will happen to it on its own. */
+export function isFinished(state) {
+  return state === 'Complete' || state === 'Failed' || state === 'Cancelled';
+}
+
+/**
+ * A finished transfer can be taken off the list. A running one cannot, and neither can a
+ * paused one: it keeps its journal so it can resume ("Start over" is the other action).
+ */
+export function canRemove(job) {
+  return !!job && isFinished(job.state);
+}
+
+/** Removing it would throw away partial data (a stopped transfer that can still resume). */
+export function removeNeedsDiscard(job) {
+  return !!job && isFinished(job.state) && !!job.resumable;
+}
+
+/** Finished rows that "Clear finished" removes without losing anything. */
+export function clearable(job) {
+  return !!job && isFinished(job.state) && !job.resumable;
+}
+
 /** Above this many segments several are drawn as one cell, so the strip stays legible. */
 export const MAX_STRIP_CELLS = 400;
 
@@ -175,7 +198,12 @@ export function buildStrip(total, done, running, resumedFrom) {
 /** Map an error string from the bridge to a locale key, when it is one a person can act on. */
 export function errorKey(message) {
   const m = String(message || '');
+  if (m.startsWith('output path rejected') && m.includes('is a folder, not a file')) return 'tf_err_path_folder';
+  // An unwritable place: the daemon names the path and the OS error, which is the useful text.
+  if (m.startsWith('output path rejected') && /cannot |no file name|not a folder/.test(m)) return '';
   if (m.startsWith('output path rejected')) return 'tf_err_path';
+  if (m.includes('transfer is still running')) return 'tf_err_remove_running';
+  if (m.includes('transfer is paused')) return 'tf_err_remove_paused';
   if (m.startsWith('invalid MID')) return 'tf_err_mid';
   if (m.includes('wrong password')) return 'tf_err_wrong_password';
   if (m.includes('a password is required') || m.includes('password-protected')) return 'tf_err_password_required';

@@ -307,7 +307,16 @@ enum Commands {
     /// List transfers: running, paused, and finished, including ones an earlier
     /// daemon process left behind (those can be resumed by running the same
     /// `network-get` again).
-    Transfers,
+    ///
+    /// With `--clear-finished`, first removes every finished (complete, failed or
+    /// cancelled) transfer that has no partial data, then lists what is left.
+    /// Nothing you received or sent is deleted, and a file you sent stays
+    /// available to peers.
+    Transfers {
+        /// Remove finished transfers from the list.
+        #[arg(long)]
+        clear_finished: bool,
+    },
 
     /// Print the link that opens the browser client for the running daemon.
     ///
@@ -330,6 +339,20 @@ enum Commands {
     TransferCancel {
         /// The MID of the transfer (`miasma:<base58>`).
         mid: String,
+    },
+
+    /// Remove one finished (complete, failed or cancelled) transfer from the list.
+    ///
+    /// A running or paused transfer is refused. Nothing you received or sent is
+    /// deleted, and a file you sent stays available to peers. A stopped transfer
+    /// with partial data is refused unless you pass `--discard-partial`, which
+    /// deletes that partial data (its journal and its `.part` file).
+    TransferRemove {
+        /// The id shown by `miasma transfers` (a MID, or `send:<path>`).
+        id: String,
+        /// Also delete the partial data of a failed or cancelled transfer.
+        #[arg(long)]
+        discard_partial: bool,
     },
 
     /// Measure what a redundancy setting (k of n) costs and buys, on this machine.
@@ -542,9 +565,13 @@ async fn main() -> Result<()> {
             .await
         }
 
-        Commands::Transfers => cmd_transfers(&data_dir).await,
+        Commands::Transfers { clear_finished } => cmd_transfers(&data_dir, clear_finished).await,
         Commands::Web { open, web_url } => cmd_web(&data_dir, open, web_url.as_deref()),
         Commands::TransferCancel { mid } => cmd_transfer_cancel(&data_dir, &mid).await,
+        Commands::TransferRemove {
+            id,
+            discard_partial,
+        } => cmd_transfer_remove(&data_dir, &id, discard_partial).await,
         Commands::RedundancyBench {
             size_mib,
             preset,
@@ -2555,9 +2582,26 @@ fn cmd_web(data_dir: &std::path::Path, open: bool, web_url: Option<&str>) -> Res
     Ok(())
 }
 
-async fn cmd_transfers(data_dir: &std::path::Path) -> Result<()> {
+async fn cmd_transfers(data_dir: &std::path::Path, clear_finished: bool) -> Result<()> {
     use miasma_core::{daemon_request, ControlRequest, ControlResponse};
 
+    if clear_finished {
+        match daemon_request(data_dir, ControlRequest::TransferClearFinished).await? {
+            ControlResponse::TransferRemoved {
+                removed,
+                kept_partial,
+            } => eprintln!(
+                "{}",
+                Msg::TransfersRemoved {
+                    removed,
+                    kept_partial
+                }
+                .t()
+            ),
+            ControlResponse::Error(e) => return Err(daemon_error(e)),
+            other => return Err(unexpected_response(&other)),
+        }
+    }
     let list = match daemon_request(data_dir, ControlRequest::TransferList).await? {
         ControlResponse::TransferList(l) => l,
         ControlResponse::Error(e) => return Err(daemon_error(e)),
@@ -2652,6 +2696,53 @@ async fn cmd_transfer_cancel(data_dir: &std::path::Path, mid: &str) -> Result<()
             Ok(())
         }
         ControlResponse::Error(e) => bail!("{}", Msg::CancelError { e }.t()),
+        other => Err(unexpected_response(&other)),
+    }
+}
+
+async fn cmd_transfer_remove(
+    data_dir: &std::path::Path,
+    id: &str,
+    discard_partial: bool,
+) -> Result<()> {
+    use miasma_core::{
+        daemon_request, transfer::jobs::RemoveRefusal, ControlRequest, ControlResponse,
+    };
+
+    match daemon_request(
+        data_dir,
+        ControlRequest::TransferRemove {
+            id: id.to_owned(),
+            discard_partial,
+        },
+    )
+    .await?
+    {
+        ControlResponse::TransferRemoved {
+            removed,
+            kept_partial,
+        } => {
+            eprintln!(
+                "{}",
+                Msg::TransfersRemoved {
+                    removed,
+                    kept_partial
+                }
+                .t()
+            );
+            Ok(())
+        }
+        ControlResponse::TransferRemoveRefused { id, reason } => bail!(
+            "{}",
+            match reason {
+                RemoveRefusal::NotFound => Msg::RemoveNotFound { id },
+                RemoveRefusal::Running => Msg::RemoveRunning,
+                RemoveRefusal::Paused => Msg::RemovePaused,
+                RemoveRefusal::HasPartialData => Msg::RemoveHasPartial,
+            }
+            .t()
+        ),
+        ControlResponse::Error(e) => Err(daemon_error(e)),
         other => Err(unexpected_response(&other)),
     }
 }
@@ -3236,5 +3327,57 @@ mod via_flag_tests {
             Commands::Tunnel { port } => assert_eq!(port, Some(8443)),
             _ => panic!("wrong command"),
         }
+    }
+}
+
+#[cfg(test)]
+mod remove_flag_tests {
+    use super::{Cli, Commands};
+    use clap::Parser;
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        let mut v = vec!["miasma"];
+        v.extend_from_slice(args);
+        Cli::try_parse_from(v)
+    }
+
+    #[test]
+    fn transfers_lists_by_default_and_clears_only_when_asked() {
+        match parse(&["transfers"]).unwrap().command {
+            Commands::Transfers { clear_finished } => assert!(!clear_finished),
+            _ => panic!("wrong command"),
+        }
+        match parse(&["transfers", "--clear-finished"]).unwrap().command {
+            Commands::Transfers { clear_finished } => assert!(clear_finished),
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn transfer_remove_takes_an_id_and_never_discards_unless_told() {
+        match parse(&["transfer-remove", "miasma:abc"]).unwrap().command {
+            Commands::TransferRemove {
+                id,
+                discard_partial,
+            } => {
+                assert_eq!(id, "miasma:abc");
+                assert!(!discard_partial);
+            }
+            _ => panic!("wrong command"),
+        }
+        match parse(&["transfer-remove", "send:/tmp/in.bin", "--discard-partial"])
+            .unwrap()
+            .command
+        {
+            Commands::TransferRemove {
+                id,
+                discard_partial,
+            } => {
+                assert_eq!(id, "send:/tmp/in.bin");
+                assert!(discard_partial);
+            }
+            _ => panic!("wrong command"),
+        }
+        assert!(parse(&["transfer-remove"]).is_err(), "an id is required");
     }
 }

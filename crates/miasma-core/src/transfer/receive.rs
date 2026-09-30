@@ -157,6 +157,10 @@ async fn run_inner<S: PieceSource + ?Sized>(
 
     progress.set_phase(Phase::Preparing);
 
+    // A folder or an unwritable place is a mistake the person can fix now; do not
+    // discover it after the pieces have been fetched.
+    check_output_target(&output_path)?;
+
     // ── 1. The record, the manifest and the parameters must agree. ──────────
     if record.mid_digest != *mid.as_bytes() {
         return Err(MiasmaError::InvalidMid(
@@ -241,7 +245,8 @@ async fn run_inner<S: PieceSource + ?Sized>(
     // ── 4. Fresh start or resume. ───────────────────────────────────────────
     if let Some(parent) = output_path.parent() {
         if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| io_context("cannot create the folder", parent, &e))?;
         }
     }
     let part_path = part_path_for(&output_path);
@@ -287,8 +292,12 @@ async fn run_inner<S: PieceSource + ?Sized>(
         hasher = h;
         // Drop anything after the last verified byte (a crash between the write
         // and the journal update leaves a tail).
-        let f = std::fs::OpenOptions::new().write(true).open(&part_path)?;
-        f.set_len(bytes_done)?;
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&part_path)
+            .map_err(|e| io_context("cannot open the partial file", &part_path, &e))?;
+        f.set_len(bytes_done)
+            .map_err(|e| io_context("cannot trim the partial file", &part_path, &e))?;
     } else {
         // Fresh: never inherit a stale partial file.
         let _ = std::fs::remove_file(&part_path);
@@ -301,7 +310,8 @@ async fn run_inner<S: PieceSource + ?Sized>(
         .create(true)
         .truncate(false)
         .open(&part_path)
-        .await?;
+        .await
+        .map_err(|e| io_context("cannot create the partial file", &part_path, &e))?;
     file.seek(SeekFrom::Start(bytes_done)).await?;
 
     let mut journal = ReceiveJournal {
@@ -441,9 +451,69 @@ async fn run_inner<S: PieceSource + ?Sized>(
     }
     file.sync_all().await?;
     drop(file);
-    std::fs::rename(&part_path, &output_path)?;
+    std::fs::rename(&part_path, &output_path).map_err(|e| {
+        io_context(
+            "cannot move the finished file into place at",
+            &output_path,
+            &e,
+        )
+    })?;
     ReceiveJournal::remove(&jpath);
     Ok(ReceiveOutcome::Complete { bytes: bytes_done })
+}
+
+/// An I/O failure with the path and the OS error kind in the message, so a
+/// report from another machine (a macOS permission prompt, a read-only volume)
+/// says what was refused and where.
+fn io_context(what: &str, path: &Path, e: &std::io::Error) -> MiasmaError {
+    MiasmaError::Storage(format!("{what} {}: {:?}: {e}", path.display(), e.kind()))
+}
+
+/// Check, before any network work, that `output` can be written: it must not be
+/// an existing folder, its folder must exist (or be creatable) and be writable.
+/// Answers with a message that names the path and the OS error.
+///
+/// It leaves nothing behind except a newly created parent folder, which the
+/// receive would create anyway.
+pub fn check_output_target(output: &Path) -> Result<(), MiasmaError> {
+    if output.is_dir() {
+        return Err(MiasmaError::Storage(format!(
+            "the output path {} is a folder, not a file: give a file name inside it \
+             (for example {})",
+            output.display(),
+            output.join("received.bin").display()
+        )));
+    }
+    if output.file_name().is_none() {
+        return Err(MiasmaError::Storage(format!(
+            "the output path {} has no file name",
+            output.display()
+        )));
+    }
+    if let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) {
+        if parent.exists() && !parent.is_dir() {
+            return Err(MiasmaError::Storage(format!(
+                "cannot save to {}: {} is not a folder",
+                output.display(),
+                parent.display()
+            )));
+        }
+        std::fs::create_dir_all(parent)
+            .map_err(|e| io_context("cannot create the folder", parent, &e))?;
+    }
+    // Writability: open the `.part` file the way the receive will, without
+    // truncating one that is already there, and remove it again if it is ours.
+    let part = part_path_for(output);
+    let existed = part.exists();
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&part)
+        .map_err(|e| io_context("cannot write to", &part, &e))?;
+    if !existed {
+        let _ = std::fs::remove_file(&part);
+    }
+    Ok(())
 }
 
 /// A piece that passed verification, with the holder it came from.

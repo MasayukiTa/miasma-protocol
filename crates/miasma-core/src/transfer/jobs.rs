@@ -20,10 +20,10 @@ use zeroize::Zeroizing;
 
 use super::{
     direct::{receive_file_via, ViaConfig},
-    journal::ReceiveJournal,
+    journal::{journal_path, part_path_for, ReceiveJournal},
     progress::{Phase, TransferKind, TransferProgress, TransferState, TransferStatus},
     publish::PublishSpec,
-    publish_journal::PublishJournal,
+    publish_journal::{publish_journal_path, PublishJournal},
 };
 use crate::{
     crypto::hash::ContentId,
@@ -34,6 +34,29 @@ use crate::{
 /// The id of a send: the source path, prefixed so it can never collide with a MID.
 pub fn send_id(source: &Path) -> String {
     format!("send:{}", source.to_string_lossy())
+}
+
+/// Why a transfer could not be removed from the dashboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RemoveRefusal {
+    /// No transfer has this id.
+    NotFound,
+    /// Still running: cancel it first.
+    Running,
+    /// Paused and resumable: resume it, or start it over. Removing it is a
+    /// different action.
+    Paused,
+    /// Failed or cancelled with a partial file and journal on disk; removing it
+    /// would discard them, which needs `discard_partial`.
+    HasPartialData,
+}
+
+/// The id a status is known by (what `TransferStatus` / `TransferCancel` take).
+fn status_id(s: &TransferStatus) -> String {
+    match s.kind {
+        TransferKind::Receive => s.mid.clone(),
+        TransferKind::Send => send_id(Path::new(&s.name)),
+    }
 }
 
 pub struct TransferRegistry {
@@ -238,6 +261,127 @@ impl TransferRegistry {
                 true
             }
             _ => false,
+        }
+    }
+
+    /// Take one finished transfer off the dashboard.
+    ///
+    /// Only a job in a terminal state (Complete, Failed, Cancelled) can be
+    /// removed; a Running or Paused one is refused, and an unknown id is a clean
+    /// [`RemoveRefusal::NotFound`]. What is deleted:
+    ///
+    /// * always: the registry entry;
+    /// * with `discard_partial`, for a Failed/Cancelled transfer that still has a
+    ///   journal: that journal and, for a receive, its own `<output>.part` file.
+    ///   Without it such a transfer is refused ([`RemoveRefusal::HasPartialData`])
+    ///   because removing it would throw its partial data away.
+    ///
+    /// Never deleted: a finished receive's output file, a send's source file, and
+    /// the shares a send published (the file stays available to peers).
+    ///
+    /// `id` is only ever used as a registry key (and hashed for a send's journal
+    /// name), never opened as a path, so a request cannot steer the deletion.
+    pub fn remove(&self, id: &str, discard_partial: bool) -> Result<(), RemoveRefusal> {
+        let mut jobs = self.jobs.lock().unwrap();
+        let Some(p) = jobs.get(id) else {
+            // Known only from its journal: that is a Paused transfer.
+            return Err(
+                if self.journal_statuses().iter().any(|s| status_id(s) == id) {
+                    RemoveRefusal::Paused
+                } else {
+                    RemoveRefusal::NotFound
+                },
+            );
+        };
+        let snap = p.snapshot();
+        match snap.state {
+            TransferState::Running => return Err(RemoveRefusal::Running),
+            TransferState::Paused => return Err(RemoveRefusal::Paused),
+            TransferState::Complete => {}
+            TransferState::Failed | TransferState::Cancelled => {
+                if let Some(jpath) = self.journal_file_for(id, snap.kind) {
+                    if jpath.exists() {
+                        if !discard_partial {
+                            return Err(RemoveRefusal::HasPartialData);
+                        }
+                        self.discard_partial(&jpath, snap.kind);
+                    }
+                }
+            }
+        }
+        jobs.remove(id);
+        Ok(())
+    }
+
+    /// Remove every finished transfer that has nothing to discard. Returns
+    /// `(removed, kept_with_partial_data)`; a Failed/Cancelled transfer with a
+    /// journal is kept, since clearing must never delete partial data.
+    pub fn clear_finished(&self) -> (u32, u32) {
+        let ids: Vec<String> = self
+            .jobs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, p)| {
+                matches!(
+                    p.snapshot().state,
+                    TransferState::Complete | TransferState::Failed | TransferState::Cancelled
+                )
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        let (mut removed, mut kept) = (0, 0);
+        for id in ids {
+            match self.remove(&id, false) {
+                Ok(()) => removed += 1,
+                Err(RemoveRefusal::HasPartialData) => kept += 1,
+                Err(_) => {}
+            }
+        }
+        (removed, kept)
+    }
+
+    /// A restart of the daemon, for tests: the same data directory with no live
+    /// jobs, so only what is on disk survives.
+    #[doc(hidden)]
+    pub fn detached_for_tests(data_dir: &Path) -> TransferRegistry {
+        TransferRegistry {
+            data_dir: data_dir.to_path_buf(),
+            jobs: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Put a job into the registry without running anything (tests only).
+    #[doc(hidden)]
+    pub fn insert_for_tests(&self, id: &str, progress: Arc<TransferProgress>) {
+        self.jobs.lock().unwrap().insert(id.to_owned(), progress);
+    }
+
+    /// The journal file the transfer `id` would have on disk.
+    fn journal_file_for(&self, id: &str, kind: TransferKind) -> Option<PathBuf> {
+        match kind {
+            TransferKind::Receive => ContentId::from_str(id)
+                .ok()
+                .map(|mid| journal_path(&self.journal_dir(), &mid)),
+            TransferKind::Send => id
+                .strip_prefix("send:")
+                .map(|src| publish_journal_path(&self.journal_dir(), Path::new(src))),
+        }
+    }
+
+    /// Delete a transfer's journal and, for a receive, the `.part` file the
+    /// journal names, but only if that is exactly `<output>.part`.
+    fn discard_partial(&self, jpath: &Path, kind: TransferKind) {
+        if kind == TransferKind::Receive {
+            if let Some(j) = ReceiveJournal::load(jpath) {
+                let expected = part_path_for(Path::new(&j.output_path));
+                if expected == Path::new(&j.part_path) {
+                    let _ = std::fs::remove_file(&expected);
+                }
+            }
+            ReceiveJournal::remove(jpath);
+        } else {
+            PublishJournal::remove(jpath);
         }
     }
 

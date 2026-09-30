@@ -1172,6 +1172,21 @@ pub struct TransferStrings {
     pub easy_bal_desc: &'static str,
     pub easy_safe: &'static str,
     pub easy_safe_desc: &'static str,
+
+    // Removing finished transfers.
+    pub btn_remove: &'static str,
+    pub btn_clear_finished: &'static str,
+    pub clear_finished_hint: &'static str,
+    pub remove_note_send: &'static str,
+    pub remove_note_recv: &'static str,
+    pub remove_note_plain: &'static str,
+    pub remove_note_partial: &'static str,
+    pub discard_confirm: &'static str,
+    pub discard_yes: &'static str,
+    pub removed_msg: &'static str,
+    pub err_remove_running: &'static str,
+    pub err_remove_paused: &'static str,
+    pub recv_folder_note: &'static str,
 }
 
 impl TransferStrings {
@@ -1275,6 +1290,19 @@ impl TransferStrings {
             ("easy_bal_desc", self.easy_bal_desc),
             ("easy_safe", self.easy_safe),
             ("easy_safe_desc", self.easy_safe_desc),
+            ("btn_remove", self.btn_remove),
+            ("btn_clear_finished", self.btn_clear_finished),
+            ("clear_finished_hint", self.clear_finished_hint),
+            ("remove_note_send", self.remove_note_send),
+            ("remove_note_recv", self.remove_note_recv),
+            ("remove_note_plain", self.remove_note_plain),
+            ("remove_note_partial", self.remove_note_partial),
+            ("discard_confirm", self.discard_confirm),
+            ("discard_yes", self.discard_yes),
+            ("removed_msg", self.removed_msg),
+            ("err_remove_running", self.err_remove_running),
+            ("err_remove_paused", self.err_remove_paused),
+            ("recv_folder_note", self.recv_folder_note),
         ]
     }
 }
@@ -1391,6 +1419,20 @@ static TR_EN: TransferStrings = TransferStrings {
     easy_bal_desc: "A little spare: up to 2 damaged pieces per part can be repaired.",
     easy_safe: "Safest",
     easy_safe_desc: "Uses twice the disk space. Up to 10 damaged pieces per part can be repaired.",
+
+    btn_remove: "Remove from list",
+    btn_clear_finished: "Clear finished",
+    clear_finished_hint: "Removes finished transfers from this list. Files you received or sent are not touched. Stopped transfers that still hold partial data are kept.",
+    remove_note_send: "Only removes this row. The file stays available to peers.",
+    remove_note_recv: "Only removes this row. The received file is not deleted.",
+    remove_note_plain: "Only removes this row. Nothing on disk is deleted.",
+    remove_note_partial: "This transfer stopped with partial data. Removing it discards that data.",
+    discard_confirm: "Discard the partial data and remove this transfer? This cannot be undone.",
+    discard_yes: "Discard and remove",
+    removed_msg: "Removed from the list.",
+    err_remove_running: "This transfer is still running. Stop it first.",
+    err_remove_paused: "This transfer is paused and can be resumed, so it was not removed.",
+    recv_folder_note: "That is a folder. The file will be saved as: {path}",
 };
 
 static TR_JA: TransferStrings = TransferStrings {
@@ -1497,6 +1539,20 @@ static TR_JA: TransferStrings = TransferStrings {
     easy_bal_desc: "少し予備があり、各部分で最大2ピースの破損まで修復できます。",
     easy_safe: "最も安全",
     easy_safe_desc: "ディスク容量が2倍になります。各部分で最大10ピースの破損まで修復できます。",
+
+    btn_remove: "リストから外す",
+    btn_clear_finished: "完了分を消去",
+    clear_finished_hint: "完了・失敗・中止した転送をこの一覧から外します。受信したファイルや送信元ファイルには触れません。途中までのデータが残っている転送は残します。",
+    remove_note_send: "この行を外すだけです。送信したファイルは引き続き相手が受け取れます。",
+    remove_note_recv: "この行を外すだけです。受信したファイルは削除されません。",
+    remove_note_plain: "この行を外すだけです。ディスク上のものは削除されません。",
+    remove_note_partial: "この転送は途中までのデータを残して止まっています。外すとそのデータも破棄されます。",
+    discard_confirm: "途中までのデータを破棄して、この転送を外しますか。元に戻せません。",
+    discard_yes: "破棄して外す",
+    removed_msg: "リストから外しました。",
+    err_remove_running: "この転送はまだ実行中です。先に停止してください。",
+    err_remove_paused: "この転送は一時停止中で再開できるため、外していません。",
+    recv_folder_note: "指定先はフォルダです。次のファイル名で保存します: {path}",
 };
 
 static TR_ZH_CN: TransferStrings = TransferStrings {
@@ -1603,6 +1659,20 @@ static TR_ZH_CN: TransferStrings = TransferStrings {
     easy_bal_desc: "有少量备用：每部分最多可修复 2 个损坏的分片。",
     easy_safe: "最安全",
     easy_safe_desc: "占用两倍磁盘空间。每部分最多可修复 10 个损坏的分片。",
+
+    btn_remove: "从列表中移除",
+    btn_clear_finished: "清除已结束项",
+    clear_finished_hint: "从此列表中移除已完成、失败或已取消的传输。不会改动您接收或发送的文件。仍保留部分数据的已停止传输会被保留。",
+    remove_note_send: "仅移除此行。该文件仍可供对方接收。",
+    remove_note_recv: "仅移除此行。已接收的文件不会被删除。",
+    remove_note_plain: "仅移除此行。不会删除磁盘上的任何内容。",
+    remove_note_partial: "此传输已停止并保留了部分数据。移除它会丢弃这些数据。",
+    discard_confirm: "丢弃部分数据并移除此传输吗？此操作无法撤销。",
+    discard_yes: "丢弃并移除",
+    removed_msg: "已从列表中移除。",
+    err_remove_running: "此传输仍在运行。请先停止它。",
+    err_remove_paused: "此传输已暂停且可以继续，因此未被移除。",
+    recv_folder_note: "该路径是文件夹。文件将保存为：{path}",
 };
 
 #[cfg(test)]
@@ -1626,7 +1696,7 @@ mod tests {
     fn transfer_placeholders_survive_translation() {
         // A translation that drops a placeholder would silently show a blank in the UI.
         type Getter = fn(&TransferStrings) -> &'static str;
-        let need: [(&str, Getter, &[&str]); 8] = [
+        let need: [(&str, Getter, &[&str]); 9] = [
             ("strip_resumed", |t| t.strip_resumed, &["{n}"]),
             ("strip_per_cell", |t| t.strip_per_cell, &["{n}"]),
             ("split_recv", |t| t.split_recv, &["{a}", "{b}", "{c}"]),
@@ -1639,6 +1709,7 @@ mod tests {
                 &["{pct}", "{eta}"],
             ),
             ("red_row", |t| t.red_row, &["{kn}", "{x}", "{loss}"]),
+            ("recv_folder_note", |t| t.recv_folder_note, &["{path}"]),
         ];
         for lang in Locale::ALL {
             let t = transfer_strings(lang);

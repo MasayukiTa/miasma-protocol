@@ -140,6 +140,20 @@ pub fn localize_daemon_error(e: &str, lang: Lang) -> String {
             return "制御トークンが無効か未指定です（データディレクトリの daemon.token を確認してください）".to_owned();
         }
         if e.starts_with("output path rejected:") {
+            if let Some(rest) = e.split_once("the output path ").map(|(_, r)| r) {
+                if let Some((path, _)) = rest.split_once(" is a folder, not a file") {
+                    return format!(
+                        "出力先 {path} はフォルダです。フォルダの中のファイル名まで指定してください（例: {path}\\received.bin）"
+                    );
+                }
+            }
+            // A path that cannot be written: the daemon's text names the path and the OS error.
+            if e.contains("cannot ") || e.contains("no file name") || e.contains("not a folder") {
+                return format!(
+                    "出力先に書き込めません（詳細: {}）",
+                    e.trim_start_matches("output path rejected:").trim()
+                );
+            }
             return "出力先は絶対パスで指定してください（'..' を含めることはできません）"
                 .to_owned();
         }
@@ -279,6 +293,18 @@ pub enum Msg {
     CancelError {
         e: String,
     },
+
+    // ---- removing finished transfers ----
+    TransfersRemoved {
+        removed: u32,
+        kept_partial: u32,
+    },
+    RemoveNotFound {
+        id: String,
+    },
+    RemoveRunning,
+    RemovePaused,
+    RemoveHasPartial,
 
     // ---- daemon answers ----
     DaemonError {
@@ -457,6 +483,21 @@ impl Msg {
                 "Cancel requested; it stops at the next safe point and stays resumable.".into()
             }
             CancelError { e } => e.clone(),
+            TransfersRemoved { removed, kept_partial } => {
+                let mut t = format!(
+                    "Removed {removed} finished transfer(s) from the list. Received files and source files are not touched; a file you sent stays available to peers."
+                );
+                if *kept_partial > 0 {
+                    t.push_str(&format!(
+                        "\n  {kept_partial} stopped transfer(s) still hold partial data and were kept; remove one with `miasma transfer-remove <id> --discard-partial`."
+                    ));
+                }
+                t
+            }
+            RemoveNotFound { id } => format!("no such transfer: {id}"),
+            RemoveRunning => "that transfer is still running; cancel it first (`miasma transfer-cancel <id>`).".into(),
+            RemovePaused => "that transfer is paused and can be resumed, so it is not finished; run the same command to resume it.".into(),
+            RemoveHasPartial => "that transfer stopped with partial data; removing it discards that data. Run again with --discard-partial to do so.".into(),
 
             DaemonError { e } => format!("daemon error: {e}"),
             UnexpectedResponse { debug } => format!("unexpected response: {debug}"),
@@ -622,6 +663,21 @@ Anyone who has this link can control this node until the daemon restarts: do not
                 "中止を依頼しました。次の安全な区切りで止まり、あとで再開できます。".into()
             }
             CancelError { e } => localize_daemon_error(e, Lang::Ja),
+            TransfersRemoved { removed, kept_partial } => {
+                let mut t = format!(
+                    "完了・失敗・中止した転送を {removed} 件、一覧から外しました。受信したファイルや送信元ファイルには触れていません。送信したファイルは引き続き相手が受け取れます。"
+                );
+                if *kept_partial > 0 {
+                    t.push_str(&format!(
+                        "\n  {kept_partial} 件は途中までのデータが残っているため残しました。外すには `miasma transfer-remove <id> --discard-partial` を使います。"
+                    ));
+                }
+                t
+            }
+            RemoveNotFound { id } => format!("そのような転送はありません: {id}"),
+            RemoveRunning => "その転送はまだ実行中です。先に中止してください（`miasma transfer-cancel <id>`）。".into(),
+            RemovePaused => "その転送は一時停止中で再開できるため、完了していません。同じコマンドをもう一度実行すると再開します。".into(),
+            RemoveHasPartial => "その転送は途中までのデータを残して止まっています。外すとそのデータも破棄されます。破棄してよければ --discard-partial を付けて再実行してください。".into(),
 
             DaemonError { e } => format!("デーモンのエラー: {}", localize_daemon_error(e, Lang::Ja)),
             UnexpectedResponse { debug } => format!("想定外の応答です: {debug}"),
@@ -787,6 +843,11 @@ mod tests {
             TransferFailed { .. } => "TransferFailed",
             CancelRequested => "CancelRequested",
             CancelError { .. } => "CancelError",
+            TransfersRemoved { .. } => "TransfersRemoved",
+            RemoveNotFound { .. } => "RemoveNotFound",
+            RemoveRunning => "RemoveRunning",
+            RemovePaused => "RemovePaused",
+            RemoveHasPartial => "RemoveHasPartial",
             DaemonError { .. } => "DaemonError",
             UnexpectedResponse { .. } => "UnexpectedResponse",
             WrongPassword => "WrongPassword",
@@ -951,6 +1012,27 @@ mod tests {
                 "Cancel requested; it stops at the next safe point and stays resumable.",
             ),
             (CancelError { e: s("no such transfer") }, "no such transfer"),
+            (
+                TransfersRemoved { removed: 2, kept_partial: 0 },
+                "Removed 2 finished transfer(s) from the list. Received files and source files are not touched; a file you sent stays available to peers.",
+            ),
+            (
+                TransfersRemoved { removed: 1, kept_partial: 3 },
+                "Removed 1 finished transfer(s) from the list. Received files and source files are not touched; a file you sent stays available to peers.\n  3 stopped transfer(s) still hold partial data and were kept; remove one with `miasma transfer-remove <id> --discard-partial`.",
+            ),
+            (RemoveNotFound { id: s("miasma:x") }, "no such transfer: miasma:x"),
+            (
+                RemoveRunning,
+                "that transfer is still running; cancel it first (`miasma transfer-cancel <id>`).",
+            ),
+            (
+                RemovePaused,
+                "that transfer is paused and can be resumed, so it is not finished; run the same command to resume it.",
+            ),
+            (
+                RemoveHasPartial,
+                "that transfer stopped with partial data; removing it discards that data. Run again with --discard-partial to do so.",
+            ),
             (DaemonError { e: s("wrong password") }, "daemon error: wrong password"),
             (UnexpectedResponse { debug: s("Foo") }, "unexpected response: Foo"),
             (WrongPassword, "wrong password"),
