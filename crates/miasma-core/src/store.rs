@@ -412,8 +412,25 @@ impl LocalShareStore {
     /// `put_hosted` always rejects -- a node must opt in to hosting other
     /// publishers' shares, not have it happen implicitly.
     pub fn with_hosted_quota_mb(mut self, hosted_quota_mb: u64) -> Self {
-        self.hosted_quota_bytes = hosted_quota_mb * 1024 * 1024;
+        self.hosted_quota_bytes = hosted_quota_mb.saturating_mul(1024 * 1024);
         self
+    }
+
+    /// Open the store the way a daemon does: owned quota from
+    /// `storage.quota_mb`, hosted quota from `storage.hosted_quota_mb`
+    /// (default `0`, i.e. every pushed share is refused). This is the single
+    /// place the configuration reaches the store, so a test can drive it with
+    /// a parsed `config.toml`.
+    pub fn open_configured(
+        data_dir: &Path,
+        storage: &crate::config::StorageConfig,
+    ) -> Result<Self, MiasmaError> {
+        Ok(Self::open(data_dir, storage.quota_mb)?.with_hosted_quota_mb(storage.hosted_quota_mb))
+    }
+
+    /// Configured hosted-share budget in bytes (`0` = refuse all pushed shares).
+    pub fn hosted_quota_bytes(&self) -> u64 {
+        self.hosted_quota_bytes
     }
 
     fn lock_master_key(
