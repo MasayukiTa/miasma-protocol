@@ -2097,6 +2097,14 @@ pub struct MiasmaNode {
 }
 
 impl MiasmaNode {
+    /// The raw Ed25519 seed of the node's persistent identity (the key that
+    /// signs its DHT records and is the publisher in a share ID). The iroh
+    /// endpoint uses it as its own identity so a share ID names the endpoint to
+    /// dial. Zeroized on drop; do not copy it into long-lived state.
+    pub fn identity_seed(&self) -> zeroize::Zeroizing<[u8; 32]> {
+        zeroize::Zeroizing::new(self.dht_signing_key.to_bytes())
+    }
+
     /// Build a node from the given master key.
     pub fn new(
         master_key: &[u8; 32],
