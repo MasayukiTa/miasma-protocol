@@ -29,6 +29,7 @@ use sha2::Sha256;
 use subtle::ConstantTimeEq as _;
 use zeroize::Zeroizing;
 
+use super::password_policy;
 use crate::{crypto::hash::ContentId, MiasmaError};
 
 const LABEL_SEGMENT_KEY: &[u8] = b"miasma-seg-key-v1";
@@ -102,6 +103,32 @@ impl PasswordProtection {
     /// As [`create`](Self::create) with an explicit Argon2id cost (used by tests
     /// to avoid a 64 MiB derivation per case in a debug build).
     pub fn create_with_cost(
+        password: &str,
+        m_kib: u32,
+        t_cost: u32,
+        p_cost: u32,
+    ) -> Result<(Self, UnlockedKey), MiasmaError> {
+        // The policy gate for every way of creating key material: refused
+        // before any Argon2 work, salt or file I/O. Never applied to `unlock`.
+        password_policy::check(password).map_err(MiasmaError::WeakPassword)?;
+        Self::create_unchecked_with_cost(password, m_kib, t_cost, p_cost)
+    }
+
+    /// Key creation without the password policy. Test-only: it exists so a
+    /// test can build the transfer an older version would have published
+    /// with a weak password and prove it can still be received. It is not
+    /// compiled into any shipped build.
+    #[cfg(test)]
+    pub(crate) fn create_unchecked(
+        password: &str,
+        m_kib: u32,
+        t_cost: u32,
+        p_cost: u32,
+    ) -> Result<(Self, UnlockedKey), MiasmaError> {
+        Self::create_unchecked_with_cost(password, m_kib, t_cost, p_cost)
+    }
+
+    fn create_unchecked_with_cost(
         password: &str,
         m_kib: u32,
         t_cost: u32,
@@ -212,10 +239,11 @@ fn key_check_tag(pw_key: &[u8; 32]) -> Result<[u8; KEY_CHECK_LEN], MiasmaError> 
     Ok(tag)
 }
 
-/// A fresh random password, for tests: no test carries a fixed secret.
+/// A fresh random password, for tests: no test carries a fixed secret. It
+/// always satisfies the password policy (a digit, letters and a symbol).
 #[cfg(test)]
 pub(crate) fn random_test_password() -> String {
-    format!("pw-{:032x}", rand::random::<u128>())
+    format!("pw-1{:032x}", rand::random::<u128>())
 }
 
 #[cfg(test)]
@@ -340,6 +368,49 @@ mod tests {
         assert!(validate_cost(DEFAULT_M_KIB, DEFAULT_T_COST, DEFAULT_P_COST).is_ok());
         // The old ceiling (256 MiB) is now refused.
         assert!(validate_cost(256 * 1024, 3, 1).is_err());
+    }
+
+    #[test]
+    fn a_weak_password_is_refused_before_any_key_work() {
+        use super::password_policy::PolicyViolation;
+        // The default cost (64 MiB x 3) takes seconds in a debug build; a
+        // policy refusal must come back at once, having derived nothing.
+        let t0 = std::time::Instant::now();
+        for weak in ["", "a1!bc", "abcdef!", "123456!", "abc1234"] {
+            let err = PasswordProtection::create(weak).err().expect("refused");
+            assert!(matches!(err, MiasmaError::WeakPassword(_)), "{err:?}");
+        }
+        assert!(
+            t0.elapsed() < std::time::Duration::from_millis(500),
+            "policy check must run before Argon2: {:?}",
+            t0.elapsed()
+        );
+        match PasswordProtection::create("abc").err().unwrap() {
+            MiasmaError::WeakPassword(v) => assert_eq!(
+                v,
+                vec![
+                    PolicyViolation::TooShort { min: 6, len: 3 },
+                    PolicyViolation::NoDigit,
+                    PolicyViolation::NoSymbol
+                ]
+            ),
+            other => panic!("{other:?}"),
+        }
+        // create_with_cost is gated too, and the gate runs before the cost check.
+        assert!(matches!(
+            PasswordProtection::create_with_cost("abc", 1, 1, 1),
+            Err(MiasmaError::WeakPassword(_))
+        ));
+    }
+
+    #[test]
+    fn a_compliant_password_is_accepted_and_unlock_never_applies_the_policy() {
+        let pw = random_test_password();
+        assert!(super::password_policy::check(&pw).is_ok());
+        assert!(PasswordProtection::create_with_cost(&pw, M, T, P).is_ok());
+        // An old weak password made without the gate still unlocks.
+        let (prot, _) = PasswordProtection::create_unchecked("x", M, T, P).unwrap();
+        assert!(prot.unlock("x").is_ok());
     }
 
     #[test]
