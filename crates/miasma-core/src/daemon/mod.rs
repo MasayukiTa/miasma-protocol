@@ -103,6 +103,9 @@ pub struct DaemonServer {
     wss_tls_enabled: bool,
     /// WSS accept-loop task. Aborted and awaited during daemon shutdown/wipe.
     wss_server_handle: Option<JoinHandle<()>>,
+    /// Whether the iroh endpoint is running (it is found by data dir, see
+    /// `transport::iroh_direct::node_for`).
+    iroh_enabled: bool,
     /// Whether a proxy is configured.
     proxy_configured: bool,
     /// Proxy type string (e.g. "socks5", "http_connect").
@@ -152,7 +155,12 @@ impl DaemonServer {
         store: Arc<LocalShareStore>,
         data_dir: PathBuf,
     ) -> Result<Self> {
-        Self::start_with_transport(node, store, data_dir, TransportConfig::default()).await
+        // No iroh here: this entry point is the one tests and embedders call
+        // without a configuration, and it must not talk to any public service.
+        // `start_with_transport` with the node's real config is the daemon.
+        let mut transport = TransportConfig::default();
+        transport.iroh_mode = crate::config::IrohMode::Off;
+        Self::start_with_transport(node, store, data_dir, transport).await
     }
 
     /// Build and bind the daemon with explicit transport configuration.
@@ -396,6 +404,10 @@ impl DaemonServer {
         };
         drop(wss_key_pem);
 
+        // 6a'. iroh direct transport: receivers reach this node by the publisher
+        // key in a share ID, with no address, open port or tunnel.
+        let iroh_enabled = start_iroh(&node, &store, &data_dir, &transport_config).await;
+
         // 6b. ObfuscatedQuic server.
         let mut obfs_quic_port = 0u16;
         let mut obfs_server_handle: Option<JoinHandle<()>> = None;
@@ -529,6 +541,7 @@ impl DaemonServer {
             wss_port,
             wss_tls_enabled,
             wss_server_handle,
+            iroh_enabled,
             proxy_configured,
             proxy_type,
             obfs_quic_port,
@@ -716,12 +729,85 @@ impl DaemonServer {
             let _ = handle.await;
         }
 
+        if self.iroh_enabled {
+            stop_iroh(&self.data_dir).await;
+        }
         coord.shutdown().await;
         remove_port_file(&self.data_dir);
         control_auth::remove_token_file(&self.data_dir);
         ipc::remove_http_port_file(&self.data_dir);
         Ok(())
     }
+}
+
+/// Start the iroh endpoint with the node's identity. A failure is logged and the
+/// daemon runs without it: receive by share ID alone is then unavailable, nothing
+/// else changes.
+#[cfg(feature = "iroh")]
+async fn start_iroh(
+    node: &MiasmaNode,
+    store: &Arc<LocalShareStore>,
+    data_dir: &std::path::Path,
+    transport: &TransportConfig,
+) -> bool {
+    use crate::transport::iroh_direct::{self, IrohNode, IrohSettings};
+    if transport.iroh_mode == crate::config::IrohMode::Off {
+        info!("iroh direct transport is off (transport.iroh_mode = off)");
+        return false;
+    }
+    let settings = IrohSettings::from_config(transport);
+    iroh_direct::log_privacy_notice(&settings);
+    let seed = node.identity_seed();
+    let records: Arc<dyn crate::transport::websocket::RecordProvider> = Arc::new(node.dht_handle());
+    match IrohNode::start(&seed, settings, store.clone(), Some(records)).await {
+        Ok(iroh) => {
+            info!(
+                endpoint = %hex::encode(iroh.endpoint_id()),
+                mode = %transport.iroh_mode,
+                "iroh direct transport started"
+            );
+            iroh_direct::register_node(data_dir, iroh);
+            true
+        }
+        Err(e) => {
+            warn!("iroh direct transport failed to start: {e}");
+            false
+        }
+    }
+}
+
+#[cfg(not(feature = "iroh"))]
+async fn start_iroh(
+    _node: &MiasmaNode,
+    _store: &Arc<LocalShareStore>,
+    _data_dir: &std::path::Path,
+    transport: &TransportConfig,
+) -> bool {
+    if transport.iroh_mode != crate::config::IrohMode::Off {
+        info!("iroh direct transport is not built into this binary");
+    }
+    false
+}
+
+#[cfg(feature = "iroh")]
+async fn stop_iroh(data_dir: &std::path::Path) {
+    if let Some(node) = crate::transport::iroh_direct::unregister_node(data_dir) {
+        node.shutdown().await;
+    }
+}
+
+#[cfg(not(feature = "iroh"))]
+async fn stop_iroh(_data_dir: &std::path::Path) {}
+
+/// What `miasma status` reports about iroh.
+#[cfg(feature = "iroh")]
+fn iroh_status_for(data_dir: &std::path::Path) -> Option<ipc::IrohStatus> {
+    crate::transport::iroh_direct::node_for(data_dir).map(|n| n.status())
+}
+
+#[cfg(not(feature = "iroh"))]
+fn iroh_status_for(_data_dir: &std::path::Path) -> Option<ipc::IrohStatus> {
+    None
 }
 
 // ─── IPC server ──────────────────────────────────────────────────────────────
@@ -990,6 +1076,7 @@ pub(crate) async fn process_request(
             };
             // Refuse a bad endpoint list now, with a clear message, rather than
             // starting a job that can only fail.
+            let iroh_ca_pem = via_ca_pem.clone();
             let via = crate::transfer::direct::ViaConfig::from_request(via, via_ca_pem);
             if let Some(v) = &via {
                 if let Err(e) = v.build_clients() {
@@ -997,8 +1084,15 @@ pub(crate) async fn process_request(
                 }
             }
             let registry = crate::transfer::jobs::registry_for(&data_dir);
-            let id =
-                registry.start_receive(coord.clone(), target, output_path, password, restart, via);
+            let id = registry.start_receive(
+                coord.clone(),
+                target,
+                output_path,
+                password,
+                restart,
+                via,
+                iroh_ca_pem,
+            );
             ControlResponse::TransferStarted { id }
         }
 
@@ -1277,6 +1371,7 @@ pub(crate) async fn process_request(
             let dir_relay = coord.directed_relay_stats().await.unwrap_or_default();
 
             ControlResponse::Status(DaemonStatus {
+                iroh: iroh_status_for(&data_dir),
                 peer_id: coord.peer_id().to_string(),
                 listen_addrs,
                 peer_count,

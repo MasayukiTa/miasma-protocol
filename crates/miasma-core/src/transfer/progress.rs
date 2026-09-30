@@ -94,6 +94,12 @@ pub struct TransferStatus {
     /// path cannot tell who published.
     #[serde(default)]
     pub publisher_authenticated: bool,
+    /// How the data is moving when it comes over the iroh direct transport:
+    /// `"direct"` (a hole-punched or LAN connection) or `"relay"` (through a
+    /// relay server, which is much slower on a public relay). `None` for every
+    /// other source and before a connection exists.
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 struct Inner {
@@ -102,6 +108,7 @@ struct Inner {
     share_id: Option<String>,
     share_id_checked: bool,
     publisher_authenticated: bool,
+    path: Option<String>,
     phase: Phase,
     state: TransferState,
     last_error: Option<String>,
@@ -154,6 +161,7 @@ impl TransferProgress {
                 share_id: None,
                 share_id_checked: false,
                 publisher_authenticated: false,
+                path: None,
                 phase: Phase::Preparing,
                 state: TransferState::Running,
                 last_error: None,
@@ -198,6 +206,11 @@ impl TransferProgress {
     /// The fetched record was verified against the share ID's publisher.
     pub fn set_publisher_authenticated(&self, authenticated: bool) {
         self.inner.lock().unwrap().publisher_authenticated = authenticated;
+    }
+
+    /// The path an iroh transfer is using (`direct` / `relay`); `None` clears it.
+    pub fn set_path(&self, path: Option<&str>) {
+        self.inner.lock().unwrap().path = path.map(str::to_owned);
     }
 
     pub fn set_phase(&self, phase: Phase) {
@@ -340,6 +353,7 @@ impl TransferProgress {
             share_id: g.share_id.clone(),
             share_id_checked: g.share_id_checked,
             publisher_authenticated: g.publisher_authenticated,
+            path: g.path.clone(),
         }
     }
 }

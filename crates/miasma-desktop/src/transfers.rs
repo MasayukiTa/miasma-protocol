@@ -914,6 +914,27 @@ impl TransfersUi {
                         ui.end_row();
                     }
 
+                    // A receive over iroh says how the data travels: a public relay is
+                    // an order of magnitude slower than a direct path.
+                    if job.kind == TransferKind::Receive {
+                        if let Some(path) = job.path.as_deref() {
+                            ui.label(egui::RichText::new(t.path_label).color(pal().muted));
+                            match path {
+                                "direct" => {
+                                    ui.label(
+                                        egui::RichText::new(t.path_direct).color(pal().success),
+                                    );
+                                }
+                                _ => {
+                                    ui.label(
+                                        egui::RichText::new(t.path_relay).color(pal().warning),
+                                    );
+                                }
+                            }
+                            ui.end_row();
+                        }
+                    }
+
                     // The MID: in Technical mode always; in Easy mode only where there is no
                     // Share ID to give instead (a receive, or a send from an older daemon).
                     if !easy || job.share_id.as_deref().is_none_or(str::is_empty) {
@@ -2192,6 +2213,7 @@ mod tests {
             share_id: None,
             share_id_checked: false,
             publisher_authenticated: false,
+            path: None,
         }
     }
 
