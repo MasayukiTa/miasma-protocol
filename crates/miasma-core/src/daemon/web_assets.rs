@@ -38,6 +38,7 @@ pub static ASSETS: &[Asset] = &[
     asset!("js/bridge.js", JS),
     asset!("js/format.js", JS),
     asset!("js/i18n.js", JS),
+    asset!("js/password_policy.js", JS),
     asset!("js/storage.js", JS),
     asset!("js/theme.js", JS),
     asset!("js/transfers.js", JS),
