@@ -1201,6 +1201,10 @@ pub struct TransferStrings {
     pub publisher_verified: &'static str,
     /// A receive started from a bare MID.
     pub publisher_unverified: &'static str,
+    /// A receive over iroh: how the data travels.
+    pub path_label: &'static str,
+    pub path_direct: &'static str,
+    pub path_relay: &'static str,
 
     // Send password policy and the generator.
     /// Under the send password field: the rule, and the honest caveat.
@@ -1340,6 +1344,9 @@ impl TransferStrings {
             ("publisher_label", self.publisher_label),
             ("publisher_verified", self.publisher_verified),
             ("publisher_unverified", self.publisher_unverified),
+            ("path_label", self.path_label),
+            ("path_direct", self.path_direct),
+            ("path_relay", self.path_relay),
             ("pw_policy_note", self.pw_policy_note),
             ("pw_weak_prefix", self.pw_weak_prefix),
             ("pw_err_sep", self.pw_err_sep),
@@ -1488,6 +1495,9 @@ static TR_EN: TransferStrings = TransferStrings {
     publisher_label: "Publisher",
     publisher_verified: "Verified by the Share ID",
     publisher_unverified: "Not authenticated: use the Share ID",
+    path_label: "Connection",
+    path_direct: "Direct (peer to peer)",
+    path_relay: "Through a relay server (slower)",
 
     pw_policy_note: "Optional. If you set one: at least 6 characters with a digit, a letter (a-z, A-Z) and a symbol; a space does not count. Even so, a short password is weak: anyone who holds the transfer's manifest can try guesses offline. Press Generate for a strong one.",
     pw_weak_prefix: "Password not accepted:",
@@ -1627,6 +1637,9 @@ static TR_JA: TransferStrings = TransferStrings {
     publisher_label: "発行元",
     publisher_verified: "共有IDで確認済み",
     publisher_unverified: "未確認: 共有IDを使ってください",
+    path_label: "接続",
+    path_direct: "直接接続（ピアツーピア）",
+    path_relay: "リレーサーバ経由（低速）",
 
     pw_policy_note: "任意です。設定する場合は 6 文字以上で、数字・英字 (a-z, A-Z)・記号をそれぞれ含めてください（空白は記号に数えません）。ただし短いパスワードは弱く、転送のマニフェストを持つ人はオフラインで何度でも推測できます。「生成」で強いパスワードを作れます。",
     pw_weak_prefix: "このパスワードは使えません:",
@@ -1766,6 +1779,9 @@ static TR_ZH_CN: TransferStrings = TransferStrings {
     publisher_label: "发布者",
     publisher_verified: "已通过共享 ID 核实",
     publisher_unverified: "未验证：请使用共享 ID",
+    path_label: "连接",
+    path_direct: "直连（点对点）",
+    path_relay: "经中继服务器（较慢）",
 
     pw_policy_note: "可选。若设置，须至少 6 个字符，并包含数字、字母 (a-z, A-Z) 和符号；空格不算符号。即便如此，短密码仍然很弱：持有该传输清单的人可以离线反复猜测。点击“生成”可得到高强度密码。",
     pw_weak_prefix: "密码不符合要求：",

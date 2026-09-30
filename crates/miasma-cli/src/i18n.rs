@@ -159,6 +159,27 @@ pub fn localize_daemon_error(e: &str, lang: Lang) -> String {
         if e.contains(CORE_PASSWORD_REQUIRED) {
             return Msg::PasswordRequired.text(lang);
         }
+        // iroh direct transport (receive by share ID alone): the dial failures a
+        // person can act on. The English text follows as the detail.
+        if let Some(at) = e.find("cannot reach the sender over iroh") {
+            let detail = &e[at..];
+            let why = if detail.contains("not connected to a relay server") {
+                "この PC が iroh のリレーサーバに接続できていません。プロキシ（環境変数 HTTPS_PROXY）や社内ネットワークの制限が原因の可能性があります。"
+            } else if detail.contains("no connection within") {
+                "時間内に送信者へ接続できませんでした。送信者のデーモンが起動していて iroh が有効か（transport.iroh_mode）、送信者がオンラインかを確認してください。"
+            } else {
+                "送信者へ接続できませんでした。"
+            };
+            return format!("iroh で送信者に到達できません。{why}（詳細: {detail}）");
+        }
+        if e.contains("the peer that answered is not the publisher named in the share ID") {
+            return format!(
+                "応答した相手が共有 ID の公開者の鍵と一致しません。接続を拒否しました（詳細: {e}）"
+            );
+        }
+        if e.contains("iroh is switched off") {
+            return format!("iroh はオフです（transport.iroh_mode = off）（詳細: {e}）");
+        }
         // Control-channel refusals from the daemon (miasma-core daemon module).
         if e.starts_with("unauthorized:") {
             return "制御トークンが無効か未指定です（データディレクトリの daemon.token を確認してください）".to_owned();
@@ -422,6 +443,20 @@ pub enum Msg {
     },
     TunnelRunning,
     TunnelNoUrl,
+
+    // ---- iroh direct transport (receive by share ID alone) ----
+    /// Printed once when the daemon starts with iroh discovery via n0 enabled.
+    DaemonIrohNotice,
+    /// `miasma status` line when an iroh endpoint is running.
+    StatusIroh {
+        mode: String,
+        endpoint: String,
+        relay: Option<String>,
+        connected: bool,
+        error: Option<String>,
+    },
+    /// `miasma status` line when iroh is off.
+    StatusIrohOff,
 }
 
 impl Msg {
@@ -622,6 +657,18 @@ Anyone who has this link can control this node until the daemon restarts: do not
             ),
             TunnelRunning => "The tunnel is running. Press Ctrl-C to stop it.".into(),
             TunnelNoUrl => "cloudflared did not report a tunnel URL; is it able to reach the internet?".into(),
+
+            DaemonIrohNotice => "iroh discovery via n0 is enabled: your endpoint id and addresses are published to n0; disable with transport.iroh_mode=off".into(),
+            StatusIroh { mode, endpoint, relay, connected, error } => format!(
+                "iroh: {mode} endpoint {endpoint}… home relay {} ({})",
+                relay.as_deref().unwrap_or("none"),
+                match (connected, error) {
+                    (true, _) => "connected".to_owned(),
+                    (false, Some(e)) => format!("not connected: {e}"),
+                    (false, None) => "not connected".to_owned(),
+                }
+            ),
+            StatusIrohOff => "iroh: off".into(),
         }
     }
 
@@ -818,6 +865,18 @@ Anyone who has this link can control this node until the daemon restarts: do not
             ),
             TunnelRunning => "トンネルは動作中です。止めるには Ctrl-C を押してください。".into(),
             TunnelNoUrl => "cloudflared がトンネルの URL を報告しませんでした。インターネットに接続できていますか？".into(),
+
+            DaemonIrohNotice => "iroh の探索に n0 を使います: このノードのエンドポイント ID とアドレスが n0 に公開されます。無効にするには transport.iroh_mode=off を設定してください".into(),
+            StatusIroh { mode, endpoint, relay, connected, error } => format!(
+                "iroh: {mode} エンドポイント {endpoint}… ホームリレー {} ({})",
+                relay.as_deref().unwrap_or("なし"),
+                match (connected, error) {
+                    (true, _) => "接続中".to_owned(),
+                    (false, Some(e)) => format!("未接続: {e}"),
+                    (false, None) => "未接続".to_owned(),
+                }
+            ),
+            StatusIrohOff => "iroh: オフ".into(),
         }
     }
 }
@@ -962,6 +1021,9 @@ mod tests {
             TunnelReady { .. } => "TunnelReady",
             TunnelRunning => "TunnelRunning",
             TunnelNoUrl => "TunnelNoUrl",
+            DaemonIrohNotice => "DaemonIrohNotice",
+            StatusIroh { .. } => "StatusIroh",
+            StatusIrohOff => "StatusIrohOff",
         }
     }
 
@@ -1244,6 +1306,31 @@ Anyone who has this link can control this node until the daemon restarts: do not
                 TunnelNoUrl,
                 "cloudflared did not report a tunnel URL; is it able to reach the internet?",
             ),
+            (
+                DaemonIrohNotice,
+                "iroh discovery via n0 is enabled: your endpoint id and addresses are published to n0; disable with transport.iroh_mode=off",
+            ),
+            (
+                StatusIroh {
+                    mode: s("n0"),
+                    endpoint: s("0123456789ab"),
+                    relay: Some(s("https://relay.example./")),
+                    connected: true,
+                    error: None,
+                },
+                "iroh: n0 endpoint 0123456789ab… home relay https://relay.example./ (connected)",
+            ),
+            (
+                StatusIroh {
+                    mode: s("custom"),
+                    endpoint: s("0123456789ab"),
+                    relay: None,
+                    connected: false,
+                    error: Some(s("unable to connect")),
+                },
+                "iroh: custom endpoint 0123456789ab… home relay none (not connected: unable to connect)",
+            ),
+            (StatusIrohOff, "iroh: off"),
         ]
     }
 

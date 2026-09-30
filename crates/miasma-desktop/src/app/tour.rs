@@ -67,6 +67,7 @@ fn mock(kind: TransferKind, mid: &str, name: &str, state: TransferState) -> Tran
         share_id: None,
         share_id_checked: false,
         publisher_authenticated: false,
+        path: None,
     }
 }
 
