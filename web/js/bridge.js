@@ -476,6 +476,68 @@ export class MiasmaBridge {
     return [];
   }
 
+  // ── Transfers (daemon over HTTP only) ─────────────────────────────
+
+  /** Whether this backend can list and start transfers at all. */
+  get supportsTransfers() { return this._mode === MODE_HTTP; }
+
+  /**
+   * Every transfer the daemon knows (running, paused, finished), each with an `id`.
+   * Throws an Error whose `code` is 'unsupported', 'offline', 'auth' or 'http'.
+   */
+  async transfers() {
+    if (this._mode !== MODE_HTTP) throw transferError('unsupported');
+    let resp;
+    try {
+      resp = await bridgeFetch(`${bridgeBase}/api/transfers`, { method: 'GET' });
+    } catch (_) {
+      this._setConnected(false);
+      throw transferError('offline');
+    }
+    if (resp.status === 401) throw new BridgeAuthError(authState);
+    if (!resp.ok) throw transferError('http', await errorText(resp));
+    const list = await resp.json();
+    return Array.isArray(list) ? list : [];
+  }
+
+  /**
+   * Start (or resume: the same request again) a receive. `outputPath` is a path on the
+   * DAEMON's computer. The password goes in the request body only: never in the URL,
+   * never stored here. Returns the transfer id.
+   */
+  async transferReceive({ mid, outputPath, password, restart }) {
+    if (this._mode !== MODE_HTTP) throw transferError('unsupported');
+    const body = { mid, output_path: outputPath, restart: !!restart };
+    if (password) body.password = password;
+    let resp;
+    try {
+      resp = await bridgeFetch(`${bridgeBase}/api/transfers/receive`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } catch (_) {
+      throw transferError('offline');
+    }
+    if (resp.status === 401) throw new BridgeAuthError(authState);
+    if (!resp.ok) throw transferError('http', await errorText(resp));
+    return (await resp.json()).id;
+  }
+
+  /** Ask a running transfer to stop at its next safe point (progress is kept). */
+  async transferCancel(id) {
+    if (this._mode !== MODE_HTTP) throw transferError('unsupported');
+    let resp;
+    try {
+      resp = await bridgeFetch(`${bridgeBase}/api/transfers/${encodeURIComponent(id)}/cancel`, { method: 'POST' });
+    } catch (_) {
+      throw transferError('offline');
+    }
+    if (resp.status === 401) throw new BridgeAuthError(authState);
+    if (!resp.ok) throw transferError('http', await errorText(resp));
+    return true;
+  }
+
   /** Try to reconnect if currently disconnected. */
   async reconnect() {
     await this.init(this._wasm);
@@ -677,6 +739,20 @@ async function bridgeFetch(url, options) {
     else if (resp.ok) setAuthState('ok');
   }
   return resp;
+}
+
+function transferError(code, message) {
+  const e = new Error(message || code);
+  e.code = code;
+  return e;
+}
+
+async function errorText(resp) {
+  try {
+    const j = await resp.json();
+    if (j && typeof j.error === 'string') return j.error;
+  } catch (_) { /* not JSON */ }
+  return `HTTP ${resp.status}`;
 }
 
 function fetchWithTimeout(url, options, timeoutMs) {

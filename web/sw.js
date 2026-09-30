@@ -10,6 +10,8 @@ const PRECACHE_ASSETS = [
   'js/i18n.js',
   'js/storage.js',
   'js/theme.js',
+  'js/format.js',
+  'js/transfers.js',
   'manifest.json',
 ];
 

@@ -98,8 +98,8 @@ test('no rule draws a coloured left rail or fills a card with a status colour', 
     for (const d of body.split(';')) {
       const [prop, val] = d.split(/:(.+)/).map((s) => (s || '').trim());
       if ((prop === 'background' || prop === 'background-color') && /var\(--(success|warning|danger)\)/.test(val)) {
-        // Only the 7-9 px dots may use a status colour as a background.
-        assert.ok(/::before|progress-fill|\.chip|\.connection-dot/.test(selector), `status background on: ${selector.trim()}`);
+        // Only dots, thin bars and strip cells may use a status colour as a background.
+        assert.ok(/::before|progress-fill|\.chip|\.connection-dot|\.tf-fill|\.tf-cell/.test(selector), `status background on: ${selector.trim()}`);
       }
     }
   }
