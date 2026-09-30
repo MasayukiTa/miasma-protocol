@@ -260,12 +260,20 @@ pub fn show_clear_finished(jobs: &[TransferStatus]) -> bool {
     jobs.iter().any(clearable)
 }
 
-/// The file name offered when the person has not chosen one: `received-<first 8 characters of the
-/// MID digest>.bin`, or `received.bin` when no MID has been typed yet. The manifest carries no
-/// original name, so the receiver cannot know it.
-pub fn suggested_file_name(mid: &str) -> String {
-    let digest: String = mid
-        .trim()
+/// The file name offered in the Save-As dialog before the transfer is looked up: `received-<first
+/// 8 characters of the MID digest>.bin`, or `received.bin` when no ID has been typed yet. (The
+/// original name is only known once the manifest has been fetched; a folder target uses it then,
+/// see [`effective_receive_path`].) Accepts a share ID or a MID.
+pub fn suggested_file_name(id: &str) -> String {
+    let typed = id.trim();
+    let mid_text = if typed.starts_with("miasma-share:") {
+        miasma_core::transfer::ShareId::parse(typed)
+            .map(|s| s.mid().to_string())
+            .unwrap_or_default()
+    } else {
+        typed.to_owned()
+    };
+    let digest: String = mid_text
         .strip_prefix("miasma:")
         .unwrap_or("")
         .chars()
@@ -279,17 +287,13 @@ pub fn suggested_file_name(mid: &str) -> String {
     }
 }
 
-/// The path a receive will write to. A typed path that is an existing folder gets the suggested
-/// file name appended, so a folder picked by mistake still ends up a file. Returns the path and
-/// whether the file name was added.
-pub fn effective_receive_path(typed: &str, mid: &str) -> (String, bool) {
+/// The path a receive is started with, and whether it is an existing folder. A folder is passed
+/// on as it is: the daemon writes `<folder>/<original file name>` once the transfer's manifest
+/// names the file, and refuses (never overwrites) if that file already exists.
+pub fn effective_receive_path(typed: &str) -> (String, bool) {
     let typed = typed.trim();
-    if !typed.is_empty() && std::path::Path::new(typed).is_dir() {
-        let joined = std::path::Path::new(typed).join(suggested_file_name(mid));
-        (joined.to_string_lossy().into_owned(), true)
-    } else {
-        (typed.to_owned(), false)
-    }
+    let is_folder = !typed.is_empty() && std::path::Path::new(typed).is_dir();
+    (typed.to_owned(), is_folder)
 }
 
 // ─── Pure: the segment strip ────────────────────────────────────────────────
@@ -868,25 +872,70 @@ impl TransfersUi {
                 .num_columns(2)
                 .spacing([16.0, 5.0])
                 .show(ui, |ui| {
-                    // The MID is what the receiver needs, so it is shown in Easy mode too.
-                    let mid_label = if easy { t.mid_label_easy } else { t.mid_label };
-                    ui.label(egui::RichText::new(mid_label).color(pal().muted));
-                    ui.horizontal_wrapped(|ui| {
-                        if job.mid.is_empty() {
-                            ui.label(egui::RichText::new("-").color(pal().faint));
-                        } else {
-                            ui.label(egui::RichText::new(job.mid.as_str()).monospace());
-                            let copied = self
-                                .copied_at
-                                .is_some_and(|c| c.elapsed() < Duration::from_secs(2));
-                            let label = if copied { t.copied } else { t.copy };
-                            if ui.small_button(label).clicked() {
-                                ui.output_mut(|o| o.copied_text = job.mid.clone());
-                                self.copied_at = Some(Instant::now());
+                    // The Share ID is what the receiver needs (it also lets them check who
+                    // published it), so it is shown in Easy mode too, with a Copy button.
+                    if let Some(share_id) = job.share_id.as_deref().filter(|s| !s.is_empty()) {
+                        ui.label(egui::RichText::new(t.share_id_label).color(pal().muted));
+                        ui.vertical(|ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(egui::RichText::new(share_id).monospace());
+                                let copied = self
+                                    .copied_at
+                                    .is_some_and(|c| c.elapsed() < Duration::from_secs(2));
+                                let label = if copied { t.copied } else { t.copy };
+                                if ui.small_button(label).clicked() {
+                                    ui.output_mut(|o| o.copied_text = share_id.to_owned());
+                                    self.copied_at = Some(Instant::now());
+                                }
+                            });
+                            if job.kind == TransferKind::Send {
+                                ui.label(
+                                    egui::RichText::new(t.share_id_send_note)
+                                        .small()
+                                        .color(pal().faint),
+                                );
                             }
+                        });
+                        ui.end_row();
+                    }
+
+                    // A receive says whether the publisher was authenticated.
+                    if job.kind == TransferKind::Receive && !job.mid.is_empty() {
+                        ui.label(egui::RichText::new(t.publisher_label).color(pal().muted));
+                        if job.publisher_authenticated {
+                            ui.label(
+                                egui::RichText::new(t.publisher_verified).color(pal().success),
+                            );
+                        } else {
+                            ui.label(
+                                egui::RichText::new(t.publisher_unverified).color(pal().warning),
+                            );
                         }
-                    });
-                    ui.end_row();
+                        ui.end_row();
+                    }
+
+                    // The MID: in Technical mode always; in Easy mode only where there is no
+                    // Share ID to give instead (a receive, or a send from an older daemon).
+                    if !easy || job.share_id.as_deref().map_or(true, str::is_empty) {
+                        let mid_label = if easy { t.mid_label_easy } else { t.mid_label };
+                        ui.label(egui::RichText::new(mid_label).color(pal().muted));
+                        ui.horizontal_wrapped(|ui| {
+                            if job.mid.is_empty() {
+                                ui.label(egui::RichText::new("-").color(pal().faint));
+                            } else {
+                                ui.label(egui::RichText::new(job.mid.as_str()).monospace());
+                                let copied = self
+                                    .copied_at
+                                    .is_some_and(|c| c.elapsed() < Duration::from_secs(2));
+                                let label = if copied { t.copied } else { t.copy };
+                                if ui.small_button(label).clicked() {
+                                    ui.output_mut(|o| o.copied_text = job.mid.clone());
+                                    self.copied_at = Some(Instant::now());
+                                }
+                            }
+                        });
+                        ui.end_row();
+                    }
 
                     ui.label(egui::RichText::new(t.phase_label).color(pal().muted));
                     if easy {
@@ -1312,18 +1361,14 @@ impl TransfersUi {
         connected: bool,
         cmds: &mut Vec<WorkerCmd>,
     ) {
-        form_row(
-            ui,
-            if easy { t.mid_label_easy } else { t.mid_label },
-            |ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.recv_mid)
-                        .hint_text("miasma:...")
-                        .font(egui::TextStyle::Monospace)
-                        .desired_width(f32::INFINITY),
-                );
-            },
-        );
+        form_row(ui, t.recv_id_label, |ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.recv_mid)
+                    .hint_text("miasma-share:...")
+                    .font(egui::TextStyle::Monospace)
+                    .desired_width(f32::INFINITY),
+            );
+        });
         form_row(ui, t.recv_path_label, |ui| {
             ui.horizontal(|ui| {
                 ui.add(
@@ -1351,9 +1396,10 @@ impl TransfersUi {
                 }
             });
         });
-        // A typed or picked folder is turned into a file inside it; say so before starting.
-        let (final_path, added_name) = effective_receive_path(&self.recv_path, &self.recv_mid);
-        if added_name {
+        // A typed or picked folder receives the file inside it, under the name it had when it
+        // was sent; say so before starting.
+        let (final_path, is_folder) = effective_receive_path(&self.recv_path);
+        if is_folder {
             ui.label(
                 egui::RichText::new(fill(t.recv_folder_note, &[("path", &final_path)]))
                     .small()
@@ -1392,8 +1438,17 @@ impl TransfersUi {
             .clicked()
         {
             let mid = self.recv_mid.trim().to_owned();
-            if !mid.starts_with("miasma:") {
-                self.form_error = Some(t.err_mid.to_owned());
+            // One parse of what was typed, before anything is sent: a mistyped share ID stops
+            // here (its checksum), a MID is accepted but cannot authenticate the publisher.
+            let parsed = miasma_core::transfer::parse_transfer_id(&mid);
+            if let Err(e) = &parsed {
+                self.form_error = Some(
+                    match e {
+                        miasma_core::MiasmaError::InvalidShareId(_) => t.err_share_id,
+                        _ => t.err_mid,
+                    }
+                    .to_owned(),
+                );
             } else {
                 let password = (!self.recv_password.is_empty()).then(|| self.recv_password.clone());
                 self.pending_protected = password.is_some();
@@ -1663,7 +1718,8 @@ fn start_again(job: &TransferStatus, password: &str, restart: bool) -> WorkerCmd
     let password = (!password.is_empty()).then(|| password.to_owned());
     match job.kind {
         TransferKind::Receive => WorkerCmd::TransferStartReceive {
-            mid: job.mid.clone(),
+            // The share ID it was started from, so a resume keeps verifying the publisher.
+            mid: job.share_id.clone().unwrap_or_else(|| job.mid.clone()),
             output_path: plain_path(&job.name).into(),
             password,
             restart,
@@ -2108,6 +2164,9 @@ mod tests {
             resumed_from_segment: 0,
             last_error: None,
             resumable: false,
+            share_id: None,
+            share_id_checked: false,
+            publisher_authenticated: false,
         }
     }
 
@@ -2406,6 +2465,16 @@ mod tests {
     }
 
     #[test]
+    fn resuming_a_share_id_receive_keeps_the_share_id() {
+        let mut r = status(TransferKind::Receive, TransferState::Paused);
+        r.share_id = Some("miasma-share:xyz".into());
+        match start_again(&r, "", false) {
+            WorkerCmd::TransferStartReceive { mid, .. } => assert_eq!(mid, "miasma-share:xyz"),
+            other => panic!("wrong command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn resuming_reissues_the_same_request() {
         let mut r = status(TransferKind::Receive, TransferState::Paused);
         r.name = r"\\?\C:\out\big.iso".into();
@@ -2590,24 +2659,33 @@ mod tests {
     }
 
     #[test]
-    fn a_folder_is_turned_into_a_file_inside_it_and_a_file_path_is_kept() {
+    fn the_suggested_file_name_also_reads_a_share_id() {
+        let mid = miasma_core::ContentId::compute(b"x", b"p");
+        // The Ed25519 base point: a valid public key without any key material.
+        let mut publisher = [0x66u8; 32];
+        publisher[0] = 0x58;
+        let share = miasma_core::transfer::ShareId::new(&mid, publisher, false).to_string();
+        assert_eq!(
+            suggested_file_name(&share),
+            suggested_file_name(&mid.to_string())
+        );
+        assert_ne!(suggested_file_name(&share), "received.bin");
+        // A mistyped share ID suggests the fixed name, nothing more.
+        assert_eq!(suggested_file_name("miasma-share:0OIl"), "received.bin");
+    }
+
+    #[test]
+    fn a_folder_is_passed_on_as_a_folder_and_a_file_path_is_kept() {
         let dir = std::env::temp_dir().join(format!("miasma-desktop-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let folder = dir.to_string_lossy().into_owned();
-        let (path, added) = effective_receive_path(&folder, "miasma:3vQB7B6MrGQZ");
-        assert!(added);
-        assert_eq!(
-            std::path::Path::new(&path),
-            dir.join("received-3vQB7B6M.bin")
-        );
+        // The daemon resolves <folder>/<original name>; the desktop no longer invents a name.
+        assert_eq!(effective_receive_path(&folder), (folder.clone(), true));
 
         let file = dir.join("mine.bin").to_string_lossy().into_owned();
-        assert_eq!(effective_receive_path(&file, "miasma:x"), (file, false));
+        assert_eq!(effective_receive_path(&file), (file, false));
         // Empty stays empty (the Start button is disabled for it).
-        assert_eq!(
-            effective_receive_path("  ", "miasma:x"),
-            (String::new(), false)
-        );
+        assert_eq!(effective_receive_path("  "), (String::new(), false));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
