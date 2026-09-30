@@ -26,8 +26,8 @@ use miasma_core::{
     network::sybil::SignedDhtRecord,
     transfer::{
         direct::{
-            receive_file_direct_id, try_receive_direct, DirectOutcome, DirectSources, IrohPieceSource,
-            IrohSource, ViaConfig,
+            receive_file_direct_id, try_receive_direct, DirectOutcome, DirectSources,
+            IrohPieceSource, IrohSource, ViaConfig,
         },
         open_signed_record,
         receive::{resolve_output_target, run_receive, PieceSource, ReceiveSpec, RetryConfig},
@@ -43,7 +43,7 @@ use miasma_core::{
     MiasmaShare, NodeType, PublishOptions, WssShareServer,
 };
 use tempfile::TempDir;
-use tokio::{io::AsyncWriteExt, time::timeout};
+use tokio::time::timeout;
 use zeroize::Zeroizing;
 
 /// A file one 64 KiB block longer than the largest k=2 segment: exactly two
@@ -311,13 +311,23 @@ async fn a_protected_multi_segment_transfer_is_received_by_share_id_alone_and_re
 
         // (b) A wrong password is refused before a single piece is fetched.
         let progress = TransferProgress::new(mid.to_string());
-        let err = receive_iroh(&rx, &share, &out, &journals, Some(&random_password()), progress.clone())
-            .await
-            .unwrap_err();
+        let err = receive_iroh(
+            &rx,
+            &share,
+            &out,
+            &journals,
+            Some(&random_password()),
+            progress.clone(),
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("wrong password"), "{err}");
         let s = progress.snapshot();
         assert_eq!(s.state, TransferState::Failed);
-        assert_eq!(s.pieces_fetched, 0, "nothing may be fetched for a wrong password");
+        assert_eq!(
+            s.pieces_fetched, 0,
+            "nothing may be fetched for a wrong password"
+        );
         assert!(!out.exists());
 
         // A protected transfer needs its password at all.
@@ -339,9 +349,16 @@ async fn a_protected_multi_segment_transfer_is_received_by_share_id_alone_and_re
         // ... and run it again: resumes at segment 1 and finishes exactly.
         let progress = TransferProgress::new(mid.to_string());
         let started = std::time::Instant::now();
-        let second = receive_iroh(&rx, &share, &out, &journals, Some(&password), progress.clone())
-            .await
-            .unwrap();
+        let second = receive_iroh(
+            &rx,
+            &share,
+            &out,
+            &journals,
+            Some(&password),
+            progress.clone(),
+        )
+        .await
+        .unwrap();
         let secs = started.elapsed().as_secs_f64();
         assert_eq!(
             second,
@@ -422,7 +439,8 @@ async fn an_endpoint_that_is_not_the_publisher_is_refused_even_at_the_right_addr
         let err = client.fetch_record(*mid.as_bytes()).await.unwrap_err();
         assert!(err.is_permanent(), "{err}");
         assert!(
-            err.to_string().contains("cannot reach the sender over iroh"),
+            err.to_string()
+                .contains("cannot reach the sender over iroh"),
             "{err}"
         );
 
@@ -439,7 +457,11 @@ async fn an_endpoint_that_is_not_the_publisher_is_refused_even_at_the_right_addr
                     ca_pem: None,
                 }),
             },
-            &TransferId::Share(ShareId::new(&mid, *impostor_id_as_share_key(&impostor), false)),
+            &TransferId::Share(ShareId::new(
+                &mid,
+                *impostor_id_as_share_key(&impostor),
+                false,
+            )),
             &out,
             None,
             &work.path().join("transfers"),
@@ -620,7 +642,8 @@ async fn a_tampered_piece_is_rejected_reported_and_replaced_by_a_spare() {
             .await
             .unwrap()
             .expect("the sender has the record");
-        let fetched = open_signed_record(mid.as_bytes(), &envelope, Some(share.publisher())).unwrap();
+        let fetched =
+            open_signed_record(mid.as_bytes(), &envelope, Some(share.publisher())).unwrap();
         assert!(fetched.manifest.is_some());
 
         let work = tempfile::tempdir().unwrap();
@@ -657,7 +680,10 @@ async fn a_tampered_piece_is_rejected_reported_and_replaced_by_a_spare() {
             }
         );
         let s = progress.snapshot();
-        assert!(s.pieces_rejected >= 1, "the bad piece must be reported: {s:?}");
+        assert!(
+            s.pieces_rejected >= 1,
+            "the bad piece must be reported: {s:?}"
+        );
         assert!(std::fs::read(&out).unwrap() == data);
     })
     .await
@@ -742,9 +768,10 @@ async fn start_daemon(transport: TransportConfig) -> (TempDir, tokio::sync::mpsc
     let store = Arc::new(LocalShareStore::open(dir.path(), 1000).unwrap());
     let key: [u8; 32] = rand::random();
     let node = MiasmaNode::new(&key, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
-    let server = DaemonServer::start_with_transport(node, store, dir.path().to_path_buf(), transport)
-        .await
-        .unwrap();
+    let server =
+        DaemonServer::start_with_transport(node, store, dir.path().to_path_buf(), transport)
+            .await
+            .unwrap();
     let shutdown = server.shutdown_handle();
     tokio::spawn(server.run());
     (dir, shutdown)
@@ -810,7 +837,10 @@ async fn the_daemons_endpoint_id_is_the_publisher_key_of_its_share_ids() {
         );
 
         // `miasma status` shows it.
-        match daemon_request(dir.path(), ControlRequest::Status).await.unwrap() {
+        match daemon_request(dir.path(), ControlRequest::Status)
+            .await
+            .unwrap()
+        {
             ControlResponse::Status(s) => {
                 let i = s.iroh.expect("status reports the iroh endpoint");
                 assert_eq!(i.endpoint_id, hex::encode(node.endpoint_id()));
@@ -831,7 +861,10 @@ async fn a_daemon_with_iroh_off_runs_no_endpoint_and_says_so() {
         t.iroh_mode = IrohMode::Off;
         let (dir, shutdown) = start_daemon(t).await;
         assert!(node_for(dir.path()).is_none());
-        match daemon_request(dir.path(), ControlRequest::Status).await.unwrap() {
+        match daemon_request(dir.path(), ControlRequest::Status)
+            .await
+            .unwrap()
+        {
             ControlResponse::Status(s) => assert!(s.iroh.is_none()),
             other => panic!("unexpected: {other:?}"),
         }
@@ -876,13 +909,20 @@ async fn an_oversized_frame_length_ends_the_connection_before_anything_is_alloca
         let (mut tx, _rx) = conn.open_bi().await.unwrap();
         tx.write_all(&u32::MAX.to_be_bytes()).await.unwrap();
         let closed = timeout(Duration::from_secs(10), conn.closed()).await;
-        assert!(closed.is_ok(), "the server must drop a connection that declares an oversized frame");
+        assert!(
+            closed.is_ok(),
+            "the server must drop a connection that declares an oversized frame"
+        );
 
         // The server is still fine for an honest client.
         let (rx, _d) = receiver(&relay).await;
         let client = rx.client(&sender.publisher()).unwrap();
         let unknown = ContentId::compute(b"never published", &params().to_param_bytes());
-        assert!(client.fetch_record(*unknown.as_bytes()).await.unwrap().is_none());
+        assert!(client
+            .fetch_record(*unknown.as_bytes())
+            .await
+            .unwrap()
+            .is_none());
     })
     .await
     .expect("timed out");
@@ -897,7 +937,9 @@ async fn a_malformed_request_ends_the_connection_without_an_answer() {
         let (mut tx, mut rx) = conn.open_bi().await.unwrap();
         // A well-framed request with the wrong wire version byte and a junk body.
         let junk = [0xEEu8; 16];
-        tx.write_all(&(junk.len() as u32).to_be_bytes()).await.unwrap();
+        tx.write_all(&(junk.len() as u32).to_be_bytes())
+            .await
+            .unwrap();
         tx.write_all(&junk).await.unwrap();
         tx.finish().unwrap();
         let mut buf = Vec::new();
@@ -933,13 +975,20 @@ async fn the_request_cap_redials_transparently_and_an_idle_connection_is_dropped
 
         // Six requests across a cap of two per connection: the client redials by itself.
         for _ in 0..6 {
-            assert!(client.fetch_record(*unknown.as_bytes()).await.unwrap().is_none());
+            assert!(client
+                .fetch_record(*unknown.as_bytes())
+                .await
+                .unwrap()
+                .is_none());
         }
 
         // An idle raw connection is closed by the server.
         let (_ep, conn) = raw_connection(&relay, &sender.iroh).await;
         let closed = timeout(Duration::from_secs(10), conn.closed()).await;
-        assert!(closed.is_ok(), "an idle connection must be dropped after the idle timeout");
+        assert!(
+            closed.is_ok(),
+            "an idle connection must be dropped after the idle timeout"
+        );
     })
     .await
     .expect("timed out");
@@ -961,9 +1010,12 @@ async fn connections_over_the_cap_are_refused_and_slots_are_reused() {
         let (rx, _d) = receiver(&relay).await;
         let second = rx.client(&sender.publisher()).unwrap();
         let unknown = ContentId::compute(b"never published", &params().to_param_bytes());
-        let refused = timeout(Duration::from_secs(25), second.fetch_record(*unknown.as_bytes()))
-            .await
-            .expect("a refused client gets an answer, not a hang");
+        let refused = timeout(
+            Duration::from_secs(25),
+            second.fetch_record(*unknown.as_bytes()),
+        )
+        .await
+        .expect("a refused client gets an answer, not a hang");
         assert!(refused.is_err(), "over the cap: {refused:?}");
 
         // Release the slot: the next client is served.
@@ -971,7 +1023,11 @@ async fn connections_over_the_cap_are_refused_and_slots_are_reused() {
         tokio::time::sleep(Duration::from_millis(500)).await;
         let (rx2, _d2) = receiver(&relay).await;
         let third = rx2.client(&sender.publisher()).unwrap();
-        assert!(third.fetch_record(*unknown.as_bytes()).await.unwrap().is_none());
+        assert!(third
+            .fetch_record(*unknown.as_bytes())
+            .await
+            .unwrap()
+            .is_none());
     })
     .await
     .expect("timed out");
@@ -1013,7 +1069,10 @@ async fn n0_public_discovery_dials_a_sender_by_its_key_alone() {
         let receiver = IrohNode::start(&rand::random(), n0(Duration::from_secs(40)), rstore, None)
             .await
             .unwrap();
-        assert!(sender.wait_online(Duration::from_secs(30)).await, "sender reaches n0's relay");
+        assert!(
+            sender.wait_online(Duration::from_secs(30)).await,
+            "sender reaches n0's relay"
+        );
         eprintln!("sender status: {:?}", sender.status());
 
         let client = receiver.client(&sender.endpoint_id()).unwrap();
@@ -1026,7 +1085,10 @@ async fn n0_public_discovery_dials_a_sender_by_its_key_alone() {
             started.elapsed().as_secs_f64(),
             client.path_kind()
         );
-        assert!(got.unwrap().is_none(), "connected, protocol answered 'no record'");
+        assert!(
+            got.unwrap().is_none(),
+            "connected, protocol answered 'no record'"
+        );
         sender.shutdown().await;
         receiver.shutdown().await;
     })
