@@ -57,6 +57,13 @@ pub struct NetworkConfig {
 /// Transport-layer configuration for restrictive networks.
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct TransportConfig {
+    /// Port for the WebSocket share server, on 127.0.0.1. `0` (the default)
+    /// picks a free port each start. Set a fixed port to expose the server
+    /// through an outbound tunnel, e.g. `cloudflared tunnel --url
+    /// http://127.0.0.1:<port>`; the tunnel terminates TLS, so leave
+    /// `wss_tls_enabled` off for that use.
+    #[serde(default)]
+    pub wss_port: u16,
     /// Enable TLS on the WSS share server and client connections.
     #[serde(default)]
     pub wss_tls_enabled: bool,
@@ -108,6 +115,7 @@ pub struct TransportConfig {
 impl fmt::Debug for TransportConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TransportConfig")
+            .field("wss_port", &self.wss_port)
             .field("wss_tls_enabled", &self.wss_tls_enabled)
             .field("wss_sni", &self.wss_sni)
             .field("wss_cert_pem_path", &self.wss_cert_pem_path)
