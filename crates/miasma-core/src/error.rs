@@ -53,6 +53,16 @@ pub enum MiasmaError {
     #[error("invalid transfer manifest: {0}")]
     InvalidManifest(String),
 
+    /// A share ID the person typed is malformed (bad prefix, alphabet, length,
+    /// checksum, version or flags). Raised before any network work.
+    #[error("invalid share ID: {0}")]
+    InvalidShareId(crate::transfer::share_id::ShareIdError),
+
+    /// The record or manifest fetched from the network does not match the share
+    /// ID (wrong signer, publisher, protection state or content).
+    #[error("share ID mismatch: {0}")]
+    ShareMismatch(crate::transfer::share_id::ShareMismatch),
+
     /// The transfer is password-protected and no password was supplied.
     #[error("this transfer is password-protected; a password is required")]
     PasswordRequired,

@@ -128,6 +128,7 @@ fn leave_partial(d: &TestDaemon, mid: &ContentId, output: &Path) {
         started_at: 1,
         updated_at: 2,
         last_error: None,
+        share_id: None,
     }
     .save(&journal_path(&d.registry().journal_dir(), mid))
     .unwrap();
@@ -419,10 +420,14 @@ async fn a_remove_without_the_control_token_is_refused_and_changes_nothing() {
     d.stop().await;
 }
 
-// ─── A receive needs a file to write, not a folder ───────────────────────────
+// ─── A folder target: the daemon accepts it, the engine still refuses it ─────
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_receive_into_a_folder_is_refused_at_once_with_a_clear_error() {
+async fn a_receive_into_a_folder_is_accepted_by_the_daemon_and_resolved_by_the_job() {
+    // The daemon no longer refuses a folder: the job writes <folder>/<name> once
+    // the manifest names the file (see share_id_test for the written file). The
+    // engine's own check still refuses a folder (next test), so nothing is
+    // created in the folder before the record is known.
     let d = start_daemon().await;
     let folder = tempfile::tempdir().unwrap();
     let mid = mid_of("folder target");
@@ -436,16 +441,12 @@ async fn a_receive_into_a_folder_is_refused_at_once_with_a_clear_error() {
             via_ca_pem: None,
         })
         .await;
-    match resp {
-        ControlResponse::Error(e) => {
-            assert!(e.starts_with("output path rejected"), "{e}");
-            assert!(e.contains("is a folder, not a file"), "{e}");
-        }
-        other => panic!("a folder must be refused, got {other:?}"),
-    }
-    // Nothing was started: no row, nothing created in the folder.
-    assert!(d.list().await.is_empty());
+    let id = match resp {
+        ControlResponse::TransferStarted { id } => id,
+        other => panic!("a folder must be accepted, got {other:?}"),
+    };
     assert_eq!(std::fs::read_dir(folder.path()).unwrap().count(), 0);
+    let _ = d.ask(ControlRequest::TransferCancel { id }).await;
     d.stop().await;
 }
 

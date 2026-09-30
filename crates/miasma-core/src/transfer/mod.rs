@@ -23,9 +23,13 @@ pub mod protection;
 pub mod publish;
 pub mod publish_journal;
 pub mod receive;
+pub mod share_id;
+
+pub use share_id::{parse_transfer_id, ShareId, ShareIdError, ShareMismatch, TransferId};
 
 pub use manifest::{
-    decode_record_value, encode_record_value, PieceId, SegmentEntry, TransferManifest,
+    decode_record_value, encode_record_value, open_signed_record, sanitize_file_name,
+    FetchedRecord, PieceId, SegmentEntry, SignedRecordError, TransferManifest,
 };
 pub use progress::{Phase, TransferKind, TransferProgress, TransferState, TransferStatus};
 pub use protection::{PasswordProtection, Protection, UnlockedKey};

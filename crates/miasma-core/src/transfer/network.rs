@@ -11,9 +11,12 @@ use async_trait::async_trait;
 use zeroize::Zeroizing;
 
 use super::{
-    progress::{Phase, TransferProgress},
-    receive::{run_receive, PieceSource, ReceiveOutcome, ReceiveSpec, RetryConfig},
-    TransferManifest,
+    progress::{Phase, TransferProgress, TransferState},
+    receive::{
+        resolve_output_target, run_receive, PieceSource, ReceiveOutcome, ReceiveSpec, RetryConfig,
+    },
+    share_id::TransferId,
+    FetchedRecord, TransferManifest,
 };
 use crate::{
     crypto::hash::ContentId,
@@ -90,12 +93,27 @@ impl MiasmaCoordinator {
         &self,
         mid: &ContentId,
     ) -> Result<(DhtRecord, Option<TransferManifest>), MiasmaError> {
+        self.fetch_verified_record(mid, None)
+            .await
+            .map(|f| (f.record, f.manifest))
+    }
+
+    /// As [`fetch_record_and_manifest`](Self::fetch_record_and_manifest), also
+    /// returning the record's signer. With `expected_signer` (from a share ID)
+    /// only a record signed by exactly that key is accepted: answers from other
+    /// signers are ignored while the lookup keeps waiting for the publisher's
+    /// own (C-01), and the error says so if none arrives.
+    pub async fn fetch_verified_record(
+        &self,
+        mid: &ContentId,
+        expected_signer: Option<[u8; 32]>,
+    ) -> Result<FetchedRecord, MiasmaError> {
         let retry = RetryConfig::default();
         for attempt in 1..=RECORD_LOOKUP_ATTEMPTS {
             let link = self.dht_handle().ensure_connected(PEER_CONNECT_WAIT).await;
             if let Some(found) = self
                 .dht_handle()
-                .get_record_with_manifest(*mid.as_bytes())
+                .get_signed_record(*mid.as_bytes(), expected_signer)
                 .await?
             {
                 return Ok(found);
@@ -106,10 +124,17 @@ impl MiasmaCoordinator {
                 tokio::time::sleep(retry.delay_for(attempt)).await;
             }
         }
-        Err(MiasmaError::Dht(format!(
-            "no record found for {} after {RECORD_LOOKUP_ATTEMPTS} attempts",
-            mid.to_string()
-        )))
+        Err(MiasmaError::Dht(match expected_signer {
+            Some(_) => format!(
+                "no record signed by the publisher named in the share ID was found for {} after \
+                 {RECORD_LOOKUP_ATTEMPTS} attempts (records from any other signer are ignored)",
+                mid.to_string()
+            ),
+            None => format!(
+                "no record found for {} after {RECORD_LOOKUP_ATTEMPTS} attempts",
+                mid.to_string()
+            ),
+        }))
     }
 
     /// Receive `mid` into `output_path`: verified piece by piece, resumable, with
@@ -126,30 +151,67 @@ impl MiasmaCoordinator {
         restart: bool,
         progress: Arc<TransferProgress>,
     ) -> Result<ReceiveOutcome, MiasmaError> {
+        self.receive_file_id(
+            &TransferId::Mid(mid.clone()),
+            output_path,
+            password,
+            journal_dir,
+            restart,
+            progress,
+        )
+        .await
+    }
+
+    /// As [`receive_file`](Self::receive_file), for what the person typed: a
+    /// share ID (the record must be signed by its publisher, and the manifest's
+    /// publisher, protection state and MID must agree with it, all before any
+    /// piece is fetched), or a bare MID (accepted, `publisher_authenticated`
+    /// stays false).
+    ///
+    /// `output_path` may be an existing folder: the file is then written inside
+    /// it under the name the manifest carries, never over an existing file.
+    pub async fn receive_file_id(
+        &self,
+        target: &TransferId,
+        output_path: &Path,
+        password: Option<Zeroizing<String>>,
+        journal_dir: &Path,
+        restart: bool,
+        progress: Arc<TransferProgress>,
+    ) -> Result<ReceiveOutcome, MiasmaError> {
         progress.set_phase(Phase::Preparing);
-        let (record, manifest) = match self.fetch_record_and_manifest(mid).await {
-            Ok(found) => found,
-            Err(e) => {
-                progress.set_state(
-                    super::progress::TransferState::Failed,
-                    Some(e.to_string()),
-                    false,
-                );
-                return Err(e);
-            }
+        let mid = target.mid();
+        let expect = target.share_id().copied();
+        if let Some(id) = &expect {
+            progress.set_share_id(Some(id.to_string()));
+            progress.set_share_id_checked(true);
+        }
+        let fail = |e: MiasmaError| {
+            progress.set_state(TransferState::Failed, Some(e.to_string()), false);
+            e
         };
+        let fetched = self
+            .fetch_verified_record(&mid, expect.as_ref().map(|s| *s.publisher()))
+            .await
+            .map_err(fail)?;
+        let output = resolve_output_target(output_path, fetched.manifest.as_ref()).map_err(fail)?;
+        if output != output_path {
+            progress.set_name(output.to_string_lossy());
+        }
         let source = self.piece_source();
         run_receive(
             &source,
             ReceiveSpec {
-                mid: mid.clone(),
-                record,
-                manifest,
+                mid,
+                record: fetched.record,
+                manifest: fetched.manifest,
                 password,
-                output_path: output_path.to_path_buf(),
+                output_path: output,
                 journal_dir: journal_dir.to_path_buf(),
                 restart,
                 retry: RetryConfig::default(),
+                expect,
+                record_signer: Some(fetched.signer),
             },
             progress,
         )

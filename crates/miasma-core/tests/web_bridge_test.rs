@@ -859,6 +859,7 @@ async fn a_finished_transfer_is_removed_over_http_and_a_running_one_is_refused()
         started_at: 1,
         updated_at: 2,
         last_error: None,
+        share_id: None,
     }
     .save(&miasma_core::transfer::journal::journal_path(
         &reg.journal_dir(),
