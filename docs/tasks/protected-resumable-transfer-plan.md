@@ -1139,3 +1139,7 @@ Stages (each ends with a build, `cargo test -p miasma-desktop`, and a look at th
 Blocker found before starting: C: had 1.4 GB free (target 3.5 GB, Windows Search running again), too
 little to build the desktop. Cleanup was handed to a sonnet subagent under the runbook rules (never
 Windows logs, never sibling worktrees).
+
+### Removing finished transfers
+
+Complete, Failed and Cancelled rows can be removed from the list (`TransferRemove`, `TransferClearFinished`; CLI `transfer-remove` and `transfers --clear-finished`; Remove and Clear finished in the desktop and web Transfers screens). Only the dashboard entry goes. A received file, a source file and the shares a send published are never touched, so a removed send stays available to peers; unpublishing is future work. Running and Paused jobs are refused (Paused keeps its journal; "Start over" is the separate action). A Failed or Cancelled job that still has a journal is refused unless the person asks to discard its partial data, which deletes only that journal and its own `<output>.part`. A receive into an existing folder is now refused at request time, and the desktop suggests `received-<digest>.bin`; the manifest has no file-name field, so a `name` field (format v3, a Mac and Windows rebuild) is the proper follow-up.
