@@ -540,6 +540,44 @@ export class MiasmaBridge {
     return true;
   }
 
+  /**
+   * Remove one finished transfer from the daemon's list. A running or paused one is refused
+   * (HTTP 409). One that holds partial data is refused too unless `discardPartial` is true,
+   * which deletes that partial data. The received file, the source file and published shares
+   * are never touched.
+   */
+  async transferRemove(id, discardPartial) {
+    if (this._mode !== MODE_HTTP) throw transferError('unsupported');
+    let resp;
+    try {
+      resp = await bridgeFetch(`${bridgeBase}/api/transfers/${encodeURIComponent(id)}/remove`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ discard_partial: !!discardPartial }),
+      });
+    } catch (_) {
+      throw transferError('offline');
+    }
+    if (resp.status === 401) throw new BridgeAuthError(authState);
+    if (!resp.ok) throw transferError('http', await errorText(resp));
+    return true;
+  }
+
+  /** Remove every finished transfer that holds no partial data. Returns how many went. */
+  async transferClearFinished() {
+    if (this._mode !== MODE_HTTP) throw transferError('unsupported');
+    let resp;
+    try {
+      resp = await bridgeFetch(`${bridgeBase}/api/transfers/clear-finished`, { method: 'POST' });
+    } catch (_) {
+      throw transferError('offline');
+    }
+    if (resp.status === 401) throw new BridgeAuthError(authState);
+    if (!resp.ok) throw transferError('http', await errorText(resp));
+    const j = await resp.json();
+    return (j && j.removed) || 0;
+  }
+
   /** Try to reconnect if currently disconnected. */
   async reconnect() {
     await this.init(this._wasm);
