@@ -1187,6 +1187,22 @@ pub struct TransferStrings {
     pub err_remove_running: &'static str,
     pub err_remove_paused: &'static str,
     pub recv_folder_note: &'static str,
+
+    // Send password policy and the generator.
+    /// Under the send password field: the rule, and the honest caveat.
+    pub pw_policy_note: &'static str,
+    /// Prefix of the refusal; the reasons follow, separated by `pw_err_sep`.
+    pub pw_weak_prefix: &'static str,
+    pub pw_err_sep: &'static str,
+    pub pw_err_too_short: &'static str,
+    pub pw_err_too_long: &'static str,
+    pub pw_err_no_digit: &'static str,
+    pub pw_err_no_letter: &'static str,
+    pub pw_err_no_symbol: &'static str,
+    /// Soft warning (compliant but under 12 characters).
+    pub pw_short_warning: &'static str,
+    pub pw_generate: &'static str,
+    pub pw_generated_note: &'static str,
 }
 
 impl TransferStrings {
@@ -1303,6 +1319,17 @@ impl TransferStrings {
             ("err_remove_running", self.err_remove_running),
             ("err_remove_paused", self.err_remove_paused),
             ("recv_folder_note", self.recv_folder_note),
+            ("pw_policy_note", self.pw_policy_note),
+            ("pw_weak_prefix", self.pw_weak_prefix),
+            ("pw_err_sep", self.pw_err_sep),
+            ("pw_err_too_short", self.pw_err_too_short),
+            ("pw_err_too_long", self.pw_err_too_long),
+            ("pw_err_no_digit", self.pw_err_no_digit),
+            ("pw_err_no_letter", self.pw_err_no_letter),
+            ("pw_err_no_symbol", self.pw_err_no_symbol),
+            ("pw_short_warning", self.pw_short_warning),
+            ("pw_generate", self.pw_generate),
+            ("pw_generated_note", self.pw_generated_note),
         ]
     }
 }
@@ -1433,6 +1460,18 @@ static TR_EN: TransferStrings = TransferStrings {
     err_remove_running: "This transfer is still running. Stop it first.",
     err_remove_paused: "This transfer is paused and can be resumed, so it was not removed.",
     recv_folder_note: "That is a folder. The file will be saved as: {path}",
+
+    pw_policy_note: "Optional. If you set one: at least 6 characters with a digit, a letter (a-z, A-Z) and a symbol; a space does not count. Even so, a short password is weak: anyone who holds the transfer's manifest can try guesses offline. Press Generate for a strong one.",
+    pw_weak_prefix: "Password not accepted:",
+    pw_err_sep: "; ",
+    pw_err_too_short: "it is shorter than 6 characters",
+    pw_err_too_long: "it is longer than 1024 characters",
+    pw_err_no_digit: "it has no digit (0-9)",
+    pw_err_no_letter: "it has no letter (a-z, A-Z)",
+    pw_err_no_symbol: "it has no symbol such as ! # $ %",
+    pw_short_warning: "short: use 12+ characters or press Generate",
+    pw_generate: "Generate",
+    pw_generated_note: "Generated password, shown once. Store it now: it is not saved anywhere and cannot be recovered. The receiver needs it in addition to the MID.",
 };
 
 static TR_JA: TransferStrings = TransferStrings {
@@ -1553,6 +1592,18 @@ static TR_JA: TransferStrings = TransferStrings {
     err_remove_running: "この転送はまだ実行中です。先に停止してください。",
     err_remove_paused: "この転送は一時停止中で再開できるため、外していません。",
     recv_folder_note: "指定先はフォルダです。次のファイル名で保存します: {path}",
+
+    pw_policy_note: "任意です。設定する場合は 6 文字以上で、数字・英字 (a-z, A-Z)・記号をそれぞれ含めてください（空白は記号に数えません）。ただし短いパスワードは弱く、転送のマニフェストを持つ人はオフラインで何度でも推測できます。「生成」で強いパスワードを作れます。",
+    pw_weak_prefix: "このパスワードは使えません:",
+    pw_err_sep: "、",
+    pw_err_too_short: "6 文字未満です",
+    pw_err_too_long: "1024 文字を超えています",
+    pw_err_no_digit: "数字 (0-9) がありません",
+    pw_err_no_letter: "英字 (a-z, A-Z) がありません",
+    pw_err_no_symbol: "記号 (! # $ % など) がありません",
+    pw_short_warning: "短めです: 12 文字以上にするか「生成」を押してください",
+    pw_generate: "生成",
+    pw_generated_note: "生成したパスワードです（この1回だけ表示）。今すぐ保管してください。どこにも保存されず、失くすと復元できません。受信する人には MID に加えてこのパスワードが必要です。",
 };
 
 static TR_ZH_CN: TransferStrings = TransferStrings {
@@ -1673,6 +1724,18 @@ static TR_ZH_CN: TransferStrings = TransferStrings {
     err_remove_running: "此传输仍在运行。请先停止它。",
     err_remove_paused: "此传输已暂停且可以继续，因此未被移除。",
     recv_folder_note: "该路径是文件夹。文件将保存为：{path}",
+
+    pw_policy_note: "可选。若设置，须至少 6 个字符，并包含数字、字母 (a-z, A-Z) 和符号；空格不算符号。即便如此，短密码仍然很弱：持有该传输清单的人可以离线反复猜测。点击“生成”可得到高强度密码。",
+    pw_weak_prefix: "密码不符合要求：",
+    pw_err_sep: "；",
+    pw_err_too_short: "少于 6 个字符",
+    pw_err_too_long: "超过 1024 个字符",
+    pw_err_no_digit: "没有数字 (0-9)",
+    pw_err_no_letter: "没有字母 (a-z, A-Z)",
+    pw_err_no_symbol: "没有符号（如 ! # $ %）",
+    pw_short_warning: "偏短：请使用 12 个以上字符，或点击“生成”",
+    pw_generate: "生成",
+    pw_generated_note: "已生成的密码（仅显示这一次）。请立即保存：它不会保存在任何地方，丢失后无法找回。接收方除 MID 外还需要此密码。",
 };
 
 #[cfg(test)]

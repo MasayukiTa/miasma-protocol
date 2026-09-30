@@ -18,6 +18,7 @@ import {
   titleOf, transferId, chipTone, sortJobs, canResume, buildStrip, errorKey,
   canRemove, removeNeedsDiscard, clearable,
 } from './format.js';
+import { parseWeakPasswordCodes } from './password_policy.js';
 
 const POLL_VISIBLE_MS = 1000;   // screen open, tab visible
 const POLL_BACKGROUND_MS = 3000; // a job runs, but the screen is not the one shown
@@ -322,7 +323,7 @@ export function createTransfers({ bridge, t, showToast, copyToClipboard, authMes
     el('tf-d-error').classList.toggle('hidden', !err);
     if (err) {
       const key = errorKey(err);
-      detailText('tf-d-error-text', key ? t(key) : err);
+      detailText('tf-d-error-text', key ? t(key) : weakPasswordText(err) || err);
     }
 
     // Actions.
@@ -372,10 +373,20 @@ export function createTransfers({ bridge, t, showToast, copyToClipboard, authMes
 
   // ── Actions ─────────────────────────────────────────────────────
 
+  // The daemon's refusal of a weak publish password (`weak password: too_short,no_symbol`),
+  // in the page language. A transfer started from the CLI or desktop app can fail this way
+  // and show up in the list. Receiving never checks the policy.
+  function weakPasswordText(message) {
+    const codes = parseWeakPasswordCodes(message);
+    if (!codes) return '';
+    const reasons = codes.map((c) => t('tf_pw_' + c)).join(t('tf_pw_sep'));
+    return `${t('tf_pw_weak_prefix')} ${reasons}. ${t('tf_pw_hint')}`;
+  }
+
   function explain(e) {
     if (e && e.code === 'auth') return authMessage();
     const key = errorKey(e && e.message);
-    return key ? t(key) : (e && e.message) || String(e);
+    return key ? t(key) : weakPasswordText(e && e.message) || (e && e.message) || String(e);
   }
 
   async function stop() {

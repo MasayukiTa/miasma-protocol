@@ -125,10 +125,34 @@ pub fn display_width(s: &str) -> usize {
 const CORE_WRONG_PASSWORD: &str = "wrong password";
 const CORE_PASSWORD_REQUIRED: &str = "a password is required";
 
-/// A daemon-side error text for a person in `lang`. Only the two password
-/// errors are translated; everything else is passed through untouched.
+/// One password-policy violation code (from miasma-core) as a clause.
+pub fn policy_problem(code: &str, lang: Lang) -> String {
+    match (code, lang) {
+        ("too_short", Lang::En) => "it is shorter than 6 characters".into(),
+        ("too_long", Lang::En) => "it is longer than 1024 characters".into(),
+        ("no_digit", Lang::En) => "it has no digit (0-9)".into(),
+        ("no_letter", Lang::En) => "it has no letter (a-z, A-Z)".into(),
+        ("no_symbol", Lang::En) => "it has no symbol such as ! # $ %".into(),
+        ("too_short", Lang::Ja) => "6 文字未満です".into(),
+        ("too_long", Lang::Ja) => "1024 文字を超えています".into(),
+        ("no_digit", Lang::Ja) => "数字 (0-9) がありません".into(),
+        ("no_letter", Lang::Ja) => "英字 (a-z, A-Z) がありません".into(),
+        ("no_symbol", Lang::Ja) => "記号 (! # $ % など) がありません".into(),
+        (other, _) => other.to_owned(),
+    }
+}
+
+/// A daemon-side error text for a person in `lang`. The password errors (and
+/// the publish-side weak-password refusal) are translated; everything else is
+/// passed through untouched.
 pub fn localize_daemon_error(e: &str, lang: Lang) -> String {
     if lang == Lang::Ja {
+        if let Some(codes) = miasma_core::transfer::password_policy::parse_codes(e) {
+            return Msg::WeakPassword {
+                codes: codes.into_iter().map(str::to_owned).collect(),
+            }
+            .text(lang);
+        }
         if e.contains(CORE_WRONG_PASSWORD) {
             return Msg::WrongPassword.text(lang);
         }
@@ -322,6 +346,16 @@ pub enum Msg {
     },
     CannotReadPasswordStdin,
     PasswordEmpty,
+    /// A new protected transfer's password fails the policy. `codes` are the
+    /// stable violation codes from miasma-core (`too_short`, `no_digit`, ...).
+    WeakPassword {
+        codes: Vec<String>,
+    },
+    /// Compliant but shorter than 12 characters: a warning, not a refusal.
+    PasswordShortWarning,
+    /// Printed to stderr after `password-generate` (the password itself goes
+    /// to stdout alone).
+    PasswordGeneratedNote,
 
     // ---- redundancy-bench ----
     BenchDebugBuildNote,
@@ -507,6 +541,16 @@ impl Msg {
             CannotReadPasswordFile { path } => format!("cannot read password file {path}"),
             CannotReadPasswordStdin => "cannot read the password from standard input".into(),
             PasswordEmpty => "the password is empty; refusing to publish with no protection".into(),
+            WeakPassword { codes } => format!(
+                "this password is not accepted for a new protected transfer: {}. A password needs at least 6 characters with a digit (0-9), a letter (a-z, A-Z) and a symbol such as ! # $ % (a space does not count). Run `miasma password-generate` for a strong one.",
+                codes
+                    .iter()
+                    .map(|c| policy_problem(c, Lang::En))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+            PasswordShortWarning => "warning: short password. A password that meets the rules is still easy to guess at 6 to 11 characters, and anyone holding the manifest can try guesses offline. Use 12+ characters or run `miasma password-generate`.".into(),
+            PasswordGeneratedNote => "Store this password somewhere safe: it is not saved anywhere and cannot be recovered. The receiver needs it in addition to the MID; share it over a different channel than the MID.".into(),
 
             BenchDebugBuildNote => "NOTE: this is a debug build. Storage factor and loss tolerance are exact, but the\n      throughput figures are not representative. Build with --release for those.".into(),
             BenchRunning {
@@ -689,6 +733,16 @@ Anyone who has this link can control this node until the daemon restarts: do not
             }
             CannotReadPasswordStdin => "標準入力からパスワードを読み込めません".into(),
             PasswordEmpty => "パスワードが空です。保護なしでは公開しません".into(),
+            WeakPassword { codes } => format!(
+                "このパスワードは新しい保護付き転送には使えません: {}。パスワードは 6 文字以上で、数字 (0-9)、英字 (a-z, A-Z)、記号 (! # $ % など) をそれぞれ 1 つ以上含めてください（空白は記号に数えません）。`miasma password-generate` で強いパスワードを作れます。",
+                codes
+                    .iter()
+                    .map(|c| policy_problem(c, Lang::Ja))
+                    .collect::<Vec<_>>()
+                    .join("、")
+            ),
+            PasswordShortWarning => "注意: 短いパスワードです。規則を満たしていても 6〜11 文字では推測されやすく、マニフェストを持つ人はオフラインで何度でも試せます。12 文字以上にするか、`miasma password-generate` を使ってください。".into(),
+            PasswordGeneratedNote => "このパスワードは安全な場所に保管してください。どこにも保存されず、失くすと復元できません。受信する人には MID とは別の経路で伝えてください。".into(),
 
             BenchDebugBuildNote => "注意: これはデバッグビルドです。保存倍率と欠損への耐性は正確ですが、\n      速度の数値は参考になりません。速度を測るには --release でビルドしてください。".into(),
             BenchRunning {
@@ -855,6 +909,9 @@ mod tests {
             CannotReadPasswordFile { .. } => "CannotReadPasswordFile",
             CannotReadPasswordStdin => "CannotReadPasswordStdin",
             PasswordEmpty => "PasswordEmpty",
+            WeakPassword { .. } => "WeakPassword",
+            PasswordShortWarning => "PasswordShortWarning",
+            PasswordGeneratedNote => "PasswordGeneratedNote",
             BenchDebugBuildNote => "BenchDebugBuildNote",
             BenchRunning { .. } => "BenchRunning",
             BenchStageTimes => "BenchStageTimes",
@@ -1051,6 +1108,18 @@ mod tests {
             (
                 PasswordEmpty,
                 "the password is empty; refusing to publish with no protection",
+            ),
+            (
+                WeakPassword { codes: vec![s("too_short"), s("no_symbol")] },
+                "this password is not accepted for a new protected transfer: it is shorter than 6 characters; it has no symbol such as ! # $ %. A password needs at least 6 characters with a digit (0-9), a letter (a-z, A-Z) and a symbol such as ! # $ % (a space does not count). Run `miasma password-generate` for a strong one.",
+            ),
+            (
+                PasswordShortWarning,
+                "warning: short password. A password that meets the rules is still easy to guess at 6 to 11 characters, and anyone holding the manifest can try guesses offline. Use 12+ characters or run `miasma password-generate`.",
+            ),
+            (
+                PasswordGeneratedNote,
+                "Store this password somewhere safe: it is not saved anywhere and cannot be recovered. The receiver needs it in addition to the MID; share it over a different channel than the MID.",
             ),
             (
                 BenchDebugBuildNote,
@@ -1270,6 +1339,75 @@ Anyone who has this link can control this node until the daemon restarts: do not
         assert_eq!(localize_daemon_error("disk full", Lang::Ja), "disk full");
         // And it reaches the messages that show daemon text.
         assert!(DaemonErrorProbe::ja(wrong).contains("パスワード"));
+    }
+
+    #[test]
+    fn the_weak_password_message_names_each_problem_in_english_and_japanese() {
+        use miasma_core::transfer::password_policy::{check, codes};
+        // Three letters only: too short, no digit, no symbol (but a letter).
+        let v = check(&compose_pw(3, 0, 0)).unwrap_err();
+        let codes: Vec<String> = codes(&v).split(',').map(str::to_owned).collect();
+        let en = Msg::WeakPassword {
+            codes: codes.clone(),
+        }
+        .text(Lang::En);
+        // The failure messages below are static text: no password, and nothing
+        // derived from one, is ever formatted into them.
+        assert!(
+            en.contains("shorter than 6 characters"),
+            "english: too short"
+        );
+        assert!(en.contains("no digit"), "english: no digit");
+        assert!(en.contains("no symbol"), "english: no symbol");
+        assert!(!en.contains("no letter"), "english: a letter is present");
+        assert!(en.contains("password-generate"), "english: generator hint");
+        let ja = Msg::WeakPassword { codes }.text(Lang::Ja);
+        assert!(ja.contains("6 文字未満"), "japanese: too short");
+        assert!(ja.contains("数字"), "japanese: no digit");
+        assert!(
+            !ja.contains("英字 (a-z, A-Z) がありません"),
+            "japanese: a letter is present"
+        );
+    }
+
+    #[test]
+    fn a_daemon_weak_password_refusal_is_translated_from_its_codes() {
+        // Letters and digits, no symbol.
+        let e = miasma_core::MiasmaError::WeakPassword(
+            miasma_core::transfer::password_policy::check(&compose_pw(3, 4, 0)).unwrap_err(),
+        )
+        .to_string();
+        assert!(
+            e == "weak password: no_symbol",
+            "unexpected daemon error text"
+        );
+        assert!(
+            localize_daemon_error(&e, Lang::En) == e,
+            "english is untouched"
+        );
+        let ja = localize_daemon_error(&format!("daemon error: {e}"), Lang::Ja);
+        assert!(ja.contains("記号"), "japanese: no symbol");
+        assert!(ja.contains("password-generate"), "japanese: generator hint");
+    }
+
+    /// A password of the given shape built at run time from random draws, so no
+    /// test carries a literal password. Order is irrelevant to the policy.
+    fn compose_pw(letters: usize, digits: usize, symbols: usize) -> String {
+        use std::hash::{BuildHasher, Hasher};
+        fn draw(set: Vec<u8>, n: usize) -> String {
+            (0..n)
+                .map(|_| {
+                    let h = std::collections::hash_map::RandomState::new()
+                        .build_hasher()
+                        .finish();
+                    set[(h % set.len() as u64) as usize] as char
+                })
+                .collect()
+        }
+        let letters_set: Vec<u8> = (b'a'..=b'z').chain(b'A'..=b'Z').collect();
+        let digits_set: Vec<u8> = (b'0'..=b'9').collect();
+        let symbols_set: Vec<u8> = (0x21u8..=0x7e).filter(u8::is_ascii_punctuation).collect();
+        draw(letters_set, letters) + &draw(digits_set, digits) + &draw(symbols_set, symbols)
     }
 
     struct DaemonErrorProbe;

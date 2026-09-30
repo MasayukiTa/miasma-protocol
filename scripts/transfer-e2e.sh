@@ -155,13 +155,20 @@ echo "  Node A: $BOOT"
 PID_B="$(start_daemon "$DIR_B" "$BOOT")" || exit 1
 wait_peers "$DIR_B" 60 && check 1 "node B is connected to node A before the first transfer" || check 0 "node B is connected to node A before the first transfer"
 
-PW="$TMP/password.txt";  printf 'e2e-correct-horse\n' > "$PW"
+# The publish password is generated at run time (and meets the password policy).
+PW="$TMP/password.txt"
+"$CLI" password-generate > "$PW" 2>/dev/null || { echo "password-generate failed"; exit 1; }
+[ -s "$PW" ] || { echo "password-generate printed nothing"; exit 1; }
+# A receiver's wrong guess may be anything: the policy applies to publishing only.
 BADPW="$TMP/wrong.txt";  printf 'not-the-password\n' > "$BADPW"
+WEAKPW="$TMP/weak.txt";  printf 'weak\n' > "$WEAKPW"
 
 # ---- 1. publish -------------------------------------------------------------
 echo
 echo "[1] Publish ${SIZE_MB} MB, password-protected, k=$K n=$N"
 SRC1="$TMP/payload1.bin"; new_file "$SRC1" "$SIZE_MB"; HASH1="$(sha "$SRC1")"
+R="$("$CLI" --data-dir "$DIR_A" network-publish "$SRC1" --password-file "$WEAKPW" 2>&1)"; RC=$?
+if [ $RC -ne 0 ] && echo "$R" | grep -q "not accepted for a new protected transfer"; then check 1 "a weak publish password is refused"; else check 0 "a weak publish password is refused"; fi
 MID1="$("$CLI" --data-dir "$DIR_A" network-publish "$SRC1" --data-shards $K --total-shards $N --password-file "$PW" 2>/dev/null | grep '^miasma:' | head -1)"
 if [ -n "$MID1" ]; then check 1 "network-publish succeeded and printed a MID"; else check 0 "network-publish succeeded and printed a MID"; fi
 echo "  MID: $MID1"
