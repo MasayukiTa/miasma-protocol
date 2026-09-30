@@ -27,7 +27,10 @@ use serde::{Deserialize, Serialize};
 use super::protection::Protection;
 use crate::{
     crypto::hash::ContentId,
-    network::types::{DhtRecord, MAX_SEGMENTS},
+    network::{
+        sybil::{RecordAuthError, SignedDhtRecord},
+        types::{DhtRecord, MAX_SEGMENTS},
+    },
     pipeline::DissolutionParams,
     share::MiasmaShare,
     MiasmaError,
@@ -38,9 +41,13 @@ pub const TRAILER_MAGIC: &[u8; 4] = b"MNFT";
 /// Manifest format version.
 ///
 /// 2: a piece ID is the full-share commitment ([`MiasmaShare::piece_commitment`]),
-/// not `BLAKE3(shard_data)`. Version 1 manifests are refused (beta: no second
-/// format is kept), see [`TransferManifest::validate`].
-pub const MANIFEST_VERSION: u8 = 2;
+/// not `BLAKE3(shard_data)`.
+/// 3: the manifest names its `publisher` (the key that signs the carrying record)
+/// and may carry the original file `name`. Older manifests are refused (beta: no
+/// second format is kept), see [`TransferManifest::validate`].
+pub const MANIFEST_VERSION: u8 = 3;
+/// Longest file name a manifest may carry, in UTF-8 bytes.
+pub const MAX_NAME_BYTES: usize = 255;
 /// Largest plaintext segment a manifest may declare: the publisher never
 /// exceeds `DEFAULT_SEGMENT_SIZE` (64 MiB). A receiver sizes its per-segment
 /// decode buffers from this untrusted field, so it is bounded.
@@ -122,6 +129,13 @@ pub struct TransferManifest {
     pub version: u8,
     /// Must equal the carrying record's `mid_digest`.
     pub mid: [u8; 32],
+    /// The Ed25519 key that signs the record this manifest rides on. A receiver
+    /// holding a share ID checks it against the ID's publisher; it must also
+    /// equal the record's signer.
+    pub publisher: [u8; 32],
+    /// The original file name (never a path), sanitised by the publisher. The
+    /// receiver treats it as untrusted display text and sanitises it again.
+    pub name: Option<String>,
     pub data_shards: u8,
     pub total_shards: u8,
     pub segment_size: u32,
@@ -134,6 +148,7 @@ pub struct TransferManifest {
 impl TransferManifest {
     pub fn new(
         mid: &ContentId,
+        publisher: [u8; 32],
         params: DissolutionParams,
         segment_size: u32,
         total_bytes: u64,
@@ -142,6 +157,8 @@ impl TransferManifest {
         Self {
             version: MANIFEST_VERSION,
             mid: *mid.as_bytes(),
+            publisher,
+            name: None,
             data_shards: params.data_shards as u8,
             total_shards: params.total_shards as u8,
             segment_size,
@@ -149,6 +166,13 @@ impl TransferManifest {
             protection,
             segments: Vec::new(),
         }
+    }
+
+    /// Record the original file name, reduced to a safe single component (see
+    /// [`sanitize_file_name`]); a name that cannot be made safe is left out.
+    pub fn with_name(mut self, raw: Option<&str>) -> Self {
+        self.name = raw.and_then(sanitize_file_name);
+        self
     }
 
     pub fn params(&self) -> DissolutionParams {
@@ -199,6 +223,14 @@ impl TransferManifest {
         }
         if let Protection::Password(p) = &self.protection {
             p.validate()?;
+        }
+        if let Some(name) = &self.name {
+            if name.len() > MAX_NAME_BYTES {
+                return bad(format!(
+                    "file name is {} bytes, limit {MAX_NAME_BYTES}",
+                    name.len()
+                ));
+            }
         }
 
         // An empty file still has exactly one (empty) segment, as in publish.
@@ -302,8 +334,8 @@ fn unsupported_version_message(found: u8) -> String {
     if found < MANIFEST_VERSION {
         format!(
             "manifest version {found} is no longer supported (this build reads version \
-             {MANIFEST_VERSION}: piece IDs now commit to the whole share); ask the sender to \
-             publish the file again"
+             {MANIFEST_VERSION}: a manifest now names its publisher and is bound to a share \
+             ID); ask the sender to publish the file again"
         )
     } else {
         format!(
@@ -311,6 +343,86 @@ fn unsupported_version_message(found: u8) -> String {
              update Miasma"
         )
     }
+}
+
+/// Reduce `raw` to a single safe file name, or `None` if nothing safe remains.
+///
+/// Used by the publisher on the source file's name and again by the receiver on
+/// whatever a manifest carries (untrusted). It keeps only the final path
+/// component (split on both `/` and `\`), drops control and bidi-override
+/// characters, replaces characters Windows forbids in a name, trims trailing
+/// dots and spaces, refuses `.`/`..` and the Windows device names (`CON`, `NUL`,
+/// `COM1`... with or without an extension), and limits the result to
+/// [`MAX_NAME_BYTES`] bytes of UTF-8 (shortening the stem, keeping the
+/// extension).
+pub fn sanitize_file_name(raw: &str) -> Option<String> {
+    let last = raw.rsplit(['/', '\\']).next().unwrap_or("");
+    let mut cleaned: String = last
+        .chars()
+        .filter(|c| {
+            !c.is_control()
+                && !matches!(*c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+        })
+        .map(|c| match c {
+            '<' | '>' | ':' | '"' | '|' | '?' | '*' => '_',
+            c => c,
+        })
+        .collect();
+    let trimmed = cleaned.trim_matches(|c: char| c == ' ' || c == '.').len();
+    if trimmed == 0 {
+        return None;
+    }
+    // Leading spaces are dropped too; trailing dots and spaces are not allowed on Windows.
+    cleaned = cleaned.trim_start().trim_end_matches(['.', ' ']).to_owned();
+    if cleaned.is_empty() || cleaned == "." || cleaned == ".." {
+        return None;
+    }
+    let stem = cleaned.split('.').next().unwrap_or("").trim_end();
+    if is_windows_device_name(stem) {
+        return None;
+    }
+    if cleaned.len() > MAX_NAME_BYTES {
+        cleaned = shorten_keeping_extension(&cleaned, MAX_NAME_BYTES);
+        if cleaned.is_empty() {
+            return None;
+        }
+    }
+    Some(cleaned)
+}
+
+fn is_windows_device_name(stem: &str) -> bool {
+    let up = stem.to_ascii_uppercase();
+    if matches!(
+        up.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) {
+        return true;
+    }
+    for prefix in ["COM", "LPT"] {
+        if let Some(n) = up.strip_prefix(prefix) {
+            if n.len() == 1 && n.as_bytes()[0].is_ascii_digit() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Cut `name` to at most `max` bytes on a character boundary, keeping a short
+/// extension (up to 16 bytes) so the file type survives.
+fn shorten_keeping_extension(name: &str, max: usize) -> String {
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if i > 0 && name.len() - i <= 16 => (&name[..i], &name[i..]),
+        _ => (name, ""),
+    };
+    let budget = max.saturating_sub(ext.len());
+    let mut end = budget.min(stem.len());
+    while end > 0 && !stem.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = stem[..end].trim_end_matches(['.', ' ']).to_owned();
+    out.push_str(ext);
+    out
 }
 
 /// Serialize `record` followed by `manifest`'s trailer, as the signed value.
@@ -377,6 +489,94 @@ pub fn decode_record_value(
     Ok((record, Some(manifest)))
 }
 
+/// A record envelope that passed every check [`open_signed_record`] makes.
+#[derive(Debug, Clone)]
+pub struct FetchedRecord {
+    pub record: DhtRecord,
+    pub manifest: Option<TransferManifest>,
+    /// The key that signed the envelope. If `manifest` is present it names this
+    /// key as its publisher.
+    pub signer: [u8; 32],
+}
+
+/// Why [`open_signed_record`] refused an envelope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignedRecordError {
+    /// Not a decodable signed envelope.
+    Malformed,
+    /// The signature does not verify, or it is for a different DHT key.
+    BadSignature,
+    /// Validly signed, but not by the expected publisher.
+    WrongSigner,
+    /// The signed value (record or manifest trailer) is damaged, out of bounds
+    /// or in an unsupported format; the message says which (for example the
+    /// "publish the file again" text for an old manifest version).
+    InvalidInner(String),
+    /// The record inside is for a different MID than the key it was fetched under.
+    InnerMidMismatch,
+    /// The manifest names a publisher other than the key that signed the record.
+    ManifestPublisher,
+}
+
+/// The text of a decode failure without the error type's own prefix.
+fn inner_message(e: MiasmaError) -> String {
+    match e {
+        MiasmaError::InvalidManifest(m) => m,
+        other => other.to_string(),
+    }
+}
+
+/// Open a signed DHT envelope fetched for `expected_key` (the MID digest).
+///
+/// The one place a network record is taken apart, for both the DHT and the
+/// direct (`--via`) path. All of these must hold:
+/// 1. the signature verifies and covers `expected_key`;
+/// 2. with `expected_signer`, the signer is exactly that key (C-01: a
+///    signature that verifies against the key carried in the record proves
+///    nothing about *who* published);
+/// 3. the value decodes, its record is for `expected_key` and within bounds;
+/// 4. a manifest, if present, names the signer as its publisher.
+pub fn open_signed_record(
+    expected_key: &[u8],
+    envelope: &[u8],
+    expected_signer: Option<&[u8; 32]>,
+) -> Result<FetchedRecord, SignedRecordError> {
+    let signed: SignedDhtRecord =
+        bincode::deserialize(envelope).map_err(|_| SignedRecordError::Malformed)?;
+    match expected_signer {
+        Some(signer) => signed
+            .verify_for_key_and_signer(expected_key, signer)
+            .map_err(|e| match e {
+                RecordAuthError::WrongSigner => SignedRecordError::WrongSigner,
+                _ => SignedRecordError::BadSignature,
+            })?,
+        None => {
+            if !signed.verify_for_key(expected_key) {
+                return Err(SignedRecordError::BadSignature);
+            }
+        }
+    }
+    let (record, manifest) = decode_record_value(&signed.value)
+        .map_err(|e| SignedRecordError::InvalidInner(inner_message(e)))?;
+    if record.dht_key().as_slice() != expected_key {
+        return Err(SignedRecordError::InnerMidMismatch);
+    }
+    record
+        .validate()
+        .map_err(|e| SignedRecordError::InvalidInner(inner_message(e)))?;
+    if manifest
+        .as_ref()
+        .is_some_and(|m| m.publisher != signed.signer_pubkey)
+    {
+        return Err(SignedRecordError::ManifestPublisher);
+    }
+    Ok(FetchedRecord {
+        record,
+        manifest,
+        signer: signed.signer_pubkey,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,11 +593,14 @@ mod tests {
         ContentId::compute(b"whole file", &params().to_param_bytes())
     }
 
+    /// Any 32 bytes do as a publisher key where no signature is checked.
+    const PUB: [u8; 32] = [0x5a; 32];
+
     /// A consistent manifest over `segs` segments of `seg_size` bytes (last one
     /// `last` bytes), built from real dissolved shares.
     fn build(seg_size: u32, segs: u32, last: u32) -> TransferManifest {
         let total = seg_size as u64 * (segs as u64 - 1) + last as u64;
-        let mut m = TransferManifest::new(&mid(), params(), seg_size, total, Protection::None);
+        let mut m = TransferManifest::new(&mid(), PUB, params(), seg_size, total, Protection::None);
         for i in 0..segs {
             let len = (if i + 1 == segs { last } else { seg_size }) as usize;
             let data = vec![i as u8 + 1; len];
@@ -487,7 +690,7 @@ mod tests {
 
     #[test]
     fn segments_must_be_pushed_in_order() {
-        let mut m = TransferManifest::new(&mid(), params(), 256, 512, Protection::None);
+        let mut m = TransferManifest::new(&mid(), PUB, params(), 256, 512, Protection::None);
         let data = vec![1u8; 256];
         let (_, shares) = dissolve_segment(&data, &mid(), 1, 0, params()).unwrap();
         let entry = SegmentEntry::from_dissolved(1, &mid(), &data, &shares).unwrap();
@@ -496,7 +699,7 @@ mod tests {
 
     #[test]
     fn an_empty_file_has_one_empty_segment() {
-        let mut m = TransferManifest::new(&mid(), params(), 256, 0, Protection::None);
+        let mut m = TransferManifest::new(&mid(), PUB, params(), 256, 0, Protection::None);
         let (_, shares) = dissolve_segment(&[], &mid(), 0, 0, params()).unwrap();
         m.push_segment(SegmentEntry::from_dissolved(0, &mid(), &[], &shares).unwrap())
             .unwrap();
@@ -586,6 +789,112 @@ mod tests {
     }
 
     #[test]
+    fn a_v2_trailer_is_refused_with_a_publish_again_message() {
+        let m = build(256, 2, 50);
+        let rec = record(m.mid);
+        let mut value = encode_record_value(&rec, Some(&m)).unwrap();
+        let rec_len = bincode::serialize(&rec).unwrap().len();
+        value[rec_len + 4] = 2;
+        match decode_record_value(&value) {
+            Err(MiasmaError::InvalidManifest(msg)) => {
+                assert!(msg.contains("no longer supported"), "{msg}");
+                assert!(msg.contains("publish the file again"), "{msg}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn publisher_and_name_survive_the_record_round_trip() {
+        let m = build(256, 2, 50).with_name(Some("C:\\Users\\me\\report final.pdf"));
+        assert_eq!(m.name.as_deref(), Some("report final.pdf"));
+        let rec = record(m.mid);
+        let value = encode_record_value(&rec, Some(&m)).unwrap();
+        let (_, back) = decode_record_value(&value).unwrap();
+        let back = back.unwrap();
+        assert_eq!(back.publisher, PUB);
+        assert_eq!(back.name.as_deref(), Some("report final.pdf"));
+    }
+
+    #[test]
+    fn an_overlong_name_in_a_received_manifest_fails_validation() {
+        let mut m = build(256, 2, 50);
+        m.name = Some("a".repeat(MAX_NAME_BYTES + 1));
+        assert!(m.validate().is_err());
+        m.name = Some("a".repeat(MAX_NAME_BYTES));
+        m.validate().unwrap();
+    }
+
+    #[test]
+    fn file_name_sanitiser() {
+        let long_ascii = "x".repeat(400);
+        let long_with_ext = format!("{}.tar.gz", "y".repeat(400));
+        let long_unicode = "あ".repeat(200); // 3 bytes each
+        let cases: Vec<(&str, Option<String>)> = vec![
+            ("report.pdf", Some("report.pdf".into())),
+            ("a b (1).txt", Some("a b (1).txt".into())),
+            (".bashrc", Some(".bashrc".into())),
+            // Path traversal and absolute paths keep only the final component.
+            ("../../etc/passwd", Some("passwd".into())),
+            ("..\\..\\Windows\\win.ini", Some("win.ini".into())),
+            ("/var/log/syslog", Some("syslog".into())),
+            ("C:\\Users\\me\\x.doc", Some("x.doc".into())),
+            ("a/b\\c/d.txt", Some("d.txt".into())),
+            // Nothing safe remains.
+            ("", None),
+            (".", None),
+            ("..", None),
+            ("...", None),
+            ("a/..", None),
+            ("dir/", None),
+            ("   ", None),
+            ("\u{0}\u{1f}", None),
+            // Windows device names, any case, with or without an extension.
+            ("CON", None),
+            ("nul", None),
+            ("Nul.txt", None),
+            ("COM1", None),
+            ("lpt9.log", None),
+            ("aux.tar.gz", None),
+            ("PRN ", None),
+            ("COM10", Some("COM10".into())),
+            ("console.txt", Some("console.txt".into())),
+            // Control characters and Windows-forbidden characters.
+            ("a\u{0}b\nc\td.txt", Some("abcd.txt".into())),
+            ("a:b*c?.txt", Some("a_b_c_.txt".into())),
+            ("file.txt:stream", Some("file.txt_stream".into())),
+            ("name. . ", Some("name".into())),
+            // Bidi overrides that disguise an extension are dropped.
+            ("photo\u{202E}gpj.exe", Some("photogpj.exe".into())),
+            // Unicode is kept.
+            ("日本語のファイル.txt", Some("日本語のファイル.txt".into())),
+            ("café ☕.md", Some("café ☕.md".into())),
+        ];
+        for (raw, want) in cases {
+            assert_eq!(sanitize_file_name(raw), want, "input {raw:?}");
+        }
+
+        let n = sanitize_file_name(&long_ascii).unwrap();
+        assert_eq!(n.len(), MAX_NAME_BYTES);
+        let n = sanitize_file_name(&long_with_ext).unwrap();
+        assert!(
+            n.len() <= MAX_NAME_BYTES && n.ends_with(".gz"),
+            "{}",
+            n.len()
+        );
+        let n = sanitize_file_name(&long_unicode).unwrap();
+        assert!(n.len() <= MAX_NAME_BYTES);
+        assert!(n.chars().all(|c| c == 'あ'), "cut on a character boundary");
+        // The result is always a single, re-sanitisable component.
+        for raw in ["../x", "a\\b", "CON", "ok.txt", &long_ascii] {
+            if let Some(s) = sanitize_file_name(raw) {
+                assert_eq!(sanitize_file_name(&s).as_deref(), Some(s.as_str()));
+                assert!(!s.contains(['/', '\\']));
+            }
+        }
+    }
+
+    #[test]
     fn a_password_manifest_carries_only_public_parameters() {
         let pw = crate::transfer::protection::random_test_password();
         let (prot, _key) = PasswordProtection::create_with_cost(&pw, 64, 1, 1).unwrap();
@@ -615,7 +924,7 @@ mod tests {
         let params = DissolutionParams::default();
         let seg = crate::dissolution::DEFAULT_SEGMENT_SIZE as u32;
         let total: u64 = 100 * 1024 * 1024 * 1024;
-        let mut m = TransferManifest::new(&mid(), params, seg, total, Protection::None);
+        let mut m = TransferManifest::new(&mid(), PUB, params, seg, total, Protection::None);
         for i in 0..1600u32 {
             m.push_segment(SegmentEntry {
                 index: i,
@@ -679,7 +988,7 @@ mod tests {
             published_at: 0,
         };
 
-        let mut m = TransferManifest::new(&the_mid, params, seg, total, Protection::None);
+        let mut m = TransferManifest::new(&the_mid, PUB, params, seg, total, Protection::None);
         for i in 0..segments {
             m.push_segment(SegmentEntry {
                 index: i,
