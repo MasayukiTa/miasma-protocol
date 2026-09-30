@@ -705,6 +705,43 @@ unknown owners share a bucket, small quota stays usable, default quota refuses, 
 `store_index.json` loads. In `network/node.rs`: a valid layer is processed once, 5000 unique invalid layers
 follow, and the replay is still rejected; a single sender's failed decryptions are capped.
 
+### Security fixes 3 (2026-09-30, branch `security/fix-transfer-layer`)
+
+The local control channel (C-05 / F3, S-02). Before this, any process that could open a loopback TCP
+connection was served: a raw client got `Status` and then `Wipe` (master key erased) with no secret, and
+`PublishFile` / `TransferStartReceive` let it choose file paths. The HTTP bridge treated a missing `Origin`
+as "not a browser, allow".
+
+- **Token.** At each start the daemon draws a 256-bit token from `OsRng` and writes it to
+  `<data_dir>/daemon.token` before it writes `daemon.port`. A stale file is unlinked and replaced; the file is
+  deleted at clean shutdown (and by `cleanup_stale_state`). Unix: created with mode 0600 (no
+  widen-then-narrow). Windows: created empty, then `icacls` drops inheritance and grants the current user
+  only, then the secret is written; if `icacls` fails the daemon warns and keeps going with the data
+  directory's own ACL (not verified by the daemon). New module `daemon/control_auth.rs`.
+- **IPC.** The first frame of every connection is a `ControlAuth { token }` frame (max 4 KiB, 5 s timeout),
+  compared in constant time. Anything else, or a wrong token, gets an `unauthorized` error and a close before
+  any request is deserialised. Failures are delayed 100 ms doubling to 3 s, reset by a success.
+  `daemon_request` reads the token file itself, so the CLI, desktop worker, FFI and tests needed no change
+  beyond `Wipe`.
+- **Wipe.** `Wipe` now only returns `WipeChallenge { nonce }` (single use, 30 s, replaced by a newer one);
+  `WipeConfirm { nonce }` wipes. `daemon_wipe()` performs both; CLI, desktop, FFI and the integration test
+  use it.
+- **HTTP bridge.** Everything except `GET /api/ping` needs `Authorization: Bearer <token>` regardless of
+  `Origin`; `POST /api/wipe` is two-step (`{"confirm": <challenge>}`). `web/js/bridge.js` sends the token
+  from `localStorage['miasma_control_token']` (set with `setControlToken()`); a page cannot read the file, so
+  the token must be pasted once. Mobile bridge clients do not send it yet (see P1-9 in
+  `remaining-tasks-prioritized.md`).
+- **S-02.** `ControlRequest::zeroize` now wipes the passwords of `PublishFileProtected`,
+  `TransferStartReceive`, `TransferStartPublish` (and the `WipeConfirm` nonce). `daemon_request` zeroizes the
+  request after writing it.
+- **Path policy.** `TransferStartReceive` output paths must be absolute and free of `..`
+  (`PathPolicyError`, returned as `output path rejected: ...`). CLI and desktop resolve paths lexically first
+  (`absolutize_lexical`). This is not a sandbox.
+- **Tests.** `crates/miasma-core/tests/adversarial_ipc_test.rs` (11 tests) plus unit tests in
+  `control_auth.rs`.
+- **Limits.** Any process running as the same user can read the token. Not done: OS-authenticated IPC
+  (named pipe / Unix socket with peer credentials), a token for the mobile bridge clients.
+
 ## 7. Decisions and open questions
 
 - D1 Manifest lives in the record trailer, not a second DHT key. (Reason in §2.2.)
