@@ -19,13 +19,19 @@ before relying on it:
 
 - The protocol is beta and externally unaudited. Do not use it for material
   whose exposure would be serious.
-- MID + password protect the confidentiality of file content. The MID does not
-  bind whether a file is password-protected, nor which publication of it a
-  record refers to (no publication generation).
-- DHT records are not authenticated to the publisher: anyone who knows a MID
-  can publish a competing record for it. The final whole-file MID check stops
-  an attacker from substituting different content, but availability can still
-  be attacked (a receiver can be pointed at unavailable or junk locations).
+- MID + password protect the confidentiality of file content. A bare MID does
+  not bind whether a file is password-protected, nor which publication of it a
+  record refers to (no publication generation); the share ID
+  (`miasma-share:...`) binds the protection state, the MID and the publisher.
+- DHT records are authenticated to the publisher only when the receiver uses
+  the share ID: it accepts just a record signed by the publisher key inside
+  the ID. A receiver that uses a bare MID is not protected: anyone who knows a
+  MID can publish a competing record for it (the client then says "publisher
+  not authenticated"). The final whole-file MID check stops an attacker from
+  substituting different content, but availability can still be attacked (a
+  record held by peers can be replaced by another signer, and a bare-MID
+  receiver can be pointed at unavailable or junk locations). The publisher key
+  is the node identity key and cannot be rotated or revoked yet.
 - Hosted-share storage (keeping shares for other peers) is opt-in; the default
   quota is 0.
 - The obfuscated QUIC and REALITY transports do not authenticate the server and
