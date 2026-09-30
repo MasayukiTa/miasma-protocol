@@ -280,6 +280,7 @@ pub fn initialize_node(
         storage: StorageConfig {
             quota_mb: storage_mb,
             bandwidth_mb_day,
+            hosted_quota_mb: 0,
         },
         network: NetworkConfig {
             listen_addr: "/ip4/0.0.0.0/udp/0/quic-v1".into(),
