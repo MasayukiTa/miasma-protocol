@@ -173,6 +173,11 @@ pub struct PublishReport {
     /// segment in order (excludes the publisher's own local copy). A
     /// single-segment publish has exactly one entry.
     pub remote_distinct_shards_per_segment: Vec<usize>,
+    /// The share ID to give the receiver (binds the MID, this node's record
+    /// signing key and the protection state). `None` for the single-shot
+    /// in-memory publish, which carries no manifest and so cannot be bound to a
+    /// publisher.
+    pub share_id: Option<crate::transfer::ShareId>,
 }
 
 // ─── Push bookkeeping ───────────────────────────────────────────────────────
@@ -830,6 +835,7 @@ impl MiasmaCoordinator {
         Ok(PublishReport {
             mid,
             remote_distinct_shards_per_segment: vec![remote_distinct],
+            share_id: None,
         })
     }
 
