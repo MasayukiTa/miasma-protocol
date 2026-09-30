@@ -2744,8 +2744,12 @@ fn os_version() -> String {
     #[cfg(windows)]
     {
         // Try reading Windows version from registry-like env or version API.
+        use std::os::windows::process::CommandExt as _;
+        // CREATE_NO_WINDOW: a GUI process spawning a console program would
+        // otherwise flash a console window.
         if let Ok(ver) = std::process::Command::new("cmd")
             .args(["/c", "ver"])
+            .creation_flags(0x0800_0000)
             .output()
         {
             let out = String::from_utf8_lossy(&ver.stdout);
