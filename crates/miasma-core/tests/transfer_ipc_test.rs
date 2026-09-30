@@ -75,9 +75,69 @@ async fn wait_until_finished(d: &Daemon, id: &str) -> TransferStatus {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_weak_publish_password_is_refused_with_machine_readable_codes() {
+    timeout(Duration::from_secs(120), async {
+        let a = start_daemon(0x53, None).await;
+        let src_dir = tempfile::tempdir().unwrap();
+        let src = src_dir.path().join("payload.bin");
+        std::fs::write(&src, vec![7u8; 50_000]).unwrap();
+        let weak = "abc"; // short, no digit, no symbol
+
+        // Direct publish: the error text carries the stable codes.
+        match daemon_request(
+            &a.dir,
+            ControlRequest::PublishFileProtected {
+                file_path: src.to_string_lossy().into_owned(),
+                data_shards: 2,
+                total_shards: 3,
+                password: weak.into(),
+            },
+        )
+        .await
+        .unwrap()
+        {
+            ControlResponse::Error(e) => {
+                assert_eq!(e, "weak password: too_short,no_digit,no_symbol")
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        // Transfer job: starts, then ends Failed with the same text, before
+        // anything is published.
+        let id = match daemon_request(
+            &a.dir,
+            ControlRequest::TransferStartPublish {
+                file_path: src.to_string_lossy().into_owned(),
+                data_shards: 2,
+                total_shards: 3,
+                password: Some(weak.into()),
+                restart: false,
+            },
+        )
+        .await
+        .unwrap()
+        {
+            ControlResponse::TransferStarted { id } => id,
+            other => panic!("unexpected: {other:?}"),
+        };
+        let s = wait_until_finished(&a, &id).await;
+        assert_eq!(s.state, TransferState::Failed);
+        assert_eq!(
+            s.last_error.as_deref(),
+            Some("weak password: too_short,no_digit,no_symbol")
+        );
+        let _ = a.shutdown.send(()).await;
+    })
+    .await
+    .expect("timed out");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_receive_job_reports_status_completes_and_a_wrong_password_fails_cleanly() {
     timeout(Duration::from_secs(180), async {
         let a = start_daemon(0x51, None).await;
+        // Drawn at run time; shaped to satisfy the publish password policy.
+        let password = format!("pw-1{:032x}", rand::random::<u128>());
 
         // A publishes a password-protected file.
         let src_dir = tempfile::tempdir().unwrap();
@@ -90,7 +150,7 @@ async fn a_receive_job_reports_status_completes_and_a_wrong_password_fails_clean
                 file_path: src.to_string_lossy().into_owned(),
                 data_shards: 2,
                 total_shards: 3,
-                password: "ipc-secret".into(),
+                password: password.clone(),
             },
         )
         .await
@@ -172,7 +232,7 @@ async fn a_receive_job_reports_status_completes_and_a_wrong_password_fails_clean
             ControlRequest::TransferStartReceive {
                 mid: mid.clone(),
                 output_path: out.to_string_lossy().into_owned(),
-                password: Some("ipc-secret".into()),
+                password: Some(password.clone()),
                 restart: false,
                 via: vec![],
                 via_ca_pem: None,
