@@ -22,7 +22,10 @@ use libp2p::{
         store::{MemoryStore, MemoryStoreConfig, RecordStore},
     },
     mdns, noise, ping, relay, request_response,
-    swarm::{ConnectionId, NetworkBehaviour, SwarmEvent},
+    swarm::{
+        dial_opts::{DialOpts, PeerCondition},
+        ConnectionId, DialError, NetworkBehaviour, SwarmEvent,
+    },
     yamux, Multiaddr, PeerId, StreamProtocol, Swarm,
 };
 use serde::{Deserialize, Serialize};
@@ -860,6 +863,12 @@ pub enum DhtCommand {
     GetConnectedPeers {
         reply: oneshot::Sender<Vec<(PeerId, Vec<Multiaddr>)>>,
     },
+    /// If no peer is connected, dial every configured bootstrap peer now
+    /// (ignoring the redial backoff and flap damping: a caller that needs the
+    /// network asked for it), then report the connection state.
+    EnsureBootstrapDialed {
+        reply: oneshot::Sender<BootstrapLinkStatus>,
+    },
     /// Get connection health snapshot from the live health monitor.
     GetHealthSnapshot {
         reply: oneshot::Sender<super::connection_health::ConnectionHealthSnapshot>,
@@ -970,6 +979,16 @@ fn decode_signed_record_and_manifest(
 #[derive(Clone)]
 pub struct DhtHandle {
     pub(crate) tx: mpsc::Sender<DhtCommand>,
+}
+
+/// The node's link to the network at one instant, as answered to
+/// [`DhtCommand::EnsureBootstrapDialed`].
+#[derive(Debug, Clone)]
+pub struct BootstrapLinkStatus {
+    /// Peers with an established connection.
+    pub connected_peers: usize,
+    /// The bootstrap peers this node was configured with (peer, address).
+    pub bootstrap_peers: Vec<(PeerId, Multiaddr)>,
 }
 
 /// Timeout for request-reply DHT commands.  30 s is generous — if the node
@@ -1470,6 +1489,47 @@ impl DhtHandle {
         self.recv_reply(rx, "connected_peers").await
     }
 
+    /// Make sure this node has a link to the network before something that needs
+    /// peers (a record lookup) starts, waiting at most `timeout`.
+    ///
+    /// * A peer is already connected: returns at once.
+    /// * None is, but bootstrap peers are configured: they are dialed right now
+    ///   (again every half second while the wait lasts, so a sender that comes
+    ///   up mid-wait is picked up within half a second, not on the next backoff
+    ///   tick) and this returns as soon as one connection is up.
+    /// * None is and no bootstrap peer is configured: returns `Ok` -- there is
+    ///   nothing to wait for, and the caller may still find its record locally.
+    ///
+    /// On timeout the error says which bootstrap addresses were unreachable.
+    pub async fn ensure_connected(&self, timeout: Duration) -> Result<(), MiasmaError> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let (tx, rx) = oneshot::channel();
+            self.tx
+                .send(DhtCommand::EnsureBootstrapDialed { reply: tx })
+                .await
+                .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
+            let status = self.recv_reply(rx, "ensure_connected").await?;
+            if status.connected_peers > 0 || status.bootstrap_peers.is_empty() {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                let list = status
+                    .bootstrap_peers
+                    .iter()
+                    .map(|(peer, addr)| format!("{addr}/p2p/{peer}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(MiasmaError::Network(format!(
+                    "not connected to any peer, bootstrap {list} unreachable \
+                     (waited {} s)",
+                    timeout.as_secs()
+                )));
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
     /// Push `share` to `peer_id`, asking it to host it (Phase 2.1).
     pub async fn store_share_on_peer(
         &self,
@@ -1886,6 +1946,10 @@ pub struct MiasmaNode {
     reconnection_metrics: crate::daemon::self_heal::ReconnectionMetrics,
     /// Remembered bootstrap peers for recovery re-dialing.
     bootstrap_peers: Vec<(PeerId, Multiaddr)>,
+    /// Redial backoff for the bootstrap peers only (1 s doubling to 30 s, never
+    /// abandoned). Separate from `reconnection_scheduler`, whose 5 s..10 min
+    /// schedule and circuit breaker suit ordinary peers, not the lifeline.
+    bootstrap_backoff: BootstrapBackoff,
 
     // ── Directed sharing relay fallback diagnostics ─────────────────────
     /// Directed requests sent to already-connected peers (direct path).
@@ -2023,6 +2087,7 @@ impl MiasmaNode {
             reconnection_scheduler: crate::daemon::self_heal::ReconnectionScheduler::default(),
             reconnection_metrics: crate::daemon::self_heal::ReconnectionMetrics::default(),
             bootstrap_peers: Vec::new(),
+            bootstrap_backoff: BootstrapBackoff::default(),
             directed_direct_sends: 0,
             directed_relay_fallback_attempts: 0,
             directed_relay_circuits_registered: 0,
@@ -2190,10 +2255,11 @@ impl MiasmaNode {
 
     /// Run the node event loop. Blocks until shutdown or error.
     pub async fn run(&mut self) -> Result<(), MiasmaError> {
-        // Time-based bootstrap re-dial interval — fires independently of swarm
-        // events so that an isolated node (zero peers, minimal events) can still
-        // attempt reconnection on a predictable schedule.
-        let mut bootstrap_interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        // Time-based bootstrap re-dial tick — fires independently of swarm
+        // events so that an isolated node (zero peers, minimal events) still
+        // redials a lost bootstrap peer. The tick is short; how often a peer is
+        // actually dialed is set by its backoff (`BootstrapBackoff`).
+        let mut bootstrap_interval = tokio::time::interval(BOOTSTRAP_REDIAL_TICK);
         bootstrap_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         // Skip the first immediate tick (startup bootstrap is handled elsewhere).
         bootstrap_interval.tick().await;
@@ -2224,56 +2290,56 @@ impl MiasmaNode {
         Ok(())
     }
 
-    /// Time-driven bootstrap re-dial.  Called every 30 seconds independently
-    /// of the swarm event stream so that a node with zero peers still attempts
-    /// to reconnect to its configured bootstrap peers.
-    ///
-    /// Bootstrap peers are treated specially: the reconnection scheduler's
-    /// circuit breaker is reset for them because a configured bootstrap peer
-    /// is the node's lifeline back to the network and should never be
-    /// permanently abandoned.
-    fn periodic_bootstrap_redial(&mut self) {
-        let peer_count = self.swarm.connected_peers().count();
-        if peer_count > 0 || self.bootstrap_peers.is_empty() {
-            return; // Already connected or nothing to dial.
+    /// Dial one bootstrap peer at its configured address, unless it is already
+    /// connected or a dial to it is already in flight. Returns whether a new
+    /// dial was started.
+    fn dial_bootstrap_peer(&mut self, peer_id: PeerId, addr: &Multiaddr) -> bool {
+        let opts = DialOpts::peer_id(peer_id)
+            .addresses(vec![addr.clone()])
+            .condition(PeerCondition::DisconnectedAndNotDialing)
+            .build();
+        match self.swarm.dial(opts) {
+            Ok(()) => {
+                self.reconnection_metrics.record_attempt();
+                true
+            }
+            // Connected, or a dial is already running: nothing to start.
+            Err(DialError::DialPeerConditionFalse(_)) => false,
+            Err(e) => {
+                info!("bootstrap_redial.dial_failed peer={peer_id}: {e}");
+                false
+            }
         }
-        if self.flap_detector.is_damping() {
-            info!("bootstrap_redial.skipped reason=flap_damping");
+    }
+
+    /// Redial every configured bootstrap peer that is not connected and whose
+    /// backoff has elapsed. Runs on a 1 s tick, so a lost link is retried within
+    /// about a second and an unreachable peer at most every 30 s.
+    ///
+    /// A configured bootstrap peer is the node's lifeline back to the network:
+    /// it is never abandoned (no circuit breaker), and this is independent of how
+    /// many *other* peers are connected -- one healthy peer must not hide a
+    /// lost bootstrap peer. Flap damping still applies (a link that keeps
+    /// closing is not redialed in a storm).
+    fn periodic_bootstrap_redial(&mut self) {
+        if self.bootstrap_peers.is_empty() {
             return;
         }
-
+        if self.flap_detector.is_damping() {
+            debug!("bootstrap_redial.skipped reason=flap_damping");
+            return;
+        }
         let mut dialed = 0usize;
-        for (peer_id, addr) in &self.bootstrap_peers {
-            let peer_bytes = peer_id.to_bytes();
-            // Reset circuit breaker for bootstrap peers — they should never
-            // be permanently abandoned since they are the configured lifeline.
-            if self.reconnection_scheduler.failures_for(&peer_bytes) >= 10 {
-                self.reconnection_scheduler.record_success(&peer_bytes);
-                info!("bootstrap_redial.circuit_breaker_reset peer={peer_id}");
-            }
-            if !self.reconnection_scheduler.should_attempt(&peer_bytes) {
+        for (peer_id, addr) in self.bootstrap_peers.clone() {
+            if self.swarm.is_connected(&peer_id) || !self.bootstrap_backoff.is_due(&peer_id) {
                 continue;
             }
-            let p2p = addr
-                .clone()
-                .with(libp2p::multiaddr::Protocol::P2p(*peer_id));
-            match self.swarm.dial(p2p) {
-                Ok(_) => {
-                    dialed += 1;
-                    self.reconnection_metrics.record_attempt();
-                }
-                Err(e) => {
-                    info!("bootstrap_redial.dial_failed peer={peer_id}: {e}");
-                }
+            if self.dial_bootstrap_peer(peer_id, &addr) {
+                dialed += 1;
             }
         }
         if dialed > 0 {
             info!("bootstrap_redial.attempted peers={dialed}");
-        } else {
-            info!(
-                "bootstrap_redial.no_attempt bootstrap_count={} peer_count={peer_count}",
-                self.bootstrap_peers.len()
-            );
         }
     }
 
@@ -2642,6 +2708,19 @@ impl MiasmaNode {
                     .collect();
                 let _ = reply.send(peers);
             }
+            DhtCommand::EnsureBootstrapDialed { reply } => {
+                let connected_peers = self.swarm.connected_peers().count();
+                let bootstrap_peers = self.bootstrap_peers.clone();
+                if connected_peers == 0 {
+                    for (peer_id, addr) in &bootstrap_peers {
+                        self.dial_bootstrap_peer(*peer_id, addr);
+                    }
+                }
+                let _ = reply.send(BootstrapLinkStatus {
+                    connected_peers,
+                    bootstrap_peers,
+                });
+            }
             DhtCommand::GetHealthSnapshot { reply } => {
                 let peer_count = self.swarm.connected_peers().count();
                 let _ = reply.send(self.health_monitor.snapshot(peer_count));
@@ -2933,6 +3012,7 @@ impl MiasmaNode {
                 // Reset reconnection backoff on successful connection.
                 self.reconnection_scheduler
                     .record_success(&peer_id.to_bytes());
+                self.bootstrap_backoff.record_success(&peer_id);
                 self.reconnection_metrics.record_success();
                 if let Some(tx) = &self.topology_tx {
                     let _ = tx.try_send(super::types::TopologyEvent::PeerConnected { peer_id });
@@ -2987,6 +3067,12 @@ impl MiasmaNode {
                     if tripped {
                         self.reconnection_metrics.record_circuit_breaker();
                         debug!("Circuit breaker tripped for peer {peer_id}");
+                    }
+                    // A lost bootstrap peer is redialed by the 1 s tick after its
+                    // first backoff step, not by the next 30 s timer.
+                    if self.bootstrap_peers.iter().any(|(p, _)| *p == peer_id) {
+                        self.bootstrap_backoff.record_failure(peer_id);
+                        info!("bootstrap_redial.link_lost peer={peer_id} cause={cause:?}");
                     }
                     if let Some(tx) = &self.topology_tx {
                         let _ =
@@ -3061,6 +3147,12 @@ impl MiasmaNode {
                 self.health_monitor
                     .backoff
                     .record_failure(&peer_id.to_string());
+                // A failed dial to a bootstrap peer pushes its next redial out.
+                if self.bootstrap_peers.iter().any(|(p, _)| *p == peer_id)
+                    && !self.swarm.is_connected(&peer_id)
+                {
+                    self.bootstrap_backoff.record_failure(peer_id);
+                }
                 // Track in reconnection scheduler.
                 self.reconnection_metrics.record_attempt();
                 let tripped = self
@@ -4876,6 +4968,119 @@ impl MiasmaNode {
     }
 }
 
+// ─── Connection lifetime and redial ───────────────────────────────────────────
+
+/// How long a connection may carry no request before the swarm closes it.
+///
+/// This used to be 30 s. Nothing on an otherwise quiet connection asks to keep
+/// it (libp2p's ping and Kademlia handlers do not), so every link was closed
+/// ~30-45 s after its last request -- measured on two loopback nodes, the
+/// receiver-to-sender link lived 44.5 s and then stayed down. A node's job is to
+/// stay in the network, so a quiet link is kept for an hour. Dead peers are not
+/// held that long: the ping behaviour (every 30 s, 20 s reply timeout) closes a
+/// connection whose peer stops answering, and its packets also keep NAT
+/// mappings warm.
+const IDLE_CONNECTION_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+
+/// Redial schedule for a lost bootstrap peer: 1 s, 2 s, 4 s ... capped at 30 s.
+const BOOTSTRAP_REDIAL_BASE: Duration = Duration::from_secs(1);
+const BOOTSTRAP_REDIAL_MAX: Duration = Duration::from_secs(30);
+/// How often the event loop looks for a bootstrap peer that is due for a redial.
+const BOOTSTRAP_REDIAL_TICK: Duration = Duration::from_secs(1);
+
+/// Delay before redial number `failures` (1-based) of a bootstrap peer.
+fn bootstrap_redial_delay(failures: u32) -> Duration {
+    // `checked_shl` yields None from a shift of 32: saturate instead of wrapping to 0.
+    let factor = 1u32
+        .checked_shl(failures.saturating_sub(1))
+        .unwrap_or(u32::MAX);
+    BOOTSTRAP_REDIAL_BASE
+        .saturating_mul(factor)
+        .min(BOOTSTRAP_REDIAL_MAX)
+}
+
+/// Per-peer redial state of the bootstrap peers: consecutive failures and the
+/// earliest time of the next attempt. A bootstrap peer is never abandoned.
+#[derive(Debug, Default)]
+struct BootstrapBackoff {
+    peers: HashMap<PeerId, (u32, std::time::Instant)>,
+}
+
+impl BootstrapBackoff {
+    /// The link to `peer` was lost, or a dial to it failed.
+    fn record_failure(&mut self, peer: PeerId) {
+        let entry = self
+            .peers
+            .entry(peer)
+            .or_insert((0, std::time::Instant::now()));
+        entry.0 = entry.0.saturating_add(1);
+        entry.1 = std::time::Instant::now() + bootstrap_redial_delay(entry.0);
+    }
+
+    /// `peer` is connected: forget its failures.
+    fn record_success(&mut self, peer: &PeerId) {
+        self.peers.remove(peer);
+    }
+
+    /// Whether a redial of `peer` is due (never failed counts as due).
+    fn is_due(&self, peer: &PeerId) -> bool {
+        self.peers
+            .get(peer)
+            .is_none_or(|(_, next)| std::time::Instant::now() >= *next)
+    }
+}
+
+/// TCP transport wrapper that makes ordinary outbound dials use a fresh local
+/// port instead of the listening port.
+///
+/// libp2p's default (`PortUse::Reuse`) binds the outgoing socket to the node's
+/// listen port so a NAT mapping can be shared. On Windows a dial from that port
+/// to a peer it was connected to a moment ago fails with `AddrInUse` (os error
+/// 10048) while the closed 4-tuple sits in TIME_WAIT -- up to 120 s, measured:
+/// every redial in that window failed instantly, and a daemon restarted after a
+/// kill could not reach its own peer for two minutes. A fresh port cannot
+/// collide. Hole-punch dials (`role == Listener`, driven by DCUtR) keep `Reuse`,
+/// which is the one case that needs it.
+struct NewPortOnDial<T>(T);
+
+impl<T: libp2p::core::Transport + Unpin> libp2p::core::Transport for NewPortOnDial<T> {
+    type Output = T::Output;
+    type Error = T::Error;
+    type ListenerUpgrade = T::ListenerUpgrade;
+    type Dial = T::Dial;
+
+    fn listen_on(
+        &mut self,
+        id: libp2p::core::transport::ListenerId,
+        addr: Multiaddr,
+    ) -> Result<(), libp2p::core::transport::TransportError<Self::Error>> {
+        self.0.listen_on(id, addr)
+    }
+
+    fn remove_listener(&mut self, id: libp2p::core::transport::ListenerId) -> bool {
+        self.0.remove_listener(id)
+    }
+
+    fn dial(
+        &mut self,
+        addr: Multiaddr,
+        mut opts: libp2p::core::transport::DialOpts,
+    ) -> Result<Self::Dial, libp2p::core::transport::TransportError<Self::Error>> {
+        if opts.role == libp2p::core::Endpoint::Dialer {
+            opts.port_use = libp2p::core::transport::PortUse::New;
+        }
+        self.0.dial(addr, opts)
+    }
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<libp2p::core::transport::TransportEvent<Self::ListenerUpgrade, Self::Error>>
+    {
+        std::pin::Pin::new(&mut self.get_mut().0).poll(cx)
+    }
+}
+
 // ─── Swarm builder ────────────────────────────────────────────────────────────
 
 fn build_swarm(
@@ -4883,15 +5088,23 @@ fn build_swarm(
     local_peer_id: PeerId,
     listen_addr: &str,
 ) -> Result<Swarm<MiasmaBehaviour>, MiasmaError> {
+    let tcp_noise = noise::Config::new(&keypair)
+        .map_err(|e| MiasmaError::Sss(format!("TCP init failed: {e}")))?;
     let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
         .with_tokio()
-        .with_tcp(
-            libp2p::tcp::Config::default(),
-            noise::Config::new,
-            yamux::Config::default,
-        )
-        .map_err(|e| MiasmaError::Sss(format!("TCP init failed: {e}")))?
         .with_quic()
+        // TCP, built by hand so outbound dials can avoid the listen port
+        // (`NewPortOnDial`); otherwise identical to `SwarmBuilder::with_tcp`.
+        .with_other_transport(|_key| {
+            use libp2p::core::{upgrade::Version, Transport as _};
+            NewPortOnDial(libp2p::tcp::tokio::Transport::new(
+                libp2p::tcp::Config::default(),
+            ))
+            .upgrade(Version::V1Lazy)
+            .authenticate(tcp_noise)
+            .multiplex(yamux::Config::default())
+        })
+        .map_err(|e| MiasmaError::Sss(format!("TCP init failed: {e}")))?
         .with_relay_client(noise::Config::new, yamux::Config::default)
         .map_err(|e| MiasmaError::Sss(format!("relay client init failed: {e}")))?
         .with_behaviour(|key: &Keypair, relay_client| {
@@ -5036,7 +5249,7 @@ fn build_swarm(
             })
         })
         .map_err(|e| MiasmaError::Sss(format!("behaviour init failed: {e}")))?
-        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(30)))
+        .with_swarm_config(|c| c.with_idle_connection_timeout(IDLE_CONNECTION_TIMEOUT))
         .build();
 
     let addr: Multiaddr = listen_addr
@@ -5047,6 +5260,47 @@ fn build_swarm(
         .map_err(|e| MiasmaError::Sss(format!("listen_on failed: {e}")))?;
 
     Ok(swarm)
+}
+
+#[cfg(test)]
+mod connection_lifetime_tests {
+    use super::*;
+
+    #[test]
+    fn redial_delay_doubles_from_one_second_to_the_cap_and_never_wraps() {
+        let secs: Vec<u64> = (1..=8)
+            .map(|n| bootstrap_redial_delay(n).as_secs())
+            .collect();
+        assert_eq!(secs, vec![1, 2, 4, 8, 16, 30, 30, 30]);
+        // A permanently unreachable peer keeps failing for hours. The delay must stay
+        // at the cap: a shift of 32 or more used to wrap a `u32` factor to 0, i.e.
+        // "dial every tick" (the bug in `ReconnectionScheduler`, which is only spared
+        // by its circuit breaker).
+        for n in [31, 32, 33, 64, 1000, u32::MAX] {
+            assert_eq!(bootstrap_redial_delay(n), BOOTSTRAP_REDIAL_MAX, "n={n}");
+        }
+    }
+
+    #[test]
+    fn backoff_is_due_for_a_peer_that_never_failed_and_resets_on_success() {
+        let peer = PeerId::random();
+        let mut b = BootstrapBackoff::default();
+        assert!(b.is_due(&peer));
+        b.record_failure(peer);
+        assert!(!b.is_due(&peer), "first failure schedules the redial ahead");
+        b.record_success(&peer);
+        assert!(
+            b.is_due(&peer),
+            "a connected peer starts from a clean slate"
+        );
+    }
+
+    #[test]
+    fn a_quiet_link_is_kept_far_longer_than_the_old_thirty_seconds() {
+        // Ping runs every 30 s with a 20 s reply timeout; the idle timeout must sit
+        // well above that or a healthy but silent link is closed between pings.
+        assert!(IDLE_CONNECTION_TIMEOUT >= Duration::from_secs(10 * 60));
+    }
 }
 
 #[cfg(test)]
