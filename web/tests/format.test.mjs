@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import {
   formatBytes, formatRate, formatEta, permille, formatPermille, timeSplit, fill, plainPath,
   fileNameOf, titleOf, transferId, chipTone, sortJobs, canResume, buildStrip, MAX_STRIP_CELLS, errorKey,
+  isFinished, canRemove, removeNeedsDiscard, clearable,
 } from '../js/format.js';
 
 test('formatBytes: units, truncation, and no float rounding for big sizes', () => {
@@ -157,4 +158,29 @@ test('errorKey maps the errors a person can act on', () => {
   assert.equal(errorKey('wrong password'), 'tf_err_wrong_password');
   assert.equal(errorKey('this transfer is password-protected; a password is required'), 'tf_err_password_required');
   assert.equal(errorKey('disk full'), '');
+});
+
+test('removal rules: only finished rows go, partial data needs a discard', () => {
+  const j = (state, resumable = false) => ({ state, resumable });
+  for (const s of ['Complete', 'Failed', 'Cancelled']) assert.equal(isFinished(s), true, s);
+  for (const s of ['Running', 'Paused']) assert.equal(isFinished(s), false, s);
+  assert.equal(canRemove(j('Complete')), true);
+  assert.equal(canRemove(j('Running')), false);
+  assert.equal(canRemove(j('Paused', true)), false);
+  assert.equal(canRemove(null), false);
+  assert.equal(removeNeedsDiscard(j('Cancelled', true)), true);
+  assert.equal(removeNeedsDiscard(j('Failed', false)), false);
+  assert.equal(removeNeedsDiscard(j('Paused', true)), false);
+  // Clear finished never takes a row that holds partial data.
+  assert.equal(clearable(j('Complete')), true);
+  assert.equal(clearable(j('Failed', true)), false);
+  assert.equal(clearable(j('Running')), false);
+});
+
+test('errorKey: a folder target and a refused remove have their own messages', () => {
+  assert.equal(errorKey('output path rejected: the output path /home/me is a folder, not a file: give a file name'), 'tf_err_path_folder');
+  // An unwritable place shows the daemon text, which names the path and the OS error.
+  assert.equal(errorKey('output path rejected: cannot write to /x/y.part: PermissionDenied: Operation not permitted (os error 1)'), '');
+  assert.equal(errorKey('transfer is still running: cancel it first'), 'tf_err_remove_running');
+  assert.equal(errorKey('transfer is paused and can be resumed: it is not finished'), 'tf_err_remove_paused');
 });
