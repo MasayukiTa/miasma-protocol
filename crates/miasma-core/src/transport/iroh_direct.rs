@@ -117,6 +117,13 @@ fn proxy_env_is_set() -> bool {
         .any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()))
 }
 
+/// Appended to the "not connected to a relay server" diagnosis. iroh does not
+/// report *why* a relay handshake failed when it never got as far as choosing a
+/// home relay, so a rejected relay certificate cannot be told apart from a
+/// blocked network; the likely TLS cause is named rather than left out.
+pub const RELAY_TLS_HINT: &str = "; relay TLS certificate not trusted? if you are behind a \
+     TLS-inspecting proxy, install its CA in the OS certificate store or pass --ca-cert";
+
 /// Who is trusted to vouch for the relay, pkarr and DNS-over-HTTPS servers.
 ///
 /// The OS certificate store (through `rustls-platform-verifier`, the same
@@ -798,7 +805,7 @@ impl IrohDirectClient {
                     .or_else(|| r.last_error().map(|e| one_line(&format!("{e:?}"))))
             })
             .unwrap_or_else(|| "no relay connection yet".to_owned());
-        format!("; this computer is not connected to a relay server ({why})")
+        format!("; this computer is not connected to a relay server ({why}){RELAY_TLS_HINT}")
     }
 }
 
