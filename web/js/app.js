@@ -2,7 +2,7 @@
 
 import { t, getLang, setLang, applyTranslations } from './i18n.js';
 import { initDB, saveShares, getSharesByMidPrefix, getShareCount, getMidCount, getStorageEstimate, clearAll } from './storage.js';
-import { MiasmaBridge } from './bridge.js';
+import { MiasmaBridge, getAuthState, onAuthChange } from './bridge.js';
 
 let wasm = null;
 let bridge = null;
@@ -51,12 +51,14 @@ async function init() {
     bridge = new MiasmaBridge();
     await bridge.init(wasm);
     bridge.onStateChange = onBridgeStateChange;
+    onAuthChange(updateAuthBanner);
 
     showView('home');
     setupEventListeners();
     applyTranslations();
     updateStats();
     updateConnectionUI();
+    updateAuthBanner();
     const vi = document.getElementById('version-info');
     if (vi) vi.textContent = wasm.protocol_version();
     showInstallBanner();
@@ -325,7 +327,7 @@ async function handleDissolve() {
     result.style.animation = '';
   } catch (e) {
     console.error('Dissolve failed:', e);
-    showToast(t('error_dissolve_failed'), 'error');
+    showToast(e && e.code === 'auth' ? authMessage() : t('error_dissolve_failed'), 'error');
     progress.classList.add('hidden');
   } finally {
     btn.disabled = false;
@@ -643,7 +645,7 @@ async function handleRetrieve() {
     resultSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   } catch (e) {
     console.error('Retrieve failed:', e);
-    showToast(t('error_retrieve'), 'error');
+    showToast(e && e.code === 'auth' ? authMessage() : t('error_retrieve'), 'error');
   } finally {
     btn.disabled = !isConnected && retrieveShares.length < k;
     applyTranslations();
@@ -1221,6 +1223,26 @@ function decodeBase58(str) {
   return bytes;
 }
 
+// ── Token / connection banner ─────────────────────────────────────
+
+/** Why the daemon refuses this page, and what to do about it. */
+function authMessage() {
+  return t(getAuthState() === 'rejected' ? 'auth_rejected' : 'auth_missing');
+}
+
+/**
+ * The daemon answers /api/ping without a token but everything else needs one.
+ * If it is reachable and refusing us, say so and say how to get in.
+ */
+function updateAuthBanner() {
+  const banner = document.getElementById('auth-banner');
+  if (!banner) return;
+  const state = getAuthState();
+  const refused = bridge && bridge.mode === 'http' && (state === 'missing' || state === 'rejected');
+  banner.classList.toggle('hidden', !refused);
+  if (refused) document.getElementById('auth-banner-text').textContent = authMessage();
+}
+
 // ── Connection State UI ───────────────────────────────────────────
 
 function updateConnectionUI() {
@@ -1277,6 +1299,7 @@ function updateConnectionUI() {
 
 function onBridgeStateChange(mode, connected, status) {
   updateConnectionUI();
+  updateAuthBanner();
   if (connected && status) {
     const peerEl = document.getElementById('stat-peers');
     if (peerEl) peerEl.textContent = (status.peer_count || 0).toString();

@@ -133,6 +133,8 @@ const translations = {
     retention_1d: "1 day",
     retention_7d: "7 days",
     error_not_connected: "Not connected to daemon. Directed sharing requires a network connection.",
+    auth_missing: "The daemon is running, but this page was not opened with its link, so the daemon refuses its requests. Run `miasma web` and open the link it prints.",
+    auth_rejected: "The daemon no longer accepts this page's token (it changes every time the daemon starts). Run `miasma web` again and open the link it prints.",
   },
   ja: {
     loading: "Miasma Protocol を読み込み中...",
@@ -266,6 +268,8 @@ const translations = {
     retention_1d: "1日",
     retention_7d: "7日間",
     error_not_connected: "デーモンに未接続です。ダイレクト共有にはネットワーク接続が必要です。",
+    auth_missing: "デーモンは動作していますが、このページは専用リンクから開かれていないため、リクエストが拒否されます。`miasma web` を実行し、表示されたリンクを開いてください。",
+    auth_rejected: "デーモンがこのページのトークンを受け付けなくなりました（トークンはデーモンの起動のたびに変わります）。もう一度 `miasma web` を実行し、表示されたリンクを開いてください。",
   },
   zh: {
     loading: "正在加载 Miasma Protocol...",
@@ -399,10 +403,16 @@ const translations = {
     retention_1d: "1 天",
     retention_7d: "7 天",
     error_not_connected: "未连接到守护进程。定向共享需要网络连接。",
+    auth_missing: "守护进程正在运行，但此页面不是通过它的专用链接打开的，因此请求被拒绝。请运行 `miasma web` 并打开它输出的链接。",
+    auth_rejected: "守护进程不再接受此页面的令牌（令牌在每次守护进程启动时都会改变）。请再次运行 `miasma web` 并打开它输出的链接。",
   }
 };
 
-let currentLang = localStorage.getItem('miasma-lang') || 'en';
+function storedLang() {
+  try { return localStorage.getItem('miasma-lang') || 'en'; } catch (_) { return 'en'; }
+}
+
+let currentLang = storedLang();
 
 export function t(key) {
   return translations[currentLang]?.[key] || translations.en[key] || key;
@@ -415,7 +425,7 @@ export function getLang() {
 export function setLang(lang) {
   if (translations[lang]) {
     currentLang = lang;
-    localStorage.setItem('miasma-lang', lang);
+    try { localStorage.setItem('miasma-lang', lang); } catch (_) { /* storage unavailable */ }
     applyTranslations();
   }
 }

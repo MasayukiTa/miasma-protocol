@@ -1189,3 +1189,16 @@ nav {
     font-size: 1.6rem;
   }
 }
+
+/* ── Token banner ─────────────────────────────────────────────── */
+
+.auth-banner {
+  margin: 8px 0 16px;
+  padding: 12px 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--warning);
+  border-radius: var(--radius-sm);
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: var(--text);
+}
