@@ -1211,7 +1211,7 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
 
 async fn cmd_wipe(data_dir: &std::path::Path, confirm: bool) -> Result<()> {
     use miasma_core::daemon::ipc::PORT_FILE;
-    use miasma_core::{daemon_request, ControlRequest, ControlResponse};
+    use miasma_core::{daemon_wipe, ControlResponse};
 
     if !confirm {
         eprintln!(
@@ -1224,7 +1224,7 @@ async fn cmd_wipe(data_dir: &std::path::Path, confirm: bool) -> Result<()> {
     let t0 = std::time::Instant::now();
     let port_path = data_dir.join(PORT_FILE);
     if port_path.exists() {
-        match daemon_request(data_dir, ControlRequest::Wipe).await {
+        match daemon_wipe(data_dir).await {
             Ok(ControlResponse::Wiped) => {}
             Ok(ControlResponse::Error(e)) => {
                 bail!("wipe incomplete; daemon is shutting down: {e}");
@@ -2239,11 +2239,7 @@ async fn cmd_network_get_transfer(
 ) -> Result<()> {
     use miasma_core::{daemon_request, ControlRequest, ControlResponse};
 
-    let abs_path = if path.is_absolute() {
-        path.to_owned()
-    } else {
-        std::env::current_dir().unwrap_or_default().join(path)
-    };
+    let abs_path = miasma_core::daemon::control_auth::absolutize_lexical(path);
 
     let id = match daemon_request(
         data_dir,

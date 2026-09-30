@@ -32,7 +32,9 @@ pub use config::{default_data_dir, NodeConfig, TransportConfig};
 pub use cover_traffic::{CoverTrafficConfig, CoverTrafficEngine};
 pub use crypto::hash::ContentId;
 pub use daemon::{
-    ipc::{daemon_request, read_port_file, ControlRequest, ControlResponse, DaemonStatus},
+    ipc::{
+        daemon_request, daemon_wipe, read_port_file, ControlRequest, ControlResponse, DaemonStatus,
+    },
     DaemonServer,
 };
 pub use directed::{

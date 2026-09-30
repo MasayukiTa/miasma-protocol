@@ -1210,7 +1210,7 @@ async fn cli_smoke_loopback() {
 #[tokio::test(flavor = "multi_thread")]
 async fn daemon_wipe_returns_then_shuts_down_runtime() {
     use miasma_core::daemon::ipc::{
-        daemon_request, ControlRequest, ControlResponse, HTTP_PORT_FILE, PORT_FILE,
+        daemon_request, daemon_wipe, ControlRequest, ControlResponse, HTTP_PORT_FILE, PORT_FILE,
     };
     use miasma_core::daemon::DaemonServer;
     use std::time::Duration;
@@ -1230,7 +1230,7 @@ async fn daemon_wipe_returns_then_shuts_down_runtime() {
     let data_dir = dir.path().to_owned();
     let run_task = tokio::spawn(server.run());
 
-    let response = daemon_request(&data_dir, ControlRequest::Wipe)
+    let response = daemon_wipe(&data_dir)
         .await
         .expect("wipe request should receive a response before shutdown");
     assert!(matches!(response, ControlResponse::Wiped));
