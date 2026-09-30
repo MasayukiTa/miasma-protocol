@@ -46,9 +46,15 @@ pub const DEFAULT_P_COST: u32 = 1;
 
 /// Upper bounds accepted from an *untrusted* manifest. Without them a hostile
 /// sender could make a receiver allocate gigabytes just to check a password.
-pub const MAX_M_KIB: u32 = 256 * 1024;
-pub const MAX_T_COST: u32 = 10;
-pub const MAX_P_COST: u32 = 4;
+///
+/// `create` uses 64 MiB / 3 passes / 1 lane (the defaults above) and nothing in
+/// the CLI or desktop picks another cost, so the ceiling is twice the memory,
+/// twice the passes and twice the lanes of what is actually produced: room to
+/// raise the default later, far below what a hostile manifest could ask for.
+/// A manifest above it is refused before any KDF work runs.
+pub const MAX_M_KIB: u32 = 128 * 1024;
+pub const MAX_T_COST: u32 = 6;
+pub const MAX_P_COST: u32 = 2;
 /// Argon2 itself requires `m >= 8 * p` KiB.
 pub const MIN_M_KIB: u32 = 8;
 
@@ -322,6 +328,18 @@ mod tests {
         assert!(prot.unlock(&pw).is_err());
         prot.p_cost = 64;
         assert!(prot.unlock(&pw).is_err());
+    }
+
+    #[test]
+    fn the_ceiling_is_close_to_what_create_produces() {
+        // Not a free-for-all: at most 2x the default memory, passes and lanes.
+        assert!(MAX_M_KIB <= 2 * DEFAULT_M_KIB);
+        assert!(MAX_T_COST <= 2 * DEFAULT_T_COST);
+        assert!(MAX_P_COST <= 2 * DEFAULT_P_COST);
+        // What create() makes is always acceptable.
+        assert!(validate_cost(DEFAULT_M_KIB, DEFAULT_T_COST, DEFAULT_P_COST).is_ok());
+        // The old ceiling (256 MiB) is now refused.
+        assert!(validate_cost(256 * 1024, 3, 1).is_err());
     }
 
     #[test]
