@@ -541,8 +541,76 @@ Each entry says what was actually run. Machine: Windows 11, slim debug profile (
   with `no record found` (seen in the window as a *Failed* row with that text). The runs above started
   the transfer while the peer was up (a script waited for `Connected peers >= 1` and then clicked).
   Once a transfer is fetching pieces the link held; after a daemon restart the same window applies.
-  Not investigated (network layer, not this task). Also seen: `elapsed_secs` keeps growing for a failed
+  Not investigated in this stage; root-caused and fixed afterwards, see "Connection stability" below. Also seen: `elapsed_secs` keeps growing for a failed
   job (the daemon reports time since the job began, not since it stopped).
+
+### Connection stability (2026-09-30)
+
+- **Symptom** (from the real GUI run above): two loopback nodes, receiver dials sender, were connected
+  ~10 s per 30 s redial cycle; a receive started while disconnected failed with `no record found`
+  after 6 lookups; once pieces were flowing the link held.
+- **Measured, before** (`target\debug\miasma.exe` at `8e87222`, two CLI daemons, `MIASMA_LOG=miasma_core=debug,libp2p_swarm=debug`,
+  `Connected peers` sampled every ~2.8 s for 200 s, three topologies): the link came up at 23:44:47.3 and was
+  closed **by both sides at the same instant, 23:45:31.85, `Connection closed with error KeepAliveTimeout`**
+  (44.5 s after it came up = the last request, an AutoNAT probe at 15 s, plus the 30 s idle timeout).
+  The redials that followed: 23:45:47, 23:46:17, 23:46:31, 23:47:17 all failed at once with
+  `os error 10048 (AddrInUse)` on a dial logged as `port_use: Reuse`; the next success was at 23:48:01, **149.5 s after the close**.
+  Both-bootstrap and receiver-only-bootstrap behaved the same (25.4 % and 25.7 % of samples connected; a third
+  run 70 %, with one 3 s reconnect at t=59 s that dropped again at t=90 s). A receive started at t=102 s
+  (no peer): `network-get` exited 1 after **30.3 s**, the six-lookup budget (1+2+4+8+15 s of backoff), with the
+  link still down.
+- **Root cause, three parts** (each with the evidence above):
+  1. `build_swarm` set `idle_connection_timeout` to 30 s and nothing on a quiet connection asks to keep it
+     (libp2p 0.57's ping and Kademlia handlers do not), so every idle link was closed ~30-45 s after its last
+     request.
+  2. The redial could not succeed: libp2p dials with `PortUse::Reuse` (bind to the listen port). On Windows
+     the closed 4-tuple stays in TIME_WAIT for 120 s and a `connect` from the same local port fails with
+     10048. Reproduced without libp2p (a 15-line socket test: second dial from the same port -> 10048,
+     `netstat` shows `TIME_WAIT`, a fresh port connects). The same holds after a daemon is killed and restarted.
+     Even without that, the periodic redial ran only every 30 s and only when *no* peer was connected.
+  3. `fetch_record_and_manifest` never looked at the link: with an empty routing table a lookup answers "not
+     found" at once, so six attempts were spent inside the ~30 s the link was down.
+- **Fix** (`crates/miasma-core`, `network/node.rs`, `transfer/network.rs`):
+  1. `IDLE_CONNECTION_TIMEOUT` = 1 h. Dead peers are still detected: ping (30 s, 20 s reply timeout) closes a
+     connection whose peer stops answering, and its packets keep NAT mappings warm.
+  2. Outbound TCP dials use a fresh local port (`NewPortOnDial`, a transport wrapper; hole-punch dials with
+     `role == Listener` keep `Reuse`, the one case that needs it).
+  3. A lost bootstrap peer is redialed by a 1 s tick with its own backoff (1, 2, 4 ... 30 s, never abandoned,
+     independent of how many *other* peers are connected). The generic `ReconnectionScheduler` was not reused: its
+     factor is cast `as u32`, which wraps to 0 from the 33rd consecutive failure (a dial every tick for a
+     permanently unreachable peer; only its 10-failure circuit breaker hides it). Left alone, noted.
+  4. `DhtHandle::ensure_connected(timeout)`: if no peer is connected, dial the bootstrap peers now and wait
+     (bounded, re-dialing every 0.5 s); no bootstrap configured = nothing to wait for. Every record-lookup
+     attempt calls it first (60 s wait). If the bootstrap stays unreachable, one last lookup runs (the record may
+     be local) and the error reads `not connected to any peer, bootstrap <addr>/p2p/<id> unreachable (waited 60 s)`
+     instead of `no record found`.
+- **Tests** (`tests/integration_test.rs`, `network::node::connection_lifetime_tests`):
+  `idle_link_to_bootstrap_peer_outlives_the_old_idle_timeout` (**fails before**: "dropped 44.6 s after it came up";
+  passes after, 50 s idle), `record_lookup_waits_for_a_sender_that_becomes_reachable` (path comes up 50 s in;
+  **fails before**: `no record found` at 43 s; passes after, found at 50.5 s), `unreachable_bootstrap_is_reported...`,
+  and three unit tests (backoff schedule incl. no wrap at 32+ failures, backoff reset, idle timeout floor).
+  `cargo test -p miasma-core --lib` 572 passed / 2 ignored (569 + 3); `--tests`: adversarial 186, integration
+  67 passed / 7 ignored (64 + 3), transfer_ipc 1, transfer_publish 8 / 1 ignored; fmt clean; no new clippy warning.
+- **Measured, after** (same harness, `target\debug\miasma.exe` at the fix): both topologies **71 of 71
+  samples connected (100 %)** over 200 s, one connection, no `KeepAliveTimeout`. Receive started at t=102 s:
+  **exit 0 in 1.1 s** (before: failed at 30.3 s). Sender daemon killed and restarted 2 s later: receiver sees it
+  again after **1.1 s** (before: 5.9 s; that case is a reset, not a TIME_WAIT close, so it improves less).
+  Seconds connected per 30 s window: **~7.7 (25.7 %) before, 30 (100 %) after**. `scripts/transfer-e2e.ps1` with the
+  fix and the script changes below: `=== PASS ===` four times in a row (200, 200, 183, 182 s; debug build).
+- **Scripts.** `scripts/transfer-e2e.{sh,ps1}` now wait for `Connected peers >= 1` on B before the first transfer,
+  after B is restarted, and before B receives from a restarted A (what the runbook tells the user to do).
+  Step 4 (kill the sender mid-publish) was flaky on a fast macOS runner: the 40 MB send can complete between the
+  poll that sees segment 1 and the kill, leaving no journal, so `transfers` shows nothing paused and the
+  re-run is a fresh publish; the CI log shows the first segment seen at 23:43:13.22 and the kill 30 ms later, on
+  a machine that receives 40 MB in ~1.3 s (step 3). That reading is inferred from the timestamps, not from the
+  daemon logs (the script prints none). The step now retries with a file twice as large (up to 4 tries) until
+  the kill provably landed mid-send. The same race exists in step 3 in principle (not changed: it passed).
+- **Not verified.** A real NAT between two networks (macOS sender, Windows receiver); the macOS behaviour of
+  `PortUse::Reuse` after a close (the CI flake is consistent with the Windows mechanism but macOS was not
+  reproduced here); a peer that keeps a connection open without answering ping is closed by ping (30 s + 20 s),
+  not by the idle timeout, and that path is not exercised by a test. No inbound connection limit exists; with a
+  1 h idle timeout a public node holds idle inbound connections for an hour (`libp2p::connection_limits` is the
+  follow-up if that matters).
 
 ## 7. Decisions and open questions
 

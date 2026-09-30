@@ -100,10 +100,8 @@ impl MiasmaCoordinator {
             {
                 return Ok(found);
             }
-            if let Err(unreachable) = link {
-                // Waited the full bound already; more lookups cannot succeed.
-                return Err(unreachable);
-            }
+            // Unreachable after the full wait: more lookups cannot succeed.
+            link?;
             if attempt < RECORD_LOOKUP_ATTEMPTS {
                 tokio::time::sleep(retry.delay_for(attempt)).await;
             }

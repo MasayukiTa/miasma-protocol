@@ -137,6 +137,15 @@ miasma --data-dir $D daemon --bootstrap /ip4/<MacのLAN IP>/tcp/4001/p2p/<Macの
 miasma --data-dir $D status                   # peer が 1 になること
 ```
 
+- **転送を始める前に `Connected peers` が 1 以上になっていることを確認する**手順は変わりません。
+  変わったのは中身です。以前は、接続が使われないまま約 30〜45 秒で切れ、再接続に 30 秒周期の
+  タイマー(Windows では閉じた接続の TIME_WAIT で最大 2 分)がかかっていたため、`peers` が
+  1 と 0 を行き来し、切れている間に始めた受信は `no record found` で終わっていました。
+  現在は、使われていない接続も 1 時間は保持され(相手の無応答は ping が検出)、切れても
+  bootstrap 先へ 1 秒後から間隔を延ばしながら再接続し、`network-get` は受信の前に接続を
+  待ちます(最大 60 秒。届かなければ `not connected to any peer, bootstrap <アドレス> unreachable`)。
+  詳細は計画書 §6「Connection stability」。
+
 - macOS は初回に「受信接続を許可しますか」と聞きます。**許可**してください。
 - 有線 LAN を推奨します。**先に生のLAN速度を測る**と、上限が分かります(`iperf3 -s` を Mac、
   `iperf3 -c <Mac>` を Windows)。
@@ -223,7 +232,8 @@ write なら受信側ディスク**です。最初に測るべきはこの内訳
 |---|---|
 | `wrong password` | パスワードファイルの**改行だけが除かれ、空白は含まれます**。前後の空白に注意 |
 | `this transfer is password-protected` | `--password-file` が必要 |
-| `no record found for ... after 6 attempts` | 接続(`status` の peer 数)、送信側が起動中か、bootstrap、ファイアウォール |
+| `not connected to any peer, bootstrap ... unreachable` | 受信側から送信側の IP:ポート に届いていない。送信側が起動中か、`--bootstrap` のアドレスと PeerId、ファイアウォール(60 秒待ったうえでの結果) |
+| `no record found for ... after 6 attempts` | 接続はあるがレコードが見つからない。MID の誤り、送信側が公開を完了していない、DHT レコードが大きすぎる(§4) |
 | `paused: segment N: only X of 10 valid pieces` | 送信側が止まっている/届かない。復旧後に同じコマンドを再実行 |
 | `paused: cannot write ...` | 受信側の空き容量。空けて再実行 |
 | `publish requires approximately N MiB of owned-share quota` | `storage.quota_mb` を上げる(§1) |
