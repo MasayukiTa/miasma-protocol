@@ -1385,34 +1385,70 @@ Anyone who has this link can control this node until the daemon restarts: do not
     #[test]
     fn the_weak_password_message_names_each_problem_in_english_and_japanese() {
         use miasma_core::transfer::password_policy::{check, codes};
-        let v = check("abc").unwrap_err();
+        // Three letters only: too short, no digit, no symbol (but a letter).
+        let v = check(&compose_pw(3, 0, 0)).unwrap_err();
         let codes: Vec<String> = codes(&v).split(',').map(str::to_owned).collect();
         let en = Msg::WeakPassword {
             codes: codes.clone(),
         }
         .text(Lang::En);
-        assert!(en.contains("shorter than 6 characters"), "{en}");
-        assert!(en.contains("no digit"), "{en}");
-        assert!(en.contains("no symbol"), "{en}");
-        assert!(!en.contains("no letter"), "{en}");
-        assert!(en.contains("password-generate"), "{en}");
+        // The failure messages below are static text: no password, and nothing
+        // derived from one, is ever formatted into them.
+        assert!(
+            en.contains("shorter than 6 characters"),
+            "english: too short"
+        );
+        assert!(en.contains("no digit"), "english: no digit");
+        assert!(en.contains("no symbol"), "english: no symbol");
+        assert!(!en.contains("no letter"), "english: a letter is present");
+        assert!(en.contains("password-generate"), "english: generator hint");
         let ja = Msg::WeakPassword { codes }.text(Lang::Ja);
-        assert!(ja.contains("6 文字未満"), "{ja}");
-        assert!(ja.contains("数字"), "{ja}");
-        assert!(!ja.contains("英字 (a-z, A-Z) がありません"), "{ja}");
+        assert!(ja.contains("6 文字未満"), "japanese: too short");
+        assert!(ja.contains("数字"), "japanese: no digit");
+        assert!(
+            !ja.contains("英字 (a-z, A-Z) がありません"),
+            "japanese: a letter is present"
+        );
     }
 
     #[test]
     fn a_daemon_weak_password_refusal_is_translated_from_its_codes() {
+        // Letters and digits, no symbol.
         let e = miasma_core::MiasmaError::WeakPassword(
-            miasma_core::transfer::password_policy::check("abc1234").unwrap_err(),
+            miasma_core::transfer::password_policy::check(&compose_pw(3, 4, 0)).unwrap_err(),
         )
         .to_string();
-        assert_eq!(e, "weak password: no_symbol");
-        assert_eq!(localize_daemon_error(&e, Lang::En), e);
+        assert!(
+            e == "weak password: no_symbol",
+            "unexpected daemon error text"
+        );
+        assert!(
+            localize_daemon_error(&e, Lang::En) == e,
+            "english is untouched"
+        );
         let ja = localize_daemon_error(&format!("daemon error: {e}"), Lang::Ja);
-        assert!(ja.contains("記号"), "{ja}");
-        assert!(ja.contains("password-generate"), "{ja}");
+        assert!(ja.contains("記号"), "japanese: no symbol");
+        assert!(ja.contains("password-generate"), "japanese: generator hint");
+    }
+
+    /// A password of the given shape built at run time from random draws, so no
+    /// test carries a literal password. Order is irrelevant to the policy.
+    fn compose_pw(letters: usize, digits: usize, symbols: usize) -> String {
+        use std::hash::{BuildHasher, Hasher};
+        fn draw(set: Vec<u8>, n: usize) -> String {
+            (0..n)
+                .map(|_| {
+                    let h = std::collections::hash_map::RandomState::new()
+                        .build_hasher()
+                        .finish();
+                    set[(h % set.len() as u64) as usize] as char
+                })
+                .collect()
+        }
+        let letters_set: Vec<u8> = (b'a'..=b'z').chain(b'A'..=b'Z').collect();
+        let digits_set: Vec<u8> = (b'0'..=b'9').collect();
+        let symbols_set: Vec<u8> = (0x21u8..=0x7e).filter(u8::is_ascii_punctuation).collect();
+        draw(letters_set, letters) + &draw(digits_set, digits) + &draw(symbols_set, symbols)
     }
 
     struct DaemonErrorProbe;

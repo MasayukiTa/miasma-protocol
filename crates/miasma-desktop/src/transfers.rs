@@ -2058,9 +2058,10 @@ mod tests {
     #[test]
     fn a_weak_send_password_disables_the_button_and_explains_why() {
         use crate::locale::{transfer_strings, Locale};
-        let weak = SendPassword::Weak(match send_password_state("abc") {
+        // Three letters only: too short, no digit, no symbol.
+        let weak = SendPassword::Weak(match send_password_state(&compose_pw(3, 0, 0, 0)) {
             SendPassword::Weak(v) => v,
-            other => panic!("{other:?}"),
+            _ => panic!("expected a weak verdict"),
         });
         assert!(!send_ready(true, "C:\\f.bin", false, &weak));
         // Everything else ready: only the password blocks it.
@@ -2083,46 +2084,70 @@ mod tests {
         for lang in Locale::ALL {
             let t = transfer_strings(lang);
             let msg = weak_password_text(t, &violation_codes(v));
-            assert!(msg.starts_with(t.pw_weak_prefix), "{lang:?}: {msg}");
-            assert!(msg.contains(t.pw_err_too_short), "{lang:?}: {msg}");
-            assert!(msg.contains(t.pw_err_no_digit), "{lang:?}: {msg}");
-            assert!(msg.contains(t.pw_err_no_symbol), "{lang:?}: {msg}");
-            assert!(!msg.contains(t.pw_err_no_letter), "{lang:?}: {msg}");
+            // Static failure text only: nothing derived from a password.
+            assert!(msg.starts_with(t.pw_weak_prefix), "{lang:?}: prefix");
+            assert!(msg.contains(t.pw_err_too_short), "{lang:?}: too short");
+            assert!(msg.contains(t.pw_err_no_digit), "{lang:?}: no digit");
+            assert!(msg.contains(t.pw_err_no_symbol), "{lang:?}: no symbol");
+            assert!(!msg.contains(t.pw_err_no_letter), "{lang:?}: has a letter");
         }
+    }
+
+    /// A password of the given shape built at run time from random draws (plus
+    /// `spaces` ASCII spaces), so no test carries a literal password.
+    fn compose_pw(letters: usize, digits: usize, symbols: usize, spaces: usize) -> String {
+        use std::hash::{BuildHasher, Hasher};
+        fn draw(set: Vec<u8>, n: usize) -> String {
+            (0..n)
+                .map(|_| {
+                    let h = std::collections::hash_map::RandomState::new()
+                        .build_hasher()
+                        .finish();
+                    set[(h % set.len() as u64) as usize] as char
+                })
+                .collect()
+        }
+        let letters_set: Vec<u8> = (b'a'..=b'z').chain(b'A'..=b'Z').collect();
+        let digits_set: Vec<u8> = (b'0'..=b'9').collect();
+        let symbols_set: Vec<u8> = (0x21u8..=0x7e).filter(u8::is_ascii_punctuation).collect();
+        draw(letters_set, letters)
+            + &draw(digits_set, digits)
+            + &draw(symbols_set, symbols)
+            + &" ".repeat(spaces)
     }
 
     #[test]
     fn the_send_password_states_follow_the_policy() {
-        assert_eq!(send_password_state(""), SendPassword::Unprotected);
+        assert!(send_password_state(&String::new()) == SendPassword::Unprotected);
+        // Five characters in every class: too short to accept.
         assert!(matches!(
-            send_password_state("a1!bc"),
+            send_password_state(&compose_pw(3, 1, 1, 0)),
             SendPassword::Weak(_)
         ));
+        // Space is not a symbol.
         assert!(matches!(
-            send_password_state("abc 123 "),
+            send_password_state(&compose_pw(3, 3, 0, 2)),
             SendPassword::Weak(_)
         ));
-        assert_eq!(send_password_state("a1!bcd"), SendPassword::Short);
-        assert_eq!(send_password_state("a1!bcdefghi"), SendPassword::Short);
-        assert_eq!(send_password_state("a1!bcdefghij"), SendPassword::Good);
+        // 6 and 11 characters are compliant but short; 12 is good.
+        assert!(send_password_state(&compose_pw(4, 1, 1, 0)) == SendPassword::Short);
+        assert!(send_password_state(&compose_pw(9, 1, 1, 0)) == SendPassword::Short);
+        assert!(send_password_state(&compose_pw(10, 1, 1, 0)) == SendPassword::Good);
     }
 
     #[test]
     fn generate_fills_both_fields_with_a_compliant_password_and_shows_it_once() {
         let mut ui = TransfersUi::default();
         ui.generate_send_password();
-        assert_eq!(ui.send_password, ui.send_confirm);
-        assert_eq!(
-            ui.send_generated.as_deref(),
-            Some(ui.send_password.as_str())
-        );
+        assert!(ui.send_password == ui.send_confirm);
+        assert!(ui.send_generated.as_deref() == Some(ui.send_password.as_str()));
         assert_eq!(ui.send_password.chars().count(), 16);
         assert!(password_policy::check(&ui.send_password).is_ok());
-        assert_eq!(send_password_state(&ui.send_password), SendPassword::Good);
+        assert!(send_password_state(&ui.send_password) == SendPassword::Good);
         // A new press makes a different one.
         let first = ui.send_password.clone();
         ui.generate_send_password();
-        assert_ne!(first, ui.send_password);
+        assert!(first != ui.send_password);
         // Wiped with the rest of the form's secrets.
         ui.zeroize_passwords();
         assert!(ui.send_generated.is_none());
@@ -2134,8 +2159,8 @@ mod tests {
         use crate::locale::{transfer_strings, Locale};
         let ja = transfer_strings(Locale::Ja);
         let shown = localize_job_error(ja, "weak password: too_short,no_symbol");
-        assert!(shown.starts_with(ja.pw_weak_prefix), "{shown}");
-        assert!(shown.contains(ja.pw_err_no_symbol), "{shown}");
+        assert!(shown.starts_with(ja.pw_weak_prefix), "translated prefix");
+        assert!(shown.contains(ja.pw_err_no_symbol), "translated no-symbol");
         // Anything else is untouched.
         assert_eq!(localize_job_error(ja, "disk full"), "disk full");
         assert_eq!(localize_job_error(ja, "wrong password"), "wrong password");
