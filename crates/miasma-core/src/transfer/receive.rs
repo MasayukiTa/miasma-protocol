@@ -362,6 +362,7 @@ async fn run_inner<S: PieceSource + ?Sized>(
         started_at,
         updated_at: now_secs(),
         last_error: None,
+        share_id: expect.map(|s| s.to_string()),
     };
     journal.save(&jpath)?;
 

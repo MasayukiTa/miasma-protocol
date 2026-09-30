@@ -483,8 +483,10 @@ pub fn status_from_journal(j: &ReceiveJournal) -> TransferStatus {
         resumed_from_segment: j.next_segment,
         last_error: j.last_error.clone(),
         resumable: true,
-        share_id: None,
-        share_id_checked: false,
+        // What a stopped transfer was started from, so a client resumes it with
+        // the same ID. Not verified in this session: nothing has been fetched.
+        share_id: j.share_id.clone(),
+        share_id_checked: j.share_id.is_some(),
         publisher_authenticated: false,
     }
 }
@@ -510,6 +512,7 @@ mod tests {
             started_at: 1,
             updated_at: 2,
             last_error: Some("holder went away".into()),
+            share_id: None,
         }
     }
 
