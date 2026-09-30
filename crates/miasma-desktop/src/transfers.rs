@@ -12,7 +12,7 @@
 //! The file has two halves: the pure functions (formatting, strip bucketing, chip mapping, the
 //! redundancy table) that the unit tests at the bottom cover, and the drawing code.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -387,6 +387,8 @@ pub struct TransfersUi {
     recv_mid: String,
     recv_path: String,
     recv_password: String,
+    /// Technical mode: fetch directly from this sender URL (`wss://...`) instead of the network.
+    recv_via: String,
 
     send_path: String,
     send_password: String,
@@ -401,6 +403,10 @@ pub struct TransfersUi {
     /// Ids started with a password in this session (the daemon does not tell us).
     known_protected: HashSet<String>,
     pending_protected: bool,
+    /// Ids started with a `via` URL in this session, so Resume goes to the same endpoint (the
+    /// daemon's journal does not record it).
+    known_via: HashMap<String, String>,
+    pending_via: Option<String>,
     /// The start request in flight came from a "new transfer" form (so the form is cleared when
     /// it is accepted), not from the Resume button.
     from_form: bool,
@@ -424,6 +430,7 @@ impl Default for TransfersUi {
             recv_mid: String::new(),
             recv_path: String::new(),
             recv_password: String::new(),
+            recv_via: String::new(),
             send_path: String::new(),
             send_password: String::new(),
             send_confirm: String::new(),
@@ -433,6 +440,8 @@ impl Default for TransfersUi {
             restart_confirm: false,
             known_protected: HashSet::new(),
             pending_protected: false,
+            known_via: HashMap::new(),
+            pending_via: None,
             from_form: false,
             copied_at: None,
         }
@@ -547,12 +556,16 @@ impl TransfersUi {
             self.known_protected.insert(id.clone());
         }
         self.pending_protected = false;
+        if let Some(via) = self.pending_via.take() {
+            self.known_via.insert(id.clone(), via);
+        }
         self.form_error = None;
         if self.from_form {
             match self.form {
                 NewForm::Receive => {
                     self.recv_mid.clear();
                     self.recv_path.clear();
+                    self.recv_via.clear();
                 }
                 NewForm::Send => self.send_path.clear(),
             }
@@ -566,6 +579,7 @@ impl TransfersUi {
 
     pub fn on_error(&mut self, message: String) {
         self.pending_protected = false;
+        self.pending_via = None;
         self.from_form = false;
         self.form_error = Some(message);
     }
@@ -981,7 +995,12 @@ impl TransfersUi {
                 let needs_pw = protected && self.resume_password.is_empty();
                 let go = ui.add_enabled(connected && !needs_pw, primary_button(t.resume_go));
                 if go.clicked() {
-                    cmds.push(start_again(job, &self.resume_password, false));
+                    let via = self.known_via.get(&job.mid).cloned();
+                    cmds.push(with_via(
+                        start_again(job, &self.resume_password, false),
+                        via.as_ref(),
+                    ));
+                    self.pending_via = via;
                     self.resume_password.zeroize();
                     self.resume_open = false;
                     self.pending_protected = protected;
@@ -1012,7 +1031,12 @@ impl TransfersUi {
                     .add_enabled(connected, danger_button(t.restart_yes))
                     .clicked()
                 {
-                    cmds.push(start_again(job, &self.resume_password, true));
+                    let via = self.known_via.get(&job.mid).cloned();
+                    cmds.push(with_via(
+                        start_again(job, &self.resume_password, true),
+                        via.as_ref(),
+                    ));
+                    self.pending_via = via;
                     self.resume_password.zeroize();
                     self.restart_confirm = false;
                     self.poll_soon();
@@ -1125,6 +1149,18 @@ impl TransfersUi {
                     .color(pal().faint),
             );
         });
+        // Technical mode only: Easy mode shows nothing new.
+        if !easy {
+            form_row(ui, t.via_label, |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.recv_via)
+                        .hint_text(t.via_hint)
+                        .font(egui::TextStyle::Monospace)
+                        .desired_width(f32::INFINITY),
+                );
+                ui.label(egui::RichText::new(t.via_note).small().color(pal().faint));
+            });
+        }
         ui.add_space(8.0);
         let ready =
             connected && !self.recv_mid.trim().is_empty() && !self.recv_path.trim().is_empty();
@@ -1141,11 +1177,17 @@ impl TransfersUi {
                 self.from_form = true;
                 self.recv_password.zeroize();
                 self.form_error = None;
+                // Only Technical mode has the field; Easy mode never sends one.
+                let via = (!easy)
+                    .then(|| self.recv_via.trim().to_owned())
+                    .filter(|v| !v.is_empty());
+                self.pending_via = via.clone();
                 cmds.push(WorkerCmd::TransferStartReceive {
                     mid,
                     output_path: self.recv_path.trim().into(),
                     password,
                     restart: false,
+                    via: via.into_iter().collect(),
                 });
             }
         }
@@ -1279,6 +1321,7 @@ fn start_again(job: &TransferStatus, password: &str, restart: bool) -> WorkerCmd
             output_path: plain_path(&job.name).into(),
             password,
             restart,
+            via: Vec::new(),
         },
         TransferKind::Send if restart => WorkerCmd::TransferStartPublish {
             // A restart begins again, so the settings come from the current defaults.
@@ -1293,6 +1336,14 @@ fn start_again(job: &TransferStatus, password: &str, restart: bool) -> WorkerCmd
             password,
         },
     }
+}
+
+/// A resumed receive goes to the endpoint it was started with, if this session knows it.
+fn with_via(mut cmd: WorkerCmd, via: Option<&String>) -> WorkerCmd {
+    if let (WorkerCmd::TransferStartReceive { via: v, .. }, Some(url)) = (&mut cmd, via) {
+        *v = vec![url.clone()];
+    }
+    cmd
 }
 
 fn phase_plain(t: &TransferStrings, phase: Phase) -> &'static str {
@@ -1898,6 +1949,28 @@ mod tests {
     }
 
     #[test]
+    fn a_resumed_receive_goes_back_to_its_via_endpoint_and_only_a_receive() {
+        let r = status(TransferKind::Receive, TransferState::Paused);
+        let none = String::new();
+        let url = "wss://example.trycloudflare.com".to_owned();
+        match with_via(start_again(&r, &none, false), Some(&url)) {
+            WorkerCmd::TransferStartReceive { via, .. } => assert_eq!(via, vec![url.clone()]),
+            other => panic!("wrong command: {other:?}"),
+        }
+        // Nothing known: the ordinary receive, as before.
+        match with_via(start_again(&r, &none, false), None) {
+            WorkerCmd::TransferStartReceive { via, .. } => assert!(via.is_empty()),
+            other => panic!("wrong command: {other:?}"),
+        }
+        // A send is left alone.
+        let s = status(TransferKind::Send, TransferState::Paused);
+        assert!(matches!(
+            with_via(start_again(&s, &none, false), Some(&url)),
+            WorkerCmd::TransferResumePublish { .. }
+        ));
+    }
+
+    #[test]
     fn resuming_reissues_the_same_request() {
         let mut r = status(TransferKind::Receive, TransferState::Paused);
         r.name = r"\\?\C:\out\big.iso".into();
@@ -1909,7 +1982,9 @@ mod tests {
                 output_path,
                 password,
                 restart,
+                via,
             } => {
+                assert!(via.is_empty());
                 assert_eq!(mid, "miasma:abc");
                 assert_eq!(output_path, std::path::PathBuf::from(r"C:\out\big.iso"));
                 assert_eq!(password.as_deref(), Some(pw.as_str()));

@@ -36,6 +36,7 @@ tokio-tungstenite.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true
 webpki-roots.workspace = true
+rustls-platform-verifier = "0.7"
 rustls-pemfile.workspace = true
 tokio-socks.workspace = true
 quinn.workspace = true

@@ -17,6 +17,7 @@ use tracing::info;
 use zeroize::{Zeroize, Zeroizing};
 
 mod i18n;
+mod tunnel;
 mod web_link;
 use i18n::{Lang, Msg};
 
@@ -123,6 +124,23 @@ enum Commands {
         /// Bootstrap peer multiaddrs (repeatable).
         #[arg(long)]
         bootstrap: Vec<String>,
+        /// Fixed port for the WebSocket share server on 127.0.0.1 (default: a
+        /// free port each start; also the config key `transport.wss_port`). Put
+        /// a tunnel in front of it, e.g. `cloudflared tunnel --url
+        /// http://127.0.0.1:<port>`, so a receiver behind a firewall can fetch
+        /// with `network-get --via`. The tunnel terminates TLS; leave
+        /// `transport.wss_tls_enabled` off.
+        #[arg(long, value_name = "PORT")]
+        wss_port: Option<u16>,
+    },
+
+    /// Expose this node's WebSocket share server through `cloudflared` (which
+    /// must already be installed and on PATH) and print the wss:// URL to give
+    /// a receiver. Nothing is downloaded or installed. Runs until Ctrl-C.
+    Tunnel {
+        /// WebSocket server port to expose (default: the running daemon's).
+        #[arg(long)]
+        port: Option<u16>,
     },
 
     /// Dissolve a file and publish it to the P2P network via Kademlia DHT.
@@ -273,6 +291,17 @@ enum Commands {
         /// `miasma transfers`.
         #[arg(long)]
         no_wait: bool,
+        /// Receive directly from a sender's WebSocket endpoint instead of the
+        /// DHT (repeatable; tried in order): the `wss://<host>` that `miasma
+        /// tunnel` prints, or `ws://127.0.0.1:<port>`. Needs no peer and no
+        /// bootstrap, only this outbound connection. Requires -o.
+        #[arg(long, value_name = "URL")]
+        via: Vec<String>,
+        /// An extra CA certificate (PEM file) to trust for a `wss://` --via URL,
+        /// in addition to the operating system's store (for example the root
+        /// certificate of a TLS-inspecting corporate proxy).
+        #[arg(long, value_name = "FILE", requires = "via")]
+        ca_cert: Option<PathBuf>,
     },
 
     /// List transfers: running, paused, and finished, including ones an earlier
@@ -431,7 +460,12 @@ async fn main() -> Result<()> {
 
         Commands::Config { key, value } => cmd_config(&data_dir, key.as_deref(), value.as_deref()),
 
-        Commands::Daemon { bootstrap } => cmd_daemon(&data_dir, &bootstrap).await,
+        Commands::Daemon {
+            bootstrap,
+            wss_port,
+        } => cmd_daemon(&data_dir, &bootstrap, wss_port).await,
+
+        Commands::Tunnel { port } => cmd_tunnel(&data_dir, port).await,
 
         Commands::Diagnostics { json } => cmd_diagnostics(&data_dir, json).await,
 
@@ -488,6 +522,8 @@ async fn main() -> Result<()> {
             password_stdin,
             restart,
             no_wait,
+            via,
+            ca_cert,
         } => {
             let password = read_transfer_password(password_file.as_deref(), password_stdin)?;
             cmd_network_get(
@@ -500,6 +536,8 @@ async fn main() -> Result<()> {
                 password.as_ref().map(|p| p.as_str()),
                 restart,
                 no_wait,
+                &via,
+                ca_cert.as_deref(),
             )
             .await
         }
@@ -1349,6 +1387,7 @@ fn cmd_config_loaded(
                         println!("{peer}");
                     }
                 }
+                "transport.wss_port" => println!("{}", config.transport.wss_port),
                 "transport.wss_tls_enabled" => println!("{}", config.transport.wss_tls_enabled),
                 "transport.wss_sni" => {
                     println!("{}", config.transport.wss_sni.as_deref().unwrap_or(""))
@@ -1397,6 +1436,10 @@ fn cmd_config_loaded(
                     } else {
                         config.network.bootstrap_peers.push(v.into());
                     }
+                }
+                "transport.wss_port" => {
+                    config.transport.wss_port =
+                        v.parse().context("expected a port number (0-65535)")?;
                 }
                 "transport.wss_tls_enabled" => {
                     config.transport.wss_tls_enabled = v.parse().context("expected bool")?;
@@ -1449,10 +1492,18 @@ fn cmd_config_loaded(
     Ok(())
 }
 
-async fn cmd_daemon(data_dir: &std::path::Path, bootstrap_addrs: &[String]) -> Result<()> {
+async fn cmd_daemon(
+    data_dir: &std::path::Path,
+    bootstrap_addrs: &[String],
+    wss_port: Option<u16>,
+) -> Result<()> {
     use miasma_core::DaemonServer;
 
     let mut config = NodeConfig::load(data_dir).context("cannot load config")?;
+    if let Some(port) = wss_port {
+        config.transport.wss_port = port;
+    }
+    let wanted_wss_port = config.transport.wss_port;
 
     let master_key_path = data_dir.join("master.key");
     if !master_key_path.exists() {
@@ -1493,6 +1544,20 @@ async fn cmd_daemon(data_dir: &std::path::Path, bootstrap_addrs: &[String]) -> R
     }
     eprintln!("IPC control port: {}", server.control_port());
     eprintln!("Log file: {}/daemon.log.*", data_dir.display());
+    if wanted_wss_port != 0 && server.wss_port() != wanted_wss_port {
+        bail!(
+            "the WebSocket share server could not bind 127.0.0.1:{wanted_wss_port} (is the port in use?)"
+        );
+    }
+    if server.wss_port() != 0 && !server.wss_tls_enabled() {
+        eprintln!(
+            "{}",
+            Msg::DaemonExposeHint {
+                port: server.wss_port()
+            }
+            .t()
+        );
+    }
     eprintln!();
 
     // Add bootstrap peers from CLI flags and config.
@@ -1559,6 +1624,12 @@ async fn add_bootstrap_peers_to_server(server: &miasma_core::DaemonServer, addrs
         }
     }
     added
+}
+
+/// Boxed so `main`'s future, which holds every command's future, does not grow by the
+/// tunnel's (a process handle, a line reader, a `select!`).
+async fn cmd_tunnel(data_dir: &std::path::Path, port: Option<u16>) -> Result<()> {
+    Box::pin(tunnel::run(data_dir, port)).await
 }
 
 // ─── Directed sharing commands ────────────────────────────────────────────────
@@ -2026,6 +2097,8 @@ async fn cmd_network_get(
     password: Option<&str>,
     restart: bool,
     no_wait: bool,
+    via: &[String],
+    ca_cert: Option<&std::path::Path>,
 ) -> Result<()> {
     use miasma_core::{daemon_request, ControlRequest, ControlResponse};
 
@@ -2033,7 +2106,13 @@ async fn cmd_network_get(
     // resumable, with progress. (The daemon still serves the older `GetToFile`
     // for callers that want the single blocking request.)
     if let Some(path) = output {
-        return cmd_network_get_transfer(data_dir, mid_str, path, password, restart, no_wait).await;
+        return cmd_network_get_transfer(
+            data_dir, mid_str, path, password, restart, no_wait, via, ca_cert,
+        )
+        .await;
+    }
+    if !via.is_empty() {
+        bail!("{}", Msg::ViaNeedsOutput.t());
     }
     if password.is_some() {
         bail!("{}", Msg::PasswordOnlyToFile.t());
@@ -2289,10 +2368,23 @@ async fn cmd_network_get_transfer(
     password: Option<&str>,
     restart: bool,
     no_wait: bool,
+    via: &[String],
+    ca_cert: Option<&std::path::Path>,
 ) -> Result<()> {
     use miasma_core::{daemon_request, ControlRequest, ControlResponse};
 
     let abs_path = miasma_core::daemon::control_auth::absolutize_lexical(path);
+    // The CA is read here and sent as text: the daemon never opens a path that a
+    // client names.
+    let via_ca_pem = match ca_cert {
+        Some(p) => Some(std::fs::read_to_string(p).with_context(|| {
+            Msg::CannotReadCaFile {
+                path: p.display().to_string(),
+            }
+            .t()
+        })?),
+        None => None,
+    };
 
     let id = match daemon_request(
         data_dir,
@@ -2301,6 +2393,8 @@ async fn cmd_network_get_transfer(
             output_path: abs_path.to_string_lossy().into_owned(),
             password: password.map(str::to_owned),
             restart,
+            via: via.to_vec(),
+            via_ca_pem,
         },
     )
     .await?
@@ -2318,6 +2412,15 @@ async fn cmd_network_get_transfer(
         }
         .t()
     );
+    if !via.is_empty() {
+        eprintln!(
+            "{}",
+            Msg::ViaReceiveFrom {
+                urls: via.join(", ")
+            }
+            .t()
+        );
+    }
     eprintln!("{}", Msg::ReceiveKeepsGoing.t());
     if no_wait {
         eprintln!("{}", Msg::StartedCheckWith.t());
@@ -3060,6 +3163,78 @@ mod redundancy_bench_args {
             "", "10", "10/", "/12", "a/b", "0/5", "12/10", "10/300", "10-12",
         ] {
             assert!(parse_preset(bad).is_err(), "{bad:?} must be refused");
+        }
+    }
+}
+
+#[cfg(test)]
+mod via_flag_tests {
+    use super::{Cli, Commands};
+    use clap::Parser;
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        let mut v = vec!["miasma"];
+        v.extend_from_slice(args);
+        Cli::try_parse_from(v)
+    }
+
+    #[test]
+    fn network_get_takes_repeatable_via_and_a_ca_file() {
+        let cli = parse(&[
+            "network-get",
+            "miasma:abc",
+            "-o",
+            "out.bin",
+            "--via",
+            "wss://one.example",
+            "--via",
+            "ws://127.0.0.1:9",
+            "--ca-cert",
+            "proxy-root.pem",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::NetworkGet { via, ca_cert, .. } => {
+                assert_eq!(via, ["wss://one.example", "ws://127.0.0.1:9"]);
+                assert_eq!(ca_cert.unwrap().to_str(), Some("proxy-root.pem"));
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn without_via_network_get_is_the_ordinary_receive() {
+        match parse(&["network-get", "miasma:abc", "-o", "out.bin"])
+            .unwrap()
+            .command
+        {
+            Commands::NetworkGet { via, ca_cert, .. } => {
+                assert!(via.is_empty());
+                assert!(ca_cert.is_none());
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn a_ca_file_without_via_is_refused() {
+        assert!(parse(&["network-get", "miasma:abc", "--ca-cert", "x.pem"]).is_err());
+    }
+
+    #[test]
+    fn the_daemon_takes_a_fixed_wss_port_and_tunnel_a_port() {
+        match parse(&["daemon", "--wss-port", "8443"]).unwrap().command {
+            Commands::Daemon { wss_port, .. } => assert_eq!(wss_port, Some(8443)),
+            _ => panic!("wrong command"),
+        }
+        match parse(&["daemon"]).unwrap().command {
+            Commands::Daemon { wss_port, .. } => assert_eq!(wss_port, None),
+            _ => panic!("wrong command"),
+        }
+        assert!(parse(&["daemon", "--wss-port", "70000"]).is_err());
+        match parse(&["tunnel", "--port", "8443"]).unwrap().command {
+            Commands::Tunnel { port } => assert_eq!(port, Some(8443)),
+            _ => panic!("wrong command"),
         }
     }
 }

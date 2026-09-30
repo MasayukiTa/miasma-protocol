@@ -344,7 +344,7 @@ export function createTransfers({ bridge, t, showToast, copyToClipboard, authMes
     notice.classList.toggle('hidden', !message);
 
     el('tf-forms-offline').classList.toggle('hidden', connected && !offline);
-    for (const id of ['tf-mid', 'tf-path', 'tf-pw', 'tf-start']) el(id).disabled = !connected;
+    for (const id of ['tf-mid', 'tf-path', 'tf-pw', 'tf-via', 'tf-start']) el(id).disabled = !connected;
 
     renderList();
     renderDetail();
@@ -370,9 +370,14 @@ export function createTransfers({ bridge, t, showToast, copyToClipboard, authMes
     poll();
   }
 
-  async function startReceive({ mid, outputPath, password, restart }) {
+  // Ids started with a via URL in this page, so Resume goes to the same endpoint (the
+  // daemon's journal does not record it).
+  const viaById = new Map();
+
+  async function startReceive({ mid, outputPath, password, restart, via }) {
     try {
-      const id = await bridge.transferReceive({ mid, outputPath, password, restart });
+      const id = await bridge.transferReceive({ mid, outputPath, password, restart, via });
+      if (via && via.length) viaById.set(id, via);
       showToast(t('tf_started'), 'success');
       selectedId = id;
       stripSignature = '';
@@ -389,7 +394,8 @@ export function createTransfers({ bridge, t, showToast, copyToClipboard, authMes
     if (!job || job.kind === 'Send' || !job.name) return;
     const pwInput = el('tf-d-password');
     const password = pwInput.value;
-    const ok = await startReceive({ mid: job.mid, outputPath: plainPath(job.name), password, restart });
+    const via = viaById.get(job.mid);
+    const ok = await startReceive({ mid: job.mid, outputPath: plainPath(job.name), password, restart, via });
     if (ok) {
       pwInput.value = '';
       restartArmed = false;
@@ -403,14 +409,19 @@ export function createTransfers({ bridge, t, showToast, copyToClipboard, authMes
     const pw = el('tf-pw');
     if (!mid.startsWith('miasma:')) { showToast(t('tf_err_mid'), 'error'); return; }
     if (!path) { showToast(t('tf_err_no_path'), 'error'); return; }
+    const viaUrl = el('tf-via').value.trim();
     const button = el('tf-start');
     button.disabled = true;
-    const ok = await startReceive({ mid, outputPath: path, password: pw.value, restart: false });
+    const ok = await startReceive({
+      mid, outputPath: path, password: pw.value, restart: false,
+      via: viaUrl ? [viaUrl] : undefined,
+    });
     if (ok) {
       // The password is never kept around; the rest is on screen in the list now.
       pw.value = '';
       el('tf-mid').value = '';
       el('tf-path').value = '';
+      el('tf-via').value = '';
     }
     button.disabled = !(bridge && bridge.connected);
   }
@@ -428,7 +439,7 @@ export function createTransfers({ bridge, t, showToast, copyToClipboard, authMes
   el('tf-d-restart-yes').addEventListener('click', () => resume(true));
   el('tf-d-password').addEventListener('keydown', (e) => { if (e.key === 'Enter') resume(false); });
   el('tf-start').addEventListener('click', submitForm);
-  for (const id of ['tf-mid', 'tf-path', 'tf-pw']) {
+  for (const id of ['tf-mid', 'tf-path', 'tf-pw', 'tf-via']) {
     el(id).addEventListener('keydown', (e) => { if (e.key === 'Enter') submitForm(); });
   }
 

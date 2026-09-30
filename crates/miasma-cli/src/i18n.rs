@@ -331,6 +331,28 @@ pub enum Msg {
     WebOpenFailed {
         e: String,
     },
+
+    // ---- direct receive over a tunnel (--via) and `miasma tunnel` ----
+    ViaNeedsOutput,
+    ViaReceiveFrom {
+        urls: String,
+    },
+    CannotReadCaFile {
+        path: String,
+    },
+    DaemonExposeHint {
+        port: u16,
+    },
+    TunnelNoPort,
+    TunnelCloudflaredMissing,
+    TunnelStarting {
+        port: u16,
+    },
+    TunnelReady {
+        url: String,
+    },
+    TunnelRunning,
+    TunnelNoUrl,
 }
 
 impl Msg {
@@ -476,6 +498,28 @@ impl Msg {
 Anyone who has this link can control this node until the daemon restarts: do not share it or paste it into chat.".into(),
             WebOpening => "Opening it in the default browser...".into(),
             WebOpenFailed { e } => format!("could not open the browser ({e}); open the link by hand"),
+
+            ViaNeedsOutput => "--via receives into a file: pass -o/--output.".into(),
+            ViaReceiveFrom { urls } => {
+                format!("  Fetching directly from {urls} (no DHT lookup, no peers needed).")
+            }
+            CannotReadCaFile { path } => format!("cannot read CA file {path}"),
+            DaemonExposeHint { port } => format!(
+                "WebSocket share server: 127.0.0.1:{port} (plain WS; put a tunnel in front of it, the tunnel terminates TLS)\n\
+                 To let a receiver behind a firewall fetch from this node with no open port:\n\
+                 \x20 cloudflared tunnel --url http://127.0.0.1:{port}\n\
+                 (or run `miasma tunnel`), then give the receiver your MID and the wss:// URL it prints:\n\
+                 \x20 miasma network-get <MID> -o <file> --via wss://<host>"
+            ),
+            TunnelNoPort => "the daemon has no WebSocket server port; start it with `miasma daemon --wss-port N`, or pass --port N".into(),
+            TunnelCloudflaredMissing => "cloudflared was not found on PATH. Install it (macOS: brew install cloudflared; Windows/Linux: download it from https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) and run this again. Nothing is downloaded or started automatically.".into(),
+            TunnelStarting { port } => format!("Starting cloudflared for http://127.0.0.1:{port} ..."),
+            TunnelReady { url } => format!(
+                "Tunnel ready. Give the receiver this URL (and the MID):\n  {url}\n\
+                 Receiver: miasma network-get <MID> -o <file> --via {url}"
+            ),
+            TunnelRunning => "The tunnel is running. Press Ctrl-C to stop it.".into(),
+            TunnelNoUrl => "cloudflared did not report a tunnel URL; is it able to reach the internet?".into(),
         }
     }
 
@@ -621,6 +665,28 @@ Anyone who has this link can control this node until the daemon restarts: do not
 このリンクを持つ人は、デーモンが再起動されるまでこのノードを操作できます。共有したりチャットに貼り付けたりしないでください。".into(),
             WebOpening => "既定のブラウザで開いています...".into(),
             WebOpenFailed { e } => format!("ブラウザを開けませんでした（{e}）。リンクを手で開いてください"),
+
+            ViaNeedsOutput => "--via はファイルへ受信するときに使います。-o/--output を指定してください。".into(),
+            ViaReceiveFrom { urls } => {
+                format!("  {urls} から直接取得します（DHT の検索も、ほかのピアも不要です）。")
+            }
+            CannotReadCaFile { path } => format!("CA ファイル {path} を読めません"),
+            DaemonExposeHint { port } => format!(
+                "WebSocket 共有サーバ: 127.0.0.1:{port}（平文の WS です。前段にトンネルを置いてください。TLS はトンネルが終端します）\n\
+                 ファイアウォールの内側の受信者が、開放ポートなしでこのノードから取得できるようにするには:\n\
+                 \x20 cloudflared tunnel --url http://127.0.0.1:{port}\n\
+                 （または `miasma tunnel` を実行）。表示された wss:// の URL と MID を受信者へ伝えてください:\n\
+                 \x20 miasma network-get <MID> -o <file> --via wss://<host>"
+            ),
+            TunnelNoPort => "デーモンに WebSocket サーバのポートがありません。`miasma daemon --wss-port N` で起動するか、--port N を指定してください".into(),
+            TunnelCloudflaredMissing => "PATH に cloudflared が見つかりません。インストールしてからもう一度実行してください（macOS: brew install cloudflared / Windows・Linux: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/ からダウンロード）。ダウンロードや起動は自動では行いません。".into(),
+            TunnelStarting { port } => format!("http://127.0.0.1:{port} 向けに cloudflared を起動しています..."),
+            TunnelReady { url } => format!(
+                "トンネルの準備ができました。この URL（と MID）を受信者へ伝えてください:\n  {url}\n\
+                 受信側: miasma network-get <MID> -o <file> --via {url}"
+            ),
+            TunnelRunning => "トンネルは動作中です。止めるには Ctrl-C を押してください。".into(),
+            TunnelNoUrl => "cloudflared がトンネルの URL を報告しませんでした。インターネットに接続できていますか？".into(),
         }
     }
 }
@@ -743,6 +809,16 @@ mod tests {
             WebLinkNote => "WebLinkNote",
             WebOpening => "WebOpening",
             WebOpenFailed { .. } => "WebOpenFailed",
+            ViaNeedsOutput => "ViaNeedsOutput",
+            ViaReceiveFrom { .. } => "ViaReceiveFrom",
+            CannotReadCaFile { .. } => "CannotReadCaFile",
+            DaemonExposeHint { .. } => "DaemonExposeHint",
+            TunnelNoPort => "TunnelNoPort",
+            TunnelCloudflaredMissing => "TunnelCloudflaredMissing",
+            TunnelStarting { .. } => "TunnelStarting",
+            TunnelReady { .. } => "TunnelReady",
+            TunnelRunning => "TunnelRunning",
+            TunnelNoUrl => "TunnelNoUrl",
         }
     }
 
@@ -941,6 +1017,40 @@ Anyone who has this link can control this node until the daemon restarts: do not
             (
                 WebOpenFailed { e: s("boom") },
                 "could not open the browser (boom); open the link by hand",
+            ),
+            (ViaNeedsOutput, "--via receives into a file: pass -o/--output."),
+            (
+                ViaReceiveFrom { urls: s("wss://h.example") },
+                "  Fetching directly from wss://h.example (no DHT lookup, no peers needed).",
+            ),
+            (
+                CannotReadCaFile { path: s("ca.pem") },
+                "cannot read CA file ca.pem",
+            ),
+            (
+                DaemonExposeHint { port: 8443 },
+                "WebSocket share server: 127.0.0.1:8443 (plain WS; put a tunnel in front of it, the tunnel terminates TLS)\nTo let a receiver behind a firewall fetch from this node with no open port:\n  cloudflared tunnel --url http://127.0.0.1:8443\n(or run `miasma tunnel`), then give the receiver your MID and the wss:// URL it prints:\n  miasma network-get <MID> -o <file> --via wss://<host>",
+            ),
+            (
+                TunnelNoPort,
+                "the daemon has no WebSocket server port; start it with `miasma daemon --wss-port N`, or pass --port N",
+            ),
+            (
+                TunnelCloudflaredMissing,
+                "cloudflared was not found on PATH. Install it (macOS: brew install cloudflared; Windows/Linux: download it from https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) and run this again. Nothing is downloaded or started automatically.",
+            ),
+            (
+                TunnelStarting { port: 8443 },
+                "Starting cloudflared for http://127.0.0.1:8443 ...",
+            ),
+            (
+                TunnelReady { url: s("wss://h.trycloudflare.com") },
+                "Tunnel ready. Give the receiver this URL (and the MID):\n  wss://h.trycloudflare.com\nReceiver: miasma network-get <MID> -o <file> --via wss://h.trycloudflare.com",
+            ),
+            (TunnelRunning, "The tunnel is running. Press Ctrl-C to stop it."),
+            (
+                TunnelNoUrl,
+                "cloudflared did not report a tunnel URL; is it able to reach the internet?",
             ),
         ]
     }
