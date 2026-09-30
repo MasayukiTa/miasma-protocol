@@ -8,11 +8,16 @@
 //!
 //! | Method | Path            | Description                              |
 //! |--------|-----------------|------------------------------------------|
+//! | GET    | `/`, `/js/...`  | The web client itself (public, no token) |
 //! | GET    | `/api/ping`     | Connection liveness check                |
 //! | GET    | `/api/status`   | Full `DaemonStatus` snapshot             |
 //! | POST   | `/api/publish`  | Dissolve + publish (base64 data)         |
 //! | POST   | `/api/retrieve` | Network retrieve by MID (returns base64) |
 //! | POST   | `/api/wipe`     | Distress wipe                            |
+//! | GET    | `/api/transfers`             | Every transfer (running, paused, done) |
+//! | GET    | `/api/transfers/<id>`        | One transfer's status                  |
+//! | POST   | `/api/transfers/receive`     | Start or resume a receive (`mid`, `output_path` on the daemon's computer, optional `password`) |
+//! | POST   | `/api/transfers/<id>/cancel` | Stop a running transfer, keeping it resumable |
 //!
 //! # Security
 //!
@@ -24,6 +29,14 @@
 //! non-browser clients authenticate like everyone else, and browser origins
 //! that are not localhost are still refused.  `POST /api/wipe` is two-step:
 //! without a body it returns a challenge, `{"confirm": "<challenge>"}` wipes.
+//!
+//! The web client (`web/`) is compiled in (`web_assets`) and served from the
+//! bridge's own origin.  Those files are public code and need no token; `miasma
+//! web` prints a link `http://127.0.0.1:<port>/#token=<token>` whose fragment the
+//! page reads once, keeps in `sessionStorage` and strips from the URL.  A URL
+//! fragment is never sent to the server, so the token does not appear in this
+//! process's request path, in logs, or in `Referer`.  The bridge never hands the
+//! token to a caller that does not already hold it.
 
 use std::sync::{Arc, Mutex};
 
@@ -37,13 +50,16 @@ use hyper::{
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tracing::{debug, warn};
+use zeroize::Zeroize;
 
 use crate::{network::coordinator::MiasmaCoordinator, store::LocalShareStore};
 
 use super::{
     ipc::{ControlRequest, ControlResponse},
     process_request,
-    rate_limit::{classify_endpoint, validate_origin},
+    rate_limit::{
+        classify_endpoint, validate_field_length, validate_origin, MAX_MID_LEN, MAX_PASSWORD_LEN,
+    },
     replication::ReplicationQueue,
     BridgeLiveState,
 };
@@ -242,6 +258,13 @@ async fn handle(
         )));
     }
 
+    // The web client's own files: public code, no token, but the same Origin gate.
+    if req.method() == Method::GET {
+        if let Some(asset) = super::web_assets::lookup(req.uri().path()) {
+            return Ok(static_response(asset));
+        }
+    }
+
     // Authentication — everything but the liveness probe needs the token.
     if !(req.method() == Method::GET && req.uri().path() == "/api/ping") {
         let presented = req
@@ -275,6 +298,13 @@ async fn handle(
                     .unwrap(),
             ));
         }
+    }
+
+    // Transfers (list, status, start a receive, cancel): the same handlers the CLI and
+    // the desktop app use, reached through the same request type.
+    if let Some(rest) = path_str.strip_prefix("/api/transfers") {
+        let resp = route_transfers(req, rest.to_owned(), state).await;
+        return Ok(cors(resp));
     }
 
     let resp = match (req.method().clone(), req.uri().path()) {
@@ -621,6 +651,208 @@ async fn handle_directed_outbox(state: BridgeState) -> Response<Full<Bytes>> {
     }
 }
 
+// ─── Transfers ───────────────────────────────────────────────────────────────
+
+/// Longest output path accepted; far above what any OS allows.
+const MAX_OUTPUT_PATH_LEN: usize = 4096;
+
+/// A transfer as the web client sees it: the daemon's status plus the id that
+/// `/api/transfers/<id>` and `.../cancel` take (the MID for a receive,
+/// `send:<path>` for a send, exactly what `TransferCancel` takes).
+#[derive(Serialize)]
+struct TransferJson {
+    id: String,
+    #[serde(flatten)]
+    status: crate::transfer::TransferStatus,
+}
+
+fn transfer_json(status: crate::transfer::TransferStatus) -> TransferJson {
+    let id = match status.kind {
+        crate::transfer::TransferKind::Receive => status.mid.clone(),
+        crate::transfer::TransferKind::Send => {
+            crate::transfer::jobs::send_id(std::path::Path::new(&status.name))
+        }
+    };
+    TransferJson { id, status }
+}
+
+#[derive(Deserialize)]
+struct TransferReceiveRequest {
+    mid: String,
+    /// Absolute path on the daemon's computer. A browser has no filesystem path
+    /// to offer, so the person types where the *daemon* should save the file;
+    /// the same policy as every other daemon-side write applies (absolute, no `..`).
+    output_path: String,
+    #[serde(default)]
+    password: Option<String>,
+    /// Discard any partial transfer and start over.
+    #[serde(default)]
+    restart: bool,
+}
+
+// The password is never printed, whatever formats this.
+impl std::fmt::Debug for TransferReceiveRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TransferReceiveRequest")
+            .field("mid", &self.mid)
+            .field("output_path", &"<redacted>")
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("restart", &self.restart)
+            .finish()
+    }
+}
+
+impl Drop for TransferReceiveRequest {
+    fn drop(&mut self) {
+        if let Some(p) = self.password.as_mut() {
+            p.zeroize();
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct TransferStartedResponse {
+    id: String,
+}
+
+/// Decode `%XX` escapes (a send id contains a path, so it arrives encoded).
+fn percent_decode(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = s.get(i + 1..i + 3)?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// HTTP status for an error string the request handlers produce.
+fn transfer_error_status(e: &str) -> StatusCode {
+    if e.starts_with("output path rejected") || e.starts_with("invalid MID") {
+        StatusCode::BAD_REQUEST
+    } else if e.starts_with("no such transfer") {
+        StatusCode::NOT_FOUND
+    } else if e.starts_with("no running transfer") {
+        StatusCode::CONFLICT
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    }
+}
+
+async fn route_transfers(
+    req: Request<Incoming>,
+    rest: String,
+    state: BridgeState,
+) -> Response<Full<Bytes>> {
+    let method = req.method().clone();
+    let segments: Vec<&str> = match rest.strip_prefix('/') {
+        None if rest.is_empty() => Vec::new(),
+        None => return json_error(StatusCode::NOT_FOUND, "not found"),
+        Some(r) => r.split('/').collect(),
+    };
+    match (&method, segments.as_slice()) {
+        (&Method::GET, []) => handle_transfer_list(state).await,
+        (&Method::POST, ["receive"]) => match read_body(req).await {
+            Ok(body) => handle_transfer_receive(body, state).await,
+            Err(e) => json_error(StatusCode::BAD_REQUEST, &e.to_string()),
+        },
+        (&Method::GET, [id]) if !id.is_empty() => match percent_decode(id) {
+            Some(id) => handle_transfer_status(id, state).await,
+            None => json_error(StatusCode::BAD_REQUEST, "bad transfer id"),
+        },
+        (&Method::POST, [id, "cancel"]) if !id.is_empty() => match percent_decode(id) {
+            Some(id) => handle_transfer_cancel(id, state).await,
+            None => json_error(StatusCode::BAD_REQUEST, "bad transfer id"),
+        },
+        _ => json_error(StatusCode::NOT_FOUND, "not found"),
+    }
+}
+
+async fn handle_transfer_list(state: BridgeState) -> Response<Full<Bytes>> {
+    match bridge_request(state, ControlRequest::TransferList).await {
+        ControlResponse::TransferList(list) => {
+            let list: Vec<TransferJson> = list.into_iter().map(transfer_json).collect();
+            json_ok(&list)
+        }
+        ControlResponse::Error(e) => json_error(transfer_error_status(&e), &e),
+        _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "unexpected response"),
+    }
+}
+
+async fn handle_transfer_status(id: String, state: BridgeState) -> Response<Full<Bytes>> {
+    match bridge_request(state, ControlRequest::TransferStatus { id }).await {
+        ControlResponse::TransferStatus(s) => json_ok(&transfer_json(s)),
+        ControlResponse::Error(e) => json_error(transfer_error_status(&e), &e),
+        _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "unexpected response"),
+    }
+}
+
+async fn handle_transfer_cancel(id: String, state: BridgeState) -> Response<Full<Bytes>> {
+    match bridge_request(state, ControlRequest::TransferCancel { id }).await {
+        ControlResponse::TransferCancelled => json_ok(&OkResponse { ok: true }),
+        ControlResponse::Error(e) => json_error(transfer_error_status(&e), &e),
+        _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "unexpected response"),
+    }
+}
+
+async fn handle_transfer_receive(body: Bytes, state: BridgeState) -> Response<Full<Bytes>> {
+    // A serde error message can quote the offending value (a password sent as a
+    // number, say), so this endpoint answers "bad body" and nothing more.
+    let parsed = serde_json::from_slice::<TransferReceiveRequest>(&body);
+    scrub(body);
+    let mut req = match parsed {
+        Ok(r) => r,
+        Err(_) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "invalid JSON body: expected {\"mid\", \"output_path\", optional \"password\", \"restart\"}",
+            )
+        }
+    };
+    let checks = [
+        validate_field_length("mid", &req.mid, MAX_MID_LEN),
+        validate_field_length("output_path", &req.output_path, MAX_OUTPUT_PATH_LEN),
+        match &req.password {
+            Some(p) => validate_field_length("password", p, MAX_PASSWORD_LEN),
+            None => Ok(()),
+        },
+    ];
+    if let Some(Err(e)) = checks.into_iter().find(|c| c.is_err()) {
+        return json_error(StatusCode::BAD_REQUEST, &e);
+    }
+
+    // An empty password field means "no password".
+    let password = req.password.take().filter(|p| !p.is_empty());
+    let request = ControlRequest::TransferStartReceive {
+        mid: std::mem::take(&mut req.mid),
+        output_path: std::mem::take(&mut req.output_path),
+        password,
+        restart: req.restart,
+    };
+    // The output-path policy (absolute, no `..`) and the MID check are the
+    // daemon's own, the same as for the CLI and the desktop app.
+    match bridge_request(state, request).await {
+        ControlResponse::TransferStarted { id } => json_ok(&TransferStartedResponse { id }),
+        ControlResponse::Error(e) => json_error(transfer_error_status(&e), &e),
+        _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "unexpected response"),
+    }
+}
+
+/// Overwrite the raw request body when this is its only owner (best effort: the
+/// HTTP stack may have made other copies).
+fn scrub(body: Bytes) {
+    if let Ok(mut m) = body.try_into_mut() {
+        Zeroize::zeroize(&mut m[..]);
+    }
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 async fn read_body(req: Request<Incoming>) -> Result<Bytes> {
@@ -660,6 +892,20 @@ fn json_error(status: StatusCode, msg: &str) -> Response<Full<Bytes>> {
         .status(status)
         .header(header::CONTENT_TYPE, "application/json")
         .body(Full::new(Bytes::from(body)))
+        .unwrap()
+}
+
+fn static_response(asset: &'static super::web_assets::Asset) -> Response<Full<Bytes>> {
+    // `no-cache` so a new daemon build is picked up on the next load; the client's
+    // service worker keeps its own versioned cache for offline use.
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, asset.content_type)
+        .header(header::CACHE_CONTROL, "no-cache")
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(header::REFERRER_POLICY, "no-referrer")
+        .header(header::X_FRAME_OPTIONS, "DENY")
+        .body(Full::new(Bytes::from_static(asset.body)))
         .unwrap()
 }
 

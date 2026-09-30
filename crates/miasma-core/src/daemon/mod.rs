@@ -24,6 +24,7 @@ pub mod ipc;
 pub mod rate_limit;
 pub mod replication;
 pub mod self_heal;
+pub mod web_assets;
 
 use std::{
     path::PathBuf,
