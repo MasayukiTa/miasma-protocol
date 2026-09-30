@@ -1093,6 +1093,7 @@ nav {
 .tf-detail > .empty-note { padding: 28px 16px; }
 
 .tf-sub { font-size: 0.8rem; color: var(--muted); line-height: 1.5; overflow-wrap: anywhere; }
+.tf-sub.tf-warn { color: var(--warning); }
 .tf-label { font-size: 0.75rem; font-weight: 700; color: var(--muted); }
 .field .tf-sub { margin-top: 6px; }
 
