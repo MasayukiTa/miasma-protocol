@@ -1084,16 +1084,15 @@ pub(crate) async fn process_request(
                 }
             }
             let registry = crate::transfer::jobs::registry_for(&data_dir);
-            let id =
-                registry.start_receive(
-                    coord.clone(),
-                    target,
-                    output_path,
-                    password,
-                    restart,
-                    via,
-                    iroh_ca_pem,
-                );
+            let id = registry.start_receive(
+                coord.clone(),
+                target,
+                output_path,
+                password,
+                restart,
+                via,
+                iroh_ca_pem,
+            );
             ControlResponse::TransferStarted { id }
         }
 

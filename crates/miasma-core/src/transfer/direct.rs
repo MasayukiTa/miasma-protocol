@@ -166,7 +166,10 @@ impl PieceSource for IrohPieceSource {
         slot: u16,
         _holder: &ShardLocation,
     ) -> Result<Option<MiasmaShare>, MiasmaError> {
-        let got = self.client.fetch_share(*mid.as_bytes(), segment, slot).await;
+        let got = self
+            .client
+            .fetch_share(*mid.as_bytes(), segment, slot)
+            .await;
         if let Some(progress) = &self.progress {
             // `direct` or `relay`: shown next to the speed, because a public relay
             // is an order of magnitude slower than a direct path.
@@ -454,28 +457,26 @@ pub async fn try_receive_direct(
     if let Some(via) = &sources.via {
         match via.build_clients() {
             Err(e) => failures.push(("--via".to_owned(), e)),
-            Ok(clients) => {
-                match fetch_verified_record_via(&clients, &mid, signer.as_ref()).await {
-                    Ok(fetched) => {
-                        let source = WsPieceSource::new(clients);
-                        return DirectOutcome::Finished(
-                            run_from_record(
-                                &source,
-                                mid,
-                                fetched,
-                                expect,
-                                output_path,
-                                password,
-                                journal_dir,
-                                restart,
-                                progress,
-                            )
-                            .await,
-                        );
-                    }
-                    Err(e) => failures.push(("--via".to_owned(), e)),
+            Ok(clients) => match fetch_verified_record_via(&clients, &mid, signer.as_ref()).await {
+                Ok(fetched) => {
+                    let source = WsPieceSource::new(clients);
+                    return DirectOutcome::Finished(
+                        run_from_record(
+                            &source,
+                            mid,
+                            fetched,
+                            expect,
+                            output_path,
+                            password,
+                            journal_dir,
+                            restart,
+                            progress,
+                        )
+                        .await,
+                    );
                 }
-            }
+                Err(e) => failures.push(("--via".to_owned(), e)),
+            },
         }
     }
 

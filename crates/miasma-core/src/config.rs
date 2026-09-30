@@ -444,7 +444,10 @@ bandwidth_mb_day = 512
         assert_eq!(t.iroh_mode, IrohMode::N0);
         assert!(t.iroh_relay_urls.is_empty());
         assert!(t.iroh_discovery);
-        assert_eq!(t.iroh_connect_timeout_secs, DEFAULT_IROH_CONNECT_TIMEOUT_SECS);
+        assert_eq!(
+            t.iroh_connect_timeout_secs,
+            DEFAULT_IROH_CONNECT_TIMEOUT_SECS
+        );
         let d = TransportConfig::default();
         assert_eq!(d.iroh_mode, IrohMode::N0);
         assert!(d.iroh_discovery);
