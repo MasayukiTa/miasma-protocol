@@ -3,15 +3,16 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <meta name="theme-color" content="#0a0a0f">
+  <meta name="theme-color" content="#f7f6f2">
+  <script src="js/theme.js"></script>
   <meta name="description" content="Miasma Protocol — censorship-resistant content dissolution and retrieval in your browser">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' http://127.0.0.1:* http://localhost:*; frame-ancestors 'none'; base-uri 'self'; form-action 'self';">
   <title>Miasma Web</title>
   <link rel="stylesheet" href="css/style.css">
   <link rel="manifest" href="manifest.json">
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='45' fill='%230a0a0f' stroke='%237c3aed' stroke-width='4'/><circle cx='50' cy='50' r='20' fill='none' stroke='%2322d3ee' stroke-width='2' stroke-dasharray='8 4'/><circle cx='50' cy='50' r='6' fill='%237c3aed'/></svg>">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='45' fill='%23f7f6f2' stroke='%2318181b' stroke-width='5'/><circle cx='50' cy='50' r='20' fill='none' stroke='%2318181b' stroke-width='3' stroke-dasharray='8 4'/><circle cx='50' cy='50' r='6' fill='%2318181b'/></svg>">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
 </head>
 <body>
   <div id="app">
@@ -19,9 +20,9 @@
     <nav id="nav">
       <div class="nav-brand" data-view="home">
         <svg class="nav-logo" viewBox="0 0 100 100" width="28" height="28">
-          <circle cx="50" cy="50" r="45" fill="none" stroke="var(--accent)" stroke-width="4"/>
-          <circle cx="50" cy="50" r="20" fill="none" stroke="var(--secondary)" stroke-width="2" stroke-dasharray="8 4"/>
-          <circle cx="50" cy="50" r="6" fill="var(--accent)"/>
+          <circle cx="50" cy="50" r="45" fill="none" stroke="currentColor" stroke-width="4"/>
+          <circle cx="50" cy="50" r="20" fill="none" stroke="var(--muted)" stroke-width="2" stroke-dasharray="8 4"/>
+          <circle cx="50" cy="50" r="6" fill="currentColor"/>
         </svg>
         <span>Miasma</span>
       </div>
@@ -52,7 +53,6 @@
     <!-- Home View -->
     <div id="view-home" class="view">
       <div class="home-hero">
-        <div class="hero-orb"></div>
         <h1 data-i18n="hero_title">Miasma Protocol</h1>
         <p class="hero-sub" data-i18n="hero_sub">Local content protection in your browser</p>
         <p class="hero-desc" data-i18n="hero_desc">Encrypt and split content into shares. Reconstruct from any k-of-n shares. All processing runs locally — nothing leaves your device.</p>
@@ -64,8 +64,10 @@
               <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
             </svg>
           </div>
-          <h2 data-i18n="dissolve">Dissolve</h2>
-          <p data-i18n="dissolve_desc">Encrypt and split content into protected shares</p>
+          <div class="card-text">
+            <h2 data-i18n="dissolve">Dissolve</h2>
+            <p data-i18n="dissolve_desc">Encrypt and split content into protected shares</p>
+          </div>
         </button>
         <button class="action-card card-retrieve" data-view="retrieve">
           <div class="card-icon">
@@ -73,8 +75,10 @@
               <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
             </svg>
           </div>
-          <h2 data-i18n="retrieve">Retrieve</h2>
-          <p data-i18n="retrieve_desc">Reconstruct content from collected shares</p>
+          <div class="card-text">
+            <h2 data-i18n="retrieve">Retrieve</h2>
+            <p data-i18n="retrieve_desc">Reconstruct content from collected shares</p>
+          </div>
         </button>
         <button class="action-card card-send" data-view="send">
           <div class="card-icon">
@@ -82,8 +86,10 @@
               <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
             </svg>
           </div>
-          <h2 data-i18n="tab_send">Send</h2>
-          <p data-i18n="send_desc">Send encrypted content directly to a specific recipient</p>
+          <div class="card-text">
+            <h2 data-i18n="tab_send">Send</h2>
+            <p data-i18n="send_desc">Send encrypted content directly to a specific recipient</p>
+          </div>
         </button>
         <button class="action-card card-inbox" data-view="inbox">
           <div class="card-icon">
@@ -91,8 +97,10 @@
               <polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 002 2h16a2 2 0 002-2v-6l-3.45-6.89A2 2 0 0016.76 4H7.24a2 2 0 00-1.79 1.11z"/>
             </svg>
           </div>
-          <h2 data-i18n="tab_inbox">Inbox</h2>
-          <p data-i18n="inbox_desc">Directed shares received from other users</p>
+          <div class="card-text">
+            <h2 data-i18n="tab_inbox">Inbox</h2>
+            <p data-i18n="inbox_desc">Directed shares received from other users</p>
+          </div>
         </button>
         <button class="action-card card-outbox" data-view="outbox">
           <div class="card-icon">
@@ -100,8 +108,10 @@
               <polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 002 2h16a2 2 0 002-2v-6l-3.45-6.89A2 2 0 0016.76 4H7.24a2 2 0 00-1.79 1.11z"/><line x1="12" y1="2" x2="12" y2="9"/><polyline points="9 5 12 2 15 5"/>
             </svg>
           </div>
-          <h2 data-i18n="outbox_heading">Outbox</h2>
-          <p data-i18n="outbox_desc">Directed shares you have sent to others</p>
+          <div class="card-text">
+            <h2 data-i18n="outbox_heading">Outbox</h2>
+            <p data-i18n="outbox_desc">Directed shares you have sent to others</p>
+          </div>
         </button>
       </div>
       <div class="scope-notice" id="scope-notice">
@@ -150,7 +160,7 @@
         <!-- File Input -->
         <div id="file-input-area" class="input-area hidden">
           <div class="drop-zone" id="drop-zone">
-            <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="var(--text-dim)" stroke-width="1">
+            <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1">
               <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
             </svg>
             <p data-i18n="drop_file">Drop a file here or tap to select</p>
@@ -397,7 +407,7 @@
           <button id="btn-inbox-refresh" class="btn-secondary" data-i18n="inbox_refresh">Refresh</button>
         </div>
         <div id="inbox-list"></div>
-        <p id="inbox-empty" class="hidden" data-i18n="inbox_empty" style="text-align:center;color:var(--text-dim);padding:2rem 0;">No items in inbox</p>
+        <p id="inbox-empty" class="hidden empty-note" data-i18n="inbox_empty">No items in inbox</p>
       </div>
     </div>
 
@@ -415,7 +425,7 @@
           <button id="btn-outbox-refresh" class="btn-secondary" data-i18n="outbox_refresh">Refresh</button>
         </div>
         <div id="outbox-list"></div>
-        <p id="outbox-empty" class="hidden" data-i18n="outbox_empty" style="text-align:center;color:var(--text-dim);padding:2rem 0;">No items in outbox</p>
+        <p id="outbox-empty" class="hidden empty-note" data-i18n="outbox_empty">No items in outbox</p>
       </div>
     </div>
 
@@ -440,6 +450,15 @@
             <span id="settings-storage-size">0 KB</span>
           </div>
           <button id="btn-clear-all" class="btn-danger" data-i18n="clear_all_shares">Clear All Shares</button>
+        </div>
+
+        <div class="settings-group">
+          <h3 data-i18n="theme_title">Appearance</h3>
+          <div class="theme-options">
+            <button class="theme-btn" data-theme-mode="system" data-i18n="theme_system">System</button>
+            <button class="theme-btn" data-theme-mode="light" data-i18n="theme_light">Light</button>
+            <button class="theme-btn" data-theme-mode="dark" data-i18n="theme_dark">Dark</button>
+          </div>
         </div>
 
         <div class="settings-group">

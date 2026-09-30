@@ -38,6 +38,7 @@ pub static ASSETS: &[Asset] = &[
     asset!("js/bridge.js", JS),
     asset!("js/i18n.js", JS),
     asset!("js/storage.js", JS),
+    asset!("js/theme.js", JS),
     asset!("manifest.json", "application/manifest+json"),
     asset!("pkg/miasma_wasm.js", JS),
     asset!("pkg/miasma_wasm_bg.wasm", "application/wasm"),
@@ -87,7 +88,11 @@ mod tests {
                     .unwrap()
                     .to_string_lossy()
                     .replace('\\', "/");
-                if skip.contains(&rel.as_str()) || rel.ends_with(".d.ts") {
+                // `tests/` holds the client's node tests: development only.
+                if skip.contains(&rel.as_str())
+                    || rel.ends_with(".d.ts")
+                    || rel.starts_with("tests/")
+                {
                     continue;
                 }
                 assert!(
