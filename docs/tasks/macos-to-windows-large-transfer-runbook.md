@@ -63,8 +63,8 @@
   設定は**フラグ形式**です:
 
 ```bash
-miasma --data-dir /Volumes/SSD/miasma-data config --key storage.quota_mb --value 10240
-miasma --data-dir /Volumes/SSD/miasma-data config --key storage.quota_mb      # 確認
+miasma --data-dir /Volumes/<SSD名>/miasma-data config --key storage.quota_mb --value 10240
+miasma --data-dir /Volumes/<SSD名>/miasma-data config --key storage.quota_mb      # 確認
 ```
 
 ## 2. 手順
@@ -119,9 +119,9 @@ powershell -ExecutionPolicy Bypass -File scripts\transfer-e2e.ps1
 ### 2-3. 冗長度を測る(Mac のリリースビルド)
 
 ```bash
-mkdir -p /Volumes/SSD/bench
-./target/release/miasma redundancy-bench --size-mib 1024 --store-dir /Volumes/SSD/bench
-rm -rf /Volumes/SSD/bench
+mkdir -p /Volumes/<SSD名>/bench
+./target/release/miasma redundancy-bench --size-mib 1024 --store-dir /Volumes/<SSD名>/bench
+rm -rf /Volumes/<SSD名>/bench
 ```
 
 読み方: **「保存倍率(実測)」と「損失耐性」はどのマシンでも正確**です。**MiB/s は Mac のリリース
@@ -138,9 +138,25 @@ rm -rf /Volumes/SSD/bench
 
 ### 2-4. 2台をつなぐ
 
+**2 台が別の LAN にある場合(今回の想定)は、先にここを確認します。** 同じ LAN の想定で書いた手順です。
+
+- 受信側(Windows)が、送信側(Mac)の TCP ポート(下の例では 4001)へ**届く**必要があります。
+  Mac 側の家庭用ルーターで、そのポートを Mac へ転送する設定(ポート転送)が要ります。
+  プロバイダが CGNAT(共有アドレス)や DS-Lite の場合、ポート転送そのものができません。
+- Windows 側から外向きの TCP 4001 が、社内ネットワークのファイアウォールやプロキシで止められていないことも要ります。
+- **Miasma を動かす前に**、届くかだけを確かめます。Mac で `daemon` を起動した状態で、Windows から
+  `Test-NetConnection <Macの公開IP> -Port 4001`(`TcpTestSucceeded : True` になること)。
+  Mac の公開 IP は、Mac のブラウザで「IP アドレス確認」のサイトを開くと分かります。
+- コードには AutoNAT・リレー・ホールパンチ(DCUtR)の実装がありますが、**実際の NAT を挟んだ 2 台では
+  一度も試していません**。届かない場合に自動で通る、とは言えません。
+- 届かないときの代替(別途検討): 両方に入れられる VPN(例: Tailscale)で同じ仮想 LAN にする、
+  Mac から Windows へ接続する向きに変える(Windows 側で受け付けられる場合)、ポート 443 の WSS 転送を使う。
+
+以下の例の `<MacのLAN IP>` は、別の LAN のときは **Mac の公開 IP**(またはポート転送先のアドレス)に読み替えます。
+
 ```bash
 # --- Mac (送信側) ---
-D=/Volumes/SSD/miasma-data
+D=/Volumes/<SSD名>/miasma-data
 miasma --data-dir $D init --listen-addr /ip4/0.0.0.0/tcp/4001
 miasma --data-dir $D config --key storage.quota_mb --value <表の保存クォータ>   # 4 GiB までは既定 10240 のままでよい
 miasma --data-dir $D daemon                   # 前面で動かす。別ターミナルで以降を実行
@@ -149,7 +165,7 @@ miasma --data-dir $D status                   # "Listen addr:" に LAN の IP �
 
 ```powershell
 # --- Windows (受信側) ---
-$D = "D:\miasma-data"
+$D = "$env:USERPROFILE\miasma-data"        # この Windows には C: しかないので、ユーザーフォルダ配下
 miasma --data-dir $D init
 miasma --data-dir $D daemon --bootstrap /ip4/<MacのLAN IP>/tcp/4001/p2p/<MacのPeerId>
 miasma --data-dir $D status                   # peer が 1 になること
@@ -176,22 +192,26 @@ miasma --data-dir $D status                   # peer が 1 になること
 各段階で同じことを行い、記録表(§3)を埋めます。**前の段階が通ってから次へ。**
 最初の 256 MiB で §0b の成功条件が満たされれば、分割転送が受信できたことの証明としては十分です
 (オーナー決定)。1 GiB・4 GiB は、速度の傾向を見るための追加です。
+**受信側 Windows の空きを、各段階の前に確認します**(この Windows のドライブは C: と H:(空き 0)だけで、
+C: の空きは 2026-09-30 時点で約 2.7 GB でした)。256 MiB は問題ありません。1 GiB は空きが 3 GiB 以上のとき。
+4 GiB は空きが 6 GiB 以上のときだけ行います(足りなければ、そこで止めます)。
 
 ```bash
 # --- Mac: ダミーファイルとパスワード ---
-head -c $((256*1024*1024)) /dev/urandom > /Volumes/SSD/test-256m.bin      # 段階に合わせてサイズを変える(1 GiB = 1024*1024*1024)
-printf '%s\n' 'ここに強いパスワード' > /Volumes/SSD/pw.txt
-shasum -a 256 /Volumes/SSD/test-256m.bin
+head -c $((256*1024*1024)) /dev/urandom > /Volumes/<SSD名>/test-256m.bin      # 段階に合わせてサイズを変える(1 GiB = 1024*1024*1024)
+printf '%s\n' 'ここに強いパスワード' > /Volumes/<SSD名>/pw.txt
+shasum -a 256 /Volumes/<SSD名>/test-256m.bin
 
 # --- Mac: 公開(進捗行が出る。完了時に MID と平均速度が出る) ---
-miasma --data-dir $D network-publish /Volumes/SSD/test-256m.bin \
-    --data-shards 10 --total-shards 12 --password-file /Volumes/SSD/pw.txt
+miasma --data-dir $D network-publish /Volumes/<SSD名>/test-256m.bin \
+    --data-shards 10 --total-shards 12 --password-file /Volumes/<SSD名>/pw.txt
 ```
 
 ```powershell
 # --- Windows: パスワードファイルを安全な手段で渡してから ---
-miasma --data-dir $D network-get <MID> -o D:\recv\test-256m.bin --password-file D:\pw.txt
-Get-FileHash D:\recv\test-256m.bin -Algorithm SHA256      # Mac の値と一致すること
+New-Item -ItemType Directory -Force "$env:USERPROFILE\recv" | Out-Null
+miasma --data-dir $D network-get <MID> -o "$env:USERPROFILE\recv\test-256m.bin" --password-file "$env:USERPROFILE\pw.txt"
+Get-FileHash "$env:USERPROFILE\recv\test-256m.bin" -Algorithm SHA256      # Mac の値と一致すること
 ```
 
 **誤パスワードの確認(256 MiB で必ず行う):** 正しいパスワードで受信する前に、別のパスワードのファイル(または
@@ -292,7 +312,7 @@ write なら受信側ディスク**です。最初に測るべきはこの内訳
 
 - **受信側**: 100 GiB なら出力ファイルと同じボリュームに 100 GiB 以上の空き。
 - 20 GiB 以上では既定の保存クォータ(10,240 MiB)では足りないので、表の値に上げます:
-  `miasma --data-dir /Volumes/SSD/miasma-data config --key storage.quota_mb --value 123031`
+  `miasma --data-dir /Volumes/<SSD名>/miasma-data config --key storage.quota_mb --value 123031`
 - 送信 Mac がスリープしないこと: `caffeinate -dimsu -w <daemonのPID>`。Windows も電源プランでスリープなし。
 - 所要時間は、**20 GiB の段階で実測した MB/s** から `100 GiB / 実測値` で見積もってください。
 - 止まったら(`paused: ...`)**同じコマンドを再実行するだけ**です。原因が空き容量なら、空けてから再実行。
