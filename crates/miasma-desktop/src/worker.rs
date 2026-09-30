@@ -103,6 +103,12 @@ pub enum WorkerCmd {
     TransferPoll,
     /// Stop a running transfer at its next safe point; its progress is kept.
     TransferCancel { id: String },
+    /// Remove one finished transfer from the list. With `discard_partial` a
+    /// stopped transfer's partial data is deleted too; without it such a transfer
+    /// is refused.
+    TransferRemove { id: String, discard_partial: bool },
+    /// Remove every finished transfer that holds no partial data.
+    TransferClearFinished,
 }
 
 impl fmt::Debug for WorkerCmd {
@@ -173,6 +179,14 @@ impl fmt::Debug for WorkerCmd {
             Self::TransferPoll => f.write_str("TransferPoll"),
             // A send's id embeds the source path.
             Self::TransferCancel { .. } => f.write_str("TransferCancel(<redacted>)"),
+            Self::TransferRemove {
+                discard_partial, ..
+            } => f
+                .debug_struct("TransferRemove")
+                .field("id", &"<redacted>")
+                .field("discard_partial", discard_partial)
+                .finish(),
+            Self::TransferClearFinished => f.write_str("TransferClearFinished"),
         }
     }
 }
@@ -256,6 +270,10 @@ pub enum WorkerResult {
     TransferStarted { id: String },
     /// The daemon accepted a cancel request.
     TransferCancelRequested,
+    /// Finished transfers were removed from the daemon's list.
+    TransferRemoved { removed: u32, kept_partial: u32 },
+    /// The daemon declined to remove a transfer, and why.
+    TransferRemoveRefused(miasma_core::transfer::jobs::RemoveRefusal),
     /// A start or cancel request was refused or failed.
     TransferError(String),
     /// Any error.
@@ -357,6 +375,18 @@ impl fmt::Debug for WorkerResult {
                 .finish(),
             Self::TransferStarted { .. } => f.write_str("TransferStarted(<redacted>)"),
             Self::TransferCancelRequested => f.write_str("TransferCancelRequested"),
+            Self::TransferRemoved {
+                removed,
+                kept_partial,
+            } => f
+                .debug_struct("TransferRemoved")
+                .field("removed", removed)
+                .field("kept_partial", kept_partial)
+                .finish(),
+            Self::TransferRemoveRefused(reason) => f
+                .debug_tuple("TransferRemoveRefused")
+                .field(reason)
+                .finish(),
             Self::TransferError(message) => f.debug_tuple("TransferError").field(message).finish(),
             Self::Err(message) => f.debug_tuple("Err").field(message).finish(),
         }
@@ -676,6 +706,20 @@ fn worker_thread(
             }
             WorkerCmd::TransferPoll => rt.block_on(do_transfer_poll(&data_dir)),
             WorkerCmd::TransferCancel { id } => rt.block_on(do_transfer_cancel(&data_dir, &id)),
+            WorkerCmd::TransferRemove {
+                id,
+                discard_partial,
+            } => rt.block_on(do_transfer_remove(
+                &data_dir,
+                ControlRequest::TransferRemove {
+                    id,
+                    discard_partial,
+                },
+            )),
+            WorkerCmd::TransferClearFinished => rt.block_on(do_transfer_remove(
+                &data_dir,
+                ControlRequest::TransferClearFinished,
+            )),
         };
 
         if tx.send(res).is_err() {
@@ -1442,6 +1486,24 @@ async fn do_transfer_cancel(data_dir: &Path, id: &str) -> WorkerResult {
     }
 }
 
+async fn do_transfer_remove(data_dir: &Path, req: ControlRequest) -> WorkerResult {
+    match daemon_request(data_dir, req).await {
+        Ok(ControlResponse::TransferRemoved {
+            removed,
+            kept_partial,
+        }) => WorkerResult::TransferRemoved {
+            removed,
+            kept_partial,
+        },
+        Ok(ControlResponse::TransferRemoveRefused { reason, .. }) => {
+            WorkerResult::TransferRemoveRefused(reason)
+        }
+        Ok(ControlResponse::Error(e)) => WorkerResult::TransferError(e),
+        Ok(other) => WorkerResult::TransferError(format!("Unexpected response: {other:?}")),
+        Err(e) => WorkerResult::TransferError(daemon_error(&e)),
+    }
+}
+
 /// `(k, n)` a stopped send began with, read from its journal in `<data_dir>/transfers`.
 fn journal_shard_params(data_dir: &Path, source: &Path) -> Option<(u8, u8)> {
     use miasma_core::transfer::publish_journal::{publish_journal_path, PublishJournal};
@@ -1567,6 +1629,17 @@ mod tests {
             id: "send:C:/private/src-secret.iso".into(),
         };
         assert!(!format!("{cancel:?}").contains("src-secret"));
+        let remove = WorkerCmd::TransferRemove {
+            id: "send:C:/private/src-secret.iso".into(),
+            discard_partial: true,
+        };
+        let rendered = format!("{remove:?}");
+        assert!(!rendered.contains("src-secret"));
+        assert!(rendered.contains("discard_partial: true"));
+        assert_eq!(
+            format!("{:?}", WorkerCmd::TransferClearFinished),
+            "TransferClearFinished"
+        );
         assert_eq!(format!("{:?}", WorkerCmd::TransferPoll), "TransferPoll");
     }
 
