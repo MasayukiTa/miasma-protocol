@@ -1210,7 +1210,7 @@ async fn cli_smoke_loopback() {
 #[tokio::test(flavor = "multi_thread")]
 async fn daemon_wipe_returns_then_shuts_down_runtime() {
     use miasma_core::daemon::ipc::{
-        daemon_request, ControlRequest, ControlResponse, HTTP_PORT_FILE, PORT_FILE,
+        daemon_request, daemon_wipe, ControlRequest, ControlResponse, HTTP_PORT_FILE, PORT_FILE,
     };
     use miasma_core::daemon::DaemonServer;
     use std::time::Duration;
@@ -1230,7 +1230,7 @@ async fn daemon_wipe_returns_then_shuts_down_runtime() {
     let data_dir = dir.path().to_owned();
     let run_task = tokio::spawn(server.run());
 
-    let response = daemon_request(&data_dir, ControlRequest::Wipe)
+    let response = daemon_wipe(&data_dir)
         .await
         .expect("wipe request should receive a response before shutdown");
     assert!(matches!(response, ControlResponse::Wiped));
@@ -1655,10 +1655,9 @@ async fn dissolve_and_publish_file_multi_segment_network_retrieval_is_fast() {
 // test), but that shards genuinely land on *other* peers, and that content
 // survives the *original publisher* going offline entirely.
 
-/// Spawn a node/coordinator for the Phase 2.1 tests, with `hosted_quota_mb`
-/// controlling whether it can accept pushed shares at all (`0` = cannot --
-/// see `LocalShareStore::with_hosted_quota_mb`'s doc comment on why that's
-/// the safe default).
+/// Spawn a node/coordinator for Phase 2.1 tests with an explicit low-level
+/// hosted quota. Raw `LocalShareStore::open` remains fail-closed at zero;
+/// shipped node configuration uses `open_with_quotas` with a positive default.
 async fn spawn_phase21_node(
     key_byte: u8,
     hosted_quota_mb: u64,
@@ -1678,6 +1677,303 @@ async fn spawn_phase21_node(
     let listen_addr_str = addrs[0].to_string();
     let coord = MiasmaCoordinator::start(node, store.clone(), vec![listen_addr_str]).await;
     (coord, store)
+}
+
+/// Spawn a node whose share store is opened exactly as the daemon opens it:
+/// from a `config.toml` in the data dir, through `NodeConfig::load` and
+/// `LocalShareStore::open_configured`. `config_toml == None` means no config
+/// file at all (a fresh node with the built-in defaults).
+async fn spawn_configured_node(
+    key_byte: u8,
+    config_toml: Option<&str>,
+) -> (MiasmaCoordinator, Arc<LocalShareStore>) {
+    let dir = tempfile::tempdir().unwrap().keep();
+    if let Some(text) = config_toml {
+        std::fs::write(dir.join("config.toml"), text).unwrap();
+    }
+    let config = miasma_core::NodeConfig::load(&dir).unwrap();
+    let store = Arc::new(LocalShareStore::open_configured(&dir, &config.storage).unwrap());
+    let key = [key_byte; 32];
+    let mut node = MiasmaNode::new(&key, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+    let addrs = node.collect_listen_addrs(400).await;
+    let listen_addr_str = addrs[0].to_string();
+    let coord = MiasmaCoordinator::start(node, store.clone(), vec![listen_addr_str]).await;
+    (coord, store)
+}
+
+/// Spawn exactly as a shipped node does: quotas come from `NodeConfig::default`
+/// and are applied through the production store constructor.
+async fn spawn_phase21_default_config_node(
+    key_byte: u8,
+) -> (MiasmaCoordinator, Arc<LocalShareStore>) {
+    let dir = tempfile::tempdir().unwrap().keep();
+    let config = miasma_core::config::NodeConfig::default();
+    let store = Arc::new(
+        LocalShareStore::open_with_quotas(
+            &dir,
+            config.storage.quota_mb,
+            config.storage.hosted_quota_mb,
+        )
+        .unwrap(),
+    );
+    let key = [key_byte; 32];
+    let mut node = MiasmaNode::new(&key, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+    let addrs = node.collect_listen_addrs(400).await;
+    let listen_addr_str = addrs[0].to_string();
+    let coord = MiasmaCoordinator::start(node, store.clone(), vec![listen_addr_str]).await;
+    (coord, store)
+}
+
+#[test]
+fn hosted_quota_defaults_to_the_shipped_default_including_for_configs_written_before_the_key_existed(
+) {
+    let default_mb = miasma_core::config::DEFAULT_HOSTED_QUOTA_MB;
+
+    // Built-in default.
+    assert_eq!(
+        miasma_core::config::StorageConfig::default().hosted_quota_mb,
+        default_mb
+    );
+
+    // A config.toml from before `hosted_quota_mb` existed must still load, and
+    // must get the shipped default (not an error, not zero).
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("config.toml"),
+        "[storage]\nquota_mb = 100\nbandwidth_mb_day = 1024\n",
+    )
+    .unwrap();
+    let config = miasma_core::NodeConfig::load(dir.path()).unwrap();
+    assert_eq!(config.storage.hosted_quota_mb, default_mb);
+    let store = LocalShareStore::open_configured(dir.path(), &config.storage).unwrap();
+    assert_eq!(store.hosted_quota_bytes(), default_mb * 1024 * 1024);
+
+    // With the key set, the value reaches the store, in MiB.
+    let dir2 = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir2.path().join("config.toml"),
+        "[storage]\nquota_mb = 100\nbandwidth_mb_day = 1024\nhosted_quota_mb = 7\n",
+    )
+    .unwrap();
+    let config2 = miasma_core::NodeConfig::load(dir2.path()).unwrap();
+    let store2 = LocalShareStore::open_configured(dir2.path(), &config2.storage).unwrap();
+    assert_eq!(store2.hosted_quota_bytes(), 7 * 1024 * 1024);
+
+    // An explicit 0 is honoured: the operator opted out of hosting.
+    let dir3 = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir3.path().join("config.toml"),
+        "[storage]
+quota_mb = 100
+bandwidth_mb_day = 1024
+hosted_quota_mb = 0
+",
+    )
+    .unwrap();
+    let config3 = miasma_core::NodeConfig::load(dir3.path()).unwrap();
+    let store3 = LocalShareStore::open_configured(dir3.path(), &config3.storage).unwrap();
+    assert_eq!(store3.hosted_quota_bytes(), 0);
+}
+
+/// Opt-out path: a node whose `config.toml` sets `hosted_quota_mb = 0` refuses
+/// a pushed share, so the publisher stays the sole holder.
+#[tokio::test(flavor = "multi_thread")]
+async fn zero_hosted_quota_node_refuses_pushed_shares() {
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let result = timeout(Duration::from_secs(60), async {
+        let (coord_a, _store_a) = spawn_configured_node(0xA5, None).await;
+        let (coord_b, store_b) = spawn_configured_node(
+            0xB5,
+            Some(
+                "[storage]
+quota_mb = 100
+bandwidth_mb_day = 1024
+hosted_quota_mb = 0
+",
+            ),
+        )
+        .await;
+        let peer_id_a = *coord_a.peer_id();
+        let peer_id_b = *coord_b.peer_id();
+        let addr_a: Multiaddr = coord_a.listen_addrs()[0].parse().unwrap();
+
+        coord_b.add_bootstrap_peer(peer_id_a, addr_a).await.unwrap();
+        coord_b.bootstrap_dht().await.unwrap();
+        coord_b
+            .wait_until_peer_connected(peer_id_a, Duration::from_secs(10))
+            .await
+            .unwrap();
+        coord_a
+            .wait_until_peer_connected(peer_id_b, Duration::from_secs(10))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        let params = DissolutionParams {
+            data_shards: 2,
+            total_shards: 3,
+        };
+        coord_a
+            .dissolve_and_publish_with_options(
+                b"zero hosted quota must refuse pushed shares",
+                params,
+                PublishOptions::default(),
+            )
+            .await
+            .expect("publish succeeds; the publisher keeps every share");
+
+        let (attempted, refused) = coord_a.push_counts();
+        assert!(
+            attempted >= 1 && refused >= 1,
+            "A must have tried to push and been refused (attempted {attempted}, refused {refused})"
+        );
+        assert_eq!(store_b.hosted_quota_bytes(), 0);
+        assert_eq!(
+            store_b.used_hosted_bytes(),
+            0,
+            "a node with hosted_quota_mb = 0 must hold no pushed shares"
+        );
+
+        coord_a.shutdown().await;
+        coord_b.shutdown().await;
+    })
+    .await;
+
+    result.expect("zero_hosted_quota_node_refuses_pushed_shares timed out (60s)");
+}
+
+/// The opt-in path end to end through the *configuration*: B sets
+/// `storage.hosted_quota_mb` in its config.toml, holds A's pushed shares, A
+/// goes offline, and C (never connected to A) retrieves the content from B.
+#[tokio::test(flavor = "multi_thread")]
+async fn node_with_hosted_quota_key_holds_shares_and_serves_after_publisher_leaves() {
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let result = timeout(Duration::from_secs(60), async {
+        let (coord_a, _store_a) = spawn_configured_node(0xA6, None).await;
+        let (coord_b, store_b) = spawn_configured_node(
+            0xB6,
+            Some("[storage]\nquota_mb = 100\nbandwidth_mb_day = 1024\nhosted_quota_mb = 50\n"),
+        )
+        .await;
+        let peer_id_a = *coord_a.peer_id();
+        let peer_id_b = *coord_b.peer_id();
+        let addr_a: Multiaddr = coord_a.listen_addrs()[0].parse().unwrap();
+        let addr_b: Multiaddr = coord_b.listen_addrs()[0].parse().unwrap();
+
+        coord_b.add_bootstrap_peer(peer_id_a, addr_a).await.unwrap();
+        coord_b.bootstrap_dht().await.unwrap();
+        coord_b
+            .wait_until_peer_connected(peer_id_a, Duration::from_secs(10))
+            .await
+            .unwrap();
+        coord_a
+            .wait_until_peer_connected(peer_id_b, Duration::from_secs(10))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        let content = b"hosted quota key: B holds it, A leaves, C still reads it";
+        // A places at most one share per peer, and B is the only peer, so
+        // B can hold exactly one share per segment. With k = 1 that one share
+        // is enough for C to reconstruct; with k = 2 it would not be (see
+        // `dissolve_and_publish_distributes_to_connected_peers` for two hosts).
+        let params = DissolutionParams {
+            data_shards: 1,
+            total_shards: 2,
+        };
+        let report = coord_a
+            .dissolve_and_publish_with_options(content, params, PublishOptions::strict(params))
+            .await
+            .expect("publish should reach the strict remote-distribution requirement via B");
+        let mid = report.mid;
+
+        assert!(
+            store_b.used_hosted_bytes() > 0,
+            "B was configured with hosted_quota_mb and must hold pushed shares"
+        );
+
+        // A goes away entirely.
+        coord_a.shutdown().await;
+
+        // C only ever talks to B.
+        let (coord_c, _store_c) = spawn_configured_node(0xC6, None).await;
+        coord_c.add_bootstrap_peer(peer_id_b, addr_b).await.unwrap();
+        coord_c.bootstrap_dht().await.unwrap();
+        coord_c
+            .wait_until_peer_connected(peer_id_b, Duration::from_secs(10))
+            .await
+            .unwrap();
+
+        let recovered = coord_c
+            .retrieve_from_network(&mid, params)
+            .await
+            .expect("C must retrieve from B with the publisher offline");
+        assert_eq!(recovered.as_slice(), content as &[u8]);
+
+        coord_b.shutdown().await;
+        coord_c.shutdown().await;
+    })
+    .await;
+
+    result.expect(
+        "node_with_hosted_quota_key_holds_shares_and_serves_after_publisher_leaves timed out (60s)",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn default_config_accepts_remote_distribution() {
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let result = timeout(Duration::from_secs(30), async {
+        let (coord_a, _store_a) = spawn_phase21_node(0xA0, 0).await;
+        let (coord_b, store_b) = spawn_phase21_default_config_node(0xB0).await;
+
+        let peer_id_a = *coord_a.peer_id();
+        let peer_id_b = *coord_b.peer_id();
+        let addr_a: Multiaddr = coord_a.listen_addrs()[0].parse().unwrap();
+
+        coord_b.add_bootstrap_peer(peer_id_a, addr_a).await.unwrap();
+        coord_b.bootstrap_dht().await.unwrap();
+        coord_b
+            .wait_until_peer_connected(peer_id_a, Duration::from_secs(10))
+            .await
+            .unwrap();
+        coord_a
+            .wait_until_peer_connected(peer_id_b, Duration::from_secs(10))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let params = DissolutionParams {
+            data_shards: 1,
+            total_shards: 2,
+        };
+        let report = coord_a
+            .dissolve_and_publish_with_options(
+                b"default hosted quota must accept remote shares",
+                params,
+                PublishOptions::strict(params),
+            )
+            .await
+            .expect("default-config peer should accept required remote placement");
+
+        assert_eq!(report.remote_distinct_shards_per_segment, vec![1]);
+        assert!(
+            store_b.used_hosted_bytes() > 0,
+            "default-config peer accepted no hosted share"
+        );
+
+        coord_a.shutdown().await;
+        coord_b.shutdown().await;
+    })
+    .await;
+
+    result.expect("default_config_accepts_remote_distribution timed out (30s)");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -4841,4 +5137,218 @@ async fn credential_exchange_actually_stores_a_credential() {
     .await;
 
     result.expect("credential exchange test timed out");
+}
+
+// ── Connection stability ─────────────────────────────────────────────────────
+//
+// Measured on this codebase before the fix (two loopback CLI daemons, receiver
+// dials sender): the link was closed with `KeepAliveTimeout` ~30 s after the
+// last request, and the redial that should have restored it failed with
+// `AddrInUse` (Windows keeps the closed 4-tuple in TIME_WAIT and the dial reused
+// the listen port) or waited for a 30 s timer. A receive started in that window
+// burned its 6 lookups on an empty routing table and failed with `no record found`.
+
+/// A link that carries no request must stay up. It used to be closed by the
+/// swarm's 30 s idle timeout because nothing on the connection asked to keep it.
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_link_to_bootstrap_peer_outlives_the_old_idle_timeout() {
+    use std::time::Duration;
+
+    let dir_a = tempfile::tempdir().unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
+    let store_a = Arc::new(LocalShareStore::open(dir_a.path(), 100).unwrap());
+    let store_b = Arc::new(LocalShareStore::open(dir_b.path(), 100).unwrap());
+
+    let mut node_a =
+        MiasmaNode::new(&[0x31u8; 32], NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+    let addr_a = node_a.collect_listen_addrs(400).await[0].to_string();
+    let coord_a = MiasmaCoordinator::start(node_a, store_a, vec![addr_a.clone()]).await;
+    let peer_id_a = *coord_a.peer_id();
+
+    let mut node_b =
+        MiasmaNode::new(&[0x32u8; 32], NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+    let addr_b = node_b.collect_listen_addrs(400).await[0].to_string();
+    let coord_b = MiasmaCoordinator::start(node_b, store_b, vec![addr_b]).await;
+
+    // Only the receiver dials the sender: the real topology.
+    coord_b
+        .add_bootstrap_peer(peer_id_a, addr_a.parse::<Multiaddr>().unwrap())
+        .await
+        .unwrap();
+    coord_b
+        .wait_until_peer_connected(peer_id_a, Duration::from_secs(10))
+        .await
+        .expect("B never connected to A");
+
+    // No request at all for longer than the old 30 s idle timeout plus the
+    // AutoNAT probe that used to reset it (measured: closed at 44.5 s).
+    let started = tokio::time::Instant::now();
+    let mut lowest = usize::MAX;
+    while started.elapsed() < Duration::from_secs(50) {
+        let n_b = coord_b.dht_handle().connected_peers().await.unwrap().len();
+        let n_a = coord_a.dht_handle().connected_peers().await.unwrap().len();
+        lowest = lowest.min(n_a).min(n_b);
+        assert!(
+            lowest >= 1,
+            "the link dropped {:.1}s after it came up (A sees {n_a}, B sees {n_b})",
+            started.elapsed().as_secs_f32()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    coord_a.shutdown().await;
+    coord_b.shutdown().await;
+}
+
+/// With every bootstrap peer unreachable, a receive reports that plainly (naming
+/// the address) instead of `no record found` after burning its lookups.
+#[tokio::test(flavor = "multi_thread")]
+async fn unreachable_bootstrap_is_reported_as_such_not_as_a_missing_record() {
+    use std::time::Duration;
+
+    let dir_b = tempfile::tempdir().unwrap();
+    let store_b = Arc::new(LocalShareStore::open(dir_b.path(), 100).unwrap());
+    let mut node_b =
+        MiasmaNode::new(&[0x35u8; 32], NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+    let addr_b = node_b.collect_listen_addrs(400).await[0].to_string();
+    let coord_b = MiasmaCoordinator::start(node_b, store_b, vec![addr_b]).await;
+
+    let dead_port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let dead_peer = libp2p_peer_id_for_test();
+    let dead_addr: Multiaddr = format!("/ip4/127.0.0.1/tcp/{dead_port}").parse().unwrap();
+    coord_b
+        .add_bootstrap_peer(dead_peer, dead_addr)
+        .await
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let err = coord_b
+        .dht_handle()
+        .ensure_connected(Duration::from_secs(3))
+        .await
+        .expect_err("nothing listens there");
+    let text = err.to_string();
+    assert!(text.contains("not connected to any peer"), "{text}");
+    assert!(text.contains("unreachable"), "{text}");
+    assert!(text.contains(&format!("/tcp/{dead_port}")), "{text}");
+    assert!(started.elapsed() < Duration::from_secs(10));
+
+    // No bootstrap peer configured at all is not an error: there is nothing to wait for.
+    let dir_c = tempfile::tempdir().unwrap();
+    let store_c = Arc::new(LocalShareStore::open(dir_c.path(), 100).unwrap());
+    let mut node_c =
+        MiasmaNode::new(&[0x36u8; 32], NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+    let addr_c = node_c.collect_listen_addrs(400).await[0].to_string();
+    let coord_c = MiasmaCoordinator::start(node_c, store_c, vec![addr_c]).await;
+    coord_c
+        .dht_handle()
+        .ensure_connected(Duration::from_secs(3))
+        .await
+        .expect("no bootstrap peer: nothing to wait for");
+
+    coord_b.shutdown().await;
+    coord_c.shutdown().await;
+}
+
+/// A peer id nobody owns, for a bootstrap entry that must never connect.
+fn libp2p_peer_id_for_test() -> miasma_core::PeerId {
+    miasma_core::PeerId::random()
+}
+
+/// Forward every connection accepted on `port` to `target` once `after` has
+/// elapsed. Stands in for a network path that is not there yet (the sender is
+/// not reachable for a while): until then the port refuses connections.
+async fn forward_from_when_up(port: u16, target: std::net::SocketAddr, after: std::time::Duration) {
+    tokio::time::sleep(after).await;
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .unwrap();
+    loop {
+        let (mut inbound, _) = listener.accept().await.unwrap();
+        tokio::spawn(async move {
+            if let Ok(mut out) = tokio::net::TcpStream::connect(target).await {
+                let _ = tokio::io::copy_bidirectional(&mut inbound, &mut out).await;
+            }
+        });
+    }
+}
+
+/// A receive started while the sender cannot be reached yet must wait for the
+/// link (bounded) instead of spending its lookups on an empty routing table.
+/// The path comes up 50 s in: past the ~41 s the old six lookups took in total
+/// (each lookup waits for Kademlia's own failed dial), inside the 60 s wait.
+#[tokio::test(flavor = "multi_thread")]
+async fn record_lookup_waits_for_a_sender_that_becomes_reachable() {
+    use std::time::Duration;
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("miasma_core=debug,libp2p_swarm=debug")
+        .try_init();
+
+    let dir_a = tempfile::tempdir().unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
+    let store_a = Arc::new(LocalShareStore::open(dir_a.path(), 100).unwrap());
+    let store_b = Arc::new(LocalShareStore::open(dir_b.path(), 100).unwrap());
+
+    let mut node_a =
+        MiasmaNode::new(&[0x33u8; 32], NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+    let addr_a = node_a.collect_listen_addrs(400).await[0].to_string();
+    let coord_a = MiasmaCoordinator::start(node_a, store_a, vec![addr_a.clone()]).await;
+    let peer_id_a = *coord_a.peer_id();
+    // "/ip4/127.0.0.1/tcp/<port>"
+    let real_port: u16 = addr_a
+        .rsplit('/')
+        .next()
+        .and_then(|p| p.parse().ok())
+        .expect("A listens on tcp");
+
+    // The address B is given points at a port that refuses connections for now.
+    let front_port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let forwarder = tokio::spawn(forward_from_when_up(
+        front_port,
+        std::net::SocketAddr::from(([127, 0, 0, 1], real_port)),
+        Duration::from_secs(50),
+    ));
+
+    let content = b"a receive that starts before the sender is reachable";
+    let params = DissolutionParams {
+        data_shards: 2,
+        total_shards: 3,
+    };
+    let mid = coord_a
+        .dissolve_and_publish(content, params)
+        .await
+        .expect("publish on A");
+
+    let mut node_b =
+        MiasmaNode::new(&[0x34u8; 32], NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+    let addr_b = node_b.collect_listen_addrs(400).await[0].to_string();
+    let coord_b = MiasmaCoordinator::start(node_b, store_b, vec![addr_b]).await;
+    let front: Multiaddr = format!("/ip4/127.0.0.1/tcp/{front_port}").parse().unwrap();
+    coord_b.add_bootstrap_peer(peer_id_a, front).await.unwrap();
+
+    let started = std::time::Instant::now();
+    let _found = tokio::time::timeout(
+        Duration::from_secs(120),
+        coord_b.fetch_record_and_manifest(&mid),
+    )
+    .await
+    .expect("the lookup neither succeeded nor failed within 120 s")
+    .expect("the lookup must wait for the link and then find the record");
+    let waited = started.elapsed();
+    eprintln!("[late sender] lookup succeeded after {waited:?}");
+    assert!(
+        waited >= Duration::from_secs(45),
+        "the path only came up after 50 s, yet the lookup returned after {waited:?}"
+    );
+
+    forwarder.abort();
+    coord_a.shutdown().await;
+    coord_b.shutdown().await;
 }

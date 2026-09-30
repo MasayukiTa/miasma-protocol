@@ -40,6 +40,89 @@ const SHARES_DIR: &str = "shares";
 const INDEX_FILE: &str = "store_index.json";
 const SHARE_EXT: &str = ".ms";
 
+/// Share of the hosted quota one principal may hold, in percent.
+///
+/// The hosted budget is one pool; without a per-principal limit a single
+/// admitted peer can fill all of it and deny every later publisher. A quarter
+/// means at least four distinct principals must cooperate to exhaust the pool,
+/// while a single publisher can still park a meaningful amount of data.
+pub const HOSTED_PRINCIPAL_SHARE_PERCENT: u64 = 25;
+
+/// Lower bound of the per-principal hosted budget, applied as
+/// `min(hosted quota, HOSTED_PRINCIPAL_FLOOR_BYTES)`.
+///
+/// A percentage alone makes a small quota unusable (25% of 20 MiB is 5 MiB,
+/// less than one 4 MiB-segment publish of a few pieces). 16 MiB lets one
+/// publisher place a full segment set on a small node, and the `min` with the
+/// quota keeps the budget from ever exceeding the pool itself.
+pub const HOSTED_PRINCIPAL_FLOOR_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Why [`LocalShareStore::put_hosted_by`] refused a share. Reaches the pusher
+/// as a `StoreRejectReason`, so its `PushState` can tell a standing refusal
+/// (budget) from a per-piece one (ownership).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostedRefusal {
+    /// The global hosted budget is full.
+    QuotaExceeded,
+    /// The pushing principal already holds its share of the hosted budget.
+    PrincipalBudgetExceeded,
+    /// A different principal holds this `(mid_prefix, segment, slot)`.
+    NotOwner,
+}
+
+impl std::fmt::Display for HostedRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::QuotaExceeded => write!(f, "hosted share storage quota exceeded"),
+            Self::PrincipalBudgetExceeded => {
+                write!(f, "per-principal hosted share budget exceeded")
+            }
+            Self::NotOwner => write!(f, "hosted piece is held by another principal"),
+        }
+    }
+}
+
+/// Error of [`LocalShareStore::put_hosted_by`].
+#[derive(Debug)]
+pub enum HostedPutError {
+    /// The store declined the share for a policy reason.
+    Refused(HostedRefusal),
+    /// I/O, crypto or serialization failure.
+    Store(MiasmaError),
+}
+
+impl From<HostedRefusal> for HostedPutError {
+    fn from(r: HostedRefusal) -> Self {
+        Self::Refused(r)
+    }
+}
+
+impl From<MiasmaError> for HostedPutError {
+    fn from(e: MiasmaError) -> Self {
+        Self::Store(e)
+    }
+}
+
+impl From<HostedPutError> for MiasmaError {
+    fn from(e: HostedPutError) -> Self {
+        match e {
+            HostedPutError::Refused(r) => MiasmaError::Storage(r.to_string()),
+            HostedPutError::Store(e) => e,
+        }
+    }
+}
+
+impl std::fmt::Display for HostedPutError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(r) => r.fmt(f),
+            Self::Store(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for HostedPutError {}
+
 // ─── LRU index ───────────────────────────────────────────────────────────────
 
 /// Who a stored share belongs to.
@@ -67,7 +150,10 @@ pub enum ShareOrigin {
 /// (fresh key, fresh RS/SSS output) and a different content address. Content
 /// addressing (`BLAKE3(bincode(share))`) means those generations would
 /// otherwise coexist forever instead of the newer one replacing the older --
-/// see the "hosted put replaces same-tuple entry" logic in `put_hosted`.
+/// see the "hosted put replaces same-tuple entry" logic in `put_hosted_by`.
+///
+/// The tuple is public and carries no identity, so it is *not* ownership: a
+/// replacement is only allowed for the principal that stored the old entry.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 struct HostedTuple {
     mid_prefix: [u8; 8],
@@ -86,9 +172,52 @@ struct IndexEntry {
     /// they age out via normal hosted-quota pressure instead).
     #[serde(default)]
     hosted_tuple: Option<HostedTuple>,
+    /// Which piece this share is, for *every* entry (owned or hosted): the same
+    /// `(mid_prefix, segment, slot)` triple as `hosted_tuple`.
+    ///
+    /// It exists so a piece can be found by index lookup instead of by
+    /// decrypting stored shares one after another to read their headers, which
+    /// is what serving a fetch request used to do -- O(shares in the store)
+    /// full decryptions per request. `None` for entries written before this
+    /// field existed; `find_piece` fills those in lazily, once.
+    #[serde(default)]
+    piece: Option<PieceKey>,
+    /// For `Hosted` entries: the authenticated principal (the transport-level
+    /// peer id) that pushed the share. `None` means unknown -- entries written
+    /// before this field existed, or pushed through [`LocalShareStore::put_hosted`]
+    /// without a principal. An unknown owner never matches anyone, so its entry
+    /// is neither replaced nor claimed by a later push; its bytes are accounted
+    /// to one shared "unknown" bucket.
+    #[serde(default)]
+    hosted_principal: Option<String>,
+}
+
+/// See [`IndexEntry::piece`]. Same shape as [`HostedTuple`].
+type PieceKey = HostedTuple;
+
+impl PieceKey {
+    fn of(share: &MiasmaShare) -> Self {
+        Self {
+            mid_prefix: share.mid_prefix,
+            segment_index: share.segment_index,
+            slot_index: share.slot_index,
+        }
+    }
 }
 
 type StoreIndex = HashMap<String, IndexEntry>;
+
+/// A parsed copy of the index plus the file stamp it was read at. Lets
+/// read-only lookups skip re-parsing a multi-megabyte JSON file per request.
+struct CachedIndex {
+    stamp: Option<(SystemTime, u64)>,
+    index: std::sync::Arc<StoreIndex>,
+}
+
+fn index_stamp(data_dir: &Path) -> Option<(SystemTime, u64)> {
+    let m = std::fs::metadata(data_dir.join(INDEX_FILE)).ok()?;
+    Some((m.modified().ok()?, m.len()))
+}
 
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -273,6 +402,9 @@ fn rebuild_index(data_dir: &Path, shares_dir: &Path) {
                     // eviction sooner than ideal; never a security issue).
                     origin: ShareOrigin::Owned,
                     hosted_tuple: None,
+                    // Filled in lazily by `find_piece`.
+                    piece: None,
+                    hosted_principal: None,
                 },
             );
         }
@@ -313,14 +445,18 @@ pub struct LocalShareStore {
     /// content for can never evict this node's own shares, or another
     /// publisher's already-hosted shares, just by pushing enough shares of
     /// its own -- see `put_hosted`'s reject-rather-than-evict behaviour.
-    /// Zero by default (a node must opt in via `with_hosted_quota_mb` to
-    /// accept any pushed shares at all).
+    /// Raw `open` keeps this at zero; production callers apply their configured
+    /// hosted-share policy via `open_with_quotas`. This keeps low-level/test
+    /// callers fail-closed while shipped node defaults actually participate in
+    /// distributed hosting.
     hosted_quota_bytes: u64,
     /// Serializes every index read-modify-write sequence across all mutating
     /// methods, so two concurrent writers (e.g. a local dissolve and an
     /// inbound network `Store` request) can never interleave and corrupt or
     /// silently drop an update to `store_index.json`.
     write_lock: std::sync::Mutex<()>,
+    /// Parsed index for read-only piece lookups; see [`CachedIndex`].
+    index_cache: std::sync::Mutex<Option<CachedIndex>>,
 }
 
 impl LocalShareStore {
@@ -360,7 +496,21 @@ impl LocalShareStore {
             quota_bytes: quota_mb * 1024 * 1024,
             hosted_quota_bytes: 0,
             write_lock: std::sync::Mutex::new(()),
+            index_cache: std::sync::Mutex::new(None),
         })
+    }
+
+    /// Open the store using both owned-share and hosted-share quotas.
+    ///
+    /// This is the production constructor. Keeping hosted quota explicit here
+    /// prevents remote shares from sharing/evicting the owned quota while also
+    /// avoiding the raw `open` default of rejecting every inbound share.
+    pub fn open_with_quotas(
+        data_dir: &Path,
+        quota_mb: u64,
+        hosted_quota_mb: u64,
+    ) -> Result<Self, MiasmaError> {
+        Ok(Self::open(data_dir, quota_mb)?.with_hosted_quota_mb(hosted_quota_mb))
     }
 
     /// Opt this store in to accepting inbound-hosted shares (from
@@ -372,8 +522,25 @@ impl LocalShareStore {
     /// `put_hosted` always rejects -- a node must opt in to hosting other
     /// publishers' shares, not have it happen implicitly.
     pub fn with_hosted_quota_mb(mut self, hosted_quota_mb: u64) -> Self {
-        self.hosted_quota_bytes = hosted_quota_mb * 1024 * 1024;
+        self.hosted_quota_bytes = hosted_quota_mb.saturating_mul(1024 * 1024);
         self
+    }
+
+    /// Open the store the way a daemon does: owned quota from
+    /// `storage.quota_mb`, hosted quota from `storage.hosted_quota_mb`
+    /// (`0` refuses every pushed share). Thin wrapper over
+    /// `open_with_quotas` that takes the parsed `StorageConfig`, so a test can
+    /// drive it with a `config.toml`.
+    pub fn open_configured(
+        data_dir: &Path,
+        storage: &crate::config::StorageConfig,
+    ) -> Result<Self, MiasmaError> {
+        Self::open_with_quotas(data_dir, storage.quota_mb, storage.hosted_quota_mb)
+    }
+
+    /// Configured hosted-share budget in bytes (`0` = refuse all pushed shares).
+    pub fn hosted_quota_bytes(&self) -> u64 {
+        self.hosted_quota_bytes
     }
 
     fn lock_master_key(
@@ -435,6 +602,8 @@ impl LocalShareStore {
                 last_accessed_secs: now_secs(),
                 origin: ShareOrigin::Owned,
                 hosted_tuple: None,
+                piece: Some(PieceKey::of(share)),
+                hosted_principal: None,
             },
         );
         save_index(&self.data_dir, &index)?;
@@ -442,23 +611,54 @@ impl LocalShareStore {
         Ok(address)
     }
 
-    /// Store a share on behalf of a remote publisher (hosted quota), as
-    /// accepted via inbound `/miasma/share-store/1.0.0`. Returns its content
-    /// address.
+    /// Store a share on behalf of a remote publisher whose identity is not
+    /// known (hosted quota). Returns its content address.
     ///
-    /// Unlike `put`, this **never evicts** owned shares or other publishers'
-    /// hosted shares to make room -- a peer merely being helped with
-    /// distribution must not be able to push its way past what it was
-    /// allocated. When the hosted budget would be exceeded, returns
-    /// `Err(MiasmaError::Storage(..))` (reject, not evict).
-    ///
-    /// If an existing hosted entry already occupies the same
-    /// `(mid_prefix, segment_index, slot_index)` tuple as `share` (a newer
-    /// generation from `redistribute_segment`'s repair path, or from the
-    /// same content being re-dissolved and re-pushed), that older entry is
-    /// replaced rather than left to coexist ambiguously with the new one --
-    /// see `HostedTuple`'s doc comment.
+    /// The share is recorded with an *unknown* principal: it is accounted to
+    /// the shared "unknown" bucket and can neither be replaced by, nor replace,
+    /// any other entry with the same `(mid_prefix, segment_index, slot_index)`
+    /// tuple. Network code must use [`put_hosted_by`](Self::put_hosted_by) with
+    /// the authenticated peer id instead.
     pub fn put_hosted(&self, share: &MiasmaShare) -> Result<String, MiasmaError> {
+        self.put_hosted_inner(share, None)
+            .map_err(MiasmaError::from)
+    }
+
+    /// Store a share pushed by the authenticated principal `principal` (the
+    /// transport-level peer id of the sender). Returns its content address.
+    ///
+    /// Unlike `put`, this **never evicts** owned shares or hosted shares of
+    /// other principals to make room. Refusals are typed ([`HostedRefusal`]):
+    ///
+    /// * [`HostedRefusal::NotOwner`] -- another principal (or an unknown one)
+    ///   already holds this `(mid_prefix, segment_index, slot_index)` tuple.
+    ///   The tuple is public and carries no identity, so it cannot express
+    ///   ownership; only the principal that stored an entry may replace it.
+    /// * [`HostedRefusal::QuotaExceeded`] -- the global hosted budget is full.
+    /// * [`HostedRefusal::PrincipalBudgetExceeded`] -- this principal already
+    ///   holds its fraction of the hosted budget
+    ///   ([`hosted_principal_budget_bytes`](Self::hosted_principal_budget_bytes)).
+    ///
+    /// A share whose bytes are already stored is acknowledged without touching
+    /// the entry, so a second principal pushing identical bytes can neither
+    /// take over nor evict the first one's copy.
+    ///
+    /// A newer generation of the same tuple pushed by the *same* principal (a
+    /// republish, or `redistribute_segment`'s repair path) replaces the older
+    /// one rather than coexisting ambiguously -- see `HostedTuple`.
+    pub fn put_hosted_by(
+        &self,
+        share: &MiasmaShare,
+        principal: &str,
+    ) -> Result<String, HostedPutError> {
+        self.put_hosted_inner(share, Some(principal))
+    }
+
+    fn put_hosted_inner(
+        &self,
+        share: &MiasmaShare,
+        principal: Option<&str>,
+    ) -> Result<String, HostedPutError> {
         let _guard = self
             .write_lock
             .lock()
@@ -472,39 +672,52 @@ impl LocalShareStore {
         let size = plaintext.len() as u64;
 
         let mut index = load_index(&self.data_dir);
-        let already_present = index.contains_key(&address);
+        if index.contains_key(&address) {
+            // Identical bytes are already stored: idempotent. Never change the
+            // recorded owner or origin of an existing entry.
+            return Ok(address);
+        }
 
         let tuple = HostedTuple {
             mid_prefix: share.mid_prefix,
             segment_index: share.segment_index,
             slot_index: share.slot_index,
         };
-        let conflicting_old = index
+        // An unknown principal (`None`) never owns anything.
+        let owned_by_caller =
+            |e: &IndexEntry| principal.is_some() && e.hosted_principal.as_deref() == principal;
+        let conflicting: Vec<(String, u64, bool)> = index
             .iter()
-            .find(|(addr, e)| {
-                addr.as_str() != address
-                    && e.origin == ShareOrigin::Hosted
-                    && e.hosted_tuple == Some(tuple)
-            })
-            .map(|(addr, e)| (addr.clone(), e.size_bytes));
+            .filter(|(_, e)| e.origin == ShareOrigin::Hosted && e.hosted_tuple == Some(tuple))
+            .map(|(addr, e)| (addr.clone(), e.size_bytes, owned_by_caller(e)))
+            .collect();
+        if conflicting.iter().any(|(_, _, mine)| !mine) {
+            return Err(HostedRefusal::NotOwner.into());
+        }
+        let freed: u64 = conflicting.iter().map(|(_, sz, _)| *sz).sum();
 
-        if !already_present {
-            let current_hosted: u64 = index
-                .values()
-                .filter(|e| e.origin == ShareOrigin::Hosted)
-                .map(|e| e.size_bytes)
-                .sum();
-            let freed_by_replacement = conflicting_old.as_ref().map(|(_, sz)| *sz).unwrap_or(0);
-            if current_hosted + size - freed_by_replacement > self.hosted_quota_bytes {
-                return Err(MiasmaError::Storage(
-                    "hosted share storage quota exceeded".into(),
-                ));
-            }
+        let hosted_total: u64 = index
+            .values()
+            .filter(|e| e.origin == ShareOrigin::Hosted)
+            .map(|e| e.size_bytes)
+            .sum();
+        if hosted_total.saturating_sub(freed) + size > self.hosted_quota_bytes {
+            return Err(HostedRefusal::QuotaExceeded.into());
+        }
+        // `None` matches `None`: unknown/legacy entries share one bucket.
+        let held_by_principal: u64 = index
+            .values()
+            .filter(|e| {
+                e.origin == ShareOrigin::Hosted && e.hosted_principal.as_deref() == principal
+            })
+            .map(|e| e.size_bytes)
+            .sum();
+        if held_by_principal.saturating_sub(freed) + size > self.hosted_principal_budget_bytes() {
+            return Err(HostedRefusal::PrincipalBudgetExceeded.into());
         }
 
-        // Replace an older generation of the same (mid, segment, slot) tuple
-        // rather than let both coexist.
-        if let Some((old_addr, _)) = &conflicting_old {
+        // Replace the caller's own older generation of this tuple.
+        for (old_addr, _, _) in &conflicting {
             let _ = std::fs::remove_file(self.share_path(old_addr));
             index.remove(old_addr);
         }
@@ -520,11 +733,24 @@ impl LocalShareStore {
                 last_accessed_secs: now_secs(),
                 origin: ShareOrigin::Hosted,
                 hosted_tuple: Some(tuple),
+                piece: Some(PieceKey::of(share)),
+                hosted_principal: principal.map(str::to_owned),
             },
         );
         save_index(&self.data_dir, &index)?;
 
         Ok(address)
+    }
+
+    /// The most hosted bytes one principal (one pushing peer; all unknown
+    /// owners together) may hold: see [`HOSTED_PRINCIPAL_SHARE_PERCENT`] and
+    /// [`HOSTED_PRINCIPAL_FLOOR_BYTES`].
+    pub fn hosted_principal_budget_bytes(&self) -> u64 {
+        let fraction = self
+            .hosted_quota_bytes
+            .saturating_mul(HOSTED_PRINCIPAL_SHARE_PERCENT)
+            / 100;
+        fraction.max(self.hosted_quota_bytes.min(HOSTED_PRINCIPAL_FLOOR_BYTES))
     }
 
     /// Current total size of `Hosted`-origin share blobs in bytes.
@@ -538,14 +764,7 @@ impl LocalShareStore {
 
     /// Retrieve a share by its content address.
     pub fn get(&self, address: &str) -> Result<MiasmaShare, MiasmaError> {
-        let master_guard = self.lock_master_key()?;
-        let master_key = Self::live_master_key(&master_guard)?;
-        let file_path = self.share_path(address);
-        let blob = std::fs::read(&file_path)?;
-
-        let file_key = derive_file_key(master_key, address)?;
-        let plaintext = decrypt_share(&file_key, &blob)?;
-        let share = MiasmaShare::from_bytes(&plaintext)?;
+        let share = self.get_untouched(address)?;
 
         // Update last_accessed.
         let mut index = load_index(&self.data_dir);
@@ -555,6 +774,123 @@ impl LocalShareStore {
         }
 
         Ok(share)
+    }
+
+    /// As [`get`](Self::get) but without recording the access.
+    ///
+    /// `get` re-reads and rewrites the whole index file on every call to bump
+    /// `last_accessed`. That is right for LRU bookkeeping and wrong for a hot
+    /// read path (serving a fetch request), where it is O(index size) extra
+    /// work per share and turns every read into a write.
+    pub fn get_untouched(&self, address: &str) -> Result<MiasmaShare, MiasmaError> {
+        let master_guard = self.lock_master_key()?;
+        let master_key = Self::live_master_key(&master_guard)?;
+        let file_path = self.share_path(address);
+        let blob = std::fs::read(&file_path)?;
+
+        let file_key = derive_file_key(master_key, address)?;
+        let plaintext = decrypt_share(&file_key, &blob)?;
+        MiasmaShare::from_bytes(&plaintext)
+    }
+
+    /// The parsed index, re-read only when the file has changed.
+    fn index_snapshot(&self) -> std::sync::Arc<StoreIndex> {
+        let stamp = index_stamp(&self.data_dir);
+        let mut cache = self.index_cache.lock().unwrap();
+        if let (Some(c), Some(_)) = (cache.as_ref(), stamp) {
+            if c.stamp == stamp {
+                return c.index.clone();
+            }
+        }
+        let index = std::sync::Arc::new(load_index(&self.data_dir));
+        *cache = Some(CachedIndex {
+            stamp,
+            index: index.clone(),
+        });
+        index
+    }
+
+    /// The address of the share for exactly `(mid_prefix, segment, slot)`, found
+    /// through the index with **no decryption**.
+    ///
+    /// This replaces `search_by_mid_prefix` + `get` on the fetch-serving path,
+    /// which decrypted every share in the store to read its header: one fetch
+    /// request cost O(shares stored) full decryptions and index rewrites. For a
+    /// 100 GiB publish that is 32,000 shares, ~200 GiB of decryption per
+    /// request.
+    ///
+    /// If several generations of the same piece exist (the same content
+    /// published twice gets a fresh key each time) the most recently written one
+    /// is returned. Entries written before piece keys existed are identified by
+    /// decrypting them once; the answer is recorded so it is never repeated.
+    pub fn find_piece(
+        &self,
+        mid_prefix: &[u8; 8],
+        segment_index: u32,
+        slot_index: u16,
+    ) -> Option<String> {
+        let want = PieceKey {
+            mid_prefix: *mid_prefix,
+            segment_index,
+            slot_index,
+        };
+        let pick = |index: &StoreIndex| {
+            index
+                .iter()
+                .filter(|(_, e)| e.piece == Some(want))
+                .max_by_key(|(_, e)| e.last_accessed_secs)
+                .map(|(addr, _)| addr.clone())
+        };
+
+        if let Some(addr) = pick(&self.index_snapshot()) {
+            return Some(addr);
+        }
+
+        // Not in the cached view: the cache may simply be stale, so look once at
+        // the file itself before concluding the piece is not here.
+        let fresh = load_index(&self.data_dir);
+        if let Some(addr) = pick(&fresh) {
+            return Some(addr);
+        }
+        if fresh.values().all(|e| e.piece.is_some()) {
+            return None;
+        }
+        self.backfill_pieces(&want)
+    }
+
+    /// One-time migration for entries with no piece key: decrypt each, record its
+    /// key in the index, and return the address matching `want`, if any.
+    fn backfill_pieces(&self, want: &PieceKey) -> Option<String> {
+        let _guard = self.write_lock.lock().ok()?;
+        let mut index = load_index(&self.data_dir);
+        let unknown: Vec<String> = index
+            .iter()
+            .filter(|(_, e)| e.piece.is_none())
+            .map(|(a, _)| a.clone())
+            .collect();
+        let mut found: Option<(String, u64)> = None;
+        let mut changed = false;
+        for addr in unknown {
+            let Ok(share) = self.get_untouched(&addr) else {
+                continue;
+            };
+            let key = PieceKey::of(&share);
+            if let Some(e) = index.get_mut(&addr) {
+                e.piece = Some(key);
+                changed = true;
+                if key == *want
+                    && found
+                        .as_ref()
+                        .is_none_or(|(_, t)| e.last_accessed_secs >= *t)
+                {
+                    found = Some((addr.clone(), e.last_accessed_secs));
+                }
+            }
+        }
+        if changed {
+            let _ = save_index(&self.data_dir, &index);
+        }
+        found.map(|(a, _)| a)
     }
 
     /// Check if a share with the given address exists.
@@ -659,6 +995,24 @@ impl LocalShareStore {
             .sum()
     }
 
+    /// Configured byte budget for locally-owned shares.
+    ///
+    /// Large streaming publishes use this for a preflight check so a file
+    /// cannot silently evict its own earlier segments while it is still being
+    /// published.
+    pub fn owned_quota_bytes(&self) -> u64 {
+        self.quota_bytes
+    }
+
+    /// Current byte usage by locally-owned shares only.
+    pub fn used_owned_bytes(&self) -> u64 {
+        load_index(&self.data_dir)
+            .values()
+            .filter(|entry| entry.origin == ShareOrigin::Owned)
+            .map(|entry| entry.size_bytes)
+            .sum()
+    }
+
     // ── private helpers ────────────────────────────────────────────────────
 
     fn share_path(&self, address: &str) -> PathBuf {
@@ -748,6 +1102,21 @@ mod tests {
             100,
             ts,
         )
+    }
+
+    #[test]
+    fn default_node_config_accepts_hosted_share() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = crate::config::NodeConfig::default();
+        let store = LocalShareStore::open_with_quotas(
+            dir.path(),
+            config.storage.quota_mb,
+            config.storage.hosted_quota_mb,
+        )
+        .unwrap();
+        let share = dummy_share(31);
+        let address = store.put_hosted(&share).unwrap();
+        assert!(store.contains(&address));
     }
 
     #[test]
@@ -1039,5 +1408,221 @@ mod tests {
         let addr = store.put(&dummy_share(70)).unwrap();
         assert_eq!(store.list().len(), 1);
         assert!(store.list().contains(&addr));
+    }
+
+    // ── find_piece: index lookup instead of decrypting the whole store ───────
+
+    fn piece(seg: u32, slot: u16, payload: u8) -> MiasmaShare {
+        let mid = ContentId::compute(b"piece lookup", b"k=10,n=20,v=1");
+        MiasmaShare::new(
+            &mid,
+            seg,
+            slot,
+            vec![payload; 64],
+            vec![0xAA; 32],
+            rand::random::<[u8; 12]>(),
+            100,
+            1,
+        )
+    }
+
+    fn prefix() -> [u8; 8] {
+        ContentId::compute(b"piece lookup", b"k=10,n=20,v=1").prefix()
+    }
+
+    fn index_json(dir: &Path) -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(dir.join(INDEX_FILE)).unwrap()).unwrap()
+    }
+
+    fn write_index_json(dir: &Path, v: &serde_json::Value) {
+        std::fs::write(dir.join(INDEX_FILE), serde_json::to_string(v).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn find_piece_locates_each_share_by_its_tuple() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        let a = store.put(&piece(0, 0, 1)).unwrap();
+        let b = store.put(&piece(0, 1, 2)).unwrap();
+        let c = store.put(&piece(1, 0, 3)).unwrap();
+
+        assert_eq!(store.find_piece(&prefix(), 0, 0), Some(a));
+        assert_eq!(store.find_piece(&prefix(), 0, 1), Some(b));
+        assert_eq!(store.find_piece(&prefix(), 1, 0), Some(c.clone()));
+        // Segment and slot are not interchangeable.
+        assert_eq!(store.find_piece(&prefix(), 0, 2), None);
+        assert_eq!(store.find_piece(&prefix(), 2, 0), None);
+        // Nor is a different MID.
+        assert_eq!(store.find_piece(&[9u8; 8], 1, 0), None);
+
+        let got = store.get_untouched(&c).unwrap();
+        assert_eq!((got.segment_index, got.slot_index), (1, 0));
+    }
+
+    #[test]
+    fn a_lookup_neither_decrypts_other_shares_nor_writes_the_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        let mut target = String::new();
+        for slot in 0..20u16 {
+            let addr = store.put(&piece(0, slot, slot as u8)).unwrap();
+            if slot == 7 {
+                target = addr;
+            }
+        }
+        // Destroy every other share file: the old scan decrypted all of them and
+        // would have choked. An index lookup must not need them at all.
+        for addr in store.list() {
+            if addr != target {
+                std::fs::write(
+                    dir.path()
+                        .join(SHARES_DIR)
+                        .join(format!("{addr}{SHARE_EXT}")),
+                    b"x",
+                )
+                .unwrap();
+            }
+        }
+        let before = std::fs::read(dir.path().join(INDEX_FILE)).unwrap();
+        for _ in 0..50 {
+            let addr = store.find_piece(&prefix(), 0, 7).expect("must be found");
+            assert_eq!(addr, target);
+            assert_eq!(store.get_untouched(&addr).unwrap().slot_index, 7);
+        }
+        let after = std::fs::read(dir.path().join(INDEX_FILE)).unwrap();
+        assert_eq!(before, after, "serving reads must not rewrite the index");
+    }
+
+    #[test]
+    fn get_untouched_leaves_last_accessed_alone_but_get_still_updates_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        let addr = store.put(&piece(0, 0, 1)).unwrap();
+
+        // Age the entry so a touch is visible.
+        let mut v = index_json(dir.path());
+        v[&addr]["last_accessed_secs"] = serde_json::json!(5);
+        write_index_json(dir.path(), &v);
+
+        store.get_untouched(&addr).unwrap();
+        assert_eq!(index_json(dir.path())[&addr]["last_accessed_secs"], 5);
+
+        store.get(&addr).unwrap();
+        assert!(
+            index_json(dir.path())[&addr]["last_accessed_secs"]
+                .as_u64()
+                .unwrap()
+                > 5
+        );
+    }
+
+    #[test]
+    fn find_piece_prefers_the_newest_generation() {
+        // The same content published twice gets a fresh key each time, so the same
+        // (mid, segment, slot) can be stored under two addresses.
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        let old = store.put(&piece(0, 0, 1)).unwrap();
+        let new = store.put(&piece(0, 0, 2)).unwrap();
+        assert_ne!(old, new);
+
+        let mut v = index_json(dir.path());
+        v[&old]["last_accessed_secs"] = serde_json::json!(100);
+        v[&new]["last_accessed_secs"] = serde_json::json!(200);
+        write_index_json(dir.path(), &v);
+
+        let fresh = LocalShareStore::open(dir.path(), 100).unwrap();
+        assert_eq!(fresh.find_piece(&prefix(), 0, 0), Some(new));
+    }
+
+    #[test]
+    fn entries_from_before_piece_keys_are_found_and_recorded_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        let a = store.put(&piece(0, 0, 1)).unwrap();
+        let b = store.put(&piece(3, 5, 2)).unwrap();
+
+        // Rewrite the index the way an older version would have: no `piece`.
+        let mut v = index_json(dir.path());
+        for addr in [&a, &b] {
+            v[addr].as_object_mut().unwrap().remove("piece");
+        }
+        write_index_json(dir.path(), &v);
+        assert!(index_json(dir.path())[&a].get("piece").is_none());
+
+        let fresh = LocalShareStore::open(dir.path(), 100).unwrap();
+        assert_eq!(fresh.find_piece(&prefix(), 3, 5), Some(b.clone()));
+        // The answer was recorded for *both* legacy entries, not just the match.
+        let after = index_json(dir.path());
+        assert!(
+            !after[&a]["piece"].is_null(),
+            "legacy entry a was backfilled"
+        );
+        assert!(
+            !after[&b]["piece"].is_null(),
+            "legacy entry b was backfilled"
+        );
+        assert_eq!(fresh.find_piece(&prefix(), 0, 0), Some(a));
+    }
+
+    #[test]
+    fn find_piece_survives_a_reopen_and_sees_another_instances_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = LocalShareStore::open(dir.path(), 100).unwrap();
+        let a = first.put(&piece(0, 0, 1)).unwrap();
+        assert_eq!(first.find_piece(&prefix(), 0, 0), Some(a));
+
+        // A second handle on the same directory writes a new piece; the first
+        // handle's cached view must not hide it.
+        let second = LocalShareStore::open(dir.path(), 100).unwrap();
+        let b = second.put(&piece(4, 4, 9)).unwrap();
+        assert_eq!(first.find_piece(&prefix(), 4, 4), Some(b));
+    }
+
+    #[test]
+    fn hosted_shares_are_findable_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100)
+            .unwrap()
+            .with_hosted_quota_mb(10);
+        let addr = store.put_hosted(&piece(2, 3, 7)).unwrap();
+        assert_eq!(store.find_piece(&prefix(), 2, 3), Some(addr));
+    }
+
+    /// Measurement, not a correctness test: how the cost of one `put` grows with
+    /// the number of shares already stored. Every `put` re-reads and rewrites the
+    /// whole JSON index, so this should grow linearly with the store size (and a
+    /// whole publish quadratically). Run with:
+    /// `cargo test -p miasma-core --lib -- --ignored --nocapture measure_put_cost`
+    #[test]
+    #[ignore]
+    fn measure_put_cost_growth() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100_000).unwrap();
+        let mut n = 0u32;
+        let mut last = std::time::Instant::now();
+        for checkpoint in [250u32, 500, 1000, 2000, 4000] {
+            let batch_start = n;
+            let t = std::time::Instant::now();
+            while n < checkpoint {
+                store
+                    .put(&piece(n / 20, (n % 20) as u16, (n % 251) as u8))
+                    .unwrap();
+                n += 1;
+            }
+            let per_put = t.elapsed().as_secs_f64() * 1e3 / (n - batch_start) as f64;
+            let idx = std::fs::metadata(dir.path().join(INDEX_FILE))
+                .unwrap()
+                .len();
+            println!(
+                "[measure] shares {:>5}: avg {:>7.2} ms/put over the last {:>4}, index file {:>6.2} MB",
+                n,
+                per_put,
+                n - batch_start,
+                idx as f64 / 1e6
+            );
+            last = std::time::Instant::now();
+        }
+        let _ = last;
     }
 }

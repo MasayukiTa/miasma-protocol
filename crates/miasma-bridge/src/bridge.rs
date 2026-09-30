@@ -1043,11 +1043,13 @@ async fn archive_org_torrent(ih_hex: &str) -> anyhow::Result<Vec<u8>> {
 async fn https_get(url: &str) -> anyhow::Result<Vec<u8>> {
     // Use curl subprocess — it handles TLS, redirects, and proxy settings
     // automatically, and is available on Windows 10+.
-    let output = tokio::process::Command::new("curl")
-        .args(["-skL", "--connect-timeout", "10", "-o", "-", url])
-        .output()
-        .await
-        .context("spawn curl")?;
+    let mut curl = tokio::process::Command::new("curl");
+    curl.args(["-skL", "--connect-timeout", "10", "-o", "-", url]);
+    // The bridge runs without a console when started from the desktop app; a
+    // console child would otherwise open its own window on every fetch.
+    #[cfg(windows)]
+    curl.creation_flags(0x0800_0000);
+    let output = curl.output().await.context("spawn curl")?;
 
     if !output.status.success() {
         bail!("curl failed: {}", String::from_utf8_lossy(&output.stderr));
