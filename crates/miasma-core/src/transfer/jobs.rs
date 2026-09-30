@@ -18,8 +18,10 @@ use std::{
 
 use zeroize::Zeroizing;
 
+#[cfg(feature = "iroh")]
+use super::direct::IrohSource;
 use super::{
-    direct::{receive_file_via_id, ViaConfig},
+    direct::{try_receive_direct, DirectOutcome, DirectSources, ViaConfig},
     journal::{journal_path, part_path_for, ReceiveJournal},
     progress::{Phase, TransferKind, TransferProgress, TransferState, TransferStatus},
     publish::PublishSpec,
@@ -95,8 +97,10 @@ impl TransferRegistry {
     /// is replaced by the new run — which resumes from its journal unless
     /// `restart` is set.
     ///
-    /// With `via` the pieces (and the record) come from those WebSocket
-    /// endpoints and the DHT is not consulted; without it, from the network.
+    /// The record and pieces come from the first source that has the record:
+    /// the `via` WebSocket endpoints, then (for a share ID, if this daemon runs
+    /// an iroh endpoint) the publisher over iroh, then the DHT. If every source
+    /// fails the error names each attempt and why it failed.
     ///
     /// `target` is what the person typed: a share ID (the publisher, protection
     /// state and manifest are then verified against it) or a bare MID (accepted,
@@ -111,6 +115,7 @@ impl TransferRegistry {
         password: Option<Zeroizing<String>>,
         restart: bool,
         via: Option<ViaConfig>,
+        iroh_ca_pem: Option<String>,
     ) -> String {
         let id = target.mid().to_string();
         let progress = {
@@ -135,35 +140,71 @@ impl TransferRegistry {
         };
 
         let journal_dir = self.journal_dir();
+        // Direct sources, in order: explicit `--via` endpoints, then iroh (only
+        // for a share ID, which names the publisher to dial, and only if this
+        // daemon runs an iroh endpoint). The DHT comes last.
+        #[cfg(feature = "iroh")]
+        let iroh = crate::transport::iroh_direct::node_for(&self.data_dir)
+            .filter(|_| target.share_id().is_some())
+            .map(|node| IrohSource {
+                node,
+                ca_pem: iroh_ca_pem.clone().filter(|p| !p.trim().is_empty()),
+            });
+        #[cfg(not(feature = "iroh"))]
+        let _ = &iroh_ca_pem;
+        let sources = DirectSources {
+            via,
+            #[cfg(feature = "iroh")]
+            iroh,
+        };
+        #[cfg(feature = "iroh")]
+        let has_direct = sources.via.is_some() || sources.iroh.is_some();
+        #[cfg(not(feature = "iroh"))]
+        let has_direct = sources.via.is_some();
         let watched = progress.clone();
         let task = tokio::spawn(async move {
             // The outcome is recorded in `progress` by the engine itself.
-            let _ = match via {
-                Some(via) => {
-                    receive_file_via_id(
-                        &via,
-                        &target,
-                        &output_path,
-                        password,
-                        &journal_dir,
-                        restart,
-                        progress,
-                    )
-                    .await
+            let direct_failures = if has_direct {
+                match try_receive_direct(
+                    &sources,
+                    &target,
+                    &output_path,
+                    password.clone(),
+                    &journal_dir,
+                    restart,
+                    progress.clone(),
+                )
+                .await
+                {
+                    DirectOutcome::Finished(_) => return,
+                    DirectOutcome::Unavailable(failures) => failures,
                 }
-                None => {
-                    coord
-                        .receive_file_id(
-                            &target,
-                            &output_path,
-                            password,
-                            &journal_dir,
-                            restart,
-                            progress,
-                        )
-                        .await
-                }
+            } else {
+                Vec::new()
             };
+            let result = coord
+                .receive_file_id(
+                    &target,
+                    &output_path,
+                    password,
+                    &journal_dir,
+                    restart,
+                    progress.clone(),
+                )
+                .await;
+            // The DHT was the last resort: if it failed too, say what every
+            // earlier source said as well.
+            if let Err(e) = result {
+                if !direct_failures.is_empty() && progress.snapshot().state == TransferState::Failed
+                {
+                    let earlier = direct_failures
+                        .iter()
+                        .map(|(source, why)| format!("{source}: {why}"))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    progress.note_error(format!("{e}; earlier direct attempts: {earlier}"));
+                }
+            }
         });
         // If the task panics the progress cell would say Running forever.
         tokio::spawn(async move {
@@ -456,6 +497,7 @@ pub fn status_from_publish_journal(j: &PublishJournal) -> TransferStatus {
         share_id: None,
         share_id_checked: false,
         publisher_authenticated: false,
+        path: None,
     }
 }
 
@@ -488,6 +530,7 @@ pub fn status_from_journal(j: &ReceiveJournal) -> TransferStatus {
         share_id: j.share_id.clone(),
         share_id_checked: j.share_id.is_some(),
         publisher_authenticated: false,
+        path: None,
     }
 }
 
