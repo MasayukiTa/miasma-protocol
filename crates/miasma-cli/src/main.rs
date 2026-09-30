@@ -17,6 +17,7 @@ use tracing::info;
 use zeroize::{Zeroize, Zeroizing};
 
 mod i18n;
+mod web_link;
 use i18n::{Lang, Msg};
 
 // ─── CLI definition ───────────────────────────────────────────────────────────
@@ -279,6 +280,22 @@ enum Commands {
     /// `network-get` again).
     Transfers,
 
+    /// Print the link that opens the browser client for the running daemon.
+    ///
+    /// The link carries the daemon's control token in its URL fragment (the part
+    /// after '#', which a browser never sends to a server), so no token has to be
+    /// pasted by hand. The link goes to stdout, the explanation to stderr. Anyone
+    /// with the link controls this node until the daemon restarts.
+    Web {
+        /// Also open the link in the system's default browser.
+        #[arg(long)]
+        open: bool,
+        /// Use a page you serve yourself (for example `python -m http.server` in
+        /// `web/`) instead of the one the daemon serves. Must be a localhost URL.
+        #[arg(long)]
+        web_url: Option<String>,
+    },
+
     /// Stop a running transfer at its next safe point. The partial file is kept
     /// and the transfer can be resumed.
     TransferCancel {
@@ -488,6 +505,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::Transfers => cmd_transfers(&data_dir).await,
+        Commands::Web { open, web_url } => cmd_web(&data_dir, open, web_url.as_deref()),
         Commands::TransferCancel { mid } => cmd_transfer_cancel(&data_dir, &mid).await,
         Commands::RedundancyBench {
             size_mib,
@@ -2394,6 +2412,42 @@ fn cmd_redundancy_bench(
             r.stage_reed_solomon.as_secs_f64() * 1e3,
             r.stage_shamir.as_secs_f64() * 1e3
         );
+    }
+    Ok(())
+}
+
+/// `miasma web`: print (and optionally open) the browser client's launch link.
+fn cmd_web(data_dir: &std::path::Path, open: bool, web_url: Option<&str>) -> Result<()> {
+    let port = web_link::read_bridge_port(data_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "{}",
+            Msg::WebNoBridge {
+                detail: format!("{e:#}")
+            }
+            .t()
+        )
+    })?;
+    let token = miasma_core::daemon::control_auth::read_token_file(data_dir)?;
+    let page = match web_url {
+        Some(u) => web_link::Page::Static(u),
+        None => web_link::Page::Bridge,
+    };
+    let url = web_link::launch_url(port, token.as_str(), &page)?;
+
+    // The link alone on stdout, so `miasma web | clip` or `$(miasma web)` works.
+    println!("{url}");
+    eprintln!("{}", Msg::WebLinkNote.t());
+    if open {
+        eprintln!("{}", Msg::WebOpening.t());
+        if let Err(e) = web_link::open_in_default_browser(&url) {
+            eprintln!(
+                "{}",
+                Msg::WebOpenFailed {
+                    e: format!("{e:#}")
+                }
+                .t()
+            );
+        }
     }
     Ok(())
 }
