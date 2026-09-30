@@ -128,6 +128,7 @@ fn leave_partial(d: &TestDaemon, mid: &ContentId, output: &Path) {
         started_at: 1,
         updated_at: 2,
         last_error: None,
+        share_id: None,
     }
     .save(&journal_path(&d.registry().journal_dir(), mid))
     .unwrap();
