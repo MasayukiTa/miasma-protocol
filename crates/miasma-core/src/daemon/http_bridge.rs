@@ -748,6 +748,7 @@ fn percent_decode(s: &str) -> Option<String> {
 fn transfer_error_status(e: &str) -> StatusCode {
     if e.starts_with("output path rejected")
         || e.starts_with("invalid MID")
+        || e.starts_with("invalid share ID")
         // A bad `via` list (scheme, credentials in the URL, too many, too long).
         || e.contains("--via")
     {

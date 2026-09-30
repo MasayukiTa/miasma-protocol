@@ -19,11 +19,12 @@ use std::{
 use zeroize::Zeroizing;
 
 use super::{
-    direct::{receive_file_via, ViaConfig},
+    direct::{receive_file_via_id, ViaConfig},
     journal::{journal_path, part_path_for, ReceiveJournal},
     progress::{Phase, TransferKind, TransferProgress, TransferState, TransferStatus},
     publish::PublishSpec,
     publish_journal::{publish_journal_path, PublishJournal},
+    share_id::TransferId,
 };
 use crate::{
     crypto::hash::ContentId,
@@ -96,16 +97,22 @@ impl TransferRegistry {
     ///
     /// With `via` the pieces (and the record) come from those WebSocket
     /// endpoints and the DHT is not consulted; without it, from the network.
+    ///
+    /// `target` is what the person typed: a share ID (the publisher, protection
+    /// state and manifest are then verified against it) or a bare MID (accepted,
+    /// but `publisher_authenticated` stays false). The job is known by the MID
+    /// string either way. `output_path` may be an existing folder: the file is
+    /// then written inside it under the name the manifest carries.
     pub fn start_receive(
         &self,
         coord: Arc<MiasmaCoordinator>,
-        mid: ContentId,
+        target: TransferId,
         output_path: PathBuf,
         password: Option<Zeroizing<String>>,
         restart: bool,
         via: Option<ViaConfig>,
     ) -> String {
-        let id = mid.to_string();
+        let id = target.mid().to_string();
         let progress = {
             let mut jobs = self.jobs.lock().unwrap();
             if let Some(existing) = jobs.get(&id) {
@@ -119,6 +126,10 @@ impl TransferRegistry {
             // journal had it), so `miasma transfers` printed `receive <mid> -> ` and a job that
             // failed before writing a journal could not say where it was going.
             p.set_name(output_path.to_string_lossy());
+            if let Some(share) = target.share_id() {
+                p.set_share_id(Some(share.to_string()));
+                p.set_share_id_checked(true);
+            }
             jobs.insert(id.clone(), p.clone());
             p
         };
@@ -129,9 +140,9 @@ impl TransferRegistry {
             // The outcome is recorded in `progress` by the engine itself.
             let _ = match via {
                 Some(via) => {
-                    receive_file_via(
+                    receive_file_via_id(
                         &via,
-                        &mid,
+                        &target,
                         &output_path,
                         password,
                         &journal_dir,
@@ -142,8 +153,8 @@ impl TransferRegistry {
                 }
                 None => {
                     coord
-                        .receive_file(
-                            &mid,
+                        .receive_file_id(
+                            &target,
                             &output_path,
                             password,
                             &journal_dir,
@@ -442,6 +453,9 @@ pub fn status_from_publish_journal(j: &PublishJournal) -> TransferStatus {
         resumed_from_segment: j.segments.len() as u32,
         last_error: None,
         resumable: true,
+        share_id: None,
+        share_id_checked: false,
+        publisher_authenticated: false,
     }
 }
 
@@ -469,6 +483,9 @@ pub fn status_from_journal(j: &ReceiveJournal) -> TransferStatus {
         resumed_from_segment: j.next_segment,
         last_error: j.last_error.clone(),
         resumable: true,
+        share_id: None,
+        share_id_checked: false,
+        publisher_authenticated: false,
     }
 }
 

@@ -81,11 +81,27 @@ pub struct TransferStatus {
     pub last_error: Option<String>,
     /// Whether running the same transfer again would pick up where it stopped.
     pub resumable: bool,
+    /// The share ID (`miasma-share:...`): for a send, the thing to give the
+    /// receiver once the file is published; for a receive, the one that was
+    /// typed. `None` while unknown, and for a receive started from a bare MID.
+    #[serde(default)]
+    pub share_id: Option<String>,
+    /// The receiver supplied a share ID whose checksum verified.
+    #[serde(default)]
+    pub share_id_checked: bool,
+    /// The record and manifest were verified to come from the publisher named in
+    /// the share ID. Always `false` for a receive started from a bare MID: that
+    /// path cannot tell who published.
+    #[serde(default)]
+    pub publisher_authenticated: bool,
 }
 
 struct Inner {
     mid: String,
     name: String,
+    share_id: Option<String>,
+    share_id_checked: bool,
+    publisher_authenticated: bool,
     phase: Phase,
     state: TransferState,
     last_error: Option<String>,
@@ -135,6 +151,9 @@ impl TransferProgress {
             inner: Mutex::new(Inner {
                 mid,
                 name,
+                share_id: None,
+                share_id_checked: false,
+                publisher_authenticated: false,
                 phase: Phase::Preparing,
                 state: TransferState::Running,
                 last_error: None,
@@ -164,6 +183,21 @@ impl TransferProgress {
 
     pub fn set_name(&self, name: impl Into<String>) {
         self.inner.lock().unwrap().name = name.into();
+    }
+
+    /// The share ID this transfer is known by (see [`TransferStatus::share_id`]).
+    pub fn set_share_id(&self, share_id: Option<String>) {
+        self.inner.lock().unwrap().share_id = share_id;
+    }
+
+    /// The receiver typed a share ID and its checksum verified.
+    pub fn set_share_id_checked(&self, checked: bool) {
+        self.inner.lock().unwrap().share_id_checked = checked;
+    }
+
+    /// The fetched record was verified against the share ID's publisher.
+    pub fn set_publisher_authenticated(&self, authenticated: bool) {
+        self.inner.lock().unwrap().publisher_authenticated = authenticated;
     }
 
     pub fn set_phase(&self, phase: Phase) {
@@ -303,6 +337,9 @@ impl TransferProgress {
             resumed_from_segment: self.resumed_from.load(Ordering::Relaxed),
             last_error: g.last_error.clone(),
             resumable: g.resumable,
+            share_id: g.share_id.clone(),
+            share_id_checked: g.share_id_checked,
+            publisher_authenticated: g.publisher_authenticated,
         }
     }
 }

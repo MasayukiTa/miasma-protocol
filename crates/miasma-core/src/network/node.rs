@@ -747,8 +747,14 @@ pub enum DhtCommand {
         reply: oneshot::Sender<Result<(), MiasmaError>>,
     },
     /// GET raw record bytes from Kademlia.
+    ///
+    /// With `expected_signer`, only a record signed by exactly that key can
+    /// answer the query; a record from any other signer is ignored and the
+    /// query keeps waiting for a matching one, so a malicious peer that answers
+    /// first cannot decide the result (C-01).
     Get {
         key: Vec<u8>,
+        expected_signer: Option<[u8; 32]>,
         reply: oneshot::Sender<Result<Option<Vec<u8>>, MiasmaError>>,
     },
     /// Read the signed record for `key` from this node's own store only. Never
@@ -944,8 +950,36 @@ pub struct DirectedRelayStats {
 enum DhtEnvelopeError {
     UnsignedOrMalformed,
     InvalidSignatureOrKeyMismatch,
+    /// Validly signed, but not by the publisher the caller required.
+    WrongSigner,
     InvalidInnerRecord,
     InnerMidMismatch,
+}
+
+/// Validate a record the event loop received for a GET, with the signer filter
+/// of the query if it has one.
+fn check_received_record(
+    expected_signer: Option<&[u8; 32]>,
+    key: &[u8],
+    value: &[u8],
+) -> Result<(), DhtEnvelopeError> {
+    use super::sybil::RecordAuthError;
+    match expected_signer {
+        None => decode_signed_dht_record(key, value).map(|_| ()),
+        // From the required signer the envelope is enough to resolve the query:
+        // if its content is unusable (an unsupported manifest version, say) the
+        // caller reports that precisely instead of the query waiting in vain.
+        Some(signer) => {
+            let signed: SignedDhtRecord =
+                bincode::deserialize(value).map_err(|_| DhtEnvelopeError::UnsignedOrMalformed)?;
+            signed
+                .verify_for_key_and_signer(key, signer)
+                .map_err(|e| match e {
+                    RecordAuthError::WrongSigner => DhtEnvelopeError::WrongSigner,
+                    _ => DhtEnvelopeError::InvalidSignatureOrKeyMismatch,
+                })
+        }
+    }
 }
 
 /// Decode and validate the signed Kademlia value for one requested MID key.
@@ -976,30 +1010,6 @@ fn decode_signed_dht_record(
     Ok(record)
 }
 
-/// As [`decode_signed_dht_record`], also decoding the transfer-manifest trailer.
-///
-/// Same three key checks. A damaged trailer maps to `InvalidInnerRecord` so the
-/// whole record is refused; see `DhtHandle::get_record_with_manifest`.
-fn decode_signed_record_and_manifest(
-    expected_key: &[u8],
-    envelope_bytes: &[u8],
-) -> Result<(DhtRecord, Option<crate::transfer::TransferManifest>), DhtEnvelopeError> {
-    let signed: SignedDhtRecord =
-        bincode::deserialize(envelope_bytes).map_err(|_| DhtEnvelopeError::UnsignedOrMalformed)?;
-    if !signed.verify_for_key(expected_key) {
-        return Err(DhtEnvelopeError::InvalidSignatureOrKeyMismatch);
-    }
-    let (record, manifest) = crate::transfer::decode_record_value(&signed.value)
-        .map_err(|_| DhtEnvelopeError::InvalidInnerRecord)?;
-    if record.dht_key().as_slice() != expected_key {
-        return Err(DhtEnvelopeError::InnerMidMismatch);
-    }
-    record
-        .validate()
-        .map_err(|_| DhtEnvelopeError::InvalidInnerRecord)?;
-    Ok((record, manifest))
-}
-
 /// Sender side of the DHT command channel.
 ///
 /// Wraps the low-level channel with typed `put`/`get_record` helpers that
@@ -1007,6 +1017,10 @@ fn decode_signed_record_and_manifest(
 #[derive(Clone)]
 pub struct DhtHandle {
     pub(crate) tx: mpsc::Sender<DhtCommand>,
+    /// The public key this node signs DHT records with (its persistent identity
+    /// key, derived from the master key, so it is the same after a restart).
+    /// `None` only for a handle built from a bare channel in tests.
+    publisher: Option<[u8; 32]>,
 }
 
 /// The node's link to the network at one instant, as answered to
@@ -1041,7 +1055,17 @@ const DHT_MAX_PACKET_SIZE: usize = DHT_RECORD_MAX_VALUE_BYTES + 1024 * 1024;
 impl DhtHandle {
     /// Create a DhtHandle from a raw channel sender (for testing).
     pub fn from_sender(tx: mpsc::Sender<DhtCommand>) -> Self {
-        Self { tx }
+        Self {
+            tx,
+            publisher: None,
+        }
+    }
+
+    /// The Ed25519 public key that signs this node's DHT records: the
+    /// "publisher" a share ID names. Public information only; the private key
+    /// never leaves the node's event loop.
+    pub fn publisher_key(&self) -> Option<[u8; 32]> {
+        self.publisher
     }
 
     /// Await a oneshot reply with a bounded timeout.
@@ -1084,6 +1108,15 @@ impl DhtHandle {
         record: DhtRecord,
         manifest: Option<&crate::transfer::TransferManifest>,
     ) -> Result<(), MiasmaError> {
+        // A manifest must name the key that is about to sign it, or no receiver
+        // holding the share ID could ever accept the record.
+        if let (Some(m), Some(own)) = (manifest, self.publisher) {
+            if m.publisher != own {
+                return Err(MiasmaError::InvalidManifest(
+                    "the manifest's publisher is not this node's record-signing key".into(),
+                ));
+            }
+        }
         let key = record.mid_digest.to_vec();
         let value = crate::transfer::encode_record_value(&record, manifest)?;
         if value.len() >= DHT_INNER_RECORD_MAX_BYTES {
@@ -1155,6 +1188,7 @@ impl DhtHandle {
         self.tx
             .send(DhtCommand::Get {
                 key: mid_digest.to_vec(),
+                expected_signer: None,
                 reply: tx,
             })
             .await
@@ -1184,35 +1218,69 @@ impl DhtHandle {
         &self,
         mid_digest: [u8; 32],
     ) -> Result<Option<(DhtRecord, Option<crate::transfer::TransferManifest>)>, MiasmaError> {
+        Ok(self
+            .get_signed_record(mid_digest, None)
+            .await?
+            .map(|f| (f.record, f.manifest)))
+    }
+
+    /// As [`get_record_with_manifest`](Self::get_record_with_manifest), also
+    /// returning the key that signed the record, and optionally requiring it.
+    ///
+    /// With `expected_signer` the query itself only accepts a record signed by
+    /// that key (see [`DhtCommand::Get`]): an earlier answer from any other
+    /// signer is ignored instead of resolving the query. The result is checked
+    /// once more here. A manifest in the record must name the signer as its
+    /// publisher.
+    pub async fn get_signed_record(
+        &self,
+        mid_digest: [u8; 32],
+        expected_signer: Option<[u8; 32]>,
+    ) -> Result<Option<crate::transfer::FetchedRecord>, MiasmaError> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(DhtCommand::Get {
                 key: mid_digest.to_vec(),
+                expected_signer,
                 reply: tx,
             })
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
-        let raw_opt = self.recv_reply(rx, "get_record_with_manifest").await??;
+        let raw_opt = self.recv_reply(rx, "get_signed_record").await??;
         match raw_opt {
-            Some(bytes) => match decode_signed_record_and_manifest(&mid_digest, &bytes) {
-                Ok(pair) => Ok(Some(pair)),
-                Err(reason) => {
-                    warn!("DHT GET: signed record rejected reason={reason:?}");
-                    Ok(None)
+            Some(bytes) => {
+                match crate::transfer::open_signed_record(
+                    &mid_digest,
+                    &bytes,
+                    expected_signer.as_ref(),
+                ) {
+                    Ok(found) => Ok(Some(found)),
+                    // From the signer the caller asked for (or, without one, at
+                    // least signed): the content is unusable, and the reason is
+                    // worth reporting (for example "publish the file again").
+                    Err(crate::transfer::SignedRecordError::InvalidInner(msg)) => {
+                        Err(MiasmaError::InvalidManifest(msg))
+                    }
+                    Err(reason) => {
+                        warn!("DHT GET: signed record rejected reason={reason:?}");
+                        Ok(None)
+                    }
                 }
-            },
+            }
             None => Ok(None),
         }
     }
 
-    /// The record value (record + manifest trailer, exactly what
-    /// [`crate::transfer::decode_record_value`] reads) that this node itself
+    /// The signed record envelope (bincode `SignedDhtRecord` whose value is the
+    /// record plus manifest trailer, exactly what
+    /// [`crate::transfer::open_signed_record`] reads) that this node itself
     /// holds for `mid_digest`, or `None`.
     ///
-    /// Local store only: no network query. The signed envelope is checked as on
-    /// every other read (signature, key agreement, decodable value) and only the
-    /// inner value is returned, so a caller serving it onward hands out nothing
-    /// that this node would not have accepted from the DHT itself.
+    /// Local store only: no network query. The envelope is checked as on every
+    /// other read (signature, key agreement, decodable value) and returned whole,
+    /// signature included, so the party it is served to can check who signed it.
+    /// A caller serving it onward hands out nothing that this node would not
+    /// have accepted from the DHT itself.
     pub async fn local_record_value(&self, mid_digest: [u8; 32]) -> Option<Vec<u8>> {
         let (tx, rx) = oneshot::channel();
         self.tx
@@ -1231,7 +1299,7 @@ impl DhtHandle {
         if record.dht_key().as_slice() != mid_digest.as_slice() || record.validate().is_err() {
             return None;
         }
-        Some(signed.value)
+        Some(envelope)
     }
 
     /// Query admission statistics from the node.
@@ -1864,6 +1932,8 @@ pub struct MiasmaNode {
         (
             oneshot::Sender<Result<Option<Vec<u8>>, MiasmaError>>,
             Option<Vec<u8>>,
+            // Only a record signed by this key may resolve the query.
+            Option<[u8; 32]>,
         ),
     >,
     // Pending outbound share-fetch requests.
@@ -2278,6 +2348,7 @@ impl MiasmaNode {
     pub fn dht_handle(&self) -> DhtHandle {
         DhtHandle {
             tx: self.dht_tx.clone(),
+            publisher: Some(self.dht_signing_key.verifying_key().to_bytes()),
         }
     }
 
@@ -2548,13 +2619,18 @@ impl MiasmaNode {
                     }
                 }
             }
-            DhtCommand::Get { key, reply } => {
+            DhtCommand::Get {
+                key,
+                expected_signer,
+                reply,
+            } => {
                 let qid = self
                     .swarm
                     .behaviour_mut()
                     .kademlia
                     .get_record(kad::RecordKey::new(&key));
-                self.pending_gets.insert(qid, (reply, None));
+                self.pending_gets
+                    .insert(qid, (reply, None, expected_signer));
             }
             DhtCommand::GetLocal { key, reply } => {
                 let value = self
@@ -4896,27 +4972,32 @@ impl MiasmaNode {
                     // DhtRecord MID must equal that same key.
                     let outer_key = pr.record.key.as_ref().to_vec();
                     let value = pr.record.value;
-                    let validated = match decode_signed_dht_record(&outer_key, &value) {
-                        Ok(_) => {
-                            if let Some(peer) = pr.peer {
-                                self.routing_table.record_success(&peer);
+                    // A query that named its publisher (a share ID) ignores every
+                    // record from another signer and keeps waiting for the
+                    // publisher's own: the first answer must not decide.
+                    let expected_signer = self.pending_gets.get(&id).and_then(|(_, _, s)| *s);
+                    let validated =
+                        match check_received_record(expected_signer.as_ref(), &outer_key, &value) {
+                            Ok(()) => {
+                                if let Some(peer) = pr.peer {
+                                    self.routing_table.record_success(&peer);
+                                }
+                                Some(value)
                             }
-                            Some(value)
-                        }
-                        Err(reason) => {
-                            warn!(
-                                "dht.record_rejected reason={reason:?} key={:?}",
-                                pr.record.key
-                            );
-                            if let Some(peer) = pr.peer {
-                                self.routing_table.record_failure(&peer);
+                            Err(reason) => {
+                                warn!(
+                                    "dht.record_rejected reason={reason:?} key={:?}",
+                                    pr.record.key
+                                );
+                                if let Some(peer) = pr.peer {
+                                    self.routing_table.record_failure(&peer);
+                                }
+                                None
                             }
-                            None
-                        }
-                    };
+                        };
 
                     if let Some(valid_value) = validated {
-                        if let Some((reply, _)) = self.pending_gets.remove(&id) {
+                        if let Some((reply, _, _)) = self.pending_gets.remove(&id) {
                             let _ = reply.send(Ok(Some(valid_value)));
                         }
                     }
@@ -4927,7 +5008,7 @@ impl MiasmaNode {
                 ))
                 | kad::QueryResult::GetRecord(Err(_)) => {
                     if step.last {
-                        if let Some((reply, cached)) = self.pending_gets.remove(&id) {
+                        if let Some((reply, cached, _)) = self.pending_gets.remove(&id) {
                             let _ = reply.send(Ok(cached));
                         }
                     }
@@ -5782,6 +5863,41 @@ mod admission_pow_tests {
             decode_signed_dht_record(&expected_key, &bincode::serialize(&record).unwrap()),
             Err(DhtEnvelopeError::UnsignedOrMalformed)
         ));
+    }
+
+    #[test]
+    fn a_get_with_a_required_signer_ignores_every_other_signers_record() {
+        // The event loop's filter: a record signed by anyone but the publisher
+        // in the share ID must not resolve the query, however valid it looks.
+        let honest = ed25519_dalek::SigningKey::from_bytes(&[0x61; 32]);
+        let attacker = ed25519_dalek::SigningKey::from_bytes(&[0x62; 32]);
+        let key = [0xE5; 32];
+        let record = DhtRecord {
+            mid_digest: key,
+            data_shards: 2,
+            total_shards: 3,
+            version: 1,
+            locations: vec![],
+            published_at: 1,
+        };
+        let value = bincode::serialize(&record).unwrap();
+        let by = |k: &ed25519_dalek::SigningKey| {
+            bincode::serialize(&SignedDhtRecord::sign(key.to_vec(), value.clone(), k)).unwrap()
+        };
+        let want = honest.verifying_key().to_bytes();
+
+        assert!(check_received_record(Some(&want), &key, &by(&honest)).is_ok());
+        assert_eq!(
+            check_received_record(Some(&want), &key, &by(&attacker)),
+            Err(DhtEnvelopeError::WrongSigner)
+        );
+        // Without a required signer both are accepted: the legacy, unauthenticated path.
+        assert!(check_received_record(None, &key, &by(&attacker)).is_ok());
+        // The key binding still applies.
+        assert_eq!(
+            check_received_record(Some(&want), &[0xE6; 32], &by(&honest)),
+            Err(DhtEnvelopeError::InvalidSignatureOrKeyMismatch)
+        );
     }
 
     #[test]

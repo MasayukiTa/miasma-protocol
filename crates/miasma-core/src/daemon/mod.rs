@@ -972,11 +972,22 @@ pub(crate) async fn process_request(
                 Ok(p) => p,
                 Err(e) => return ControlResponse::Error(format!("output path rejected: {e}")),
             };
-            // A folder, or a place that cannot be written, is refused now rather
-            // than as a Failed row after the network work.
-            if let Err(e) = crate::transfer::receive::check_output_target(&output_path) {
-                return ControlResponse::Error(format!("output path rejected: {e}"));
+            // A place that cannot be written is refused now rather than as a
+            // Failed row after the network work. An existing folder is allowed:
+            // the job writes <folder>/<name> once the manifest names the file
+            // (and refuses if there is no name or the file exists). The engine
+            // itself still refuses a folder.
+            if !output_path.is_dir() {
+                if let Err(e) = crate::transfer::receive::check_output_target(&output_path) {
+                    return ControlResponse::Error(format!("output path rejected: {e}"));
+                }
             }
+            // One parse for what the person typed, before any network work: a
+            // mistyped share ID stops here (checksum), not after a lookup.
+            let target = match crate::transfer::parse_transfer_id(&mid) {
+                Ok(t) => t,
+                Err(e) => return ControlResponse::Error(e.to_string()),
+            };
             // Refuse a bad endpoint list now, with a clear message, rather than
             // starting a job that can only fail.
             let via = crate::transfer::direct::ViaConfig::from_request(via, via_ca_pem);
@@ -985,21 +996,10 @@ pub(crate) async fn process_request(
                     return ControlResponse::Error(e.to_string());
                 }
             }
-            match crate::crypto::hash::ContentId::from_str(&mid) {
-                Ok(content_id) => {
-                    let registry = crate::transfer::jobs::registry_for(&data_dir);
-                    let id = registry.start_receive(
-                        coord.clone(),
-                        content_id,
-                        output_path,
-                        password,
-                        restart,
-                        via,
-                    );
-                    ControlResponse::TransferStarted { id }
-                }
-                Err(e) => ControlResponse::Error(format!("invalid MID: {e}")),
-            }
+            let registry = crate::transfer::jobs::registry_for(&data_dir);
+            let id =
+                registry.start_receive(coord.clone(), target, output_path, password, restart, via);
+            ControlResponse::TransferStarted { id }
         }
 
         ControlRequest::TransferStartPublish {
