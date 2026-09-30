@@ -34,6 +34,7 @@ use super::{
         publish_journal_path, PublishHeader, PublishJournal, PublishSegmentRecord,
         PUBLISH_JOURNAL_VERSION,
     },
+    share_id::ShareId,
 };
 use crate::{
     crypto::hash::ContentId,
@@ -257,8 +258,25 @@ impl MiasmaCoordinator {
         progress.set_mid(mid.to_string());
 
         // ── Rebuild what the finished segments contributed. ─────────────────
-        let mut manifest =
-            TransferManifest::new(&mid, params, segment_size as u32, file_len, protection);
+        // The key this node signs its records with: the manifest names it, and
+        // the share ID binds it (a receiver then accepts only this publisher).
+        let publisher = self.dht_handle().publisher_key().ok_or_else(|| {
+            MiasmaError::Network("this node has no record-signing key to publish with".into())
+        })?;
+        let share_id = ShareId::new(&mid, publisher, protection.is_password());
+        // Only the file's own name travels, never its path.
+        let original_name = file_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned());
+        let mut manifest = TransferManifest::new(
+            &mid,
+            publisher,
+            params,
+            segment_size as u32,
+            file_len,
+            protection,
+        )
+        .with_name(original_name.as_deref());
         let mut all_locations: Vec<ShardLocation> = Vec::new();
         let mut remote_distinct_per_segment: Vec<usize> = Vec::new();
         let mut start_segment: u32 = 0;
@@ -380,6 +398,8 @@ impl MiasmaCoordinator {
         if let Some(jp) = &journal_path {
             PublishJournal::remove(jp);
         }
+        // The record is announced: this is now the thing to give the receiver.
+        progress.set_share_id(Some(share_id.to_string()));
 
         tracing::info!(
             "Published {} ({file_len} bytes, {segment_count} segments) via streaming dissolution",
@@ -388,6 +408,7 @@ impl MiasmaCoordinator {
         Ok(PublishOutcome::Complete(PublishReport {
             mid,
             remote_distinct_shards_per_segment: remote_distinct_per_segment,
+            share_id: Some(share_id),
         }))
     }
 

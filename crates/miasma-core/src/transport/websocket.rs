@@ -271,7 +271,10 @@ pub(crate) fn ws_limits(max: usize) -> WsProtocolConfig {
 /// its own DHT store, so an endpoint can answer `Record` for what it published.
 #[async_trait::async_trait]
 pub trait RecordProvider: Send + Sync {
-    /// The record value (record + manifest trailer) held locally for the MID.
+    /// The signed record envelope (signature and signer included; the value is
+    /// the record plus its manifest trailer) held locally for the MID. The
+    /// receiver opens it with `transfer::open_signed_record`, so it can check who
+    /// signed it.
     async fn record_value(&self, mid_digest: [u8; 32]) -> Option<Vec<u8>>;
 }
 

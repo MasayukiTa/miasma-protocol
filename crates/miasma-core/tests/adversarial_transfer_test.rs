@@ -68,7 +68,8 @@ fn build_world(len: usize, k: usize, n: usize, password: Option<&str>) -> World 
         }
         None => (Protection::None, None),
     };
-    let mut manifest = TransferManifest::new(&mid, params, SEG as u32, len as u64, protection);
+    let mut manifest =
+        TransferManifest::new(&mid, [0x5a; 32], params, SEG as u32, len as u64, protection);
     let mut shares = HashMap::new();
     let mut locations = Vec::new();
     for (i, chunk) in data.chunks(SEG).enumerate() {
@@ -159,6 +160,8 @@ fn spec(w: &World, dir: &tempfile::TempDir, with_manifest: bool, pw: Option<&str
             base_delay: Duration::from_millis(1),
             max_delay: Duration::from_millis(2),
         },
+        expect: None,
+        record_signer: None,
     }
 }
 
@@ -357,6 +360,8 @@ async fn receive_record(
                 base_delay: Duration::ZERO,
                 max_delay: Duration::ZERO,
             },
+            expect: None,
+            record_signer: None,
         },
         TransferProgress::new(mid.to_string()),
     )

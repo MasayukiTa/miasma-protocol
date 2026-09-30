@@ -34,6 +34,11 @@ pub struct ReceiveJournal {
     pub started_at: u64,
     pub updated_at: u64,
     pub last_error: Option<String>,
+    /// The share ID the transfer was started from, if any (public, not a
+    /// secret). A resume then keeps checking the publisher; absent in journals
+    /// written before share IDs, and for a transfer started from a bare MID.
+    #[serde(default)]
+    pub share_id: Option<String>,
 }
 
 /// Where the journal for `mid` lives inside `dir`. Base58 is filesystem-safe.
@@ -108,7 +113,19 @@ mod tests {
             started_at: 1,
             updated_at: 2,
             last_error: None,
+            share_id: Some("miasma-share:abc".into()),
         }
+    }
+
+    #[test]
+    fn a_journal_written_before_share_ids_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("j.json");
+        let mut value = serde_json::to_value(sample()).unwrap();
+        value.as_object_mut().unwrap().remove("share_id");
+        std::fs::write(&path, value.to_string()).unwrap();
+        let back = ReceiveJournal::load(&path).expect("loads without the field");
+        assert_eq!(back.share_id, None);
     }
 
     #[test]
