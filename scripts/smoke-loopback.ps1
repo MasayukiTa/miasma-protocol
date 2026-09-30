@@ -99,7 +99,7 @@ Write-Host "`n[3/7] Starting daemon A..."
 # the script console and doesn't interfere with later command captures.
 $script:procA = Start-Process -FilePath $CLI `
     -ArgumentList "--data-dir `"$DIR_A`" daemon" `
-    -PassThru `
+    -PassThru -WindowStyle Hidden `
     -RedirectStandardOutput (Join-Path $DIR_A "stdout.log") `
     -RedirectStandardError  (Join-Path $DIR_A "stderr.log")
 
@@ -141,7 +141,7 @@ Write-Host "  Bootstrap: $bootstrapAddr"
 Write-Host "`n[4/7] Starting daemon B (bootstrap -> A)..."
 $script:procB = Start-Process -FilePath $CLI `
     -ArgumentList "--data-dir `"$DIR_B`" daemon --bootstrap $bootstrapAddr" `
-    -PassThru `
+    -PassThru -WindowStyle Hidden `
     -RedirectStandardOutput (Join-Path $DIR_B "stdout.log") `
     -RedirectStandardError  (Join-Path $DIR_B "stderr.log")
 

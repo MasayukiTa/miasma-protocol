@@ -234,7 +234,12 @@ fn open_store_inner(
             msg: "failed to load config".into(),
         }
     })?;
-    let store = LocalShareStore::open(&path, config.storage.quota_mb).map_err(|e| {
+    let store = LocalShareStore::open_with_quotas(
+        &path,
+        config.storage.quota_mb,
+        config.storage.hosted_quota_mb,
+    )
+    .map_err(|e| {
         tracing::warn!("store open error: {e}");
         MiasmaFfiError::Other {
             msg: "failed to open store".into(),
@@ -280,6 +285,7 @@ pub fn initialize_node(
         storage: StorageConfig {
             quota_mb: storage_mb,
             bandwidth_mb_day,
+            ..StorageConfig::default()
         },
         network: NetworkConfig {
             listen_addr: "/ip4/0.0.0.0/udp/0/quic-v1".into(),
@@ -393,7 +399,7 @@ pub fn get_node_status(data_dir: String) -> Result<NodeStatusFfi, MiasmaFfiError
 /// and persisted transport secrets are then scrubbed locally.
 #[uniffi::export]
 pub fn distress_wipe(data_dir: String) -> Result<(), MiasmaFfiError> {
-    use miasma_core::daemon::ipc::{daemon_request, ControlRequest, ControlResponse, PORT_FILE};
+    use miasma_core::daemon::ipc::{daemon_wipe, ControlResponse, PORT_FILE};
 
     let path = validate_data_dir(&data_dir)?;
     let port_path = path.join(PORT_FILE);
@@ -407,11 +413,7 @@ pub fn distress_wipe(data_dir: String) -> Result<(), MiasmaFfiError> {
 
     if port_path.exists() {
         let ipc_result = shared_runtime().block_on(async {
-            tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                daemon_request(&path, ControlRequest::Wipe),
-            )
-            .await
+            tokio::time::timeout(std::time::Duration::from_secs(5), daemon_wipe(&path)).await
         });
         match ipc_result {
             Ok(Ok(ControlResponse::Wiped)) => daemon_wipe_started = true,

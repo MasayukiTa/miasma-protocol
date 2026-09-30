@@ -94,6 +94,10 @@ jobs:
       - name: Test wasm crate
         run: cargo test -p miasma-wasm --locked
 
+      # Design tokens (contrast, palette) and the client's pure functions.
+      - name: Web client JS tests (node, no dependencies)
+        run: node --test web/tests/*.test.mjs
+
       - name: Build wasm target
         run: cargo build -p miasma-wasm --target wasm32-unknown-unknown --locked
 
@@ -129,6 +133,49 @@ jobs:
         with:
           name: Miasma-macOS
           path: dist/Miasma-macOS.zip
+
+  macos-cli-transfer:
+    name: CLI + desktop build and transfer e2e (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # Release build: the same binaries that are handed to a person who has no
+      # Rust toolchain (see the artifact step below).
+      - name: Build CLI and desktop (release)
+        run: cargo build --release -p miasma-cli -p miasma-desktop --locked
+
+      # Real binary, two loopback nodes, a daemon killed mid-transfer on each
+      # side. The same script the macOS sender runs before a cross-machine test.
+      - name: Transfer end-to-end (protected, resumable)
+        run: scripts/transfer-e2e.sh --cli target/release/miasma
+
+      # Zip artifacts lose the executable bit, so ship a tar.gz inside it.
+      # The binaries are unsigned: on the receiving Mac, remove the quarantine
+      # flag once (see docs/tasks/macos-to-windows-large-transfer-runbook.md).
+      - name: Package macOS binaries
+        run: |
+          mkdir -p dist/miasma-macos
+          cp target/release/miasma target/release/miasma-desktop dist/miasma-macos/
+          cp scripts/transfer-e2e.sh dist/miasma-macos/
+          cp docs/tasks/macos-to-windows-large-transfer-runbook.md dist/miasma-macos/
+          tar -czf dist/miasma-macos.tar.gz -C dist miasma-macos
+          shasum -a 256 dist/miasma-macos.tar.gz
+
+      - name: Upload macOS binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: miasma-macos-arm64
+          path: dist/miasma-macos.tar.gz
+          retention-days: 14
+          if-no-files-found: error
 
   cross-compile-arm64:
     name: Cross-compile ARM64
@@ -181,21 +228,27 @@ jobs:
         # this repo layout, so these are passed as flags.)
         run: >
           cargo audit
-          --ignore RUSTSEC-2026-0194
-          --ignore RUSTSEC-2026-0195
           --ignore RUSTSEC-2026-0257
+          --ignore RUSTSEC-2026-0293
         # RUSTSEC-2026-0118 / -0119 are no longer ignored: libp2p 0.57.0
         #   pulls libp2p-mdns 0.49.0 and hickory-proto 0.26.3, beyond the
         #   vulnerable 0.25.x line.
-        # RUSTSEC-2026-0194 / -0195 (quick-xml): needs >=0.41.0. Two old
-        #   versions (0.37.5, 0.39.2) are both in the graph from different
-        #   transitive paths and need identifying + bumping individually.
+        # RUSTSEC-2026-0194 / -0195 (quick-xml) are no longer ignored:
+        #   librqbit 9.0.1 collapses the graph to quick-xml 0.41.0 only.
         # RUSTSEC-2024-0398 (sharks 0.5.0) is no longer ignored: the
         #   dependency was replaced with `blahaj` 0.6, the fixed fork the
         #   advisory itself points at. See docs/adr/011-sss-crate-swap.md.
         # RUSTSEC-2026-0257 (webbrowser): needs >=1.2.2. Transitive via the
         #   CLI's browser-launch helper; low severity, straightforward once
         #   touched together with its dependents' version requirements.
+        # RUSTSEC-2026-0293 (ringbuf <0.5.2): librqbit 9.0.1 unconditionally
+        #   pulls librqbit-utp 0.7.0, which pins ringbuf ^0.4.7. The advisory
+        #   requires an element's Drop implementation to panic while
+        #   Consumer::skip/clear is dropping elements. librqbit-utp's ring
+        #   buffer is SharedRb<Heap<u8>>, so its elements are u8 and have no
+        #   Drop implementation; the exploit precondition is unreachable in
+        #   this dependency path. Upstream librqbit-utp main still pins 0.4.7
+        #   as of 2026-09-29. Remove this ignore when upstream moves to >=0.5.2.
         #
         # NOT ignored, and deliberately not tracked here: yamux 0.12.1
         # (GHSA-vxx9-2994-q338 / CVE-2026-32314, remote panic) is present in

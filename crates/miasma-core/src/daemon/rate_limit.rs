@@ -182,6 +182,11 @@ pub fn classify_endpoint(method: &str, path: &str) -> RateLimitClass {
         | ("GET", "/api/directed/inbox")
         | ("GET", "/api/directed/outbox") => RateLimitClass::ReadApi,
 
+        // The transfers list is polled about once a second while the screen is open.
+        ("GET", p) if p == "/api/transfers" || p.starts_with("/api/transfers/") => {
+            RateLimitClass::ReadApi
+        }
+
         // Heavyweight
         ("POST", "/api/retrieve") | ("POST", "/api/directed/retrieve") | ("POST", "/api/wipe") => {
             RateLimitClass::HeavyApi
@@ -319,6 +324,25 @@ mod tests {
     }
 
     // ── Endpoint classification ─────────────────────────────────────────
+
+    #[test]
+    fn transfer_polling_is_a_read() {
+        for p in [
+            "/api/transfers",
+            "/api/transfers/miasma%3Aabc",
+            "/api/transfers/send%3A%2Fa%2Fb",
+        ] {
+            assert_eq!(classify_endpoint("GET", p), RateLimitClass::ReadApi, "{p}");
+        }
+        // Starting and stopping are writes.
+        for p in ["/api/transfers/receive", "/api/transfers/x/cancel"] {
+            assert_eq!(
+                classify_endpoint("POST", p),
+                RateLimitClass::WriteApi,
+                "{p}"
+            );
+        }
+    }
 
     #[test]
     fn classify_read_endpoints() {

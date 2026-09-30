@@ -18,11 +18,13 @@
 //!  └──────────────┘   └──────────────┘
 //! ```
 
+pub mod control_auth;
 pub mod http_bridge;
 pub mod ipc;
 pub mod rate_limit;
 pub mod replication;
 pub mod self_heal;
+pub mod web_assets;
 
 use std::{
     path::PathBuf,
@@ -66,6 +68,17 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+/// Finalize the same full-content MID used by publish_file while consuming a
+/// retrieval stream incrementally. This keeps 100 GB-class verification O(1)
+/// in memory.
+fn finalize_streamed_mid(
+    mut hasher: blake3::Hasher,
+    params: DissolutionParams,
+) -> crate::crypto::hash::ContentId {
+    hasher.update(&params.to_param_bytes());
+    crate::crypto::hash::ContentId::from_digest(*hasher.finalize().as_bytes())
 }
 
 /// Maximum number of concurrent DHT announce operations per replication cycle.
@@ -119,6 +132,8 @@ pub struct DaemonServer {
     shadowsocks_configured: bool,
     /// Whether Tor is configured.
     tor_configured: bool,
+    /// Control-channel token and wipe-challenge state.
+    control_auth: Arc<control_auth::ControlAuth>,
     // Single-consumer resources moved into run():
     listener: Option<TcpListener>,
     rep_success_rx: Option<mpsc::Receiver<[u8; 32]>>,
@@ -300,7 +315,16 @@ impl DaemonServer {
         };
         // Publish the control port only after every fallible preflight step has
         // succeeded. A failed start must never leave a stale daemon.port file.
-        write_port_file(&data_dir, control_port)?;
+        // The control token is written first: clients wait for daemon.port and
+        // then read the token, so it must already be there.
+        let control_auth = Arc::new(control_auth::ControlAuth::new(
+            control_auth::ControlToken::generate(),
+        ));
+        control_auth::write_token_file(&data_dir, control_auth.token())?;
+        if let Err(e) = write_port_file(&data_dir, control_port) {
+            control_auth::remove_token_file(&data_dir);
+            return Err(e);
+        }
         if let Some(ref sni) = transport_config.wss_sni {
             wss_config.sni_override = Some(sni.clone());
         }
@@ -461,6 +485,7 @@ impl DaemonServer {
                 shadowsocks_configured,
                 tor_configured,
                 daemon_shutdown_tx: shutdown_tx.clone(),
+                control_auth: control_auth.clone(),
             },
         )
         .await
@@ -513,6 +538,7 @@ impl DaemonServer {
             listener: Some(listener),
             rep_success_rx: Some(rep_rx),
             topology_rx: Some(topo_rx),
+            control_auth,
             shutdown_tx,
             shutdown_rx: Some(shutdown_rx),
         })
@@ -614,6 +640,7 @@ impl DaemonServer {
             shadowsocks_configured: self.shadowsocks_configured,
             tor_configured: self.tor_configured,
             daemon_shutdown_tx: self.shutdown_tx.clone(),
+            control_auth: self.control_auth.clone(),
         };
         let ipc_handle: JoinHandle<()> = tokio::spawn(async move {
             ipc_server_loop(
@@ -678,6 +705,7 @@ impl DaemonServer {
 
         coord.shutdown().await;
         remove_port_file(&self.data_dir);
+        control_auth::remove_token_file(&self.data_dir);
         ipc::remove_http_port_file(&self.data_dir);
         Ok(())
     }
@@ -751,6 +779,43 @@ async fn handle_ipc_client(
     data_dir: PathBuf,
     bridge_state: BridgeLiveState,
 ) -> Result<()> {
+    // Authenticate before anything else is parsed: the first frame must be a
+    // small ControlAuth frame carrying the token. Any other first frame, a
+    // wrong token, or a slow peer is answered with an error (after a delay
+    // that grows with consecutive failures) and disconnected without a
+    // request ever being deserialised or processed.
+    let auth_result = tokio::time::timeout(
+        control_auth::PRE_AUTH_TIMEOUT,
+        ipc::read_frame_limited::<ipc::ControlAuth>(&mut stream, control_auth::PRE_AUTH_FRAME_MAX),
+    )
+    .await;
+    let denial = match auth_result {
+        Ok(Ok(hello)) => {
+            let hello = Zeroizing::new(hello);
+            bridge_state.control_auth.check(&hello.token).err()
+        }
+        // Not an auth frame / oversize / timeout: count it as a failure too.
+        _ => Some(
+            bridge_state
+                .control_auth
+                .check("")
+                .err()
+                .unwrap_or(std::time::Duration::from_millis(100)),
+        ),
+    };
+    if let Some(delay) = denial {
+        tokio::time::sleep(delay).await;
+        let _ = write_frame(
+            &mut stream,
+            &ControlResponse::Error(
+                "unauthorized: missing or invalid control token (see daemon.token in the data dir)"
+                    .into(),
+            ),
+        )
+        .await;
+        let _ = tokio::io::AsyncWriteExt::shutdown(&mut stream).await;
+        return Ok(());
+    }
     let req: ControlRequest = read_frame(&mut stream).await?;
     let mut resp = process_request(
         req,
@@ -787,6 +852,9 @@ pub struct BridgeLiveState {
     /// terminate IPC/HTTP/network tasks so master-derived identity material in
     /// the libp2p swarm is dropped as part of the wipe boundary.
     pub daemon_shutdown_tx: mpsc::Sender<()>,
+    /// Control token (checked on every IPC connection and HTTP bridge request)
+    /// and the outstanding `Wipe` confirmation challenge.
+    pub control_auth: Arc<control_auth::ControlAuth>,
 }
 
 pub(crate) async fn process_request(
@@ -849,6 +917,104 @@ pub(crate) async fn process_request(
             }
         }
 
+        ControlRequest::PublishFileProtected {
+            file_path,
+            data_shards,
+            total_shards,
+            password,
+        } => {
+            // Wiped from memory when this arm ends.
+            let password = Zeroizing::new(password);
+            let params = DissolutionParams {
+                data_shards: data_shards as usize,
+                total_shards: total_shards as usize,
+            };
+            let path = std::path::Path::new(&file_path);
+            match coord
+                .dissolve_and_publish_file_protected(
+                    path,
+                    params,
+                    crate::network::PublishOptions::default(),
+                    password.as_str(),
+                )
+                .await
+            {
+                Ok(report) => ControlResponse::Published {
+                    mid: report.mid.to_string(),
+                },
+                Err(e) => ControlResponse::Error(e.to_string()),
+            }
+        }
+
+        ControlRequest::TransferStartReceive {
+            mid,
+            output_path,
+            password,
+            restart,
+        } => {
+            let password = password.map(Zeroizing::new);
+            let output_path = match control_auth::validate_output_path(&output_path) {
+                Ok(p) => p,
+                Err(e) => return ControlResponse::Error(format!("output path rejected: {e}")),
+            };
+            match crate::crypto::hash::ContentId::from_str(&mid) {
+                Ok(content_id) => {
+                    let registry = crate::transfer::jobs::registry_for(&data_dir);
+                    let id = registry.start_receive(
+                        coord.clone(),
+                        content_id,
+                        output_path,
+                        password,
+                        restart,
+                    );
+                    ControlResponse::TransferStarted { id }
+                }
+                Err(e) => ControlResponse::Error(format!("invalid MID: {e}")),
+            }
+        }
+
+        ControlRequest::TransferStartPublish {
+            file_path,
+            data_shards,
+            total_shards,
+            password,
+            restart,
+        } => {
+            let password = password.map(Zeroizing::new);
+            let params = DissolutionParams {
+                data_shards: data_shards as usize,
+                total_shards: total_shards as usize,
+            };
+            let registry = crate::transfer::jobs::registry_for(&data_dir);
+            let id = registry.start_publish(
+                coord.clone(),
+                PathBuf::from(file_path),
+                params,
+                password,
+                restart,
+            );
+            ControlResponse::TransferStarted { id }
+        }
+
+        ControlRequest::TransferStatus { id } => {
+            match crate::transfer::jobs::registry_for(&data_dir).status(&id) {
+                Some(status) => ControlResponse::TransferStatus(status),
+                None => ControlResponse::Error(format!("no such transfer: {id}")),
+            }
+        }
+
+        ControlRequest::TransferList => {
+            ControlResponse::TransferList(crate::transfer::jobs::registry_for(&data_dir).list())
+        }
+
+        ControlRequest::TransferCancel { id } => {
+            if crate::transfer::jobs::registry_for(&data_dir).cancel(&id) {
+                ControlResponse::TransferCancelled
+            } else {
+                ControlResponse::Error(format!("no running transfer: {id}"))
+            }
+        }
+
         ControlRequest::Get {
             mid,
             data_shards,
@@ -891,23 +1057,45 @@ pub(crate) async fn process_request(
                                 Ok(mut file) => {
                                     let mut bytes_written: u64 = 0;
                                     let mut write_err: Option<String> = None;
+                                    let mut content_hasher = blake3::Hasher::new();
                                     while let Some(chunk) = stream.next().await {
                                         match chunk {
-                                            Ok(bytes) => match file.write_all(&bytes).await {
-                                                Ok(_) => bytes_written += bytes.len() as u64,
-                                                Err(e) => {
-                                                    write_err = Some(format!(
-                                                        "cannot write to {output_path}: {e}"
-                                                    ));
-                                                    break;
+                                            Ok(bytes) => {
+                                                content_hasher.update(&bytes);
+                                                match file.write_all(&bytes).await {
+                                                    Ok(_) => bytes_written += bytes.len() as u64,
+                                                    Err(e) => {
+                                                        write_err = Some(format!(
+                                                            "cannot write to {output_path}: {e}"
+                                                        ));
+                                                        break;
+                                                    }
                                                 }
-                                            },
+                                            }
                                             Err(e) => {
                                                 write_err = Some(e.to_string());
                                                 break;
                                             }
                                         }
                                     }
+                                    // The streaming network path reconstructs and authenticates
+                                    // each segment independently, but it intentionally cannot
+                                    // verify the full-file MID itself without buffering the
+                                    // whole file. Verify the complete plaintext here while the
+                                    // bytes are already flowing to disk. A mismatch is a hard
+                                    // failure and the partial output is removed below.
+                                    if write_err.is_none() {
+                                        let actual_mid =
+                                            finalize_streamed_mid(content_hasher, params);
+                                        if actual_mid != content_id {
+                                            write_err = Some(format!(
+                                                "streamed retrieval MID mismatch: expected {}, got {}",
+                                                content_id.to_string(),
+                                                actual_mid.to_string()
+                                            ));
+                                        }
+                                    }
+
                                     // Explicit flush before declaring success: tokio::fs::File
                                     // writes are dispatched to a blocking-pool thread, so a
                                     // caller reading the file back immediately after this
@@ -1199,7 +1387,20 @@ pub(crate) async fn process_request(
             })
         }
 
-        ControlRequest::Wipe => {
+        ControlRequest::Wipe => ControlResponse::WipeChallenge {
+            nonce: bridge_state.control_auth.issue_wipe_challenge(),
+        },
+
+        ControlRequest::WipeConfirm { nonce } => {
+            let nonce = Zeroizing::new(nonce);
+            if !bridge_state
+                .control_auth
+                .consume_wipe_challenge(nonce.as_str())
+            {
+                return ControlResponse::Error(
+                    "wipe not confirmed: missing, expired or wrong confirmation nonce".into(),
+                );
+            }
             // Wipe store key material first, then take the exclusive directed-key
             // lock. The write lock waits for every in-flight send/retrieve read
             // guard before Zeroizing the final shared secret copy.
@@ -2014,5 +2215,36 @@ async fn environment_detector_loop(
         }
 
         *env_snapshot.lock().unwrap() = new_snap;
+    }
+}
+
+#[cfg(test)]
+mod large_file_stream_integrity_tests {
+    use super::*;
+
+    #[test]
+    fn streamed_mid_matches_chunked_content() {
+        let params = DissolutionParams::default();
+        let chunks: [&[u8]; 4] = [b"chunk-one-", b"chunk-two-", b"chunk-three-", b"chunk-four"];
+        let full = chunks.concat();
+        let expected = crate::crypto::hash::ContentId::compute(&full, &params.to_param_bytes());
+
+        let mut hasher = blake3::Hasher::new();
+        for chunk in chunks {
+            hasher.update(chunk);
+        }
+        let streamed = finalize_streamed_mid(hasher, params);
+        assert_eq!(streamed, expected);
+    }
+
+    #[test]
+    fn streamed_mid_detects_content_change() {
+        let params = DissolutionParams::default();
+        let expected =
+            crate::crypto::hash::ContentId::compute(b"expected", &params.to_param_bytes());
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"tampered");
+        assert_ne!(finalize_streamed_mid(hasher, params), expected);
     }
 }

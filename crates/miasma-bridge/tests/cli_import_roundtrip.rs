@@ -36,7 +36,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use librqbit::{
-    create_torrent, AddTorrent, AddTorrentOptions, CreateTorrentOptions, Session, SessionOptions,
+    create_torrent, spawn_utils::BlockingSpawner, AddTorrent, AddTorrentOptions,
+    CreateTorrentOptions, ListenerOptions, Session, SessionOptions,
 };
 use miasma_core::pipeline::{dissolve, DissolutionParams};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -233,8 +234,10 @@ impl Fixture {
             &payload_path,
             CreateTorrentOptions {
                 name: Some("payload.bin"),
+                trackers: Vec::new(),
                 piece_length: Some(PIECE_LEN),
             },
+            &BlockingSpawner::new(1),
         )
         .await
         .expect("create torrent");
@@ -248,9 +251,12 @@ impl Fixture {
         let seeder = Session::new_with_opts(
             seed_dir.clone(),
             SessionOptions {
-                disable_dht: true,
-                disable_dht_persistence: true,
-                listen_port_range: Some(listen_from..listen_from + 50),
+                dht: None,
+                persistence: None,
+                listen: Some(ListenerOptions {
+                    listen_addr: SocketAddr::from((Ipv4Addr::LOCALHOST, listen_from)),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
         )
@@ -276,10 +282,7 @@ impl Fixture {
             .expect("seeder did not finish checking the payload in time")
             .expect("seeder completion");
 
-        let seed_port = seeder
-            .tcp_listen_port()
-            .expect("seeder should be listening for peers");
-        let seed_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, seed_port));
+        let seed_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, listen_from));
 
         // ── Stub tracker ────────────────────────────────────────────────────
         let (tracker_port, tracker) = spawn_stub_tracker(seed_addr).await;

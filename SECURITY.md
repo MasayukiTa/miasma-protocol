@@ -12,6 +12,35 @@ currently being supported with security updates.
 | 4.0.x   | :white_check_mark: |
 | < 4.0   | :x:                |
 
+## Known security limits (beta)
+
+Miasma is beta software and has not been externally audited. Read these limits
+before relying on it:
+
+- The protocol is beta and externally unaudited. Do not use it for material
+  whose exposure would be serious.
+- MID + password protect the confidentiality of file content. The MID does not
+  bind whether a file is password-protected, nor which publication of it a
+  record refers to (no publication generation).
+- DHT records are not authenticated to the publisher: anyone who knows a MID
+  can publish a competing record for it. The final whole-file MID check stops
+  an attacker from substituting different content, but availability can still
+  be attacked (a receiver can be pointed at unavailable or junk locations).
+- Hosted-share storage (keeping shares for other peers) is opt-in; the default
+  quota is 0.
+- The obfuscated QUIC and REALITY transports do not authenticate the server and
+  do not resist replay. Do not rely on them for resistance to active probing or
+  for confidentiality against an active interceptor. Content encryption still
+  applies on top of them.
+- Local control: the daemon's IPC and HTTP bridge require a random per-start
+  token stored in `daemon.token` in the data directory. It is created owner-only
+  on Unix (mode 0600). On Windows the daemon asks `icacls` to restrict the file
+  to the current user and logs a warning, then continues, if that fails. Any
+  process running as the same user can read the token and control the daemon;
+  the token protects against other users and against unauthenticated loopback
+  clients, not against malware in your own account. The bridge's `/api/ping`
+  stays unauthenticated. Wipe needs a second, confirming request.
+
 ## Reporting a Vulnerability
 
 Use this section to tell people how to report a vulnerability.

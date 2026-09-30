@@ -252,6 +252,10 @@ pub fn cleanup_stale_state(data_dir: &std::path::Path) -> CleanupReport {
         tracing::info!("Removed stale HTTP port file: {}", http_port_file.display());
     }
 
+    // A token left by a crashed daemon authenticates nothing; the next start
+    // draws a new one, but do not leave the dead secret lying around.
+    super::control_auth::remove_token_file(data_dir);
+
     report
 }
 
