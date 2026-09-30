@@ -107,7 +107,7 @@ fn world_with(
         let (_, seg_shares) =
             dissolve_segment_with(chunk, &mid, i as u32, 0, params, key.as_ref()).unwrap();
         manifest
-            .push_segment(SegmentEntry::from_dissolved(i as u32, chunk, &seg_shares).unwrap())
+            .push_segment(SegmentEntry::from_dissolved(i as u32, &mid, chunk, &seg_shares).unwrap())
             .unwrap();
         for s in seg_shares {
             locations.push(ShardLocation {

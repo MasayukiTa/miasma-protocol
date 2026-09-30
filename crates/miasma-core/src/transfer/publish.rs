@@ -298,7 +298,7 @@ impl MiasmaCoordinator {
             let dissolve_started = Instant::now();
             let (_meta, shares) =
                 dissolve_segment_with(chunk, &mid, seg, offset, params, key.as_deref())?;
-            manifest.push_segment(SegmentEntry::from_dissolved(seg, chunk, &shares)?)?;
+            manifest.push_segment(SegmentEntry::from_dissolved(seg, &mid, chunk, &shares)?)?;
             let dissolve_time = dissolve_started.elapsed();
             let entry = manifest.segments[seg as usize].clone();
 

@@ -1009,12 +1009,17 @@ impl MiasmaCoordinator {
         let max_seg = {
             let dht = DirectDhtExecutor::new(self.dht_handle.clone());
             match OnionAwareDhtExecutor::get(&dht, mid).await? {
-                Some(record) => record
-                    .locations
-                    .iter()
-                    .map(|l| l.segment_index)
-                    .max()
-                    .unwrap_or(0),
+                Some(record) => {
+                    // The record is network input: bound every index before
+                    // `max_seg + 1` sizes a loop (C-02).
+                    record.validate()?;
+                    record
+                        .locations
+                        .iter()
+                        .map(|l| l.segment_index)
+                        .max()
+                        .unwrap_or(0)
+                }
                 None => 0,
             }
         };
@@ -1069,12 +1074,17 @@ impl MiasmaCoordinator {
         let max_seg = {
             let dht = DirectDhtExecutor::new(self.dht_handle.clone());
             match OnionAwareDhtExecutor::get(&dht, mid).await? {
-                Some(record) => record
-                    .locations
-                    .iter()
-                    .map(|l| l.segment_index)
-                    .max()
-                    .unwrap_or(0),
+                Some(record) => {
+                    // The record is network input: bound every index before
+                    // `max_seg + 1` sizes a loop (C-02).
+                    record.validate()?;
+                    record
+                        .locations
+                        .iter()
+                        .map(|l| l.segment_index)
+                        .max()
+                        .unwrap_or(0)
+                }
                 None => 0,
             }
         };
