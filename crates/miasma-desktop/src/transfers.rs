@@ -2493,7 +2493,8 @@ mod tests {
     fn resuming_a_share_id_receive_keeps_the_share_id() {
         let mut r = status(TransferKind::Receive, TransferState::Paused);
         r.share_id = Some("miasma-share:xyz".into());
-        match start_again(&r, "", false) {
+        let none = String::new();
+        match start_again(&r, &none, false) {
             WorkerCmd::TransferStartReceive { mid, .. } => assert_eq!(mid, "miasma-share:xyz"),
             other => panic!("wrong command: {other:?}"),
         }
