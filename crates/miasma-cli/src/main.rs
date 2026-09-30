@@ -105,7 +105,8 @@ enum Commands {
 
     /// Get or set configuration values.
     Config {
-        /// Config key to read or write (e.g. `storage.quota_mb`).
+        /// Config key to read or write (e.g. `storage.quota_mb`,
+        /// `storage.hosted_quota_mb`).
         #[arg(long)]
         key: Option<String>,
         /// Value to set. If omitted, prints current value.
@@ -744,6 +745,10 @@ async fn cmd_status(data_dir: &std::path::Path) -> Result<()> {
         store.used_hosted_bytes() as f64 / 1024.0 / 1024.0,
         hosted_quota_mb,
     );
+    println!(
+        "  Hosted quota:  {} MiB (storage.hosted_quota_mb; 0 = refuse shares pushed by others)",
+        config.storage.hosted_quota_mb
+    );
     Ok(())
 }
 
@@ -1237,7 +1242,7 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
 
 async fn cmd_wipe(data_dir: &std::path::Path, confirm: bool) -> Result<()> {
     use miasma_core::daemon::ipc::PORT_FILE;
-    use miasma_core::{daemon_request, ControlRequest, ControlResponse};
+    use miasma_core::{daemon_wipe, ControlResponse};
 
     if !confirm {
         eprintln!(
@@ -1250,7 +1255,7 @@ async fn cmd_wipe(data_dir: &std::path::Path, confirm: bool) -> Result<()> {
     let t0 = std::time::Instant::now();
     let port_path = data_dir.join(PORT_FILE);
     if port_path.exists() {
-        match daemon_request(data_dir, ControlRequest::Wipe).await {
+        match daemon_wipe(data_dir).await {
             Ok(ControlResponse::Wiped) => {}
             Ok(ControlResponse::Error(e)) => {
                 bail!("wipe incomplete; daemon is shutting down: {e}");
@@ -1319,6 +1324,7 @@ fn cmd_config_loaded(
                 "storage.quota_mb" => println!("{}", config.storage.quota_mb),
                 "storage.hosted_quota_mb" => println!("{}", config.storage.hosted_quota_mb),
                 "storage.bandwidth_mb_day" => println!("{}", config.storage.bandwidth_mb_day),
+                "storage.hosted_quota_mb" => println!("{}", config.storage.hosted_quota_mb),
                 "network.listen_addr" => println!("{}", config.network.listen_addr),
                 "network.bootstrap_peers" => {
                     for peer in &config.network.bootstrap_peers {
@@ -1360,6 +1366,9 @@ fn cmd_config_loaded(
                 }
                 "storage.bandwidth_mb_day" => {
                     config.storage.bandwidth_mb_day = v.parse().context("expected integer")?;
+                }
+                "storage.hosted_quota_mb" => {
+                    config.storage.hosted_quota_mb = v.parse().context("expected integer")?;
                 }
                 "network.listen_addr" => {
                     config.network.listen_addr = v.into();
@@ -1442,13 +1451,11 @@ async fn cmd_daemon(data_dir: &std::path::Path, bootstrap_addrs: &[String]) -> R
         bail!("master.key is erased/all-zero");
     }
 
+    // `storage.hosted_quota_mb` bounds the shares this node holds for other
+    // publishers (0 = refuse every pushed share).
     let store = Arc::new(
-        LocalShareStore::open_with_quotas(
-            data_dir,
-            config.storage.quota_mb,
-            config.storage.hosted_quota_mb,
-        )
-        .context("cannot open share store")?,
+        LocalShareStore::open_configured(data_dir, &config.storage)
+            .context("cannot open share store")?,
     );
 
     let node = MiasmaNode::new(&master_key, NodeType::Full, &config.network.listen_addr)
@@ -2267,11 +2274,7 @@ async fn cmd_network_get_transfer(
 ) -> Result<()> {
     use miasma_core::{daemon_request, ControlRequest, ControlResponse};
 
-    let abs_path = if path.is_absolute() {
-        path.to_owned()
-    } else {
-        std::env::current_dir().unwrap_or_default().join(path)
-    };
+    let abs_path = miasma_core::daemon::control_auth::absolutize_lexical(path);
 
     let id = match daemon_request(
         data_dir,

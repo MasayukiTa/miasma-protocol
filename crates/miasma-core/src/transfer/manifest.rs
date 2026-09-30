@@ -26,14 +26,25 @@ use serde::{Deserialize, Serialize};
 
 use super::protection::Protection;
 use crate::{
-    crypto::hash::ContentId, network::types::DhtRecord, pipeline::DissolutionParams,
-    share::MiasmaShare, MiasmaError,
+    crypto::hash::ContentId,
+    network::types::{DhtRecord, MAX_SEGMENTS},
+    pipeline::DissolutionParams,
+    share::MiasmaShare,
+    MiasmaError,
 };
 
 /// Trailer magic.
 pub const TRAILER_MAGIC: &[u8; 4] = b"MNFT";
 /// Manifest format version.
-pub const MANIFEST_VERSION: u8 = 1;
+///
+/// 2: a piece ID is the full-share commitment ([`MiasmaShare::piece_commitment`]),
+/// not `BLAKE3(shard_data)`. Version 1 manifests are refused (beta: no second
+/// format is kept), see [`TransferManifest::validate`].
+pub const MANIFEST_VERSION: u8 = 2;
+/// Largest plaintext segment a manifest may declare: the publisher never
+/// exceeds `DEFAULT_SEGMENT_SIZE` (64 MiB). A receiver sizes its per-segment
+/// decode buffers from this untrusted field, so it is bounded.
+pub const MAX_SEGMENT_SIZE: u32 = crate::dissolution::DEFAULT_SEGMENT_SIZE as u32;
 /// Hard cap on an encoded manifest, enforced on both encode and decode.
 ///
 /// 100 GiB at `n = 20` is ~1.1 MB; this leaves room for `n` up to 255 at that
@@ -42,8 +53,9 @@ pub const MANIFEST_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 const TRAILER_HEADER_LEN: usize = 4 + 1 + 4;
 
-/// One piece's ID: `BLAKE3(shard_data)`, the same value carried in
-/// [`MiasmaShare::shard_hash`].
+/// One piece's ID: the commitment over the whole share, see
+/// [`MiasmaShare::piece_commitment`] (it covers `key_share` and `nonce`, which
+/// `MiasmaShare::shard_hash` does not).
 pub type PieceId = [u8; 32];
 
 /// Everything the receiver needs to know about one segment.
@@ -66,6 +78,7 @@ impl SegmentEntry {
     /// `total_shards` shares with distinct slot indexes `0..n`.
     pub fn from_dissolved(
         index: u32,
+        mid: &ContentId,
         plaintext: &[u8],
         shares: &[MiasmaShare],
     ) -> Result<Self, MiasmaError> {
@@ -76,7 +89,13 @@ impl SegmentEntry {
             let cell = piece_ids.get_mut(slot).ok_or_else(|| {
                 MiasmaError::InvalidManifest(format!("slot {slot} out of range for {n} shares"))
             })?;
-            if cell.replace(share.shard_hash).is_some() {
+            if share.segment_index != index {
+                return Err(MiasmaError::InvalidManifest(format!(
+                    "share of segment {} listed under segment {index}",
+                    share.segment_index
+                )));
+            }
+            if cell.replace(share.piece_commitment(mid)).is_some() {
                 return Err(MiasmaError::InvalidManifest(format!(
                     "duplicate shard slot {slot} in segment {index}"
                 )));
@@ -157,7 +176,7 @@ impl TransferManifest {
     pub fn validate(&self) -> Result<(), MiasmaError> {
         let bad = |m: String| Err(MiasmaError::InvalidManifest(m));
         if self.version != MANIFEST_VERSION {
-            return bad(format!("unsupported manifest version {}", self.version));
+            return bad(unsupported_version_message(self.version));
         }
         let (k, n) = (self.data_shards as usize, self.total_shards as usize);
         if k == 0 || n < k {
@@ -165,6 +184,18 @@ impl TransferManifest {
         }
         if self.segment_size == 0 {
             return bad("segment_size is zero".into());
+        }
+        if self.segment_size > MAX_SEGMENT_SIZE {
+            return bad(format!(
+                "segment_size {} exceeds the limit {MAX_SEGMENT_SIZE}",
+                self.segment_size
+            ));
+        }
+        if self.segments.len() > MAX_SEGMENTS as usize {
+            return bad(format!(
+                "{} segments listed, limit {MAX_SEGMENTS}",
+                self.segments.len()
+            ));
         }
         if let Protection::Password(p) = &self.protection {
             p.validate()?;
@@ -267,11 +298,28 @@ impl TransferManifest {
     }
 }
 
+fn unsupported_version_message(found: u8) -> String {
+    if found < MANIFEST_VERSION {
+        format!(
+            "manifest version {found} is no longer supported (this build reads version \
+             {MANIFEST_VERSION}: piece IDs now commit to the whole share); ask the sender to \
+             publish the file again"
+        )
+    } else {
+        format!(
+            "manifest version {found} is newer than this build supports ({MANIFEST_VERSION}); \
+             update Miasma"
+        )
+    }
+}
+
 /// Serialize `record` followed by `manifest`'s trailer, as the signed value.
 pub fn encode_record_value(
     record: &DhtRecord,
     manifest: Option<&TransferManifest>,
 ) -> Result<Vec<u8>, MiasmaError> {
+    // Never publish a record the receivers' own validation would refuse.
+    record.validate()?;
     let mut value =
         bincode::serialize(record).map_err(|e| MiasmaError::Serialization(e.to_string()))?;
     if let Some(m) = manifest {
@@ -308,9 +356,8 @@ pub fn decode_record_value(
         ));
     }
     if rest[4] != MANIFEST_VERSION {
-        return Err(MiasmaError::InvalidManifest(format!(
-            "unsupported manifest trailer version {}",
-            rest[4]
+        return Err(MiasmaError::InvalidManifest(unsupported_version_message(
+            rest[4],
         )));
     }
     let len = u32::from_le_bytes(rest[5..9].try_into().expect("4 bytes")) as usize;
@@ -355,7 +402,7 @@ mod tests {
             let len = (if i + 1 == segs { last } else { seg_size }) as usize;
             let data = vec![i as u8 + 1; len];
             let (_, shares) = dissolve_segment(&data, &mid(), i, 0, params()).unwrap();
-            m.push_segment(SegmentEntry::from_dissolved(i, &data, &shares).unwrap())
+            m.push_segment(SegmentEntry::from_dissolved(i, &mid(), &data, &shares).unwrap())
                 .unwrap();
         }
         m
@@ -373,14 +420,17 @@ mod tests {
     }
 
     #[test]
-    fn piece_ids_are_the_shard_hashes_indexed_by_slot() {
+    fn piece_ids_are_the_piece_commitments_indexed_by_slot() {
         let data = vec![5u8; 300];
         let (_, mut shares) = dissolve_segment(&data, &mid(), 0, 0, params()).unwrap();
         shares.reverse(); // arrival order must not matter
-        let entry = SegmentEntry::from_dissolved(0, &data, &shares).unwrap();
+        let entry = SegmentEntry::from_dissolved(0, &mid(), &data, &shares).unwrap();
         assert_eq!(entry.piece_ids.len(), 6);
         for s in &shares {
-            assert_eq!(entry.piece_ids[s.slot_index as usize], s.shard_hash);
+            assert_eq!(
+                entry.piece_ids[s.slot_index as usize],
+                s.piece_commitment(&mid())
+            );
         }
         assert_eq!(entry.plain_hash, *blake3::hash(&data).as_bytes());
     }
@@ -440,7 +490,7 @@ mod tests {
         let mut m = TransferManifest::new(&mid(), params(), 256, 512, Protection::None);
         let data = vec![1u8; 256];
         let (_, shares) = dissolve_segment(&data, &mid(), 1, 0, params()).unwrap();
-        let entry = SegmentEntry::from_dissolved(1, &data, &shares).unwrap();
+        let entry = SegmentEntry::from_dissolved(1, &mid(), &data, &shares).unwrap();
         assert!(m.push_segment(entry).is_err());
     }
 
@@ -448,7 +498,7 @@ mod tests {
     fn an_empty_file_has_one_empty_segment() {
         let mut m = TransferManifest::new(&mid(), params(), 256, 0, Protection::None);
         let (_, shares) = dissolve_segment(&[], &mid(), 0, 0, params()).unwrap();
-        m.push_segment(SegmentEntry::from_dissolved(0, &[], &shares).unwrap())
+        m.push_segment(SegmentEntry::from_dissolved(0, &mid(), &[], &shares).unwrap())
             .unwrap();
         m.validate().unwrap();
     }
@@ -458,11 +508,11 @@ mod tests {
         let data = vec![1u8; 100];
         let (_, mut shares) = dissolve_segment(&data, &mid(), 0, 0, params()).unwrap();
         shares[1].slot_index = 0; // duplicate slot 0
-        assert!(SegmentEntry::from_dissolved(0, &data, &shares).is_err());
+        assert!(SegmentEntry::from_dissolved(0, &mid(), &data, &shares).is_err());
 
         let (_, mut shares) = dissolve_segment(&data, &mid(), 0, 0, params()).unwrap();
         shares[1].slot_index = 99;
-        assert!(SegmentEntry::from_dissolved(0, &data, &shares).is_err());
+        assert!(SegmentEntry::from_dissolved(0, &mid(), &data, &shares).is_err());
     }
 
     #[test]
