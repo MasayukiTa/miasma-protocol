@@ -123,6 +123,23 @@ wait_segments() {  # wait_segments <dir> <match> <at least> <timeout s>
     return 1
 }
 
+peers_of() {  # peers_of <dir> -> "Connected peers: N" from `miasma status` (empty if the daemon is silent)
+    "$CLI" --data-dir "$1" status 2>/dev/null | sed -n 's/.*Connected peers: *\([0-9][0-9]*\).*/\1/p' | head -1
+}
+
+# Wait until the node at <dir> is connected to at least one peer: what the runbook tells
+# the user to do before starting a transfer, so the script does the same.
+wait_peers() {  # wait_peers <dir> <timeout s>
+    local i=0 p
+    while [ $i -lt $(( $2 * 2 )) ]; do
+        p="$(peers_of "$1")"
+        if [ -n "$p" ] && [ "$p" -ge 1 ]; then return 0; fi
+        sleep 0.5
+        i=$((i + 1))
+    done
+    return 1
+}
+
 echo "=== Miasma protected + resumable transfer, end to end ==="
 
 PORT_A=$(( 21000 + RANDOM % 800 ))
@@ -136,7 +153,7 @@ BOOT="$("$CLI" --data-dir "$DIR_A" status 2>/dev/null | sed -n 's/.*Listen addr:
 [ -n "$BOOT" ] || { echo "could not read node A's listen address"; exit 1; }
 echo "  Node A: $BOOT"
 PID_B="$(start_daemon "$DIR_B" "$BOOT")" || exit 1
-sleep 5
+wait_peers "$DIR_B" 60 && check 1 "node B is connected to node A before the first transfer" || check 0 "node B is connected to node A before the first transfer"
 
 PW="$TMP/password.txt";  printf 'e2e-correct-horse\n' > "$PW"
 BADPW="$TMP/wrong.txt";  printf 'not-the-password\n' > "$BADPW"
@@ -172,7 +189,7 @@ echo "  B's daemon killed."
 [ -e "$RECV.part" ] && check 1 "the partial file is kept" || check 0 "the partial file is kept"
 
 PID_B="$(start_daemon "$DIR_B" "$BOOT")" || exit 1
-sleep 5
+wait_peers "$DIR_B" 60 && check 1 "after the restart, node B is connected to node A again" || check 0 "after the restart, node B is connected to node A again"
 LISTED="$("$CLI" --data-dir "$DIR_B" transfers 2>/dev/null)"
 if echo "$LISTED" | grep -q "Paused" && echo "$LISTED" | grep -q "resumable"; then check 1 "after the restart, 'transfers' shows it paused and resumable"; else check 0 "after the restart, 'transfers' shows it paused and resumable"; fi
 DONE_BEFORE="$(segments_done "$DIR_B" "$MID1")"
@@ -187,21 +204,39 @@ if [ -f "$RECV" ] && [ "$(sha "$RECV")" = "$HASH1" ]; then check 1 "the received
 # ---- 4. sender killed mid-publish -------------------------------------------
 echo
 echo "[4] Sender: kill A's daemon after the first segment, restart, resume"
-SRC2="$TMP/payload2.bin"; new_file "$SRC2" "$SIZE_MB"; HASH2="$(sha "$SRC2")"
-"$CLI" --data-dir "$DIR_A" network-publish "$SRC2" --data-shards $K --total-shards $N --password-file "$PW" --no-wait >/dev/null 2>&1; RC=$?
-[ $RC -eq 0 ] && check 1 "network-publish --no-wait started the publish" || check 0 "network-publish --no-wait started the publish"
-wait_segments "$DIR_A" "payload2.bin" 1 900 && check 1 "the first segment was published" || check 0 "the first segment was published"
-kill_daemon "$PID_A" "$DIR_A"; PID_A=""
-echo "  A's daemon killed."
+# The kill has to land while the send is still running. On a fast machine a small file can
+# finish between the poll that sees segment 1 and the kill; the job is then complete, its
+# journal is gone, and there is nothing to resume (seen on a fast CI runner). That is a
+# property of the machine, not a defect, so retry with a file twice as large (each attempt
+# uses its own file name) until the kill provably came mid-send.
+SIZE2="$SIZE_MB"
+PAUSED=0
+TRY=1
+while [ "$TRY" -le 4 ] && [ "$PAUSED" = "0" ]; do
+    NAME2="payload2-$TRY.bin"
+    SRC2="$TMP/$NAME2"; new_file "$SRC2" "$SIZE2"; HASH2="$(sha "$SRC2")"
+    "$CLI" --data-dir "$DIR_A" network-publish "$SRC2" --data-shards $K --total-shards $N --password-file "$PW" --no-wait >/dev/null 2>&1; RC=$?
+    [ $RC -eq 0 ] && check 1 "network-publish --no-wait started the publish (${SIZE2} MB)" || check 0 "network-publish --no-wait started the publish (${SIZE2} MB)"
+    wait_segments "$DIR_A" "$NAME2" 1 900 && check 1 "the first segment was published" || check 0 "the first segment was published"
+    kill_daemon "$PID_A" "$DIR_A"; PID_A=""
+    echo "  A's daemon killed."
 
-PID_A="$(start_daemon "$DIR_A" "")" || exit 1
-sleep 3
-LISTED_A="$("$CLI" --data-dir "$DIR_A" transfers 2>/dev/null)"
-if echo "$LISTED_A" | grep -q "^send" && echo "$LISTED_A" | grep -q "Paused"; then check 1 "after the restart, 'transfers' shows the send paused"; else check 0 "after the restart, 'transfers' shows the send paused"; fi
+    PID_A="$(start_daemon "$DIR_A" "")" || exit 1
+    sleep 3
+    LISTED_A="$("$CLI" --data-dir "$DIR_A" transfers 2>/dev/null)"
+    if echo "$LISTED_A" | grep -q "^send" && echo "$LISTED_A" | grep -q "Paused"; then
+        PAUSED=1
+    elif [ "$TRY" -lt 4 ]; then
+        echo "  the send finished before the kill landed at ${SIZE2} MB; retrying with $(( SIZE2 * 2 )) MB"
+        SIZE2=$(( SIZE2 * 2 ))
+    fi
+    TRY=$(( TRY + 1 ))
+done
+[ "$PAUSED" = "1" ] && check 1 "after the restart, 'transfers' shows the send paused" || check 0 "after the restart, 'transfers' shows the send paused"
 MID2="$("$CLI" --data-dir "$DIR_A" network-publish "$SRC2" --data-shards $K --total-shards $N --password-file "$PW" 2>/dev/null | grep '^miasma:' | head -1)"
 [ -n "$MID2" ] && check 1 "running the same network-publish again completed and printed a MID" || check 0 "running the same network-publish again completed and printed a MID"
 
-sleep 3
+wait_peers "$DIR_B" 60 && check 1 "node B is connected to the restarted node A before it starts receiving" || check 0 "node B is connected to the restarted node A before it starts receiving"
 RECV2="$TMP/received2.bin"
 "$CLI" --data-dir "$DIR_B" network-get "$MID2" -o "$RECV2" --password-file "$PW" >/dev/null 2>&1; RC=$?
 [ $RC -eq 0 ] && check 1 "node B received the resumed publish" || check 0 "node B received the resumed publish"
