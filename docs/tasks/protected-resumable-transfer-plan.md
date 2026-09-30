@@ -668,6 +668,43 @@ Still open from the same review (not transfer layer or design work): DHT records
 authenticated (a MID holder can sign a record), the protection mode is not part of the MID, unauthenticated
 daemon IPC, hosted-share tuple replacement.
 
+### Security fixes 2 (2026-09-30, branch `security/fix-transfer-layer`)
+
+Share hosting and the onion replay cache.
+
+**1. Hosted-share replacement by any peer (C-03, high).** The `(mid_prefix, segment, slot)` tuple is public,
+so `put_hosted` deleting "the older generation" let any admitted peer replace another publisher's share with
+self-consistent garbage. Fix (`store.rs`, `network/node.rs`): a hosted entry records the authenticated
+principal (the libp2p `PeerId` of the sender) in the store index (`hosted_principal`, `#[serde(default)]`, so
+an old `store_index.json` loads with principal = unknown). `LocalShareStore::put_hosted_by(share, principal)`
+replaces an existing entry of the same tuple only for the same principal; anyone else, and any unknown
+owner, is refused with `HostedRefusal::NotOwner`, which reaches the pusher as
+`StoreRejectReason::NotOwner`. Pushing identical bytes is acknowledged without touching the entry, so it can
+neither take over nor evict. `put_hosted(share)` stays as the no-principal entry point (unknown owner; it
+cannot replace or be replaced). The pusher's `PushState` remembers a `NotOwner` answer per (peer, piece) and
+stops offering that piece to that peer, without blacklisting the peer. Legacy hosted entries (unknown owner)
+cannot be repaired by a new push; the old copy has to be removed first.
+
+**2. Hosted quota monopoly (C-08, medium).** Under the global cap, one principal may hold at most
+`max(25% of the hosted quota, min(quota, 16 MiB))` (`HOSTED_PRINCIPAL_SHARE_PERCENT`,
+`HOSTED_PRINCIPAL_FLOOR_BYTES`, `hosted_principal_budget_bytes()`); unknown/legacy entries share one bucket.
+Over budget gives `HostedRefusal::PrincipalBudgetExceeded` / `StoreRejectReason::PrincipalBudgetExceeded`
+(a standing refusal in `PushState`). Default hosted quota is still 0. No new config key. Note that the floor
+means a quota of 16 MiB or less gives a single principal the whole pool; the fairness only bites above that.
+
+**3. Onion replay cache poisoning (C-10, medium).** `onion_is_replay` is now read-only and runs before
+decryption; the fingerprint is recorded (`onion_record_authenticated`) only after the AEAD peel succeeds, at
+both the relay and the delivery site. Failed authentications are counted per sender
+(64 per 10 s, at most 1024 tracked senders); past that, that sender's layers are dropped before any
+decryption. Invalid ciphertext can no longer mutate the replay state.
+
+**Tests.** New `crates/miasma-core/tests/adversarial_storage_test.rs` (9 tests): other principal cannot
+replace or evict, unknown principal neither replaces nor is replaced, same principal can republish,
+identical bytes do not transfer ownership, per-principal budget stops one peer while another still stores,
+unknown owners share a bucket, small quota stays usable, default quota refuses, a pre-principal
+`store_index.json` loads. In `network/node.rs`: a valid layer is processed once, 5000 unique invalid layers
+follow, and the replay is still rejected; a single sender's failed decryptions are capped.
+
 ## 7. Decisions and open questions
 
 - D1 Manifest lives in the record trailer, not a second DHT key. (Reason in §2.2.)
