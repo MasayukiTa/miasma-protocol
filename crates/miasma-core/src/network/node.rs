@@ -751,6 +751,13 @@ pub enum DhtCommand {
         key: Vec<u8>,
         reply: oneshot::Sender<Result<Option<Vec<u8>>, MiasmaError>>,
     },
+    /// Read the signed record for `key` from this node's own store only. Never
+    /// touches the network, so it answers at once and cannot be used to make
+    /// this node query its peers on someone else's behalf.
+    GetLocal {
+        key: Vec<u8>,
+        reply: oneshot::Sender<Option<Vec<u8>>>,
+    },
     /// Register a bootstrap peer and dial from within the running event loop.
     ///
     /// Dialing from inside the event loop avoids the ECONNREFUSED race that
@@ -1196,6 +1203,35 @@ impl DhtHandle {
             },
             None => Ok(None),
         }
+    }
+
+    /// The record value (record + manifest trailer, exactly what
+    /// [`crate::transfer::decode_record_value`] reads) that this node itself
+    /// holds for `mid_digest`, or `None`.
+    ///
+    /// Local store only: no network query. The signed envelope is checked as on
+    /// every other read (signature, key agreement, decodable value) and only the
+    /// inner value is returned, so a caller serving it onward hands out nothing
+    /// that this node would not have accepted from the DHT itself.
+    pub async fn local_record_value(&self, mid_digest: [u8; 32]) -> Option<Vec<u8>> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::GetLocal {
+                key: mid_digest.to_vec(),
+                reply: tx,
+            })
+            .await
+            .ok()?;
+        let envelope = self.recv_reply(rx, "local_record").await.ok()??;
+        let signed: SignedDhtRecord = bincode::deserialize(&envelope).ok()?;
+        if !signed.verify_for_key(&mid_digest) {
+            return None;
+        }
+        let (record, _) = crate::transfer::decode_record_value(&signed.value).ok()?;
+        if record.dht_key().as_slice() != mid_digest.as_slice() || record.validate().is_err() {
+            return None;
+        }
+        Some(signed.value)
     }
 
     /// Query admission statistics from the node.
@@ -2519,6 +2555,16 @@ impl MiasmaNode {
                     .kademlia
                     .get_record(kad::RecordKey::new(&key));
                 self.pending_gets.insert(qid, (reply, None));
+            }
+            DhtCommand::GetLocal { key, reply } => {
+                let value = self
+                    .swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .store_mut()
+                    .get(&kad::RecordKey::new(&key))
+                    .map(|record| record.value.clone());
+                let _ = reply.send(value);
             }
             DhtCommand::AddBootstrapPeer {
                 peer_id,

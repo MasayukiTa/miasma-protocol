@@ -37,6 +37,7 @@ pub mod reality;
 pub mod shadowsocks;
 pub mod tor;
 pub mod websocket;
+pub mod ws_direct;
 
 use async_trait::async_trait;
 

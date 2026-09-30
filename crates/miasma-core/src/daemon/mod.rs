@@ -336,13 +336,14 @@ impl DaemonServer {
                 .unwrap_or_default();
             match crate::transport::websocket::WssShareServer::bind_tls(
                 store.clone(),
-                0,
+                transport_config.wss_port,
                 cert_pem,
                 key_pem,
             )
             .await
             {
                 Ok(server) => {
+                    let server = server.with_record_provider(Arc::new(node.dht_handle()));
                     let port = server.port;
                     let handle = tokio::spawn(server.run());
                     info!(
@@ -366,8 +367,14 @@ impl DaemonServer {
                 }
             }
         } else {
-            match crate::transport::websocket::WssShareServer::bind(store.clone(), 0).await {
+            match crate::transport::websocket::WssShareServer::bind(
+                store.clone(),
+                transport_config.wss_port,
+            )
+            .await
+            {
                 Ok(server) => {
+                    let server = server.with_record_provider(Arc::new(node.dht_handle()));
                     let port = server.port;
                     let handle = tokio::spawn(server.run());
                     info!(wss_port = port, "WSS share server started");
