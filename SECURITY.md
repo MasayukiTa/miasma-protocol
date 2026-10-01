@@ -38,7 +38,11 @@ before relying on it:
   endpoint ID (which is its publisher key, so also what its share IDs contain),
   its home relay and its IP addresses, and anyone who holds a share ID can look
   the node up the same way; n0's relay sees connection metadata and ciphertext
-  only. Nothing else is sent to n0. Turn it off with
+  only. Nothing else is sent to n0. The relay and discovery HTTPS connections
+  are verified against the operating system certificate store plus `--ca-cert`,
+  so a TLS-inspecting proxy whose CA is installed in the OS can see the
+  connection's metadata (host names, the WebSocket upgrade, traffic pattern)
+  but not the encrypted content. Turn it off with
   `miasma config --key transport.iroh_mode --value off` (or `miasma daemon
   --no-iroh`), or use your own relay with `transport.iroh_mode = custom`. A
   public relay is for reaching the sender, not for bulk transfer (measured about

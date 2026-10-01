@@ -1095,3 +1095,166 @@ async fn n0_public_discovery_dials_a_sender_by_its_key_alone() {
     .await
     .expect("timed out");
 }
+
+// ─── Relay TLS trust: OS store plus --ca-cert ───────────────────────────────
+
+/// A relay whose certificate is issued by a throw-away CA (not self-signed), and
+/// that CA's PEM: what `--ca-cert` would carry for a TLS-inspecting proxy.
+async fn relay_with_own_ca() -> (Relay, Vec<u8>) {
+    use iroh_relay::server::{CertConfig, TlsConfig};
+    let ca_key = rcgen::KeyPair::generate().unwrap();
+    let mut ca_params = rcgen::CertificateParams::new(Vec::new()).unwrap();
+    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    ca_params.key_usages = vec![
+        rcgen::KeyUsagePurpose::KeyCertSign,
+        rcgen::KeyUsagePurpose::CrlSign,
+    ];
+    ca_params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "miasma test relay ca");
+    let ca = ca_params.self_signed(&ca_key).unwrap();
+    let leaf_key = rcgen::KeyPair::generate().unwrap();
+    let leaf =
+        rcgen::CertificateParams::new(vec!["127.0.0.1".to_string(), "localhost".to_string()])
+            .unwrap()
+            .signed_by(&leaf_key, &ca, &ca_key)
+            .unwrap();
+    let key = rustls::pki_types::PrivateKeyDer::from(rustls::pki_types::PrivatePkcs8KeyDer::from(
+        leaf_key.serialize_der(),
+    ));
+    let server_config = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(vec![leaf.der().clone()], key)
+    .unwrap();
+    let mut cfg = iroh_relay::server::testing::server_config();
+    cfg.quic = None;
+    cfg.relay.as_mut().unwrap().tls = Some(TlsConfig::new(
+        (std::net::Ipv4Addr::LOCALHOST, 0),
+        CertConfig::Manual { server_config },
+    ));
+    let server = iroh_relay::server::Server::spawn(cfg).await.unwrap();
+    let url = format!("https://{}", server.https_addr().unwrap());
+    (
+        Relay {
+            _server: server,
+            url,
+        },
+        ca.pem().into_bytes(),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_relay_certificate_from_a_private_ca_is_trusted_only_with_ca_cert() {
+    timeout(Duration::from_secs(90), async {
+        let (relay, ca_pem) = relay_with_own_ca().await;
+
+        // With the CA given (as `--ca-cert` does): the default verifier, no test override.
+        let mut s = settings(&relay.url, Duration::from_secs(15));
+        s.ca_pem = Some(ca_pem);
+        let (sdir, sstore) = empty_store();
+        let (rdir, rstore) = empty_store();
+        let _keep = (sdir, rdir);
+        let seed: [u8; 32] = rand::random();
+        let sender = IrohNode::start(&seed, s.clone(), sstore, None)
+            .await
+            .unwrap();
+        let receiver = IrohNode::start(&rand::random(), s, rstore, None)
+            .await
+            .unwrap();
+        assert!(sender.wait_online(Duration::from_secs(20)).await);
+        assert!(receiver.wait_online(Duration::from_secs(20)).await);
+        let client = receiver.client(&sender.endpoint_id()).unwrap();
+        let unknown = ContentId::compute(b"nothing", &params().to_param_bytes());
+        assert!(client
+            .fetch_record(*unknown.as_bytes())
+            .await
+            .unwrap()
+            .is_none());
+        sender.shutdown().await;
+        receiver.shutdown().await;
+
+        // Without it: the certificate is not trusted and the endpoint says so.
+        let (dir, store) = empty_store();
+        let _keep = dir;
+        let s = settings(&relay.url, Duration::from_secs(5));
+        let node = IrohNode::start(&rand::random(), s, store, None)
+            .await
+            .unwrap();
+        assert!(!node.wait_online(Duration::from_secs(6)).await);
+        assert!(!node.status().relay_connected);
+        // A dial through it fails, and the message names the likely TLS cause.
+        let peer = iroh::SecretKey::from_bytes(&rand::random()).public();
+        let client = node.client(&peer).unwrap();
+        let e = client
+            .fetch_record([7u8; 32])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("relay TLS certificate not trusted"), "{e}");
+        assert!(e.contains("--ca-cert"), "{e}");
+        node.shutdown().await;
+    })
+    .await
+    .expect("timed out");
+}
+
+/// Manual, like the n0 discovery test above: the same scenario,
+/// but with every IP transport removed on both ends, so the relay carries the
+/// connection (and the relay's TLS certificate is verified by the OS store).
+///
+/// ```text
+/// cargo test -p miasma-core --test iroh_direct_test n0_public_relay_only -- --ignored --nocapture
+/// ```
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "manual: contacts n0's public discovery service and relays"]
+async fn n0_public_relay_only_connects_through_the_relay_with_the_os_trust_store() {
+    timeout(Duration::from_secs(120), async {
+        let n0 = IrohSettings {
+            mode: IrohMode::N0,
+            relay_urls: Vec::new(),
+            discovery: true,
+            connect_timeout: Duration::from_secs(40),
+            ca_pem: None,
+            proxy_from_env: false,
+        };
+        let limits = IrohServerLimits::default;
+        let (sdir, sstore) = empty_store();
+        let (rdir, rstore) = empty_store();
+        let _keep = (sdir, rdir);
+        let seed: [u8; 32] = rand::random();
+        let sb = endpoint_builder(Some(&seed), &n0, true)
+            .unwrap()
+            .clear_ip_transports();
+        let sender = IrohNode::start_from_builder(sb, n0.clone(), sstore, None, limits())
+            .await
+            .unwrap();
+        let rseed: [u8; 32] = rand::random();
+        let rb = endpoint_builder(Some(&rseed), &n0, true)
+            .unwrap()
+            .clear_ip_transports();
+        let receiver = IrohNode::start_from_builder(rb, n0, rstore, None, limits())
+            .await
+            .unwrap();
+        assert!(sender.wait_online(Duration::from_secs(30)).await);
+        assert!(receiver.wait_online(Duration::from_secs(30)).await);
+        eprintln!("sender status: {:?}", sender.status());
+        let client = receiver.client(&sender.endpoint_id()).unwrap();
+        let unknown = ContentId::compute(b"never published", &params().to_param_bytes());
+        let got = client.fetch_record(*unknown.as_bytes()).await;
+        eprintln!(
+            "relay-only dial: {:?}; path={:?}",
+            got.as_ref().map(|v| v.is_some()),
+            client.path_kind()
+        );
+        assert!(got.unwrap().is_none());
+        assert_eq!(client.path_kind(), Some("relay"));
+        sender.shutdown().await;
+        receiver.shutdown().await;
+    })
+    .await
+    .expect("timed out");
+}
