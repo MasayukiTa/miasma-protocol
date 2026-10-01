@@ -1496,6 +1496,9 @@ fn cmd_config_loaded(
                     }
                 }
                 "transport.iroh_discovery" => println!("{}", config.transport.iroh_discovery),
+                "transport.iroh_lan_discovery" => {
+                    println!("{}", config.transport.iroh_lan_discovery)
+                }
                 "transport.iroh_connect_timeout_secs" => {
                     println!("{}", config.transport.iroh_connect_timeout_secs)
                 }
@@ -1567,6 +1570,9 @@ fn cmd_config_loaded(
                 }
                 "transport.iroh_discovery" => {
                     config.transport.iroh_discovery = v.parse().context("expected bool")?;
+                }
+                "transport.iroh_lan_discovery" => {
+                    config.transport.iroh_lan_discovery = v.parse().context("expected bool")?;
                 }
                 "transport.iroh_connect_timeout_secs" => {
                     let secs: u64 = v.parse().context("expected a number of seconds")?;
