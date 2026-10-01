@@ -119,6 +119,9 @@ pub enum ReceiveOutcome {
     Paused {
         next_segment: u32,
         reason: String,
+        /// The source could not supply enough valid pieces (as opposed to a
+        /// local problem such as a full disk): another source may continue.
+        source_stalled: bool,
     },
     Cancelled {
         next_segment: u32,
@@ -415,6 +418,7 @@ async fn run_inner<S: PieceSource + ?Sized>(
                         return Ok(ReceiveOutcome::Paused {
                             next_segment: seg,
                             reason,
+                            source_stalled: true,
                         });
                     }
                     progress.segment_retry();
@@ -459,6 +463,7 @@ async fn run_inner<S: PieceSource + ?Sized>(
             return Ok(ReceiveOutcome::Paused {
                 next_segment: seg,
                 reason,
+                source_stalled: false,
             });
         }
         hasher.update(&plaintext);
