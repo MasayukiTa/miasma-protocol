@@ -32,6 +32,8 @@
 pub mod diagnostics;
 #[cfg(feature = "iroh")]
 pub mod iroh_direct;
+#[cfg(feature = "iroh")]
+pub mod netcheck;
 pub mod obfuscated;
 pub mod payload;
 pub mod proxy;

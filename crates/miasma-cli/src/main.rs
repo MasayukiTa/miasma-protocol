@@ -402,6 +402,20 @@ enum Commands {
         store_dir: Option<PathBuf>,
     },
 
+    /// Diagnose the network path for receiving by share ID (iroh).
+    ///
+    /// Measures UDP, the NAT mapping, the relay connection and TCP 443 to the
+    /// relays and to Cloudflare's tunnel API, and says which path to expect.
+    /// Sends no user data. Uses the same iroh settings as the daemon.
+    Netcheck {
+        /// Seconds to wait for the relay and the net report. Default: 15.
+        #[arg(long, default_value = "15")]
+        timeout_secs: u64,
+        /// Print the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Probe WebSocket/WSS connectivity to a URL.
     ///
     /// Connects via TCP (+ TLS for wss:// or https://) and performs a WebSocket
@@ -615,6 +629,10 @@ async fn main() -> Result<()> {
             preset,
             store_dir,
         } => cmd_redundancy_bench(size_mib, &preset, store_dir.as_deref()),
+
+        Commands::Netcheck { timeout_secs, json } => {
+            cmd_netcheck(&data_dir, timeout_secs, json).await
+        }
 
         Commands::WssProbe {
             url,
@@ -2919,6 +2937,24 @@ async fn cmd_transfer_remove(
 ///
 /// Exit 0 on session success (or data-phase error → connection itself worked).
 /// Exit 1 on session failure.
+async fn cmd_netcheck(data_dir: &std::path::Path, timeout_secs: u64, json: bool) -> Result<()> {
+    use miasma_core::transport::{iroh_direct::IrohSettings, netcheck::run_netcheck};
+    let config = NodeConfig::load(data_dir).context("cannot load config")?;
+    let settings = IrohSettings::from_config(&config.transport);
+    let report = run_netcheck(
+        &settings,
+        std::time::Duration::from_secs(timeout_secs.max(1)),
+    )
+    .await
+    .context("netcheck failed")?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print!("{}", i18n::format_netcheck(&report, i18n::lang()));
+    }
+    Ok(())
+}
+
 async fn cmd_wss_probe(
     url: &str,
     timeout_secs: u64,
