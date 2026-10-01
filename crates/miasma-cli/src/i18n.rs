@@ -925,6 +925,110 @@ pub fn format_bench_table(rows: &[BenchRow], lang: Lang) -> String {
     out
 }
 
+/// The text of `miasma netcheck` (a few lines per fact, plus the verdict).
+pub fn format_netcheck(r: &miasma_core::transport::netcheck::NetcheckReport, lang: Lang) -> String {
+    use miasma_core::transport::netcheck::{Note, Verdict};
+    let ja = lang == Lang::Ja;
+    let yn = |b: bool| match (b, ja) {
+        (true, false) => "yes",
+        (false, false) => "no",
+        (true, true) => "はい",
+        (false, true) => "いいえ",
+    };
+    let mut o = String::new();
+    let mut line = |en: String, jp: String| {
+        o.push_str(if ja { &jp } else { &en });
+        o.push('\n');
+    };
+    line(
+        format!("UDP (IPv4 / IPv6):     {} / {}", yn(r.udp_v4), yn(r.udp_v6)),
+        format!("UDP(IPv4 / IPv6):      {} / {}", yn(r.udp_v4), yn(r.udp_v6)),
+    );
+    let varies = |en: bool| match (r.nat_mapping_varies, en) {
+        (Some(true), true) => "varies by destination (hole punching unlikely)",
+        (Some(false), true) => "stable (hole punching likely)",
+        (None, true) => "unknown",
+        (Some(true), false) => "宛先ごとに変わる(穴あけは通りにくい)",
+        (Some(false), false) => "安定(穴あけが通りやすい)",
+        (None, false) => "測れませんでした",
+    };
+    line(
+        format!("NAT mapping:           {}", varies(true)),
+        format!("NAT の割り当て:        {}", varies(false)),
+    );
+    line(
+        format!("Relay connection:      {}", yn(r.relay_connected)),
+        format!("中継サーバーへの接続:  {}", yn(r.relay_connected)),
+    );
+    for (url, ms) in &r.relay_latency {
+        line(
+            format!("  relay {url}  {ms} ms"),
+            format!("  中継 {url}  {ms} ms"),
+        );
+    }
+    for p in &r.tcp {
+        let res = match (p.ok, p.millis, p.error.as_deref()) {
+            (true, Some(ms), _) => format!("OK {ms} ms"),
+            (_, _, Some(e)) => format!("NG ({e})"),
+            _ => "NG".to_owned(),
+        };
+        line(
+            format!("  TCP {}:{}  {res}", p.host, p.port),
+            format!("  TCP {}:{}  {res}", p.host, p.port),
+        );
+    }
+    line(String::new(), String::new());
+    let (en, jp) = match r.verdict {
+        Verdict::DirectLikely => (
+            "Verdict: a direct path is likely; the relay is the backup.",
+            "判定: 直接つながる見込みがあります(中継サーバーは予備です)。",
+        ),
+        Verdict::RelayOnly => (
+            "Verdict: relay only. Transfers work but are slow (about 1 MiB/s on the public relay).",
+            "判定: 中継サーバー経由のみ。転送はできますが遅くなります(公開の中継で約 1 MiB/s)。",
+        ),
+        Verdict::HttpsOnly => (
+            "Verdict: only HTTPS gets out. Receive through a tunnel: ask the sender to run `miasma tunnel` and use --via wss://…",
+            "判定: HTTPS だけが通ります。トンネル経由で受け取ってください(送る側が `miasma tunnel` を実行し、--via wss://… を使う)。",
+        ),
+        Verdict::Offline => (
+            "Verdict: no network path found. Check the connection, proxy and VPN.",
+            "判定: 経路が見つかりません。接続、プロキシ、VPN を確認してください。",
+        ),
+    };
+    line(en.to_owned(), jp.to_owned());
+    for n in &r.notes {
+        let (en, jp) = match n {
+            Note::UdpBlocked => (
+                "- UDP is blocked: no direct path; the relay carries the data.",
+                "- UDP が止められています。直接の経路は使えず、中継サーバーがデータを運びます。",
+            ),
+            Note::NatMappingVaries => (
+                "- The NAT assigns a different public port per destination (symmetric): hole punching rarely works.",
+                "- NAT が宛先ごとに別の公開ポートを割り当てています(対称型)。穴あけはほぼ通りません。",
+            ),
+            Note::CaptivePortal => (
+                "- A captive portal may intercept HTTP: sign in to the network first.",
+                "- キャプティブポータルが HTTP を横取りしている可能性があります。先にネットワークへのサインインを済ませてください。",
+            ),
+            Note::ProxyInUse => (
+                "- HTTP(S)_PROXY is set: relay and discovery traffic goes through it.",
+                "- HTTP(S)_PROXY が設定されています。中継と探索の通信はそれを通ります。",
+            ),
+            Note::RelayTcpButNoRelay => (
+                "- The relay host answers on 443 but the relay connection failed: TLS inspection? Install the proxy's CA in the OS store or pass --ca-cert.",
+                "- 中継サーバーの 443 には届きますが、中継への接続に失敗しました。TLS 検査の可能性があります。その CA を OS のストアに入れるか、--ca-cert を指定してください。",
+            ),
+            Note::TunnelApiUnreachable => (
+                "- api.trycloudflare.com is unreachable: `miasma tunnel` will not work from here.",
+                "- api.trycloudflare.com に届きません。ここからは `miasma tunnel` が使えません。",
+            ),
+        };
+        line(en.to_owned(), jp.to_owned());
+    }
+    o
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -51,7 +51,9 @@ shadowsocks-crypto.workspace = true
 # Direct transport by public key (see src/transport/iroh_direct.rs). ring TLS
 # only: no aws-lc/cmake, no portmapper, no metrics. platform-verifier: relay and
 # discovery TLS is checked against the OS certificate store (see ca_tls_config).
-iroh = { version = "1.3", default-features = false, features = ["tls-ring", "platform-verifier"], optional = true }
+# unstable-net-report: UDP / NAT-mapping / relay-latency report for `netcheck`
+# (the version is pinned by Cargo.lock; revisit on an iroh upgrade).
+iroh = { version = "1.3", default-features = false, features = ["tls-ring", "platform-verifier", "unstable-net-report"], optional = true }
 
 [features]
 default = ["iroh"]
