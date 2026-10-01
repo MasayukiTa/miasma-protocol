@@ -428,6 +428,46 @@ async fn run_from_record<S: PieceSource>(
     .await
 }
 
+/// Whether a receive that ended `r` should go on with the next source: the
+/// source had the record but could not supply pieces, the person did not cancel,
+/// and another source is left.
+fn should_fail_over(
+    r: &Result<ReceiveOutcome, MiasmaError>,
+    progress: &TransferProgress,
+    another_source: bool,
+) -> bool {
+    another_source
+        && !progress.is_cancelled()
+        && matches!(
+            r,
+            Ok(ReceiveOutcome::Paused {
+                source_stalled: true,
+                ..
+            })
+        )
+}
+
+/// The engine marked the transfer paused; it is running again on another source.
+fn note_failover(progress: &TransferProgress, from: &str) {
+    warn!("{from} stopped supplying pieces; trying the next source from the saved progress");
+    progress.set_state(TransferState::Running, None, false);
+}
+
+/// Every later source failed: show the transfer as the paused one it is.
+fn restore_paused(
+    r: &Result<ReceiveOutcome, MiasmaError>,
+    progress: &TransferProgress,
+    failures: &[(String, MiasmaError)],
+) {
+    if let Ok(ReceiveOutcome::Paused { reason, .. }) = r {
+        let mut why = reason.clone();
+        for (source, e) in failures {
+            why.push_str(&format!("; {source}: {e}"));
+        }
+        progress.set_state(TransferState::Paused, Some(why), true);
+    }
+}
+
 /// Receive `target` into `output_path` from the direct sources, in order, and
 /// stop at the first that has the record.
 ///
@@ -453,6 +493,15 @@ pub async fn try_receive_direct(
     }
     let signer = expect.as_ref().map(|s| *s.publisher());
     let mut failures: Vec<(String, MiasmaError)> = Vec::new();
+    // A source that had the record but stopped supplying pieces. If the next
+    // source also fails to have the record, this is what the receive ends as.
+    let mut stalled: Option<Result<ReceiveOutcome, MiasmaError>> = None;
+    let mut restart = restart;
+
+    #[cfg(feature = "iroh")]
+    let later_after_via = sources.iroh.is_some() && signer.is_some();
+    #[cfg(not(feature = "iroh"))]
+    let later_after_via = false;
 
     if let Some(via) = &sources.via {
         match via.build_clients() {
@@ -460,20 +509,25 @@ pub async fn try_receive_direct(
             Ok(clients) => match fetch_verified_record_via(&clients, &mid, signer.as_ref()).await {
                 Ok(fetched) => {
                     let source = WsPieceSource::new(clients);
-                    return DirectOutcome::Finished(
-                        run_from_record(
-                            &source,
-                            mid,
-                            fetched,
-                            expect,
-                            output_path,
-                            password,
-                            journal_dir,
-                            restart,
-                            progress,
-                        )
-                        .await,
-                    );
+                    let r = run_from_record(
+                        &source,
+                        mid.clone(),
+                        fetched,
+                        expect,
+                        output_path,
+                        password.clone(),
+                        journal_dir,
+                        restart,
+                        progress.clone(),
+                    )
+                    .await;
+                    if !should_fail_over(&r, &progress, later_after_via) {
+                        return DirectOutcome::Finished(r);
+                    }
+                    // Continue on the next source from what is already on disk.
+                    note_failover(&progress, "--via");
+                    restart = false;
+                    stalled = Some(r);
                 }
                 Err(e) => failures.push(("--via".to_owned(), e)),
             },
@@ -510,6 +564,11 @@ pub async fn try_receive_direct(
         }
     }
 
+    if let Some(r) = stalled {
+        // The later sources had nothing: the earlier stall stands, and says why.
+        restore_paused(&r, &progress, &failures);
+        return DirectOutcome::Finished(r);
+    }
     DirectOutcome::Unavailable(failures)
 }
 
@@ -630,4 +689,58 @@ pub async fn receive_file_via_id(
         progress,
     )
     .await
+}
+
+#[cfg(test)]
+mod failover_tests {
+    use super::*;
+
+    fn paused(stalled: bool) -> Result<ReceiveOutcome, MiasmaError> {
+        Ok(ReceiveOutcome::Paused {
+            next_segment: 3,
+            reason: "pieces missing".into(),
+            source_stalled: stalled,
+        })
+    }
+
+    #[test]
+    fn a_stalled_source_fails_over_only_when_another_source_is_left() {
+        let p = TransferProgress::new("m");
+        assert!(should_fail_over(&paused(true), &p, true));
+        assert!(!should_fail_over(&paused(true), &p, false));
+    }
+
+    #[test]
+    fn local_problems_and_cancel_and_completion_never_fail_over() {
+        let p = TransferProgress::new("m");
+        // A full disk is not the source's fault.
+        assert!(!should_fail_over(&paused(false), &p, true));
+        assert!(!should_fail_over(
+            &Ok(ReceiveOutcome::Complete { bytes: 1 }),
+            &p,
+            true
+        ));
+        assert!(!should_fail_over(
+            &Err(MiasmaError::Network("x".into())),
+            &p,
+            true
+        ));
+        p.cancel();
+        assert!(!should_fail_over(&paused(true), &p, true));
+    }
+
+    #[test]
+    fn failing_over_shows_running_and_exhausting_sources_shows_paused_with_reasons() {
+        let p = TransferProgress::new("m");
+        p.set_state(TransferState::Paused, Some("pieces missing".into()), true);
+        note_failover(&p, "--via");
+        assert_eq!(p.snapshot().state, TransferState::Running);
+        let failures = vec![("iroh".to_owned(), MiasmaError::Network("no route".into()))];
+        restore_paused(&paused(true), &p, &failures);
+        let s = p.snapshot();
+        assert_eq!(s.state, TransferState::Paused);
+        assert!(s.resumable);
+        let why = s.last_error.unwrap();
+        assert!(why.contains("pieces missing") && why.contains("iroh") && why.contains("no route"));
+    }
 }
