@@ -170,7 +170,9 @@ pub fn localize_daemon_error(e: &str, lang: Lang) -> String {
             } else {
                 "送信者へ接続できませんでした。"
             };
-            return format!("iroh で送信者に到達できません。{why}（詳細: {detail}）");
+            return format!(
+                "iroh で送信者に到達できません。{why}原因の切り分けには `miasma netcheck` を実行してください。HTTPS しか通らない場合は、送信者に `miasma tunnel` を実行してもらい、--via wss://… で受け取れます。（詳細: {detail}）"
+            );
         }
         if e.contains("the peer that answered is not the publisher named in the share ID") {
             return format!(
