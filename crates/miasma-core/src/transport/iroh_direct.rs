@@ -580,7 +580,12 @@ impl IrohClientError {
 impl std::fmt::Display for IrohClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Unreachable(e) => write!(f, "cannot reach the sender over iroh: {e}"),
+            Self::Unreachable(e) => write!(
+                f,
+                "cannot reach the sender over iroh: {e}; run `miasma netcheck` to see which path \
+                 this network allows. If only HTTPS gets out, ask the sender to run \
+                 `miasma tunnel` and receive with --via wss://..."
+            ),
             Self::Connection(e) => write!(f, "the iroh connection failed: {e}"),
             Self::Protocol(e) => write!(f, "the iroh peer did not answer as expected: {e}"),
         }
