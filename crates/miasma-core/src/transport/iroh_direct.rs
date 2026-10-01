@@ -39,6 +39,7 @@ use iroh::{
     tls::CaTlsConfig,
     Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey, Watcher,
 };
+use iroh_mdns_address_lookup::MdnsAddressLookup;
 use tokio::{
     io::AsyncReadExt,
     sync::{Mutex, Semaphore},
@@ -62,6 +63,9 @@ use crate::{
 /// Application protocol name on the wire.
 pub const IROH_ALPN: &[u8] = b"miasma/direct/1";
 
+/// mDNS service name: keeps Miasma's announcements apart from other iroh apps'.
+const LAN_SERVICE_NAME: &str = "miasma";
+
 /// Largest extra CA bundle accepted (PEM text), as for `--via`.
 const MAX_CA_PEM_BYTES: usize = 256 * 1024;
 
@@ -76,6 +80,8 @@ pub struct IrohSettings {
     pub relay_urls: Vec<String>,
     /// Publish to / resolve from n0's discovery service.
     pub discovery: bool,
+    /// Announce on / resolve from the local network (mDNS).
+    pub lan_discovery: bool,
     /// Upper bound on one dial.
     pub connect_timeout: Duration,
     /// Extra CA certificate(s), PEM text, trusted in addition to the bundled
@@ -91,6 +97,7 @@ impl IrohSettings {
             mode: t.iroh_mode,
             relay_urls: t.iroh_relay_urls.clone(),
             discovery: t.iroh_discovery,
+            lan_discovery: t.iroh_lan_discovery,
             connect_timeout: Duration::from_secs(t.iroh_connect_timeout_secs.max(1)),
             ca_pem: None,
             proxy_from_env: proxy_env_is_set(),
@@ -186,6 +193,14 @@ pub fn endpoint_builder(
         b = b
             .address_lookup(PkarrResolver::n0_dns())
             .address_lookup(DnsAddressLookup::n0_dns());
+    }
+    if settings.lan_discovery {
+        // Only an endpoint with an identity of its own is worth announcing.
+        b = b.address_lookup(
+            MdnsAddressLookup::builder()
+                .advertise(publish)
+                .service_name(LAN_SERVICE_NAME),
+        );
     }
     if settings.proxy_from_env {
         b = b.proxy_from_env();
@@ -863,6 +878,12 @@ pub fn log_privacy_notice(settings: &IrohSettings) {
         info!(
             "iroh discovery via n0 is enabled: your endpoint id and addresses are published to \
              n0; disable with transport.iroh_mode=off"
+        );
+    }
+    if settings.lan_discovery {
+        info!(
+            "iroh LAN discovery is enabled: your endpoint id and LAN addresses are announced to \
+             the local network (mDNS); disable with transport.iroh_lan_discovery=false"
         );
     }
 }
