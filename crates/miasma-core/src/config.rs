@@ -130,6 +130,12 @@ pub struct TransportConfig {
     /// can only reach senders through `iroh_relay_urls`.
     #[serde(default = "default_true")]
     pub iroh_discovery: bool,
+    /// Announce this node on, and look senders up in, the local network (mDNS),
+    /// so two machines on one LAN connect without the internet. The announcement
+    /// carries the endpoint ID and the LAN addresses and is visible to the whole
+    /// LAN; turn it off on a network you do not trust.
+    #[serde(default = "default_true")]
+    pub iroh_lan_discovery: bool,
     /// How long one receive tries to reach a sender over iroh, in seconds.
     #[serde(default = "default_iroh_connect_timeout_secs")]
     pub iroh_connect_timeout_secs: u64,
@@ -194,6 +200,7 @@ impl Default for TransportConfig {
             iroh_mode: IrohMode::default(),
             iroh_relay_urls: Vec::new(),
             iroh_discovery: true,
+            iroh_lan_discovery: true,
             iroh_connect_timeout_secs: DEFAULT_IROH_CONNECT_TIMEOUT_SECS,
             wss_port: 0,
             wss_tls_enabled: false,
@@ -220,6 +227,7 @@ impl fmt::Debug for TransportConfig {
             .field("iroh_mode", &self.iroh_mode)
             .field("iroh_relay_urls", &self.iroh_relay_urls)
             .field("iroh_discovery", &self.iroh_discovery)
+            .field("iroh_lan_discovery", &self.iroh_lan_discovery)
             .field("iroh_connect_timeout_secs", &self.iroh_connect_timeout_secs)
             .field("wss_port", &self.wss_port)
             .field("wss_tls_enabled", &self.wss_tls_enabled)
@@ -444,6 +452,7 @@ bandwidth_mb_day = 512
         assert_eq!(t.iroh_mode, IrohMode::N0);
         assert!(t.iroh_relay_urls.is_empty());
         assert!(t.iroh_discovery);
+        assert!(t.iroh_lan_discovery);
         assert_eq!(
             t.iroh_connect_timeout_secs,
             DEFAULT_IROH_CONNECT_TIMEOUT_SECS
