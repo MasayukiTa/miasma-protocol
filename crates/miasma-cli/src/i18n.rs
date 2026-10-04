@@ -312,6 +312,10 @@ pub enum Msg {
         id: String,
     },
     ShareIdHint,
+    /// Heading above the `--invite` message (printed to stderr, like the Share ID).
+    InviteHeading,
+    /// `--invite` was given but there is no Share ID to put in the message.
+    InviteUnavailable,
     ShareIdNeedsOutput,
     /// A receive started from a bare MID: it cannot tell who published.
     UnauthenticatedMid,
@@ -538,6 +542,8 @@ impl Msg {
             ShareIdHint => "  Give the receiver the Share ID (and the password): it also lets them \
                             check who published the file, which the MID alone cannot."
                 .into(),
+            InviteHeading => "--- Invitation (copy everything below; the password is not included) ---".into(),
+            InviteUnavailable => "--invite: no Share ID is available yet, so no invitation was printed. Look the Share ID up with `miasma transfers` once the publish finishes.".into(),
             ShareIdNeedsOutput => "a share ID is verified while receiving to a file: pass -o/--output \
                                    (writing to stdout takes the MID, which cannot check who published)."
                 .into(),
@@ -742,6 +748,8 @@ Anyone who has this link can control this node until the daemon restarts: do not
             RetrieveHint { mid } => format!("  受信するには: miasma network-get {mid} -o output.bin"),
             ShareIdLine { id } => format!("共有ID: {id}"),
             ShareIdHint => "  受信する人には共有ID(とパスワード)を渡してください。共有IDがあれば、誰が公開したファイルかも確認できます(MIDだけでは確認できません)。".into(),
+            InviteHeading => "--- 招待文(以下をそのままコピーしてください。パスワードは含まれません) ---".into(),
+            InviteUnavailable => "--invite: 共有IDがまだ無いため招待文を表示できません。公開が完了したら `miasma transfers` で共有IDを確認してください。".into(),
             ShareIdNeedsOutput => "共有IDの確認はファイルへ受信するときに行われます。-o/--output を指定してください(標準出力へ書き出すにはMIDを使いますが、MIDでは発行元を確認できません)。".into(),
             UnauthenticatedMid => "発行元は確認されていません。共有IDを使ってください".into(),
 
@@ -1074,6 +1082,8 @@ mod tests {
             RetrieveHint { .. } => "RetrieveHint",
             ShareIdLine { .. } => "ShareIdLine",
             ShareIdHint => "ShareIdHint",
+            InviteHeading => "InviteHeading",
+            InviteUnavailable => "InviteUnavailable",
             ShareIdNeedsOutput => "ShareIdNeedsOutput",
             UnauthenticatedMid => "UnauthenticatedMid",
             PasswordOnlyToFile => "PasswordOnlyToFile",
