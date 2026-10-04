@@ -126,6 +126,10 @@ pub struct MiasmaApp {
 
     // Transfers screen (resumable large-file transfers)
     transfers: TransfersUi,
+    /// `miasma-share:` links handed over by later launches (see `link.rs`), and the instance lock
+    /// that makes this window the one they are handed to.
+    link_rx: Option<std::sync::mpsc::Receiver<String>>,
+    _instance: Option<crate::link::Instance>,
 
     // Send panel (directed sharing)
     send_contact: String,
@@ -257,6 +261,8 @@ impl MiasmaApp {
             launch_attempts: 0,
 
             transfers: TransfersUi::default(),
+            link_rx: None,
+            _instance: None,
 
             // Directed sharing
             send_contact: String::new(),
@@ -272,6 +278,23 @@ impl MiasmaApp {
             outbox_items: Vec::new(),
             outbox_confirm_code: String::new(),
         }
+    }
+
+    /// Show New transfer > Receive with a share ID filled in (a `miasma-share:` link was opened).
+    pub fn open_share_link(&mut self, share_id: String) {
+        self.tab = Tab::Transfers;
+        self.transfers.prefill_receive(share_id);
+    }
+
+    /// Start receiving links handed over by later launches. `instance` is kept alive for as long as
+    /// this window is, so the lock stays held.
+    pub fn set_link_listener(
+        &mut self,
+        rx: std::sync::mpsc::Receiver<String>,
+        instance: crate::link::Instance,
+    ) {
+        self.link_rx = Some(rx);
+        self._instance = Some(instance);
     }
 
     /// Current locale string table.
@@ -2861,6 +2884,9 @@ impl eframe::App for MiasmaApp {
 
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
         self.poll_worker();
+        if let Some(id) = self.link_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.open_share_link(id);
+        }
 
         // Periodic status poll (~30 seconds).
         if self.daemon_state == DaemonState::Connected
