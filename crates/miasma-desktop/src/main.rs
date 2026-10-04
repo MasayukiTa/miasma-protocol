@@ -19,6 +19,7 @@
 
 mod app;
 mod fonts;
+mod link;
 pub mod locale;
 mod theme;
 mod transfers;
@@ -106,6 +107,25 @@ fn main() -> eframe::Result<()> {
             .init();
     }
 
+    // A `miasma-share:` link (the OS passes it as an argument). If a Miasma window of this data
+    // dir is already open, hand the link to it and exit instead of starting a second copy.
+    let share_link = link::share_id_from_args(std::env::args().skip(1));
+    let instance = link::acquire(&data_dir);
+    if let (Some(id), link::Instance::Other) = (&share_link, &instance) {
+        if link::hand_off(&data_dir, id) {
+            tracing::info!("handed a miasma-share link to the running window");
+            return Ok(());
+        }
+        tracing::warn!("the running window did not take the link; opening it here");
+    }
+    // Per-user URL scheme (HKCU only), registered off the startup path; never fatal.
+    {
+        let dir = data_dir.clone();
+        let _ = std::thread::Builder::new()
+            .name("url-scheme".into())
+            .spawn(move || link::register_url_scheme(&dir));
+    }
+
     // Stamp version for future upgrade detection.
     miasma_core::config::stamp_version(&data_dir, env!("CARGO_PKG_VERSION"));
 
@@ -146,9 +166,18 @@ fn main() -> eframe::Result<()> {
         "Miasma",
         native_options,
         Box::new(move |cc| {
-            Box::new(app::MiasmaApp::new(
-                cc, mode, locale, theme, data_dir, intent,
-            ))
+            let mut app = app::MiasmaApp::new(cc, mode, locale, theme, data_dir.clone(), intent);
+            if let Some(id) = share_link {
+                app.open_share_link(id);
+            }
+            // Only the window that holds the instance lock listens for hand-offs.
+            if matches!(instance, link::Instance::Primary(_)) {
+                app.set_link_listener(
+                    link::spawn_listener(data_dir, cc.egui_ctx.clone()),
+                    instance,
+                );
+            }
+            Box::new(app)
         }),
     )
 }
