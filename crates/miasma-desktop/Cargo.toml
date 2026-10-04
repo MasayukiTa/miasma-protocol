@@ -33,7 +33,8 @@ directories.workspace = true
 egui   = "0.27"
 eframe = { version = "0.27", features = ["default_fonts"] }
 rfd    = "0.14"   # native file-picker dialogs
-# qrcode = "0.14"  # enable in Phase 3 when network allows image crate download
+# Share ID QR code: pure Rust, no image or system dependencies.
+qrcode = { version = "0.14", default-features = false }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

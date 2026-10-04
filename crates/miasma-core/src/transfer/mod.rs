@@ -13,6 +13,7 @@
 
 pub mod bench;
 pub mod direct;
+pub mod invite;
 pub mod jobs;
 pub mod journal;
 pub mod manifest;
@@ -25,6 +26,7 @@ pub mod publish_journal;
 pub mod receive;
 pub mod share_id;
 
+pub use invite::{extract_share_id, invitation_text, share_id_from_link, InviteLang};
 pub use share_id::{parse_transfer_id, ShareId, ShareIdError, ShareMismatch, TransferId};
 
 pub use manifest::{

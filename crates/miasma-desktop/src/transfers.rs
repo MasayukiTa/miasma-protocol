@@ -486,6 +486,13 @@ pub struct TransfersUi {
     /// it is accepted), not from the Resume button.
     from_form: bool,
     copied_at: Option<Instant>,
+    /// When the invitation was last copied (the button says so for two seconds).
+    invitation_copied_at: Option<Instant>,
+    /// The share ID of this transfer is shown as a QR code.
+    show_qr: bool,
+    /// Put the cursor in the receive form's password field on the next frame (set when a
+    /// link or invitation filled in the share ID).
+    focus_recv_password: bool,
 }
 
 impl Default for TransfersUi {
@@ -521,6 +528,9 @@ impl Default for TransfersUi {
             pending_via: None,
             from_form: false,
             copied_at: None,
+            invitation_copied_at: None,
+            show_qr: false,
+            focus_recv_password: false,
         }
     }
 }
@@ -578,6 +588,16 @@ impl TransfersUi {
         self.resume_open = true;
     }
 
+    /// A `miasma-share:` link was opened: show the New transfer > Receive form with the share ID
+    /// filled in and the cursor on the password field. The password is never part of a link.
+    pub fn prefill_receive(&mut self, share_id: String) {
+        self.select_id(None);
+        self.form = NewForm::Receive;
+        self.form_error = None;
+        self.recv_mid = share_id;
+        self.focus_recv_password = true;
+    }
+
     fn select_id(&mut self, id: Option<String>) {
         if self.selected != id {
             self.selected = id;
@@ -585,6 +605,7 @@ impl TransfersUi {
             self.restart_confirm = false;
             self.discard_confirm = false;
             self.resume_password.zeroize();
+            self.show_qr = false;
         }
     }
 
@@ -887,10 +908,42 @@ impl TransfersUi {
                                     ui.output_mut(|o| o.copied_text = share_id.to_owned());
                                     self.copied_at = Some(Instant::now());
                                 }
+                                let invited = self
+                                    .invitation_copied_at
+                                    .is_some_and(|c| c.elapsed() < Duration::from_secs(2));
+                                let label = if invited { t.copied } else { t.copy_invitation };
+                                if ui.small_button(label).clicked() {
+                                    ui.output_mut(|o| {
+                                        o.copied_text = miasma_core::transfer::invitation_text(
+                                            share_id,
+                                            t.invite_lang,
+                                        )
+                                    });
+                                    self.invitation_copied_at = Some(Instant::now());
+                                }
+                                let qr_label = if self.show_qr { t.hide_qr } else { t.show_qr };
+                                if ui.small_button(qr_label).clicked() {
+                                    self.show_qr = !self.show_qr;
+                                }
                             });
+                            if self.show_qr {
+                                ui.add_space(4.0);
+                                if draw_qr(ui, share_id, 240.0) {
+                                    ui.label(
+                                        egui::RichText::new(t.qr_note).small().color(pal().faint),
+                                    );
+                                } else {
+                                    ui.label(egui::RichText::new(t.qr_failed).color(pal().danger));
+                                }
+                            }
                             if job.kind == TransferKind::Send {
                                 ui.label(
                                     egui::RichText::new(t.share_id_send_note)
+                                        .small()
+                                        .color(pal().faint),
+                                );
+                                ui.label(
+                                    egui::RichText::new(t.invitation_note)
                                         .small()
                                         .color(pal().faint),
                                 );
@@ -1383,12 +1436,21 @@ impl TransfersUi {
         cmds: &mut Vec<WorkerCmd>,
     ) {
         form_row(ui, t.recv_id_label, |ui| {
-            ui.add(
+            let resp = ui.add(
                 egui::TextEdit::singleline(&mut self.recv_mid)
                     .hint_text("miasma-share:...")
                     .font(egui::TextStyle::Monospace)
                     .desired_width(f32::INFINITY),
             );
+            // A whole invitation (or a link, or an id with a line break in it) pasted here:
+            // keep just the Share ID, and only when it is a valid one.
+            if resp.changed() {
+                if let Some(id) = miasma_core::transfer::extract_share_id(&self.recv_mid) {
+                    if id != self.recv_mid {
+                        self.recv_mid = id;
+                    }
+                }
+            }
         });
         form_row(ui, t.recv_path_label, |ui| {
             ui.horizontal(|ui| {
@@ -1428,11 +1490,15 @@ impl TransfersUi {
             );
         }
         form_row(ui, t.password_label, |ui| {
-            ui.add(
+            let pw = ui.add(
                 egui::TextEdit::singleline(&mut self.recv_password)
                     .password(true)
                     .desired_width(240.0),
             );
+            if self.focus_recv_password {
+                self.focus_recv_password = false;
+                pw.request_focus();
+            }
             ui.label(
                 egui::RichText::new(t.password_note)
                     .small()
@@ -1886,6 +1952,39 @@ fn fit_text(painter: &egui::Painter, text: &str, font: &egui::FontId, max_w: f32
         }
     }
     chars[..lo].iter().collect::<String>() + "..."
+}
+
+/// Draw `text` as a QR code: dark modules on a white quiet zone whatever the theme, so it scans.
+/// Returns false if the text cannot be encoded.
+fn draw_qr(ui: &mut egui::Ui, text: &str, side: f32) -> bool {
+    use qrcode::{Color, QrCode};
+    let Ok(code) = QrCode::new(text.as_bytes()) else {
+        return false;
+    };
+    let n = code.width();
+    // 4 modules of quiet zone on every side (the QR specification's minimum).
+    const QUIET: usize = 4;
+    let cells = (n + 2 * QUIET) as f32;
+    // Whole pixels per module keep the edges sharp.
+    let module = (side / cells).floor().max(1.0);
+    let size = module * cells;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0.0, egui::Color32::WHITE);
+    for y in 0..n {
+        for x in 0..n {
+            if code[(x, y)] == Color::Dark {
+                let min =
+                    rect.min + egui::vec2((x + QUIET) as f32 * module, (y + QUIET) as f32 * module);
+                painter.rect_filled(
+                    egui::Rect::from_min_size(min, egui::vec2(module, module)),
+                    0.0,
+                    egui::Color32::BLACK,
+                );
+            }
+        }
+    }
+    true
 }
 
 /// An up (send) or down (receive) arrow drawn with lines, so it needs no font glyph.

@@ -188,6 +188,11 @@ enum Commands {
         /// `miasma transfers`; the MID is shown there once the file is hashed.
         #[arg(long)]
         no_wait: bool,
+        /// Also print a ready-to-paste invitation message (Share ID, how to
+        /// receive, where to download Miasma) to stderr. The password is never
+        /// part of it. Default output is unchanged without this flag.
+        #[arg(long)]
+        invite: bool,
     },
 
     /// Generate a strong random password for `network-publish --password-file`.
@@ -562,6 +567,7 @@ async fn main() -> Result<()> {
             password_stdin,
             restart,
             no_wait,
+            invite,
         } => {
             let password = read_transfer_password(password_file.as_deref(), password_stdin)?;
             if let Some(pw) = &password {
@@ -576,6 +582,7 @@ async fn main() -> Result<()> {
                 password.as_ref().map(|p| p.as_str()),
                 restart,
                 no_wait,
+                invite,
             )
             .await
         }
@@ -601,6 +608,13 @@ async fn main() -> Result<()> {
             ca_cert,
         } => {
             let password = read_transfer_password(password_file.as_deref(), password_stdin)?;
+            // A pasted invitation (or a `miasma-share:` link) works too: when the
+            // argument is not an ID as typed, look for a valid share ID inside it.
+            let mid = if miasma_core::transfer::parse_transfer_id(&mid).is_ok() {
+                mid
+            } else {
+                miasma_core::transfer::share_id_from_link(&mid).unwrap_or(mid)
+            };
             cmd_network_get(
                 &data_dir,
                 &mid,
@@ -2171,6 +2185,7 @@ async fn cmd_network_publish(
     password: Option<&str>,
     restart: bool,
     no_wait: bool,
+    invite: bool,
 ) -> Result<()> {
     use miasma_core::{daemon_request, ControlRequest, ControlResponse};
 
@@ -2223,6 +2238,9 @@ async fn cmd_network_publish(
     eprintln!("{}", Msg::RunAgainToWatch.t());
     if no_wait {
         eprintln!("{}", Msg::StartedCheckWith.t());
+        if invite {
+            eprintln!("{}", Msg::InviteUnavailable.t());
+        }
         return Ok(());
     }
 
@@ -2268,6 +2286,20 @@ async fn cmd_network_publish(
             .t()
         );
         eprintln!("{}", Msg::ShareIdHint.t());
+    }
+    if invite {
+        match status.share_id.as_deref().filter(|s| !s.is_empty()) {
+            Some(share_id) => {
+                let lang = match crate::i18n::lang() {
+                    crate::i18n::Lang::Ja => miasma_core::transfer::InviteLang::Ja,
+                    crate::i18n::Lang::En => miasma_core::transfer::InviteLang::En,
+                };
+                eprintln!();
+                eprintln!("{}", Msg::InviteHeading.t());
+                eprint!("{}", miasma_core::transfer::invitation_text(share_id, lang));
+            }
+            None => eprintln!("{}", Msg::InviteUnavailable.t()),
+        }
     }
     Ok(())
 }
