@@ -34,6 +34,7 @@ use crate::{crypto::hash::ContentId, MiasmaError};
 
 const LABEL_SEGMENT_KEY: &[u8] = b"miasma-seg-key-v1";
 const LABEL_KEY_CHECK: &[u8] = b"miasma-pw-check-v1";
+const LABEL_NAME_KEY: &[u8] = b"miasma-name-key-v1";
 
 /// Length of the public Argon2id salt.
 pub const SALT_LEN: usize = 16;
@@ -188,6 +189,41 @@ impl UnlockedKey {
         let hk = Hkdf::<Sha256>::new(Some(self.pw_key.as_ref()), k_enc);
         let mut out = Zeroizing::new([0u8; 32]);
         hk.expand(&info, out.as_mut())
+            .map_err(|e| MiasmaError::KeyDerivation(e.to_string()))?;
+        Ok(out)
+    }
+
+    /// Encrypt and authenticate the original file name for the manifest of this
+    /// transfer. The key is derived from the password key and bound to `mid`, so
+    /// a sealed name cannot be moved to another transfer. Returns
+    /// `nonce || ciphertext || tag`.
+    pub fn seal_name(&self, mid: &ContentId, name: &str) -> Result<Vec<u8>, MiasmaError> {
+        let key = self.name_key(mid)?;
+        let nonce: [u8; crate::crypto::aead::NONCE_LEN] = rand::rngs::OsRng.gen();
+        let ct = crate::crypto::aead::encrypt_with_key(name.as_bytes(), &key, &nonce)?;
+        let mut out = Vec::with_capacity(nonce.len() + ct.len());
+        out.extend_from_slice(&nonce);
+        out.extend_from_slice(&ct);
+        Ok(out)
+    }
+
+    /// Reverse of [`seal_name`](Self::seal_name). `None` if the bytes are not a
+    /// name sealed under this key for this `mid` (tampered, or another transfer).
+    pub fn open_name(&self, mid: &ContentId, sealed: &[u8]) -> Option<String> {
+        let n = crate::crypto::aead::NONCE_LEN;
+        if sealed.len() <= n {
+            return None;
+        }
+        let key = self.name_key(mid).ok()?;
+        let nonce: [u8; crate::crypto::aead::NONCE_LEN] = sealed[..n].try_into().ok()?;
+        let plain = crate::crypto::aead::decrypt(&sealed[n..], &key, &nonce).ok()?;
+        String::from_utf8(plain).ok()
+    }
+
+    fn name_key(&self, mid: &ContentId) -> Result<Zeroizing<[u8; 32]>, MiasmaError> {
+        let hk = Hkdf::<Sha256>::new(Some(self.pw_key.as_ref()), mid.as_bytes());
+        let mut out = Zeroizing::new([0u8; 32]);
+        hk.expand(LABEL_NAME_KEY, out.as_mut())
             .map_err(|e| MiasmaError::KeyDerivation(e.to_string()))?;
         Ok(out)
     }

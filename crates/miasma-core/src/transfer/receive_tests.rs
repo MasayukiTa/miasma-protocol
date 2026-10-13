@@ -862,3 +862,59 @@ fn a_folder_target_takes_the_manifest_name_and_never_overwrites() {
     assert!(resolve_output_target(dir.path(), Some(&m)).is_err());
     assert!(resolve_output_target(dir.path(), None).is_err());
 }
+
+#[tokio::test]
+async fn the_placeholder_name_is_replaced_by_the_carried_name_and_nothing_else_is() {
+    use super::receive::{placeholder_file_name, resolve_receive_target};
+    let w = world(100, 4, 6, None);
+    let dir = tempfile::tempdir().unwrap();
+    let placeholder = dir.path().join(placeholder_file_name(&w.mid));
+    assert!(placeholder_file_name(&w.mid).starts_with("received-"));
+    assert!(placeholder_file_name(&w.mid).ends_with(".bin"));
+
+    let mut m = w.manifest.clone().unwrap();
+    m.name = Some("../photo \u{5199}\u{771f}.png".into());
+    let got = resolve_receive_target(&placeholder, &w.mid, Some(&m), None)
+        .await
+        .unwrap();
+    assert_eq!(got, dir.path().join("photo \u{5199}\u{771f}.png"));
+
+    // A name the person chose is kept.
+    let mine = dir.path().join("mine.bin");
+    assert_eq!(
+        resolve_receive_target(&mine, &w.mid, Some(&m), None)
+            .await
+            .unwrap(),
+        mine
+    );
+
+    // No carried name (an older sender, or a legacy record): the fallback stays.
+    m.name = None;
+    assert_eq!(
+        resolve_receive_target(&placeholder, &w.mid, Some(&m), None)
+            .await
+            .unwrap(),
+        placeholder
+    );
+    assert_eq!(
+        resolve_receive_target(&placeholder, &w.mid, None, None)
+            .await
+            .unwrap(),
+        placeholder
+    );
+    m.name = Some("NUL".into());
+    assert_eq!(
+        resolve_receive_target(&placeholder, &w.mid, Some(&m), None)
+            .await
+            .unwrap(),
+        placeholder
+    );
+
+    // An existing file at the carried name is never overwritten.
+    m.name = Some("taken.png".into());
+    std::fs::write(dir.path().join("taken.png"), b"keep").unwrap();
+    let err = resolve_receive_target(&placeholder, &w.mid, Some(&m), None)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("refusing to overwrite"), "{err}");
+}
