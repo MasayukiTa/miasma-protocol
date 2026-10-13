@@ -928,7 +928,8 @@ impl TransfersUi {
                             });
                             if self.show_qr {
                                 ui.add_space(4.0);
-                                if draw_qr(ui, &miasma_core::transfer::qr_payload(share_id), 260.0) {
+                                if draw_qr(ui, &miasma_core::transfer::qr_payload(share_id), 260.0)
+                                {
                                     ui.label(
                                         egui::RichText::new(t.qr_note).small().color(pal().faint),
                                     );
@@ -1009,7 +1010,9 @@ impl TransfersUi {
                                 // Technical view shows both IDs: say which one the other side needs.
                                 if !easy && job.share_id.as_deref().is_some_and(|s| !s.is_empty()) {
                                     ui.label(
-                                        egui::RichText::new(t.mid_internal_note).small().color(pal().faint),
+                                        egui::RichText::new(t.mid_internal_note)
+                                            .small()
+                                            .color(pal().faint),
                                     );
                                 }
                             }
