@@ -1096,6 +1096,34 @@ pub(crate) async fn process_request(
             ControlResponse::TransferStarted { id }
         }
 
+        ControlRequest::TransferPeekName {
+            mid,
+            password,
+            via,
+            via_ca_pem,
+        } => {
+            // A name that cannot be found is an ordinary answer, never an error:
+            // the real receive reports the real problem.
+            let password = password.filter(|p| !p.is_empty()).map(Zeroizing::new);
+            let name = match crate::transfer::parse_transfer_id(&mid) {
+                Err(_) => None,
+                Ok(target) => {
+                    let iroh_ca_pem = via_ca_pem.clone();
+                    let via = crate::transfer::direct::ViaConfig::from_request(via, via_ca_pem);
+                    crate::transfer::peek::peek_receive_name(
+                        &coord,
+                        &data_dir,
+                        &target,
+                        password.as_ref(),
+                        via,
+                        iroh_ca_pem,
+                    )
+                    .await
+                }
+            };
+            ControlResponse::TransferNamePeeked { name }
+        }
+
         ControlRequest::TransferStartPublish {
             file_path,
             data_shards,
