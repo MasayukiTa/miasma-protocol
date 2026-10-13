@@ -142,6 +142,16 @@ pub fn share_id_from_link(arg: &str) -> Option<String> {
     extract_share_id(&percent_decode(arg)).or_else(|| extract_share_id(arg))
 }
 
+/// Text to encode in the Share ID QR code.
+///
+/// The bare `miasma-share:<id>` string looks like a URL with an unregistered
+/// scheme, so the iPhone stock Camera app reports "no usable data". A short
+/// plain-text header makes it show a Text banner with a Copy action instead.
+/// [`extract_share_id`] still recovers the ID from this payload.
+pub fn qr_payload(share_id: &str) -> String {
+    format!("Miasma Share ID\n{share_id}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,6 +162,18 @@ mod tests {
         let sk = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let mid = ContentId::from_digest([9u8; 32]);
         ShareId::new(&mid, sk.verifying_key().to_bytes(), true).to_string()
+    }
+
+    #[test]
+    fn qr_payload_is_plain_text_and_round_trips() {
+        let id = sample_id();
+        let p = qr_payload(&id);
+        assert!(p.contains(&id));
+        assert_eq!(extract_share_id(&p).as_deref(), Some(id.as_str()));
+        // Must not look like `scheme:...` (iOS Camera would treat it as an URL).
+        let first = p.lines().next().unwrap_or("");
+        assert!(!p.starts_with(SHARE_ID_PREFIX));
+        assert!(!first.contains(':'), "first line must not be scheme-like");
     }
 
     #[test]
