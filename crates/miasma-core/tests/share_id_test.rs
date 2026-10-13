@@ -523,6 +523,107 @@ async fn the_published_manifest_names_the_publisher_and_only_the_file_name() {
     .expect("timed out");
 }
 
+// ─── The original file name travels with the transfer ───────────────────────
+
+/// What a front end passes before the name is known: the placeholder name in
+/// the folder the person picked.
+fn placeholder_in(dir: &Path, id: &TransferId) -> std::path::PathBuf {
+    dir.join(miasma_core::transfer::receive::placeholder_file_name(
+        &id.mid(),
+    ))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unprotected_receive_keeps_the_senders_file_name() {
+    timeout(Duration::from_secs(120), async {
+        let a = Sender::new(0x74).await;
+        let dir = tempfile::tempdir().unwrap();
+        let data = content(9_000);
+        let path = write_named(&dir, "旅行の写真 final.png", &data);
+        let (mid, share) = a.publish(&path, None).await;
+        let id = TransferId::Share(share);
+
+        // The placeholder the Save-As dialog offered: replaced by the real name.
+        let out_dir = tempfile::tempdir().unwrap();
+        let (r, progress) = receive_via(
+            vec![a.url()],
+            &id,
+            &placeholder_in(out_dir.path(), &id),
+            None,
+        )
+        .await;
+        assert!(matches!(r, Ok(ReceiveOutcome::Complete { .. })), "{r:?}");
+        let want = out_dir.path().join("旅行の写真 final.png");
+        assert_eq!(std::fs::read(&want).unwrap(), data);
+        assert_eq!(progress.snapshot().name, want.to_string_lossy());
+        assert!(!placeholder_in(out_dir.path(), &id).exists());
+
+        // A name the person chose is theirs and is never replaced.
+        let chosen = out_dir.path().join("mine.bin");
+        let (r, _) = receive_via(vec![a.url()], &id, &chosen, None).await;
+        assert!(matches!(r, Ok(ReceiveOutcome::Complete { .. })), "{r:?}");
+        assert_eq!(std::fs::read(&chosen).unwrap(), data);
+
+        // The stored record is the plain name (unprotected: allowed to be readable).
+        let signed: SignedDhtRecord = bincode::deserialize(&a.envelope(&mid).await).unwrap();
+        let (_, manifest) = decode_record_value(&signed.value).unwrap();
+        assert_eq!(
+            manifest.unwrap().name.as_deref(),
+            Some("旅行の写真 final.png")
+        );
+    })
+    .await
+    .expect("timed out");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_protected_receive_keeps_the_name_and_the_stored_record_does_not_show_it() {
+    timeout(Duration::from_secs(120), async {
+        let a = Sender::new(0x75).await;
+        let dir = tempfile::tempdir().unwrap();
+        let data = content(9_000);
+        let path = write_named(&dir, "給与明細 secret-report.png", &data);
+        let pw = random_password();
+        let (mid, share) = a.publish(&path, Some(&pw)).await;
+        let id = TransferId::Share(share);
+
+        // Neither the record as stored nor the manifest in it carries the name in the clear.
+        let envelope = a.envelope(&mid).await;
+        let has = |needle: &[u8]| envelope.windows(needle.len()).any(|w| w == needle);
+        assert!(!has("secret-report".as_bytes()));
+        assert!(!has("給与明細".as_bytes()));
+        assert!(!has(b".png"));
+        let signed: SignedDhtRecord = bincode::deserialize(&envelope).unwrap();
+        let (_, manifest) = decode_record_value(&signed.value).unwrap();
+        assert!(manifest.unwrap().name_is_sealed());
+
+        // Without the password, or with a wrong one, nothing is written and no name leaks.
+        let out_dir = tempfile::tempdir().unwrap();
+        let target = placeholder_in(out_dir.path(), &id);
+        let (r, _) = receive_via(vec![a.url()], &id, &target, None).await;
+        assert!(matches!(r, Err(MiasmaError::PasswordRequired)), "{r:?}");
+        let (r, _) = receive_via(vec![a.url()], &id, &target, Some(&random_password())).await;
+        assert!(matches!(r, Err(MiasmaError::WrongPassword)), "{r:?}");
+        assert_eq!(std::fs::read_dir(out_dir.path()).unwrap().count(), 0);
+
+        // With the password the original name comes back.
+        let (r, _) = receive_via(vec![a.url()], &id, &target, Some(&pw)).await;
+        assert!(matches!(r, Ok(ReceiveOutcome::Complete { .. })), "{r:?}");
+        assert_eq!(
+            std::fs::read(out_dir.path().join("給与明細 secret-report.png")).unwrap(),
+            data
+        );
+
+        // A folder target works the same way.
+        let folder = tempfile::tempdir().unwrap();
+        let (r, _) = receive_via(vec![a.url()], &id, folder.path(), Some(&pw)).await;
+        assert!(matches!(r, Ok(ReceiveOutcome::Complete { .. })), "{r:?}");
+        assert!(folder.path().join("給与明細 secret-report.png").exists());
+    })
+    .await
+    .expect("timed out");
+}
+
 // ─── A typo never reaches the network ───────────────────────────────────────
 
 struct Daemon {

@@ -508,38 +508,128 @@ fn io_context(what: &str, path: &Path, e: &std::io::Error) -> MiasmaError {
     MiasmaError::Storage(format!("{what} {}: {:?}: {e}", path.display(), e.kind()))
 }
 
+/// The file name a front end offers before the transfer has been looked up:
+/// `received-<first 8 characters of the MID digest>.bin`, or `received.bin` when
+/// there is no usable digest. It stands for "I do not know the name yet": a
+/// receive whose output file has exactly this name takes the sender's original
+/// name instead once the manifest has been fetched (see
+/// [`resolve_receive_target`]).
+pub fn placeholder_file_name(mid: &ContentId) -> String {
+    let text = mid.to_string();
+    let digest: String = text
+        .strip_prefix("miasma:")
+        .unwrap_or("")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(8)
+        .collect();
+    if digest.is_empty() {
+        "received.bin".to_owned()
+    } else {
+        format!("received-{digest}.bin")
+    }
+}
+
 /// Where a receive into `chosen` writes: `chosen` itself, unless it is an
 /// existing folder, in which case the file goes inside it under the name the
 /// transfer carries. The name is untrusted manifest text and is sanitised again
 /// here; an existing file is never overwritten. The engine itself stays strict
 /// ([`check_output_target`] refuses a folder); this is the layer above it.
+///
+/// This synchronous form only reads a plain (unprotected) name; use
+/// [`resolve_receive_target`] when the transfer may be password-protected.
 pub fn resolve_output_target(
     chosen: &Path,
     manifest: Option<&TransferManifest>,
 ) -> Result<PathBuf, MiasmaError> {
+    let name = manifest.and_then(|m| m.original_name(None));
+    place_by_name(chosen, name)
+}
+
+/// The sender's original file name, if the transfer carries one. A password-
+/// protected transfer seals the name under the password (so it is not readable
+/// without it); that needs the password, and a wrong or missing one is the same
+/// error the receive itself would give.
+pub async fn carried_name(
+    manifest: Option<&TransferManifest>,
+    password: Option<&Zeroizing<String>>,
+) -> Result<Option<String>, MiasmaError> {
+    let Some(m) = manifest else { return Ok(None) };
+    if !m.name_is_sealed() {
+        return Ok(m.original_name(None));
+    }
+    let Protection::Password(prot) = &m.protection else {
+        // Sealed name on an unprotected transfer: cannot be opened, ignore it.
+        return Ok(None);
+    };
+    let Some(pw) = password else {
+        return Err(MiasmaError::PasswordRequired);
+    };
+    let prot = prot.clone();
+    let pw = Zeroizing::new(pw.as_str().to_owned());
+    let key = tokio::task::spawn_blocking(move || prot.unlock(pw.as_str()))
+        .await
+        .map_err(|e| MiasmaError::Decryption(format!("password KDF task: {e}")))??;
+    Ok(m.original_name(Some(&key)))
+}
+
+/// As [`resolve_output_target`], and also: when `chosen` is a file path whose
+/// name is exactly the [`placeholder_file_name`] for `mid` (what the front ends
+/// offer before the name is known) and the transfer carries an original name,
+/// the file is written next to it under the original name. Anything else the
+/// person typed or picked is used as it is. The Save-As dialog opens before the
+/// lookup, so this is the point at which the real name is first known.
+pub async fn resolve_receive_target(
+    chosen: &Path,
+    mid: &ContentId,
+    manifest: Option<&TransferManifest>,
+    password: Option<&Zeroizing<String>>,
+) -> Result<PathBuf, MiasmaError> {
+    let is_placeholder = chosen
+        .file_name()
+        .is_some_and(|f| f.to_string_lossy() == placeholder_file_name(mid));
+    if !chosen.is_dir() && !is_placeholder {
+        return Ok(chosen.to_path_buf());
+    }
+    let name = carried_name(manifest, password).await?;
+    if chosen.is_dir() {
+        return place_by_name(chosen, name);
+    }
+    match name {
+        None => Ok(chosen.to_path_buf()),
+        Some(name) => {
+            let dir = chosen.parent().unwrap_or_else(|| Path::new(""));
+            let target = dir.join(&name);
+            refuse_existing(&target)?;
+            Ok(target)
+        }
+    }
+}
+
+fn refuse_existing(target: &Path) -> Result<(), MiasmaError> {
+    // `symlink_metadata`: a dangling link at that name is taken too.
+    if std::fs::symlink_metadata(target).is_ok() {
+        return Err(MiasmaError::Storage(format!(
+            "{} already exists; refusing to overwrite it (choose another folder or a file              name)",
+            target.display()
+        )));
+    }
+    Ok(())
+}
+
+fn place_by_name(chosen: &Path, name: Option<String>) -> Result<PathBuf, MiasmaError> {
     if !chosen.is_dir() {
         return Ok(chosen.to_path_buf());
     }
-    let name = manifest
-        .and_then(|m| m.name.as_deref())
-        .and_then(sanitize_file_name);
-    let Some(name) = name else {
+    let Some(name) = name.as_deref().and_then(sanitize_file_name) else {
         return Err(MiasmaError::Storage(format!(
-            "the output path {} is a folder and this transfer does not carry a file name: \
-             give a file name inside it (for example {})",
+            "the output path {} is a folder and this transfer does not carry a file name:              give a file name inside it (for example {})",
             chosen.display(),
             chosen.join("received.bin").display()
         )));
     };
     let target = chosen.join(&name);
-    // `symlink_metadata`: a dangling link at that name is taken too.
-    if std::fs::symlink_metadata(&target).is_ok() {
-        return Err(MiasmaError::Storage(format!(
-            "{} already exists; refusing to overwrite it (choose another folder or a file \
-             name)",
-            target.display()
-        )));
-    }
+    refuse_existing(&target)?;
     Ok(target)
 }
 
