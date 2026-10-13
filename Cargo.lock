@@ -5333,6 +5333,7 @@ dependencies = [
  "iroh",
  "iroh-mdns-address-lookup",
  "iroh-relay",
+ "libc",
  "libp2p",
  "quinn",
  "rand 0.8.8",

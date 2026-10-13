@@ -292,6 +292,7 @@ pub fn initialize_node(
             bootstrap_peers: vec![],
         },
         transport: Default::default(),
+        push: Default::default(),
     };
     config.save(&path).map_err(|e| {
         tracing::warn!("config save error: {e}");
