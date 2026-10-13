@@ -26,7 +26,9 @@ pub mod publish_journal;
 pub mod receive;
 pub mod share_id;
 
-pub use invite::{extract_share_id, invitation_text, share_id_from_link, InviteLang};
+pub use invite::{
+    extract_share_id, invitation_text, qr_payload, share_id_from_link, InviteLang,
+};
 pub use share_id::{parse_transfer_id, ShareId, ShareIdError, ShareMismatch, TransferId};
 
 pub use manifest::{
