@@ -263,7 +263,9 @@ pub fn show_clear_finished(jobs: &[TransferStatus]) -> bool {
 /// The file name offered in the Save-As dialog before the transfer is looked up: `received-<first
 /// 8 characters of the MID digest>.bin`, or `received.bin` when no ID has been typed yet. (The
 /// original name is only known once the manifest has been fetched; a folder target uses it then,
-/// see [`effective_receive_path`].) Accepts a share ID or a MID.
+/// see [`effective_receive_path`], and so does a file left with exactly this name: the daemon
+/// swaps it for the sender's name, see `miasma_core::transfer::receive::placeholder_file_name`.)
+/// Accepts a share ID or a MID.
 pub fn suggested_file_name(id: &str) -> String {
     let typed = id.trim();
     let mid_text = if typed.starts_with("miasma-share:") {
@@ -2802,6 +2804,15 @@ mod tests {
         assert!(
             !hostile.contains('/') && !hostile.contains(".."),
             "{hostile}"
+        );
+    }
+
+    #[test]
+    fn the_suggested_name_is_the_placeholder_the_daemon_swaps_for_the_original_name() {
+        let mid = miasma_core::ContentId::compute(b"x", b"k=2,n=3");
+        assert_eq!(
+            suggested_file_name(&mid.to_string()),
+            miasma_core::transfer::receive::placeholder_file_name(&mid)
         );
     }
 

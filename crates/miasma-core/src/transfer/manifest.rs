@@ -24,7 +24,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::protection::Protection;
+use super::protection::{Protection, UnlockedKey};
 use crate::{
     crypto::hash::ContentId,
     network::{
@@ -48,6 +48,13 @@ pub const TRAILER_MAGIC: &[u8; 4] = b"MNFT";
 pub const MANIFEST_VERSION: u8 = 3;
 /// Longest file name a manifest may carry, in UTF-8 bytes.
 pub const MAX_NAME_BYTES: usize = 255;
+/// Longest file name a publisher puts in a manifest, in UTF-8 bytes. Shorter than
+/// [`MAX_NAME_BYTES`] (what a receiver tolerates) so that a sealed name, which
+/// grows by the nonce, tag and encoding, still fits in `MAX_NAME_BYTES`.
+pub const MAX_CARRIED_NAME_BYTES: usize = 120;
+/// Marks a `name` that is sealed under the transfer password rather than plain.
+/// A plain name can never start with it: [`sanitize_file_name`] replaces `:`.
+pub const SEALED_NAME_PREFIX: &str = "miasma-sealed-name-v1:";
 /// Largest plaintext segment a manifest may declare: the publisher never
 /// exceeds `DEFAULT_SEGMENT_SIZE` (64 MiB). A receiver sizes its per-segment
 /// decode buffers from this untrusted field, so it is bounded.
@@ -171,8 +178,54 @@ impl TransferManifest {
     /// Record the original file name, reduced to a safe single component (see
     /// [`sanitize_file_name`]); a name that cannot be made safe is left out.
     pub fn with_name(mut self, raw: Option<&str>) -> Self {
-        self.name = raw.and_then(sanitize_file_name);
+        self.name = raw
+            .and_then(sanitize_file_name)
+            .map(|n| shorten_keeping_extension(&n, MAX_CARRIED_NAME_BYTES));
         self
+    }
+
+    /// As [`with_name`](Self::with_name) for a password-protected transfer: the
+    /// name is encrypted and authenticated under a key derived from the password
+    /// (see [`UnlockedKey::seal_name`]), so someone holding only the manifest
+    /// cannot read it. If it cannot be sealed it is left out, never written in
+    /// the clear.
+    pub fn with_sealed_name(mut self, raw: Option<&str>, key: &UnlockedKey) -> Self {
+        use base64::Engine as _;
+        let plain = self.clone().with_name(raw).name;
+        let mid = ContentId::from_digest(self.mid);
+        self.name = plain.and_then(|n| {
+            let sealed = key.seal_name(&mid, &n).ok()?;
+            Some(format!(
+                "{SEALED_NAME_PREFIX}{}",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sealed)
+            ))
+        });
+        self
+    }
+
+    /// Whether the carried name (if any) is sealed under the password.
+    pub fn name_is_sealed(&self) -> bool {
+        self.name
+            .as_deref()
+            .is_some_and(|n| n.starts_with(SEALED_NAME_PREFIX))
+    }
+
+    /// The original file name, safe to use as a single path component. A plain
+    /// name is sanitised again (it is untrusted); a sealed one needs `key` and
+    /// must authenticate. `None` when there is no usable name.
+    pub fn original_name(&self, key: Option<&UnlockedKey>) -> Option<String> {
+        use base64::Engine as _;
+        let stored = self.name.as_deref()?;
+        match stored.strip_prefix(SEALED_NAME_PREFIX) {
+            None => sanitize_file_name(stored),
+            Some(b64) => {
+                let sealed = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(b64)
+                    .ok()?;
+                let mid = ContentId::from_digest(self.mid);
+                sanitize_file_name(&key?.open_name(&mid, &sealed)?)
+            }
+        }
     }
 
     pub fn params(&self) -> DissolutionParams {
@@ -1024,5 +1077,124 @@ mod tests {
         assert_eq!(m2.unwrap().segments.len(), 1600);
         let legacy: DhtRecord = bincode::deserialize(&value).unwrap();
         assert_eq!(legacy.locations.len(), 32_000);
+    }
+
+    // ── Carrying the original file name ─────────────────────────────────────
+
+    fn sealed_fixture(
+        name: &str,
+    ) -> (
+        TransferManifest,
+        crate::transfer::protection::UnlockedKey,
+        String,
+    ) {
+        let pw = format!("pw-1{:032x}", rand::random::<u128>());
+        let (prot, key) = PasswordProtection::create_with_cost(&pw, 64, 1, 1).unwrap();
+        let m = TransferManifest::new(&mid(), PUB, params(), 1024, 10, Protection::Password(prot))
+            .with_sealed_name(Some(name), &key);
+        (m, key, pw)
+    }
+
+    #[test]
+    fn a_plain_name_round_trips_through_the_encoded_manifest() {
+        for name in [
+            "photo.png",
+            "写真 2026.png",
+            "レポート（最終）.xlsx",
+            "a b.tar.gz",
+        ] {
+            let m = build(1024, 1, 10).with_name(Some(name));
+            let bytes = bincode::serialize(&m).unwrap();
+            let back: TransferManifest = bincode::deserialize(&bytes).unwrap();
+            assert_eq!(back.original_name(None).as_deref(), Some(name));
+        }
+    }
+
+    #[test]
+    fn a_missing_name_stays_missing() {
+        let m = build(1024, 1, 10);
+        assert_eq!(m.name, None);
+        assert_eq!(m.original_name(None), None);
+        assert_eq!(build(1024, 1, 10).with_name(None).name, None);
+        assert_eq!(build(1024, 1, 10).with_name(Some("CON")).name, None);
+    }
+
+    #[test]
+    fn a_sealed_name_is_not_in_the_clear_and_needs_the_password_key() {
+        let name = "給与明細 secret-report.png";
+        let (m, key, pw) = sealed_fixture(name);
+        assert!(m.name_is_sealed());
+        let bytes = bincode::serialize(&m).unwrap();
+        let hay = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+        assert!(!hay("secret-report".as_bytes()));
+        assert!(!hay("給与明細".as_bytes()));
+        assert!(!hay(b".png"));
+        // Without the key nothing is revealed; with it the name comes back.
+        assert_eq!(m.original_name(None), None);
+        assert_eq!(m.original_name(Some(&key)).as_deref(), Some(name));
+        // The receiver derives the key from the password and the public salt.
+        let Protection::Password(prot) = &m.protection else {
+            unreachable!()
+        };
+        let unlocked = prot.unlock(&pw).unwrap();
+        assert_eq!(m.original_name(Some(&unlocked)).as_deref(), Some(name));
+        // A sealed name still passes the manifest's own length bound.
+        assert!(m.name.as_ref().unwrap().len() <= MAX_NAME_BYTES);
+    }
+
+    #[test]
+    fn a_sealed_name_is_bound_to_its_transfer_and_tamper_evident() {
+        let (m, key, _) = sealed_fixture("report.pdf");
+        // Moved onto another transfer (different MID): does not open.
+        let mut other = m.clone();
+        other.mid = [0x99; 32];
+        assert_eq!(other.original_name(Some(&key)), None);
+        // One changed character in the sealed text: does not open.
+        let mut bad = m.clone();
+        let n = bad.name.take().unwrap();
+        let mut chars: Vec<char> = n.chars().collect();
+        let at = chars.len() - 3;
+        chars[at] = if chars[at] == 'A' { 'B' } else { 'A' };
+        bad.name = Some(chars.into_iter().collect());
+        assert_eq!(bad.original_name(Some(&key)), None);
+        // A different password's key does not open it.
+        let (_, wrong, _) = sealed_fixture("x");
+        assert_eq!(m.original_name(Some(&wrong)), None);
+    }
+
+    #[test]
+    fn the_longest_sealed_name_still_fits_the_manifest_limit() {
+        let long = format!("{}.jpeg", "あ".repeat(200));
+        let (m, key, _) = sealed_fixture(&long);
+        let got = m.original_name(Some(&key)).unwrap();
+        assert!(got.len() <= MAX_CARRIED_NAME_BYTES, "{}", got.len());
+        assert!(got.ends_with(".jpeg"));
+        assert!(m.name.as_ref().unwrap().len() <= MAX_NAME_BYTES);
+    }
+
+    #[test]
+    fn hostile_names_are_reduced_on_publish_and_again_on_receive() {
+        let named = |raw: &str| build(1024, 1, 10).with_name(Some(raw)).name;
+        assert_eq!(named("../../etc/passwd").as_deref(), Some("passwd"));
+        assert_eq!(
+            named("C:\\Users\\me\\evil.exe").as_deref(),
+            Some("evil.exe")
+        );
+        for bad in ["..", ".", "NUL.txt", "com1", "", "   ", "dir/"] {
+            assert_eq!(named(bad), None, "{bad:?}");
+        }
+        assert_eq!(
+            named("a\u{0}b\u{7}c<>:|?*.txt").as_deref(),
+            Some("abc______.txt")
+        );
+        let long = format!("{}.png", "x".repeat(400));
+        let n = named(&long).unwrap();
+        assert!(n.len() <= MAX_CARRIED_NAME_BYTES && n.ends_with(".png"));
+        // A hostile manifest field is sanitised once more by the receiver.
+        let mut hostile = build(1024, 1, 10);
+        hostile.name = Some("..\\..\\startup\\run.bat".into());
+        assert_eq!(hostile.original_name(None).as_deref(), Some("run.bat"));
+        hostile.name = Some(format!("{SEALED_NAME_PREFIX}!!not base64!!"));
+        assert_eq!(hostile.original_name(None), None);
     }
 }
