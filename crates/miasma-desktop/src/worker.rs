@@ -84,6 +84,15 @@ pub enum WorkerCmd {
         /// the ordinary receive. The desktop trusts the operating system's certificate store.
         via: Vec<String>,
     },
+    /// Ask the daemon for the sender's original file name, to pre-fill the Save-As dialog. Runs
+    /// on its own thread (it can take several seconds) and always answers with
+    /// [`WorkerResult::TransferNamePeeked`]; any failure is a `None` name.
+    TransferPeekName {
+        mid: String,
+        /// `None` when no password was typed. Never stored or printed.
+        password: Option<String>,
+        via: Vec<String>,
+    },
     /// Start (or resume) a resumable send of a file in the daemon.
     TransferStartPublish {
         file_path: PathBuf,
@@ -157,6 +166,12 @@ impl fmt::Debug for WorkerCmd {
                 .field("output_path", &"<redacted>")
                 .field("password", &"<redacted>")
                 .field("restart", restart)
+                .finish(),
+            Self::TransferPeekName { mid, via, .. } => f
+                .debug_struct("TransferPeekName")
+                .field("mid", mid)
+                .field("password", &"<redacted>")
+                .field("via", &via.len())
                 .finish(),
             Self::TransferStartPublish {
                 data_shards,
@@ -268,6 +283,9 @@ pub enum WorkerResult {
     TransferPollFailed { message: String, daemon_down: bool },
     /// The daemon accepted a start request; it now runs the transfer itself.
     TransferStarted { id: String },
+    /// Answer to [`WorkerCmd::TransferPeekName`] for `mid`: the sender's file name, or `None`
+    /// for every kind of failure (older daemon, unreachable, wrong password, no name, timeout).
+    TransferNamePeeked { mid: String, name: Option<String> },
     /// The daemon accepted a cancel request.
     TransferCancelRequested,
     /// Finished transfers were removed from the daemon's list.
@@ -374,6 +392,11 @@ impl fmt::Debug for WorkerResult {
                 .field("daemon_down", daemon_down)
                 .finish(),
             Self::TransferStarted { .. } => f.write_str("TransferStarted(<redacted>)"),
+            Self::TransferNamePeeked { mid, name } => f
+                .debug_struct("TransferNamePeeked")
+                .field("mid", mid)
+                .field("name", &name.as_ref().map(|_| "<redacted>"))
+                .finish(),
             Self::TransferCancelRequested => f.write_str("TransferCancelRequested"),
             Self::TransferRemoved {
                 removed,
@@ -668,6 +691,34 @@ fn worker_thread(
                     restart,
                     via,
                 ))
+            }
+            WorkerCmd::TransferPeekName { mid, password, via } => {
+                // Off the worker thread: it must not hold up the polls and starts queued behind
+                // it. Its own runtime, because the worker's is single-threaded and busy.
+                let dir = data_dir.clone();
+                let out = tx.clone();
+                let spawned = std::thread::Builder::new()
+                    .name("miasma-peek-name".into())
+                    .spawn(move || {
+                        let name = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build()
+                            .ok()
+                            .and_then(|rt| {
+                                let password = password.map(Zeroizing::new);
+                                rt.block_on(do_peek_name(
+                                    &dir,
+                                    &mid,
+                                    password.as_ref().map(|p| p.as_str()),
+                                    via,
+                                ))
+                            });
+                        let _ = out.send(WorkerResult::TransferNamePeeked { mid, name });
+                    });
+                // If the thread cannot start there is no answer; the form's own time limit then
+                // opens the dialog with the placeholder name.
+                let _ = spawned;
+                continue;
             }
             WorkerCmd::TransferStartPublish {
                 file_path,
@@ -1416,6 +1467,31 @@ async fn do_transfer_start_receive(
     transfer_started(daemon_request(data_dir, req).await)
 }
 
+/// The most the desktop waits for the daemon's answer to a name lookup (the daemon bounds it to
+/// about 8 s itself).
+const PEEK_NAME_WAIT: std::time::Duration = std::time::Duration::from_secs(11);
+
+/// Ask the daemon for the sender's file name. Every failure, including an older daemon that
+/// does not know the request, is `None`: the Save-As dialog then offers the placeholder name and
+/// the receive itself reports any real problem.
+async fn do_peek_name(
+    data_dir: &Path,
+    mid: &str,
+    password: Option<&str>,
+    via: Vec<String>,
+) -> Option<String> {
+    let req = ControlRequest::TransferPeekName {
+        mid: mid.trim().to_owned(),
+        password: password.filter(|p| !p.is_empty()).map(str::to_owned),
+        via,
+        via_ca_pem: None,
+    };
+    match tokio::time::timeout(PEEK_NAME_WAIT, daemon_request(data_dir, req)).await {
+        Ok(Ok(ControlResponse::TransferNamePeeked { name })) => name,
+        _ => None,
+    }
+}
+
 async fn do_transfer_start_publish(
     data_dir: &Path,
     file_path: &Path,
@@ -1603,6 +1679,20 @@ mod tests {
         assert!(!rendered.contains("password-sensitive"));
         assert!(!rendered.contains("out-secret"));
         assert!(rendered.contains("miasma:visible-mid"));
+
+        let peek = WorkerCmd::TransferPeekName {
+            mid: "miasma:visible-mid".into(),
+            password: Some("password-sensitive".into()),
+            via: Vec::new(),
+        };
+        let rendered = format!("{peek:?}");
+        assert!(!rendered.contains("password-sensitive"));
+        assert!(rendered.contains("miasma:visible-mid"));
+        let answer = WorkerResult::TransferNamePeeked {
+            mid: "miasma:visible-mid".into(),
+            name: Some("name-secret.png".into()),
+        };
+        assert!(!format!("{answer:?}").contains("name-secret"));
 
         let publish = WorkerCmd::TransferStartPublish {
             file_path: std::path::PathBuf::from("C:/private/src-secret.iso"),
