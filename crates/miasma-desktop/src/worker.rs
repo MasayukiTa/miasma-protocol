@@ -755,6 +755,7 @@ fn do_init(data_dir: &Path) -> anyhow::Result<()> {
             bootstrap_peers: vec![],
         },
         transport: Default::default(),
+        push: Default::default(),
     };
     config.save(data_dir)?;
 

@@ -57,6 +57,9 @@ iroh = { version = "1.3", default-features = false, features = ["tls-ring", "pla
 # Same-LAN discovery of a publisher by its key (mDNS), no internet needed.
 iroh-mdns-address-lookup = { version = "0.6", optional = true }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [features]
 default = ["iroh"]
 # `miasma daemon --no-iroh` / `transport.iroh_mode = "off"` switch it off at run

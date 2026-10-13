@@ -63,6 +63,20 @@ use crate::{
 /// Application protocol name on the wire.
 pub const IROH_ALPN: &[u8] = b"miasma/direct/1";
 
+/// Trusted-contact push (ADR-011), served on the same endpoint.
+pub const PUSH_ALPN: &[u8] = b"miasma/push/1";
+
+/// Serves connections that negotiated [`PUSH_ALPN`]. Installed after start with
+/// [`IrohNode::set_push_handler`]; until then such connections are closed.
+#[async_trait::async_trait]
+pub trait PushConnectionHandler: Send + Sync {
+    /// Own the connection until done. `conn.remote_id()` is the authenticated
+    /// peer; the handler decides whether it may push.
+    async fn handle(&self, conn: Connection);
+}
+
+type PushSlot = Arc<OnceLock<Arc<dyn PushConnectionHandler>>>;
+
 /// mDNS service name: keeps Miasma's announcements apart from other iroh apps'.
 const LAN_SERVICE_NAME: &str = "miasma";
 
@@ -225,7 +239,7 @@ pub fn endpoint_builder(
     b = b.ca_tls_config(ca_tls_config(extra_roots));
     if let Some(seed) = seed {
         b = b.secret_key(SecretKey::from_bytes(seed));
-        b = b.alpns(vec![IROH_ALPN.to_vec()]);
+        b = b.alpns(vec![IROH_ALPN.to_vec(), PUSH_ALPN.to_vec()]);
     }
     Ok(b)
 }
@@ -274,6 +288,7 @@ pub struct IrohNode {
     endpoint: Endpoint,
     settings: IrohSettings,
     server: StdMutex<Option<JoinHandle<()>>>,
+    push: PushSlot,
 }
 
 impl IrohNode {
@@ -307,17 +322,40 @@ impl IrohNode {
             .bind()
             .await
             .map_err(|e| MiasmaError::Network(format!("cannot start the iroh endpoint: {e}")))?;
+        let push: PushSlot = Arc::new(OnceLock::new());
         let ctx = Arc::new(ServeCtx {
             store,
             records,
             limits,
+            push: push.clone(),
         });
         let server = tokio::spawn(accept_loop(endpoint.clone(), ctx));
         Ok(Arc::new(Self {
             endpoint,
             settings,
             server: StdMutex::new(Some(server)),
+            push,
         }))
+    }
+
+    /// Install the handler for [`PUSH_ALPN`] connections (once; later calls are
+    /// ignored).
+    pub fn set_push_handler(&self, handler: Arc<dyn PushConnectionHandler>) {
+        let _ = self.push.set(handler);
+    }
+
+    /// Dial `target` (an endpoint ID) speaking `alpn`, with this node's relay
+    /// hints and connect timeout. The peer that answered is checked to hold
+    /// exactly `target`'s key.
+    pub async fn connect_alpn(
+        &self,
+        target: &[u8; 32],
+        alpn: &'static [u8],
+    ) -> Result<Connection, IrohClientError> {
+        let client = self
+            .client(target)
+            .map_err(|e| IrohClientError::Protocol(e.to_string()))?;
+        client.dial_alpn(alpn).await
     }
 
     /// The endpoint ID: the Ed25519 public key, equal to the publisher key in a
@@ -458,6 +496,7 @@ struct ServeCtx {
     store: Arc<LocalShareStore>,
     records: Option<Arc<dyn RecordProvider>>,
     limits: IrohServerLimits,
+    push: PushSlot,
 }
 
 async fn accept_loop(endpoint: Endpoint, ctx: Arc<ServeCtx>) {
@@ -487,6 +526,13 @@ async fn accept_loop(endpoint: Endpoint, ctx: Arc<ServeCtx>) {
                 Ok(Err(e)) => return debug!("iroh handshake failed: {e}"),
                 Err(_) => return debug!("iroh handshake timed out"),
             };
+            if conn.alpn() == PUSH_ALPN {
+                match ctx.push.get() {
+                    Some(h) => h.handle(conn).await,
+                    None => conn.close(3u32.into(), b"unavailable"),
+                }
+                return;
+            }
             serve_connection(conn, &ctx).await;
         });
     }
@@ -774,6 +820,12 @@ impl IrohDirectClient {
     }
 
     async fn dial(&self) -> Result<Connection, IrohClientError> {
+        self.dial_alpn(IROH_ALPN).await
+    }
+
+    /// As the ordinary dial, for another application protocol on the same
+    /// endpoint.
+    pub async fn dial_alpn(&self, alpn: &'static [u8]) -> Result<Connection, IrohClientError> {
         let mut addr = EndpointAddr::new(self.target);
         for hint in &self.hints {
             addr = addr.with_relay_url(hint.clone());
@@ -782,8 +834,7 @@ impl IrohDirectClient {
             addr = addr.with_ip_addr(*ip);
         }
         let attempt =
-            tokio::time::timeout(self.connect_timeout, self.endpoint.connect(addr, IROH_ALPN))
-                .await;
+            tokio::time::timeout(self.connect_timeout, self.endpoint.connect(addr, alpn)).await;
         match attempt {
             Ok(Ok(conn)) => {
                 // TLS already proved the peer holds the key it presented; say it
