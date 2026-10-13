@@ -149,8 +149,7 @@ pub fn share_id_from_link(arg: &str) -> Option<String> {
 /// plain-text header makes it show a Text banner with a Copy action instead.
 /// [`extract_share_id`] still recovers the ID from this payload.
 pub fn qr_payload(share_id: &str) -> String {
-    format!("Miasma Share ID
-{share_id}")
+    format!("Miasma Share ID\n{share_id}")
 }
 
 #[cfg(test)]
