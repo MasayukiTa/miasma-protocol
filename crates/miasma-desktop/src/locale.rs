@@ -1082,6 +1082,8 @@ pub struct TransferStrings {
     // Detail.
     pub mid_label: &'static str,
     pub mid_label_easy: &'static str,
+    /// Small note beside the MID when a Share ID is shown too (Technical view).
+    pub mid_internal_note: &'static str,
     pub copy: &'static str,
     pub copied: &'static str,
     pub phase_label: &'static str,
@@ -1263,6 +1265,7 @@ impl TransferStrings {
             ("day", self.day),
             ("mid_label", self.mid_label),
             ("mid_label_easy", self.mid_label_easy),
+            ("mid_internal_note", self.mid_internal_note),
             ("copy", self.copy),
             ("copied", self.copied),
             ("phase_label", self.phase_label),
@@ -1415,6 +1418,7 @@ static TR_EN: TransferStrings = TransferStrings {
 
     mid_label: "MID",
     mid_label_easy: "Content ID",
+    mid_internal_note: "Internal use only; it cannot be used to receive (give the Share ID instead).",
     copy: "Copy",
     copied: "Copied",
     phase_label: "Phase",
@@ -1564,6 +1568,7 @@ static TR_JA: TransferStrings = TransferStrings {
 
     mid_label: "MID",
     mid_label_easy: "コンテンツID",
+    mid_internal_note: "内部用。受信には使えません（共有IDを渡してください）。",
     copy: "コピー",
     copied: "コピーしました",
     phase_label: "段階",
@@ -1713,6 +1718,7 @@ static TR_ZH_CN: TransferStrings = TransferStrings {
 
     mid_label: "MID",
     mid_label_easy: "内容ID",
+    mid_internal_note: "Internal use only; it cannot be used to receive (give the Share ID instead).",
     copy: "复制",
     copied: "已复制",
     phase_label: "阶段",
