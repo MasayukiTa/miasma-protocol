@@ -268,15 +268,20 @@ impl MiasmaCoordinator {
         let original_name = file_path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned());
-        let mut manifest = TransferManifest::new(
+        let manifest = TransferManifest::new(
             &mid,
             publisher,
             params,
             segment_size as u32,
             file_len,
             protection,
-        )
-        .with_name(original_name.as_deref());
+        );
+        // A protected transfer seals the name under the password; a plain one
+        // carries it as is.
+        let mut manifest = match key.as_deref() {
+            Some(k) => manifest.with_sealed_name(original_name.as_deref(), k),
+            None => manifest.with_name(original_name.as_deref()),
+        };
         let mut all_locations: Vec<ShardLocation> = Vec::new();
         let mut remote_distinct_per_segment: Vec<usize> = Vec::new();
         let mut start_segment: u32 = 0;
