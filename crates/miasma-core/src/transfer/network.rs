@@ -13,7 +13,7 @@ use zeroize::Zeroizing;
 use super::{
     progress::{Phase, TransferProgress, TransferState},
     receive::{
-        resolve_output_target, run_receive, PieceSource, ReceiveOutcome, ReceiveSpec, RetryConfig,
+        resolve_receive_target, run_receive, PieceSource, ReceiveOutcome, ReceiveSpec, RetryConfig,
     },
     share_id::TransferId,
     FetchedRecord, TransferManifest,
@@ -194,7 +194,14 @@ impl MiasmaCoordinator {
             .fetch_verified_record(&mid, expect.as_ref().map(|s| *s.publisher()))
             .await
             .map_err(fail)?;
-        let output = resolve_output_target(output_path, fetched.manifest.as_ref()).map_err(fail)?;
+        let output = resolve_receive_target(
+            output_path,
+            &mid,
+            fetched.manifest.as_ref(),
+            password.as_ref(),
+        )
+        .await
+        .map_err(fail)?;
         if output != output_path {
             progress.set_name(output.to_string_lossy());
         }

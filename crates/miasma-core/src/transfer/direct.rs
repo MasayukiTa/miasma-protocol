@@ -24,7 +24,7 @@ use super::{
     open_signed_record,
     progress::{Phase, TransferProgress, TransferState},
     receive::{
-        resolve_output_target, run_receive, PieceSource, ReceiveOutcome, ReceiveSpec, RetryConfig,
+        resolve_receive_target, run_receive, PieceSource, ReceiveOutcome, ReceiveSpec, RetryConfig,
     },
     share_id::{ShareMismatch, TransferId},
     FetchedRecord, SignedRecordError, TransferManifest,
@@ -405,7 +405,14 @@ async fn run_from_record<S: PieceSource>(
         progress.set_state(TransferState::Failed, Some(e.to_string()), false);
         e
     };
-    let output = resolve_output_target(output_path, fetched.manifest.as_ref()).map_err(fail)?;
+    let output = resolve_receive_target(
+        output_path,
+        &mid,
+        fetched.manifest.as_ref(),
+        password.as_ref(),
+    )
+    .await
+    .map_err(fail)?;
     if output != output_path {
         progress.set_name(output.to_string_lossy());
     }
