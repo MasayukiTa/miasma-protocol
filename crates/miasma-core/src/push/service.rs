@@ -879,9 +879,18 @@ impl PushService {
                     return RxEnd::Cancelled;
                 }
                 r = tokio::time::timeout(idle, AsyncReadExt::read(rx, &mut buf[..want])) => match r {
-                    Err(_) => return RxEnd::Failed("the sender stopped sending (timed out); it can resume".into()),
-                    Ok(Err(e)) => return RxEnd::Failed(format!("connection lost: {e}; it can resume")),
-                    Ok(Ok(0)) => return RxEnd::Failed("the sender ended early; it can resume".into()),
+                    Err(_) => {
+                        let _ = w.flush().await;
+                        return RxEnd::Failed("the sender stopped sending (timed out); it can resume".into());
+                    }
+                    Ok(Err(e)) => {
+                        let _ = w.flush().await;
+                        return RxEnd::Failed(format!("connection lost: {e}; it can resume"));
+                    }
+                    Ok(Ok(0)) => {
+                        let _ = w.flush().await;
+                        return RxEnd::Failed("the sender ended early; it can resume".into());
+                    }
                     Ok(Ok(n)) => n,
                 }
             };
