@@ -1,6 +1,6 @@
 # ADR-013: Stealth mode, emergency wipe and deletion
 
-- **Status**: Proposed (design only; no code in this PR)
+- **Status**: Proposed, owner decisions recorded 2026-10-14 (design only; no code in this PR)
 - **Date**: 2026-10-14
 - **Appendix**: [`ADR-013-artifact-inventory.md`](ADR-013-artifact-inventory.md) (every artifact, with file:line)
 
@@ -15,16 +15,42 @@
 - ブリッジの既定データフォルダは、デーモンとは別の場所(Roaming 側)にある。
 
 **決定の要点**:
-1. **秘匿モードを既定 ON にする**。ログはメモリ上のリングバッファだけ(既定 2 MiB、1 行 512 バイトまで)。GUI/CLI で見る・書き出すことはできる。ファイルへ書くのは、警告付きの「診断ログ」スイッチを明示的に入れたときだけ(その場合も暗号化し、日付を名前に入れない)。
+1. **秘匿モードを既定 ON にする(既存インストールもアップグレード後に ON)**。ログはメモリ上のリングバッファだけ(既定 2 MiB、1 行 512 バイトまで)。GUI/CLI で見る・書き出すことはできる。ファイルへ書くのは、警告付きの「診断ログ」スイッチを明示的に入れたときだけ(その場合も暗号化し、日付を名前に入れない)。アップグレード後の初回起動で「今後ログは書かれません」という通知を 1 回表示し、旧ログは通知のあと自動削除する(通知で「残す」を明示的に選べる)。
 2. **永続化するものはすべて、マスター鍵から HKDF で導出した「状態鍵」で暗号化する**(store_index、複製 WAL、転送ジャーナル、contacts、履歴、directed の封筒、設定、台帳)。マスター鍵を壊せば、ファイルの削除に失敗しても読めなくなる(「まず暗号消去、次に上書き+削除」)。
-3. **正直な限界**: 既定のプロファイルでは `master.key` が同じフォルダに平文であるので、暗号化は「ワイプ後の復元を防ぐ」ものであり、「ワイプ前に端末を調べられる」ことには効かない。それに効くのは、パスフレーズで鍵を包む「高セキュリティプロファイル」(オプション)だけ。
+3. **正直な限界**: 既定のプロファイルでは `master.key` が同じフォルダに平文であるので、暗号化は「ワイプ後の復元を防ぐ」ものであり、「ワイプ前に端末を調べられる」ことには効かない。それに効くのは、パスフレーズで鍵を包む「高セキュリティプロファイル」だけで、これは**オプトインとして今回の範囲に含める(段階 3b)**。
 4. **保存ファイル台帳**: Miasma が自分のストア外へ書いたファイル(受信箱、名前を付けて保存、`.part`、一時ファイル)を、暗号化した台帳に必ず記録する。ワイプは台帳のファイルを上書きして削除する。通常の削除は「履歴だけ消す/ファイルも消す」を 1 件ごとに聞く。移動・コピーされたファイルは追えない。
-5. **ワイプ v2**: 実行は確認付き(GUI のボタン+入力確認、`miasma wipe`)。順序は「鍵 → ログ → 台帳のファイル → 状態 → 共有 → レジストリ → (任意)自己削除」。ロックされたファイルは再試行し、最後の手段としての再起動時削除は明示的に選んだときだけ(その行為自体がレジストリに痕跡を残すため)。失敗は隠さず、「消せなかったもの」を一覧で表示する。失敗時は fail-closed(鍵を先に壊し、その後は起動させない)。
-6. **通常の削除**を 7 種類に整理した(共有 1 件、受信ファイル、履歴/ログ、連絡先、転送、自分が公開したものの取り消し、「鍵を残して全データ削除」)。ネットワーク上の他ノードにあるコピーは**強制削除できない**。署名付きの「撤回」メッセージを、ベストエフォートのプロトコルとして段階 7 で提案する。
-7. **実装は 7 つの小さな PR**に分ける(段階 1: 成果物の棚卸しと永続パスのレジストリ → 段階 2: 秘匿ログ → 段階 3: 状態の暗号化 → 段階 4: 台帳 → 段階 5: ワイプ v2 → 段階 6: 通常削除 UI → 段階 7: ネットワーク撤回)。それぞれにテストがある(ワイプ後にデータフォルダを走査して何も残らないこと、秘匿モードでログファイルが 0 件であること、など)。
-8. **メモリ(RAM)は必須要件**: 新設する全てに上限を決めた。リングバッファ 2〜4 MiB、暗号化状態は件数上限+上限付き LRU、台帳・履歴はディスク側でページング、ファイルの転送・暗号化・上書きは 256 KiB〜1 MiB の定数バッファ。機密メモリは Zeroize し、`mlock`/`VirtualLock` は鍵だけに使う(限界も明記)。受け入れ基準は「1 GiB 転送中・履歴 100 万件・ログ満杯でも、現状(デーモン約 35 MB、デスクトップ約 40〜240 MB)から +12 MiB 以内」。測定手順は段階ごとのテストに入れた。目標値の妥当性はオーナー確認事項。
+5. **ワイプ v2**: 実行は確認付きのボタン(GUI、確認フレーズの入力)と CLI `miasma wipe` だけ。確認なしのグローバルホットキーは作らない。順序は「鍵 → ログ → 台帳のファイル → 状態 → 共有 → レジストリ → (任意)自己削除」。ロックされたファイルは再試行し、最後の手段としての再起動時削除はユーザが明示的に選んだときだけ(その行為自体がレジストリに痕跡を残すため)。「次回起動時に再試行する」ための失敗マーカーは作らない(それ自体が痕跡になる)。ワイプ報告は画面表示のみで、ファイルには書かない。失敗は隠さず「消せなかったもの」を一覧で表示し、失敗時は fail-closed(鍵を先に壊し、その後は起動させない)。自己削除の既定は、インストール版は OFF、ポータブル版は ON。
+6. **通常の削除**を 7 種類に整理した(共有 1 件、受信ファイル、履歴/ログ、連絡先、転送、自分が公開したものの取り消し、「鍵を残して全データ削除」)。ネットワーク上の他ノードにあるコピーは**強制削除できない**。署名付きの「撤回」メッセージは、ベストエフォートのプロトコルとして**最後の段階(段階 7)に回し、優先度は低い**。
+7. **実装は小さな PR の連なり**(段階 1: 成果物の棚卸しと永続パスのレジストリ → 段階 2: 秘匿ログ → 段階 3: 状態の暗号化 → 段階 3b: 高セキュリティプロファイル → 段階 4: 台帳 → 段階 5: ワイプ v2 → 段階 6: 通常削除 UI・ポータブル版・ネットワークプリセット → 段階 7: ネットワーク撤回)。それぞれにテストがある(ワイプ後にデータフォルダを走査して何も残らないこと、秘匿モードでログファイルが 0 件であること、など)。
+8. **メモリ(RAM)は必須要件(目標値はオーナー承認済み)**: 新設する全てに上限を決めた。リングバッファ 2〜4 MiB、暗号化状態は件数上限+上限付き LRU、台帳・履歴はディスク側でページング(履歴の既定上限 1 万件、最大 100 万件)、ファイルの転送・暗号化・上書きは 256 KiB〜1 MiB の定数バッファ。機密メモリは Zeroize し、`mlock`/`VirtualLock` は鍵だけに使う(限界も明記)。受け入れ基準は「1 GiB 転送中・履歴 100 万件・ログ満杯でも、現状(デーモン約 35 MB、デスクトップ約 40〜240 MB)から +12 MiB 以内」。測定手順は段階ごとのテストに入れた。
+9. **その他の決定**: ポータブル版(exe の隣にデータ、中立な名前、レジストリ不使用)は正式な成果物。`miasma-share:` URL スキームの登録は秘匿モードで既定 OFF(「Miasma でリンクを開く」ボタンで明示的に ON にしたときだけ登録。既定ではリンクのクリックで開けなくなる。登録はワイプでも削除する)。ネットワークの「最大秘匿」プリセット(`iroh_mode=off` またはカスタムリレー、LAN 探索 OFF、ホスティング OFF)は任意で提供し、既定にはしない。他人の共有のホスティングは、通常プロファイルはコードの既定(1024 MiB)のまま、秘匿プリセットとポータブル版は 0。SECURITY.md の記述を実際の既定値に合わせて直す。ブリッジの `.processed/` 原本は既定で削除する。
 
-**オーナーに決めてほしいこと**は末尾の "Open questions" に列挙した(特に: 高セキュリティプロファイルを今回の範囲に含めるか、自己削除の既定、旧ログの自動削除、RAM 目標値)。
+**未解決の確認事項はなし**(オーナー決定は下の "Decisions (owner, 2026-10-14)" に記録した)。
+
+---
+
+## Decisions (owner, 2026-10-14)
+
+The owner resolved all questions that were open in the first draft. They are
+binding for the sections below; where a section changes because of one, it says
+so.
+
+| # | Decision | Where it lands |
+|---|---|---|
+| O1 | **High-security profile** (passphrase-wrapped master key, never stored unwrapped on disk) is **in scope as an opt-in**, phase 3b. | 5.4, 11 |
+| O2 | **Stealth mode is ON by default, also for existing installs after upgrade.** The first start after upgrade shows a one-time notice that logs are no longer written; diagnostic logging is the explicit opt-in. | 4.1, 4.4, 11 |
+| O3 | The **portable build** (data next to the exe, neutral names, no registry) is an **official artifact**. | 8.5, 11 (phase 6) |
+| O4 | **Old log files** are deleted automatically after the notice; the notice offers **Keep** as an explicit choice. | 4.4 |
+| O5 | **No failure marker** for "retry wipe on next start" (it would be a trace). Delete-on-reboot only if the user explicitly chooses it after a failure. | 8.3 |
+| O6 | Emergency wipe is triggered **only by a confirmed button (typed phrase) and the CLI `miasma wipe`**. No unconfirmed global hotkey. | 8.1 |
+| O7 | **RAM targets accepted**: baseline +12 MiB; history default cap 10 000 items (max 1 000 000); per-component caps as written in section 10. | 10 |
+| O8 | **Self-delete**: default OFF for the installed build, default ON for the portable build. | 8.5 |
+| O9 | **`miasma-share:` URL-scheme registration**: default OFF in stealth mode; registered only by an explicit "Open links in Miasma" button. Consequence: click-to-open of links does not work by default. The wipe removes the registration. | 4.1, 8.2 |
+| O10 | **Network presets**: an optional "maximum stealth" preset (`iroh_mode=off` or a custom relay, LAN discovery off, hosting off). Not the default. | 4.5 |
+| O11 | **Signed Retract** is deferred to the last phase, low priority. | 7.3, 11 (phase 7) |
+| O12 | **Hosting other people's shares**: the normal profile keeps the code default (1024 MiB); the stealth preset and the portable build default to hosting 0. `SECURITY.md` is corrected so docs and code agree (it must state the real defaults). | 4.5, 11 |
+| O13 | **Bridge `.processed/` originals** are deleted by default. | 6, 11 |
+| O14 | The **wipe report is shown on screen only** and is never written to a file. | 8.1, 8.4 |
 
 ---
 
@@ -95,7 +121,7 @@ An investigation of `origin/main` (commit `e91471e`, appendix) found:
   here". After a wipe the directory is gone, which is itself suspicious only if
   someone knew it existed. What *does* help: the **portable build** (no
   installer, no ARP entry, no HKLM keys, a neutral folder and exe name) and
-  **self-delete** at wipe (section 8). Neither gives deniability against an
+  **self-delete** at wipe (section 8; default on for the portable build). Neither gives deniability against an
   inspector who finds Prefetch/USN records.
 - **Never touch OS or Windows event logs** or any state not created by Miasma.
   The wipe report lists OS artifacts as *not removed* and tells the user how to
@@ -108,16 +134,17 @@ An investigation of `origin/main` (commit `e91471e`, appendix) found:
 | # | Decision |
 |---|---|
 | D1 | One **persisted-paths registry** in `miasma-core` (`paths.rs`): every file or directory the product writes is created through it, with a class (`State`, `Secret`, `UserVisible`, `Runtime`, `Diagnostic`), a treatment (`Encrypt`/`Plain`/`NoWriteInStealth`) and a wipe method. A CI test fails if a new `fs::write/File::create/create_dir_all` appears outside it. |
-| D2 | **Stealth mode is the default** (`privacy.stealth = true`). Logs: in-memory ring buffer only; no files, no stderr, no panic text, no crash dump. |
+| D2 | **Stealth mode is the default** (`privacy.stealth = true`), including existing installs after upgrade (with a one-time notice). Logs: in-memory ring buffer only; no files, no stderr, no panic text, no crash dump. |
 | D3 | **Diagnostic logging** is an explicit opt-in (`privacy.diagnostic_logging`), with a warning shown at the switch and in the status line while on. Logs are encrypted at rest, rotate by size not by day, and never carry file names. |
 | D4 | **State encryption**: `state_key = HKDF-SHA256(master_key, info="miasma/state/v1")`; per-document subkeys by label. Record-oriented (streaming) format. "Crypto-erase first, then overwrite and delete." |
 | D5 | **Saved-file ledger** (encrypted, record log): every file Miasma writes outside its store is registered **before** the write. |
-| D6 | **Emergency wipe v2** with a fixed order, a verification pass, a report of what could not be removed, and fail-closed behaviour. Triggered only by explicit user action. |
-| D7 | **Optional self-delete** at wipe (portable and installed builds, per OS), selectable, default off. |
+| D6 | **Emergency wipe v2** with a fixed order, a verification pass, an on-screen-only report of what could not be removed, and fail-closed behaviour. Triggered only by a confirmed button (typed phrase) or the CLI `miasma wipe`; no unconfirmed hotkey. |
+| D7 | **Optional self-delete** at wipe (portable and installed builds, per OS), selectable; default OFF for the installed build, ON for the portable build. |
 | D8 | **Normal deletion** taxonomy N1-N7 with per-item semantics (section 7). |
-| D9 | **Network retraction** is best-effort, publisher-signed, and honest about being unenforceable (section 7.3). |
-| D10 | **Optional high-security profile**: passphrase-wrapped master key (Argon2id), no key on disk. Not default. |
+| D9 | **Network retraction** is best-effort, publisher-signed, and honest about being unenforceable (section 7.3). Last phase, low priority. |
+| D10 | **High-security profile (opt-in, phase 3b)**: passphrase-wrapped master key (Argon2id), no unwrapped key on disk. Not the default profile. |
 | D11 | **Every new mechanism has a RAM budget** (section 10) and an acceptance test; no unbounded growth path may be added. |
+| D12 | **Portable build** is an official artifact; **optional "maximum stealth" network preset**; hosting defaults per profile (4.5). |
 
 ## 4. Stealth mode and logging
 
@@ -136,7 +163,7 @@ When on:
 | Panic | A panic hook (none exists today) writes a fixed text without payload or location to the ring buffer and aborts. `RUST_BACKTRACE` is ignored. |
 | Crash dumps | Windows: `SetErrorMode`, silent unhandled-exception filter. Unix: `RLIMIT_CORE=0`, `PR_SET_DUMPABLE=0`. WER/DiagnosticReports already written are OS state (not removable). |
 | Version stamp, `pending-link.txt`, `url-scheme-registered.txt`, `desktop.lock` | Not written (appendix D3, D9-D11); link hand-off goes through the loopback IPC. |
-| Registry | `miasma-share:` is **not** registered unless the user enables `register_url_scheme`. |
+| Registry | `miasma-share:` is **not** registered in stealth mode (and the registration the GUI does on every start today, `link.rs:186-247`, is skipped) unless the user presses the explicit **"Open links in Miasma"** button (`register_url_scheme`). Consequence, stated in the UI: by default, clicking a `miasma-share:` link does not open Miasma; the user pastes the link instead. The wipe removes the registration (8.2). |
 | Browser | `miasma web` prints the URL instead of launching the browser. |
 | Temp files | Decrypted downloads go to `<data>/tmp` (registry-managed), not `%TEMP%`. |
 
@@ -178,11 +205,32 @@ When on:
 ### 4.4 Migration of existing logs
 
 Existing installs have `daemon.log.*`, `desktop.log.*`, `bridge.log.*` (plaintext,
-dated names). On the first start of the new version: the GUI shows a one-time
-notice *"Old log files were found. They show when Miasma was used. [Remove
-securely] [Keep]"* with **Remove** pre-selected; headless daemons remove them
-after the state migration succeeded. The removal is OW + RM and is recorded
-nowhere. See open question Q4.
+dated names). Stealth mode turns ON for them at upgrade (O2). On the first start
+of the new version the GUI shows a one-time notice: *"Miasma no longer writes log
+files. Old log files were found; they show when Miasma was used and will be
+removed securely. [OK, remove] [Keep them]"*. Removal is automatic after the
+notice (O4); **Keep** is an explicit choice and leaves the files untouched (they
+are then listed as plaintext leftovers in the wipe plan and removed by a wipe).
+The notice also explains that diagnostic logging is the explicit opt-in for
+writing logs again. Headless daemons (no GUI to show a notice) remove the old
+logs after the state migration succeeded, unless `MIASMA_KEEP_OLD_LOGS=1` is
+set, and print one line to stdout saying so. The removal is OW + RM and is
+recorded nowhere.
+
+### 4.5 Network presets and hosting defaults
+
+- **"Maximum stealth" preset** (optional, never the default): `iroh_mode = off`
+  or a user-supplied custom relay, `iroh_lan_discovery = false`, hosting off
+  (`hosted_quota_mb = 0`) (appendix section 7). It costs connection paths
+  (fewer ways to reach peers, no LAN discovery) and the UI says so when it is
+  selected. Selectable in Settings > Privacy and `miasma config --preset
+  max-stealth`.
+- **Hosting other people's shares** (O12): the *normal* profile keeps the code
+  default of 1024 MiB (`config.rs:78`). The **stealth preset and the portable
+  build default to 0**. `SECURITY.md` currently says the default quota is zero;
+  that statement is corrected in phase 1 to state the real defaults (1024 MiB
+  normal; 0 for the maximum-stealth preset and the portable build) so that docs
+  and code agree.
 
 ## 5. Encryption of persisted state
 
@@ -276,8 +324,11 @@ gap:
   Android Keystore which already exists in `KeystoreHelper.kt`) as a second
   wrapping layer: documented, not designed here.
 - Cost: no unattended start (the daemon cannot auto-start after reboot), a lost
-  passphrase is data loss. Recommendation: build it as phase 3b, after the
-  default profile ships. See Q1.
+  passphrase is data loss. **Decision O1: included in scope as an opt-in,
+  built as phase 3b right after the default-profile state encryption (phase 3).**
+  The user chooses it at first run or later via Settings > Privacy (switching
+  re-wraps the key; the old `master.key` is overwritten and removed). The
+  wipe (8.2 step 2) overwrites `vault.dat` like `master.key`.
 
 ### 5.5 Alternatives considered
 
@@ -285,7 +336,7 @@ gap:
 |---|---|---|---|
 | **A. One encrypted container file** (e.g. `vault.dat` holding everything incl. share blobs) | One artifact to wipe; no names or sizes leak; hides count of shares | Whole-file rewrite or a custom allocator for 1 GiB+ of shares; hard to stay within the RAM budget; corruption risk concentrates; mmap interacts badly with overwrite | Rejected for shares; small state may later move into one `state.dat` |
 | **B. Many encrypted files** (this ADR) | Streams, fits the existing layout and the RAM budget, incremental migration, partial-corruption isolation | File count, sizes and mtimes leak; opaque names only partially help | **Chosen** |
-| **C. Passphrase-derived key only, never on disk** | Defeats pre-wipe inspection; real crypto-erase by forgetting | No unattended daemon, lost passphrase = loss, UX burden for the many users who do not need it | Opt-in profile (D10) |
+| **C. Passphrase-derived key only, never on disk** | Defeats pre-wipe inspection; real crypto-erase by forgetting | No unattended daemon, lost passphrase = loss, UX burden for the many users who do not need it | Opt-in profile (D10, phase 3b) |
 | **D. Key on disk (today)** | Works unattended | See 5.4 | Default, with the limit stated |
 | **E. OS key store only (DPAPI/Keychain)** | Binds to the user login | Inspector with the login (A1/A3) gets it; roaming and backup semantics; not portable | Documented as an extra layer in the high profile |
 
@@ -299,7 +350,9 @@ untracked file): push inbox files and their `.part` (`push/service.rs:798-840,
 GUI (`app.rs:446,1070`, `transfers.rs:753`), CLI `-o` outputs (`main.rs:828`),
 decrypted temp downloads (appendix T1, T2), exported logs and diagnostics
 reports (`app.rs:1551,2271`), bridge `.processed/` originals and torrent
-downloads (D23, D24).
+downloads (D23, D24). Decision O13: the bridge **deletes the `.processed/`
+original by default** after a successful import (a setting `bridge.keep_originals
+= true` keeps it, and then the original is ledger-tracked as `bridge`).
 
 **Entry** (record log, `ledger` subkey):
 `{id, path, kind (inbox|received|part|temp|export|bridge), size, created_ms, source (push contact id | transfer id | envelope id | share id), state (planned|written|moved|removed), hash8}`. `hash8`
@@ -385,7 +438,8 @@ transport peer id of the pusher (`hosted_principal`).
 recipient who downloaded the file keeps it. Any retraction is a request that
 honest hosts may honour.
 
-**Proposal (phase 7).** A signed `Retract` message:
+**Proposal (phase 7, the last phase, low priority: decision O11).** It can be
+dropped or postponed without affecting any other phase. A signed `Retract` message:
 
 ```
 Retract {
@@ -431,20 +485,23 @@ Retract {
 
 - **GUI**: Settings > Privacy > "Emergency wipe...". Opens a dialog with the
   list of what will happen and the options (checkboxes: *also remove the
-  application files*, *also remove the URL-scheme registration*). Confirmation
+  application files* (pre-checked in the portable build only), *also remove the URL-scheme registration*
+  (shown only if it was registered)). Confirmation
   is by **typing a short phrase** (`WIPE`), not just a button, to avoid
   accidents. The existing daemon-side two-step nonce (`WipeChallenge`/
   `WipeConfirm`, `control_auth.rs:141-160`) stays and is used between the GUI/CLI and
   the daemon.
 - **CLI**: `miasma wipe` prompts for the phrase; `miasma wipe --confirm` keeps
-  working for scripts (it already exists, `main.rs:1439`) and gains `--self-delete`,
-  `--no-registry`, `--report <path>` (the report file is itself a trace and is
-  refused by default; the report goes to stdout).
-- **Panic hotkey** (optional, off by default): a global hotkey is
-  *not* proposed for v1; on Windows it requires registering a system hotkey and
-  keeping the process alive, and a hotkey that wipes without a prompt is a data
-  loss hazard. Instead: a **"panic" button on the main window** that opens the
-  same confirmation dialog (one click + the typed phrase). See Q6.
+  working for scripts (it already exists, `main.rs:1439`) and gains `--self-delete`
+  and `--no-registry`. There is **no** option to write the report to a file
+  (O14): the report is shown on screen / printed to stdout only; the user may
+  redirect stdout at their own risk.
+- **No global hotkey** (O6). The wipe is triggered only by a confirmed button
+  (typed phrase) and by the CLI `miasma wipe`. A hotkey that wipes without a
+  prompt is a data-loss hazard, and on Windows it requires registering a system
+  hotkey and keeping the process alive. Instead: a **"panic" button on the main
+  window** that opens the same confirmation dialog (one click + the typed
+  phrase).
 - **When the app is not running**: `miasma wipe` works without a daemon (today it
   already falls back to a disk-only wipe when `daemon.port` is absent,
   `main.rs:1450-1480`). The GUI executable accepts `--wipe`.
@@ -476,13 +533,13 @@ safe to interrupt:
    directory. Overwrite only if the user chose "thorough" (time bound: stop
    overwriting after 30 s, unlink the rest).
 8. **Remove directories** the app created (data dir, inbox, tmp) if empty.
-9. **Registry / shell** (Windows): delete `HKCU\Software\Classes\miasma-share` via
-   the registry API (not `reg.exe`, whose command line is logged by process
+9. **Registry / shell** (Windows): delete `HKCU\Software\Classes\miasma-share`
+   (the URL-scheme registration, if present) via the registry API (not `reg.exe`, whose command line is logged by process
    auditing). MSI-owned HKLM keys are not touched (report them).
 10. **Verification pass**: re-scan the registered paths and the data dir
     (`read_dir` recursion bounded to 100 000 entries); anything that still
     exists is retried once, then listed.
-11. **Self-delete** (if selected), after the report is shown and the user acknowledged, because a failed self-delete must not hide the report.
+11. **Self-delete** (if selected; default off for the installed build, on for the portable build), after the report is shown and the user acknowledged, because a failed self-delete must not hide the report.
 
 ### 8.3 Locked files and failure handling (Windows)
 
@@ -499,7 +556,7 @@ safe to interrupt:
   the reason, and the wipe continues with the rest. It does not stop at the
   first error and it does not roll back.
 - **Delete on reboot** (`MoveFileEx(MOVEFILE_DELAY_UNTIL_REBOOT)`) is offered
-  only as an explicit choice after a failure. It writes the path into
+  only as an explicit choice after a failure (O5); it is never automatic. It writes the path into
   `HKLM\...\Session Manager\PendingFileRenameOperations`, i.e. a registry trace
   of the very path, it needs administrator rights (so it usually fails for a
   normal user), and the entry survives until the next reboot. The dialog says so.
@@ -507,11 +564,10 @@ safe to interrupt:
   leaves nothing readable under the master key. After step 2 the process refuses
   to start the node again in this data dir: with no `master.key` the app behaves
   as a fresh install (and would create a *new* key when the user initialises).
-  A "wipe incomplete" state is **not** persisted (a marker would be a trace);
-  the report is shown now, and `miasma wipe` can simply be run again, because it
-  works from the registered paths and from a scan, not from saved state. The
-  option "retry at next start" writes a one-line `.w` marker and is off by
-  default (Q5).
+  A "wipe incomplete" state is **not** persisted (O5: a marker would be a
+  trace, so there is no "retry at next start" option at all); the report is
+  shown now, and `miasma wipe` can simply be run again, because it works from
+  the registered paths and from a scan, not from saved state.
 - If step 2 itself fails (the key file cannot be overwritten), the wipe aborts
   immediately and says so, and the in-memory keys are still zeroed (this is
   what `distress_wipe` does today: the in-process key is dropped first).
@@ -523,7 +579,7 @@ safe to interrupt:
   5 s for the key).
 - A final screen: **"Removed"** (counts by class), **"Could not remove"**
   (path class, reason, e.g. "in use", "access denied", "volume not mounted";
-  paths are shown but not saved), and **"Not removable by Miasma"**: a fixed,
+  paths are shown on screen only and never saved, O14), and **"Not removable by Miasma"**: a fixed,
   honest list (OS recent files and Jump Lists, Prefetch, search index, thumbnail
   cache, pagefile/hibernation, backups and cloud sync, antivirus/EDR copies,
   SSD remnants, files you moved or copied elsewhere, installer/Add-Remove-
@@ -531,10 +587,10 @@ safe to interrupt:
 - After the user closes the dialog the app exits (it does not stay open with an
   empty node). A relaunch shows the first-run screen.
 
-### 8.5 Self-delete (optional, default off)
+### 8.5 Self-delete (optional; default off installed, on portable)
 
-Selectable in the wipe dialog and via `--self-delete`. Deferred until after the
-process has finished the report.
+Selectable in the wipe dialog and via `--self-delete` (portable build: on unless
+`--keep-app`). Deferred until after the process has finished the report.
 
 | OS | Approach | Notes |
 |---|---|---|
@@ -545,9 +601,14 @@ process has finished the report.
 | Android | Cannot silently uninstall; open the system uninstall intent after wipe. | User must confirm. |
 | iOS | Not possible. | Wipe only. |
 
-A **portable build** (zip; data directory beside the exe by default, neutral
-folder and exe name, no URL scheme, no installer) is the recommended
-distribution for users in the threat model; it makes self-delete clean. See Q3.
+The **portable build** (zip; data directory beside the exe, neutral folder and
+exe name, no registry writes at all, no URL scheme, no installer) is an
+**official artifact** (O3) and the recommended distribution for users in the
+threat model; it makes self-delete clean. Its defaults: self-delete ON, hosting
+0 (4.5), URL scheme never registered (the "Open links in Miasma" button is
+hidden). The data directory is found relative to the exe, so no `%APPDATA%`
+folder is created. It is built and released by the same packaging scripts as the
+other variants (`scripts/package-release.ps1`, phase 6).
 
 ## 9. Normal-deletion UI / API surface
 
@@ -559,8 +620,8 @@ New or extended IPC (`ControlRequest`), all with bounded replies:
 `LogsClear`, `WipePlan` (dry run: the counts per class), `WipeRun { opts }`
 (replaces `Wipe`/`WipeConfirm` semantics but keeps the nonce).
 
-GUI: a **Storage** tab (list of my published/stored content with Delete and a
-retraction request), the existing Inbox/History gets per-row "Remove from
+GUI: a **Storage** tab (list of my published/stored content with Delete and, once
+phase 7 exists, a retraction request), the existing Inbox/History gets per-row "Remove from
 history" / "Also delete file", Settings > Privacy (stealth, diagnostic
 logging, URL scheme, wipe). CLI: `miasma rm <mid>`, `miasma history rm|clear`,
 `miasma inbox rm`, `miasma logs [--follow|--clear|--decrypt]`, `miasma wipe`,
@@ -595,7 +656,7 @@ Total added by this ADR at steady state: **<= 12 MiB** per process
 (2 + 1 + 0.25 + 0.25 + 0.25 + 1 buffer + allocator slack), of which the ring
 buffer is the largest, configurable down to 1 MiB.
 
-### 10.2 Acceptance targets (to confirm with the owner, Q7)
+### 10.2 Acceptance targets (accepted by the owner, O7)
 
 Peak "Private Bytes" (Windows) / RSS (Linux), measured as `peak - baseline`
 where `baseline` is the same build idle before the scenario:
@@ -649,17 +710,21 @@ where `baseline` is the same build idle before the scenario:
 
 Each phase is one independently mergeable PR (or a small series), in this order
 because each makes the next smaller or safer. All keep existing behaviour for
-the `--no-stealth` / not-yet-migrated paths until their phase lands.
+the `--no-stealth` / not-yet-migrated paths until their phase lands. Note that
+because stealth is ON by default also for upgraded installs (O2), phase 2 ships
+the one-time upgrade notice and the old-log removal together with the ring
+buffer.
 
 | Phase | Content | Value delivered | Tests (besides unit tests) | RAM acceptance |
 |---|---|---|---|---|
-| **1. Inventory + persisted-paths registry** | `miasma-core::paths` with classes/treatments; route every existing write through it (no behaviour change); CI lint "no raw `fs::write`/`File::create`/`create_dir_all`/`temp_dir` outside the registry"; fix the bridge default data dir to the shared one; move `%TEMP%` downloads to `<data>/tmp`; doc comment fix at `config.rs:456` | Nothing can be written outside a known place; wipe has a complete list | Lint test; "registry lists every path the daemon creates in a run of the smoke test" by diffing the data dir against the registry | n/a (no new buffers) |
-| **2. Stealth logging** | Ring buffer layer, `LogsTail`/`logs` CLI/GUI viewer + export, opt-in diagnostic file logging (size-rotated, no dates), stderr/banner/panic/crash-dump handling, scrubbing lint, migration of old logs | Largest practical leak closed; default ON | `stealth_writes_zero_log_files`: run a daemon + desktop-worker session at `debug` in a temp data dir and assert the directory has **no** `*.log*`/`lg/` file and stderr is empty; `diagnostic_logging_on_creates_only_lg_files`; panic test (child process panics, assert no stderr text, no core file); lint on tracing arguments; migration test (old `daemon.log.*` removed) | ring buffer cap test (10 M appends <= cap); `mem_probe` run with full buffer |
+| **1. Inventory + persisted-paths registry** | `miasma-core::paths` with classes/treatments; route every existing write through it (no behaviour change); CI lint "no raw `fs::write`/`File::create`/`create_dir_all`/`temp_dir` outside the registry"; fix the bridge default data dir to the shared one; move `%TEMP%` downloads to `<data>/tmp`; doc comment fix at `config.rs:456`; **correct `SECURITY.md`** so its hosted-quota statement matches the real defaults (4.5, O12); make the bridge delete `.processed/` originals by default (O13) | Nothing can be written outside a known place; wipe has a complete list; docs and code agree on hosting defaults | Lint test; "registry lists every path the daemon creates in a run of the smoke test" by diffing the data dir against the registry; test that the bridge removes the original after import and keeps it with `keep_originals` | n/a (no new buffers) |
+| **2. Stealth logging** | Ring buffer layer, `LogsTail`/`logs` CLI/GUI viewer + export, opt-in diagnostic file logging (size-rotated, no dates), stderr/banner/panic/crash-dump handling, scrubbing lint, one-time upgrade notice + automatic removal of old logs with a "Keep" choice (4.4), `miasma-share:` registration off by default with the explicit "Open links in Miasma" button (4.1) | Largest practical leak closed; default ON for new and upgraded installs | `stealth_writes_zero_log_files`: run a daemon + desktop-worker session at `debug` in a temp data dir and assert the directory has **no** `*.log*`/`lg/` file and stderr is empty; `diagnostic_logging_on_creates_only_lg_files`; panic test (child process panics, assert no stderr text, no core file); lint on tracing arguments; migration test (old `daemon.log.*` removed after the notice, kept when "Keep" is chosen); upgraded-install test (stealth reads as ON with no stored flag); no `HKCU\...\miasma-share` key after a default run, key created only after the button | ring buffer cap test (10 M appends <= cap); `mem_probe` run with full buffer |
 | **3. State encryption** | `StateCrypto` (HKDF labels, document + record-log formats), page-locked `KeyVault`, migrate `store_index`, WAL, journals, contacts, history, envelopes, config, prefs; opaque names; startup migration of plaintext state (read old, write new, overwrite+delete old, verify, in that order) | Crypto-erase protects all state | Round trip each store; corruption/truncation/reorder/replay rejection; **migration from a fixture of the previous release's data dir** (including `.corrupt-*`, `.tmp` leftovers); "after deleting only `master.key`, no state file is decodable" test; startup with a half-migrated dir | streaming test (1 GiB record log, one record resident); LRU cap; `mem_probe` 1 000 000 history records |
-| **4. Saved-file ledger** | Ledger store; hook `plan/commit` into push receive, transfer receive/`.part`, GUI Save-As/CLI `-o`, temp downloads, log export, bridge originals; history rows get "remove from history only / also delete file" | Everything the app writes outside the store is findable | Crash between `plan` and `commit` leaves a deletable entry; ledger-driven delete removes the file, refuses when `hash8` differs without confirmation; moved-file case reports "not found" | ledger at cap = bounded memory |
-| **5. Wipe v2** | Ordered pipeline (8.2), verification pass, report, fail-closed, locked-file handling, registry removal, optional self-delete, CLI/GUI/FFI entry points | The headline feature | **`wipe_leaves_nothing`**: populate a temp data dir through the real daemon/desktop-worker code (publish, push receive, directed send, history, logs on, ledger files), wipe, then walk the dir and the ledger paths and assert nothing remains except an empty/absent directory; locked-file test on Windows (a handle held open without `FILE_SHARE_DELETE`); interrupted-wipe test (kill after step 2, rerun, assert complete and idempotent); report contains the fixed "not removable" list; registry test with a throwaway key name | wipe of 20 GiB sparse files stays within +4 MiB |
-| **6. Normal deletion** | N1-N5, N7 IPC + GUI tabs + CLI; `DirectedRevoke` also performs N1 and drops the WAL item | Day-to-day control | Each N-op: removes what it says and leaves what it must; N4 cancels in-flight and removes `.part` (already tested in `transfer_remove_test.rs`) | paged list through 1 000 000 entries |
-| **7. Network retraction** | Publisher key stored per hosted share; `Retract` message, tombstones, honouring, UI "Requested" state | Best-effort take-down | Forged signature rejected; bare-MID record not retractable; replay after re-publish ignored; tombstone cap eviction; two-node integration test | tombstone cap |
+| **3b. High-security profile (opt-in)** | `vault.dat` (Argon2id-wrapped master key), passphrase prompt in GUI/CLI at start, switch default <-> high with re-wrap and overwrite of the old `master.key`, no unattended start in this profile, wipe overwrites `vault.dat` | Pre-wipe inspection no longer yields the key | Wrong passphrase fails closed; no unwrapped key file exists on disk after switching; switch-back round trip; state encrypted in phase 3 opens only with the unwrapped key; wipe removes `vault.dat` | key page stays one `mlock`'d page |
+| **4. Saved-file ledger** | Ledger store; hook `plan/commit` into push receive, transfer receive/`.part`, GUI Save-As/CLI `-o`, temp downloads, log export, bridge originals when kept; history rows get "remove from history only / also delete file" | Everything the app writes outside the store is findable | Crash between `plan` and `commit` leaves a deletable entry; ledger-driven delete removes the file, refuses when `hash8` differs without confirmation; moved-file case reports "not found" | ledger at cap = bounded memory |
+| **5. Wipe v2** | Ordered pipeline (8.2), verification pass, report, fail-closed, locked-file handling, registry removal, optional self-delete (default per build, O8), on-screen-only report (O14), confirmed button + `miasma wipe` only (O6), no failure marker (O5), CLI/GUI/FFI entry points | The headline feature | **`wipe_leaves_nothing`**: populate a temp data dir through the real daemon/desktop-worker code (publish, push receive, directed send, history, logs on, ledger files), wipe, then walk the dir and the ledger paths and assert nothing remains except an empty/absent directory; locked-file test on Windows (a handle held open without `FILE_SHARE_DELETE`); interrupted-wipe test (kill after step 2, rerun, assert complete and idempotent); report contains the fixed "not removable" list; registry test with a throwaway key name; **no-trace test**: after a wipe (including a failing one) no report file, no `.w`/retry marker and no `PendingFileRenameOperations` entry exists unless delete-on-reboot was explicitly chosen; self-delete default is off for the installed layout and on for the portable layout | wipe of 20 GiB sparse files stays within +4 MiB |
+| **6. Normal deletion, portable build, network preset** | N1-N5, N7 IPC + GUI tabs + CLI; `DirectedRevoke` also performs N1 and drops the WAL item; **portable build** packaging (data beside exe, neutral names, no registry, self-delete on, hosting 0); optional "maximum stealth" preset (4.5) | Day-to-day control; a distribution that leaves no installer trace | Each N-op: removes what it says and leaves what it must; N4 cancels in-flight and removes `.part` (already tested in `transfer_remove_test.rs`); portable run in a temp dir creates no files outside that dir and no registry keys; preset sets exactly `iroh_mode=off`, LAN discovery off, hosting 0 and is not applied by default | paged list through 1 000 000 entries |
+| **7. Network retraction (last, low priority)** | Publisher key stored per hosted share; `Retract` message, tombstones, honouring, UI "Requested" state | Best-effort take-down | Forged signature rejected; bare-MID record not retractable; replay after re-publish ignored; tombstone cap eviction; two-node integration test | tombstone cap |
 
 **Migration of existing installs.** Order inside the first start of a build
 containing phases 2-3: (1) take the instance lock; (2) read plaintext state
@@ -687,19 +752,10 @@ too (a developer machine inspected for this ADR had a manual
   support (the `miasma doctor` command prints the mapping from the running
   process).
 
-## 13. Open questions for the owner
+## 13. Open questions
 
-1. **High-security profile (passphrase-wrapped key)**: include as phase 3b in this effort, or leave as a later ADR? (Without it, at-rest encryption does not protect against inspection **before** a wipe.)
-2. **Stealth default for existing installs**: switch to ON on upgrade (as proposed) or only for new installs?
-3. **Portable build**: should a zip distribution with data beside the exe and a neutral name be a first-class deliverable (it is what makes self-delete and "no registry" clean)?
-4. **Old logs on upgrade**: remove automatically after a one-time notice (proposed), or ask every time, or keep unless the user opts in?
-5. **Failed wipe**: is a persisted "retry at next start" marker acceptable (it is a trace) or must nothing be persisted (proposed default)? Also: allow delete-on-reboot as an explicit last resort, knowing it writes the path to the registry?
-6. **Panic button / hotkey**: one-click button + typed phrase (proposed), or also a global hotkey without a prompt (data-loss risk)?
-7. **RAM targets**: are `baseline + 12 MiB` under a 1 GiB transfer / 1 000 000 history entries / full log and the per-component caps in section 10 acceptable? Is a history cap of 10 000 by default (up to 1 000 000) right?
-8. **Self-delete default**: off (proposed) or on in the portable build?
-9. **URL-scheme registration**: off by default in stealth (proposed). Should the GUI ever register it silently, or only through an explicit button?
-10. **Stealth network preset**: should stealth mode also switch `iroh_mode=off`, `iroh_lan_discovery=false`, `hosted_quota_mb=0` (appendix section 7), at the cost of fewer connection paths?
-11. **Retraction**: is a best-effort signed `Retract` worth protocol surface, given it cannot be enforced and leaks that the publisher is online?
-12. **Hosted shares**: should a stealth node refuse to host shares for others by default (it already defaults to a zero quota in SECURITY.md; the current in-code default is 1024 MB, `config.rs:78`)? That mismatch should be resolved either way.
-13. **Bridge**: keep `.processed/` originals by default (today) or delete the original after import unless asked?
-14. **Wipe report**: show only; never write a report file (proposed). OK?
+None. All questions of the first draft were decided by the owner on 2026-10-14
+(see "Decisions (owner, 2026-10-14)" near the top). Items that remain *design
+details* to settle in the implementing PRs, not owner decisions: the exact
+wording of the upgrade notice, the key-wrap parameters (Argon2id cost) of the
+high-security profile, and the `Retract` wire format in the last phase.
