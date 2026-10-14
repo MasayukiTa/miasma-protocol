@@ -203,7 +203,7 @@ pub enum ControlRequest {
     /// unreadable. Only honoured with the nonce the daemon issued for `Wipe`.
     WipeConfirm { nonce: String },
 
-    // ── Trusted-contact push (ADR-011) ──────────────────────────────────
+    // ── Trusted-contact push ──────────────────────────────────
     /// Contacts and file push; see [`crate::push::PushRequest`].
     Push(crate::push::PushRequest),
 
@@ -536,7 +536,7 @@ pub enum ControlResponse {
     },
     Error(String),
 
-    // ── Trusted-contact push (ADR-011) ──────────────────────────────────
+    // ── Trusted-contact push ──────────────────────────────────
     /// Answer to [`ControlRequest::Push`].
     Push(crate::push::PushResponse),
 

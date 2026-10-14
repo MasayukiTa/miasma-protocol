@@ -17,7 +17,7 @@ pub struct NodeConfig {
     pub network: NetworkConfig,
     #[serde(default)]
     pub transport: TransportConfig,
-    /// Trusted-contact push (ADR-011).
+    /// Trusted-contact push.
     #[serde(default)]
     pub push: PushConfig,
 }

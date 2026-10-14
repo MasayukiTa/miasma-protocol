@@ -1,4 +1,4 @@
-//! Trusted-contact push over a local iroh relay (ADR-011): two in-process
+//! Trusted-contact push over a local iroh relay: two in-process
 //! nodes, no traffic to any public service.
 
 #![cfg(feature = "iroh")]

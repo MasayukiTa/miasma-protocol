@@ -1,4 +1,4 @@
-//! Trusted-contact push (ADR-011): register the other person once (both sides
+//! Trusted-contact push: register the other person once (both sides
 //! register each other), then send file after file with no per-file Share ID,
 //! password or confirmation code. The receiver auto-accepts only from
 //! registered contacts. Transport is the iroh direct endpoint (ALPN
