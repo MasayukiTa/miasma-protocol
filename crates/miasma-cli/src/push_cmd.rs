@@ -271,6 +271,125 @@ impl M<'_> {
     }
 }
 
+// ─── Reasons: stable kinds from the daemon -> words in the person's language ──
+
+/// `(English, Japanese)` for a stable `reject_reason` / `error_kind` of the daemon, worded from the
+/// point of view of this machine: `Direction::Out` = we are the sender, `In` = we are the receiver.
+/// `None` for a kind this CLI does not know (the daemon's own text is shown then).
+fn why_texts(kind: &str, dir: Direction) -> Option<(&'static str, &'static str)> {
+    let out = dir == Direction::Out;
+    Some(match kind {
+        // Refusals (`reject_reason`).
+        "not_allowed" if out => (
+            "the other side has not registered you: ask them to add your contact code",
+            "相手があなたを登録していません。相手に、あなたの連絡先コードを追加してもらってください",
+        ),
+        "not_allowed" => (
+            "this person is not registered with receiving switched on",
+            "この相手は、登録されていないか、受信がオフです",
+        ),
+        "too_large" if out => (
+            "the file is larger than the other side accepts",
+            "ファイルが、相手の受け取れるサイズを超えています",
+        ),
+        "too_large" => (
+            "the file is larger than your limit",
+            "ファイルが、設定した上限を超えているため断りました",
+        ),
+        "no_space" if out => (
+            "the other side does not have enough free disk space",
+            "相手のパソコンの空き容量が足りません",
+        ),
+        "no_space" => (
+            "there is not enough free disk space here",
+            "このパソコンの空き容量が足りないため断りました",
+        ),
+        "busy" if out => (
+            "the other side is busy receiving other files; try again in a moment",
+            "相手がほかのファイルを受け取っています。少し待ってから、もう一度試してください",
+        ),
+        "busy" => (
+            "busy with other transfers; the sender can try again in a moment",
+            "ほかの転送中のため断りました。少し待てば、相手が再び送れます",
+        ),
+        "bad_name" if out => (
+            "the other side did not accept the file name",
+            "相手が、このファイル名を受け付けませんでした",
+        ),
+        "bad_name" => (
+            "the file name cannot be used here",
+            "このファイル名は使えないため断りました",
+        ),
+        "bad_request" => (
+            "the request was not understood (different Miasma versions?)",
+            "要求を理解できませんでした。お互いのMiasmaのバージョンが違うのかもしれません",
+        ),
+        // Endings that are not refusals (`error_kind`).
+        "unreachable" => (
+            "could not reach the other side (their Miasma is not running, or this network blocks \
+             direct connections)",
+            "相手に届きませんでした(相手のMiasmaが起動していないか、ネットワークが直接通信を止めています)",
+        ),
+        "connection_lost" if out => (
+            "the connection was lost",
+            "通信が途切れました",
+        ),
+        "connection_lost" => (
+            "the connection was lost; if the sender sends it again it continues where it stopped",
+            "通信が途切れました。相手が再び送ると、続きから受け取れます",
+        ),
+        "timed_out" if out => (
+            "the other side did not answer in time",
+            "相手から時間内に返事がありませんでした",
+        ),
+        "timed_out" => (
+            "the sender stopped sending; if it sends again it continues where it stopped",
+            "相手からのデータが止まりました。相手が再び送ると、続きから受け取れます",
+        ),
+        "peer_cancelled" => (
+            "the sender cancelled this transfer",
+            "相手が転送を中止しました",
+        ),
+        "damaged" => (
+            "the file arrived damaged (checksum mismatch)",
+            "ファイルが壊れて届きました(チェックサムが一致しません)",
+        ),
+        "file_unreadable" => (
+            "the file could not be read (it may have been changed or removed)",
+            "ファイルを読み込めませんでした(変更または削除された可能性があります)",
+        ),
+        "write_failed" if out => (
+            "the other side could not save the file",
+            "相手のパソコンで保存に失敗しました",
+        ),
+        "write_failed" => (
+            "the file could not be written to the inbox",
+            "受信フォルダに書き込めませんでした",
+        ),
+        "contact_changed" => (
+            "the contact was removed or sending to it was switched off",
+            "連絡先が削除されたか、送信がオフになりました",
+        ),
+        _ => return None,
+    })
+}
+
+/// The reason line of a finished transfer in the person's language: the refusal, else the kind of
+/// ending, else (an ending this CLI has no words for) the daemon's own text.
+fn explain(t: &PushTransferInfo) -> Option<String> {
+    let kind = t.reject_reason.as_deref().or(t.error_kind.as_deref());
+    if let Some((en, ja)) = kind.and_then(|k| why_texts(k, t.direction)) {
+        return Some(
+            match lang() {
+                Lang::En => en,
+                Lang::Ja => ja,
+            }
+            .to_owned(),
+        );
+    }
+    t.error.clone()
+}
+
 // ─── Plumbing ────────────────────────────────────────────────────────────────
 
 async fn call(data_dir: &Path, req: PushRequest) -> Result<PushResponse> {
@@ -397,6 +516,19 @@ pub async fn run_contact(data_dir: &Path, cmd: ContactCmd) -> Result<()> {
 }
 
 fn state_label(s: PushState) -> &'static str {
+    if lang() == Lang::Ja {
+        return match s {
+            PushState::Queued => "待機中",
+            PushState::Preparing => "準備中",
+            PushState::Connecting => "接続中",
+            PushState::Sending => "転送中",
+            PushState::Verifying => "確認中",
+            PushState::Done => "完了",
+            PushState::Failed => "失敗",
+            PushState::Rejected => "断られました",
+            PushState::Cancelled => "中止",
+        };
+    }
     match s {
         PushState::Queued => "queued",
         PushState::Preparing => "preparing",
@@ -442,7 +574,11 @@ fn print_hint(t: &PushTransferInfo) {
         Some("no_space") => Some(M::HintNoSpace),
         Some("too_large") => Some(M::HintTooLarge),
         Some("busy") => Some(M::HintBusy),
-        _ if err.contains("cannot reach") || err.contains("no connection") => {
+        _ if t.direction == Direction::Out
+            && (t.error_kind.as_deref() == Some("unreachable")
+                || err.contains("cannot reach")
+                || err.contains("no connection")) =>
+        {
             Some(M::HintUnreachable)
         }
         _ => None,
@@ -528,7 +664,8 @@ pub async fn run_push(data_dir: &Path, args: PushArgs) -> Result<()> {
                     ),
                     PushState::Rejected => {
                         failed += 1;
-                        let text = t.error.as_deref().unwrap_or("rejected");
+                        let why = explain(&t);
+                        let text = why.as_deref().unwrap_or("rejected");
                         eprintln!("{}", M::RejectedFile { name, text }.t());
                         print_hint(&t);
                     }
@@ -538,7 +675,8 @@ pub async fn run_push(data_dir: &Path, args: PushArgs) -> Result<()> {
                     }
                     _ => {
                         failed += 1;
-                        let err = t.error.as_deref().unwrap_or("unknown error");
+                        let why = explain(&t);
+                        let err = why.as_deref().unwrap_or("unknown error");
                         eprintln!("{}", M::FailedFile { name, err }.t());
                         print_hint(&t);
                     }
@@ -573,7 +711,7 @@ pub async fn run_push_status(data_dir: &Path) -> Result<()> {
             }
             for t in &list {
                 let mut l = format!("[{}] {}", t.id, progress_line(t));
-                if let Some(e) = &t.error {
+                if let Some(e) = explain(t) {
                     l.push_str(&format!("  ({e})"));
                 }
                 println!("{l}");
@@ -614,6 +752,84 @@ mod tests {
     }
 
     #[test]
+    fn every_stable_kind_has_words_in_both_languages_from_both_points_of_view() {
+        let kinds = [
+            "not_allowed",
+            "too_large",
+            "no_space",
+            "busy",
+            "bad_name",
+            "bad_request",
+            "unreachable",
+            "connection_lost",
+            "timed_out",
+            "peer_cancelled",
+            "damaged",
+            "file_unreadable",
+            "write_failed",
+            "contact_changed",
+        ];
+        for k in kinds {
+            for dir in [Direction::Out, Direction::In] {
+                let (en, ja) = why_texts(k, dir).unwrap_or_else(|| panic!("{k}"));
+                assert!(!en.is_empty() && !ja.is_empty(), "{k}");
+                // Japanese output has no English sentence left in it.
+                assert!(
+                    ja.chars().any(|c| c as u32 > 0x3000),
+                    "{k} {dir:?} is not Japanese: {ja}"
+                );
+                for bad in ["指紋", "カード", "フィンガープリント"] {
+                    assert!(!ja.contains(bad), "{bad} in: {ja}");
+                }
+                assert!(!en.to_lowercase().contains("fingerprint"), "{en}");
+            }
+        }
+        assert!(why_texts("something_new", Direction::Out).is_none());
+        // The sender's perspective never blames "the sender", and an inbound row never tells the
+        // person to check that their own Miasma is running.
+        for dir in [Direction::Out, Direction::In] {
+            for k in kinds {
+                let (en, ja) = why_texts(k, dir).unwrap();
+                assert!(!en.contains("sender is offline"), "{k}");
+                // ("unreachable" only ever happens when sending.)
+                if dir == Direction::In && k != "unreachable" {
+                    assert!(!ja.contains("相手のMiasmaが起動"), "{k}: {ja}");
+                }
+            }
+        }
+        let (_, ja) = why_texts("not_allowed", Direction::Out).unwrap();
+        assert!(ja.contains("連絡先コード"));
+        let (_, ja) = why_texts("peer_cancelled", Direction::In).unwrap();
+        assert_eq!(ja, "相手が転送を中止しました");
+    }
+
+    #[test]
+    fn unknown_ending_keeps_the_daemons_own_text() {
+        let t = PushTransferInfo {
+            id: "i".into(),
+            direction: Direction::Out,
+            contact_id: "c".into(),
+            contact_label: "L".into(),
+            name: "n".into(),
+            size: 1,
+            bytes: 0,
+            rate_bps: 0,
+            state: PushState::Failed,
+            error: Some("raw daemon text".into()),
+            reject_reason: None,
+            error_kind: Some("brand_new_kind".into()),
+            source_path: None,
+            saved_as: None,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+        };
+        assert_eq!(explain(&t).as_deref(), Some("raw daemon text"));
+        let mut known = t.clone();
+        known.reject_reason = Some("not_allowed".into());
+        assert_ne!(explain(&known).as_deref(), Some("raw daemon text"));
+    }
+
+    #[test]
     fn every_message_renders_in_both_languages() {
         let c = ContactInfo {
             id: "i".into(),
@@ -624,6 +840,7 @@ mod tests {
             allow_send: true,
             allow_receive: false,
             max_file_size: Some(1024),
+            default_max_file_size: 0,
             inbox_dir: "/x".into(),
         };
         let msgs = [

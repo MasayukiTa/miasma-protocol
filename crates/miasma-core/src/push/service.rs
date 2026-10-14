@@ -27,8 +27,8 @@ use super::{
         CLOSE_OK, PROTOCOL_VERSION,
     },
     state::{
-        now_ms, Board, Direction, History, HistoryEntry, PushState, PushTransferInfo, RateMeter,
-        MAX_ACTIVE,
+        error_kind, now_ms, Board, Direction, History, HistoryEntry, PushState, PushTransferInfo,
+        RateMeter, MAX_ACTIVE,
     },
     store::{Contact, ContactError, ContactStore, ContactUpdate},
 };
@@ -43,6 +43,8 @@ const CHUNK: usize = 256 * 1024;
 /// Streams (files) served on one connection before it is closed.
 const MAX_STREAMS_PER_CONNECTION: usize = 10_000;
 const MAX_QUEUED_PER_SERVICE: usize = MAX_ACTIVE;
+/// How often old partial files are looked for (the first look is at start).
+const PART_SWEEP_EVERY: Duration = Duration::from_secs(24 * 3600);
 
 type FreeSpaceFn = Arc<dyn Fn(&Path) -> Option<u64> + Send + Sync>;
 
@@ -60,6 +62,9 @@ pub struct PushSettings {
     pub reply_timeout: Duration,
     /// Waits between retries after a dropped connection.
     pub retry_delays: Vec<Duration>,
+    /// Unfinished `.part` files older than this are removed (at start and once
+    /// a day). `Duration::ZERO` keeps them forever.
+    pub part_retention: Duration,
     /// Replaces the real disk query (tests).
     pub free_space: Option<FreeSpaceFn>,
 }
@@ -78,6 +83,7 @@ impl PushSettings {
                 Duration::from_secs(5),
                 Duration::from_secs(10),
             ],
+            part_retention: Duration::from_secs(cfg.part_retention_days.saturating_mul(86_400)),
             free_space: None,
         }
     }
@@ -187,8 +193,9 @@ pub struct PushService {
 
 /// Why one attempt to send failed.
 enum AttemptError {
-    /// Worth retrying (resume picks up where it stopped).
-    Retry(String),
+    /// Worth retrying (resume picks up where it stopped). `kind` is the stable
+    /// [`error_kind`] shown if the retries run out.
+    Retry(&'static str, String),
     /// Retry once from scratch (the receiver's hash check failed).
     Restart(String),
     Fatal(String),
@@ -216,6 +223,23 @@ impl PushService {
             shutdown,
         });
         node.set_push_handler(svc.clone());
+        // Old partial files of transfers the sender never resumed: once now, then daily.
+        {
+            let me = svc.clone();
+            let mut stop = svc.shutdown.subscribe();
+            tokio::spawn(async move {
+                loop {
+                    let n = me.sweep_partials();
+                    if n > 0 {
+                        info!("removed {n} unfinished partial file(s) older than the retention");
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep(PART_SWEEP_EVERY) => {}
+                        _ = stop.changed() => return,
+                    }
+                }
+            });
+        }
         info!(
             fingerprint = %fingerprint(&own_id),
             contacts = svc.contacts.list().len(),
@@ -239,6 +263,11 @@ impl PushService {
 
     pub fn history(&self) -> &History {
         &self.history
+    }
+
+    /// Largest file accepted from a contact that has no limit of its own.
+    pub fn default_max_file_size(&self) -> u64 {
+        self.settings.max_file_size
     }
 
     pub fn inbox_dir(&self) -> &Path {
@@ -297,6 +326,20 @@ impl PushService {
         }
         self.clean_partials(&removed);
         Ok(removed)
+    }
+
+    /// Remove unfinished `.part` files that have not been written to for the
+    /// retention time (`push.part_retention_days`). Only files of exactly our
+    /// own name pattern, directly inside a contact folder of the inbox, and not
+    /// in use. Returns how many were removed.
+    pub fn sweep_partials(&self) -> usize {
+        let active = self.active_parts.lock().unwrap().clone();
+        sweep_partials_in(
+            &self.settings.inbox_dir,
+            self.settings.part_retention,
+            &active,
+            std::time::SystemTime::now(),
+        )
     }
 
     /// Delete the unfinished `.part` files of a contact that is no longer
@@ -358,6 +401,8 @@ impl PushService {
             meta.len(),
             PushState::Queued,
         );
+        let shown_path = path.to_string_lossy().into_owned();
+        self.board.update(&id, |i| i.source_path = Some(shown_path));
         let start_worker = {
             let mut q = self.queues.lock().unwrap();
             let cq = q.entry(contact.id.clone()).or_default();
@@ -406,10 +451,22 @@ impl PushService {
         error: Option<String>,
         reason: Option<RejectReason>,
     ) {
+        self.finish_kind(id, state, error, reason, None)
+    }
+
+    fn finish_kind(
+        &self,
+        id: &str,
+        state: PushState,
+        error: Option<String>,
+        reason: Option<RejectReason>,
+        kind: Option<&str>,
+    ) {
         self.board.update(id, |i| {
             i.state = state;
             i.error = error;
             i.reject_reason = reason.map(|r| r.as_str().to_owned());
+            i.error_kind = kind.map(str::to_owned);
             i.rate_bps = 0;
             if state == PushState::Done {
                 i.bytes = i.size;
@@ -426,6 +483,8 @@ impl PushService {
                 state: i.state,
                 error: i.error,
                 reject_reason: i.reject_reason,
+                error_kind: i.error_kind,
+                source_path: i.source_path,
                 saved_as: i.saved_as,
                 finished_at_ms: now_ms(),
             });
@@ -438,19 +497,21 @@ impl PushService {
             return self.finish(&id, PushState::Cancelled, None, None);
         }
         let Some(contact) = self.contacts.find(contact_id) else {
-            return self.finish(
+            return self.finish_kind(
                 &id,
                 PushState::Cancelled,
                 Some("the contact was removed".into()),
                 None,
+                Some(error_kind::CONTACT_CHANGED),
             );
         };
         if !contact.allow_send {
-            return self.finish(
+            return self.finish_kind(
                 &id,
                 PushState::Failed,
                 Some("sending to this contact is switched off".into()),
                 None,
+                Some(error_kind::CONTACT_CHANGED),
             );
         }
         let Some(target) = contact.endpoint_bytes() else {
@@ -468,11 +529,12 @@ impl PushService {
             Ok(Some(v)) => v,
             Ok(None) => return self.finish(&id, PushState::Cancelled, None, None),
             Err(e) => {
-                return self.finish(
+                return self.finish_kind(
                     &id,
                     PushState::Failed,
                     Some(format!("cannot read the file: {e}")),
                     None,
+                    Some(error_kind::FILE_UNREADABLE),
                 )
             }
         };
@@ -493,11 +555,16 @@ impl PushService {
             let c = match self.ensure_conn(conn, &target).await {
                 Ok(c) => c,
                 Err(e) => {
-                    return self.finish(
+                    let kind = match e {
+                        IrohClientError::Unreachable(_) => error_kind::UNREACHABLE,
+                        _ => error_kind::CONNECTION_LOST,
+                    };
+                    return self.finish_kind(
                         &id,
                         PushState::Failed,
                         Some(describe_dial_error(&e)),
                         None,
+                        Some(kind),
                     );
                 }
             };
@@ -510,7 +577,9 @@ impl PushService {
                     return self.finish(&id, PushState::Done, None, None);
                 }
                 Err(AttemptError::Cancelled) => {
-                    // The receiver keeps its partial file for a later resume.
+                    // Closing with CLOSE_CANCELLED tells the receiver this was on
+                    // purpose (it then deletes its partial file); a connection that
+                    // merely dies keeps the partial for a later resume.
                     *conn = None;
                     c.close(proto::CLOSE_CANCELLED.into(), b"cancelled");
                     return self.finish(&id, PushState::Cancelled, None, None);
@@ -519,18 +588,25 @@ impl PushService {
                     return self.finish(&id, PushState::Rejected, Some(reject_text(r)), Some(r));
                 }
                 Err(AttemptError::Fatal(m)) => {
-                    return self.finish(&id, PushState::Failed, Some(m), None);
+                    let kind = fatal_kind(&m);
+                    return self.finish_kind(&id, PushState::Failed, Some(m), None, kind);
                 }
                 Err(AttemptError::Restart(m)) => {
                     if restarted {
-                        return self.finish(&id, PushState::Failed, Some(m), None);
+                        return self.finish_kind(
+                            &id,
+                            PushState::Failed,
+                            Some(m),
+                            None,
+                            Some(error_kind::DAMAGED),
+                        );
                     }
                     restarted = true;
                 }
-                Err(AttemptError::Retry(m)) => {
+                Err(AttemptError::Retry(kind, m)) => {
                     *conn = None;
                     let Some(delay) = self.settings.retry_delays.get(attempt).copied() else {
-                        return self.finish(&id, PushState::Failed, Some(m), None);
+                        return self.finish_kind(&id, PushState::Failed, Some(m), None, Some(kind));
                     };
                     attempt += 1;
                     debug!("push {id}: {m}; retrying in {delay:?}");
@@ -585,14 +661,19 @@ impl PushService {
             if Self::closed_as_not_allowed(conn) {
                 AttemptError::Rejected(RejectReason::NotAllowed)
             } else {
-                AttemptError::Retry(format!("{what}: {e}"))
+                AttemptError::Retry(error_kind::CONNECTION_LOST, format!("{what}: {e}"))
             }
         };
         let (mut tx, mut rx) =
             match tokio::time::timeout(Duration::from_secs(30), conn.open_bi()).await {
                 Ok(Ok(s)) => s,
                 Ok(Err(e)) => return Err(broken(conn, "open stream", e.to_string())),
-                Err(_) => return Err(AttemptError::Retry("open stream timed out".into())),
+                Err(_) => {
+                    return Err(AttemptError::Retry(
+                        error_kind::TIMED_OUT,
+                        "open stream timed out".into(),
+                    ))
+                }
             };
         let header = Header {
             v: PROTOCOL_VERSION,
@@ -610,7 +691,12 @@ impl PushService {
             {
                 Ok(Ok(r)) => r,
                 Ok(Err(e)) => return Err(broken(conn, "no reply", e.to_string())),
-                Err(_) => return Err(AttemptError::Retry("the other side did not reply".into())),
+                Err(_) => {
+                    return Err(AttemptError::Retry(
+                        error_kind::TIMED_OUT,
+                        "the other side did not reply".into(),
+                    ))
+                }
             };
         let offset = match reply {
             Reply::Reject { reason } => return Err(AttemptError::Rejected(reason)),
@@ -636,6 +722,14 @@ impl PushService {
                 .map_err(|e| AttemptError::Fatal(format!("cannot read the file: {e}")))?;
         }
         let mut buf = vec![0u8; CHUNK];
+        // Progress (`bytes` on the board) means the same on both sides: bytes of the file that
+        // the QUIC stream has taken from / given to the application, counted from byte 0 of the
+        // file (a resumed prefix included). The receiver counts what it has read and written;
+        // the sender counts what `write_all` accepted. QUIC flow control keeps the two within
+        // the stream's unacknowledged window (about 10 MiB with the transport defaults), so the
+        // sender can lead the receiver by at most that, and never lags it. A row that ended
+        // (cancelled, failed) keeps the count it had when it stopped; a later retry is a new
+        // row that starts at the resumed offset.
         let mut sent = offset;
         let mut meter = RateMeter::new(sent);
         while sent < size {
@@ -654,7 +748,7 @@ impl PushService {
                 w = tokio::time::timeout(idle, AsyncWriteExt::write_all(&mut tx, &buf[..n])) => match w {
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => return Err(broken(conn, "send", e.to_string())),
-                    Err(_) => return Err(AttemptError::Retry("the other side stopped accepting data".into())),
+                    Err(_) => return Err(AttemptError::Retry(error_kind::TIMED_OUT, "the other side stopped accepting data".into())),
                 }
             }
             sent += n as u64;
@@ -676,7 +770,7 @@ impl PushService {
             r = tokio::time::timeout(self.settings.reply_timeout, proto::read_frame(&mut rx)) => match r {
                 Ok(Ok(d)) => d,
                 Ok(Err(e)) => return Err(broken(conn, "no confirmation", e.to_string())),
-                Err(_) => return Err(AttemptError::Retry("the other side did not confirm".into())),
+                Err(_) => return Err(AttemptError::Retry(error_kind::TIMED_OUT, "the other side did not confirm".into())),
             }
         };
         if done.ok {
@@ -738,6 +832,7 @@ impl PushService {
         );
         let outcome = self
             .receive_body(
+                conn,
                 &contact,
                 &name,
                 &header,
@@ -762,6 +857,21 @@ impl PushService {
                 self.finish(&tid, PushState::Failed, Some(m), None);
                 true
             }
+            RxEnd::FailedKind(kind, m) => {
+                self.finish_kind(&tid, PushState::Failed, Some(m), None, Some(kind));
+                true
+            }
+            RxEnd::PeerCancelled => {
+                // The sender stopped on purpose; its partial file is already gone.
+                self.finish_kind(
+                    &tid,
+                    PushState::Cancelled,
+                    Some("the sender cancelled this transfer".into()),
+                    None,
+                    Some(error_kind::PEER_CANCELLED),
+                );
+                false
+            }
             RxEnd::Cancelled => {
                 self.finish(&tid, PushState::Cancelled, None, None);
                 conn.close(proto::CLOSE_CANCELLED.into(), b"cancelled");
@@ -784,6 +894,7 @@ impl PushService {
     #[allow(clippy::too_many_arguments)]
     async fn receive_body(
         &self,
+        conn: &Connection,
         contact: &Contact,
         name: &str,
         header: &Header,
@@ -867,6 +978,7 @@ impl PushService {
         }
 
         let mut buf = vec![0u8; CHUNK];
+        // `got` is the receiver's side of the progress count described in `attempt_send`.
         let mut got = offset;
         let mut meter = RateMeter::new(got);
         let idle = self.settings.idle_timeout;
@@ -880,16 +992,17 @@ impl PushService {
                 }
                 r = tokio::time::timeout(idle, AsyncReadExt::read(rx, &mut buf[..want])) => match r {
                     Err(_) => {
-                        let _ = w.flush().await;
-                        return RxEnd::Failed("the sender stopped sending (timed out); it can resume".into());
+                        return rx_broke(conn, w, &part, error_kind::TIMED_OUT,
+                            "the sender stopped sending (timed out); it can resume").await;
                     }
                     Ok(Err(e)) => {
-                        let _ = w.flush().await;
-                        return RxEnd::Failed(format!("connection lost: {e}; it can resume"));
+                        debug!("push {tid}: read failed: {e}");
+                        return rx_broke(conn, w, &part, error_kind::CONNECTION_LOST,
+                            "the connection was lost; the sender can resume").await;
                     }
                     Ok(Ok(0)) => {
-                        let _ = w.flush().await;
-                        return RxEnd::Failed("the sender ended early; it can resume".into());
+                        return rx_broke(conn, w, &part, error_kind::CONNECTION_LOST,
+                            "the sender ended early; it can resume").await;
                     }
                     Ok(Ok(n)) => n,
                 }
@@ -897,7 +1010,10 @@ impl PushService {
             hasher.update(&buf[..n]);
             if let Err(e) = w.write_all(&buf[..n]).await {
                 let _ = self.reply_done(tx, false, None, Some("write_failed")).await;
-                return RxEnd::Failed(format!("cannot write to the inbox: {e}"));
+                return RxEnd::FailedKind(
+                    error_kind::WRITE_FAILED,
+                    format!("cannot write to the inbox: {e}"),
+                );
             }
             got += n as u64;
             let rate = meter.sample(got);
@@ -910,7 +1026,10 @@ impl PushService {
         }
         if let Err(e) = w.flush().await {
             let _ = self.reply_done(tx, false, None, Some("write_failed")).await;
-            return RxEnd::Failed(format!("cannot write to the inbox: {e}"));
+            return RxEnd::FailedKind(
+                error_kind::WRITE_FAILED,
+                format!("cannot write to the inbox: {e}"),
+            );
         }
         let file = w.into_inner();
         if let Err(e) = file.sync_all().await {
@@ -927,7 +1046,10 @@ impl PushService {
             let _ = self
                 .reply_done(tx, false, None, Some("hash_mismatch"))
                 .await;
-            return RxEnd::Failed("the file arrived damaged (checksum mismatch)".into());
+            return RxEnd::FailedKind(
+                error_kind::DAMAGED,
+                "the file arrived damaged (checksum mismatch)".into(),
+            );
         }
         match place_without_overwrite(&part, &dir, name) {
             Ok(final_path) => {
@@ -1022,7 +1144,120 @@ enum RxEnd {
     Done(String),
     Rejected(RejectReason),
     Failed(String),
+    /// Failed, with a stable [`error_kind`] for the UIs.
+    FailedKind(&'static str, String),
+    /// The sender closed the connection with `CLOSE_CANCELLED`: it meant to stop.
+    PeerCancelled,
+    /// Stopped on this side (the person, or the contact was removed).
     Cancelled,
+}
+
+/// The inbound stream broke. If the sender closed the connection on purpose
+/// (`CLOSE_CANCELLED`), delete the partial file: nobody will resume it. Any
+/// other loss (network, the sender's process died) keeps the partial for a
+/// resume; the retention sweep removes it if the sender never comes back.
+async fn rx_broke(
+    conn: &Connection,
+    mut w: BufWriter<tokio::fs::File>,
+    part: &Path,
+    kind: &'static str,
+    text: &str,
+) -> RxEnd {
+    if closed_by_peer_cancel(conn).await {
+        drop(w);
+        let _ = std::fs::remove_file(part);
+        return RxEnd::PeerCancelled;
+    }
+    let _ = w.flush().await;
+    RxEnd::FailedKind(kind, text.to_owned())
+}
+
+/// Did the other side close `conn` with the "cancelled" application code?
+/// The close frame may arrive a moment after the read error that revealed it.
+async fn closed_by_peer_cancel(conn: &Connection) -> bool {
+    let reason = match conn.close_reason() {
+        Some(r) => Some(r),
+        None => tokio::time::timeout(Duration::from_millis(500), conn.closed())
+            .await
+            .ok(),
+    };
+    matches!(
+        reason,
+        Some(iroh::endpoint::ConnectionError::ApplicationClosed(c))
+            if u64::from(c.error_code) == u64::from(proto::CLOSE_CANCELLED)
+    )
+}
+
+/// Stable kind of a sender-side `Fatal` message (they are our own texts).
+fn fatal_kind(m: &str) -> Option<&'static str> {
+    if m.starts_with("cannot read the file") || m.starts_with("the file changed") {
+        Some(error_kind::FILE_UNREADABLE)
+    } else if m.starts_with("the receiver could not save") {
+        Some(error_kind::WRITE_FAILED)
+    } else {
+        None
+    }
+}
+
+/// `.<32 hex of the hash>-<size>.part`: the only files the sweep may remove.
+fn is_our_part_name(name: &str) -> bool {
+    let Some(core) = name.strip_prefix('.').and_then(|n| n.strip_suffix(".part")) else {
+        return false;
+    };
+    let Some((hash, size)) = core.split_once('-') else {
+        return false;
+    };
+    hash.len() == 32
+        && hash.bytes().all(|b| b.is_ascii_hexdigit())
+        && !size.is_empty()
+        && size.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Remove our `.part` files under `inbox/<contact>/` that were last written
+/// more than `max_age` before `now` and are not in `active`. `max_age` zero
+/// means "keep forever". Nothing else is ever touched.
+pub fn sweep_partials_in(
+    inbox: &Path,
+    max_age: Duration,
+    active: &HashSet<PathBuf>,
+    now: std::time::SystemTime,
+) -> usize {
+    if max_age.is_zero() {
+        return 0;
+    }
+    let Ok(contacts) = std::fs::read_dir(inbox) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for dir in contacts.flatten() {
+        let dir = dir.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let Ok(files) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for f in files.flatten() {
+            let p = f.path();
+            let name = f.file_name().to_string_lossy().into_owned();
+            if !is_our_part_name(&name) || active.contains(&p) {
+                continue;
+            }
+            let Ok(meta) = f.metadata() else { continue };
+            if !meta.is_file() {
+                continue;
+            }
+            let Ok(modified) = meta.modified() else {
+                continue;
+            };
+            if now.duration_since(modified).is_ok_and(|age| age > max_age)
+                && std::fs::remove_file(&p).is_ok()
+            {
+                removed += 1;
+            }
+        }
+    }
+    removed
 }
 
 struct PartGuard<'a> {

@@ -222,6 +222,14 @@ async fn registered_both_ways_file_arrives_identical_with_japanese_name() {
     let t = wait_finished(&alice.svc, &id, 60).await;
     assert_eq!(t.state, PushState::Done, "{:?}", t.error);
     assert_eq!(t.bytes, data.len() as u64);
+    // The daemon keeps which file a row sent (for "send again"), also in the history.
+    assert_eq!(t.source_path.as_deref(), src.to_str());
+    assert!(alice
+        .svc
+        .history()
+        .list(10)
+        .iter()
+        .any(|e| e.source_path.as_deref() == src.to_str()));
 
     let got = bob.inbox.join("alice").join("報告書_最終版.txt");
     assert_eq!(std::fs::read(&got).unwrap(), data);
@@ -490,6 +498,15 @@ async fn hash_mismatch_leaves_no_final_file_and_truncation_leaves_a_resumable_pa
     assert_eq!(p.len(), 1);
     let kept = std::fs::metadata(&p[0]).unwrap().len();
     assert!(kept > 0 && kept <= half as u64, "kept {kept}");
+    // From the receiver's side this is a lost connection, not a cancel.
+    let lost = bob
+        .svc
+        .board()
+        .list()
+        .into_iter()
+        .find(|i| i.direction == Direction::In && i.state == PushState::Failed)
+        .expect("the cut transfer is a failed inbound row");
+    assert_eq!(lost.error_kind.as_deref(), Some("connection_lost"));
 
     // Resume: same header; the receiver offers the offset it holds.
     let (raw, reply) = raw_open(&alice, &bob, &h).await;
@@ -772,4 +789,309 @@ async fn real_sender_resumes_from_the_receivers_partial_file() {
     let t = wait_finished(&alice.svc, &id, 60).await;
     assert_eq!(t.state, PushState::Done, "{:?}", t.error);
     assert_eq!(std::fs::read(dir.join("healed.bin")).unwrap(), data2);
+}
+
+// ─── Cancel vs. lost connection (receiver's view), partial files, retention ──
+
+/// An inbound row of `p`, once it has finished.
+async fn inbound_finished(p: &Peer, secs: u64) -> PushTransferInfo {
+    let end = std::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        if let Some(t) = p
+            .svc
+            .board()
+            .list()
+            .into_iter()
+            .find(|i| i.direction == Direction::In && i.state.is_finished())
+        {
+            return t;
+        }
+        assert!(
+            std::time::Instant::now() < end,
+            "no finished inbound transfer"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn wait_for_part(p: &Peer) {
+    for _ in 0..200 {
+        if parts(&p.inbox)
+            .iter()
+            .any(|f| std::fs::metadata(f).map(|m| m.len() > 0).unwrap_or(false))
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the receiver never started a partial file");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sender_cancel_shows_cancelled_on_the_receiver_and_removes_the_partial() {
+    let relay = relay().await;
+    let alice = peer(&relay, |_| {}).await;
+    let bob = peer(&relay, |_| {}).await;
+    register(&bob, &alice, "alice");
+    register(&alice, &bob, "bob");
+
+    let data = content(3_000_000, 21);
+    let h = header("cancelled.bin", &data);
+    let (mut raw, reply) = raw_open(&alice, &bob, &h).await;
+    assert_eq!(reply, Reply::Accept { offset: 0 });
+    AsyncWriteExt::write_all(&mut raw.tx, &data[..1_800_000])
+        .await
+        .unwrap();
+    wait_for_part(&bob).await;
+
+    // What a real sender does when the person presses "cancel": close on purpose.
+    raw.conn.close(proto::CLOSE_CANCELLED.into(), b"cancelled");
+
+    let t = inbound_finished(&bob, 20).await;
+    assert_eq!(t.state, PushState::Cancelled, "{t:?}");
+    assert_eq!(t.error_kind.as_deref(), Some("peer_cancelled"));
+    assert!(t.reject_reason.is_none());
+    // The partial file is not kept: nobody is going to resume a cancelled transfer.
+    assert!(parts(&bob.inbox).is_empty(), "{:?}", parts(&bob.inbox));
+    assert!(finals(&bob.inbox).is_empty());
+    // And the row says the same after a restart (history).
+    let hist = bob.svc.history().list(10);
+    assert!(hist
+        .iter()
+        .any(|e| e.state == PushState::Cancelled
+            && e.error_kind.as_deref() == Some("peer_cancelled")));
+
+    // The same file sent again later starts from scratch and arrives intact.
+    let src = write_src(alice.dir.path(), "cancelled.bin", &data);
+    let id = alice.svc.queue_send("bob", &src).unwrap();
+    let t = wait_finished(&alice.svc, &id, 60).await;
+    assert_eq!(t.state, PushState::Done, "{:?}", t.error);
+    assert_eq!(
+        std::fs::read(bob.inbox.join("alice").join("cancelled.bin")).unwrap(),
+        data
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn lost_connection_is_not_cancelled_keeps_the_partial_and_resumes() {
+    let relay = relay().await;
+    let alice = peer(&relay, |_| {}).await;
+    let bob = peer(&relay, |_| {}).await;
+    register(&bob, &alice, "alice");
+    register(&alice, &bob, "bob");
+
+    let data = content(3_000_000, 22);
+    let h = header("lost.bin", &data);
+    let (mut raw, reply) = raw_open(&alice, &bob, &h).await;
+    assert_eq!(reply, Reply::Accept { offset: 0 });
+    AsyncWriteExt::write_all(&mut raw.tx, &data[..1_200_000])
+        .await
+        .unwrap();
+    wait_for_part(&bob).await;
+    // The connection dies without the "cancelled" code (network loss, crash).
+    raw.conn.close(0u32.into(), b"gone");
+    drop(raw);
+
+    let t = inbound_finished(&bob, 20).await;
+    assert_eq!(t.state, PushState::Failed, "{t:?}");
+    assert_eq!(t.error_kind.as_deref(), Some("connection_lost"));
+    let e = t.error.unwrap();
+    assert!(
+        !e.contains("connection lost: connection lost"),
+        "doubled text: {e}"
+    );
+    assert!(!e.contains("cancel"), "{e}");
+    let p = parts(&bob.inbox);
+    assert_eq!(p.len(), 1, "the partial file is kept for a resume");
+
+    // A real sender resumes from it and the bytes are identical.
+    let src = write_src(alice.dir.path(), "lost.bin", &data);
+    let id = alice.svc.queue_send("bob", &src).unwrap();
+    let t = wait_finished(&alice.svc, &id, 60).await;
+    assert_eq!(t.state, PushState::Done, "{:?}", t.error);
+    assert_eq!(
+        std::fs::read(bob.inbox.join("alice").join("lost.bin")).unwrap(),
+        data
+    );
+    assert!(parts(&bob.inbox).is_empty());
+}
+
+/// A receiver that is only a stub: accepts, reads one chunk, then records how the sender
+/// closed the connection.
+struct StubReceiver {
+    got_chunk: tokio::sync::Notify,
+    closed:
+        tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<iroh::endpoint::ConnectionError>>>,
+}
+
+#[async_trait::async_trait]
+impl miasma_core::transport::iroh_direct::PushConnectionHandler for StubReceiver {
+    async fn handle(&self, conn: Connection) {
+        let Ok((mut tx, mut rx)) = conn.accept_bi().await else {
+            return;
+        };
+        let _h: Header = proto::read_frame(&mut rx).await.unwrap();
+        proto::write_frame(&mut tx, &Reply::Accept { offset: 0 })
+            .await
+            .unwrap();
+        let mut b = vec![0u8; 4096];
+        let _ = tokio::io::AsyncReadExt::read(&mut rx, &mut b).await;
+        self.got_chunk.notify_one();
+        let why = conn.closed().await;
+        if let Some(s) = self.closed.lock().await.take() {
+            let _ = s.send(why);
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_real_sender_that_is_cancelled_closes_with_the_cancelled_code() {
+    let relay = relay().await;
+    let alice = peer(&relay, |_| {}).await;
+
+    // A second node with the stub as its push handler.
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(LocalShareStore::open(store_dir.path(), 10).unwrap());
+    let s = IrohSettings {
+        mode: IrohMode::Custom,
+        relay_urls: vec![relay.url.clone()],
+        discovery: false,
+        lan_discovery: false,
+        connect_timeout: Duration::from_secs(20),
+        ca_pem: None,
+        proxy_from_env: false,
+    };
+    let seed: [u8; 32] = rand::random();
+    let builder = endpoint_builder(Some(&seed), &s, false)
+        .unwrap()
+        .ca_tls_config(CaTlsConfig::insecure_skip_verify());
+    let stub_node =
+        IrohNode::start_from_builder(builder, s, store, None, IrohServerLimits::default())
+            .await
+            .unwrap();
+    assert!(stub_node.wait_online(Duration::from_secs(20)).await);
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let stub = Arc::new(StubReceiver {
+        got_chunk: tokio::sync::Notify::new(),
+        closed: tokio::sync::Mutex::new(Some(tx)),
+    });
+    stub_node.set_push_handler(stub.clone());
+    alice
+        .svc
+        .add_contact(&ContactCode::new(stub_node.endpoint_id()), Some("stub"))
+        .unwrap();
+
+    let data = content(2_000_000, 23);
+    let src = write_src(alice.dir.path(), "to_cancel.bin", &data);
+    let id = alice.svc.queue_send("stub", &src).unwrap();
+    tokio::time::timeout(Duration::from_secs(30), stub.got_chunk.notified())
+        .await
+        .expect("the stub received the first bytes");
+    assert!(alice.svc.board().cancel(&id));
+
+    let t = wait_finished(&alice.svc, &id, 30).await;
+    assert_eq!(t.state, PushState::Cancelled);
+    let why = tokio::time::timeout(Duration::from_secs(10), rx)
+        .await
+        .expect("the stub saw the connection close")
+        .unwrap();
+    match why {
+        iroh::endpoint::ConnectionError::ApplicationClosed(c) => {
+            assert_eq!(u64::from(c.error_code), u64::from(proto::CLOSE_CANCELLED));
+        }
+        other => panic!("closed as {other:?}, not by the cancelled code"),
+    }
+    // The cancelled row can be sent again: the daemon kept the file it was sending.
+    assert_eq!(t.source_path.as_deref(), src.to_str());
+}
+
+fn age(p: &Path, days: u64) {
+    let when = std::time::SystemTime::now() - Duration::from_secs(days * 86_400);
+    std::fs::File::options()
+        .write(true)
+        .open(p)
+        .unwrap()
+        .set_modified(when)
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn old_partial_files_are_swept_at_start_and_on_demand_but_nothing_else() {
+    let relay = relay().await;
+    let hex = "0123456789abcdef".repeat(2);
+    let old_part = |n: u32| format!(".{hex}-{n}.part");
+
+    // Files already lying in the inbox when the daemon starts.
+    let mut seeded: Vec<PathBuf> = Vec::new();
+    let bob = peer(&relay, |s| {
+        let dir = s.inbox_dir.join("alice");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, days) in [
+            (old_part(100), 30),            // old part: goes
+            (old_part(200), 1),             // fresh part: stays
+            ("report.part".to_owned(), 30), // not our pattern: stays
+            ("photo.jpg".to_owned(), 30),   // a received file: stays
+        ] {
+            let p = dir.join(name);
+            std::fs::write(&p, b"x").unwrap();
+            age(&p, days);
+            seeded.push(p);
+        }
+        s.part_retention = Duration::from_secs(7 * 86_400);
+    })
+    .await;
+    // The first sweep runs when the service starts.
+    for _ in 0..100 {
+        if !seeded[0].exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        !seeded[0].exists(),
+        "the 30-day-old partial is removed at start"
+    );
+    assert!(seeded[1].exists(), "a recent partial is kept");
+    assert!(seeded[2].exists(), "only our own .part pattern is touched");
+    assert!(seeded[3].exists(), "received files are never touched");
+
+    // The daily sweep: the recent one is not old yet, then it is.
+    assert_eq!(bob.svc.sweep_partials(), 0);
+    age(&seeded[1], 8);
+    assert_eq!(bob.svc.sweep_partials(), 1);
+    assert!(!seeded[1].exists());
+    assert!(seeded[2].exists() && seeded[3].exists());
+
+    // 0 days = keep forever.
+    let carol = peer(&relay, |s| {
+        let dir = s.inbox_dir.join("alice");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join(old_part(300));
+        std::fs::write(&p, b"x").unwrap();
+        age(&p, 400);
+        s.part_retention = Duration::ZERO;
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(carol.svc.sweep_partials(), 0);
+    assert_eq!(parts(&carol.inbox).len(), 1);
+}
+
+#[test]
+fn part_retention_comes_from_config_with_a_seven_day_default() {
+    let d = tempfile::tempdir().unwrap();
+    let def = PushSettings::from_config(&PushConfig::default(), d.path());
+    assert_eq!(def.part_retention, Duration::from_secs(7 * 86_400));
+    let cfg: PushConfig = toml::from_str("part_retention_days = 2").unwrap();
+    assert_eq!(
+        PushSettings::from_config(&cfg, d.path()).part_retention,
+        Duration::from_secs(2 * 86_400)
+    );
+    let cfg: PushConfig = toml::from_str("part_retention_days = 0").unwrap();
+    assert!(PushSettings::from_config(&cfg, d.path())
+        .part_retention
+        .is_zero());
+    // A config.toml written before the key existed.
+    let cfg: PushConfig = toml::from_str("max_concurrent_inbound = 3").unwrap();
+    assert_eq!(cfg.part_retention_days, 7);
 }
