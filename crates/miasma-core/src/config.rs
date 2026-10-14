@@ -39,8 +39,13 @@ pub struct PushConfig {
     /// Inbound transfers served at once (default 2).
     #[serde(default = "default_push_max_inbound")]
     pub max_concurrent_inbound: usize,
+    /// Unfinished `.part` files of a transfer the sender never resumed are
+    /// removed after this many days (default 7; 0 = keep them forever).
+    #[serde(default = "default_push_part_retention_days")]
+    pub part_retention_days: u64,
 }
 
+pub const DEFAULT_PUSH_PART_RETENTION_DAYS: u64 = 7;
 pub const DEFAULT_PUSH_MAX_FILE_SIZE: u64 = 20 * 1024 * 1024 * 1024;
 pub const DEFAULT_PUSH_MIN_FREE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
@@ -53,6 +58,9 @@ fn default_push_min_free_bytes() -> u64 {
 fn default_push_max_inbound() -> usize {
     2
 }
+fn default_push_part_retention_days() -> u64 {
+    DEFAULT_PUSH_PART_RETENTION_DAYS
+}
 
 impl Default for PushConfig {
     fn default() -> Self {
@@ -61,6 +69,7 @@ impl Default for PushConfig {
             max_file_size: DEFAULT_PUSH_MAX_FILE_SIZE,
             min_free_bytes: DEFAULT_PUSH_MIN_FREE_BYTES,
             max_concurrent_inbound: 2,
+            part_retention_days: DEFAULT_PUSH_PART_RETENTION_DAYS,
         }
     }
 }

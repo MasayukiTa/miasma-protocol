@@ -661,6 +661,15 @@ impl From<IrohClientError> for MiasmaError {
     }
 }
 
+/// Why a dial that got no answer in time most likely failed. Worded neutrally ("the other
+/// side"): the same dial serves a receiver reaching a publisher and a sender reaching a contact.
+fn no_connection_text(secs: u64) -> String {
+    format!(
+        "no connection within {secs} s (the other side is offline or not running iroh, or this \
+         network blocks iroh's relay and discovery servers)"
+    )
+}
+
 /// A client for one publisher's endpoint, reusing one connection.
 pub struct IrohDirectClient {
     endpoint: Endpoint,
@@ -853,9 +862,8 @@ impl IrohDirectClient {
                 self.relay_diagnosis()
             ))),
             Err(_) => Err(IrohClientError::Unreachable(format!(
-                "no connection within {} s (the sender is offline or not running iroh, or this \
-                 network blocks iroh's relay and discovery servers){}",
-                self.connect_timeout.as_secs(),
+                "{}{}",
+                no_connection_text(self.connect_timeout.as_secs()),
                 self.relay_diagnosis()
             ))),
         }
@@ -946,6 +954,14 @@ pub fn log_privacy_notice(settings: &IrohSettings) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_dial_timeout_blames_the_other_side_not_the_sender() {
+        let t = super::no_connection_text(20);
+        assert!(t.contains("the other side is offline"), "{t}");
+        assert!(!t.contains("the sender"), "{t}");
+        assert!(t.contains("20 s"));
+    }
+
     use std::sync::Arc;
 
     use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
