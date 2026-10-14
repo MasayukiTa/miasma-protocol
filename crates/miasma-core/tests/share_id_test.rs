@@ -933,3 +933,197 @@ async fn over_the_dht_only_the_named_publishers_record_is_accepted() {
     .await
     .expect("timed out");
 }
+
+// ─── Peeking at the file name before the receive starts ─────────────────────
+
+fn peek_request(id: &TransferId, password: Option<&str>, via: Vec<String>) -> ControlRequest {
+    let typed = match id {
+        TransferId::Share(s) => s.to_string(),
+        TransferId::Mid(m) => m.to_string(),
+    };
+    ControlRequest::TransferPeekName {
+        mid: typed,
+        password: password.map(str::to_owned),
+        via,
+        via_ca_pem: None,
+    }
+}
+
+async fn peeked(d: &Daemon, req: ControlRequest) -> Option<String> {
+    match ask(d, req).await {
+        ControlResponse::TransferNamePeeked { name } => name,
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+/// Nothing a receive would leave behind exists: no transfer row, no journal.
+async fn assert_nothing_started(d: &Daemon) {
+    match ask(d, ControlRequest::TransferList).await {
+        ControlResponse::TransferList(list) => assert!(list.is_empty(), "{list:?}"),
+        other => panic!("unexpected: {other:?}"),
+    }
+    let journals = d.dir.path().join("transfers");
+    assert!(
+        !journals.exists() || std::fs::read_dir(&journals).unwrap().count() == 0,
+        "the peek wrote into {}",
+        journals.display()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn peeking_returns_the_original_name_and_writes_nothing() {
+    timeout(Duration::from_secs(120), async {
+        let a = Sender::new(0x7a).await;
+        let d = start_daemon(0x7b).await;
+        let src = tempfile::tempdir().unwrap();
+        let out_dir = tempfile::tempdir().unwrap();
+
+        // Unprotected: the plain name, no password needed.
+        let plain_name = "旅行の写真 final.png";
+        let path = write_named(&src, plain_name, &content(9_000));
+        let (_, share) = a.publish(&path, None).await;
+        let id = TransferId::Share(share);
+        assert_eq!(
+            peeked(&d, peek_request(&id, None, vec![a.url()]))
+                .await
+                .as_deref(),
+            Some(plain_name)
+        );
+        // A password typed for a transfer that needs none changes nothing.
+        assert_eq!(
+            peeked(
+                &d,
+                peek_request(&id, Some(&random_password()), vec![a.url()])
+            )
+            .await
+            .as_deref(),
+            Some(plain_name)
+        );
+
+        // Protected: only the right password opens the name.
+        let secret_name = "給与明細 secret-report.png";
+        let spath = write_named(&src, secret_name, &content(9_000));
+        let pw = random_password();
+        let (_, sshare) = a.publish(&spath, Some(&pw)).await;
+        let sid = TransferId::Share(sshare);
+        assert_eq!(
+            peeked(&d, peek_request(&sid, Some(&pw), vec![a.url()]))
+                .await
+                .as_deref(),
+            Some(secret_name)
+        );
+        // Wrong and missing passwords give exactly what a transfer without a name gives:
+        // `None`, never an error that would tell them apart.
+        assert_eq!(
+            peeked(
+                &d,
+                peek_request(&sid, Some(&random_password()), vec![a.url()])
+            )
+            .await,
+            None
+        );
+        assert_eq!(
+            peeked(&d, peek_request(&sid, None, vec![a.url()])).await,
+            None
+        );
+
+        // A mistyped ID is simply "no name"; the real receive reports the typo.
+        let bad = ControlRequest::TransferPeekName {
+            mid: "miasma-share:not-a-real-one".into(),
+            password: None,
+            via: vec![a.url()],
+            via_ca_pem: None,
+        };
+        assert_eq!(peeked(&d, bad).await, None);
+
+        // Nothing was downloaded or written anywhere.
+        assert_nothing_started(&d).await;
+        assert_eq!(std::fs::read_dir(out_dir.path()).unwrap().count(), 0);
+
+        // And the real receive afterwards still works and keeps the name (the safety net).
+        let target = placeholder_in(out_dir.path(), &sid);
+        let (r, _) = receive_via(vec![a.url()], &sid, &target, Some(&pw)).await;
+        assert!(matches!(r, Ok(ReceiveOutcome::Complete { .. })), "{r:?}");
+        assert!(out_dir.path().join(secret_name).exists());
+        let _ = d.shutdown.send(()).await;
+    })
+    .await
+    .expect("timed out");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unreachable_source_gives_no_name_within_the_time_limit() {
+    timeout(Duration::from_secs(60), async {
+        let a = Sender::new(0x7c).await;
+        let d = start_daemon(0x7d).await;
+        let src = tempfile::tempdir().unwrap();
+        let path = write_named(&src, "x.png", &content(1_000));
+        let (_, share) = a.publish(&path, None).await;
+        let id = TransferId::Share(share);
+        // Nothing listens there, and the daemon has no peer to ask: the DHT fallback finds
+        // nothing either, and the whole peek ends by itself.
+        let started = std::time::Instant::now();
+        let got = peeked(&d, peek_request(&id, None, vec!["ws://127.0.0.1:9".into()])).await;
+        assert_eq!(got, None);
+        assert!(
+            started.elapsed() < miasma_core::transfer::peek::PEEK_TIMEOUT + Duration::from_secs(5),
+            "took {:?}",
+            started.elapsed()
+        );
+        assert_nothing_started(&d).await;
+        let _ = d.shutdown.send(()).await;
+    })
+    .await
+    .expect("timed out");
+}
+
+#[test]
+fn the_peek_request_and_answer_survive_the_wire_and_never_print_secrets() {
+    let req = ControlRequest::TransferPeekName {
+        mid: "miasma-share:abc".into(),
+        password: Some("pw-sensitive-1".into()),
+        via: vec!["wss://example.test/x".into()],
+        via_ca_pem: Some("-----BEGIN CERTIFICATE-----".into()),
+    };
+    let wire = serde_json::to_vec(&req).unwrap();
+    match serde_json::from_slice::<ControlRequest>(&wire).unwrap() {
+        ControlRequest::TransferPeekName {
+            mid,
+            password,
+            via,
+            via_ca_pem,
+        } => {
+            assert_eq!(mid, "miasma-share:abc");
+            assert_eq!(password.as_deref(), Some("pw-sensitive-1"));
+            assert_eq!(via, vec!["wss://example.test/x".to_owned()]);
+            assert!(via_ca_pem.is_some());
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+    // A client that sends only the required fields is understood.
+    let min = br#"{"TransferPeekName":{"mid":"m","password":null}}"#;
+    match serde_json::from_slice::<ControlRequest>(min).unwrap() {
+        ControlRequest::TransferPeekName {
+            via, via_ca_pem, ..
+        } => {
+            assert!(via.is_empty() && via_ca_pem.is_none());
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+    let shown = format!("{req:?}");
+    assert!(!shown.contains("pw-sensitive-1") && !shown.contains("BEGIN CERTIFICATE"));
+
+    for name in [Some("写真.png".to_owned()), None] {
+        let resp = ControlResponse::TransferNamePeeked { name: name.clone() };
+        let wire = serde_json::to_vec(&resp).unwrap();
+        match serde_json::from_slice::<ControlResponse>(&wire).unwrap() {
+            ControlResponse::TransferNamePeeked { name: back } => assert_eq!(back, name),
+            other => panic!("unexpected: {other:?}"),
+        }
+        assert!(!format!("{resp:?}").contains("写真"));
+    }
+
+    // An older daemon does not know the request: it cannot parse it, which the desktop treats
+    // as "no name". (The variant is new; no existing variant changed.)
+    assert!(serde_json::from_slice::<ControlRequest>(br#"{"NoSuchRequest":{}}"#).is_err());
+}

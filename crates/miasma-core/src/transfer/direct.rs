@@ -376,6 +376,20 @@ pub struct DirectSources {
     pub iroh: Option<IrohSource>,
 }
 
+impl DirectSources {
+    /// Whether there is any direct source to try before the DHT.
+    pub fn has_any(&self) -> bool {
+        #[cfg(feature = "iroh")]
+        {
+            self.via.is_some() || self.iroh.is_some()
+        }
+        #[cfg(not(feature = "iroh"))]
+        {
+            self.via.is_some()
+        }
+    }
+}
+
 /// What [`try_receive_direct`] came to.
 pub enum DirectOutcome {
     /// A source had the record, and the receive ran (and may have failed or
@@ -473,6 +487,43 @@ fn restore_paused(
         }
         progress.set_state(TransferState::Paused, Some(why), true);
     }
+}
+
+/// Read the verified record for `target` from the direct sources, in the order
+/// [`try_receive_direct`] uses (`--via` endpoints, then iroh), and stop at the
+/// first that has it. Fetches the record and manifest only: no piece, nothing
+/// written. `Err` holds one `(source, reason)` per source tried (empty if there
+/// was no source), so the caller can go on to the DHT.
+pub async fn fetch_record_direct(
+    sources: &DirectSources,
+    target: &TransferId,
+) -> Result<FetchedRecord, Vec<(String, MiasmaError)>> {
+    let mid = target.mid();
+    let signer = target.share_id().map(|s| *s.publisher());
+    let mut failures: Vec<(String, MiasmaError)> = Vec::new();
+    if let Some(via) = &sources.via {
+        match via.build_clients() {
+            Err(e) => failures.push(("--via".to_owned(), e)),
+            Ok(clients) => match fetch_verified_record_via(&clients, &mid, signer.as_ref()).await {
+                Ok(fetched) => return Ok(fetched),
+                Err(e) => failures.push(("--via".to_owned(), e)),
+            },
+        }
+    }
+    #[cfg(feature = "iroh")]
+    if let (Some(iroh), Some(signer)) = (&sources.iroh, &signer) {
+        match iroh_client(iroh, signer).await {
+            Err(e) => failures.push(("iroh".to_owned(), e)),
+            Ok(client) => {
+                let endpoints = [client as Arc<dyn RecordEndpoint>];
+                match fetch_verified_record_from(&endpoints, &mid, Some(signer)).await {
+                    Ok(fetched) => return Ok(fetched),
+                    Err(e) => failures.push(("iroh".to_owned(), e)),
+                }
+            }
+        }
+    }
+    Err(failures)
 }
 
 /// Receive `target` into `output_path` from the direct sources, in order, and
