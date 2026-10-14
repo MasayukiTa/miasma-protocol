@@ -815,6 +815,13 @@ impl Cells<'_> {
 mod tests {
     use super::*;
 
+    /// `apply_theme` switches a process-wide palette flag, so the tests that call it take turns.
+    static THEME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn theme_guard() -> std::sync::MutexGuard<'static, ()> {
+        THEME_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn spacing_scale_is_the_agreed_one() {
         assert_eq!([SP_1, SP_2, SP_3, SP_4, SP_5], [4.0, 8.0, 12.0, 16.0, 24.0]);
@@ -822,6 +829,7 @@ mod tests {
 
     #[test]
     fn type_scale_has_no_text_below_12_5_px() {
+        let _guard = theme_guard();
         let ctx = egui::Context::default();
         apply_theme(&ctx, false);
         let style = ctx.style();
@@ -839,6 +847,7 @@ mod tests {
 
     #[test]
     fn apply_theme_switches_the_palette_and_the_visuals_together() {
+        let _guard = theme_guard();
         let ctx = egui::Context::default();
         apply_theme(&ctx, true);
         assert_eq!(ctx.style().visuals.panel_fill, Palette::dark().bg);
@@ -850,6 +859,7 @@ mod tests {
 
     #[test]
     fn the_column_is_capped_and_centred() {
+        let _guard = theme_guard();
         // Run the layout once and read where the column landed.
         let ctx = egui::Context::default();
         apply_theme(&ctx, false);
@@ -887,6 +897,7 @@ mod tests {
 
     #[test]
     fn a_surface_fills_the_column_whatever_it_contains() {
+        let _guard = theme_guard();
         let ctx = egui::Context::default();
         apply_theme(&ctx, true);
         let mut widths = Vec::new();
