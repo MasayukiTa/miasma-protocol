@@ -18,6 +18,7 @@
 //! ```
 
 mod app;
+mod contacts;
 mod fonts;
 mod link;
 pub mod locale;
