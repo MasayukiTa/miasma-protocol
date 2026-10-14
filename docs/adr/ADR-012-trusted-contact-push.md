@@ -71,6 +71,25 @@ sender seeks. After a connection drop the sender retries with resume
 (2 s, 5 s, 10 s); a hash mismatch deletes the part and is retried once from
 scratch.
 
+Cancel versus loss: when the person cancels on the sender, the sender closes the
+connection with application error 499 (`CLOSE_CANCELLED`). The receiver reads
+that code and shows "the sender cancelled this transfer" (state `cancelled`,
+`error_kind = peer_cancelled`) and deletes the part: nobody will resume it. Any
+other end of the connection (network loss, the sender's process died, an older
+peer that closes differently) is "connection lost" (`error_kind =
+connection_lost`): the part is kept for a resume. A kept part nobody resumes is
+removed after `push.part_retention_days` (default 7, 0 = keep forever), at daemon
+start and once a day; only files named `.<32 hex>-<digits>.part` directly inside
+a contact folder of the inbox, not in use, are ever removed.
+
+Rows carry a stable `error_kind` (`unreachable`, `connection_lost`, `timed_out`,
+`peer_cancelled`, `damaged`, `file_unreadable`, `write_failed`,
+`contact_changed`) next to `reject_reason`, so the GUI and the CLI word the
+reason in their own language and from the right side (sending or receiving).
+Outbound rows also carry `source_path`, which is what "Send again" re-queues.
+Progress (`bytes`) counts file bytes taken from / given to the QUIC stream on both
+sides; the sender leads by at most the stream's unacknowledged window.
+
 A dialer that is not a contact with `allow_receive` has its connection closed
 with application error 403 right after the handshake and a debug-level log
 line only (per-id token bucket, bounded memory). The sender maps that close

@@ -34,6 +34,55 @@ pub fn eta_secs(size: u64, bytes: u64, rate_bps: u64) -> Option<u64> {
     Some((size - bytes).div_ceil(rate_bps))
 }
 
+/// The remaining time in the person's language, compact: `あと 5 秒`, `あと 3 分 12 秒`,
+/// `あと 1 時間 5 分` (English keeps `hh:mm:ss`). The words come from `ContactStrings::eta_*`.
+pub fn eta_text(c: &ContactStrings, secs: u64) -> String {
+    let (d, h, m, s) = (
+        secs / 86_400,
+        (secs % 86_400) / 3600,
+        (secs % 3600) / 60,
+        secs % 60,
+    );
+    if d > 999 {
+        return format_eta(Some(secs), "d");
+    }
+    let tpl = if d > 0 {
+        c.eta_day
+    } else if h > 0 {
+        if m == 0 {
+            c.eta_hour_even
+        } else {
+            c.eta_hour
+        }
+    } else if m > 0 {
+        if s == 0 {
+            c.eta_min_even
+        } else {
+            c.eta_min
+        }
+    } else {
+        c.eta_sec
+    };
+    let (d, h, m, s) = (d.to_string(), h.to_string(), m.to_string(), s.to_string());
+    let (h2, m2, s2) = (
+        format!("{:0>2}", h),
+        format!("{:0>2}", m),
+        format!("{:0>2}", s),
+    );
+    fill(
+        tpl,
+        &[
+            ("d", &d),
+            ("h2", &h2),
+            ("m2", &m2),
+            ("s2", &s2),
+            ("h", &h),
+            ("m", &m),
+            ("s", &s),
+        ],
+    )
+}
+
 /// Progress as `0.0..=1.0`; an empty file is complete only when the transfer is.
 pub fn fraction(size: u64, bytes: u64, done: bool) -> f32 {
     if done {
@@ -128,6 +177,27 @@ pub fn size_limit_text(limit: Option<u64>) -> String {
     }
 }
 
+/// A limit as the person reads it: whole GiB as `20 GiB`, anything else like `512.0 MiB`.
+pub fn format_limit(bytes: u64) -> String {
+    const GIB: u64 = 1 << 30;
+    if bytes >= GIB && bytes % GIB == 0 {
+        format!("{} GiB", bytes / GIB)
+    } else {
+        format_bytes(bytes)
+    }
+}
+
+/// Grey hint of the empty max-size box: what applies when it stays empty. `default_limit` is
+/// what the daemon reported (0 = unknown, e.g. an older daemon: the built-in default is shown).
+pub fn max_size_hint_text(c: &ContactStrings, default_limit: u64) -> String {
+    let limit = if default_limit == 0 {
+        miasma_core::config::DEFAULT_PUSH_MAX_FILE_SIZE
+    } else {
+        default_limit
+    };
+    fill(c.max_size_default_hint, &[("limit", &format_limit(limit))])
+}
+
 // ─── Pure: contact card texts ───────────────────────────────────────────────
 
 /// The message to paste into chat or e-mail. Bilingual, and it carries only public things: the
@@ -193,6 +263,25 @@ pub enum FailClass {
     Other,
 }
 
+/// `error_kind` values of the core that mean "the other side could not be reached / answered".
+fn kind_is_unreachable(kind: &str) -> bool {
+    matches!(kind, "unreachable" | "connection_lost" | "timed_out")
+}
+
+/// An inbound transfer that stopped because the connection broke or the sender fell silent.
+/// Rows saved by an older daemon have no `error_kind`; their English text is recognised instead.
+fn lost_inbound(r: &Row) -> bool {
+    match r.error_kind.as_deref() {
+        Some(k) => matches!(k, "connection_lost" | "timed_out"),
+        None => {
+            let e = r.error.as_deref().unwrap_or("").to_ascii_lowercase();
+            e.contains("connection lost")
+                || e.contains("sender stopped sending")
+                || e.contains("sender ended early")
+        }
+    }
+}
+
 pub fn classify_failure(error: &str) -> FailClass {
     let e = error.to_ascii_lowercase();
     if e.contains("cannot reach")
@@ -223,6 +312,10 @@ pub struct Row {
     pub state: PushState,
     pub error: Option<String>,
     pub reject_reason: Option<String>,
+    /// Stable kind of a non-rejection ending, from the daemon (see core `error_kind`).
+    pub error_kind: Option<String>,
+    /// Outbound: the file this row sent, when the daemon knows it (rows of older daemons: no).
+    pub source_path: Option<String>,
     pub saved_as: Option<String>,
     /// Last change, milliseconds since the epoch.
     pub at_ms: u64,
@@ -248,6 +341,8 @@ impl From<&PushTransferInfo> for Row {
             state: t.state,
             error: t.error.clone(),
             reject_reason: t.reject_reason.clone(),
+            error_kind: t.error_kind.clone(),
+            source_path: t.source_path.clone(),
             saved_as: t.saved_as.clone(),
             at_ms: t.updated_at_ms,
         }
@@ -272,6 +367,8 @@ impl From<&HistoryEntry> for Row {
             state: h.state,
             error: h.error.clone(),
             reject_reason: h.reject_reason.clone(),
+            error_kind: h.error_kind.clone(),
+            source_path: h.source_path.clone(),
             saved_as: h.saved_as.clone(),
             at_ms: h.finished_at_ms,
         }
@@ -328,12 +425,30 @@ pub fn row_guidance(c: &ContactStrings, r: &Row) -> Option<String> {
             }
             .to_owned(),
         ),
+        // Received files: the other side is the sender. "Could not reach them / is their Miasma
+        // running" is about sending, so it is never used for an inbound row.
+        PushState::Failed if !r.outbound && lost_inbound(r) => Some(c.fail_lost_in.to_owned()),
+        PushState::Cancelled
+            if !r.outbound && r.error_kind.as_deref() == Some("peer_cancelled") =>
+        {
+            Some(c.fail_peer_cancelled.to_owned())
+        }
         PushState::Failed => {
             let e = r.error.as_deref().unwrap_or("");
-            Some(match classify_failure(e) {
-                FailClass::Unreachable => c.fail_unreachable.to_owned(),
-                FailClass::Other if e.trim().is_empty() => c.fail_other.to_owned(),
-                FailClass::Other => format!("{}: {}", c.fail_other, e.trim()),
+            let unreachable = if r.outbound {
+                r.error_kind
+                    .as_deref()
+                    .map(kind_is_unreachable)
+                    .unwrap_or_else(|| classify_failure(e) == FailClass::Unreachable)
+            } else {
+                false
+            };
+            Some(if unreachable {
+                c.fail_unreachable.to_owned()
+            } else if e.trim().is_empty() {
+                c.fail_other.to_owned()
+            } else {
+                format!("{}: {}", c.fail_other, e.trim())
             })
         }
         // A queued/connecting transfer that carries an error is retrying after one.
@@ -883,8 +998,16 @@ impl ContactsUi {
         }
     }
 
+    /// The file a row sent: remembered by this session, else what the daemon recorded.
+    fn source_of(&self, r: &Row) -> Option<PathBuf> {
+        self.paths
+            .get(&r.id)
+            .cloned()
+            .or_else(|| r.source_path.as_deref().map(PathBuf::from))
+    }
+
     fn retry(&mut self, r: &Row) {
-        if let Some(path) = self.paths.get(&r.id).cloned() {
+        if let Some(path) = self.source_of(r) {
             self.out.push_back(PushRequest::Send {
                 contact: r.contact_id.clone(),
                 path: path.to_string_lossy().into_owned(),
@@ -906,10 +1029,18 @@ impl ContactsUi {
         self.rebuild_rows();
     }
 
+    /// "Send again": an outbound transfer that did not complete (failed, refused or cancelled),
+    /// whose file is known and whose contact still exists. Not when the other side has not
+    /// registered me (`not_allowed`): sending again cannot help until they add me, so the row
+    /// shows the guidance only.
     fn can_retry(&self, r: &Row) -> bool {
         r.outbound
-            && matches!(r.state, PushState::Failed | PushState::Rejected)
-            && self.paths.contains_key(&r.id)
+            && matches!(
+                r.state,
+                PushState::Failed | PushState::Rejected | PushState::Cancelled
+            )
+            && r.reject_reason.as_deref() != Some("not_allowed")
+            && self.source_of(r).is_some()
             && self.contacts.iter().any(|c| c.id == r.contact_id)
     }
 
@@ -1021,7 +1152,7 @@ impl ContactsUi {
             ui.set_width(ui.available_width());
             section_title(ui, c.help_title);
             for line in [c.help_1, c.help_2, c.help_3] {
-                ui.add(egui::Label::new(line).wrap(true));
+                help_step(ui, line);
                 ui.add_space(2.0);
             }
         });
@@ -1344,8 +1475,8 @@ impl ContactsUi {
                 .or_insert_with(|| init.clone());
             ui.add(
                 egui::TextEdit::singleline(buf)
-                    .hint_text(c.max_size_hint)
-                    .desired_width(150.0),
+                    .hint_text(max_size_hint_text(c, ct.default_max_file_size))
+                    .desired_width(240.0),
             );
             let dirty = *buf != init;
             let text = buf.clone();
@@ -1486,10 +1617,7 @@ impl ContactsUi {
                     line.push_str(&format!("  ·  {}", format_rate(r.rate_bps as f64)));
                 }
                 if let Some(e) = eta_secs(r.size, r.bytes, r.rate_bps) {
-                    line.push_str(&format!(
-                        "  ·  {}",
-                        fill(c.eta, &[("t", &format_eta(Some(e), "d"))])
-                    ));
+                    line.push_str(&format!("  ·  {}", fill(c.eta, &[("t", &eta_text(c, e))])));
                 }
                 ui.add_space(2.0);
                 // The track must show against the row's own background.
@@ -1503,7 +1631,9 @@ impl ContactsUi {
                 });
             }
             if let Some(g) = row_guidance(c, r) {
-                let color = if r.finished() {
+                let color = if r.state == PushState::Cancelled {
+                    pal().muted
+                } else if r.finished() {
                     pal().danger
                 } else {
                     pal().warning
@@ -1597,6 +1727,26 @@ fn section_title(ui: &mut egui::Ui, text: &str) {
     ui.add_space(4.0);
 }
 
+/// One numbered step: the number stays on the left and the text wraps in its own column, so a
+/// second line starts under the text and not under the number (also at a 700 px window).
+fn help_step(ui: &mut egui::Ui, line: &str) {
+    let (num, body) = match line.split_once(". ") {
+        Some((n, b)) if !n.is_empty() && n.chars().all(|ch| ch.is_ascii_digit()) => {
+            (format!("{n}."), b)
+        }
+        _ => (String::new(), line),
+    };
+    ui.horizontal_top(|ui| {
+        if !num.is_empty() {
+            ui.add_sized(
+                [20.0, 0.0],
+                egui::Label::new(egui::RichText::new(num).strong()),
+            );
+        }
+        ui.add(egui::Label::new(body).wrap(true));
+    });
+}
+
 /// A field label.
 fn label_text(text: &str) -> egui::RichText {
     egui::RichText::new(text)
@@ -1641,6 +1791,7 @@ impl ContactsUi {
             allow_send: send,
             allow_receive: true,
             max_file_size: max,
+            default_max_file_size: 20 << 30,
             inbox_dir: format!(r"C:\Users\Taro\AppData\Local\miasma\data\inbox\{label}"),
         };
         #[allow(clippy::too_many_arguments)]
@@ -1664,6 +1815,8 @@ impl ContactsUi {
             state: st,
             error: None,
             reject_reason: None,
+            error_kind: None,
+            source_path: None,
             saved_as: None,
             created_at_ms: at,
             updated_at_ms: at,
@@ -1853,6 +2006,8 @@ mod tests {
             state,
             error: None,
             reject_reason: None,
+            error_kind: None,
+            source_path: None,
             saved_as: None,
             created_at_ms: at,
             updated_at_ms: at,
@@ -2196,6 +2351,8 @@ mod tests {
                 state: PushState::Done,
                 error: None,
                 reject_reason: None,
+                error_kind: None,
+                source_path: None,
                 saved_as: None,
                 finished_at_ms: 1,
             },
@@ -2209,6 +2366,8 @@ mod tests {
                 state: PushState::Failed,
                 error: Some("x".into()),
                 reject_reason: None,
+                error_kind: None,
+                source_path: None,
                 saved_as: None,
                 finished_at_ms: 3,
             },
@@ -2406,6 +2565,7 @@ mod tests {
             allow_send: true,
             allow_receive: true,
             max_file_size: None,
+            default_max_file_size: 0,
             inbox_dir: "d".into(),
         });
         let dir = std::env::temp_dir();
@@ -2415,5 +2575,283 @@ mod tests {
             ui.page_msg.as_ref().map(|m| m.0.as_str()),
             Some(c.drop_folder)
         );
+    }
+
+    fn row_of(dir: Direction, state: PushState, kind: Option<&str>, err: Option<&str>) -> Row {
+        let mut r = rows(vec![t("a", dir, "bob", state, 1)]).remove(0);
+        r.error_kind = kind.map(str::to_owned);
+        r.error = err.map(str::to_owned);
+        r
+    }
+
+    #[test]
+    fn receiver_side_texts_never_say_unreachable() {
+        for lang in Locale::ALL {
+            let c = contact_strings(lang);
+            // The sender cancelled: its own message, not a failure.
+            let r = row_of(
+                Direction::In,
+                PushState::Cancelled,
+                Some("peer_cancelled"),
+                Some("the sender cancelled this transfer"),
+            );
+            assert_eq!(row_guidance(c, &r).unwrap(), c.fail_peer_cancelled);
+            // The connection broke while receiving (new daemon: kind; old daemon: the text).
+            for r in [
+                row_of(
+                    Direction::In,
+                    PushState::Failed,
+                    Some("connection_lost"),
+                    Some("the connection was lost; the sender can resume"),
+                ),
+                row_of(
+                    Direction::In,
+                    PushState::Failed,
+                    Some("timed_out"),
+                    Some("the sender stopped sending (timed out); it can resume"),
+                ),
+                row_of(
+                    Direction::In,
+                    PushState::Failed,
+                    None,
+                    Some("connection lost: connection lost; it can resume"),
+                ),
+            ] {
+                let g = row_guidance(c, &r).unwrap();
+                assert_eq!(g, c.fail_lost_in);
+                assert_ne!(g, c.fail_unreachable);
+            }
+            // Whatever the text, an inbound failure never gets the "unreachable" guidance.
+            for e in ["cannot reach the other side", "did not reply", "connect"] {
+                let r = row_of(Direction::In, PushState::Failed, None, Some(e));
+                assert_ne!(row_guidance(c, &r).unwrap(), c.fail_unreachable, "{e}");
+            }
+            // Outbound keeps it.
+            for k in ["unreachable", "connection_lost", "timed_out"] {
+                let r = row_of(Direction::Out, PushState::Failed, Some(k), Some("x"));
+                assert_eq!(row_guidance(c, &r).unwrap(), c.fail_unreachable, "{k}");
+            }
+            // A cancel the person made themselves on an outbound row needs no message.
+            let r = row_of(Direction::Out, PushState::Cancelled, None, None);
+            assert!(row_guidance(c, &r).is_none());
+        }
+        let ja = contact_strings(Locale::Ja);
+        assert_eq!(ja.fail_peer_cancelled, "相手が転送を中止しました。");
+        assert_eq!(
+            ja.fail_lost_in,
+            "通信が途切れました。相手が再び送ると、続きから受け取れます。"
+        );
+        let en = contact_strings(Locale::En);
+        assert_eq!(
+            en.fail_peer_cancelled,
+            "The sender cancelled this transfer."
+        );
+        assert!(!en.fail_lost_in.contains("their Miasma is running"));
+    }
+
+    fn bob() -> ContactInfo {
+        ContactInfo {
+            id: "bob".into(),
+            label: "bob".into(),
+            endpoint_id: "e".into(),
+            fingerprint: "f".into(),
+            added_at: 0,
+            allow_send: true,
+            allow_receive: true,
+            max_file_size: None,
+            default_max_file_size: 0,
+            inbox_dir: "d".into(),
+        }
+    }
+
+    #[test]
+    fn send_again_is_offered_for_failed_rejected_and_cancelled_outbound_rows() {
+        let mut ui = ContactsUi::default();
+        ui.contacts.push(bob());
+        for st in [PushState::Failed, PushState::Rejected, PushState::Cancelled] {
+            let mut r = row_of(Direction::Out, st, None, None);
+            r.source_path = Some("/data/a.bin".into());
+            assert!(ui.can_retry(&r), "{st:?}");
+        }
+        // Not for running, finished-ok or inbound rows.
+        for st in [
+            PushState::Queued,
+            PushState::Sending,
+            PushState::Verifying,
+            PushState::Done,
+        ] {
+            let mut r = row_of(Direction::Out, st, None, None);
+            r.source_path = Some("/data/a.bin".into());
+            assert!(!ui.can_retry(&r), "{st:?}");
+        }
+        let mut inbound = row_of(Direction::In, PushState::Failed, None, None);
+        inbound.source_path = Some("/data/a.bin".into());
+        assert!(!ui.can_retry(&inbound));
+        // Without a known file (an older daemon's row from a previous session): hidden.
+        let r = row_of(Direction::Out, PushState::Failed, None, None);
+        assert!(!ui.can_retry(&r));
+        // ...unless this session queued it itself.
+        ui.paths.insert("a".into(), PathBuf::from("/data/a.bin"));
+        assert!(ui.can_retry(&r));
+        // The contact is gone: nobody to send to.
+        ui.contacts.clear();
+        assert!(!ui.can_retry(&r));
+    }
+
+    #[test]
+    fn not_allowed_rows_show_guidance_only_no_retry_loop() {
+        let mut ui = ContactsUi::default();
+        ui.contacts.push(bob());
+        for st in [PushState::Rejected, PushState::Failed] {
+            let mut r = row_of(Direction::Out, st, None, None);
+            r.source_path = Some("/data/a.bin".into());
+            r.reject_reason = Some("not_allowed".into());
+            assert!(!ui.can_retry(&r), "{st:?}");
+        }
+        // Other refusals can be retried (the person may have freed space, raised the limit...).
+        let mut r = row_of(Direction::Out, PushState::Rejected, None, None);
+        r.source_path = Some("/data/a.bin".into());
+        r.reject_reason = Some("no_space".into());
+        assert!(ui.can_retry(&r));
+    }
+
+    #[test]
+    fn send_again_queues_the_same_file_for_the_same_contact() {
+        let mut ui = ContactsUi::default();
+        ui.contacts.push(bob());
+        let mut r = row_of(Direction::Out, PushState::Failed, None, Some("x"));
+        r.source_path = Some("/data/報告.pdf".into());
+        ui.retry(&r);
+        let sends = ui
+            .out
+            .iter()
+            .filter(|q| matches!(q, PushRequest::Send { .. }))
+            .count();
+        assert_eq!(sends, 1, "exactly one new send");
+        match ui.out.front().unwrap() {
+            PushRequest::Send { contact, path } => {
+                assert_eq!(contact, "bob");
+                assert_eq!(path, "/data/報告.pdf");
+            }
+            other => panic!("{other:?}"),
+        }
+        // A row from this session prefers the path it remembers.
+        let mut ui = ContactsUi::default();
+        ui.contacts.push(bob());
+        ui.paths.insert("a".into(), PathBuf::from("/mine/b.bin"));
+        let mut r = row_of(Direction::Out, PushState::Cancelled, None, None);
+        r.source_path = Some("/daemon/other.bin".into());
+        ui.retry(&r);
+        match ui.out.front().unwrap() {
+            PushRequest::Send { path, .. } => assert_eq!(path, "/mine/b.bin"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn source_path_flows_from_the_daemon_and_from_history_into_rows() {
+        let mut info = t("x", Direction::Out, "bob", PushState::Failed, 5);
+        info.source_path = Some("/p/x.bin".into());
+        info.error_kind = Some("unreachable".into());
+        let r = Row::from(&info);
+        assert_eq!(r.source_path.as_deref(), Some("/p/x.bin"));
+        assert_eq!(r.error_kind.as_deref(), Some("unreachable"));
+        let h = HistoryEntry {
+            id: "h".into(),
+            direction: Direction::Out,
+            contact_id: "bob".into(),
+            contact_label: "bob".into(),
+            name: "h.bin".into(),
+            size: 3,
+            state: PushState::Failed,
+            error: None,
+            reject_reason: None,
+            error_kind: Some("connection_lost".into()),
+            source_path: Some("/p/h.bin".into()),
+            saved_as: None,
+            finished_at_ms: 9,
+        };
+        let r = Row::from(&h);
+        assert_eq!(r.source_path.as_deref(), Some("/p/h.bin"));
+        assert_eq!(r.error_kind.as_deref(), Some("connection_lost"));
+    }
+
+    #[test]
+    fn remaining_time_reads_naturally_in_japanese_and_keeps_the_english_format() {
+        let ja = contact_strings(Locale::Ja);
+        let en = contact_strings(Locale::En);
+        for (secs, want_ja) in [
+            (5, "5 秒"),
+            (59, "59 秒"),
+            (60, "1 分"),
+            (192, "3 分 12 秒"),
+            (3600, "1 時間"),
+            (3900, "1 時間 5 分"),
+            (90_000, "1 日 1 時間"),
+        ] {
+            assert_eq!(eta_text(ja, secs), want_ja, "{secs}");
+            assert_eq!(
+                eta_text(en, secs),
+                format_eta(Some(secs), "d"),
+                "en keeps hh:mm:ss ({secs})"
+            );
+        }
+        assert_eq!(fill(ja.eta, &[("t", &eta_text(ja, 5))]), "あと 5 秒");
+        assert_eq!(
+            fill(ja.eta, &[("t", &eta_text(ja, 192))]),
+            "あと 3 分 12 秒"
+        );
+        assert_eq!(
+            fill(ja.eta, &[("t", &eta_text(ja, 3900))]),
+            "あと 1 時間 5 分"
+        );
+    }
+
+    #[test]
+    fn empty_max_size_box_hints_at_the_effective_default() {
+        let ja = contact_strings(Locale::Ja);
+        let en = contact_strings(Locale::En);
+        assert_eq!(max_size_hint_text(ja, 0), "空欄 = 既定の上限（20 GiB）");
+        assert_eq!(
+            max_size_hint_text(ja, 5 << 30),
+            "空欄 = 既定の上限（5 GiB）"
+        );
+        assert_eq!(
+            max_size_hint_text(ja, 1536 << 20),
+            "空欄 = 既定の上限（1.5 GiB）"
+        );
+        assert_eq!(max_size_hint_text(en, 0), "empty = default limit (20 GiB)");
+        assert_eq!(format_limit(20 << 30), "20 GiB");
+    }
+
+    #[test]
+    fn help_steps_stay_inside_a_700_px_window() {
+        // Lay the three steps out in the real card at a 700 px window and check nothing pokes
+        // out of the panel, in every language.
+        let ctx = egui::Context::default();
+        crate::ui_kit::apply_theme(&ctx, false);
+        for lang in Locale::ALL {
+            let c = contact_strings(lang);
+            let mut inner = None;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(700.0, 900.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let avail = ui.max_rect();
+                    ContactsUi::default().help_card(ui, c);
+                    inner = Some((avail, ui.min_rect()));
+                });
+            });
+            let (avail, used) = inner.unwrap();
+            assert!(
+                used.right() <= avail.right() + 1.0,
+                "{lang:?}: help steps overflow ({used:?} vs {avail:?})"
+            );
+        }
     }
 }
