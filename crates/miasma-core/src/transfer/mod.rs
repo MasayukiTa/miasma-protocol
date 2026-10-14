@@ -19,6 +19,7 @@ pub mod journal;
 pub mod manifest;
 pub mod network;
 pub mod password_policy;
+pub mod peek;
 pub mod progress;
 pub mod protection;
 pub mod publish;
