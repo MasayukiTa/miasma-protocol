@@ -1,0 +1,677 @@
+//! `miasma contact ...`, `miasma push`, `miasma push-status`, `miasma push-inbox`:
+//! trusted-contact push (ADR-011). Everything goes through the running daemon
+//! (`ControlRequest::Push`); the CLI never touches the network or the files'
+//! bytes itself.
+//!
+//! Messages follow the pattern of `i18n.rs` (one `match` per language in one
+//! enum, language from `i18n::lang()`), kept here so the table sits next to
+//! the commands that print it.
+
+use std::{
+    io::{IsTerminal, Write},
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
+use anyhow::{bail, Result};
+use clap::{Args, Subcommand};
+use miasma_core::{
+    daemon_request,
+    push::{ContactInfo, Direction, PushRequest, PushResponse, PushState, PushTransferInfo},
+    ControlRequest, ControlResponse,
+};
+
+use crate::i18n::{lang, Lang};
+
+#[derive(Subcommand)]
+pub enum ContactCmd {
+    /// Show YOUR contact code and fingerprint: give the code to the other person.
+    Code,
+    /// Register the other person from their contact code.
+    ///
+    /// The code can be pasted as a whole message; it is found inside it. After
+    /// adding, compare the fingerprint with theirs over a call.
+    Add {
+        /// `miasma-contact:...` (or a message that contains it).
+        code: String,
+        /// A name for this contact (also the inbox folder name).
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// List registered contacts.
+    List,
+    /// Unregister a contact (cancels its transfers, removes its partial files).
+    Remove {
+        /// Label, id or endpoint ID.
+        contact: String,
+    },
+    /// Change a contact's permissions.
+    Set {
+        /// Label, id or endpoint ID.
+        contact: String,
+        /// New label.
+        #[arg(long)]
+        label: Option<String>,
+        /// Allow sending files to this contact.
+        #[arg(long, overrides_with = "no_allow_send")]
+        allow_send: bool,
+        /// Do not send files to this contact.
+        #[arg(long, overrides_with = "allow_send")]
+        no_allow_send: bool,
+        /// Accept files pushed by this contact.
+        #[arg(long, overrides_with = "no_allow_receive")]
+        allow_receive: bool,
+        /// Refuse files pushed by this contact (cancels running ones).
+        #[arg(long, overrides_with = "allow_receive")]
+        no_allow_receive: bool,
+        /// Largest file accepted from this contact, e.g. 500MB, 20GiB. `0` or
+        /// `default` removes the per-contact limit.
+        #[arg(long, value_name = "SIZE", value_parser = parse_size)]
+        max_size: Option<u64>,
+    },
+}
+
+#[derive(Args)]
+pub struct PushArgs {
+    /// Contact label, id or endpoint ID.
+    pub contact: String,
+    /// Files to send, one after the other.
+    #[arg(required = true)]
+    pub files: Vec<PathBuf>,
+    /// Queue the files and return without waiting for them.
+    #[arg(long)]
+    pub no_wait: bool,
+}
+
+/// `500MB`, `20GiB`, `1048576`, `0`/`default` (= no per-contact limit).
+pub fn parse_size(s: &str) -> Result<u64, String> {
+    let t = s.trim().to_ascii_lowercase();
+    if t == "default" || t == "none" {
+        return Ok(0);
+    }
+    let split = t
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(t.len());
+    let (num, unit) = t.split_at(split);
+    let n: f64 = num.parse().map_err(|_| format!("'{s}' is not a size"))?;
+    let mult: f64 = match unit.trim() {
+        "" | "b" => 1.0,
+        "k" | "kb" | "kib" => 1024.0,
+        "m" | "mb" | "mib" => 1024.0 * 1024.0,
+        "g" | "gb" | "gib" => 1024.0 * 1024.0 * 1024.0,
+        "t" | "tb" | "tib" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        _ => return Err(format!("'{s}': unknown unit (use KB, MB, GB, TB)")),
+    };
+    if n < 0.0 || !n.is_finite() {
+        return Err(format!("'{s}' is not a size"));
+    }
+    Ok((n * mult) as u64)
+}
+
+fn human_bytes(n: u64) -> String {
+    const U: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = n as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i < U.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", U[i])
+    }
+}
+
+// ─── Messages ────────────────────────────────────────────────────────────────
+
+enum M<'a> {
+    DaemonDown,
+    YourCode,
+    YourFingerprint(&'a str),
+    ShareCodeHint,
+    Added {
+        label: &'a str,
+        fp: &'a str,
+    },
+    AddedHint,
+    ContactsNone,
+    ContactRow(&'a ContactInfo),
+    Removed(&'a str),
+    Updated(&'a ContactInfo),
+    Queued {
+        name: &'a str,
+        label: &'a str,
+    },
+    Progress {
+        label: String,
+    },
+    DoneFile {
+        name: &'a str,
+        label: &'a str,
+        saved: &'a str,
+    },
+    FailedFile {
+        name: &'a str,
+        err: &'a str,
+    },
+    RejectedFile {
+        name: &'a str,
+        text: &'a str,
+    },
+    CancelledFile(&'a str),
+    HintNotAllowed,
+    HintUnreachable,
+    HintNoSpace,
+    HintTooLarge,
+    HintBusy,
+    SomeFailed(usize),
+    QueueEmpty,
+    InboxIs(&'a str),
+    NotAFile(&'a str),
+    ApiError(&'a str),
+}
+
+impl M<'_> {
+    fn t(&self) -> String {
+        match lang() {
+            Lang::En => self.en(),
+            Lang::Ja => self.ja(),
+        }
+    }
+
+    fn en(&self) -> String {
+        match self {
+            M::DaemonDown => "The Miasma daemon is not running. Start it first (`miasma daemon`, or open the app), then try again.".into(),
+            M::YourCode => "Your contact code (give this to the other person):".into(),
+            M::YourFingerprint(f) => format!("Your fingerprint: {f}\nRead it to the other person over a call and compare it with what they see for you."),
+            M::ShareCodeHint => "They must also add YOUR code (`miasma contact add <code>`) before you can send them files, and you must add theirs before they can send to you.".into(),
+            M::Added { label, fp } => format!("Added contact \"{label}\"\nFingerprint: {fp}"),
+            M::AddedHint => "Compare this fingerprint with the other person over a call. If it differs, remove the contact: the code was changed on its way.".into(),
+            M::ContactsNone => "No contacts yet. Add one with `miasma contact add <code>`.".into(),
+            M::ContactRow(c) => format!(
+                "{:<20} {}  send:{}  receive:{}  max:{}  inbox: {}",
+                c.label,
+                c.fingerprint,
+                if c.allow_send { "yes" } else { "no" },
+                if c.allow_receive { "yes" } else { "no" },
+                c.max_file_size.map(human_bytes).unwrap_or_else(|| "default".into()),
+                c.inbox_dir
+            ),
+            M::Removed(l) => format!("Removed contact \"{l}\"."),
+            M::Updated(c) => format!(
+                "Updated \"{}\": send {}, receive {}, max size {}",
+                c.label,
+                if c.allow_send { "on" } else { "off" },
+                if c.allow_receive { "on" } else { "off" },
+                c.max_file_size.map(human_bytes).unwrap_or_else(|| "default".into()),
+            ),
+            M::Queued { name, label } => format!("queued: {name} -> {label}"),
+            M::Progress { label } => label.clone(),
+            M::DoneFile { name, label, saved } => format!("sent: {name} -> {label} (saved there as {saved})"),
+            M::FailedFile { name, err } => format!("FAILED: {name}: {err}"),
+            M::RejectedFile { name, text } => format!("REJECTED: {name}: {text}"),
+            M::CancelledFile(n) => format!("cancelled: {n}"),
+            M::HintNotAllowed => "The other side has not registered you. Ask them to run `miasma contact add` with YOUR contact code (`miasma contact code`).".into(),
+            M::HintUnreachable => "Could not reach them. Check that their Miasma is running and online, then run `miasma netcheck` to see what this network allows.".into(),
+            M::HintNoSpace => "Their disk is too full for this file. Ask them to free space.".into(),
+            M::HintTooLarge => "The file is over their size limit. They can raise it with `miasma contact set <you> --max-size ...` or `push.max_file_size` in config.toml.".into(),
+            M::HintBusy => "They are busy receiving other files. Try again in a minute.".into(),
+            M::SomeFailed(n) => format!("{n} transfer(s) did not complete."),
+            M::QueueEmpty => "No transfers in progress.".into(),
+            M::InboxIs(d) => format!("Received files are in: {d}"),
+            M::NotAFile(p) => format!("not a file (folders cannot be sent): {p}"),
+            M::ApiError(e) => format!("error: {e}"),
+        }
+    }
+
+    fn ja(&self) -> String {
+        match self {
+            M::DaemonDown => "Miasma デーモンが起動していません。先に起動(`miasma daemon` またはアプリを開く)してからやり直してください。".into(),
+            M::YourCode => "あなたの連絡先コード(相手に渡してください):".into(),
+            M::YourFingerprint(f) => format!("あなたのフィンガープリント: {f}\n通話などで相手に読み上げ、相手の画面に表示されるものと一致するか確認してください。"),
+            M::ShareCodeHint => "相手にも「あなたのコード」を登録してもらう必要があります(`miasma contact add <コード>`)。双方が登録して初めて送受信できます。".into(),
+            M::Added { label, fp } => format!("連絡先「{label}」を追加しました\nフィンガープリント: {fp}"),
+            M::AddedHint => "このフィンガープリントを通話などで相手と照合してください。違う場合は連絡先を削除してください(コードが途中で書き換えられています)。".into(),
+            M::ContactsNone => "連絡先はまだありません。`miasma contact add <コード>` で追加してください。".into(),
+            M::ContactRow(c) => format!(
+                "{:<20} {}  送信:{}  受信:{}  上限:{}  受信箱: {}",
+                c.label,
+                c.fingerprint,
+                if c.allow_send { "可" } else { "不可" },
+                if c.allow_receive { "可" } else { "不可" },
+                c.max_file_size.map(human_bytes).unwrap_or_else(|| "既定".into()),
+                c.inbox_dir
+            ),
+            M::Removed(l) => format!("連絡先「{l}」を削除しました。"),
+            M::Updated(c) => format!(
+                "「{}」を更新しました: 送信 {}、受信 {}、最大サイズ {}",
+                c.label,
+                if c.allow_send { "オン" } else { "オフ" },
+                if c.allow_receive { "オン" } else { "オフ" },
+                c.max_file_size.map(human_bytes).unwrap_or_else(|| "既定".into()),
+            ),
+            M::Queued { name, label } => format!("送信待ち: {name} -> {label}"),
+            M::Progress { label } => label.clone(),
+            M::DoneFile { name, label, saved } => format!("送信完了: {name} -> {label}(相手側の保存名: {saved})"),
+            M::FailedFile { name, err } => format!("失敗: {name}: {err}"),
+            M::RejectedFile { name, text } => format!("拒否されました: {name}: {text}"),
+            M::CancelledFile(n) => format!("キャンセル: {n}"),
+            M::HintNotAllowed => "相手があなたを登録していません。相手に「あなたの連絡先コード」(`miasma contact code`)を `miasma contact add` で登録してもらってください。".into(),
+            M::HintUnreachable => "相手に接続できませんでした。相手の Miasma が起動してオンラインか確認し、`miasma netcheck` でこのネットワークの状態を確認してください。".into(),
+            M::HintNoSpace => "相手のディスク空き容量が足りません。空きを作ってもらってください。".into(),
+            M::HintTooLarge => "相手の受信サイズ上限を超えています。相手側で `miasma contact set <あなた> --max-size ...` または config.toml の `push.max_file_size` を上げてもらってください。".into(),
+            M::HintBusy => "相手は他のファイルを受信中です。少し待ってからやり直してください。".into(),
+            M::SomeFailed(n) => format!("{n} 件の転送が完了しませんでした。"),
+            M::QueueEmpty => "実行中の転送はありません。".into(),
+            M::InboxIs(d) => format!("受信したファイルの場所: {d}"),
+            M::NotAFile(p) => format!("ファイルではありません(フォルダは送れません): {p}"),
+            M::ApiError(e) => format!("エラー: {e}"),
+        }
+    }
+}
+
+// ─── Plumbing ────────────────────────────────────────────────────────────────
+
+async fn call(data_dir: &Path, req: PushRequest) -> Result<PushResponse> {
+    match daemon_request(data_dir, ControlRequest::Push(req)).await {
+        Ok(ControlResponse::Push(r)) => Ok(r),
+        Ok(ControlResponse::Error(e)) => bail!("{}", M::ApiError(&e).t()),
+        Ok(other) => bail!("unexpected response: {other:?}"),
+        Err(e) => {
+            tracing::debug!("daemon request failed: {e:#}");
+            bail!("{}", M::DaemonDown.t())
+        }
+    }
+}
+
+fn api_error(kind: &str, message: &str) -> anyhow::Error {
+    // `kind` is stable; the message is the daemon's English text.
+    let _ = kind;
+    anyhow::anyhow!("{}", M::ApiError(message).t())
+}
+
+// ─── Commands ────────────────────────────────────────────────────────────────
+
+pub async fn run_contact(data_dir: &Path, cmd: ContactCmd) -> Result<()> {
+    match cmd {
+        ContactCmd::Code => match call(data_dir, PushRequest::ContactCode).await? {
+            PushResponse::Code {
+                code, fingerprint, ..
+            } => {
+                println!("{}", M::YourCode.t());
+                println!();
+                println!("{code}");
+                println!();
+                println!("{}", M::YourFingerprint(&fingerprint).t());
+                println!();
+                println!("{}", M::ShareCodeHint.t());
+                Ok(())
+            }
+            PushResponse::Error { kind, message } => Err(api_error(&kind, &message)),
+            other => bail!("unexpected response: {other:?}"),
+        },
+        ContactCmd::Add { code, label } => {
+            match call(data_dir, PushRequest::ContactAdd { code, label }).await? {
+                PushResponse::Contact(c) => {
+                    println!(
+                        "{}",
+                        M::Added {
+                            label: &c.label,
+                            fp: &c.fingerprint
+                        }
+                        .t()
+                    );
+                    println!("{}", M::AddedHint.t());
+                    Ok(())
+                }
+                PushResponse::Error { kind, message } => Err(api_error(&kind, &message)),
+                other => bail!("unexpected response: {other:?}"),
+            }
+        }
+        ContactCmd::List => match call(data_dir, PushRequest::ContactList).await? {
+            PushResponse::Contacts(list) => {
+                if list.is_empty() {
+                    println!("{}", M::ContactsNone.t());
+                }
+                for c in &list {
+                    println!("{}", M::ContactRow(c).t());
+                }
+                Ok(())
+            }
+            PushResponse::Error { kind, message } => Err(api_error(&kind, &message)),
+            other => bail!("unexpected response: {other:?}"),
+        },
+        ContactCmd::Remove { contact } => {
+            match call(
+                data_dir,
+                PushRequest::ContactRemove {
+                    contact: contact.clone(),
+                },
+            )
+            .await?
+            {
+                PushResponse::Removed => {
+                    println!("{}", M::Removed(&contact).t());
+                    Ok(())
+                }
+                PushResponse::Error { kind, message } => Err(api_error(&kind, &message)),
+                other => bail!("unexpected response: {other:?}"),
+            }
+        }
+        ContactCmd::Set {
+            contact,
+            label,
+            allow_send,
+            no_allow_send,
+            allow_receive,
+            no_allow_receive,
+            max_size,
+        } => {
+            let flag = |on: bool, off: bool| {
+                if on {
+                    Some(true)
+                } else if off {
+                    Some(false)
+                } else {
+                    None
+                }
+            };
+            let req = PushRequest::ContactUpdate {
+                contact,
+                label,
+                allow_send: flag(allow_send, no_allow_send),
+                allow_receive: flag(allow_receive, no_allow_receive),
+                max_size,
+            };
+            match call(data_dir, req).await? {
+                PushResponse::Contact(c) => {
+                    println!("{}", M::Updated(&c).t());
+                    Ok(())
+                }
+                PushResponse::Error { kind, message } => Err(api_error(&kind, &message)),
+                other => bail!("unexpected response: {other:?}"),
+            }
+        }
+    }
+}
+
+fn state_label(s: PushState) -> &'static str {
+    match s {
+        PushState::Queued => "queued",
+        PushState::Preparing => "preparing",
+        PushState::Connecting => "connecting",
+        PushState::Sending => "sending",
+        PushState::Verifying => "verifying",
+        PushState::Done => "done",
+        PushState::Failed => "failed",
+        PushState::Rejected => "rejected",
+        PushState::Cancelled => "cancelled",
+    }
+}
+
+fn progress_line(t: &PushTransferInfo) -> String {
+    let pct = if t.size == 0 {
+        100
+    } else {
+        (t.bytes as f64 / t.size as f64 * 100.0) as u64
+    };
+    let dir = match t.direction {
+        Direction::Out => "->",
+        Direction::In => "<-",
+    };
+    let mut s = format!(
+        "{dir} {} {}: {} {}% ({} / {})",
+        t.contact_label,
+        t.name,
+        state_label(t.state),
+        pct,
+        human_bytes(t.bytes),
+        human_bytes(t.size)
+    );
+    if t.rate_bps > 0 {
+        s.push_str(&format!(" {}/s", human_bytes(t.rate_bps)));
+    }
+    s
+}
+
+fn print_hint(t: &PushTransferInfo) {
+    let err = t.error.as_deref().unwrap_or("");
+    let hint = match t.reject_reason.as_deref() {
+        Some("not_allowed") => Some(M::HintNotAllowed),
+        Some("no_space") => Some(M::HintNoSpace),
+        Some("too_large") => Some(M::HintTooLarge),
+        Some("busy") => Some(M::HintBusy),
+        _ if err.contains("cannot reach") || err.contains("no connection") => {
+            Some(M::HintUnreachable)
+        }
+        _ => None,
+    };
+    if let Some(h) = hint {
+        eprintln!("  -> {}", h.t());
+    }
+}
+
+pub async fn run_push(data_dir: &Path, args: PushArgs) -> Result<()> {
+    let mut ids: Vec<(String, String)> = Vec::new();
+    for f in &args.files {
+        let abs = std::fs::canonicalize(f).unwrap_or_else(|_| f.clone());
+        if !abs.is_file() {
+            bail!("{}", M::NotAFile(&f.display().to_string()).t());
+        }
+        let path = abs.to_string_lossy().into_owned();
+        // `canonicalize` yields \\?\C:\... on Windows; the daemon accepts it,
+        // but a plain path reads better in logs.
+        let path = path.strip_prefix(r"\\?\").unwrap_or(&path).to_owned();
+        match call(
+            data_dir,
+            PushRequest::Send {
+                contact: args.contact.clone(),
+                path,
+            },
+        )
+        .await?
+        {
+            PushResponse::Queued { id } => {
+                let name = f
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                println!(
+                    "{}",
+                    M::Queued {
+                        name: &name,
+                        label: &args.contact
+                    }
+                    .t()
+                );
+                ids.push((id, name));
+            }
+            PushResponse::Error { kind, message } => return Err(api_error(&kind, &message)),
+            other => bail!("unexpected response: {other:?}"),
+        }
+    }
+    if args.no_wait {
+        return Ok(());
+    }
+
+    let tty = std::io::stderr().is_terminal();
+    let mut failed = 0usize;
+    for (id, name) in &ids {
+        let mut last_print = std::time::Instant::now() - Duration::from_secs(60);
+        loop {
+            let t = match call(
+                data_dir,
+                PushRequest::Status {
+                    id: Some(id.clone()),
+                },
+            )
+            .await?
+            {
+                PushResponse::Transfer(t) => t,
+                PushResponse::Error { kind, message } => return Err(api_error(&kind, &message)),
+                other => bail!("unexpected response: {other:?}"),
+            };
+            if t.state.is_finished() {
+                if tty {
+                    eprint!("\r{:width$}\r", "", width = 100);
+                }
+                match t.state {
+                    PushState::Done => println!(
+                        "{}",
+                        M::DoneFile {
+                            name,
+                            label: &t.contact_label,
+                            saved: t.saved_as.as_deref().unwrap_or(name),
+                        }
+                        .t()
+                    ),
+                    PushState::Rejected => {
+                        failed += 1;
+                        let text = t.error.as_deref().unwrap_or("rejected");
+                        eprintln!("{}", M::RejectedFile { name, text }.t());
+                        print_hint(&t);
+                    }
+                    PushState::Cancelled => {
+                        failed += 1;
+                        eprintln!("{}", M::CancelledFile(name).t());
+                    }
+                    _ => {
+                        failed += 1;
+                        let err = t.error.as_deref().unwrap_or("unknown error");
+                        eprintln!("{}", M::FailedFile { name, err }.t());
+                        print_hint(&t);
+                    }
+                }
+                break;
+            }
+            let line = M::Progress {
+                label: progress_line(&t),
+            }
+            .t();
+            if tty {
+                eprint!("\r{line:<100}");
+                let _ = std::io::stderr().flush();
+            } else if last_print.elapsed() >= Duration::from_secs(5) {
+                eprintln!("{line}");
+                last_print = std::time::Instant::now();
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+    if failed > 0 {
+        bail!("{}", M::SomeFailed(failed).t());
+    }
+    Ok(())
+}
+
+pub async fn run_push_status(data_dir: &Path) -> Result<()> {
+    match call(data_dir, PushRequest::Status { id: None }).await? {
+        PushResponse::Transfers(list) => {
+            if list.is_empty() {
+                println!("{}", M::QueueEmpty.t());
+            }
+            for t in &list {
+                let mut l = format!("[{}] {}", t.id, progress_line(t));
+                if let Some(e) = &t.error {
+                    l.push_str(&format!("  ({e})"));
+                }
+                println!("{l}");
+            }
+            Ok(())
+        }
+        PushResponse::Error { kind, message } => Err(api_error(&kind, &message)),
+        other => bail!("unexpected response: {other:?}"),
+    }
+}
+
+pub async fn run_push_inbox(data_dir: &Path) -> Result<()> {
+    match call(data_dir, PushRequest::Inbox).await? {
+        PushResponse::Inbox { dir } => {
+            println!("{}", M::InboxIs(&dir).t());
+            Ok(())
+        }
+        PushResponse::Error { kind, message } => Err(api_error(&kind, &message)),
+        other => bail!("unexpected response: {other:?}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sizes() {
+        assert_eq!(parse_size("500MB").unwrap(), 500 * 1024 * 1024);
+        assert_eq!(parse_size("20GiB").unwrap(), 20 * 1024 * 1024 * 1024);
+        assert_eq!(parse_size("1.5g").unwrap(), 1610612736);
+        assert_eq!(parse_size("1234").unwrap(), 1234);
+        assert_eq!(parse_size("default").unwrap(), 0);
+        assert_eq!(parse_size("0").unwrap(), 0);
+        assert!(parse_size("12 parsecs").is_err());
+        assert!(parse_size("-1").is_err());
+        assert!(parse_size("").is_err());
+    }
+
+    #[test]
+    fn every_message_renders_in_both_languages() {
+        let c = ContactInfo {
+            id: "i".into(),
+            label: "Taro".into(),
+            endpoint_id: "e".into(),
+            fingerprint: "AAAAA-BBBBB-CCCCC-DDDDD".into(),
+            added_at: 0,
+            allow_send: true,
+            allow_receive: false,
+            max_file_size: Some(1024),
+            inbox_dir: "/x".into(),
+        };
+        let msgs = [
+            M::DaemonDown,
+            M::YourCode,
+            M::YourFingerprint("F"),
+            M::ShareCodeHint,
+            M::Added {
+                label: "L",
+                fp: "F",
+            },
+            M::AddedHint,
+            M::ContactsNone,
+            M::ContactRow(&c),
+            M::Removed("L"),
+            M::Updated(&c),
+            M::Queued {
+                name: "n",
+                label: "l",
+            },
+            M::DoneFile {
+                name: "n",
+                label: "l",
+                saved: "s",
+            },
+            M::FailedFile {
+                name: "n",
+                err: "e",
+            },
+            M::RejectedFile {
+                name: "n",
+                text: "t",
+            },
+            M::CancelledFile("n"),
+            M::HintNotAllowed,
+            M::HintUnreachable,
+            M::HintNoSpace,
+            M::HintTooLarge,
+            M::HintBusy,
+            M::SomeFailed(2),
+            M::QueueEmpty,
+            M::InboxIs("d"),
+            M::NotAFile("p"),
+            M::ApiError("e"),
+        ];
+        for m in &msgs {
+            assert!(!m.en().is_empty());
+            assert!(!m.ja().is_empty());
+        }
+    }
+}

@@ -203,6 +203,10 @@ pub enum ControlRequest {
     /// unreadable. Only honoured with the nonce the daemon issued for `Wipe`.
     WipeConfirm { nonce: String },
 
+    // ── Trusted-contact push (ADR-011) ──────────────────────────────────
+    /// Contacts and file push; see [`crate::push::PushRequest`].
+    Push(crate::push::PushRequest),
+
     // ── Directed sharing ────────────────────────────────────────────────
     /// Get this node's sharing key (X25519 pubkey + PeerId).
     SharingKey,
@@ -448,6 +452,7 @@ impl fmt::Debug for ControlRequest {
                 .debug_struct("DirectedRevoke")
                 .field("envelope_id", envelope_id)
                 .finish(),
+            Self::Push(_) => f.write_str("Push(<redacted>)"),
             Self::DirectedInbox => f.write_str("DirectedInbox"),
             Self::DirectedOutbox => f.write_str("DirectedOutbox"),
         }
@@ -530,6 +535,10 @@ pub enum ControlResponse {
         nonce: String,
     },
     Error(String),
+
+    // ── Trusted-contact push (ADR-011) ──────────────────────────────────
+    /// Answer to [`ControlRequest::Push`].
+    Push(crate::push::PushResponse),
 
     // ── Directed sharing ────────────────────────────────────────────────
     /// This node's sharing key and contact string.
@@ -623,6 +632,7 @@ impl fmt::Debug for ControlResponse {
                 .field("nonce", &"<redacted>")
                 .finish(),
             Self::Error(message) => f.debug_tuple("Error").field(message).finish(),
+            Self::Push(_) => f.write_str("Push(..)"),
             Self::SharingKey { .. } => f
                 .debug_struct("SharingKey")
                 .field("key", &"<redacted>")

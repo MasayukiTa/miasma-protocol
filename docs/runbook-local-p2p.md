@@ -133,3 +133,40 @@ miasma --data-dir /tmp/miasma-a daemon
 The `daemon` command is best suited for a node that participates in the network
 as a passive relay/store; use `network-publish` when you want to dissolve and
 immediately serve a specific file.
+
+
+---
+
+## Push files to a registered contact (no Share ID, no password)
+
+Two people who trust each other register **once**, then send file after file.
+Both Miasma daemons must be running and online (ADR-012).
+
+```sh
+# On each machine: start the daemon (leave it running)
+miasma init          # first time only
+miasma daemon
+
+# On each machine: show YOUR contact code and fingerprint
+miasma contact code
+
+# Send your code to the other person (chat is fine) and add theirs.
+# Do this on BOTH sides - the receiver accepts only registered contacts.
+miasma contact add "miasma-contact:..." --label taro
+
+# Compare the fingerprint printed by `contact add` with the one the other
+# person sees for you, over a call. If they differ, `miasma contact remove taro`.
+
+# Send (several files are sent one after the other; Ctrl-C only stops waiting,
+# the daemon keeps sending)
+miasma push taro report.pdf photos.zip
+
+# Progress / history, and where received files go (<inbox>/<contact label>/)
+miasma push-status
+miasma push-inbox
+```
+
+Useful: `miasma contact list`, `miasma contact set taro --no-allow-receive`
+(stop accepting from them), `miasma contact set taro --max-size 5GiB`.
+Settings in `config.toml`: `[push] inbox_dir`, `max_file_size`,
+`min_free_bytes`. If a push says "cannot reach", run `miasma netcheck`.
