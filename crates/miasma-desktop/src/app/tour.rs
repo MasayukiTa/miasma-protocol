@@ -12,7 +12,7 @@ use eframe::egui;
 
 use miasma_core::transfer::{Phase, TransferKind, TransferState, TransferStatus};
 
-use super::{MiasmaApp, Tab};
+use super::{InboxItem, MiasmaApp, Tab};
 use crate::locale::Locale;
 use crate::theme::ThemeMode;
 use crate::transfers::{transfer_id, NewForm};
@@ -169,6 +169,106 @@ fn mock_jobs() -> Vec<TransferStatus> {
     vec![big, send, paused, failed, cancelled, done]
 }
 
+/// Fill the status fields the daemon would report, so Status/Send/Inbox/Outbox/Store show data.
+fn mock_app(app: &mut MiasmaApp) {
+    use crate::worker::TransportStatusInfo;
+    use std::sync::Arc;
+    use zeroize::Zeroizing;
+    app.peer_id = "12D3KooWHbnkB6HD2o5drAChZZVNg53AWHDFKbDtuDPpwX3ZtS62".to_owned();
+    app.peer_count = 3;
+    app.share_count = 295;
+    app.used_mb = 1130.6;
+    app.quota_mb = 10240;
+    app.replicated_count = 12;
+    app.pending_replication = 2;
+    app.listen_addrs = vec![
+        "/ip4/10.238.5.182/udp/56485/quic-v1".to_owned(),
+        "/ip4/127.0.0.1/udp/56485/quic-v1".to_owned(),
+    ];
+    app.wss_port = 61745;
+    app.wss_tls_enabled = false;
+    app.obfs_quic_port = 61746;
+    app.transport_statuses = vec![
+        TransportStatusInfo {
+            name: "direct-libp2p".to_owned(),
+            available: true,
+            selected: true,
+            success_count: 14,
+            failure_count: 0,
+            session_failures: 0,
+            data_failures: 0,
+            last_error: None,
+        },
+        TransportStatusInfo {
+            name: "tcp-direct".to_owned(),
+            available: true,
+            selected: false,
+            success_count: 2,
+            failure_count: 3,
+            session_failures: 1,
+            data_failures: 2,
+            last_error: None,
+        },
+        TransportStatusInfo {
+            name: "wss-tunnel".to_owned(),
+            available: false,
+            selected: false,
+            success_count: 0,
+            failure_count: 4,
+            session_failures: 0,
+            data_failures: 0,
+            last_error: Some(
+                "connection refused (os error 111) while dialing the relay".to_owned(),
+            ),
+        },
+    ];
+    app.sharing_contact =
+        Some("miasma-contact:3vQk9TzWc1nXbR7uYhE4sJmAfPdLgN2oKxVe8CiUyH".to_owned());
+    app.last_mid = Some("miasma:3vQk9TzWc1nXbR7uYhE4sJmAfPdLgN2oKxVe8CiUyH".to_owned());
+    app.retrieved_summary = Some("Retrieved 38.0 MiB (thesis-final.pdf)".to_owned());
+    app.save_data = Some(vec![0u8; 4]);
+    let item = |id: &str, state: &str, code: bool, name: Option<&str>| InboxItem {
+        envelope_id: id.to_owned(),
+        sender: "12D3KooWHbnkB6HD2o5drAChZZVNg53AWHDFKbDtuDPpwX3ZtS62".to_owned(),
+        recipient: "12D3KooWQ9fPzKx2TnYw5Rb7uLhE4sJmAfPdLgN2oKxVe8CiUyH".to_owned(),
+        state: state.to_owned(),
+        challenge_code: code.then(|| Arc::new(Zeroizing::new("482-913".to_owned()))),
+        created_at: "2026-10-12 09:41".to_owned(),
+        expires_at: "2026-10-19 09:41".to_owned(),
+        filename: name.map(str::to_owned),
+        file_size: if name.is_some() { 38 * MIB } else { 0 },
+    };
+    app.inbox_items = vec![
+        item(
+            "a1b2c3d4e5f60718293a",
+            "Confirmed",
+            true,
+            Some("thesis-final.pdf"),
+        ),
+        item(
+            "b2c3d4e5f6071829a3b4",
+            "Pending",
+            false,
+            Some("photos-2025.tar"),
+        ),
+        item("c3d4e5f6071829a3b4c5", "Expired", false, None),
+    ];
+    app.outbox_items = vec![
+        item(
+            "d4e5f6071829a3b4c5d6",
+            "ChallengeIssued",
+            false,
+            Some("wedding-4K.mov"),
+        ),
+        item(
+            "e5f6071829a3b4c5d6e7",
+            "Retrieved",
+            false,
+            Some("thesis-final.pdf"),
+        ),
+    ];
+}
+
 struct Step {
     name: String,
     theme: ThemeMode,
@@ -274,6 +374,7 @@ impl Tour {
         let _ = std::fs::create_dir_all(&out);
         let mut steps = Vec::new();
         let tabs = [
+            (Tab::Contacts, "contacts"),
             (Tab::Store, "store"),
             (Tab::Retrieve, "retrieve"),
             (Tab::Send, "send"),
@@ -300,7 +401,7 @@ impl Tour {
                         theme,
                         locale,
                         tab,
-                        daemon: None,
+                        daemon: Some(DaemonState::Connected),
                         transfers: None,
                         contacts: None,
                         size: None,
@@ -378,9 +479,9 @@ impl Tour {
                 }
             }
         }
-        // MIASMA_UI_TOUR_FILTER=<text> keeps only the steps whose name contains it.
+        // MIASMA_UI_TOUR_FILTER=<a>,<b> keeps only the steps whose name contains one of the parts.
         if let Ok(f) = std::env::var("MIASMA_UI_TOUR_FILTER") {
-            steps.retain(|s| s.name.contains(&f));
+            steps.retain(|s| f.split(',').any(|part| s.name.contains(part)));
         }
         Some(Self {
             out,
@@ -405,6 +506,15 @@ impl Tour {
         ctx.request_repaint();
         if self.frames_in_step == 0 {
             app.theme_mode = step.theme;
+            if std::env::var_os("MIASMA_UI_TOUR_EASY").is_some() {
+                app.mode = crate::variant::ProductMode::Easy;
+            }
+            if let Some((w, h)) = std::env::var("MIASMA_UI_TOUR_SIZE").ok().and_then(|v| {
+                let (w, h) = v.split_once('x')?;
+                Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?))
+            }) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
+            }
             app.locale = step.locale;
             app.tab = step.tab;
             if let Some(d) = &step.daemon {
@@ -423,7 +533,11 @@ impl Tour {
             }
             if let Some(v) = &step.transfers {
                 // Tall enough that the list, the detail pane and the form are all on screen.
-                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(1000.0, 1400.0)));
+                if std::env::var_os("MIASMA_UI_TOUR_SIZE").is_none() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                        1000.0, 1400.0,
+                    )));
+                }
                 app.transfers
                     .set_mock(if v.empty { Vec::new() } else { mock_jobs() });
                 let id = app
@@ -441,6 +555,9 @@ impl Tour {
         } else if let Some(d) = &step.daemon {
             // The worker may report its own state meanwhile; keep the one being shown.
             app.daemon_state = d.clone();
+        }
+        if matches!(step.daemon, Some(DaemonState::Connected)) {
+            mock_app(app);
         }
         self.frames_in_step += 1;
         if !self.requested && self.frames_in_step >= 8 {

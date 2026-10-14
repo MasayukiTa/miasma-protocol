@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use eframe::egui;
+use eframe::egui::{self, RichText};
 use miasma_core::transfer::{
     jobs::send_id,
     password_policy::{self, PolicyViolation, Strength},
@@ -24,9 +24,9 @@ use miasma_core::transfer::{
 };
 use zeroize::Zeroize;
 
-use crate::app::{card_frame, danger_button, primary_button, section_heading};
 use crate::locale::TransferStrings;
 use crate::theme::{self, Palette};
+use crate::ui_kit::{self as kit, Level};
 use crate::worker::{WorkerCmd, DEFAULT_SEND_K, DEFAULT_SEND_N};
 
 fn pal() -> Palette {
@@ -177,6 +177,16 @@ pub fn chip_for(state: TransferState) -> Chip {
         TransferState::Complete => Chip::Success,
         TransferState::Failed => Chip::Danger,
         TransferState::Cancelled => Chip::Faint,
+    }
+}
+
+fn chip_level(chip: Chip) -> Level {
+    match chip {
+        Chip::Info => Level::Info,
+        Chip::Warning => Level::Warn,
+        Chip::Success => Level::Ok,
+        Chip::Danger => Level::Error,
+        Chip::Faint => Level::Muted,
     }
 }
 
@@ -804,76 +814,71 @@ impl TransfersUi {
         // fact, and nothing here can be started or stopped without the daemon.
         let connected = connected && !self.poll_error.as_ref().is_some_and(|(_, down)| *down);
 
-        section_heading(ui, if easy { t.heading_easy } else { t.heading });
-        ui.add_space(4.0);
-        ui.label(egui::RichText::new(if easy { t.desc_easy } else { t.desc }).color(pal().muted));
-        ui.add_space(10.0);
-
-        if let Some((msg, down)) = &self.poll_error {
-            let shown = if *down { t.offline_note } else { msg.as_str() };
-            ui.label(egui::RichText::new(shown).color(pal().warning));
-            if !self.jobs.is_empty() {
-                ui.label(egui::RichText::new(t.stale_note).small().color(pal().faint));
-            }
-            ui.add_space(6.0);
-        }
-
-        if show_clear_finished(&self.jobs) {
-            ui.horizontal(|ui| {
-                // Neutral: the one accent action on this screen is Start receiving / sending.
-                let btn = egui::Button::new(t.btn_clear_finished);
-                if ui
-                    .add_enabled(connected, btn)
-                    .on_hover_text(t.clear_finished_hint)
-                    .clicked()
-                {
-                    cmds.push(WorkerCmd::TransferClearFinished);
-                    self.drop_rows(|j| !clearable(j));
+        let desc = if easy { t.desc_easy } else { t.desc };
+        kit::page(
+            ui,
+            if easy { t.heading_easy } else { t.heading },
+            Some(desc),
+            |ui| {
+                if let Some((msg, down)) = &self.poll_error {
+                    let shown = if *down { t.offline_note } else { msg.as_str() };
+                    kit::notice(ui, Level::Warn, shown);
+                    if !self.jobs.is_empty() {
+                        kit::hint(ui, t.stale_note);
+                    }
                 }
-            });
-            ui.add_space(4.0);
-        }
-        self.list_card(ui, t, easy);
-        ui.add_space(8.0);
-        self.detail_card(ui, t, easy, connected, &mut cmds);
-        ui.add_space(8.0);
-        self.new_card(ui, t, easy, connected, &mut cmds);
+
+                if show_clear_finished(&self.jobs) {
+                    kit::button_row(ui, |ui| {
+                        // Neutral: the one accent action on this screen is Start receiving / sending.
+                        if ui
+                            .add_enabled(connected, kit::secondary_button(t.btn_clear_finished))
+                            .on_hover_text(t.clear_finished_hint)
+                            .clicked()
+                        {
+                            cmds.push(WorkerCmd::TransferClearFinished);
+                            self.drop_rows(|j| !clearable(j));
+                        }
+                    });
+                }
+                self.list_card(ui, t, easy);
+                ui.add_space(kit::SP_2);
+                self.detail_card(ui, t, easy, connected, &mut cmds);
+                self.new_card(ui, t, easy, connected, &mut cmds);
+            },
+        );
         cmds
     }
 
     fn list_card(&mut self, ui: &mut egui::Ui, t: &TransferStrings, easy: bool) {
         let stale = self.poll_error.as_ref().is_some_and(|(_, down)| *down);
         let mut clicked: Option<String> = None;
-        card_frame()
-            .inner_margin(egui::Margin::same(6.0))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                if self.jobs.is_empty() {
-                    ui.add_space(14.0);
-                    ui.vertical_centered(|ui| {
-                        ui.label(
-                            egui::RichText::new(if easy { t.empty_easy } else { t.empty })
-                                .color(pal().muted),
-                        );
-                    });
-                    ui.add_space(14.0);
-                    return;
-                }
-                egui::ScrollArea::vertical()
-                    .id_source("transfer_list")
-                    .max_height(ROW_H * 5.0 + 8.0)
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = 2.0;
-                        for job in &self.jobs {
-                            let id = transfer_id(job);
-                            let selected = self.selected.as_deref() == Some(id.as_str());
-                            if job_row(ui, t, job, selected, stale) {
-                                clicked = Some(id);
-                            }
-                        }
-                    });
+        // A plain list between two hairlines: rows are separated by hairlines, the selected one
+        // is tinted. No frame.
+        kit::divider(ui);
+        if self.jobs.is_empty() {
+            ui.add_space(kit::SP_4);
+            ui.vertical_centered(|ui| {
+                ui.label(kit::muted_text(if easy { t.empty_easy } else { t.empty }));
             });
+            ui.add_space(kit::SP_4);
+        } else {
+            egui::ScrollArea::vertical()
+                .id_source("transfer_list")
+                .max_height(ROW_H * 5.5)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    for job in &self.jobs {
+                        let id = transfer_id(job);
+                        let selected = self.selected.as_deref() == Some(id.as_str());
+                        if job_row(ui, t, job, selected, stale) {
+                            clicked = Some(id);
+                        }
+                    }
+                });
+        }
+        kit::divider(ui);
         if let Some(id) = clicked {
             self.select_id(Some(id));
         }
@@ -889,80 +894,58 @@ impl TransfersUi {
     ) {
         let Some(job) = self.selected_job().cloned() else {
             if !self.jobs.is_empty() {
-                card_frame().show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.label(egui::RichText::new(t.select_hint).color(pal().muted));
-                });
+                kit::paragraph_muted(ui, t.select_hint);
+                ui.add_space(kit::SP_4);
             }
             return;
         };
         let id = transfer_id(&job);
-        let chip = chip_for(job.state);
-        let color = chip_color(chip);
+        let level = chip_level(chip_for(job.state));
+        let status_label = state_label(t, job.state);
+        let title = title_of(&job);
 
-        card_frame().show(ui, |ui| {
-            ui.set_width(ui.available_width());
+        // The selected transfer is a section: file name and state in its title row.
+        kit::section_actions(
+            ui,
+            &title,
+            |ui| {
+                kit::status_dot(ui, level, status_label);
+            },
+            |ui| {
+                // The full path under the title.
+                if !job.name.is_empty() {
+                    kit::hint(ui, plain_path(&job.name));
+                }
+                // Why it stopped, directly under the title: this is what the person needs first.
+                if let Some(err) = &job.last_error {
+                    kit::notice(
+                        ui,
+                        Level::Error,
+                        &format!("{}: {}", t.error_label, localize_job_error(t, err)),
+                    );
+                }
 
-            // Title: file name + chip, full path under it.
-            ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(title_of(&job))
-                        .size(15.0)
-                        .strong()
-                        .color(pal().text),
-                );
-                draw_chip(ui, color, state_label(t, job.state));
-            });
-            if !job.name.is_empty() {
-                ui.label(
-                    egui::RichText::new(plain_path(&job.name))
-                        .small()
-                        .color(pal().faint),
-                );
-            }
-            // Why it stopped, directly under the title: this is what the person needs first.
-            if let Some(err) = &job.last_error {
-                ui.add_space(4.0);
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(format!(
-                            "{}: {}",
-                            t.error_label,
-                            localize_job_error(t, err)
-                        ))
-                        .color(pal().danger),
-                    )
-                    .wrap(true),
-                );
-            }
-            ui.add_space(8.0);
+                if easy {
+                    let pct = format_permille(permille(job.bytes_done, job.bytes_total, job.state));
+                    kit::paragraph(ui, &easy_sentence(t, &job, &pct));
+                }
 
-            if easy {
-                let pct = format_permille(permille(job.bytes_done, job.bytes_total, job.state));
-                ui.label(easy_sentence(t, &job, &pct));
-                ui.add_space(6.0);
-            }
+                // Where am I: one cell per segment (or per bucket).
+                self.strip_section(ui, t, &job);
+                ui.add_space(kit::SP_2);
 
-            // Where am I: one cell per segment (or per bucket).
-            self.strip_section(ui, t, &job);
-            ui.add_space(8.0);
-
-            egui::Grid::new("transfer_detail")
-                .num_columns(2)
-                .spacing([16.0, 5.0])
-                .show(ui, |ui| {
+                kit::kv_grid(ui, |g| {
                     // The Share ID is what the receiver needs (it also lets them check who
                     // published it), so it is shown in Easy mode too, with a Copy button.
                     if let Some(share_id) = job.share_id.as_deref().filter(|s| !s.is_empty()) {
-                        ui.label(egui::RichText::new(t.share_id_label).color(pal().muted));
-                        ui.vertical(|ui| {
+                        g.row(t.share_id_label, |ui| {
                             ui.horizontal_wrapped(|ui| {
-                                ui.label(egui::RichText::new(share_id).monospace());
+                                ui.label(RichText::new(share_id).monospace().color(pal().text));
                                 let copied = self
                                     .copied_at
                                     .is_some_and(|c| c.elapsed() < Duration::from_secs(2));
                                 let label = if copied { t.copied } else { t.copy };
-                                if ui.small_button(label).clicked() {
+                                if ui.add(kit::compact_button(label)).clicked() {
                                     ui.output_mut(|o| o.copied_text = share_id.to_owned());
                                     self.copied_at = Some(Instant::now());
                                 }
@@ -970,7 +953,7 @@ impl TransfersUi {
                                     .invitation_copied_at
                                     .is_some_and(|c| c.elapsed() < Duration::from_secs(2));
                                 let label = if invited { t.copied } else { t.copy_invitation };
-                                if ui.small_button(label).clicked() {
+                                if ui.add(kit::compact_button(label)).clicked() {
                                     ui.output_mut(|o| {
                                         o.copied_text = miasma_core::transfer::invitation_text(
                                             share_id,
@@ -980,70 +963,49 @@ impl TransfersUi {
                                     self.invitation_copied_at = Some(Instant::now());
                                 }
                                 let qr_label = if self.show_qr { t.hide_qr } else { t.show_qr };
-                                if ui.small_button(qr_label).clicked() {
+                                if ui.add(kit::compact_button(qr_label)).clicked() {
                                     self.show_qr = !self.show_qr;
                                 }
                             });
                             if self.show_qr {
-                                ui.add_space(4.0);
+                                ui.add_space(kit::SP_1);
                                 if draw_qr(ui, &miasma_core::transfer::qr_payload(share_id), 260.0)
                                 {
-                                    ui.label(
-                                        egui::RichText::new(t.qr_note).small().color(pal().faint),
-                                    );
+                                    kit::hint(ui, t.qr_note);
                                 } else {
-                                    ui.label(egui::RichText::new(t.qr_failed).color(pal().danger));
+                                    kit::notice(ui, Level::Error, t.qr_failed);
                                 }
                             }
                             if job.kind == TransferKind::Send {
-                                ui.label(
-                                    egui::RichText::new(t.share_id_send_note)
-                                        .small()
-                                        .color(pal().faint),
-                                );
-                                ui.label(
-                                    egui::RichText::new(t.invitation_note)
-                                        .small()
-                                        .color(pal().faint),
-                                );
+                                kit::hint(ui, t.share_id_send_note);
+                                kit::hint(ui, t.invitation_note);
                             }
                         });
-                        ui.end_row();
                     }
 
                     // A receive says whether the publisher was authenticated.
                     if job.kind == TransferKind::Receive && !job.mid.is_empty() {
-                        ui.label(egui::RichText::new(t.publisher_label).color(pal().muted));
-                        if job.publisher_authenticated {
-                            ui.label(
-                                egui::RichText::new(t.publisher_verified).color(pal().success),
-                            );
-                        } else {
-                            ui.label(
-                                egui::RichText::new(t.publisher_unverified).color(pal().warning),
-                            );
-                        }
-                        ui.end_row();
+                        g.row(t.publisher_label, |ui| {
+                            if job.publisher_authenticated {
+                                kit::status_dot(ui, Level::Ok, t.publisher_verified);
+                            } else {
+                                kit::status_dot(ui, Level::Warn, t.publisher_unverified);
+                            }
+                        });
                     }
 
                     // A receive over iroh says how the data travels: a public relay is
                     // an order of magnitude slower than a direct path.
                     if job.kind == TransferKind::Receive {
                         if let Some(path) = job.path.as_deref() {
-                            ui.label(egui::RichText::new(t.path_label).color(pal().muted));
-                            match path {
+                            g.row(t.path_label, |ui| match path {
                                 "direct" => {
-                                    ui.label(
-                                        egui::RichText::new(t.path_direct).color(pal().success),
-                                    );
+                                    kit::status_dot(ui, Level::Ok, t.path_direct);
                                 }
                                 _ => {
-                                    ui.label(
-                                        egui::RichText::new(t.path_relay).color(pal().warning),
-                                    );
+                                    kit::status_dot(ui, Level::Warn, t.path_relay);
                                 }
-                            }
-                            ui.end_row();
+                            });
                         }
                     }
 
@@ -1051,91 +1013,92 @@ impl TransfersUi {
                     // Share ID to give instead (a receive, or a send from an older daemon).
                     if !easy || job.share_id.as_deref().is_none_or(str::is_empty) {
                         let mid_label = if easy { t.mid_label_easy } else { t.mid_label };
-                        ui.label(egui::RichText::new(mid_label).color(pal().muted));
-                        ui.horizontal_wrapped(|ui| {
-                            if job.mid.is_empty() {
-                                ui.label(egui::RichText::new("-").color(pal().faint));
-                            } else {
-                                ui.label(egui::RichText::new(job.mid.as_str()).monospace());
-                                let copied = self
-                                    .copied_at
-                                    .is_some_and(|c| c.elapsed() < Duration::from_secs(2));
-                                let label = if copied { t.copied } else { t.copy };
-                                if ui.small_button(label).clicked() {
-                                    ui.output_mut(|o| o.copied_text = job.mid.clone());
-                                    self.copied_at = Some(Instant::now());
-                                }
-                                // Technical view shows both IDs: say which one the other side needs.
-                                if !easy && job.share_id.as_deref().is_some_and(|s| !s.is_empty()) {
+                        g.row(mid_label, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                if job.mid.is_empty() {
+                                    ui.label(kit::muted_text("-"));
+                                } else {
                                     ui.label(
-                                        egui::RichText::new(t.mid_internal_note)
-                                            .small()
-                                            .color(pal().faint),
+                                        RichText::new(job.mid.as_str())
+                                            .monospace()
+                                            .color(pal().text),
                                     );
+                                    let copied = self
+                                        .copied_at
+                                        .is_some_and(|c| c.elapsed() < Duration::from_secs(2));
+                                    let label = if copied { t.copied } else { t.copy };
+                                    if ui.add(kit::compact_button(label)).clicked() {
+                                        ui.output_mut(|o| o.copied_text = job.mid.clone());
+                                        self.copied_at = Some(Instant::now());
+                                    }
+                                    // Technical view shows both IDs: say which one the other side needs.
+                                    if !easy
+                                        && job.share_id.as_deref().is_some_and(|s| !s.is_empty())
+                                    {
+                                        ui.label(
+                                            RichText::new(t.mid_internal_note)
+                                                .small()
+                                                .color(pal().muted),
+                                        );
+                                    }
                                 }
-                            }
+                            });
                         });
-                        ui.end_row();
                     }
 
-                    ui.label(egui::RichText::new(t.phase_label).color(pal().muted));
-                    if easy {
-                        ui.label(phase_plain(t, job.phase));
-                    } else {
-                        ui.label(egui::RichText::new(format!("{:?}", job.phase)).monospace());
-                    }
-                    ui.end_row();
+                    g.row(t.phase_label, |ui| {
+                        if easy {
+                            ui.label(phase_plain(t, job.phase));
+                        } else {
+                            ui.label(
+                                RichText::new(format!("{:?}", job.phase))
+                                    .monospace()
+                                    .color(pal().text),
+                            );
+                        }
+                    });
 
-                    ui.label(egui::RichText::new(t.elapsed_label).color(pal().muted));
                     // A transfer known only from its journal has no elapsed time.
                     let elapsed = (job.elapsed_secs >= 1.0).then_some(job.elapsed_secs as u64);
-                    ui.label(format_eta(elapsed, t.day));
-                    ui.end_row();
+                    g.text(t.elapsed_label, &format_eta(elapsed, t.day));
 
                     if !easy {
-                        ui.label(egui::RichText::new(t.segments_label).color(pal().muted));
-                        ui.label(format!("{} / {}", job.segments_done, job.segments_total));
-                        ui.end_row();
-
-                        ui.label(egui::RichText::new(t.resumed_label).color(pal().muted));
+                        g.text(
+                            t.segments_label,
+                            &format!("{} / {}", job.segments_done, job.segments_total),
+                        );
                         if job.resumed_from_segment == 0 {
-                            ui.label(t.resumed_fresh);
+                            g.text(t.resumed_label, t.resumed_fresh);
                         } else {
                             // 1-based, like the caption under the strip.
-                            ui.label((job.resumed_from_segment + 1).to_string());
+                            g.text(t.resumed_label, &(job.resumed_from_segment + 1).to_string());
                         }
-                        ui.end_row();
-
-                        ui.label(egui::RichText::new(t.split_label).color(pal().muted));
-                        ui.label(split_text(t, &job));
-                        ui.end_row();
-
-                        ui.label(egui::RichText::new(t.pieces_label).color(pal().muted));
-                        ui.label(fill(
-                            t.pieces_fmt,
-                            &[
-                                ("ok", &job.pieces_fetched.to_string()),
-                                ("bad", &job.pieces_rejected.to_string()),
-                            ],
-                        ));
-                        ui.end_row();
-
-                        ui.label(egui::RichText::new(t.retries_label).color(pal().muted));
-                        ui.label(job.segment_retries.to_string());
-                        ui.end_row();
+                        g.text(t.split_label, &split_text(t, &job));
+                        g.text(
+                            t.pieces_label,
+                            &fill(
+                                t.pieces_fmt,
+                                &[
+                                    ("ok", &job.pieces_fetched.to_string()),
+                                    ("bad", &job.pieces_rejected.to_string()),
+                                ],
+                            ),
+                        );
+                        g.text(t.retries_label, &job.segment_retries.to_string());
                     }
                 });
 
-            // A completed transfer has nothing to resume.
-            if job.state != TransferState::Complete {
-                ui.add_space(10.0);
-                self.detail_buttons(ui, t, &job, &id, connected, cmds);
-            }
-            if can_remove(&job) {
-                ui.add_space(10.0);
-                self.remove_section(ui, t, &job, &id, connected, cmds);
-            }
-        });
+                // A completed transfer has nothing to resume.
+                if job.state != TransferState::Complete {
+                    ui.add_space(kit::SP_2);
+                    self.detail_buttons(ui, t, &job, &id, connected, cmds);
+                }
+                if can_remove(&job) {
+                    ui.add_space(kit::SP_2);
+                    self.remove_section(ui, t, &job, &id, connected, cmds);
+                }
+            },
+        );
     }
 
     fn strip_section(&self, ui: &mut egui::Ui, t: &TransferStrings, job: &TransferStatus) {
@@ -1260,10 +1223,10 @@ impl TransfersUi {
         cmds: &mut Vec<WorkerCmd>,
     ) {
         let protected = self.known_protected.contains(id);
-        ui.horizontal_wrapped(|ui| {
+        kit::button_row(ui, |ui| {
             if job.state == TransferState::Running {
                 if ui
-                    .add_enabled(connected, egui::Button::new(t.btn_stop))
+                    .add_enabled(connected, kit::secondary_button(t.btn_stop))
                     .clicked()
                 {
                     cmds.push(WorkerCmd::TransferCancel { id: id.to_owned() });
@@ -1277,7 +1240,7 @@ impl TransfersUi {
             if job.name.is_empty() {
                 // Without a path there is nothing to start again into (an older daemon reported
                 // none for a live receive): only a new start from the form is possible.
-                ui.label(egui::RichText::new(t.no_path_hint).color(pal().muted));
+                ui.label(kit::muted_text(t.no_path_hint));
                 return;
             }
             let label = if job.resumable {
@@ -1286,13 +1249,12 @@ impl TransfersUi {
                 t.btn_try_again
             };
             if !self.resume_open {
-                let btn = primary_button(label);
-                if ui.add_enabled(connected, btn).clicked() {
+                if kit::primary(ui, connected, label).clicked() {
                     self.resume_open = true;
                     self.restart_confirm = false;
                 }
                 if ui
-                    .add_enabled(connected, danger_button(t.btn_restart))
+                    .add_enabled(connected, kit::danger_button(t.btn_restart))
                     .clicked()
                 {
                     self.restart_confirm = true;
@@ -1302,79 +1264,80 @@ impl TransfersUi {
         });
 
         if self.resume_open {
-            ui.label(
-                egui::RichText::new(if protected {
+            kit::hint(
+                ui,
+                if protected {
                     t.resume_pw_required
                 } else {
                     t.resume_pw_optional
-                })
-                .small()
-                .color(pal().muted),
+                },
             );
-            ui.horizontal(|ui| {
-                ui.label(if protected {
+            kit::form_row(
+                ui,
+                if protected {
                     t.password_short
                 } else {
                     t.password_label
-                });
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.resume_password)
-                        .password(true)
-                        .desired_width(220.0),
-                );
-                let needs_pw = protected && self.resume_password.is_empty();
-                let go = ui.add_enabled(connected && !needs_pw, primary_button(t.resume_go));
-                if go.clicked() {
-                    let via = self.known_via.get(&job.mid).cloned();
-                    cmds.push(with_via(
-                        start_again(job, &self.resume_password, false),
-                        via.as_ref(),
-                    ));
-                    self.pending_via = via;
-                    self.resume_password.zeroize();
-                    self.resume_open = false;
-                    self.pending_protected = protected;
-                    self.poll_soon();
-                }
-                if ui.button(t.btn_keep).clicked() {
-                    self.resume_open = false;
-                    self.resume_password.zeroize();
-                }
-            });
+                },
+                None,
+                |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            kit::input(&mut self.resume_password)
+                                .password(true)
+                                .desired_width(220.0),
+                        );
+                        let needs_pw = protected && self.resume_password.is_empty();
+                        if kit::primary(ui, connected && !needs_pw, t.resume_go).clicked() {
+                            let via = self.known_via.get(&job.mid).cloned();
+                            cmds.push(with_via(
+                                start_again(job, &self.resume_password, false),
+                                via.as_ref(),
+                            ));
+                            self.pending_via = via;
+                            self.resume_password.zeroize();
+                            self.resume_open = false;
+                            self.pending_protected = protected;
+                            self.poll_soon();
+                        }
+                        if ui.add(kit::secondary_button(t.btn_keep)).clicked() {
+                            self.resume_open = false;
+                            self.resume_password.zeroize();
+                        }
+                    });
+                },
+            );
         }
 
         if self.restart_confirm {
-            ui.label(egui::RichText::new(t.restart_confirm).color(pal().danger));
-            ui.label(
-                egui::RichText::new(t.resume_pw_optional)
-                    .small()
-                    .color(pal().muted),
-            );
-            ui.horizontal(|ui| {
-                ui.label(t.password_label);
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.resume_password)
-                        .password(true)
-                        .desired_width(220.0),
-                );
-                if ui
-                    .add_enabled(connected, danger_button(t.restart_yes))
-                    .clicked()
-                {
-                    let via = self.known_via.get(&job.mid).cloned();
-                    cmds.push(with_via(
-                        start_again(job, &self.resume_password, true),
-                        via.as_ref(),
-                    ));
-                    self.pending_via = via;
-                    self.resume_password.zeroize();
-                    self.restart_confirm = false;
-                    self.poll_soon();
-                }
-                if ui.button(t.btn_keep).clicked() {
-                    self.restart_confirm = false;
-                    self.resume_password.zeroize();
-                }
+            kit::notice(ui, Level::Error, t.restart_confirm);
+            kit::hint(ui, t.resume_pw_optional);
+            kit::form_row(ui, t.password_label, None, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add(
+                        kit::input(&mut self.resume_password)
+                            .password(true)
+                            .desired_width(220.0),
+                    );
+                    if ui
+                        .add_enabled(connected, kit::danger_button(t.restart_yes))
+                        .clicked()
+                    {
+                        let via = self.known_via.get(&job.mid).cloned();
+                        cmds.push(with_via(
+                            start_again(job, &self.resume_password, true),
+                            via.as_ref(),
+                        ));
+                        self.pending_via = via;
+                        self.resume_password.zeroize();
+                        self.restart_confirm = false;
+                        self.poll_soon();
+                    }
+                    if ui.add(kit::secondary_button(t.btn_keep)).clicked() {
+                        self.restart_confirm = false;
+                        self.resume_password.zeroize();
+                    }
+                });
             });
         }
     }
@@ -1392,10 +1355,10 @@ impl TransfersUi {
     ) {
         let needs_discard = remove_needs_discard(job);
         if self.discard_confirm {
-            ui.label(egui::RichText::new(t.discard_confirm).color(pal().danger));
-            ui.horizontal(|ui| {
+            kit::notice(ui, Level::Error, t.discard_confirm);
+            kit::button_row(ui, |ui| {
                 if ui
-                    .add_enabled(connected, danger_button(t.discard_yes))
+                    .add_enabled(connected, kit::danger_button(t.discard_yes))
                     .clicked()
                 {
                     cmds.push(WorkerCmd::TransferRemove {
@@ -1407,15 +1370,15 @@ impl TransfersUi {
                     self.drop_rows(|j| transfer_id(j) != gone);
                     self.selected = None;
                 }
-                if ui.button(t.btn_keep).clicked() {
+                if ui.add(kit::secondary_button(t.btn_keep)).clicked() {
                     self.discard_confirm = false;
                 }
             });
             return;
         }
-        ui.horizontal_wrapped(|ui| {
+        kit::button_row(ui, |ui| {
             if ui
-                .add_enabled(connected, egui::Button::new(t.btn_remove))
+                .add_enabled(connected, kit::secondary_button(t.btn_remove))
                 .clicked()
             {
                 if needs_discard {
@@ -1436,10 +1399,11 @@ impl TransfersUi {
                 (TransferState::Complete, TransferKind::Receive, _) => t.remove_note_recv,
                 _ => t.remove_note_plain,
             };
-            ui.label(egui::RichText::new(note).small().color(pal().muted));
+            ui.label(RichText::new(note).small().color(pal().muted));
         });
     }
 
+    /// The primary task of the screen: start a transfer. The only framed block on the page.
     fn new_card(
         &mut self,
         ui: &mut egui::Ui,
@@ -1448,48 +1412,27 @@ impl TransfersUi {
         connected: bool,
         cmds: &mut Vec<WorkerCmd>,
     ) {
-        card_frame().show(ui, |ui| {
-            ui.set_width(ui.available_width());
+        kit::surface(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(
-                    egui::RichText::new(t.new_heading)
-                        .size(15.0)
-                        .strong()
-                        .color(pal().text),
-                );
-                ui.add_space(8.0);
-                for (form, label) in [(NewForm::Receive, t.receive), (NewForm::Send, t.send)] {
-                    let active = self.form == form;
-                    let text = if active {
-                        egui::RichText::new(label).strong().color(pal().text)
-                    } else {
-                        egui::RichText::new(label).color(pal().muted)
-                    };
-                    let btn = egui::Button::new(text)
-                        .fill(if active {
-                            pal().selected
-                        } else {
-                            egui::Color32::TRANSPARENT
-                        })
-                        .stroke(egui::Stroke::NONE);
-                    if ui.add(btn).clicked() {
-                        self.form = form;
-                        self.form_error = None;
-                    }
+                ui.label(kit::section_text(t.new_heading));
+                ui.add_space(kit::SP_2);
+                let mut form = self.form;
+                let options = [(NewForm::Receive, t.receive), (NewForm::Send, t.send)];
+                if kit::segmented(ui, &mut form, &options) {
+                    self.form = form;
+                    self.form_error = None;
                 }
             });
-            ui.add_space(6.0);
+            ui.add_space(kit::SP_1);
             if !connected {
-                ui.label(egui::RichText::new(t.forms_offline).color(pal().warning));
-                ui.add_space(4.0);
+                kit::notice(ui, Level::Warn, t.forms_offline);
             }
             match self.form {
                 NewForm::Receive => self.receive_form(ui, t, easy, connected, cmds),
                 NewForm::Send => self.send_form(ui, t, easy, connected, cmds),
             }
             if let Some(err) = &self.form_error {
-                ui.add_space(6.0);
-                ui.label(egui::RichText::new(err.as_str()).color(pal().danger));
+                kit::notice(ui, Level::Error, err);
             }
         });
     }
@@ -1502,13 +1445,8 @@ impl TransfersUi {
         connected: bool,
         cmds: &mut Vec<WorkerCmd>,
     ) {
-        form_row(ui, t.recv_id_label, |ui| {
-            let resp = ui.add(
-                egui::TextEdit::singleline(&mut self.recv_mid)
-                    .hint_text("miasma-share:...")
-                    .font(egui::TextStyle::Monospace)
-                    .desired_width(f32::INFINITY),
-            );
+        kit::form_row(ui, t.recv_id_label, None, |ui| {
+            let resp = ui.add(kit::input_mono(&mut self.recv_mid).hint_text("miasma-share:..."));
             // A whole invitation (or a link, or an id with a line break in it) pasted here:
             // keep just the Share ID, and only when it is a valid one.
             if resp.changed() {
@@ -1520,15 +1458,15 @@ impl TransfersUi {
             }
         });
         let mut browse = false;
-        form_row(ui, t.recv_path_label, |ui| {
+        kit::form_row(ui, t.recv_path_label, None, |ui| {
             ui.horizontal(|ui| {
                 ui.add(
-                    egui::TextEdit::singleline(&mut self.recv_path)
+                    kit::input(&mut self.recv_path)
                         .hint_text(t.recv_path_hint)
-                        .desired_width((ui.available_width() - 110.0).max(120.0)),
+                        .desired_width(kit::input_width_beside_button(ui)),
                 );
                 if ui
-                    .add_enabled(self.name_peek.is_none(), egui::Button::new(t.browse))
+                    .add_enabled(self.name_peek.is_none(), kit::secondary_button(t.browse))
                     .clicked()
                 {
                     browse = true;
@@ -1568,13 +1506,11 @@ impl TransfersUi {
             let found = self.name_peek.take().and_then(|p| p.answer).flatten();
             self.open_save_dialog(found.as_deref());
         } else if self.name_peek.is_some() {
-            ui.horizontal(|ui| {
-                ui.add(egui::Spinner::new().size(12.0));
-                ui.label(
-                    egui::RichText::new(t.recv_name_lookup)
-                        .small()
-                        .color(pal().muted),
-                );
+            kit::form_row(ui, "", None, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add(egui::Spinner::new().size(12.0));
+                    ui.label(RichText::new(t.recv_name_lookup).small().color(pal().muted));
+                });
             });
             ui.ctx().request_repaint_after(Duration::from_millis(150));
         }
@@ -1582,15 +1518,17 @@ impl TransfersUi {
         // was sent; say so before starting.
         let (final_path, is_folder) = effective_receive_path(&self.recv_path);
         if is_folder {
-            ui.label(
-                egui::RichText::new(fill(t.recv_folder_note, &[("path", &final_path)]))
-                    .small()
-                    .color(pal().warning),
-            );
+            kit::form_row(ui, "", None, |ui| {
+                kit::notice(
+                    ui,
+                    Level::Warn,
+                    &fill(t.recv_folder_note, &[("path", &final_path)]),
+                );
+            });
         }
-        form_row(ui, t.password_label, |ui| {
+        kit::form_row(ui, t.password_label, Some(t.password_note), |ui| {
             let pw = ui.add(
-                egui::TextEdit::singleline(&mut self.recv_password)
+                kit::input(&mut self.recv_password)
                     .password(true)
                     .desired_width(240.0),
             );
@@ -1598,31 +1536,18 @@ impl TransfersUi {
                 self.focus_recv_password = false;
                 pw.request_focus();
             }
-            ui.label(
-                egui::RichText::new(t.password_note)
-                    .small()
-                    .color(pal().faint),
-            );
         });
         // Technical mode only: Easy mode shows nothing new.
         if !easy {
-            form_row(ui, t.via_label, |ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.recv_via)
-                        .hint_text(t.via_hint)
-                        .font(egui::TextStyle::Monospace)
-                        .desired_width(f32::INFINITY),
-                );
-                ui.label(egui::RichText::new(t.via_note).small().color(pal().faint));
+            kit::form_row(ui, t.via_label, Some(t.via_note), |ui| {
+                ui.add(kit::input_mono(&mut self.recv_via).hint_text(t.via_hint));
             });
         }
-        ui.add_space(8.0);
+        ui.add_space(kit::SP_1);
         let ready =
             connected && !self.recv_mid.trim().is_empty() && !self.recv_path.trim().is_empty();
-        if ui
-            .add_enabled(ready, primary_button(t.recv_button))
-            .clicked()
-        {
+        let go = kit::form_actions(ui, |ui| kit::primary(ui, ready, t.recv_button).clicked());
+        if go {
             let mid = self.recv_mid.trim().to_owned();
             // One parse of what was typed, before anything is sent: a mistyped share ID stops
             // here (its checksum), a MID is accepted but cannot authenticate the publisher.
@@ -1665,14 +1590,14 @@ impl TransfersUi {
         connected: bool,
         cmds: &mut Vec<WorkerCmd>,
     ) {
-        form_row(ui, t.send_path_label, |ui| {
+        kit::form_row(ui, t.send_path_label, None, |ui| {
             ui.horizontal(|ui| {
                 ui.add(
-                    egui::TextEdit::singleline(&mut self.send_path)
+                    kit::input(&mut self.send_path)
                         .hint_text(t.send_path_hint)
-                        .desired_width((ui.available_width() - 110.0).max(120.0)),
+                        .desired_width(kit::input_width_beside_button(ui)),
                 );
-                if ui.button(t.browse).clicked() {
+                if ui.add(kit::secondary_button(t.browse)).clicked() {
                     if let Some(p) = rfd::FileDialog::new().pick_file() {
                         self.send_path = p.to_string_lossy().into_owned();
                     }
@@ -1681,22 +1606,17 @@ impl TransfersUi {
         });
         // Generate fills both fields; done after the row so the closure borrows stay simple.
         let mut generate = false;
-        form_row(ui, t.password_label, |ui| {
+        kit::form_row(ui, t.password_label, Some(t.pw_policy_note), |ui| {
             ui.horizontal(|ui| {
                 ui.add(
-                    egui::TextEdit::singleline(&mut self.send_password)
+                    kit::input(&mut self.send_password)
                         .password(true)
                         .desired_width(240.0),
                 );
-                if ui.button(t.pw_generate).clicked() {
+                if ui.add(kit::secondary_button(t.pw_generate)).clicked() {
                     generate = true;
                 }
             });
-            ui.label(
-                egui::RichText::new(t.pw_policy_note)
-                    .small()
-                    .color(pal().faint),
-            );
         });
         if generate {
             self.generate_send_password();
@@ -1707,70 +1627,64 @@ impl TransfersUi {
             self.send_generated = None;
         }
         if let Some(pw) = self.send_generated.clone() {
-            form_row(ui, "", |ui| {
+            kit::form_row(ui, "", Some(t.pw_generated_note), |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(egui::RichText::new(pw.as_str()).monospace());
+                    ui.label(RichText::new(pw.as_str()).monospace().color(pal().text));
                     let copied = self
                         .copied_at
                         .is_some_and(|c| c.elapsed() < Duration::from_secs(2));
                     if ui
-                        .small_button(if copied { t.copied } else { t.copy })
+                        .add(kit::compact_button(if copied { t.copied } else { t.copy }))
                         .clicked()
                     {
                         ui.output_mut(|o| o.copied_text = pw.clone());
                         self.copied_at = Some(Instant::now());
                     }
                 });
-                ui.label(
-                    egui::RichText::new(t.pw_generated_note)
-                        .small()
-                        .color(pal().muted),
-                );
             });
         }
-        form_row(ui, t.confirm_label, |ui| {
+        kit::form_row(ui, t.confirm_label, None, |ui| {
             ui.add(
-                egui::TextEdit::singleline(&mut self.send_confirm)
+                kit::input(&mut self.send_confirm)
                     .password(true)
                     .desired_width(240.0),
             );
         });
-        form_row(
+        kit::form_row(
             ui,
             if easy { t.red_label_easy } else { t.red_label },
+            None,
             |ui| self.redundancy_picker(ui, t, easy),
         );
 
         let mismatch = self.send_password != self.send_confirm;
         if mismatch && !self.send_confirm.is_empty() {
-            ui.label(egui::RichText::new(t.mismatch).small().color(pal().danger));
+            kit::form_row(ui, "", None, |ui| {
+                kit::notice(ui, Level::Error, t.mismatch);
+            });
         }
         // The same rule the daemon enforces: a weak password blocks the button and says why;
         // a compliant but short one only gets a warning.
         let pw_state = send_password_state(&self.send_password);
         match &pw_state {
             SendPassword::Weak(v) => {
-                ui.label(
-                    egui::RichText::new(weak_password_text(t, &violation_codes(v)))
-                        .small()
-                        .color(pal().danger),
-                );
+                kit::form_row(ui, "", None, |ui| {
+                    kit::notice(
+                        ui,
+                        Level::Error,
+                        &weak_password_text(t, &violation_codes(v)),
+                    );
+                });
             }
             SendPassword::Short => {
-                ui.label(
-                    egui::RichText::new(t.pw_short_warning)
-                        .small()
-                        .color(pal().muted),
-                );
+                kit::form_row(ui, "", Some(t.pw_short_warning), |_| {});
             }
             SendPassword::Unprotected | SendPassword::Good => {}
         }
-        ui.add_space(8.0);
+        ui.add_space(kit::SP_1);
         let ready = send_ready(connected, &self.send_path, mismatch, &pw_state);
-        if ui
-            .add_enabled(ready, primary_button(t.send_button))
-            .clicked()
-        {
+        let go = kit::form_actions(ui, |ui| kit::primary(ui, ready, t.send_button).clicked());
+        if go {
             let password = (!self.send_password.is_empty()).then(|| self.send_password.clone());
             self.pending_protected = password.is_some();
             self.from_form = true;
@@ -1788,14 +1702,13 @@ impl TransfersUi {
                 restart: false,
             });
         }
-        ui.add_space(6.0);
         // The one thing a sender must know before starting.
-        ui.label(egui::RichText::new(t.send_hint).small().color(pal().muted));
+        kit::form_row(ui, "", Some(t.send_hint), |_| {});
     }
 
     fn redundancy_picker(&mut self, ui: &mut egui::Ui, t: &TransferStrings, easy: bool) {
         // Tight rows: five presets should not push the send button off the screen.
-        ui.spacing_mut().item_spacing.y = 1.0;
+        ui.spacing_mut().item_spacing.y = kit::SP_1;
         if easy {
             // A preset picked in Technical mode that has no plain name selects none of the three.
             let current = EasyChoice::from_preset_index(self.send_preset);
@@ -1809,7 +1722,7 @@ impl TransfersUi {
                     if ui.radio(current == Some(choice), label).clicked() {
                         self.send_preset = choice.preset_index();
                     }
-                    ui.label(egui::RichText::new(desc).small().color(pal().muted));
+                    ui.label(RichText::new(desc).small().color(pal().muted));
                 });
             }
         } else {
@@ -1982,28 +1895,7 @@ fn split_text(t: &TransferStrings, job: &TransferStatus) -> String {
 
 // ─── Drawing helpers ────────────────────────────────────────────────────────
 
-const FORM_LABEL_W: f32 = 170.0;
-
-/// A form row: a fixed-width label column, aligned to the top so it stays next to the first
-/// line of a tall control (a grid would centre it against the whole row), and the control.
-fn form_row(ui: &mut egui::Ui, label: &str, content: impl FnOnce(&mut egui::Ui)) {
-    ui.horizontal_top(|ui| {
-        ui.allocate_ui_with_layout(
-            egui::vec2(FORM_LABEL_W, 0.0),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| {
-                ui.set_min_width(FORM_LABEL_W);
-                ui.add_space(4.0);
-                ui.label(label);
-            },
-        );
-        ui.vertical(content);
-    });
-    ui.add_space(2.0);
-}
-
-/// Text colour for a chip tinted with `color`: the `faint` state colour is too dim to read as
-/// text on its own tint (about 3:1 in dark mode), so it is drawn in `muted`.
+/// Text colour for a state: `faint` (cancelled) is drawn in `muted`, which is a step easier to read.
 fn chip_fg(color: egui::Color32) -> egui::Color32 {
     if color == pal().faint {
         pal().muted
@@ -2012,20 +1904,9 @@ fn chip_fg(color: egui::Color32) -> egui::Color32 {
     }
 }
 
-/// A small state chip: tinted background, text in the state colour.
+/// A state as a dot and a word in the state colour (never a filled pill).
 pub(crate) fn draw_chip(ui: &mut egui::Ui, color: egui::Color32, text: &str) {
-    egui::Frame::none()
-        .inner_margin(egui::Margin::symmetric(8.0, 2.0))
-        .rounding(4.0)
-        .fill(color.linear_multiply(0.15))
-        .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(text)
-                    .small()
-                    .strong()
-                    .color(chip_fg(color)),
-            );
-        });
+    kit::dot_text(ui, chip_fg(color), text);
 }
 
 /// Trim `text` with `...` until it is at most `max_w` wide.
@@ -2117,8 +1998,16 @@ fn job_row(
     let painter = ui.painter_at(rect);
     if selected {
         painter.rect_filled(rect, 6.0, p.selected);
-    } else if resp.hovered() {
-        painter.rect_filled(rect, 6.0, p.text.gamma_multiply(0.05));
+    } else {
+        if resp.hovered() {
+            painter.rect_filled(rect, 6.0, p.text.gamma_multiply(0.05));
+        }
+        // Row separator.
+        painter.hline(
+            rect.x_range(),
+            rect.bottom() - 0.5,
+            egui::Stroke::new(1.0, p.border),
+        );
     }
 
     let chip = chip_for(job.state);
@@ -2141,7 +2030,7 @@ fn job_row(
     } else {
         t.receive
     };
-    let small = egui::FontId::proportional(11.5);
+    let small = egui::FontId::proportional(12.5);
     let dir_rect = painter.text(
         egui::pos2(left + 18.0, y1),
         egui::Align2::LEFT_CENTER,
@@ -2150,26 +2039,22 @@ fn job_row(
         muted,
     );
 
-    // The chip sits at the right edge; its width is measured, not guessed.
-    let chip_galley = painter.layout_no_wrap(
+    // The state sits at the right edge as a dot and a word in the state colour; its width is
+    // measured, not guessed.
+    let state_color = chip_fg(color);
+    let state_galley = painter.layout_no_wrap(
         state_label(t, job.state).to_owned(),
-        egui::FontId::proportional(11.5),
-        chip_fg(color),
+        small.clone(),
+        state_color,
     );
-    let chip_w = chip_galley.size().x + 16.0;
-    let chip_rect = egui::Rect::from_min_size(
-        egui::pos2(right - chip_w, y1 - 10.0),
-        egui::vec2(chip_w, 20.0),
-    );
-    painter.rect_filled(chip_rect, 4.0, color.linear_multiply(0.15));
+    let state_left = right - state_galley.size().x;
+    painter.circle_filled(egui::pos2(state_left - 10.0, y1), 4.0, state_color);
     painter.galley(
-        egui::pos2(
-            chip_rect.left() + 8.0,
-            chip_rect.center().y - chip_galley.size().y * 0.5,
-        ),
-        chip_galley,
-        chip_fg(color),
+        egui::pos2(state_left, y1 - state_galley.size().y * 0.5),
+        state_galley,
+        state_color,
     );
+    let chip_left = state_left - 18.0;
 
     let name_font = egui::FontId::proportional(14.0);
     let name_left = dir_rect.right() + 10.0;
@@ -2177,7 +2062,7 @@ fn job_row(
         &painter,
         &title_of(job),
         &name_font,
-        (chip_rect.left() - 12.0 - name_left).max(20.0),
+        (chip_left - 12.0 - name_left).max(20.0),
     );
     painter.text(
         egui::pos2(name_left, y1),
