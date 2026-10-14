@@ -17,6 +17,62 @@ pub struct NodeConfig {
     pub network: NetworkConfig,
     #[serde(default)]
     pub transport: TransportConfig,
+    /// Trusted-contact push (ADR-011).
+    #[serde(default)]
+    pub push: PushConfig,
+}
+
+/// `[push]` in `config.toml`: where pushed files land and the limits on them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PushConfig {
+    /// Folder for received files (one sub-folder per contact). Empty means
+    /// `<data_dir>/inbox`.
+    #[serde(default)]
+    pub inbox_dir: Option<String>,
+    /// Largest file accepted from any contact, in bytes (default 20 GiB).
+    #[serde(default = "default_push_max_file_size")]
+    pub max_file_size: u64,
+    /// Free space that must remain after a file is received, in bytes
+    /// (default 2 GiB).
+    #[serde(default = "default_push_min_free_bytes")]
+    pub min_free_bytes: u64,
+    /// Inbound transfers served at once (default 2).
+    #[serde(default = "default_push_max_inbound")]
+    pub max_concurrent_inbound: usize,
+}
+
+pub const DEFAULT_PUSH_MAX_FILE_SIZE: u64 = 20 * 1024 * 1024 * 1024;
+pub const DEFAULT_PUSH_MIN_FREE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+fn default_push_max_file_size() -> u64 {
+    DEFAULT_PUSH_MAX_FILE_SIZE
+}
+fn default_push_min_free_bytes() -> u64 {
+    DEFAULT_PUSH_MIN_FREE_BYTES
+}
+fn default_push_max_inbound() -> usize {
+    2
+}
+
+impl Default for PushConfig {
+    fn default() -> Self {
+        Self {
+            inbox_dir: None,
+            max_file_size: DEFAULT_PUSH_MAX_FILE_SIZE,
+            min_free_bytes: DEFAULT_PUSH_MIN_FREE_BYTES,
+            max_concurrent_inbound: 2,
+        }
+    }
+}
+
+impl PushConfig {
+    /// The inbox folder for `data_dir`.
+    pub fn resolved_inbox(&self, data_dir: &Path) -> PathBuf {
+        match self.inbox_dir.as_deref().map(str::trim) {
+            Some(d) if !d.is_empty() => PathBuf::from(d),
+            _ => data_dir.join("inbox"),
+        }
+    }
 }
 
 pub const DEFAULT_HOSTED_QUOTA_MB: u64 = 1_024;
