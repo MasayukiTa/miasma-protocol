@@ -610,7 +610,10 @@ impl PushService {
                     };
                     attempt += 1;
                     debug!("push {id}: {m}; retrying in {delay:?}");
-                    self.board.update(&id, |i| i.error = Some(m));
+                    self.board.update(&id, |i| {
+                        i.error = Some(m);
+                        i.error_kind = Some(kind.to_owned());
+                    });
                     let mut cancel = job.cancel.clone();
                     tokio::select! {
                         _ = tokio::time::sleep(delay) => {}
@@ -712,6 +715,7 @@ impl PushService {
             i.state = PushState::Sending;
             i.bytes = offset;
             i.error = None;
+            i.error_kind = None;
         });
         let mut file = tokio::fs::File::open(path)
             .await
