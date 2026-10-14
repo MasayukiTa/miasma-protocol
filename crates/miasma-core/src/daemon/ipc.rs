@@ -149,6 +149,21 @@ pub enum ControlRequest {
         #[serde(default)]
         via_ca_pem: Option<String>,
     },
+    /// Look up the sender's original file name for a receive, without starting
+    /// one: only the signed record and its manifest are read (from the same
+    /// sources `TransferStartReceive` would use), nothing is downloaded or
+    /// written, and a protected transfer's sealed name is opened with
+    /// `password`. Answered by `TransferNamePeeked`, bounded to a few seconds.
+    /// Added after the first release: an older daemon answers with an error,
+    /// which a front end treats as "no name" and falls back to a placeholder.
+    TransferPeekName {
+        mid: String,
+        password: Option<String>,
+        #[serde(default)]
+        via: Vec<String>,
+        #[serde(default)]
+        via_ca_pem: Option<String>,
+    },
     /// Start (or resume) publishing a file as a background transfer, and return
     /// at once with its id. Progress, resume and cancel work as for a receive;
     /// a stopped publish resumes from its journal unless `restart` is set.
@@ -324,6 +339,18 @@ impl fmt::Debug for ControlRequest {
                 .field("password", &password.as_ref().map(|_| "<redacted>"))
                 .field("restart", restart)
                 .finish(),
+            Self::TransferPeekName {
+                mid,
+                password,
+                via,
+                via_ca_pem,
+            } => f
+                .debug_struct("TransferPeekName")
+                .field("mid", mid)
+                .field("password", &password.as_ref().map(|_| "<redacted>"))
+                .field("via", &via.len())
+                .field("via_ca_pem", &via_ca_pem.as_ref().map(|_| "<pem>"))
+                .finish(),
             Self::TransferStatus { id } => {
                 f.debug_struct("TransferStatus").field("id", id).finish()
             }
@@ -438,6 +465,7 @@ impl Zeroize for ControlRequest {
             Self::Publish { data, .. } => data.zeroize(),
             Self::PublishFileProtected { password, .. } => password.zeroize(),
             Self::TransferStartReceive { password, .. }
+            | Self::TransferPeekName { password, .. }
             | Self::TransferStartPublish { password, .. } => {
                 if let Some(p) = password.as_mut() {
                     p.zeroize();
@@ -476,6 +504,12 @@ pub enum ControlResponse {
     /// A background transfer was started (or was already running).
     TransferStarted {
         id: String,
+    },
+    /// Answer to `TransferPeekName`: the sender's sanitised file name, or `None`
+    /// for every kind of "no name" (unreachable, wrong or missing password, none
+    /// carried, timed out) so a wrong password reveals nothing.
+    TransferNamePeeked {
+        name: Option<String>,
     },
     TransferStatus(crate::transfer::TransferStatus),
     TransferList(Vec<crate::transfer::TransferStatus>),
@@ -568,6 +602,10 @@ impl fmt::Debug for ControlResponse {
             Self::TransferStarted { id } => {
                 f.debug_struct("TransferStarted").field("id", id).finish()
             }
+            Self::TransferNamePeeked { name } => f
+                .debug_struct("TransferNamePeeked")
+                .field("name", &name.as_ref().map(|_| "<redacted>"))
+                .finish(),
             Self::TransferStatus(status) => f.debug_tuple("TransferStatus").field(status).finish(),
             Self::TransferList(list) => f
                 .debug_struct("TransferList")
