@@ -41,7 +41,7 @@ Expected: Status tab shows peer ID, listen addresses, share count.
 
 ### Test: PowerShell smoke script
 ```powershell
-cd C:\Users\M118A8586\Desktop\github_lab\miasma-protocol
+cd C:\Users\<user>\Desktop\github_lab\miasma-protocol
 powershell -ExecutionPolicy Bypass -File scripts\smoke-loopback.ps1
 ```
 

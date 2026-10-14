@@ -63,7 +63,7 @@ bootstrap_peers = [
 ```
 
 **Key build notes**:
-- Corporate GlobalProtect intercepts TLS (SdkgrComnet CA). Root + intermediate CAs must be installed in Alpine: export from Windows cert store → DER → PEM → `/usr/local/share/ca-certificates/` → `update-ca-certificates`. Set `CARGO_HTTP_CAINFO`.
+- Corporate GlobalProtect intercepts TLS (the corporate TLS-inspection CA). Root + intermediate CAs must be installed in Alpine: export from Windows cert store → DER → PEM → `/usr/local/share/ca-certificates/` → `update-ca-certificates`. Set `CARGO_HTTP_CAINFO`.
 - Build from Linux-native path (`/root/miasma/`), not DrvFs mount (`/mnt/c/...`) — DrvFs is too slow for incremental builds.
 - `MSYS_NO_PATHCONV=1` required when calling `wsl -d MiasmaLab -- sh -c "..."` from Git Bash to prevent path mangling.
 
@@ -200,7 +200,7 @@ Starting Tor with direct (no-bridge) config:
 [warn] Received a bad CERTS cell: Link certificate does not match TLS certificate
 ```
 
-GlobalProtect's TLS MITM (SdkgrComnet CA) intercepts Tor's TLS handshake and substitutes certificates. Tor's protocol requires the relay's CERTS cell to match the TLS certificate — the MITM breaks this invariant. Tor cannot bootstrap on this corporate network.
+GlobalProtect's TLS MITM (the corporate TLS-inspection CA) intercepts Tor's TLS handshake and substitutes certificates. Tor's protocol requires the relay's CERTS cell to match the TLS certificate — the MITM breaks this invariant. Tor cannot bootstrap on this corporate network.
 
 The system `/etc/tor/torrc` already has meek bridge configuration (Azure CDN front), but meek itself also fails to reach the Tor network (stuck at "No running bridges"). Whether this is because meek-client also encounters TLS interception or because the meek endpoint is blocked separately was not determined.
 
