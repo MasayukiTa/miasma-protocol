@@ -5,53 +5,28 @@
 ///
 /// Supports two product modes (Technical / Easy) and three locales (EN / JA / ZH-CN).
 /// Both modes share all backend code; only UI presentation differs.
-use eframe::egui;
+use eframe::egui::{self, RichText};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::contacts::ContactsUi;
 use crate::locale::{self, Locale, Strings, TransferStrings};
 use crate::theme::{self, Palette, ThemeMode};
 use crate::transfers::TransfersUi;
+use crate::ui_kit::{self as kit, Level};
 use crate::variant::ProductMode;
 use crate::worker::{DaemonState, WorkerCmd, WorkerHandle, WorkerResult};
 use crate::LaunchIntent;
 
+// Compatibility: `contacts.rs` still imports its drawing helpers from here. They are the kit's
+// own (`ui_kit.rs`); remove this line when contacts.rs imports `ui_kit` directly.
+pub(crate) use crate::ui_kit::{card_frame, danger_button, primary_button, section_heading};
+
 #[cfg(feature = "ui-tour")]
 mod tour;
 
-// ─── Style and colours ──────────────────────────────────────────────────────
-//
-// Fonts are discovered per OS in `fonts.rs` (Meiryo first, read from the system, never bundled).
-// Colours come from the palette in `theme.rs`; use `pal()` at the call site, never a literal.
-
-/// Text sizes and spacing.
-///
-/// Meiryo has tall glyphs and a large line gap. egui derives row heights from the font metrics,
-/// so text is not clipped, but the interact height and button padding are sized for it so
-/// buttons and tabs keep their shape.
-fn configure_style(ctx: &egui::Context) {
-    let mut style = (*ctx.style()).clone();
-    style
-        .text_styles
-        .insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
-    style
-        .text_styles
-        .insert(egui::TextStyle::Button, egui::FontId::proportional(13.5));
-    style
-        .text_styles
-        .insert(egui::TextStyle::Heading, egui::FontId::proportional(20.0));
-    style
-        .text_styles
-        .insert(egui::TextStyle::Small, egui::FontId::proportional(11.5));
-    style
-        .text_styles
-        .insert(egui::TextStyle::Monospace, egui::FontId::monospace(12.5));
-    style.spacing.item_spacing = egui::vec2(8.0, 6.0);
-    style.spacing.button_padding = egui::vec2(12.0, 5.0);
-    style.spacing.window_margin = egui::Margin::same(12.0);
-    style.spacing.interact_size.y = 26.0;
-    ctx.set_style(style);
-}
+// Style, type scale and spacing are set in one place: `ui_kit::apply_theme`. Fonts are discovered
+// per OS in `fonts.rs` (Meiryo first, read from the system, never bundled). Colours come from the
+// palette in `theme.rs`; use `pal()` at the call site, never a literal.
 
 /// The palette currently in force (light or dark).
 fn pal() -> Palette {
@@ -206,9 +181,8 @@ impl MiasmaApp {
         intent: LaunchIntent,
     ) -> Self {
         crate::fonts::install(&cc.egui_ctx);
-        configure_style(&cc.egui_ctx);
         let dark = theme::resolve_dark(theme_mode, cc.integration_info.system_theme);
-        theme::apply(&cc.egui_ctx, dark);
+        kit::apply_theme(&cc.egui_ctx, dark);
         let worker = WorkerHandle::spawn(data_dir.clone());
 
         // If launched with a magnet/torrent intent, go to Import tab.
@@ -571,129 +545,98 @@ impl MiasmaApp {
 
     // ── Connection header ────────────────────────────────────────────────
 
+    /// What the page shows above its content while the daemon is not up: one surface, one
+    /// primary action.
     fn connection_header(&mut self, ui: &mut egui::Ui) {
         let s = self.s();
         let easy = self.mode.is_easy();
-        let frame = egui::Frame::none()
-            .inner_margin(egui::Margin::symmetric(16.0, 14.0))
-            .rounding(8.0)
-            .fill(pal().surface)
-            .stroke(egui::Stroke::new(1.0, pal().border));
 
         match self.daemon_state {
             DaemonState::Connected => {}
             DaemonState::NeedsInit => {
-                frame.show(ui, |ui| {
-                    ui.vertical(|ui| {
-                        tag_label(ui, pal().warning, s.setup_needed);
-                        ui.add_space(4.0);
-                        let title = if easy {
-                            s.welcome_title_easy
-                        } else {
-                            s.welcome_title
-                        };
-                        ui.label(egui::RichText::new(title).size(18.0).strong());
-                        ui.add_space(6.0);
-                        let desc = if easy {
+                kit::surface(ui, |ui| {
+                    kit::status_dot(ui, Level::Warn, s.setup_needed);
+                    let title = if easy {
+                        s.welcome_title_easy
+                    } else {
+                        s.welcome_title
+                    };
+                    ui.label(kit::section_text(title));
+                    kit::paragraph(
+                        ui,
+                        if easy {
                             s.welcome_desc_easy
                         } else {
                             s.welcome_desc
-                        };
-                        ui.label(desc);
-                        ui.add_space(4.0);
-                        let detail = if easy {
+                        },
+                    );
+                    kit::paragraph_muted(
+                        ui,
+                        if easy {
                             s.welcome_detail_easy
                         } else {
                             s.welcome_detail
-                        };
-                        ui.label(egui::RichText::new(detail).color(pal().muted));
-                        ui.add_space(10.0);
-                        ui.add_enabled_ui(!self.busy, |ui| {
-                            let btn = primary_button(
-                                egui::RichText::new(s.welcome_button).strong().size(14.0),
-                            );
-                            if ui.add_sized([180.0, 36.0], btn).clicked() {
-                                let _ = self.worker.tx.try_send(WorkerCmd::Init);
-                                self.busy = true;
-                                self.set_msg(
-                                    MsgKind::Info,
-                                    if easy {
-                                        s.welcome_progress_easy
-                                    } else {
-                                        s.welcome_progress
-                                    },
-                                );
-                            }
-                        });
+                        },
+                    );
+                    let progress = if easy {
+                        s.welcome_progress_easy
+                    } else {
+                        s.welcome_progress
+                    };
+                    kit::button_row(ui, |ui| {
+                        if kit::primary(ui, !self.busy, s.welcome_button).clicked() {
+                            let _ = self.worker.tx.try_send(WorkerCmd::Init);
+                            self.busy = true;
+                            self.set_msg(MsgKind::Info, progress);
+                        }
                         if self.busy {
-                            ui.add_space(4.0);
-                            ui.horizontal(|ui| {
-                                ui.spinner();
-                                let progress = if easy {
-                                    s.welcome_progress_easy
-                                } else {
-                                    s.welcome_progress
-                                };
-                                ui.label(egui::RichText::new(progress).color(pal().muted));
-                            });
+                            ui.spinner();
+                            ui.label(kit::muted_text(progress));
                         }
                     });
                 });
-                ui.add_space(4.0);
             }
             DaemonState::Stopped => {
-                frame.show(ui, |ui| {
-                    ui.vertical(|ui| {
-                        tag_label(ui, pal().danger, s.offline);
-                        ui.add_space(4.0);
-                        let title = if easy {
-                            s.stopped_title_easy
-                        } else {
-                            s.stopped_title
-                        };
-                        ui.label(egui::RichText::new(title).size(14.0).color(pal().danger));
-                        ui.add_space(2.0);
-                        if let Some(ref err) = self.last_error {
-                            ui.label(egui::RichText::new(err).color(pal().muted).small());
-                            ui.add_space(4.0);
-                        } else {
-                            let desc = if easy {
+                kit::surface(ui, |ui| {
+                    kit::status_dot(ui, Level::Error, s.offline);
+                    let title = if easy {
+                        s.stopped_title_easy
+                    } else {
+                        s.stopped_title
+                    };
+                    ui.label(kit::section_text(title));
+                    if let Some(ref err) = self.last_error {
+                        kit::hint(ui, err);
+                    } else {
+                        kit::hint(
+                            ui,
+                            if easy {
                                 s.stopped_desc_easy
                             } else {
                                 s.stopped_desc
-                            };
-                            ui.label(egui::RichText::new(desc).color(pal().muted).small());
-                            ui.add_space(4.0);
-                        }
-                        ui.horizontal(|ui| {
-                            ui.add_enabled_ui(!self.busy, |ui| {
-                                let btn_text = if easy {
-                                    s.stopped_button_easy
-                                } else {
-                                    s.stopped_button
-                                };
-                                if ui
-                                    .add_sized([140.0, 28.0], primary_button(btn_text))
-                                    .clicked()
-                                {
-                                    let _ = self.worker.tx.try_send(WorkerCmd::StartDaemon);
-                                    self.busy = true;
-                                    self.last_error = None;
-                                    let label = if easy {
-                                        s.starting_label_easy
-                                    } else {
-                                        s.starting_label
-                                    };
-                                    self.set_msg(MsgKind::Info, label);
-                                }
-                            });
-                        });
-                    });
+                            },
+                        );
+                    }
+                    let btn_text = if easy {
+                        s.stopped_button_easy
+                    } else {
+                        s.stopped_button
+                    };
+                    if kit::primary(ui, !self.busy, btn_text).clicked() {
+                        let _ = self.worker.tx.try_send(WorkerCmd::StartDaemon);
+                        self.busy = true;
+                        self.last_error = None;
+                        let label = if easy {
+                            s.starting_label_easy
+                        } else {
+                            s.starting_label
+                        };
+                        self.set_msg(MsgKind::Info, label);
+                    }
                 });
-                ui.add_space(4.0);
             }
             DaemonState::Starting => {
-                frame.show(ui, |ui| {
+                kit::surface(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spinner();
                         let label = if easy {
@@ -701,10 +644,9 @@ impl MiasmaApp {
                         } else {
                             s.starting_label
                         };
-                        ui.label(egui::RichText::new(label).color(pal().info));
+                        ui.label(RichText::new(label).color(kit::level_color(Level::Info)));
                     });
                 });
-                ui.add_space(4.0);
             }
         }
     }
@@ -716,187 +658,87 @@ impl MiasmaApp {
         let easy = self.mode.is_easy();
         let connected = self.daemon_state == DaemonState::Connected;
 
-        let heading = if easy {
+        let title = if easy {
             s.store_heading_easy
         } else {
             s.store_heading
         };
-        section_heading(ui, heading);
-        ui.add_space(4.0);
         let desc = if easy {
             s.store_desc_easy
         } else {
             s.store_desc
         };
-        ui.label(egui::RichText::new(desc).color(pal().muted));
-        ui.add_space(10.0);
-
-        // ── Easy mode: quick status dashboard ──
-        if easy && connected {
-            card_frame().show(ui, |ui| {
-                ui.label(
-                    egui::RichText::new(s.dashboard_quick_status)
-                        .strong()
-                        .color(pal().text)
-                        .size(13.0),
-                );
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    // Storage mini indicator.
-                    let storage_frame = egui::Frame::none()
-                        .inner_margin(egui::Margin::symmetric(12.0, 8.0))
-                        .rounding(6.0)
-                        .fill(pal().surface_subtle);
-                    storage_frame.show(ui, |ui| {
-                        ui.vertical(|ui| {
-                            ui.label(
-                                egui::RichText::new(s.dashboard_storage_label)
-                                    .color(pal().muted)
-                                    .small(),
-                            );
-                            if self.quota_mb > 0 {
-                                let pct = (self.used_mb / self.quota_mb as f64) * 100.0;
-                                ui.label(
-                                    egui::RichText::new(format!("{:.0}%", pct))
-                                        .size(18.0)
-                                        .strong(),
-                                );
-                                // Mini progress bar.
-                                let bar_width = 80.0;
-                                let (rect, _) = ui.allocate_exact_size(
-                                    egui::vec2(bar_width, 4.0),
-                                    egui::Sense::hover(),
-                                );
-                                ui.painter().rect_filled(rect, 2.0, pal().selected);
-                                let fill_width = (pct as f32 / 100.0).min(1.0) * bar_width;
-                                let fill_color = if pct > 90.0 {
-                                    pal().warning
+        kit::page(ui, title, Some(desc), |ui| {
+            // Easy mode: the three numbers that matter, as plain figures.
+            if easy && connected {
+                kit::section(ui, s.dashboard_quick_status, |ui| {
+                    let pct = if self.quota_mb > 0 {
+                        (self.used_mb / self.quota_mb as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+                    let storage = if self.quota_mb > 0 {
+                        format!("{pct:.0}%")
+                    } else {
+                        s.dashboard_no_data.to_owned()
+                    };
+                    kit::stats(
+                        ui,
+                        &[
+                            (s.dashboard_storage_label, storage, Level::Muted),
+                            (
+                                s.dashboard_peers_label,
+                                self.peer_count.to_string(),
+                                if self.peer_count > 0 {
+                                    Level::Ok
                                 } else {
-                                    pal().info
-                                };
-                                let fill_rect = egui::Rect::from_min_size(
-                                    rect.min,
-                                    egui::vec2(fill_width, 4.0),
-                                );
-                                ui.painter().rect_filled(fill_rect, 2.0, fill_color);
-                            } else {
-                                ui.label(
-                                    egui::RichText::new(s.dashboard_no_data)
-                                        .color(pal().muted)
-                                        .small(),
-                                );
-                            }
-                        });
-                    });
-
-                    // Peers mini indicator.
-                    let peer_frame = egui::Frame::none()
-                        .inner_margin(egui::Margin::symmetric(12.0, 8.0))
-                        .rounding(6.0)
-                        .fill(pal().surface_subtle);
-                    peer_frame.show(ui, |ui| {
-                        ui.vertical(|ui| {
-                            ui.label(
-                                egui::RichText::new(s.dashboard_peers_label)
-                                    .color(pal().muted)
-                                    .small(),
-                            );
-                            let peer_color = if self.peer_count > 0 {
-                                pal().success
-                            } else {
-                                pal().warning
-                            };
-                            ui.label(
-                                egui::RichText::new(self.peer_count.to_string())
-                                    .size(18.0)
-                                    .strong()
-                                    .color(peer_color),
-                            );
-                            let peer_hint = if self.peer_count > 0 {
-                                format!(
-                                    "{} {}",
-                                    self.peer_count,
-                                    s.status_peers.trim_end_matches('：').trim_end_matches(':')
-                                )
-                            } else {
-                                s.health_no_peers.to_string()
-                            };
-                            ui.label(egui::RichText::new(peer_hint).color(pal().muted).small());
-                        });
-                    });
-
-                    // Items mini indicator.
-                    let items_frame = egui::Frame::none()
-                        .inner_margin(egui::Margin::symmetric(12.0, 8.0))
-                        .rounding(6.0)
-                        .fill(pal().surface_subtle);
-                    items_frame.show(ui, |ui| {
-                        ui.vertical(|ui| {
-                            ui.label(
-                                egui::RichText::new(s.status_items_stored)
-                                    .color(pal().muted)
-                                    .small(),
-                            );
-                            ui.label(
-                                egui::RichText::new(self.share_count.to_string())
-                                    .size(18.0)
-                                    .strong(),
-                            );
-                        });
-                    });
+                                    Level::Warn
+                                },
+                            ),
+                            (
+                                s.status_items_stored,
+                                self.share_count.to_string(),
+                                Level::Muted,
+                            ),
+                        ],
+                    );
+                    if self.quota_mb > 0 {
+                        ui.add_space(kit::SP_1);
+                        kit::progress(ui, (pct / 100.0) as f32, pct > 90.0);
+                    }
+                    if self.peer_count == 0 {
+                        kit::notice(ui, Level::Warn, s.health_no_peers);
+                    }
                 });
-            });
-            ui.add_space(8.0);
-        }
+            }
 
-        // Not-connected hint for Easy mode.
-        if easy && !connected {
-            card_frame().show(ui, |ui| {
-                ui.colored_label(pal().warning, s.store_not_connected_hint);
-            });
-            ui.add_space(8.0);
-        }
+            if easy && !connected {
+                kit::notice(ui, Level::Warn, s.store_not_connected_hint);
+            }
 
-        // Text input card.
-        card_frame().show(ui, |ui| {
-            ui.label(s.store_text_label);
-            ui.add_space(2.0);
-            ui.add_enabled(
-                connected,
-                egui::TextEdit::multiline(&mut self.dissolve_text)
-                    .hint_text(s.store_text_hint)
-                    .desired_rows(if easy { 6 } else { 5 })
-                    .desired_width(f32::INFINITY),
-            );
-
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                // Primary action button — accent for Easy, normal for Technical.
-                ui.add_enabled_ui(
-                    connected && !self.dissolve_text.is_empty() && !self.busy,
-                    |ui| {
-                        let btn = if easy {
-                            primary_button(egui::RichText::new(s.store_button).strong().size(14.0))
-                        } else {
-                            primary_button(s.store_button)
-                        };
-                        let size = if easy { [140.0, 34.0] } else { [120.0, 28.0] };
-                        if ui.add_sized(size, btn).clicked() {
-                            let _ = self
-                                .worker
-                                .tx
-                                .try_send(WorkerCmd::DissolveText(self.dissolve_text.clone()));
-                            self.busy = true;
-                            self.set_msg(MsgKind::Info, s.store_busy);
-                        }
-                    },
+            // The primary task: put text or a file into the network.
+            kit::surface(ui, |ui| {
+                ui.label(s.store_text_label);
+                ui.add_enabled(
+                    connected,
+                    kit::input_multiline(&mut self.dissolve_text)
+                        .hint_text(s.store_text_hint)
+                        .desired_rows(if easy { 6 } else { 5 }),
                 );
-
-                ui.add_enabled_ui(connected && !self.busy, |ui| {
+                kit::button_row(ui, |ui| {
+                    let can_store = connected && !self.dissolve_text.is_empty() && !self.busy;
+                    if kit::primary(ui, can_store, s.store_button).clicked() {
+                        let _ = self
+                            .worker
+                            .tx
+                            .try_send(WorkerCmd::DissolveText(self.dissolve_text.clone()));
+                        self.busy = true;
+                        self.set_msg(MsgKind::Info, s.store_busy);
+                    }
                     if ui
-                        .add_sized(
-                            [130.0, if easy { 34.0 } else { 28.0 }],
-                            egui::Button::new(s.store_choose_file),
+                        .add_enabled(
+                            connected && !self.busy,
+                            kit::secondary_button(s.store_choose_file),
                         )
                         .clicked()
                     {
@@ -906,54 +748,44 @@ impl MiasmaApp {
                             self.set_msg(MsgKind::Info, s.store_busy);
                         }
                     }
+                    if self.busy {
+                        ui.spinner();
+                    }
                 });
-
-                if self.busy {
-                    ui.spinner();
-                }
             });
-        });
 
-        // MID result card.
-        if let Some(ref mid) = self.last_mid.clone() {
-            ui.add_space(8.0);
-            card_frame().show(ui, |ui| {
+            // The result: the MID to hand to whoever should retrieve it.
+            if let Some(mid) = self.last_mid.clone() {
+                ui.add_space(kit::SP_4);
                 let mid_label = if easy {
                     s.store_mid_label_easy
                 } else {
                     s.store_mid_label
                 };
-                ui.label(egui::RichText::new(mid_label).strong().color(pal().success));
-                ui.add_space(4.0);
-
-                ui.horizontal(|ui| {
-                    let mut display = mid.clone();
-                    ui.add(
-                        egui::TextEdit::singleline(&mut display)
-                            .desired_width(ui.available_width() - 80.0)
-                            .font(egui::TextStyle::Monospace),
+                kit::section(ui, mid_label, |ui| {
+                    ui.horizontal(|ui| {
+                        let mut display = mid.clone();
+                        let w = kit::input_width_beside_button(ui);
+                        ui.add(kit::input_mono(&mut display).desired_width(w));
+                        if ui.add(kit::secondary_button(s.store_copy)).clicked() {
+                            ui.output_mut(|o| o.copied_text = mid.clone());
+                            self.set_msg(MsgKind::Info, s.store_copied);
+                        }
+                    });
+                    kit::hint(
+                        ui,
+                        if easy {
+                            s.store_share_hint_easy
+                        } else {
+                            s.store_share_hint
+                        },
                     );
-                    if ui
-                        .add_sized([70.0, 26.0], egui::Button::new(s.store_copy))
-                        .clicked()
-                    {
-                        ui.output_mut(|o| o.copied_text = mid.clone());
-                        self.set_msg(MsgKind::Info, s.store_copied);
-                    }
                 });
-
-                ui.add_space(4.0);
-                let hint = if easy {
-                    s.store_share_hint_easy
-                } else {
-                    s.store_share_hint
-                };
-                ui.label(egui::RichText::new(hint).color(pal().muted).small());
-            });
-        }
+            }
+        });
     }
 
-    // ── Retrieve panel ───────────────────────────────────────────────────
+    // ── Transfers / Retrieve panels ──────────────────────────────────────
 
     fn transfers_panel(&mut self, ui: &mut egui::Ui) {
         let t = self.tr();
@@ -969,149 +801,104 @@ impl MiasmaApp {
         let easy = self.mode.is_easy();
         let connected = self.daemon_state == DaemonState::Connected;
 
-        let heading = if easy {
+        let title = if easy {
             s.retrieve_heading_easy
         } else {
             s.retrieve_heading
         };
-        section_heading(ui, heading);
-        ui.add_space(4.0);
         let desc = if easy {
             s.retrieve_desc_easy
         } else {
             s.retrieve_desc
         };
-        ui.label(egui::RichText::new(desc).color(pal().muted));
-        ui.add_space(10.0);
+        kit::page(ui, title, Some(desc), |ui| {
+            if easy && !connected {
+                kit::notice(ui, Level::Warn, s.retrieve_not_connected_hint);
+            }
 
-        // Not-connected hint for Easy mode.
-        if easy && !connected {
-            card_frame().show(ui, |ui| {
-                ui.colored_label(pal().warning, s.retrieve_not_connected_hint);
-            });
-            ui.add_space(8.0);
-        }
-
-        // Input card.
-        card_frame().show(ui, |ui| {
-            let mid_label = if easy {
-                s.retrieve_mid_label_easy
-            } else {
-                s.retrieve_mid_label
-            };
-            ui.label(mid_label);
-            ui.add_space(2.0);
-            ui.add_enabled(
-                connected,
-                egui::TextEdit::singleline(&mut self.mid_input)
-                    .hint_text("miasma:...")
-                    .desired_width(f32::INFINITY)
-                    .font(egui::TextStyle::Monospace),
-            );
-
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                ui.add_enabled_ui(
-                    connected && !self.mid_input.is_empty() && !self.busy,
-                    |ui| {
-                        let label = if easy {
-                            s.retrieve_button_easy
-                        } else {
-                            s.retrieve_button
-                        };
-                        let btn = if easy {
-                            primary_button(egui::RichText::new(label).strong().size(14.0))
-                        } else {
-                            primary_button(label)
-                        };
-                        let size = if easy { [140.0, 34.0] } else { [120.0, 28.0] };
-                        if ui.add_sized(size, btn).clicked() {
-                            let _ = self
-                                .worker
-                                .tx
-                                .try_send(WorkerCmd::Retrieve(self.mid_input.clone()));
-                            self.busy = true;
-                            self.set_msg(MsgKind::Info, s.retrieve_busy);
-                        }
-                    },
+            kit::surface(ui, |ui| {
+                ui.label(if easy {
+                    s.retrieve_mid_label_easy
+                } else {
+                    s.retrieve_mid_label
+                });
+                ui.add_enabled(
+                    connected,
+                    kit::input_mono(&mut self.mid_input).hint_text("miasma:..."),
                 );
-
-                if self.busy {
-                    ui.spinner();
-                }
-            });
-        });
-
-        // Result card.
-        if let Some(summary) = self.retrieved_summary.clone() {
-            ui.add_space(8.0);
-            card_frame().show(ui, |ui| {
-                ui.label(
-                    egui::RichText::new(s.retrieve_result_label)
-                        .strong()
-                        .color(pal().success),
-                );
-                ui.add_space(2.0);
-                ui.label(&summary);
-                ui.add_space(6.0);
-
-                if self.save_data.is_some() || self.save_file_path.is_some() {
-                    let save_btn = if easy {
-                        egui::Button::new(
-                            egui::RichText::new(s.retrieve_save_button)
-                                .strong()
-                                .size(14.0),
-                        )
+                kit::button_row(ui, |ui| {
+                    let can_get = connected && !self.mid_input.is_empty() && !self.busy;
+                    let label = if easy {
+                        s.retrieve_button_easy
                     } else {
-                        egui::Button::new(s.retrieve_save_button)
+                        s.retrieve_button
                     };
-                    let size = if easy { [160.0, 34.0] } else { [140.0, 28.0] };
-                    if ui.add_sized(size, save_btn).clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .set_file_name("retrieved.bin")
-                            .save_file()
-                        {
-                            if let Some(temp_path) = self.save_file_path.clone() {
-                                let result = std::fs::rename(&temp_path, &path).or_else(|_| {
-                                    std::fs::copy(&temp_path, &path).map(|_| ())?;
-                                    std::fs::remove_file(&temp_path).ok();
-                                    Ok::<(), std::io::Error>(())
-                                });
-                                match result {
-                                    Ok(()) => {
-                                        self.save_file_path = None;
-                                        self.set_msg(
-                                            MsgKind::Success,
-                                            format!("{} {}", s.retrieve_saved, path.display()),
-                                        );
-                                    }
-                                    Err(e) => {
-                                        self.set_msg(
-                                            MsgKind::Error,
-                                            format!("{} {e}", s.retrieve_save_failed),
-                                        );
-                                    }
-                                }
-                            } else if let Some(data) = &self.save_data {
-                                match std::fs::write(&path, data) {
-                                    Ok(_) => {
-                                        self.set_msg(
-                                            MsgKind::Success,
-                                            format!("{} {}", s.retrieve_saved, path.display()),
-                                        );
-                                    }
-                                    Err(e) => {
-                                        self.set_msg(
-                                            MsgKind::Error,
-                                            format!("{} {e}", s.retrieve_save_failed),
-                                        );
-                                    }
-                                }
-                            }
-                        }
+                    if kit::primary(ui, can_get, label).clicked() {
+                        let _ = self
+                            .worker
+                            .tx
+                            .try_send(WorkerCmd::Retrieve(self.mid_input.clone()));
+                        self.busy = true;
+                        self.set_msg(MsgKind::Info, s.retrieve_busy);
                     }
-                }
+                    if self.busy {
+                        ui.spinner();
+                    }
+                });
             });
+
+            if let Some(summary) = self.retrieved_summary.clone() {
+                ui.add_space(kit::SP_4);
+                kit::section(ui, s.retrieve_result_label, |ui| {
+                    kit::paragraph(ui, &summary);
+                    if (self.save_data.is_some() || self.save_file_path.is_some())
+                        && kit::primary(ui, true, s.retrieve_save_button).clicked()
+                    {
+                        self.save_retrieved(s);
+                    }
+                });
+            }
+        });
+    }
+
+    /// Ask where to put the retrieved data and write it there.
+    fn save_retrieved(&mut self, s: &'static Strings) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name("retrieved.bin")
+            .save_file()
+        else {
+            return;
+        };
+        if let Some(temp_path) = self.save_file_path.clone() {
+            let result = std::fs::rename(&temp_path, &path).or_else(|_| {
+                std::fs::copy(&temp_path, &path).map(|_| ())?;
+                std::fs::remove_file(&temp_path).ok();
+                Ok::<(), std::io::Error>(())
+            });
+            match result {
+                Ok(()) => {
+                    self.save_file_path = None;
+                    self.set_msg(
+                        MsgKind::Success,
+                        format!("{} {}", s.retrieve_saved, path.display()),
+                    );
+                }
+                Err(e) => {
+                    self.set_msg(MsgKind::Error, format!("{} {e}", s.retrieve_save_failed));
+                }
+            }
+        } else if let Some(data) = &self.save_data {
+            match std::fs::write(&path, data) {
+                Ok(_) => {
+                    self.set_msg(
+                        MsgKind::Success,
+                        format!("{} {}", s.retrieve_saved, path.display()),
+                    );
+                }
+                Err(e) => {
+                    self.set_msg(MsgKind::Error, format!("{} {e}", s.retrieve_save_failed));
+                }
+            }
         }
     }
 
@@ -1120,96 +907,75 @@ impl MiasmaApp {
     fn send_panel(&mut self, ui: &mut egui::Ui) {
         let s = self.s();
         let easy = self.mode.is_easy();
-        let heading = if easy {
+        let title = if easy {
             s.send_heading_easy
         } else {
             s.send_heading
         };
         let desc = if easy { s.send_desc_easy } else { s.send_desc };
+        let connected = self.daemon_state == DaemonState::Connected;
 
-        card_frame().show(ui, |ui| {
-            ui.colored_label(pal().text, egui::RichText::new(heading).size(15.0).strong());
-            ui.add_space(4.0);
-            ui.colored_label(pal().muted, desc);
-            ui.add_space(10.0);
-
-            // Show sharing contact (own).
-            if let Some(contact) = self.sharing_contact.clone() {
-                let key_desc = if easy {
-                    s.sharing_key_desc_easy
-                } else {
-                    s.sharing_key_desc
-                };
-                ui.colored_label(pal().muted, key_desc);
-                ui.horizontal(|ui| {
-                    ui.monospace(contact.as_str());
-                    if ui.small_button(s.sharing_key_copy).clicked() {
-                        ui.output_mut(|o| o.copied_text = contact.clone());
+        kit::page(ui, title, Some(desc), |ui| {
+            kit::surface(ui, |ui| {
+                // Own contact string: what a sender needs to address this device.
+                if let Some(contact) = self.sharing_contact.clone() {
+                    kit::hint(
+                        ui,
+                        if easy {
+                            s.sharing_key_desc_easy
+                        } else {
+                            s.sharing_key_desc
+                        },
+                    );
+                    if kit::mono_copy(ui, &contact, s.sharing_key_copy) {
                         self.set_msg(MsgKind::Success, s.sharing_key_copied);
                     }
+                    ui.add_space(kit::SP_1);
+                    kit::divider(ui);
+                    ui.add_space(kit::SP_1);
+                } else if connected {
+                    // Request sharing key on first render.
+                    let _ = self.worker.tx.try_send(WorkerCmd::GetSharingKey);
+                }
+
+                kit::form_row(ui, s.send_contact_label, None, |ui| {
+                    ui.add(kit::input(&mut self.send_contact).hint_text(s.send_contact_hint));
                 });
-                ui.add_space(8.0);
-            } else if self.daemon_state == DaemonState::Connected {
-                // Request sharing key on first render.
-                let _ = self.worker.tx.try_send(WorkerCmd::GetSharingKey);
-            }
-
-            // Recipient contact.
-            ui.horizontal(|ui| {
-                ui.label(s.send_contact_label);
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.send_contact)
-                        .hint_text(s.send_contact_hint)
-                        .desired_width(350.0),
+                kit::form_row(ui, s.send_password_label, None, |ui| {
+                    ui.add(
+                        kit::input(&mut self.send_password)
+                            .password(true)
+                            .desired_width(240.0),
+                    );
+                });
+                kit::form_row(
+                    ui,
+                    s.send_retention_label,
+                    Some("(e.g. 24h, 7d, 30d)"),
+                    |ui| {
+                        ui.add(kit::input(&mut self.send_retention).desired_width(120.0));
+                    },
                 );
-            });
+                kit::form_row(ui, s.inbox_filename, None, |ui| {
+                    ui.horizontal(|ui| {
+                        if ui.add(kit::secondary_button(s.send_choose_file)).clicked() {
+                            if let Some(path) = rfd::FileDialog::new().pick_file() {
+                                self.send_file_path = Some(path);
+                            }
+                        }
+                        if let Some(ref path) = self.send_file_path {
+                            kit::mono_elided(ui, &path.display().to_string());
+                        }
+                    });
+                });
 
-            // Password.
-            ui.horizontal(|ui| {
-                ui.label(s.send_password_label);
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.send_password)
-                        .password(true)
-                        .desired_width(200.0),
-                );
-            });
-
-            // Retention.
-            ui.horizontal(|ui| {
-                ui.label(s.send_retention_label);
-                ui.add(egui::TextEdit::singleline(&mut self.send_retention).desired_width(80.0));
-                ui.colored_label(pal().muted, "(e.g. 24h, 7d, 30d)");
-            });
-
-            // File chooser.
-            ui.horizontal(|ui| {
-                if ui.button(s.send_choose_file).clicked() {
-                    if let Some(path) = rfd::FileDialog::new().pick_file() {
-                        self.send_file_path = Some(path);
-                    }
-                }
-                if let Some(ref path) = self.send_file_path {
-                    ui.monospace(path.display().to_string());
-                }
-            });
-
-            ui.add_space(8.0);
-
-            // Send button.
-            let can_send = self.daemon_state == DaemonState::Connected
-                && !self.busy
-                && !self.send_contact.is_empty()
-                && !self.send_password.is_empty()
-                && self.send_file_path.is_some();
-
-            if self.daemon_state != DaemonState::Connected {
-                ui.colored_label(pal().muted, s.send_not_connected);
-            } else if self.busy {
-                ui.colored_label(pal().muted, s.send_busy);
-            } else {
-                ui.horizontal(|ui| {
-                    let btn = primary_button(egui::RichText::new(s.send_button));
-                    if ui.add_enabled(can_send, btn).clicked() {
+                let can_send = connected
+                    && !self.busy
+                    && !self.send_contact.is_empty()
+                    && !self.send_password.is_empty()
+                    && self.send_file_path.is_some();
+                kit::form_actions(ui, |ui| {
+                    if kit::primary(ui, can_send, s.send_button).clicked() {
                         if let Some(ref path) = self.send_file_path {
                             self.busy = true;
                             let _ = self.worker.tx.try_send(WorkerCmd::DirectedSend {
@@ -1220,20 +986,20 @@ impl MiasmaApp {
                             });
                         }
                     }
-                });
-            }
-
-            // Show last envelope ID.
-            if let Some(ref eid) = self.last_envelope_id {
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.colored_label(pal().success, "Envelope ID:");
-                    ui.monospace(eid.as_str());
-                    if ui.small_button(s.copy).clicked() {
-                        ui.output_mut(|o| o.copied_text = eid.clone());
+                    if !connected {
+                        ui.label(kit::muted_text(s.send_not_connected));
+                    } else if self.busy {
+                        ui.label(kit::muted_text(s.send_busy));
                     }
                 });
-            }
+
+                if let Some(eid) = self.last_envelope_id.clone() {
+                    ui.add_space(kit::SP_1);
+                    kit::form_row(ui, "Envelope ID:", None, |ui| {
+                        kit::mono_copy(ui, &eid, s.copy);
+                    });
+                }
+            });
         });
     }
 
@@ -1242,7 +1008,8 @@ impl MiasmaApp {
     fn inbox_panel(&mut self, ui: &mut egui::Ui) {
         let s = self.s();
         let easy = self.mode.is_easy();
-        let heading = if easy {
+        let connected = self.daemon_state == DaemonState::Connected;
+        let title = if easy {
             s.inbox_heading_easy
         } else {
             s.inbox_heading
@@ -1253,144 +1020,111 @@ impl MiasmaApp {
             s.inbox_desc
         };
 
-        card_frame().show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.colored_label(pal().text, egui::RichText::new(heading).size(15.0).strong());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button(s.inbox_refresh).clicked()
-                        && self.daemon_state == DaemonState::Connected
-                    {
-                        let _ = self.worker.tx.try_send(WorkerCmd::DirectedInbox);
-                    }
-                });
-            });
-            ui.add_space(4.0);
-            ui.colored_label(pal().muted, desc);
-            ui.add_space(10.0);
-
-            if self.inbox_items.is_empty() {
-                ui.colored_label(pal().muted, s.inbox_empty);
-                // Auto-refresh on first render.
-                if self.daemon_state == DaemonState::Connected {
+        // Taken out for the frame instead of cloned: the rows need `&mut self` for the password
+        // field and the worker.
+        let items = std::mem::take(&mut self.inbox_items);
+        kit::page_actions(
+            ui,
+            title,
+            Some(desc),
+            |ui| {
+                if ui.add(kit::compact_button(s.inbox_refresh)).clicked() && connected {
                     let _ = self.worker.tx.try_send(WorkerCmd::DirectedInbox);
                 }
-            } else {
-                for item in &self.inbox_items.clone() {
-                    card_frame().show(ui, |ui| {
-                        // Envelope ID and colored state badge.
-                        ui.horizontal(|ui| {
-                            ui.monospace(&item.envelope_id[..16.min(item.envelope_id.len())]);
-                            let (state_color, state_label) = inbox_state_display(s, &item.state);
-                            ui.colored_label(state_color, format!("  {state_label}"));
-                        });
+            },
+            |ui| {
+                if items.is_empty() {
+                    ui.label(kit::muted_text(s.inbox_empty));
+                    // Auto-refresh on first render.
+                    if connected {
+                        let _ = self.worker.tx.try_send(WorkerCmd::DirectedInbox);
+                    }
+                    return;
+                }
+                for item in &items {
+                    kit::list_item(ui, |ui| {
+                        let (level, state_label) = inbox_state_display(s, &item.state);
+                        envelope_header(ui, &item.envelope_id, level, state_label);
 
-                        // Sender.
-                        ui.horizontal(|ui| {
-                            ui.colored_label(pal().muted, s.inbox_from);
-                            ui.monospace(&item.sender[..20.min(item.sender.len())]);
-                        });
-
-                        // Filename and size.
-                        if let Some(ref fname) = item.filename {
-                            ui.horizontal(|ui| {
-                                ui.colored_label(pal().muted, s.inbox_filename);
-                                ui.label(fname.as_str());
-                                if item.file_size > 0 {
-                                    ui.colored_label(
-                                        pal().muted,
-                                        format!(
-                                            "  ({} {})",
-                                            s.inbox_file_size,
-                                            format_size(item.file_size)
-                                        ),
-                                    );
-                                }
+                        kit::kv_grid(ui, |g| {
+                            g.row(s.inbox_from, |ui| {
+                                kit::mono_elided(ui, short(&item.sender, 20));
                             });
-                        }
-
-                        // Timestamps.
-                        ui.horizontal(|ui| {
-                            ui.colored_label(pal().muted, format!("Created: {}", item.created_at));
-                            ui.colored_label(
-                                pal().muted,
-                                format!("  Expires: {}", item.expires_at),
-                            );
+                            if let Some(ref fname) = item.filename {
+                                g.row(s.inbox_filename, |ui| {
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.label(fname.as_str());
+                                        if item.file_size > 0 {
+                                            ui.label(kit::muted_text(format!(
+                                                "({} {})",
+                                                s.inbox_file_size,
+                                                format_size(item.file_size)
+                                            )));
+                                        }
+                                    });
+                                });
+                            }
+                            g.text("Created:", &item.created_at);
+                            g.text("Expires:", &item.expires_at);
+                            // Challenge code: the recipient reads this out to the sender.
+                            if let Some(ref code) = item.challenge_code {
+                                g.row(s.inbox_challenge, |ui| {
+                                    kit::mono_copy(ui, code.as_str(), s.copy);
+                                });
+                            }
                         });
 
-                        // Challenge code display (recipient shows this to sender out-of-band).
-                        if let Some(ref code) = item.challenge_code {
-                            ui.horizontal(|ui| {
-                                ui.colored_label(
-                                    pal().success,
-                                    format!("{} {}", s.inbox_challenge, code.as_str()),
-                                );
-                                if ui.small_button(s.copy).clicked() {
-                                    ui.output_mut(|o| o.copied_text = code.as_str().to_owned());
-                                }
-                            });
-                        }
-
-                        // Error / terminal state messages.
                         match item.state.as_str() {
-                            "Expired" => {
-                                ui.colored_label(pal().danger, s.inbox_expired);
-                            }
-                            "SenderRevoked" => {
-                                ui.colored_label(pal().danger, s.inbox_revoked);
-                            }
+                            "Expired" => kit::notice(ui, Level::Error, s.inbox_expired),
+                            "SenderRevoked" => kit::notice(ui, Level::Error, s.inbox_revoked),
                             "PasswordFailed" => {
-                                ui.colored_label(pal().danger, s.inbox_attempts_exhausted);
+                                kit::notice(ui, Level::Error, s.inbox_attempts_exhausted)
                             }
                             "ChallengeFailed" => {
-                                ui.colored_label(pal().danger, s.outbox_challenge_failed);
+                                kit::notice(ui, Level::Error, s.outbox_challenge_failed)
                             }
                             _ => {}
                         }
 
-                        // Retrieve button (only in Confirmed state).
+                        // Retrieve (only in Confirmed state).
                         if item.state == "Confirmed" {
-                            ui.add_space(4.0);
-                            ui.horizontal(|ui| {
-                                ui.label(s.inbox_password_label);
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut self.inbox_retrieve_password)
-                                        .password(true)
-                                        .desired_width(150.0),
-                                );
-                                let can_retrieve = !self.inbox_retrieve_password.is_empty()
-                                    && self.daemon_state == DaemonState::Connected
-                                    && !self.busy;
-                                let btn = egui::Button::new(s.inbox_retrieve_button);
-                                if ui.add_enabled(can_retrieve, btn).clicked() {
-                                    self.busy = true;
-                                    let _ = self.worker.tx.try_send(WorkerCmd::DirectedRetrieve {
-                                        envelope_id: item.envelope_id.clone(),
-                                        password: self.inbox_retrieve_password.clone(),
-                                    });
-                                }
+                            kit::form_row(ui, s.inbox_password_label, None, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.add(
+                                        kit::input(&mut self.inbox_retrieve_password)
+                                            .password(true)
+                                            .desired_width(200.0),
+                                    );
+                                    let can_retrieve = !self.inbox_retrieve_password.is_empty()
+                                        && connected
+                                        && !self.busy;
+                                    if kit::primary(ui, can_retrieve, s.inbox_retrieve_button)
+                                        .clicked()
+                                    {
+                                        self.busy = true;
+                                        let _ =
+                                            self.worker.tx.try_send(WorkerCmd::DirectedRetrieve {
+                                                envelope_id: item.envelope_id.clone(),
+                                                password: self.inbox_retrieve_password.clone(),
+                                            });
+                                    }
+                                });
                             });
                         }
 
-                        // Delete button (non-terminal states only).
-                        let is_terminal = matches!(
-                            item.state.as_str(),
-                            "Retrieved"
-                                | "SenderRevoked"
-                                | "RecipientDeleted"
-                                | "Expired"
-                                | "ChallengeFailed"
-                                | "PasswordFailed"
-                        );
-                        if !is_terminal && ui.small_button(s.inbox_revoke_button).clicked() {
+                        // Revoke (non-terminal states only).
+                        if !is_terminal_state(&item.state)
+                            && ui.add(kit::danger_button(s.inbox_revoke_button)).clicked()
+                        {
                             let _ = self.worker.tx.try_send(WorkerCmd::DirectedRevoke {
                                 envelope_id: item.envelope_id.clone(),
                             });
                         }
                     });
-                    ui.add_space(4.0);
                 }
-            }
-        });
+            },
+        );
+        self.inbox_items = items;
     }
 
     // ── Outbox panel (sender view) ──────────────────────────────────────
@@ -1398,7 +1132,8 @@ impl MiasmaApp {
     fn outbox_panel(&mut self, ui: &mut egui::Ui) {
         let s = self.s();
         let easy = self.mode.is_easy();
-        let heading = if easy {
+        let connected = self.daemon_state == DaemonState::Connected;
+        let title = if easy {
             s.outbox_heading_easy
         } else {
             s.outbox_heading
@@ -1409,111 +1144,84 @@ impl MiasmaApp {
             s.outbox_desc
         };
 
-        card_frame().show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.colored_label(pal().text, egui::RichText::new(heading).size(15.0).strong());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button(s.outbox_refresh).clicked()
-                        && self.daemon_state == DaemonState::Connected
-                    {
-                        let _ = self.worker.tx.try_send(WorkerCmd::DirectedOutbox);
-                    }
-                });
-            });
-            ui.add_space(4.0);
-            ui.colored_label(pal().muted, desc);
-            ui.add_space(10.0);
-
-            if self.outbox_items.is_empty() {
-                ui.colored_label(pal().muted, s.outbox_empty);
-                // Auto-refresh on first render.
-                if self.daemon_state == DaemonState::Connected {
+        let items = std::mem::take(&mut self.outbox_items);
+        kit::page_actions(
+            ui,
+            title,
+            Some(desc),
+            |ui| {
+                if ui.add(kit::compact_button(s.outbox_refresh)).clicked() && connected {
                     let _ = self.worker.tx.try_send(WorkerCmd::DirectedOutbox);
                 }
-            } else {
-                for item in &self.outbox_items.clone() {
-                    card_frame().show(ui, |ui| {
-                        // Envelope ID and state badge.
-                        ui.horizontal(|ui| {
-                            ui.monospace(&item.envelope_id[..16.min(item.envelope_id.len())]);
-                            let (state_color, state_label) = outbox_state_display(s, &item.state);
-                            ui.colored_label(state_color, format!("  {state_label}"));
-                        });
+            },
+            |ui| {
+                if items.is_empty() {
+                    ui.label(kit::muted_text(s.outbox_empty));
+                    // Auto-refresh on first render.
+                    if connected {
+                        let _ = self.worker.tx.try_send(WorkerCmd::DirectedOutbox);
+                    }
+                    return;
+                }
+                for item in &items {
+                    kit::list_item(ui, |ui| {
+                        let (level, state_label) = outbox_state_display(s, &item.state);
+                        envelope_header(ui, &item.envelope_id, level, state_label);
 
-                        // Recipient.
-                        ui.horizontal(|ui| {
-                            ui.colored_label(pal().muted, s.outbox_to);
-                            ui.monospace(&item.recipient[..20.min(item.recipient.len())]);
-                        });
-
-                        // Filename.
-                        if let Some(ref fname) = item.filename {
-                            ui.horizontal(|ui| {
-                                ui.colored_label(pal().muted, s.outbox_filename);
-                                ui.label(fname.as_str());
+                        kit::kv_grid(ui, |g| {
+                            g.row(s.outbox_to, |ui| {
+                                kit::mono_elided(ui, short(&item.recipient, 20));
                             });
-                        }
-
-                        // Timestamps.
-                        ui.horizontal(|ui| {
-                            ui.colored_label(pal().muted, format!("Created: {}", item.created_at));
-                            ui.colored_label(
-                                pal().muted,
-                                format!("  Expires: {}", item.expires_at),
-                            );
+                            if let Some(ref fname) = item.filename {
+                                g.text(s.outbox_filename, fname);
+                            }
+                            g.text("Created:", &item.created_at);
+                            g.text("Expires:", &item.expires_at);
                         });
 
-                        // Sender confirmation: if ChallengeIssued, show challenge code entry.
+                        // Sender confirmation: ask for the challenge code.
                         if item.state == "ChallengeIssued" {
-                            ui.add_space(4.0);
-                            ui.colored_label(pal().warning, s.outbox_confirm_heading);
-                            ui.horizontal(|ui| {
-                                ui.label(s.outbox_confirm_label);
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut self.outbox_confirm_code)
-                                        .hint_text(s.outbox_confirm_hint)
-                                        .desired_width(120.0)
-                                        .font(egui::TextStyle::Monospace),
-                                );
-                                let can_confirm = !self.outbox_confirm_code.is_empty()
-                                    && self.daemon_state == DaemonState::Connected
-                                    && !self.busy;
-                                let btn = egui::Button::new(s.outbox_confirm_button);
-                                if ui.add_enabled(can_confirm, btn).clicked() {
-                                    self.busy = true;
-                                    let _ = self.worker.tx.try_send(WorkerCmd::DirectedConfirm {
-                                        envelope_id: item.envelope_id.clone(),
-                                        challenge_code: self.outbox_confirm_code.clone(),
-                                    });
-                                }
+                            kit::notice(ui, Level::Warn, s.outbox_confirm_heading);
+                            kit::form_row(ui, s.outbox_confirm_label, None, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.add(
+                                        kit::input_mono(&mut self.outbox_confirm_code)
+                                            .hint_text(s.outbox_confirm_hint)
+                                            .desired_width(140.0),
+                                    );
+                                    let can_confirm = !self.outbox_confirm_code.is_empty()
+                                        && connected
+                                        && !self.busy;
+                                    if kit::primary(ui, can_confirm, s.outbox_confirm_button)
+                                        .clicked()
+                                    {
+                                        self.busy = true;
+                                        let _ =
+                                            self.worker.tx.try_send(WorkerCmd::DirectedConfirm {
+                                                envelope_id: item.envelope_id.clone(),
+                                                challenge_code: self.outbox_confirm_code.clone(),
+                                            });
+                                    }
+                                });
                             });
                         }
 
-                        // Waiting state hint.
                         if item.state == "Pending" {
-                            ui.colored_label(pal().warning, s.outbox_waiting_challenge);
+                            kit::notice(ui, Level::Warn, s.outbox_waiting_challenge);
                         }
 
-                        // Revoke button for non-terminal states.
-                        let is_terminal = matches!(
-                            item.state.as_str(),
-                            "Retrieved"
-                                | "SenderRevoked"
-                                | "RecipientDeleted"
-                                | "Expired"
-                                | "ChallengeFailed"
-                                | "PasswordFailed"
-                        );
-                        if !is_terminal && ui.small_button(s.outbox_revoke_button).clicked() {
+                        if !is_terminal_state(&item.state)
+                            && ui.add(kit::danger_button(s.outbox_revoke_button)).clicked()
+                        {
                             let _ = self.worker.tx.try_send(WorkerCmd::DirectedRevoke {
                                 envelope_id: item.envelope_id.clone(),
                             });
                         }
                     });
-                    ui.add_space(4.0);
                 }
-            }
-        });
+            },
+        );
+        self.outbox_items = items;
     }
 
     // ── Status panel ─────────────────────────────────────────────────────
@@ -1521,420 +1229,246 @@ impl MiasmaApp {
     fn status_panel(&mut self, ui: &mut egui::Ui) {
         let s = self.s();
         let easy = self.mode.is_easy();
+        let connected = self.daemon_state == DaemonState::Connected;
 
-        section_heading(ui, s.status_heading);
-        ui.add_space(4.0);
+        kit::page(ui, s.status_heading, None, |ui| {
+            kit::button_row(ui, |ui| {
+                if ui.add(kit::secondary_button(s.status_refresh)).clicked() {
+                    let _ = self.worker.tx.try_send(WorkerCmd::GetStatus);
+                }
+                if !easy {
+                    self.copy_diagnostics_button(ui);
+                }
+                // "Save report" is in both modes: it is what support asks for.
+                self.save_diagnostics_button(ui);
+            });
+            ui.add_space(kit::SP_2);
 
-        // Action buttons — smaller row for Easy, full row for Technical.
-        ui.horizontal(|ui| {
-            if ui
-                .add_sized([90.0, 26.0], egui::Button::new(s.status_refresh))
-                .clicked()
-            {
-                let _ = self.worker.tx.try_send(WorkerCmd::GetStatus);
+            if easy {
+                self.status_panel_easy(ui);
+            } else {
+                self.status_panel_technical(ui);
             }
-            if !easy
-                && ui
-                    .add_sized([160.0, 26.0], egui::Button::new(s.status_copy_diag))
-                    .clicked()
-            {
-                let diag = self.build_diagnostics();
-                ui.output_mut(|o| o.copied_text = diag);
-                self.set_msg(MsgKind::Info, s.status_diag_copied);
-            }
-            // "Save Report" — available in both modes for support.
-            if ui
-                .add_sized([130.0, 26.0], egui::Button::new(s.status_save_diag))
-                .clicked()
-            {
-                let diag = self.build_diagnostics();
-                if let Some(path) = rfd::FileDialog::new()
-                    .set_file_name("miasma-diagnostics.txt")
-                    .add_filter("Text files", &["txt"])
-                    .save_file()
-                {
-                    match std::fs::write(&path, &diag) {
-                        Ok(()) => self.set_msg(
-                            MsgKind::Success,
-                            format!("{} {}", s.status_diag_saved, path.display()),
-                        ),
-                        Err(e) => self
-                            .set_msg(MsgKind::Error, format!("{}{e}", s.status_diag_save_failed)),
+
+            // Emergency wipe: a section of its own at the bottom, never next to a primary.
+            kit::section(ui, s.wipe_label, |ui| {
+                ui.add_enabled_ui(connected, |ui| {
+                    kit::paragraph_muted(ui, s.wipe_desc);
+                    if ui.add(kit::danger_button(s.wipe_button)).clicked() {
+                        self.show_wipe_confirm = true;
                     }
-                }
-            }
-        });
-
-        ui.add_space(8.0);
-
-        if easy {
-            self.status_panel_easy(ui);
-        } else {
-            self.status_panel_technical(ui);
-        }
-
-        // ── Emergency wipe ──────────────────────────────────────────
-        ui.add_space(12.0);
-
-        card_frame().show(ui, |ui| {
-            ui.add_enabled_ui(self.daemon_state == DaemonState::Connected, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(s.wipe_label)
-                            .color(pal().danger)
-                            .strong(),
-                    );
-                    ui.label(egui::RichText::new(s.wipe_desc).color(pal().muted).small());
                 });
-                ui.add_space(4.0);
-                if ui
-                    .add_sized(
-                        [160.0, 28.0],
-                        egui::Button::new(egui::RichText::new(s.wipe_button).color(pal().danger)),
-                    )
-                    .clicked()
-                {
-                    self.show_wipe_confirm = true;
-                }
             });
         });
     }
 
-    /// Easy-mode status: simplified view — big status indicator + key numbers + next step.
+    fn copy_diagnostics_button(&mut self, ui: &mut egui::Ui) {
+        let s = self.s();
+        if ui.add(kit::secondary_button(s.status_copy_diag)).clicked() {
+            let diag = self.build_diagnostics();
+            ui.output_mut(|o| o.copied_text = diag);
+            self.set_msg(MsgKind::Info, s.status_diag_copied);
+        }
+    }
+
+    fn save_diagnostics_button(&mut self, ui: &mut egui::Ui) {
+        let s = self.s();
+        if ui.add(kit::secondary_button(s.status_save_diag)).clicked() {
+            let diag = self.build_diagnostics();
+            if let Some(path) = rfd::FileDialog::new()
+                .set_file_name("miasma-diagnostics.txt")
+                .add_filter("Text files", &["txt"])
+                .save_file()
+            {
+                match std::fs::write(&path, &diag) {
+                    Ok(()) => self.set_msg(
+                        MsgKind::Success,
+                        format!("{} {}", s.status_diag_saved, path.display()),
+                    ),
+                    Err(e) => {
+                        self.set_msg(MsgKind::Error, format!("{}{e}", s.status_diag_save_failed))
+                    }
+                }
+            }
+        }
+    }
+
+    /// Easy-mode status: one headline, three health lines, three numbers.
     fn status_panel_easy(&self, ui: &mut egui::Ui) {
         let s = self.s();
 
-        // Big status card.
-        let (status_color, status_text, hint) = if self.daemon_state == DaemonState::Connected {
+        let (level, status_text, hint) = if self.daemon_state == DaemonState::Connected {
             if self.peer_count > 0 {
-                (pal().success, s.status_ready, s.status_hint_ready)
+                (Level::Ok, s.status_ready, s.status_hint_ready)
             } else {
                 (
-                    pal().warning,
+                    Level::Warn,
                     s.status_state_connected,
                     s.status_hint_no_peers,
                 )
             }
         } else {
-            (pal().danger, s.status_not_ready, s.status_hint_not_ready)
+            (Level::Error, s.status_not_ready, s.status_hint_not_ready)
         };
 
-        card_frame().show(ui, |ui| {
-            ui.horizontal(|ui| {
-                // Status dot.
-                let dot_rect = ui.allocate_space(egui::vec2(14.0, 14.0));
-                ui.painter()
-                    .circle_filled(dot_rect.1.center(), 6.0, status_color);
-                ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new(status_text)
-                        .size(18.0)
-                        .strong()
-                        .color(status_color),
+        kit::status_headline(ui, level, status_text);
+        kit::paragraph_muted(ui, hint);
+        ui.add_space(kit::SP_2);
+
+        // Health: app, backend, network.
+        kit::divider(ui);
+        ui.add_space(kit::SP_1);
+        kit::status_dot(ui, Level::Ok, &format!("{}  {}", s.health_app, s.health_ok));
+        match self.daemon_state {
+            DaemonState::Connected => {
+                kit::status_dot(
+                    ui,
+                    Level::Ok,
+                    &format!("{}  {}", s.health_backend, s.health_ok),
                 );
-            });
-
-            ui.add_space(4.0);
-            ui.label(egui::RichText::new(hint).color(pal().muted));
-
-            // Health checklist — explicit indicators for app/backend/network.
-            ui.add_space(10.0);
-            egui::Grid::new("easy_health_grid")
-                .num_columns(2)
-                .spacing([10.0, 4.0])
-                .show(ui, |ui| {
-                    // App — always running if we're here.
-                    let check = egui::RichText::new("\u{2713}").color(pal().success); // ✓
-                    let cross = egui::RichText::new("\u{2717}").color(pal().danger); // ✗
-                    let dot = egui::RichText::new("\u{25CF}").color(pal().warning); // ●
-
-                    ui.label(check.clone());
-                    ui.label(
-                        egui::RichText::new(format!("{}  {}", s.health_app, s.health_ok))
-                            .color(pal().muted),
-                    );
-                    ui.end_row();
-
-                    // Backend.
-                    match self.daemon_state {
-                        DaemonState::Connected => {
-                            ui.label(check.clone());
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{}  {}",
-                                    s.health_backend, s.health_ok
-                                ))
-                                .color(pal().muted),
-                            );
-                        }
-                        DaemonState::Starting => {
-                            ui.label(dot.clone());
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{}  {}",
-                                    s.health_backend, s.health_starting
-                                ))
-                                .color(pal().warning),
-                            );
-                        }
-                        _ => {
-                            ui.label(cross.clone());
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{}  {}",
-                                    s.health_backend, s.health_offline
-                                ))
-                                .color(pal().danger),
-                            );
-                        }
-                    }
-                    ui.end_row();
-
-                    // Network.
-                    if self.daemon_state == DaemonState::Connected {
-                        if self.peer_count > 0 {
-                            ui.label(check);
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{}  {} {}",
-                                    s.health_network,
-                                    self.peer_count,
-                                    s.status_peers.trim_end_matches('：').trim_end_matches(':')
-                                ))
-                                .color(pal().muted),
-                            );
-                        } else {
-                            ui.label(dot);
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{}  {}",
-                                    s.health_network, s.health_no_peers
-                                ))
-                                .color(pal().warning),
-                            );
-                        }
-                    } else {
-                        ui.label(cross);
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "{}  {}",
-                                s.health_network, s.health_offline
-                            ))
-                            .color(pal().danger),
-                        );
-                    }
-                    ui.end_row();
-                });
-
-            if self.daemon_state == DaemonState::Connected {
-                ui.add_space(10.0);
-
-                egui::Grid::new("easy_status_grid")
-                    .num_columns(2)
-                    .spacing([16.0, 6.0])
-                    .show(ui, |ui| {
-                        ui.label(egui::RichText::new(s.status_items_stored).color(pal().muted));
-                        ui.label(
-                            egui::RichText::new(self.share_count.to_string())
-                                .size(15.0)
-                                .strong(),
-                        );
-                        ui.end_row();
-
-                        ui.label(egui::RichText::new(s.status_peers).color(pal().muted));
-                        let peer_text = self.peer_count.to_string();
-                        if self.peer_count > 0 {
-                            ui.label(
-                                egui::RichText::new(peer_text)
-                                    .size(15.0)
-                                    .color(pal().success),
-                            );
-                        } else {
-                            ui.label(egui::RichText::new(peer_text).size(15.0));
-                        }
-                        ui.end_row();
-
-                        if self.quota_mb > 0 {
-                            ui.label(egui::RichText::new(s.status_used).color(pal().muted));
-                            let pct = (self.used_mb / self.quota_mb as f64) * 100.0;
-                            let used_text = format!(
-                                "{:.1} / {} MiB  ({:.0}%)",
-                                self.used_mb, self.quota_mb, pct
-                            );
-                            ui.vertical(|ui| {
-                                if pct > 90.0 {
-                                    ui.colored_label(pal().warning, &used_text);
-                                } else {
-                                    ui.label(&used_text);
-                                }
-                                // Progress bar for Easy mode too.
-                                let bar_width = 120.0;
-                                let (rect, _) = ui.allocate_exact_size(
-                                    egui::vec2(bar_width, 4.0),
-                                    egui::Sense::hover(),
-                                );
-                                ui.painter().rect_filled(rect, 2.0, pal().selected);
-                                let fill_width = (pct as f32 / 100.0).min(1.0) * bar_width;
-                                let fill_color = if pct > 90.0 {
-                                    pal().warning
-                                } else {
-                                    pal().info
-                                };
-                                let fill_rect = egui::Rect::from_min_size(
-                                    rect.min,
-                                    egui::vec2(fill_width, 4.0),
-                                );
-                                ui.painter().rect_filled(fill_rect, 2.0, fill_color);
-                            });
-                            ui.end_row();
-                        }
-                    });
             }
-        });
+            DaemonState::Starting => {
+                kit::status_dot(
+                    ui,
+                    Level::Warn,
+                    &format!("{}  {}", s.health_backend, s.health_starting),
+                );
+            }
+            _ => {
+                kit::status_dot(
+                    ui,
+                    Level::Error,
+                    &format!("{}  {}", s.health_backend, s.health_offline),
+                );
+            }
+        }
+        if self.daemon_state == DaemonState::Connected {
+            if self.peer_count > 0 {
+                kit::status_dot(
+                    ui,
+                    Level::Ok,
+                    &format!(
+                        "{}  {} {}",
+                        s.health_network,
+                        self.peer_count,
+                        s.status_peers.trim_end_matches('：').trim_end_matches(':')
+                    ),
+                );
+            } else {
+                kit::status_dot(
+                    ui,
+                    Level::Warn,
+                    &format!("{}  {}", s.health_network, s.health_no_peers),
+                );
+            }
+        } else {
+            kit::status_dot(
+                ui,
+                Level::Error,
+                &format!("{}  {}", s.health_network, s.health_offline),
+            );
+        }
+        ui.add_space(kit::SP_2);
+
+        if self.daemon_state == DaemonState::Connected {
+            kit::divider(ui);
+            ui.add_space(kit::SP_1);
+            kit::kv_grid(ui, |g| {
+                g.text(s.status_items_stored, &self.share_count.to_string());
+                g.text(s.status_peers, &self.peer_count.to_string());
+                if self.quota_mb > 0 {
+                    g.row(s.status_used, |ui| self.storage_usage(ui));
+                }
+            });
+            ui.add_space(kit::SP_4);
+        }
     }
 
-    /// Technical-mode status: full diagnostics with card grouping.
+    /// "12.3 / 10240 MiB (11%)" with a bar under it.
+    fn storage_usage(&self, ui: &mut egui::Ui) {
+        let pct = (self.used_mb / self.quota_mb as f64) * 100.0;
+        let used_text = format!("{:.1} / {} MiB  ({:.0}%)", self.used_mb, self.quota_mb, pct);
+        if pct > 90.0 {
+            ui.label(RichText::new(used_text).color(kit::level_color(Level::Warn)));
+        } else {
+            ui.label(used_text);
+        }
+        kit::progress(ui, (pct / 100.0) as f32, pct > 90.0);
+    }
+
+    /// Technical-mode status: full diagnostics, one section per topic.
     fn status_panel_technical(&self, ui: &mut egui::Ui) {
         let s = self.s();
 
         // ── Connection & identity ─────────────────────────────────────
-        card_frame().show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(s.status_connection)
-                    .strong()
-                    .color(pal().text),
-            );
-            ui.add_space(4.0);
-
-            egui::Grid::new("conn_grid")
-                .num_columns(2)
-                .spacing([16.0, 4.0])
-                .show(ui, |ui| {
-                    ui.label(egui::RichText::new(s.status_state).color(pal().muted));
-                    match self.daemon_state {
-                        DaemonState::Connected => {
-                            ui.colored_label(pal().success, s.status_state_connected);
-                        }
-                        DaemonState::Starting => {
-                            ui.horizontal(|ui| {
-                                ui.spinner();
-                                ui.colored_label(pal().info, s.status_state_starting);
-                            });
-                        }
-                        DaemonState::Stopped => {
-                            ui.colored_label(pal().danger, s.status_state_not_running);
-                        }
-                        DaemonState::NeedsInit => {
-                            ui.colored_label(pal().warning, s.status_state_not_init);
-                        }
+        kit::section(ui, s.status_connection, |ui| {
+            kit::kv_grid(ui, |g| {
+                g.row(s.status_state, |ui| match self.daemon_state {
+                    DaemonState::Connected => {
+                        kit::status_dot(ui, Level::Ok, s.status_state_connected);
                     }
-                    ui.end_row();
-
-                    ui.label(egui::RichText::new(s.status_peer_id).color(pal().muted));
-                    if self.peer_id.is_empty() {
-                        ui.colored_label(pal().muted, "—");
-                    } else {
-                        ui.label(
-                            egui::RichText::new(&self.peer_id).font(egui::FontId::monospace(11.0)),
-                        );
-                    }
-                    ui.end_row();
-
-                    ui.label(egui::RichText::new(s.status_peers).color(pal().muted));
-                    let peer_text = self.peer_count.to_string();
-                    if self.peer_count > 0 {
-                        ui.colored_label(pal().success, peer_text);
-                    } else {
-                        ui.label(peer_text);
-                    }
-                    ui.end_row();
-
-                    if !self.listen_addrs.is_empty() {
-                        ui.label(egui::RichText::new(s.status_listening).color(pal().muted));
-                        ui.vertical(|ui| {
-                            for addr in &self.listen_addrs {
-                                ui.label(
-                                    egui::RichText::new(addr).font(egui::FontId::monospace(11.0)),
-                                );
-                            }
+                    DaemonState::Starting => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(
+                                RichText::new(s.status_state_starting)
+                                    .color(kit::level_color(Level::Info)),
+                            );
                         });
-                        ui.end_row();
+                    }
+                    DaemonState::Stopped => {
+                        kit::status_dot(ui, Level::Error, s.status_state_not_running);
+                    }
+                    DaemonState::NeedsInit => {
+                        kit::status_dot(ui, Level::Warn, s.status_state_not_init);
                     }
                 });
-        }); // end connection card
-
-        ui.add_space(8.0);
+                g.row(s.status_peer_id, |ui| {
+                    if self.peer_id.is_empty() {
+                        ui.label(kit::muted_text("—"));
+                    } else {
+                        kit::mono(ui, &self.peer_id);
+                    }
+                });
+                g.text(s.status_peers, &self.peer_count.to_string());
+                if !self.listen_addrs.is_empty() {
+                    g.row(s.status_listening, |ui| {
+                        for addr in &self.listen_addrs {
+                            kit::mono(ui, addr);
+                        }
+                    });
+                }
+            });
+        });
 
         // ── Storage & replication ─────────────────────────────────────
-        card_frame().show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(s.status_storage)
-                    .strong()
-                    .color(pal().text),
-            );
-            ui.add_space(4.0);
-
-            egui::Grid::new("storage_grid")
-                .num_columns(2)
-                .spacing([16.0, 4.0])
-                .show(ui, |ui| {
-                    ui.label(egui::RichText::new(s.status_shares).color(pal().muted));
-                    ui.label(self.share_count.to_string());
-                    ui.end_row();
-
-                    ui.label(egui::RichText::new(s.status_used).color(pal().muted));
+        kit::section(ui, s.status_storage, |ui| {
+            kit::kv_grid(ui, |g| {
+                g.text(s.status_shares, &self.share_count.to_string());
+                g.row(s.status_used, |ui| {
                     if self.quota_mb > 0 {
-                        let pct = (self.used_mb / self.quota_mb as f64) * 100.0;
-                        let used_text =
-                            format!("{:.1} / {} MiB  ({:.0}%)", self.used_mb, self.quota_mb, pct);
-                        ui.vertical(|ui| {
-                            if pct > 90.0 {
-                                ui.colored_label(pal().warning, &used_text);
-                            } else {
-                                ui.label(&used_text);
-                            }
-                            // Storage progress bar.
-                            let bar_width = ui.available_width().min(200.0);
-                            let (rect, _) = ui.allocate_exact_size(
-                                egui::vec2(bar_width, 4.0),
-                                egui::Sense::hover(),
-                            );
-                            ui.painter().rect_filled(rect, 2.0, pal().selected);
-                            let fill_width = (pct as f32 / 100.0).min(1.0) * bar_width;
-                            let fill_color = if pct > 90.0 {
-                                pal().warning
-                            } else {
-                                pal().info
-                            };
-                            let fill_rect =
-                                egui::Rect::from_min_size(rect.min, egui::vec2(fill_width, 4.0));
-                            ui.painter().rect_filled(fill_rect, 2.0, fill_color);
-                        });
+                        self.storage_usage(ui);
                     } else {
                         ui.label(format!("{:.1} MiB", self.used_mb));
                     }
-                    ui.end_row();
-
-                    ui.label(egui::RichText::new(s.status_replication).color(pal().muted));
+                });
+                g.row(s.status_replication, |ui| {
                     if self.pending_replication > 0 {
-                        ui.colored_label(
-                            pal().warning,
-                            format!(
+                        ui.label(
+                            RichText::new(format!(
                                 "{} replicated, {} pending",
                                 self.replicated_count, self.pending_replication
-                            ),
+                            ))
+                            .color(kit::level_color(Level::Warn)),
                         );
                     } else if self.replicated_count > 0 {
-                        ui.colored_label(
-                            pal().success,
-                            format!("{} replicated", self.replicated_count),
-                        );
+                        ui.label(format!("{} replicated", self.replicated_count));
                     } else {
-                        ui.colored_label(pal().muted, "—");
+                        ui.label(kit::muted_text("—"));
                     }
-                    ui.end_row();
                 });
-        }); // end storage card
+            });
+        });
 
         // ── Transport ─────────────────────────────────────────────────
         if !self.transport_statuses.is_empty()
@@ -1942,125 +1476,82 @@ impl MiasmaApp {
             || self.obfs_quic_port > 0
             || self.proxy_configured
         {
-            ui.add_space(8.0);
-            card_frame().show(ui, |ui| {
-                ui.label(
-                    egui::RichText::new(s.status_transport)
-                        .strong()
-                        .color(pal().text),
-                );
-                ui.add_space(4.0);
-
-                // Summary line: active services.
+            kit::section(ui, s.status_transport, |ui| {
+                // Services that are listening, as plain dotted lines.
                 ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = kit::SP_4;
                     if self.wss_port > 0 {
                         let tls = if self.wss_tls_enabled { "TLS" } else { "plain" };
-                        tag_label(
-                            ui,
-                            pal().success,
-                            &format!("WSS :{} ({tls})", self.wss_port),
-                        );
+                        kit::status_dot(ui, Level::Ok, &format!("WSS :{} ({tls})", self.wss_port));
                     }
                     if self.obfs_quic_port > 0 {
-                        tag_label(
+                        kit::status_dot(
                             ui,
-                            pal().success,
+                            Level::Ok,
                             &format!("ObfuscatedQuic :{}", self.obfs_quic_port),
                         );
                     }
                     if self.proxy_configured {
-                        let pt = self.proxy_type.as_deref().unwrap_or("proxy");
-                        tag_label(ui, pal().info, pt);
+                        kit::status_dot(
+                            ui,
+                            Level::Info,
+                            self.proxy_type.as_deref().unwrap_or("proxy"),
+                        );
                     }
                 });
 
                 if !self.transport_statuses.is_empty() {
-                    ui.add_space(6.0);
-
-                    egui::Grid::new("transport_grid")
-                        .num_columns(4)
-                        .spacing([12.0, 3.0])
-                        .striped(true)
-                        .show(ui, |ui| {
-                            // Header.
-                            ui.label(
-                                egui::RichText::new(s.status_transport_name)
-                                    .strong()
-                                    .small(),
-                            );
-                            ui.label(
-                                egui::RichText::new(s.status_transport_status)
-                                    .strong()
-                                    .small(),
-                            );
-                            ui.label(
-                                egui::RichText::new(s.status_transport_counts)
-                                    .strong()
-                                    .small(),
-                            );
-                            ui.label(
-                                egui::RichText::new(s.status_transport_details)
-                                    .strong()
-                                    .small(),
-                            );
-                            ui.end_row();
-
-                            for t in &self.transport_statuses {
-                                ui.label(&t.name);
-
-                                // Status badge.
-                                if t.selected {
-                                    ui.colored_label(pal().success, "Active");
-                                } else if t.available && t.failure_count == 0 {
-                                    ui.colored_label(pal().success, "Ready");
-                                } else if t.available && t.failure_count > 0 {
-                                    ui.colored_label(pal().warning, "Degraded");
-                                } else if t.failure_count > 0 {
-                                    ui.colored_label(pal().danger, "Failing");
-                                } else {
-                                    ui.colored_label(pal().muted, "Idle");
-                                }
-
-                                // Counts.
-                                ui.label(format!("{} / {}", t.success_count, t.failure_count));
-
-                                // Last error or phase failures.
-                                if let Some(ref err) = t.last_error {
-                                    let short = if err.len() > 50 {
-                                        format!("{}...", &err[..50])
-                                    } else {
-                                        err.clone()
-                                    };
-                                    ui.label(egui::RichText::new(short).color(pal().muted).small());
-                                } else if t.session_failures > 0 || t.data_failures > 0 {
-                                    ui.label(
-                                        egui::RichText::new(format!(
-                                            "session:{} data:{}",
-                                            t.session_failures, t.data_failures
-                                        ))
-                                        .color(pal().muted)
-                                        .small(),
-                                    );
-                                } else {
-                                    ui.colored_label(pal().muted, "—");
-                                }
-                                ui.end_row();
+                    ui.add_space(kit::SP_1);
+                    let table = kit::table(ui, &[0.28, 0.18, 0.16, 0.38]);
+                    table.header(
+                        ui,
+                        &[
+                            s.status_transport_name,
+                            s.status_transport_status,
+                            s.status_transport_counts,
+                            s.status_transport_details,
+                        ],
+                    );
+                    for t in &self.transport_statuses {
+                        table.row(ui, true, |row| {
+                            row.text(&t.name);
+                            let (level, label) = if t.selected {
+                                (Level::Ok, "Active")
+                            } else if t.available && t.failure_count == 0 {
+                                (Level::Ok, "Ready")
+                            } else if t.available && t.failure_count > 0 {
+                                (Level::Warn, "Degraded")
+                            } else if t.failure_count > 0 {
+                                (Level::Error, "Failing")
+                            } else {
+                                (Level::Muted, "Idle")
+                            };
+                            row.status(level, label);
+                            row.text(&format!("{} / {}", t.success_count, t.failure_count));
+                            if let Some(ref err) = t.last_error {
+                                row.muted(err);
+                            } else if t.session_failures > 0 || t.data_failures > 0 {
+                                row.muted(&format!(
+                                    "session:{} data:{}",
+                                    t.session_failures, t.data_failures
+                                ));
+                            } else {
+                                row.muted("—");
                             }
                         });
+                    }
 
-                    // Troubleshooting hint when all transports failing.
+                    // Troubleshooting hint when all transports are failing.
                     let all_failing = self
                         .transport_statuses
                         .iter()
                         .all(|t| t.failure_count > 0 && t.success_count == 0);
                     if all_failing && self.transport_statuses.iter().any(|t| t.failure_count > 0) {
-                        ui.add_space(8.0);
-                        ui.horizontal_wrapped(|ui| {
-                            ui.colored_label(pal().warning, s.status_all_failing);
-                        });
+                        ui.add_space(kit::SP_2);
+                        kit::notice(ui, Level::Warn, s.status_all_failing);
                     }
                 }
-            }); // end transport card
+            });
         }
     }
 
@@ -2070,255 +1561,125 @@ impl MiasmaApp {
         let s = self.s();
         let easy = self.mode.is_easy();
 
-        section_heading(ui, s.settings_heading);
-        ui.add_space(8.0);
-
-        // ── Preferences card (Language + Mode) ───────────────────────
-        card_frame().show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(s.settings_language)
-                    .strong()
-                    .color(pal().text),
-            );
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                for lang in Locale::ALL {
-                    let selected = self.locale == lang;
-                    if ui.selectable_label(selected, lang.display_name()).clicked() {
-                        self.locale = lang;
+        kit::page(ui, s.settings_heading, None, |ui| {
+            // Preferences: three aligned rows, no frame.
+            kit::form_row(ui, s.settings_language, None, |ui| {
+                let mut lang = self.locale;
+                let options = Locale::ALL.map(|l| (l, l.display_name()));
+                if kit::segmented(ui, &mut lang, &options) {
+                    self.locale = lang;
+                    self.save_prefs();
+                }
+            });
+            kit::form_row(
+                ui,
+                s.settings_mode,
+                Some(if easy {
+                    s.settings_mode_desc_easy
+                } else {
+                    s.settings_mode_desc_technical
+                }),
+                |ui| {
+                    let mut mode = self.mode;
+                    let options = [
+                        (ProductMode::Easy, s.settings_mode_easy),
+                        (ProductMode::Technical, s.settings_mode_technical),
+                    ];
+                    if kit::segmented(ui, &mut mode, &options) {
+                        self.mode = mode;
                         self.save_prefs();
                     }
-                }
-            });
-
-            ui.add_space(12.0);
-
-            ui.label(
-                egui::RichText::new(s.settings_mode)
-                    .strong()
-                    .color(pal().text),
+                },
             );
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                let is_easy = self.mode.is_easy();
-                if ui.selectable_label(is_easy, s.settings_mode_easy).clicked() {
-                    self.mode = ProductMode::Easy;
-                    self.save_prefs();
-                }
-                if ui
-                    .selectable_label(!is_easy, s.settings_mode_technical)
-                    .clicked()
-                {
-                    self.mode = ProductMode::Technical;
-                    self.save_prefs();
-                }
-            });
-            ui.add_space(2.0);
-            let mode_desc = if easy {
-                s.settings_mode_desc_easy
-            } else {
-                s.settings_mode_desc_technical
-            };
-            ui.label(egui::RichText::new(mode_desc).color(pal().muted).small());
-
-            ui.add_space(12.0);
-
-            ui.label(
-                egui::RichText::new(s.settings_theme)
-                    .strong()
-                    .color(pal().text),
-            );
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                for (choice, label) in [
+            kit::form_row(ui, s.settings_theme, None, |ui| {
+                let mut theme_mode = self.theme_mode;
+                let options = [
                     (ThemeMode::System, s.settings_theme_system),
                     (ThemeMode::Light, s.settings_theme_light),
                     (ThemeMode::Dark, s.settings_theme_dark),
-                ] {
-                    if ui
-                        .selectable_label(self.theme_mode == choice, label)
-                        .clicked()
-                    {
-                        self.theme_mode = choice;
-                        self.save_prefs();
-                    }
+                ];
+                if kit::segmented(ui, &mut theme_mode, &options) {
+                    self.theme_mode = theme_mode;
+                    self.save_prefs();
                 }
             });
-        });
+            ui.add_space(kit::SP_4);
 
-        ui.add_space(8.0);
-
-        // ── Paths card ───────────────────────────────────────────────
-        card_frame().show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(s.settings_paths)
-                    .strong()
-                    .color(pal().text),
-            );
-            ui.add_space(4.0);
-
-            egui::Grid::new("paths_grid")
-                .num_columns(2)
-                .spacing([16.0, 4.0])
-                .show(ui, |ui| {
-                    ui.label(egui::RichText::new(s.settings_data_dir).color(pal().muted));
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(&self.data_dir_display)
-                                .font(egui::FontId::monospace(11.0)),
-                        );
-                        if ui.small_button(s.copy).clicked() {
-                            ui.output_mut(|o| o.copied_text = self.data_dir_display.clone());
+            // ── Paths ────────────────────────────────────────────────
+            kit::section(ui, s.settings_paths, |ui| {
+                let sep = std::path::MAIN_SEPARATOR;
+                kit::kv_grid(ui, |g| {
+                    g.row(s.settings_data_dir, |ui| {
+                        if kit::mono_copy(ui, &self.data_dir_display, s.copy) {
                             self.set_msg(MsgKind::Info, s.settings_path_copied);
                         }
                     });
-                    ui.end_row();
-
-                    ui.label(egui::RichText::new(s.settings_config_file).color(pal().muted));
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "{}{}config.toml",
-                            &self.data_dir_display,
-                            std::path::MAIN_SEPARATOR
-                        ))
-                        .font(egui::FontId::monospace(11.0)),
+                    g.mono(
+                        s.settings_config_file,
+                        &format!("{}{sep}config.toml", &self.data_dir_display),
                     );
-                    ui.end_row();
-
-                    ui.label(egui::RichText::new(s.settings_log).color(pal().muted));
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "{}{}desktop.log.*",
-                            &self.data_dir_display,
-                            std::path::MAIN_SEPARATOR
-                        ))
-                        .font(egui::FontId::monospace(11.0)),
+                    g.mono(
+                        s.settings_log,
+                        &format!("{}{sep}desktop.log.*", &self.data_dir_display),
                     );
-                    ui.end_row();
-
-                    ui.label(egui::RichText::new(s.settings_install).color(pal().muted));
                     if let Ok(exe) = std::env::current_exe() {
                         if let Some(dir) = exe.parent() {
-                            ui.label(
-                                egui::RichText::new(dir.to_string_lossy())
-                                    .font(egui::FontId::monospace(11.0)),
-                            );
+                            g.mono(s.settings_install, &dir.to_string_lossy());
                         }
                     }
-                    ui.end_row();
                 });
-        });
-
-        ui.add_space(8.0);
-
-        // ── About card (How it works) ────────────────────────────────
-        card_frame().show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(s.settings_how)
-                    .strong()
-                    .color(pal().text),
-            );
-            ui.add_space(4.0);
-            let line1 = if easy {
-                s.settings_how_line1_easy
-            } else {
-                s.settings_how_line1
-            };
-            ui.label(line1);
-            let line2 = if easy {
-                s.settings_how_line2_easy
-            } else {
-                s.settings_how_line2
-            };
-            ui.label(line2);
-            ui.add_space(6.0);
-            ui.label(egui::RichText::new(s.settings_stored_in).color(pal().muted));
-            ui.label(
-                egui::RichText::new(&self.data_dir_display).font(egui::FontId::monospace(11.0)),
-            );
-            ui.label(
-                egui::RichText::new(s.settings_preserved)
-                    .color(pal().muted)
-                    .small(),
-            );
-        });
-
-        ui.add_space(8.0);
-
-        // ── Actions card ─────────────────────────────────────────────
-        card_frame().show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(s.settings_actions)
-                    .strong()
-                    .color(pal().text),
-            );
-            ui.add_space(4.0);
-
-            ui.horizontal(|ui| {
-                if ui
-                    .add_sized([160.0, 30.0], egui::Button::new(s.status_copy_diag))
-                    .clicked()
-                {
-                    let diag = self.build_diagnostics();
-                    ui.output_mut(|o| o.copied_text = diag);
-                    self.set_msg(MsgKind::Info, s.status_diag_copied);
-                }
-                if ui
-                    .add_sized([130.0, 30.0], egui::Button::new(s.status_save_diag))
-                    .clicked()
-                {
-                    let diag = self.build_diagnostics();
-                    if let Some(path) = rfd::FileDialog::new()
-                        .set_file_name("miasma-diagnostics.txt")
-                        .add_filter("Text files", &["txt"])
-                        .save_file()
-                    {
-                        match std::fs::write(&path, &diag) {
-                            Ok(()) => self.set_msg(
-                                MsgKind::Success,
-                                format!("{} {}", s.status_diag_saved, path.display()),
-                            ),
-                            Err(e) => self.set_msg(
-                                MsgKind::Error,
-                                format!("{}{e}", s.status_diag_save_failed),
-                            ),
-                        }
-                    }
-                }
-
-                #[cfg(windows)]
-                if ui
-                    .add_sized([160.0, 30.0], egui::Button::new(s.settings_open_folder))
-                    .clicked()
-                {
-                    let _ = std::process::Command::new("explorer")
-                        .arg(&self.data_dir_display)
-                        .spawn();
-                }
-
-                #[cfg(not(windows))]
-                if ui
-                    .add_sized([160.0, 30.0], egui::Button::new(s.settings_open_folder))
-                    .clicked()
-                {
-                    let _ = std::process::Command::new("xdg-open")
-                        .arg(&self.data_dir_display)
-                        .spawn();
-                }
             });
+
+            // ── How it works ─────────────────────────────────────────
+            kit::section(ui, s.settings_how, |ui| {
+                kit::paragraph(
+                    ui,
+                    if easy {
+                        s.settings_how_line1_easy
+                    } else {
+                        s.settings_how_line1
+                    },
+                );
+                kit::paragraph(
+                    ui,
+                    if easy {
+                        s.settings_how_line2_easy
+                    } else {
+                        s.settings_how_line2
+                    },
+                );
+                ui.add_space(kit::SP_1);
+                kit::paragraph_muted(ui, s.settings_stored_in);
+                kit::mono(ui, &self.data_dir_display);
+                kit::hint(ui, s.settings_preserved);
+            });
+
+            // ── Actions ──────────────────────────────────────────────
+            kit::section(ui, s.settings_actions, |ui| {
+                kit::button_row(ui, |ui| {
+                    self.copy_diagnostics_button(ui);
+                    self.save_diagnostics_button(ui);
+                    if ui
+                        .add(kit::secondary_button(s.settings_open_folder))
+                        .clicked()
+                    {
+                        #[cfg(windows)]
+                        let opener = "explorer";
+                        #[cfg(not(windows))]
+                        let opener = "xdg-open";
+                        let _ = std::process::Command::new(opener)
+                            .arg(&self.data_dir_display)
+                            .spawn();
+                    }
+                });
+            });
+
+            let variant_label = if easy { "" } else { " Technical Beta" };
+            kit::hint(
+                ui,
+                &format!("Miasma{variant_label} v{}", env!("CARGO_PKG_VERSION")),
+            );
         });
-
-        ui.add_space(12.0);
-
-        let variant_label = if easy { "" } else { " Technical Beta" };
-        ui.label(
-            egui::RichText::new(format!(
-                "Miasma{variant_label} v{}",
-                env!("CARGO_PKG_VERSION")
-            ))
-            .color(pal().muted)
-            .small(),
-        );
     }
 
     // ── Import panel (magnet / .torrent) ──────────────────────────────────
@@ -2327,19 +1688,13 @@ impl MiasmaApp {
         let s = self.s();
         let easy = self.mode.is_easy();
 
-        section_heading(ui, s.import_heading);
-        ui.add_space(8.0);
-
-        match self.import_state {
+        kit::page(ui, s.import_heading, None, |ui| match self.import_state {
             ImportState::Idle => {
-                // No import — show hint to go to Save tab instead.
-                card_frame().show(ui, |ui| {
-                    ui.label(s.import_idle_hint);
-                });
+                // No import: point at the Save tab instead.
+                kit::paragraph(ui, s.import_idle_hint);
             }
             ImportState::Confirming => {
-                // Show what was received and ask for confirmation.
-                card_frame().show(ui, |ui| {
+                kit::surface(ui, |ui| {
                     let description = match &self.import_intent {
                         Some(LaunchIntent::Magnet(uri)) => {
                             let display = if uri.len() > 80 {
@@ -2354,17 +1709,19 @@ impl MiasmaApp {
                         }
                         _ => String::new(),
                     };
-
-                    ui.label(egui::RichText::new(&description).strong());
-                    ui.add_space(8.0);
-
-                    let explain = if easy { s.import_explain_easy } else { s.import_explain };
-                    ui.label(explain);
-                    ui.add_space(12.0);
+                    kit::mono(ui, &description);
+                    kit::paragraph_muted(
+                        ui,
+                        if easy {
+                            s.import_explain_easy
+                        } else {
+                            s.import_explain
+                        },
+                    );
 
                     let connected = self.daemon_state == DaemonState::Connected;
 
-                    // Pre-validate: check for problems before showing the Import button.
+                    // Pre-validate: check for problems before offering the Import button.
                     let validation_error = match &self.import_intent {
                         Some(LaunchIntent::Magnet(uri)) => {
                             if !uri.contains("xt=") {
@@ -2382,41 +1739,29 @@ impl MiasmaApp {
                         }
                         _ => None,
                     };
-
                     if let Some(err) = validation_error {
-                        ui.colored_label(pal().warning, err);
-                        ui.add_space(4.0);
+                        kit::notice(ui, Level::Warn, err);
                     }
 
-                    ui.horizontal(|ui| {
+                    kit::button_row(ui, |ui| {
                         let can_import = connected && !self.busy && validation_error.is_none();
-                        ui.add_enabled_ui(can_import, |ui| {
-                            let btn = if easy {
-                                primary_button(
-                                    egui::RichText::new(s.import_button).strong().size(14.0),
-                                )
-                            } else {
-                                primary_button(s.import_button)
-                            };
-                            if ui.add_sized([140.0, 34.0], btn).clicked() {
-                                if let Some(intent) = &self.import_intent {
-                                    let cmd = match intent {
-                                        LaunchIntent::Magnet(uri) => {
-                                            WorkerCmd::ImportMagnet(uri.clone())
-                                        }
-                                        LaunchIntent::TorrentFile(path) => {
-                                            WorkerCmd::ImportTorrentFile(path.clone())
-                                        }
-                                        LaunchIntent::Normal => unreachable!(),
-                                    };
-                                    let _ = self.worker.tx.try_send(cmd);
-                                    self.busy = true;
-                                    self.import_state = ImportState::InProgress;
-                                }
+                        if kit::primary(ui, can_import, s.import_button).clicked() {
+                            if let Some(intent) = &self.import_intent {
+                                let cmd = match intent {
+                                    LaunchIntent::Magnet(uri) => {
+                                        WorkerCmd::ImportMagnet(uri.clone())
+                                    }
+                                    LaunchIntent::TorrentFile(path) => {
+                                        WorkerCmd::ImportTorrentFile(path.clone())
+                                    }
+                                    LaunchIntent::Normal => unreachable!(),
+                                };
+                                let _ = self.worker.tx.try_send(cmd);
+                                self.busy = true;
+                                self.import_state = ImportState::InProgress;
                             }
-                        });
-
-                        if ui.add_sized([100.0, 34.0], egui::Button::new(s.import_cancel)).clicked() {
+                        }
+                        if ui.add(kit::secondary_button(s.import_cancel)).clicked() {
                             self.import_state = ImportState::Idle;
                             self.import_intent = None;
                             self.tab = Tab::Store;
@@ -2424,70 +1769,46 @@ impl MiasmaApp {
                     });
 
                     if !connected {
-                        ui.add_space(4.0);
-                        ui.colored_label(pal().warning, s.import_not_connected);
+                        kit::notice(ui, Level::Warn, s.import_not_connected);
                     }
                 });
             }
             ImportState::InProgress => {
-                card_frame().show(ui, |ui| {
+                kit::surface(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label(egui::RichText::new(s.import_progress).color(pal().info));
+                        ui.label(
+                            RichText::new(s.import_progress).color(kit::level_color(Level::Info)),
+                        );
                     });
                 });
             }
             ImportState::Complete => {
-                card_frame().show(ui, |ui| {
-                    ui.label(
-                        egui::RichText::new(s.import_complete)
-                            .strong()
-                            .color(pal().success),
-                    );
-                    ui.add_space(8.0);
-
+                kit::surface(ui, |ui| {
+                    kit::status_dot(ui, Level::Ok, s.import_complete);
                     for (i, mid) in self.import_mids.clone().iter().enumerate() {
-                        ui.horizontal(|ui| {
-                            let label = format!("#{}: {}", i + 1, truncate_mid(mid));
-                            ui.label(
-                                egui::RichText::new(&label).font(egui::FontId::monospace(11.0)),
-                            );
-                            if ui.small_button(s.store_copy).clicked() {
-                                ui.output_mut(|o| o.copied_text = mid.clone());
-                                self.set_msg(MsgKind::Info, s.store_copied);
-                            }
-                        });
+                        let label = format!("#{}: {}", i + 1, truncate_mid(mid));
+                        if kit::mono_copy_labelled(ui, &label, mid, s.store_copy) {
+                            self.set_msg(MsgKind::Info, s.store_copied);
+                        }
                     }
-
-                    ui.add_space(8.0);
-                    if ui
-                        .add_sized([120.0, 28.0], egui::Button::new(s.import_done))
-                        .clicked()
-                    {
+                    if kit::primary(ui, true, s.import_done).clicked() {
                         self.import_state = ImportState::Idle;
                         self.tab = Tab::Store;
                     }
                 });
             }
             ImportState::Failed => {
-                card_frame().show(ui, |ui| {
-                    ui.colored_label(pal().danger, s.import_failed);
+                kit::surface(ui, |ui| {
+                    kit::status_dot(ui, Level::Error, s.import_failed);
                     if let Some(ref err) = self.last_error {
-                        ui.add_space(4.0);
-                        ui.label(egui::RichText::new(err).color(pal().muted).small());
+                        kit::hint(ui, err);
                     }
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add_sized([120.0, 28.0], egui::Button::new(s.import_retry))
-                            .clicked()
-                        {
+                    kit::button_row(ui, |ui| {
+                        if kit::primary(ui, true, s.import_retry).clicked() {
                             self.import_state = ImportState::Confirming;
                         }
-                        if ui
-                            .add_sized([120.0, 28.0], egui::Button::new(s.import_cancel))
-                            .clicked()
-                        {
+                        if ui.add(kit::secondary_button(s.import_cancel)).clicked() {
                             self.import_state = ImportState::Idle;
                             self.import_intent = None;
                             self.tab = Tab::Store;
@@ -2495,7 +1816,7 @@ impl MiasmaApp {
                     });
                 });
             }
-        }
+        });
     }
 
     // ── Diagnostics (always in English — support/debug artifact) ─────────
@@ -2649,30 +1970,7 @@ impl MiasmaApp {
     }
 }
 
-// ─── UI helpers ─────────────────────────────────────────────────────────────
-
-pub(crate) fn section_heading(ui: &mut egui::Ui, text: &str) {
-    ui.label(
-        egui::RichText::new(text)
-            .size(18.0)
-            .strong()
-            .color(pal().text),
-    );
-    // Subtle separator line below heading.
-    let rect = ui.allocate_space(egui::vec2(ui.available_width(), 1.0)).1;
-    ui.painter().rect_filled(rect, 0.0, pal().border);
-}
-
-/// The one primary action of a screen: accent fill, white text. Everything else stays neutral.
-pub(crate) fn primary_button<'a>(text: impl Into<egui::WidgetText>) -> egui::Button<'a> {
-    let text: egui::WidgetText = text.into();
-    egui::Button::new(text.color(pal().on_accent())).fill(pal().accent_fill)
-}
-
-/// A destructive action (delete, wipe): neutral button, danger-coloured text.
-pub(crate) fn danger_button<'a>(text: impl Into<String>) -> egui::Button<'a> {
-    egui::Button::new(egui::RichText::new(text).color(pal().danger).strong())
-}
+// ─── Small helpers ──────────────────────────────────────────────────────────
 
 fn format_epoch(epoch_secs: u64) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2706,83 +2004,66 @@ fn format_epoch(epoch_secs: u64) -> String {
     }
 }
 
-/// Map envelope state string to a (color, label) for outbox display.
-fn outbox_state_display<'a>(
-    s: &'a crate::locale::Strings,
-    state: &'a str,
-) -> (egui::Color32, &'a str) {
+/// Map envelope state string to a (level, label) for outbox display.
+fn outbox_state_display<'a>(s: &'a crate::locale::Strings, state: &'a str) -> (Level, &'a str) {
     match state {
-        "Pending" => (pal().warning, s.outbox_waiting_challenge),
-        "ChallengeIssued" => (pal().warning, s.outbox_confirm_heading),
-        "Confirmed" => (pal().success, s.outbox_confirmed),
-        "Retrieved" => (pal().success, s.outbox_retrieved),
-        "Expired" => (pal().danger, s.outbox_expired),
-        "SenderRevoked" => (pal().danger, s.outbox_revoked),
-        "RecipientDeleted" => (pal().muted, s.outbox_revoked),
-        "ChallengeFailed" => (pal().danger, s.outbox_challenge_failed),
-        "PasswordFailed" => (pal().danger, s.outbox_password_failed),
-        _ => (pal().muted, state),
+        "Pending" => (Level::Warn, s.outbox_waiting_challenge),
+        "ChallengeIssued" => (Level::Warn, s.outbox_confirm_heading),
+        "Confirmed" => (Level::Ok, s.outbox_confirmed),
+        "Retrieved" => (Level::Ok, s.outbox_retrieved),
+        "Expired" => (Level::Error, s.outbox_expired),
+        "SenderRevoked" => (Level::Error, s.outbox_revoked),
+        "RecipientDeleted" => (Level::Muted, s.outbox_revoked),
+        "ChallengeFailed" => (Level::Error, s.outbox_challenge_failed),
+        "PasswordFailed" => (Level::Error, s.outbox_password_failed),
+        _ => (Level::Muted, state),
     }
 }
 
-/// Map envelope state string to a (color, label) for inbox display.
-fn inbox_state_display<'a>(
-    s: &'a crate::locale::Strings,
-    state: &'a str,
-) -> (egui::Color32, &'a str) {
+/// Map envelope state string to a (level, label) for inbox display.
+fn inbox_state_display<'a>(s: &'a crate::locale::Strings, state: &'a str) -> (Level, &'a str) {
     match state {
-        "Pending" | "ChallengeIssued" => (pal().warning, s.inbox_state),
-        "Confirmed" => (pal().success, s.outbox_confirmed),
-        "Retrieved" => (pal().success, s.inbox_retrieved),
-        "Expired" => (pal().danger, s.inbox_expired),
-        "SenderRevoked" => (pal().danger, s.inbox_revoked),
-        "RecipientDeleted" => (pal().muted, s.outbox_revoked),
-        "ChallengeFailed" => (pal().danger, s.outbox_challenge_failed),
-        "PasswordFailed" => (pal().danger, s.inbox_attempts_exhausted),
-        _ => (pal().muted, state),
+        "Pending" | "ChallengeIssued" => (Level::Warn, s.inbox_state),
+        "Confirmed" => (Level::Ok, s.outbox_confirmed),
+        "Retrieved" => (Level::Ok, s.inbox_retrieved),
+        "Expired" => (Level::Error, s.inbox_expired),
+        "SenderRevoked" => (Level::Error, s.inbox_revoked),
+        "RecipientDeleted" => (Level::Muted, s.outbox_revoked),
+        "ChallengeFailed" => (Level::Error, s.outbox_challenge_failed),
+        "PasswordFailed" => (Level::Error, s.inbox_attempts_exhausted),
+        _ => (Level::Muted, state),
     }
 }
 
-pub(crate) fn card_frame() -> egui::Frame {
-    egui::Frame::none()
-        .inner_margin(egui::Margin::same(14.0))
-        .rounding(8.0)
-        .fill(pal().surface)
-        .stroke(egui::Stroke::new(1.0, pal().border))
+/// An envelope in one of these states can no longer be acted on.
+fn is_terminal_state(state: &str) -> bool {
+    matches!(
+        state,
+        "Retrieved"
+            | "SenderRevoked"
+            | "RecipientDeleted"
+            | "Expired"
+            | "ChallengeFailed"
+            | "PasswordFailed"
+    )
 }
 
-/// Nav bar tab button with active styling.
-fn nav_tab(ui: &mut egui::Ui, current: &mut Tab, tab: Tab, label: &str) {
-    let is_active = *current == tab;
-    let text = if is_active {
-        egui::RichText::new(label)
-            .size(13.0)
-            .strong()
-            .color(pal().text)
-    } else {
-        egui::RichText::new(label).size(13.0).color(pal().muted)
-    };
-    let frame = egui::Frame::none()
-        .inner_margin(egui::Margin::symmetric(10.0, 5.0))
-        .rounding(4.0)
-        .fill(if is_active {
-            pal().selected
-        } else {
-            egui::Color32::TRANSPARENT
+/// The first `n` characters of `s` (never splits a character).
+fn short(s: &str, n: usize) -> &str {
+    match s.char_indices().nth(n) {
+        Some((i, _)) => &s[..i],
+        None => s,
+    }
+}
+
+/// First line of an inbox/outbox item: the envelope id on the left, its state on the right.
+fn envelope_header(ui: &mut egui::Ui, id: &str, level: Level, state_label: &str) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(short(id, 16)).monospace().color(pal().text));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            kit::status_dot(ui, level, state_label);
         });
-    let resp = frame
-        .show(ui, |ui| {
-            ui.label(text);
-        })
-        .response
-        .interact(egui::Sense::click());
-    if resp.clicked() {
-        *current = tab;
-    }
-    if resp.hovered() && !is_active {
-        ui.painter()
-            .rect_filled(resp.rect, 4.0, pal().text.gamma_multiply(0.06));
-    }
+    });
 }
 
 /// Get OS version string for diagnostics.
@@ -2829,16 +2110,6 @@ fn os_version() -> String {
         }
     }
     format!("{} {}", std::env::consts::OS, std::env::consts::ARCH)
-}
-
-fn tag_label(ui: &mut egui::Ui, color: egui::Color32, text: &str) {
-    let frame = egui::Frame::none()
-        .inner_margin(egui::Margin::symmetric(8.0, 2.0))
-        .rounding(4.0)
-        .fill(color.linear_multiply(0.15));
-    frame.show(ui, |ui| {
-        ui.label(egui::RichText::new(text).color(color).small());
-    });
 }
 
 fn truncate_mid(mid: &str) -> String {
@@ -2893,7 +2164,7 @@ impl eframe::App for MiasmaApp {
         // re-apply if the panel colour is no longer ours.
         let dark = theme::resolve_dark(self.theme_mode, frame.info().system_theme);
         if self.applied_dark != Some(dark) || ctx.style().visuals.panel_fill != pal().bg {
-            theme::apply(ctx, dark);
+            kit::apply_theme(ctx, dark);
             self.applied_dark = Some(dark);
         }
 
@@ -2936,132 +2207,152 @@ impl eframe::App for MiasmaApp {
         let easy = self.mode.is_easy();
 
         // ── Top navigation bar ────────────────────────────────────────
+        // Two rows so nine tabs never overflow at the 700 px minimum width: brand and connection
+        // on the first, the tab strip (which wraps if it must) on the second.
+        // The bar's content sits on the same column as the pages below it.
+        let edge = kit::column_edge(ctx.screen_rect().width());
         egui::TopBottomPanel::top("nav_bar")
             .frame(
                 egui::Frame::none()
                     .fill(pal().surface)
-                    .inner_margin(egui::Margin::symmetric(14.0, 0.0))
-                    .stroke(egui::Stroke::new(1.0, pal().border)),
+                    .inner_margin(egui::Margin::symmetric(edge, 0.0)),
             )
             .show(ctx, |ui| {
-                ui.add_space(6.0);
+                ui.add_space(kit::SP_2);
                 ui.horizontal(|ui| {
-                    // ── Brand mark ──
                     let brand = if easy { s.nav_brand_easy } else { s.nav_brand };
-                    ui.label(
-                        egui::RichText::new(brand)
-                            .size(14.0)
-                            .strong()
-                            .color(pal().text),
-                    );
-                    ui.add_space(6.0);
-                    ui.label(egui::RichText::new("|").size(14.0).color(pal().border));
-                    ui.add_space(6.0);
-
-                    // ── Tab buttons with active indicator ──
-                    let store_label = if easy { s.tab_store_easy } else { s.tab_store };
-                    let retrieve_label = if easy {
-                        s.tab_retrieve_easy
-                    } else {
-                        s.tab_retrieve
-                    };
-                    let tr_label = if easy {
-                        self.tr().tab_easy
-                    } else {
-                        self.tr().tab
-                    };
-                    let ct = locale::contact_strings(self.locale);
-                    let contacts_label = match self.contacts.unseen() {
-                        0 => ct.tab.to_owned(),
-                        n => format!("{} ({n} {})", ct.tab, ct.nav_new),
-                    };
-                    nav_tab(ui, &mut self.tab, Tab::Contacts, &contacts_label);
-                    nav_tab(ui, &mut self.tab, Tab::Transfers, tr_label);
-                    nav_tab(ui, &mut self.tab, Tab::Store, store_label);
-                    nav_tab(ui, &mut self.tab, Tab::Retrieve, retrieve_label);
-                    let send_label = if easy { s.tab_send_easy } else { s.tab_send };
-                    let inbox_label = if easy { s.tab_inbox_easy } else { s.tab_inbox };
-                    let outbox_label = if easy {
-                        s.tab_outbox_easy
-                    } else {
-                        s.tab_outbox
-                    };
-                    nav_tab(ui, &mut self.tab, Tab::Send, send_label);
-                    nav_tab(ui, &mut self.tab, Tab::Inbox, inbox_label);
-                    nav_tab(ui, &mut self.tab, Tab::Outbox, outbox_label);
-                    nav_tab(ui, &mut self.tab, Tab::Status, s.tab_status);
-                    nav_tab(ui, &mut self.tab, Tab::Settings, s.tab_settings);
-                    // Show Import tab only when an import is active.
-                    if self.import_intent.is_some() || self.import_state != ImportState::Idle {
-                        nav_tab(ui, &mut self.tab, Tab::Import, s.tab_import);
-                    }
-
-                    // Right-aligned connection indicator with dot.
+                    ui.label(kit::section_text(brand));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let (color, label) = match self.daemon_state {
-                            DaemonState::Connected => (pal().success, s.connected),
-                            DaemonState::Starting => (pal().info, s.starting),
-                            DaemonState::Stopped => (pal().danger, s.offline),
-                            DaemonState::NeedsInit => (pal().warning, s.setup_needed),
+                        let (level, label) = match self.daemon_state {
+                            DaemonState::Connected => (Level::Ok, s.connected),
+                            DaemonState::Starting => (Level::Info, s.starting),
+                            DaemonState::Stopped => (Level::Error, s.offline),
+                            DaemonState::NeedsInit => (Level::Warn, s.setup_needed),
                         };
-                        ui.colored_label(color, label);
-                        // Status dot.
-                        let dot = ui.allocate_space(egui::vec2(8.0, 8.0));
-                        ui.painter().circle_filled(dot.1.center(), 4.0, color);
+                        kit::status_dot(ui, level, label);
                     });
                 });
-                ui.add_space(6.0);
+
+                let store_label = if easy { s.tab_store_easy } else { s.tab_store };
+                let retrieve_label = if easy {
+                    s.tab_retrieve_easy
+                } else {
+                    s.tab_retrieve
+                };
+                let tr_label = if easy {
+                    self.tr().tab_easy
+                } else {
+                    self.tr().tab
+                };
+                let ct = locale::contact_strings(self.locale);
+                let contacts_label = match self.contacts.unseen() {
+                    0 => ct.tab.to_owned(),
+                    n => format!("{} ({n} {})", ct.tab, ct.nav_new),
+                };
+                let send_label = if easy { s.tab_send_easy } else { s.tab_send };
+                let inbox_label = if easy { s.tab_inbox_easy } else { s.tab_inbox };
+                let outbox_label = if easy {
+                    s.tab_outbox_easy
+                } else {
+                    s.tab_outbox
+                };
+                let tabs: [(Tab, &str); 10] = [
+                    (Tab::Contacts, contacts_label.as_str()),
+                    (Tab::Transfers, tr_label),
+                    (Tab::Store, store_label),
+                    (Tab::Retrieve, retrieve_label),
+                    (Tab::Send, send_label),
+                    (Tab::Inbox, inbox_label),
+                    (Tab::Outbox, outbox_label),
+                    (Tab::Status, s.tab_status),
+                    (Tab::Settings, s.tab_settings),
+                    (Tab::Import, s.tab_import),
+                ];
+                // The Import tab shows only while an import is active.
+                let show_import =
+                    self.import_intent.is_some() || self.import_state != ImportState::Idle;
+                let count = if show_import {
+                    tabs.len()
+                } else {
+                    tabs.len() - 1
+                };
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                    for (tab, label) in &tabs[..count] {
+                        if kit::nav_tab(ui, self.tab == *tab, label).clicked() {
+                            self.tab = *tab;
+                        }
+                    }
+                });
+                // Hairline under the whole bar, edge to edge.
+                let y = ui.min_rect().bottom();
+                ui.painter().hline(
+                    ui.clip_rect().x_range(),
+                    y,
+                    egui::Stroke::new(1.0, pal().border),
+                );
             });
 
         // ── Bottom status bar ─────────────────────────────────────────
         if let Some((ref msg, kind)) = self.status_msg.clone() {
             egui::TopBottomPanel::bottom("status_bar")
-                .max_height(24.0)
+                .frame(
+                    egui::Frame::none()
+                        .fill(pal().surface)
+                        .stroke(egui::Stroke::new(1.0, pal().border))
+                        .inner_margin(egui::Margin::symmetric(edge, kit::SP_1)),
+                )
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
-                        let color = match kind {
-                            MsgKind::Info => pal().muted,
-                            MsgKind::Success => pal().success,
-                            MsgKind::Error => pal().danger,
+                        let level = match kind {
+                            MsgKind::Info => Level::Muted,
+                            MsgKind::Success => Level::Ok,
+                            MsgKind::Error => Level::Error,
                         };
-                        ui.colored_label(color, msg);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button(s.dismiss).clicked() {
+                            if ui.add(kit::compact_button(s.dismiss)).clicked() {
                                 self.status_msg = None;
                             }
+                            ui.with_layout(
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    kit::status_dot(ui, level, &msg);
+                                },
+                            );
                         });
                     });
                 });
         }
 
-        // ── Central panel ─────────────────────────────────────────────
-        egui::CentralPanel::default().show(ctx, |ui| {
-            // Show connection header when not connected.
-            self.connection_header(ui);
-
-            egui::ScrollArea::vertical()
-                .auto_shrink([false; 2])
-                .show(ui, |ui| {
-                    ui.add_space(4.0);
-                    match self.tab {
-                        Tab::Contacts => {
-                            let c = locale::contact_strings(self.locale);
-                            let connected = self.daemon_state == DaemonState::Connected;
-                            self.contacts.show(ui, c, connected, !easy);
-                        }
-                        Tab::Transfers => self.transfers_panel(ui),
-                        Tab::Store => self.store_panel(ui),
-                        Tab::Retrieve => self.retrieve_panel(ui),
-                        Tab::Send => self.send_panel(ui),
-                        Tab::Inbox => self.inbox_panel(ui),
-                        Tab::Outbox => self.outbox_panel(ui),
-                        Tab::Status => self.status_panel(ui),
-                        Tab::Settings => self.settings_panel(ui),
-                        Tab::Import => self.import_panel(ui),
-                    }
-                    ui.add_space(8.0);
-                });
-        });
+        // ── Central panel: one scrolling column ───────────────────────
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none().fill(pal().bg))
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| {
+                        kit::column(ui, |ui| {
+                            // Connection state first, when not connected.
+                            self.connection_header(ui);
+                            match self.tab {
+                                Tab::Contacts => {
+                                    let c = locale::contact_strings(self.locale);
+                                    let connected = self.daemon_state == DaemonState::Connected;
+                                    self.contacts.show(ui, c, connected, !easy);
+                                }
+                                Tab::Transfers => self.transfers_panel(ui),
+                                Tab::Store => self.store_panel(ui),
+                                Tab::Retrieve => self.retrieve_panel(ui),
+                                Tab::Send => self.send_panel(ui),
+                                Tab::Inbox => self.inbox_panel(ui),
+                                Tab::Outbox => self.outbox_panel(ui),
+                                Tab::Status => self.status_panel(ui),
+                                Tab::Settings => self.settings_panel(ui),
+                                Tab::Import => self.import_panel(ui),
+                            }
+                        });
+                    });
+            });
 
         // ── Wipe confirmation dialog ──────────────────────────────────
         if self.show_wipe_confirm {
@@ -3070,28 +2361,18 @@ impl eframe::App for MiasmaApp {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .show(ctx, |ui| {
-                    ui.add_space(4.0);
-                    ui.label(s.wipe_confirm_line1);
-                    ui.add_space(4.0);
-                    ui.label(egui::RichText::new(s.wipe_confirm_line2).strong());
-                    ui.add_space(12.0);
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add_sized([120.0, 30.0], danger_button(s.wipe_confirm_button))
-                            .clicked()
-                        {
+                    kit::paragraph(ui, s.wipe_confirm_line1);
+                    ui.label(RichText::new(s.wipe_confirm_line2).color(pal().danger));
+                    ui.add_space(kit::SP_1);
+                    kit::button_row(ui, |ui| {
+                        if ui.add(kit::danger_button(s.wipe_confirm_button)).clicked() {
                             let _ = self.worker.tx.try_send(WorkerCmd::Wipe);
                             self.busy = true;
                         }
-                        ui.add_space(8.0);
-                        if ui
-                            .add_sized([120.0, 30.0], egui::Button::new(s.wipe_cancel))
-                            .clicked()
-                        {
+                        if ui.add(kit::secondary_button(s.wipe_cancel)).clicked() {
                             self.show_wipe_confirm = false;
                         }
                     });
-                    ui.add_space(4.0);
                 });
         }
     }
