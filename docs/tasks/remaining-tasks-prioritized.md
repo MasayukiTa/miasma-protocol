@@ -199,7 +199,7 @@
 
 - **種別**: アーキテクチャ・セキュリティ
 - **現状**: 詳細な進捗ログは `docs/tasks/p2p-content-transfer-hardening.md`、実装計画は
-  `C:\Users\M118A8586\.claude\plans\binary-wiggling-sky.md` を参照
+  `C:\Users\<user>\.claude\plans\binary-wiggling-sky.md` を参照
 - **要点**: 公開時に全シャードが公開ノード自身にしか存在しない(検閲耐性の核心的な
   未達成)、DHT PUTが伝播確認なしに成功扱い、GET側にリトライが無い、
   Kademliaが完全にデフォルト設定、唯一のend-to-end検証テストが常時
