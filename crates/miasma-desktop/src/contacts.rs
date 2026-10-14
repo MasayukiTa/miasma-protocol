@@ -71,6 +71,17 @@ pub fn shorten_name(name: &str, max: usize) -> String {
     format!("{head_s}…{tail_s}")
 }
 
+/// Shorten a contact name (no extension to keep): the start, then `…`. The full name is always
+/// available as hover text.
+pub fn shorten_label(name: &str, max: usize) -> String {
+    let n = name.chars().count();
+    if max < 2 || n <= max {
+        return name.to_owned();
+    }
+    let head: String = name.chars().take(max - 1).collect();
+    format!("{}…", head.trim_end())
+}
+
 /// The last component of a path from either OS.
 pub fn base_name(path: &str) -> String {
     crate::transfers::file_name_of(path)
@@ -120,18 +131,21 @@ pub fn size_limit_text(limit: Option<u64>) -> String {
 // ─── Pure: contact card texts ───────────────────────────────────────────────
 
 /// The message to paste into chat or e-mail. Bilingual, and it carries only public things: the
-/// contact code is public by design, the fingerprint is a digest of it. No secret ever goes here.
+/// contact code is public by design, the verification code is a digest of it. No secret ever
+/// goes here.
 pub fn invitation_message(code: &str, fingerprint: &str) -> String {
     format!(
-        "Miasma の連絡先カードです / Here is my Miasma contact card.\n\
+        "Miasma の連絡先を送ります。 / Here is my Miasma contact.\n\
          \n\
          {code}\n\
          \n\
-         指紋 / Fingerprint: {fingerprint}\n\
+         確認用コード / Verification code: {fingerprint}\n\
          \n\
-         使い方: Miasma > 連絡先 > 「連絡先を追加」に、このメッセージをそのまま貼り付けて「追加」を押してください。\n\
-         How to: paste this whole message in Miasma > Contacts > Add a contact, then press Add.\n\
-         (連絡先コードは公開して大丈夫です。パスワードではありません。/ The code is public, not a password.)\n"
+         使い方: Miasma の「連絡先」を開き、「連絡先を追加」にこのメッセージをそのまま貼り付けて、「追加」を押してください。\n\
+         How to: open Miasma > Contacts, paste this whole message into \"Add a contact\", then press Add.\n\
+         \n\
+         連絡先コードは人に見せても大丈夫です。パスワードではありません。\n\
+         The contact code is safe to share. It is not a password.\n"
     )
 }
 
@@ -544,6 +558,9 @@ pub struct ContactsUi {
     remove_target: Option<(String, String)>,
     row_rects: Vec<(String, egui::Rect)>,
     page_msg: Option<(String, bool)>,
+
+    /// Dev-only screenshot fixtures: show what was set up, never ask the daemon.
+    frozen: bool,
 }
 
 impl Default for ContactsUi {
@@ -587,6 +604,7 @@ impl Default for ContactsUi {
             remove_target: None,
             row_rects: Vec::new(),
             page_msg: None,
+            frozen: false,
         }
     }
 }
@@ -618,6 +636,9 @@ impl ContactsUi {
     /// Ask for more data when it is due. Cheap: when the area is closed and nothing is running
     /// this is one small request every 3 s (so arrivals are noticed).
     pub fn tick(&mut self, area_open: bool, connected: bool) {
+        if self.frozen {
+            return;
+        }
         if connected && !self.was_connected {
             // (Re)connected: read everything again.
             self.initial_sent = false;
@@ -714,6 +735,9 @@ impl ContactsUi {
         req: PushRequest,
         reply: Result<PushResponse, PushFail>,
     ) {
+        if self.frozen {
+            return;
+        }
         let is_status = matches!(req, PushRequest::Status { id: None });
         if is_status {
             self.status_in_flight = None;
@@ -919,7 +943,7 @@ impl ContactsUi {
         section_heading(ui, c.heading);
         ui.add_space(4.0);
         ui.add(egui::Label::new(egui::RichText::new(c.desc).color(pal().muted)).wrap(true));
-        ui.add_space(8.0);
+        ui.add_space(GAP);
 
         if !connected || self.availability == Availability::DaemonDown {
             self.notice_card(ui, c.daemon_down, pal().warning, None);
@@ -946,26 +970,28 @@ impl ContactsUi {
         if let Some((msg, is_err)) = self.page_msg.clone() {
             let color = if is_err { pal().danger } else { pal().success };
             card_frame().show(ui, |ui| {
+                ui.set_width(ui.available_width());
                 ui.add(egui::Label::new(egui::RichText::new(&msg).color(color)).wrap(true));
-                if ui.small_button(c.cancel).clicked() {
+                ui.add_space(4.0);
+                if ui.button(c.dismiss).clicked() {
                     self.page_msg = None;
                 }
             });
-            ui.add_space(8.0);
+            ui.add_space(GAP);
         }
 
         if self.contacts.is_empty() && self.contacts_loaded {
             self.help_card(ui, c);
-            ui.add_space(10.0);
+            ui.add_space(GAP);
         }
         self.my_card_ui(ui, c);
-        ui.add_space(10.0);
+        ui.add_space(GAP);
         self.add_ui(ui, c);
-        ui.add_space(10.0);
+        ui.add_space(GAP);
         self.list_ui(ui, c, technical);
-        ui.add_space(10.0);
+        ui.add_space(GAP);
         self.transfers_ui(ui, c);
-        ui.add_space(10.0);
+        ui.add_space(GAP);
         self.inbox_ui(ui, c);
         self.remove_dialog(ui.ctx(), c);
     }
@@ -993,37 +1019,34 @@ impl ContactsUi {
     fn help_card(&self, ui: &mut egui::Ui, c: &ContactStrings) {
         card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(egui::RichText::new(c.help_title).strong().size(15.0));
-            ui.add_space(4.0);
+            section_title(ui, c.help_title);
             for line in [c.help_1, c.help_2, c.help_3] {
                 ui.add(egui::Label::new(line).wrap(true));
+                ui.add_space(2.0);
             }
-            ui.add_space(6.0);
-            ui.add(
-                egui::Label::new(egui::RichText::new(c.offline_note).color(pal().muted)).wrap(true),
-            );
         });
     }
 
     fn my_card_ui(&mut self, ui: &mut egui::Ui, c: &ContactStrings) {
         card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(egui::RichText::new(c.my_card).strong().size(15.0));
+            section_title(ui, c.my_card);
             let Some((code, fp)) = self.my_code.clone() else {
                 ui.label(egui::RichText::new(c.loading).color(pal().muted));
                 return;
             };
-            ui.add_space(4.0);
-            ui.label(egui::RichText::new(c.my_code).small().color(pal().muted));
-            let mut shown = code.clone();
+            ui.label(label_text(c.my_code));
+            // Read-only and selectable; one row high, it grows with the wrapped code only.
+            let mut shown: &str = code.as_str();
             ui.add(
                 egui::TextEdit::multiline(&mut shown)
                     .font(egui::TextStyle::Monospace)
-                    .desired_rows(3)
+                    .desired_rows(1)
                     .desired_width(f32::INFINITY),
             );
-            ui.add_space(6.0);
-            ui.label(egui::RichText::new(c.my_fp).small().color(pal().muted));
+            hint(ui, c.my_code_hint);
+            ui.add_space(8.0);
+            ui.label(label_text(c.my_fp));
             ui.label(
                 egui::RichText::new(&fp)
                     .monospace()
@@ -1031,20 +1054,10 @@ impl ContactsUi {
                     .strong()
                     .color(pal().text),
             );
-            ui.add(
-                egui::Label::new(egui::RichText::new(c.my_fp_hint).color(pal().muted)).wrap(true),
-            );
-            ui.add_space(6.0);
+            hint(ui, c.my_fp_hint);
+            ui.add_space(8.0);
+            // One primary action per card: the invitation message is what people send.
             ui.horizontal_wrapped(|ui| {
-                let l = if recent(self.copied_at) {
-                    c.copied
-                } else {
-                    c.copy_code
-                };
-                if ui.button(l).clicked() {
-                    ui.output_mut(|o| o.copied_text = code.clone());
-                    self.copied_at = Some(Instant::now());
-                }
                 let l = if recent(self.invite_copied_at) {
                     c.copied
                 } else {
@@ -1055,20 +1068,27 @@ impl ContactsUi {
                     ui.output_mut(|o| o.copied_text = msg);
                     self.invite_copied_at = Some(Instant::now());
                 }
+                let l = if recent(self.copied_at) {
+                    c.copied
+                } else {
+                    c.copy_code
+                };
+                if ui.button(l).clicked() {
+                    ui.output_mut(|o| o.copied_text = code.clone());
+                    self.copied_at = Some(Instant::now());
+                }
                 let l = if self.show_qr { c.hide_qr } else { c.show_qr };
                 if ui.button(l).clicked() {
                     self.show_qr = !self.show_qr;
                 }
             });
             if self.show_qr {
-                ui.add_space(6.0);
+                ui.add_space(8.0);
                 if !crate::transfers::draw_qr(ui, &qr_payload(&code), 240.0) {
                     ui.label(egui::RichText::new("QR: too long").color(pal().danger));
                 }
-                ui.add(
-                    egui::Label::new(egui::RichText::new(c.qr_note).small().color(pal().muted))
-                        .wrap(true),
-                );
+                ui.add_space(2.0);
+                hint(ui, c.qr_note);
             }
         });
     }
@@ -1076,22 +1096,24 @@ impl ContactsUi {
     fn add_ui(&mut self, ui: &mut egui::Ui, c: &ContactStrings) {
         card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(egui::RichText::new(c.add_title).strong().size(15.0));
-            ui.add(egui::Label::new(egui::RichText::new(c.add_hint).color(pal().muted)).wrap(true));
-            ui.add_space(4.0);
-            ui.label(egui::RichText::new(c.add_paste).small().color(pal().muted));
+            section_title(ui, c.add_title);
+            ui.add(egui::Label::new(c.add_hint).wrap(true));
+            ui.add_space(6.0);
+            ui.label(label_text(c.add_paste));
             ui.add(
                 egui::TextEdit::multiline(&mut self.add_text)
+                    .font(egui::TextStyle::Monospace)
                     .desired_rows(3)
                     .desired_width(f32::INFINITY),
             );
-            ui.label(egui::RichText::new(c.add_label).small().color(pal().muted));
+            ui.add_space(4.0);
+            ui.label(label_text(c.add_label));
             ui.add(
                 egui::TextEdit::singleline(&mut self.add_label)
                     .hint_text(c.add_label_hint)
                     .desired_width(260.0),
             );
-            ui.add_space(6.0);
+            ui.add_space(8.0);
             let ready = !self.add_text.trim().is_empty() && !self.add_busy;
             ui.horizontal_wrapped(|ui| {
                 let l = if self.add_busy {
@@ -1120,10 +1142,16 @@ impl ContactsUi {
             }
             if let Some((label, fp)) = &self.add_result {
                 ui.add_space(8.0);
-                ui.label(
-                    egui::RichText::new(fill(c.added_title, &[("label", label)]))
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(fill(
+                            c.added_title,
+                            &[("label", &shorten_label(label, 40))],
+                        ))
                         .strong()
                         .color(pal().success),
+                    )
+                    .wrap(true),
                 );
                 ui.label(egui::RichText::new(fp).monospace().size(26.0).strong());
                 ui.add(
@@ -1149,9 +1177,13 @@ impl ContactsUi {
         });
         if hovering && !self.contacts.is_empty() {
             card_frame().show(ui, |ui| {
-                ui.colored_label(pal().accent, c.drop_hint);
+                ui.set_width(ui.available_width());
+                ui.add(
+                    egui::Label::new(egui::RichText::new(c.drop_hint).color(pal().accent))
+                        .wrap(true),
+                );
             });
-            ui.add_space(6.0);
+            ui.add_space(GAP);
         }
         if dropped.is_empty() {
             return;
@@ -1165,24 +1197,32 @@ impl ContactsUi {
     }
 
     fn list_ui(&mut self, ui: &mut egui::Ui, c: &ContactStrings, technical: bool) {
-        ui.label(egui::RichText::new(c.list_title).strong().size(15.0));
-        ui.add_space(4.0);
-        if self.contacts.is_empty() {
-            ui.label(egui::RichText::new(c.list_empty).color(pal().muted));
-            return;
-        }
-        let contacts = self.contacts.clone();
-        let not_allowed = not_allowed_contacts(&self.rows);
-        let mut rects = Vec::new();
-        for ct in &contacts {
-            let resp = card_frame().show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                self.contact_row(ui, c, ct, not_allowed.contains(&ct.id), technical);
-            });
-            rects.push((ct.id.clone(), resp.response.rect));
-            ui.add_space(6.0);
-        }
-        self.row_rects = rects;
+        card_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            section_title(ui, c.list_title);
+            if self.contacts.is_empty() {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(c.list_empty).color(pal().muted))
+                        .wrap(true),
+                );
+                self.row_rects.clear();
+                return;
+            }
+            let contacts = self.contacts.clone();
+            let not_allowed = not_allowed_contacts(&self.rows);
+            let mut rects = Vec::new();
+            for (i, ct) in contacts.iter().enumerate() {
+                if i > 0 {
+                    ui.add_space(8.0);
+                }
+                let resp = inner_frame().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    self.contact_row(ui, c, ct, not_allowed.contains(&ct.id), technical);
+                });
+                rects.push((ct.id.clone(), resp.response.rect));
+            }
+            self.row_rects = rects;
+        });
     }
 
     fn contact_row(
@@ -1193,13 +1233,13 @@ impl ContactsUi {
         no_reg: bool,
         technical: bool,
     ) {
-        // Title line: name, status chip, fingerprint.
+        // Title line: name and status chip; both wrap onto a second line when the window is narrow.
         ui.horizontal_wrapped(|ui| {
             if self.renaming.as_ref().is_some_and(|(id, _)| *id == ct.id) {
                 let mut commit = false;
                 let mut stop = false;
                 if let Some((_, text)) = self.renaming.as_mut() {
-                    ui.add(egui::TextEdit::singleline(text).desired_width(180.0));
+                    ui.add(egui::TextEdit::singleline(text).desired_width(200.0));
                     let t = text.trim().to_owned();
                     if ui
                         .add_enabled(!t.is_empty(), egui::Button::new(c.save))
@@ -1219,11 +1259,15 @@ impl ContactsUi {
                     self.renaming = None;
                 }
             } else {
-                ui.label(
-                    egui::RichText::new(shorten_name(&ct.label, 40))
-                        .strong()
-                        .size(16.0),
-                );
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(shorten_label(&ct.label, NAME_MAX))
+                            .strong()
+                            .size(NAME_SIZE),
+                    )
+                    .wrap(true),
+                )
+                .on_hover_text(&ct.label);
             }
             if no_reg {
                 crate::transfers::draw_chip(ui, pal().warning, c.chip_not_registered);
@@ -1232,11 +1276,7 @@ impl ContactsUi {
             }
         });
         ui.horizontal_wrapped(|ui| {
-            ui.label(
-                egui::RichText::new(c.fingerprint)
-                    .small()
-                    .color(pal().muted),
-            );
+            ui.label(label_text(c.fingerprint));
             ui.label(egui::RichText::new(&ct.fingerprint).monospace().strong());
         });
         if technical {
@@ -1245,9 +1285,9 @@ impl ContactsUi {
                     egui::RichText::new(format!(
                         "{}  {}",
                         shorten_name(&ct.endpoint_id, 24),
-                        ct.inbox_dir
+                        crate::transfers::plain_path(&ct.inbox_dir)
                     ))
-                    .small()
+                    .size(12.0)
                     .monospace()
                     .color(pal().faint),
                 )
@@ -1255,12 +1295,13 @@ impl ContactsUi {
             );
         }
         if no_reg {
+            ui.add_space(2.0);
             ui.add(
                 egui::Label::new(egui::RichText::new(c.hint_not_registered).color(pal().warning))
                     .wrap(true),
             );
         }
-        ui.add_space(4.0);
+        ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
             let can_send = ct.allow_send;
             if ui
@@ -1279,12 +1320,9 @@ impl ContactsUi {
             }
         });
         if !ct.allow_send {
-            ui.label(
-                egui::RichText::new(c.send_disabled_note)
-                    .small()
-                    .color(pal().muted),
-            );
+            ui.add(egui::Label::new(label_text(c.send_disabled_note)).wrap(true));
         }
+        ui.add_space(2.0);
         ui.horizontal_wrapped(|ui| {
             let mut recv = ct.allow_receive;
             if ui.checkbox(&mut recv, c.allow_receive).changed() {
@@ -1298,7 +1336,7 @@ impl ContactsUi {
             }
         });
         ui.horizontal_wrapped(|ui| {
-            ui.label(egui::RichText::new(c.max_size).small().color(pal().muted));
+            ui.label(label_text(c.max_size));
             let init = size_limit_text(ct.max_file_size);
             let buf = self
                 .edits
@@ -1307,7 +1345,7 @@ impl ContactsUi {
             ui.add(
                 egui::TextEdit::singleline(buf)
                     .hint_text(c.max_size_hint)
-                    .desired_width(90.0),
+                    .desired_width(150.0),
             );
             let dirty = *buf != init;
             let text = buf.clone();
@@ -1327,10 +1365,9 @@ impl ContactsUi {
             }
         });
         if self.max_error.contains(&ct.id) {
-            ui.label(
-                egui::RichText::new(c.max_size_invalid)
-                    .small()
-                    .color(pal().danger),
+            ui.add(
+                egui::Label::new(egui::RichText::new(c.max_size_invalid).color(pal().danger))
+                    .wrap(true),
             );
         }
     }
@@ -1349,11 +1386,19 @@ impl ContactsUi {
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .default_width(380.0)
             .max_width(420.0)
             .show(ctx, |ui| {
-                ui.add(egui::Label::new(fill(c.remove_body, &[("label", &label)])).wrap(true));
+                ui.set_max_width(400.0);
+                ui.add(
+                    egui::Label::new(fill(
+                        c.remove_body,
+                        &[("label", &shorten_label(&label, 40))],
+                    ))
+                    .wrap(true),
+                );
                 ui.add_space(8.0);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if ui.add(danger_button(c.remove_confirm)).clicked() {
                         self.out.push_back(PushRequest::ContactRemove {
                             contact: id.clone(),
@@ -1370,41 +1415,48 @@ impl ContactsUi {
     }
 
     fn transfers_ui(&mut self, ui: &mut egui::Ui, c: &ContactStrings) {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(egui::RichText::new(c.tr_title).strong().size(15.0));
-            if self
-                .rows
-                .iter()
-                .any(|r| r.finished() && r.at_ms > self.cleared_before_ms)
-                && ui.small_button(c.btn_clear_finished).clicked()
-            {
-                self.cleared_before_ms = self.rows.iter().map(|r| r.at_ms).max().unwrap_or(0);
+        card_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                section_title(ui, c.tr_title);
+                if self
+                    .rows
+                    .iter()
+                    .any(|r| r.finished() && r.at_ms > self.cleared_before_ms)
+                    && ui.button(c.btn_clear_finished).clicked()
+                {
+                    self.cleared_before_ms = self.rows.iter().map(|r| r.at_ms).max().unwrap_or(0);
+                }
+            });
+            let rows: Vec<Row> =
+                visible_rows(&self.rows, self.cleared_before_ms, MAX_FINISHED_SHOWN)
+                    .into_iter()
+                    .cloned()
+                    .collect();
+            if rows.is_empty() {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(c.tr_empty).color(pal().muted)).wrap(true),
+                );
+                return;
+            }
+            for (i, r) in rows.iter().enumerate() {
+                if i > 0 {
+                    ui.add_space(6.0);
+                }
+                self.row_ui(ui, c, r);
             }
         });
-        ui.add_space(4.0);
-        let rows: Vec<Row> = visible_rows(&self.rows, self.cleared_before_ms, MAX_FINISHED_SHOWN)
-            .into_iter()
-            .cloned()
-            .collect();
-        if rows.is_empty() {
-            ui.label(egui::RichText::new(c.tr_empty).color(pal().muted));
-            return;
-        }
-        for r in &rows {
-            self.row_ui(ui, c, r);
-            ui.add_space(4.0);
-        }
     }
 
     fn row_ui(&mut self, ui: &mut egui::Ui, c: &ContactStrings, r: &Row) {
-        card_frame().show(ui, |ui| {
+        inner_frame().show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
+            ui.horizontal_top(|ui| {
                 let (rect, _) =
                     ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
                 crate::transfers::paint_arrow(ui.painter(), rect.center(), r.outbound, pal().muted);
                 let name = ui.add(
-                    egui::Label::new(egui::RichText::new(shorten_name(&r.name, 48)).strong())
+                    egui::Label::new(egui::RichText::new(shorten_name(&r.name, 40)).strong())
                         .wrap(true),
                 );
                 name.on_hover_text(&r.name);
@@ -1414,7 +1466,7 @@ impl ContactsUi {
                 ui.label(
                     egui::RichText::new(format!(
                         "{who}: {}  ·  {}",
-                        shorten_name(&r.contact_label, 30),
+                        shorten_label(&r.contact_label, 24),
                         format_bytes(r.size)
                     ))
                     .color(pal().muted),
@@ -1434,13 +1486,21 @@ impl ContactsUi {
                     line.push_str(&format!("  ·  {}", format_rate(r.rate_bps as f64)));
                 }
                 if let Some(e) = eta_secs(r.size, r.bytes, r.rate_bps) {
-                    line.push_str(&format!("  ·  {} {}", format_eta(Some(e), "d"), c.eta));
+                    line.push_str(&format!(
+                        "  ·  {}",
+                        fill(c.eta, &[("t", &format_eta(Some(e), "d"))])
+                    ));
                 }
-                ui.add(
-                    egui::ProgressBar::new(f)
-                        .desired_width(ui.available_width().max(60.0))
-                        .text(line),
-                );
+                ui.add_space(2.0);
+                // The track must show against the row's own background.
+                ui.scope(|ui| {
+                    ui.visuals_mut().extreme_bg_color = pal().surface;
+                    ui.add(
+                        egui::ProgressBar::new(f)
+                            .desired_width(ui.available_width().max(60.0))
+                            .text(line),
+                    );
+                });
             }
             if let Some(g) = row_guidance(c, r) {
                 let color = if r.finished() {
@@ -1448,54 +1508,330 @@ impl ContactsUi {
                 } else {
                     pal().warning
                 };
+                ui.add_space(2.0);
                 ui.add(egui::Label::new(egui::RichText::new(g).color(color)).wrap(true));
             }
-            ui.horizontal_wrapped(|ui| {
-                if !r.finished() && ui.button(c.btn_cancel).clicked() {
-                    self.out.push_back(PushRequest::Cancel { id: r.id.clone() });
-                }
-                if self.can_retry(r) && ui.button(c.btn_retry).clicked() {
-                    self.retry(r);
-                }
-                if !r.outbound && r.state == PushState::Done {
-                    if let Some(sa) = &r.saved_as {
-                        let inbox = self
-                            .contacts
-                            .iter()
-                            .find(|x| x.id == r.contact_id)
-                            .map(|x| x.inbox_dir.as_str());
-                        let p = saved_path(sa, inbox);
+            let can_cancel = !r.finished();
+            let can_retry = self.can_retry(r);
+            let open = if !r.outbound && r.state == PushState::Done {
+                r.saved_as.as_ref().map(|sa| {
+                    let inbox = self
+                        .contacts
+                        .iter()
+                        .find(|x| x.id == r.contact_id)
+                        .map(|x| x.inbox_dir.as_str());
+                    saved_path(sa, inbox)
+                })
+            } else {
+                None
+            };
+            if can_cancel || can_retry || open.is_some() {
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    if can_cancel && ui.button(c.btn_cancel).clicked() {
+                        self.out.push_back(PushRequest::Cancel { id: r.id.clone() });
+                    }
+                    if can_retry && ui.button(c.btn_retry).clicked() {
+                        self.retry(r);
+                    }
+                    if let Some(p) = &open {
                         if ui.button(c.btn_open_file).clicked() {
-                            open_file(&p);
+                            open_file(p);
                         }
                         if ui.button(c.btn_show_folder).clicked() {
-                            reveal_file(&p);
+                            reveal_file(p);
                         }
                     }
-                }
-            });
+                });
+            }
         });
     }
 
     fn inbox_ui(&mut self, ui: &mut egui::Ui, c: &ContactStrings) {
         card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(egui::RichText::new(c.inbox_title).strong().size(15.0));
+            section_title(ui, c.inbox_title);
             if let Some(dir) = self.inbox_dir.clone() {
+                ui.label(label_text(c.inbox_dir));
+                // The path in the monospace font, on its own: the Japanese UI font draws a
+                // backslash as a yen sign.
                 ui.add(
                     egui::Label::new(
-                        egui::RichText::new(format!("{}: {dir}", c.inbox_dir))
-                            .monospace()
-                            .small(),
+                        egui::RichText::new(crate::transfers::plain_path(&dir)).monospace(),
                     )
                     .wrap(true),
                 );
+                ui.add_space(6.0);
                 if ui.button(c.open_folder).clicked() {
                     open_folder(&dir);
                 }
             }
-            ui.label(egui::RichText::new(c.inbox_note).small().color(pal().muted));
+            ui.add_space(4.0);
+            hint(ui, c.inbox_note);
         });
+    }
+}
+
+// ─── Look: one set of sizes and frames for every section ───────────────────
+
+/// Space between two sections.
+const GAP: f32 = 10.0;
+/// Section title / contact name / body / label and hint. Never below the app's small size.
+const SECTION_SIZE: f32 = 16.0;
+const NAME_SIZE: f32 = 15.0;
+const LABEL_SIZE: f32 = 13.0;
+/// Longest contact name drawn (characters); the full name is the hover text.
+const NAME_MAX: usize = 28;
+
+/// The title of a card.
+fn section_title(ui: &mut egui::Ui, text: &str) {
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new(text)
+                .strong()
+                .size(SECTION_SIZE)
+                .color(pal().text),
+        )
+        .wrap(true),
+    );
+    ui.add_space(4.0);
+}
+
+/// A field label.
+fn label_text(text: &str) -> egui::RichText {
+    egui::RichText::new(text)
+        .size(LABEL_SIZE)
+        .color(pal().muted)
+}
+
+/// A line of explanation under a field.
+fn hint(ui: &mut egui::Ui, text: &str) {
+    ui.add(egui::Label::new(label_text(text)).wrap(true));
+}
+
+/// A row inside a card (a contact, a transfer): quieter than the card itself.
+fn inner_frame() -> egui::Frame {
+    egui::Frame::none()
+        .inner_margin(egui::Margin::same(12.0))
+        .rounding(6.0)
+        .fill(pal().surface_subtle)
+        .stroke(egui::Stroke::new(1.0, pal().border))
+}
+
+// ─── Dev-only screenshot fixtures ───────────────────────────────────────────
+
+/// Fixture names for the `ui-tour` screenshots and the layout unit test.
+#[cfg(any(test, feature = "ui-tour"))]
+pub const FIXTURES: &[&str] = &[
+    "empty", "two", "active", "failed", "qr", "remove", "added", "adderror",
+];
+
+#[cfg(any(test, feature = "ui-tour"))]
+impl ContactsUi {
+    /// A Contacts area filled with fake data (no daemon). `None` for an unknown name.
+    pub fn fixture(name: &str, c: &ContactStrings) -> Option<Self> {
+        const LONG: &str =
+            "株式会社サンプル商事 営業第二部 プロジェクト管理チーム 山田太郎さん（出張中のノートPC）";
+        let contact = |id: &str, label: &str, fp: &str, send: bool, max: Option<u64>| ContactInfo {
+            id: id.into(),
+            label: label.into(),
+            endpoint_id: "d9a3f1c07b2e4a58b6c1e0f39a7d5b24c8e61f0a9b3d7c2e5f4a8b1c6d0e3f72".into(),
+            fingerprint: fp.into(),
+            added_at: 0,
+            allow_send: send,
+            allow_receive: true,
+            max_file_size: max,
+            inbox_dir: format!(r"C:\Users\Taro\AppData\Local\miasma\data\inbox\{label}"),
+        };
+        #[allow(clippy::too_many_arguments)]
+        let xfer = |id: &str,
+                    out: bool,
+                    ct: &ContactInfo,
+                    file: &str,
+                    size: u64,
+                    bytes: u64,
+                    rate: u64,
+                    st: PushState,
+                    at: u64| PushTransferInfo {
+            id: id.into(),
+            direction: if out { Direction::Out } else { Direction::In },
+            contact_id: ct.id.clone(),
+            contact_label: ct.label.clone(),
+            name: file.into(),
+            size,
+            bytes,
+            rate_bps: rate,
+            state: st,
+            error: None,
+            reject_reason: None,
+            saved_as: None,
+            created_at_ms: at,
+            updated_at_ms: at,
+        };
+        let mib = 1u64 << 20;
+        let a = contact("a", "田中", "0CS3Y-09W9N-5B5WM-QMMCX", true, None);
+        let b = contact("b", LONG, "7KQ2D-4HZ8M-X1N6P-V3RTA", true, Some(2 << 30));
+        let mut ui = ContactsUi {
+            frozen: true,
+            availability: Availability::Ok,
+            ever_ok: true,
+            contacts_loaded: true,
+            baseline_done: true,
+            my_code: Some((
+                "miasma-contact:3pg8nKBJuripJfrJxMKBKFY6JSBPhTP266EJPq6Q8RDVL2ymxw".into(),
+                "0CS3Y-09W9N-5B5WM-QMMCX".into(),
+            )),
+            inbox_dir: Some(r"C:\Users\Taro\AppData\Local\miasma\data\inbox".into()),
+            ..Default::default()
+        };
+        let mut board: Vec<PushTransferInfo> = Vec::new();
+        match name {
+            "empty" => {}
+            "two" => {
+                ui.contacts = vec![a.clone(), b.clone()];
+                let mut n = xfer(
+                    "1",
+                    true,
+                    &b,
+                    "請求書_2026年10月分.pdf",
+                    3 * mib,
+                    0,
+                    0,
+                    PushState::Rejected,
+                    20,
+                );
+                n.reject_reason = Some("not_allowed".into());
+                let mut d = xfer(
+                    "2",
+                    false,
+                    &a,
+                    "写真.zip",
+                    48 * mib,
+                    48 * mib,
+                    0,
+                    PushState::Done,
+                    10,
+                );
+                d.saved_as = Some("写真.zip".into());
+                board = vec![n, d];
+            }
+            "active" => {
+                ui.contacts = vec![a.clone(), b.clone()];
+                board = vec![
+                    xfer(
+                        "1",
+                        true,
+                        &b,
+                        "ミーティング資料_最終版_修正反映済み_営業部確認用_v12.pdf",
+                        900 * mib,
+                        333 * mib,
+                        4_400_000,
+                        PushState::Sending,
+                        5,
+                    ),
+                    xfer(
+                        "2",
+                        false,
+                        &a,
+                        "backup.img",
+                        4 << 30,
+                        3 << 30,
+                        31_000_000,
+                        PushState::Sending,
+                        6,
+                    ),
+                    xfer("3", true, &a, "memo.txt", 1000, 0, 0, PushState::Queued, 7),
+                    xfer(
+                        "4",
+                        true,
+                        &a,
+                        "photo.jpg",
+                        5 * mib,
+                        0,
+                        0,
+                        PushState::Connecting,
+                        8,
+                    ),
+                ];
+            }
+            "failed" => {
+                let mut a2 = a.clone();
+                a2.allow_send = false;
+                ui.contacts = vec![a2, b.clone()];
+                let mut t = 100u64;
+                let mut add = |st: PushState, err: Option<&str>, rej: Option<&str>, file: &str| {
+                    t += 1;
+                    let mut x = xfer(&format!("f{t}"), true, &b, file, 10 * mib, 0, 0, st, t);
+                    x.error = err.map(str::to_owned);
+                    x.reject_reason = rej.map(str::to_owned);
+                    board.push(x);
+                };
+                add(
+                    PushState::Failed,
+                    Some("cannot reach the other side: timed out"),
+                    None,
+                    "届かない.pdf",
+                );
+                add(
+                    PushState::Failed,
+                    Some("cannot read the file: access denied"),
+                    None,
+                    "読めない.pdf",
+                );
+                add(PushState::Failed, None, None, "原因不明.pdf");
+                for r in [
+                    "too_large",
+                    "no_space",
+                    "not_allowed",
+                    "busy",
+                    "bad_name",
+                    "bad_request",
+                    "other",
+                ] {
+                    add(
+                        PushState::Rejected,
+                        None,
+                        Some(r),
+                        &format!("rejected_{r}.pdf"),
+                    );
+                }
+                add(PushState::Cancelled, None, None, "中止した.pdf");
+                let mut retrying = xfer(
+                    "r",
+                    true,
+                    &b,
+                    "再試行中.pdf",
+                    10 * mib,
+                    0,
+                    0,
+                    PushState::Connecting,
+                    5,
+                );
+                retrying.error = Some("open stream timed out".into());
+                board.push(retrying);
+            }
+            "qr" => {
+                ui.contacts = vec![a.clone()];
+                ui.show_qr = true;
+            }
+            "remove" => {
+                ui.contacts = vec![a.clone(), b.clone()];
+                ui.remove_target = Some((b.id.clone(), b.label.clone()));
+            }
+            "added" => {
+                ui.contacts = vec![a.clone()];
+                ui.add_result = Some(("田中".into(), "0CS3Y-09W9N-5B5WM-QMMCX".into()));
+            }
+            "adderror" => {
+                ui.add_text = "これは連絡先コードではありません".into();
+                ui.add_error = Some(c.err_bad_code.to_owned());
+                ui.page_msg = Some((c.err_send_disabled.to_owned(), true));
+            }
+            _ => return None,
+        }
+        ui.board = board;
+        ui.rebuild_rows();
+        Some(ui)
     }
 }
 
@@ -1616,6 +1952,42 @@ mod tests {
         // A very long extension is treated as no extension.
         let e = format!("a{}.{}", "b".repeat(50), "x".repeat(30));
         assert!(shorten_name(&e, 20).chars().count() <= 20);
+    }
+
+    #[test]
+    fn long_contact_names_keep_their_start_and_say_so() {
+        let long = "株式会社サンプル商事 営業第二部 プロジェクト管理チーム 山田太郎さん（出張中のノートPC）";
+        let s = shorten_label(long, 28);
+        assert!(
+            s.chars().count() <= 28 && s.ends_with('…') && s.starts_with("株式会社"),
+            "{s}"
+        );
+        assert_eq!(shorten_label("田中", 28), "田中");
+    }
+
+    #[test]
+    fn every_fixture_builds_and_covers_its_state() {
+        for lang in crate::locale::Locale::ALL {
+            let c = contact_strings(lang);
+            for name in FIXTURES {
+                let ui = ContactsUi::fixture(name, c).unwrap_or_else(|| panic!("{name}"));
+                assert!(ui.frozen && ui.availability == Availability::Ok);
+            }
+            assert!(ContactsUi::fixture("nope", c).is_none());
+            let two = ContactsUi::fixture("two", c).unwrap();
+            assert_eq!(two.contacts.len(), 2);
+            assert!(not_allowed_contacts(&two.rows).contains("b"));
+            assert!(ContactsUi::fixture("active", c).unwrap().has_active());
+            assert!(ContactsUi::fixture("remove", c)
+                .unwrap()
+                .remove_target
+                .is_some());
+            assert!(ContactsUi::fixture("qr", c).unwrap().show_qr);
+            let failed = ContactsUi::fixture("failed", c).unwrap();
+            for r in failed.rows.iter().filter(|r| r.finished()) {
+                assert!(row_guidance(c, r).is_some() || r.state == PushState::Cancelled);
+            }
+        }
     }
 
     #[test]
