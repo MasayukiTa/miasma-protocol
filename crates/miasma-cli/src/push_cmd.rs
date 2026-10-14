@@ -25,12 +25,12 @@ use crate::i18n::{lang, Lang};
 
 #[derive(Subcommand)]
 pub enum ContactCmd {
-    /// Show YOUR contact code and fingerprint: give the code to the other person.
+    /// Show YOUR contact code and verification code: give the contact code to the other person.
     Code,
     /// Register the other person from their contact code.
     ///
     /// The code can be pasted as a whole message; it is found inside it. After
-    /// adding, compare the fingerprint with theirs over a call.
+    /// adding, compare the verification code with theirs over a call.
     Add {
         /// `miasma-contact:...` (or a message that contains it).
         code: String,
@@ -184,13 +184,13 @@ impl M<'_> {
         match self {
             M::DaemonDown => "The Miasma daemon is not running. Start it first (`miasma daemon`, or open the app), then try again.".into(),
             M::YourCode => "Your contact code (give this to the other person):".into(),
-            M::YourFingerprint(f) => format!("Your fingerprint: {f}\nRead it to the other person over a call and compare it with what they see for you."),
-            M::ShareCodeHint => "They must also add YOUR code (`miasma contact add <code>`) before you can send them files, and you must add theirs before they can send to you.".into(),
-            M::Added { label, fp } => format!("Added contact \"{label}\"\nFingerprint: {fp}"),
-            M::AddedHint => "Compare this fingerprint with the other person over a call. If it differs, remove the contact: the code was changed on its way.".into(),
+            M::YourFingerprint(f) => format!("Your verification code: {f}\nRead it to the other person, for example over a call, and ask them to compare it with the verification code on their screen."),
+            M::ShareCodeHint => "They must also add YOUR contact code (`miasma contact add <code>`) before you can send them files. You must add theirs before they can send to you.".into(),
+            M::Added { label, fp } => format!("Added contact \"{label}\"\nVerification code: {fp}"),
+            M::AddedHint => "Ask them to read out their \"Your verification code\" over a call, and compare it with the code above. If it differs, remove this contact.".into(),
             M::ContactsNone => "No contacts yet. Add one with `miasma contact add <code>`.".into(),
             M::ContactRow(c) => format!(
-                "{:<20} {}  send:{}  receive:{}  max:{}  inbox: {}",
+                "{:<20} {}  send:{}  receive:{}  max:{}  saved in: {}",
                 c.label,
                 c.fingerprint,
                 if c.allow_send { "yes" } else { "no" },
@@ -212,8 +212,8 @@ impl M<'_> {
             M::FailedFile { name, err } => format!("FAILED: {name}: {err}"),
             M::RejectedFile { name, text } => format!("REJECTED: {name}: {text}"),
             M::CancelledFile(n) => format!("cancelled: {n}"),
-            M::HintNotAllowed => "The other side has not registered you. Ask them to run `miasma contact add` with YOUR contact code (`miasma contact code`).".into(),
-            M::HintUnreachable => "Could not reach them. Check that their Miasma is running and online, then run `miasma netcheck` to see what this network allows.".into(),
+            M::HintNotAllowed => "They have not added you yet. Ask them to run `miasma contact add` with YOUR contact code (`miasma contact code`).".into(),
+            M::HintUnreachable => "Could not reach them. Check that their Miasma is running and online. If they are online, run `miasma netcheck` to see what this network allows.".into(),
             M::HintNoSpace => "Their disk is too full for this file. Ask them to free space.".into(),
             M::HintTooLarge => "The file is over their size limit. They can raise it with `miasma contact set <you> --max-size ...` or `push.max_file_size` in config.toml.".into(),
             M::HintBusy => "They are busy receiving other files. Try again in a minute.".into(),
@@ -227,15 +227,15 @@ impl M<'_> {
 
     fn ja(&self) -> String {
         match self {
-            M::DaemonDown => "Miasma デーモンが起動していません。先に起動(`miasma daemon` またはアプリを開く)してからやり直してください。".into(),
-            M::YourCode => "あなたの連絡先コード(相手に渡してください):".into(),
-            M::YourFingerprint(f) => format!("あなたのフィンガープリント: {f}\n通話などで相手に読み上げ、相手の画面に表示されるものと一致するか確認してください。"),
-            M::ShareCodeHint => "相手にも「あなたのコード」を登録してもらう必要があります(`miasma contact add <コード>`)。双方が登録して初めて送受信できます。".into(),
-            M::Added { label, fp } => format!("連絡先「{label}」を追加しました\nフィンガープリント: {fp}"),
-            M::AddedHint => "このフィンガープリントを通話などで相手と照合してください。違う場合は連絡先を削除してください(コードが途中で書き換えられています)。".into(),
+            M::DaemonDown => "Miasmaのバックグラウンド機能(デーモン)が起動していません。先に起動(`miasma daemon` またはアプリを開く)してから、もう一度試してください。".into(),
+            M::YourCode => "あなたの連絡先コード(相手に送ってください):".into(),
+            M::YourFingerprint(f) => format!("あなたの確認用コード: {f}\n相手に電話などで読み上げて、相手の画面の「確認用コード」と同じか見比べてもらってください。"),
+            M::ShareCodeHint => "相手にも、あなたの連絡先コードを登録してもらってください(`miasma contact add <コード>`)。お互いに登録すると、送り合えるようになります。".into(),
+            M::Added { label, fp } => format!("連絡先「{label}」を追加しました\n確認用コード: {fp}"),
+            M::AddedHint => "相手に電話などで「あなたの確認用コード」を読み上げてもらい、上のコードと同じか見比べてください。違っていたら、この連絡先を削除してください。".into(),
             M::ContactsNone => "連絡先はまだありません。`miasma contact add <コード>` で追加してください。".into(),
             M::ContactRow(c) => format!(
-                "{:<20} {}  送信:{}  受信:{}  上限:{}  受信箱: {}",
+                "{:<20} {}  送信:{}  受信:{}  上限:{}  保存先: {}",
                 c.label,
                 c.fingerprint,
                 if c.allow_send { "可" } else { "不可" },
@@ -253,18 +253,18 @@ impl M<'_> {
             ),
             M::Queued { name, label } => format!("送信待ち: {name} -> {label}"),
             M::Progress { label } => label.clone(),
-            M::DoneFile { name, label, saved } => format!("送信完了: {name} -> {label}(相手側の保存名: {saved})"),
+            M::DoneFile { name, label, saved } => format!("送信しました: {name} -> {label}(相手の保存名: {saved})"),
             M::FailedFile { name, err } => format!("失敗: {name}: {err}"),
-            M::RejectedFile { name, text } => format!("拒否されました: {name}: {text}"),
-            M::CancelledFile(n) => format!("キャンセル: {n}"),
-            M::HintNotAllowed => "相手があなたを登録していません。相手に「あなたの連絡先コード」(`miasma contact code`)を `miasma contact add` で登録してもらってください。".into(),
-            M::HintUnreachable => "相手に接続できませんでした。相手の Miasma が起動してオンラインか確認し、`miasma netcheck` でこのネットワークの状態を確認してください。".into(),
-            M::HintNoSpace => "相手のディスク空き容量が足りません。空きを作ってもらってください。".into(),
-            M::HintTooLarge => "相手の受信サイズ上限を超えています。相手側で `miasma contact set <あなた> --max-size ...` または config.toml の `push.max_file_size` を上げてもらってください。".into(),
-            M::HintBusy => "相手は他のファイルを受信中です。少し待ってからやり直してください。".into(),
+            M::RejectedFile { name, text } => format!("断られました: {name}: {text}"),
+            M::CancelledFile(n) => format!("中止しました: {n}"),
+            M::HintNotAllowed => "相手はまだあなたを登録していません。相手のMiasmaで、あなたの連絡先コード(`miasma contact code`)を `miasma contact add` で追加してもらってください。".into(),
+            M::HintUnreachable => "相手に届きませんでした。相手のMiasmaが起動していて、オンラインか確認してください。それでも届かないときは、`miasma netcheck` でこのネットワークの状態を確認してください。".into(),
+            M::HintNoSpace => "相手のパソコンの空き容量が足りません。空きを作ってもらってください。".into(),
+            M::HintTooLarge => "ファイルが、相手の受け取れるサイズを超えています。相手のMiasmaで `miasma contact set <あなた> --max-size ...` を実行するか、config.toml の `push.max_file_size` を上げてもらってください。".into(),
+            M::HintBusy => "相手がほかのファイルを受け取っています。少し待ってから、もう一度試してください。".into(),
             M::SomeFailed(n) => format!("{n} 件の転送が完了しませんでした。"),
             M::QueueEmpty => "実行中の転送はありません。".into(),
-            M::InboxIs(d) => format!("受信したファイルの場所: {d}"),
+            M::InboxIs(d) => format!("受信したファイルの保存先: {d}"),
             M::NotAFile(p) => format!("ファイルではありません(フォルダは送れません): {p}"),
             M::ApiError(e) => format!("エラー: {e}"),
         }
@@ -672,6 +672,16 @@ mod tests {
         for m in &msgs {
             assert!(!m.en().is_empty());
             assert!(!m.ja().is_empty());
+            // Same words as the app: "確認用コード", never the literal "指紋" / "カード".
+            let ja = m.ja();
+            for bad in ["指紋", "カード", "フィンガープリント"] {
+                assert!(!ja.contains(bad), "{bad} in: {ja}");
+            }
+            assert!(!m.en().to_lowercase().contains("fingerprint"), "{}", m.en());
         }
+        assert!(M::YourFingerprint("F").ja().contains("確認用コード"));
+        assert!(M::HintUnreachable
+            .ja()
+            .contains("相手のMiasmaが起動していて"));
     }
 }
