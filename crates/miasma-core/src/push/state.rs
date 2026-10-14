@@ -76,6 +76,14 @@ pub struct PushTransferInfo {
     /// `too_large`, `no_space`, `not_allowed`, `busy`, `bad_name` when rejected.
     #[serde(default)]
     pub reject_reason: Option<String>,
+    /// Stable machine-readable kind of a non-rejection ending (see [`error_kind`]).
+    /// `error` stays the English text; UIs map this to their own words.
+    #[serde(default)]
+    pub error_kind: Option<String>,
+    /// Outbound only: the file this transfer sends, so a UI (or a later
+    /// session) can offer "send again" without guessing.
+    #[serde(default)]
+    pub source_path: Option<String>,
     /// Where an inbound file was saved / the name the receiver reported.
     #[serde(default)]
     pub saved_as: Option<String>,
@@ -99,8 +107,33 @@ pub struct HistoryEntry {
     #[serde(default)]
     pub reject_reason: Option<String>,
     #[serde(default)]
+    pub error_kind: Option<String>,
+    #[serde(default)]
+    pub source_path: Option<String>,
+    #[serde(default)]
     pub saved_as: Option<String>,
     pub finished_at_ms: u64,
+}
+
+/// Stable values of `PushTransferInfo::error_kind` / `HistoryEntry::error_kind`.
+/// The English `error` text may change; these do not.
+pub mod error_kind {
+    /// Outbound: the other side could not be reached (offline, network blocks).
+    pub const UNREACHABLE: &str = "unreachable";
+    /// The connection broke mid-transfer (outbound: retries ran out). Resumable.
+    pub const CONNECTION_LOST: &str = "connection_lost";
+    /// Nothing moved / no answer within the time limit.
+    pub const TIMED_OUT: &str = "timed_out";
+    /// Inbound, state `Cancelled`: the sender stopped the transfer on purpose.
+    pub const PEER_CANCELLED: &str = "peer_cancelled";
+    /// The file arrived damaged (checksum mismatch).
+    pub const DAMAGED: &str = "damaged";
+    /// Outbound: the file could not be read or changed while being sent.
+    pub const FILE_UNREADABLE: &str = "file_unreadable";
+    /// Inbound: the inbox could not be written.
+    pub const WRITE_FAILED: &str = "write_failed";
+    /// Outbound: the contact was removed / sending to it was switched off.
+    pub const CONTACT_CHANGED: &str = "contact_changed";
 }
 
 pub fn now_ms() -> u64 {
@@ -152,6 +185,8 @@ impl Board {
             state,
             error: None,
             reject_reason: None,
+            error_kind: None,
+            source_path: None,
             saved_as: None,
             created_at_ms: now,
             updated_at_ms: now,
@@ -355,6 +390,8 @@ mod tests {
             state: PushState::Done,
             error: None,
             reject_reason: None,
+            error_kind: None,
+            source_path: None,
             saved_as: None,
             finished_at_ms: i as u64,
         }
