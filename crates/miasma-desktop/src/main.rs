@@ -24,6 +24,7 @@ mod link;
 pub mod locale;
 mod theme;
 mod transfers;
+mod ui_kit;
 pub mod variant;
 mod worker;
 
@@ -157,7 +158,7 @@ fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([960.0, 680.0])
-            .with_min_inner_size([600.0, 400.0])
+            .with_min_inner_size([700.0, 480.0])
             .with_title(title)
             .with_icon(std::sync::Arc::new(icon_data)),
         ..Default::default()
