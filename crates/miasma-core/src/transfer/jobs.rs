@@ -140,27 +140,8 @@ impl TransferRegistry {
         };
 
         let journal_dir = self.journal_dir();
-        // Direct sources, in order: explicit `--via` endpoints, then iroh (only
-        // for a share ID, which names the publisher to dial, and only if this
-        // daemon runs an iroh endpoint). The DHT comes last.
-        #[cfg(feature = "iroh")]
-        let iroh = crate::transport::iroh_direct::node_for(&self.data_dir)
-            .filter(|_| target.share_id().is_some())
-            .map(|node| IrohSource {
-                node,
-                ca_pem: iroh_ca_pem.clone().filter(|p| !p.trim().is_empty()),
-            });
-        #[cfg(not(feature = "iroh"))]
-        let _ = &iroh_ca_pem;
-        let sources = DirectSources {
-            via,
-            #[cfg(feature = "iroh")]
-            iroh,
-        };
-        #[cfg(feature = "iroh")]
-        let has_direct = sources.via.is_some() || sources.iroh.is_some();
-        #[cfg(not(feature = "iroh"))]
-        let has_direct = sources.via.is_some();
+        let sources = direct_sources(&self.data_dir, &target, via, iroh_ca_pem);
+        let has_direct = sources.has_any();
         let watched = progress.clone();
         let task = tokio::spawn(async move {
             // The outcome is recorded in `progress` by the engine itself.
@@ -531,6 +512,33 @@ pub fn status_from_journal(j: &ReceiveJournal) -> TransferStatus {
         share_id_checked: j.share_id.is_some(),
         publisher_authenticated: false,
         path: None,
+    }
+}
+
+/// The direct sources a receive of `target` may use, in order: explicit `--via`
+/// endpoints, then iroh (only for a share ID, which names the publisher to dial,
+/// and only if this daemon runs an iroh endpoint). The DHT comes last and is not
+/// part of this. Shared by the real receive and the file-name peek, so both pick
+/// the same sources.
+pub fn direct_sources(
+    data_dir: &Path,
+    target: &TransferId,
+    via: Option<ViaConfig>,
+    iroh_ca_pem: Option<String>,
+) -> DirectSources {
+    #[cfg(feature = "iroh")]
+    let iroh = crate::transport::iroh_direct::node_for(data_dir)
+        .filter(|_| target.share_id().is_some())
+        .map(|node| IrohSource {
+            node,
+            ca_pem: iroh_ca_pem.clone().filter(|p| !p.trim().is_empty()),
+        });
+    #[cfg(not(feature = "iroh"))]
+    let _ = (data_dir, target, &iroh_ca_pem);
+    DirectSources {
+        via,
+        #[cfg(feature = "iroh")]
+        iroh,
     }
 }
 

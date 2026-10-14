@@ -495,6 +495,32 @@ pub struct TransfersUi {
     /// Put the cursor in the receive form's password field on the next frame (set when a
     /// link or invitation filled in the share ID).
     focus_recv_password: bool,
+    /// Browse was clicked and the sender's file name is being looked up before the Save-As
+    /// dialog opens.
+    name_peek: Option<NamePeek>,
+}
+
+/// How long the form waits for the name lookup before it opens the dialog with the placeholder
+/// name anyway. The daemon bounds its own lookup to about 8 s; this covers a daemon that never
+/// answers (and an older one that does not know the request, which answers at once).
+const NAME_PEEK_LIMIT: Duration = Duration::from_secs(12);
+
+/// A pending "what is this file called?" lookup for the Browse button.
+struct NamePeek {
+    /// The ID that was typed (trimmed) when Browse was clicked. An answer for another ID is stale.
+    mid: String,
+    since: Instant,
+    /// `Some` once the worker has answered; the inner `None` is "no name found".
+    answer: Option<Option<String>>,
+}
+
+/// The file name the Save-As dialog is pre-filled with: the sender's name when the lookup found
+/// one (sanitised again here, it is untrusted text), otherwise the placeholder
+/// [`suggested_file_name`], which the daemon swaps for the real name after the dialog.
+pub fn dialog_file_name(id: &str, peeked: Option<&str>) -> String {
+    peeked
+        .and_then(miasma_core::transfer::manifest::sanitize_file_name)
+        .unwrap_or_else(|| suggested_file_name(id))
 }
 
 impl Default for TransfersUi {
@@ -533,6 +559,7 @@ impl Default for TransfersUi {
             invitation_copied_at: None,
             show_qr: false,
             focus_recv_password: false,
+            name_peek: None,
         }
     }
 }
@@ -697,6 +724,35 @@ impl TransfersUi {
         self.pending_via = None;
         self.from_form = false;
         self.form_error = Some(message);
+    }
+
+    /// The worker answered a name lookup. An answer for an ID that is no longer the pending one
+    /// is dropped.
+    pub fn on_name_peeked(&mut self, mid: &str, name: Option<String>) {
+        if let Some(p) = self.name_peek.as_mut() {
+            if p.mid == mid.trim() {
+                p.answer = Some(name);
+            }
+        }
+    }
+
+    /// Open the Save-As dialog with a name already filled in, so what comes back is a file path
+    /// even when the person only picks a folder. `peeked` is the sender's name if it was found.
+    fn open_save_dialog(&mut self, peeked: Option<&str>) {
+        let mut dialog =
+            rfd::FileDialog::new().set_file_name(dialog_file_name(&self.recv_mid, peeked));
+        let current = std::path::Path::new(self.recv_path.trim());
+        let start = if current.is_dir() {
+            Some(current)
+        } else {
+            current.parent().filter(|p| p.is_dir())
+        };
+        if let Some(dir) = start {
+            dialog = dialog.set_directory(dir);
+        }
+        if let Some(p) = dialog.save_file() {
+            self.recv_path = p.to_string_lossy().into_owned();
+        }
     }
 
     /// Take rows off the list at once, so a poll already in flight cannot show them again for a
@@ -1463,6 +1519,7 @@ impl TransfersUi {
                 }
             }
         });
+        let mut browse = false;
         form_row(ui, t.recv_path_label, |ui| {
             ui.horizontal(|ui| {
                 ui.add(
@@ -1470,26 +1527,57 @@ impl TransfersUi {
                         .hint_text(t.recv_path_hint)
                         .desired_width((ui.available_width() - 110.0).max(120.0)),
                 );
-                if ui.button(t.browse).clicked() {
-                    // A Save-As dialog with a name already filled in, so what comes back is a
-                    // file path even when the person only picks a folder.
-                    let mut dialog =
-                        rfd::FileDialog::new().set_file_name(suggested_file_name(&self.recv_mid));
-                    let current = std::path::Path::new(self.recv_path.trim());
-                    let start = if current.is_dir() {
-                        Some(current)
-                    } else {
-                        current.parent().filter(|p| p.is_dir())
-                    };
-                    if let Some(dir) = start {
-                        dialog = dialog.set_directory(dir);
-                    }
-                    if let Some(p) = dialog.save_file() {
-                        self.recv_path = p.to_string_lossy().into_owned();
-                    }
+                if ui
+                    .add_enabled(self.name_peek.is_none(), egui::Button::new(t.browse))
+                    .clicked()
+                {
+                    browse = true;
                 }
             });
         });
+        if browse {
+            let id = self.recv_mid.trim().to_owned();
+            let password = (!self.recv_password.is_empty()).then(|| self.recv_password.clone());
+            // Only a well-formed ID can be looked up; anything else gets today's behaviour at once.
+            if connected && miasma_core::transfer::parse_transfer_id(&id).is_ok() {
+                let via = (!easy)
+                    .then(|| self.recv_via.trim().to_owned())
+                    .filter(|v| !v.is_empty());
+                self.name_peek = Some(NamePeek {
+                    mid: id.clone(),
+                    since: Instant::now(),
+                    answer: None,
+                });
+                cmds.push(WorkerCmd::TransferPeekName {
+                    mid: id,
+                    password,
+                    via: via.into_iter().collect(),
+                });
+            } else {
+                self.open_save_dialog(None);
+            }
+        }
+        // The lookup finished (or ran out of time, or the ID was edited under it): open the
+        // dialog now, with the sender's name if there is one.
+        let ready = self.name_peek.as_ref().is_some_and(|p| {
+            p.answer.is_some()
+                || p.since.elapsed() >= NAME_PEEK_LIMIT
+                || p.mid != self.recv_mid.trim()
+        });
+        if ready {
+            let found = self.name_peek.take().and_then(|p| p.answer).flatten();
+            self.open_save_dialog(found.as_deref());
+        } else if self.name_peek.is_some() {
+            ui.horizontal(|ui| {
+                ui.add(egui::Spinner::new().size(12.0));
+                ui.label(
+                    egui::RichText::new(t.recv_name_lookup)
+                        .small()
+                        .color(pal().muted),
+                );
+            });
+            ui.ctx().request_repaint_after(Duration::from_millis(150));
+        }
         // A typed or picked folder receives the file inside it, under the name it had when it
         // was sent; say so before starting.
         let (final_path, is_folder) = effective_receive_path(&self.recv_path);
@@ -2822,6 +2910,41 @@ mod tests {
         assert_eq!(
             suggested_file_name(&mid.to_string()),
             miasma_core::transfer::receive::placeholder_file_name(&mid)
+        );
+    }
+
+    #[test]
+    fn the_dialog_name_is_the_senders_name_or_else_the_placeholder() {
+        let id = "miasma:3vQB7B6MrGQZaxCuFg4oh";
+        assert_eq!(dialog_file_name(id, Some("photo.png")), "photo.png");
+        // Untrusted text is sanitised again; an unusable name falls back to the placeholder.
+        assert_eq!(dialog_file_name(id, Some("../../a/photo.png")), "photo.png");
+        assert_eq!(dialog_file_name(id, Some("CON")), suggested_file_name(id));
+        assert_eq!(dialog_file_name(id, Some("")), suggested_file_name(id));
+        assert_eq!(dialog_file_name(id, None), suggested_file_name(id));
+        // No extension is fine; it is the sender's name.
+        assert_eq!(dialog_file_name(id, Some("README")), "README");
+    }
+
+    #[test]
+    fn a_name_answer_is_kept_only_for_the_pending_id() {
+        let mut ui = TransfersUi::default();
+        // No lookup pending: an answer is ignored.
+        ui.on_name_peeked("miasma:a", Some("x.png".into()));
+        assert!(ui.name_peek.is_none());
+        ui.name_peek = Some(NamePeek {
+            mid: "miasma:a".into(),
+            since: Instant::now(),
+            answer: None,
+        });
+        ui.on_name_peeked("miasma:other", Some("stale.png".into()));
+        assert!(ui.name_peek.as_ref().unwrap().answer.is_none());
+        ui.on_name_peeked(" miasma:a ", None);
+        assert_eq!(ui.name_peek.as_ref().unwrap().answer, Some(None));
+        ui.on_name_peeked("miasma:a", Some("x.png".into()));
+        assert_eq!(
+            ui.name_peek.as_ref().unwrap().answer,
+            Some(Some("x.png".to_owned()))
         );
     }
 
