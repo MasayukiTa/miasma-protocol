@@ -71,6 +71,10 @@ pub struct ContactInfo {
     pub allow_send: bool,
     pub allow_receive: bool,
     pub max_file_size: Option<u64>,
+    /// The limit that applies when `max_file_size` is `None` (`push.max_file_size`
+    /// of this daemon). 0 from a daemon that predates the field.
+    #[serde(default)]
+    pub default_max_file_size: u64,
     /// Where files from this contact land.
     pub inbox_dir: String,
 }
@@ -122,6 +126,7 @@ pub fn contact_info(c: &Contact, inbox_dir: String) -> ContactInfo {
         allow_send: c.allow_send,
         allow_receive: c.allow_receive,
         max_file_size: c.max_file_size,
+        default_max_file_size: 0,
         inbox_dir,
     }
 }
@@ -169,8 +174,10 @@ pub fn handle_with(
     req: PushRequest,
 ) -> PushResponse {
     use super::store::ContactUpdate;
-    let info =
-        |c: &Contact| contact_info(c, svc.contact_dir(&c.label).to_string_lossy().into_owned());
+    let info = |c: &Contact| ContactInfo {
+        default_max_file_size: svc.default_max_file_size(),
+        ..contact_info(c, svc.contact_dir(&c.label).to_string_lossy().into_owned())
+    };
     match req {
         PushRequest::ContactCode => {
             let code = svc.my_code();
