@@ -732,3 +732,44 @@ async fn three_files_in_a_row_including_64_mib() {
     }
     assert!(parts(&bob.inbox).is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn real_sender_resumes_from_the_receivers_partial_file() {
+    let relay = relay().await;
+    let alice = peer(&relay, |_| {}).await;
+    let bob = peer(&relay, |_| {}).await;
+    register(&alice, &bob, "bob");
+    register(&bob, &alice, "alice");
+
+    let data = content(1_500_000, 9);
+    let half = 700_000usize;
+    // A partial file as an interrupted earlier attempt would have left it.
+    let dir = bob.inbox.join("alice");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join(format!(".{}-{}.part", &hash(&data)[..32], data.len())),
+        &data[..half],
+    )
+    .unwrap();
+
+    let src = write_src(alice.dir.path(), "resumed.bin", &data);
+    let id = alice.svc.queue_send("bob", &src).unwrap();
+    let t = wait_finished(&alice.svc, &id, 60).await;
+    assert_eq!(t.state, PushState::Done, "{:?}", t.error);
+    assert_eq!(std::fs::read(dir.join("resumed.bin")).unwrap(), data);
+    assert!(parts(&bob.inbox).is_empty());
+
+    // A damaged partial (right length, wrong bytes) is caught by the final
+    // hash and the sender retries once from scratch.
+    let data2 = content(900_000, 10);
+    std::fs::write(
+        dir.join(format!(".{}-{}.part", &hash(&data2)[..32], data2.len())),
+        vec![0u8; 300_000],
+    )
+    .unwrap();
+    let src2 = write_src(alice.dir.path(), "healed.bin", &data2);
+    let id = alice.svc.queue_send("bob", &src2).unwrap();
+    let t = wait_finished(&alice.svc, &id, 60).await;
+    assert_eq!(t.state, PushState::Done, "{:?}", t.error);
+    assert_eq!(std::fs::read(dir.join("healed.bin")).unwrap(), data2);
+}
