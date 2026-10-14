@@ -164,12 +164,12 @@ see, by feature. Source: `config.rs:176-200`, `transport/iroh_direct.rs:8-27,
 | libp2p QUIC (Kademlia DHT, UDP) | UDP/QUIC flows to many peers, fixed protocol ids in the handshake, bootstrap peer addresses | obfuscated QUIC, WSS transport, Shadowsocks, Tor (`config.rs:219-250`) |
 | WSS via tunnel (`miasma tunnel`) | Connection to a Cloudflare edge: looks like ordinary HTTPS to that CDN | n/a. The tunnel's own metadata is Cloudflare's |
 | Traffic volume and timing | Bulk transfers have a recognisable shape; relay is ~1 MiB/s | none (padding/cover traffic is a separate roadmap item: `cover_traffic.rs`) |
-| Hosting shares for others | Inbound connections and disk growth on this machine | `hosted_quota_mb = 0` (default in SECURITY.md) |
+| Hosting shares for others | Inbound connections and disk growth on this machine | `hosted_quota_mb = 0`. SECURITY.md says this is the default, but the code default is 1024 MiB (`config.rs:78`); the ADR corrects the doc and sets 0 for the maximum-stealth preset and the portable build |
 
 A stealth-oriented profile (`iroh_mode=off`, `iroh_lan_discovery=false`,
 `hosted_quota_mb=0`, WSS-over-tunnel or Tor) is a **configuration preset**
-covered by the ADR's "Stealth network preset" open question; it is not part of
-the wipe work.
+offered by the ADR as an optional "maximum stealth" preset (section 4.5, owner
+decision O10); it is not the default and not part of the wipe work.
 
 ## 8. The ten artifacts the current wipe misses (summary)
 
