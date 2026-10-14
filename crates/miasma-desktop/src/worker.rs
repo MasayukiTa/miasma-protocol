@@ -118,6 +118,9 @@ pub enum WorkerCmd {
     TransferRemove { id: String, discard_partial: bool },
     /// Remove every finished transfer that holds no partial data.
     TransferClearFinished,
+    /// One trusted-contact push request (contacts, send, queue, ...); the answer comes back as
+    /// [`WorkerResult::PushReply`] together with the request, so the UI knows what it was for.
+    Push(miasma_core::push::PushRequest),
 }
 
 impl fmt::Debug for WorkerCmd {
@@ -202,6 +205,8 @@ impl fmt::Debug for WorkerCmd {
                 .field("discard_partial", discard_partial)
                 .finish(),
             Self::TransferClearFinished => f.write_str("TransferClearFinished"),
+            // Contact codes, labels and file paths are not logged.
+            Self::Push(_) => f.write_str("Push(<redacted>)"),
         }
     }
 }
@@ -294,6 +299,12 @@ pub enum WorkerResult {
     TransferRemoveRefused(miasma_core::transfer::jobs::RemoveRefusal),
     /// A start or cancel request was refused or failed.
     TransferError(String),
+    /// Answer to [`WorkerCmd::Push`]: the request that was sent, and the daemon's answer or why
+    /// there was none.
+    PushReply {
+        req: miasma_core::push::PushRequest,
+        reply: Result<miasma_core::push::PushResponse, PushFail>,
+    },
     /// Any error.
     Err(String),
 }
@@ -411,6 +422,10 @@ impl fmt::Debug for WorkerResult {
                 .field(reason)
                 .finish(),
             Self::TransferError(message) => f.debug_tuple("TransferError").field(message).finish(),
+            Self::PushReply { reply, .. } => f
+                .debug_struct("PushReply")
+                .field("ok", &reply.is_ok())
+                .finish(),
             Self::Err(message) => f.debug_tuple("Err").field(message).finish(),
         }
     }
@@ -771,6 +786,7 @@ fn worker_thread(
                 &data_dir,
                 ControlRequest::TransferClearFinished,
             )),
+            WorkerCmd::Push(req) => rt.block_on(do_push(&data_dir, req)),
         };
 
         if tx.send(res).is_err() {
@@ -1547,6 +1563,33 @@ async fn do_transfer_poll(data_dir: &Path) -> WorkerResult {
             message: daemon_error(&e),
         },
     }
+}
+
+/// Why a push request got no answer from the daemon.
+#[derive(Debug, Clone)]
+pub struct PushFail {
+    pub message: String,
+    /// The daemon is not running (as opposed to answering badly).
+    pub daemon_down: bool,
+}
+
+async fn do_push(data_dir: &Path, req: miasma_core::push::PushRequest) -> WorkerResult {
+    let reply = match daemon_request(data_dir, ControlRequest::Push(req.clone())).await {
+        Ok(ControlResponse::Push(p)) => Ok(p),
+        Ok(ControlResponse::Error(message)) => Err(PushFail {
+            message,
+            daemon_down: false,
+        }),
+        Ok(other) => Err(PushFail {
+            message: format!("Unexpected response: {other:?}"),
+            daemon_down: false,
+        }),
+        Err(e) => Err(PushFail {
+            daemon_down: is_daemon_down(&format!("{e:#}")),
+            message: daemon_error(&e),
+        }),
+    };
+    WorkerResult::PushReply { req, reply }
 }
 
 async fn do_transfer_cancel(data_dir: &Path, id: &str) -> WorkerResult {
