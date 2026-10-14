@@ -1,5 +1,5 @@
 //! `miasma contact ...`, `miasma push`, `miasma push-status`, `miasma push-inbox`:
-//! trusted-contact push (ADR-011). Everything goes through the running daemon
+//! trusted-contact push. Everything goes through the running daemon
 //! (`ControlRequest::Push`); the CLI never touches the network or the files'
 //! bytes itself.
 //!

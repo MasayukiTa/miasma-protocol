@@ -63,7 +63,7 @@ use crate::{
 /// Application protocol name on the wire.
 pub const IROH_ALPN: &[u8] = b"miasma/direct/1";
 
-/// Trusted-contact push (ADR-011), served on the same endpoint.
+/// Trusted-contact push, served on the same endpoint.
 pub const PUSH_ALPN: &[u8] = b"miasma/push/1";
 
 /// Serves connections that negotiated [`PUSH_ALPN`]. Installed after start with

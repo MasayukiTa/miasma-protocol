@@ -1,4 +1,4 @@
-//! The Contacts area: trusted-contact push (ADR-012) in the desktop app.
+//! The Contacts area: trusted-contact push in the desktop app.
 //!
 //! Everything the daemon knows (contacts, my card, transfers, inbox folder) is read through
 //! `WorkerCmd::Push` on the worker thread; this file never touches the network or the disk
