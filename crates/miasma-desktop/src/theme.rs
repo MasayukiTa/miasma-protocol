@@ -3,11 +3,13 @@
 //! The values are the design tokens of the owner's other product (warm neutrals, one accent
 //! that is reserved for the single primary action). Only the colour values are used.
 //!
-//! Rules that the call sites in `app.rs` follow:
-//! - Status is shown as a small chip and as coloured *text*. Never as a coloured rail down the
-//!   edge of a block and never as a full-card fill in a status colour.
-//! - `accent` / `accent_fill` belong to the one primary action of a screen. Everything else is
-//!   neutral (`text`, `muted`, `faint`, `border`, ...).
+//! Rules that the screens follow (see `ui_kit.rs`, which applies them):
+//! - Status is shown as coloured *text* with a small dot. Never as a filled pill, never as a
+//!   coloured rail down the edge of a block and never as a full-card fill in a status colour.
+//! - `accent` / `accent_fill` belong to the primary action of a section, the selected tab or
+//!   segment, and links. Everything else is neutral (`text`, `muted`, `faint`, `border`, ...).
+//! - Every colour that carries text meets 4.5:1 on the surfaces it is drawn on, in both themes
+//!   (tests below).
 //!
 //! The current palette lives in a process-wide flag so any drawing code can read it cheaply with
 //! [`palette`]. It is switched by [`set_dark`], which the app calls when the resolved theme
@@ -71,6 +73,11 @@ const fn hex(rgb: u32) -> Color32 {
     Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
 }
 
+fn darken(c: Color32, k: f32) -> Color32 {
+    let f = |v: u8| (v as f32 * k).round() as u8;
+    Color32::from_rgb(f(c.r()), f(c.g()), f(c.b()))
+}
+
 impl Palette {
     pub const fn light() -> Self {
         Self {
@@ -79,16 +86,16 @@ impl Palette {
             surface_subtle: hex(0xF4F4F2),
             selected: hex(0xE7E5DE),
             border: hex(0xD8D6CF),
-            border_strong: hex(0xD4D4D0),
+            border_strong: hex(0xB0AEA6),
             text: hex(0x18181B),
             muted: hex(0x5F5F66),
-            faint: hex(0x6B6B73),
-            accent: hex(0xC4400D),
-            accent_fill: hex(0xC4400D),
-            success: hex(0x15803D),
-            warning: hex(0xB45309),
+            faint: hex(0x65656D),
+            accent: hex(0xB63A0A),
+            accent_fill: hex(0xB63A0A),
+            success: hex(0x136B33),
+            warning: hex(0x9A4607),
             danger: hex(0xB91C1C),
-            info: hex(0x2563EB),
+            info: hex(0x1D4FD0),
         }
     }
 
@@ -99,15 +106,15 @@ impl Palette {
             surface_subtle: hex(0x202020),
             selected: hex(0x2C2C2C),
             border: hex(0x2E2E2E),
-            border_strong: hex(0x3A3A3A),
+            border_strong: hex(0x4A4A4A),
             text: hex(0xF4F4F5),
             muted: hex(0xA1A1AA),
-            faint: hex(0x71717A),
+            faint: hex(0x8C8C96),
             accent: hex(0xF97316),
             accent_fill: hex(0xC2410C),
             success: hex(0x22C55E),
             warning: hex(0xF59E0B),
-            danger: hex(0xEF4444),
+            danger: hex(0xF87171),
             info: hex(0x60A5FA),
         }
     }
@@ -115,6 +122,16 @@ impl Palette {
     /// Text colour to put on `accent_fill` (both modes: white).
     pub const fn on_accent(&self) -> Color32 {
         Color32::WHITE
+    }
+
+    /// Primary action fill while hovered / pressed: the fill, darkened (white text stays
+    /// readable on it in both themes).
+    pub fn accent_hover(&self) -> Color32 {
+        darken(self.accent_fill, 0.88)
+    }
+
+    pub fn accent_pressed(&self) -> Color32 {
+        darken(self.accent_fill, 0.78)
     }
 
     /// Build the egui visuals for this palette.
@@ -130,16 +147,27 @@ impl Palette {
         v.panel_fill = self.bg;
         v.window_fill = self.surface;
         v.window_stroke = egui::Stroke::new(1.0, self.border);
-        v.extreme_bg_color = self.surface_subtle; // text edit / scroll area background
+        // Text edits: white on the light theme (they read as fields on both the page and a
+        // surface), one step lighter than the surface on the dark theme.
+        v.extreme_bg_color = if dark {
+            self.surface_subtle
+        } else {
+            self.surface
+        };
         v.faint_bg_color = self.surface_subtle; // striped rows
         v.code_bg_color = self.surface_subtle;
-        v.hyperlink_color = self.info;
+        v.hyperlink_color = self.accent;
         v.warn_fg_color = self.warning;
         v.error_fg_color = self.danger;
 
-        // Selection is neutral: the accent belongs to the primary action only.
-        v.selection.bg_fill = self.selected;
-        v.selection.stroke = egui::Stroke::new(1.0, self.text);
+        // Selection and the focus ring are the one accent.
+        v.selection.bg_fill = Color32::from_rgba_unmultiplied(
+            self.accent.r(),
+            self.accent.g(),
+            self.accent.b(),
+            if dark { 70 } else { 48 },
+        );
+        v.selection.stroke = egui::Stroke::new(1.5, self.accent);
 
         let w = &mut v.widgets;
         w.noninteractive.bg_fill = self.surface;
@@ -147,9 +175,10 @@ impl Palette {
         w.noninteractive.bg_stroke = egui::Stroke::new(1.0, self.border); // also separators
         w.noninteractive.fg_stroke = egui::Stroke::new(1.0, self.text);
 
+        // Buttons: outlined neutral (the surface colour with a visible 1 px border).
         w.inactive.bg_fill = self.surface_subtle;
-        w.inactive.weak_bg_fill = self.surface_subtle;
-        w.inactive.bg_stroke = egui::Stroke::new(1.0, self.border);
+        w.inactive.weak_bg_fill = self.surface;
+        w.inactive.bg_stroke = egui::Stroke::new(1.0, self.border_strong);
         w.inactive.fg_stroke = egui::Stroke::new(1.0, self.text);
 
         w.hovered.bg_fill = self.selected;
@@ -175,11 +204,9 @@ impl Palette {
         w.noninteractive.rounding = egui::Rounding::same(4.0);
         v.window_rounding = egui::Rounding::same(8.0);
 
-        // Softer shadows on the light theme (the egui default is tuned for dark).
-        if !dark {
-            v.window_shadow.color = Color32::from_black_alpha(28);
-            v.popup_shadow.color = Color32::from_black_alpha(28);
-        }
+        // No shadows anywhere: surfaces are told apart by a hairline border.
+        v.window_shadow = egui::epaint::Shadow::NONE;
+        v.popup_shadow = egui::epaint::Shadow::NONE;
         v
     }
 }
@@ -201,7 +228,8 @@ pub fn is_dark() -> bool {
     DARK.load(Ordering::Relaxed)
 }
 
-/// Switch the process-wide palette. The caller must also `ctx.set_visuals(...)`; use [`apply`].
+/// Switch the process-wide palette. Call `ui_kit::apply_theme`, which also rebuilds the egui
+/// style; calling this alone leaves egui's visuals on the old palette.
 pub fn set_dark(dark: bool) {
     DARK.store(dark, Ordering::Relaxed);
 }
@@ -214,12 +242,6 @@ pub fn resolve_dark(mode: ThemeMode, system: Option<eframe::Theme>) -> bool {
         ThemeMode::Light => false,
         ThemeMode::System => !matches!(system, Some(eframe::Theme::Light)),
     }
-}
-
-/// Make `dark` the current palette and rebuild the egui visuals from it.
-pub fn apply(ctx: &egui::Context, dark: bool) {
-    set_dark(dark);
-    ctx.set_visuals(palette().visuals(dark));
 }
 
 #[cfg(test)]
@@ -258,16 +280,16 @@ mod tests {
             (p.surface_subtle, 0xF4F4F2),
             (p.selected, 0xE7E5DE),
             (p.border, 0xD8D6CF),
-            (p.border_strong, 0xD4D4D0),
+            (p.border_strong, 0xB0AEA6),
             (p.text, 0x18181B),
             (p.muted, 0x5F5F66),
-            (p.faint, 0x6B6B73),
-            (p.accent, 0xC4400D),
-            (p.accent_fill, 0xC4400D),
-            (p.success, 0x15803D),
-            (p.warning, 0xB45309),
+            (p.faint, 0x65656D),
+            (p.accent, 0xB63A0A),
+            (p.accent_fill, 0xB63A0A),
+            (p.success, 0x136B33),
+            (p.warning, 0x9A4607),
             (p.danger, 0xB91C1C),
-            (p.info, 0x2563EB),
+            (p.info, 0x1D4FD0),
         ];
         for (i, (got, exp)) in want.iter().enumerate() {
             assert_eq!(rgb(*got), *exp, "light token #{i}");
@@ -283,15 +305,15 @@ mod tests {
             (p.surface_subtle, 0x202020),
             (p.selected, 0x2C2C2C),
             (p.border, 0x2E2E2E),
-            (p.border_strong, 0x3A3A3A),
+            (p.border_strong, 0x4A4A4A),
             (p.text, 0xF4F4F5),
             (p.muted, 0xA1A1AA),
-            (p.faint, 0x71717A),
+            (p.faint, 0x8C8C96),
             (p.accent, 0xF97316),
             (p.accent_fill, 0xC2410C),
             (p.success, 0x22C55E),
             (p.warning, 0xF59E0B),
-            (p.danger, 0xEF4444),
+            (p.danger, 0xF87171),
             (p.info, 0x60A5FA),
         ];
         for (i, (got, exp)) in want.iter().enumerate() {
@@ -325,20 +347,56 @@ mod tests {
     }
 
     #[test]
-    fn status_text_is_readable_on_bg_and_surface() {
-        // Status colours are used as text and as small chips: hold them to the AA bar for
-        // large / bold text (3.0) on the two surfaces they are drawn on.
+    fn status_faint_and_accent_text_meet_aa_on_every_surface_in_both_modes() {
+        // Status colours are drawn as text (with a dot), `faint` as hint text and `accent` as
+        // link / selection text: all of them are held to the 4.5:1 bar.
         for (name, p) in [("light", Palette::light()), ("dark", Palette::dark())] {
             for (tok, c) in [
                 ("success", p.success),
                 ("warning", p.warning),
                 ("danger", p.danger),
                 ("info", p.info),
+                ("faint", p.faint),
+                ("accent", p.accent),
             ] {
-                for (bg_name, bg) in [("bg", p.bg), ("surface", p.surface)] {
+                for (bg_name, bg) in [
+                    ("bg", p.bg),
+                    ("surface", p.surface),
+                    ("surface_subtle", p.surface_subtle),
+                ] {
                     let r = contrast(c, bg);
-                    assert!(r >= 3.0, "{name}: {tok} on {bg_name} = {r:.2}");
+                    assert!(r >= 4.5, "{name}: {tok} on {bg_name} = {r:.2}");
                 }
+            }
+            // Status text on the selected row of a list (Transfers).
+            for (tok, c) in [
+                ("success", p.success),
+                ("warning", p.warning),
+                ("danger", p.danger),
+                ("info", p.info),
+            ] {
+                let r = contrast(c, p.selected);
+                assert!(r >= 4.5, "{name}: {tok} on selected = {r:.2}");
+            }
+        }
+    }
+
+    #[test]
+    fn button_outline_is_visible_against_the_surface() {
+        // Non-text UI components need 3:1 in WCAG; the outline of a secondary button is
+        // border_strong on the surface it sits on. The hairline `border` is only a divider.
+        for (name, p) in [("light", Palette::light()), ("dark", Palette::dark())] {
+            let r = contrast(p.border_strong, p.surface);
+            assert!(r >= 1.9, "{name}: border_strong on surface = {r:.2}");
+        }
+    }
+
+    #[test]
+    fn primary_hover_and_pressed_keep_white_text_readable() {
+        for (name, p) in [("light", Palette::light()), ("dark", Palette::dark())] {
+            for (state, c) in [("hover", p.accent_hover()), ("pressed", p.accent_pressed())] {
+                let r = contrast(p.on_accent(), c);
+                assert!(r >= 4.5, "{name}: white on accent {state} = {r:.2}");
             }
         }
     }
@@ -382,7 +440,7 @@ mod tests {
             assert_eq!(v.panel_fill, p.bg);
             assert_eq!(v.window_fill, p.surface);
             assert_eq!(v.widgets.noninteractive.fg_stroke.color, p.text);
-            assert_eq!(v.hyperlink_color, p.info);
+            assert_eq!(v.hyperlink_color, p.accent);
         }
     }
 }
