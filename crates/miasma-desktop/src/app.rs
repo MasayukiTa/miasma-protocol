@@ -527,6 +527,9 @@ impl MiasmaApp {
                     self.transfers.on_started(id);
                     self.set_msg(MsgKind::Success, self.tr().started);
                 }
+                WorkerResult::TransferNamePeeked { mid, name } => {
+                    self.transfers.on_name_peeked(&mid, name);
+                }
                 WorkerResult::TransferCancelRequested => {
                     self.transfers.poll_soon();
                     self.set_msg(MsgKind::Info, self.tr().stop_requested);
