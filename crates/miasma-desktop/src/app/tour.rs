@@ -276,6 +276,10 @@ struct Step {
     tab: Tab,
     daemon: Option<DaemonState>,
     transfers: Option<TransfersView>,
+    /// A `ContactsUi::fixture` name (Contacts tab with fake data).
+    contacts: Option<&'static str>,
+    /// Window size to render at.
+    size: Option<(f32, f32)>,
 }
 
 /// `MIASMA_UI_SNAP=<dir>`: leave the app alone and only save what it draws, every
@@ -386,6 +390,8 @@ impl Tour {
             tab: Tab::Store,
             daemon: None,
             transfers: None,
+            contacts: None,
+            size: None,
         });
         for (theme, tname) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
             for (locale, lname) in [(Locale::En, "en"), (Locale::Ja, "ja")] {
@@ -397,6 +403,8 @@ impl Tour {
                         tab,
                         daemon: Some(DaemonState::Connected),
                         transfers: None,
+                        contacts: None,
+                        size: None,
                     });
                 }
                 // The Transfers tab, one step per situation worth looking at. The daemon is
@@ -427,6 +435,8 @@ impl Tour {
                         tab: Tab::Transfers,
                         daemon: Some(DaemonState::Connected),
                         transfers: Some(v),
+                        contacts: None,
+                        size: None,
                     });
                 }
                 for (d, dname) in [
@@ -441,6 +451,30 @@ impl Tour {
                         tab: Tab::Store,
                         daemon: Some(d),
                         transfers: None,
+                        contacts: None,
+                        size: None,
+                    });
+                }
+            }
+        }
+        // The Contacts tab with fake data: every fixture, wide and at the 700 px minimum.
+        // MIASMA_UI_TOUR_FILTER=contacts_ keeps just these.
+        for fx in crate::contacts::FIXTURES {
+            for (w, h, wname) in [(1400.0, 2100.0, "wide"), (700.0, 2700.0, "narrow")] {
+                for (theme, tname, locale, lname) in [
+                    (ThemeMode::Light, "light", Locale::Ja, "ja"),
+                    (ThemeMode::Dark, "dark", Locale::Ja, "ja"),
+                    (ThemeMode::Light, "light", Locale::En, "en"),
+                ] {
+                    steps.push(Step {
+                        name: format!("contacts_{fx}_{tname}_{lname}_{wname}"),
+                        theme,
+                        locale,
+                        tab: Tab::Contacts,
+                        daemon: Some(DaemonState::Connected),
+                        transfers: None,
+                        contacts: Some(fx),
+                        size: Some((w, h)),
                     });
                 }
             }
@@ -485,6 +519,17 @@ impl Tour {
             app.tab = step.tab;
             if let Some(d) = &step.daemon {
                 app.daemon_state = d.clone();
+            }
+            if let Some(fx) = step.contacts {
+                if let Some((w, h)) = step.size {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
+                }
+                if let Some(ui) = crate::contacts::ContactsUi::fixture(
+                    fx,
+                    crate::locale::contact_strings(step.locale),
+                ) {
+                    app.contacts = ui;
+                }
             }
             if let Some(v) = &step.transfers {
                 // Tall enough that the list, the detail pane and the form are all on screen.
