@@ -8,6 +8,7 @@
 use eframe::egui;
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::contacts::ContactsUi;
 use crate::locale::{self, Locale, Strings, TransferStrings};
 use crate::theme::{self, Palette, ThemeMode};
 use crate::transfers::TransfersUi;
@@ -61,6 +62,7 @@ fn pal() -> Palette {
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Tab {
+    Contacts,
     Transfers,
     Store,
     Retrieve,
@@ -126,6 +128,8 @@ pub struct MiasmaApp {
 
     // Transfers screen (resumable large-file transfers)
     transfers: TransfersUi,
+    /// Contacts screen (trusted-contact push).
+    contacts: ContactsUi,
     /// `miasma-share:` links handed over by later launches (see `link.rs`), and the instance lock
     /// that makes this window the one they are handed to.
     link_rx: Option<std::sync::mpsc::Receiver<String>>,
@@ -261,6 +265,7 @@ impl MiasmaApp {
             launch_attempts: 0,
 
             transfers: TransfersUi::default(),
+            contacts: ContactsUi::default(),
             link_rx: None,
             _instance: None,
 
@@ -511,6 +516,13 @@ impl MiasmaApp {
                             file_size: item.file_size,
                         })
                         .collect();
+                }
+                WorkerResult::PushReply { req, reply } => {
+                    let c = locale::contact_strings(self.locale);
+                    self.contacts.on_reply(c, req, reply);
+                    for n in self.contacts.take_notices() {
+                        self.set_msg(MsgKind::Success, n);
+                    }
                 }
                 WorkerResult::TransferList(list) => self.transfers.on_list(list),
                 WorkerResult::TransferPollFailed {
@@ -2907,6 +2919,19 @@ impl eframe::App for MiasmaApp {
             self.transfers.note_polled();
         }
 
+        // Contacts: light polling in the background (arrivals), fast while the area is open.
+        {
+            let open = self.tab == Tab::Contacts;
+            if open {
+                self.contacts.mark_seen();
+            }
+            self.contacts
+                .tick(open, self.daemon_state == DaemonState::Connected);
+            let tx = self.worker.tx.clone();
+            self.contacts
+                .drain(|req| tx.try_send(WorkerCmd::Push(req)).is_ok());
+        }
+
         let s = self.s();
         let easy = self.mode.is_easy();
 
@@ -2945,6 +2970,12 @@ impl eframe::App for MiasmaApp {
                     } else {
                         self.tr().tab
                     };
+                    let ct = locale::contact_strings(self.locale);
+                    let contacts_label = match self.contacts.unseen() {
+                        0 => ct.tab.to_owned(),
+                        n => format!("{} ({n} {})", ct.tab, ct.nav_new),
+                    };
+                    nav_tab(ui, &mut self.tab, Tab::Contacts, &contacts_label);
                     nav_tab(ui, &mut self.tab, Tab::Transfers, tr_label);
                     nav_tab(ui, &mut self.tab, Tab::Store, store_label);
                     nav_tab(ui, &mut self.tab, Tab::Retrieve, retrieve_label);
@@ -3013,6 +3044,11 @@ impl eframe::App for MiasmaApp {
                 .show(ui, |ui| {
                     ui.add_space(4.0);
                     match self.tab {
+                        Tab::Contacts => {
+                            let c = locale::contact_strings(self.locale);
+                            let connected = self.daemon_state == DaemonState::Connected;
+                            self.contacts.show(ui, c, connected, !easy);
+                        }
                         Tab::Transfers => self.transfers_panel(ui),
                         Tab::Store => self.store_panel(ui),
                         Tab::Retrieve => self.retrieve_panel(ui),

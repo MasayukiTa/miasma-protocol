@@ -2013,7 +2013,7 @@ fn chip_fg(color: egui::Color32) -> egui::Color32 {
 }
 
 /// A small state chip: tinted background, text in the state colour.
-fn draw_chip(ui: &mut egui::Ui, color: egui::Color32, text: &str) {
+pub(crate) fn draw_chip(ui: &mut egui::Ui, color: egui::Color32, text: &str) {
     egui::Frame::none()
         .inner_margin(egui::Margin::symmetric(8.0, 2.0))
         .rounding(4.0)
@@ -2055,7 +2055,7 @@ fn fit_text(painter: &egui::Painter, text: &str, font: &egui::FontId, max_w: f32
 
 /// Draw `text` as a QR code: dark modules on a white quiet zone whatever the theme, so it scans.
 /// Returns false if the text cannot be encoded.
-fn draw_qr(ui: &mut egui::Ui, text: &str, side: f32) -> bool {
+pub(crate) fn draw_qr(ui: &mut egui::Ui, text: &str, side: f32) -> bool {
     use qrcode::{Color, QrCode};
     let Ok(code) = QrCode::new(text.as_bytes()) else {
         return false;
@@ -2087,7 +2087,7 @@ fn draw_qr(ui: &mut egui::Ui, text: &str, side: f32) -> bool {
 }
 
 /// An up (send) or down (receive) arrow drawn with lines, so it needs no font glyph.
-fn paint_arrow(painter: &egui::Painter, c: egui::Pos2, up: bool, color: egui::Color32) {
+pub(crate) fn paint_arrow(painter: &egui::Painter, c: egui::Pos2, up: bool, color: egui::Color32) {
     let s = egui::Stroke::new(1.6, color);
     let (tip, tail) = if up {
         (egui::pos2(c.x, c.y - 6.0), egui::pos2(c.x, c.y + 6.0))
