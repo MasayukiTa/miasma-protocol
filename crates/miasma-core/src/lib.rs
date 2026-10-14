@@ -20,6 +20,7 @@ pub mod error;
 pub mod network;
 pub mod onion;
 pub mod pipeline;
+pub mod push;
 pub mod repair;
 pub mod retrieval;
 pub mod secure_file;

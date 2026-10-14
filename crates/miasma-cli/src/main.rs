@@ -17,6 +17,7 @@ use tracing::info;
 use zeroize::{Zeroize, Zeroizing};
 
 mod i18n;
+mod push_cmd;
 mod tunnel;
 mod web_link;
 use i18n::{Lang, Msg};
@@ -421,6 +422,27 @@ enum Commands {
         json: bool,
     },
 
+    /// Trusted contacts: register the other person once, then `miasma push`.
+    ///
+    /// Both sides register each other (`contact code` -> `contact add`); the
+    /// receiver then accepts files from registered contacts only, with no
+    /// Share ID, password or confirmation code per file.
+    Contact {
+        #[command(subcommand)]
+        action: push_cmd::ContactCmd,
+    },
+
+    /// Send files to a registered contact (they must have registered you).
+    ///
+    /// Example: miasma push taro report.pdf photos.zip
+    Push(push_cmd::PushArgs),
+
+    /// Show running and recent contact transfers (both directions).
+    PushStatus,
+
+    /// Print the folder where files pushed to you are saved.
+    PushInbox,
+
     /// Probe WebSocket/WSS connectivity to a URL.
     ///
     /// Connects via TCP (+ TLS for wss:// or https://) and performs a WebSocket
@@ -648,6 +670,11 @@ async fn main() -> Result<()> {
             cmd_netcheck(&data_dir, timeout_secs, json).await
         }
 
+        Commands::Contact { action } => push_cmd::run_contact(&data_dir, action).await,
+        Commands::Push(args) => push_cmd::run_push(&data_dir, args).await,
+        Commands::PushStatus => push_cmd::run_push_status(&data_dir).await,
+        Commands::PushInbox => push_cmd::run_push_inbox(&data_dir).await,
+
         Commands::WssProbe {
             url,
             timeout_secs,
@@ -682,6 +709,7 @@ fn cmd_init(
             bootstrap_peers: vec![],
         },
         transport: Default::default(),
+        push: Default::default(),
     };
     config.save(data_dir).context("cannot save config")?;
 
