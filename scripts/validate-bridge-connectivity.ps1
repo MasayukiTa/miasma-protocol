@@ -20,7 +20,7 @@
     - Shadowsocks: ss-local running on 127.0.0.1:1080
     - Tor: Tor running on 127.0.0.1:9050
 
-    Results are written to docs/validation/bridge-connectivity-live-results.md
+    Results are written to validation-output/bridge-connectivity-live-results.md
 #>
 
 $ErrorActionPreference = "Continue"
@@ -234,7 +234,8 @@ Cleanup
 Write-Host "`n=== Results ===" -ForegroundColor Cyan
 $RESULTS | Format-Table -AutoSize
 
-$outPath = Join-Path $REPO "docs\validation\bridge-connectivity-live-results.md"
+$outPath = Join-Path $REPO "validation-output\bridge-connectivity-live-results.md"
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $outPath) | Out-Null
 $md = @"
 # Bridge Connectivity — Live Validation Results
 
