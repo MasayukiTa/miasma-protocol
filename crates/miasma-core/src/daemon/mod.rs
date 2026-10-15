@@ -789,7 +789,14 @@ async fn start_iroh(
                 "iroh direct transport started"
             );
             // Trusted-contact push rides on the same endpoint (ALPN miasma/push/1).
-            crate::push::service::start_for_daemon(data_dir, iroh.clone());
+            let push = crate::push::service::start_for_daemon(data_dir, iroh.clone());
+            // One-to-one chat (ALPN miasma/chat/1) shares the contact list.
+            crate::chat::service::start_for_daemon(
+                data_dir,
+                iroh.clone(),
+                &seed,
+                push.contacts().clone(),
+            );
             iroh_direct::register_node(data_dir, iroh);
             true
         }
@@ -815,6 +822,7 @@ async fn start_iroh(
 
 #[cfg(feature = "iroh")]
 async fn stop_iroh(data_dir: &std::path::Path) {
+    crate::chat::service::unregister_service(data_dir);
     crate::push::service::unregister_service(data_dir);
     if let Some(node) = crate::transport::iroh_direct::unregister_node(data_dir) {
         node.shutdown().await;
@@ -1846,6 +1854,10 @@ pub(crate) async fn process_request(
 
         ControlRequest::Push(req) => {
             ControlResponse::Push(crate::push::handle_ipc(&data_dir, req).await)
+        }
+
+        ControlRequest::Chat(req) => {
+            ControlResponse::Chat(crate::chat::handle_ipc(&data_dir, req).await)
         }
 
         ControlRequest::DirectedRevoke { envelope_id } => {

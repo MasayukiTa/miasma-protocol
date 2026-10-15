@@ -20,6 +20,9 @@ pub struct NodeConfig {
     /// Trusted-contact push.
     #[serde(default)]
     pub push: PushConfig,
+    /// One-to-one chat.
+    #[serde(default)]
+    pub chat: ChatConfig,
     /// Logging and traces left on this machine.
     #[serde(default)]
     pub privacy: PrivacyConfig,
@@ -86,6 +89,100 @@ impl PrivacyConfig {
     /// Whether log files are written: the opt-in switch, or stealth mode off.
     pub fn writes_log_files(&self) -> bool {
         self.diagnostic_logging || !self.stealth_mode
+    }
+}
+
+/// `[chat]` in `config.toml`: one-to-one chat between registered contacts.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChatConfig {
+    /// Chat on or off (default on). Takes effect when the daemon starts.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Keep the message history on disk (encrypted). Not set (the default):
+    /// the history is saved. Set it to `false` to keep it in memory only (it is
+    /// then gone when the daemon stops). `privacy.stealth_mode` does not change
+    /// this.
+    #[serde(default)]
+    pub history_save: Option<bool>,
+    /// Longest message accepted, in bytes (1-4096, default 4096).
+    #[serde(default = "default_chat_max_message_bytes")]
+    pub max_message_bytes: usize,
+    /// Messages that may wait for delivery at once (1-500, default 500).
+    #[serde(default = "default_chat_outbox_max")]
+    pub outbox_max: usize,
+    /// Saved messages older than this many days are removed (0 = keep).
+    #[serde(default)]
+    pub retention_days: u64,
+}
+
+pub const DEFAULT_CHAT_MAX_MESSAGE_BYTES: usize = 4096;
+pub const DEFAULT_CHAT_OUTBOX_MAX: usize = 500;
+
+fn default_chat_max_message_bytes() -> usize {
+    DEFAULT_CHAT_MAX_MESSAGE_BYTES
+}
+fn default_chat_outbox_max() -> usize {
+    DEFAULT_CHAT_OUTBOX_MAX
+}
+
+impl Default for ChatConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            history_save: None,
+            max_message_bytes: DEFAULT_CHAT_MAX_MESSAGE_BYTES,
+            outbox_max: DEFAULT_CHAT_OUTBOX_MAX,
+            retention_days: 0,
+        }
+    }
+}
+
+impl ChatConfig {
+    /// Whether messages are written to disk: yes unless `history_save = false`
+    /// is set explicitly.
+    pub fn history_saved(&self) -> bool {
+        self.history_save.unwrap_or(true)
+    }
+}
+
+#[cfg(test)]
+mod chat_config_tests {
+    use super::*;
+
+    #[test]
+    fn history_is_saved_unless_switched_off_explicitly() {
+        let mut cfg = NodeConfig::default();
+        assert_eq!(cfg.chat.history_save, None);
+        assert!(cfg.chat.history_saved());
+        for stealth in [true, false] {
+            cfg.privacy.stealth_mode = stealth;
+            cfg.chat.history_save = None;
+            assert!(cfg.chat.history_saved(), "unset, stealth {stealth}");
+            cfg.chat.history_save = Some(true);
+            assert!(cfg.chat.history_saved(), "true, stealth {stealth}");
+            cfg.chat.history_save = Some(false);
+            assert!(!cfg.chat.history_saved(), "false, stealth {stealth}");
+        }
+    }
+
+    #[test]
+    fn the_setting_reads_from_toml() {
+        let off: NodeConfig = toml::from_str(
+            "[chat]
+history_save = false
+",
+        )
+        .unwrap();
+        assert!(!off.chat.history_saved());
+        let unset: NodeConfig = toml::from_str(
+            "[chat]
+enabled = true
+",
+        )
+        .unwrap();
+        assert!(unset.chat.history_saved());
+        let none: NodeConfig = toml::from_str("").unwrap();
+        assert!(none.chat.history_saved());
     }
 }
 

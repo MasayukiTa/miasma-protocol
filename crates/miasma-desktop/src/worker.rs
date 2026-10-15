@@ -904,6 +904,7 @@ fn do_init(data_dir: &Path) -> anyhow::Result<()> {
         },
         transport: Default::default(),
         push: Default::default(),
+        chat: Default::default(),
         privacy: Default::default(),
     };
     config.save(data_dir)?;

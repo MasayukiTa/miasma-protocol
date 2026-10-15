@@ -293,6 +293,7 @@ pub fn initialize_node(
         },
         transport: Default::default(),
         push: Default::default(),
+        chat: Default::default(),
         privacy: Default::default(),
     };
     config.save(&path).map_err(|e| {
