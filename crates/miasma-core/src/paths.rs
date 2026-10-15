@@ -533,7 +533,7 @@ spec!(
     Skippable,
     OverwriteRemove,
     "D19",
-    "Daemon log, one file per day (daemon.log.<date>)."
+    "Legacy daemon log, one file per day (daemon.log.<date>). No longer written; found and removed by the old-log cleanup."
 );
 spec!(
     DESKTOP_LOG,
@@ -544,7 +544,7 @@ spec!(
     Skippable,
     OverwriteRemove,
     "D20",
-    "Desktop log, one file per day (desktop.log.<date>)."
+    "Legacy desktop log, one file per day (desktop.log.<date>). No longer written; found and removed by the old-log cleanup."
 );
 spec!(
     BRIDGE_LOG,
@@ -555,7 +555,30 @@ spec!(
     Skippable,
     OverwriteRemove,
     "D21",
-    "Bridge log, one file per day (bridge.log.<date>)."
+    "Legacy bridge log, one file per day (bridge.log.<date>). No longer written; found and removed by the old-log cleanup."
+);
+
+spec!(
+    DIAG_LOG_DIR,
+    "lg",
+    Dir,
+    DataDir,
+    Diagnostic,
+    Skippable,
+    OverwriteRemove,
+    "D19",
+    "Folder of opt-in diagnostic log files; exists only while diagnostic logging is on."
+);
+spec!(
+    DIAG_LOG_FILE,
+    "lg/*.dat",
+    Pattern,
+    DataDir,
+    Diagnostic,
+    Skippable,
+    OverwriteRemove,
+    "D19",
+    "Opt-in diagnostic log, size-rotated, neutral names (<letter><n>.dat), no dates."
 );
 
 // ── Plaintext user content ──────────────────────────────────────────────────
@@ -778,6 +801,8 @@ pub const REGISTRY: &[PathSpec] = &[
     DAEMON_LOG,
     DESKTOP_LOG,
     BRIDGE_LOG,
+    DIAG_LOG_DIR,
+    DIAG_LOG_FILE,
     PUSH_INBOX,
     PUSH_PART,
     OUTPUT_PART,
@@ -827,6 +852,38 @@ pub fn version_stamp(data_dir: &Path) -> PathBuf {
 /// `<data>/shares`
 pub fn shares_dir(data_dir: &Path) -> PathBuf {
     SHARES_DIR.in_dir(data_dir)
+}
+/// `<data>/lg`
+pub fn diag_log_dir(data_dir: &Path) -> PathBuf {
+    DIAG_LOG_DIR.in_dir(data_dir)
+}
+/// Name of diagnostic log file number `n` of the program tagged `prefix`
+/// (`d` daemon, `u` desktop, `b` bridge): `<prefix><n>.dat`.
+pub fn diag_log_name(prefix: char, n: usize) -> String {
+    format!("{prefix}{n}.dat")
+}
+/// Whether `name` is one of the diagnostic log file names.
+pub fn is_diag_log_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let (Some(p), rest) = (chars.next(), chars.as_str()) else {
+        return false;
+    };
+    p.is_ascii_lowercase()
+        && rest
+            .strip_suffix(".dat")
+            .is_some_and(|d| !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()))
+}
+/// Whether `name` is a legacy dated log file of one of the programs
+/// (`daemon.log`, `daemon.log.2026-01-01`, `desktop.log.*`, `bridge.log.*`).
+pub fn is_legacy_log_name(name: &str) -> bool {
+    [DAEMON_LOG.name, DESKTOP_LOG.name, BRIDGE_LOG.name]
+        .iter()
+        .any(|base| {
+            name == *base
+                || name
+                    .strip_prefix(base)
+                    .is_some_and(|rest| rest.starts_with('.'))
+        })
 }
 /// `<data>/transfers`
 pub fn transfers_dir(data_dir: &Path) -> PathBuf {
@@ -1024,6 +1081,15 @@ mod tests {
         assert_eq!(transfers_dir(d), join("transfers"));
         assert_eq!(directed_incoming_dir(d), join("directed/incoming"));
         assert_eq!(directed_outgoing_dir(d), join("directed/outgoing"));
+        assert_eq!(diag_log_dir(d), join("lg"));
+        assert_eq!(diag_log_name('d', 0), "d0.dat");
+        assert!(is_diag_log_name("u12.dat"));
+        assert!(!is_diag_log_name("daemon.log"));
+        assert!(!is_diag_log_name("x.dat"));
+        assert!(is_legacy_log_name("daemon.log.2026-01-01"));
+        assert!(is_legacy_log_name("bridge.log"));
+        assert!(!is_legacy_log_name("daemon.logger"));
+        assert!(!is_legacy_log_name("notes.log"));
         assert_eq!(DAEMON_LOG.name, "daemon.log");
         assert_eq!(DESKTOP_LOG.name, "desktop.log");
         assert_eq!(BRIDGE_LOG.name, "bridge.log");

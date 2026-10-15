@@ -230,7 +230,6 @@ impl ReplicationQueue {
         }
 
         info!(
-            path = %queue.wal_path.display(),
             items = queue.items.len(),
             pending = queue.pending_count(),
             "replication queue loaded"

@@ -96,6 +96,31 @@ enum Commands {
     /// Show node status (peer ID, storage usage, config summary).
     Status,
 
+    /// Show the recent log lines of the running daemon.
+    ///
+    /// By default Miasma keeps its log lines only in memory (stealth mode):
+    /// nothing is written to disk, and the lines are gone when the daemon
+    /// stops. This command reads that memory buffer over the local control
+    /// connection. To write log files instead, for troubleshooting only, run
+    /// `miasma config --key privacy.diagnostic_logging --value true` (and turn
+    /// it off again afterwards: that deletes the files).
+    ///
+    /// `--delete-old` / `--keep-old` settle log files left by earlier versions.
+    Logs {
+        /// How many of the newest lines to show.
+        #[arg(long, default_value_t = 200)]
+        lines: u32,
+        /// Keep running and print new lines as they arrive (Ctrl-C to stop).
+        #[arg(long)]
+        follow: bool,
+        /// Securely delete log files written by earlier versions, now.
+        #[arg(long)]
+        delete_old: bool,
+        /// Keep log files written by earlier versions (do not offer to delete them).
+        #[arg(long)]
+        keep_old: bool,
+    },
+
     /// Emergency wipe — zero and delete the master key within seconds.
     ///
     /// All locally stored shares become immediately and permanently unreadable.
@@ -483,37 +508,20 @@ async fn main() -> Result<()> {
 
     let data_dir = cli.data_dir.unwrap_or_else(default_data_dir);
 
-    // Logging: MIASMA_LOG or default to info.
-    // Daemon mode logs to both stderr and a file in the data directory.
-    let filter = tracing_subscriber::EnvFilter::try_from_env("MIASMA_LOG")
-        .unwrap_or_else(|_| "miasma=info,miasma_core=info".parse().unwrap());
-
+    // Logging is set up in one place (`miasma_core::logging`): by default the
+    // log lines stay in memory only (stealth mode); `MIASMA_LOG` sets the level.
     let is_daemon = matches!(cli.command, Commands::Daemon { .. });
-    if is_daemon {
-        let log_dir = data_dir.clone();
-        let _ = std::fs::create_dir_all(&log_dir);
-        let file_appender =
-            tracing_appender::rolling::daily(&log_dir, miasma_core::paths::DAEMON_LOG.name);
-        // Truncate old logs: keep recent file only (daily roller creates new files).
-        cleanup_old_logs(&log_dir, miasma_core::paths::DAEMON_LOG.name, 3);
-        let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-        use tracing_subscriber::layer::SubscriberExt;
-        use tracing_subscriber::util::SubscriberInitExt;
-        let stderr_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
-        let file_layer = tracing_subscriber::fmt::layer()
-            .with_writer(non_blocking)
-            .with_ansi(false);
-        tracing_subscriber::registry()
-            .with(filter)
-            .with(stderr_layer)
-            .with(file_layer)
-            .init();
-        // Keep _guard alive for the duration of main by leaking it.
-        // This is intentional: the guard must outlive all tracing calls.
-        std::mem::forget(_guard);
-    } else {
-        tracing_subscriber::fmt().with_env_filter(filter).init();
-    }
+    let log_settings = miasma_core::logging::init(miasma_core::logging::InitOptions {
+        component: if is_daemon {
+            miasma_core::logging::Component::Daemon
+        } else {
+            miasma_core::logging::Component::Cli
+        },
+        data_dir: &data_dir,
+        filter_env: "MIASMA_LOG",
+        default_filter: "miasma=info,miasma_core=info",
+        process_hardening: true,
+    });
 
     // Stamp version for future upgrade detection.
     if miasma_core::paths::config_file(&data_dir).exists() {
@@ -548,15 +556,30 @@ async fn main() -> Result<()> {
 
         Commands::Status => cmd_status(&data_dir).await,
 
+        Commands::Logs {
+            lines,
+            follow,
+            delete_old,
+            keep_old,
+        } => cmd_logs(&data_dir, lines, follow, delete_old, keep_old).await,
+
         Commands::Wipe { confirm } => cmd_wipe(&data_dir, confirm).await,
 
-        Commands::Config { key, value } => cmd_config(&data_dir, key.as_deref(), value.as_deref()),
+        Commands::Config { key, value } => {
+            cmd_config(&data_dir, key.as_deref(), value.as_deref())?;
+            if let (Some("privacy.diagnostic_logging"), Some(v)) =
+                (key.as_deref(), value.as_deref())
+            {
+                apply_diagnostic_switch(&data_dir, v.parse().unwrap_or(false)).await;
+            }
+            Ok(())
+        }
 
         Commands::Daemon {
             bootstrap,
             wss_port,
             no_iroh,
-        } => cmd_daemon(&data_dir, &bootstrap, wss_port, no_iroh).await,
+        } => cmd_daemon(&data_dir, &bootstrap, wss_port, no_iroh, &log_settings).await,
 
         Commands::Tunnel { port } => cmd_tunnel(&data_dir, port).await,
 
@@ -711,6 +734,7 @@ fn cmd_init(
         },
         transport: Default::default(),
         push: Default::default(),
+        privacy: Default::default(),
     };
     config.save(data_dir).context("cannot save config")?;
 
@@ -865,6 +889,7 @@ async fn cmd_status(data_dir: &std::path::Path) -> Result<()> {
             );
             println!("  Pending replication: {}", s.pending_replication);
             println!("  Replicated items:    {}", s.replicated_count);
+            print_logging_status(data_dir);
             if s.wss_port > 0 {
                 let tls_tag = if s.wss_tls_enabled {
                     " (TLS)"
@@ -946,7 +971,144 @@ async fn cmd_status(data_dir: &std::path::Path) -> Result<()> {
         "  Hosted quota:  {} MiB (storage.hosted_quota_mb; 0 = refuse shares pushed by others)",
         config.storage.hosted_quota_mb
     );
+    print_logging_status(data_dir);
     Ok(())
+}
+
+/// Lines about logging for `miasma status`: where log lines go, a warning
+/// while diagnostic files are written, and old log files that still need a
+/// decision.
+fn print_logging_status(data_dir: &std::path::Path) {
+    let privacy = miasma_core::logging::load_privacy(data_dir);
+    if privacy.writes_log_files() {
+        println!(
+            "  Logging:             LOG FILES ARE BEING WRITTEN to {} (diagnostic logging); \
+             they show that Miasma was used and when. Turn off: \
+             miasma config --key privacy.diagnostic_logging --value false",
+            miasma_core::paths::diag_log_dir(data_dir).display()
+        );
+    } else {
+        println!(
+            "  Logging:             memory only (stealth mode); `miasma logs` shows the daemon's recent lines"
+        );
+    }
+    if let Some(line) = miasma_core::logging::legacy::status_line(data_dir) {
+        println!("  Old log files:       {line}");
+    }
+}
+
+/// Apply a change of `privacy.diagnostic_logging` to a running daemon; with no
+/// daemon, switching it off deletes the files straight away.
+async fn apply_diagnostic_switch(data_dir: &std::path::Path, enabled: bool) {
+    use miasma_core::{daemon_request, ControlRequest, ControlResponse};
+    match daemon_request(data_dir, ControlRequest::LogsSetDiagnostic { enabled }).await {
+        Ok(ControlResponse::Logs { diagnostic, .. }) if diagnostic == enabled => {
+            println!(
+                "The running daemon now {} diagnostic log files.",
+                if enabled {
+                    "writes"
+                } else {
+                    "no longer writes (and has deleted)"
+                }
+            );
+        }
+        _ => {
+            if !enabled {
+                miasma_core::logging::delete_diagnostic_files(data_dir);
+                println!(
+                    "Diagnostic log files deleted. Restart a running desktop app to stop it writing."
+                );
+            } else {
+                println!("Diagnostic logging takes effect when the daemon or desktop app starts.");
+            }
+        }
+    }
+}
+
+/// `miasma logs`: show the daemon's memory buffer, or settle old log files.
+async fn cmd_logs(
+    data_dir: &std::path::Path,
+    lines: u32,
+    follow: bool,
+    delete_old: bool,
+    keep_old: bool,
+) -> Result<()> {
+    use miasma_core::{daemon_request, ControlRequest, ControlResponse};
+
+    if delete_old || keep_old {
+        if keep_old {
+            miasma_core::logging::legacy::record_keep(data_dir);
+            println!("Old log files are kept and will not be offered for deletion again.");
+        }
+        if delete_old {
+            match miasma_core::logging::legacy::pending(data_dir) {
+                Some(found) => {
+                    let r = miasma_core::logging::legacy::remove(&found);
+                    println!(
+                        "Removed {} old log file(s), {} failed.",
+                        r.removed, r.failed
+                    );
+                }
+                None => println!("No old log files found."),
+            }
+        }
+        return Ok(());
+    }
+
+    let mut since: Option<u64> = None;
+    let mut first = true;
+    loop {
+        let req = ControlRequest::LogsTail {
+            max_lines: lines.max(1),
+            since_seq: since,
+        };
+        match daemon_request(data_dir, req).await {
+            Ok(ControlResponse::Logs {
+                lines: got,
+                next_seq,
+                diagnostic,
+                stealth,
+                capacity,
+            }) => {
+                if first {
+                    eprintln!(
+                        "# memory buffer {} KiB; stealth mode {}; diagnostic log files {}",
+                        capacity / 1024,
+                        if stealth { "on" } else { "off" },
+                        if diagnostic { "ON" } else { "off" }
+                    );
+                    first = false;
+                }
+                for l in &got {
+                    println!("{l}");
+                }
+                since = Some(next_seq);
+            }
+            Ok(ControlResponse::Error(e)) => bail!("{e}"),
+            Ok(other) => bail!("unexpected daemon response: {other:?}"),
+            Err(e) => {
+                // An older daemon closes the connection on a request it does
+                // not know; tell that apart from "no daemon".
+                if daemon_request(data_dir, ControlRequest::Status)
+                    .await
+                    .is_ok()
+                {
+                    bail!(
+                        "not supported: the running daemon is an older version and cannot show \
+                         its logs. Restart it with this version."
+                    );
+                }
+                return Err(e).context("cannot reach the daemon (is it running?)");
+            }
+        }
+        if !follow {
+            return Ok(());
+        }
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => return Ok(()),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(1000)) => {}
+        }
+    }
 }
 
 async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<()> {
@@ -1001,11 +1163,15 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
         );
         report.insert("config_exists".into(), serde_json::json!(has_config));
         report.insert("master_key_exists".into(), serde_json::json!(key_exists));
-        // Log file location.
-        let log_glob = miasma_core::paths::DAEMON_LOG.log_glob(data_dir);
+        // Where log lines go.
+        let privacy = miasma_core::logging::load_privacy(data_dir);
         report.insert(
-            "log_file".into(),
-            serde_json::json!(log_glob.display().to_string()),
+            "log_files_written".into(),
+            serde_json::json!(privacy.writes_log_files()),
+        );
+        report.insert(
+            "stealth_mode".into(),
+            serde_json::json!(privacy.stealth_mode),
         );
         report.insert("share_count".into(), serde_json::json!(share_count));
         report.insert("storage_used_bytes".into(), serde_json::json!(storage_used));
@@ -1092,7 +1258,15 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
             "Master key:      {}",
             if key_exists { "present" } else { "MISSING" }
         );
-        println!("Daemon log:      {}/daemon.log.*", data_dir.display());
+        let privacy = miasma_core::logging::load_privacy(data_dir);
+        println!(
+            "Logging:         {}",
+            if privacy.writes_log_files() {
+                "log files are written to disk (diagnostic logging)"
+            } else {
+                "memory only (stealth mode)"
+            }
+        );
 
         if let Ok((quota_mb, hosted_quota_mb, listen_addr)) = &config_info {
             println!("Storage quota:   {quota_mb} MiB");
@@ -1526,6 +1700,11 @@ fn cmd_config_loaded(
                 "storage.hosted_quota_mb" => println!("{}", config.storage.hosted_quota_mb),
                 "storage.bandwidth_mb_day" => println!("{}", config.storage.bandwidth_mb_day),
                 "storage.hosted_quota_mb" => println!("{}", config.storage.hosted_quota_mb),
+                "privacy.stealth_mode" => println!("{}", config.privacy.stealth_mode),
+                "privacy.diagnostic_logging" => {
+                    println!("{}", config.privacy.diagnostic_logging)
+                }
+                "privacy.log_buffer_mib" => println!("{}", config.privacy.log_buffer_mib),
                 "network.listen_addr" => println!("{}", config.network.listen_addr),
                 "network.bootstrap_peers" => {
                     for peer in &config.network.bootstrap_peers {
@@ -1584,6 +1763,22 @@ fn cmd_config_loaded(
                 }
                 "storage.hosted_quota_mb" => {
                     config.storage.hosted_quota_mb = v.parse().context("expected integer")?;
+                }
+                "privacy.stealth_mode" => {
+                    config.privacy.stealth_mode = v.parse().context("expected bool")?;
+                }
+                "privacy.diagnostic_logging" => {
+                    config.privacy.diagnostic_logging = v.parse().context("expected bool")?;
+                }
+                "privacy.log_buffer_mib" => {
+                    let mib: u32 = v.parse().context("expected a number of MiB")?;
+                    if !(miasma_core::config::MIN_LOG_BUFFER_MIB
+                        ..=miasma_core::config::MAX_LOG_BUFFER_MIB)
+                        .contains(&mib)
+                    {
+                        bail!("expected 1-8 MiB");
+                    }
+                    config.privacy.log_buffer_mib = mib;
                 }
                 "network.listen_addr" => {
                     config.network.listen_addr = v.into();
@@ -1684,6 +1879,7 @@ async fn cmd_daemon(
     bootstrap_addrs: &[String],
     wss_port: Option<u16>,
     no_iroh: bool,
+    log_settings: &miasma_core::logging::Settings,
 ) -> Result<()> {
     use miasma_core::DaemonServer;
 
@@ -1701,6 +1897,28 @@ async fn cmd_daemon(
         eprintln!("{}", Msg::DaemonIrohNotice.t());
     }
     let wanted_wss_port = config.transport.wss_port;
+
+    // Log files from earlier versions: told once, removed on a later start
+    // (unless kept). A desktop app that started this daemon shows its own notice.
+    match miasma_core::logging::legacy::headless_startup(data_dir) {
+        miasma_core::logging::legacy::Startup::Nothing => {}
+        miasma_core::logging::legacy::Startup::Notice { files, bytes } => println!(
+            "Notice: {files} log file(s) ({} KiB) from an earlier version were found. Miasma no \
+             longer writes log files. They will be securely deleted the next time the daemon \
+             starts; keep them with MIASMA_KEEP_OLD_LOGS=1 or `miasma logs --keep-old`, or \
+             delete them now with `miasma logs --delete-old`.",
+            bytes.div_ceil(1024)
+        ),
+        miasma_core::logging::legacy::Startup::Removed(r) => println!(
+            "Removed {} old log file(s) from an earlier version{}.",
+            r.removed,
+            if r.failed > 0 {
+                format!(" ({} could not be removed)", r.failed)
+            } else {
+                String::new()
+            }
+        ),
+    }
 
     let master_key_path = miasma_core::paths::master_key(data_dir);
     if !master_key_path.exists() {
@@ -1733,14 +1951,29 @@ async fn cmd_daemon(
             .await
             .context("daemon start failed")?;
 
-    // Print peer ID and bootstrap addresses.
-    eprintln!("Peer ID: {}", server.peer_id());
-    eprintln!("Bootstrap addresses for other nodes:");
-    for addr in server.listen_addrs() {
-        eprintln!("  {addr}/p2p/{}", server.peer_id());
+    // In stealth mode the console keeps no record of peer ID, addresses or
+    // paths: they are available from `miasma status` while the daemon runs.
+    if log_settings.stealth {
+        eprintln!(
+            "Miasma daemon started. `miasma status` shows the peer ID and addresses; \
+             `miasma logs` shows recent activity."
+        );
+    } else {
+        eprintln!("Peer ID: {}", server.peer_id());
+        eprintln!("Bootstrap addresses for other nodes:");
+        for addr in server.listen_addrs() {
+            eprintln!("  {addr}/p2p/{}", server.peer_id());
+        }
+        eprintln!("IPC control port: {}", server.control_port());
     }
-    eprintln!("IPC control port: {}", server.control_port());
-    eprintln!("Log file: {}/daemon.log.*", data_dir.display());
+    if log_settings.diagnostic_files {
+        eprintln!(
+            "WARNING: log files are being written to {}. They show that Miasma was used and \
+             when. Turn this off with `miasma config --key privacy.diagnostic_logging --value false` \
+             (that deletes them).",
+            miasma_core::paths::diag_log_dir(data_dir).display()
+        );
+    }
     if wanted_wss_port != 0 && server.wss_port() != wanted_wss_port {
         bail!(
             "the WebSocket share server could not bind 127.0.0.1:{wanted_wss_port} (is the port in use?)"
@@ -3102,38 +3335,6 @@ async fn cmd_wss_probe(
     }
 
     Ok(())
-}
-
-// ─── Log file cleanup ───────────────────────────────────────────────────────
-
-/// Remove old log files beyond `keep` count. Matches files starting with `prefix`.
-fn cleanup_old_logs(dir: &std::path::Path, prefix: &str, keep: usize) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut logs: Vec<(std::path::PathBuf, std::time::SystemTime)> = entries
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_name()
-                .to_str()
-                .map(|n| n.starts_with(prefix))
-                .unwrap_or(false)
-        })
-        .filter_map(|e| {
-            let meta = e.metadata().ok()?;
-            Some((e.path(), meta.modified().unwrap_or(std::time::UNIX_EPOCH)))
-        })
-        .collect();
-
-    if logs.len() <= keep {
-        return;
-    }
-
-    // Sort newest-first, then remove the oldest.
-    logs.sort_by(|a, b| b.1.cmp(&a.1));
-    for (path, _) in logs.into_iter().skip(keep) {
-        let _ = std::fs::remove_file(path);
-    }
 }
 
 #[cfg(test)]

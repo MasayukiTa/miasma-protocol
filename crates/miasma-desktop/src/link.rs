@@ -60,7 +60,8 @@ pub fn acquire(data_dir: &Path) -> Instance {
     {
         Ok(f) => f,
         Err(e) => {
-            tracing::warn!("instance lock: cannot open {LOCK_FILE}: {e}");
+            let _ = &e;
+            tracing::warn!("instance lock: cannot open the lock file");
             return Instance::Unknown;
         }
     };
@@ -68,7 +69,8 @@ pub fn acquire(data_dir: &Path) -> Instance {
         Ok(()) => Instance::Primary(file),
         Err(std::fs::TryLockError::WouldBlock) => Instance::Other,
         Err(std::fs::TryLockError::Error(e)) => {
-            tracing::warn!("instance lock: {e}");
+            let _ = &e;
+            tracing::warn!("instance lock: failed");
             Instance::Unknown
         }
     }
@@ -132,7 +134,8 @@ pub fn spawn_listener(data_dir: PathBuf, ctx: egui::Context) -> Receiver<String>
             }
         });
     if let Err(e) = spawned {
-        tracing::warn!("cannot start the link listener: {e}");
+        let _ = &e;
+        tracing::warn!("cannot start the link listener");
     }
     rx
 }
@@ -162,7 +165,7 @@ pub fn register_url_scheme(data_dir: &Path) {
     match windows_register::register(data_dir) {
         Ok(true) => tracing::info!("registered the miasma-share URL scheme for this user"),
         Ok(false) => {}
-        Err(e) => tracing::warn!("could not register the miasma-share URL scheme: {e}"),
+        Err(_) => tracing::warn!("could not register the miasma-share URL scheme"),
     }
 }
 
