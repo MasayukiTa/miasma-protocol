@@ -9,6 +9,7 @@ use eframe::egui::{self, RichText};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::contacts::ContactsUi;
+use crate::errors::{ErrorKind, UiError};
 use crate::locale::{self, Locale, LogStrings, Strings, TransferStrings};
 use crate::theme::{self, Palette, ThemeMode};
 use crate::transfers::TransfersUi;
@@ -69,7 +70,7 @@ pub struct MiasmaApp {
 
     // Connection state
     daemon_state: DaemonState,
-    last_error: Option<String>,
+    last_error: Option<UiError>,
 
     // Store panel
     dissolve_text: String,
@@ -450,6 +451,19 @@ impl MiasmaApp {
         locale::transfer_strings(self.locale)
     }
 
+    /// An error in the UI language; Technical mode adds the original wording.
+    fn error_text(&self, e: &UiError) -> String {
+        e.text(self.locale, !self.mode.is_easy())
+    }
+
+    /// The error as a hint line, with the original wording under it in Technical mode.
+    fn error_hint(&self, ui: &mut egui::Ui, e: &UiError) {
+        kit::hint(ui, e.plain(self.locale));
+        if !self.mode.is_easy() && !e.detail.is_empty() {
+            kit::mono(ui, &e.detail);
+        }
+    }
+
     fn set_msg(&mut self, kind: MsgKind, msg: impl Into<String>) {
         self.status_msg = Some((msg.into(), kind));
         self.status_msg_at = std::time::Instant::now();
@@ -728,13 +742,19 @@ impl MiasmaApp {
                         });
                         match result {
                             Ok(()) => {
-                                self.set_msg(
-                                    MsgKind::Success,
-                                    format!("Saved {} bytes to {}", bytes_written, path.display()),
+                                let s = self.s();
+                                let saved = format!(
+                                    "{} {} ({})",
+                                    s.retrieve_saved,
+                                    path.display(),
+                                    format_size(bytes_written)
                                 );
+                                self.set_msg(MsgKind::Success, saved);
                             }
                             Err(e) => {
-                                self.set_msg(MsgKind::Error, format!("Save failed: {e}"));
+                                let err = UiError::new(ErrorKind::DiskError, e.to_string());
+                                let text = self.error_text(&err);
+                                self.set_msg(MsgKind::Error, text);
                             }
                         }
                     } else {
@@ -773,8 +793,8 @@ impl MiasmaApp {
                             challenge_code: item
                                 .challenge_code
                                 .map(|code| std::sync::Arc::new(Zeroizing::new(code))),
-                            created_at: format_epoch(item.created_at),
-                            expires_at: format_epoch(item.expires_at),
+                            created_at: format_epoch(item.created_at, self.locale),
+                            expires_at: format_epoch(item.expires_at, self.locale),
                             filename: item.filename,
                             file_size: item.file_size,
                         })
@@ -791,8 +811,8 @@ impl MiasmaApp {
                             challenge_code: item
                                 .challenge_code
                                 .map(|code| std::sync::Arc::new(Zeroizing::new(code))),
-                            created_at: format_epoch(item.created_at),
-                            expires_at: format_epoch(item.expires_at),
+                            created_at: format_epoch(item.created_at, self.locale),
+                            expires_at: format_epoch(item.expires_at, self.locale),
                             filename: item.filename,
                             file_size: item.file_size,
                         })
@@ -800,6 +820,8 @@ impl MiasmaApp {
                 }
                 WorkerResult::PushReply { req, reply } => {
                     let c = locale::contact_strings(self.locale);
+                    self.contacts
+                        .set_error_context(self.locale, !self.mode.is_easy());
                     self.contacts.on_reply(c, req, reply);
                     for n in self.contacts.take_notices() {
                         self.set_msg(MsgKind::Success, n);
@@ -810,6 +832,7 @@ impl MiasmaApp {
                     message,
                     daemon_down,
                 } => {
+                    let message = self.error_text(&message);
                     // The worker owns reconnecting; ask it to look (and relaunch) now instead
                     // of waiting for the 30 s status poll.
                     if self.transfers.on_poll_failed(message, daemon_down) {
@@ -836,7 +859,8 @@ impl MiasmaApp {
                     self.transfers.on_remove_refused(reason, t);
                 }
                 WorkerResult::TransferError(e) => {
-                    self.transfers.on_error(e);
+                    let text = self.error_text(&e);
+                    self.transfers.on_error(text);
                 }
                 WorkerResult::Logs { daemon_lines, .. } => {
                     self.logs.daemon_lines = daemon_lines;
@@ -884,8 +908,9 @@ impl MiasmaApp {
                     if self.import_state == ImportState::InProgress {
                         self.import_state = ImportState::Failed;
                     }
-                    self.last_error = Some(e.clone());
-                    self.set_msg(MsgKind::Error, e);
+                    let text = self.error_text(&e);
+                    self.last_error = Some(e);
+                    self.set_msg(MsgKind::Error, text);
                 }
             }
         }
@@ -953,8 +978,8 @@ impl MiasmaApp {
                         s.stopped_title
                     };
                     ui.label(kit::section_text(title));
-                    if let Some(ref err) = self.last_error {
-                        kit::hint(ui, err);
+                    if let Some(err) = self.last_error.clone() {
+                        self.error_hint(ui, &err);
                     } else {
                         kit::hint(
                             ui,
@@ -1343,9 +1368,14 @@ impl MiasmaApp {
 
                 if let Some(eid) = self.last_envelope_id.clone() {
                     ui.add_space(kit::SP_1);
-                    kit::form_row(ui, "Envelope ID:", None, |ui| {
-                        kit::mono_copy(ui, &eid, s.copy);
-                    });
+                    kit::form_row(
+                        ui,
+                        crate::uitext::envelope_id_label(self.locale),
+                        None,
+                        |ui| {
+                            kit::mono_copy(ui, &eid, s.copy);
+                        },
+                    );
                 }
             });
         });
@@ -1415,8 +1445,8 @@ impl MiasmaApp {
                                     });
                                 });
                             }
-                            g.text("Created:", &item.created_at);
-                            g.text("Expires:", &item.expires_at);
+                            g.text(crate::uitext::created_label(self.locale), &item.created_at);
+                            g.text(crate::uitext::expires_label(self.locale), &item.expires_at);
                             // Challenge code: the recipient reads this out to the sender.
                             if let Some(ref code) = item.challenge_code {
                                 g.row(s.inbox_challenge, |ui| {
@@ -1528,8 +1558,8 @@ impl MiasmaApp {
                             if let Some(ref fname) = item.filename {
                                 g.text(s.outbox_filename, fname);
                             }
-                            g.text("Created:", &item.created_at);
-                            g.text("Expires:", &item.expires_at);
+                            g.text(crate::uitext::created_label(self.locale), &item.created_at);
+                            g.text(crate::uitext::expires_label(self.locale), &item.expires_at);
                         });
 
                         // Sender confirmation: ask for the challenge code.
@@ -1635,7 +1665,7 @@ impl MiasmaApp {
             let diag = self.build_diagnostics();
             if let Some(path) = rfd::FileDialog::new()
                 .set_file_name("miasma-diagnostics.txt")
-                .add_filter("Text files", &["txt"])
+                .add_filter(crate::uitext::text_files_filter(self.locale), &["txt"])
                 .save_file()
             {
                 match std::fs::write(&path, &diag) {
@@ -1820,7 +1850,10 @@ impl MiasmaApp {
                             .color(kit::level_color(Level::Warn)),
                         );
                     } else if self.replicated_count > 0 {
-                        ui.label(format!("{} replicated", self.replicated_count));
+                        ui.label(crate::uitext::replicated(
+                            self.locale,
+                            self.replicated_count as u64,
+                        ));
                     } else {
                         ui.label(kit::muted_text("—"));
                     }
@@ -1870,19 +1903,21 @@ impl MiasmaApp {
                             s.status_transport_details,
                         ],
                     );
+                    let loc = self.locale;
+                    use crate::uitext::{self, TransportState as TS};
                     for t in &self.transport_statuses {
                         table.row(ui, true, |row| {
                             row.text(&t.name);
                             let (level, label) = if t.selected {
-                                (Level::Ok, "Active")
+                                (Level::Ok, uitext::transport_state(loc, TS::Active))
                             } else if t.available && t.failure_count == 0 {
-                                (Level::Ok, "Ready")
+                                (Level::Ok, uitext::transport_state(loc, TS::Ready))
                             } else if t.available && t.failure_count > 0 {
-                                (Level::Warn, "Degraded")
+                                (Level::Warn, uitext::transport_state(loc, TS::Degraded))
                             } else if t.failure_count > 0 {
-                                (Level::Error, "Failing")
+                                (Level::Error, uitext::transport_state(loc, TS::Failing))
                             } else {
-                                (Level::Muted, "Idle")
+                                (Level::Muted, uitext::transport_state(loc, TS::Idle))
                             };
                             row.status(level, label);
                             row.text(&format!("{} / {}", t.success_count, t.failure_count));
@@ -1926,6 +1961,9 @@ impl MiasmaApp {
                 let options = Locale::ALL.map(|l| (l, l.display_name()));
                 if kit::segmented(ui, &mut lang, &options) {
                     self.locale = lang;
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Title(
+                        crate::buildinfo::window_title(lang),
+                    ));
                     self.save_prefs();
                 }
             });
@@ -1982,6 +2020,10 @@ impl MiasmaApp {
                         self.lg().memory_only.to_owned()
                     };
                     g.mono(s.settings_log, &log_where);
+                    g.mono(
+                        crate::buildinfo::build_row_label(self.locale),
+                        &crate::buildinfo::build_row_value(),
+                    );
                     if let Ok(exe) = std::env::current_exe() {
                         if let Some(dir) = exe.parent() {
                             g.mono(s.settings_install, &dir.to_string_lossy());
@@ -2037,11 +2079,7 @@ impl MiasmaApp {
                 });
             });
 
-            let variant_label = if easy { "" } else { " Technical Beta" };
-            kit::hint(
-                ui,
-                &format!("Miasma{variant_label} v{}", env!("CARGO_PKG_VERSION")),
-            );
+            kit::hint(ui, &crate::buildinfo::window_title(self.locale));
         });
     }
 
@@ -2260,8 +2298,8 @@ impl MiasmaApp {
             ImportState::Failed => {
                 kit::surface(ui, |ui| {
                     kit::status_dot(ui, Level::Error, s.import_failed);
-                    if let Some(ref err) = self.last_error {
-                        kit::hint(ui, err);
+                    if let Some(err) = self.last_error.clone() {
+                        self.error_hint(ui, &err);
                     }
                     kit::button_row(ui, |ui| {
                         if kit::primary(ui, true, s.import_retry).clicked() {
@@ -2288,6 +2326,10 @@ impl MiasmaApp {
         d.push_str(&format!(
             "Desktop version: {} (beta)\n",
             env!("CARGO_PKG_VERSION")
+        ));
+        d.push_str(&format!(
+            "Build:           {}\n",
+            crate::buildinfo::BUILD_ID
         ));
         d.push_str(&format!(
             "OS:              {} {}\n",
@@ -2402,7 +2444,7 @@ impl MiasmaApp {
         }
 
         if let Some(ref err) = self.last_error {
-            d.push_str(&format!("\n--- Last Error ---\n{err}\n"));
+            d.push_str(&format!("\n--- Last Error ---\n{}\n", err.report_line()));
         }
 
         // Font detection results — helpful for diagnosing CJK rendering.
@@ -2431,36 +2473,13 @@ impl MiasmaApp {
 
 // ─── Small helpers ──────────────────────────────────────────────────────────
 
-fn format_epoch(epoch_secs: u64) -> String {
+fn format_epoch(epoch_secs: u64, locale: Locale) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    if epoch_secs == 0 {
-        return "unknown".into();
-    }
-    if epoch_secs > now {
-        let diff = epoch_secs - now;
-        if diff < 3600 {
-            format!("in {}m", diff / 60)
-        } else if diff < 86400 {
-            format!("in {}h", diff / 3600)
-        } else {
-            format!("in {}d", diff / 86400)
-        }
-    } else {
-        let diff = now - epoch_secs;
-        if diff < 60 {
-            "just now".into()
-        } else if diff < 3600 {
-            format!("{}m ago", diff / 60)
-        } else if diff < 86400 {
-            format!("{}h ago", diff / 3600)
-        } else {
-            format!("{}d ago", diff / 86400)
-        }
-    }
+    crate::uitext::relative_time(locale, epoch_secs, now)
 }
 
 /// Map envelope state string to a (level, label) for outbox display.
