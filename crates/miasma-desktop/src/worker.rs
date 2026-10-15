@@ -2076,7 +2076,7 @@ mod tests {
             ChatFail::NotSupported
         );
         // No connection at all.
-        let down = Some(Err(anyhow::anyhow!(super::DAEMON_DOWN_MESSAGE)));
+        let down = Some(Err(anyhow::anyhow!("daemon.port not found")));
         assert_eq!(
             classify_chat_outcome(down, || true).unwrap_err(),
             ChatFail::DaemonDown
