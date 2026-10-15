@@ -1,8 +1,12 @@
 //! Local inbox and outbox for directed share envelopes.
 //!
-//! Envelopes are stored as JSON files in subdirectories of the data dir:
+//! Envelopes are stored as files in subdirectories of the data dir:
 //! - `{data_dir}/directed/incoming/{envelope_id_hex}.json`
 //! - `{data_dir}/directed/outgoing/{envelope_id_hex}.json`
+//!
+//! The envelope files and their `.challenge` / `.peer` sidecars are encrypted
+//! at rest (see `state_crypto`); files written in plaintext by earlier
+//! versions are converted the first time they are touched.
 
 use std::{
     fmt,
@@ -14,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use super::envelope::{DirectedEnvelope, EnvelopeState};
+use crate::state_crypto::{self, doc, Label, StateError, StateKeys};
 
 /// Maximum number of envelopes allowed in a single directory (inbox or outbox).
 /// Prevents unbounded disk growth from malicious or excessive invite delivery.
@@ -70,6 +75,7 @@ impl fmt::Debug for EnvelopeSummary {
 pub struct DirectedInbox {
     incoming_dir: PathBuf,
     outgoing_dir: PathBuf,
+    keys: StateKeys,
 }
 
 impl DirectedInbox {
@@ -77,12 +83,40 @@ impl DirectedInbox {
     pub fn open(data_dir: &Path) -> Result<Self> {
         let incoming_dir = crate::paths::directed_incoming_dir(data_dir);
         let outgoing_dir = crate::paths::directed_outgoing_dir(data_dir);
+        let keys =
+            StateKeys::open_or_init(data_dir).context("open the state key for directed shares")?;
         std::fs::create_dir_all(&incoming_dir).context("create incoming dir")?;
         std::fs::create_dir_all(&outgoing_dir).context("create outgoing dir")?;
         Ok(Self {
             incoming_dir,
             outgoing_dir,
+            keys,
         })
+    }
+
+    /// Read and decrypt one file of this inbox. A plaintext file left by an
+    /// earlier version is converted on the way.
+    fn read_meta(&self, path: &Path) -> std::io::Result<Zeroizing<Vec<u8>>> {
+        let first = state_crypto::read_document(&self.keys, Label::DirectedMeta, path);
+        let res = match first {
+            Err(StateError::NotProtected) => {
+                state_crypto::migrate::migrate_document(&self.keys, Label::DirectedMeta, path)
+                    .map_err(to_io)?;
+                state_crypto::read_document(&self.keys, Label::DirectedMeta, path)
+            }
+            other => other,
+        };
+        res.map_err(to_io)
+    }
+
+    fn read_meta_string(&self, path: &Path) -> Option<String> {
+        let raw = self.read_meta(path).ok()?;
+        String::from_utf8(raw.to_vec()).ok()
+    }
+
+    fn write_meta(&self, path: &Path, data: &[u8]) -> Result<()> {
+        state_crypto::write_document(&self.keys, Label::DirectedMeta, path, data)?;
+        Ok(())
     }
 
     // ─── Outgoing (sender) ──────────────────────────────────────────────
@@ -92,7 +126,7 @@ impl DirectedInbox {
         let path = self.outgoing_path(&envelope.id_hex());
         let json =
             Zeroizing::new(serde_json::to_vec_pretty(envelope).context("serialize envelope")?);
-        crate::secure_file::atomic_write_restricted(&path, json.as_slice())
+        self.write_meta(&path, json.as_slice())
             .context("write outgoing envelope")?;
         Ok(())
     }
@@ -100,9 +134,9 @@ impl DirectedInbox {
     /// Load an outgoing envelope by hex ID.
     pub fn load_outgoing(&self, id_hex: &str) -> Result<DirectedEnvelope> {
         let path = self.outgoing_path(id_hex);
-        let json = Zeroizing::new(
-            std::fs::read(&path).with_context(|| format!("read outgoing {id_hex}"))?,
-        );
+        let json = self
+            .read_meta(&path)
+            .with_context(|| format!("read outgoing {id_hex}"))?;
         serde_json::from_slice(json.as_slice()).context("deserialize envelope")
     }
 
@@ -133,7 +167,7 @@ impl DirectedInbox {
         }
         let json =
             Zeroizing::new(serde_json::to_vec_pretty(envelope).context("serialize envelope")?);
-        crate::secure_file::atomic_write_restricted(&path, json.as_slice())
+        self.write_meta(&path, json.as_slice())
             .context("write incoming envelope")?;
         Ok(())
     }
@@ -141,9 +175,9 @@ impl DirectedInbox {
     /// Load an incoming envelope by hex ID.
     pub fn load_incoming(&self, id_hex: &str) -> Result<DirectedEnvelope> {
         let path = self.incoming_path(id_hex);
-        let json = Zeroizing::new(
-            std::fs::read(&path).with_context(|| format!("read incoming {id_hex}"))?,
-        );
+        let json = self
+            .read_meta(&path)
+            .with_context(|| format!("read incoming {id_hex}"))?;
         serde_json::from_slice(json.as_slice()).context("deserialize envelope")
     }
 
@@ -201,8 +235,7 @@ impl DirectedInbox {
                     if path.extension().and_then(|e| e.to_str()) != Some("json") {
                         continue;
                     }
-                    if let Ok(json) = std::fs::read(&path) {
-                        let json = Zeroizing::new(json);
+                    if let Ok(json) = self.read_meta(&path) {
                         if let Ok(mut env) =
                             serde_json::from_slice::<DirectedEnvelope>(json.as_slice())
                         {
@@ -210,10 +243,7 @@ impl DirectedInbox {
                                 env.state = EnvelopeState::Expired;
                                 if let Ok(serialized) = serde_json::to_vec_pretty(&env) {
                                     let serialized = Zeroizing::new(serialized);
-                                    let _ = crate::secure_file::atomic_write_restricted(
-                                        &path,
-                                        serialized.as_slice(),
-                                    );
+                                    let _ = self.write_meta(&path, serialized.as_slice());
                                 }
                             }
                             // Clean up challenge file for terminal envelopes.
@@ -276,13 +306,12 @@ impl DirectedInbox {
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
-            if let Ok(json) = std::fs::read(&path) {
-                let json = Zeroizing::new(json);
+            if let Ok(json) = self.read_meta(&path) {
                 if let Ok(env) = serde_json::from_slice::<DirectedEnvelope>(json.as_slice()) {
                     // Try to load the challenge code for incoming envelopes.
                     let challenge_code = if is_incoming {
                         let challenge_path = path.with_extension("challenge");
-                        std::fs::read_to_string(&challenge_path).ok()
+                        self.read_meta_string(&challenge_path)
                     } else {
                         None
                     };
@@ -318,7 +347,7 @@ impl DirectedInbox {
     /// This is stored separately so it's only on the recipient's machine.
     pub fn save_challenge_code(&self, id_hex: &str, code: &str) -> Result<()> {
         let path = self.incoming_dir.join(format!("{id_hex}.challenge"));
-        crate::secure_file::atomic_write_restricted(&path, code.as_bytes())
+        self.write_meta(&path, code.as_bytes())
             .context("write challenge code")?;
         Ok(())
     }
@@ -326,7 +355,7 @@ impl DirectedInbox {
     /// Load the challenge code for an incoming envelope.
     pub fn load_challenge_code(&self, id_hex: &str) -> Option<String> {
         let path = self.incoming_dir.join(format!("{id_hex}.challenge"));
-        std::fs::read_to_string(&path).ok()
+        self.read_meta_string(&path)
     }
 
     /// Delete the challenge code file.
@@ -339,36 +368,28 @@ impl DirectedInbox {
     /// the initial Invite. The binding is immutable: a different peer cannot
     /// claim an existing envelope_id later.
     pub fn bind_incoming_peer_id(&self, id_hex: &str, peer_id: &str) -> Result<()> {
-        use std::io::Write;
-
         let path = self.incoming_dir.join(format!("{id_hex}.peer"));
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(mut file) => file
-                .write_all(peer_id.as_bytes())
-                .context("write incoming peer binding"),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                let existing = std::fs::read_to_string(&path)
-                    .context("read existing incoming peer binding")?;
-                if existing.trim() == peer_id {
-                    Ok(())
-                } else {
-                    anyhow::bail!("incoming envelope is already bound to a different peer")
-                }
-            }
-            Err(e) => Err(e).context("create incoming peer binding"),
+        // Created only if absent: the first binding wins.
+        let created =
+            doc::write_document_new(&self.keys, Label::DirectedMeta, &path, peer_id.as_bytes())
+                .context("create incoming peer binding")?;
+        if created {
+            return Ok(());
+        }
+        let existing = self
+            .read_meta_string(&path)
+            .context("read existing incoming peer binding")?;
+        if existing.trim() == peer_id {
+            Ok(())
+        } else {
+            anyhow::bail!("incoming envelope is already bound to a different peer")
         }
     }
 
     /// Load the authenticated sender PeerId for an incoming envelope.
     pub fn load_incoming_peer_id(&self, id_hex: &str) -> Option<String> {
         let path = self.incoming_dir.join(format!("{id_hex}.peer"));
-        std::fs::read_to_string(&path)
-            .ok()
-            .map(|s| s.trim().to_string())
+        self.read_meta_string(&path).map(|s| s.trim().to_string())
     }
 
     /// Check whether a follow-up request comes from the PeerId bound by the
@@ -381,13 +402,20 @@ impl DirectedInbox {
     /// Used to reconnect for challenge confirmation.
     pub fn save_outgoing_peer_id(&self, id_hex: &str, peer_id: &str) {
         let path = self.outgoing_dir.join(format!("{id_hex}.peer"));
-        let _ = std::fs::write(&path, peer_id);
+        let _ = self.write_meta(&path, peer_id.as_bytes());
     }
 
     /// Load the recipient's PeerId for an outgoing envelope.
     pub fn load_outgoing_peer_id(&self, id_hex: &str) -> Option<String> {
         let path = self.outgoing_dir.join(format!("{id_hex}.peer"));
-        std::fs::read_to_string(&path).ok()
+        self.read_meta_string(&path)
+    }
+}
+
+fn to_io(e: StateError) -> std::io::Error {
+    match e {
+        StateError::Io(io) => io,
+        other => std::io::Error::other(other.to_string()),
     }
 }
 

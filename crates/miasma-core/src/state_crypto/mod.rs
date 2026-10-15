@@ -122,6 +122,17 @@ impl Label {
         }
     }
 
+    /// Largest plaintext record of a log of this class. Most records are a few
+    /// hundred bytes; the replication queue stores the shard locations of a
+    /// whole file in one record, which grows with the file.
+    pub const fn max_record_bytes(self) -> usize {
+        match self {
+            Label::ReplicationWal => 16 * 1024 * 1024,
+            Label::TransferJournal => 1024 * 1024,
+            _ => 64 * 1024,
+        }
+    }
+
     /// Largest document of this class that is read or written.
     pub const fn max_document_bytes(self) -> usize {
         match self {

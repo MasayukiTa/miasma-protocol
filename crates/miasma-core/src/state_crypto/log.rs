@@ -44,10 +44,9 @@ use crate::crypto::keyderive;
 
 pub const LOG_VERSION: u8 = 1;
 pub const LOG_HEADER_LEN: usize = 4 + 1 + 1 + 16;
-/// Largest plaintext record.
-pub const MAX_RECORD: usize = 64 * 1024;
+
 const MIN_BODY: usize = NONCE_LEN + TAG_LEN;
-const MAX_BODY: usize = NONCE_LEN + MAX_RECORD + TAG_LEN;
+
 const IO_BUF: usize = 64 * 1024;
 
 /// Key and identity of one open log file.
@@ -63,6 +62,10 @@ impl Core {
         let key = keyderive::derive_state_log_key(doc_key.as_ref(), &salt)
             .expect("HKDF expand of 32 bytes cannot fail");
         Self { key, label, salt }
+    }
+
+    fn max_body(&self) -> usize {
+        NONCE_LEN + self.label.max_record_bytes() + TAG_LEN
     }
 
     fn header(&self) -> [u8; LOG_HEADER_LEN] {
@@ -225,7 +228,7 @@ impl LogReader {
             Err(e) => return self.fail(e.into()),
         }
         let body_len = u32::from_le_bytes(lenb) as usize;
-        if !(MIN_BODY..=MAX_BODY).contains(&body_len) {
+        if !(MIN_BODY..=self.core.max_body()).contains(&body_len) {
             let zeros =
                 lenb == [0u8; 4] && matches!(rest_is_zero(&mut self.r, remaining - 4), Ok(true));
             return if zeros {
@@ -248,6 +251,9 @@ impl LogReader {
             Ok(plain) => {
                 self.seq += 1;
                 self.offset = end;
+                if self.scratch.capacity() > 256 * 1024 {
+                    self.scratch = Zeroizing::new(Vec::new());
+                }
                 Ok(Some(plain))
             }
             Err(_) if end == self.file_len => Ok(self.tear()),
@@ -374,7 +380,7 @@ impl LogWriter {
             let mut lenb = [0u8; 4];
             r.read_exact(&mut lenb)?;
             let body_len = u32::from_le_bytes(lenb) as usize;
-            if !(MIN_BODY..=MAX_BODY).contains(&body_len) {
+            if !(MIN_BODY..=core.max_body()).contains(&body_len) {
                 if lenb == [0u8; 4] && rest_is_zero(&mut r, remaining - 4)? {
                     break;
                 }
@@ -406,12 +412,12 @@ impl LogWriter {
         })
     }
 
-    /// Append one record (at most [`MAX_RECORD`] bytes).
+    /// Append one record (at most [`Label::max_record_bytes`] bytes).
     pub fn append(&mut self, record: &[u8]) -> Result<(), StateError> {
-        if record.len() > MAX_RECORD {
+        if record.len() > self.core.label.max_record_bytes() {
             return Err(StateError::TooLarge {
                 size: record.len() as u64,
-                limit: MAX_RECORD as u64,
+                limit: self.core.label.max_record_bytes() as u64,
             });
         }
         let body_len = NONCE_LEN + record.len() + TAG_LEN;
@@ -438,6 +444,10 @@ impl LogWriter {
         }
         self.end += self.scratch.len() as u64;
         self.seq += 1;
+        if self.scratch.capacity() > 256 * 1024 {
+            // Do not keep a large buffer for the life of the process.
+            self.scratch = Zeroizing::new(Vec::new());
+        }
         Ok(())
     }
 
@@ -578,14 +588,14 @@ mod tests {
             let mut w = LogWriter::open_append(&k, label, &p).unwrap();
             assert_eq!(w.record_count(), 3);
             w.append(b"").unwrap();
-            w.append(&vec![7u8; MAX_RECORD]).unwrap();
+            w.append(&vec![7u8; label.max_record_bytes()]).unwrap();
             drop(w);
             let (recs, torn) = read_all(&k, label, &p).unwrap();
             assert_eq!(torn, None);
             assert_eq!(recs.len(), 5);
             assert_eq!(recs[0], b"record number 0");
             assert!(recs[3].is_empty());
-            assert_eq!(recs[4].len(), MAX_RECORD);
+            assert_eq!(recs[4].len(), label.max_record_bytes());
         }
     }
 
@@ -607,7 +617,7 @@ mod tests {
         let p = dir.path().join("h.log");
         let mut w = LogWriter::open_append(&k, Label::PushHistory, &p).unwrap();
         assert!(matches!(
-            w.append(&vec![0u8; MAX_RECORD + 1]),
+            w.append(&vec![0u8; Label::PushHistory.max_record_bytes() + 1]),
             Err(StateError::TooLarge { .. })
         ));
         w.append(b"still works").unwrap();

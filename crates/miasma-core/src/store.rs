@@ -32,7 +32,11 @@ use chacha20poly1305::{
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use crate::{share::MiasmaShare, MiasmaError};
+use crate::{
+    share::MiasmaShare,
+    state_crypto::{self, Label, StateError, StateKeys},
+    MiasmaError,
+};
 
 const NONCE_LEN: usize = 24; // XChaCha20 nonce
 const MASTER_KEY_FILE: &str = crate::paths::MASTER_KEY.name;
@@ -226,19 +230,36 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+/// Read the share index. It is encrypted at rest under a key derived from the
+/// master key (`state_crypto`); an index written in plaintext by an earlier
+/// version is converted on first read. A missing, unreadable or undecryptable
+/// index reads as empty (the caller rebuilds it from the share files).
+///
+/// The whole index is one document: it is read and written whole, so its memory
+/// cost is its size (one buffer while reading, as before the encryption).
 fn load_index(data_dir: &Path) -> StoreIndex {
     let path = data_dir.join(INDEX_FILE);
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
+    let Ok(keys) = StateKeys::load(data_dir) else {
+        return StoreIndex::default();
+    };
+    let mut raw = state_crypto::read_document(&keys, Label::StoreIndex, &path);
+    if matches!(raw, Err(StateError::NotProtected)) {
+        let _ = state_crypto::migrate::migrate_document(&keys, Label::StoreIndex, &path);
+        raw = state_crypto::read_document(&keys, Label::StoreIndex, &path);
+    }
+    raw.ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default()
 }
 
 fn save_index(data_dir: &Path, index: &StoreIndex) -> Result<(), MiasmaError> {
     let path = data_dir.join(INDEX_FILE);
-    let raw =
-        serde_json::to_string(index).map_err(|e| MiasmaError::Serialization(e.to_string()))?;
-    atomic_write(&path, raw.as_bytes())
+    let keys = StateKeys::load(data_dir)?;
+    let raw = Zeroizing::new(
+        serde_json::to_vec(index).map_err(|e| MiasmaError::Serialization(e.to_string()))?,
+    );
+    state_crypto::write_document(&keys, Label::StoreIndex, &path, &raw)?;
+    Ok(())
 }
 
 /// Write to a temp file then rename — atomic on POSIX, best-effort on Windows.
@@ -1431,7 +1452,10 @@ mod tests {
     }
 
     fn index_json(dir: &Path) -> serde_json::Value {
-        serde_json::from_str(&std::fs::read_to_string(dir.join(INDEX_FILE)).unwrap()).unwrap()
+        let keys = StateKeys::load(dir).unwrap();
+        let raw =
+            state_crypto::read_document(&keys, Label::StoreIndex, &dir.join(INDEX_FILE)).unwrap();
+        serde_json::from_slice(&raw).unwrap()
     }
 
     fn write_index_json(dir: &Path, v: &serde_json::Value) {
