@@ -316,3 +316,54 @@ Both machines: start Miasma desktop (it starts its own daemon), open
    yet** and the transfer says "Refused". Quit Miasma on one side and send:
    the error says to check that the other Miasma is running (with `netcheck`).
    Drop a folder on a row: a clear "Folders cannot be sent" message.
+
+## Chat between registered contacts (CLI)
+
+Chat works between two people who have registered each other as contacts (the
+same step as for pushing files: `miasma contact add` on **both** sides). Text
+only, up to 4096 bytes per message. Messages are end-to-end encrypted and go
+straight to the other person's Miasma; there is no server in between.
+
+```sh
+# Send. Several words are one message.
+miasma chat send taro "See you at 3"
+
+# Read the latest messages (--limit N, --ids shows message IDs,
+# --follow keeps running and prints new messages as they arrive).
+miasma chat history taro --limit 20
+
+# Your conversations, and how many messages still wait to be delivered.
+miasma chat list
+```
+
+**If the other person is offline**, the message waits in an encrypted outbox on
+your computer and is sent again automatically (after 5 s, 30 s, 2 min, 10 min,
+then every 15 minutes, and at once when their Miasma connects to yours). In
+`history` it is marked *waiting* until it arrives and *delivered* afterwards. A
+message can fail for good only when the other person has not registered you
+(`not_allowed`), removed you, or when you removed or switched off the contact;
+it then stays in the history marked *failed*. Up to 500 messages can wait.
+Removing a contact keeps the conversation but you cannot write to them anymore.
+
+**History.** Messages are stored encrypted (with the state key derived from
+`master.key`), one file per contact in `<data dir>/chat/`. While **stealth mode**
+is on (`privacy.stealth_mode`, the default) and `chat.history_save` is not set,
+the history is kept in memory only (a few MiB, the oldest messages are dropped)
+and is gone when the daemon stops; messages waiting to be delivered and the keys
+of the conversation are still stored encrypted. Set
+`miasma config --key chat.history_save --value true` to save the history on disk
+in any case (`false` to never save it, `auto` to go back to the rule above).
+`chat.retention_days` removes saved messages older than that many days
+(0 = keep); other keys: `chat.enabled`, `chat.max_message_bytes`,
+`chat.outbox_max`. They take effect when the daemon starts.
+
+**Delete (on this device only; the other person keeps their copy).**
+
+```sh
+miasma chat history taro --ids        # shows the ID of each message
+miasma chat delete taro <message-id>  # one message (or cancel one still waiting)
+miasma chat delete taro --all         # the whole conversation, waiting messages included
+```
+
+Times are shown in UTC. If `chat` says the daemon does not support it, restart
+the daemon after updating.

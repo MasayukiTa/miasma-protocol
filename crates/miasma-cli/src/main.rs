@@ -16,6 +16,7 @@ use miasma_core::{
 use tracing::info;
 use zeroize::{Zeroize, Zeroizing};
 
+mod chat_cmd;
 mod i18n;
 mod push_cmd;
 mod tunnel;
@@ -468,6 +469,17 @@ enum Commands {
     /// Print the folder where files pushed to you are saved.
     PushInbox,
 
+    /// Chat with a registered contact: send a message, read the conversation, list conversations.
+    ///
+    /// Both sides must have registered each other (`miasma contact add`). A message to someone
+    /// who is offline waits and is delivered when they come online.
+    ///
+    /// Example: miasma chat send taro "See you at 3"
+    Chat {
+        #[command(subcommand)]
+        action: chat_cmd::ChatCmd,
+    },
+
     /// Probe WebSocket/WSS connectivity to a URL.
     ///
     /// Connects via TCP (+ TLS for wss:// or https://) and performs a WebSocket
@@ -698,6 +710,7 @@ async fn main() -> Result<()> {
         Commands::Push(args) => push_cmd::run_push(&data_dir, args).await,
         Commands::PushStatus => push_cmd::run_push_status(&data_dir).await,
         Commands::PushInbox => push_cmd::run_push_inbox(&data_dir).await,
+        Commands::Chat { action } => chat_cmd::run_chat(&data_dir, action).await,
 
         Commands::WssProbe {
             url,
@@ -734,6 +747,7 @@ fn cmd_init(
         },
         transport: Default::default(),
         push: Default::default(),
+        chat: Default::default(),
         privacy: Default::default(),
     };
     config.save(data_dir).context("cannot save config")?;
@@ -1701,6 +1715,14 @@ fn cmd_config_loaded(
                 "storage.bandwidth_mb_day" => println!("{}", config.storage.bandwidth_mb_day),
                 "storage.hosted_quota_mb" => println!("{}", config.storage.hosted_quota_mb),
                 "privacy.stealth_mode" => println!("{}", config.privacy.stealth_mode),
+                "chat.enabled" => println!("{}", config.chat.enabled),
+                "chat.history_save" => match config.chat.history_save {
+                    Some(v) => println!("{v}"),
+                    None => println!("auto"),
+                },
+                "chat.max_message_bytes" => println!("{}", config.chat.max_message_bytes),
+                "chat.outbox_max" => println!("{}", config.chat.outbox_max),
+                "chat.retention_days" => println!("{}", config.chat.retention_days),
                 "privacy.diagnostic_logging" => {
                     println!("{}", config.privacy.diagnostic_logging)
                 }
@@ -1766,6 +1788,32 @@ fn cmd_config_loaded(
                 }
                 "privacy.stealth_mode" => {
                     config.privacy.stealth_mode = v.parse().context("expected bool")?;
+                }
+                "chat.enabled" => {
+                    config.chat.enabled = v.parse().context("expected bool")?;
+                }
+                "chat.history_save" => {
+                    config.chat.history_save = match v {
+                        "auto" | "" => None,
+                        other => Some(other.parse().context("expected true, false or auto")?),
+                    };
+                }
+                "chat.max_message_bytes" => {
+                    let n: usize = v.parse().context("expected a number of bytes")?;
+                    if !(1..=4096).contains(&n) {
+                        bail!("expected 1-4096 bytes");
+                    }
+                    config.chat.max_message_bytes = n;
+                }
+                "chat.outbox_max" => {
+                    let n: usize = v.parse().context("expected a number")?;
+                    if !(1..=500).contains(&n) {
+                        bail!("expected 1-500");
+                    }
+                    config.chat.outbox_max = n;
+                }
+                "chat.retention_days" => {
+                    config.chat.retention_days = v.parse().context("expected a number of days")?;
                 }
                 "privacy.diagnostic_logging" => {
                     config.privacy.diagnostic_logging = v.parse().context("expected bool")?;

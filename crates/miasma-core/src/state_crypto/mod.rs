@@ -79,10 +79,16 @@ pub enum Label {
     DirectedMeta,
     StoreIndex,
     DesktopPrefs,
+    /// Chat messages (one record log per contact).
+    ChatHistory,
+    /// Chat ratchet sessions and delivery counters (one document per contact).
+    ChatSessions,
+    /// Chat messages waiting to be delivered.
+    ChatOutbox,
 }
 
 impl Label {
-    pub const ALL: [Label; 7] = [
+    pub const ALL: [Label; 10] = [
         Label::Contacts,
         Label::PushHistory,
         Label::ReplicationWal,
@@ -90,6 +96,9 @@ impl Label {
         Label::DirectedMeta,
         Label::StoreIndex,
         Label::DesktopPrefs,
+        Label::ChatHistory,
+        Label::ChatSessions,
+        Label::ChatOutbox,
     ];
 
     /// The id stored in file headers.
@@ -102,6 +111,9 @@ impl Label {
             Label::DirectedMeta => 5,
             Label::StoreIndex => 6,
             Label::DesktopPrefs => 7,
+            Label::ChatHistory => 8,
+            Label::ChatSessions => 9,
+            Label::ChatOutbox => 10,
         }
     }
 
@@ -119,6 +131,9 @@ impl Label {
             Label::DirectedMeta => "directed-meta",
             Label::StoreIndex => "store-index",
             Label::DesktopPrefs => "desktop-prefs",
+            Label::ChatHistory => "chat-history",
+            Label::ChatSessions => "chat-sessions",
+            Label::ChatOutbox => "chat-outbox",
         }
     }
 
@@ -293,6 +308,7 @@ fn has_protected_state(data_dir: &Path) -> bool {
         TRANSFERS_DIR.in_dir(data_dir),
         DIRECTED_INCOMING.in_dir(data_dir),
         DIRECTED_OUTGOING.in_dir(data_dir),
+        CHAT_DIR.in_dir(data_dir),
     ]
     .iter()
     .any(|dir| {

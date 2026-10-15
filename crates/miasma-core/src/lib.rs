@@ -10,6 +10,7 @@
     clippy::if_same_then_else
 )]
 
+pub mod chat;
 pub mod config;
 pub mod cover_traffic;
 pub mod crypto;
