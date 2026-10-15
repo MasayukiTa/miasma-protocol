@@ -86,6 +86,7 @@ struct Sender {
 impl Sender {
     async fn plain(key: u8) -> Self {
         let dir = tempfile::tempdir().unwrap();
+        miasma_core::state_crypto::provision_master_key(dir.path()).unwrap();
         let store = Arc::new(LocalShareStore::open(dir.path(), 1000).unwrap());
         let mut node = MiasmaNode::new(&[key; 32], NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
         let addrs = node.collect_listen_addrs(400).await;
@@ -158,6 +159,7 @@ struct Daemon {
 
 async fn start_daemon(key: u8) -> Daemon {
     let dir = tempfile::tempdir().unwrap();
+    miasma_core::state_crypto::provision_master_key(dir.path()).unwrap();
     let store = Arc::new(LocalShareStore::open(dir.path(), 1000).unwrap());
     let node = MiasmaNode::new(&[key; 32], NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
     let server = DaemonServer::start(node, store, dir.path().to_path_buf())
@@ -356,6 +358,7 @@ async fn a_direct_receive_resumes_after_a_stop_and_finishes_exactly() {
         let mid = sender.publish(&data, Some(&password)).await;
 
         let work = tempfile::tempdir().unwrap();
+        miasma_core::state_crypto::provision_master_key(work.path()).unwrap();
         let out = work.path().join("received").join("payload.bin");
         let journals = work.path().join("transfers");
         let cfg = via(&sender.ws_url());
@@ -409,6 +412,7 @@ async fn an_unknown_mid_is_a_clean_error_not_a_hang() {
 
         let unknown = ContentId::compute(b"never published", &params().to_param_bytes());
         let work = tempfile::tempdir().unwrap();
+        miasma_core::state_crypto::provision_master_key(work.path()).unwrap();
         let progress = TransferProgress::new(unknown.to_string());
         let started = std::time::Instant::now();
         let err = receive_file_via(
@@ -444,6 +448,7 @@ async fn an_unreachable_endpoint_is_reported_not_endless() {
         };
         let mid = ContentId::compute(b"whatever", &params().to_param_bytes());
         let work = tempfile::tempdir().unwrap();
+        miasma_core::state_crypto::provision_master_key(work.path()).unwrap();
         let err = receive_file_via(
             &via(&format!("ws://127.0.0.1:{closed}")),
             &mid,
@@ -525,6 +530,7 @@ async fn a_tampered_piece_is_rejected_reported_and_replaced_by_a_spare() {
         // Slot 0 is corrupted in flight; slots 1 and 2 are good, k = 2.
         let relay = tampering_relay(sender.port, vec![0]).await;
         let work = tempfile::tempdir().unwrap();
+        miasma_core::state_crypto::provision_master_key(work.path()).unwrap();
         let out = work.path().join("out.bin");
         let progress = TransferProgress::new(mid.to_string());
         let outcome = receive_file_via(
@@ -567,6 +573,7 @@ async fn when_every_piece_is_tampered_nothing_is_written_and_the_transfer_pauses
         )];
         let (record, manifest) = fetch_record_and_manifest_via(&clients, &mid).await.unwrap();
         let work = tempfile::tempdir().unwrap();
+        miasma_core::state_crypto::provision_master_key(work.path()).unwrap();
         let out = work.path().join("out.bin");
         let progress = TransferProgress::new(mid.to_string());
         let outcome = run_receive(
@@ -616,6 +623,7 @@ async fn a_second_endpoint_serves_when_the_first_is_dead() {
             l.local_addr().unwrap().port()
         };
         let work = tempfile::tempdir().unwrap();
+        miasma_core::state_crypto::provision_master_key(work.path()).unwrap();
         let out = work.path().join("out.bin");
         let cfg = ViaConfig {
             urls: vec![format!("ws://127.0.0.1:{dead}"), sender.ws_url()],
@@ -677,6 +685,7 @@ async fn wss_with_a_self_signed_certificate_works_with_the_ca_and_is_refused_wit
 
         // With the certificate as an extra CA: the whole file arrives.
         let work = tempfile::tempdir().unwrap();
+        miasma_core::state_crypto::provision_master_key(work.path()).unwrap();
         let out = work.path().join("out.bin");
         let with_ca = ViaConfig {
             urls: vec![url.clone()],
@@ -766,6 +775,7 @@ async fn measure_direct_receive_throughput_on_loopback() {
 
     // Whole receive.
     let work = tempfile::tempdir().unwrap();
+    miasma_core::state_crypto::provision_master_key(work.path()).unwrap();
     let progress = TransferProgress::new(mid.to_string());
     let t = std::time::Instant::now();
     receive_file_via(

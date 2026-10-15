@@ -241,6 +241,28 @@ impl DaemonServer {
         };
         node.set_directed_recipient_pubkey(sharing_pubkey);
 
+        // Convert state files written in plaintext by earlier versions. Each
+        // store also converts its own file when it opens it; this pass covers
+        // the folders (transfer journals, directed shares) and leftovers.
+        match crate::state_crypto::migrate::migrate_data_dir(&data_dir) {
+            Ok(report) => {
+                if report.changed_anything() {
+                    info!(
+                        converted = report.migrated + report.recovered,
+                        leftovers_removed = report.discarded_leftovers,
+                        "state files converted to the protected format"
+                    );
+                }
+                if !report.is_clean() {
+                    warn!(
+                        failed = report.failures.len(),
+                        "some state files could not be converted and were left as they are"
+                    );
+                }
+            }
+            Err(e) => warn!("state conversion skipped: {e}"),
+        }
+
         let queue = Arc::new(Mutex::new(ReplicationQueue::load_or_create(&data_dir)?));
 
         // Consume the serialized Shadowsocks credential exactly once. The

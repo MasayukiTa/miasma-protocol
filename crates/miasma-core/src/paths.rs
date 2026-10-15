@@ -522,6 +522,40 @@ spec!(
     "Leftover restricted temp copy (master key, config with secrets, envelopes)."
 );
 
+spec!(
+    STATE_MIGRATION_LOCK,
+    "state-migration.lock",
+    File,
+    DataDir,
+    Runtime,
+    Plain,
+    Remove,
+    "D22",
+    "Advisory lock that serialises the one-time conversion of older plaintext state files; created only when there is something to convert."
+);
+spec!(
+    PREMIGRATE_COPY,
+    "*.premigrate",
+    Pattern,
+    DataDir,
+    State,
+    Plain,
+    OverwriteRemove,
+    "D22",
+    "Plaintext original of a state file that is being converted; overwritten and removed within the same step, so it only survives an interruption."
+);
+spec!(
+    STATE_CORRUPT_ASIDE,
+    "*.corrupt-*",
+    Pattern,
+    DataDir,
+    State,
+    Encrypt,
+    CryptoEraseOverwriteRemove,
+    "D22",
+    "A protected state file that failed to open (wrong key or damage), set aside instead of being overwritten."
+);
+
 // ── Logs ────────────────────────────────────────────────────────────────────
 
 spec!(
@@ -798,6 +832,9 @@ pub const REGISTRY: &[PathSpec] = &[
     URL_SCHEME_MARKER,
     ATOMIC_TMP,
     ATOMIC_SECURE_TMP,
+    STATE_MIGRATION_LOCK,
+    PREMIGRATE_COPY,
+    STATE_CORRUPT_ASIDE,
     DAEMON_LOG,
     DESKTOP_LOG,
     BRIDGE_LOG,
@@ -974,6 +1011,57 @@ pub fn atomic_secure_tmp(path: &Path) -> PathBuf {
 /// Where the contacts loader sets an unreadable file aside.
 pub fn contacts_corrupt_aside(contacts_file: &Path, unix_secs: u64) -> PathBuf {
     contacts_file.with_extension(format!("json.corrupt-{unix_secs}"))
+}
+
+/// Suffix of the plaintext original while a state file is being converted.
+pub const PREMIGRATE_SUFFIX: &str = ".premigrate";
+
+/// `<data>/state-migration.lock`
+pub fn state_migration_lock(data_dir: &Path) -> PathBuf {
+    STATE_MIGRATION_LOCK.in_dir(data_dir)
+}
+/// `<file>.premigrate`: where the plaintext original waits while its protected
+/// replacement is moved into place.
+pub fn premigrate_copy(path: &Path) -> PathBuf {
+    append_to_name(path, PREMIGRATE_SUFFIX)
+}
+/// `<file>.sec.tmp`: staging copy of a protected state file. The full file name
+/// is kept so `<id>.json` and `<id>.peer` never share a temp name.
+pub fn staged_tmp(path: &Path) -> PathBuf {
+    append_to_name(path, ".sec.tmp")
+}
+/// `<file>.corrupt-<unix seconds>`: where a protected file that failed to open
+/// is set aside.
+pub fn corrupt_aside(path: &Path, unix_secs: u64) -> PathBuf {
+    append_to_name(path, &format!(".corrupt-{unix_secs}"))
+}
+fn append_to_name(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(suffix);
+    path.with_file_name(name)
+}
+/// A contacts file set aside by the contacts loader (`contacts.json.corrupt-*`).
+pub fn is_contacts_corrupt_name(name: &str) -> bool {
+    name.strip_prefix(CONTACTS.name)
+        .is_some_and(|rest| rest.starts_with(".corrupt-"))
+}
+/// `recv-<mid>.json`
+pub fn is_recv_journal_name(name: &str) -> bool {
+    name.starts_with("recv-") && name.ends_with(".json")
+}
+/// `send-<hash>.jsonl`
+pub fn is_send_journal_name(name: &str) -> bool {
+    name.starts_with("send-") && name.ends_with(".jsonl")
+}
+/// A directed-share file: the envelope (`.json`) or one of its sidecars
+/// (`.challenge`, `.peer`).
+pub fn is_directed_meta_name(name: &str) -> bool {
+    [".json", ".challenge", ".peer"]
+        .iter()
+        .any(|ext| name.ends_with(ext))
 }
 
 #[cfg(test)]

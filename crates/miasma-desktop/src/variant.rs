@@ -7,7 +7,7 @@
 ///
 /// 1. Explicit launch argument (`--mode easy` or `--mode technical`)
 /// 2. `MIASMA_MODE` environment variable (developer/testing override only)
-/// 3. Persisted user preference in `desktop-prefs.toml`
+/// 3. Persisted user preference in `desktop-prefs.toml` (encrypted at rest)
 /// 4. Built-in default: `Easy`
 use std::path::{Path, PathBuf};
 
@@ -41,8 +41,10 @@ const PREFS_FILE: &str = miasma_core::paths::DESKTOP_PREFS.name;
 
 /// Persisted desktop preferences (mode + locale + theme).
 ///
-/// Stored as `desktop-prefs.toml` in the data directory.
-/// Survives restart, upgrade, and reinstall (data dir is preserved).
+/// Stored as `desktop-prefs.toml` in the data directory, encrypted with a key
+/// derived from `master.key`; a plaintext file from an earlier version is
+/// converted on first load. Without a usable key the defaults apply and nothing
+/// is written. Survives restart, upgrade, and reinstall (data dir is preserved).
 /// Every field has a default, so a file written by an older version (without `theme`) loads.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -56,19 +58,43 @@ pub struct DesktopPrefs {
 impl DesktopPrefs {
     /// Load from data directory. Returns defaults if file is missing or corrupt.
     pub fn load(data_dir: &Path) -> Self {
+        use miasma_core::state_crypto::{self, Label, StateKeys};
         let path = data_dir.join(PREFS_FILE);
-        match std::fs::read_to_string(&path) {
-            Ok(contents) => toml::from_str(&contents).unwrap_or_default(),
+        if !path.exists() {
+            return Self::default();
+        }
+        let Ok(keys) = StateKeys::open_or_init(data_dir) else {
+            return Self::default();
+        };
+        let _ = state_crypto::migrate::migrate_document(&keys, Label::DesktopPrefs, &path);
+        match state_crypto::read_document(&keys, Label::DesktopPrefs, &path) {
+            Ok(contents) => std::str::from_utf8(&contents)
+                .ok()
+                .and_then(|s| toml::from_str(s).ok())
+                .unwrap_or_default(),
             Err(_) => Self::default(),
         }
     }
 
     /// Save to data directory. Errors are logged but not fatal.
     pub fn save(&self, data_dir: &Path) {
+        use miasma_core::state_crypto::{self, Label, StateKeys};
         let path = data_dir.join(PREFS_FILE);
+        let keys = match StateKeys::open_or_init(data_dir) {
+            Ok(k) => k,
+            Err(e) => {
+                tracing::warn!("Failed to save desktop prefs: {e}");
+                return;
+            }
+        };
         match toml::to_string_pretty(self) {
             Ok(contents) => {
-                if let Err(e) = std::fs::write(&path, contents) {
+                if let Err(e) = state_crypto::write_document(
+                    &keys,
+                    Label::DesktopPrefs,
+                    &path,
+                    contents.as_bytes(),
+                ) {
                     tracing::warn!("Failed to save desktop prefs: {e}");
                 }
             }

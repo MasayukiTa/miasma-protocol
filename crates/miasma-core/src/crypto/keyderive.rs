@@ -10,6 +10,12 @@ const LABEL_DHT_SIGN: &[u8] = b"miasma-v1-dht-signing-key";
 const LABEL_SESSION: &[u8] = b"miasma-v1-session-key";
 const LABEL_MAC: &[u8] = b"miasma-v1-mac-key-v1";
 const LABEL_SHARING: &[u8] = b"miasma-v1-sharing-key";
+/// Root label of the at-rest state key hierarchy (see `state_crypto`).
+const LABEL_STATE_ROOT: &[u8] = b"miasma/state/v1";
+/// Prefix of the per-document-class labels below the state key.
+const LABEL_STATE_DOC_PREFIX: &[u8] = b"miasma/state/v1/doc/";
+/// Label of the per-file key of an append-only record log.
+const LABEL_STATE_LOG_FILE: &[u8] = b"miasma/state/v1/log-file";
 
 /// Node key hierarchy derived from a single master key.
 ///
@@ -45,6 +51,38 @@ impl NodeKeys {
 /// out-of-band with potential senders.
 pub fn derive_sharing_key(master_key: &[u8]) -> Result<Zeroizing<[u8; 32]>, MiasmaError> {
     hkdf_derive(master_key, LABEL_SHARING)
+}
+
+/// Derive the at-rest state key from the master key:
+/// `HKDF-SHA256(ikm = master_key, salt = none, info = "miasma/state/v1")`.
+pub fn derive_state_key(master_key: &[u8]) -> Result<Zeroizing<[u8; 32]>, MiasmaError> {
+    hkdf_derive(master_key, LABEL_STATE_ROOT)
+}
+
+/// Derive the key of one document class from the state key. `label` is the
+/// class name (`"contacts"`, `"push-history"`, ...): different classes never
+/// share a key.
+pub fn derive_state_doc_key(
+    state_key: &[u8],
+    label: &str,
+) -> Result<Zeroizing<[u8; 32]>, MiasmaError> {
+    let mut info = Vec::with_capacity(LABEL_STATE_DOC_PREFIX.len() + label.len());
+    info.extend_from_slice(LABEL_STATE_DOC_PREFIX);
+    info.extend_from_slice(label.as_bytes());
+    hkdf_derive(state_key, &info)
+}
+
+/// Derive the key of one record-log file from its class key and the random
+/// salt in the file header, so no two files ever encrypt under the same key.
+pub fn derive_state_log_key(
+    doc_key: &[u8],
+    file_salt: &[u8],
+) -> Result<Zeroizing<[u8; 32]>, MiasmaError> {
+    let hk = Hkdf::<Sha256>::new(Some(file_salt), doc_key);
+    let mut out = Zeroizing::new([0u8; 32]);
+    hk.expand(LABEL_STATE_LOG_FILE, out.as_mut())
+        .map_err(|e| MiasmaError::KeyDerivation(e.to_string()))?;
+    Ok(out)
 }
 
 /// Derive a MAC key (K_tag) from an encryption key (K_enc).
@@ -99,6 +137,25 @@ mod tests {
         let k_enc = [0x11u8; 32];
         let k_tag = derive_mac_key(&k_enc).unwrap();
         assert_ne!(*k_tag, k_enc, "K_tag must differ from K_enc");
+    }
+
+    #[test]
+    fn state_keys_are_separated_by_class_and_file() {
+        let state = derive_state_key(MASTER).unwrap();
+        let a = derive_state_doc_key(state.as_ref(), "contacts").unwrap();
+        let b = derive_state_doc_key(state.as_ref(), "push-history").unwrap();
+        assert_ne!(*a, *b);
+        assert_ne!(*a, *state);
+        assert_eq!(
+            *a,
+            *derive_state_doc_key(state.as_ref(), "contacts").unwrap()
+        );
+        let f1 = derive_state_log_key(a.as_ref(), &[1u8; 16]).unwrap();
+        let f2 = derive_state_log_key(a.as_ref(), &[2u8; 16]).unwrap();
+        assert_ne!(*f1, *f2);
+        assert_ne!(*f1, *a);
+        let other = derive_state_key(b"other-master-key-32bytes-padded!").unwrap();
+        assert_ne!(*other, *state);
     }
 
     #[test]
