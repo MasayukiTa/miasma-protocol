@@ -30,7 +30,7 @@
 
 use std::{
     fs::File,
-    io::{BufReader, Read, Seek, SeekFrom, Write},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
@@ -144,18 +144,23 @@ fn read_array<const N: usize, R: Read>(r: &mut R) -> std::io::Result<[u8; N]> {
         .map_err(|_| std::io::ErrorKind::UnexpectedEof.into())
 }
 
-/// True when the next `count` bytes of `r` are all zero. (Only inspects file
-/// layout; nothing here is key material.)
-fn rest_is_zero<R: Read>(r: &mut R, mut count: u64) -> std::io::Result<bool> {
-    while count > 0 {
-        let n = count.min(4096);
-        let chunk = read_vec(r, n as usize)?;
-        if chunk.iter().any(|b| *b != 0) {
-            return Ok(false);
+/// Whether the next `count` bytes of `r` are all NUL, found by walking the
+/// reader's own buffer. (Only inspects file layout; nothing here is key
+/// material and it shares no code with the cipher paths.)
+fn rest_is_zero<R: BufRead>(r: &mut R, count: u64) -> std::io::Result<bool> {
+    let mut left = count;
+    let mut dirty = false;
+    while left > 0 {
+        let buf = r.fill_buf()?;
+        if buf.is_empty() {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
         }
-        count -= n;
+        let n = buf.len().min(usize::try_from(left).unwrap_or(usize::MAX));
+        dirty |= buf[..n].iter().any(|b| *b != b'\0');
+        r.consume(n);
+        left -= n as u64;
     }
-    Ok(true)
+    Ok(!dirty)
 }
 
 // ─── Reader ─────────────────────────────────────────────────────────────────
