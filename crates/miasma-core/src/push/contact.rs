@@ -1,4 +1,4 @@
-//! Contact codes and fingerprints for trusted-contact push (ADR-011).
+//! Contact codes and fingerprints for trusted-contact push.
 //!
 //! A contact is another node's iroh endpoint ID (its Ed25519 public key). The
 //! text form is `miasma-contact:<base58(version || endpoint id || checksum)>`,

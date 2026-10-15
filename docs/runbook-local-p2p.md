@@ -140,7 +140,7 @@ immediately serve a specific file.
 ## Push files to a registered contact (no Share ID, no password)
 
 Two people who trust each other add each other as contacts **once**, then send
-file after file. Both Miasma daemons must be running and online (ADR-012).
+file after file. Both Miasma daemons must be running and online.
 
 Words used here and in the app (Japanese in brackets):
 

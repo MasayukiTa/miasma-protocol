@@ -1,6 +1,6 @@
 //! The push service: the receiving side (accepts connections from contacts),
 //! the sending side (per-contact sequential queues), and the bookkeeping the
-//! IPC layer exposes. See ADR-011.
+//! IPC layer exposes.
 //!
 //! Identity: the only identity of a peer is `Connection::remote_id()`, proven
 //! by the QUIC/TLS handshake. Nothing in a message is believed about who the
