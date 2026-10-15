@@ -25,6 +25,8 @@ use miasma_core::{
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
+use crate::errors::{ErrorKind, UiError};
+
 // ─── Protocol ─────────────────────────────────────────────────────────────────
 
 pub enum WorkerCmd {
@@ -302,7 +304,7 @@ pub enum WorkerResult {
     TransferList(Vec<miasma_core::transfer::TransferStatus>),
     /// The transfer list could not be read. `daemon_down` means the background
     /// service is not reachable (as opposed to it answering with an error).
-    TransferPollFailed { message: String, daemon_down: bool },
+    TransferPollFailed { message: UiError, daemon_down: bool },
     /// The daemon accepted a start request; it now runs the transfer itself.
     TransferStarted { id: String },
     /// Answer to [`WorkerCmd::TransferPeekName`] for `mid`: the sender's file name, or `None`
@@ -315,7 +317,7 @@ pub enum WorkerResult {
     /// The daemon declined to remove a transfer, and why.
     TransferRemoveRefused(miasma_core::transfer::jobs::RemoveRefusal),
     /// A start or cancel request was refused or failed.
-    TransferError(String),
+    TransferError(UiError),
     /// Answer to [`WorkerCmd::Push`]: the request that was sent, and the daemon's answer or why
     /// there was none.
     PushReply {
@@ -341,7 +343,7 @@ pub enum WorkerResult {
         kept: bool,
     },
     /// Any error.
-    Err(String),
+    Err(UiError),
 }
 
 impl fmt::Debug for WorkerResult {
@@ -597,7 +599,10 @@ fn worker_thread(
     {
         Ok(rt) => rt,
         Err(e) => {
-            let _ = tx.send(WorkerResult::Err(format!("Failed to start runtime: {e}")));
+            let _ = tx.send(WorkerResult::Err(UiError::new(
+                ErrorKind::RuntimeStartFailed,
+                e.to_string(),
+            )));
             return;
         }
     };
@@ -627,9 +632,9 @@ fn worker_thread(
             Err(e) => {
                 warn!("Auto-launch daemon failed: {e}");
                 let _ = tx.send(WorkerResult::StateChanged(DaemonState::Stopped));
-                let _ = tx.send(WorkerResult::Err(format!(
-                    "Could not start daemon automatically: {e}\n\
-                     Start manually with: miasma daemon"
+                let _ = tx.send(WorkerResult::Err(launch_failure(
+                    &e,
+                    ErrorKind::DaemonAutostartFailed,
                 )));
             }
         }
@@ -651,7 +656,7 @@ fn worker_thread(
             WorkerCmd::GetStatus => {
                 let status = rt.block_on(get_status(&data_dir));
                 // Update connection state based on result.
-                if matches!(&status, WorkerResult::Err(e) if is_daemon_down(e)) {
+                if matches!(&status, WorkerResult::Err(e) if e.is_daemon_down()) {
                     // Auto-reconnect: try relaunch if under retry cap.
                     if launch_attempts < MAX_AUTO_LAUNCHES {
                         launch_attempts += 1;
@@ -696,13 +701,18 @@ fn worker_thread(
                             }
                             Err(e) => {
                                 let _ = tx.send(WorkerResult::StateChanged(DaemonState::Stopped));
-                                WorkerResult::Err(format!(
-                                    "Node initialized, but daemon start failed: {e}"
+                                // Whatever the launcher said is kept as the detail; the text tells
+                                // the person setup is done and what to press.
+                                WorkerResult::Err(UiError::new(
+                                    ErrorKind::InitDaemonFailed,
+                                    format!("{e:#}"),
                                 ))
                             }
                         }
                     }
-                    Err(e) => WorkerResult::Err(format!("Init failed: {e}")),
+                    Err(e) => {
+                        WorkerResult::Err(UiError::new(ErrorKind::InitFailed, format!("{e:#}")))
+                    }
                 }
             }
             WorkerCmd::StartDaemon => {
@@ -717,7 +727,7 @@ fn worker_thread(
                     }
                     Err(e) => {
                         let _ = tx.send(WorkerResult::StateChanged(DaemonState::Stopped));
-                        WorkerResult::Err(format!("Daemon start failed: {e}"))
+                        WorkerResult::Err(launch_failure(&e, ErrorKind::DaemonStartFailed))
                     }
                 }
             }
@@ -1005,6 +1015,43 @@ const MAX_AUTO_LAUNCHES: u32 = 2;
 /// How long to wait for the daemon to become reachable after spawn.
 const DAEMON_STARTUP_TIMEOUT_SECS: u64 = 30;
 
+/// Why the background service could not be started. Typed so the window can pick its text from
+/// the kind instead of reading English.
+#[derive(Debug, thiserror::Error)]
+pub enum LaunchError {
+    #[error("daemon already running on port {port}")]
+    AlreadyRunning { port: u16 },
+    #[error("cannot find the miasma backend next to the desktop executable")]
+    BackendMissing,
+    #[error("spawn daemon: {0}")]
+    Spawn(std::io::Error),
+    #[error("daemon did not become ready within {secs} seconds")]
+    NotReady { secs: u64 },
+}
+
+impl LaunchError {
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            Self::AlreadyRunning { .. } => ErrorKind::DaemonAlreadyRunning,
+            Self::BackendMissing => ErrorKind::BackendMissing,
+            Self::Spawn(_) if cfg!(target_os = "macos") => ErrorKind::SpawnFailedMac,
+            Self::Spawn(_) => ErrorKind::SpawnBlocked,
+            Self::NotReady { .. } => ErrorKind::DaemonNotReady,
+        }
+    }
+}
+
+/// The error for a failed launch: the launcher's own kind when it has one, else `fallback`.
+fn launch_failure(e: &anyhow::Error, fallback: ErrorKind) -> UiError {
+    let typed = e.chain().any(|c| c.is::<LaunchError>());
+    let classified = crate::errors::classify_anyhow(e);
+    if typed {
+        classified
+    } else {
+        UiError::new(fallback, classified.detail)
+    }
+}
+
 /// Launch daemon as a background process. Waits up to 30s for port file.
 fn auto_launch_daemon(data_dir: &Path, rt: &tokio::runtime::Runtime) -> anyhow::Result<Child> {
     // Safety: check if daemon is already running (avoid duplicates).
@@ -1019,18 +1066,13 @@ fn auto_launch_daemon(data_dir: &Path, rt: &tokio::runtime::Runtime) -> anyhow::
             })
             .is_ok()
         {
-            anyhow::bail!("daemon already running on port {port}");
+            return Err(LaunchError::AlreadyRunning { port }.into());
         }
         // Stale port file — remove it.
         miasma_core::daemon::ipc::remove_port_file(data_dir);
     }
 
-    let miasma_exe = find_miasma_exe().ok_or_else(|| {
-        anyhow::anyhow!(
-            "Cannot find miasma backend.\n\
-             Reinstall the complete application, keeping the backend next to the desktop executable."
-        )
-    })?;
+    let miasma_exe = find_miasma_exe().ok_or(LaunchError::BackendMissing)?;
 
     info!(
         "Auto-launching daemon: {} daemon",
@@ -1055,18 +1097,17 @@ fn auto_launch_daemon(data_dir: &Path, rt: &tokio::runtime::Runtime) -> anyhow::
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let child = cmd
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("spawn daemon: {e}"))?;
+    let child = cmd.spawn().map_err(LaunchError::Spawn)?;
 
     // Wait for daemon to become reachable (port file appears + IPC responds).
     let deadline =
         std::time::Instant::now() + std::time::Duration::from_secs(DAEMON_STARTUP_TIMEOUT_SECS);
     loop {
         if std::time::Instant::now() > deadline {
-            anyhow::bail!(
-                "daemon did not become ready within {DAEMON_STARTUP_TIMEOUT_SECS} seconds"
-            );
+            return Err(LaunchError::NotReady {
+                secs: DAEMON_STARTUP_TIMEOUT_SECS,
+            }
+            .into());
         }
         std::thread::sleep(std::time::Duration::from_millis(300));
 
@@ -1097,8 +1138,8 @@ async fn publish_bytes(data: &[u8], data_dir: &Path, params: DissolutionParams) 
     };
     match daemon_request(data_dir, req).await {
         Ok(ControlResponse::Published { mid }) => WorkerResult::Dissolved { mid },
-        Ok(ControlResponse::Error(e)) => WorkerResult::Err(e),
-        Ok(other) => WorkerResult::Err(format!("Unexpected response: {other:?}")),
+        Ok(ControlResponse::Error(e)) => WorkerResult::Err(UiError::from_text(e)),
+        Ok(other) => WorkerResult::Err(UiError::unexpected(&other)),
         Err(e) => WorkerResult::Err(daemon_error(&e)),
     }
 }
@@ -1114,8 +1155,8 @@ async fn retrieve_mid(mid_str: &str, data_dir: &Path, params: DissolutionParams)
             mid: mid_str.to_string(),
             data,
         },
-        Ok(ControlResponse::Error(e)) => WorkerResult::Err(e),
-        Ok(other) => WorkerResult::Err(format!("Unexpected response: {other:?}")),
+        Ok(ControlResponse::Error(e)) => WorkerResult::Err(UiError::from_text(e)),
+        Ok(other) => WorkerResult::Err(UiError::unexpected(&other)),
         Err(e) => WorkerResult::Err(daemon_error(&e)),
     }
 }
@@ -1128,8 +1169,8 @@ async fn publish_file(path: &Path, data_dir: &Path, params: DissolutionParams) -
     };
     match daemon_request(data_dir, req).await {
         Ok(ControlResponse::Published { mid }) => WorkerResult::Dissolved { mid },
-        Ok(ControlResponse::Error(e)) => WorkerResult::Err(e),
-        Ok(other) => WorkerResult::Err(format!("Unexpected response: {other:?}")),
+        Ok(ControlResponse::Error(e)) => WorkerResult::Err(UiError::from_text(e)),
+        Ok(other) => WorkerResult::Err(UiError::unexpected(&other)),
         Err(e) => WorkerResult::Err(daemon_error(&e)),
     }
 }
@@ -1164,11 +1205,11 @@ async fn retrieve_mid_to_file(
         }
         Ok(ControlResponse::Error(e)) => {
             let _ = std::fs::remove_file(&temp_path);
-            WorkerResult::Err(e)
+            WorkerResult::Err(UiError::from_text(e))
         }
         Ok(other) => {
             let _ = std::fs::remove_file(&temp_path);
-            WorkerResult::Err(format!("Unexpected response: {other:?}"))
+            WorkerResult::Err(UiError::unexpected(&other))
         }
         Err(e) => {
             let _ = std::fs::remove_file(&temp_path);
@@ -1215,8 +1256,8 @@ async fn get_status(data_dir: &Path) -> WorkerResult {
                     .collect(),
             }
         }
-        Ok(ControlResponse::Error(e)) => WorkerResult::Err(e),
-        Ok(other) => WorkerResult::Err(format!("Unexpected response: {other:?}")),
+        Ok(ControlResponse::Error(e)) => WorkerResult::Err(UiError::from_text(e)),
+        Ok(other) => WorkerResult::Err(UiError::unexpected(&other)),
         Err(e) => WorkerResult::Err(daemon_error(&e)),
     }
 }
@@ -1224,8 +1265,8 @@ async fn get_status(data_dir: &Path) -> WorkerResult {
 async fn do_wipe(data_dir: &Path) -> WorkerResult {
     match miasma_core::daemon_wipe(data_dir).await {
         Ok(ControlResponse::Wiped) => WorkerResult::Wiped,
-        Ok(ControlResponse::Error(e)) => WorkerResult::Err(e),
-        Ok(other) => WorkerResult::Err(format!("Unexpected response: {other:?}")),
+        Ok(ControlResponse::Error(e)) => WorkerResult::Err(UiError::from_text(e)),
+        Ok(other) => WorkerResult::Err(UiError::unexpected(&other)),
         // The background service is not running: erase through the store directly. This is the
         // same operation the service performs (`LocalShareStore::distress_wipe`).
         Err(e) if wipe_needs_direct_path(&format!("{e:#}")) => wipe_without_daemon(data_dir),
@@ -1236,7 +1277,7 @@ async fn do_wipe(data_dir: &Path) -> WorkerResult {
 /// True when the wipe request failed because there is no background service to ask, so the
 /// erase has to run without it. Any other failure is shown to the person as it is.
 fn wipe_needs_direct_path(msg: &str) -> bool {
-    is_daemon_down(msg) || msg.contains("daemon.token not found")
+    is_daemon_down(msg)
 }
 
 /// Erase the stored data and keys without the background service.
@@ -1244,36 +1285,13 @@ fn wipe_without_daemon(data_dir: &Path) -> WorkerResult {
     warn!("background service not reachable; erasing through the store directly");
     match miasma_core::LocalShareStore::open(data_dir, 0).and_then(|store| store.distress_wipe()) {
         Ok(()) => WorkerResult::Wiped,
-        Err(e) => WorkerResult::Err(format!("Erase failed: {e}")),
+        Err(e) => WorkerResult::Err(UiError::new(ErrorKind::EraseFailed, e.to_string())),
     }
 }
 
-/// Convert anyhow errors into user-friendly messages with actionable guidance.
-fn daemon_error(e: &anyhow::Error) -> String {
-    let msg = format!("{e:#}");
-    if is_daemon_down(&msg) {
-        DAEMON_DOWN_MESSAGE.to_string()
-    } else if msg.contains("Cannot find miasma.exe") || msg.contains("Cannot find miasma") {
-        "Cannot find the Miasma backend.\n\
-         Reinstall the complete application, keeping the backend next to the desktop executable."
-            .to_string()
-    } else if msg.contains("spawn daemon") && cfg!(target_os = "macos") {
-        "Could not start the backend process.\n\
-         Try rebuilding or reinstalling the complete Miasma.app bundle."
-            .to_string()
-    } else if msg.contains("spawn daemon") {
-        "Could not start the backend process.\n\
-         This can happen if antivirus or SmartScreen is blocking miasma.exe.\n\
-         Try: right-click miasma.exe → Properties → Unblock, then restart."
-            .to_string()
-    } else if msg.contains("did not become ready within") {
-        "The backend started but is taking too long to respond.\n\
-         This can happen on slower machines or when antivirus is scanning.\n\
-         Try waiting a moment and clicking Start again."
-            .to_string()
-    } else {
-        msg
-    }
+/// Convert an `anyhow` error from the daemon client into a kind the window can word.
+fn daemon_error(e: &anyhow::Error) -> UiError {
+    crate::errors::classify_anyhow(e)
 }
 
 // ─── Bridge import ───────────────────────────────────────────────────────────
@@ -1317,12 +1335,7 @@ fn run_bridge_import(
 ) -> WorkerResult {
     let bridge_exe = match find_bridge_exe() {
         Some(p) => p,
-        None => {
-            return WorkerResult::Err(
-                "Cannot find miasma-bridge. Ensure it is installed alongside the desktop app."
-                    .into(),
-            )
-        }
+        None => return WorkerResult::Err(UiError::of(ErrorKind::BridgeMissing)),
     };
 
     let display_name = if args.first() == Some(&"--magnet") {
@@ -1349,7 +1362,9 @@ fn run_bridge_import(
 
     let child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) => return WorkerResult::Err(format!("Failed to start bridge: {e}")),
+        Err(e) => {
+            return WorkerResult::Err(UiError::new(ErrorKind::BridgeStartFailed, e.to_string()))
+        }
     };
 
     match child.wait_with_output() {
@@ -1364,10 +1379,10 @@ fn run_bridge_import(
                 WorkerResult::ImportComplete { mids }
             } else {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                WorkerResult::Err(format!("Bridge exited with error: {}", stderr.trim()))
+                WorkerResult::Err(UiError::new(ErrorKind::BridgeFailed, stderr.trim()))
             }
         }
-        Err(e) => WorkerResult::Err(format!("Bridge process error: {e}")),
+        Err(e) => WorkerResult::Err(UiError::new(ErrorKind::BridgeFailed, e.to_string())),
     }
 }
 
@@ -1406,19 +1421,15 @@ fn parse_mids_from_stdout(stdout: &str) -> Vec<String> {
         .collect()
 }
 
-/// What the user is told when the daemon cannot be reached.
-const DAEMON_DOWN_MESSAGE: &str = "Not connected. Click the Start button above to restart.\n\
-     If the problem persists, try closing all Miasma windows and starting again.";
-
-/// True for a raw "daemon unreachable" error *and* for the message `daemon_error` turns it into.
+/// True when `msg` says there is no background service to talk to: its port file or its token
+/// file is missing (it never started, or it was stopped), or its port refuses the connection.
 ///
-/// The second half matters: `get_status` returns the already-rewritten message, and the
-/// auto-relaunch in the `GetStatus` handler tests that message. Matching only the raw wording
-/// meant a daemon that died was never noticed: no relaunch, and the header kept saying
-/// "Connected" (seen in the running window when a transfer's daemon was killed).
-fn is_daemon_down(msg: &str) -> bool {
-    msg == DAEMON_DOWN_MESSAGE
-        || msg.contains("daemon.port not found")
+/// The token file counts. The control client reads `daemon.token` before `daemon.port`, so a
+/// stopped service surfaces as "daemon.token not found" first; leaving it out meant that case
+/// slipped past the auto-relaunch in the `GetStatus` handler.
+pub(crate) fn is_daemon_down(msg: &str) -> bool {
+    msg.contains("daemon.port not found")
+        || msg.contains("daemon.token not found")
         || msg.contains("cannot connect to daemon")
         || msg.contains("Daemon not running")
 }
@@ -1515,8 +1526,8 @@ fn do_legacy_logs(data_dir: &Path, delete: bool) -> WorkerResult {
 async fn do_sharing_key(data_dir: &Path) -> WorkerResult {
     match daemon_request(data_dir, ControlRequest::SharingKey).await {
         Ok(ControlResponse::SharingKey { contact, .. }) => WorkerResult::SharingKey { contact },
-        Ok(ControlResponse::Error(e)) => WorkerResult::Err(e),
-        Ok(other) => WorkerResult::Err(format!("Unexpected response: {other:?}")),
+        Ok(ControlResponse::Error(e)) => WorkerResult::Err(UiError::from_text(e)),
+        Ok(other) => WorkerResult::Err(UiError::unexpected(&other)),
         Err(e) => WorkerResult::Err(daemon_error(&e)),
     }
 }
@@ -1530,11 +1541,14 @@ async fn do_directed_send(
 ) -> WorkerResult {
     // Validate file exists before sending path to daemon.
     if !file_path.exists() {
-        return WorkerResult::Err(format!("File not found: {}", file_path.display()));
+        return WorkerResult::Err(UiError::new(
+            ErrorKind::FileNotFound,
+            file_path.display().to_string(),
+        ));
     }
     let retention_secs = match parse_retention(retention) {
         Ok(s) => s,
-        Err(e) => return WorkerResult::Err(format!("Invalid retention: {e}")),
+        Err(e) => return WorkerResult::Err(UiError::new(ErrorKind::InvalidRetention, e)),
     };
     // Use file-path variant — daemon reads file directly, no IPC bloat.
     let abs_path = std::fs::canonicalize(file_path).unwrap_or_else(|_| file_path.to_owned());
@@ -1549,8 +1563,8 @@ async fn do_directed_send(
         Ok(ControlResponse::DirectedSent { envelope_id }) => {
             WorkerResult::DirectedSent { envelope_id }
         }
-        Ok(ControlResponse::Error(e)) => WorkerResult::Err(e),
-        Ok(other) => WorkerResult::Err(format!("Unexpected response: {other:?}")),
+        Ok(ControlResponse::Error(e)) => WorkerResult::Err(UiError::from_text(e)),
+        Ok(other) => WorkerResult::Err(UiError::unexpected(&other)),
         Err(e) => WorkerResult::Err(daemon_error(&e)),
     }
 }
@@ -1574,8 +1588,8 @@ async fn do_directed_retrieve(data_dir: &Path, envelope_id: &str, password: &str
             filename,
             bytes_written,
         },
-        Ok(ControlResponse::Error(e)) => WorkerResult::Err(e),
-        Ok(other) => WorkerResult::Err(format!("Unexpected response: {other:?}")),
+        Ok(ControlResponse::Error(e)) => WorkerResult::Err(UiError::from_text(e)),
+        Ok(other) => WorkerResult::Err(UiError::unexpected(&other)),
         Err(e) => WorkerResult::Err(daemon_error(&e)),
     }
 }
@@ -1586,8 +1600,8 @@ async fn do_directed_revoke(data_dir: &Path, envelope_id: &str) -> WorkerResult 
     };
     match daemon_request(data_dir, req).await {
         Ok(ControlResponse::DirectedRevoked) => WorkerResult::DirectedRevoked,
-        Ok(ControlResponse::Error(e)) => WorkerResult::Err(e),
-        Ok(other) => WorkerResult::Err(format!("Unexpected response: {other:?}")),
+        Ok(ControlResponse::Error(e)) => WorkerResult::Err(UiError::from_text(e)),
+        Ok(other) => WorkerResult::Err(UiError::unexpected(&other)),
         Err(e) => WorkerResult::Err(daemon_error(&e)),
     }
 }
@@ -1603,8 +1617,8 @@ async fn do_directed_confirm(
     };
     match daemon_request(data_dir, req).await {
         Ok(ControlResponse::DirectedConfirmed) => WorkerResult::DirectedConfirmed,
-        Ok(ControlResponse::Error(e)) => WorkerResult::Err(e),
-        Ok(other) => WorkerResult::Err(format!("Unexpected response: {other:?}")),
+        Ok(ControlResponse::Error(e)) => WorkerResult::Err(UiError::from_text(e)),
+        Ok(other) => WorkerResult::Err(UiError::unexpected(&other)),
         Err(e) => WorkerResult::Err(daemon_error(&e)),
     }
 }
@@ -1632,8 +1646,8 @@ async fn do_directed_inbox(data_dir: &Path) -> WorkerResult {
         Ok(ControlResponse::DirectedInboxList(items)) => {
             WorkerResult::DirectedInboxList(map_summary_items(items))
         }
-        Ok(ControlResponse::Error(e)) => WorkerResult::Err(e),
-        Ok(other) => WorkerResult::Err(format!("Unexpected response: {other:?}")),
+        Ok(ControlResponse::Error(e)) => WorkerResult::Err(UiError::from_text(e)),
+        Ok(other) => WorkerResult::Err(UiError::unexpected(&other)),
         Err(e) => WorkerResult::Err(daemon_error(&e)),
     }
 }
@@ -1643,8 +1657,8 @@ async fn do_directed_outbox(data_dir: &Path) -> WorkerResult {
         Ok(ControlResponse::DirectedOutboxList(items)) => {
             WorkerResult::DirectedOutboxList(map_summary_items(items))
         }
-        Ok(ControlResponse::Error(e)) => WorkerResult::Err(e),
-        Ok(other) => WorkerResult::Err(format!("Unexpected response: {other:?}")),
+        Ok(ControlResponse::Error(e)) => WorkerResult::Err(UiError::from_text(e)),
+        Ok(other) => WorkerResult::Err(UiError::unexpected(&other)),
         Err(e) => WorkerResult::Err(daemon_error(&e)),
     }
 }
@@ -1717,7 +1731,10 @@ async fn do_transfer_start_publish(
     // so the same file started from either place is the same transfer.
     let path = if canonicalize {
         if !file_path.exists() {
-            return WorkerResult::TransferError(format!("File not found: {}", file_path.display()));
+            return WorkerResult::TransferError(UiError::new(
+                ErrorKind::FileNotFound,
+                file_path.display().to_string(),
+            ));
         }
         std::fs::canonicalize(file_path).unwrap_or_else(|_| file_path.to_owned())
     } else {
@@ -1736,8 +1753,8 @@ async fn do_transfer_start_publish(
 fn transfer_started(res: anyhow::Result<ControlResponse>) -> WorkerResult {
     match res {
         Ok(ControlResponse::TransferStarted { id }) => WorkerResult::TransferStarted { id },
-        Ok(ControlResponse::Error(e)) => WorkerResult::TransferError(e),
-        Ok(other) => WorkerResult::TransferError(format!("Unexpected response: {other:?}")),
+        Ok(ControlResponse::Error(e)) => WorkerResult::TransferError(UiError::from_text(e)),
+        Ok(other) => WorkerResult::TransferError(UiError::unexpected(&other)),
         Err(e) => WorkerResult::TransferError(daemon_error(&e)),
     }
 }
@@ -1746,16 +1763,16 @@ async fn do_transfer_poll(data_dir: &Path) -> WorkerResult {
     match daemon_request(data_dir, ControlRequest::TransferList).await {
         Ok(ControlResponse::TransferList(list)) => WorkerResult::TransferList(list),
         Ok(ControlResponse::Error(message)) => WorkerResult::TransferPollFailed {
-            message,
+            message: UiError::from_text(message),
             daemon_down: false,
         },
         Ok(other) => WorkerResult::TransferPollFailed {
-            message: format!("Unexpected response: {other:?}"),
+            message: UiError::unexpected(&other),
             daemon_down: false,
         },
         Err(e) => WorkerResult::TransferPollFailed {
-            daemon_down: is_daemon_down(&format!("{e:#}")),
             message: daemon_error(&e),
+            daemon_down: is_daemon_down(&format!("{e:#}")),
         },
     }
 }
@@ -1763,7 +1780,7 @@ async fn do_transfer_poll(data_dir: &Path) -> WorkerResult {
 /// Why a push request got no answer from the daemon.
 #[derive(Debug, Clone)]
 pub struct PushFail {
-    pub message: String,
+    pub message: UiError,
     /// The daemon is not running (as opposed to answering badly).
     pub daemon_down: bool,
 }
@@ -1772,16 +1789,16 @@ async fn do_push(data_dir: &Path, req: miasma_core::push::PushRequest) -> Worker
     let reply = match daemon_request(data_dir, ControlRequest::Push(req.clone())).await {
         Ok(ControlResponse::Push(p)) => Ok(p),
         Ok(ControlResponse::Error(message)) => Err(PushFail {
-            message,
+            message: UiError::new(ErrorKind::PushNoReply, message),
             daemon_down: false,
         }),
         Ok(other) => Err(PushFail {
-            message: format!("Unexpected response: {other:?}"),
+            message: UiError::unexpected(&other),
             daemon_down: false,
         }),
         Err(e) => Err(PushFail {
-            daemon_down: is_daemon_down(&format!("{e:#}")),
             message: daemon_error(&e),
+            daemon_down: is_daemon_down(&format!("{e:#}")),
         }),
     };
     WorkerResult::PushReply { req, reply }
@@ -1795,8 +1812,8 @@ async fn do_transfer_cancel(data_dir: &Path, id: &str) -> WorkerResult {
     .await
     {
         Ok(ControlResponse::TransferCancelled) => WorkerResult::TransferCancelRequested,
-        Ok(ControlResponse::Error(e)) => WorkerResult::TransferError(e),
-        Ok(other) => WorkerResult::TransferError(format!("Unexpected response: {other:?}")),
+        Ok(ControlResponse::Error(e)) => WorkerResult::TransferError(UiError::from_text(e)),
+        Ok(other) => WorkerResult::TransferError(UiError::unexpected(&other)),
         Err(e) => WorkerResult::TransferError(daemon_error(&e)),
     }
 }
@@ -1813,8 +1830,8 @@ async fn do_transfer_remove(data_dir: &Path, req: ControlRequest) -> WorkerResul
         Ok(ControlResponse::TransferRemoveRefused { reason, .. }) => {
             WorkerResult::TransferRemoveRefused(reason)
         }
-        Ok(ControlResponse::Error(e)) => WorkerResult::TransferError(e),
-        Ok(other) => WorkerResult::TransferError(format!("Unexpected response: {other:?}")),
+        Ok(ControlResponse::Error(e)) => WorkerResult::TransferError(UiError::from_text(e)),
+        Ok(other) => WorkerResult::TransferError(UiError::unexpected(&other)),
         Err(e) => WorkerResult::TransferError(daemon_error(&e)),
     }
 }
@@ -1865,7 +1882,6 @@ mod tests {
         assert!(wipe_needs_direct_path(
             "cannot connect to daemon on 127.0.0.1:1 — is the miasma daemon still running?"
         ));
-        assert!(wipe_needs_direct_path(super::DAEMON_DOWN_MESSAGE));
         // A refusal from a running service is not a reason to go around it.
         assert!(!wipe_needs_direct_path(
             "wipe not confirmed: missing, expired or wrong confirmation nonce"
@@ -1962,19 +1978,26 @@ mod tests {
     }
 
     #[test]
-    fn a_dead_daemon_is_recognised_after_the_error_has_been_rewritten() {
-        // `get_status` returns `daemon_error(..)`, and the GetStatus handler then asks
-        // `is_daemon_down` about that text to decide whether to relaunch the daemon.
+    fn a_dead_daemon_is_recognised_by_kind_and_by_wording() {
+        // `get_status` returns a `UiError`, and the GetStatus handler asks it whether the
+        // service is down to decide whether to relaunch it.
         for raw in [
             "cannot connect to daemon at 127.0.0.1:49783",
             "daemon.port not found in the data dir",
+            "daemon.token not found - is the miasma daemon running?",
             "Daemon not running",
         ] {
-            let shown = super::daemon_error(&anyhow::anyhow!(raw));
             assert!(super::is_daemon_down(raw), "{raw}");
-            assert!(super::is_daemon_down(&shown), "rewritten form of {raw}");
+            let shown = super::daemon_error(&anyhow::anyhow!(raw));
+            assert!(shown.is_daemon_down(), "kind of {raw}");
         }
+        // A stopped service whose token file is already gone is down, not "some other error".
+        let ctx = anyhow::anyhow!("read it")
+            .context("daemon.token not found - is the miasma daemon running?");
+        assert!(super::daemon_error(&ctx).is_daemon_down());
         assert!(!super::is_daemon_down("invalid MID"));
+        assert!(!super::is_daemon_down("daemon.token is empty"));
+        assert!(!super::daemon_error(&anyhow::anyhow!("invalid MID: x")).is_daemon_down());
     }
 
     #[test]
