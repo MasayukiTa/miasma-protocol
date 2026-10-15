@@ -99,8 +99,9 @@ pub struct ChatConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
     /// Keep the message history on disk (encrypted). Not set (the default):
-    /// the history is saved, except while stealth mode is on, when it is kept
-    /// in memory only. Set it to `true` or `false` to decide for yourself.
+    /// the history is saved. Set it to `false` to keep it in memory only (it is
+    /// then gone when the daemon stops). `privacy.stealth_mode` does not change
+    /// this.
     #[serde(default)]
     pub history_save: Option<bool>,
     /// Longest message accepted, in bytes (1-4096, default 4096).
@@ -137,10 +138,51 @@ impl Default for ChatConfig {
 }
 
 impl ChatConfig {
-    /// Whether messages are written to disk: the explicit setting, else yes
-    /// unless stealth mode is on.
-    pub fn history_saved(&self, privacy: &PrivacyConfig) -> bool {
-        self.history_save.unwrap_or(!privacy.stealth_mode)
+    /// Whether messages are written to disk: yes unless `history_save = false`
+    /// is set explicitly.
+    pub fn history_saved(&self) -> bool {
+        self.history_save.unwrap_or(true)
+    }
+}
+
+#[cfg(test)]
+mod chat_config_tests {
+    use super::*;
+
+    #[test]
+    fn history_is_saved_unless_switched_off_explicitly() {
+        let mut cfg = NodeConfig::default();
+        assert_eq!(cfg.chat.history_save, None);
+        assert!(cfg.chat.history_saved());
+        for stealth in [true, false] {
+            cfg.privacy.stealth_mode = stealth;
+            cfg.chat.history_save = None;
+            assert!(cfg.chat.history_saved(), "unset, stealth {stealth}");
+            cfg.chat.history_save = Some(true);
+            assert!(cfg.chat.history_saved(), "true, stealth {stealth}");
+            cfg.chat.history_save = Some(false);
+            assert!(!cfg.chat.history_saved(), "false, stealth {stealth}");
+        }
+    }
+
+    #[test]
+    fn the_setting_reads_from_toml() {
+        let off: NodeConfig = toml::from_str(
+            "[chat]
+history_save = false
+",
+        )
+        .unwrap();
+        assert!(!off.chat.history_saved());
+        let unset: NodeConfig = toml::from_str(
+            "[chat]
+enabled = true
+",
+        )
+        .unwrap();
+        assert!(unset.chat.history_saved());
+        let none: NodeConfig = toml::from_str("").unwrap();
+        assert!(none.chat.history_saved());
     }
 }
 
