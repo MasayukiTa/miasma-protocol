@@ -748,6 +748,11 @@ impl ContactsUi {
         self.rows.iter().any(|r| !r.finished())
     }
 
+    /// How many pushes are not finished, sending or receiving.
+    pub fn active_count(&self) -> usize {
+        self.rows.iter().filter(|r| !r.finished()).count()
+    }
+
     /// Ask for more data when it is due. Cheap: when the area is closed and nothing is running
     /// this is one small request every 3 s (so arrivals are noticed).
     pub fn tick(&mut self, area_open: bool, connected: bool) {

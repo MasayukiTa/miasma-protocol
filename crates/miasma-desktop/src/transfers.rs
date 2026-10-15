@@ -652,6 +652,14 @@ impl TransfersUi {
         self.jobs.iter().any(|j| j.state == TransferState::Running)
     }
 
+    /// How many transfers are running now, sending or receiving.
+    pub fn running_count(&self) -> usize {
+        self.jobs
+            .iter()
+            .filter(|j| j.state == TransferState::Running)
+            .count()
+    }
+
     /// Whether a `TransferPoll` should be sent now. One poll to learn the state after connecting;
     /// after that only while the screen is showing or a transfer is running.
     pub fn poll_due(&self, tab_visible: bool) -> bool {

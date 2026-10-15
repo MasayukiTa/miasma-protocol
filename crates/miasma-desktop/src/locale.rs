@@ -145,6 +145,29 @@ pub struct Strings {
     pub wipe_confirm_button: &'static str,
     pub wipe_cancel: &'static str,
     pub wipe_done: &'static str,
+    /// What is not erased (copies already sent, files saved elsewhere).
+    pub wipe_confirm_kept: &'static str,
+    /// Shown in the dialog when the background service is stopped: the wipe then runs without it.
+    pub wipe_confirm_offline: &'static str,
+    /// Shown under the wipe button when the background service is stopped.
+    pub wipe_offline_note: &'static str,
+
+    // ── Closing the window while a transfer runs ──
+    pub close_title: &'static str,
+    pub close_body: &'static str,
+    pub close_confirm: &'static str,
+    pub close_cancel: &'static str,
+
+    // ── Confirmation before delete / revoke ──
+    pub dialog_cancel: &'static str,
+    pub inbox_revoke_title: &'static str,
+    pub inbox_revoke_body: &'static str,
+    pub inbox_revoke_confirm: &'static str,
+    pub inbox_revoke_done: &'static str,
+    pub outbox_revoke_title: &'static str,
+    pub outbox_revoke_body: &'static str,
+    pub outbox_revoke_confirm: &'static str,
+    pub outbox_revoke_done: &'static str,
 
     // ── Settings ──
     pub settings_heading: &'static str,
@@ -402,14 +425,30 @@ static EN: Strings = Strings {
     status_hint_no_peers: "Connected, but no peers found yet. Content may not replicate until peers appear.",
 
     wipe_label: "Emergency Wipe",
-    wipe_desc: "— permanently destroys all stored content",
-    wipe_button: "Wipe All Shares",
-    wipe_confirm_title: "Confirm Emergency Wipe",
-    wipe_confirm_line1: "This will permanently destroy the master encryption key.",
-    wipe_confirm_line2: "All stored shares will become unreadable immediately.\nThis action cannot be undone.",
-    wipe_confirm_button: "Wipe Now",
+    wipe_desc: "Erases all data and keys that Miasma stores on this device. This cannot be undone.",
+    wipe_button: "Erase All Data",
+    wipe_confirm_title: "Erase all data?",
+    wipe_confirm_line1: "This erases everything Miasma stores on this device, and the keys that open it: stored content, contacts and settings.",
+    wipe_confirm_line2: "This cannot be undone.",
+    wipe_confirm_button: "Erase everything",
     wipe_cancel: "Cancel",
-    wipe_done: "Wiped. All shares are now permanently unreadable.",
+    wipe_done: "Erased. Close Miasma and set it up again if you want to keep using it.",
+    wipe_confirm_kept: "Not erased: copies you have already sent to others, and files you saved elsewhere, such as the receive folder.",
+    wipe_confirm_offline: "The background service is stopped, so the data is erased directly, without it.",
+    wipe_offline_note: "This also works while the background service is stopped.",
+    close_title: "Close Miasma?",
+    close_body: "A transfer is in progress. If you close now, it stops.\nThe part already transferred is kept, and you can resume it from where it stopped.",
+    close_confirm: "Close",
+    close_cancel: "Cancel",
+    dialog_cancel: "Cancel",
+    inbox_revoke_title: "Decline this file?",
+    inbox_revoke_body: "You will not receive this file. This cannot be undone. The sender can send it again if needed.",
+    inbox_revoke_confirm: "Decline",
+    inbox_revoke_done: "Declined.",
+    outbox_revoke_title: "Revoke this share?",
+    outbox_revoke_body: "The recipient will no longer be able to get this file. This cannot be undone. You can send it again later.",
+    outbox_revoke_confirm: "Revoke",
+    outbox_revoke_done: "Revoked.",
 
     settings_heading: "Settings",
     settings_paths: "Paths",
@@ -505,7 +544,7 @@ static EN: Strings = Strings {
     inbox_challenge: "Challenge:",
     inbox_retrieve_button: "Retrieve",
     inbox_password_label: "Password:",
-    inbox_revoke_button: "Delete",
+    inbox_revoke_button: "Decline",
     inbox_refresh: "Refresh",
     sharing_key_label: "Your sharing contact:",
     sharing_key_desc: "Share this contact string so others can send you directed files.",
@@ -545,7 +584,7 @@ static EN: Strings = Strings {
     inbox_wrong_password: "Wrong password.",
     inbox_attempts_exhausted: "Too many failed attempts.",
 
-    dismiss: "dismiss",
+    dismiss: "Dismiss",
     copy: "Copy",
     node_init_msg: "Node initialized.",
 };
@@ -650,14 +689,30 @@ static JA: Strings = Strings {
     status_hint_no_peers: "接続済みですが、ピアが見つかりません。ピアが見つかるまでレプリケーションは保留されます。",
 
     wipe_label: "緊急消去",
-    wipe_desc: "— 保存されたすべてのコンテンツを完全に破棄します",
-    wipe_button: "全データを消去",
-    wipe_confirm_title: "緊急消去の確認",
-    wipe_confirm_line1: "マスター暗号鍵を完全に破棄します。",
-    wipe_confirm_line2: "保存されたすべてのデータが即座に読み取り不能になります。\nこの操作は取り消せません。",
-    wipe_confirm_button: "消去する",
-    wipe_cancel: "キャンセル",
-    wipe_done: "消去しました。すべてのデータが読み取り不能になりました。",
+    wipe_desc: "このパソコンにあるMiasmaのデータと、それを開くためのカギをすべて消します。元に戻せません。",
+    wipe_button: "すべてのデータを消去",
+    wipe_confirm_title: "すべてのデータを消去しますか？",
+    wipe_confirm_line1: "このパソコンにあるMiasmaのデータと、それを開くためのカギをすべて消します。保存した内容、連絡先、設定などが対象です。",
+    wipe_confirm_line2: "消したものは、二度と元に戻せません。",
+    wipe_confirm_button: "すべて消去する",
+    wipe_cancel: "やめる",
+    wipe_done: "消去しました。Miasmaを閉じて、続けて使う場合は最初から設定し直してください。",
+    wipe_confirm_kept: "消えないもの: すでに相手に送ったコピーと、受信フォルダなど別の場所に保存したファイル。",
+    wipe_confirm_offline: "バックグラウンドのサービスが止まっているため、サービスを使わずに直接消去します。",
+    wipe_offline_note: "バックグラウンドのサービスが止まっていても消去できます。",
+    close_title: "閉じますか？",
+    close_body: "転送中です。閉じると転送が止まります。\n途中までのファイルは残り、あとで続きから再開できます。",
+    close_confirm: "閉じる",
+    close_cancel: "キャンセル",
+    dialog_cancel: "やめる",
+    inbox_revoke_title: "このファイルを受け取りませんか？",
+    inbox_revoke_body: "このファイルは受け取らないことにします。元に戻せません。必要なら、相手にもう一度送ってもらってください。",
+    inbox_revoke_confirm: "受け取らない",
+    inbox_revoke_done: "受け取らないことにしました。",
+    outbox_revoke_title: "この送信を取り消しますか？",
+    outbox_revoke_body: "取り消すと、相手はこのファイルを受け取れなくなります。元に戻せません。必要なら、あとで送り直してください。",
+    outbox_revoke_confirm: "取り消す",
+    outbox_revoke_done: "取り消しました。",
 
     settings_heading: "設定",
     settings_paths: "パス",
@@ -753,7 +808,7 @@ static JA: Strings = Strings {
     inbox_challenge: "チャレンジ:",
     inbox_retrieve_button: "取得",
     inbox_password_label: "パスワード:",
-    inbox_revoke_button: "削除",
+    inbox_revoke_button: "受け取らない",
     inbox_refresh: "更新",
     sharing_key_label: "あなたの共有コンタクト:",
     sharing_key_desc: "このコンタクト文字列を共有すると相手がダイレクト送信できます。",
@@ -772,7 +827,7 @@ static JA: Strings = Strings {
     outbox_state: "状態:",
     outbox_filename: "ファイル:",
     outbox_refresh: "更新",
-    outbox_revoke_button: "取り消し",
+    outbox_revoke_button: "取り消す",
     outbox_confirm_heading: "チャレンジコード入力",
     outbox_confirm_label: "コード:",
     outbox_confirm_hint: "XXXX-XXXX",
@@ -898,14 +953,30 @@ static ZH_CN: Strings = Strings {
     status_hint_no_peers: "已连接，但尚未找到节点。在找到节点之前内容可能不会复制。",
 
     wipe_label: "紧急擦除",
-    wipe_desc: "— 永久销毁所有已保存的内容",
+    wipe_desc: "擦除 Miasma 在此设备上保存的所有数据和用于打开它们的密钥。此操作无法恢复。",
     wipe_button: "擦除所有数据",
-    wipe_confirm_title: "确认紧急擦除",
-    wipe_confirm_line1: "这将永久销毁主加密密钥。",
-    wipe_confirm_line2: "所有已保存的数据将立即变为不可读。\n此操作无法撤销。",
-    wipe_confirm_button: "立即擦除",
+    wipe_confirm_title: "要擦除所有数据吗？",
+    wipe_confirm_line1: "这会擦除 Miasma 保存在此设备上的所有内容，以及用于打开它们的密钥，包括已保存的内容、联系人和设置。",
+    wipe_confirm_line2: "擦除后无法恢复。",
+    wipe_confirm_button: "全部擦除",
     wipe_cancel: "取消",
-    wipe_done: "已擦除。所有数据已变为不可读。",
+    wipe_done: "已擦除。如需继续使用，请关闭 Miasma 并重新设置。",
+    wipe_confirm_kept: "不会擦除：已经发送给他人的副本，以及您保存在其他位置的文件（例如接收文件夹）。",
+    wipe_confirm_offline: "后台服务已停止，将不经过该服务直接擦除。",
+    wipe_offline_note: "即使后台服务已停止，也可以擦除。",
+    close_title: "要关闭吗？",
+    close_body: "正在传输。关闭后传输会停止。\n已传输的部分会保留，之后可以从中断处继续。",
+    close_confirm: "关闭",
+    close_cancel: "取消",
+    dialog_cancel: "取消",
+    inbox_revoke_title: "不接收此文件吗？",
+    inbox_revoke_body: "将不再接收此文件，且无法恢复。如有需要，请让对方重新发送。",
+    inbox_revoke_confirm: "不接收",
+    inbox_revoke_done: "已设为不接收。",
+    outbox_revoke_title: "要撤销这次发送吗？",
+    outbox_revoke_body: "撤销后，对方将无法再获取此文件，且无法恢复。如有需要，可以稍后重新发送。",
+    outbox_revoke_confirm: "撤销",
+    outbox_revoke_done: "已撤销。",
 
     settings_heading: "设置",
     settings_paths: "路径",
@@ -1001,7 +1072,7 @@ static ZH_CN: Strings = Strings {
     inbox_challenge: "验证码:",
     inbox_retrieve_button: "取回",
     inbox_password_label: "密码:",
-    inbox_revoke_button: "删除",
+    inbox_revoke_button: "不接收",
     inbox_refresh: "刷新",
     sharing_key_label: "你的共享联系方式:",
     sharing_key_desc: "分享此联系方式，其他人即可向你发送定向文件。",
@@ -2630,6 +2701,81 @@ mod tests {
         assert!(Locale::ALL.contains(&Locale::En));
         assert!(Locale::ALL.contains(&Locale::Ja));
         assert!(Locale::ALL.contains(&Locale::ZhCn));
+    }
+
+    #[test]
+    fn dialog_and_confirmation_strings_exist_in_every_locale() {
+        for lang in Locale::ALL {
+            let s = strings(lang);
+            for (name, v) in [
+                ("wipe_desc", s.wipe_desc),
+                ("wipe_button", s.wipe_button),
+                ("wipe_confirm_title", s.wipe_confirm_title),
+                ("wipe_confirm_line1", s.wipe_confirm_line1),
+                ("wipe_confirm_line2", s.wipe_confirm_line2),
+                ("wipe_confirm_button", s.wipe_confirm_button),
+                ("wipe_cancel", s.wipe_cancel),
+                ("wipe_done", s.wipe_done),
+                ("wipe_confirm_kept", s.wipe_confirm_kept),
+                ("wipe_confirm_offline", s.wipe_confirm_offline),
+                ("wipe_offline_note", s.wipe_offline_note),
+                ("close_title", s.close_title),
+                ("close_body", s.close_body),
+                ("close_confirm", s.close_confirm),
+                ("close_cancel", s.close_cancel),
+                ("dialog_cancel", s.dialog_cancel),
+                ("inbox_revoke_button", s.inbox_revoke_button),
+                ("inbox_revoke_title", s.inbox_revoke_title),
+                ("inbox_revoke_body", s.inbox_revoke_body),
+                ("inbox_revoke_confirm", s.inbox_revoke_confirm),
+                ("inbox_revoke_done", s.inbox_revoke_done),
+                ("outbox_revoke_button", s.outbox_revoke_button),
+                ("outbox_revoke_title", s.outbox_revoke_title),
+                ("outbox_revoke_body", s.outbox_revoke_body),
+                ("outbox_revoke_confirm", s.outbox_revoke_confirm),
+                ("outbox_revoke_done", s.outbox_revoke_done),
+                ("dismiss", s.dismiss),
+            ] {
+                assert!(!v.trim().is_empty(), "{lang:?} {name} is empty");
+            }
+            // The confirming button names what it does, not just "OK".
+            assert_ne!(s.wipe_confirm_button, s.wipe_cancel, "{lang:?}");
+            assert_ne!(s.close_confirm, s.close_cancel, "{lang:?}");
+            // The wipe dialog says what is and is not erased, and that it is irreversible.
+            assert_ne!(s.wipe_confirm_line1, s.wipe_confirm_kept, "{lang:?}");
+            // The two names for the same action are gone: the dialog's confirm button carries the
+            // button's own word, so what was clicked is what is confirmed.
+            assert_eq!(s.inbox_revoke_button, s.inbox_revoke_confirm, "{lang:?}");
+            assert_eq!(s.outbox_revoke_button, s.outbox_revoke_confirm, "{lang:?}");
+            // No leftover leading dash from the old one-line layout.
+            assert!(!s.wipe_desc.starts_with('—'), "{lang:?}");
+        }
+    }
+
+    #[test]
+    fn japanese_wipe_and_close_texts_say_what_matters() {
+        let s = strings(Locale::Ja);
+        assert_eq!(s.wipe_confirm_button, "すべて消去する");
+        assert_eq!(s.close_confirm, "閉じる");
+        assert_eq!(s.close_cancel, "キャンセル");
+        assert!(s
+            .close_body
+            .contains("転送中です。閉じると転送が止まります。"));
+        assert!(s.close_body.contains("続きから再開"));
+        assert!(s.wipe_confirm_line2.contains("元に戻せません"));
+        assert!(s.wipe_confirm_kept.contains("すでに相手に送ったコピー"));
+        // Plain words for people who are not engineers.
+        for v in [
+            s.wipe_desc,
+            s.wipe_confirm_line1,
+            s.wipe_confirm_line2,
+            s.wipe_confirm_kept,
+        ] {
+            assert!(!v.contains("マスター暗号鍵"), "{v}");
+        }
+        // Inbox says "decline", outbox says "revoke": one word each, never "delete".
+        assert!(!s.inbox_revoke_button.contains("削除"));
+        assert_ne!(s.inbox_revoke_button, s.outbox_revoke_button);
     }
 
     #[test]
