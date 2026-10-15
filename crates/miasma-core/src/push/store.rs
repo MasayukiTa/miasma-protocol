@@ -19,7 +19,7 @@ use tracing::warn;
 use super::contact::{fingerprint, ContactCode};
 use crate::MiasmaError;
 
-pub const CONTACTS_FILE: &str = "contacts.json";
+pub const CONTACTS_FILE: &str = crate::paths::CONTACTS.name;
 const SCHEMA_VERSION: u32 = 1;
 pub const MAX_CONTACTS: usize = 500;
 pub const MAX_LABEL_CHARS: usize = 64;
@@ -170,7 +170,7 @@ impl ContactStore {
                     .collect()
             }
             Err(e) => {
-                let aside = path.with_extension(format!("json.corrupt-{}", now_secs()));
+                let aside = crate::paths::contacts_corrupt_aside(path, now_secs());
                 warn!(
                     "contacts.json is unreadable ({e}); moved to {}",
                     aside.display()

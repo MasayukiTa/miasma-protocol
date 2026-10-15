@@ -45,7 +45,7 @@ use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 /// Filename inside the data directory holding the control token.
-pub const TOKEN_FILE: &str = "daemon.token";
+pub const TOKEN_FILE: &str = crate::paths::DAEMON_TOKEN.name;
 
 /// Largest frame accepted before the peer has authenticated.
 pub const PRE_AUTH_FRAME_MAX: usize = 4 * 1024;

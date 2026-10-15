@@ -75,8 +75,8 @@ pub struct DirectedInbox {
 impl DirectedInbox {
     /// Open or create the inbox at `data_dir/directed/`.
     pub fn open(data_dir: &Path) -> Result<Self> {
-        let incoming_dir = data_dir.join("directed").join("incoming");
-        let outgoing_dir = data_dir.join("directed").join("outgoing");
+        let incoming_dir = crate::paths::directed_incoming_dir(data_dir);
+        let outgoing_dir = crate::paths::directed_outgoing_dir(data_dir);
         std::fs::create_dir_all(&incoming_dir).context("create incoming dir")?;
         std::fs::create_dir_all(&outgoing_dir).context("create outgoing dir")?;
         Ok(Self {

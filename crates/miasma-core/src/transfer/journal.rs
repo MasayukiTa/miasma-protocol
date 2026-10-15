@@ -43,20 +43,14 @@ pub struct ReceiveJournal {
 
 /// Where the journal for `mid` lives inside `dir`. Base58 is filesystem-safe.
 pub fn journal_path(dir: &Path, mid: &ContentId) -> PathBuf {
-    dir.join(format!(
-        "recv-{}.json",
-        bs58::encode(mid.as_bytes()).into_string()
+    dir.join(crate::paths::recv_journal_name(
+        &bs58::encode(mid.as_bytes()).into_string(),
     ))
 }
 
 /// The partial file next to the final output.
 pub fn part_path_for(output: &Path) -> PathBuf {
-    let mut name = output
-        .file_name()
-        .map(|n| n.to_os_string())
-        .unwrap_or_default();
-    name.push(".part");
-    output.with_file_name(name)
+    crate::paths::output_part_path(output)
 }
 
 impl ReceiveJournal {

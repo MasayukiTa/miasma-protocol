@@ -152,8 +152,8 @@ impl PendingReplication {
 
 // ─── WAL entry types ─────────────────────────────────────────────────────────
 
-const WAL_FILE: &str = "replication_wal.jsonl";
-const WAL_TMP: &str = "replication_wal.jsonl.tmp";
+const WAL_FILE: &str = crate::paths::REPLICATION_WAL.name;
+const WAL_TMP: &str = crate::paths::REPLICATION_WAL_TMP.name;
 /// Legacy JSON file — migrated on first load then deleted.
 const LEGACY_FILE: &str = "replication_queue.json";
 /// Compact after this many appended entries to keep replay fast.

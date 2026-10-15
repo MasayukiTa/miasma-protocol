@@ -222,7 +222,7 @@ fn open_store_inner(
     keep_transport_secrets: bool,
 ) -> Result<(NodeConfig, Arc<LocalShareStore>), MiasmaFfiError> {
     let path = validate_data_dir(data_dir)?;
-    let master_key_path = path.join("master.key");
+    let master_key_path = miasma_core::paths::master_key(&path);
     if !master_key_path.exists() {
         return Err(MiasmaFfiError::NotInitialized {
             data_dir: data_dir.to_owned(),
@@ -477,7 +477,7 @@ pub fn distress_wipe(data_dir: String) -> Result<(), MiasmaFfiError> {
 
     // Scrub persisted transport secrets even when master.key was already absent
     // and LocalShareStore could not be opened.
-    let config_path = path.join("config.toml");
+    let config_path = miasma_core::paths::config_file(&path);
     if config_path.exists() {
         match NodeConfig::load(&path) {
             Ok(mut config) => {
@@ -497,7 +497,11 @@ pub fn distress_wipe(data_dir: String) -> Result<(), MiasmaFfiError> {
 
     // Platform wrappers can leave encrypted key blobs alongside master.key.
     // Erase-and-remove each one and treat any failure as incomplete wipe.
-    for fname in ["master.key", "master.key.enc", "master.key.iv"] {
+    for fname in [
+        miasma_core::paths::MASTER_KEY.name,
+        miasma_core::paths::MASTER_KEY_WRAPPED.name,
+        miasma_core::paths::MASTER_KEY_WRAP_IV.name,
+    ] {
         let fpath = path.join(fname);
         if !fpath.exists() {
             continue;
@@ -606,7 +610,7 @@ fn read_master_key_zeroizing(
 #[uniffi::export]
 pub fn get_sharing_key(data_dir: String) -> Result<String, MiasmaFfiError> {
     let path = validate_data_dir(&data_dir)?;
-    let master_key_path = path.join("master.key");
+    let master_key_path = miasma_core::paths::master_key(&path);
     if !master_key_path.exists() {
         return Err(MiasmaFfiError::NotInitialized {
             data_dir: data_dir.to_owned(),
@@ -719,7 +723,7 @@ pub fn start_embedded_daemon(
     let (mut config, store) = open_store_for_daemon(&data_dir)?;
 
     // Read master key for node identity.
-    let master_key_path = path.join("master.key");
+    let master_key_path = miasma_core::paths::master_key(&path);
     let master_key = read_master_key_zeroizing(&master_key_path)?;
 
     // Create MiasmaNode with full networking.

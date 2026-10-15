@@ -28,7 +28,7 @@ pub fn write_restricted(path: &Path, data: &[u8]) -> Result<(), MiasmaError> {
 /// This is the preferred pattern for secrets that must never be readable by
 /// other users even momentarily at the final path.
 pub fn atomic_write_restricted(path: &Path, data: &[u8]) -> Result<(), MiasmaError> {
-    let tmp = path.with_extension("sec.tmp");
+    let tmp = crate::paths::atomic_secure_tmp(path);
     write_restricted(&tmp, data).inspect_err(|_e| {
         let _ = std::fs::remove_file(&tmp);
     })?;

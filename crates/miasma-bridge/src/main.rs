@@ -33,7 +33,8 @@ fn main() {
     if is_daemon {
         let (data_dir, _) = parse_data_dir(if args.len() > 2 { &args[2..] } else { &[] });
         let _ = std::fs::create_dir_all(&data_dir);
-        let file_appender = tracing_appender::rolling::daily(&data_dir, "bridge.log");
+        let file_appender =
+            tracing_appender::rolling::daily(&data_dir, miasma_core::paths::BRIDGE_LOG.name);
         let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
         {
             use tracing_subscriber::layer::SubscriberExt;

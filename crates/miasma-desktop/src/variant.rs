@@ -37,7 +37,7 @@ impl ProductMode {
 
 // ─── Persisted desktop preferences ──────────────────────────────────────────
 
-const PREFS_FILE: &str = "desktop-prefs.toml";
+const PREFS_FILE: &str = miasma_core::paths::DESKTOP_PREFS.name;
 
 /// Persisted desktop preferences (mode + locale + theme).
 ///

@@ -35,10 +35,10 @@ use zeroize::Zeroizing;
 use crate::{share::MiasmaShare, MiasmaError};
 
 const NONCE_LEN: usize = 24; // XChaCha20 nonce
-const MASTER_KEY_FILE: &str = "master.key";
-const SHARES_DIR: &str = "shares";
-const INDEX_FILE: &str = "store_index.json";
-const SHARE_EXT: &str = ".ms";
+const MASTER_KEY_FILE: &str = crate::paths::MASTER_KEY.name;
+const SHARES_DIR: &str = crate::paths::SHARES_DIR.name;
+const INDEX_FILE: &str = crate::paths::STORE_INDEX.name;
+const SHARE_EXT: &str = crate::paths::SHARE_BLOB_EXT;
 
 /// Share of the hosted quota one principal may hold, in percent.
 ///
@@ -243,7 +243,7 @@ fn save_index(data_dir: &Path, index: &StoreIndex) -> Result<(), MiasmaError> {
 
 /// Write to a temp file then rename — atomic on POSIX, best-effort on Windows.
 fn atomic_write(path: &Path, data: &[u8]) -> Result<(), MiasmaError> {
-    let tmp = path.with_extension("tmp");
+    let tmp = crate::paths::atomic_tmp(path);
     {
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(data)?;
@@ -946,7 +946,7 @@ impl LocalShareStore {
 
         // Scrub persisted transport secrets from config.toml so they do not
         // survive a wipe. A parse/save failure is wipe failure, never advisory.
-        let config_path = self.data_dir.join("config.toml");
+        let config_path = crate::paths::config_file(&self.data_dir);
         if config_path.exists() {
             match crate::config::NodeConfig::load(&self.data_dir) {
                 Ok(mut config) => {

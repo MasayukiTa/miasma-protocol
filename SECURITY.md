@@ -47,8 +47,12 @@ before relying on it:
   --no-iroh`), or use your own relay with `transport.iroh_mode = custom`. A
   public relay is for reaching the sender, not for bulk transfer (measured about
   1 MiB/s); large files need a direct path or a self-hosted relay.
-- Hosted-share storage (keeping shares for other peers) is opt-in; the default
-  quota is 0.
+- Hosted-share storage (keeping shares for other peers) is **on by default**: the
+  hosted quota (`storage.hosted_quota_mb`) defaults to 1024 MiB, so a default node
+  accepts shares pushed by authenticated peers (so it uses disk for them and
+  receives inbound connections). Set it to 0
+  (`miasma config --key storage.hosted_quota_mb --value 0`, takes effect at the
+  next daemon start) to refuse every pushed share.
 - The obfuscated QUIC and REALITY transports do not authenticate the server and
   do not resist replay. Do not rely on them for resistance to active probing or
   for confidentiality against an active interceptor. Content encryption still

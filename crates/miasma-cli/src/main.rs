@@ -492,9 +492,10 @@ async fn main() -> Result<()> {
     if is_daemon {
         let log_dir = data_dir.clone();
         let _ = std::fs::create_dir_all(&log_dir);
-        let file_appender = tracing_appender::rolling::daily(&log_dir, "daemon.log");
+        let file_appender =
+            tracing_appender::rolling::daily(&log_dir, miasma_core::paths::DAEMON_LOG.name);
         // Truncate old logs: keep recent file only (daily roller creates new files).
-        cleanup_old_logs(&log_dir, "daemon.log", 3);
+        cleanup_old_logs(&log_dir, miasma_core::paths::DAEMON_LOG.name, 3);
         let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
@@ -515,7 +516,7 @@ async fn main() -> Result<()> {
     }
 
     // Stamp version for future upgrade detection.
-    if data_dir.join("config.toml").exists() {
+    if miasma_core::paths::config_file(&data_dir).exists() {
         miasma_core::config::stamp_version(&data_dir, env!("CARGO_PKG_VERSION"));
     }
 
@@ -962,7 +963,7 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
         info
     });
     let has_config = config_info.is_ok();
-    let key_path = data_dir.join("master.key");
+    let key_path = miasma_core::paths::master_key(data_dir);
     let key_exists = key_path.exists();
 
     // Store info.
@@ -1001,7 +1002,7 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
         report.insert("config_exists".into(), serde_json::json!(has_config));
         report.insert("master_key_exists".into(), serde_json::json!(key_exists));
         // Log file location.
-        let log_glob = data_dir.join("daemon.log.*");
+        let log_glob = miasma_core::paths::DAEMON_LOG.log_glob(data_dir);
         report.insert(
             "log_file".into(),
             serde_json::json!(log_glob.display().to_string()),
@@ -1701,7 +1702,7 @@ async fn cmd_daemon(
     }
     let wanted_wss_port = config.transport.wss_port;
 
-    let master_key_path = data_dir.join("master.key");
+    let master_key_path = miasma_core::paths::master_key(data_dir);
     if !master_key_path.exists() {
         bail!("Node not initialised. Run `miasma init` first.");
     }
@@ -1972,8 +1973,7 @@ async fn cmd_receive(
     // No explicit output — try to get the filename from the daemon, then decide.
     // We need to use a temp file as the target so we can learn the original
     // filename before choosing the final destination.
-    let tmp_dir = std::env::temp_dir();
-    let tmp_path = tmp_dir.join(format!("miasma-retrieve-{envelope_id}.tmp"));
+    let tmp_path = miasma_core::paths::retrieve_tmp_for_envelope(envelope_id);
     let req = ControlRequest::DirectedRetrieveToFile {
         envelope_id: envelope_id.to_owned(),
         password: password.to_owned(),

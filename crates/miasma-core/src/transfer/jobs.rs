@@ -87,7 +87,7 @@ pub fn registry_for(data_dir: &Path) -> Arc<TransferRegistry> {
 impl TransferRegistry {
     /// Where receive journals live.
     pub fn journal_dir(&self) -> PathBuf {
-        self.data_dir.join("transfers")
+        crate::paths::transfers_dir(&self.data_dir)
     }
 
     /// Start (or resume) receiving `mid` into `output_path` in the background.
