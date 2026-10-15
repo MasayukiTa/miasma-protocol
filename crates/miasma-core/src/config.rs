@@ -79,7 +79,7 @@ impl PushConfig {
     pub fn resolved_inbox(&self, data_dir: &Path) -> PathBuf {
         match self.inbox_dir.as_deref().map(str::trim) {
             Some(d) if !d.is_empty() => PathBuf::from(d),
-            _ => data_dir.join("inbox"),
+            _ => crate::paths::default_push_inbox(data_dir),
         }
     }
 }
@@ -393,7 +393,7 @@ impl Default for NetworkConfig {
 
 impl NodeConfig {
     pub fn load(data_dir: &Path) -> Result<Self, MiasmaError> {
-        let path = data_dir.join("config.toml");
+        let path = crate::paths::config_file(data_dir);
         if !path.exists() {
             return Ok(Self::default());
         }
@@ -406,7 +406,7 @@ impl NodeConfig {
             .parsed_obfuscated_quic_secret()
             .map_err(|e| MiasmaError::Serialization(format!("invalid transport config: {e}")))?;
         std::fs::create_dir_all(data_dir)?;
-        let path = data_dir.join("config.toml");
+        let path = crate::paths::config_file(data_dir);
         let raw = Zeroizing::new(
             toml::to_string_pretty(self).map_err(|e| MiasmaError::Serialization(e.to_string()))?,
         );
@@ -462,7 +462,9 @@ impl NodeConfig {
 ///
 /// - Linux:       `~/.local/share/miasma`
 /// - macOS:       `~/Library/Application Support/miasma`
-/// - Windows:     `%APPDATA%\miasma`
+/// - Windows:     `%LOCALAPPDATA%\miasma\data` (the `data` component is added by
+///   `directories::ProjectDirs::data_local_dir`; it is the local, non-roaming
+///   profile, not `%APPDATA%`)
 pub fn default_data_dir() -> PathBuf {
     directories::ProjectDirs::from("", "", "miasma")
         .map(|d| d.data_local_dir().to_path_buf())
@@ -474,13 +476,13 @@ pub fn default_data_dir() -> PathBuf {
 /// Written on every startup to support future upgrade detection.
 /// The file is a simple text file containing the version string.
 pub fn stamp_version(data_dir: &Path, version: &str) {
-    let path = data_dir.join("version");
+    let path = crate::paths::version_stamp(data_dir);
     let _ = std::fs::write(path, version);
 }
 
 /// Read the last-stamped version from the data directory.
 pub fn read_stamped_version(data_dir: &Path) -> Option<String> {
-    std::fs::read_to_string(data_dir.join("version"))
+    std::fs::read_to_string(crate::paths::version_stamp(data_dir))
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())

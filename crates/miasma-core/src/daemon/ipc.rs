@@ -36,10 +36,10 @@ use zeroize::{Zeroize, Zeroizing};
 const FRAME_MAX: usize = 512 * 1_024 * 1_024;
 
 /// Filename inside the data directory containing the control port number.
-pub const PORT_FILE: &str = "daemon.port";
+pub const PORT_FILE: &str = crate::paths::DAEMON_PORT.name;
 
 /// Filename inside the data directory containing the HTTP bridge port.
-pub const HTTP_PORT_FILE: &str = "daemon.http";
+pub const HTTP_PORT_FILE: &str = crate::paths::DAEMON_HTTP.name;
 
 /// Default HTTP bridge port.  Fixed so browsers can discover the daemon
 /// without filesystem access.  Configurable via `http_bridge.port` in

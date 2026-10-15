@@ -217,7 +217,7 @@ impl DaemonServer {
         };
 
         let (sharing_secret, sharing_pubkey) = {
-            let master_key_path = data_dir.join("master.key");
+            let master_key_path = crate::paths::master_key(&data_dir);
             let master_bytes = zeroize::Zeroizing::new(
                 std::fs::read(&master_key_path)
                     .with_context(|| format!("cannot read {}", master_key_path.display()))?,

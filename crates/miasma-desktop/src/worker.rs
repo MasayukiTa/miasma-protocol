@@ -837,7 +837,8 @@ fn do_init(data_dir: &Path) -> anyhow::Result<()> {
 
 /// Check if node is initialized (master.key + config.toml exist).
 fn is_node_initialized(data_dir: &Path) -> bool {
-    data_dir.join("master.key").exists() && data_dir.join("config.toml").exists()
+    miasma_core::paths::master_key(data_dir).exists()
+        && miasma_core::paths::config_file(data_dir).exists()
 }
 
 /// Detect current daemon connection state.
@@ -1046,10 +1047,7 @@ fn retrieval_temp_path() -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    std::env::temp_dir().join(format!(
-        "miasma-retrieve-{}-{nonce}.tmp",
-        std::process::id()
-    ))
+    miasma_core::paths::retrieve_tmp_unique(std::process::id(), nonce)
 }
 
 async fn retrieve_mid_to_file(
@@ -1363,7 +1361,7 @@ async fn do_directed_send(
 async fn do_directed_retrieve(data_dir: &Path, envelope_id: &str, password: &str) -> WorkerResult {
     // Use file-path variant — daemon writes decrypted content to a temp file,
     // avoiding IPC bloat for large files.
-    let tmp_path = std::env::temp_dir().join(format!("miasma-retrieve-{envelope_id}.tmp"));
+    let tmp_path = miasma_core::paths::retrieve_tmp_for_envelope(envelope_id);
     let req = ControlRequest::DirectedRetrieveToFile {
         envelope_id: envelope_id.to_owned(),
         password: password.to_owned(),
@@ -1627,7 +1625,7 @@ async fn do_transfer_remove(data_dir: &Path, req: ControlRequest) -> WorkerResul
 /// `(k, n)` a stopped send began with, read from its journal in `<data_dir>/transfers`.
 fn journal_shard_params(data_dir: &Path, source: &Path) -> Option<(u8, u8)> {
     use miasma_core::transfer::publish_journal::{publish_journal_path, PublishJournal};
-    let path = publish_journal_path(&data_dir.join("transfers"), source);
+    let path = publish_journal_path(&miasma_core::paths::transfers_dir(data_dir), source);
     let j = PublishJournal::load(&path)?;
     Some((j.header.data_shards, j.header.total_shards))
 }

@@ -91,7 +91,8 @@ fn main() -> eframe::Result<()> {
     // Logging: stderr + file in data dir.
     let data_dir = resolve_data_dir();
     let _ = std::fs::create_dir_all(&data_dir);
-    let file_appender = tracing_appender::rolling::daily(&data_dir, "desktop.log");
+    let file_appender =
+        tracing_appender::rolling::daily(&data_dir, miasma_core::paths::DESKTOP_LOG.name);
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
     {
         use tracing_subscriber::layer::SubscriberExt;
