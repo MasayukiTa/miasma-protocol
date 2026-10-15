@@ -179,6 +179,49 @@ processes where the system allows it, but dumps written earlier, the page file a
 hibernation files, and records the operating system keeps about any program that
 ran (Prefetch, event logs, endpoint-security tools) are outside its control.
 
+## State files are encrypted at rest
+
+Miasma's own records (the contact list, the transfer history and transfer
+progress files, the replication queue, the directed-share inbox, the share
+index and the desktop preferences) are stored encrypted with a key derived from
+your master key (`master.key` in the data directory). Files from an earlier
+version are converted automatically the first time the new version starts; the
+old plaintext copy is overwritten and removed.
+
+- Deleting `master.key` makes these files unreadable, even if the files
+  themselves are still on the disk.
+- **Back up `master.key`** if you need your contacts and history after
+  reinstalling the operating system or moving to a new computer. Without it
+  Miasma starts with an empty contact list and a new identity.
+- Miasma never overwrites an encrypted file it cannot open. A file that cannot
+  be opened with the current key (for example after `master.key` was replaced)
+  is kept next to the others with `.corrupt-<time>` in its name instead of being
+  deleted, and it opens again if the original `master.key` is put back and the
+  suffix is removed.
+- `master.key` itself, `config.toml`, the received files and the share blobs
+  are not covered by this: the key must be readable to start, the configuration
+  is read before the key is available, and received files are yours to open.
+  This protects the records on a disk you no longer have the key for; it does not
+  protect a computer that is running and unlocked, or a copy of the whole data
+  directory that includes `master.key`.
+
+### 保存データの暗号化(日本語)
+
+連絡先、転送履歴・転送の進行記録、複製キュー、宛先指定共有の受信箱、共有インデックス、
+デスクトップの設定は、マスター鍵(データフォルダの `master.key`)から作った鍵で暗号化して
+保存されます。旧バージョンのファイルは、新しいバージョンの初回起動時に自動で変換され、
+元の平文ファイルは上書きしてから削除されます。
+
+- `master.key` を削除すると、ファイルが残っていても読めなくなります。
+- OS の再インストールや PC の入れ替えのあとも連絡先や履歴を使いたい場合は、
+  **`master.key` をバックアップ**してください。なければ連絡先は空、ID は新しくなります。
+- Miasma は、開けない暗号化ファイルを上書きしません。現在の鍵で開けないファイル
+  (たとえば `master.key` を差し替えた場合)は、削除せず名前に `.corrupt-<時刻>` を付けて
+  残します。元の `master.key` を戻して名前の末尾を外せば、再び開けます。
+- `master.key` 自体、`config.toml`、受信したファイル、共有ブロブは対象外です。
+  動作中でロック解除済みの PC や、`master.key` を含むデータフォルダの丸ごとコピーは
+  この暗号化では守られません。
+
 ## Push files to a registered contact (no Share ID, no password)
 
 Two people who trust each other add each other as contacts **once**, then send

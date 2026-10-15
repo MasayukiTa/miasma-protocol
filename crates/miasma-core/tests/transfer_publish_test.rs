@@ -57,6 +57,7 @@ fn content(len: usize) -> Vec<u8> {
 
 async fn spawn_node(key_byte: u8) -> (MiasmaCoordinator, Arc<LocalShareStore>) {
     let dir = tempfile::tempdir().unwrap().keep();
+    miasma_core::state_crypto::provision_master_key(&dir).unwrap();
     let store = Arc::new(LocalShareStore::open(&dir, 1000).unwrap());
     let key = [key_byte; 32];
     let mut node = MiasmaNode::new(&key, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
@@ -292,6 +293,7 @@ async fn a_protected_transfer_is_received_over_the_network_and_resumes_after_a_c
         let mid = report.mid.clone();
 
         let dir = tempfile::tempdir().unwrap().keep();
+        miasma_core::state_crypto::provision_master_key(&dir).unwrap();
         let out = dir.join("received").join("payload.bin");
         let journals = dir.join("transfers");
 
@@ -508,6 +510,7 @@ async fn a_cancelled_publish_resumes_and_the_result_is_a_working_transfer() {
         let data = content(SEND_TEST_LEN);
         let path = write_temp(&data);
         let journals = tempfile::tempdir().unwrap().keep();
+        miasma_core::state_crypto::provision_master_key(&journals).unwrap();
         let password_owned = random_password();
         let password = password_owned.as_str();
 
@@ -588,6 +591,7 @@ async fn a_cancelled_publish_resumes_and_the_result_is_a_working_transfer() {
 
         // ...and the other node can actually receive the file, byte for byte.
         let dir = tempfile::tempdir().unwrap().keep();
+        miasma_core::state_crypto::provision_master_key(&dir).unwrap();
         let out = dir.join("payload.bin");
         let outcome = b
             .receive_file(
@@ -616,6 +620,7 @@ async fn a_publish_is_not_resumed_if_the_source_changed_or_a_share_went_missing(
 
         // ── The source file changes between runs. ───────────────────────────
         let journals = tempfile::tempdir().unwrap().keep();
+        miasma_core::state_crypto::provision_master_key(&journals).unwrap();
         let p1 = TransferProgress::for_send(path.to_string_lossy());
         p1.stop_after_segments(1);
         let first = a
@@ -654,6 +659,7 @@ async fn a_publish_is_not_resumed_if_the_source_changed_or_a_share_went_missing(
         // ── A share of a finished segment is gone from the local store. ─────
         let path2 = write_temp(&content(SEND_TEST_LEN + 4096));
         let journals2 = tempfile::tempdir().unwrap().keep();
+        miasma_core::state_crypto::provision_master_key(&journals2).unwrap();
         let p3 = TransferProgress::for_send(path2.to_string_lossy());
         p3.stop_after_segments(1);
         let third = a

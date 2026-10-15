@@ -3,8 +3,10 @@
 //!
 //! How it is measured: the subscriber (and with it the whole 2 MiB ring
 //! buffer) is built first, then the resident size of this process is read
-//! (`VmRSS` from `/proc/self/status` on Linux; the working set from
-//! `GetProcessMemoryInfo` on Windows). One million events then go through the
+//! (`VmRSS` from `/proc/self/status` on Linux; the private (commit) bytes from
+//! `GetProcessMemoryInfo` on Windows, because the working set is trimmed and
+//! re-faulted by the system, which made the test depend on what else the
+//! machine was doing). One million events then go through the
 //! normal `tracing` macros, the size is sampled every 10 000 events, and the
 //! test asserts that `max(samples) - baseline <= 4 MiB`. The ring is
 //! allocated zeroed and untouched, so the ring's own pages count as growth
@@ -57,7 +59,7 @@ fn resident_bytes() -> Option<u64> {
         if K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) == 0 {
             return None;
         }
-        Some(c.working_set_size as u64)
+        Some(c.pagefile_usage as u64)
     }
 }
 

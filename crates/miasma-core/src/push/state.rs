@@ -4,8 +4,7 @@
 //! testable) without an iroh endpoint.
 
 use std::{
-    collections::HashMap,
-    io::Write,
+    collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
@@ -13,6 +12,9 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
+use tracing::warn;
+
+use crate::state_crypto::{self, Label, LogReader, LogRewrite, LogWriter, StateKeys};
 
 pub const HISTORY_FILE: &str = crate::paths::PUSH_HISTORY.name;
 /// Lines kept after trimming, and the size that triggers a trim.
@@ -307,71 +309,150 @@ impl RateMeter {
     }
 }
 
-/// Persisted history: JSON lines, capped.
+/// Persisted history: one encrypted record per entry (see `state_crypto`),
+/// capped. Reads stream the file and keep only what they return; nothing
+/// loads the whole history.
 pub struct History {
     path: PathBuf,
-    lock: Mutex<()>,
+    /// `None` when the state key is unavailable (nothing is read or written).
+    keys: Option<StateKeys>,
+    /// The append handle, opened on first use and dropped when the file is
+    /// replaced.
+    writer: Mutex<Option<LogWriter>>,
 }
 
 impl History {
     pub fn open(data_dir: &Path) -> Self {
+        let keys = match StateKeys::open_or_init(data_dir) {
+            Ok(k) => Some(k),
+            Err(e) => {
+                warn!("the transfer history stays closed: {e}");
+                None
+            }
+        };
         let h = Self {
             path: data_dir.join(HISTORY_FILE),
-            lock: Mutex::new(()),
+            keys,
+            writer: Mutex::new(None),
         };
-        h.trim_if_needed();
+        let total = h.prepare();
+        h.trim_if_needed(total);
         h
     }
 
-    fn read_all(&self) -> Vec<HistoryEntry> {
-        let Ok(raw) = std::fs::read_to_string(&self.path) else {
-            return Vec::new();
+    /// Convert an old plaintext history, set aside one that cannot be opened
+    /// (wrong key or damage) so a fresh one can start, and return how many
+    /// entries the file holds. One streaming pass.
+    fn prepare(&self) -> usize {
+        let Some(keys) = &self.keys else { return 0 };
+        if let Err(e) = state_crypto::migrate::migrate_log(keys, Label::PushHistory, &self.path) {
+            warn!("could not convert the transfer history to the protected format: {e}");
+            return 0;
+        }
+        let mut entries = 0usize;
+        let damaged = match LogReader::open(keys, Label::PushHistory, &self.path) {
+            Ok(Some(mut r)) => loop {
+                match r.next_record() {
+                    Ok(Some(rec)) => {
+                        if serde_json::from_slice::<HistoryEntry>(&rec).is_ok() {
+                            entries += 1;
+                        }
+                    }
+                    Ok(None) => break false,
+                    Err(_) => break true,
+                }
+            },
+            Ok(None) => false,
+            Err(_) => true,
         };
-        raw.lines()
-            .filter_map(|l| serde_json::from_str::<HistoryEntry>(l).ok())
-            .collect()
+        if damaged {
+            match state_crypto::set_aside(&self.path) {
+                Ok(p) => warn!("the transfer history cannot be opened; it was moved to {p:?}"),
+                Err(e) => warn!("the transfer history cannot be opened: {e}"),
+            }
+            return 0;
+        }
+        entries
     }
 
-    fn trim_if_needed(&self) {
-        let _g = self.lock.lock().unwrap();
-        let all = self.read_all();
-        if all.len() > HISTORY_TRIM_AT {
-            let keep = &all[all.len() - HISTORY_KEEP..];
-            let mut out = String::new();
-            for e in keep {
-                if let Ok(l) = serde_json::to_string(e) {
-                    out.push_str(&l);
-                    out.push('\n');
-                }
-            }
-            let tmp = self.path.with_extension("jsonl.tmp");
-            if std::fs::write(&tmp, out).is_ok() {
-                let _ = std::fs::rename(&tmp, &self.path);
+    /// Stream the entries, oldest first, to `f`. A damaged tail ends the walk.
+    fn for_each(&self, mut f: impl FnMut(HistoryEntry, &[u8])) {
+        let Some(keys) = &self.keys else { return };
+        let Ok(Some(mut r)) = LogReader::open(keys, Label::PushHistory, &self.path) else {
+            return;
+        };
+        while let Ok(Some(rec)) = r.next_record() {
+            if let Ok(e) = serde_json::from_slice::<HistoryEntry>(&rec) {
+                f(e, &rec);
             }
         }
     }
 
-    pub fn append(&self, e: &HistoryEntry) {
-        let Ok(line) = serde_json::to_string(e) else {
+    fn trim_if_needed(&self, total: usize) {
+        let Some(keys) = &self.keys else { return };
+        let mut guard = self.writer.lock().unwrap();
+        *guard = None;
+        if total <= HISTORY_TRIM_AT {
+            return;
+        }
+        // Keep the newest HISTORY_KEEP entries: skip the older ones while
+        // streaming into the replacement.
+        let skip = total - HISTORY_KEEP;
+        let tmp =
+            crate::paths::PUSH_HISTORY_TMP.in_dir(self.path.parent().unwrap_or(Path::new("")));
+        let Ok(mut out) = LogRewrite::begin(keys, Label::PushHistory, &self.path, &tmp) else {
             return;
         };
-        let _g = self.lock.lock().unwrap();
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-        {
-            let _ = writeln!(f, "{line}");
+        let mut seen = 0usize;
+        let mut ok = true;
+        self.for_each(|_, raw| {
+            if ok && seen >= skip && out.append(raw).is_err() {
+                ok = false;
+            }
+            seen += 1;
+        });
+        if ok {
+            let _ = out.commit();
+        }
+    }
+
+    pub fn append(&self, e: &HistoryEntry) {
+        let Some(keys) = &self.keys else { return };
+        let Ok(line) = serde_json::to_vec(e) else {
+            return;
+        };
+        let mut guard = self.writer.lock().unwrap();
+        if guard.is_none() {
+            match LogWriter::open_append(keys, Label::PushHistory, &self.path) {
+                Ok(w) => *guard = Some(w),
+                Err(err) => {
+                    warn!("cannot append to the transfer history: {err}");
+                    return;
+                }
+            }
+        }
+        if let Some(w) = guard.as_mut() {
+            if w.append(&line).is_err() {
+                *guard = None;
+            }
         }
     }
 
     /// Newest first, at most `limit` (and never more than the cap).
     pub fn list(&self, limit: usize) -> Vec<HistoryEntry> {
-        let _g = self.lock.lock().unwrap();
-        let mut all = self.read_all();
-        all.reverse();
-        all.truncate(limit.min(HISTORY_KEEP));
-        all
+        let _g = self.writer.lock().unwrap();
+        let cap = limit.min(HISTORY_KEEP);
+        if cap == 0 {
+            return Vec::new();
+        }
+        let mut newest: VecDeque<HistoryEntry> = VecDeque::with_capacity(cap.min(64));
+        self.for_each(|e, _| {
+            if newest.len() == cap {
+                newest.pop_front();
+            }
+            newest.push_back(e);
+        });
+        newest.into_iter().rev().collect()
     }
 }
 
@@ -405,17 +486,20 @@ mod tests {
             for i in 0..2100 {
                 h.append(&entry(i));
             }
+            // The process died while writing the last record.
+            let p = dir.path().join(HISTORY_FILE);
+            let len = std::fs::metadata(&p).unwrap().len();
             std::fs::OpenOptions::new()
-                .append(true)
-                .open(dir.path().join(HISTORY_FILE))
+                .write(true)
+                .open(&p)
                 .unwrap()
-                .write_all(b"{garbage\n")
+                .set_len(len - 5)
                 .unwrap();
         }
         let h = History::open(dir.path());
         let l = h.list(5);
         assert_eq!(l.len(), 5);
-        assert_eq!(l[0].id, "2099");
+        assert_eq!(l[0].id, "2098");
         let total = h.list(100_000).len();
         assert!(total <= HISTORY_KEEP, "{total}");
     }

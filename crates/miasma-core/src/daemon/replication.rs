@@ -10,14 +10,15 @@
 //!
 //! # Persistence
 //!
-//! State is stored as a JSONL write-ahead log (`replication_wal.jsonl`).
-//! Each mutation appends one line.  On startup the log is replayed to
+//! State is stored as a write-ahead log (`replication_wal.jsonl`) of
+//! encrypted records (see `state_crypto`), each holding one JSON entry.
+//! Each mutation appends one record.  On startup the log is streamed to
 //! rebuild in-memory state, then compacted to a clean snapshot via atomic
-//! rename so recovery stays fast.
+//! rename so recovery stays fast.  A log written by an earlier version in
+//! plaintext lines is converted on first load.
 
 use std::{
     collections::HashMap,
-    io::Write as _,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -27,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use crate::network::types::DhtRecord;
+use crate::state_crypto::{self, Label, LogReader, LogRewrite, LogWriter, StateKeys};
 
 // ─── Time helper ─────────────────────────────────────────────────────────────
 
@@ -195,6 +197,9 @@ pub struct ReplicationQueue {
     items: HashMap<[u8; 32], PendingReplication>,
     wal_path: PathBuf,
     wal_tmp_path: PathBuf,
+    keys: StateKeys,
+    /// Append handle, opened on first use and dropped around compaction.
+    writer: Option<LogWriter>,
     /// Number of entries appended since last compaction.
     appended_since_compact: usize,
     /// Retry policy (shared, not per-item — simplifies config).
@@ -213,13 +218,19 @@ impl ReplicationQueue {
         let wal_tmp_path = data_dir.join(WAL_TMP);
         let legacy_path = data_dir.join(LEGACY_FILE);
 
+        let keys = StateKeys::open_or_init(data_dir)
+            .context("cannot open the state key for the replication queue")?;
         let mut queue = Self {
             items: HashMap::new(),
             wal_path,
             wal_tmp_path,
+            keys,
+            writer: None,
             appended_since_compact: 0,
             policy,
         };
+        state_crypto::migrate::migrate_log(&queue.keys, Label::ReplicationWal, &queue.wal_path)
+            .with_context(|| format!("convert WAL {}", queue.wal_path.display()))?;
 
         // Try to replay existing WAL.
         if queue.wal_path.exists() {
@@ -238,19 +249,40 @@ impl ReplicationQueue {
     }
 
     fn replay_wal(&mut self) -> Result<()> {
-        let raw = std::fs::read_to_string(&self.wal_path)
-            .with_context(|| format!("read WAL {}", self.wal_path.display()))?;
-
-        for (lineno, line) in raw.lines().enumerate() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            match serde_json::from_str::<WalEntry>(line) {
-                Ok(entry) => self.apply_entry(entry),
-                Err(e) => {
-                    warn!(lineno, "WAL line corrupt, skipping: {e}");
+        let mut damaged = false;
+        match LogReader::open(&self.keys, Label::ReplicationWal, &self.wal_path) {
+            Ok(Some(mut reader)) => {
+                let mut recno = 0usize;
+                loop {
+                    match reader.next_record() {
+                        Ok(Some(rec)) => {
+                            recno += 1;
+                            match serde_json::from_slice::<WalEntry>(&rec) {
+                                Ok(entry) => self.apply_entry(entry),
+                                Err(e) => warn!(recno, "WAL record corrupt, skipping: {e}"),
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            warn!("WAL damaged after {recno} records: {e}");
+                            damaged = true;
+                            break;
+                        }
+                    }
                 }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                warn!("WAL cannot be opened: {e}");
+                damaged = true;
+            }
+        }
+        if damaged {
+            // Keep the unreadable file (it may open again with the right key)
+            // and carry on from what could be read.
+            match state_crypto::set_aside(&self.wal_path) {
+                Ok(p) => warn!("replication WAL set aside as {p:?}"),
+                Err(e) => warn!("cannot set the replication WAL aside: {e}"),
             }
         }
         // Compact after full replay so the next startup is fast.
@@ -353,16 +385,23 @@ impl ReplicationQueue {
 
     /// Append a single WAL entry.  Uses write + fsync for crash safety.
     fn append_wal(&mut self, entry: &WalEntry) -> Result<()> {
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.wal_path)
-            .with_context(|| format!("open WAL {}", self.wal_path.display()))?;
-        let line = serde_json::to_string(entry).context("serialize WAL entry")?;
-        writeln!(file, "{}", line).context("write WAL entry")?;
-        file.flush().context("flush WAL")?;
-        // fsync for crash safety (best-effort on Windows).
-        let _ = file.sync_all();
+        let line =
+            zeroize::Zeroizing::new(serde_json::to_vec(entry).context("serialize WAL entry")?);
+        if self.writer.is_none() {
+            self.writer = Some(
+                LogWriter::open_append(&self.keys, Label::ReplicationWal, &self.wal_path)
+                    .with_context(|| format!("open WAL {}", self.wal_path.display()))?,
+            );
+        }
+        let appended = self
+            .writer
+            .as_mut()
+            .map(|w| w.append_durable(&line))
+            .transpose();
+        if let Err(e) = appended {
+            self.writer = None;
+            return Err(e).context("write WAL entry");
+        }
 
         self.appended_since_compact += 1;
         if self.appended_since_compact >= COMPACT_THRESHOLD {
@@ -373,16 +412,20 @@ impl ReplicationQueue {
 
     /// Rewrite the WAL as a clean set of Snapshot entries via atomic rename.
     fn compact(&mut self) -> Result<()> {
-        let mut file = std::fs::File::create(&self.wal_tmp_path)
-            .with_context(|| format!("create WAL tmp {}", self.wal_tmp_path.display()))?;
+        self.writer = None;
+        let mut rewrite = LogRewrite::begin(
+            &self.keys,
+            Label::ReplicationWal,
+            &self.wal_path,
+            &self.wal_tmp_path,
+        )
+        .with_context(|| format!("create WAL tmp {}", self.wal_tmp_path.display()))?;
         for item in self.items.values() {
             let entry = WalEntry::Snapshot(item.clone());
-            let line = serde_json::to_string(&entry).context("serialize snapshot")?;
-            writeln!(file, "{}", line)?;
+            let line = serde_json::to_vec(&entry).context("serialize snapshot")?;
+            rewrite.append(&line).context("write snapshot")?;
         }
-        file.flush()?;
-        let _ = file.sync_all();
-        std::fs::rename(&self.wal_tmp_path, &self.wal_path).with_context(|| "atomic WAL rename")?;
+        rewrite.commit().with_context(|| "atomic WAL rename")?;
         self.appended_since_compact = 0;
         debug!(items = self.items.len(), "WAL compacted");
         Ok(())

@@ -147,6 +147,7 @@ async fn start_node(
 
 fn empty_store() -> (TempDir, Arc<LocalShareStore>) {
     let dir = tempfile::tempdir().unwrap();
+    miasma_core::state_crypto::provision_master_key(dir.path()).unwrap();
     let store = Arc::new(LocalShareStore::open(dir.path(), 10).unwrap());
     (dir, store)
 }
@@ -184,6 +185,7 @@ impl Sender {
 
     async fn with_limits(relay: &Relay, limits: IrohServerLimits) -> Self {
         let dir = tempfile::tempdir().unwrap();
+        miasma_core::state_crypto::provision_master_key(dir.path()).unwrap();
         let store = Arc::new(LocalShareStore::open(dir.path(), 1000).unwrap());
         let key: [u8; 32] = rand::random();
         let mut node = MiasmaNode::new(&key, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
@@ -307,6 +309,7 @@ async fn a_protected_multi_segment_transfer_is_received_by_share_id_alone_and_re
         // relay to find the sender through.
         let (rx, _rx_dir) = receiver(&relay).await;
         let work = tempfile::tempdir().unwrap();
+        miasma_core::state_crypto::provision_master_key(work.path()).unwrap();
         let out = work.path().join("got.bin");
         let journals = work.path().join("transfers");
 
@@ -448,6 +451,7 @@ async fn an_endpoint_that_is_not_the_publisher_is_refused_even_at_the_right_addr
         // Through the receive path: an error, nothing written, never a receive
         // from the impostor.
         let work = tempfile::tempdir().unwrap();
+        miasma_core::state_crypto::provision_master_key(work.path()).unwrap();
         let out = work.path().join("got.bin");
         let progress = TransferProgress::new(mid.to_string());
         let outcome = try_receive_direct(
@@ -551,6 +555,7 @@ async fn a_forged_record_is_refused_and_the_honest_endpoint_listed_second_still_
             }),
         };
         let work = tempfile::tempdir().unwrap();
+        miasma_core::state_crypto::provision_master_key(work.path()).unwrap();
         let out = work.path().join("got.bin");
         let progress = TransferProgress::new(mid.to_string());
         let outcome = try_receive_direct(
@@ -648,6 +653,7 @@ async fn a_tampered_piece_is_rejected_reported_and_replaced_by_a_spare() {
         assert!(fetched.manifest.is_some());
 
         let work = tempfile::tempdir().unwrap();
+        miasma_core::state_crypto::provision_master_key(work.path()).unwrap();
         let out = work.path().join("out.bin");
         let progress = TransferProgress::new(mid.to_string());
         // Slot 0 is corrupted in flight; slots 1 and 2 are good, k = 2.
@@ -713,6 +719,7 @@ async fn an_unreachable_relay_ends_in_a_clear_error_not_an_endless_wait() {
         let mid = ContentId::compute(b"x", &params().to_param_bytes());
         let share = ShareId::new(&mid, publisher, false);
         let work = tempfile::tempdir().unwrap();
+        miasma_core::state_crypto::provision_master_key(work.path()).unwrap();
         let progress = TransferProgress::new(mid.to_string());
         let started = std::time::Instant::now();
         let err = receive_iroh(
@@ -766,6 +773,7 @@ async fn start_node_offline(
 
 async fn start_daemon(transport: TransportConfig) -> (TempDir, tokio::sync::mpsc::Sender<()>) {
     let dir = tempfile::tempdir().unwrap();
+    miasma_core::state_crypto::provision_master_key(dir.path()).unwrap();
     let store = Arc::new(LocalShareStore::open(dir.path(), 1000).unwrap());
     let key: [u8; 32] = rand::random();
     let node = MiasmaNode::new(&key, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();

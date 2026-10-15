@@ -1,24 +1,27 @@
 //! The send journal: an append-only log of what a publish has finished.
 //!
 //! A publish of a big file takes long enough that it must survive being stopped.
-//! Each completed segment appends **one line** — never a rewrite of the whole
-//! file, which would cost O(segments) per segment. A line that was only half
-//! written when the process died is simply ignored on load.
+//! Each completed segment appends **one record** (an encrypted JSON line, see
+//! `state_crypto`) — never a rewrite of the whole file, which would cost
+//! O(segments) per segment. A record that was only half written when the
+//! process died is simply ignored on load. The key comes from the
+//! `master.key` found above the folder the journal lives in.
 //!
 //! It records where the publish got to, never the password. It is also never
 //! trusted by itself: on resume the source file is re-read and every completed
 //! segment re-checked against its recorded hash, and the shares are checked to
 //! still be in the local store.
 
-use std::{
-    io::{BufRead, BufReader, Write},
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use super::{manifest::SegmentEntry, protection::Protection};
-use crate::{network::types::ShardLocation, MiasmaError};
+use crate::{
+    network::types::ShardLocation,
+    state_crypto::{self, Label, LogReader, LogWriter, StateKeys},
+    MiasmaError,
+};
 
 pub const PUBLISH_JOURNAL_VERSION: u8 = 2;
 
@@ -66,49 +69,45 @@ pub fn publish_journal_path(dir: &Path, source: &Path) -> PathBuf {
     ))
 }
 
-fn to_line<T: Serialize>(v: &T) -> Result<Vec<u8>, MiasmaError> {
-    let mut line = serde_json::to_vec(v).map_err(|e| MiasmaError::Serialization(e.to_string()))?;
-    line.push(b'\n');
-    Ok(line)
+fn to_record<T: Serialize>(v: &T) -> Result<Vec<u8>, MiasmaError> {
+    serde_json::to_vec(v).map_err(|e| MiasmaError::Serialization(e.to_string()))
 }
 
 impl PublishJournal {
     /// Start a new journal, replacing any previous one.
     pub fn create(path: &Path, header: &PublishHeader) -> Result<(), MiasmaError> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let mut f = std::fs::File::create(path)?;
-        f.write_all(&to_line(header)?)?;
-        f.sync_data()?;
+        let keys = StateKeys::for_state_file(path)?;
+        let mut w = LogWriter::create_file(&keys, Label::TransferJournal, path)?;
+        w.append_durable(&to_record(header)?)?;
         Ok(())
     }
 
-    /// Record one finished segment. One line, made durable.
+    /// Record one finished segment. One record, made durable.
     pub fn append(path: &Path, record: &PublishSegmentRecord) -> Result<(), MiasmaError> {
-        let mut f = std::fs::OpenOptions::new().append(true).open(path)?;
-        f.write_all(&to_line(record)?)?;
-        f.sync_data()?;
+        if !path.exists() {
+            return Err(std::io::Error::from(std::io::ErrorKind::NotFound).into());
+        }
+        let keys = StateKeys::for_state_file(path)?;
+        let mut w = LogWriter::open_append(&keys, Label::TransferJournal, path)?;
+        w.append_durable(&to_record(record)?)?;
         Ok(())
     }
 
     /// Read a journal. Returns `None` if there is no usable header. A damaged or
-    /// half-written *trailing* line is dropped; nothing after a bad line is used,
-    /// because segments must be contiguous from 0.
+    /// half-written *trailing* record is dropped; nothing after a bad record is
+    /// used, because segments must be contiguous from 0.
     pub fn load(path: &Path) -> Option<Self> {
-        let f = std::fs::File::open(path).ok()?;
-        let mut lines = BufReader::new(f).lines();
-        let header: PublishHeader = serde_json::from_str(&lines.next()?.ok()?).ok()?;
+        let keys = StateKeys::for_state_file(path).ok()?;
+        // A journal written in plaintext by an earlier version is converted here.
+        let _ = state_crypto::migrate::migrate_log(&keys, Label::TransferJournal, path);
+        let mut reader = LogReader::open(&keys, Label::TransferJournal, path).ok()??;
+        let header: PublishHeader = serde_json::from_slice(&reader.next_record().ok()??).ok()?;
         if header.version != PUBLISH_JOURNAL_VERSION {
             return None;
         }
         let mut segments: Vec<PublishSegmentRecord> = Vec::new();
-        for line in lines {
-            let Ok(line) = line else { break };
-            if line.trim().is_empty() {
-                continue;
-            }
-            let Ok(rec) = serde_json::from_str::<PublishSegmentRecord>(&line) else {
+        while let Ok(Some(rec)) = reader.next_record() {
+            let Ok(rec) = serde_json::from_slice::<PublishSegmentRecord>(&rec) else {
                 break;
             };
             if rec.entry.index as usize != segments.len() {
@@ -122,10 +121,13 @@ impl PublishJournal {
     /// Keep only the first `keep` segments (used when a resume finds that later
     /// ones no longer check out). Rewrites the file.
     pub fn truncate_to(&self, path: &Path, keep: usize) -> Result<(), MiasmaError> {
-        Self::create(path, &self.header)?;
+        let keys = StateKeys::for_state_file(path)?;
+        let mut w = LogWriter::create_file(&keys, Label::TransferJournal, path)?;
+        w.append(&to_record(&self.header)?)?;
         for rec in self.segments.iter().take(keep) {
-            Self::append(path, rec)?;
+            w.append(&to_record(rec)?)?;
         }
+        w.sync()?;
         Ok(())
     }
 
@@ -137,6 +139,13 @@ impl PublishJournal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A data directory with a master key, so the journal can be encrypted.
+    fn test_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state_crypto::provision_master_key(dir.path()).unwrap();
+        dir
+    }
 
     fn header() -> PublishHeader {
         PublishHeader {
@@ -168,7 +177,7 @@ mod tests {
 
     #[test]
     fn a_journal_round_trips_header_and_segments_in_order() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_dir();
         let p = dir.path().join("j.jsonl");
         PublishJournal::create(&p, &header()).unwrap();
         for i in 0..5 {
@@ -181,23 +190,31 @@ mod tests {
     }
 
     #[test]
-    fn a_half_written_last_line_is_ignored_not_fatal() {
-        let dir = tempfile::tempdir().unwrap();
+    fn a_half_written_last_record_is_ignored_not_fatal() {
+        let dir = test_dir();
         let p = dir.path().join("j.jsonl");
         PublishJournal::create(&p, &header()).unwrap();
         PublishJournal::append(&p, &record(0)).unwrap();
         PublishJournal::append(&p, &record(1)).unwrap();
+        PublishJournal::append(&p, &record(2)).unwrap();
         // The process died part-way through writing segment 2.
-        let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
-        f.write_all(b"{\"entry\":{\"index\":2,\"plaintext_le")
+        let len = std::fs::metadata(&p).unwrap().len();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&p)
+            .unwrap()
+            .set_len(len - 9)
             .unwrap();
         let j = PublishJournal::load(&p).unwrap();
         assert_eq!(j.segments.len(), 2);
+        // The next append continues cleanly after the torn record.
+        PublishJournal::append(&p, &record(2)).unwrap();
+        assert_eq!(PublishJournal::load(&p).unwrap().segments.len(), 3);
     }
 
     #[test]
     fn nothing_after_a_gap_is_used() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_dir();
         let p = dir.path().join("j.jsonl");
         PublishJournal::create(&p, &header()).unwrap();
         PublishJournal::append(&p, &record(0)).unwrap();
@@ -207,7 +224,7 @@ mod tests {
 
     #[test]
     fn a_missing_empty_or_unreadable_header_means_no_journal() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_dir();
         assert!(PublishJournal::load(&dir.path().join("nope")).is_none());
         let empty = dir.path().join("empty");
         std::fs::write(&empty, b"").unwrap();
@@ -224,7 +241,7 @@ mod tests {
 
     #[test]
     fn truncating_keeps_only_the_first_n_segments() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_dir();
         let p = dir.path().join("j.jsonl");
         PublishJournal::create(&p, &header()).unwrap();
         for i in 0..6 {
@@ -238,21 +255,26 @@ mod tests {
     }
 
     #[test]
-    fn appending_costs_one_line_not_a_rewrite() {
-        let dir = tempfile::tempdir().unwrap();
+    fn appending_costs_one_record_not_a_rewrite() {
+        let dir = test_dir();
         let p = dir.path().join("j.jsonl");
         PublishJournal::create(&p, &header()).unwrap();
         PublishJournal::append(&p, &record(0)).unwrap();
         let before = std::fs::metadata(&p).unwrap().len();
         PublishJournal::append(&p, &record(1)).unwrap();
         let grew = std::fs::metadata(&p).unwrap().len() - before;
-        let one_line = to_line(&record(1)).unwrap().len() as u64;
-        assert_eq!(grew, one_line, "an append adds exactly its own line");
+        let body = to_record(&record(1)).unwrap().len() as u64;
+        // length prefix + nonce + ciphertext + tag
+        assert_eq!(
+            grew,
+            4 + 24 + body + 16,
+            "an append adds exactly its own record"
+        );
     }
 
     #[test]
     fn the_journal_carries_no_password() {
-        let raw = String::from_utf8(to_line(&header()).unwrap())
+        let raw = String::from_utf8(to_record(&header()).unwrap())
             .unwrap()
             .to_lowercase();
         assert!(!raw.contains("password\":\"") && !raw.contains("secret"));

@@ -584,6 +584,7 @@ mod tests {
     #[test]
     fn a_journal_left_by_an_earlier_process_is_listed_as_paused_and_resumable() {
         let dir = tempfile::tempdir().unwrap();
+        crate::state_crypto::provision_master_key(dir.path()).unwrap();
         let reg = registry_for(dir.path());
         let mid = ContentId::compute(b"left behind", b"p");
         journal(&mid, 4)

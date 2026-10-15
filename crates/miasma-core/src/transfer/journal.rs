@@ -1,15 +1,21 @@
 //! The receive journal: what a resumed transfer needs to know.
 //!
-//! One small JSON file per transfer, replaced atomically (write a temp file,
-//! then rename) after every completed segment. It records *where the transfer
-//! got to*, never the password, and it is never trusted on its own: on resume
-//! the partial file itself is re-read and re-verified against the manifest.
+//! One small encrypted file per transfer (see `state_crypto`), replaced
+//! atomically (write a temp file, then rename) after every completed segment.
+//! It records *where the transfer got to*, never the password, and it is never
+//! trusted on its own: on resume the partial file itself is re-read and
+//! re-verified against the manifest. The key comes from the `master.key` found
+//! above the folder the journal lives in.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{crypto::hash::ContentId, MiasmaError};
+use crate::{
+    crypto::hash::ContentId,
+    state_crypto::{self, Label, StateKeys},
+    MiasmaError,
+};
 
 pub const JOURNAL_VERSION: u8 = 1;
 
@@ -57,21 +63,22 @@ impl ReceiveJournal {
     /// Load a journal. A missing or unreadable file is `None`: the transfer
     /// then simply starts from the beginning, which is always safe.
     pub fn load(path: &Path) -> Option<Self> {
-        let raw = std::fs::read_to_string(path).ok()?;
-        let journal: Self = serde_json::from_str(&raw).ok()?;
+        let keys = StateKeys::for_state_file(path).ok()?;
+        // A journal written in plaintext by an earlier version is converted here.
+        let _ = state_crypto::migrate::migrate_document(&keys, Label::TransferJournal, path);
+        let raw = state_crypto::read_document(&keys, Label::TransferJournal, path).ok()?;
+        let journal: Self = serde_json::from_slice(&raw).ok()?;
         (journal.version == JOURNAL_VERSION).then_some(journal)
     }
 
     /// Replace the journal atomically.
     pub fn save(&self, path: &Path) -> Result<(), MiasmaError> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let tmp = path.with_extension("json.tmp");
-        let raw = serde_json::to_string_pretty(self)
-            .map_err(|e| MiasmaError::Serialization(e.to_string()))?;
-        std::fs::write(&tmp, raw)?;
-        std::fs::rename(&tmp, path)?;
+        let keys = StateKeys::for_state_file(path)?;
+        let raw = zeroize::Zeroizing::new(
+            serde_json::to_vec_pretty(self)
+                .map_err(|e| MiasmaError::Serialization(e.to_string()))?,
+        );
+        state_crypto::write_document(&keys, Label::TransferJournal, path, &raw)?;
         Ok(())
     }
 
@@ -90,6 +97,13 @@ pub fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A data directory with a master key, so the journal can be encrypted.
+    fn test_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state_crypto::provision_master_key(dir.path()).unwrap();
+        dir
+    }
 
     fn sample() -> ReceiveJournal {
         ReceiveJournal {
@@ -113,7 +127,7 @@ mod tests {
 
     #[test]
     fn a_journal_written_before_share_ids_still_loads() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_dir();
         let path = dir.path().join("j.json");
         let mut value = serde_json::to_value(sample()).unwrap();
         value.as_object_mut().unwrap().remove("share_id");
@@ -124,7 +138,7 @@ mod tests {
 
     #[test]
     fn save_then_load_round_trips() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_dir();
         let path = dir.path().join("transfers").join("j.json");
         let j = sample();
         j.save(&path).unwrap();
@@ -133,7 +147,7 @@ mod tests {
 
     #[test]
     fn a_missing_corrupt_or_wrong_version_journal_loads_as_none() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_dir();
         assert!(ReceiveJournal::load(&dir.path().join("nope.json")).is_none());
 
         let bad = dir.path().join("bad.json");
@@ -149,14 +163,23 @@ mod tests {
 
     #[test]
     fn saving_replaces_the_previous_journal_without_leaving_a_temp_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = test_dir();
         let path = dir.path().join("j.json");
         let mut j = sample();
         j.save(&path).unwrap();
         j.next_segment = 43;
         j.save(&path).unwrap();
         assert_eq!(ReceiveJournal::load(&path).unwrap().next_segment, 43);
-        assert!(!path.with_extension("json.tmp").exists());
+        let files = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name() != crate::paths::MASTER_KEY.name)
+            .count();
+        assert_eq!(files, 1, "only the journal itself is left");
+        // On disk it is ciphertext.
+        let raw = std::fs::read(&path).unwrap();
+        assert_eq!(&raw[..4], b"MSD1");
+        assert!(!raw.windows(4).any(|w| w == b"mid\""));
     }
 
     #[test]

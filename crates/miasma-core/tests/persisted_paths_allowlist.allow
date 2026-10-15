@@ -18,21 +18,20 @@ miasma-core/src/config.rs | 4 | config.toml and version stamp writers
 miasma-core/src/daemon/control_auth.rs | 3 | daemon.token creation (restricted, create_new)
 miasma-core/src/daemon/ipc.rs | 2 | daemon.port and daemon.http discovery files
 miasma-core/src/daemon/mod.rs | 2 | streaming decrypted retrieval to a caller-chosen output path
-miasma-core/src/daemon/replication.rs | 3 | replication WAL append and compaction
 miasma-core/src/logging/diag.rs | 4 | opt-in diagnostic log files: lg folder, rotation, zero-overwrite of removed files
-miasma-core/src/directed/inbox.rs | 8 | directed envelopes and sidecars below directed/
+miasma-core/src/directed/inbox.rs | 2 | directed/ folders (the envelope and sidecar files themselves are written through state_crypto)
 miasma-core/src/push/service.rs | 4 | push inbox: .part files and final placement
-miasma-core/src/push/state.rs | 3 | push history append and trim
-miasma-core/src/push/store.rs | 3 | contacts.json writer and corrupt-file aside
+miasma-core/src/push/store.rs | 2 | setting an unreadable contacts file aside (contents are written through state_crypto)
 miasma-core/src/secure_file.rs | 6 | restricted-permission write primitives used by the stores
-miasma-core/src/store.rs | 10 | master key, store index, share blobs
-miasma-core/src/transfer/journal.rs | 3 | receive journal
-miasma-core/src/transfer/publish_journal.rs | 3 | publish journal
+miasma-core/src/store.rs | 9 | master key, share blobs (the index is written through state_crypto)
 miasma-core/src/transfer/receive.rs | 6 | resumable receive: .part file and final rename
 miasma-desktop/src/app/tour.rs | 4 | GUI screenshots, only when MIASMA_UI_SNAP is set (dev/QA)
 miasma-desktop/src/app.rs | 6 | user-initiated Save As and diagnostics export
 miasma-desktop/src/link.rs | 3 | instance lock, pending-link hand-off, URL scheme marker
 miasma-desktop/src/main.rs | 1 | data dir creation (log setup lives in miasma-core logging)
-miasma-desktop/src/variant.rs | 1 | desktop-prefs.toml writer
 miasma-desktop/src/worker.rs | 1 | data dir creation on node init
 miasma-ffi/src/lib.rs | 2 | mobile data dir creation and key-file overwrite during wipe
+miasma-core/src/state_crypto/doc.rs | 3 | encrypted single-document writer: temp file, fsync, rename; create-if-absent link
+miasma-core/src/state_crypto/log.rs | 6 | encrypted record log: create, append, cut a torn tail, replace by rename
+miasma-core/src/state_crypto/migrate.rs | 4 | one-time conversion of plaintext state files: lock file, staging, rename, wipe of the plaintext
+miasma-core/src/state_crypto/mod.rs | 5 | master key creation on first use, overwrite-and-remove, set-aside of unreadable files

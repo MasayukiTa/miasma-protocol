@@ -1,11 +1,14 @@
 //! The contact list: `{data_dir}/contacts.json`.
 //!
 //! Default-deny: a node that is not in this list (with `allow_receive`) can
-//! push nothing. The file is rewritten atomically (temp file + rename) with
-//! owner-only permissions where the platform supports it, has a schema
-//! version, ignores fields it does not know, and a corrupt file is moved
-//! aside (never deleted) so the list restarts empty rather than the daemon
-//! refusing to start.
+//! push nothing. The file is encrypted at rest (see `state_crypto`) and
+//! rewritten atomically (temp file + rename), has a schema version, ignores
+//! fields it does not know, and a corrupt file is moved aside (never deleted)
+//! so the list restarts empty rather than the daemon refusing to start.
+//!
+//! When the state key cannot be had (the master key is missing while protected
+//! state exists) the store stays empty and refuses every change, so nothing on
+//! disk is replaced.
 
 use std::{
     path::{Path, PathBuf},
@@ -15,9 +18,10 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use tracing::warn;
+use zeroize::Zeroizing;
 
 use super::contact::{fingerprint, ContactCode};
-use crate::MiasmaError;
+use crate::state_crypto::{self, Label, StateError, StateKeys};
 
 pub const CONTACTS_FILE: &str = crate::paths::CONTACTS.name;
 const SCHEMA_VERSION: u32 = 1;
@@ -93,6 +97,9 @@ pub enum ContactError {
 
 pub struct ContactStore {
     path: PathBuf,
+    /// `None` when the state key is unavailable; the reason is in `locked`.
+    keys: Option<StateKeys>,
+    locked: String,
     inner: RwLock<Vec<Contact>>,
 }
 
@@ -131,20 +138,55 @@ impl ContactStore {
     /// Load `{data_dir}/contacts.json` (or start empty).
     pub fn open(data_dir: &Path) -> Self {
         let path = data_dir.join(CONTACTS_FILE);
-        let contacts = Self::load(&path);
+        let (keys, mut locked) = match StateKeys::open_or_init(data_dir) {
+            Ok(k) => (Some(k), String::new()),
+            Err(e) => {
+                warn!("the contact list stays closed: {e}");
+                (None, e.to_string())
+            }
+        };
+        let contacts = match &keys {
+            Some(k) => match Self::load(&path, k) {
+                Ok(c) => c,
+                Err(reason) => {
+                    locked = reason;
+                    Vec::new()
+                }
+            },
+            None => Vec::new(),
+        };
+        let keys = if locked.is_empty() { keys } else { None };
         Self {
             path,
+            keys,
+            locked,
             inner: RwLock::new(contacts),
         }
     }
 
-    fn load(path: &Path) -> Vec<Contact> {
-        let raw = match std::fs::read(path) {
+    /// `Err` means the file must not be touched (it could not be converted).
+    fn load(path: &Path, keys: &StateKeys) -> Result<Vec<Contact>, String> {
+        if let Err(e) = state_crypto::migrate::migrate_document(keys, Label::Contacts, path) {
+            warn!("could not convert the contact list to the protected format: {e}");
+        }
+        let raw = match state_crypto::read_document(keys, Label::Contacts, path) {
             Ok(r) => r,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
-            Err(e) => {
+            Err(StateError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Vec::new())
+            }
+            Err(StateError::NotProtected) => {
+                return Err("the contact list is still in the old format".into());
+            }
+            Err(StateError::Io(e)) => {
                 warn!("cannot read the contact list: {e}");
-                return Vec::new();
+                return Err(e.to_string());
+            }
+            Err(e) => {
+                // Wrong key, damaged or truncated: keep the file, start empty.
+                let aside = crate::paths::contacts_corrupt_aside(path, now_secs());
+                warn!("the contact list cannot be opened ({e}); it was moved aside");
+                let _ = std::fs::rename(path, aside);
+                return Ok(Vec::new());
             }
         };
         match serde_json::from_slice::<Document>(&raw) {
@@ -157,7 +199,8 @@ impl ContactStore {
                     );
                 }
                 let mut seen = std::collections::HashSet::new();
-                doc.contacts
+                Ok(doc
+                    .contacts
                     .into_iter()
                     .filter(|c| c.endpoint_bytes().is_some() && seen.insert(c.endpoint_id.clone()))
                     .map(|mut c| {
@@ -167,13 +210,13 @@ impl ContactStore {
                         }
                         c
                     })
-                    .collect()
+                    .collect())
             }
             Err(e) => {
                 let aside = crate::paths::contacts_corrupt_aside(path, now_secs());
                 warn!("the contact list is unreadable ({e}); it was moved aside");
                 let _ = std::fs::rename(path, aside);
-                Vec::new()
+                Ok(Vec::new())
             }
         }
     }
@@ -183,13 +226,14 @@ impl ContactStore {
             version: SCHEMA_VERSION,
             contacts: list.to_vec(),
         };
-        let bytes =
-            serde_json::to_vec_pretty(&doc).map_err(|e| ContactError::Save(e.to_string()))?;
-        if let Some(parent) = self.path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        crate::secure_file::atomic_write_restricted(&self.path, &bytes)
-            .map_err(|e: MiasmaError| ContactError::Save(e.to_string()))
+        let Some(keys) = &self.keys else {
+            return Err(ContactError::Save(self.locked.clone()));
+        };
+        let bytes = Zeroizing::new(
+            serde_json::to_vec_pretty(&doc).map_err(|e| ContactError::Save(e.to_string()))?,
+        );
+        state_crypto::write_document(keys, Label::Contacts, &self.path, &bytes)
+            .map_err(|e| ContactError::Save(e.to_string()))
     }
 
     pub fn list(&self) -> Vec<Contact> {
