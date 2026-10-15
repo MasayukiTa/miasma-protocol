@@ -167,6 +167,31 @@ pub fn write_document(
     Ok(())
 }
 
+/// Write a document only if `path` does not exist yet. `Ok(true)` when this
+/// call created it, `Ok(false)` when it was already there (untouched).
+pub fn write_document_new(
+    keys: &StateKeys,
+    label: Label,
+    path: &Path,
+    plaintext: &[u8],
+) -> Result<bool, StateError> {
+    if path.exists() {
+        return Ok(false);
+    }
+    let tmp = stage_document(keys, label, path, plaintext)?;
+    // A hard link fails when the target exists, so a competing writer cannot be replaced.
+    let linked = std::fs::hard_link(&tmp, path);
+    let _ = std::fs::remove_file(&tmp);
+    match linked {
+        Ok(()) => {
+            sync_parent_dir(path);
+            Ok(true)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Write the sealed document for `path` to a durable temp file and return the
 /// temp path (not yet renamed). Callers serialise writers of one file.
 pub(crate) fn stage_document(

@@ -44,7 +44,7 @@ use zeroize::Zeroizing;
 
 use super::{
     doc::{self, context_of},
-    log::{LogReader, LogRewrite, MAX_RECORD},
+    log::{LogReader, LogRewrite},
     overwrite_and_remove, sniff, sync_parent_dir, Label, Sniffed, StateError, StateKeys,
 };
 
@@ -278,11 +278,12 @@ fn document_locked(keys: &StateKeys, label: Label, path: &Path) -> Result<Outcom
 /// Feed every non-blank line of a plaintext JSONL file to `f`. Lines longer
 /// than a record are skipped and counted.
 fn for_each_line(
+    max_record: usize,
     path: &Path,
     skipped: &mut usize,
     mut f: impl FnMut(&[u8]) -> Result<(), StateError>,
 ) -> Result<(), StateError> {
-    let limit = MAX_RECORD as u64 + 2;
+    let limit = max_record as u64 + 2;
     let mut r = BufReader::with_capacity(64 * 1024, File::open(path)?);
     let mut buf: Vec<u8> = Vec::new();
     loop {
@@ -310,7 +311,7 @@ fn for_each_line(
         if buf.iter().all(|b| b.is_ascii_whitespace()) {
             continue;
         }
-        if buf.len() > MAX_RECORD {
+        if buf.len() > max_record {
             *skipped += 1;
             continue;
         }
@@ -347,7 +348,7 @@ fn log_locked(
     let mut rewrite = LogRewrite::begin(keys, label, path, &tmp)?;
     let mut want = blake3::Hasher::new();
     let mut count = 0u64;
-    for_each_line(&source, skipped, |line| {
+    for_each_line(label.max_record_bytes(), &source, skipped, |line| {
         digest_step(&mut want, line);
         count += 1;
         rewrite.append(line)
