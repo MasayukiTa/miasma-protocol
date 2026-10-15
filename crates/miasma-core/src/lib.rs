@@ -27,6 +27,7 @@ pub mod repair;
 pub mod retrieval;
 pub mod secure_file;
 pub mod share;
+pub mod state_crypto;
 pub mod store;
 pub mod transfer;
 pub mod transport;
