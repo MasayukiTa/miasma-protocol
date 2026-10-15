@@ -655,6 +655,10 @@ pub fn nav_tab(ui: &mut Ui, selected: bool, label: &str) -> Response {
     let galley = ui.fonts(|f| f.layout_no_wrap(label.to_owned(), font, color));
     let size = vec2(galley.size().x + 2.0 * SP_3, 34.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    // Screen readers: a selectable item named by its label (which carries any count of new items).
+    resp.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, selected, label)
+    });
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         if resp.hovered() && !selected {

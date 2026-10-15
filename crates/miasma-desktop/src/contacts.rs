@@ -766,6 +766,30 @@ impl ContactsUi {
         std::mem::take(&mut self.notices)
     }
 
+    /// The registered contacts as last read from the service (the Chat area lists them).
+    pub fn contact_list(&self) -> &[ContactInfo] {
+        &self.contacts
+    }
+
+    /// The same file picker and queueing as the "Send files" button of a contact's row, for
+    /// another screen. Returns the names of the files that were queued (none if the dialog was
+    /// cancelled or only folders were picked).
+    pub fn pick_and_send_files(&mut self, c: &ContactStrings, id: &str) -> Vec<String> {
+        if !self.contacts.iter().any(|x| x.id == id) {
+            return Vec::new();
+        }
+        let Some(files) = rfd::FileDialog::new().set_title(c.pick_title).pick_files() else {
+            return Vec::new();
+        };
+        let names: Vec<String> = files
+            .iter()
+            .filter(|p| !p.is_dir())
+            .map(|p| base_name(&p.to_string_lossy()))
+            .collect();
+        self.send_paths(c, id, files);
+        names
+    }
+
     fn has_active(&self) -> bool {
         self.rows.iter().any(|r| !r.finished())
     }

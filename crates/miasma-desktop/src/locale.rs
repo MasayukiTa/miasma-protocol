@@ -2328,6 +2328,288 @@ static CT_ZH_CN: ContactStrings = ContactStrings {
     qr_too_long: "内容太长，无法生成二维码。",
 };
 
+// ─── Chat (one-to-one messages between registered contacts) ─────────────────
+
+/// Declares `ChatStrings` and a field listing for the completeness test from one field list.
+macro_rules! chat_strings {
+    ($($f:ident),* $(,)?) => {
+        /// Strings of the Chat area (`chat.rs`). `{name}`-style holes are filled with
+        /// `transfers::fill`.
+        pub struct ChatStrings { $(pub $f: &'static str),* }
+        impl ChatStrings {
+            /// Every field with its name, for the completeness test.
+            #[cfg(test)]
+            fn all(&self) -> Vec<(&'static str, &'static str)> {
+                vec![$((stringify!($f), self.$f)),*]
+            }
+        }
+    };
+}
+
+chat_strings! {
+    tab, heading, desc, loading, daemon_down, unavailable, old_daemon, retry_now,
+    list_title, list_empty, list_empty_no_contacts, open_contacts, new_chat,
+    pick_title, pick_none, pick_send_off, pick_close,
+    preview_you, preview_file, time_today, time_yesterday, time_date,
+    back, empty_thread, composer_hint, composer_keys, send, send_empty_hint,
+    counter_chars, counter_near, counter_over, too_long_note,
+    state_sending, state_queued, state_delivered, state_failed, retry, queued_note,
+    fail_not_allowed, fail_too_big, fail_rejected, fail_unsupported, fail_contact_removed,
+    fail_send_disabled, fail_expired, fail_session, fail_other,
+    delete_history, delete_title, delete_body, delete_confirm, delete_cancel, delete_done,
+    memory_only, send_file, send_file_hint, send_off_note, loading_older, jump_latest,
+    err_empty, err_too_big, err_outbox_full, err_send_disabled, err_unknown_contact,
+    err_internal, err_other,
+    a11y_conversations, a11y_messages, a11y_composer, a11y_send, a11y_attach, a11y_back,
+    a11y_row, a11y_unread, nav_new, dismiss,
+}
+
+pub fn chat_strings(locale: Locale) -> &'static ChatStrings {
+    match locale {
+        Locale::En => &CH_EN,
+        Locale::Ja => &CH_JA,
+        Locale::ZhCn => &CH_ZH_CN,
+    }
+}
+
+static CH_EN: ChatStrings = ChatStrings {
+    tab: "Chat",
+    heading: "Chat",
+    desc: "Send short text messages to the contacts you have added. To send a file, use \"Send a file\".",
+    loading: "Loading...",
+    daemon_down: "Miasma's background service is not running, so chat is unavailable. Start it with the button at the top of the window.",
+    unavailable: "Chat is not available right now. Check that contacts work, then restart Miasma.",
+    old_daemon: "The background service does not answer chat requests. It is probably an older version. Close Miasma completely and start it again. If that does not help, update both the app and the background service.",
+    retry_now: "Try again",
+    list_title: "Conversations",
+    list_empty: "No conversations yet. Press \"New conversation\", choose a contact and send the first message.",
+    list_empty_no_contacts: "You have no contacts yet. Add a contact on the Contacts tab, and you can send messages here.",
+    open_contacts: "Open Contacts",
+    new_chat: "New conversation",
+    pick_title: "Choose a contact",
+    pick_none: "No contacts yet. Add a contact on the Contacts tab first.",
+    pick_send_off: "Sending to this contact is switched off.",
+    pick_close: "Close",
+    preview_you: "You: {text}",
+    preview_file: "Sent a file: {name}",
+    time_today: "Today {time}",
+    time_yesterday: "Yesterday",
+    time_date: "{m}/{d}",
+    back: "Back to conversations",
+    empty_thread: "No messages yet. Send the first one.",
+    composer_hint: "Type a message",
+    composer_keys: "Enter sends, Shift+Enter starts a new line.",
+    send: "Send",
+    send_empty_hint: "Type a message to send it.",
+    counter_chars: "{n} characters",
+    counter_near: "About {n} characters left",
+    counter_over: "About {n} characters too long",
+    too_long_note: "The message is too long. Shorten it, then send.",
+    state_sending: "Sending",
+    state_queued: "Sent. Waiting for them to receive it.",
+    state_delivered: "Delivered",
+    state_failed: "Could not send",
+    retry: "Send again",
+    queued_note: "It will arrive when the other person is online.",
+    fail_not_allowed: "They have not added you yet. Ask them to add your contact code in their Miasma.",
+    fail_too_big: "The message was too long for the other side.",
+    fail_rejected: "The other side did not accept the message.",
+    fail_unsupported: "The other person's Miasma is too old for chat. Ask them to update it.",
+    fail_contact_removed: "The contact was removed, so the message was not sent.",
+    fail_send_disabled: "Sending to this contact is switched off.",
+    fail_expired: "It could not be delivered in time.",
+    fail_session: "A secure connection could not be set up. Check the contact's verification code with them.",
+    fail_other: "It could not be sent.",
+    delete_history: "Delete this conversation's history",
+    delete_title: "Delete the history of this conversation?",
+    delete_body: "All messages with {name} will be deleted from this device only. This cannot be undone. The other person keeps their own copy.",
+    delete_confirm: "Delete",
+    delete_cancel: "Cancel",
+    delete_done: "Deleted the history with {name}",
+    memory_only: "This device does not keep chat history. Conversations are cleared when you close Miasma.",
+    send_file: "Send a file",
+    send_file_hint: "Pick files to send, as on the Contacts tab. You can follow them there.",
+    send_off_note: "Sending to this contact is switched off, so messages cannot be sent. You can switch it on in Contacts.",
+    loading_older: "Loading older messages...",
+    jump_latest: "Go to the newest messages",
+    err_empty: "Please type a message.",
+    err_too_big: "The message is too long. Shorten it, then send.",
+    err_outbox_full: "Too many messages are waiting to be delivered. Wait until the other person is online.",
+    err_send_disabled: "Sending to this contact is switched off. You can switch it on in Contacts.",
+    err_unknown_contact: "That contact no longer exists.",
+    err_internal: "Something went wrong inside Miasma. Try again. If it keeps happening, check the logs.",
+    err_other: "The request could not be completed. Try again.",
+    a11y_conversations: "Conversations",
+    a11y_messages: "Messages",
+    a11y_composer: "Message input",
+    a11y_send: "Send message",
+    a11y_attach: "Choose a file to send",
+    a11y_back: "Back to conversations",
+    a11y_row: "Conversation with {name}",
+    a11y_unread: "{n} unread",
+    nav_new: "new",
+    dismiss: "Dismiss",
+};
+
+static CH_JA: ChatStrings = ChatStrings {
+    tab: "チャット",
+    heading: "チャット",
+    desc: "登録した連絡先と、短い文字のメッセージをやり取りできます。ファイルは「ファイルを送る」から送れます。",
+    loading: "読み込み中です...",
+    daemon_down: "Miasmaのバックグラウンド機能が止まっているため、チャットを使えません。画面上部のボタンで起動してください。",
+    unavailable: "チャットは、いまは使えない状態です。連絡先が使えるか確認して、Miasmaを再起動してください。",
+    old_daemon: "バックグラウンド機能がチャットに応答しません。古いバージョンかもしれません。Miasmaを完全に終了して、もう一度起動してください。直らないときは、アプリとバックグラウンド機能の両方を最新にしてください。",
+    retry_now: "もう一度試す",
+    list_title: "会話",
+    list_empty: "まだ会話がありません。「新しい会話」を押して相手を選び、最初のメッセージを送ってみましょう。",
+    list_empty_no_contacts: "まだ連絡先がありません。「連絡先」タブで相手を登録すると、ここでメッセージを送れます。",
+    open_contacts: "連絡先を開く",
+    new_chat: "新しい会話",
+    pick_title: "会話する相手を選ぶ",
+    pick_none: "登録した連絡先がありません。先に「連絡先」タブで相手を登録してください。",
+    pick_send_off: "この人には送らない設定です。",
+    pick_close: "閉じる",
+    preview_you: "あなた: {text}",
+    preview_file: "ファイルを送りました: {name}",
+    time_today: "今日 {time}",
+    time_yesterday: "昨日",
+    time_date: "{m}月{d}日",
+    back: "会話一覧に戻る",
+    empty_thread: "まだメッセージはありません。最初のひとことを送ってみましょう。",
+    composer_hint: "メッセージを入力",
+    composer_keys: "Enterで送信、Shift+Enterで改行します。",
+    send: "送信",
+    send_empty_hint: "メッセージを入力すると送信できます。",
+    counter_chars: "{n} 文字",
+    counter_near: "あと約 {n} 文字",
+    counter_over: "約 {n} 文字、長すぎます",
+    too_long_note: "メッセージが長すぎます。短くしてから送ってください。",
+    state_sending: "送信中",
+    state_queued: "送信済み（相手に届くのを待っています）",
+    state_delivered: "届きました",
+    state_failed: "送信に失敗しました",
+    retry: "もう一度送る",
+    queued_note: "相手がオンラインになると届きます。",
+    fail_not_allowed: "相手はまだあなたを登録していません。相手のMiasmaで、あなたの連絡先コードを追加してもらってください。",
+    fail_too_big: "メッセージが長すぎて、相手が受け取れませんでした。",
+    fail_rejected: "相手がメッセージを受け付けませんでした。",
+    fail_unsupported: "相手のMiasmaが古く、チャットに対応していません。更新してもらってください。",
+    fail_contact_removed: "連絡先を削除したため、送れませんでした。",
+    fail_send_disabled: "この人には送らない設定のため、送れませんでした。",
+    fail_expired: "届けられないまま、時間が過ぎました。",
+    fail_session: "安全な接続を作れませんでした。相手と確認用コードを見比べてください。",
+    fail_other: "送れませんでした。",
+    delete_history: "この会話の履歴を削除",
+    delete_title: "この会話の履歴を削除しますか？",
+    delete_body: "{name} との会話の履歴を、この端末からすべて削除します。元に戻せません。相手の端末の履歴は消えません。",
+    delete_confirm: "削除する",
+    delete_cancel: "キャンセル",
+    delete_done: "{name} との会話の履歴を削除しました",
+    memory_only: "この端末には履歴を残しません。Miasmaを閉じると会話は消えます。",
+    send_file: "ファイルを送る",
+    send_file_hint: "連絡先タブと同じように、ファイルを選んで送れます。送った結果は連絡先タブで見られます。",
+    send_off_note: "この人には送らない設定のため、メッセージを送れません。「連絡先」タブでオンにできます。",
+    loading_older: "古いメッセージを読み込んでいます...",
+    jump_latest: "最新のメッセージへ",
+    err_empty: "メッセージを入力してください。",
+    err_too_big: "メッセージが長すぎます。短くしてから送ってください。",
+    err_outbox_full: "送信待ちのメッセージが多すぎます。相手がオンラインになるまでお待ちください。",
+    err_send_disabled: "この人には送らない設定です。「連絡先」タブでオンにしてください。",
+    err_unknown_contact: "その連絡先は、もうありません。",
+    err_internal: "Miasmaの内部で問題が起きました。もう一度試してください。直らないときは、ログを確認してください。",
+    err_other: "処理を完了できませんでした。もう一度試してください。",
+    a11y_conversations: "会話の一覧",
+    a11y_messages: "メッセージの一覧",
+    a11y_composer: "メッセージを入力",
+    a11y_send: "メッセージを送信",
+    a11y_attach: "ファイルを選んで送る",
+    a11y_back: "会話一覧に戻る",
+    a11y_row: "{name} との会話",
+    a11y_unread: "{n}件の未読",
+    nav_new: "新着",
+    dismiss: "閉じる",
+};
+
+// zh-CN: a first translation; to be reviewed by a native speaker before it is called finished.
+static CH_ZH_CN: ChatStrings = ChatStrings {
+    tab: "聊天",
+    heading: "聊天",
+    desc: "可以与已添加的联系人互发简短的文字消息。发送文件请使用“发送文件”。",
+    loading: "加载中...",
+    daemon_down: "Miasma 的后台服务未运行，无法使用聊天。请点击窗口顶部的按钮启动。",
+    unavailable: "聊天目前不可用。请确认联系人功能正常，然后重启 Miasma。",
+    old_daemon: "后台服务不响应聊天请求，可能是旧版本。请完全退出 Miasma 后重新启动。若仍不行，请将应用和后台服务都更新到最新版本。",
+    retry_now: "重试",
+    list_title: "会话",
+    list_empty: "还没有会话。点击“新会话”，选择联系人并发送第一条消息。",
+    list_empty_no_contacts: "还没有联系人。在“联系人”页添加联系人后，即可在这里发消息。",
+    open_contacts: "打开联系人",
+    new_chat: "新会话",
+    pick_title: "选择联系人",
+    pick_none: "还没有联系人。请先在“联系人”页添加。",
+    pick_send_off: "已关闭向此联系人发送。",
+    pick_close: "关闭",
+    preview_you: "你: {text}",
+    preview_file: "已发送文件：{name}",
+    time_today: "今天 {time}",
+    time_yesterday: "昨天",
+    time_date: "{m}月{d}日",
+    back: "返回会话列表",
+    empty_thread: "还没有消息。发送第一条吧。",
+    composer_hint: "输入消息",
+    composer_keys: "按 Enter 发送，按 Shift+Enter 换行。",
+    send: "发送",
+    send_empty_hint: "输入消息后即可发送。",
+    counter_chars: "{n} 个字",
+    counter_near: "还可输入约 {n} 个字",
+    counter_over: "约超出 {n} 个字",
+    too_long_note: "消息太长。请缩短后再发送。",
+    state_sending: "发送中",
+    state_queued: "已发送（等待对方接收）",
+    state_delivered: "已送达",
+    state_failed: "发送失败",
+    retry: "重新发送",
+    queued_note: "对方上线后即可收到。",
+    fail_not_allowed: "对方还没有添加你。请让对方在其 Miasma 中添加你的联系人码。",
+    fail_too_big: "消息太长，对方无法接收。",
+    fail_rejected: "对方没有接受这条消息。",
+    fail_unsupported: "对方的 Miasma 版本过旧，不支持聊天。请让对方更新。",
+    fail_contact_removed: "联系人已删除，消息未发送。",
+    fail_send_disabled: "已关闭向此联系人发送，消息未发送。",
+    fail_expired: "一直未能送达，已超时。",
+    fail_session: "无法建立安全连接。请与对方核对确认用码。",
+    fail_other: "无法发送。",
+    delete_history: "删除此会话的记录",
+    delete_title: "删除此会话的记录？",
+    delete_body: "将从本设备删除与 {name} 的全部消息。无法恢复。对方设备上的记录仍会保留。",
+    delete_confirm: "删除",
+    delete_cancel: "取消",
+    delete_done: "已删除与 {name} 的记录",
+    memory_only: "本设备不保存聊天记录。关闭 Miasma 后会话将被清除。",
+    send_file: "发送文件",
+    send_file_hint: "与联系人页相同，可选择文件发送，并可在联系人页查看进度。",
+    send_off_note: "已关闭向此联系人发送，无法发消息。可在“联系人”页重新开启。",
+    loading_older: "正在加载更早的消息...",
+    jump_latest: "回到最新消息",
+    err_empty: "请输入消息内容。",
+    err_too_big: "消息太长。请缩短后再发送。",
+    err_outbox_full: "待发送的消息过多。请等对方上线后再试。",
+    err_send_disabled: "已关闭向此联系人发送。可在“联系人”页重新开启。",
+    err_unknown_contact: "该联系人已不存在。",
+    err_internal: "Miasma 内部出现问题。请重试；若仍然如此，请查看日志。",
+    err_other: "无法完成操作，请重试。",
+    a11y_conversations: "会话列表",
+    a11y_messages: "消息列表",
+    a11y_composer: "消息输入框",
+    a11y_send: "发送消息",
+    a11y_attach: "选择要发送的文件",
+    a11y_back: "返回会话列表",
+    a11y_row: "与 {name} 的会话",
+    a11y_unread: "{n} 条未读",
+    nav_new: "新消息",
+    dismiss: "关闭",
+};
+
 // ─── Logs (memory-only logging, opt-in diagnostic logging) ──────────────────
 
 /// Declares `LogStrings` and a field listing for the completeness test from one field list.
@@ -2470,6 +2752,72 @@ mod tests {
                     "{lang:?} contacts.{name} is empty"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn every_chat_string_exists_in_every_locale() {
+        for lang in Locale::ALL {
+            for (name, value) in chat_strings(lang).all() {
+                assert!(!value.trim().is_empty(), "{lang:?} chat.{name} is empty");
+            }
+        }
+    }
+
+    #[test]
+    fn japanese_chat_texts_use_the_words_of_the_contacts_tab() {
+        let ja = chat_strings(Locale::Ja);
+        for (name, value) in ja.all() {
+            for bad in [
+                "指紋",
+                "カード",
+                "デーモン",
+                "iroh",
+                "フィンガープリント",
+                "ratchet",
+                "mailbox",
+                "DHT",
+            ] {
+                assert!(!value.contains(bad), "ja chat.{name} says {bad}");
+            }
+        }
+        // The same words as the Contacts tab for the same things.
+        let ct = contact_strings(Locale::Ja);
+        assert_eq!(ja.send_file, ct.send_files);
+        assert!(ja.daemon_down.contains("バックグラウンド機能"));
+        assert!(ja.fail_session.contains("確認用コード"));
+        assert!(ja.fail_not_allowed.contains("連絡先コード"));
+        // The states the owner asked for, word for word.
+        assert_eq!(ja.state_sending, "送信中");
+        assert_eq!(ja.state_queued, "送信済み（相手に届くのを待っています）");
+        assert_eq!(ja.state_delivered, "届きました");
+        assert_eq!(ja.state_failed, "送信に失敗しました");
+        assert_eq!(ja.retry, "もう一度送る");
+        assert_eq!(
+            ja.memory_only.split('。').next(),
+            Some("この端末には履歴を残しません")
+        );
+        assert_eq!(ja.time_yesterday, "昨日");
+    }
+
+    #[test]
+    fn chat_placeholders_survive_translation() {
+        for lang in Locale::ALL {
+            let c = chat_strings(lang);
+            assert!(c.preview_you.contains("{text}"), "{lang:?}");
+            assert!(c.preview_file.contains("{name}"), "{lang:?}");
+            assert!(c.time_today.contains("{time}"), "{lang:?}");
+            assert!(
+                c.time_date.contains("{m}") && c.time_date.contains("{d}"),
+                "{lang:?}"
+            );
+            assert!(c.delete_body.contains("{name}"), "{lang:?}");
+            assert!(c.delete_done.contains("{name}"), "{lang:?}");
+            assert!(c.a11y_row.contains("{name}"), "{lang:?}");
+            assert!(c.a11y_unread.contains("{n}"), "{lang:?}");
+            assert!(c.counter_chars.contains("{n}"), "{lang:?}");
+            assert!(c.counter_near.contains("{n}"), "{lang:?}");
+            assert!(c.counter_over.contains("{n}"), "{lang:?}");
         }
     }
 
