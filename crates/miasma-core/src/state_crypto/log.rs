@@ -256,7 +256,10 @@ impl LogReader {
                 }
                 Ok(Some(plain))
             }
-            Err(_) if end == self.file_len => Ok(self.tear()),
+            // A final record that fails is a torn write only when an earlier
+            // record of this file opened: that proves the key is the right one.
+            // Otherwise it may be a wrong key, and nothing is cut away.
+            Err(_) if end == self.file_len && self.seq > 0 => Ok(self.tear()),
             Err(e) => self.fail(e),
         }
     }
@@ -372,6 +375,7 @@ impl LogWriter {
         let mut offset = LOG_HEADER_LEN as u64;
         let mut count = 0u64;
         let mut last: Option<(u64, usize)> = None;
+        let mut prev: Option<(u64, usize)> = None;
         loop {
             let remaining = file_len - offset;
             if remaining == 0 || remaining < 4 {
@@ -389,6 +393,7 @@ impl LogWriter {
             if (4 + body_len) as u64 > remaining {
                 break;
             }
+            prev = last;
             last = Some((offset, body_len));
             count += 1;
             offset += 4 + body_len as u64;
@@ -399,7 +404,18 @@ impl LogWriter {
             let mut body = Zeroizing::new(vec![0u8; body_len]);
             r.read_exact(&mut body)?;
             if core.open_body(count - 1, &mut body).is_err() {
-                // The final record was not written completely.
+                // Cut the final record away only if it was not written
+                // completely, which an earlier record opening proves: with the
+                // wrong key nothing opens, and then nothing may be cut.
+                let Some((poff, plen)) = prev else {
+                    return Err(StateError::Authentication);
+                };
+                r.seek(SeekFrom::Start(poff + 4))?;
+                let mut pbody = Zeroizing::new(vec![0u8; plen]);
+                r.read_exact(&mut pbody)?;
+                if core.open_body(count - 2, &mut pbody).is_err() {
+                    return Err(StateError::Authentication);
+                }
                 return Ok(Scan {
                     count: count - 1,
                     valid_len: off,
@@ -697,6 +713,32 @@ mod tests {
         // body (only the tail is verified); the reader still reports it.
         let (res,) = (read_all(&k, Label::PushHistory, &p),);
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn a_single_unreadable_record_is_never_cut_away() {
+        // With one record there is no proof that the key is right, so a record
+        // that does not open (wrong key, damage) is kept, not treated as torn.
+        let k = keys(3);
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("h.log");
+        write_n(&k, Label::PushHistory, &p, 1);
+        let right = std::fs::read(&p).unwrap();
+        assert!(matches!(
+            read_all(&keys(4), Label::PushHistory, &p),
+            Err(StateError::Authentication)
+        ));
+        assert!(matches!(
+            LogWriter::open_append(&keys(4), Label::PushHistory, &p),
+            Err(StateError::Authentication)
+        ));
+        assert_eq!(std::fs::read(&p).unwrap(), right, "file untouched");
+        // A log of several records under the wrong key fails as well, and also
+        // stays as it is.
+        write_n(&k, Label::PushHistory, &p, 3);
+        let three = std::fs::read(&p).unwrap();
+        assert!(LogWriter::open_append(&keys(4), Label::PushHistory, &p).is_err());
+        assert_eq!(std::fs::read(&p).unwrap(), three);
     }
 
     #[test]
