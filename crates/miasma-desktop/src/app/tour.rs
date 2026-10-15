@@ -561,6 +561,10 @@ impl Tour {
                     app.contacts = ui;
                 }
             }
+            if step.chat.is_some() {
+                // The old-log-files question is not what these screenshots are about.
+                app.logs.legacy = None;
+            }
             if let Some(fx) = step.chat {
                 if let Some((w, h)) = step.size {
                     ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));

@@ -389,6 +389,7 @@ impl Unread {
         self.per_peer.get(peer).copied().unwrap_or(0)
     }
 
+    #[cfg(test)]
     pub fn total(&self) -> u32 {
         self.per_peer
             .values()
@@ -439,10 +440,12 @@ impl MessageWindow {
         &self.items
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.items.len()
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
@@ -1171,7 +1174,7 @@ mod tests {
         assert_eq!(near.approx_left, (4096 - 3900) / 3);
         let over = counter(&"あ".repeat(1400), 4096);
         assert_eq!(over.level, CounterLevel::Over);
-        assert_eq!(over.approx_over, (4200 - 4096 + 2) / 3);
+        assert_eq!(over.approx_over, (4200usize - 4096).div_ceil(3));
         // ASCII counts one byte each.
         assert_eq!(counter(&"a".repeat(4096), 4096).level, CounterLevel::Near);
         assert_eq!(counter(&"a".repeat(4097), 4096).level, CounterLevel::Over);
