@@ -144,32 +144,18 @@ fn read_array<const N: usize, R: Read>(r: &mut R) -> std::io::Result<[u8; N]> {
         .map_err(|_| std::io::ErrorKind::UnexpectedEof.into())
 }
 
-/// A sink that only records whether it was ever given a non-zero byte.
-struct ZeroCheck {
-    all_zero: bool,
-}
-
-impl Write for ZeroCheck {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        if buf.iter().any(|b| *b != 0) {
-            self.all_zero = false;
-        }
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 /// True when the next `count` bytes of `r` are all zero. (Only inspects file
 /// layout; nothing here is key material.)
-fn rest_is_zero<R: Read>(r: &mut R, count: u64) -> std::io::Result<bool> {
-    let mut sink = ZeroCheck { all_zero: true };
-    let copied = std::io::copy(&mut r.by_ref().take(count), &mut sink)?;
-    if copied < count {
-        return Err(std::io::ErrorKind::UnexpectedEof.into());
+fn rest_is_zero<R: Read>(r: &mut R, mut count: u64) -> std::io::Result<bool> {
+    while count > 0 {
+        let n = count.min(4096);
+        let chunk = read_vec(r, n as usize)?;
+        if chunk.iter().any(|b| *b != 0) {
+            return Ok(false);
+        }
+        count -= n;
     }
-    Ok(sink.all_zero)
+    Ok(true)
 }
 
 // ─── Reader ─────────────────────────────────────────────────────────────────
