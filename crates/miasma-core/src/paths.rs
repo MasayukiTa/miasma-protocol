@@ -874,9 +874,9 @@ pub fn os_temp_dir() -> PathBuf {
 pub fn retrieve_tmp_for_envelope(envelope_id: &str) -> PathBuf {
     os_temp_dir().join(format!("miasma-retrieve-{envelope_id}.tmp"))
 }
-/// `<temp>/miasma-retrieve-<pid>-<nonce>.tmp`
-pub fn retrieve_tmp_unique(pid: u32, nonce: u128) -> PathBuf {
-    os_temp_dir().join(format!("miasma-retrieve-{pid}-{nonce}.tmp"))
+/// `<temp>/miasma-retrieve-<pid>-<stamp>.tmp`
+pub fn retrieve_tmp_unique(pid: u32, stamp: u128) -> PathBuf {
+    os_temp_dir().join(format!("miasma-retrieve-{pid}-{stamp}.tmp"))
 }
 
 /// File name of the receive journal for a content id already rendered in base58.
