@@ -209,7 +209,10 @@ pub async fn dissolve_torrent_file(
 
     let store = Arc::new(LocalShareStore::open(data_dir, quota_mb).context("open share store")?);
 
-    info!("Dissolving {} via librqbit", torrent_path.display());
+    info!(
+        "Dissolving {} via librqbit",
+        miasma_core::logging::redact::path(torrent_path)
+    );
 
     let session = MiasmaSession::new(torrent_config_for(data_dir, opts))
         .await
@@ -274,7 +277,11 @@ async fn dissolve_downloaded_files(
     let mut mids = Vec::new();
 
     for file in &result.files {
-        info!("  Dissolving {} ({} bytes)…", file.path, file.size);
+        info!(
+            "  Dissolving {} ({} bytes)…",
+            miasma_core::logging::redact::name(&file.path),
+            file.size
+        );
         let data = tokio::fs::read(&file.disk_path)
             .await
             .with_context(|| format!("read downloaded file {}", file.disk_path.display()))?;
@@ -285,10 +292,13 @@ async fn dissolve_downloaded_files(
                 for share in &shares {
                     store.put(share).context("store share")?;
                 }
-                info!("    -> {mid_str}");
+                debug!("    -> {mid_str}");
                 mids.push(mid_str);
             }
-            Err(e) => warn!("Dissolution failed for {}: {e}", file.path),
+            Err(e) => warn!(
+                "Dissolution failed for {}: {e}",
+                miasma_core::logging::redact::name(&file.path)
+            ),
         }
     }
 
@@ -1573,7 +1583,7 @@ pub async fn watch_and_dissolve(
 
     info!(
         "Bridge daemon watching {} for new files…",
-        watch_dir.display()
+        miasma_core::logging::redact::path(watch_dir)
     );
     let mut seen = seed_seen_files(watch_dir)?;
 
@@ -1588,15 +1598,18 @@ pub async fn watch_and_dissolve(
                             let _ = store.put(share);
                         }
                         archive_imported_file(watch_dir, &path)?;
-                        info!(
-                            "Dissolved {} → {}",
-                            path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
-                            mid.to_string()
-                        );
+                        info!("Dissolved a file from the inbox");
+                        debug!("Dissolved -> {}", mid.to_string());
                     }
-                    Err(e) => warn!("Dissolution failed for {}: {e}", path.display()),
+                    Err(e) => warn!(
+                        "Dissolution failed for {}: {e}",
+                        miasma_core::logging::redact::path(&path)
+                    ),
                 },
-                Err(e) => warn!("Read failed for {}: {e}", path.display()),
+                Err(e) => warn!(
+                    "Read failed for {}: {e}",
+                    miasma_core::logging::redact::path(&path)
+                ),
             }
         }
         sleep(Duration::from_secs(10)).await;

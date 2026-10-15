@@ -123,7 +123,7 @@ If you want Node A to be a long-running daemon **separate** from the publish ste
 # Terminal 1: start daemon, observe bootstrap addr in output
 miasma --data-dir /tmp/miasma-a init
 miasma --data-dir /tmp/miasma-a daemon
-# prints: Peer ID + Bootstrap addresses
+# prints one line; `miasma status` shows the Peer ID + Bootstrap addresses
 
 # Terminal 1 (second shell): dissolve and start serving
 #   Currently: use network-publish (combines dissolve + DHT publish + serve)
@@ -136,6 +136,48 @@ immediately serve a specific file.
 
 
 ---
+
+## Logs: memory only by default
+
+Miasma does not write log files by default (stealth mode, `privacy.stealth_mode`
+= true, also after an upgrade). The daemon, the desktop app and the bridge keep
+their log lines in a memory buffer of 2 MiB each (1-8 MiB with
+`privacy.log_buffer_mib`; one line is cut at 512 bytes and the oldest lines are
+dropped when it is full). Library code prints nothing to the console, and a panic
+leaves one fixed line in the buffer instead of a message or backtrace.
+
+```sh
+miasma logs                 # newest 200 lines of the running daemon
+miasma logs --lines 1000 --follow
+miasma status               # shows whether logs go to memory only or to files
+```
+
+The desktop app shows the same buffers under Settings > Logs, with a **Copy**
+button (clipboard only; nothing is exported to a file).
+
+To troubleshoot with files, turn on diagnostic logging in Settings > Logs or with
+`miasma config --key privacy.diagnostic_logging --value true`. Files are
+written to the `lg` folder of the data directory (neutral names, no dates, 5
+files of 2 MiB per program, file names, paths, contacts and addresses
+shortened or removed). The desktop app shows a warning while this is on, and so does
+`miasma status`. Turning it off deletes the files (overwritten with zeros first).
+With `privacy.stealth_mode = false` (or `MIASMA_STEALTH=0` for one run) log lines
+also go to the console and the log files are written as in earlier versions.
+
+**Old log files** (`daemon.log.*`, `desktop.log.*`, `bridge.log.*` and, on
+Windows, console-output files of the old test scripts in the per-user
+application folder) are no longer written. After an upgrade the desktop app
+asks once whether to delete them now (default) or keep them. A daemon without a
+window prints one line on its first start and removes the files on a later start;
+set `MIASMA_KEEP_OLD_LOGS=1` or run `miasma logs --keep-old` to keep them, or
+`miasma logs --delete-old` to remove them at once.
+
+What this cannot do: Windows Error Reporting and the operating system's own
+crash-dump settings (core dumps, `systemd-coredump`, crash reporters) are
+machine-wide policy. Miasma turns off the error dialog and core dumps for its own
+processes where the system allows it, but dumps written earlier, the page file and
+hibernation files, and records the operating system keeps about any program that
+ran (Prefetch, event logs, endpoint-security tools) are outside its control.
 
 ## Push files to a registered contact (no Share ID, no password)
 

@@ -9,7 +9,7 @@ use eframe::egui::{self, RichText};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::contacts::ContactsUi;
-use crate::locale::{self, Locale, Strings, TransferStrings};
+use crate::locale::{self, Locale, LogStrings, Strings, TransferStrings};
 use crate::theme::{self, Palette, ThemeMode};
 use crate::transfers::TransfersUi;
 use crate::ui_kit::{self as kit, Level};
@@ -134,6 +134,104 @@ pub struct MiasmaApp {
     startup_time: std::time::Instant,
     last_status_poll: std::time::Instant,
     launch_attempts: u32,
+
+    // Logs (memory-only by default; opt-in diagnostic files)
+    logs: LogsState,
+}
+
+/// Why the background service's log lines are not shown.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DaemonLogsNote {
+    Unsupported,
+    Unavailable,
+}
+
+/// State of the Logs section, the diagnostic-logging banner and the old-log-files notice.
+struct LogsState {
+    /// The "Show logs" area is open.
+    open: bool,
+    /// Lines of the background service's buffer, from the last fetch (at most 500).
+    daemon_lines: Vec<String>,
+    /// Set when the last fetch could not return lines.
+    daemon_note: Option<DaemonLogsNote>,
+    /// Lines of this program's own buffer (at most 500).
+    local_lines: Vec<String>,
+    /// Switch state: `privacy.diagnostic_logging`.
+    diagnostic_on: bool,
+    /// Log files are being written (diagnostic logging on, or stealth mode off): the banner.
+    writes_files: bool,
+    /// Old log files found at startup, until the person answers.
+    legacy: Option<miasma_core::logging::legacy::LegacyLogs>,
+    /// The notice has been shown (recorded once).
+    legacy_noted: bool,
+}
+
+/// Most lines shown from each buffer.
+const LOG_VIEW_LINES: usize = 500;
+/// Most bytes read from this program's own buffer.
+const LOG_VIEW_BYTES: usize = 256 * 1024;
+
+impl LogsState {
+    fn new(data_dir: &std::path::Path) -> Self {
+        let privacy = miasma_core::logging::load_privacy(data_dir);
+        Self {
+            open: false,
+            daemon_lines: Vec::new(),
+            daemon_note: None,
+            local_lines: Vec::new(),
+            diagnostic_on: privacy.diagnostic_logging,
+            writes_files: privacy.writes_log_files(),
+            // One scan at startup; it is cheap.
+            legacy: miasma_core::logging::legacy::pending(data_dir),
+            legacy_noted: false,
+        }
+    }
+
+    /// Re-read this program's own buffer.
+    fn refresh_local(&mut self) {
+        self.local_lines = miasma_core::logging::global()
+            .map(|l| l.read(None, LOG_VIEW_LINES, LOG_VIEW_BYTES).lines)
+            .unwrap_or_default();
+    }
+
+    /// The text shown in the log area, also what "Copy" puts on the clipboard.
+    fn shown_text(&self, l: &locale::LogStrings) -> String {
+        fn last(lines: &[String]) -> &[String] {
+            &lines[lines.len().saturating_sub(LOG_VIEW_LINES)..]
+        }
+        let mut out = String::new();
+        out.push_str(&format!("[{}]\n", l.daemon_title));
+        match self.daemon_note {
+            Some(DaemonLogsNote::Unsupported) => {
+                out.push_str(l.unsupported);
+                out.push('\n');
+            }
+            Some(DaemonLogsNote::Unavailable) => {
+                out.push_str(l.unavailable);
+                out.push('\n');
+            }
+            None => {
+                if self.daemon_lines.is_empty() {
+                    out.push_str(l.empty);
+                    out.push('\n');
+                }
+                for line in last(&self.daemon_lines) {
+                    out.push_str(line);
+                    out.push('\n');
+                }
+            }
+        }
+        out.push_str(&format!("\n[{}]\n", l.desktop_title));
+        if self.local_lines.is_empty() {
+            out.push_str(l.empty);
+            out.push('\n');
+        }
+        for line in last(&self.local_lines) {
+            out.push_str(line);
+            out.push('\n');
+        }
+        out
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -237,6 +335,7 @@ impl MiasmaApp {
             startup_time: now,
             last_status_poll: now,
             launch_attempts: 0,
+            logs: LogsState::new(&data_dir),
 
             transfers: TransfersUi::default(),
             contacts: ContactsUi::default(),
@@ -279,6 +378,11 @@ impl MiasmaApp {
     /// Current locale string table.
     fn s(&self) -> &'static Strings {
         locale::strings(self.locale)
+    }
+
+    /// Logs section string table.
+    fn lg(&self) -> &'static LogStrings {
+        locale::log_strings(self.locale)
     }
 
     /// Transfers screen string table.
@@ -530,6 +634,47 @@ impl MiasmaApp {
                 }
                 WorkerResult::TransferError(e) => {
                     self.transfers.on_error(e);
+                }
+                WorkerResult::Logs { daemon_lines, .. } => {
+                    self.logs.daemon_lines = daemon_lines;
+                    self.logs.daemon_note = None;
+                    self.logs.refresh_local();
+                }
+                WorkerResult::LogsUnsupported => {
+                    self.logs.daemon_lines.clear();
+                    self.logs.daemon_note = Some(DaemonLogsNote::Unsupported);
+                    self.logs.refresh_local();
+                }
+                WorkerResult::LogsUnavailable => {
+                    self.logs.daemon_lines.clear();
+                    self.logs.daemon_note = Some(DaemonLogsNote::Unavailable);
+                    self.logs.refresh_local();
+                }
+                WorkerResult::DiagnosticSet { enabled, ok } => {
+                    // The configuration is the source of truth for both the switch and the banner.
+                    let privacy = miasma_core::logging::load_privacy(&self.data_dir);
+                    self.logs.diagnostic_on = privacy.diagnostic_logging;
+                    self.logs.writes_files = privacy.writes_log_files();
+                    if !ok || privacy.diagnostic_logging != enabled {
+                        self.set_msg(MsgKind::Error, self.lg().diag_save_failed);
+                    }
+                }
+                WorkerResult::LegacyLogsDone {
+                    removed,
+                    failed,
+                    kept,
+                } => {
+                    self.logs.legacy = None;
+                    if !kept {
+                        let l = self.lg();
+                        if failed > 0 {
+                            let msg = l.legacy_failed.replace("{n}", &failed.to_string());
+                            self.set_msg(MsgKind::Error, msg);
+                        } else {
+                            let msg = l.legacy_deleted.replace("{n}", &removed.to_string());
+                            self.set_msg(MsgKind::Success, msg);
+                        }
+                    }
                 }
                 WorkerResult::Err(e) => {
                     self.busy = false;
@@ -1618,10 +1763,12 @@ impl MiasmaApp {
                         s.settings_config_file,
                         &format!("{}{sep}config.toml", &self.data_dir_display),
                     );
-                    g.mono(
-                        s.settings_log,
-                        &format!("{}{sep}desktop.log.*", &self.data_dir_display),
-                    );
+                    let log_where = if self.logs.writes_files {
+                        format!("{}{sep}lg", &self.data_dir_display)
+                    } else {
+                        self.lg().memory_only.to_owned()
+                    };
+                    g.mono(s.settings_log, &log_where);
                     if let Ok(exe) = std::env::current_exe() {
                         if let Some(dir) = exe.parent() {
                             g.mono(s.settings_install, &dir.to_string_lossy());
@@ -1629,6 +1776,9 @@ impl MiasmaApp {
                     }
                 });
             });
+
+            // ── Logs ─────────────────────────────────────────────────
+            self.logs_section(ui);
 
             // ── How it works ─────────────────────────────────────────
             kit::section(ui, s.settings_how, |ui| {
@@ -1680,6 +1830,102 @@ impl MiasmaApp {
                 &format!("Miasma{variant_label} v{}", env!("CARGO_PKG_VERSION")),
             );
         });
+    }
+
+    // ── Logs section (Settings) ───────────────────────────────────────────
+
+    fn logs_section(&mut self, ui: &mut egui::Ui) {
+        let l = self.lg();
+        kit::section(ui, l.heading, |ui| {
+            // Opt-in diagnostic logging.
+            let mut on = self.logs.diagnostic_on;
+            if ui.checkbox(&mut on, l.diag_label).changed() {
+                self.logs.diagnostic_on = on;
+                let _ = self.worker.tx.try_send(WorkerCmd::SetDiagnostic(on));
+            }
+            kit::paragraph_muted(ui, l.diag_warning);
+            ui.add_space(kit::SP_2);
+
+            // The in-memory buffers.
+            kit::button_row(ui, |ui| {
+                let toggle = if self.logs.open {
+                    l.hide_logs
+                } else {
+                    l.show_logs
+                };
+                if ui.add(kit::secondary_button(toggle)).clicked() {
+                    self.logs.open = !self.logs.open;
+                    if self.logs.open {
+                        self.logs.refresh_local();
+                        let _ = self.worker.tx.try_send(WorkerCmd::LogsFetch);
+                    }
+                }
+            });
+            if !self.logs.open {
+                return;
+            }
+            kit::hint(ui, l.memory_note);
+            let text = self.logs.shown_text(l);
+            egui::ScrollArea::vertical()
+                .id_source("settings_logs_view")
+                .max_height(280.0)
+                .auto_shrink([false, true])
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    ui.add(egui::Label::new(RichText::new(&text).monospace()));
+                });
+            kit::button_row(ui, |ui| {
+                if ui.add(kit::secondary_button(l.refresh)).clicked() {
+                    self.logs.refresh_local();
+                    let _ = self.worker.tx.try_send(WorkerCmd::LogsFetch);
+                }
+                if ui.add(kit::secondary_button(l.copy)).clicked() {
+                    // Clipboard only: logs are never exported to a file.
+                    ui.output_mut(|o| o.copied_text = text.clone());
+                    self.set_msg(MsgKind::Info, l.copied);
+                }
+                if ui.add(kit::secondary_button(l.clear)).clicked() {
+                    self.logs.daemon_lines.clear();
+                    self.logs.local_lines.clear();
+                    let _ = self.worker.tx.try_send(WorkerCmd::LogsClear);
+                }
+            });
+        });
+    }
+
+    /// The old-log-files notice: a window until the person chooses.
+    fn legacy_logs_notice(&mut self, ctx: &egui::Context) {
+        if self.logs.legacy.is_none() {
+            return;
+        }
+        if !self.logs.legacy_noted {
+            self.logs.legacy_noted = true;
+            miasma_core::logging::legacy::record_notice_shown(&self.data_dir);
+        }
+        let l = self.lg();
+        egui::Window::new(l.legacy_title)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.set_max_width(420.0);
+                kit::paragraph(ui, l.legacy_body);
+                ui.add_space(kit::SP_1);
+                kit::button_row(ui, |ui| {
+                    if ui.add(kit::primary_button(l.legacy_delete)).clicked() {
+                        let _ = self
+                            .worker
+                            .tx
+                            .try_send(WorkerCmd::LegacyLogs { delete: true });
+                    }
+                    if ui.add(kit::secondary_button(l.legacy_keep)).clicked() {
+                        let _ = self
+                            .worker
+                            .tx
+                            .try_send(WorkerCmd::LegacyLogs { delete: false });
+                    }
+                });
+            });
     }
 
     // ── Import panel (magnet / .torrent) ──────────────────────────────────
@@ -1854,16 +2100,16 @@ impl MiasmaApp {
         d.push_str(&format!("Install type:    {}\n", install_type));
 
         d.push_str(&format!("Data directory:  {}\n", self.data_dir_display));
-        d.push_str(&format!(
-            "Desktop log:     {}{}desktop.log.*\n",
-            self.data_dir_display,
-            std::path::MAIN_SEPARATOR
-        ));
-        d.push_str(&format!(
-            "Daemon log:      {}{}daemon.log.*\n",
-            self.data_dir_display,
-            std::path::MAIN_SEPARATOR
-        ));
+        // Log lines are never part of the diagnostics.
+        if self.logs.writes_files {
+            d.push_str(&format!(
+                "Logs:            diagnostic logging is ON; files in {}{}lg\n",
+                self.data_dir_display,
+                std::path::MAIN_SEPARATOR
+            ));
+        } else {
+            d.push_str("Logs:            memory only (nothing is written to disk)\n");
+        }
         d.push_str(&format!("Mode:            {:?}\n", self.mode));
         d.push_str(&format!("Locale:          {:?}\n", self.locale));
         d.push_str(&format!("Launch attempts: {}\n", self.launch_attempts));
@@ -2332,6 +2578,10 @@ impl eframe::App for MiasmaApp {
                     .auto_shrink([false; 2])
                     .show(ui, |ui| {
                         kit::column(ui, |ui| {
+                            // Diagnostic logging writes files: say so on every screen.
+                            if self.logs.writes_files {
+                                kit::notice(ui, Level::Warn, self.lg().diag_banner);
+                            }
                             // Connection state first, when not connected.
                             self.connection_header(ui);
                             match self.tab {
@@ -2353,6 +2603,8 @@ impl eframe::App for MiasmaApp {
                         });
                     });
             });
+
+        self.legacy_logs_notice(ctx);
 
         // ── Wipe confirmation dialog ──────────────────────────────────
         if self.show_wipe_confirm {

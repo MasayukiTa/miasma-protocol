@@ -173,13 +173,11 @@ DIAGNOSTICS AND LOGS
   Desktop: Status tab > Copy Diagnostics
   CLI:     miasma diagnostics --json
 
-  Log files are stored in your data directory:
-    daemon.log.<date>    Daemon activity
-    desktop.log.<date>   Desktop GUI activity
-    bridge.log.<date>    Bridge daemon activity
-
-  Settings tab (Desktop) or "miasma diagnostics" (CLI) shows the log
-  file location.
+  Logs are kept in memory only (nothing is written to disk by default):
+    Desktop: Settings tab > Logs
+    CLI:     miasma logs
+  Diagnostic logging (files in the "lg" folder of the data directory) is an
+  explicit opt-in in Settings > Logs; turning it off deletes the files.
 
 KNOWN LIMITATIONS
 

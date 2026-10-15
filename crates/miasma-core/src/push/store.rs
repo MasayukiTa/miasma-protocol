@@ -171,10 +171,7 @@ impl ContactStore {
             }
             Err(e) => {
                 let aside = crate::paths::contacts_corrupt_aside(path, now_secs());
-                warn!(
-                    "contacts.json is unreadable ({e}); moved to {}",
-                    aside.display()
-                );
+                warn!("the contact list is unreadable ({e}); it was moved aside");
                 let _ = std::fs::rename(path, aside);
                 Vec::new()
             }
