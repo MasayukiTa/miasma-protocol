@@ -29,8 +29,7 @@ use std::time::{Duration, SystemTime};
 
 use miasma_core::transfer::share_id_from_link;
 
-const LOCK_FILE: &str = "desktop.lock";
-const PENDING_FILE: &str = "pending-link.txt";
+const LOCK_FILE: &str = miasma_core::paths::DESKTOP_LOCK.name;
 /// A pending link older than this is ignored (a leftover, not something just clicked).
 const PENDING_MAX_AGE: Duration = Duration::from_secs(60);
 /// How long a link launch waits for the running window to take the hand-off.
@@ -76,13 +75,13 @@ pub fn acquire(data_dir: &Path) -> Instance {
 }
 
 fn pending_path(data_dir: &Path) -> PathBuf {
-    data_dir.join(PENDING_FILE)
+    miasma_core::paths::pending_link(data_dir)
 }
 
 /// Give `share_id` to the running window. True once it has taken it.
 pub fn hand_off(data_dir: &Path, share_id: &str) -> bool {
     let target = pending_path(data_dir);
-    let tmp = data_dir.join(format!("{PENDING_FILE}.{}.tmp", std::process::id()));
+    let tmp = miasma_core::paths::pending_link_tmp(data_dir, std::process::id());
     if std::fs::write(&tmp, share_id).is_err() || std::fs::rename(&tmp, &target).is_err() {
         let _ = std::fs::remove_file(&tmp);
         return false;
@@ -180,11 +179,10 @@ mod windows_register {
     use std::process::Command;
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    const SCHEME_KEY: &str = r"HKCU\Software\Classes\miasma-share";
-    const COMMAND_KEY: &str = r"HKCU\Software\Classes\miasma-share\shell\open\command";
+    use miasma_core::paths::{URL_SCHEME_COMMAND_KEY, URL_SCHEME_KEY};
     /// Remembers which exe the keys were last written for: `reg query` prints in the OEM code
     /// page, so a non-ASCII install path cannot be compared reliably from its output.
-    const MARKER_FILE: &str = "url-scheme-registered.txt";
+    const MARKER_FILE: &str = miasma_core::paths::URL_SCHEME_MARKER.name;
 
     /// `reg.exe` with a hidden console, arguments passed raw (the value needs its own quotes).
     fn reg(args: &str) -> std::io::Result<std::process::Output> {
@@ -220,10 +218,12 @@ mod windows_register {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let expected = open_command(&exe);
         let marker = data_dir.join(MARKER_FILE);
+        let scheme_key = URL_SCHEME_KEY.registry_path();
+        let command_key = URL_SCHEME_COMMAND_KEY.registry_path();
         let exe_text = expected.clone();
 
-        let command_out = query(COMMAND_KEY, "/ve");
-        let protocol_present = query(SCHEME_KEY, "/v \"URL Protocol\"").is_some();
+        let command_out = query(&command_key, "/ve");
+        let protocol_present = query(&scheme_key, "/v \"URL Protocol\"").is_some();
         let stale = if expected.is_ascii() {
             needs_registration(command_out.as_deref(), &expected)
         } else {
@@ -237,11 +237,11 @@ mod windows_register {
             return Ok(false);
         }
 
-        add(SCHEME_KEY, "/ve", "REG_SZ", "\"URL:Miasma Share\"")?;
-        add(SCHEME_KEY, "/v \"URL Protocol\"", "REG_SZ", "\"\"")?;
+        add(&scheme_key, "/ve", "REG_SZ", "\"URL:Miasma Share\"")?;
+        add(&scheme_key, "/v \"URL Protocol\"", "REG_SZ", "\"\"")?;
         // The value is `"<exe>" "%1"`: quotes inside it are escaped for reg.exe.
         let escaped = expected.replace('"', "\\\"");
-        add(COMMAND_KEY, "/ve", "REG_SZ", &format!("\"{escaped}\""))?;
+        add(&command_key, "/ve", "REG_SZ", &format!("\"{escaped}\""))?;
         let _ = std::fs::write(&marker, exe_text);
         Ok(true)
     }

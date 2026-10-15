@@ -41,7 +41,7 @@ pub struct TorrentConfig {
 impl Default for TorrentConfig {
     fn default() -> Self {
         Self {
-            output_dir: std::env::temp_dir().join("miasma-bridge-downloads"),
+            output_dir: miasma_core::paths::bridge_downloads_temp_default(),
             seed_enabled: false,
             upload_rate_limit_bps: 0,
             download_rate_limit_bps: 0,

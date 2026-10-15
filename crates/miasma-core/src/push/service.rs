@@ -353,7 +353,7 @@ impl PushService {
         for e in rd.flatten() {
             let p = e.path();
             let n = e.file_name().to_string_lossy().into_owned();
-            if n.starts_with('.') && n.ends_with(".part") && !active.contains(&p) {
+            if crate::paths::is_push_part_name(&n) && !active.contains(&p) {
                 let _ = std::fs::remove_file(&p);
             }
         }
@@ -914,7 +914,7 @@ impl PushService {
         }
         // The part file is keyed by content (hash + size), not by name, so a
         // resume finds it whatever the name and no name can be too long.
-        let part = dir.join(format!(".{}-{}.part", &header.hash[..32], size));
+        let part = dir.join(crate::paths::push_part_name(&header.hash[..32], size));
         if !self.active_parts.lock().unwrap().insert(part.clone()) {
             return RxEnd::Rejected(RejectReason::Busy);
         }

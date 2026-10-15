@@ -19,6 +19,7 @@ pub mod dissolution;
 pub mod error;
 pub mod network;
 pub mod onion;
+pub mod paths;
 pub mod pipeline;
 pub mod push;
 pub mod repair;

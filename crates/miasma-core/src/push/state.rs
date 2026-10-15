@@ -14,7 +14,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
-pub const HISTORY_FILE: &str = "push_history.jsonl";
+pub const HISTORY_FILE: &str = crate::paths::PUSH_HISTORY.name;
 /// Lines kept after trimming, and the size that triggers a trim.
 pub const HISTORY_KEEP: usize = 1000;
 const HISTORY_TRIM_AT: usize = 2000;

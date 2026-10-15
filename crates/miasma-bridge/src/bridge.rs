@@ -47,8 +47,8 @@ const DHT_BOOTSTRAP: &[&str] = &[
 const EXT_FLAG: u8 = 0x10;
 // ut_metadata extension ID we advertise.
 const UT_METADATA_ID: u8 = 3;
-const INBOX_MARKER: &str = ".miasma-bridge-inbox";
-const PROCESSED_DIR: &str = ".processed";
+const INBOX_MARKER: &str = miasma_core::paths::BRIDGE_INBOX_MARKER.name;
+const PROCESSED_DIR: &str = miasma_core::paths::BRIDGE_PROCESSED.name;
 
 /// How the torrent metadata was obtained.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -230,7 +230,7 @@ pub async fn dissolve_torrent_file(
 /// Build the librqbit session configuration from the CLI safety options.
 fn torrent_config_for(data_dir: &std::path::Path, opts: &DownloadSafetyOpts) -> TorrentConfig {
     TorrentConfig {
-        output_dir: data_dir.join("bridge-downloads"),
+        output_dir: data_dir.join(miasma_core::paths::BRIDGE_DOWNLOADS.name),
         seed_enabled: opts.seed_enabled,
         upload_rate_limit_bps: opts.upload_rate_limit_bps,
         download_rate_limit_bps: opts.download_rate_limit_bps,

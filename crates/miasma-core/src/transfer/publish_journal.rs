@@ -61,7 +61,9 @@ pub struct PublishJournal {
 /// Where the journal for the file at `source` lives inside `dir`.
 pub fn publish_journal_path(dir: &Path, source: &Path) -> PathBuf {
     let h = blake3::hash(source.to_string_lossy().as_bytes());
-    dir.join(format!("send-{}.jsonl", &hex::encode(h.as_bytes())[..32]))
+    dir.join(crate::paths::send_journal_name(
+        &hex::encode(h.as_bytes())[..32],
+    ))
 }
 
 fn to_line<T: Serialize>(v: &T) -> Result<Vec<u8>, MiasmaError> {
