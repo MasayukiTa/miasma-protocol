@@ -23,42 +23,29 @@ mod torrent;
 
 use std::path::PathBuf;
 
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let is_daemon = args.get(1).map(|s| s.as_str()) == Some("daemon");
 
-    // For daemon mode, set up file logging. For short-lived commands, stderr only.
+    // Logging is set up in one place (`miasma_core::logging`): by default the
+    // log lines stay in memory only (stealth mode) and no log file is written.
+    let (data_dir, _) = parse_data_dir(if args.len() > 2 { &args[2..] } else { &[] });
     if is_daemon {
-        let (data_dir, _) = parse_data_dir(if args.len() > 2 { &args[2..] } else { &[] });
         let _ = std::fs::create_dir_all(&data_dir);
-        let file_appender =
-            tracing_appender::rolling::daily(&data_dir, miasma_core::paths::BRIDGE_LOG.name);
-        let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-        {
-            use tracing_subscriber::layer::SubscriberExt;
-            use tracing_subscriber::util::SubscriberInitExt;
-            let filter = tracing_subscriber::EnvFilter::try_from_env("RUST_LOG")
-                .unwrap_or_else(|_| "miasma_bridge=info".parse().unwrap());
-            let stderr_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
-            let file_layer = tracing_subscriber::fmt::layer()
-                .with_writer(non_blocking)
-                .with_ansi(false);
-            tracing_subscriber::registry()
-                .with(filter)
-                .with(stderr_layer)
-                .with(file_layer)
-                .init();
-        }
-        std::mem::forget(_guard);
-    } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(
-                std::env::var("RUST_LOG").unwrap_or_else(|_| "miasma_bridge=info".into()),
-            )
-            .init();
     }
+    miasma_core::logging::init(miasma_core::logging::InitOptions {
+        component: if is_daemon {
+            miasma_core::logging::Component::Bridge
+        } else {
+            miasma_core::logging::Component::Cli
+        },
+        data_dir: &data_dir,
+        filter_env: "RUST_LOG",
+        default_filter: "miasma_bridge=info",
+        process_hardening: true,
+    });
     if args.len() < 2 {
         print_usage();
         std::process::exit(1);
@@ -215,7 +202,10 @@ fn cmd_dissolve(args: &[String]) {
         },
         DissolveSource::TorrentFile(path) => {
             if !path.is_file() {
-                error!("No such .torrent file: {}", path.display());
+                error!(
+                    "No such .torrent file: {}",
+                    miasma_core::logging::redact::path(path)
+                );
                 std::process::exit(1);
             }
             (
@@ -275,7 +265,8 @@ fn cmd_dissolve(args: &[String]) {
 
     // ── Stage 2: Download ────────────────────────────────────────────────
     println!("[2/3] Downloading torrent...");
-    info!("Dissolving torrent: {source_label}");
+    info!("Dissolving torrent");
+    debug!("source: {source_label}");
 
     let outcome = match &source {
         DissolveSource::Magnet(magnet) => rt.block_on(bridge::dissolve_magnet(
@@ -335,16 +326,13 @@ fn cmd_init_inbox(args: &[String]) {
 }
 
 fn cmd_retrieve(args: &[String]) {
-    let (data_dir, rest) = parse_data_dir(args);
+    let (_data_dir, rest) = parse_data_dir(args);
     if rest.is_empty() {
         eprintln!("Usage: miasma-bridge retrieve --data-dir <dir> <MID>");
         std::process::exit(1);
     }
     let mid = &rest[0];
-    info!(
-        "Retrieve stub: would fetch {mid} from Miasma and re-seed as torrent (data_dir={}).",
-        data_dir.display()
-    );
+    info!("Retrieve stub: would fetch {mid} from Miasma and re-seed as torrent.");
     println!("Phase 2 stub: retrieve {mid} from Miasma.");
 }
 
@@ -361,13 +349,7 @@ fn cmd_daemon(args: &[String]) {
         }
     };
 
-    info!(
-        "Bridge daemon: data_dir={}, quota={}M, inbox={}",
-        data_dir.display(),
-        quota_mb,
-        inbox_dir.display()
-    );
-    info!("Log file: {}/bridge.log.*", data_dir.display());
+    info!("Bridge daemon starting, quota={}M", quota_mb);
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()

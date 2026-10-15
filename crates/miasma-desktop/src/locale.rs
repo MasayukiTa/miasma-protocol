@@ -2253,9 +2253,138 @@ static CT_ZH_CN: ContactStrings = ContactStrings {
     dismiss: "Dismiss",
 };
 
+// ─── Logs (memory-only logging, opt-in diagnostic logging) ──────────────────
+
+/// Declares `LogStrings` and a field listing for the completeness test from one field list.
+macro_rules! log_strings {
+    ($($f:ident),* $(,)?) => {
+        /// Strings of the Logs section in Settings, the diagnostic-logging banner and the
+        /// old-log-files notice.
+        pub struct LogStrings { $(pub $f: &'static str),* }
+        impl LogStrings {
+            /// Every field with its name, for the completeness test.
+            #[cfg(test)]
+            fn all(&self) -> Vec<(&'static str, &'static str)> {
+                vec![$((stringify!($f), self.$f)),*]
+            }
+        }
+    };
+}
+
+log_strings! {
+    heading, memory_only, diag_label, diag_warning, diag_banner, diag_save_failed,
+    show_logs, hide_logs, refresh, copy, copied, clear, memory_note,
+    daemon_title, desktop_title, empty, unsupported, unavailable,
+    legacy_title, legacy_body, legacy_delete, legacy_keep, legacy_deleted, legacy_failed,
+}
+
+pub fn log_strings(locale: Locale) -> &'static LogStrings {
+    match locale {
+        Locale::En => &LG_EN,
+        Locale::Ja => &LG_JA,
+        Locale::ZhCn => &LG_ZH_CN,
+    }
+}
+
+static LG_EN: LogStrings = LogStrings {
+    heading: "Logs",
+    memory_only: "memory only (nothing is written to disk)",
+    diag_label: "Diagnostic logging",
+    diag_warning: "Turning on diagnostic logging leaves a record of your use in files. Some times and details about the other party are kept on this computer, so turn it on only while investigating a problem and always turn it off afterwards (the files are deleted when you turn it off).",
+    diag_banner: "Diagnostic logging is on. A record of your use is being written to files on this computer. Turn it off in Settings when you are done.",
+    diag_save_failed: "The setting could not be saved. Please try again.",
+    show_logs: "Show logs",
+    hide_logs: "Hide logs",
+    refresh: "Refresh",
+    copy: "Copy",
+    copied: "Logs copied to the clipboard.",
+    clear: "Clear",
+    memory_note: "These lines are kept only in memory and disappear when Miasma closes.",
+    daemon_title: "Background service",
+    desktop_title: "This window",
+    empty: "(no lines)",
+    unsupported: "not supported by this older background service",
+    unavailable: "background service not running",
+    legacy_title: "Old log files were found",
+    legacy_body: "Miasma no longer writes logs to files. Old log files were found on this computer. They show when Miasma was used. You can delete them securely now, or keep them.",
+    legacy_delete: "Delete now",
+    legacy_keep: "Keep",
+    legacy_deleted: "Old log files deleted: {n}",
+    legacy_failed: "Could not delete {n} file(s). Close other programs that use them and try again from the next start.",
+};
+
+static LG_JA: LogStrings = LogStrings {
+    heading: "ログ",
+    memory_only: "メモリ上のみ(ディスクには何も書き込まれません)",
+    diag_label: "診断ログ",
+    diag_warning: "診断ログを有効にすると、使った記録がファイルに残ります。使った日時や相手の情報の一部がパソコンに残るため、不具合を調べるときだけ有効にし、終わったら必ず無効にしてください(無効にするとファイルは削除されます)。",
+    diag_banner: "診断ログが有効です。使った記録がこのパソコンのファイルに書き込まれています。確認が終わったら、設定で無効にしてください。",
+    diag_save_failed: "設定を保存できませんでした。もう一度お試しください。",
+    show_logs: "ログを表示",
+    hide_logs: "ログを隠す",
+    refresh: "更新",
+    copy: "コピー",
+    copied: "ログをクリップボードにコピーしました。",
+    clear: "消去",
+    memory_note: "これらの行はメモリ上にだけあり、Miasma を閉じると消えます。",
+    daemon_title: "バックグラウンドサービス",
+    desktop_title: "このウィンドウ",
+    empty: "(行がありません)",
+    unsupported: "古いバックグラウンドサービスのため、対応していません",
+    unavailable: "バックグラウンドサービスが起動していません",
+    legacy_title: "古いログファイルが見つかりました",
+    legacy_body: "Miasma はログをファイルに書き込まなくなりました。このパソコンに古いログファイルが見つかりました。ログファイルには、Miasma を使った日時が残っています。今すぐ安全に削除するか、そのまま残すかを選んでください。",
+    legacy_delete: "今すぐ削除",
+    legacy_keep: "残す",
+    legacy_deleted: "古いログファイルを削除しました: {n} 件",
+    legacy_failed: "{n} 件を削除できませんでした。使用中のほかのプログラムを閉じて、次回の起動時にもう一度お試しください。",
+};
+
+static LG_ZH_CN: LogStrings = LogStrings {
+    heading: "日志",
+    memory_only: "仅在内存中（不会向磁盘写入任何内容）",
+    diag_label: "诊断日志",
+    diag_warning: "启用诊断日志后，您的使用记录会保存在文件中。使用时间和对方信息的一部分会留在这台电脑上，因此请仅在排查问题时启用，并在结束后务必关闭（关闭后文件会被删除）。",
+    diag_banner: "诊断日志已启用。您的使用记录正在写入这台电脑上的文件。完成后请在“设置”中关闭。",
+    diag_save_failed: "无法保存该设置。请重试。",
+    show_logs: "显示日志",
+    hide_logs: "隐藏日志",
+    refresh: "刷新",
+    copy: "复制",
+    copied: "日志已复制到剪贴板。",
+    clear: "清除",
+    memory_note: "这些行仅保存在内存中，关闭 Miasma 后即消失。",
+    daemon_title: "后台服务",
+    desktop_title: "此窗口",
+    empty: "（没有内容）",
+    unsupported: "此较旧的后台服务不支持",
+    unavailable: "后台服务未运行",
+    legacy_title: "发现旧的日志文件",
+    legacy_body: "Miasma 不再将日志写入文件。在这台电脑上发现了旧的日志文件，其中记录了使用 Miasma 的时间。您可以现在安全删除，也可以保留。",
+    legacy_delete: "立即删除",
+    legacy_keep: "保留",
+    legacy_deleted: "已删除旧日志文件：{n} 个",
+    legacy_failed: "有 {n} 个文件无法删除。请关闭正在使用它们的其他程序，下次启动时再试。",
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_log_string_exists_in_every_locale() {
+        for lang in Locale::ALL {
+            for (name, value) in log_strings(lang).all() {
+                assert!(!value.trim().is_empty(), "{lang:?} logs.{name} is empty");
+            }
+            let l = log_strings(lang);
+            assert!(l.legacy_deleted.contains("{n}"), "{lang:?}");
+            assert!(l.legacy_failed.contains("{n}"), "{lang:?}");
+        }
+        assert!(log_strings(Locale::Ja)
+            .diag_warning
+            .starts_with("診断ログを有効にすると、使った記録がファイルに残ります。"));
+    }
 
     #[test]
     fn every_contact_string_exists_in_every_locale() {

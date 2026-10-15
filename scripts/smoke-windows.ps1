@@ -312,11 +312,12 @@ while (-not (Test-Path $portFile) -and (Get-Date) -lt $deadline) {
 Start-Sleep -Seconds 2
 StopDaemon
 
-$logFiles = Get-ChildItem -Path $DATA_DIR -Filter "daemon.log.*" -ErrorAction SilentlyContinue
-if ($logFiles -and $logFiles.Count -gt 0) {
-    Pass "daemon creates log file in data dir"
+$logFiles = Get-ChildItem -Path $DATA_DIR -Filter "*.log.*" -ErrorAction SilentlyContinue
+$lgDir = Join-Path $DATA_DIR "lg"
+if (($logFiles -and $logFiles.Count -gt 0) -or (Test-Path $lgDir)) {
+    Fail "log file" "log files were written although stealth mode is the default"
 } else {
-    Fail "log file" "no daemon.log.* found in $DATA_DIR"
+    Pass "daemon writes no log files (memory-only logging)"
 }
 
 # ── Summary ──────────────────────────────────────────────────────────────────

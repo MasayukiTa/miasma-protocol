@@ -20,6 +20,73 @@ pub struct NodeConfig {
     /// Trusted-contact push.
     #[serde(default)]
     pub push: PushConfig,
+    /// Logging and traces left on this machine.
+    #[serde(default)]
+    pub privacy: PrivacyConfig,
+}
+
+/// `[privacy]` in `config.toml`: what the programs may leave behind.
+///
+/// Every key has a default, so a `config.toml` written by an older version
+/// (without the section) reads as stealth mode with no log files.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PrivacyConfig {
+    /// Stealth mode (default **on**, also after an upgrade): the programs keep
+    /// their log lines only in a bounded in-memory buffer; nothing is printed
+    /// by library code and no log file is written. With it off, log lines also
+    /// go to stderr and to the rotating log files, as in earlier versions.
+    #[serde(default = "default_true")]
+    pub stealth_mode: bool,
+    /// Opt-in diagnostic logging (default **off**): writes size-rotated log
+    /// files to the data directory even in stealth mode. They show that Miasma
+    /// was used and when. Turning it off deletes them.
+    #[serde(default)]
+    pub diagnostic_logging: bool,
+    /// Size of the in-memory log buffer per program, in MiB (1-8, default 2).
+    #[serde(default = "default_log_buffer_mib")]
+    pub log_buffer_mib: u32,
+    /// The one-time notice about old log files has been shown.
+    #[serde(default)]
+    pub old_logs_notice_shown: bool,
+    /// The user chose to keep old log files; they are not offered for removal
+    /// again.
+    #[serde(default)]
+    pub old_logs_keep: bool,
+}
+
+pub const DEFAULT_LOG_BUFFER_MIB: u32 = 2;
+pub const MIN_LOG_BUFFER_MIB: u32 = 1;
+pub const MAX_LOG_BUFFER_MIB: u32 = 8;
+
+fn default_log_buffer_mib() -> u32 {
+    DEFAULT_LOG_BUFFER_MIB
+}
+
+impl Default for PrivacyConfig {
+    fn default() -> Self {
+        Self {
+            stealth_mode: true,
+            diagnostic_logging: false,
+            log_buffer_mib: DEFAULT_LOG_BUFFER_MIB,
+            old_logs_notice_shown: false,
+            old_logs_keep: false,
+        }
+    }
+}
+
+impl PrivacyConfig {
+    /// The ring buffer size in bytes, clamped to the allowed range.
+    pub fn log_buffer_bytes(&self) -> usize {
+        self.log_buffer_mib
+            .clamp(MIN_LOG_BUFFER_MIB, MAX_LOG_BUFFER_MIB) as usize
+            * 1024
+            * 1024
+    }
+
+    /// Whether log files are written: the opt-in switch, or stealth mode off.
+    pub fn writes_log_files(&self) -> bool {
+        self.diagnostic_logging || !self.stealth_mode
+    }
 }
 
 /// `[push]` in `config.toml`: where pushed files land and the limits on them.

@@ -528,7 +528,7 @@ impl DaemonServer {
             "daemon IPC server bound"
         );
         for addr in &listen_addr_strings {
-            info!("  bootstrap addr: {addr}/p2p/{}", coord.peer_id());
+            tracing::debug!("  bootstrap addr: {addr}/p2p/{}", coord.peer_id());
         }
 
         Ok(Self {
@@ -862,6 +862,31 @@ async fn ipc_server_loop(
                 break;
             }
         }
+    }
+}
+
+/// Answer for the log requests: the lines asked for (`Some((from, max))`) or
+/// just the state (`None`).
+fn logs_response(read: Option<(Option<u64>, usize)>) -> ControlResponse {
+    let Some(l) = crate::logging::global() else {
+        return ControlResponse::Logs {
+            lines: Vec::new(),
+            next_seq: 0,
+            diagnostic: false,
+            stealth: true,
+            capacity: 0,
+        };
+    };
+    let slice = match read {
+        Some((from, n)) => l.read(from, n, ipc::LOGS_REPLY_MAX_BYTES),
+        None => l.read(None, 0, 0),
+    };
+    ControlResponse::Logs {
+        lines: slice.lines,
+        next_seq: slice.next_seq,
+        diagnostic: l.diagnostic_enabled(),
+        stealth: l.stealth(),
+        capacity: l.ring_capacity() as u64,
     }
 }
 
@@ -1596,6 +1621,27 @@ pub(crate) async fn process_request(
                     ControlResponse::Error(format!("wipe incomplete; daemon is shutting down: {e}"))
                 }
             }
+        }
+
+        // ── Logs ────────────────────────────────────────────────────────
+        ControlRequest::LogsTail {
+            max_lines,
+            since_seq,
+        } => {
+            let n = max_lines.clamp(1, ipc::LOGS_MAX_LINES) as usize;
+            logs_response(Some((since_seq, n)))
+        }
+        ControlRequest::LogsSetDiagnostic { enabled } => {
+            match crate::logging::set_diagnostic_persistent(&data_dir, enabled) {
+                Ok(()) => logs_response(None),
+                Err(_) => ControlResponse::Error("cannot change diagnostic logging".into()),
+            }
+        }
+        ControlRequest::LogsClear => {
+            if let Some(l) = crate::logging::global() {
+                l.clear();
+            }
+            logs_response(None)
         }
 
         // ── Directed sharing ────────────────────────────────────────────

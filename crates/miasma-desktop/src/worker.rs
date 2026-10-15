@@ -121,6 +121,16 @@ pub enum WorkerCmd {
     /// One trusted-contact push request (contacts, send, queue, ...); the answer comes back as
     /// [`WorkerResult::PushReply`] together with the request, so the UI knows what it was for.
     Push(miasma_core::push::PushRequest),
+    /// Read the background service's in-memory log buffer. Answered with
+    /// [`WorkerResult::Logs`], [`WorkerResult::LogsUnsupported`] or
+    /// [`WorkerResult::LogsUnavailable`].
+    LogsFetch,
+    /// Switch diagnostic (file) logging on or off, here and in the background service.
+    SetDiagnostic(bool),
+    /// Empty the in-memory log buffers (this program's and the service's).
+    LogsClear,
+    /// Answer the old-log-files notice: `delete` removes them, otherwise they are kept.
+    LegacyLogs { delete: bool },
 }
 
 impl fmt::Debug for WorkerCmd {
@@ -207,6 +217,13 @@ impl fmt::Debug for WorkerCmd {
             Self::TransferClearFinished => f.write_str("TransferClearFinished"),
             // Contact codes, labels and file paths are not logged.
             Self::Push(_) => f.write_str("Push(<redacted>)"),
+            Self::LogsFetch => f.write_str("LogsFetch"),
+            Self::SetDiagnostic(on) => f.debug_tuple("SetDiagnostic").field(on).finish(),
+            Self::LogsClear => f.write_str("LogsClear"),
+            Self::LegacyLogs { delete } => f
+                .debug_struct("LegacyLogs")
+                .field("delete", delete)
+                .finish(),
         }
     }
 }
@@ -304,6 +321,24 @@ pub enum WorkerResult {
     PushReply {
         req: miasma_core::push::PushRequest,
         reply: Result<miasma_core::push::PushResponse, PushFail>,
+    },
+    /// The background service's log buffer (oldest line first) and its logging state.
+    Logs {
+        daemon_lines: Vec<String>,
+        diagnostic: bool,
+        stealth: bool,
+    },
+    /// The background service answers but does not know the log request (older version).
+    LogsUnsupported,
+    /// The background service is not reachable.
+    LogsUnavailable,
+    /// Answer to [`WorkerCmd::SetDiagnostic`]: the requested state and whether it was applied here.
+    DiagnosticSet { enabled: bool, ok: bool },
+    /// Answer to [`WorkerCmd::LegacyLogs`].
+    LegacyLogsDone {
+        removed: usize,
+        failed: usize,
+        kept: bool,
     },
     /// Any error.
     Err(String),
@@ -425,6 +460,34 @@ impl fmt::Debug for WorkerResult {
             Self::PushReply { reply, .. } => f
                 .debug_struct("PushReply")
                 .field("ok", &reply.is_ok())
+                .finish(),
+            // Log lines are never printed, only their number.
+            Self::Logs {
+                daemon_lines,
+                diagnostic,
+                stealth,
+            } => f
+                .debug_struct("Logs")
+                .field("daemon_line_count", &daemon_lines.len())
+                .field("diagnostic", diagnostic)
+                .field("stealth", stealth)
+                .finish(),
+            Self::LogsUnsupported => f.write_str("LogsUnsupported"),
+            Self::LogsUnavailable => f.write_str("LogsUnavailable"),
+            Self::DiagnosticSet { enabled, ok } => f
+                .debug_struct("DiagnosticSet")
+                .field("enabled", enabled)
+                .field("ok", ok)
+                .finish(),
+            Self::LegacyLogsDone {
+                removed,
+                failed,
+                kept,
+            } => f
+                .debug_struct("LegacyLogsDone")
+                .field("removed", removed)
+                .field("failed", failed)
+                .field("kept", kept)
                 .finish(),
             Self::Err(message) => f.debug_tuple("Err").field(message).finish(),
         }
@@ -787,6 +850,10 @@ fn worker_thread(
                 ControlRequest::TransferClearFinished,
             )),
             WorkerCmd::Push(req) => rt.block_on(do_push(&data_dir, req)),
+            WorkerCmd::LogsFetch => rt.block_on(do_logs_fetch(&data_dir)),
+            WorkerCmd::SetDiagnostic(on) => rt.block_on(do_set_diagnostic(&data_dir, on)),
+            WorkerCmd::LogsClear => rt.block_on(do_logs_clear(&data_dir)),
+            WorkerCmd::LegacyLogs { delete } => do_legacy_logs(&data_dir, delete),
         };
 
         if tx.send(res).is_err() {
@@ -796,10 +863,7 @@ fn worker_thread(
 
     // Cleanup: if we own the daemon, kill it on exit.
     if let Some(mut child) = owned_daemon {
-        info!(
-            "Desktop exiting — stopping owned daemon (pid={})",
-            child.id()
-        );
+        info!("Desktop exiting — stopping owned daemon");
         let _ = child.kill();
         let _ = child.wait();
     }
@@ -823,13 +887,17 @@ fn do_init(data_dir: &Path) -> anyhow::Result<()> {
         },
         transport: Default::default(),
         push: Default::default(),
+        privacy: Default::default(),
     };
     config.save(data_dir)?;
 
     // Creates master.key.
     LocalShareStore::open(data_dir, config.storage.quota_mb)?;
 
-    info!("Node initialized at {}", data_dir.display());
+    info!(
+        "Node initialized at {}",
+        miasma_core::logging::redact::path(data_dir)
+    );
     Ok(())
 }
 
@@ -866,7 +934,8 @@ fn detect_state(data_dir: &Path, rt: &tokio::runtime::Runtime) -> DaemonState {
         Ok(Ok(ControlResponse::Status(_))) => DaemonState::Connected,
         _ => {
             // Port file is stale — remove it.
-            info!("Stale daemon.port (port {port}), removing");
+            let _ = port;
+            info!("Stale daemon.port, removing");
             miasma_core::daemon::ipc::remove_port_file(data_dir);
             DaemonState::Stopped
         }
@@ -945,9 +1014,14 @@ fn auto_launch_daemon(data_dir: &Path, rt: &tokio::runtime::Runtime) -> anyhow::
         )
     })?;
 
-    info!("Auto-launching daemon: {} daemon", miasma_exe.display());
+    info!(
+        "Auto-launching daemon: {} daemon",
+        miasma_core::logging::redact::path(&miasma_exe)
+    );
 
     let mut cmd = std::process::Command::new(&miasma_exe);
+    // The app shows the old-log-files notice itself; the daemon leaves them alone.
+    cmd.env(miasma_core::logging::legacy::GUI_NOTICE_ENV, "gui");
     cmd.arg("daemon")
         .arg("--data-dir")
         .arg(data_dir)
@@ -1249,7 +1323,7 @@ fn run_bridge_import(
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let mids = parse_mids_from_stdout(&stdout);
                 if mids.is_empty() {
-                    warn!("Bridge succeeded but produced no MIDs. stdout: {stdout}");
+                    warn!("Bridge succeeded but produced no MIDs");
                 }
                 WorkerResult::ImportComplete { mids }
             } else {
@@ -1311,6 +1385,93 @@ fn is_daemon_down(msg: &str) -> bool {
         || msg.contains("daemon.port not found")
         || msg.contains("cannot connect to daemon")
         || msg.contains("Daemon not running")
+}
+
+// ─── Log handlers ───────────────────────────────────────────────────────────
+
+/// Longest wait for one log request; the service answers from memory.
+const LOGS_REQUEST_TIMEOUT_SECS: u64 = 5;
+
+async fn timed_request(
+    data_dir: &Path,
+    req: ControlRequest,
+) -> Option<anyhow::Result<ControlResponse>> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(LOGS_REQUEST_TIMEOUT_SECS),
+        daemon_request(data_dir, req),
+    )
+    .await
+    .ok()
+}
+
+async fn do_logs_fetch(data_dir: &Path) -> WorkerResult {
+    let req = ControlRequest::LogsTail {
+        max_lines: 500,
+        since_seq: None,
+    };
+    match timed_request(data_dir, req).await {
+        Some(Ok(ControlResponse::Logs {
+            lines,
+            diagnostic,
+            stealth,
+            ..
+        })) => WorkerResult::Logs {
+            daemon_lines: lines,
+            diagnostic,
+            stealth,
+        },
+        Some(Ok(_)) | Some(Err(_)) | None => {
+            // The request failed: tell an old service from a missing one.
+            match timed_request(data_dir, ControlRequest::Status).await {
+                Some(Ok(ControlResponse::Status(_))) => WorkerResult::LogsUnsupported,
+                _ => WorkerResult::LogsUnavailable,
+            }
+        }
+    }
+}
+
+async fn do_set_diagnostic(data_dir: &Path, on: bool) -> WorkerResult {
+    let ok = miasma_core::logging::set_diagnostic_persistent(data_dir, on).is_ok();
+    // Best effort: the service may be stopped or too old to know the request.
+    let _ = timed_request(data_dir, ControlRequest::LogsSetDiagnostic { enabled: on }).await;
+    if !on {
+        miasma_core::logging::delete_diagnostic_files(data_dir);
+    }
+    WorkerResult::DiagnosticSet { enabled: on, ok }
+}
+
+async fn do_logs_clear(data_dir: &Path) -> WorkerResult {
+    if let Some(l) = miasma_core::logging::global() {
+        l.clear();
+    }
+    let _ = timed_request(data_dir, ControlRequest::LogsClear).await;
+    // Hand back the (now empty) service buffer so the view refreshes.
+    do_logs_fetch(data_dir).await
+}
+
+fn do_legacy_logs(data_dir: &Path, delete: bool) -> WorkerResult {
+    use miasma_core::logging::legacy;
+    if delete {
+        let (removed, failed) = match legacy::pending(data_dir) {
+            Some(found) => {
+                let r = legacy::remove(&found);
+                (r.removed, r.failed)
+            }
+            None => (0, 0),
+        };
+        WorkerResult::LegacyLogsDone {
+            removed,
+            failed,
+            kept: false,
+        }
+    } else {
+        legacy::record_keep(data_dir);
+        WorkerResult::LegacyLogsDone {
+            removed: 0,
+            failed: 0,
+            kept: true,
+        }
+    }
 }
 
 // ─── Directed sharing handlers ──────────────────────────────────────────────
@@ -1654,6 +1815,42 @@ mod tests {
     };
     use std::ffi::OsString;
     use std::path::Path;
+
+    #[test]
+    fn log_variants_never_print_line_contents() {
+        let secret = "SECRET-LOG-LINE-TEXT";
+        let r = WorkerResult::Logs {
+            daemon_lines: vec![secret.to_owned(), secret.to_owned()],
+            diagnostic: true,
+            stealth: false,
+        };
+        let shown = format!("{r:?}");
+        assert!(!shown.contains(secret), "{shown}");
+        assert!(shown.contains("daemon_line_count: 2"), "{shown}");
+        for r in [
+            WorkerResult::LogsUnsupported,
+            WorkerResult::LogsUnavailable,
+            WorkerResult::DiagnosticSet {
+                enabled: true,
+                ok: true,
+            },
+            WorkerResult::LegacyLogsDone {
+                removed: 1,
+                failed: 0,
+                kept: false,
+            },
+        ] {
+            assert!(!format!("{r:?}").is_empty());
+        }
+        for c in [
+            WorkerCmd::LogsFetch,
+            WorkerCmd::SetDiagnostic(true),
+            WorkerCmd::LogsClear,
+            WorkerCmd::LegacyLogs { delete: true },
+        ] {
+            assert!(!format!("{c:?}").is_empty());
+        }
+    }
 
     const MAGNET: &str = "magnet:?xt=urn:btih:abcdef0123456789abcdef0123456789abcdef01";
 

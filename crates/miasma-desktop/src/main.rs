@@ -88,27 +88,17 @@ fn resolve_data_dir() -> std::path::PathBuf {
 }
 
 fn main() -> eframe::Result<()> {
-    // Logging: stderr + file in data dir.
+    // Logging is set up in one place (`miasma_core::logging`): by default the
+    // log lines stay in memory only (stealth mode) and no log file is written.
     let data_dir = resolve_data_dir();
     let _ = std::fs::create_dir_all(&data_dir);
-    let file_appender =
-        tracing_appender::rolling::daily(&data_dir, miasma_core::paths::DESKTOP_LOG.name);
-    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-    {
-        use tracing_subscriber::layer::SubscriberExt;
-        use tracing_subscriber::util::SubscriberInitExt;
-        let filter = tracing_subscriber::EnvFilter::try_from_env("RUST_LOG")
-            .unwrap_or_else(|_| "miasma_desktop=info,miasma_core=info".parse().unwrap());
-        let stderr_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
-        let file_layer = tracing_subscriber::fmt::layer()
-            .with_writer(non_blocking)
-            .with_ansi(false);
-        tracing_subscriber::registry()
-            .with(filter)
-            .with(stderr_layer)
-            .with(file_layer)
-            .init();
-    }
+    miasma_core::logging::init(miasma_core::logging::InitOptions {
+        component: miasma_core::logging::Component::Desktop,
+        data_dir: &data_dir,
+        filter_env: "RUST_LOG",
+        default_filter: "miasma_desktop=info,miasma_core=info",
+        process_hardening: true,
+    });
 
     // A `miasma-share:` link (the OS passes it as an argument). If a Miasma window of this data
     // dir is already open, hand the link to it and exit instead of starting a second copy.

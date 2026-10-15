@@ -284,7 +284,29 @@ pub enum ControlRequest {
 
     /// List outgoing directed shares (sender outbox).
     DirectedOutbox,
+
+    // ── Logs (added after the variants above; older daemons do not know them) ──
+    /// Read the daemon's in-memory log buffer: the newest `max_lines` lines,
+    /// or, with `since_seq`, the lines from that sequence number on (what
+    /// `miasma logs --follow` polls with). The reply is bounded to
+    /// [`LOGS_REPLY_MAX_BYTES`].
+    LogsTail {
+        max_lines: u32,
+        #[serde(default)]
+        since_seq: Option<u64>,
+    },
+    /// Switch opt-in diagnostic file logging on or off in the daemon, and
+    /// remember the choice in the configuration. Answered with `Logs` (no
+    /// lines) carrying the resulting state.
+    LogsSetDiagnostic { enabled: bool },
+    /// Empty the daemon's in-memory log buffer (zeroing it).
+    LogsClear,
 }
+
+/// Upper bound on the line text in one `Logs` reply.
+pub const LOGS_REPLY_MAX_BYTES: usize = 256 * 1024;
+/// Upper bound on `LogsTail::max_lines`.
+pub const LOGS_MAX_LINES: u32 = 5_000;
 
 impl fmt::Debug for ControlRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -401,6 +423,19 @@ impl fmt::Debug for ControlRequest {
                 .field("output_path", &"<redacted>")
                 .finish(),
             Self::Status => f.write_str("Status"),
+            Self::LogsTail {
+                max_lines,
+                since_seq,
+            } => f
+                .debug_struct("LogsTail")
+                .field("max_lines", max_lines)
+                .field("since_seq", since_seq)
+                .finish(),
+            Self::LogsSetDiagnostic { enabled } => f
+                .debug_struct("LogsSetDiagnostic")
+                .field("enabled", enabled)
+                .finish(),
+            Self::LogsClear => f.write_str("LogsClear"),
             Self::Wipe => f.write_str("Wipe"),
             Self::WipeConfirm { .. } => f
                 .debug_struct("WipeConfirm")
@@ -584,6 +619,23 @@ pub enum ControlResponse {
 
     /// Outbox listing (outgoing directed shares).
     DirectedOutboxList(Vec<crate::directed::EnvelopeSummary>),
+
+    /// Answer to `LogsTail`, `LogsSetDiagnostic` and `LogsClear`.
+    Logs {
+        /// Oldest first.
+        lines: Vec<String>,
+        /// Pass as `since_seq` to get only lines newer than these.
+        next_seq: u64,
+        /// Diagnostic file logging is on in the daemon.
+        #[serde(default)]
+        diagnostic: bool,
+        /// Stealth mode is on in the daemon.
+        #[serde(default)]
+        stealth: bool,
+        /// Size of the daemon's log buffer in bytes.
+        #[serde(default)]
+        capacity: u64,
+    },
 }
 
 impl fmt::Debug for ControlResponse {
@@ -666,6 +718,17 @@ impl fmt::Debug for ControlResponse {
             Self::DirectedOutboxList(items) => f
                 .debug_struct("DirectedOutboxList")
                 .field("items", &items.len())
+                .finish(),
+            Self::Logs {
+                lines,
+                next_seq,
+                diagnostic,
+                ..
+            } => f
+                .debug_struct("Logs")
+                .field("lines", &lines.len())
+                .field("next_seq", next_seq)
+                .field("diagnostic", diagnostic)
                 .finish(),
         }
     }

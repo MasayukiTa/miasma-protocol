@@ -241,10 +241,8 @@ impl PushService {
             });
         }
         info!(
-            fingerprint = %fingerprint(&own_id),
             contacts = svc.contacts.list().len(),
-            "trusted-contact push is on (inbox: {})",
-            svc.settings.inbox_dir.display()
+            "trusted-contact push is on"
         );
         svc
     }

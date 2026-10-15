@@ -308,12 +308,13 @@ if ($presentCount -ge 3) {
 
 # ── Test 10: Log files ──────────────────────────────────────────────────────
 
-Write-Host "[10] Log file creation"
-$logFiles = Get-ChildItem -Path $DATA_DIR -Filter "daemon.log.*" -ErrorAction SilentlyContinue
-if ($logFiles -and $logFiles.Count -gt 0) {
-    Pass "daemon log files created"
+Write-Host "[10] Stealth mode: no log files"
+$logFiles = Get-ChildItem -Path $DATA_DIR -Filter "*.log.*" -ErrorAction SilentlyContinue
+$lgDir = Join-Path $DATA_DIR "lg"
+if (($logFiles -and $logFiles.Count -gt 0) -or (Test-Path $lgDir)) {
+    Fail "log files" "log files were written although stealth mode is the default"
 } else {
-    Fail "log files" "no daemon.log.* found in data dir"
+    Pass "no log files written (memory-only logging)"
 }
 
 # ── Summary ──────────────────────────────────────────────────────────────────
