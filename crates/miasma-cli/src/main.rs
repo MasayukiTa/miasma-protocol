@@ -29,7 +29,7 @@ use i18n::{Lang, Msg};
 #[command(
     name = "miasma",
     about = "Miasma Protocol — censorship-resistant decentralized file sharing",
-    version
+    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("MIASMA_BUILD_ID"), ")")
 )]
 struct Cli {
     /// Override the data directory (default: platform-specific ~/.local/share/miasma).

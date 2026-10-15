@@ -18,7 +18,9 @@
 //! ```
 
 mod app;
+mod buildinfo;
 mod contacts;
+mod errors;
 mod fonts;
 mod link;
 pub mod locale;
@@ -26,6 +28,7 @@ mod os_locale;
 mod theme;
 mod transfers;
 mod ui_kit;
+mod uitext;
 mod ux;
 pub mod variant;
 mod worker;
@@ -134,11 +137,7 @@ fn main() -> eframe::Result<()> {
     // Parse launch intent (magnet URI or .torrent file).
     let intent = parse_launch_intent();
 
-    let version = env!("CARGO_PKG_VERSION");
-    let title = match mode {
-        variant::ProductMode::Technical => format!("Miasma v{version} (Technical Beta)"),
-        variant::ProductMode::Easy => format!("Miasma v{version}"),
-    };
+    let title = buildinfo::window_title(locale);
 
     // Embedded 32x32 RGBA icon for the window titlebar and taskbar.
     let icon_rgba = include_bytes!("../assets/icon-32x32.rgba");

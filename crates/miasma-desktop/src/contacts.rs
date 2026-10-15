@@ -15,7 +15,7 @@ use miasma_core::push::{
 };
 
 use crate::app::{card_frame, danger_button, primary_button, section_heading};
-use crate::locale::ContactStrings;
+use crate::locale::{ContactStrings, Locale};
 use crate::theme::{self, Palette};
 use crate::transfers::{fill, format_bytes, format_eta, format_rate};
 use crate::worker::PushFail;
@@ -230,6 +230,11 @@ pub fn qr_payload(code: &str) -> String {
 /// Plain-language text for an `Error{kind, message}` answer. Unknown kinds fall back to the
 /// generic text plus the daemon's own message, so nothing is hidden.
 pub fn error_text(c: &ContactStrings, kind: &str, message: &str) -> String {
+    error_text_for(c, kind, message, true)
+}
+
+/// [`error_text`], with the daemon's own wording after an unknown kind only when `technical`.
+pub fn error_text_for(c: &ContactStrings, kind: &str, message: &str, technical: bool) -> String {
     let t = match kind {
         "bad_code" => c.err_bad_code,
         "this_is_me" => c.err_this_is_me,
@@ -245,7 +250,7 @@ pub fn error_text(c: &ContactStrings, kind: &str, message: &str) -> String {
         "not_found" => c.err_not_found,
         "internal" => c.err_internal,
         _ => {
-            return if message.trim().is_empty() {
+            return if !technical || message.trim().is_empty() {
                 c.err_other.to_owned()
             } else {
                 format!("{}: {}", c.err_other, message.trim())
@@ -412,6 +417,11 @@ pub fn state_label(c: &ContactStrings, s: PushState) -> &'static str {
 /// Guidance for a finished row that did not succeed, or the live retry note for a row that is
 /// still trying. `None` when there is nothing to add.
 pub fn row_guidance(c: &ContactStrings, r: &Row) -> Option<String> {
+    row_guidance_for(c, r, true)
+}
+
+/// [`row_guidance`], with the core's own wording only when `technical`.
+pub fn row_guidance_for(c: &ContactStrings, r: &Row, technical: bool) -> Option<String> {
     match r.state {
         PushState::Rejected => Some(
             match r.reject_reason.as_deref() {
@@ -445,7 +455,7 @@ pub fn row_guidance(c: &ContactStrings, r: &Row) -> Option<String> {
             };
             Some(if unreachable {
                 c.fail_unreachable.to_owned()
-            } else if e.trim().is_empty() {
+            } else if !technical || e.trim().is_empty() {
                 c.fail_other.to_owned()
             } else {
                 format!("{}: {}", c.fail_other, e.trim())
@@ -456,10 +466,11 @@ pub fn row_guidance(c: &ContactStrings, r: &Row) -> Option<String> {
             if r.outbound && r.error.as_deref().is_some_and(|e| !e.trim().is_empty()) =>
         {
             let e = r.error.as_deref().unwrap_or("");
-            Some(match classify_failure(e) {
-                FailClass::Unreachable => c.fail_unreachable.to_owned(),
-                FailClass::Other => e.trim().to_owned(),
-            })
+            match classify_failure(e) {
+                FailClass::Unreachable => Some(c.fail_unreachable.to_owned()),
+                FailClass::Other if technical => Some(e.trim().to_owned()),
+                FailClass::Other => None,
+            }
         }
         _ => None,
     }
@@ -676,6 +687,11 @@ pub struct ContactsUi {
 
     /// Dev-only screenshot fixtures: show what was set up, never ask the daemon.
     frozen: bool,
+
+    /// How a daemon failure is worded: the UI language, and whether Technical mode adds the
+    /// original wording. Set by the app before it hands over a reply.
+    err_locale: Locale,
+    err_technical: bool,
 }
 
 impl Default for ContactsUi {
@@ -720,6 +736,8 @@ impl Default for ContactsUi {
             row_rects: Vec::new(),
             page_msg: None,
             frozen: false,
+            err_locale: Locale::En,
+            err_technical: false,
         }
     }
 }
@@ -848,6 +866,12 @@ impl ContactsUi {
         self.rows = merge_rows(&self.board, &self.history);
     }
 
+    /// Say how failures are worded from now on (UI language; Technical adds the original text).
+    pub fn set_error_context(&mut self, locale: Locale, technical: bool) {
+        self.err_locale = locale;
+        self.err_technical = technical;
+    }
+
     /// Process the daemon's answer to a request this UI made.
     pub fn on_reply(
         &mut self,
@@ -871,7 +895,8 @@ impl ContactsUi {
                     // Answered with a closed connection or an error frame: no push in that daemon.
                     self.availability = Availability::OldDaemon;
                 }
-                self.fail_request(&req, f.message);
+                let text = f.message.text(self.err_locale, self.err_technical);
+                self.fail_request(&req, text);
                 return;
             }
         };
@@ -880,7 +905,7 @@ impl ContactsUi {
                 if kind == "unavailable" {
                     self.availability = Availability::NoIroh;
                 }
-                let text = error_text(c, &kind, &message);
+                let text = error_text_for(c, &kind, &message, self.err_technical);
                 self.fail_request(&req, text);
             }
             other => {
@@ -1076,6 +1101,7 @@ impl ContactsUi {
         connected: bool,
         technical: bool,
     ) {
+        self.err_technical = technical;
         section_heading(ui, c.heading);
         ui.add_space(4.0);
         ui.add(egui::Label::new(egui::RichText::new(c.desc).color(pal().muted)).wrap(true));
@@ -1088,6 +1114,14 @@ impl ContactsUi {
         match self.availability {
             Availability::NoIroh => {
                 self.notice_card(ui, c.push_unavailable, pal().warning, Some(c.retry_now));
+                if technical {
+                    // The command is for Technical mode only; Easy mode never names one.
+                    ui.add(egui::Label::new(
+                        egui::RichText::new("miasma netcheck")
+                            .monospace()
+                            .color(pal().muted),
+                    ));
+                }
                 return;
             }
             Availability::OldDaemon => {
@@ -1221,7 +1255,7 @@ impl ContactsUi {
             if self.show_qr {
                 ui.add_space(8.0);
                 if !crate::transfers::draw_qr(ui, &qr_payload(&code), 240.0) {
-                    ui.label(egui::RichText::new("QR: too long").color(pal().danger));
+                    ui.label(egui::RichText::new(c.qr_too_long).color(pal().danger));
                 }
                 ui.add_space(2.0);
                 hint(ui, c.qr_note);
@@ -1635,7 +1669,7 @@ impl ContactsUi {
                     );
                 });
             }
-            if let Some(g) = row_guidance(c, r) {
+            if let Some(g) = row_guidance_for(c, r, self.err_technical) {
                 let color = if r.state == PushState::Cancelled {
                     pal().muted
                 } else if r.finished() {
@@ -1831,6 +1865,8 @@ impl ContactsUi {
         let b = contact("b", LONG, "7KQ2D-4HZ8M-X1N6P-V3RTA", true, Some(2 << 30));
         let mut ui = ContactsUi {
             frozen: true,
+            err_locale: Locale::En,
+            err_technical: false,
             availability: Availability::Ok,
             ever_ok: true,
             contacts_loaded: true,
@@ -2062,9 +2098,27 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_points_at_the_daemon_and_netcheck() {
-        let m = error_text(contact_strings(Locale::En), "unavailable", "");
-        assert!(m.contains("daemon") && m.contains("netcheck"));
+    fn unavailable_says_what_to_do_without_naming_a_command() {
+        for l in Locale::ALL {
+            let c = contact_strings(l);
+            for m in [
+                error_text(c, "unavailable", ""),
+                c.push_unavailable.to_owned(),
+                c.fail_unreachable.to_owned(),
+            ] {
+                assert!(
+                    !m.contains("netcheck") && !m.contains("iroh") && !m.contains("daemon"),
+                    "{l:?}: {m}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_error_kind_hides_the_daemon_message_outside_technical_mode() {
+        let c = contact_strings(Locale::En);
+        assert_eq!(error_text_for(c, "weird", "boom", false), c.err_other);
+        assert!(error_text_for(c, "weird", "boom", true).contains("boom"));
     }
 
     #[test]
@@ -2222,7 +2276,6 @@ mod tests {
         r.error = Some("cannot reach the other side: timeout".into());
         let g = row_guidance(c, &r).unwrap();
         assert!(g.contains("相手のMiasmaが起動しているか確認してください"));
-        assert!(g.contains("netcheck"));
         r.error = Some("cannot read the file: denied".into());
         assert!(row_guidance(c, &r)
             .unwrap()
