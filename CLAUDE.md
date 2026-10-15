@@ -25,7 +25,7 @@
 - `ios`: SwiftUI app, Swift package, XCFramework/UniFFI integration
 - `installer`: MSI and Windows install behavior
 - `scripts`: build, package, smoke, soak, release helpers
-- `docs`: ADRs, release notes, variant guide, validation logs, tasks
+- `docs`: ADRs, release notes, variant guide
 
 ## Current Windows Priorities
 
@@ -78,6 +78,3 @@
 - `RELEASE-NOTES.md`
 - `docs/variant-guide.md`
 - `docs/adr/`
-- `docs/tasks/`
-- Android-facing task docs and validation notes
-- iOS-facing task docs and validation notes

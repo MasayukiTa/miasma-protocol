@@ -1,5 +1,5 @@
 // Design tokens of web/css/style.css: the light and dark values must match the
-// plan's token table (docs/tasks/protected-resumable-transfer-plan.md, section 9)
+// desktop app's token table
 // except where a value had to change to keep text at 4.5:1, and every text/background
 // pair the client uses must reach 4.5:1 in both themes.
 //

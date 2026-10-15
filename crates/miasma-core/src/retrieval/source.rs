@@ -32,7 +32,7 @@ pub trait ShareSource: Send + Sync {
     /// sequentially fetch-and-reject shares belonging to every *other* segment
     /// before it accumulates enough valid shares for its own segment — O(total
     /// segments × total shards) network round-trips per segment instead of
-    /// O(total shards). See docs/tasks/p2p-content-transfer-hardening.md Phase 2.4.
+    /// O(total shards).
     ///
     /// An implementation that has per-shard segment metadata available (e.g.
     /// `FallbackShareSource`, whose `DhtRecord` locations already carry a
