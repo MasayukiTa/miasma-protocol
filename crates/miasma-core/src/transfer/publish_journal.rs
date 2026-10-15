@@ -265,7 +265,11 @@ mod tests {
         let grew = std::fs::metadata(&p).unwrap().len() - before;
         let body = to_record(&record(1)).unwrap().len() as u64;
         // length prefix + nonce + ciphertext + tag
-        assert_eq!(grew, 4 + 24 + body + 16, "an append adds exactly its own record");
+        assert_eq!(
+            grew,
+            4 + 24 + body + 16,
+            "an append adds exactly its own record"
+        );
     }
 
     #[test]
