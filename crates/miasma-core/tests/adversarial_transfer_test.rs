@@ -185,6 +185,7 @@ async fn poisoned_piece_is_refused_and_a_spare_is_used(
     let w = build_world(4 * SEG, 4, 6, password);
     let attacker = Hostile::new(&w, (2, 0), tamper);
     let dir = tempfile::tempdir().unwrap();
+    miasma_core::state_crypto::provision_master_key(dir.path()).unwrap();
     let progress = TransferProgress::new(w.mid.to_string());
     let outcome = run_receive(&attacker, spec(&w, &dir, true, password), progress.clone())
         .await
@@ -274,6 +275,7 @@ async fn legacy_record_with_a_poisoned_key_share_recovers_from_spare_pieces() {
     let w = build_world(3 * SEG, 4, 6, None);
     let attacker = Hostile::new(&w, (1, 0), flip_key_share);
     let dir = tempfile::tempdir().unwrap();
+    miasma_core::state_crypto::provision_master_key(dir.path()).unwrap();
     let outcome = run_receive(
         &attacker,
         spec(&w, &dir, false, None),
@@ -297,6 +299,7 @@ async fn recovery_is_bounded_when_too_many_pieces_are_bad() {
     let w = build_world(SEG, 3, 3, None);
     let attacker = Hostile::new(&w, (0, 0), flip_key_share);
     let dir = tempfile::tempdir().unwrap();
+    miasma_core::state_crypto::provision_master_key(dir.path()).unwrap();
     let r = run_receive(
         &attacker,
         spec(&w, &dir, false, None),
@@ -344,6 +347,7 @@ async fn receive_record(
     mid: ContentId,
 ) -> (Result<ReceiveOutcome, MiasmaError>, Duration) {
     let tmp = tempfile::tempdir().unwrap();
+    miasma_core::state_crypto::provision_master_key(tmp.path()).unwrap();
     let t = Instant::now();
     let r = run_receive(
         &Nothing,
@@ -487,6 +491,7 @@ async fn an_unchecked_original_len_cannot_size_the_decode_buffer() {
         }
     }
     let dir = tempfile::tempdir().unwrap();
+    miasma_core::state_crypto::provision_master_key(dir.path()).unwrap();
     let t = Instant::now();
     let outcome = run_receive(
         &Liar(w.shares.clone()),
