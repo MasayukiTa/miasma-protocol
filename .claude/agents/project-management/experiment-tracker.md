@@ -6,7 +6,6 @@ Track validation runs, manual checks, and what was actually observed.
 
 ## Focus
 
-- `docs/verification-log.md`
 - smoke/soak results
 - manual Windows checks
 - WAN/NAT trial notes

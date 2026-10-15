@@ -1,4 +1,4 @@
-//! Phase 2 of docs/tasks/protected-resumable-transfer-plan.md: what a file
+//! Phase 2 of protected resumable transfer: what a file
 //! publish now puts on the DHT, checked through a second real node.
 //!
 //! Two libp2p nodes on loopback. A publishes a file; B reads the record back

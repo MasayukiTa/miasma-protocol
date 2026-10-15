@@ -159,13 +159,12 @@ jobs:
 
       # Zip artifacts lose the executable bit, so ship a tar.gz inside it.
       # The binaries are unsigned: on the receiving Mac, remove the quarantine
-      # flag once (see docs/tasks/macos-to-windows-large-transfer-runbook.md).
+      # flag once: xattr -dr com.apple.quarantine <file>.
       - name: Package macOS binaries
         run: |
           mkdir -p dist/miasma-macos
           cp target/release/miasma target/release/miasma-desktop dist/miasma-macos/
           cp scripts/transfer-e2e.sh dist/miasma-macos/
-          cp docs/tasks/macos-to-windows-large-transfer-runbook.md dist/miasma-macos/
           tar -czf dist/miasma-macos.tar.gz -C dist miasma-macos
           shasum -a 256 dist/miasma-macos.tar.gz
 
@@ -260,10 +259,9 @@ jobs:
         # `Either::Right(Config013)` -- the fixed yamux013 path. The
         # vulnerable yamux012 code is compiled in but never instantiated at
         # runtime. cargo-audit's local RustSec DB does not flag this ID at
-        # all yet, so it never reached this ignore list; see the P1-6 note
-        # in docs/tasks/remaining-tasks-prioritized.md for the full
-        # reachability analysis and why the corresponding Dependabot alert
-        # was dismissed with a tolerable_risk rationale rather than fixed.
+        # all yet, so it never reached this ignore list. The corresponding
+        # Dependabot alert was dismissed with a tolerable_risk rationale
+        # rather than fixed.
 
   coverage:
     name: Core Coverage

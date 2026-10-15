@@ -1,7 +1,6 @@
 //! Protected, resumable large-file transfer.
 //!
-//! See `docs/tasks/protected-resumable-transfer-plan.md` for the design and the
-//! phase plan. This module is deliberately self-contained so that the shared
+//! This module is deliberately self-contained so that the shared
 //! daemon/IPC/CLI files only need a variant and a dispatch call to use it.
 //!
 //! * [`protection`] — password as an encryption factor (Argon2id → HKDF).

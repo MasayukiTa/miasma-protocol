@@ -94,8 +94,7 @@ impl<D: OnionAwareDhtExecutor> ShareSource for FallbackShareSource<D> {
     }
 
     /// Segment-scoped variant of `list_candidates` — the fix for the
-    /// multi-segment retrieval slowdown described in
-    /// docs/tasks/p2p-content-transfer-hardening.md Phase 2.4.
+    /// multi-segment retrieval slowdown.
     ///
     /// `DhtRecord::locations` already carries a `segment_index` per
     /// `ShardLocation`, so this filters to just `segment_index`'s shards

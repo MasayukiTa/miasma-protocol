@@ -72,7 +72,7 @@ pub struct ShareFetchResponse {
 //
 // A *separate* protocol from `/miasma/share/1.0.0` (pull-only, above) rather
 // than an enum-extension of it -- per external design review (codex 5.6 sol
-// + claude fable, see docs/tasks/p2p-content-transfer-hardening.md): the
+// + claude fable): the
 // existing `ShareFetchRequest`/`ShareFetchResponse` types are deserialized
 // verbatim across five different transport paths (WSS, obfuscated QUIC, Tor/
 // shadowsocks, onion, direct payload), so changing their wire shape is not a
@@ -925,8 +925,7 @@ pub enum DhtCommand {
     /// `exclude`) as candidates to push shares to, best-first, via the
     /// existing routing overlay's trust/reliability/IP-diversity scoring
     /// (`RoutingTable::rank_peers`). Not true Kademlia K-closest-to-content-
-    /// key placement -- see the external design review's discussion of that
-    /// trade-off in `docs/tasks/p2p-content-transfer-hardening.md`.
+    /// key placement -- the external design review accepted that trade-off.
     SelectStorageCandidates {
         exclude: Vec<PeerId>,
         reply: oneshot::Sender<Vec<PeerId>>,
@@ -5170,8 +5169,7 @@ impl MiasmaNode {
     /// inbound `ShareFetchRequest` handler above (which already does a
     /// synchronous decrypt-on-read from the same store) -- moving this to a
     /// `spawn_blocking` worker with a results channel would reduce event-loop
-    /// stall time under load, but is a documented follow-up
-    /// (`docs/tasks/p2p-content-transfer-hardening.md`), not a blocker: it
+    /// stall time under load, but is a follow-up, not a blocker: it
     /// does not change correctness, only latency under concurrent load this
     /// project's expected network size does not yet need to worry about.
     fn handle_inbound_store(&mut self, peer: PeerId, share: MiasmaShare) -> StoreResponse {
