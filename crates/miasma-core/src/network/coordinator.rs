@@ -273,8 +273,7 @@ impl PushState {
 /// (`RoutingTable::rank_peers`). This is **not** true Kademlia
 /// K-closest-to-content-key placement; per the external design review, that
 /// trade-off is an acceptable, explicitly-documented simplification for this
-/// phase (see `docs/tasks/p2p-content-transfer-hardening.md`) -- K-closest
-/// discovery is deferred as its own follow-up.
+/// phase -- K-closest discovery is deferred as its own follow-up.
 ///
 /// # Per-holder cap
 /// No single holder is allowed to accumulate more than

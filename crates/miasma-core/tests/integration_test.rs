@@ -1506,10 +1506,8 @@ async fn daemon_ipc_get_to_file_roundtrip() {
 // O(total_segments * total_shards). See
 // `dissolve_and_publish_file_multi_segment_network_retrieval_is_fast` below
 // for the regression test (real 2-node network, real
-// `dissolve_and_publish_file`, both retrieval paths) and
-// `docs/tasks/p2p-content-transfer-hardening.md`'s Phase 2.4 entry /
-// `docs/tasks/remaining-tasks-prioritized.md`'s P1-7 entry for the full
-// writeup. `daemon_ipc_get_to_file_roundtrip` above remains the correctness
+// `dissolve_and_publish_file`, both retrieval paths).
+// `daemon_ipc_get_to_file_roundtrip` above remains the correctness
 // proof for `GetToFile` at a size too small to have shown this bug.
 
 /// Regression test for the Phase 2.4 candidate-listing fix described above.
