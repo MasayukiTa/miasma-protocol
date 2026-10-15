@@ -229,6 +229,8 @@ pub fn qr_payload(code: &str) -> String {
 
 /// Plain-language text for an `Error{kind, message}` answer. Unknown kinds fall back to the
 /// generic text plus the daemon's own message, so nothing is hidden.
+/// Full wording (as Technical mode shows it); the window itself calls [`error_text_for`].
+#[cfg(test)]
 pub fn error_text(c: &ContactStrings, kind: &str, message: &str) -> String {
     error_text_for(c, kind, message, true)
 }
@@ -416,6 +418,8 @@ pub fn state_label(c: &ContactStrings, s: PushState) -> &'static str {
 
 /// Guidance for a finished row that did not succeed, or the live retry note for a row that is
 /// still trying. `None` when there is nothing to add.
+/// Full wording (as Technical mode shows it); the window itself calls [`row_guidance_for`].
+#[cfg(test)]
 pub fn row_guidance(c: &ContactStrings, r: &Row) -> Option<String> {
     row_guidance_for(c, r, true)
 }
@@ -2539,6 +2543,33 @@ mod tests {
             }),
         );
         assert_eq!(ui.availability, Availability::Ok);
+    }
+
+    #[test]
+    fn daemon_failures_are_worded_in_the_ui_language_and_detail_is_technical_only() {
+        use crate::errors::{ErrorKind, UiError};
+        let fail = || {
+            Err(PushFail {
+                message: UiError::new(ErrorKind::DaemonUnreachable, "daemon.port not found"),
+                daemon_down: true,
+            })
+        };
+        let req = || PushRequest::ContactAdd {
+            code: "x".into(),
+            label: Some("a".into()),
+        };
+        let mut ui = ContactsUi::default();
+        ui.set_error_context(Locale::Ja, false);
+        ui.on_reply(contact_strings(Locale::Ja), req(), fail());
+        let easy = ui.add_error.clone().unwrap();
+        assert_eq!(easy, ErrorKind::DaemonUnreachable.text(Locale::Ja));
+        assert!(!easy.contains("daemon.port"));
+
+        let mut ui = ContactsUi::default();
+        ui.set_error_context(Locale::En, true);
+        ui.on_reply(contact_strings(Locale::En), req(), fail());
+        let tech = ui.add_error.clone().unwrap();
+        assert!(tech.ends_with("daemon.port not found"), "{tech}");
     }
 
     #[test]

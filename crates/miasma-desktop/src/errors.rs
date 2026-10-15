@@ -52,6 +52,8 @@ pub enum ErrorKind {
 }
 
 impl ErrorKind {
+    /// Every kind, for the completeness tests.
+    #[cfg(test)]
     pub const ALL: [ErrorKind; 33] = [
         Self::RuntimeStartFailed,
         Self::DaemonAutostartFailed,
@@ -339,7 +341,7 @@ impl From<String> for UiError {
 
 impl From<&str> for UiError {
     fn from(detail: &str) -> Self {
-        Self::from_text(detail.to_owned())
+        Self::from_text(detail)
     }
 }
 
