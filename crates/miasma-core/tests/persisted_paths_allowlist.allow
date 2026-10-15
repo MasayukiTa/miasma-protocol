@@ -35,3 +35,4 @@ miasma-core/src/state_crypto/doc.rs | 3 | encrypted single-document writer: temp
 miasma-core/src/state_crypto/log.rs | 6 | encrypted record log: create, append, cut a torn tail, replace by rename
 miasma-core/src/state_crypto/migrate.rs | 4 | one-time conversion of plaintext state files: lock file, staging, rename, wipe of the plaintext
 miasma-core/src/state_crypto/mod.rs | 5 | master key creation on first use, overwrite-and-remove, set-aside of unreadable files
+miasma-core/src/chat/store.rs | 1 | chat folder creation (the files in it are written through state_crypto)
