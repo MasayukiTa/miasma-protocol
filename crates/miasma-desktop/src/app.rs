@@ -13,6 +13,7 @@ use crate::locale::{self, Locale, LogStrings, Strings, TransferStrings};
 use crate::theme::{self, Palette, ThemeMode};
 use crate::transfers::TransfersUi;
 use crate::ui_kit::{self as kit, Level};
+use crate::ux::{self, Answer, RefreshGate};
 use crate::variant::ProductMode;
 use crate::worker::{DaemonState, WorkerCmd, WorkerHandle, WorkerResult};
 use crate::LaunchIntent;
@@ -35,7 +36,7 @@ fn pal() -> Palette {
 
 // ─── Tab enum ───────────────────────────────────────────────────────────────
 
-#[derive(PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum Tab {
     Contacts,
     Transfers,
@@ -126,11 +127,29 @@ pub struct MiasmaApp {
     outbox_items: Vec<InboxItem>,
     outbox_confirm_code: String,
 
+    /// When each list was last asked for (see `ux::RefreshGate`): a list that is empty is not
+    /// asked for again on every frame.
+    inbox_gate: RefreshGate,
+    outbox_gate: RefreshGate,
+    sharing_gate: RefreshGate,
+    /// The tab drawn on the previous frame, to notice a tab being opened.
+    prev_tab: Tab,
+
     // Settings / general
     data_dir_display: String,
     busy: bool,
     status_msg: Option<(String, MsgKind)>,
+    /// When `status_msg` was set (for the messages that go away by themselves).
+    status_msg_at: std::time::Instant,
     show_wipe_confirm: bool,
+    /// The "a transfer is running, close anyway?" dialog is open.
+    show_close_confirm: bool,
+    /// The person confirmed: the next close request goes through.
+    close_confirmed: bool,
+    /// Delete / revoke waiting for a yes: which side and which envelope.
+    revoke_confirm: Option<(RevokeSide, String)>,
+    /// Which side asked for the revoke whose answer is still to come (for its message).
+    revoke_in_flight: Option<RevokeSide>,
     startup_time: std::time::Instant,
     last_status_poll: std::time::Instant,
     launch_attempts: u32,
@@ -262,11 +281,42 @@ struct InboxItem {
     file_size: u64,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum MsgKind {
-    Info,
-    Success,
-    Error,
+/// Which side of a directed share asks to end it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RevokeSide {
+    /// The recipient declines a file sent to them.
+    Recipient,
+    /// The sender takes a file back.
+    Sender,
+}
+
+use crate::ux::MsgLevel as MsgKind;
+
+/// The tabs of the navigation bar, left to right. The Import tab is last and shows only while an
+/// import is active.
+const NAV_TABS: [Tab; 10] = [
+    Tab::Contacts,
+    Tab::Transfers,
+    Tab::Store,
+    Tab::Retrieve,
+    Tab::Send,
+    Tab::Inbox,
+    Tab::Outbox,
+    Tab::Status,
+    Tab::Settings,
+    Tab::Import,
+];
+
+/// The first tab of the navigation bar: where a normal launch starts.
+const FIRST_TAB: Tab = NAV_TABS[0];
+
+/// The tab shown when the window opens. A normal launch starts on the first tab in the
+/// navigation; opening a magnet link or a torrent file goes straight to the Import tab.
+fn initial_tab(intent: &LaunchIntent) -> Tab {
+    match intent {
+        LaunchIntent::Normal => FIRST_TAB,
+        LaunchIntent::Magnet(_) | LaunchIntent::TorrentFile(_) => Tab::Import,
+    }
 }
 
 impl MiasmaApp {
@@ -281,13 +331,14 @@ impl MiasmaApp {
         crate::fonts::install(&cc.egui_ctx);
         let dark = theme::resolve_dark(theme_mode, cc.integration_info.system_theme);
         kit::apply_theme(&cc.egui_ctx, dark);
-        let worker = WorkerHandle::spawn(data_dir.clone());
+        let worker = WorkerHandle::spawn(data_dir.clone(), cc.egui_ctx.clone());
 
         // If launched with a magnet/torrent intent, go to Import tab.
-        let (initial_tab, import_intent, import_state) = match &intent {
-            LaunchIntent::Normal => (Tab::Store, None, ImportState::Idle),
+        let first_tab = initial_tab(&intent);
+        let (import_intent, import_state) = match &intent {
+            LaunchIntent::Normal => (None, ImportState::Idle),
             LaunchIntent::Magnet(_) | LaunchIntent::TorrentFile(_) => {
-                (Tab::Import, Some(intent), ImportState::Confirming)
+                (Some(intent), ImportState::Confirming)
             }
         };
 
@@ -295,7 +346,8 @@ impl MiasmaApp {
 
         Self {
             worker,
-            tab: initial_tab,
+            tab: first_tab,
+            prev_tab: first_tab,
             mode,
             locale,
             theme_mode,
@@ -331,7 +383,15 @@ impl MiasmaApp {
             data_dir_display: data_dir.to_string_lossy().into_owned(),
             busy: false,
             status_msg: None,
+            status_msg_at: now,
             show_wipe_confirm: false,
+            show_close_confirm: false,
+            close_confirmed: false,
+            revoke_confirm: None,
+            revoke_in_flight: None,
+            inbox_gate: RefreshGate::new(ux::LIST_REFRESH_EVERY),
+            outbox_gate: RefreshGate::new(ux::LIST_REFRESH_EVERY),
+            sharing_gate: RefreshGate::new(ux::LIST_REFRESH_EVERY),
             startup_time: now,
             last_status_poll: now,
             launch_attempts: 0,
@@ -392,6 +452,29 @@ impl MiasmaApp {
 
     fn set_msg(&mut self, kind: MsgKind, msg: impl Into<String>) {
         self.status_msg = Some((msg.into(), kind));
+        self.status_msg_at = std::time::Instant::now();
+    }
+
+    /// Ask the service for the inbox now, and hold off the timed refresh for a while.
+    fn request_inbox(&mut self) {
+        self.inbox_gate.mark(std::time::Instant::now());
+        let _ = self.worker.tx.try_send(WorkerCmd::DirectedInbox);
+    }
+
+    /// Ask the service for the outbox now, and hold off the timed refresh for a while.
+    fn request_outbox(&mut self) {
+        self.outbox_gate.mark(std::time::Instant::now());
+        let _ = self.worker.tx.try_send(WorkerCmd::DirectedOutbox);
+    }
+
+    /// True while something on screen is moving or waiting for an answer, so the window should
+    /// keep redrawing quickly. Everything else wakes the window by itself (input, worker replies).
+    fn is_moving(&self) -> bool {
+        self.busy
+            || self.daemon_state == DaemonState::Starting
+            || self.import_state == ImportState::InProgress
+            || self.transfers.running_count() > 0
+            || self.contacts.active_count() > 0
     }
 
     /// Persist current mode, locale and theme to desktop-prefs.toml.
@@ -402,6 +485,112 @@ impl MiasmaApp {
             theme: self.theme_mode,
         };
         prefs.save(&self.data_dir);
+    }
+
+    // ── Dialogs ──────────────────────────────────────────────────────────
+
+    /// The "are you sure" dialogs. One is open at a time; each is answered with a button or Esc.
+    fn dialogs(&mut self, ctx: &egui::Context) {
+        let s = self.s();
+        let connected = self.daemon_state == DaemonState::Connected;
+
+        // Closing the window would stop a running transfer.
+        if self.show_close_confirm {
+            let answer = ux::confirm::show(
+                ctx,
+                "close_confirm",
+                s.close_title,
+                s.close_confirm,
+                s.close_cancel,
+                |ui| {
+                    kit::paragraph(ui, s.close_body);
+                },
+            );
+            match answer {
+                Answer::Confirm => {
+                    self.show_close_confirm = false;
+                    self.close_confirmed = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                Answer::Cancel => self.show_close_confirm = false,
+                Answer::Pending => {}
+            }
+            return;
+        }
+
+        // Emergency wipe: what goes, what stays, that it cannot be undone.
+        if self.show_wipe_confirm {
+            let answer = ux::confirm::show(
+                ctx,
+                "wipe_confirm",
+                s.wipe_confirm_title,
+                s.wipe_confirm_button,
+                s.wipe_cancel,
+                |ui| {
+                    kit::paragraph(ui, s.wipe_confirm_line1);
+                    ui.add_space(kit::SP_1);
+                    ui.label(
+                        RichText::new(s.wipe_confirm_line2)
+                            .strong()
+                            .color(pal().danger),
+                    );
+                    ui.add_space(kit::SP_1);
+                    kit::paragraph_muted(ui, s.wipe_confirm_kept);
+                    if !connected {
+                        ui.add_space(kit::SP_1);
+                        kit::hint(ui, s.wipe_confirm_offline);
+                    }
+                },
+            );
+            match answer {
+                Answer::Confirm => {
+                    self.show_wipe_confirm = false;
+                    self.busy = true;
+                    let _ = self.worker.tx.try_send(WorkerCmd::Wipe);
+                }
+                Answer::Cancel => self.show_wipe_confirm = false,
+                Answer::Pending => {}
+            }
+            return;
+        }
+
+        // Decline (recipient) or revoke (sender): one confirmation, one word per side.
+        if let Some((side, id)) = self.revoke_confirm.clone() {
+            let (title, body, confirm) = match side {
+                RevokeSide::Recipient => (
+                    s.inbox_revoke_title,
+                    s.inbox_revoke_body,
+                    s.inbox_revoke_confirm,
+                ),
+                RevokeSide::Sender => (
+                    s.outbox_revoke_title,
+                    s.outbox_revoke_body,
+                    s.outbox_revoke_confirm,
+                ),
+            };
+            let answer = ux::confirm::show(
+                ctx,
+                "revoke_confirm",
+                title,
+                confirm,
+                s.dialog_cancel,
+                |ui| {
+                    kit::paragraph(ui, body);
+                },
+            );
+            match answer {
+                Answer::Confirm => {
+                    self.revoke_confirm = None;
+                    self.revoke_in_flight = Some(side);
+                    let _ = self
+                        .worker
+                        .tx
+                        .try_send(WorkerCmd::DirectedRevoke { envelope_id: id });
+                }
+                Answer::Cancel => self.revoke_confirm = None,
+                Answer::Pending => {}
+            }
+        }
     }
 
     // ── Poll worker ──────────────────────────────────────────────────────
@@ -478,7 +667,16 @@ impl MiasmaApp {
                         let _ = std::fs::remove_file(path);
                     }
                     self.show_wipe_confirm = false;
-                    self.set_msg(MsgKind::Error, self.s().wipe_done);
+                    // What the window still remembers about the erased data goes too.
+                    self.inbox_items.clear();
+                    self.outbox_items.clear();
+                    self.sharing_contact = None;
+                    self.last_envelope_id = None;
+                    self.peer_id.clear();
+                    self.contacts = ContactsUi::default();
+                    self.transfers = TransfersUi::default();
+                    // Finished, not failed: the success colour.
+                    self.set_msg(MsgKind::Success, self.s().wipe_done);
                 }
                 WorkerResult::StateChanged(state) => {
                     self.last_error = None;
@@ -510,7 +708,7 @@ impl MiasmaApp {
                     self.last_envelope_id = Some(envelope_id);
                     self.set_msg(MsgKind::Success, self.s().send_success);
                     // Auto-refresh outbox to show new item.
-                    let _ = self.worker.tx.try_send(WorkerCmd::DirectedOutbox);
+                    self.request_outbox();
                 }
                 WorkerResult::DirectedRetrieved {
                     temp_path,
@@ -546,16 +744,21 @@ impl MiasmaApp {
                 }
                 WorkerResult::DirectedRevoked => {
                     self.busy = false;
-                    self.set_msg(MsgKind::Success, "Revoked.");
+                    let s = self.s();
+                    let done = match self.revoke_in_flight.take() {
+                        Some(RevokeSide::Recipient) => s.inbox_revoke_done,
+                        _ => s.outbox_revoke_done,
+                    };
+                    self.set_msg(MsgKind::Success, done);
                     // Refresh inbox and outbox.
-                    let _ = self.worker.tx.try_send(WorkerCmd::DirectedInbox);
-                    let _ = self.worker.tx.try_send(WorkerCmd::DirectedOutbox);
+                    self.request_inbox();
+                    self.request_outbox();
                 }
                 WorkerResult::DirectedConfirmed => {
                     self.busy = false;
                     self.outbox_confirm_code.zeroize();
                     self.set_msg(MsgKind::Success, self.s().outbox_confirm_success);
-                    let _ = self.worker.tx.try_send(WorkerCmd::DirectedOutbox);
+                    self.request_outbox();
                 }
                 WorkerResult::DirectedInboxList(items) => {
                     self.inbox_items = items
@@ -1078,8 +1281,8 @@ impl MiasmaApp {
                     ui.add_space(kit::SP_1);
                     kit::divider(ui);
                     ui.add_space(kit::SP_1);
-                } else if connected {
-                    // Request sharing key on first render.
+                } else if connected && self.sharing_gate.take(std::time::Instant::now()) {
+                    // Ask once when the tab opens; again only after a while if no answer came.
                     let _ = self.worker.tx.try_send(WorkerCmd::GetSharingKey);
                 }
 
@@ -1168,22 +1371,25 @@ impl MiasmaApp {
         // Taken out for the frame instead of cloned: the rows need `&mut self` for the password
         // field and the worker.
         let items = std::mem::take(&mut self.inbox_items);
+        let refresh_clicked = std::cell::Cell::new(false);
         kit::page_actions(
             ui,
             title,
             Some(desc),
             |ui| {
-                if ui.add(kit::compact_button(s.inbox_refresh)).clicked() && connected {
-                    let _ = self.worker.tx.try_send(WorkerCmd::DirectedInbox);
+                if ui.add(kit::compact_button(s.inbox_refresh)).clicked() {
+                    refresh_clicked.set(true);
                 }
             },
             |ui| {
+                // On opening the tab, then every few seconds while it stays open (and after
+                // anything that changes the list). An empty list used to be asked for on every
+                // frame, forever.
+                if connected && self.inbox_gate.take(std::time::Instant::now()) {
+                    let _ = self.worker.tx.try_send(WorkerCmd::DirectedInbox);
+                }
                 if items.is_empty() {
                     ui.label(kit::muted_text(s.inbox_empty));
-                    // Auto-refresh on first render.
-                    if connected {
-                        let _ = self.worker.tx.try_send(WorkerCmd::DirectedInbox);
-                    }
                     return;
                 }
                 for item in &items {
@@ -1257,19 +1463,21 @@ impl MiasmaApp {
                             });
                         }
 
-                        // Revoke (non-terminal states only).
+                        // Decline (non-terminal states only): asks first, it cannot be undone.
                         if !is_terminal_state(&item.state)
                             && ui.add(kit::danger_button(s.inbox_revoke_button)).clicked()
                         {
-                            let _ = self.worker.tx.try_send(WorkerCmd::DirectedRevoke {
-                                envelope_id: item.envelope_id.clone(),
-                            });
+                            self.revoke_confirm =
+                                Some((RevokeSide::Recipient, item.envelope_id.clone()));
                         }
                     });
                 }
             },
         );
         self.inbox_items = items;
+        if refresh_clicked.get() && connected {
+            self.request_inbox();
+        }
     }
 
     // ── Outbox panel (sender view) ──────────────────────────────────────
@@ -1290,22 +1498,22 @@ impl MiasmaApp {
         };
 
         let items = std::mem::take(&mut self.outbox_items);
+        let refresh_clicked = std::cell::Cell::new(false);
         kit::page_actions(
             ui,
             title,
             Some(desc),
             |ui| {
-                if ui.add(kit::compact_button(s.outbox_refresh)).clicked() && connected {
-                    let _ = self.worker.tx.try_send(WorkerCmd::DirectedOutbox);
+                if ui.add(kit::compact_button(s.outbox_refresh)).clicked() {
+                    refresh_clicked.set(true);
                 }
             },
             |ui| {
+                if connected && self.outbox_gate.take(std::time::Instant::now()) {
+                    let _ = self.worker.tx.try_send(WorkerCmd::DirectedOutbox);
+                }
                 if items.is_empty() {
                     ui.label(kit::muted_text(s.outbox_empty));
-                    // Auto-refresh on first render.
-                    if connected {
-                        let _ = self.worker.tx.try_send(WorkerCmd::DirectedOutbox);
-                    }
                     return;
                 }
                 for item in &items {
@@ -1358,15 +1566,17 @@ impl MiasmaApp {
                         if !is_terminal_state(&item.state)
                             && ui.add(kit::danger_button(s.outbox_revoke_button)).clicked()
                         {
-                            let _ = self.worker.tx.try_send(WorkerCmd::DirectedRevoke {
-                                envelope_id: item.envelope_id.clone(),
-                            });
+                            self.revoke_confirm =
+                                Some((RevokeSide::Sender, item.envelope_id.clone()));
                         }
                     });
                 }
             },
         );
         self.outbox_items = items;
+        if refresh_clicked.get() && connected {
+            self.request_outbox();
+        }
     }
 
     // ── Status panel ─────────────────────────────────────────────────────
@@ -1396,13 +1606,16 @@ impl MiasmaApp {
             }
 
             // Emergency wipe: a section of its own at the bottom, never next to a primary.
+            // The button works with the background service stopped too: the wipe then runs
+            // without it, so it is never greyed out when it may be needed most.
             kit::section(ui, s.wipe_label, |ui| {
-                ui.add_enabled_ui(connected, |ui| {
-                    kit::paragraph_muted(ui, s.wipe_desc);
-                    if ui.add(kit::danger_button(s.wipe_button)).clicked() {
-                        self.show_wipe_confirm = true;
-                    }
-                });
+                kit::paragraph_muted(ui, s.wipe_desc);
+                if ui.add(kit::danger_button(s.wipe_button)).clicked() {
+                    self.show_wipe_confirm = true;
+                }
+                if !connected {
+                    kit::hint(ui, s.wipe_offline_note);
+                }
             });
         });
     }
@@ -2414,8 +2627,32 @@ impl eframe::App for MiasmaApp {
             self.applied_dark = Some(dark);
         }
 
-        ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        // The window redraws quickly only while something moves; otherwise about once a second,
+        // for the timers. Input and replies from the worker wake it sooner.
+        let moving = self.is_moving();
+        ctx.request_repaint_after(ux::repaint_delay(moving));
+
+        // Closing the window stops the background service and every transfer with it: ask first
+        // when one is running.
+        if ctx.input(|i| i.viewport().close_requested()) && !self.close_confirmed {
+            let running = self.transfers.running_count();
+            let pushes = self.contacts.active_count();
+            if ux::close_needs_confirmation(running, pushes) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.show_close_confirm = true;
+            }
+        }
+
         self.poll_worker();
+
+        // Messages that go away by themselves: success and progress notes. Errors stay until
+        // they are closed.
+        if let Some((_, kind)) = &self.status_msg {
+            if ux::message_expired(*kind, self.status_msg_at.elapsed(), moving) {
+                self.status_msg = None;
+            }
+        }
+
         if let Some(id) = self.link_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.open_share_link(id);
         }
@@ -2502,30 +2739,32 @@ impl eframe::App for MiasmaApp {
                 } else {
                     s.tab_outbox
                 };
-                let tabs: [(Tab, &str); 10] = [
-                    (Tab::Contacts, contacts_label.as_str()),
-                    (Tab::Transfers, tr_label),
-                    (Tab::Store, store_label),
-                    (Tab::Retrieve, retrieve_label),
-                    (Tab::Send, send_label),
-                    (Tab::Inbox, inbox_label),
-                    (Tab::Outbox, outbox_label),
-                    (Tab::Status, s.tab_status),
-                    (Tab::Settings, s.tab_settings),
-                    (Tab::Import, s.tab_import),
-                ];
+                let label_for = |tab: Tab| -> &str {
+                    match tab {
+                        Tab::Contacts => contacts_label.as_str(),
+                        Tab::Transfers => tr_label,
+                        Tab::Store => store_label,
+                        Tab::Retrieve => retrieve_label,
+                        Tab::Send => send_label,
+                        Tab::Inbox => inbox_label,
+                        Tab::Outbox => outbox_label,
+                        Tab::Status => s.tab_status,
+                        Tab::Settings => s.tab_settings,
+                        Tab::Import => s.tab_import,
+                    }
+                };
                 // The Import tab shows only while an import is active.
                 let show_import =
                     self.import_intent.is_some() || self.import_state != ImportState::Idle;
                 let count = if show_import {
-                    tabs.len()
+                    NAV_TABS.len()
                 } else {
-                    tabs.len() - 1
+                    NAV_TABS.len() - 1
                 };
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
-                    for (tab, label) in &tabs[..count] {
-                        if kit::nav_tab(ui, self.tab == *tab, label).clicked() {
+                    for tab in &NAV_TABS[..count] {
+                        if kit::nav_tab(ui, self.tab == *tab, label_for(*tab)).clicked() {
                             self.tab = *tab;
                         }
                     }
@@ -2538,6 +2777,17 @@ impl eframe::App for MiasmaApp {
                     egui::Stroke::new(1.0, pal().border),
                 );
             });
+
+        // A list tab was just opened: its list is due at once.
+        if self.tab != self.prev_tab {
+            match self.tab {
+                Tab::Inbox => self.inbox_gate.reset(),
+                Tab::Outbox => self.outbox_gate.reset(),
+                Tab::Send => self.sharing_gate.reset(),
+                _ => {}
+            }
+            self.prev_tab = self.tab;
+        }
 
         // ── Bottom status bar ─────────────────────────────────────────
         if let Some((ref msg, kind)) = self.status_msg.clone() {
@@ -2606,26 +2856,40 @@ impl eframe::App for MiasmaApp {
 
         self.legacy_logs_notice(ctx);
 
-        // ── Wipe confirmation dialog ──────────────────────────────────
-        if self.show_wipe_confirm {
-            egui::Window::new(s.wipe_confirm_title)
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .show(ctx, |ui| {
-                    kit::paragraph(ui, s.wipe_confirm_line1);
-                    ui.label(RichText::new(s.wipe_confirm_line2).color(pal().danger));
-                    ui.add_space(kit::SP_1);
-                    kit::button_row(ui, |ui| {
-                        if ui.add(kit::danger_button(s.wipe_confirm_button)).clicked() {
-                            let _ = self.worker.tx.try_send(WorkerCmd::Wipe);
-                            self.busy = true;
-                        }
-                        if ui.add(kit::secondary_button(s.wipe_cancel)).clicked() {
-                            self.show_wipe_confirm = false;
-                        }
-                    });
-                });
+        self.dialogs(ctx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_normal_launch_starts_on_the_first_tab_of_the_navigation() {
+        assert_eq!(initial_tab(&LaunchIntent::Normal), NAV_TABS[0]);
+        assert_eq!(initial_tab(&LaunchIntent::Normal), Tab::Contacts);
+    }
+
+    #[test]
+    fn opening_a_magnet_or_torrent_still_goes_to_import() {
+        assert_eq!(
+            initial_tab(&LaunchIntent::Magnet("magnet:?xt=urn:btih:abc".into())),
+            Tab::Import
+        );
+        assert_eq!(
+            initial_tab(&LaunchIntent::TorrentFile("a.torrent".into())),
+            Tab::Import
+        );
+    }
+
+    #[test]
+    fn every_tab_is_in_the_navigation_exactly_once() {
+        for (i, a) in NAV_TABS.iter().enumerate() {
+            for b in &NAV_TABS[i + 1..] {
+                assert_ne!(a, b);
+            }
         }
+        // Import is the one that is hidden unless an import is active, so it stays last.
+        assert_eq!(NAV_TABS[NAV_TABS.len() - 1], Tab::Import);
     }
 }
