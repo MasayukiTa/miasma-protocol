@@ -68,6 +68,7 @@ enum M<'a> {
     Deleted(u32),
     NeedAllOrId,
     Following,
+    TemporaryHistory,
     ApiError(&'a str),
     Hint(&'a str),
 }
@@ -98,6 +99,7 @@ impl M<'_> {
             M::Deleted(n) => format!("Deleted {n} message(s) on this device."),
             M::NeedAllOrId => "Give a message ID, or --all to delete the whole conversation.".into(),
             M::Following => "Waiting for new messages (Ctrl+C to stop)...".into(),
+            M::TemporaryHistory => "Note: the history is temporary here (chat.history_save is false): it is kept in memory only and is gone when the daemon stops. Messages are saved by default; run `miasma config --key chat.history_save --value auto` and restart the daemon to save them.".into(),
             M::ApiError(e) => format!("error: {e}"),
             M::Hint(kind) => match *kind {
                 "unknown_contact" => "No such contact. See `miasma contact list`.".into(),
@@ -130,6 +132,7 @@ impl M<'_> {
             M::Deleted(n) => format!("この端末のメッセージを{n}件削除しました。"),
             M::NeedAllOrId => "削除するメッセージのIDを指定するか、会話ぜんたいを消すには --all を付けてください。".into(),
             M::Following => "新しいメッセージを待っています(Ctrl+C で終了)...".into(),
+            M::TemporaryHistory => "注意: 履歴は一時的です(chat.history_save が false)。メモリにだけ置かれ、デーモンを止めると消えます。既定では保存されます。保存するには `miasma config --key chat.history_save --value auto` を実行してデーモンを再起動してください。".into(),
             M::ApiError(e) => format!("エラー: {e}"),
             M::Hint(kind) => match *kind {
                 "unknown_contact" => "その連絡先はありません。`miasma contact list` で確認してください。".into(),
@@ -238,6 +241,15 @@ fn api_error(kind: &str, message: &str) -> anyhow::Error {
     }
 }
 
+/// Say so when the history is only kept in memory.
+async fn note_if_temporary(data_dir: &Path) {
+    if let Ok(ChatResponse::Status(s)) = call(data_dir, ChatRequest::Status {}).await {
+        if !s.history_saved {
+            println!("{}", M::TemporaryHistory.t());
+        }
+    }
+}
+
 fn label_of(contact: &str, label: &Option<String>) -> String {
     label.clone().unwrap_or_else(|| contact.to_owned())
 }
@@ -273,6 +285,7 @@ pub async fn run_chat(data_dir: &Path, cmd: ChatCmd) -> Result<()> {
                 for c in &list {
                     println!("{}", M::ConversationRow(c).t());
                 }
+                note_if_temporary(data_dir).await;
                 Ok(())
             }
             ChatResponse::Error { kind, message } => Err(api_error(&kind, &message)),
@@ -285,6 +298,7 @@ pub async fn run_chat(data_dir: &Path, cmd: ChatCmd) -> Result<()> {
             ids,
         } => {
             let (endpoint_id, label) = show_history(data_dir, &contact, limit, ids).await?;
+            note_if_temporary(data_dir).await;
             if follow {
                 follow_events(data_dir, &endpoint_id, &label.unwrap_or(contact)).await?;
             }
@@ -446,6 +460,7 @@ mod tests {
             M::Deleted(2),
             M::NeedAllOrId,
             M::Following,
+            M::TemporaryHistory,
             M::ApiError("x"),
         ];
         for m in &all {

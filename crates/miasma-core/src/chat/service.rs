@@ -188,7 +188,7 @@ pub fn start_for_daemon(
         }
     };
     let mut store = StoreSettings {
-        history_save: cfg.chat.history_saved(&cfg.privacy),
+        history_save: cfg.chat.history_saved(),
         retention_days: cfg.chat.retention_days,
         ..StoreSettings::default()
     };

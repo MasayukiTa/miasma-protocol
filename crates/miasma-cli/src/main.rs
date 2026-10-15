@@ -474,6 +474,9 @@ enum Commands {
     /// Both sides must have registered each other (`miasma contact add`). A message to someone
     /// who is offline waits and is delivered when they come online.
     ///
+    /// The history is saved (encrypted) by default. `miasma config --key chat.history_save --value false`
+    /// keeps it in memory only (temporary: gone when the daemon stops).
+    ///
     /// Example: miasma chat send taro "See you at 3"
     Chat {
         #[command(subcommand)]

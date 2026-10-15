@@ -346,13 +346,14 @@ it then stays in the history marked *failed*. Up to 500 messages can wait.
 Removing a contact keeps the conversation but you cannot write to them anymore.
 
 **History.** Messages are stored encrypted (with the state key derived from
-`master.key`), one file per contact in `<data dir>/chat/`. While **stealth mode**
-is on (`privacy.stealth_mode`, the default) and `chat.history_save` is not set,
-the history is kept in memory only (a few MiB, the oldest messages are dropped)
-and is gone when the daemon stops; messages waiting to be delivered and the keys
-of the conversation are still stored encrypted. Set
-`miasma config --key chat.history_save --value true` to save the history on disk
-in any case (`false` to never save it, `auto` to go back to the rule above).
+`master.key`), one file per contact in `<data dir>/chat/`. **The history is saved
+by default** and stays on disk until you delete it (stealth mode, which only
+concerns logs, does not change that). To keep it in memory only, run
+`miasma config --key chat.history_save --value false` and restart the daemon:
+the history is then temporary (a few MiB, the oldest messages are dropped, all
+gone when the daemon stops) and nothing of it is written to disk; messages
+waiting to be delivered and the keys of the conversation are still stored
+encrypted. `--value auto` removes the setting (back to the default: saved).
 `chat.retention_days` removes saved messages older than that many days
 (0 = keep); other keys: `chat.enabled`, `chat.max_message_bytes`,
 `chat.outbox_max`. They take effect when the daemon starts.
