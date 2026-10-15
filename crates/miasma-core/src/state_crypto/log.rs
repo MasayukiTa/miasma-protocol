@@ -127,18 +127,32 @@ fn is_unexpected_eof(e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::UnexpectedEof
 }
 
-/// True when the next `count` bytes of `r` are all zero.
-fn rest_is_zero<R: Read>(r: &mut R, mut count: u64) -> std::io::Result<bool> {
-    let mut buf = [0u8; 4096];
-    while count > 0 {
-        let n = count.min(buf.len() as u64) as usize;
-        r.read_exact(&mut buf[..n])?;
-        if buf[..n].iter().any(|b| *b != 0) {
-            return Ok(false);
+/// A sink that only records whether it was ever given a non-zero byte.
+struct ZeroCheck {
+    all_zero: bool,
+}
+
+impl Write for ZeroCheck {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if buf.iter().any(|b| *b != 0) {
+            self.all_zero = false;
         }
-        count -= n as u64;
+        Ok(buf.len())
     }
-    Ok(true)
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// True when the next `count` bytes of `r` are all zero. (Only inspects file
+/// layout; nothing here is key material.)
+fn rest_is_zero<R: Read>(r: &mut R, count: u64) -> std::io::Result<bool> {
+    let mut sink = ZeroCheck { all_zero: true };
+    let copied = std::io::copy(&mut r.by_ref().take(count), &mut sink)?;
+    if copied < count {
+        return Err(std::io::ErrorKind::UnexpectedEof.into());
+    }
+    Ok(sink.all_zero)
 }
 
 // ─── Reader ─────────────────────────────────────────────────────────────────
@@ -146,7 +160,8 @@ fn rest_is_zero<R: Read>(r: &mut R, mut count: u64) -> std::io::Result<bool> {
 /// Streams the records of one log, oldest first.
 pub struct LogReader {
     r: BufReader<File>,
-    core: Core,
+    /// `None` for an empty file: there is no salt, so no key is derived.
+    core: Option<Core>,
     seq: u64,
     offset: u64,
     file_len: u64,
@@ -167,7 +182,7 @@ impl LogReader {
         let file_len = file.metadata()?.len();
         let mut r = BufReader::with_capacity(IO_BUF, file);
         let (core, offset, done) = if file_len == 0 {
-            (Core::new(keys, label, [0u8; 16]), 0, true)
+            (None, 0, true)
         } else {
             if file_len < LOG_HEADER_LEN as u64 {
                 let mut head = vec![0u8; file_len as usize];
@@ -182,7 +197,11 @@ impl LogReader {
             let mut h = [0u8; LOG_HEADER_LEN];
             r.read_exact(&mut h)?;
             let salt = parse_header(&h, label)?;
-            (Core::new(keys, label, salt), LOG_HEADER_LEN as u64, false)
+            (
+                Some(Core::new(keys, label, salt)),
+                LOG_HEADER_LEN as u64,
+                false,
+            )
         };
         Ok(Some(Self {
             r,
@@ -210,9 +229,14 @@ impl LogReader {
     /// The next record, `Ok(None)` at the end (clean or torn: see
     /// [`torn_at`](Self::torn_at)). After an error the reader is finished.
     pub fn next_record(&mut self) -> Result<Option<Zeroizing<Vec<u8>>>, StateError> {
+        let Some(core) = &self.core else {
+            self.done = true;
+            return Ok(None);
+        };
         if self.done {
             return Ok(None);
         }
+        let max_body = core.max_body();
         let remaining = self.file_len - self.offset;
         if remaining == 0 {
             self.done = true;
@@ -228,9 +252,9 @@ impl LogReader {
             Err(e) => return self.fail(e.into()),
         }
         let body_len = u32::from_le_bytes(lenb) as usize;
-        if !(MIN_BODY..=self.core.max_body()).contains(&body_len) {
-            let zeros =
-                lenb == [0u8; 4] && matches!(rest_is_zero(&mut self.r, remaining - 4), Ok(true));
+        if !(MIN_BODY..=max_body).contains(&body_len) {
+            let zeros = u32::from_le_bytes(lenb) == 0
+                && matches!(rest_is_zero(&mut self.r, remaining - 4), Ok(true));
             return if zeros {
                 Ok(self.tear())
             } else {
@@ -247,7 +271,11 @@ impl LogReader {
             Err(e) => return self.fail(e.into()),
         }
         let end = self.offset + 4 + body_len as u64;
-        match self.core.open_body(self.seq, &mut self.scratch) {
+        let opened = self
+            .core
+            .as_ref()
+            .map(|c| c.open_body(self.seq, &mut self.scratch));
+        match opened.unwrap_or(Err(StateError::Authentication)) {
             Ok(plain) => {
                 self.seq += 1;
                 self.offset = end;
@@ -385,7 +413,7 @@ impl LogWriter {
             r.read_exact(&mut lenb)?;
             let body_len = u32::from_le_bytes(lenb) as usize;
             if !(MIN_BODY..=core.max_body()).contains(&body_len) {
-                if lenb == [0u8; 4] && rest_is_zero(&mut r, remaining - 4)? {
+                if u32::from_le_bytes(lenb) == 0 && rest_is_zero(&mut r, remaining - 4)? {
                     break;
                 }
                 return Err(StateError::Corrupt(offset));
@@ -437,8 +465,7 @@ impl LogWriter {
             });
         }
         let body_len = NONCE_LEN + record.len() + TAG_LEN;
-        let mut nonce = [0u8; NONCE_LEN];
-        nonce[..16].copy_from_slice(&rand::random::<[u8; 16]>());
+        let mut nonce: [u8; NONCE_LEN] = rand::random();
         nonce[16..].copy_from_slice(&self.seq.to_be_bytes());
         self.scratch.clear();
         self.scratch
@@ -899,6 +926,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn appending_to_an_empty_file_uses_a_fresh_random_salt() {
+        let k = keys(5);
+        let dir = tempfile::tempdir().unwrap();
+        let mut salts = Vec::new();
+        for i in 0..3 {
+            let p = dir.path().join(format!("e{i}.log"));
+            std::fs::write(&p, b"").unwrap();
+            let mut w = LogWriter::open_append(&k, Label::PushHistory, &p).unwrap();
+            w.append(b"x").unwrap();
+            drop(w);
+            let raw = std::fs::read(&p).unwrap();
+            salts.push(raw[6..22].to_vec());
+            assert_eq!(read_all(&k, Label::PushHistory, &p).unwrap().0.len(), 1);
+        }
+        assert!(salts.iter().all(|s| s.iter().any(|b| *b != 0)));
+        assert!(salts[0] != salts[1] && salts[1] != salts[2]);
+    }
     #[test]
     fn two_files_with_the_same_content_look_different() {
         let k = keys(9);
