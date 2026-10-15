@@ -127,6 +127,23 @@ fn is_unexpected_eof(e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::UnexpectedEof
 }
 
+/// Read exactly `n` bytes.
+fn read_vec<R: Read>(r: &mut R, n: usize) -> std::io::Result<Vec<u8>> {
+    let mut v = Vec::with_capacity(n);
+    r.by_ref().take(n as u64).read_to_end(&mut v)?;
+    if v.len() != n {
+        return Err(std::io::ErrorKind::UnexpectedEof.into());
+    }
+    Ok(v)
+}
+
+/// Read exactly `N` bytes into an array.
+fn read_array<const N: usize, R: Read>(r: &mut R) -> std::io::Result<[u8; N]> {
+    read_vec(r, N)?
+        .try_into()
+        .map_err(|_| std::io::ErrorKind::UnexpectedEof.into())
+}
+
 /// A sink that only records whether it was ever given a non-zero byte.
 struct ZeroCheck {
     all_zero: bool,
@@ -185,8 +202,7 @@ impl LogReader {
             (None, 0, true)
         } else {
             if file_len < LOG_HEADER_LEN as u64 {
-                let mut head = vec![0u8; file_len as usize];
-                r.read_exact(&mut head)?;
+                let head = read_vec(&mut r, file_len as usize)?;
                 let n = head.len().min(4);
                 return Err(if head[..n] == LOG_MAGIC[..n] {
                     StateError::Truncated
@@ -194,8 +210,7 @@ impl LogReader {
                     StateError::NotProtected
                 });
             }
-            let mut h = [0u8; LOG_HEADER_LEN];
-            r.read_exact(&mut h)?;
+            let h: [u8; LOG_HEADER_LEN] = read_array(&mut r)?;
             let salt = parse_header(&h, label)?;
             (
                 Some(Core::new(keys, label, salt)),
@@ -245,12 +260,11 @@ impl LogReader {
         if remaining < 4 {
             return Ok(self.tear());
         }
-        let mut lenb = [0u8; 4];
-        match self.r.read_exact(&mut lenb) {
-            Ok(()) => {}
+        let lenb: [u8; 4] = match read_array(&mut self.r) {
+            Ok(b) => b,
             Err(e) if is_unexpected_eof(&e) => return Ok(self.tear()),
             Err(e) => return self.fail(e.into()),
-        }
+        };
         let body_len = u32::from_le_bytes(lenb) as usize;
         if !(MIN_BODY..=max_body).contains(&body_len) {
             let zeros = u32::from_le_bytes(lenb) == 0
@@ -264,9 +278,8 @@ impl LogReader {
         if (4 + body_len) as u64 > remaining {
             return Ok(self.tear());
         }
-        self.scratch.resize(body_len, 0);
-        match self.r.read_exact(&mut self.scratch) {
-            Ok(()) => {}
+        match read_vec(&mut self.r, body_len) {
+            Ok(body) => self.scratch = Zeroizing::new(body),
             Err(e) if is_unexpected_eof(&e) => return Ok(self.tear()),
             Err(e) => return self.fail(e.into()),
         }
@@ -336,8 +349,7 @@ impl LogWriter {
             if len > 0 {
                 // A prefix of our own header is a creation that never finished;
                 // anything else is somebody's data and is left alone.
-                let mut head = vec![0u8; len as usize];
-                File::open(path)?.read_exact(&mut head)?;
+                let head = read_vec(&mut File::open(path)?, len as usize)?;
                 let n = head.len().min(4);
                 if head[..n] != LOG_MAGIC[..n] {
                     return Err(StateError::NotProtected);
@@ -349,8 +361,7 @@ impl LogWriter {
             .read(true)
             .write(true)
             .open(path)?;
-        let mut h = [0u8; LOG_HEADER_LEN];
-        file.read_exact(&mut h)?;
+        let h: [u8; LOG_HEADER_LEN] = read_array(&mut file)?;
         let salt = parse_header(&h, label)?;
         let core = Core::new(keys, label, salt);
         let scan = Self::scan(path, &core, len)?;
@@ -409,8 +420,7 @@ impl LogWriter {
             if remaining == 0 || remaining < 4 {
                 break;
             }
-            let mut lenb = [0u8; 4];
-            r.read_exact(&mut lenb)?;
+            let lenb: [u8; 4] = read_array(&mut r)?;
             let body_len = u32::from_le_bytes(lenb) as usize;
             if !(MIN_BODY..=core.max_body()).contains(&body_len) {
                 if u32::from_le_bytes(lenb) == 0 && rest_is_zero(&mut r, remaining - 4)? {
@@ -429,8 +439,7 @@ impl LogWriter {
         }
         if let Some((off, body_len)) = last {
             r.seek(SeekFrom::Start(off + 4))?;
-            let mut body = Zeroizing::new(vec![0u8; body_len]);
-            r.read_exact(&mut body)?;
+            let mut body = Zeroizing::new(read_vec(&mut r, body_len)?);
             if core.open_body(count - 1, &mut body).is_err() {
                 // Cut the final record away only if it was not written
                 // completely, which an earlier record opening proves: with the
@@ -439,8 +448,7 @@ impl LogWriter {
                     return Err(StateError::Authentication);
                 };
                 r.seek(SeekFrom::Start(poff + 4))?;
-                let mut pbody = Zeroizing::new(vec![0u8; plen]);
-                r.read_exact(&mut pbody)?;
+                let mut pbody = Zeroizing::new(read_vec(&mut r, plen)?);
                 if core.open_body(count - 2, &mut pbody).is_err() {
                     return Err(StateError::Authentication);
                 }
