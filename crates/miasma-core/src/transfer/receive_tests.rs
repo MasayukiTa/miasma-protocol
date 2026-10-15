@@ -235,9 +235,9 @@ struct Run {
 
 impl Run {
     fn new() -> Self {
-        Self {
-            dir: tempfile::tempdir().unwrap(),
-        }
+        let dir = tempfile::tempdir().unwrap();
+        crate::state_crypto::provision_master_key(dir.path()).unwrap();
+        Self { dir }
     }
     fn out(&self) -> std::path::PathBuf {
         self.dir.path().join("out").join("file.bin")

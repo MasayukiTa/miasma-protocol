@@ -1459,7 +1459,14 @@ mod tests {
     }
 
     fn write_index_json(dir: &Path, v: &serde_json::Value) {
-        std::fs::write(dir.join(INDEX_FILE), serde_json::to_string(v).unwrap()).unwrap();
+        let keys = StateKeys::load(dir).unwrap();
+        state_crypto::write_document(
+            &keys,
+            Label::StoreIndex,
+            &dir.join(INDEX_FILE),
+            serde_json::to_string(v).unwrap().as_bytes(),
+        )
+        .unwrap();
     }
 
     #[test]
