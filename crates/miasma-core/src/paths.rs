@@ -431,6 +431,62 @@ spec!(
     "Outgoing envelopes (<id>.json) and their .peer sidecars."
 );
 
+spec!(
+    CHAT_DIR,
+    "chat",
+    Dir,
+    DataDir,
+    State,
+    Encrypt,
+    CryptoEraseOverwriteRemove,
+    "D27",
+    "Directory of chat state: per-contact sessions and history, and the outbox."
+);
+spec!(
+    CHAT_SESSION,
+    "chat/*.sess",
+    Pattern,
+    DataDir,
+    State,
+    Encrypt,
+    CryptoEraseOverwriteRemove,
+    "D27",
+    "Chat session of one contact: ratchet keys, delivery counters, summary (file name is a keyed hash)."
+);
+spec!(
+    CHAT_HISTORY,
+    "chat/*.msgs",
+    Pattern,
+    DataDir,
+    State,
+    Encrypt,
+    CryptoEraseOverwriteRemove,
+    "D27",
+    "Chat messages of one contact (encrypted record log; absent in ephemeral mode)."
+);
+spec!(
+    CHAT_OUTBOX,
+    "chat/outbox.log",
+    File,
+    DataDir,
+    State,
+    Encrypt,
+    CryptoEraseOverwriteRemove,
+    "D27",
+    "Chat messages waiting to be delivered."
+);
+spec!(
+    CHAT_TMP,
+    "chat/*.tmp",
+    Pattern,
+    DataDir,
+    State,
+    Encrypt,
+    CryptoEraseOverwriteRemove,
+    "D27",
+    "Replacement copy of a chat log while it is rewritten (trim, delete, compaction)."
+);
+
 // ── Data directory: runtime coordination ────────────────────────────────────
 
 spec!(
@@ -824,6 +880,11 @@ pub const REGISTRY: &[PathSpec] = &[
     DIRECTED_DIR,
     DIRECTED_INCOMING,
     DIRECTED_OUTGOING,
+    CHAT_DIR,
+    CHAT_SESSION,
+    CHAT_HISTORY,
+    CHAT_OUTBOX,
+    CHAT_TMP,
     DAEMON_PORT,
     DAEMON_HTTP,
     DESKTOP_LOCK,
@@ -1011,6 +1072,31 @@ pub fn atomic_secure_tmp(path: &Path) -> PathBuf {
 /// Where the contacts loader sets an unreadable file aside.
 pub fn contacts_corrupt_aside(contacts_file: &Path, unix_secs: u64) -> PathBuf {
     contacts_file.with_extension(format!("json.corrupt-{unix_secs}"))
+}
+
+/// `<data>/chat`
+pub fn chat_dir(data_dir: &Path) -> PathBuf {
+    CHAT_DIR.in_dir(data_dir)
+}
+
+/// `<chat dir>/<stem>.msgs`: the saved messages of one contact.
+pub fn chat_history_file(chat_dir: &Path, stem: &str) -> PathBuf {
+    chat_dir.join(format!("{stem}.msgs"))
+}
+
+/// `<chat dir>/<stem>.sess`: the session document of one contact.
+pub fn chat_session_file(chat_dir: &Path, stem: &str) -> PathBuf {
+    chat_dir.join(format!("{stem}.sess"))
+}
+
+/// `<chat dir>/outbox.log`
+pub fn chat_outbox_file(chat_dir: &Path) -> PathBuf {
+    chat_dir.join("outbox.log")
+}
+
+/// True for a per-contact session document name.
+pub fn is_chat_session_file(p: &Path) -> bool {
+    p.extension().is_some_and(|e| e == "sess")
 }
 
 /// Suffix of the plaintext original while a state file is being converted.

@@ -20,6 +20,9 @@ pub struct NodeConfig {
     /// Trusted-contact push.
     #[serde(default)]
     pub push: PushConfig,
+    /// One-to-one chat.
+    #[serde(default)]
+    pub chat: ChatConfig,
     /// Logging and traces left on this machine.
     #[serde(default)]
     pub privacy: PrivacyConfig,
@@ -86,6 +89,58 @@ impl PrivacyConfig {
     /// Whether log files are written: the opt-in switch, or stealth mode off.
     pub fn writes_log_files(&self) -> bool {
         self.diagnostic_logging || !self.stealth_mode
+    }
+}
+
+/// `[chat]` in `config.toml`: one-to-one chat between registered contacts.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChatConfig {
+    /// Chat on or off (default on). Takes effect when the daemon starts.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Keep the message history on disk (encrypted). Not set (the default):
+    /// the history is saved, except while stealth mode is on, when it is kept
+    /// in memory only. Set it to `true` or `false` to decide for yourself.
+    #[serde(default)]
+    pub history_save: Option<bool>,
+    /// Longest message accepted, in bytes (1-4096, default 4096).
+    #[serde(default = "default_chat_max_message_bytes")]
+    pub max_message_bytes: usize,
+    /// Messages that may wait for delivery at once (1-500, default 500).
+    #[serde(default = "default_chat_outbox_max")]
+    pub outbox_max: usize,
+    /// Saved messages older than this many days are removed (0 = keep).
+    #[serde(default)]
+    pub retention_days: u64,
+}
+
+pub const DEFAULT_CHAT_MAX_MESSAGE_BYTES: usize = 4096;
+pub const DEFAULT_CHAT_OUTBOX_MAX: usize = 500;
+
+fn default_chat_max_message_bytes() -> usize {
+    DEFAULT_CHAT_MAX_MESSAGE_BYTES
+}
+fn default_chat_outbox_max() -> usize {
+    DEFAULT_CHAT_OUTBOX_MAX
+}
+
+impl Default for ChatConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            history_save: None,
+            max_message_bytes: DEFAULT_CHAT_MAX_MESSAGE_BYTES,
+            outbox_max: DEFAULT_CHAT_OUTBOX_MAX,
+            retention_days: 0,
+        }
+    }
+}
+
+impl ChatConfig {
+    /// Whether messages are written to disk: the explicit setting, else yes
+    /// unless stealth mode is on.
+    pub fn history_saved(&self, privacy: &PrivacyConfig) -> bool {
+        self.history_save.unwrap_or(!privacy.stealth_mode)
     }
 }
 

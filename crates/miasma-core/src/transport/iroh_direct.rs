@@ -77,6 +77,20 @@ pub trait PushConnectionHandler: Send + Sync {
 
 type PushSlot = Arc<OnceLock<Arc<dyn PushConnectionHandler>>>;
 
+/// One-to-one chat between registered contacts, served on the same endpoint.
+pub const CHAT_ALPN: &[u8] = b"miasma/chat/1";
+
+/// Serves connections that negotiated [`CHAT_ALPN`]. Installed after start with
+/// [`IrohNode::set_chat_handler`]; until then such connections are closed.
+#[async_trait::async_trait]
+pub trait ChatConnectionHandler: Send + Sync {
+    /// Own the connection until done. `conn.remote_id()` is the authenticated
+    /// peer; the handler decides whether it may talk to us.
+    async fn handle(&self, conn: Connection);
+}
+
+type ChatSlot = Arc<OnceLock<Arc<dyn ChatConnectionHandler>>>;
+
 /// mDNS service name: keeps Miasma's announcements apart from other iroh apps'.
 const LAN_SERVICE_NAME: &str = "miasma";
 
@@ -239,7 +253,11 @@ pub fn endpoint_builder(
     b = b.ca_tls_config(ca_tls_config(extra_roots));
     if let Some(seed) = seed {
         b = b.secret_key(SecretKey::from_bytes(seed));
-        b = b.alpns(vec![IROH_ALPN.to_vec(), PUSH_ALPN.to_vec()]);
+        b = b.alpns(vec![
+            IROH_ALPN.to_vec(),
+            PUSH_ALPN.to_vec(),
+            CHAT_ALPN.to_vec(),
+        ]);
     }
     Ok(b)
 }
@@ -289,6 +307,7 @@ pub struct IrohNode {
     settings: IrohSettings,
     server: StdMutex<Option<JoinHandle<()>>>,
     push: PushSlot,
+    chat: ChatSlot,
 }
 
 impl IrohNode {
@@ -323,11 +342,13 @@ impl IrohNode {
             .await
             .map_err(|e| MiasmaError::Network(format!("cannot start the iroh endpoint: {e}")))?;
         let push: PushSlot = Arc::new(OnceLock::new());
+        let chat: ChatSlot = Arc::new(OnceLock::new());
         let ctx = Arc::new(ServeCtx {
             store,
             records,
             limits,
             push: push.clone(),
+            chat: chat.clone(),
         });
         let server = tokio::spawn(accept_loop(endpoint.clone(), ctx));
         Ok(Arc::new(Self {
@@ -335,7 +356,14 @@ impl IrohNode {
             settings,
             server: StdMutex::new(Some(server)),
             push,
+            chat,
         }))
+    }
+
+    /// Install the handler for [`CHAT_ALPN`] connections (once; later calls are
+    /// ignored).
+    pub fn set_chat_handler(&self, handler: Arc<dyn ChatConnectionHandler>) {
+        let _ = self.chat.set(handler);
     }
 
     /// Install the handler for [`PUSH_ALPN`] connections (once; later calls are
@@ -497,6 +525,7 @@ struct ServeCtx {
     records: Option<Arc<dyn RecordProvider>>,
     limits: IrohServerLimits,
     push: PushSlot,
+    chat: ChatSlot,
 }
 
 async fn accept_loop(endpoint: Endpoint, ctx: Arc<ServeCtx>) {
@@ -528,6 +557,13 @@ async fn accept_loop(endpoint: Endpoint, ctx: Arc<ServeCtx>) {
             };
             if conn.alpn() == PUSH_ALPN {
                 match ctx.push.get() {
+                    Some(h) => h.handle(conn).await,
+                    None => conn.close(3u32.into(), b"unavailable"),
+                }
+                return;
+            }
+            if conn.alpn() == CHAT_ALPN {
+                match ctx.chat.get() {
                     Some(h) => h.handle(conn).await,
                     None => conn.close(3u32.into(), b"unavailable"),
                 }

@@ -1,0 +1,339 @@
+//! IPC surface of chat: one request and one response enum, carried by the
+//! daemon's `ControlRequest::Chat` / `ControlResponse::Chat`.
+//!
+//! A client polls `Events` (with the number it last saw) to follow incoming
+//! messages and delivery results, the way the push status is polled. A daemon
+//! that predates chat does not know `ControlRequest::Chat`; clients treat the
+//! failure of such a request as "not supported".
+
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ChatRequest {
+    /// Queue a message for a registered contact.
+    Send {
+        contact: String,
+        text: String,
+    },
+    /// Every conversation, newest first.
+    Conversations {},
+    /// A page of one conversation: at most `limit` messages (default 50) with
+    /// `ord` below `before` (the newest when not given), oldest first.
+    History {
+        contact: String,
+        before: Option<u64>,
+        limit: Option<u32>,
+    },
+    /// Delete one message (`message_id`) or, when it is not given, the whole
+    /// conversation, on this device only.
+    DeleteLocal {
+        contact: String,
+        message_id: Option<String>,
+    },
+    Status {},
+    /// Things that happened after event number `since`.
+    Events {
+        since: u64,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageInfo {
+    /// Position in the conversation; 0 while the message is still queued.
+    pub ord: u64,
+    pub id: String,
+    pub outgoing: bool,
+    pub seq: u64,
+    pub text: String,
+    /// `queued`, `sending`, `delivered`, `failed` or `received`.
+    pub state: String,
+    /// For `failed`: a stable reason; for `queued`: why the last attempt failed.
+    pub reason: Option<String>,
+    pub sent_ms: u64,
+    pub at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationInfo {
+    pub endpoint_id: String,
+    pub fingerprint: String,
+    /// The contact's label, or `None` when the contact has been removed.
+    pub label: Option<String>,
+    pub contact_id: Option<String>,
+    pub messages: u64,
+    pub last_ms: u64,
+    /// Messages still waiting to be delivered.
+    pub pending: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatusInfo {
+    pub history_saved: bool,
+    pub conversations: u32,
+    pub outbox: u32,
+    pub outbox_max: u32,
+    pub max_message_bytes: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventInfo {
+    pub seq: u64,
+    pub endpoint_id: String,
+    pub label: Option<String>,
+    /// `received`, `delivered` or `failed`.
+    pub kind: String,
+    pub message: MessageInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ChatResponse {
+    Queued {
+        id: String,
+    },
+    Conversations(Vec<ConversationInfo>),
+    History {
+        endpoint_id: String,
+        label: Option<String>,
+        messages: Vec<MessageInfo>,
+    },
+    Deleted {
+        count: u32,
+    },
+    Status(StatusInfo),
+    Events {
+        /// The number to pass as `since` next time.
+        next: u64,
+        events: Vec<EventInfo>,
+    },
+    /// `kind` is stable (`unavailable`, `unknown_contact`, `send_disabled`,
+    /// `empty`, `too_big`, `outbox_full`, `bad_message_id`, `internal`);
+    /// `message` is for people.
+    Error {
+        kind: String,
+        message: String,
+    },
+}
+
+#[cfg_attr(not(feature = "iroh"), allow(dead_code))]
+fn err(kind: &str, message: impl Into<String>) -> ChatResponse {
+    ChatResponse::Error {
+        kind: kind.to_owned(),
+        message: message.into(),
+    }
+}
+
+/// Handle one chat request for the daemon that owns `data_dir`.
+pub async fn handle_ipc(data_dir: &Path, req: ChatRequest) -> ChatResponse {
+    #[cfg(feature = "iroh")]
+    {
+        let Some(svc) = super::service::service_for(data_dir) else {
+            return err(
+                "unavailable",
+                "chat is not running: it needs the iroh transport and chat.enabled",
+            );
+        };
+        handle_with(&svc, req)
+    }
+    #[cfg(not(feature = "iroh"))]
+    {
+        let _ = (data_dir, req);
+        err(
+            "unavailable",
+            "this build has no iroh transport, so no chat",
+        )
+    }
+}
+
+#[cfg(feature = "iroh")]
+fn info_of(m: &super::store::StoredMessage) -> MessageInfo {
+    MessageInfo {
+        ord: m.ord,
+        id: hex::encode(m.id),
+        outgoing: m.outgoing,
+        seq: m.seq,
+        text: m.text.clone(),
+        state: m.state.as_str().to_owned(),
+        reason: m.reason.clone(),
+        sent_ms: m.sent_ms,
+        at_ms: m.at_ms,
+    }
+}
+
+/// The request handler proper, on a running service (tests call it directly).
+#[cfg(feature = "iroh")]
+pub fn handle_with(
+    svc: &std::sync::Arc<super::service::ChatService>,
+    req: ChatRequest,
+) -> ChatResponse {
+    use crate::push::{contact::fingerprint, store::Contact};
+
+    // A contact by label, ID or endpoint ID; a removed contact's conversation
+    // is still reachable by its endpoint ID.
+    let resolve = |sel: &str| -> Option<([u8; 32], Option<Contact>)> {
+        if let Some(c) = svc.contacts().find(sel) {
+            return c.endpoint_bytes().map(|b| (b, Some(c)));
+        }
+        let raw = hex::decode(sel.trim()).ok()?;
+        let id: [u8; 32] = raw.try_into().ok()?;
+        Some((id, svc.contacts().by_endpoint(&id)))
+    };
+    let unknown = |sel: &str| err("unknown_contact", format!("no contact \"{sel}\""));
+    let core = svc.core();
+
+    match req {
+        ChatRequest::Send { contact, text } => {
+            let Some(c) = svc.contacts().find(&contact) else {
+                return unknown(&contact);
+            };
+            if !c.allow_send {
+                return err(
+                    "send_disabled",
+                    format!("sending to \"{}\" is switched off", c.label),
+                );
+            }
+            match svc.send(&c, &text) {
+                Ok(id) => ChatResponse::Queued {
+                    id: hex::encode(id),
+                },
+                Err(super::engine::EnqueueError::Empty) => err("empty", "the message is empty"),
+                Err(super::engine::EnqueueError::TooBig) => err(
+                    "too_big",
+                    format!("a message can hold at most {} bytes", core.max_text()),
+                ),
+                Err(super::engine::EnqueueError::OutboxFull) => err(
+                    "outbox_full",
+                    "too many messages are waiting to be delivered",
+                ),
+                Err(super::engine::EnqueueError::Storage(e)) => err("internal", e),
+            }
+        }
+        ChatRequest::Conversations {} => {
+            let mut list: Vec<ConversationInfo> = core
+                .store
+                .conversations()
+                .into_iter()
+                .map(|c| {
+                    let contact = svc.contacts().by_endpoint(&c.peer);
+                    ConversationInfo {
+                        endpoint_id: hex::encode(c.peer),
+                        fingerprint: fingerprint(&c.peer),
+                        label: contact.as_ref().map(|x| x.label.clone()),
+                        contact_id: contact.map(|x| x.id),
+                        messages: c.count,
+                        last_ms: c.last_ms,
+                        pending: core.outbox.count_for(&c.peer) as u32,
+                    }
+                })
+                .collect();
+            list.sort_by(|a, b| b.last_ms.cmp(&a.last_ms));
+            ChatResponse::Conversations(list)
+        }
+        ChatRequest::History {
+            contact,
+            before,
+            limit,
+        } => {
+            let Some((peer, c)) = resolve(&contact) else {
+                return unknown(&contact);
+            };
+            let msgs = core.history(&peer, before, limit.unwrap_or(50) as usize);
+            ChatResponse::History {
+                endpoint_id: hex::encode(peer),
+                label: c.map(|x| x.label),
+                messages: msgs.iter().map(info_of).collect(),
+            }
+        }
+        ChatRequest::DeleteLocal {
+            contact,
+            message_id,
+        } => {
+            let Some((peer, _)) = resolve(&contact) else {
+                return unknown(&contact);
+            };
+            match message_id {
+                Some(mid) => {
+                    let Some(id) = hex::decode(mid.trim())
+                        .ok()
+                        .and_then(|b| <[u8; 16]>::try_from(b).ok())
+                    else {
+                        return err("bad_message_id", "that is not a message ID");
+                    };
+                    match core.delete_message(&peer, &id) {
+                        Ok(found) => ChatResponse::Deleted {
+                            count: u32::from(found),
+                        },
+                        Err(e) => err("internal", e.to_string()),
+                    }
+                }
+                None => {
+                    let n = core.history(&peer, None, 1).len() as u32;
+                    match core.delete_conversation(&peer) {
+                        Ok(()) => ChatResponse::Deleted { count: n },
+                        Err(e) => err("internal", e.to_string()),
+                    }
+                }
+            }
+        }
+        ChatRequest::Status {} => ChatResponse::Status(StatusInfo {
+            history_saved: core.store.settings().history_save,
+            conversations: core.store.conversations().len() as u32,
+            outbox: core.outbox.len() as u32,
+            outbox_max: core.store.settings().outbox_max as u32,
+            max_message_bytes: core.max_text() as u32,
+        }),
+        ChatRequest::Events { since } => {
+            let (next, events) = core.events_since(since);
+            ChatResponse::Events {
+                next,
+                events: events
+                    .into_iter()
+                    .map(|e| EventInfo {
+                        seq: e.seq,
+                        endpoint_id: hex::encode(e.peer),
+                        label: svc.contacts().by_endpoint(&e.peer).map(|c| c.label),
+                        kind: match e.kind {
+                            super::engine::EventKind::Received => "received",
+                            super::engine::EventKind::Delivered => "delivered",
+                            super::engine::EventKind::Failed => "failed",
+                        }
+                        .to_owned(),
+                        message: info_of(&e.message),
+                    })
+                    .collect(),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requests_and_responses_round_trip_as_json() {
+        let r = ChatRequest::History {
+            contact: "alice".into(),
+            before: Some(7),
+            limit: None,
+        };
+        let s = serde_json::to_string(&r).unwrap();
+        let back: ChatRequest = serde_json::from_str(&s).unwrap();
+        assert!(matches!(
+            back,
+            ChatRequest::History {
+                before: Some(7),
+                ..
+            }
+        ));
+        let e = serde_json::to_string(&ChatRequest::Conversations {}).unwrap();
+        assert!(serde_json::from_str::<ChatRequest>(&e).is_ok());
+        let resp = ChatResponse::Error {
+            kind: "x".into(),
+            message: "y".into(),
+        };
+        let s = serde_json::to_string(&resp).unwrap();
+        assert!(serde_json::from_str::<ChatResponse>(&s).is_ok());
+    }
+}

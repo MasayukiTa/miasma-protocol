@@ -207,6 +207,11 @@ pub enum ControlRequest {
     /// Contacts and file push; see [`crate::push::PushRequest`].
     Push(crate::push::PushRequest),
 
+    // ── Chat ──────────────────────────────────────────────────
+    /// One-to-one chat; see [`crate::chat::ChatRequest`]. A daemon that predates
+    /// chat does not know this variant and fails the request.
+    Chat(crate::chat::ChatRequest),
+
     // ── Directed sharing ────────────────────────────────────────────────
     /// Get this node's sharing key (X25519 pubkey + PeerId).
     SharingKey,
@@ -488,6 +493,7 @@ impl fmt::Debug for ControlRequest {
                 .field("envelope_id", envelope_id)
                 .finish(),
             Self::Push(_) => f.write_str("Push(<redacted>)"),
+            Self::Chat(_) => f.write_str("Chat(<redacted>)"),
             Self::DirectedInbox => f.write_str("DirectedInbox"),
             Self::DirectedOutbox => f.write_str("DirectedOutbox"),
         }
@@ -574,6 +580,10 @@ pub enum ControlResponse {
     // ── Trusted-contact push ──────────────────────────────────
     /// Answer to [`ControlRequest::Push`].
     Push(crate::push::PushResponse),
+
+    // ── Chat ──────────────────────────────────────────────────
+    /// Answer to [`ControlRequest::Chat`].
+    Chat(crate::chat::ChatResponse),
 
     // ── Directed sharing ────────────────────────────────────────────────
     /// This node's sharing key and contact string.
@@ -685,6 +695,7 @@ impl fmt::Debug for ControlResponse {
                 .finish(),
             Self::Error(message) => f.debug_tuple("Error").field(message).finish(),
             Self::Push(_) => f.write_str("Push(..)"),
+            Self::Chat(_) => f.write_str("Chat(..)"),
             Self::SharingKey { .. } => f
                 .debug_struct("SharingKey")
                 .field("key", &"<redacted>")
