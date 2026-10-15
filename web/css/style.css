@@ -1,7 +1,6 @@
 /* ── Miasma Web — design system ─────────────────────────────────────
  *
- * The same tokens as the desktop app (docs/tasks/protected-resumable-transfer-plan.md,
- * section 9): calm warm neutrals, ONE accent colour that belongs to the single primary
+ * The same tokens as the desktop app: calm warm neutrals, ONE accent colour that belongs to the single primary
  * action of a screen and nothing else, and status shown as a small chip and as coloured
  * text. Never a coloured rail down the edge of a block and never a card filled with a
  * status colour.

@@ -95,8 +95,8 @@ Verified before the swap:
   crate it replaces is enumerated above, and the crate it replaces has an
   unfixed advisory against it. (Cure53 reported the bias; neither crate has
   had a full third-party audit.)
-- `docs/security/audit-checklist.md` and `docs/tasks/webapptasks.md` now name
-  `blahaj` where they named `sharks`.
+- `docs/security/audit-checklist.md` now names
+  `blahaj` where it named `sharks`.
 - Already-published shares are unaffected (point 2 above). Content that was
   published repeatedly *before* this change was split with the biased
   generator; that history cannot be retroactively fixed. It should be
