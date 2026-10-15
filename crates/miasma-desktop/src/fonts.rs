@@ -284,11 +284,20 @@ pub fn install(ctx: &egui::Context) {
                     .insert(f.name.to_owned(), egui::FontData::from_owned(data));
                 let file = f.path.file_name().map(|n| n.to_string_lossy().into_owned());
                 loaded.push(format!("{} ({})", f.name, file.unwrap_or_default()));
-                tracing::info!("Font loaded: {} from {}", f.name, f.path.display());
+                tracing::info!(
+                    "Font loaded: {} from {}",
+                    f.name,
+                    miasma_core::logging::redact::path(&f.path)
+                );
                 usable.push(f);
             }
             Err(e) => {
-                tracing::warn!("Font unreadable: {}: {e}", f.path.display());
+                let _ = &e;
+                tracing::warn!(
+                    "Font unreadable: {}: {}",
+                    f.name,
+                    miasma_core::logging::redact::path(&f.path)
+                );
                 missing.push(f.name.to_owned());
             }
         }
@@ -314,8 +323,8 @@ pub fn install(ctx: &egui::Context) {
 
     if chain_p.is_empty() {
         tracing::warn!(
-            "No Japanese-capable system font found (looked in {:?}); Japanese text will show as boxes",
-            platform.dirs
+            "No Japanese-capable system font found ({} folders searched); Japanese text will show as boxes",
+            platform.dirs.len()
         );
     } else {
         tracing::info!("Proportional font chain: {chain_p:?}; monospace: {chain_m:?}");

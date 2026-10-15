@@ -293,6 +293,7 @@ pub fn initialize_node(
         },
         transport: Default::default(),
         push: Default::default(),
+        privacy: Default::default(),
     };
     config.save(&path).map_err(|e| {
         tracing::warn!("config save error: {e}");
@@ -510,19 +511,28 @@ pub fn distress_wipe(data_dir: String) -> Result<(), MiasmaFfiError> {
             Ok(metadata) => {
                 let zeros = vec![0u8; metadata.len() as usize];
                 if let Err(e) = std::fs::write(&fpath, &zeros) {
-                    tracing::warn!("wipe overwrite failed for {fname}: {e}");
+                    tracing::warn!(
+                        "wipe overwrite failed for {}: {e}",
+                        miasma_core::logging::redact::name(fname)
+                    );
                     errors.push(format!("could not overwrite {fname}"));
                     continue;
                 }
             }
             Err(e) => {
-                tracing::warn!("wipe metadata failed for {fname}: {e}");
+                tracing::warn!(
+                    "wipe metadata failed for {}: {e}",
+                    miasma_core::logging::redact::name(fname)
+                );
                 errors.push(format!("could not inspect {fname}"));
                 continue;
             }
         }
         if let Err(e) = std::fs::remove_file(&fpath) {
-            tracing::warn!("wipe removal failed for {fname}: {e}");
+            tracing::warn!(
+                "wipe removal failed for {}: {e}",
+                miasma_core::logging::redact::name(fname)
+            );
             errors.push(format!("could not remove {fname}"));
         }
     }

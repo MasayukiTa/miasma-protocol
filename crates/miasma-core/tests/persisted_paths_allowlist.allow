@@ -11,14 +11,15 @@
 
 miasma-bridge/src/bridge.rs | 6 | bridge inbox marker/.processed dir, moving imported originals
 miasma-bridge/src/index.rs | 1 | append-only BitTorrent info-hash to MID table
-miasma-bridge/src/main.rs | 3 | bridge file logging setup (bridge.log, BRIDGE_LOG)
+miasma-bridge/src/main.rs | 1 | bridge data dir creation (log setup lives in miasma-core logging)
 miasma-bridge/src/torrent.rs | 1 | torrent download directory creation
-miasma-cli/src/main.rs | 7 | daemon file logging setup (DAEMON_LOG), data dir creation, -o output, directed retrieve save
+miasma-cli/src/main.rs | 4 | data dir creation, -o output, directed retrieve save
 miasma-core/src/config.rs | 4 | config.toml and version stamp writers
 miasma-core/src/daemon/control_auth.rs | 3 | daemon.token creation (restricted, create_new)
 miasma-core/src/daemon/ipc.rs | 2 | daemon.port and daemon.http discovery files
 miasma-core/src/daemon/mod.rs | 2 | streaming decrypted retrieval to a caller-chosen output path
 miasma-core/src/daemon/replication.rs | 3 | replication WAL append and compaction
+miasma-core/src/logging/diag.rs | 4 | opt-in diagnostic log files: lg folder, rotation, zero-overwrite of removed files
 miasma-core/src/directed/inbox.rs | 8 | directed envelopes and sidecars below directed/
 miasma-core/src/push/service.rs | 4 | push inbox: .part files and final placement
 miasma-core/src/push/state.rs | 3 | push history append and trim
@@ -31,7 +32,7 @@ miasma-core/src/transfer/receive.rs | 6 | resumable receive: .part file and fina
 miasma-desktop/src/app/tour.rs | 4 | GUI screenshots, only when MIASMA_UI_SNAP is set (dev/QA)
 miasma-desktop/src/app.rs | 6 | user-initiated Save As and diagnostics export
 miasma-desktop/src/link.rs | 3 | instance lock, pending-link hand-off, URL scheme marker
-miasma-desktop/src/main.rs | 3 | desktop file logging setup (DESKTOP_LOG)
+miasma-desktop/src/main.rs | 1 | data dir creation (log setup lives in miasma-core logging)
 miasma-desktop/src/variant.rs | 1 | desktop-prefs.toml writer
 miasma-desktop/src/worker.rs | 1 | data dir creation on node init
 miasma-ffi/src/lib.rs | 2 | mobile data dir creation and key-file overwrite during wipe

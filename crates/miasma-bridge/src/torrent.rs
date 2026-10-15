@@ -195,7 +195,7 @@ impl MiasmaSession {
     where
         F: Fn(DownloadProgress) + Send + 'static,
     {
-        info!(path = %torrent_path.display(), "Adding torrent from file");
+        info!("Adding torrent from file");
 
         let torrent_bytes = tokio::fs::read(torrent_path)
             .await
@@ -232,7 +232,8 @@ impl MiasmaSession {
         let info_hash_hex = hex::encode(handle.info_hash().0);
         let name = handle.name().unwrap_or_else(|| "unknown".into());
 
-        info!(hash = %info_hash_hex, name = %name, "Torrent added, waiting for download");
+        debug!(hash = %info_hash_hex, name = %name, "Torrent added");
+        info!("Torrent added, waiting for download");
 
         // Wait for metadata (magnet URIs need to resolve first).
         handle

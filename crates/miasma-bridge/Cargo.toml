@@ -17,7 +17,6 @@ anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-appender = "0.2"
 bs58.workspace = true
 hex.workspace = true
 sha1.workspace = true

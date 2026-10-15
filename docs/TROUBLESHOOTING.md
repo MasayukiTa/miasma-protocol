@@ -31,7 +31,7 @@ If your organization blocks unsigned software via Group Policy, ask your IT admi
 **Try**:
 1. Check if `miasma.exe` exists next to `miasma-desktop.exe` (or is on PATH)
 2. Check if antivirus is blocking `miasma.exe`
-3. Look at the daemon log: open `%LOCALAPPDATA%\miasma\data\daemon.log.*`
+3. Look at the daemon log: run `miasma logs` (log lines are kept in memory only; see the runbook for diagnostic logging)
 4. Try starting manually: open a command prompt, run `miasma daemon`
 5. If a stale lock exists, delete `%LOCALAPPDATA%\miasma\data\daemon.port` and restart
 
@@ -116,5 +116,4 @@ Both settings persist across restarts.
 2. Click **Save Report** to save diagnostics to a file
 3. Attach the file when reporting issues
 4. Include: what you did, what you expected, what happened instead
-5. Desktop logs are in `%LOCALAPPDATA%\miasma\data\desktop.log.*`
-6. Daemon logs are in `%LOCALAPPDATA%\miasma\data\daemon.log.*`
+5. Logs are kept in memory only by default: Settings > Logs in the desktop app, or `miasma logs` for the daemon
