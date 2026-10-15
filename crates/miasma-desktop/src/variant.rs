@@ -56,24 +56,47 @@ pub struct DesktopPrefs {
 }
 
 impl DesktopPrefs {
-    /// Load from data directory. Returns defaults if file is missing or corrupt.
+    /// Load from data directory.
+    ///
+    /// Without a saved language (no file, an unreadable one, or one that has no `locale` entry)
+    /// the language follows the operating system's display language; a saved language always
+    /// wins. Every other field falls back to its default.
     pub fn load(data_dir: &Path) -> Self {
+        Self::load_with_os_locale(data_dir, crate::os_locale::detect())
+    }
+
+    /// [`Self::load`] with the operating system's language given, so it can be tested.
+    pub fn load_with_os_locale(data_dir: &Path, os_locale: Locale) -> Self {
         use miasma_core::state_crypto::{self, Label, StateKeys};
+        let fresh = || Self {
+            locale: os_locale,
+            ..Self::default()
+        };
         let path = data_dir.join(PREFS_FILE);
         if !path.exists() {
-            return Self::default();
+            return fresh();
         }
         let Ok(keys) = StateKeys::open_or_init(data_dir) else {
-            return Self::default();
+            return fresh();
         };
         let _ = state_crypto::migrate::migrate_document(&keys, Label::DesktopPrefs, &path);
-        match state_crypto::read_document(&keys, Label::DesktopPrefs, &path) {
-            Ok(contents) => std::str::from_utf8(&contents)
-                .ok()
-                .and_then(|s| toml::from_str(s).ok())
-                .unwrap_or_default(),
-            Err(_) => Self::default(),
+        let Ok(contents) = state_crypto::read_document(&keys, Label::DesktopPrefs, &path) else {
+            return fresh();
+        };
+        let Some(value) = std::str::from_utf8(&contents)
+            .ok()
+            .and_then(|s| s.parse::<toml::Table>().ok())
+        else {
+            return fresh();
+        };
+        let has_locale = value.contains_key("locale");
+        let Ok(mut prefs) = toml::Value::Table(value).try_into::<Self>() else {
+            return fresh();
+        };
+        if !has_locale {
+            prefs.locale = os_locale;
         }
+        prefs
     }
 
     /// Save to data directory. Errors are logged but not fatal.
@@ -240,9 +263,35 @@ mod tests {
     fn prefs_load_missing_file_returns_defaults() {
         let tmp = std::env::temp_dir().join("miasma-test-prefs-missing");
         let _ = std::fs::create_dir_all(&tmp);
-        let prefs = DesktopPrefs::load(&tmp);
+        let prefs = DesktopPrefs::load_with_os_locale(&tmp, Locale::En);
         assert_eq!(prefs.mode, ProductMode::Easy);
         assert_eq!(prefs.locale, Locale::En);
+        // First launch: no saved preference, so the language follows the operating system.
+        for os in Locale::ALL {
+            assert_eq!(DesktopPrefs::load_with_os_locale(&tmp, os).locale, os);
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn saved_language_wins_over_the_operating_system() {
+        let tmp = std::env::temp_dir().join("miasma-test-prefs-saved-wins");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::create_dir_all(&tmp);
+        for saved in Locale::ALL {
+            DesktopPrefs {
+                locale: saved,
+                ..Default::default()
+            }
+            .save(&tmp);
+            for os in Locale::ALL {
+                assert_eq!(
+                    DesktopPrefs::load_with_os_locale(&tmp, os).locale,
+                    saved,
+                    "saved {saved:?} must beat OS {os:?}"
+                );
+            }
+        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -267,9 +316,9 @@ mod tests {
         let tmp = std::env::temp_dir().join("miasma-test-prefs-corrupt");
         let _ = std::fs::create_dir_all(&tmp);
         std::fs::write(tmp.join(PREFS_FILE), "not valid toml {{{").unwrap();
-        let prefs = DesktopPrefs::load(&tmp);
+        let prefs = DesktopPrefs::load_with_os_locale(&tmp, Locale::Ja);
         assert_eq!(prefs.mode, ProductMode::Easy);
-        assert_eq!(prefs.locale, Locale::En);
+        assert_eq!(prefs.locale, Locale::Ja);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -279,9 +328,10 @@ mod tests {
         let _ = std::fs::create_dir_all(&tmp);
         // Only mode, no locale
         std::fs::write(tmp.join(PREFS_FILE), "mode = \"technical\"\n").unwrap();
-        let prefs = DesktopPrefs::load(&tmp);
+        let prefs = DesktopPrefs::load_with_os_locale(&tmp, Locale::ZhCn);
         assert_eq!(prefs.mode, ProductMode::Technical);
-        assert_eq!(prefs.locale, Locale::En); // default
+        // No saved language in the file: the operating system's applies.
+        assert_eq!(prefs.locale, Locale::ZhCn);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

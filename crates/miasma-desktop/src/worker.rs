@@ -550,14 +550,31 @@ pub struct WorkerHandle {
 }
 
 impl WorkerHandle {
-    pub fn spawn(data_dir: PathBuf) -> Self {
+    /// Start the worker. Every result it sends also wakes the window (`ctx`), so the window can
+    /// sleep between frames while idle and still show an answer the moment it arrives.
+    pub fn spawn(data_dir: PathBuf, ctx: egui::Context) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::sync_channel(32);
+        let (worker_tx, worker_rx) = mpsc::sync_channel(64);
         let (res_tx, res_rx) = mpsc::sync_channel(64);
 
         std::thread::Builder::new()
             .name("miasma-worker".into())
-            .spawn(move || worker_thread(data_dir, cmd_rx, res_tx))
+            .spawn(move || worker_thread(data_dir, cmd_rx, worker_tx))
             .expect("spawn worker thread");
+
+        // Hands each result on and asks for a repaint. It blocks on the channel, so it costs
+        // nothing while the worker is quiet, and ends when either side is gone.
+        std::thread::Builder::new()
+            .name("miasma-worker-wake".into())
+            .spawn(move || {
+                while let Ok(result) = worker_rx.recv() {
+                    if res_tx.send(result).is_err() {
+                        break;
+                    }
+                    ctx.request_repaint();
+                }
+            })
+            .expect("spawn worker wake thread");
 
         Self {
             tx: cmd_tx,
@@ -1208,7 +1225,25 @@ async fn do_wipe(data_dir: &Path) -> WorkerResult {
         Ok(ControlResponse::Wiped) => WorkerResult::Wiped,
         Ok(ControlResponse::Error(e)) => WorkerResult::Err(e),
         Ok(other) => WorkerResult::Err(format!("Unexpected response: {other:?}")),
+        // The background service is not running: erase through the store directly. This is the
+        // same operation the service performs (`LocalShareStore::distress_wipe`).
+        Err(e) if wipe_needs_direct_path(&format!("{e:#}")) => wipe_without_daemon(data_dir),
         Err(e) => WorkerResult::Err(daemon_error(&e)),
+    }
+}
+
+/// True when the wipe request failed because there is no background service to ask, so the
+/// erase has to run without it. Any other failure is shown to the person as it is.
+fn wipe_needs_direct_path(msg: &str) -> bool {
+    is_daemon_down(msg) || msg.contains("daemon.token not found")
+}
+
+/// Erase the stored data and keys without the background service.
+fn wipe_without_daemon(data_dir: &Path) -> WorkerResult {
+    warn!("background service not reachable; erasing through the store directly");
+    match miasma_core::LocalShareStore::open(data_dir, 0).and_then(|store| store.distress_wipe()) {
+        Ok(()) => WorkerResult::Wiped,
+        Err(e) => WorkerResult::Err(format!("Erase failed: {e}")),
     }
 }
 
@@ -1811,10 +1846,46 @@ fn parse_retention(s: &str) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        bridge_import_args, parse_mids_from_stdout, DirectedInboxItem, WorkerCmd, WorkerResult,
+        bridge_import_args, parse_mids_from_stdout, wipe_needs_direct_path, wipe_without_daemon,
+        DirectedInboxItem, WorkerCmd, WorkerResult,
     };
     use std::ffi::OsString;
     use std::path::Path;
+
+    #[test]
+    fn wipe_runs_without_the_service_only_when_there_is_none_to_ask() {
+        // The messages the control client gives when nothing is listening.
+        assert!(wipe_needs_direct_path(
+            "daemon.token not found - is the miasma daemon running?"
+        ));
+        assert!(wipe_needs_direct_path(
+            "daemon.port not found — is the miasma daemon running?"
+        ));
+        assert!(wipe_needs_direct_path(
+            "cannot connect to daemon on 127.0.0.1:1 — is the miasma daemon still running?"
+        ));
+        assert!(wipe_needs_direct_path(super::DAEMON_DOWN_MESSAGE));
+        // A refusal from a running service is not a reason to go around it.
+        assert!(!wipe_needs_direct_path(
+            "wipe not confirmed: missing, expired or wrong confirmation nonce"
+        ));
+        assert!(!wipe_needs_direct_path("daemon.token is empty"));
+    }
+
+    #[test]
+    fn direct_wipe_removes_the_master_key() {
+        let dir =
+            std::env::temp_dir().join(format!("miasma-test-direct-wipe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Create the key the way a first start does, then erase without any service running.
+        miasma_core::LocalShareStore::open(&dir, 0).unwrap();
+        let key = dir.join("master.key");
+        assert!(key.exists());
+        assert!(matches!(wipe_without_daemon(&dir), WorkerResult::Wiped));
+        assert!(!key.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn log_variants_never_print_line_contents() {
