@@ -72,6 +72,7 @@ struct Sender {
 impl Sender {
     async fn new(key: u8) -> Self {
         let dir = tempfile::tempdir().unwrap();
+        miasma_core::state_crypto::provision_master_key(dir.path()).unwrap();
         let store = Arc::new(LocalShareStore::open(dir.path(), 1000).unwrap());
         let mut node = MiasmaNode::new(&[key; 32], NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
         let addrs = node.collect_listen_addrs(400).await;
@@ -152,6 +153,7 @@ impl RecordProvider for FixedEnvelope {
 /// Start such an endpoint; keep the returned directory alive.
 async fn serve_envelope(mid: &ContentId, envelope: Vec<u8>) -> (String, TempDir) {
     let dir = tempfile::tempdir().unwrap();
+    miasma_core::state_crypto::provision_master_key(dir.path()).unwrap();
     let store = Arc::new(LocalShareStore::open(dir.path(), 10).unwrap());
     let server = WssShareServer::bind(store, 0)
         .await
@@ -184,6 +186,7 @@ async fn receive_via(
     password: Option<&str>,
 ) -> (Result<ReceiveOutcome, MiasmaError>, Arc<TransferProgress>) {
     let work = tempfile::tempdir().unwrap();
+    miasma_core::state_crypto::provision_master_key(work.path()).unwrap();
     let progress = TransferProgress::new(id.mid().to_string());
     let via = ViaConfig { urls, ca_pem: None };
     let r = receive_file_via_id(
@@ -228,6 +231,7 @@ async fn a_publish_reports_a_share_id_bound_to_the_node_key_and_the_protection()
     timeout(Duration::from_secs(120), async {
         let a = Sender::new(0x71).await;
         let dir = tempfile::tempdir().unwrap();
+        miasma_core::state_crypto::provision_master_key(dir.path()).unwrap();
         let path = write_named(&dir, "plain.bin", &content(5_000));
 
         let (mid, share) = a.publish(&path, None).await;
@@ -256,6 +260,7 @@ async fn a_share_id_receive_over_via_succeeds_and_authenticates_the_publisher() 
     timeout(Duration::from_secs(120), async {
         let a = Sender::new(0x72).await;
         let dir = tempfile::tempdir().unwrap();
+        miasma_core::state_crypto::provision_master_key(dir.path()).unwrap();
         let data = content(20_000);
         let path = write_named(&dir, "plain.bin", &data);
         let (_, share) = a.publish(&path, None).await;
@@ -278,6 +283,7 @@ async fn a_protected_share_id_receive_needs_the_password_and_the_right_one_works
     timeout(Duration::from_secs(120), async {
         let a = Sender::new(0x73).await;
         let dir = tempfile::tempdir().unwrap();
+        miasma_core::state_crypto::provision_master_key(dir.path()).unwrap();
         let data = content(12_000);
         let path = write_named(&dir, "secret.bin", &data);
         let pw = random_password();
@@ -304,6 +310,7 @@ async fn a_plain_mid_still_works_but_is_not_authenticated() {
     timeout(Duration::from_secs(120), async {
         let a = Sender::new(0x74).await;
         let dir = tempfile::tempdir().unwrap();
+        miasma_core::state_crypto::provision_master_key(dir.path()).unwrap();
         let data = content(9_000);
         let path = write_named(&dir, "plain.bin", &data);
         let (mid, _) = a.publish(&path, None).await;
@@ -331,6 +338,7 @@ async fn a_record_signed_by_another_key_is_rejected_and_the_honest_one_still_win
     timeout(Duration::from_secs(120), async {
         let honest = Sender::new(0x75).await;
         let dir = tempfile::tempdir().unwrap();
+        miasma_core::state_crypto::provision_master_key(dir.path()).unwrap();
         let data = content(15_000);
         let path = write_named(&dir, "plain.bin", &data);
         let (mid, share) = honest.publish(&path, None).await;
@@ -376,6 +384,7 @@ async fn a_share_id_naming_another_publisher_finds_nothing_to_accept() {
     timeout(Duration::from_secs(120), async {
         let honest = Sender::new(0x76).await;
         let dir = tempfile::tempdir().unwrap();
+        miasma_core::state_crypto::provision_master_key(dir.path()).unwrap();
         let path = write_named(&dir, "plain.bin", &content(4_000));
         let (mid, _) = honest.publish(&path, None).await;
 
@@ -400,6 +409,7 @@ async fn an_old_unprotected_record_replayed_against_a_protected_share_id_is_refu
     timeout(Duration::from_secs(120), async {
         let a = Sender::new(0x77).await;
         let dir = tempfile::tempdir().unwrap();
+        miasma_core::state_crypto::provision_master_key(dir.path()).unwrap();
         let data = content(6_000);
         let path = write_named(&dir, "doc.bin", &data);
 
@@ -436,6 +446,7 @@ async fn an_unprotected_share_id_refuses_a_protected_record() {
     timeout(Duration::from_secs(120), async {
         let a = Sender::new(0x78).await;
         let dir = tempfile::tempdir().unwrap();
+        miasma_core::state_crypto::provision_master_key(dir.path()).unwrap();
         let path = write_named(&dir, "doc.bin", &content(3_000));
         let pw = random_password();
         let (mid, _) = a.publish(&path, Some(&pw)).await;
@@ -461,6 +472,7 @@ async fn a_v2_manifest_is_refused_with_a_publish_again_message() {
     timeout(Duration::from_secs(120), async {
         let a = Sender::new(0x79).await;
         let dir = tempfile::tempdir().unwrap();
+        miasma_core::state_crypto::provision_master_key(dir.path()).unwrap();
         let path = write_named(&dir, "doc.bin", &content(3_000));
         let (mid, _) = a.publish(&path, None).await;
 
@@ -497,6 +509,7 @@ async fn the_published_manifest_names_the_publisher_and_only_the_file_name() {
     timeout(Duration::from_secs(120), async {
         let a = Sender::new(0x7A).await;
         let dir = tempfile::tempdir().unwrap();
+        miasma_core::state_crypto::provision_master_key(dir.path()).unwrap();
         let path = write_named(&dir, "quarterly report.pdf", &content(2_000));
         let (mid, _) = a.publish(&path, None).await;
         let signed: SignedDhtRecord = bincode::deserialize(&a.envelope(&mid).await).unwrap();
@@ -538,6 +551,7 @@ async fn an_unprotected_receive_keeps_the_senders_file_name() {
     timeout(Duration::from_secs(120), async {
         let a = Sender::new(0x74).await;
         let dir = tempfile::tempdir().unwrap();
+        miasma_core::state_crypto::provision_master_key(dir.path()).unwrap();
         let data = content(9_000);
         let path = write_named(&dir, "旅行の写真 final.png", &data);
         let (mid, share) = a.publish(&path, None).await;
@@ -581,6 +595,7 @@ async fn a_protected_receive_keeps_the_name_and_the_stored_record_does_not_show_
     timeout(Duration::from_secs(120), async {
         let a = Sender::new(0x75).await;
         let dir = tempfile::tempdir().unwrap();
+        miasma_core::state_crypto::provision_master_key(dir.path()).unwrap();
         let data = content(9_000);
         let path = write_named(&dir, "給与明細 secret-report.png", &data);
         let pw = random_password();
@@ -633,6 +648,7 @@ struct Daemon {
 
 async fn start_daemon(key: u8) -> Daemon {
     let dir = tempfile::tempdir().unwrap();
+    miasma_core::state_crypto::provision_master_key(dir.path()).unwrap();
     let store = Arc::new(LocalShareStore::open(dir.path(), 1000).unwrap());
     let node = MiasmaNode::new(&[key; 32], NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
     let server = DaemonServer::start(node, store, dir.path().to_path_buf())
@@ -841,6 +857,7 @@ async fn daemons_publish_reports_the_share_id_and_a_folder_target_gets_the_origi
 
 async fn spawn_node(key_byte: u8) -> (MiasmaCoordinator, TempDir) {
     let dir = tempfile::tempdir().unwrap();
+    miasma_core::state_crypto::provision_master_key(dir.path()).unwrap();
     let store = Arc::new(LocalShareStore::open(dir.path(), 1000).unwrap());
     let mut node =
         MiasmaNode::new(&[key_byte; 32], NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();

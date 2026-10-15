@@ -268,8 +268,14 @@ fn an_index_written_before_principals_existed_still_loads() {
 
     // Rewrite the index the way an older build wrote it: no principal field.
     let index_path = dir.path().join("store_index.json");
-    let mut index: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&index_path).unwrap()).unwrap();
+    let keys = miasma_core::state_crypto::StateKeys::load(dir.path()).unwrap();
+    let raw = miasma_core::state_crypto::read_document(
+        &keys,
+        miasma_core::state_crypto::Label::StoreIndex,
+        &index_path,
+    )
+    .unwrap();
+    let mut index: serde_json::Value = serde_json::from_slice(&raw).unwrap();
     let mut stripped = 0;
     for entry in index.as_object_mut().unwrap().values_mut() {
         if entry
