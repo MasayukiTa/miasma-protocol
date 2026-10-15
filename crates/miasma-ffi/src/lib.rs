@@ -513,7 +513,7 @@ pub fn distress_wipe(data_dir: String) -> Result<(), MiasmaFfiError> {
                 if let Err(e) = std::fs::write(&fpath, &zeros) {
                     tracing::warn!(
                         "wipe overwrite failed for {}: {e}",
-                        miasma_core::logging::redact::name(&fname)
+                        miasma_core::logging::redact::name(fname)
                     );
                     errors.push(format!("could not overwrite {fname}"));
                     continue;
@@ -522,7 +522,7 @@ pub fn distress_wipe(data_dir: String) -> Result<(), MiasmaFfiError> {
             Err(e) => {
                 tracing::warn!(
                     "wipe metadata failed for {}: {e}",
-                    miasma_core::logging::redact::name(&fname)
+                    miasma_core::logging::redact::name(fname)
                 );
                 errors.push(format!("could not inspect {fname}"));
                 continue;
@@ -531,7 +531,7 @@ pub fn distress_wipe(data_dir: String) -> Result<(), MiasmaFfiError> {
         if let Err(e) = std::fs::remove_file(&fpath) {
             tracing::warn!(
                 "wipe removal failed for {}: {e}",
-                miasma_core::logging::redact::name(&fname)
+                miasma_core::logging::redact::name(fname)
             );
             errors.push(format!("could not remove {fname}"));
         }

@@ -386,7 +386,7 @@ pub fn set_diagnostic_persistent(data_dir: &Path, on: bool) -> io::Result<()> {
         if c.privacy.diagnostic_logging != on {
             c.privacy.diagnostic_logging = on;
             c.save(data_dir)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                .map_err(|e| io::Error::other(e.to_string()))?;
         }
         c.transport.zeroize_secret_copies();
     }

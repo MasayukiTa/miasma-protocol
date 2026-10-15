@@ -68,8 +68,10 @@ fn stealth_writes_zero_log_files_for_every_component() {
 #[test]
 fn diagnostic_mode_creates_only_the_rotated_folder() {
     let dir = tempfile::tempdir().unwrap();
-    let mut privacy = PrivacyConfig::default();
-    privacy.diagnostic_logging = true;
+    let privacy = PrivacyConfig {
+        diagnostic_logging: true,
+        ..PrivacyConfig::default()
+    };
     let (logger, sub) = build(&opts(dir.path(), Component::Daemon), &privacy);
     tracing::subscriber::with_default(sub, || emit_lines(10_000));
     let mut found = Vec::new();

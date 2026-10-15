@@ -129,10 +129,6 @@ fn scrub_word(w: &str) -> Option<String> {
         Some("<addr>".into())
     } else if core.contains("://") {
         Some("<url>".into())
-    } else if core.contains("://") {
-        Some("<url>".into())
-    } else if core.contains("://") {
-        Some("<url>".into())
     } else if looks_like_path(core) {
         Some("<path>".into())
     } else if is_ip_word(core) {

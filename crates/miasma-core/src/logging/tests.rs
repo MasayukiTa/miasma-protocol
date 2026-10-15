@@ -298,8 +298,10 @@ fn diagnostic_files_are_rotated_scrubbed_and_removed_on_switch_off() {
 #[test]
 fn one_shot_cli_never_writes_files_even_in_diagnostic_mode() {
     let dir = tempfile::tempdir().unwrap();
-    let mut p = PrivacyConfig::default();
-    p.diagnostic_logging = true;
+    let p = PrivacyConfig {
+        diagnostic_logging: true,
+        ..PrivacyConfig::default()
+    };
     let (logger, sub) = build(&opts(dir.path(), Component::Cli), &p);
     tracing::subscriber::with_default(sub, || tracing::info!("x"));
     assert!(!logger.diagnostic_enabled());
@@ -456,9 +458,8 @@ fn secure_remove_overwrites_before_unlinking() {
     std::fs::write(&p, vec![0xAAu8; 200_000]).unwrap();
     // Keep a second handle to the same file to observe the overwrite.
     let mut f = std::fs::File::open(&p).unwrap();
-    diag::secure_remove(&p).unwrap_or_else(|_| {
-        // Windows refuses to delete a file that is open; the overwrite still ran.
-    });
+    // Windows may refuse to delete a file that is open; the overwrite still ran.
+    let _ = diag::secure_remove(&p);
     use std::io::Read;
     let mut buf = Vec::new();
     f.read_to_end(&mut buf).unwrap();

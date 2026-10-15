@@ -49,7 +49,7 @@ impl RingBuffer {
     /// As [`new`](Self::new) without the clamp. Only for tests that want a
     /// tiny buffer.
     pub fn with_exact_capacity(cap: usize) -> Self {
-        assert!(cap >= MAX_LINE + HDR + 1, "ring too small");
+        assert!(cap > MAX_LINE + HDR, "ring too small");
         Self {
             buf: vec![0u8; cap].into_boxed_slice(),
             head: 0,
