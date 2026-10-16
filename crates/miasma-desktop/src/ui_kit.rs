@@ -1020,8 +1020,9 @@ mod tests {
                     }
                     let rest = &src[at + pat.len()..];
                     let rest = if pat.starts_with("single_line") {
-                        // single_line(ui, text, SIZE, ...): the size is the third argument.
-                        match rest.splitn(3, ',').nth(2) {
+                        // `pat` already ate "single_line(ui, ", so the next field is the text and
+                        // the one after it is the size.
+                        match rest.splitn(3, ',').nth(1) {
                             Some(r) => r,
                             None => continue,
                         }
