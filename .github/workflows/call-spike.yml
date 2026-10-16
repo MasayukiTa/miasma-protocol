@@ -1,0 +1,84 @@
+name: call-spike
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [spike/call-stack]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  spike:
+    name: spike (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    defaults:
+      run:
+        working-directory: spikes/call-stack
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ALSA headers (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+
+      - name: Toolchain info
+        shell: bash
+        run: |
+          rustc --version
+          cargo --version
+          echo "--- cmake:"
+          (command -v cmake && cmake --version | head -1) || echo "cmake: NOT FOUND"
+          echo "--- ninja:"
+          (command -v ninja && ninja --version) || echo "ninja: NOT FOUND"
+          echo "--- cc/cl:"
+          (command -v cc || command -v cl || command -v gcc || command -v clang) || echo "cc: NOT FOUND"
+
+      - name: Build
+        shell: bash
+        run: |
+          start=$(date +%s)
+          case "$RUNNER_OS" in
+            Linux) /usr/bin/time -v cargo build --release 2> build_time.txt; rc=$? ;;
+            macOS) /usr/bin/time -l cargo build --release 2> build_time.txt; rc=$? ;;
+            *) cargo build --release; rc=$? ;;
+          esac
+          end=$(date +%s)
+          [ -f build_time.txt ] && grep -E 'Maximum resident|maximum resident|^error|warning: unused' build_time.txt | head -5
+          [ -f build_time.txt ] && [ $rc -ne 0 ] && tail -60 build_time.txt
+          echo "BUILD_SECONDS=$((end-start)) exit=$rc"
+          exit $rc
+
+      - name: Run (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          /usr/bin/time -v ./target/release/call-stack-spike 2> run_time.txt; rc=$?
+          grep -E 'Maximum resident|Elapsed' run_time.txt
+          echo "run exit=$rc"; exit $rc
+
+      - name: Run (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          /usr/bin/time -l ./target/release/call-stack-spike 2> run_time.txt; rc=$?
+          grep -E 'maximum resident|real' run_time.txt
+          echo "run exit=$rc"; exit $rc
+
+      - name: Run (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath ./target/release/call-stack-spike.exe -NoNewWindow -PassThru
+          $p.WaitForExit()
+          try { $p.Refresh(); Write-Host ("PEAK_WORKING_SET_MB=" + [math]::Round($p.PeakWorkingSet64 / 1MB, 1)) } catch { Write-Host "peak rss not readable: $_" }
+          Write-Host "run exit=$($p.ExitCode)"
+          exit $p.ExitCode
