@@ -6,16 +6,18 @@
 //! (no egui context) and unit-tested headless; the second half draws it.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
+use miasma_core::contacts_suggest::SuggestionInfo;
 use miasma_core::push::{
     ContactInfo, Direction, HistoryEntry, PushRequest, PushResponse, PushState, PushTransferInfo,
 };
 
 use crate::app::{card_frame, danger_button, primary_button, section_heading};
 use crate::locale::{ContactStrings, Locale};
+use crate::open_path::{self, Action, Resolved};
 use crate::theme::{self, Palette};
 use crate::transfers::{fill, format_bytes, format_eta, format_rate};
 use crate::worker::PushFail;
@@ -536,6 +538,59 @@ pub fn new_arrivals<'a>(
     fresh
 }
 
+/// One row of the list with the earlier unsuccessful attempts at the same file folded under it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Group<'a> {
+    pub row: &'a Row,
+    pub earlier: Vec<&'a Row>,
+}
+
+fn unsuccessful(r: &Row) -> bool {
+    matches!(
+        r.state,
+        PushState::Failed | PushState::Rejected | PushState::Cancelled
+    )
+}
+
+fn same_file(a: &Row, b: &Row) -> bool {
+    a.contact_id == b.contact_id && a.outbound == b.outbound && a.name == b.name && a.size == b.size
+}
+
+/// Fold unsuccessful attempts that a later attempt at the same file (same contact, direction,
+/// name and size) replaced: the later attempt is running or done. They are listed under that
+/// attempt instead of among the rows. Nothing is deleted anywhere; a file that only ever failed
+/// keeps its row (with "send again"), and a different file is never touched.
+pub fn fold_attempts<'a>(rows: &[&'a Row]) -> Vec<Group<'a>> {
+    let mut folded_into: HashMap<&str, &'a Row> = HashMap::new();
+    for r in rows.iter().copied().filter(|r| unsuccessful(r)) {
+        let host = rows
+            .iter()
+            .copied()
+            .filter(|h| !unsuccessful(h) && h.id != r.id && same_file(h, r) && h.at_ms >= r.at_ms)
+            .max_by(|a, b| a.at_ms.cmp(&b.at_ms).then_with(|| a.id.cmp(&b.id)));
+        if let Some(h) = host {
+            folded_into.insert(r.id.as_str(), h);
+        }
+    }
+    let mut groups: Vec<Group<'a>> = rows
+        .iter()
+        .copied()
+        .filter(|r| !folded_into.contains_key(r.id.as_str()))
+        .map(|row| Group {
+            row,
+            earlier: Vec::new(),
+        })
+        .collect();
+    for r in rows.iter().copied() {
+        if let Some(h) = folded_into.get(r.id.as_str()) {
+            if let Some(g) = groups.iter_mut().find(|g| g.row.id == h.id) {
+                g.earlier.push(r);
+            }
+        }
+    }
+    groups
+}
+
 /// Hide finished rows that were cleared (`at_ms <= cleared_before_ms`) and cap how many finished
 /// rows are drawn. Unfinished rows are always kept.
 pub fn visible_rows(rows: &[Row], cleared_before_ms: u64, max_finished: usize) -> Vec<&Row> {
@@ -552,18 +607,6 @@ pub fn visible_rows(rows: &[Row], cleared_before_ms: u64, max_finished: usize) -
             finished <= max_finished
         })
         .collect()
-}
-
-/// Where a received file is: `saved_as` if it is a path, else `<contact inbox>/<saved_as>`.
-pub fn saved_path(saved_as: &str, contact_inbox: Option<&str>) -> PathBuf {
-    let p = Path::new(saved_as);
-    if p.is_absolute() {
-        return p.to_path_buf();
-    }
-    match contact_inbox {
-        Some(dir) => Path::new(dir).join(saved_as),
-        None => p.to_path_buf(),
-    }
 }
 
 /// Which contact row a dropped file belongs to: the row under the pointer, else the only
@@ -584,54 +627,105 @@ pub fn drop_target(
     None
 }
 
-// ─── Open a file or folder (only when clicked) ──────────────────────────────
-
-/// Open a folder in the file manager.
-pub fn open_folder(dir: &str) {
-    #[cfg(windows)]
-    let cmd = "explorer";
-    #[cfg(target_os = "macos")]
-    let cmd = "open";
-    #[cfg(not(any(windows, target_os = "macos")))]
-    let cmd = "xdg-open";
-    let _ = std::process::Command::new(cmd).arg(dir).spawn();
-}
-
-/// Show a file in its folder (selected where the OS supports it).
-pub fn reveal_file(path: &Path) {
-    #[cfg(windows)]
-    {
-        let _ = std::process::Command::new("explorer")
-            .arg(format!("/select,{}", path.display()))
-            .spawn();
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open")
-            .arg("-R")
-            .arg(path)
-            .spawn();
-    }
-    #[cfg(not(any(windows, target_os = "macos")))]
-    {
-        if let Some(dir) = path.parent() {
-            let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
-        }
-    }
-}
-
-/// Open a received file with its default program. Only ever called from a button click.
-pub fn open_file(path: &Path) {
-    #[cfg(windows)]
-    let cmd = "explorer";
-    #[cfg(target_os = "macos")]
-    let cmd = "open";
-    #[cfg(not(any(windows, target_os = "macos")))]
-    let cmd = "xdg-open";
-    let _ = std::process::Command::new(cmd).arg(path).spawn();
-}
-
 // ─── State ──────────────────────────────────────────────────────────────────
+
+// ─── Pure: what became of a file sent from the chat screen ──────────────────
+
+/// A file the person picked to send from the chat screen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SentFile {
+    pub name: String,
+    pub path: String,
+}
+
+/// Where a file sent from the chat screen stands, read from the push rows. The chat shows
+/// "sent" only for [`FileStatus::Done`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileStatus {
+    /// Queued, preparing or connecting (or the push row has not appeared yet).
+    Waiting,
+    Sending {
+        percent: u8,
+    },
+    Done,
+    /// Did not go through; `reason` is in the UI language.
+    Failed {
+        reason: String,
+    },
+}
+
+/// A clock difference between the chat note and the daemon's row that is still the same send.
+const NOTE_SLACK_MS: u64 = 10_000;
+
+fn is_that_file(r: &Row, contact_id: &str, path: &str) -> bool {
+    r.outbound
+        && r.contact_id == contact_id
+        && match r.source_path.as_deref() {
+            Some(sp) => sp == path,
+            // An older daemon does not report the source: fall back to the file name.
+            None => r.name == base_name(path),
+        }
+}
+
+/// The status of `path` sent to `contact_id` at or after `since_ms`: the newest matching push
+/// row decides; with no row yet, a refusal of the send request itself (`failures`) decides.
+pub fn file_status_in(
+    rows: &[Row],
+    failures: &HashMap<(String, String), String>,
+    c: &ContactStrings,
+    technical: bool,
+    contact_id: &str,
+    path: &str,
+    since_ms: u64,
+) -> FileStatus {
+    let newest = rows
+        .iter()
+        .filter(|r| is_that_file(r, contact_id, path) && r.at_ms + NOTE_SLACK_MS >= since_ms)
+        .max_by(|a, b| a.at_ms.cmp(&b.at_ms).then_with(|| a.id.cmp(&b.id)));
+    match newest {
+        Some(r) => match r.state {
+            PushState::Queued | PushState::Preparing | PushState::Connecting => FileStatus::Waiting,
+            PushState::Sending | PushState::Verifying => FileStatus::Sending {
+                percent: (fraction(r.size, r.bytes, false) * 100.0).min(99.0) as u8,
+            },
+            PushState::Done => FileStatus::Done,
+            PushState::Failed | PushState::Rejected | PushState::Cancelled => FileStatus::Failed {
+                reason: row_guidance_for(c, r, technical)
+                    .unwrap_or_else(|| state_label(c, r.state).to_owned()),
+            },
+        },
+        None => match failures.get(&(contact_id.to_owned(), path.to_owned())) {
+            Some(reason) => FileStatus::Failed {
+                reason: reason.clone(),
+            },
+            None => FileStatus::Waiting,
+        },
+    }
+}
+
+/// Most ignored suggestions remembered for the session.
+pub const MAX_IGNORED: usize = 64;
+/// Most suggestions shown at once (the core keeps at most 16).
+pub const MAX_SUGGESTIONS_SHOWN: usize = 16;
+
+/// "just now", "5 min ago", "3 h ago".
+pub fn when_text(c: &ContactStrings, now_ms: u64, at_ms: u64) -> String {
+    let mins = now_ms.saturating_sub(at_ms) / 60_000;
+    if mins < 1 {
+        c.sugg_now.to_owned()
+    } else if mins < 60 {
+        fill(c.sugg_min, &[("n", &mins.to_string())])
+    } else {
+        fill(c.sugg_hour, &[("n", &(mins / 60).to_string())])
+    }
+}
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
 /// Whether the daemon can do contacts at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -653,6 +747,7 @@ const RETRY_UNAVAILABLE: Duration = Duration::from_secs(5);
 const LIST_EVERY: Duration = Duration::from_secs(5);
 const HISTORY_EVERY: Duration = Duration::from_secs(30);
 const MAX_FINISHED_SHOWN: usize = 30;
+const SUGGEST_EVERY: Duration = Duration::from_secs(10);
 
 pub struct ContactsUi {
     availability: Availability,
@@ -704,6 +799,25 @@ pub struct ContactsUi {
     row_rects: Vec<(String, egui::Rect)>,
     page_msg: Option<(String, bool)>,
 
+    /// Failures of "Open file" / "Show in folder" reported by the helper thread.
+    open_tx: std::sync::mpsc::Sender<String>,
+    open_rx: std::sync::mpsc::Receiver<String>,
+    /// The path the last open was aimed at (named in the notice if it fails).
+    last_open: String,
+    /// Hosts whose folded earlier attempts are expanded.
+    show_earlier: HashSet<String>,
+
+    // people who tried to reach me without being a contact
+    suggestions: Vec<SuggestionInfo>,
+    /// Endpoint ids the person chose to ignore this session (never saved), oldest first.
+    ignored: Vec<String>,
+    last_suggest: Instant,
+    /// The code the add form was filled from a suggestion with: such a contact starts with
+    /// sending and receiving off.
+    add_from_suggestion: Option<String>,
+    /// Chat file sends the daemon refused outright: (contact id, path) -> reason.
+    send_failures: HashMap<(String, String), String>,
+
     /// Dev-only screenshot fixtures: show what was set up, never ask the daemon.
     frozen: bool,
 
@@ -716,7 +830,12 @@ pub struct ContactsUi {
 impl Default for ContactsUi {
     fn default() -> Self {
         let now = Instant::now();
+        let (open_tx, open_rx) = std::sync::mpsc::channel();
         Self {
+            open_tx,
+            open_rx,
+            last_open: String::new(),
+            show_earlier: HashSet::new(),
             availability: Availability::Unknown,
             ever_ok: false,
             was_connected: false,
@@ -754,6 +873,11 @@ impl Default for ContactsUi {
             remove_target: None,
             row_rects: Vec::new(),
             page_msg: None,
+            suggestions: Vec::new(),
+            ignored: Vec::new(),
+            last_suggest: now,
+            add_from_suggestion: None,
+            send_failures: HashMap::new(),
             frozen: false,
             err_locale: Locale::En,
             err_technical: false,
@@ -789,20 +913,164 @@ impl ContactsUi {
     /// The same file picker and queueing as the "Send files" button of a contact's row, for
     /// another screen. Returns the names of the files that were queued (none if the dialog was
     /// cancelled or only folders were picked).
-    pub fn pick_and_send_files(&mut self, c: &ContactStrings, id: &str) -> Vec<String> {
+    pub fn pick_and_send_files(&mut self, c: &ContactStrings, id: &str) -> Vec<SentFile> {
         if !self.contacts.iter().any(|x| x.id == id) {
             return Vec::new();
         }
         let Some(files) = rfd::FileDialog::new().set_title(c.pick_title).pick_files() else {
             return Vec::new();
         };
-        let names: Vec<String> = files
+        let sent: Vec<SentFile> = files
             .iter()
             .filter(|p| !p.is_dir())
-            .map(|p| base_name(&p.to_string_lossy()))
+            .map(|p| SentFile {
+                name: base_name(&p.to_string_lossy()),
+                path: p.to_string_lossy().into_owned(),
+            })
             .collect();
         self.send_paths(c, id, files);
-        names
+        sent
+    }
+
+    /// Where a file sent from the chat screen stands (see [`FileStatus`]).
+    pub fn file_status(
+        &self,
+        c: &ContactStrings,
+        contact_id: &str,
+        path: &str,
+        since_ms: u64,
+    ) -> FileStatus {
+        file_status_in(
+            &self.rows,
+            &self.send_failures,
+            c,
+            self.err_technical,
+            contact_id,
+            path,
+            since_ms,
+        )
+    }
+
+    /// "Send again" for a chat file line: the same file to the same contact. The failed attempt
+    /// is dropped from the lists until the new one shows up.
+    pub fn resend_file(&mut self, contact_id: &str, path: &str) {
+        self.send_failures
+            .remove(&(contact_id.to_owned(), path.to_owned()));
+        let old: Vec<String> = self
+            .rows
+            .iter()
+            .filter(|r| is_that_file(r, contact_id, path) && r.finished())
+            .map(|r| r.id.clone())
+            .collect();
+        for id in old {
+            self.cleared_ids_hide(&id);
+        }
+        self.out.push_back(PushRequest::Send {
+            contact: contact_id.to_owned(),
+            path: path.to_owned(),
+        });
+        self.refresh_soon();
+    }
+
+    // ─── Opening received files ─────────────────────────────────────────────
+
+    fn inbox_root(&self) -> Option<PathBuf> {
+        self.inbox_dir.as_deref().map(PathBuf::from)
+    }
+
+    /// "Open file" / "Show in folder" for a received row. The path is rebuilt and checked first;
+    /// a file that is gone opens its folder and says so, and a launcher that fails is reported
+    /// with the path that was tried.
+    fn open_received(&mut self, c: &ContactStrings, r: &Row, action: Action) {
+        let Some(sa) = r.saved_as.as_deref() else {
+            return;
+        };
+        let contact_dir = self
+            .contacts
+            .iter()
+            .find(|x| x.id == r.contact_id)
+            .map(|x| PathBuf::from(&x.inbox_dir));
+        match open_path::resolve_saved(sa, contact_dir.as_deref(), self.inbox_root().as_deref()) {
+            Resolved::Found(p) => {
+                self.last_open = crate::transfers::plain_path(&p.to_string_lossy()).to_owned();
+                open_path::launch(action, p, self.open_tx.clone());
+            }
+            Resolved::Missing { tried, folder } => {
+                let shown = crate::transfers::plain_path(&tried.to_string_lossy()).to_owned();
+                self.page_msg = Some((fill(c.open_missing, &[("path", &shown)]), true));
+                if let Some(f) = folder {
+                    self.last_open = crate::transfers::plain_path(&f.to_string_lossy()).to_owned();
+                    open_path::launch(Action::Open, f, self.open_tx.clone());
+                }
+            }
+        }
+    }
+
+    /// Open a folder, or say it is not there.
+    fn open_dir(&mut self, c: &ContactStrings, dir: &str) {
+        let p = PathBuf::from(dir);
+        if p.is_dir() {
+            self.last_open = crate::transfers::plain_path(dir).to_owned();
+            open_path::launch(Action::Open, p, self.open_tx.clone());
+        } else {
+            self.page_msg = Some((
+                fill(
+                    c.open_missing,
+                    &[("path", crate::transfers::plain_path(dir))],
+                ),
+                true,
+            ));
+        }
+    }
+
+    /// Failures reported by the launcher threads become a visible notice.
+    fn collect_open_failures(&mut self, c: &ContactStrings) {
+        while let Ok(why) = self.open_rx.try_recv() {
+            self.page_msg = Some((
+                fill(c.open_failed, &[("path", &self.last_open), ("why", &why)]),
+                true,
+            ));
+        }
+    }
+
+    // ─── Suggestions: people who are not contacts ───────────────────────────
+
+    /// The suggestions to show: not ignored, not already a contact, newest first.
+    pub fn visible_suggestions(&self) -> Vec<&SuggestionInfo> {
+        self.suggestions
+            .iter()
+            .filter(|s| !self.ignored.contains(&s.endpoint_id))
+            .filter(|s| !self.contacts.iter().any(|c| c.endpoint_id == s.endpoint_id))
+            .take(MAX_SUGGESTIONS_SHOWN)
+            .collect()
+    }
+
+    /// Hide a suggestion for the rest of this session.
+    pub fn ignore_suggestion(&mut self, endpoint_id: &str) {
+        if self.ignored.iter().any(|i| i == endpoint_id) {
+            return;
+        }
+        self.ignored.push(endpoint_id.to_owned());
+        if self.ignored.len() > MAX_IGNORED {
+            self.ignored.remove(0);
+        }
+    }
+
+    /// "Add as contact": fill the add form with the code. Nothing is added until the person
+    /// gives a label and presses the form's button, and then with sending and receiving off.
+    pub fn add_from_suggestion(&mut self, endpoint_id: &str) {
+        let Some(s) = self
+            .suggestions
+            .iter()
+            .find(|s| s.endpoint_id == endpoint_id)
+        else {
+            return;
+        };
+        self.add_text = s.code.clone();
+        self.add_from_suggestion = Some(s.code.clone());
+        self.add_label.clear();
+        self.add_error = None;
+        self.add_result = None;
     }
 
     fn has_active(&self) -> bool {
@@ -872,6 +1140,10 @@ impl ContactsUi {
             self.out
                 .push_back(PushRequest::History { limit: Some(200) });
         }
+        if now.duration_since(self.last_suggest) >= SUGGEST_EVERY {
+            self.last_suggest = now;
+            self.out.push_back(PushRequest::Suggestions);
+        }
     }
 
     fn request_all(&mut self) {
@@ -880,8 +1152,10 @@ impl ContactsUi {
         self.last_status = now;
         self.last_list = now;
         self.last_history = now;
+        self.last_suggest = now;
         self.out.push_back(PushRequest::ContactCode);
         self.out.push_back(PushRequest::ContactList);
+        self.out.push_back(PushRequest::Suggestions);
         self.out.push_back(PushRequest::Inbox);
         self.out
             .push_back(PushRequest::History { limit: Some(200) });
@@ -929,6 +1203,12 @@ impl ContactsUi {
         if is_status {
             self.status_in_flight = None;
         }
+        if matches!(req, PushRequest::Suggestions)
+            && !matches!(reply, Ok(PushResponse::Suggestions(_)))
+        {
+            // A daemon that predates suggestions (or a hiccup): nothing to show, nothing to say.
+            return;
+        }
         let resp = match reply {
             Ok(r) => r,
             Err(f) => {
@@ -961,12 +1241,20 @@ impl ContactsUi {
 
     fn fail_request(&mut self, req: &PushRequest, text: String) {
         match req {
-            PushRequest::ContactAdd { .. } => {
+            PushRequest::ContactAdd { .. } | PushRequest::ContactAddOff { .. } => {
                 self.add_busy = false;
                 self.add_error = Some(text);
             }
-            PushRequest::Send { .. }
-            | PushRequest::ContactRemove { .. }
+            PushRequest::Send { contact, path } => {
+                if self.send_failures.len() >= 64 {
+                    self.send_failures.clear();
+                }
+                self.send_failures
+                    .insert((contact.clone(), path.clone()), text.clone());
+                self.page_msg = Some((text, true));
+                self.refresh_soon();
+            }
+            PushRequest::ContactRemove { .. }
             | PushRequest::ContactUpdate { .. }
             | PushRequest::Cancel { .. } => {
                 self.page_msg = Some((text, true));
@@ -985,13 +1273,23 @@ impl ContactsUi {
                 self.contacts = list;
                 self.contacts_loaded = true;
             }
+            PushResponse::Suggestions(list) => {
+                self.suggestions = list;
+                self.suggestions.truncate(MAX_SUGGESTIONS_SHOWN);
+            }
             PushResponse::Contact(info) => {
-                if let PushRequest::ContactAdd { .. } = req {
+                if matches!(
+                    req,
+                    PushRequest::ContactAdd { .. } | PushRequest::ContactAddOff { .. }
+                ) {
                     self.add_busy = false;
                     self.add_error = None;
                     self.add_text.clear();
                     self.add_label.clear();
+                    self.add_from_suggestion = None;
                     self.add_result = Some((info.label.clone(), info.fingerprint.clone()));
+                    self.suggestions
+                        .retain(|s| s.endpoint_id != info.endpoint_id);
                 }
                 if let Some(slot) = self.contacts.iter_mut().find(|x| x.id == info.id) {
                     *slot = info;
@@ -1145,6 +1443,7 @@ impl ContactsUi {
         technical: bool,
     ) {
         self.err_technical = technical;
+        self.collect_open_failures(c);
         section_heading(ui, c.heading);
         ui.add_space(4.0);
         ui.add(egui::Label::new(egui::RichText::new(c.desc).color(pal().muted)).wrap(true));
@@ -1199,6 +1498,7 @@ impl ContactsUi {
         }
         self.my_card_ui(ui, c);
         ui.add_space(GAP);
+        self.suggestions_ui(ui, c);
         self.add_ui(ui, c);
         ui.add_space(GAP);
         self.list_ui(ui, c, technical);
@@ -1306,11 +1606,91 @@ impl ContactsUi {
         });
     }
 
+    /// Ask the daemon to add the contact of the form: switched off when it came from a suggestion.
+    fn queue_add(&mut self, label: String) {
+        let code = self.add_text.clone();
+        self.out.push_back(if self.add_is_from_suggestion() {
+            PushRequest::ContactAddOff {
+                code,
+                label: Some(label),
+            }
+        } else {
+            PushRequest::ContactAdd {
+                code,
+                label: Some(label),
+            }
+        });
+    }
+
+    /// The form still holds the code a suggestion filled in (not edited into something else).
+    fn add_is_from_suggestion(&self) -> bool {
+        self.add_from_suggestion
+            .as_deref()
+            .is_some_and(|code| code == self.add_text.trim())
+    }
+
+    /// The card of people who are not contacts and tried to reach me.
+    fn suggestions_ui(&mut self, ui: &mut egui::Ui, c: &ContactStrings) {
+        let items: Vec<SuggestionInfo> = self.visible_suggestions().into_iter().cloned().collect();
+        if items.is_empty() {
+            return;
+        }
+        let now = unix_ms();
+        let mut add: Option<String> = None;
+        let mut ignore: Option<String> = None;
+        card_frame().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            section_title(ui, c.sugg_title);
+            hint(ui, c.sugg_body);
+            for s in &items {
+                ui.add_space(8.0);
+                inner_frame().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    let mut line = fill(
+                        c.sugg_item,
+                        &[("id", &s.short_id), ("when", &when_text(c, now, s.last_ms))],
+                    );
+                    if s.attempts > 1 {
+                        line.push_str(", ");
+                        line.push_str(&fill(c.sugg_attempts, &[("n", &s.attempts.to_string())]));
+                    }
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(line).monospace().color(pal().text))
+                            .wrap(true),
+                    );
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.add(primary_button(c.sugg_add)).clicked() {
+                            add = Some(s.endpoint_id.clone());
+                        }
+                        if ui.button(c.sugg_ignore).clicked() {
+                            ignore = Some(s.endpoint_id.clone());
+                        }
+                    });
+                });
+            }
+        });
+        if let Some(id) = add {
+            self.add_from_suggestion(&id);
+        }
+        if let Some(id) = ignore {
+            self.ignore_suggestion(&id);
+        }
+        ui.add_space(GAP);
+    }
+
     fn add_ui(&mut self, ui: &mut egui::Ui, c: &ContactStrings) {
         card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width());
             section_title(ui, c.add_title);
             ui.add(egui::Label::new(c.add_hint).wrap(true));
+            if self.add_is_from_suggestion() {
+                ui.add_space(4.0);
+                ui.add(
+                    egui::Label::new(egui::RichText::new(c.sugg_prefill_note).color(pal().warning))
+                        .wrap(true),
+                );
+            }
             ui.add_space(6.0);
             ui.label(label_text(c.add_paste));
             ui.add(
@@ -1342,10 +1722,7 @@ impl ContactsUi {
                     } else {
                         self.add_error = None;
                         self.add_busy = true;
-                        self.out.push_back(PushRequest::ContactAdd {
-                            code: self.add_text.clone(),
-                            label: Some(label),
-                        });
+                        self.queue_add(label);
                     }
                 }
             });
@@ -1500,7 +1877,7 @@ impl ContactsUi {
                         shorten_name(&ct.endpoint_id, 24),
                         crate::transfers::plain_path(&ct.inbox_dir)
                     ))
-                    .size(12.0)
+                    .size(crate::ui_kit::MIN_TEXT_PX)
                     .monospace()
                     .color(pal().faint),
                 )
@@ -1652,11 +2029,35 @@ impl ContactsUi {
                 );
                 return;
             }
-            for (i, r) in rows.iter().enumerate() {
+            let refs: Vec<&Row> = rows.iter().collect();
+            for (i, g) in fold_attempts(&refs).into_iter().enumerate() {
                 if i > 0 {
                     ui.add_space(6.0);
                 }
-                self.row_ui(ui, c, r);
+                self.row_ui(ui, c, g.row);
+                if !g.earlier.is_empty() {
+                    let open = self.show_earlier.contains(&g.row.id);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(label_text(&fill(
+                            c.earlier_failed,
+                            &[("n", &g.earlier.len().to_string())],
+                        )));
+                        let l = if open { c.earlier_hide } else { c.earlier_show };
+                        if ui.small_button(l).clicked() {
+                            if open {
+                                self.show_earlier.remove(&g.row.id);
+                            } else {
+                                self.show_earlier.insert(g.row.id.clone());
+                            }
+                        }
+                    });
+                    if open {
+                        for e in &g.earlier {
+                            ui.add_space(4.0);
+                            self.row_ui(ui, c, e);
+                        }
+                    }
+                }
             }
         });
     }
@@ -1725,19 +2126,32 @@ impl ContactsUi {
             }
             let can_cancel = !r.finished();
             let can_retry = self.can_retry(r);
-            let open = if !r.outbound && r.state == PushState::Done {
-                r.saved_as.as_ref().map(|sa| {
-                    let inbox = self
+            let received = !r.outbound && r.state == PushState::Done && r.saved_as.is_some();
+            if received {
+                if let Some(sa) = r.saved_as.as_deref() {
+                    let contact_dir = self
                         .contacts
                         .iter()
                         .find(|x| x.id == r.contact_id)
-                        .map(|x| x.inbox_dir.as_str());
-                    saved_path(sa, inbox)
-                })
-            } else {
-                None
-            };
-            if can_cancel || can_retry || open.is_some() {
+                        .map(|x| PathBuf::from(&x.inbox_dir));
+                    let expected = open_path::expected_path(
+                        sa,
+                        contact_dir.as_deref(),
+                        self.inbox_root().as_deref(),
+                    );
+                    let full = crate::transfers::plain_path(&expected.to_string_lossy()).to_owned();
+                    ui.add_space(2.0);
+                    ui.add(
+                        egui::Label::new(label_text(&fill(
+                            c.saved_to,
+                            &[("path", &shorten_name(&full, 70))],
+                        )))
+                        .wrap(true),
+                    )
+                    .on_hover_text(full);
+                }
+            }
+            if can_cancel || can_retry || received {
                 ui.add_space(4.0);
                 ui.horizontal_wrapped(|ui| {
                     if can_cancel && ui.button(c.btn_cancel).clicked() {
@@ -1746,12 +2160,12 @@ impl ContactsUi {
                     if can_retry && ui.button(c.btn_retry).clicked() {
                         self.retry(r);
                     }
-                    if let Some(p) = &open {
+                    if received {
                         if ui.button(c.btn_open_file).clicked() {
-                            open_file(p);
+                            self.open_received(c, r, Action::Open);
                         }
                         if ui.button(c.btn_show_folder).clicked() {
-                            reveal_file(p);
+                            self.open_received(c, r, Action::Reveal);
                         }
                     }
                 });
@@ -1775,7 +2189,7 @@ impl ContactsUi {
                 );
                 ui.add_space(6.0);
                 if ui.button(c.open_folder).clicked() {
-                    open_folder(&dir);
+                    self.open_dir(c, &dir);
                 }
             }
             ui.add_space(4.0);
@@ -2520,21 +2934,6 @@ mod tests {
     }
 
     #[test]
-    fn saved_path_resolution() {
-        let abs = if cfg!(windows) {
-            r"C:\inbox\bob\a.txt"
-        } else {
-            "/inbox/bob/a.txt"
-        };
-        assert_eq!(saved_path(abs, Some("/x")), PathBuf::from(abs));
-        assert_eq!(
-            saved_path("a.txt", Some("/inbox/bob")),
-            Path::new("/inbox/bob").join("a.txt")
-        );
-        assert_eq!(saved_path("a.txt", None), PathBuf::from("a.txt"));
-    }
-
-    #[test]
     fn drop_target_prefers_the_row_under_the_pointer() {
         let r1 = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 50.0));
         let r2 = egui::Rect::from_min_size(egui::pos2(0.0, 60.0), egui::vec2(100.0, 50.0));
@@ -2654,7 +3053,7 @@ mod tests {
         let c = contact_strings(Locale::En);
         let mut ui = ContactsUi::default();
         ui.tick(true, true);
-        assert_eq!(ui.out.len(), 5, "first tick reads everything");
+        assert_eq!(ui.out.len(), 6, "first tick reads everything");
         ui.out.clear();
         ui.on_reply(
             c,
@@ -2998,6 +3397,397 @@ mod tests {
                 used.right() <= avail.right() + 1.0,
                 "{lang:?}: help steps overflow ({used:?} vs {avail:?})"
             );
+        }
+    }
+
+    // ─── Files sent from the chat screen follow their push row ──────────────
+
+    fn out_row(
+        id: &str,
+        state: PushState,
+        bytes: u64,
+        at: u64,
+        err: Option<&str>,
+    ) -> PushTransferInfo {
+        PushTransferInfo {
+            name: "flydesk_groom.mp4".into(),
+            size: 1000,
+            bytes,
+            error: err.map(str::to_owned),
+            source_path: Some("/v/flydesk_groom.mp4".into()),
+            ..t(id, Direction::Out, "bob", state, at)
+        }
+    }
+
+    #[test]
+    fn a_chat_file_follows_queued_sending_failed_retry_done_and_says_sent_only_at_the_end() {
+        let c = contact_strings(Locale::En);
+        let none = HashMap::new();
+        let st = |board: Vec<PushTransferInfo>| {
+            let rows = merge_rows(&board, &[]);
+            file_status_in(
+                &rows,
+                &none,
+                c,
+                false,
+                "bob",
+                "/v/flydesk_groom.mp4",
+                10_000,
+            )
+        };
+        // No row yet: waiting, never sent.
+        assert_eq!(st(vec![]), FileStatus::Waiting);
+        assert_eq!(
+            st(vec![out_row("a", PushState::Queued, 0, 10_100, None)]),
+            FileStatus::Waiting
+        );
+        assert_eq!(
+            st(vec![out_row("a", PushState::Sending, 250, 10_200, None)]),
+            FileStatus::Sending { percent: 25 }
+        );
+        // The push fails: the reason is the localised one, not "sent".
+        let FileStatus::Failed { reason } = st(vec![out_row(
+            "a",
+            PushState::Failed,
+            250,
+            10_300,
+            Some("could not connect"),
+        )]) else {
+            panic!("not failed")
+        };
+        assert!(!reason.is_empty());
+        // Retry: the failed row is replaced by a new queued one; the newest row decides.
+        let retry = vec![
+            out_row(
+                "a",
+                PushState::Failed,
+                250,
+                10_300,
+                Some("could not connect"),
+            ),
+            out_row("b", PushState::Queued, 0, 10_400, None),
+        ];
+        assert_eq!(st(retry.clone()), FileStatus::Waiting);
+        let mut done = retry;
+        done[1] = out_row("b", PushState::Done, 1000, 10_900, None);
+        assert_eq!(st(done), FileStatus::Done);
+        // A row from before the note (an older send of the same file) does not count.
+        let rows = merge_rows(&[out_row("old", PushState::Done, 1000, 1_000, None)], &[]);
+        assert_eq!(
+            file_status_in(
+                &rows,
+                &none,
+                c,
+                false,
+                "bob",
+                "/v/flydesk_groom.mp4",
+                60_000
+            ),
+            FileStatus::Waiting
+        );
+        // Another contact's row of the same name does not count either.
+        let mut other = out_row("x", PushState::Done, 1000, 10_500, None);
+        other.contact_id = "carol".into();
+        let rows = merge_rows(&[other], &[]);
+        assert_eq!(
+            file_status_in(
+                &rows,
+                &none,
+                c,
+                false,
+                "bob",
+                "/v/flydesk_groom.mp4",
+                10_000
+            ),
+            FileStatus::Waiting
+        );
+    }
+
+    #[test]
+    fn a_refused_send_request_fails_the_chat_file_and_resend_clears_it() {
+        let c = contact_strings(Locale::En);
+        let mut ui = ContactsUi::default();
+        ui.on_reply(
+            c,
+            PushRequest::ContactList,
+            Ok(PushResponse::Contacts(vec![bob()])),
+        );
+        ui.on_reply(
+            c,
+            PushRequest::Send {
+                contact: "bob".into(),
+                path: "/v/a.mp4".into(),
+            },
+            Ok(PushResponse::Error {
+                kind: "queue_full".into(),
+                message: "full".into(),
+            }),
+        );
+        assert!(matches!(
+            ui.file_status(c, "bob", "/v/a.mp4", 0),
+            FileStatus::Failed { .. }
+        ));
+        ui.resend_file("bob", "/v/a.mp4");
+        assert_eq!(ui.file_status(c, "bob", "/v/a.mp4", 0), FileStatus::Waiting);
+        assert!(ui
+            .out
+            .iter()
+            .any(|r| matches!(r, PushRequest::Send { path, .. } if path == "/v/a.mp4")));
+    }
+
+    // ─── Earlier failed attempts fold under the attempt that replaced them ───
+
+    fn attempt(id: &str, state: PushState, at: u64) -> Row {
+        Row::from(&PushTransferInfo {
+            name: "x.mp4".into(),
+            size: 10,
+            ..t(id, Direction::Out, "bob", state, at)
+        })
+    }
+
+    fn fold(rows: &[Row]) -> Vec<(String, Vec<String>)> {
+        let refs: Vec<&Row> = rows.iter().collect();
+        fold_attempts(&refs)
+            .into_iter()
+            .map(|g| {
+                (
+                    g.row.id.clone(),
+                    g.earlier.iter().map(|r| r.id.clone()).collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn failed_then_retry_then_done_shows_one_row_with_one_earlier_attempt() {
+        let rows = [
+            attempt("a", PushState::Failed, 100),
+            attempt("b", PushState::Sending, 200),
+        ];
+        assert_eq!(fold(&rows), [("b".to_string(), vec!["a".to_string()])]);
+        let rows = [
+            attempt("b", PushState::Done, 300),
+            attempt("a", PushState::Failed, 100),
+        ];
+        assert_eq!(fold(&rows), [("b".to_string(), vec!["a".to_string()])]);
+    }
+
+    #[test]
+    fn failed_failed_done_folds_both() {
+        let rows = [
+            attempt("c", PushState::Done, 300),
+            attempt("b", PushState::Cancelled, 200),
+            attempt("a", PushState::Failed, 100),
+        ];
+        let got = fold(&rows);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, "c");
+        assert_eq!(got[0].1.len(), 2);
+    }
+
+    #[test]
+    fn a_file_that_only_failed_stays_visible_and_other_files_are_untouched() {
+        let only = [attempt("a", PushState::Failed, 100)];
+        assert_eq!(fold(&only), [("a".to_string(), Vec::<String>::new())]);
+        // Two failures and no success: both stay.
+        let two = [
+            attempt("b", PushState::Failed, 200),
+            attempt("a", PushState::Failed, 100),
+        ];
+        assert_eq!(fold(&two).len(), 2);
+        // A different file (name, size, contact or direction) that succeeded changes nothing.
+        let mut other_name = attempt("d", PushState::Done, 400);
+        other_name.name = "other.mp4".into();
+        let mut other_size = attempt("e", PushState::Done, 400);
+        other_size.size = 11;
+        let mut other_contact = attempt("f", PushState::Done, 400);
+        other_contact.contact_id = "carol".into();
+        let mut inbound = attempt("g", PushState::Done, 400);
+        inbound.outbound = false;
+        for done in [other_name, other_size, other_contact, inbound] {
+            let rows = [done, attempt("a", PushState::Failed, 100)];
+            let got = fold(&rows);
+            assert_eq!(got.len(), 2, "{got:?}");
+            assert!(got.iter().all(|(_, e)| e.is_empty()));
+        }
+        // A success that came before the failure does not hide it.
+        let rows = [
+            attempt("b", PushState::Failed, 200),
+            attempt("a", PushState::Done, 100),
+        ];
+        assert_eq!(fold(&rows).len(), 2);
+    }
+
+    // ─── People who are not contacts ────────────────────────────────────────
+
+    fn sugg(n: u8, last: u64) -> SuggestionInfo {
+        let ep = format!("{n:02x}").repeat(32);
+        SuggestionInfo {
+            endpoint_id: ep,
+            short_id: format!("ABC{n:02}"),
+            code: format!("miasma-contact:code{n}"),
+            first_ms: last,
+            last_ms: last,
+            attempts: 1,
+        }
+    }
+
+    fn with_suggestions(list: Vec<SuggestionInfo>) -> ContactsUi {
+        let c = contact_strings(Locale::En);
+        let mut ui = ContactsUi::default();
+        ui.on_reply(
+            c,
+            PushRequest::Suggestions,
+            Ok(PushResponse::Suggestions(list)),
+        );
+        ui
+    }
+
+    #[test]
+    fn suggestions_are_listed_ignored_per_session_and_hidden_once_a_contact() {
+        let mut ui = with_suggestions(vec![sugg(1, 5), sugg(2, 4)]);
+        assert_eq!(ui.visible_suggestions().len(), 2);
+        let first = ui.visible_suggestions()[0].endpoint_id.clone();
+        ui.ignore_suggestion(&first);
+        ui.ignore_suggestion(&first);
+        assert_eq!(ui.ignored.len(), 1);
+        assert_eq!(ui.visible_suggestions().len(), 1);
+        // The next poll brings it again: still hidden.
+        let c = contact_strings(Locale::En);
+        ui.on_reply(
+            c,
+            PushRequest::Suggestions,
+            Ok(PushResponse::Suggestions(vec![sugg(1, 9), sugg(2, 4)])),
+        );
+        assert_eq!(ui.visible_suggestions().len(), 1);
+        // Someone who became a contact is no longer a suggestion.
+        let mut ct = bob();
+        ct.endpoint_id = sugg(2, 0).endpoint_id;
+        ui.on_reply(
+            c,
+            PushRequest::ContactList,
+            Ok(PushResponse::Contacts(vec![ct])),
+        );
+        assert!(ui.visible_suggestions().is_empty());
+    }
+
+    #[test]
+    fn the_ignore_list_is_bounded() {
+        let mut ui = ContactsUi::default();
+        for n in 0..(MAX_IGNORED + 20) {
+            ui.ignore_suggestion(&format!("id{n}"));
+        }
+        assert_eq!(ui.ignored.len(), MAX_IGNORED);
+        assert!(!ui.ignored.contains(&"id0".to_string()));
+        assert!(ui.ignored.contains(&format!("id{}", MAX_IGNORED + 19)));
+    }
+
+    #[test]
+    fn add_as_contact_fills_the_form_and_adds_with_permissions_off() {
+        let mut ui = with_suggestions(vec![sugg(1, 5)]);
+        let id = ui.suggestions[0].endpoint_id.clone();
+        ui.add_from_suggestion(&id);
+        assert_eq!(ui.add_text, "miasma-contact:code1");
+        assert!(ui.add_label.is_empty(), "a name is never filled in");
+        assert!(ui.add_is_from_suggestion());
+        ui.queue_add("Ken".into());
+        assert!(matches!(
+            ui.out.back(),
+            Some(PushRequest::ContactAddOff { code, label })
+                if code == "miasma-contact:code1" && label.as_deref() == Some("Ken")
+        ));
+        // Edited by hand into another code: the ordinary add.
+        ui.add_text = "miasma-contact:other".into();
+        assert!(!ui.add_is_from_suggestion());
+        ui.queue_add("Ken".into());
+        assert!(matches!(
+            ui.out.back(),
+            Some(PushRequest::ContactAdd { .. })
+        ));
+        // When the daemon confirms, the card is gone and the form is clear.
+        let c = contact_strings(Locale::En);
+        let mut ct = bob();
+        ct.endpoint_id = id;
+        ct.allow_send = false;
+        ct.allow_receive = false;
+        ui.on_reply(
+            c,
+            PushRequest::ContactAddOff {
+                code: "x".into(),
+                label: None,
+            },
+            Ok(PushResponse::Contact(ct)),
+        );
+        assert!(ui.suggestions.is_empty());
+        assert!(ui.add_text.is_empty() && ui.add_from_suggestion.is_none());
+    }
+
+    #[test]
+    fn a_daemon_without_suggestions_is_not_taken_for_an_old_daemon() {
+        let c = contact_strings(Locale::En);
+        let mut ui = ContactsUi::default();
+        ui.on_reply(
+            c,
+            PushRequest::Suggestions,
+            Err(PushFail {
+                message: "eof".into(),
+                daemon_down: false,
+            }),
+        );
+        assert_eq!(ui.availability, Availability::Unknown);
+        ui.on_reply(
+            c,
+            PushRequest::Suggestions,
+            Ok(PushResponse::Error {
+                kind: "internal".into(),
+                message: "unknown variant".into(),
+            }),
+        );
+        assert_eq!(ui.availability, Availability::Unknown);
+    }
+
+    #[test]
+    fn suggestion_times_read_naturally_in_every_language() {
+        for l in Locale::ALL {
+            let c = contact_strings(l);
+            let now = 10 * 3_600_000;
+            assert_eq!(when_text(c, now, now), c.sugg_now);
+            assert!(when_text(c, now, now - 5 * 60_000).contains('5'));
+            assert!(when_text(c, now, now - 3 * 3_600_000).contains('3'));
+            for t in [c.sugg_item, c.sugg_attempts, c.sugg_min, c.sugg_hour] {
+                assert!(t.contains('{'), "{l:?}: {t}");
+            }
+            assert!(
+                !c.sugg_title.is_empty() && !c.sugg_add.is_empty() && !c.sugg_ignore.is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn the_suggestion_card_draws_and_fits_a_700_px_window() {
+        let ctx = egui::Context::default();
+        crate::ui_kit::apply_theme(&ctx, false);
+        for l in Locale::ALL {
+            let c = contact_strings(l);
+            let mut ui_state = with_suggestions(vec![sugg(1, 5), sugg(2, 4)]);
+            let mut inner = None;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(700.0, 900.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let avail = ui.max_rect();
+                    ui_state.suggestions_ui(ui, c);
+                    inner = Some((avail, ui.min_rect()));
+                });
+            });
+            let (avail, used) = inner.unwrap();
+            assert!(used.height() > 40.0, "{l:?}: the card was not drawn");
+            assert!(used.right() <= avail.right() + 1.0, "{l:?}: overflow");
         }
     }
 }

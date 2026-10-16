@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use miasma_core::chat::ipc::{ConversationInfo, MessageInfo};
 use miasma_core::push::ContactInfo;
 
+use crate::contacts::{FileStatus, SentFile};
 use crate::locale::ChatStrings;
 use crate::transfers::fill;
 
@@ -548,21 +549,38 @@ impl MessageWindow {
 pub struct FileNote {
     pub id: String,
     pub name: String,
+    /// The file on this computer, which ties the note to its push row.
+    pub path: String,
     pub at_ms: u64,
 }
 
 /// Add `names` to the notes of one contact, keeping the newest [`MAX_NOTES_PER_CONTACT`].
-pub fn push_notes(notes: &mut Vec<FileNote>, names: &[String], at_ms: u64) {
-    for (i, n) in names.iter().enumerate() {
+pub fn push_notes(notes: &mut Vec<FileNote>, files: &[SentFile], at_ms: u64) {
+    for (i, f) in files.iter().enumerate() {
         notes.push(FileNote {
             id: format!("file-{at_ms}-{i}-{}", notes.len()),
-            name: n.clone(),
+            name: f.name.clone(),
+            path: f.path.clone(),
             at_ms,
         });
     }
     if notes.len() > MAX_NOTES_PER_CONTACT {
         let drop = notes.len() - MAX_NOTES_PER_CONTACT;
         notes.drain(..drop);
+    }
+}
+
+/// The text of a file line. "Sent" is said only when the push has finished.
+pub fn file_line(c: &ChatStrings, name: &str, status: &FileStatus) -> String {
+    let name = elide(&one_line(name, PREVIEW_CHARS), 80);
+    match status {
+        FileStatus::Waiting => fill(c.file_waiting, &[("name", &name)]),
+        FileStatus::Sending { percent } => fill(
+            c.file_sending,
+            &[("name", &name), ("pct", &percent.to_string())],
+        ),
+        FileStatus::Done => fill(c.file_done, &[("name", &name)]),
+        FileStatus::Failed { .. } => fill(c.file_failed, &[("name", &name)]),
     }
 }
 
@@ -959,7 +977,7 @@ mod tests {
                 name: "報告書.pdf".into(),
             },
         );
-        assert_eq!(p, "ファイルを送りました: 報告書.pdf");
+        assert_eq!(p, "ファイル: 報告書.pdf");
         let long = preview_text(
             c,
             &LastKind::File {
@@ -975,6 +993,7 @@ mod tests {
         let note = FileNote {
             id: "f".into(),
             name: "a.txt".into(),
+            path: "/a.txt".into(),
             at_ms: 5_000,
         };
         assert!(matches!(
@@ -1132,15 +1151,19 @@ mod tests {
             msg(3, "b", false, "received"),
         ];
         let mut notes = Vec::new();
-        push_notes(&mut notes, &["x.txt".into()], 2_000);
-        push_notes(&mut notes, &["y.txt".into()], 9_000);
+        let sf = |n: &str| SentFile {
+            name: n.into(),
+            path: format!("/tmp/{n}"),
+        };
+        push_notes(&mut notes, &[sf("x.txt")], 2_000);
+        push_notes(&mut notes, &[sf("y.txt")], 9_000);
         let order = merge_timeline(&msgs, &notes);
         assert_eq!(
             order,
             [Entry::Msg(0), Entry::File(0), Entry::Msg(1), Entry::File(1)]
         );
         for i in 0..50 {
-            push_notes(&mut notes, &[format!("f{i}")], 10_000 + i);
+            push_notes(&mut notes, &[sf(&format!("f{i}"))], 10_000 + i);
         }
         assert_eq!(notes.len(), MAX_NOTES_PER_CONTACT);
         assert!(notes.last().unwrap().name == "f49");
@@ -1267,5 +1290,26 @@ mod tests {
         ];
         let order: Vec<&str> = picker_order(&list).iter().map(|x| x.id.as_str()).collect();
         assert_eq!(order, ["3", "1", "2"]);
+    }
+
+    #[test]
+    fn a_file_line_says_sent_only_when_the_push_is_done() {
+        use crate::locale::{chat_strings, Locale};
+        for l in [Locale::En, Locale::Ja, Locale::ZhCn] {
+            let c = chat_strings(l);
+            let waiting = file_line(c, "a.mp4", &FileStatus::Waiting);
+            let sending = file_line(c, "a.mp4", &FileStatus::Sending { percent: 42 });
+            let done = file_line(c, "a.mp4", &FileStatus::Done);
+            let failed = file_line(c, "a.mp4", &FileStatus::Failed { reason: "x".into() });
+            for t in [&waiting, &sending, &done, &failed] {
+                assert!(t.contains("a.mp4"), "{l:?}: {t}");
+                assert!(!t.contains('{'), "{l:?}: {t}");
+            }
+            assert!(sending.contains("42"), "{l:?}: {sending}");
+            assert_eq!(done, fill(c.file_done, &[("name", "a.mp4")]));
+            // Three different sentences, none of them the "sent" one.
+            assert!(waiting != done && sending != done && failed != done);
+            assert!(waiting != failed && sending != failed);
+        }
     }
 }

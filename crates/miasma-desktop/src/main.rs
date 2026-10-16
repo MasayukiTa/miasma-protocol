@@ -26,6 +26,7 @@ mod errors;
 mod fonts;
 mod link;
 pub mod locale;
+mod open_path;
 mod os_locale;
 mod theme;
 mod transfers;

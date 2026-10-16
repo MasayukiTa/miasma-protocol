@@ -2927,6 +2927,10 @@ impl eframe::App for MiasmaApp {
                         self.connection_header(ui);
                         let c = locale::chat_strings(self.locale);
                         let connected = self.daemon_state == DaemonState::Connected;
+                        self.chat.refresh_file_states(
+                            &self.contacts,
+                            locale::contact_strings(self.locale),
+                        );
                         action = self
                             .chat
                             .show(ui, c, connected, self.contacts.contact_list());
@@ -2935,11 +2939,14 @@ impl eframe::App for MiasmaApp {
                         Some(ChatAction::OpenContacts) => self.tab = Tab::Contacts,
                         Some(ChatAction::SendFiles(id)) => {
                             let ct = locale::contact_strings(self.locale);
-                            let names = self.contacts.pick_and_send_files(ct, &id);
-                            self.chat.note_files_sent(&id, &names);
+                            let files = self.contacts.pick_and_send_files(ct, &id);
+                            self.chat.note_files_sent(&id, &files);
                             for n in self.contacts.take_notices() {
                                 self.set_msg(MsgKind::Success, n);
                             }
+                        }
+                        Some(ChatAction::RetryFile { contact_id, path }) => {
+                            self.contacts.resend_file(&contact_id, &path);
                         }
                         None => {}
                     }
