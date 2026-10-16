@@ -243,6 +243,17 @@ pub struct Strings {
     pub nav_brand: &'static str,
     pub nav_brand_easy: &'static str,
 
+    // ── Easy Store-facing navigation / home ──
+    pub tab_home_easy: &'static str,
+    pub tab_files_easy: &'static str,
+    pub home_heading_easy: &'static str,
+    pub home_desc_easy: &'static str,
+    pub home_send_action: &'static str,
+    pub home_receive_action: &'static str,
+    pub home_save_action: &'static str,
+    pub files_heading_easy: &'static str,
+    pub files_desc_easy: &'static str,
+
     // ── Easy dashboard (store tab quick stats) ──
     pub dashboard_quick_status: &'static str,
     pub dashboard_storage_label: &'static str,
@@ -530,6 +541,16 @@ static EN: Strings = Strings {
     nav_brand: "Miasma Protocol",
     nav_brand_easy: "Miasma",
 
+    tab_home_easy: "Home",
+    tab_files_easy: "Files",
+    home_heading_easy: "What would you like to do?",
+    home_desc_easy: "Send, receive, or keep a file safely. Miasma handles the network details for you.",
+    home_send_action: "Send a file",
+    home_receive_action: "Receive a file",
+    home_save_action: "Save securely",
+    files_heading_easy: "Files",
+    files_desc_easy: "Send, receive, recover, and review your file activity here.",
+
     dashboard_quick_status: "Quick Status",
     dashboard_storage_label: "Storage",
     dashboard_peers_label: "Network",
@@ -805,6 +826,16 @@ static JA: Strings = Strings {
     nav_brand: "Miasma Protocol",
     nav_brand_easy: "Miasma",
 
+    tab_home_easy: "ホーム",
+    tab_files_easy: "ファイル",
+    home_heading_easy: "何をしますか？",
+    home_desc_easy: "ファイルを送る・受け取る・安全に保存できます。ネットワークの詳細は Miasma が処理します。",
+    home_send_action: "ファイルを送る",
+    home_receive_action: "ファイルを受け取る",
+    home_save_action: "安全に保存する",
+    files_heading_easy: "ファイル",
+    files_desc_easy: "送受信、復元、保存中のファイルをここで確認できます。",
+
     dashboard_quick_status: "クイックステータス",
     dashboard_storage_label: "ストレージ",
     dashboard_peers_label: "ネットワーク",
@@ -1079,6 +1110,16 @@ static ZH_CN: Strings = Strings {
 
     nav_brand: "Miasma Protocol",
     nav_brand_easy: "Miasma",
+
+    tab_home_easy: "主页",
+    tab_files_easy: "文件",
+    home_heading_easy: "您想做什么？",
+    home_desc_easy: "发送、接收或安全保存文件。Miasma 会处理网络细节。",
+    home_send_action: "发送文件",
+    home_receive_action: "接收文件",
+    home_save_action: "安全保存",
+    files_heading_easy: "文件",
+    files_desc_easy: "在这里发送、接收、恢复并查看文件活动。",
 
     dashboard_quick_status: "快速状态",
     dashboard_storage_label: "存储",
