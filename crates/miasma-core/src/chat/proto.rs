@@ -7,7 +7,18 @@
 //! frame   = u32 body_len (big endian) | u8 type | payload      body_len = 1 + payload
 //! Deliver = type 0x01, payload = a sealed envelope (see crypto.rs)
 //! Ack     = type 0x02, payload = u8 status | [16] envelope id
+//! Sync    = type 0x10, payload = u8 version (1) | u16 n | n x ([16] message id | u64 seq | u16 text len)
+//! SyncReply = type 0x11, payload = u8 version (1) | u16 n | n x [16] message id
 //! ```
+//!
+//! `Sync` and `SyncReply` travel on unidirectional streams, one frame each,
+//! never on the bidirectional streams that carry `Deliver`. `Sync` is sent
+//! once on a new connection by the side that has messages waiting: the oldest
+//! ones it still holds for the peer. The peer answers with the ones it has
+//! already applied, and the sender then does not send those again. A peer from
+//! before these frames accepts only bidirectional streams, so it leaves the
+//! stream unread and does not answer; the sender stops waiting after a few
+//! seconds, notes that, and goes on with `Deliver` on the same connection.
 //!
 //! The declared length is checked against [`MAX_FRAME_BODY`] before any buffer
 //! is sized, a frame that ends early is an error, and nothing after the
@@ -35,6 +46,12 @@ pub const MAX_FRAME_BODY: usize = 1 + MAX_HEADER_BYTES + 4 + MAX_CIPHERTEXT;
 
 pub const FRAME_DELIVER: u8 = 0x01;
 pub const FRAME_ACK: u8 = 0x02;
+pub const FRAME_SYNC: u8 = 0x10;
+pub const FRAME_SYNC_REPLY: u8 = 0x11;
+/// Version byte of the sync payloads.
+pub const SYNC_VERSION: u8 = 1;
+/// Messages named in one `Sync` (and answered in one `SyncReply`).
+pub const MAX_SYNC_ITEMS: usize = 64;
 
 /// QUIC application close codes (the same numbers as the file push).
 pub const CLOSE_OK: u32 = 0;
@@ -138,10 +155,23 @@ pub struct Ack {
     pub envelope_id: [u8; 16],
 }
 
+/// One waiting message as named in a `Sync`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncItem {
+    pub id: [u8; 16],
+    pub seq: u64,
+    /// Length of the text in bytes (the receiver refuses what it cannot take).
+    pub len: u16,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Frame {
     Deliver(Vec<u8>),
     Ack(Ack),
+    /// The messages the sender still holds for the peer (oldest first).
+    Sync(Vec<SyncItem>),
+    /// Which of those the answerer has already applied.
+    SyncReply(Vec<[u8; 16]>),
 }
 
 /// The bytes of a frame (length prefix included).
@@ -153,6 +183,28 @@ pub fn encode_frame(f: &Frame) -> Vec<u8> {
             p.push(a.status.code());
             p.extend_from_slice(&a.envelope_id);
             (FRAME_ACK, p)
+        }
+        Frame::Sync(items) => {
+            let items = &items[..items.len().min(MAX_SYNC_ITEMS)];
+            let mut p = Vec::with_capacity(3 + items.len() * 26);
+            p.push(SYNC_VERSION);
+            p.extend_from_slice(&(items.len() as u16).to_be_bytes());
+            for it in items {
+                p.extend_from_slice(&it.id);
+                p.extend_from_slice(&it.seq.to_be_bytes());
+                p.extend_from_slice(&it.len.to_be_bytes());
+            }
+            (FRAME_SYNC, p)
+        }
+        Frame::SyncReply(ids) => {
+            let ids = &ids[..ids.len().min(MAX_SYNC_ITEMS)];
+            let mut p = Vec::with_capacity(3 + ids.len() * 16);
+            p.push(SYNC_VERSION);
+            p.extend_from_slice(&(ids.len() as u16).to_be_bytes());
+            for id in ids {
+                p.extend_from_slice(id);
+            }
+            (FRAME_SYNC_REPLY, p)
         }
     };
     let mut v = Vec::with_capacity(5 + payload.len());
@@ -179,6 +231,48 @@ pub fn decode_body(body: &[u8]) -> Result<Frame, ProtoError> {
                 status,
                 envelope_id: id,
             }))
+        }
+        FRAME_SYNC => {
+            let bad = |_| ProtoError::Malformed("sync");
+            let mut r = Rd::new(payload);
+            if r.u8().map_err(bad)? != SYNC_VERSION {
+                return Err(ProtoError::Malformed("sync version"));
+            }
+            let n = r.u16().map_err(bad)? as usize;
+            if n > MAX_SYNC_ITEMS {
+                return Err(ProtoError::Malformed("sync count"));
+            }
+            let mut items = Vec::with_capacity(n);
+            for _ in 0..n {
+                items.push(SyncItem {
+                    id: r.arr::<16>().map_err(bad)?,
+                    seq: r.u64().map_err(bad)?,
+                    len: r.u16().map_err(bad)?,
+                });
+            }
+            if !r.done() {
+                return Err(ProtoError::Malformed("sync"));
+            }
+            Ok(Frame::Sync(items))
+        }
+        FRAME_SYNC_REPLY => {
+            let bad = |_| ProtoError::Malformed("sync reply");
+            let mut r = Rd::new(payload);
+            if r.u8().map_err(bad)? != SYNC_VERSION {
+                return Err(ProtoError::Malformed("sync version"));
+            }
+            let n = r.u16().map_err(bad)? as usize;
+            if n > MAX_SYNC_ITEMS {
+                return Err(ProtoError::Malformed("sync count"));
+            }
+            let mut ids = Vec::with_capacity(n);
+            for _ in 0..n {
+                ids.push(r.arr::<16>().map_err(bad)?);
+            }
+            if !r.done() {
+                return Err(ProtoError::Malformed("sync reply"));
+            }
+            Ok(Frame::SyncReply(ids))
         }
         other => Err(ProtoError::BadType(other)),
     }
@@ -398,6 +492,50 @@ mod tests {
                 envelope_id: rand::random(),
             });
             assert_eq!(decode_frame(&encode_frame(&a)).unwrap().0, a);
+        }
+    }
+
+    #[test]
+    fn sync_frames_round_trip_and_are_bounded() {
+        let items: Vec<SyncItem> = (0..MAX_SYNC_ITEMS as u64)
+            .map(|i| SyncItem {
+                id: rand::random(),
+                seq: i + 1,
+                len: 5,
+            })
+            .collect();
+        for f in [
+            Frame::Sync(vec![]),
+            Frame::Sync(items.clone()),
+            Frame::SyncReply(vec![]),
+            Frame::SyncReply(items.iter().map(|i| i.id).collect()),
+        ] {
+            let wire = encode_frame(&f);
+            assert_eq!(decode_frame(&wire).unwrap(), (f.clone(), wire.len()));
+            for n in 0..wire.len() {
+                assert!(decode_frame(&wire[..n]).is_err(), "prefix {n}");
+            }
+        }
+        // More than the cap is cut on encode and refused on decode.
+        let mut many = items.clone();
+        many.push(items[0]);
+        match decode_frame(&encode_frame(&Frame::Sync(many))).unwrap().0 {
+            Frame::Sync(v) => assert_eq!(v.len(), MAX_SYNC_ITEMS),
+            other => panic!("{other:?}"),
+        }
+        for (ty, per) in [(FRAME_SYNC, 26usize), (FRAME_SYNC_REPLY, 16)] {
+            let n = MAX_SYNC_ITEMS + 1;
+            let mut p = vec![SYNC_VERSION];
+            p.extend_from_slice(&(n as u16).to_be_bytes());
+            p.extend_from_slice(&vec![0u8; n * per]);
+            let mut wire = ((p.len() + 1) as u32).to_be_bytes().to_vec();
+            wire.push(ty);
+            wire.extend_from_slice(&p);
+            assert!(decode_frame(&wire).is_err());
+            // A version this build does not know.
+            let mut v2 = wire.clone();
+            v2[5] = 2;
+            assert!(decode_frame(&v2).is_err());
         }
     }
 

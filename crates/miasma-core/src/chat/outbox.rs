@@ -11,9 +11,13 @@
 //! reached the message is refused with an error; nothing is ever dropped
 //! silently.
 //!
-//! A sealed envelope is kept only in memory, for the retries of the running
-//! process: a restart seals again with a fresh message key (the receiver keeps
-//! keys for messages it has not seen, up to a bound).
+//! The sealed envelope of a message is written to the same log (a `Sealed`
+//! record) before it is first sent, so that a resend after a restart puts the
+//! identical bytes on the wire and the ratchet is not advanced a second time
+//! for the same message. An `Unseal` record voids it when the session it
+//! belongs to is replaced. The delivery worker only ever tries the oldest
+//! message of a contact, so at most one sealed envelope per contact exists;
+//! the total is bounded by [`SEALED_BUDGET`] as well.
 
 use std::{
     collections::VecDeque,
@@ -45,6 +49,14 @@ pub enum OutKind {
     Read,
 }
 
+const REC_SEALED: u8 = 4;
+const REC_UNSEAL: u8 = 5;
+
+/// Bytes of sealed envelopes the outbox keeps (memory and log).
+pub const SEALED_BUDGET: usize = 2 * 1024 * 1024;
+/// Longest sealed envelope kept (the largest a frame can carry).
+const MAX_SEALED: usize = super::proto::MAX_FRAME_BODY;
+
 #[derive(Debug, Clone)]
 pub struct OutEntry {
     pub id: [u8; 16],
@@ -56,7 +68,7 @@ pub struct OutEntry {
     pub text: String,
     /// Delivery attempts made by this process (not persisted).
     pub attempts: u32,
-    /// Sealed bytes of the last attempt, kept for a retry (not persisted).
+    /// The sealed envelope of this message, kept (and persisted) for retries.
     pub sealed: Option<Vec<u8>>,
     pub sending: bool,
     pub last_error: Option<String>,
@@ -150,6 +162,7 @@ impl OutEntry {
 struct Inner {
     entries: VecDeque<OutEntry>,
     text_bytes: usize,
+    sealed_bytes: usize,
     writer: Option<LogWriter>,
     /// Records in the log that no longer matter (finished entries).
     garbage: usize,
@@ -189,11 +202,34 @@ impl Outbox {
                         Some(&REC_DONE) if rec.len() == 17 => {
                             let id: [u8; 16] = rec[1..17].try_into().unwrap_or_default();
                             if let Some(i) = entries.iter().position(|e| e.id == id) {
-                                entries.remove(i);
+                                if let Some(e) = entries.remove(i) {
+                                    if e.sealed.is_some() {
+                                        garbage += 1;
+                                    }
+                                }
                                 garbage += 2;
                             } else {
                                 garbage += 1;
                             }
+                        }
+                        Some(&REC_SEALED) if rec.len() > 17 && rec.len() <= 17 + MAX_SEALED => {
+                            let id: [u8; 16] = rec[1..17].try_into().unwrap_or_default();
+                            match entries.iter_mut().find(|e| e.id == id) {
+                                Some(e) => {
+                                    if e.sealed.is_some() {
+                                        garbage += 1;
+                                    }
+                                    e.sealed = Some(rec[17..].to_vec());
+                                }
+                                None => garbage += 1,
+                            }
+                        }
+                        Some(&REC_UNSEAL) if rec.len() == 17 => {
+                            let id: [u8; 16] = rec[1..17].try_into().unwrap_or_default();
+                            if let Some(e) = entries.iter_mut().find(|e| e.id == id) {
+                                e.sealed = None;
+                            }
+                            garbage += 2;
                         }
                         _ => garbage += 1,
                     },
@@ -232,6 +268,19 @@ impl Outbox {
         });
         garbage += before - entries.len();
         let text_bytes = entries.iter().map(|e| e.text.len()).sum();
+        // More sealed bytes than the budget (a log written under another
+        // setting): the surplus is dropped and those messages are sealed again
+        // when they are tried.
+        let mut sealed_bytes = 0usize;
+        for e in entries.iter_mut() {
+            if let Some(s) = &e.sealed {
+                if sealed_bytes + s.len() > SEALED_BUDGET {
+                    e.sealed = None;
+                } else {
+                    sealed_bytes += s.len();
+                }
+            }
+        }
         let ob = Self {
             path: path.to_path_buf(),
             keys,
@@ -239,6 +288,7 @@ impl Outbox {
             inner: Mutex::new(Inner {
                 entries,
                 text_bytes,
+                sealed_bytes,
                 writer: None,
                 garbage: garbage + expired.len(),
             }),
@@ -363,6 +413,10 @@ impl Outbox {
         let i = g.entries.iter().position(|e| &e.id == id)?;
         let e = g.entries.remove(i)?;
         g.text_bytes = g.text_bytes.saturating_sub(e.text.len());
+        if let Some(s) = &e.sealed {
+            g.sealed_bytes = g.sealed_bytes.saturating_sub(s.len());
+            g.garbage += 1;
+        }
         let mut rec = Vec::with_capacity(17);
         rec.push(REC_DONE);
         rec.extend_from_slice(id);
@@ -410,12 +464,82 @@ impl Outbox {
         out
     }
 
-    /// Change the in-memory part of an entry.
+    /// Change the in-memory part of an entry. Not for the sealed envelope: use
+    /// [`set_sealed`](Self::set_sealed) and [`clear_sealed`](Self::clear_sealed),
+    /// which write it down.
     pub fn update(&self, id: &[u8; 16], f: impl FnOnce(&mut OutEntry)) {
         let mut g = self.inner.lock().unwrap();
         if let Some(e) = g.entries.iter_mut().find(|e| &e.id == id) {
+            let before = e.sealed.as_ref().map_or(0, |s| s.len());
             f(e);
+            let after = e.sealed.as_ref().map_or(0, |s| s.len());
+            g.sealed_bytes = (g.sealed_bytes + after).saturating_sub(before);
         }
+    }
+
+    /// Keep the sealed envelope of entry `id`. Durable before it returns, so
+    /// the bytes can be sent knowing that a restart sends the same ones.
+    pub fn set_sealed(&self, id: &[u8; 16], bytes: &[u8]) -> Result<(), StoreError> {
+        if bytes.is_empty() || bytes.len() > MAX_SEALED {
+            return Err(StoreError::OutboxFull);
+        }
+        let mut g = self.inner.lock().unwrap();
+        let Some(i) = g.entries.iter().position(|e| &e.id == id) else {
+            return Ok(());
+        };
+        let old = g.entries[i].sealed.as_ref().map_or(0, |s| s.len());
+        if g.sealed_bytes - old + bytes.len() > SEALED_BUDGET {
+            return Err(StoreError::OutboxFull);
+        }
+        let mut rec = Vec::with_capacity(17 + bytes.len());
+        rec.push(REC_SEALED);
+        rec.extend_from_slice(id);
+        rec.extend_from_slice(bytes);
+        let durable = !self.settings.defer_flush;
+        self.with_writer(&mut g, |w| {
+            if durable {
+                w.append_durable(&rec)
+            } else {
+                w.append(&rec)
+            }
+        })?;
+        g.sealed_bytes = g.sealed_bytes - old + bytes.len();
+        if old > 0 {
+            g.garbage += 1;
+        }
+        g.entries[i].sealed = Some(bytes.to_vec());
+        Ok(())
+    }
+
+    /// Void the sealed envelope of entry `id` (its session was replaced).
+    pub fn clear_sealed(&self, id: &[u8; 16]) {
+        let mut g = self.inner.lock().unwrap();
+        let Some(i) = g.entries.iter().position(|e| &e.id == id) else {
+            return;
+        };
+        let Some(old) = g.entries[i].sealed.take() else {
+            return;
+        };
+        g.sealed_bytes = g.sealed_bytes.saturating_sub(old.len());
+        let mut rec = Vec::with_capacity(17);
+        rec.push(REC_UNSEAL);
+        rec.extend_from_slice(id);
+        // A lost `Unseal` only brings back an envelope the receiver answers
+        // with "no session"; the next attempt voids it again.
+        let _ = self.with_writer(&mut g, |w| w.append(&rec));
+        g.garbage += 2;
+    }
+
+    /// True when one more envelope of the largest size still fits the budget.
+    /// Checked before sealing, so that no key is used for a message whose
+    /// envelope could not be kept.
+    pub fn has_sealed_room(&self) -> bool {
+        self.inner.lock().unwrap().sealed_bytes + MAX_SEALED <= SEALED_BUDGET
+    }
+
+    /// Bytes of sealed envelopes currently held.
+    pub fn sealed_bytes(&self) -> usize {
+        self.inner.lock().unwrap().sealed_bytes
     }
 
     pub fn get(&self, id: &[u8; 16]) -> Option<OutEntry> {
@@ -446,6 +570,15 @@ impl Outbox {
         for e in &g.entries {
             if out.append(&e.put_record()).is_err() {
                 return;
+            }
+            if let Some(s) = &e.sealed {
+                let mut rec = Vec::with_capacity(17 + s.len());
+                rec.push(REC_SEALED);
+                rec.extend_from_slice(&e.id);
+                rec.extend_from_slice(s);
+                if out.append(&rec).is_err() {
+                    return;
+                }
             }
         }
         if out.commit().is_ok() {

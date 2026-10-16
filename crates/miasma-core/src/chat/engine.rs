@@ -293,8 +293,9 @@ impl ChatCore {
     }
 
     /// The bytes to put on the wire for outbox entry `id`. The first call
-    /// advances the ratchet and writes the new state to disk; later calls
-    /// (retries) return the same bytes.
+    /// advances the ratchet and writes the new state and the sealed envelope
+    /// to disk; later calls (retries, also after a restart) return the same
+    /// bytes.
     pub fn prepare_wire(&self, id: &[u8; 16]) -> Result<(Vec<u8>, [u8; 16]), PrepareError> {
         let _g = self.gate();
         let e = self.outbox.get(id).ok_or(PrepareError::Gone)?;
@@ -302,6 +303,9 @@ impl ChatCore {
             if let Ok(env) = Envelope::decode(s) {
                 return Ok((s.clone(), env.id));
             }
+        }
+        if !self.outbox.has_sealed_room() {
+            return Err(PrepareError::Storage("sealed envelope budget".into()));
         }
         let plain = match e.kind {
             OutKind::Text => Message {
@@ -334,8 +338,13 @@ impl ChatCore {
             .flush_peer(&peer)
             .map_err(|er| PrepareError::Storage(er.to_string()))?;
         let bytes = env.encode();
-        let copy = bytes.clone();
-        self.outbox.update(id, |x| x.sealed = Some(copy));
+        // Written down before the bytes leave: a restart then resends these
+        // exact bytes instead of sealing again with the next key. If it cannot
+        // be written the message is not sent now (the key stays used; the
+        // receiver keeps keys for messages it has not seen, up to a bound).
+        self.outbox
+            .set_sealed(id, &bytes)
+            .map_err(|er| PrepareError::Storage(er.to_string()))?;
         Ok((bytes, env.id))
     }
 
@@ -350,7 +359,7 @@ impl ChatCore {
 
     fn void_sealed(&self, peer: &[u8; 32]) {
         for e in self.outbox.pending_for(peer) {
-            self.outbox.update(&e.id, |x| x.sealed = None);
+            self.outbox.clear_sealed(&e.id);
         }
     }
 

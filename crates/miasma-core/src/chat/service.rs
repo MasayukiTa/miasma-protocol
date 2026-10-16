@@ -34,6 +34,7 @@ use super::{
         CLOSE_RATE, CLOSE_UNSUPPORTED,
     },
     store::{ChatStore, StoreSettings},
+    sync,
 };
 use crate::{
     config::NodeConfig,
@@ -53,6 +54,13 @@ const MAX_CONNECTIONS: usize = 8;
 const MAX_BAD_IN_A_ROW: u32 = 3;
 /// Sessions restarted in a row for one message before it waits.
 const MAX_RESETS: u32 = 2;
+/// How long a contact that did not understand `Sync` is left alone before it
+/// is asked again (it may have been updated meanwhile).
+const SYNC_RETRY_AFTER: Duration = Duration::from_secs(3600);
+/// Contacts remembered as not understanding `Sync`.
+const MAX_NO_SYNC: usize = 256;
+/// How long a new connection waits for the answer to `Sync`.
+const SYNC_WAIT: Duration = Duration::from_secs(5);
 
 /// Runtime settings.
 #[derive(Clone)]
@@ -227,6 +235,9 @@ pub struct ChatService {
     settings: ChatSettings,
     unknown: Mutex<Buckets>,
     inbound_rate: Mutex<Buckets>,
+    sync_rate: Mutex<Buckets>,
+    /// Contacts that did not answer a `Sync` (older builds).
+    no_sync: Mutex<HashMap<[u8; 32], Instant>>,
     slots: Arc<Semaphore>,
     workers: Mutex<HashMap<[u8; 32], Worker>>,
     shutdown: watch::Sender<bool>,
@@ -287,6 +298,8 @@ impl ChatService {
                 settings.inbound_burst,
                 settings.inbound_per_minute / 60.0,
             )),
+            sync_rate: Mutex::new(Buckets::new(4.0, 6.0 / 60.0)),
+            no_sync: Mutex::new(HashMap::new()),
             settings,
             slots: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
             workers: Mutex::new(HashMap::new()),
@@ -462,19 +475,78 @@ impl ChatService {
         }
     }
 
+    /// The open connection, or a new one; the flag is true for a new one.
     async fn ensure_conn(
         &self,
         slot: &mut Option<Connection>,
         target: &[u8; 32],
-    ) -> Result<Connection, IrohClientError> {
+    ) -> Result<(Connection, bool), IrohClientError> {
         if let Some(c) = slot.as_ref() {
             if c.close_reason().is_none() {
-                return Ok(c.clone());
+                return Ok((c.clone(), false));
             }
         }
         let c = self.node.connect_alpn(target, CHAT_ALPN).await?;
         *slot = Some(c.clone());
-        Ok(c)
+        Ok((c, true))
+    }
+
+    fn peer_lacks_sync(&self, peer: &[u8; 32]) -> bool {
+        let mut m = self.no_sync.lock().unwrap();
+        match m.get(peer) {
+            Some(t) if t.elapsed() < SYNC_RETRY_AFTER => true,
+            Some(_) => {
+                m.remove(peer);
+                false
+            }
+            None => false,
+        }
+    }
+
+    fn note_no_sync(&self, peer: &[u8; 32]) {
+        let mut m = self.no_sync.lock().unwrap();
+        if m.len() >= MAX_NO_SYNC && !m.contains_key(peer) {
+            m.clear();
+        }
+        m.insert(*peer, Instant::now());
+    }
+
+    /// Ask the contact which of our waiting messages it already has and close
+    /// those. `Ok(n)` is the number closed; `Err` is the reason the exchange
+    /// failed ("no_answer" while the link is up means an older build).
+    async fn sync_with(&self, conn: &Connection, peer: &[u8; 32]) -> Result<usize, &'static str> {
+        let core = self.core.clone();
+        let p = *peer;
+        let asked = tokio::task::spawn_blocking(move || sync::request_for(&core, &p))
+            .await
+            .map_err(|_| "storage")?;
+        if asked.is_empty() {
+            return Ok(0);
+        }
+        // Sent on a unidirectional stream: a build from before `Sync` only
+        // ever accepts bidirectional streams, so it leaves this one unread and
+        // the connection stays up; the answer is simply missing.
+        let wait = self.settings.ack_timeout.min(SYNC_WAIT);
+        let reply = tokio::time::timeout(wait, async {
+            let mut tx = conn.open_uni().await.map_err(|_| "connection_lost")?;
+            proto::write_frame(&mut tx, &Frame::Sync(asked.clone()))
+                .await
+                .map_err(|_| "connection_lost")?;
+            let _ = tx.finish();
+            let mut rx = conn.accept_uni().await.map_err(|_| "connection_lost")?;
+            match proto::read_frame(&mut rx).await {
+                Ok(Frame::SyncReply(ids)) => Ok(ids),
+                Ok(_) => Err("bad_reply"),
+                Err(_) => Err("connection_lost"),
+            }
+        })
+        .await
+        .map_err(|_| "no_answer")??;
+        let core = self.core.clone();
+        let p = *peer;
+        tokio::task::spawn_blocking(move || sync::apply_reply(&core, &p, &asked, &reply, now_ms()))
+            .await
+            .map_err(|_| "storage")
     }
 
     async fn attempt(
@@ -489,10 +561,36 @@ impl ChatService {
             Some(c) if !c.allow_send => return Outcome::Permanent(fail::SEND_DISABLED),
             Some(_) => {}
         }
-        let conn = match self.ensure_conn(conn_slot, peer).await {
+        let (conn, fresh) = match self.ensure_conn(conn_slot, peer).await {
             Ok(c) => c,
             Err(_) => return Outcome::Retry("unreachable"),
         };
+        // A new connection starts with the catch-up: whatever the contact has
+        // already applied is closed here instead of being sent again.
+        if fresh && !self.peer_lacks_sync(peer) {
+            match self.sync_with(&conn, peer).await {
+                Ok(n) => {
+                    if n > 0 {
+                        debug!(peer = %fingerprint(peer), "chat sync closed {n} message(s)");
+                    }
+                    if self.core.outbox.get(id).is_none() {
+                        return Outcome::Gone;
+                    }
+                }
+                Err("no_answer") if conn.close_reason().is_none() => {
+                    // Nobody answered and the link is fine: a build from
+                    // before `Sync`. Send on this connection as usual.
+                    self.note_no_sync(peer);
+                }
+                Err(why) => {
+                    *conn_slot = None;
+                    if closed_with(&conn, CLOSE_NOT_ALLOWED) {
+                        return Outcome::Permanent(fail::NOT_ALLOWED);
+                    }
+                    return Outcome::Retry(why);
+                }
+            }
+        }
         let (wire, env_id) = match self.core.prepare_wire(id) {
             Ok(w) => w,
             Err(PrepareError::Gone) => return Outcome::Gone,
@@ -577,6 +675,37 @@ impl ChatService {
             }
             let (mut tx, mut rx) = tokio::select! {
                 _ = shutdown.changed() => break,
+                u = conn.accept_uni() => {
+                    // `Sync` arrives on a unidirectional stream (see
+                    // `sync_with`); the answer goes back on one of ours.
+                    let Ok(mut urx) = u else { break };
+                    let frame = tokio::time::timeout(
+                        self.settings.read_timeout,
+                        proto::read_frame(&mut urx),
+                    )
+                    .await;
+                    let Ok(Ok(Frame::Sync(items))) = frame else {
+                        conn.close(CLOSE_BAD_REQUEST.into(), b"");
+                        return;
+                    };
+                    // Which of the sender's waiting messages we have already.
+                    let have = if self.sync_rate.lock().unwrap().allow(remote) {
+                        let core = self.core.clone();
+                        tokio::task::spawn_blocking(move || sync::answer(&core, &remote, &items))
+                            .await
+                            .unwrap_or_default()
+                    } else {
+                        // Too many catch-ups: an empty answer only makes the
+                        // sender send everything (duplicates are harmless).
+                        Vec::new()
+                    };
+                    let Ok(mut utx) = conn.open_uni().await else { break };
+                    if proto::write_frame(&mut utx, &Frame::SyncReply(have)).await.is_err() {
+                        break;
+                    }
+                    let _ = utx.finish();
+                    continue;
+                }
                 r = tokio::time::timeout(self.settings.idle_timeout, conn.accept_bi()) => match r {
                     Ok(Ok(s)) => s,
                     _ => break,
@@ -586,7 +715,10 @@ impl ChatService {
                 tokio::time::timeout(self.settings.read_timeout, proto::read_frame(&mut rx)).await;
             let wire = match frame {
                 Ok(Ok(Frame::Deliver(w))) => w,
-                Ok(Err(proto::ProtoError::BadLength(_))) | Ok(Ok(Frame::Ack(_))) => {
+                Ok(Err(proto::ProtoError::BadLength(_)))
+                | Ok(Ok(Frame::Ack(_)))
+                | Ok(Ok(Frame::Sync(_)))
+                | Ok(Ok(Frame::SyncReply(_))) => {
                     conn.close(CLOSE_BAD_REQUEST.into(), b"");
                     return;
                 }
