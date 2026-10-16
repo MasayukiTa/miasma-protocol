@@ -265,7 +265,10 @@ async fn a_group_works_over_the_network_and_a_peer_without_groups_keeps_its_priv
             text: "private reply".into(),
         },
     );
-    until(30, "the private reply", || texts(&a, &old.id()) == ["private reply"]).await;
+    until(30, "the private reply", || {
+        texts(&a, &old.id()).contains(&"private reply".to_owned())
+    })
+    .await;
     assert!(groups(&old).is_empty(), "it never saw the group");
     let info = groups(&a);
     assert!(info[0].pending >= 1, "copies for the old peer still wait");

@@ -643,6 +643,8 @@ impl ChatUi {
                     }
                 }
             }
+            // Group chat has no screen yet; the command line uses it.
+            ChatResponse::Group(_) => {}
         }
     }
 
