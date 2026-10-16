@@ -452,3 +452,21 @@ fn a_flood_of_resends_does_not_grow_the_kept_state() {
     assert!(max_sealed <= 16 * 1024, "{max_sealed}");
     assert!(max_log < 1024 * 1024, "{max_log}");
 }
+
+#[test]
+fn the_catch_up_leaves_read_receipts_alone() {
+    let a = side();
+    let b = side();
+    b.core.set_receipt_interval_ms(0);
+    for t in ["one", "two"] {
+        a.core.enqueue(&b.id(), t, 1).unwrap();
+        assert_eq!(push_one(&a, &b, false), Some(AckStatus::Stored));
+    }
+    b.core.mark_read(&a.id(), 2, 100).unwrap();
+    assert_eq!(b.core.outbox.len(), 1, "a receipt waits at b");
+    // A receipt is not a message with a number of its own: it is not named,
+    // and so nothing about it can be closed by the answer.
+    assert!(sync::request_for(&b.core, &a.id()).is_empty());
+    assert_eq!(catch_up(&b, &a), 0);
+    assert_eq!(b.core.outbox.len(), 1);
+}
