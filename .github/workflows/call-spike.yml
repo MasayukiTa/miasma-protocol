@@ -16,14 +16,16 @@ jobs:
     name: spike (${{ matrix.os }}${{ matrix.nocmake && ' nocmake' || '' }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    continue-on-error: ${{ matrix.nocmake == true }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
         include:
           - os: ubuntu-latest
+          - os: windows-latest
+          - os: macos-latest
+          - os: ubuntu-latest
             nocmake: true
-    continue-on-error: ${{ matrix.nocmake == true }}
     defaults:
       run:
         working-directory: spikes/call-stack
@@ -55,15 +57,15 @@ jobs:
       - name: Build
         shell: bash
         run: |
-          start=$(date +%s)
+          start=$(date +%s); rc=0
           case "$RUNNER_OS" in
-            Linux) /usr/bin/time -v cargo build --release 2> build_time.txt; rc=$? ;;
-            macOS) /usr/bin/time -l cargo build --release 2> build_time.txt; rc=$? ;;
-            *) cargo build --release; rc=$? ;;
+            Linux) /usr/bin/time -v cargo build --release 2> build_time.txt || rc=$? ;;
+            macOS) /usr/bin/time -l cargo build --release 2> build_time.txt || rc=$? ;;
+            *) cargo build --release || rc=$? ;;
           esac
           end=$(date +%s)
-          [ -f build_time.txt ] && grep -E 'Maximum resident|maximum resident|^error|warning: unused' build_time.txt | head -5
-          [ -f build_time.txt ] && [ $rc -ne 0 ] && tail -60 build_time.txt
+          if [ -f build_time.txt ]; then grep -E "Maximum resident|maximum resident" build_time.txt || true; fi
+          if [ -f build_time.txt ] && [ "$rc" -ne 0 ]; then tail -80 build_time.txt; fi
           echo "BUILD_SECONDS=$((end-start)) exit=$rc"
           exit $rc
 
