@@ -29,8 +29,8 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex as StdMutex, OnceLock},
-    time::Duration,
+    sync::{Arc, Mutex as StdMutex, OnceLock, RwLock as StdRwLock},
+    time::{Duration, Instant},
 };
 
 use iroh::{
@@ -42,7 +42,7 @@ use iroh::{
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 use tokio::{
     io::AsyncReadExt,
-    sync::{Mutex, Semaphore},
+    sync::{watch, Mutex, Semaphore},
     task::{JoinHandle, JoinSet},
 };
 use tracing::{debug, info, warn};
@@ -127,7 +127,7 @@ impl IrohSettings {
             discovery: t.iroh_discovery,
             lan_discovery: t.iroh_lan_discovery,
             connect_timeout: Duration::from_secs(t.iroh_connect_timeout_secs.max(1)),
-            ca_pem: None,
+            ca_pem: t.iroh_extra_ca_pem.as_deref().and_then(read_extra_ca),
             proxy_from_env: proxy_env_is_set(),
         }
     }
@@ -143,6 +143,73 @@ impl IrohSettings {
                 }
             })
             .collect()
+    }
+}
+
+/// The file named by `transport.iroh_extra_ca_pem`. A file that cannot be used
+/// is logged and ignored: the endpoint then trusts the OS store alone.
+fn read_extra_ca(path: &str) -> Option<Vec<u8>> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("transport.iroh_extra_ca_pem: cannot read {path}: {e}");
+            return None;
+        }
+    };
+    match parse_ca_roots(&bytes) {
+        Ok(_) => Some(bytes),
+        Err(e) => {
+            warn!("transport.iroh_extra_ca_pem: {path}: {e}");
+            None
+        }
+    }
+}
+
+/// CA certificates from a PEM bundle or a single DER certificate.
+pub fn parse_ca_roots(
+    bytes: &[u8],
+) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, MiasmaError> {
+    if bytes.len() > MAX_CA_PEM_BYTES {
+        return Err(MiasmaError::Network("the CA file is too large".into()));
+    }
+    let is_pem = bytes.windows(10).any(|w| w == b"-----BEGIN");
+    let certs = if is_pem {
+        rustls_pemfile::certs(&mut &bytes[..])
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| MiasmaError::Network(format!("the CA file is not valid PEM: {e}")))?
+    } else {
+        // One DER certificate.
+        x509_parser::parse_x509_certificate(bytes)
+            .map_err(|_| MiasmaError::Network("the CA file is neither PEM nor DER".into()))?;
+        vec![rustls::pki_types::CertificateDer::from(bytes.to_vec())]
+    };
+    if certs.is_empty() {
+        return Err(MiasmaError::Network(
+            "the CA file contains no certificate".into(),
+        ));
+    }
+    Ok(certs)
+}
+
+/// Where the operating system's trust anchors come from. A trait so the way the
+/// OS roots reach the TLS settings is testable without a real OS store.
+pub trait OsTrust {
+    fn tls(&self, extra_roots: Vec<rustls::pki_types::CertificateDer<'static>>) -> CaTlsConfig;
+}
+
+/// The real thing: Windows CryptoAPI / macOS Security / the Linux root bundle.
+pub struct PlatformTrust;
+
+impl OsTrust for PlatformTrust {
+    fn tls(&self, extra_roots: Vec<rustls::pki_types::CertificateDer<'static>>) -> CaTlsConfig {
+        #[cfg(not(target_os = "android"))]
+        {
+            CaTlsConfig::system().with_extra_roots(extra_roots)
+        }
+        #[cfg(target_os = "android")]
+        {
+            CaTlsConfig::embedded().with_extra_roots(extra_roots)
+        }
     }
 }
 
@@ -170,15 +237,20 @@ pub const RELAY_TLS_HINT: &str = "; relay TLS certificate not trusted? if you ar
 /// Android is the one platform where rustls-platform-verifier cannot take extra
 /// roots, so there the bundled Mozilla roots plus `extra_roots` are used (as
 /// for `wss://`).
-#[cfg(not(target_os = "android"))]
+///
+/// The API used is iroh's own, in the vendored relay crate:
+/// `~/.cargo/registry/src/*/iroh-relay-1.3.0/src/tls.rs`. There,
+/// `CaTlsConfig::system` selects `Mode::System` (the platform verifier is
+/// `rustls_platform_verifier::Verifier::new_with_extra_roots`, so the OS store
+/// is the base and `extra_roots` are added as further anchors), while
+/// `CaTlsConfig::embedded` selects `Mode::EmbeddedWebPki` (the compiled-in
+/// Mozilla roots, `webpki_roots::TLS_SERVER_ROOTS`). iroh's endpoint builder
+/// keeps `CaTlsConfig::default()` = `EmbeddedWebPki` unless the caller asks for
+/// something else (`iroh-1.3.0/src/endpoint.rs`, `Builder::ca_tls_config`), so
+/// the OS store has to be asked for explicitly to trust a CA that the OS
+/// trusts; the built-in roots alone do not cover an inspecting network's CA.
 pub fn ca_tls_config(extra_roots: Vec<rustls::pki_types::CertificateDer<'static>>) -> CaTlsConfig {
-    CaTlsConfig::system().with_extra_roots(extra_roots)
-}
-
-/// See the non-Android variant.
-#[cfg(target_os = "android")]
-pub fn ca_tls_config(extra_roots: Vec<rustls::pki_types::CertificateDer<'static>>) -> CaTlsConfig {
-    CaTlsConfig::embedded().with_extra_roots(extra_roots)
+    PlatformTrust.tls(extra_roots)
 }
 
 /// The endpoint builder for `settings`.
@@ -234,20 +306,7 @@ pub fn endpoint_builder(
         b = b.proxy_from_env();
     }
     let extra_roots = match &settings.ca_pem {
-        Some(pem) => {
-            if pem.len() > MAX_CA_PEM_BYTES {
-                return Err(MiasmaError::Network("the CA file is too large".into()));
-            }
-            let certs = rustls_pemfile::certs(&mut &pem[..])
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| MiasmaError::Network(format!("the CA file is not valid PEM: {e}")))?;
-            if certs.is_empty() {
-                return Err(MiasmaError::Network(
-                    "the CA file contains no certificate".into(),
-                ));
-            }
-            certs
-        }
+        Some(pem) => parse_ca_roots(pem)?,
         None => Vec::new(),
     };
     b = b.ca_tls_config(ca_tls_config(extra_roots));
@@ -303,11 +362,31 @@ impl Default for IrohServerLimits {
 /// A running iroh endpoint: serves this node's shares and records, and dials
 /// other nodes for receives.
 pub struct IrohNode {
-    endpoint: Endpoint,
+    /// Swapped by [`replace_endpoint`](Self::replace_endpoint); always read
+    /// through [`endpoint`](Self::endpoint).
+    endpoint: StdRwLock<Endpoint>,
     settings: IrohSettings,
     server: StdMutex<Option<JoinHandle<()>>>,
+    /// What the accept loop of every endpoint generation serves with; keeps the
+    /// push and chat handlers across a rebuild.
+    ctx: Arc<ServeCtx>,
     push: PushSlot,
     chat: ChatSlot,
+    health: StdMutex<RelayHealth>,
+    watchdog: StdMutex<Option<(watch::Sender<bool>, JoinHandle<()>)>>,
+    /// One refresh or rebuild at a time.
+    rebuild_lock: Mutex<()>,
+}
+
+/// What the status shows besides the live relay state.
+#[derive(Debug)]
+struct RelayHealth {
+    /// Since when no home relay has been connected (`None` while connected).
+    down_since: Option<Instant>,
+    refreshes: u32,
+    rebuilds: u32,
+    /// The relay certificate as last read while the relay was down.
+    cert: Option<super::relay_tls::RelayCert>,
 }
 
 impl IrohNode {
@@ -350,14 +429,159 @@ impl IrohNode {
             push: push.clone(),
             chat: chat.clone(),
         });
-        let server = tokio::spawn(accept_loop(endpoint.clone(), ctx));
+        let server = tokio::spawn(accept_loop(endpoint.clone(), ctx.clone()));
         Ok(Arc::new(Self {
-            endpoint,
+            endpoint: StdRwLock::new(endpoint),
             settings,
             server: StdMutex::new(Some(server)),
+            ctx,
             push,
             chat,
+            health: StdMutex::new(RelayHealth {
+                down_since: Some(Instant::now()),
+                refreshes: 0,
+                rebuilds: 0,
+                cert: None,
+            }),
+            watchdog: StdMutex::new(None),
+            rebuild_lock: Mutex::new(()),
         }))
+    }
+
+    /// Start the relay watchdog (once; see [`super::relay_watchdog`]). It stops
+    /// with [`shutdown`](Self::shutdown).
+    pub fn spawn_relay_watchdog(self: &Arc<Self>) {
+        let mut g = self.watchdog.lock().unwrap();
+        if g.is_some() {
+            return;
+        }
+        let (tx, rx) = watch::channel(false);
+        // The task holds a weak reference: a node nobody else owns can drop.
+        let weak = Arc::new(WeakNode(Arc::downgrade(self)));
+        let h = tokio::spawn(super::relay_watchdog::run(weak, rx));
+        *g = Some((tx, h));
+    }
+
+    /// The endpoint that is current now. After a rebuild an older clone keeps
+    /// pointing at the closed one, so do not hold it across long waits.
+    pub fn endpoint(&self) -> Endpoint {
+        self.endpoint.read().unwrap().clone()
+    }
+
+    /// Bind `builder`'s endpoint and make it the current one: the accept loop
+    /// moves to it (with the same push and chat handlers), the old endpoint is
+    /// closed in the background. `builder` must carry the same secret key, or the
+    /// endpoint ID changes; this is checked and the swap refused otherwise. If
+    /// binding fails the old endpoint stays.
+    pub async fn replace_endpoint(&self, builder: Builder) -> Result<(), MiasmaError> {
+        let new = builder
+            .bind()
+            .await
+            .map_err(|e| MiasmaError::Network(format!("cannot start the iroh endpoint: {e}")))?;
+        let old = self.endpoint();
+        if new.id() != old.id() {
+            let _ = new.close().await;
+            return Err(MiasmaError::Network(
+                "the new iroh endpoint has a different identity; keeping the old one".into(),
+            ));
+        }
+        let server = tokio::spawn(accept_loop(new.clone(), self.ctx.clone()));
+        *self.endpoint.write().unwrap() = new;
+        // The old accept loop ends by itself once its endpoint is closed; its
+        // connections are closed with it (a transfer resumes by protocol).
+        self.server.lock().unwrap().replace(server);
+        tokio::spawn(async move { old.close().await });
+        Ok(())
+    }
+
+    /// Build the endpoint again from this node's own key and settings and swap
+    /// it in; the endpoint ID stays.
+    pub async fn rebuild(&self) -> Result<(), MiasmaError> {
+        let _one_at_a_time = self.rebuild_lock.lock().await;
+        let mut seed = self.endpoint().secret_key().to_bytes();
+        let builder = endpoint_builder(Some(&seed), &self.settings, true);
+        zeroize::Zeroize::zeroize(&mut seed);
+        self.replace_endpoint(builder?).await?;
+        self.health.lock().unwrap().rebuilds += 1;
+        Ok(())
+    }
+
+    /// Drop everything iroh remembers about the network that could be stale
+    /// (the DNS servers it read, the DNS answers it cached) and tell it the
+    /// network may have changed.
+    pub async fn refresh_network(&self) {
+        let _one_at_a_time = self.rebuild_lock.lock().await;
+        let ep = self.endpoint();
+        if let Ok(dns) = ep.dns_resolver() {
+            dns.reset();
+            dns.clear_cache();
+        }
+        ep.network_change().await;
+        self.health.lock().unwrap().refreshes += 1;
+        self.read_relay_cert().await;
+    }
+
+    /// Read the certificate the relay presents here, with the endpoint's own TLS
+    /// settings, so the status can say that the network re-signs HTTPS. Skipped
+    /// behind a proxy (the handshake would not be the endpoint's).
+    async fn read_relay_cert(&self) {
+        if self.settings.proxy_from_env {
+            return;
+        }
+        let url = self
+            .endpoint()
+            .home_relay_status()
+            .get()
+            .first()
+            .map(|r| r.url().clone())
+            .or_else(|| self.settings.relay_hints().into_iter().next());
+        let Some(host) = url.and_then(|u| u.host_str().map(|h| h.trim_end_matches('.').to_owned()))
+        else {
+            return;
+        };
+        let extra = match &self.settings.ca_pem {
+            Some(pem) => parse_ca_roots(pem).unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let cert =
+            super::relay_tls::probe(&host, 443, &ca_tls_config(extra), Duration::from_secs(8))
+                .await;
+        match &cert {
+            Ok(c) => info!(
+                "relay certificate: issued by \"{}\" ({}), {} by this computer",
+                c.issuer,
+                if c.public_ca {
+                    "public CA"
+                } else {
+                    "not a public CA"
+                },
+                if c.trusted { "trusted" } else { "NOT trusted" }
+            ),
+            Err(e) => debug!("relay certificate could not be read: {e}"),
+        }
+        self.health.lock().unwrap().cert = cert.ok();
+    }
+
+    /// The relay link now, and since when it has been down.
+    fn relay_link(&self) -> super::relay_watchdog::RelayLink {
+        let relays = self.endpoint().home_relay_status().get();
+        let connected = relays.iter().any(|r| r.is_connected());
+        let mut h = self.health.lock().unwrap();
+        if connected {
+            h.down_since = None;
+        } else if h.down_since.is_none() {
+            h.down_since = Some(Instant::now());
+        }
+        super::relay_watchdog::RelayLink {
+            connected,
+            last_error: if connected {
+                None
+            } else {
+                relays
+                    .iter()
+                    .find_map(|r| r.last_error().map(|e| one_line(&format!("{e:?}"))))
+            },
+        }
     }
 
     /// Install the handler for [`CHAT_ALPN`] connections (once; later calls are
@@ -389,7 +613,7 @@ impl IrohNode {
     /// The endpoint ID: the Ed25519 public key, equal to the publisher key in a
     /// share ID this node publishes.
     pub fn endpoint_id(&self) -> [u8; 32] {
-        *self.endpoint.id().as_bytes()
+        *self.endpoint().id().as_bytes()
     }
 
     pub fn settings(&self) -> &IrohSettings {
@@ -398,18 +622,13 @@ impl IrohNode {
 
     /// The addresses this endpoint currently advertises (for tests and status).
     pub fn addr(&self) -> EndpointAddr {
-        self.endpoint.addr()
-    }
-
-    /// The underlying endpoint (tests build raw clients and servers with it).
-    pub fn endpoint(&self) -> &Endpoint {
-        &self.endpoint
+        self.endpoint().addr()
     }
 
     /// Wait until the endpoint has a home relay connection, at most `limit`.
     /// `false` if it did not get one in time.
     pub async fn wait_online(&self, limit: Duration) -> bool {
-        tokio::time::timeout(limit, self.endpoint.online())
+        tokio::time::timeout(limit, self.endpoint().online())
             .await
             .is_ok()
     }
@@ -418,7 +637,7 @@ impl IrohNode {
     /// endpoint.
     pub fn client(&self, publisher: &[u8; 32]) -> Result<IrohDirectClient, MiasmaError> {
         IrohDirectClient::new(
-            self.endpoint.clone(),
+            self.endpoint(),
             publisher,
             self.settings.relay_hints(),
             self.settings.connect_timeout,
@@ -449,12 +668,32 @@ impl IrohNode {
 
     /// What `miasma status` shows.
     pub fn status(&self) -> IrohStatus {
-        let relays = self.endpoint.home_relay_status().get();
+        let ep = self.endpoint();
+        let relays = ep.home_relay_status().get();
         let connected = relays.iter().find(|r| r.is_connected());
         let shown = connected.or_else(|| relays.first());
+        // Keeps the "down since" clock right even if the watchdog is off.
+        let link = self.relay_link();
+        let (relay_down_secs, relay_refreshes, relay_rebuilds, relay_cert) = {
+            let h = self.health.lock().unwrap();
+            (
+                h.down_since.map(|t| t.elapsed().as_secs()),
+                h.refreshes,
+                h.rebuilds,
+                h.cert.clone(),
+            )
+        };
         IrohStatus {
+            relay_down_secs: if link.connected {
+                None
+            } else {
+                relay_down_secs
+            },
+            relay_refreshes,
+            relay_rebuilds,
+            relay_cert: if link.connected { None } else { relay_cert },
             mode: self.settings.mode.as_str().to_owned(),
-            endpoint_id: hex::encode(self.endpoint.id().as_bytes()),
+            endpoint_id: hex::encode(ep.id().as_bytes()),
             home_relay: shown.map(|r| r.url().to_string()),
             relay_connected: connected.is_some(),
             last_error: if connected.is_some() {
@@ -470,12 +709,17 @@ impl IrohNode {
 
     /// Stop accepting and close the endpoint.
     pub async fn shutdown(&self) {
+        let dog = self.watchdog.lock().unwrap().take();
+        if let Some((stop, h)) = dog {
+            let _ = stop.send(true);
+            let _ = h.await;
+        }
         let handle = self.server.lock().unwrap().take();
         if let Some(h) = handle {
             h.abort();
             let _ = h.await;
         }
-        self.endpoint.close().await;
+        self.endpoint().close().await;
     }
 }
 
@@ -485,6 +729,39 @@ impl Drop for IrohNode {
             if let Some(h) = g.take() {
                 h.abort();
             }
+        }
+        if let Ok(mut g) = self.watchdog.lock() {
+            if let Some((_, h)) = g.take() {
+                h.abort();
+            }
+        }
+    }
+}
+
+/// What the watchdog task holds: the node without keeping it alive.
+struct WeakNode(std::sync::Weak<IrohNode>);
+
+#[async_trait::async_trait]
+impl super::relay_watchdog::RelayEndpoint for WeakNode {
+    fn link(&self) -> super::relay_watchdog::RelayLink {
+        match self.0.upgrade() {
+            Some(n) => n.relay_link(),
+            // Gone: report connected so the watchdog does nothing.
+            None => super::relay_watchdog::RelayLink {
+                connected: true,
+                last_error: None,
+            },
+        }
+    }
+    async fn refresh(&self) {
+        if let Some(n) = self.0.upgrade() {
+            n.refresh_network().await;
+        }
+    }
+    async fn rebuild(&self) -> Result<(), String> {
+        match self.0.upgrade() {
+            Some(n) => n.rebuild().await.map_err(|e| e.to_string()),
+            None => Ok(()),
         }
     }
 }
