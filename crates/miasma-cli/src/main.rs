@@ -19,6 +19,7 @@ use zeroize::{Zeroize, Zeroizing};
 mod chat_cmd;
 mod i18n;
 mod push_cmd;
+mod storage_cmd;
 mod tunnel;
 mod web_link;
 use i18n::{Lang, Msg};
@@ -483,6 +484,22 @@ enum Commands {
         action: chat_cmd::ChatCmd,
     },
 
+    /// List and delete the shares this node stores (held for other people, or left over from your own).
+    ///
+    /// `storage list` shows each share's short id, size and age. `storage delete` removes
+    /// shares by id, all of them, or everything older than some days. Shares in use (being
+    /// replicated, or part of a running transfer) are never deleted.
+    ///
+    /// With the app open, the running daemon does the work and knows what is in use; with no
+    /// daemon, the shares are read and deleted straight from disk.
+    ///
+    /// Example: miasma storage list
+    ///          miasma storage delete --older-than 30
+    Storage {
+        #[command(subcommand)]
+        action: storage_cmd::StorageCmd,
+    },
+
     /// Probe WebSocket/WSS connectivity to a URL.
     ///
     /// Connects via TCP (+ TLS for wss:// or https://) and performs a WebSocket
@@ -714,6 +731,7 @@ async fn main() -> Result<()> {
         Commands::PushStatus => push_cmd::run_push_status(&data_dir).await,
         Commands::PushInbox => push_cmd::run_push_inbox(&data_dir).await,
         Commands::Chat { action } => chat_cmd::run_chat(&data_dir, action).await,
+        Commands::Storage { action } => storage_cmd::run_storage(&data_dir, action).await,
 
         Commands::WssProbe {
             url,
@@ -2738,7 +2756,7 @@ async fn cmd_network_get(
 // ─── transfers (background receive, progress, resume) ────────────────────────
 
 /// `1.5 GiB`, `312 MiB`, `4 KiB`, `17 B`.
-fn human_bytes(n: u64) -> String {
+pub(crate) fn human_bytes(n: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut v = n as f64;
     let mut u = 0;
@@ -3954,5 +3972,91 @@ mod remove_flag_tests {
             _ => panic!("wrong command"),
         }
         assert!(parse(&["transfer-remove"]).is_err(), "an id is required");
+    }
+}
+
+#[cfg(test)]
+mod storage_flag_tests {
+    use super::{Cli, Commands};
+    use clap::Parser;
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        let mut v = vec!["miasma"];
+        v.extend_from_slice(args);
+        Cli::try_parse_from(v)
+    }
+
+    #[test]
+    fn storage_list_is_text_by_default_and_json_on_request() {
+        match parse(&["storage", "list"]).unwrap().command {
+            Commands::Storage {
+                action: crate::storage_cmd::StorageCmd::List { json },
+            } => assert!(!json),
+            _ => panic!("wrong command"),
+        }
+        match parse(&["storage", "list", "--json"]).unwrap().command {
+            Commands::Storage {
+                action: crate::storage_cmd::StorageCmd::List { json },
+            } => assert!(json),
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn storage_delete_takes_ids_all_older_than_and_yes() {
+        match parse(&["storage", "delete", "deadbeef", "cafebabe"])
+            .unwrap()
+            .command
+        {
+            Commands::Storage {
+                action:
+                    crate::storage_cmd::StorageCmd::Delete {
+                        id,
+                        all,
+                        older_than,
+                        yes,
+                    },
+            } => {
+                assert_eq!(id, ["deadbeef", "cafebabe"]);
+                assert!(!all);
+                assert!(older_than.is_none());
+                assert!(!yes);
+            }
+            _ => panic!("wrong command"),
+        }
+        match parse(&["storage", "delete", "--all", "--yes"])
+            .unwrap()
+            .command
+        {
+            Commands::Storage {
+                action:
+                    crate::storage_cmd::StorageCmd::Delete {
+                        id,
+                        all,
+                        older_than,
+                        yes,
+                    },
+            } => {
+                assert!(id.is_empty());
+                assert!(all);
+                assert!(older_than.is_none());
+                assert!(yes);
+            }
+            _ => panic!("wrong command"),
+        }
+        match parse(&["storage", "delete", "--older-than", "30"])
+            .unwrap()
+            .command
+        {
+            Commands::Storage {
+                action: crate::storage_cmd::StorageCmd::Delete { older_than, .. },
+            } => assert_eq!(older_than, Some(30)),
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn storage_delete_rejects_a_non_numeric_age() {
+        assert!(parse(&["storage", "delete", "--older-than", "soon"]).is_err());
     }
 }
