@@ -120,6 +120,11 @@ pub struct ChatConfig {
     /// when the daemon starts.
     #[serde(default = "default_true")]
     pub read_receipts: bool,
+    /// Hold sealed messages in memory for trusted contacts who are offline
+    /// (default off). Nothing listens for it yet; the setting only decides
+    /// whether the in-memory custody store accepts items.
+    #[serde(default)]
+    pub custody_enabled: bool,
 }
 
 pub const DEFAULT_CHAT_MAX_MESSAGE_BYTES: usize = 4096;
@@ -141,6 +146,7 @@ impl Default for ChatConfig {
             outbox_max: DEFAULT_CHAT_OUTBOX_MAX,
             retention_days: 0,
             read_receipts: true,
+            custody_enabled: false,
         }
     }
 }
