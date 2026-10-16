@@ -463,6 +463,38 @@ pub enum Msg {
     },
     /// `miasma status` line when iroh is off.
     StatusIrohOff,
+    /// Second `miasma status` line while the home relay is down: for how long,
+    /// the cause in plain words (`kind`: dns, timeout, tls, denied, other), and
+    /// what the watchdog has done so far.
+    StatusIrohRelayDown {
+        secs: u64,
+        kind: String,
+        refreshes: u32,
+        rebuilds: u32,
+    },
+    /// Third line: the relay's certificate comes from a CA that is not a public
+    /// one (the network re-signs HTTPS), and whether this computer trusts it.
+    StatusIrohRelayCert {
+        issuer: String,
+        trusted: bool,
+    },
+}
+
+/// "45 s", "5 min", "3 h 12 min".
+fn span_en(secs: u64) -> String {
+    match secs {
+        0..=59 => format!("{secs} s"),
+        60..=3599 => format!("{} min", secs / 60),
+        _ => format!("{} h {} min", secs / 3600, secs % 3600 / 60),
+    }
+}
+
+fn span_ja(secs: u64) -> String {
+    match secs {
+        0..=59 => format!("{secs} 秒"),
+        60..=3599 => format!("{} 分", secs / 60),
+        _ => format!("{} 時間 {} 分", secs / 3600, secs % 3600 / 60),
+    }
 }
 
 impl Msg {
@@ -677,6 +709,25 @@ Anyone who has this link can control this node until the daemon restarts: do not
                 }
             ),
             StatusIrohOff => "iroh: off".into(),
+            StatusIrohRelayCert { issuer, trusted } => format!(
+                "  The relay's certificate was issued by \"{issuer}\", which is not a public CA: this network re-signs HTTPS (TLS inspection). This computer {}.",
+                if *trusted {
+                    "trusts that CA"
+                } else {
+                    "does not trust that CA: install it in the OS certificate store, or set transport.iroh_extra_ca_pem"
+                }
+            ),
+            StatusIrohRelayDown { secs, kind, refreshes, rebuilds } => format!(
+                "  The relay has not been connected for {}: {}. Retried {refreshes} time(s), rebuilt the connection {rebuilds} time(s). Messages and files wait until it is back.",
+                span_en(*secs),
+                match kind.as_str() {
+                    "dns" => "this computer could not look up the relay's address (DNS)",
+                    "timeout" => "the relay did not answer in time",
+                    "tls" => "the relay's certificate was not accepted",
+                    "denied" => "the relay refused this computer",
+                    _ => "the connection to the relay failed",
+                }
+            ),
         }
     }
 
@@ -887,6 +938,25 @@ Anyone who has this link can control this node until the daemon restarts: do not
                 }
             ),
             StatusIrohOff => "iroh: オフ".into(),
+            StatusIrohRelayCert { issuer, trusted } => format!(
+                "  リレーの証明書は公開 CA ではない「{issuer}」が発行しています。このネットワークは HTTPS を再署名(TLS 検査)しています。このコンピューターはその CA を{}。",
+                if *trusted {
+                    "信頼しています"
+                } else {
+                    "信頼していません: OS の証明書ストアに入れるか、transport.iroh_extra_ca_pem を設定してください"
+                }
+            ),
+            StatusIrohRelayDown { secs, kind, refreshes, rebuilds } => format!(
+                "  リレーに {} 接続できていません: {}。再試行 {refreshes} 回、接続の作り直し {rebuilds} 回。メッセージとファイルは復旧するまで待機します。",
+                span_ja(*secs),
+                match kind.as_str() {
+                    "dns" => "このコンピューターがリレーのアドレスを引けません (DNS)",
+                    "timeout" => "リレーが時間内に応答しません",
+                    "tls" => "リレーの証明書が受け入れられませんでした",
+                    "denied" => "リレーがこのコンピューターを拒否しました",
+                    _ => "リレーへの接続に失敗しました",
+                }
+            ),
         }
     }
 }
@@ -1029,6 +1099,14 @@ pub fn format_netcheck(r: &miasma_core::transport::netcheck::NetcheckReport, lan
                 "- The relay host answers on 443 but the relay connection failed: TLS inspection? Install the proxy's CA in the OS store or pass --ca-cert.",
                 "- 中継サーバーの 443 には届きますが、中継への接続に失敗しました。TLS 検査の可能性があります。その CA を OS のストアに入れるか、--ca-cert を指定してください。",
             ),
+            Note::RelayCertUntrusted => (
+                "- The relay's certificate comes from a CA that is not a public one: this network re-signs HTTPS (TLS inspection) and this computer does not trust that CA. Install the CA in the OS store, or set transport.iroh_extra_ca_pem (or pass --ca-cert).",
+                "- 中継サーバーの証明書が公開 CA ではない CA から出ています。このネットワークは HTTPS を再署名(TLS 検査)しており、このコンピューターはその CA を信頼していません。CA を OS のストアに入れるか、transport.iroh_extra_ca_pem (または --ca-cert) を設定してください。",
+            ),
+            Note::RelayCertInspectedButTrusted => (
+                "- The relay's certificate comes from a CA that is not a public one (this network re-signs HTTPS), and this computer trusts it.",
+                "- 中継サーバーの証明書は公開 CA ではない CA から出ています(このネットワークは HTTPS を再署名しています)。このコンピューターはその CA を信頼しています。",
+            ),
             Note::TunnelApiUnreachable => (
                 "- api.trycloudflare.com is unreachable: `miasma tunnel` will not work from here.",
                 "- api.trycloudflare.com に届きません。ここからは `miasma tunnel` が使えません。",
@@ -1140,6 +1218,8 @@ mod tests {
             DaemonIrohNotice => "DaemonIrohNotice",
             StatusIroh { .. } => "StatusIroh",
             StatusIrohOff => "StatusIrohOff",
+            StatusIrohRelayDown { .. } => "StatusIrohRelayDown",
+            StatusIrohRelayCert { .. } => "StatusIrohRelayCert",
         }
     }
 
@@ -1447,6 +1527,22 @@ Anyone who has this link can control this node until the daemon restarts: do not
                 "iroh: custom endpoint 0123456789ab… home relay none (not connected: unable to connect)",
             ),
             (StatusIrohOff, "iroh: off"),
+            (
+                StatusIrohRelayDown {
+                    secs: 11_520,
+                    kind: s("dns"),
+                    refreshes: 3,
+                    rebuilds: 2,
+                },
+                "  The relay has not been connected for 3 h 12 min: this computer could not look up the relay's address (DNS). Retried 3 time(s), rebuilt the connection 2 time(s). Messages and files wait until it is back.",
+            ),
+            (
+                StatusIrohRelayCert {
+                    issuer: s("Test Inspection CA"),
+                    trusted: false,
+                },
+                "  The relay's certificate was issued by \"Test Inspection CA\", which is not a public CA: this network re-signs HTTPS (TLS inspection). This computer does not trust that CA: install it in the OS certificate store, or set transport.iroh_extra_ca_pem.",
+            ),
         ]
     }
 
