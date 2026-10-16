@@ -715,3 +715,127 @@ impl ChatCore {
         let _ = self.store.record(&e.peer, nm, false);
     }
 }
+
+// ─── Records that are not private-chat messages (group delivery) ────────────
+
+impl ChatCore {
+    /// Seal `plain` for `peer` on the pairwise session (started when there is
+    /// none) and write the advanced session to disk before returning. Returns
+    /// the envelope bytes and its ID. Nothing is cached: every call uses a
+    /// fresh message key.
+    pub fn seal_for(
+        &self,
+        peer: &[u8; 32],
+        plain: &[u8],
+    ) -> Result<(Vec<u8>, [u8; 16]), PrepareError> {
+        let _g = self.gate();
+        let me = &self.identity;
+        let env = self
+            .store
+            .with_peer(peer, |st| -> Result<Envelope, CryptoError> {
+                if st.session.is_none() {
+                    st.session = Some(Session::new_initiator(me, peer)?);
+                }
+                st.session.as_mut().expect("set above").seal(plain)
+            })
+            .map_err(|er| PrepareError::Session(er.to_string()))?;
+        self.store
+            .flush_peer(peer)
+            .map_err(|er| PrepareError::Storage(er.to_string()))?;
+        Ok((env.encode(), env.id))
+    }
+
+    /// Open an envelope from `peer` and let `handle` act on the plaintext, for
+    /// records that are not private-chat messages. `handle` runs while the
+    /// session gate is held, before the session moves on, and must write its
+    /// own effects down before it returns; its answer is the acknowledgement.
+    /// The session is committed (the message key is spent) for every answer
+    /// except [`AckStatus::Failed`], so a retry of a failed record is opened
+    /// again.
+    ///
+    /// The private-chat counters (`seq`) are not touched.
+    pub fn accept_raw(
+        &self,
+        peer: &[u8; 32],
+        wire: &[u8],
+        handle: impl FnOnce(&[u8]) -> AckStatus,
+    ) -> AckStatus {
+        let env = match Envelope::decode(wire) {
+            Ok(e) => e,
+            Err(CryptoError::Version(_)) | Err(CryptoError::Unsupported) => {
+                return AckStatus::Unsupported
+            }
+            Err(_) => return AckStatus::BadRequest,
+        };
+        let _g = self.gate();
+        let me = &self.identity;
+        type Opened = (Session, zeroize::Zeroizing<Vec<u8>>, bool, Option<[u8; 32]>);
+        let opened: Result<Opened, AckStatus> = self.store.peek_peer(peer, |st| {
+            if st.recent_env.contains(&env.id) {
+                return Err(AckStatus::Duplicate);
+            }
+            match &st.session {
+                Some(existing) => {
+                    let mut s = existing.clone();
+                    match s.open(&env) {
+                        Ok(pt) => Ok((s, pt, false, None)),
+                        Err(e) => {
+                            let fresh = env.header.init_ek.filter(|ek| {
+                                ek != existing.origin_ek() && !st.seen_eks.contains(ek)
+                            });
+                            match fresh {
+                                Some(ek) => {
+                                    if existing.is_initiator()
+                                        && existing.awaiting_first_reply()
+                                        && existing.origin_ek() < &ek
+                                    {
+                                        return Err(AckStatus::Busy);
+                                    }
+                                    match Session::accept(me, peer, &env) {
+                                        Ok((s, pt)) => Ok((s, pt, true, Some(ek))),
+                                        Err(_) => Err(AckStatus::BadRequest),
+                                    }
+                                }
+                                None => {
+                                    let _ = e;
+                                    Err(AckStatus::BadRequest)
+                                }
+                            }
+                        }
+                    }
+                }
+                None => match env.header.init_ek {
+                    Some(ek) if !st.seen_eks.contains(&ek) => match Session::accept(me, peer, &env)
+                    {
+                        Ok((s, pt)) => Ok((s, pt, false, Some(ek))),
+                        Err(_) => Err(AckStatus::BadRequest),
+                    },
+                    Some(_) => Err(AckStatus::BadRequest),
+                    None => Err(AckStatus::NoSession),
+                },
+            }
+        });
+        let (session, plain, replaced, new_ek) = match opened {
+            Ok(o) => o,
+            Err(status) => return status,
+        };
+        let status = handle(&plain);
+        if status == AckStatus::Failed {
+            return status;
+        }
+        self.store.with_peer(peer, |st| {
+            st.session = Some(session);
+            if let Some(ek) = new_ek {
+                st.remember_ek(ek);
+            }
+            st.remember_envelope(env.id);
+        });
+        if self.store.flush_peer(peer).is_err() {
+            return AckStatus::Failed;
+        }
+        if replaced {
+            self.void_sealed(peer);
+        }
+        status
+    }
+}

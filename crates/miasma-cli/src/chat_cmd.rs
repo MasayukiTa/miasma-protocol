@@ -21,6 +21,14 @@ use crate::i18n::{lang, Lang};
 
 #[derive(Subcommand)]
 pub enum ChatCmd {
+    /// Group conversations between registered contacts (create, add, remove, leave, send, history, list).
+    ///
+    /// Being in a group does not make anyone a trusted contact: members you have not
+    /// registered yourself show as unverified, with the code for `miasma contact add`.
+    Group {
+        #[command(subcommand)]
+        action: crate::chat_group_cmd::GroupCmd,
+    },
     /// Send a message to a registered contact. If they are offline, the message waits and is delivered when they come online.
     Send {
         /// Label, ID or endpoint ID of the contact (see `miasma contact list`).
@@ -198,7 +206,7 @@ impl M<'_> {
 }
 
 /// `YYYY-MM-DD HH:MM` in UTC.
-fn stamp(ms: u64) -> String {
+pub(crate) fn stamp(ms: u64) -> String {
     let secs = ms / 1000;
     let days = (secs / 86_400) as i64;
     let rem = secs % 86_400;
@@ -262,7 +270,7 @@ fn line(m: &MessageInfo, ja: bool) -> String {
 
 // ─── Plumbing ────────────────────────────────────────────────────────────────
 
-async fn call(data_dir: &Path, req: ChatRequest) -> Result<ChatResponse> {
+pub(crate) async fn call(data_dir: &Path, req: ChatRequest) -> Result<ChatResponse> {
     match daemon_request(data_dir, ControlRequest::Chat(req)).await {
         Ok(ControlResponse::Chat(r)) => Ok(r),
         // An older daemon answers an unknown request with an error or drops the
@@ -309,6 +317,7 @@ fn label_of(contact: &str, label: &Option<String>) -> String {
 
 pub async fn run_chat(data_dir: &Path, cmd: ChatCmd) -> Result<()> {
     match cmd {
+        ChatCmd::Group { action } => crate::chat_group_cmd::run(data_dir, action).await,
         ChatCmd::Send { contact, text } => {
             let text = text.join(" ");
             match call(

@@ -116,7 +116,7 @@ impl ChatSettings {
 }
 
 /// Token bucket per ID with bounded memory.
-struct Buckets {
+pub(crate) struct Buckets {
     map: HashMap<[u8; 32], (f64, Instant)>,
     burst: f64,
     per_sec: f64,
@@ -125,7 +125,7 @@ struct Buckets {
 impl Buckets {
     const CAP: usize = 1024;
 
-    fn new(burst: f64, per_sec: f64) -> Self {
+    pub(crate) fn new(burst: f64, per_sec: f64) -> Self {
         Self {
             map: HashMap::new(),
             burst,
@@ -133,7 +133,7 @@ impl Buckets {
         }
     }
 
-    fn allow(&mut self, id: [u8; 32]) -> bool {
+    pub(crate) fn allow(&mut self, id: [u8; 32]) -> bool {
         let now = Instant::now();
         if self.map.len() >= Self::CAP && !self.map.contains_key(&id) {
             let mut v: Vec<_> = self.map.iter().map(|(k, (_, t))| (*t, *k)).collect();
@@ -241,6 +241,7 @@ pub struct ChatService {
     slots: Arc<Semaphore>,
     workers: Mutex<HashMap<[u8; 32], Worker>>,
     shutdown: watch::Sender<bool>,
+    groups: OnceLock<Arc<super::group::service::GroupService>>,
 }
 
 impl ChatService {
@@ -273,7 +274,7 @@ impl ChatService {
         };
         let (outbox, expired) = Outbox::open(
             &crate::paths::chat_outbox_file(chat_dir),
-            keys,
+            keys.clone(),
             store_settings,
             now_ms(),
         );
@@ -304,8 +305,12 @@ impl ChatService {
             slots: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
             workers: Mutex::new(HashMap::new()),
             shutdown,
+            groups: OnceLock::new(),
         });
         node.set_chat_handler(Arc::new(Handler(svc.clone())));
+        if let Some(g) = super::group::service::GroupService::start(&svc, seed, keys) {
+            let _ = svc.groups.set(g);
+        }
         // Whatever was waiting when the program last stopped.
         for peer in svc.core.outbox.peers() {
             svc.kick(&peer);
@@ -332,11 +337,23 @@ impl ChatService {
 
     pub fn shutdown(&self) {
         let _ = self.shutdown.send(true);
+        if let Some(g) = self.groups.get() {
+            g.shutdown();
+        }
         self.core.store.close();
     }
 
     pub fn core(&self) -> &Arc<ChatCore> {
         &self.core
+    }
+
+    pub fn node(&self) -> &Arc<IrohNode> {
+        &self.node
+    }
+
+    /// Group chat, which runs on the same endpoint and identity.
+    pub fn groups(&self) -> Option<&Arc<super::group::service::GroupService>> {
+        self.groups.get()
     }
 
     pub fn contacts(&self) -> &Arc<ContactStore> {
@@ -788,7 +805,7 @@ enum Outcome {
     ResetSession,
 }
 
-fn closed_with(conn: &Connection, code: u32) -> bool {
+pub(crate) fn closed_with(conn: &Connection, code: u32) -> bool {
     matches!(
         conn.close_reason(),
         Some(ConnectionError::ApplicationClosed(c)) if u64::from(c.error_code) == u64::from(code)
@@ -797,7 +814,7 @@ fn closed_with(conn: &Connection, code: u32) -> bool {
 
 /// The envelope ID at its fixed place in the bytes (3 bytes in), or zeros when
 /// the bytes are too short to hold one (the ack then carries no useful ID).
-fn envelope_id_of(wire: &[u8]) -> [u8; 16] {
+pub(crate) fn envelope_id_of(wire: &[u8]) -> [u8; 16] {
     wire.get(3..19)
         .and_then(|s| <[u8; 16]>::try_from(s).ok())
         .unwrap_or_else(rand::random)
