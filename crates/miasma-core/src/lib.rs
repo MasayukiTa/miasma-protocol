@@ -12,6 +12,7 @@
 
 pub mod chat;
 pub mod config;
+pub mod contacts_suggest;
 pub mod cover_traffic;
 pub mod crypto;
 pub mod daemon;

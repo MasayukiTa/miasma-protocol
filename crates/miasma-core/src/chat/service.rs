@@ -660,6 +660,7 @@ impl ChatService {
             match self.contacts.by_endpoint(&remote) {
                 Some(c) if c.allow_receive => {}
                 _ => {
+                    self.contacts.note_unknown(&remote);
                     let loud = self.unknown.lock().unwrap().allow(remote);
                     if loud {
                         debug!(peer = %fingerprint(&remote), "chat refused: not a contact that may write");

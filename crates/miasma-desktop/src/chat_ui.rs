@@ -15,7 +15,8 @@ use miasma_core::chat::{ChatRequest, ChatResponse};
 use miasma_core::push::ContactInfo;
 
 use crate::chat::*;
-use crate::locale::ChatStrings;
+use crate::contacts::{ContactsUi, FileStatus, SentFile};
+use crate::locale::{ChatStrings, ContactStrings};
 use crate::theme::{self, Palette};
 use crate::transfers::fill;
 use crate::ui_kit::{self as kit, Level};
@@ -56,6 +57,8 @@ pub enum ChatAction {
     OpenContacts,
     /// Pick files and send them to this contact (the Contacts tab's own flow).
     SendFiles(String),
+    /// Send this file to this contact again (a file line that did not go through).
+    RetryFile { contact_id: String, path: String },
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +96,10 @@ pub struct ChatUi {
     window: MessageWindow,
     thread_loaded: bool,
     notes: HashMap<String, Vec<FileNote>>,
+    /// Where each file note stands (by note id), read from the push rows every frame.
+    file_states: HashMap<String, FileStatus>,
+    /// A button on a file line was pressed; handed to the app at the end of the frame.
+    file_action: Option<ChatAction>,
     timeline: Vec<Entry>,
     timeline_dirty: bool,
     heights: HashMap<String, f32>,
@@ -162,6 +169,8 @@ impl Default for ChatUi {
             window: MessageWindow::default(),
             thread_loaded: false,
             notes: HashMap::new(),
+            file_states: HashMap::new(),
+            file_action: None,
             timeline: Vec::new(),
             timeline_dirty: false,
             heights: HashMap::new(),
@@ -240,17 +249,37 @@ impl ChatUi {
 
     /// Files were queued for `contact_id` from this screen: remember them for the conversation
     /// and its preview.
-    pub fn note_files_sent(&mut self, contact_id: &str, names: &[String]) {
-        if names.is_empty() {
+    pub fn note_files_sent(&mut self, contact_id: &str, files: &[SentFile]) {
+        if files.is_empty() {
             return;
         }
         if self.notes.len() >= 50 && !self.notes.contains_key(contact_id) {
             self.notes.clear();
         }
         let list = self.notes.entry(contact_id.to_owned()).or_default();
-        push_notes(list, names, now_ms());
+        push_notes(list, files, now_ms());
         self.timeline_dirty = true;
         self.list_dirty = true;
+    }
+
+    /// Read where each file line stands from the push rows. A line whose state changed is drawn
+    /// again at its new height.
+    pub fn refresh_file_states(&mut self, contacts: &ContactsUi, ct: &ContactStrings) {
+        let mut live: HashSet<&str> = HashSet::new();
+        for (cid, notes) in &self.notes {
+            for n in notes {
+                live.insert(n.id.as_str());
+                if n.path.is_empty() {
+                    continue;
+                }
+                let now = contacts.file_status(ct, cid, &n.path, n.at_ms);
+                if self.file_states.get(&n.id) != Some(&now) {
+                    self.heights.remove(&n.id);
+                    self.file_states.insert(n.id.clone(), now);
+                }
+            }
+        }
+        self.file_states.retain(|k, _| live.contains(k.as_str()));
     }
 
     fn clock(&self) -> Clock {
@@ -857,6 +886,9 @@ impl ChatUi {
         }
         self.picker_dialog(ui.ctx(), c, contacts);
         self.delete_dialog(ui.ctx(), c);
+        if action.is_none() {
+            action = self.file_action.take();
+        }
         action
     }
 
@@ -1136,6 +1168,9 @@ impl ChatUi {
         let has_older = self.window.has_older();
         let thread_loaded = self.thread_loaded;
         let mut retry: Option<(String, String)> = None;
+        let mut file_retry: Option<(String, String)> = None;
+        let file_states = &self.file_states;
+        let contact_id = o.contact_id.clone();
         let mut moved = false;
         // Messages whose rows really overlap the visible part (not the culling margin).
         let mut in_view: Vec<usize> = Vec::new();
@@ -1177,7 +1212,13 @@ impl ChatUi {
                     let r = ui.vertical(|ui| match *e {
                         Entry::Msg(i) => message_row(ui, c, &msgs[i], clock, bubble_w, relay_down),
                         Entry::File(i) => {
-                            file_row(ui, c, &notes[i], clock);
+                            let st = file_states
+                                .get(&notes[i].id)
+                                .cloned()
+                                .unwrap_or(FileStatus::Waiting);
+                            if file_row(ui, c, &notes[i], &st, clock) {
+                                file_retry = Some((contact_id.clone(), notes[i].path.clone()));
+                            }
                             None
                         }
                     });
@@ -1208,6 +1249,9 @@ impl ChatUi {
         }
         if let Some((id, text)) = retry {
             self.retry(&id, &text);
+        }
+        if let Some((contact_id, path)) = file_retry {
+            self.file_action = Some(ChatAction::RetryFile { contact_id, path });
         }
         // Near the top with more behind it: ask for the next older page.
         if self.thread_loaded
@@ -1443,7 +1487,7 @@ fn conversation_row(
         Stroke::new(1.0, p.border),
     );
     let inner = rect.shrink2(vec2(kit::SP_3, kit::SP_2));
-    let when_galley = single_line(ui, when, 12.5, p.faint, inner.width() * 0.4);
+    let when_galley = single_line(ui, when, kit::META_PX, p.muted, inner.width() * 0.4);
     let name_galley = single_line(
         ui,
         &name,
@@ -1469,7 +1513,7 @@ fn conversation_row(
     painter.galley(
         egui::pos2(inner.right() - when_galley.size().x, inner.top() + 2.0),
         when_galley,
-        p.faint,
+        p.muted,
     );
     painter.galley(
         egui::pos2(inner.left(), inner.top() + name_galley.size().y + 4.0),
@@ -1534,10 +1578,10 @@ fn message_row(
     let mut retry = None;
     ui.with_layout(layout, |ui| {
         if let Some(s) = state {
-            ui.label(RichText::new(s).small().color(state_color));
+            ui.label(kit::meta_text(s, state_color));
         }
         if !when.is_empty() {
-            ui.label(RichText::new(when).small().color(p.faint));
+            ui.label(kit::meta_text(when, p.muted));
         }
     });
     match delivery {
@@ -1548,19 +1592,15 @@ fn message_row(
                 } else {
                     c.queued_note
                 };
-                ui.label(RichText::new(note).small().color(p.faint));
+                ui.label(kit::meta_text(note, p.muted));
             });
         }
         Delivery::Failed => {
             ui.with_layout(layout, |ui| {
                 ui.set_max_width(bubble_w);
                 ui.add(
-                    egui::Label::new(
-                        RichText::new(fail_text(c, m.reason.as_deref()))
-                            .small()
-                            .color(p.danger),
-                    )
-                    .wrap(true),
+                    egui::Label::new(kit::meta_text(fail_text(c, m.reason.as_deref()), p.danger))
+                        .wrap(true),
                 );
             });
             ui.with_layout(layout, |ui| {
@@ -1576,20 +1616,40 @@ fn message_row(
     retry
 }
 
-/// A file sent from the chat screen, as a centred note.
-fn file_row(ui: &mut egui::Ui, c: &ChatStrings, note: &FileNote, clock: Clock) {
+/// A file sent from the chat screen, as a system line: a framed block across the column (not
+/// a bubble) that starts with the word "Status", so it is told apart from a message by its
+/// shape and its words and not only by colour. It says "sent" only when the push is done.
+/// Returns true when "send again" was pressed.
+fn file_row(
+    ui: &mut egui::Ui,
+    c: &ChatStrings,
+    note: &FileNote,
+    status: &FileStatus,
+    clock: Clock,
+) -> bool {
     let p = pal();
-    let text = fill(
-        c.preview_file,
-        &[("name", &elide(&one_line(&note.name, PREVIEW_CHARS), 80))],
-    );
-    ui.with_layout(Layout::top_down(Align::Center), |ui| {
-        ui.add(egui::Label::new(RichText::new(text).color(p.muted)).wrap(true));
-        let when = when_message(c, note.at_ms, clock);
-        if !when.is_empty() {
-            ui.label(RichText::new(when).small().color(p.faint));
-        }
-    });
+    let line = format!("{} | {}", c.system_label, file_line(c, &note.name, status));
+    let mut retry = false;
+    egui::Frame::none()
+        .fill(p.surface_subtle)
+        .stroke(Stroke::new(1.0, p.border_strong))
+        .rounding(6.0)
+        .inner_margin(egui::Margin::symmetric(kit::SP_3, kit::SP_2))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.add(egui::Label::new(kit::meta_text(line, p.text)).wrap(true));
+            if let FileStatus::Failed { reason } = status {
+                ui.add(egui::Label::new(kit::meta_text(reason.as_str(), p.danger)).wrap(true));
+                if ui.add(kit::secondary_button(c.retry)).clicked() {
+                    retry = true;
+                }
+            }
+            let when = when_message(c, note.at_ms, clock);
+            if !when.is_empty() {
+                ui.label(kit::meta_text(when, p.muted));
+            }
+        });
+    retry
 }
 
 // ─── Dev-only screenshot fixtures ───────────────────────────────────────────

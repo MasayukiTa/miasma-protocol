@@ -385,6 +385,51 @@ async fn unregistered_sender_is_rejected_and_nothing_is_written() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_refused_stranger_is_suggested_and_added_with_both_permissions_off() {
+    let relay = relay().await;
+    let alice = peer(&relay, |_| {}).await;
+    let bob = peer(&relay, |_| {}).await;
+    register(&alice, &bob, "bob"); // bob never registers alice
+    let suggestions = |p: &Peer| match handle_with(&p.svc, PushRequest::Suggestions) {
+        PushResponse::Suggestions(v) => v,
+        other => panic!("{other:?}"),
+    };
+    assert!(suggestions(&bob).is_empty());
+
+    let src = write_src(alice.dir.path(), "hello.txt", b"hello");
+    let id = alice.svc.queue_send("bob", &src).unwrap();
+    let t = wait_finished(&alice.svc, &id, 60).await;
+    assert_eq!(t.state, PushState::Rejected);
+
+    // However often alice knocks, bob has one entry for her; she knows nothing about it.
+    let list = suggestions(&bob);
+    assert_eq!(list.len(), 1, "{list:?}");
+    assert_eq!(list[0].endpoint_id, hex::encode(alice.id()));
+    assert_eq!(list[0].short_id.chars().count(), 5);
+    assert!(suggestions(&alice).is_empty());
+
+    // Adding from the suggestion starts with sending and receiving off, and clears the entry.
+    let PushResponse::Contact(c) = handle_with(
+        &bob.svc,
+        PushRequest::ContactAddOff {
+            code: list[0].code.clone(),
+            label: Some("alice".into()),
+        },
+    ) else {
+        panic!()
+    };
+    assert!(!c.allow_send && !c.allow_receive);
+    assert!(suggestions(&bob).is_empty());
+
+    // A contact whose receive switch is off is not a stranger: no new suggestion.
+    let src2 = write_src(alice.dir.path(), "again.txt", b"hello");
+    let id2 = alice.svc.queue_send("bob", &src2).unwrap();
+    let t2 = wait_finished(&alice.svc, &id2, 60).await;
+    assert_eq!(t2.state, PushState::Rejected);
+    assert!(suggestions(&bob).is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn allow_receive_false_is_rejected() {
     let relay = relay().await;
     let alice = peer(&relay, |_| {}).await;

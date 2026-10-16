@@ -26,6 +26,14 @@ pub enum PushRequest {
         code: String,
         label: Option<String>,
     },
+    /// [`ContactAdd`](Self::ContactAdd) for a peer taken from the suggestions: the contact is
+    /// created with sending and receiving both switched off, until the person turns them on.
+    ContactAddOff {
+        code: String,
+        label: Option<String>,
+    },
+    /// Peers that tried to reach this node without being a contact (memory only, newest first).
+    Suggestions,
     ContactList,
     /// `contact` is a label, id, or endpoint ID.
     ContactRemove {
@@ -89,6 +97,7 @@ pub enum PushResponse {
     Contact(ContactInfo),
     Contacts(Vec<ContactInfo>),
     Removed,
+    Suggestions(Vec<crate::contacts_suggest::SuggestionInfo>),
     Queued {
         id: String,
     },
@@ -187,24 +196,18 @@ pub fn handle_with(
                 code: code.to_string(),
             }
         }
-        PushRequest::ContactAdd { code, label } => {
-            let text = extract_contact_code(&code)
-                .or_else(|| ContactCode::parse(&code).ok().map(|c| c.to_string()));
-            let Some(text) = text else {
-                let why = ContactCode::parse(code.trim())
-                    .err()
-                    .map(|e| e.to_string())
-                    .unwrap_or_else(|| "no contact code found in the text".into());
-                return err("bad_code", why);
-            };
-            let Ok(parsed) = ContactCode::parse(&text) else {
-                return err("bad_code", "the contact code is not valid");
-            };
-            match svc.add_contact(&parsed, label.as_deref()) {
-                Ok(c) => PushResponse::Contact(info(&c)),
-                Err(e) => contact_err(e),
-            }
+        PushRequest::ContactAdd { code, label } => add_contact(svc, &code, label.as_deref(), true),
+        PushRequest::ContactAddOff { code, label } => {
+            add_contact(svc, &code, label.as_deref(), false)
         }
+        PushRequest::Suggestions => PushResponse::Suggestions(
+            svc.contacts()
+                .unknown()
+                .list()
+                .iter()
+                .map(crate::contacts_suggest::SuggestionInfo::from)
+                .collect(),
+        ),
         PushRequest::ContactList => {
             PushResponse::Contacts(svc.contacts().list().iter().map(&info).collect())
         }
@@ -258,5 +261,34 @@ pub fn handle_with(
         PushRequest::Inbox => PushResponse::Inbox {
             dir: svc.inbox_dir().to_string_lossy().into_owned(),
         },
+    }
+}
+
+/// Parse a pasted contact code and register it, with sending and receiving on or off.
+#[cfg(feature = "iroh")]
+fn add_contact(
+    svc: &std::sync::Arc<super::service::PushService>,
+    code: &str,
+    label: Option<&str>,
+    allowed: bool,
+) -> PushResponse {
+    let text =
+        extract_contact_code(code).or_else(|| ContactCode::parse(code).ok().map(|c| c.to_string()));
+    let Some(text) = text else {
+        let why = ContactCode::parse(code.trim())
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "no contact code found in the text".into());
+        return err("bad_code", why);
+    };
+    let Ok(parsed) = ContactCode::parse(&text) else {
+        return err("bad_code", "the contact code is not valid");
+    };
+    match svc.add_contact_with(&parsed, label, allowed) {
+        Ok(c) => PushResponse::Contact(ContactInfo {
+            default_max_file_size: svc.default_max_file_size(),
+            ..contact_info(&c, svc.contact_dir(&c.label).to_string_lossy().into_owned())
+        }),
+        Err(e) => contact_err(e),
     }
 }

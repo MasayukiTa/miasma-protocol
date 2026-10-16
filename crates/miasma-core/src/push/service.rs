@@ -297,6 +297,17 @@ impl PushService {
         self.contacts.add(code, label, Some(&self.own_id))
     }
 
+    /// [`add_contact`](Self::add_contact) with sending and receiving both set to `allowed`.
+    pub fn add_contact_with(
+        &self,
+        code: &ContactCode,
+        label: Option<&str>,
+        allowed: bool,
+    ) -> Result<Contact, ContactError> {
+        self.contacts
+            .add_with(code, label, Some(&self.own_id), allowed)
+    }
+
     pub fn update_contact(
         &self,
         selector: &str,
@@ -1119,6 +1130,7 @@ impl PushService {
             let contact = match self.contacts.by_endpoint(&remote) {
                 Some(c) if c.allow_receive => c,
                 _ => {
+                    self.contacts.note_unknown(&remote);
                     let loud = self.limiter.lock().unwrap().allow(remote);
                     if loud {
                         debug!(peer = %fingerprint(&remote), "push refused: not a contact that may send");

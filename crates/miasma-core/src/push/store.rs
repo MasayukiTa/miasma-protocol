@@ -101,6 +101,8 @@ pub struct ContactStore {
     keys: Option<StateKeys>,
     locked: String,
     inner: RwLock<Vec<Contact>>,
+    /// Peers refused for not being contacts (memory only), shared by chat and push.
+    unknown: crate::contacts_suggest::UnknownPeers,
 }
 
 /// Fields a caller may change.
@@ -161,6 +163,7 @@ impl ContactStore {
             keys,
             locked,
             inner: RwLock::new(contacts),
+            unknown: crate::contacts_suggest::UnknownPeers::new(),
         }
     }
 
@@ -250,6 +253,19 @@ impl ContactStore {
             .cloned()
     }
 
+    /// Peers that were refused for not being contacts.
+    pub fn unknown(&self) -> &crate::contacts_suggest::UnknownPeers {
+        &self.unknown
+    }
+
+    /// A refused peer: remembered for the suggestion list only when it is not a contact at all
+    /// (a contact whose permission is off is not a stranger).
+    pub fn note_unknown(&self, id: &[u8; 32]) {
+        if self.by_endpoint(id).is_none() {
+            self.unknown.record(*id);
+        }
+    }
+
     /// The contact whose endpoint ID is `id`, whatever its permissions.
     pub fn by_endpoint(&self, id: &[u8; 32]) -> Option<Contact> {
         let hex = hex::encode(id);
@@ -267,6 +283,18 @@ impl ContactStore {
         code: &ContactCode,
         label: Option<&str>,
         own_id: Option<&[u8; 32]>,
+    ) -> Result<Contact, ContactError> {
+        self.add_with(code, label, own_id, true)
+    }
+
+    /// [`add`](Self::add) with both permissions set to `allowed` from the first moment, so a
+    /// contact taken from a suggestion can start with sending and receiving switched off.
+    pub fn add_with(
+        &self,
+        code: &ContactCode,
+        label: Option<&str>,
+        own_id: Option<&[u8; 32]>,
+        allowed: bool,
     ) -> Result<Contact, ContactError> {
         if own_id == Some(code.endpoint_id()) {
             return Err(ContactError::ThisIsMe);
@@ -291,11 +319,12 @@ impl ContactStore {
             label,
             endpoint_id: hexid,
             added_at: now_secs(),
-            allow_receive: true,
-            allow_send: true,
+            allow_receive: allowed,
+            allow_send: allowed,
             max_file_size: None,
         };
         g.push(contact.clone());
+        self.unknown.forget(code.endpoint_id());
         self.save_locked(&g)?;
         Ok(contact)
     }
