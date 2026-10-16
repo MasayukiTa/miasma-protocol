@@ -797,6 +797,7 @@ async fn start_iroh(
                 &seed,
                 push.contacts().clone(),
             );
+            iroh.spawn_relay_watchdog();
             iroh_direct::register_node(data_dir, iroh);
             true
         }

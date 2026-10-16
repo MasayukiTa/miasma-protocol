@@ -38,6 +38,10 @@ pub mod obfuscated;
 pub mod payload;
 pub mod proxy;
 pub mod reality;
+#[cfg(feature = "iroh")]
+pub mod relay_tls;
+#[cfg(feature = "iroh")]
+pub mod relay_watchdog;
 pub mod shadowsocks;
 pub mod tor;
 pub mod websocket;

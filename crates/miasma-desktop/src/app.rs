@@ -92,6 +92,7 @@ pub struct MiasmaApp {
     // Status (from daemon)
     peer_id: String,
     peer_count: usize,
+    relay_down: Option<crate::worker::RelayDown>,
     share_count: usize,
     used_mb: f64,
     quota_mb: u64,
@@ -374,6 +375,7 @@ impl MiasmaApp {
             import_mids: Vec::new(),
             peer_id: String::new(),
             peer_count: 0,
+            relay_down: None,
             share_count: 0,
             used_mb: 0.0,
             quota_mb: 0,
@@ -662,8 +664,11 @@ impl MiasmaApp {
                     proxy_type,
                     obfs_quic_port,
                     transport_statuses,
+                    relay_down,
                 } => {
                     self.busy = false;
+                    self.chat.relay_down = relay_down.is_some();
+                    self.relay_down = relay_down;
                     self.peer_id = peer_id;
                     self.peer_count = peer_count;
                     self.share_count = share_count;
@@ -1778,6 +1783,9 @@ impl MiasmaApp {
             kit::kv_grid(ui, |g| {
                 g.text(s.status_items_stored, &self.share_count.to_string());
                 g.text(s.status_peers, &self.peer_count.to_string());
+                if let Some(r) = &self.relay_down {
+                    g.text(s.status_relay, &relay_down_text(s, r));
+                }
                 if self.quota_mb > 0 {
                     g.row(s.status_used, |ui| self.storage_usage(ui));
                 }
@@ -1833,6 +1841,9 @@ impl MiasmaApp {
                     }
                 });
                 g.text(s.status_peers, &self.peer_count.to_string());
+                if let Some(r) = &self.relay_down {
+                    g.text(s.status_relay, &relay_down_text(s, r));
+                }
                 if !self.listen_addrs.is_empty() {
                     g.row(s.status_listening, |ui| {
                         for addr in &self.listen_addrs {
@@ -2487,6 +2498,37 @@ impl MiasmaApp {
 
 // ─── Small helpers ──────────────────────────────────────────────────────────
 
+/// "Not connected for 3 h 12 min: <cause>" in the window's language.
+pub(crate) fn relay_down_text(s: &Strings, r: &crate::worker::RelayDown) -> String {
+    use miasma_core::transport::relay_watchdog::RelayCause as C;
+    let span = match r.secs {
+        0..=59 => s.relay_down_s.replace("{n}", &r.secs.to_string()),
+        60..=3599 => s.relay_down_min.replace("{n}", &(r.secs / 60).to_string()),
+        _ => s
+            .relay_down_h
+            .replace("{h}", &(r.secs / 3600).to_string())
+            .replace("{m}", &(r.secs % 3600 / 60).to_string()),
+    };
+    let why = match r.cause {
+        C::Dns => s.relay_cause_dns,
+        C::Timeout => s.relay_cause_timeout,
+        C::Tls => s.relay_cause_tls,
+        C::Denied => s.relay_cause_denied,
+        C::Other => s.relay_cause_other,
+    };
+    let mut out = format!("{span}: {why}");
+    if let Some(i) = &r.inspected {
+        let tpl = if i.trusted {
+            s.relay_cert_trusted
+        } else {
+            s.relay_cert_untrusted
+        };
+        out.push_str("\n");
+        out.push_str(&tpl.replace("{ca}", &i.issuer));
+    }
+    out
+}
+
 fn format_epoch(epoch_secs: u64, locale: Locale) -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let now = SystemTime::now()
@@ -2961,6 +3003,39 @@ mod tests {
             initial_tab(&LaunchIntent::TorrentFile("a.torrent".into())),
             Tab::Import
         );
+    }
+
+    #[test]
+    fn the_relay_status_line_says_time_and_cause_in_every_locale() {
+        use crate::worker::{Inspected, RelayDown};
+        use miasma_core::transport::relay_watchdog::RelayCause;
+        let down = RelayDown {
+            secs: 11_520,
+            cause: RelayCause::Tls,
+            inspected: Some(Inspected {
+                issuer: "Test Inspection CA".into(),
+                trusted: false,
+            }),
+        };
+        let en = relay_down_text(locale::strings(Locale::En), &down);
+        assert!(en.contains("3 h 12 min"), "{en}");
+        assert!(en.contains("certificate was not accepted"), "{en}");
+        assert!(en.contains("Test Inspection CA"), "{en}");
+        for lang in Locale::ALL {
+            let text = relay_down_text(locale::strings(lang), &down);
+            assert!(
+                text.contains("3") && text.contains("12"),
+                "{lang:?}: {text}"
+            );
+            assert!(text.contains("Test Inspection CA"), "{lang:?}: {text}");
+        }
+        let fresh = RelayDown {
+            secs: 5,
+            cause: RelayCause::Dns,
+            inspected: None,
+        };
+        let en = relay_down_text(locale::strings(Locale::En), &fresh);
+        assert!(en.contains("5 s") && en.contains("DNS"), "{en}");
     }
 
     #[test]

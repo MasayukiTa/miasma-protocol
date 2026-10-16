@@ -373,6 +373,12 @@ pub struct TransportConfig {
     /// can only reach senders through `iroh_relay_urls`.
     #[serde(default = "default_true")]
     pub iroh_discovery: bool,
+    /// Path to a PEM or DER file with extra CA certificate(s) trusted for the
+    /// relay's and discovery service's TLS, on top of the OS certificate store.
+    /// For a network that re-signs HTTPS (TLS inspection) when the OS store
+    /// cannot be read by the program. Takes effect when the daemon starts.
+    #[serde(default)]
+    pub iroh_extra_ca_pem: Option<String>,
     /// Announce this node on, and look senders up in, the local network (mDNS),
     /// so two machines on one LAN connect without the internet. The announcement
     /// carries the endpoint ID and the LAN addresses and is visible to the whole
@@ -443,6 +449,7 @@ impl Default for TransportConfig {
             iroh_mode: IrohMode::default(),
             iroh_relay_urls: Vec::new(),
             iroh_discovery: true,
+            iroh_extra_ca_pem: None,
             iroh_lan_discovery: true,
             iroh_connect_timeout_secs: DEFAULT_IROH_CONNECT_TIMEOUT_SECS,
             wss_port: 0,
@@ -470,6 +477,7 @@ impl fmt::Debug for TransportConfig {
             .field("iroh_mode", &self.iroh_mode)
             .field("iroh_relay_urls", &self.iroh_relay_urls)
             .field("iroh_discovery", &self.iroh_discovery)
+            .field("iroh_extra_ca_pem", &self.iroh_extra_ca_pem)
             .field("iroh_lan_discovery", &self.iroh_lan_discovery)
             .field("iroh_connect_timeout_secs", &self.iroh_connect_timeout_secs)
             .field("wss_port", &self.wss_port)

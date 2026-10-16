@@ -115,6 +115,17 @@ pub struct Strings {
     pub status_state_not_init: &'static str,
     pub status_peer_id: &'static str,
     pub status_peers: &'static str,
+    pub status_relay: &'static str,
+    pub relay_down_s: &'static str,
+    pub relay_down_min: &'static str,
+    pub relay_down_h: &'static str,
+    pub relay_cause_dns: &'static str,
+    pub relay_cause_timeout: &'static str,
+    pub relay_cause_tls: &'static str,
+    pub relay_cause_denied: &'static str,
+    pub relay_cause_other: &'static str,
+    pub relay_cert_trusted: &'static str,
+    pub relay_cert_untrusted: &'static str,
     pub status_listening: &'static str,
     pub status_storage: &'static str,
     pub status_shares: &'static str,
@@ -405,6 +416,17 @@ static EN: Strings = Strings {
     status_state_not_init: "Not initialized",
     status_peer_id: "Peer ID:",
     status_peers: "Peers:",
+    status_relay: "Relay:",
+    relay_down_s: "Not connected for {n} s",
+    relay_down_min: "Not connected for {n} min",
+    relay_down_h: "Not connected for {h} h {m} min",
+    relay_cause_dns: "this computer cannot look up the relay's address (DNS)",
+    relay_cause_timeout: "the relay did not answer in time",
+    relay_cause_tls: "the relay's certificate was not accepted (a network that inspects traffic?)",
+    relay_cause_denied: "the relay refused this computer",
+    relay_cause_other: "the connection to the relay failed",
+    relay_cert_trusted: "This network re-signs secure connections (certificate from \"{ca}\", not a public CA). This computer trusts that CA.",
+    relay_cert_untrusted: "This network re-signs secure connections (certificate from \"{ca}\", not a public CA) and this computer does not trust that CA. Install the CA in the system certificate store, or set transport.iroh_extra_ca_pem.",
     status_listening: "Listening:",
     status_storage: "Storage",
     status_shares: "Shares:",
@@ -669,6 +691,17 @@ static JA: Strings = Strings {
     status_state_not_init: "未初期化",
     status_peer_id: "ピアID:",
     status_peers: "ピア数:",
+    status_relay: "リレー:",
+    relay_down_s: "{n} 秒間つながっていません",
+    relay_down_min: "{n} 分間つながっていません",
+    relay_down_h: "{h} 時間 {m} 分間つながっていません",
+    relay_cause_dns: "このコンピューターがリレーのアドレスを引けません (DNS)",
+    relay_cause_timeout: "リレーが時間内に応答しません",
+    relay_cause_tls: "リレーの証明書が受け入れられませんでした (通信を検査するネットワークでは?)",
+    relay_cause_denied: "リレーがこのコンピューターを拒否しました",
+    relay_cause_other: "リレーへの接続に失敗しました",
+    relay_cert_trusted: "このネットワークは安全な通信を再署名しています(証明書の発行元「{ca}」は公開 CA ではありません)。このコンピューターはその CA を信頼しています。",
+    relay_cert_untrusted: "このネットワークは安全な通信を再署名しています(証明書の発行元「{ca}」は公開 CA ではありません)。このコンピューターはその CA を信頼していません。CA をシステムの証明書ストアに入れるか、transport.iroh_extra_ca_pem を設定してください。",
     status_listening: "リッスン:",
     status_storage: "ストレージ",
     status_shares: "シェア数:",
@@ -933,6 +966,17 @@ static ZH_CN: Strings = Strings {
     status_state_not_init: "未初始化",
     status_peer_id: "节点ID：",
     status_peers: "节点数：",
+    status_relay: "中继：",
+    relay_down_s: "已断开 {n} 秒",
+    relay_down_min: "已断开 {n} 分钟",
+    relay_down_h: "已断开 {h} 小时 {m} 分钟",
+    relay_cause_dns: "本机无法解析中继服务器的地址 (DNS)",
+    relay_cause_timeout: "中继服务器未在时限内响应",
+    relay_cause_tls: "中继服务器的证书未被接受（网络是否在检查流量？）",
+    relay_cause_denied: "中继服务器拒绝了本机",
+    relay_cause_other: "无法连接到中继服务器",
+    relay_cert_trusted: "此网络会重新签署加密连接（证书由“{ca}”签发，并非公共 CA）。本机信任该 CA。",
+    relay_cert_untrusted: "此网络会重新签署加密连接（证书由“{ca}”签发，并非公共 CA），本机不信任该 CA。请将该 CA 安装到系统证书存储，或设置 transport.iroh_extra_ca_pem。",
     status_listening: "监听：",
     status_storage: "存储",
     status_shares: "分片数：",
@@ -1956,7 +2000,7 @@ contact_strings! {
     st_rejected, st_cancelled,
     btn_cancel, btn_retry, btn_open_file, btn_show_folder, btn_clear_finished, eta,
     rej_too_large, rej_no_space, rej_not_allowed, rej_busy, rej_bad_name, rej_bad_request,
-    fail_unreachable, fail_other, fail_lost_in, fail_peer_cancelled,
+    fail_unreachable, fail_relay_down, fail_other, fail_lost_in, fail_peer_cancelled,
     max_size_default_hint, eta_sec, eta_min, eta_min_even, eta_hour, eta_hour_even, eta_day,
     inbox_title, inbox_dir, open_folder, inbox_note, arrival_toast, queued_toast, nav_new, dismiss,
     qr_too_long,
@@ -2068,6 +2112,7 @@ static CT_EN: ContactStrings = ContactStrings {
     rej_bad_name: "They did not accept the file name. Rename the file and try again.",
     rej_bad_request: "They could not understand the request. The two Miasma versions may differ.",
     fail_unreachable: "Could not reach the other person. Check that their Miasma is running. If they are online, their network may be blocking direct connections.",
+    fail_relay_down: "This computer is not connected to the relay, so the file cannot be sent yet. See Node Status.",
     fail_other: "The transfer failed",
     fail_lost_in: "The connection was interrupted. If the other person sends it again, it continues where it stopped.",
     fail_peer_cancelled: "The sender cancelled this transfer.",
@@ -2187,6 +2232,7 @@ static CT_JA: ContactStrings = ContactStrings {
     rej_bad_name: "相手が、このファイル名を受け付けませんでした。ファイル名を変えて、もう一度試してください。",
     rej_bad_request: "相手が要求を理解できませんでした。お互いのMiasmaのバージョンが違うのかもしれません。",
     fail_unreachable: "相手に届きませんでした。相手のMiasmaが起動しているか確認してください。相手が起動しているのに届かないときは、ネットワークが直接の通信を止めているかもしれません。",
+    fail_relay_down: "このコンピューターがリレーに接続できていないため、まだ送れません。「ノードステータス」を確認してください。",
     fail_other: "転送に失敗しました",
     fail_lost_in: "通信が途切れました。相手が再び送ると、続きから受け取れます。",
     fail_peer_cancelled: "相手が転送を中止しました。",
@@ -2307,6 +2353,7 @@ static CT_ZH_CN: ContactStrings = ContactStrings {
     rej_bad_name: "对方不接受这个文件名。请重命名文件后重试。",
     rej_bad_request: "对方无法理解该请求。双方的 Miasma 版本可能不同。",
     fail_unreachable: "无法连接到对方。请确认对方的 Miasma 正在运行。如果对方在线仍无法连接，可能是网络阻止了直接连接。",
+    fail_relay_down: "本机未连接到中继服务器，暂时无法发送。请查看“节点状态”。",
     fail_other: "传输失败",
     fail_lost_in: "连接中断了。如果对方重新发送，会从中断处继续。",
     fail_peer_cancelled: "发送方取消了此传输。",
@@ -2353,7 +2400,7 @@ chat_strings! {
     preview_you, preview_file, time_today, time_yesterday, time_date,
     back, empty_thread, composer_hint, composer_keys, send, send_empty_hint,
     counter_chars, counter_near, counter_over, too_long_note,
-    state_sending, state_queued, state_delivered, state_failed, retry, queued_note,
+    state_sending, state_queued, state_delivered, state_failed, retry, queued_note, queued_note_relay,
     fail_not_allowed, fail_too_big, fail_rejected, fail_unsupported, fail_contact_removed,
     fail_send_disabled, fail_expired, fail_session, fail_other,
     delete_history, delete_title, delete_body, delete_confirm, delete_cancel, delete_done,
@@ -2412,6 +2459,7 @@ static CH_EN: ChatStrings = ChatStrings {
     state_failed: "Could not send",
     retry: "Send again",
     queued_note: "It will arrive when the other person is online.",
+    queued_note_relay: "This computer is not connected to the relay, so this cannot go out yet. See Node Status.",
     fail_not_allowed: "They have not added you yet. Ask them to add your contact code in their Miasma.",
     fail_too_big: "The message was too long for the other side.",
     fail_rejected: "The other side did not accept the message.",
@@ -2497,6 +2545,7 @@ static CH_JA: ChatStrings = ChatStrings {
     state_failed: "送信に失敗しました",
     retry: "もう一度送る",
     queued_note: "相手がオンラインになると届きます。",
+    queued_note_relay: "このコンピューターがリレーに接続できていないため、まだ送れません。「ノードステータス」を確認してください。",
     fail_not_allowed: "相手はまだあなたを登録していません。相手のMiasmaで、あなたの連絡先コードを追加してもらってください。",
     fail_too_big: "メッセージが長すぎて、相手が受け取れませんでした。",
     fail_rejected: "相手がメッセージを受け付けませんでした。",
@@ -2583,6 +2632,7 @@ static CH_ZH_CN: ChatStrings = ChatStrings {
     state_failed: "发送失败",
     retry: "重新发送",
     queued_note: "对方上线后即可收到。",
+    queued_note_relay: "本机未连接到中继服务器，暂时无法发出。请查看“节点状态”。",
     fail_not_allowed: "对方还没有添加你。请让对方在其 Miasma 中添加你的联系人码。",
     fail_too_big: "消息太长，对方无法接收。",
     fail_rejected: "对方没有接受这条消息。",
@@ -3029,6 +3079,27 @@ mod tests {
             assert!(
                 !s.dashboard_quick_status.is_empty(),
                 "{lang:?} dashboard_quick_status empty"
+            );
+        }
+    }
+
+    #[test]
+    fn relay_status_placeholders_survive_translation() {
+        for lang in Locale::ALL {
+            let s = strings(lang);
+            assert!(s.relay_down_s.contains("{n}"), "{lang:?} relay_down_s");
+            assert!(s.relay_down_min.contains("{n}"), "{lang:?} relay_down_min");
+            assert!(
+                s.relay_down_h.contains("{h}") && s.relay_down_h.contains("{m}"),
+                "{lang:?} relay_down_h"
+            );
+            assert!(
+                s.relay_cert_trusted.contains("{ca}"),
+                "{lang:?} relay_cert_trusted"
+            );
+            assert!(
+                s.relay_cert_untrusted.contains("{ca}"),
+                "{lang:?} relay_cert_untrusted"
             );
         }
     }
