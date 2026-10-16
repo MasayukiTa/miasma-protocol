@@ -777,6 +777,19 @@ pub struct IrohStatus {
     pub last_error: Option<String>,
     /// Whether n0's discovery service is used.
     pub discovery: bool,
+    /// Seconds since the relay was last connected (`None` while it is up).
+    #[serde(default)]
+    pub relay_down_secs: Option<u64>,
+    /// Times the watchdog refreshed the endpoint's network state.
+    #[serde(default)]
+    pub relay_refreshes: u32,
+    /// Times the watchdog rebuilt the endpoint.
+    #[serde(default)]
+    pub relay_rebuilds: u32,
+    /// The certificate the relay presents on this network, read while the relay
+    /// is down (`None` while it is up or when it could not be read).
+    #[serde(default)]
+    pub relay_cert: Option<crate::transport::relay_tls::RelayCert>,
 }
 
 /// Snapshot of daemon state — returned for `miasma status` and IPC calls.

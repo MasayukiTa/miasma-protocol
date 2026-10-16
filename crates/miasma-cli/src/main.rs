@@ -916,17 +916,50 @@ async fn cmd_status(data_dir: &std::path::Path) -> Result<()> {
                 println!("  WSS share server:    127.0.0.1:{}{}", s.wss_port, tls_tag);
             }
             match &s.iroh {
-                Some(i) => println!(
-                    "  {}",
-                    Msg::StatusIroh {
-                        mode: i.mode.clone(),
-                        endpoint: i.endpoint_id.chars().take(12).collect(),
-                        relay: i.home_relay.clone(),
-                        connected: i.relay_connected,
-                        error: i.last_error.clone(),
+                Some(i) => {
+                    println!(
+                        "  {}",
+                        Msg::StatusIroh {
+                            mode: i.mode.clone(),
+                            endpoint: i.endpoint_id.chars().take(12).collect(),
+                            relay: i.home_relay.clone(),
+                            connected: i.relay_connected,
+                            error: i.last_error.clone(),
+                        }
+                        .t()
+                    );
+                    if let (false, Some(secs)) = (i.relay_connected, i.relay_down_secs) {
+                        use miasma_core::transport::relay_watchdog::RelayCause;
+                        let kind = match RelayCause::classify(i.last_error.as_deref().unwrap_or(""))
+                        {
+                            RelayCause::Dns => "dns",
+                            RelayCause::Timeout => "timeout",
+                            RelayCause::Tls => "tls",
+                            RelayCause::Denied => "denied",
+                            RelayCause::Other => "other",
+                        };
+                        println!(
+                            "{}",
+                            Msg::StatusIrohRelayDown {
+                                secs,
+                                kind: kind.to_owned(),
+                                refreshes: i.relay_refreshes,
+                                rebuilds: i.relay_rebuilds,
+                            }
+                            .t()
+                        );
+                        if let Some(c) = i.relay_cert.as_ref().filter(|c| !c.public_ca) {
+                            println!(
+                                "{}",
+                                Msg::StatusIrohRelayCert {
+                                    issuer: c.issuer.clone(),
+                                    trusted: c.trusted,
+                                }
+                                .t()
+                            );
+                        }
                     }
-                    .t()
-                ),
+                }
                 None => println!("  {}", Msg::StatusIrohOff.t()),
             }
             if s.obfs_quic_port > 0 {
@@ -1744,6 +1777,12 @@ fn cmd_config_loaded(
                     }
                 }
                 "transport.iroh_discovery" => println!("{}", config.transport.iroh_discovery),
+                "transport.iroh_extra_ca_pem" => {
+                    println!(
+                        "{}",
+                        config.transport.iroh_extra_ca_pem.as_deref().unwrap_or("")
+                    )
+                }
                 "transport.iroh_lan_discovery" => {
                     println!("{}", config.transport.iroh_lan_discovery)
                 }
@@ -1863,6 +1902,16 @@ fn cmd_config_loaded(
                 }
                 "transport.iroh_discovery" => {
                     config.transport.iroh_discovery = v.parse().context("expected bool")?;
+                }
+                "transport.iroh_extra_ca_pem" => {
+                    // A path to a PEM or DER file; empty clears it.
+                    if v.is_empty() {
+                        config.transport.iroh_extra_ca_pem = None;
+                    } else if std::path::Path::new(v).is_file() {
+                        config.transport.iroh_extra_ca_pem = Some(v.to_owned());
+                    } else {
+                        bail!("expected the path of an existing PEM or DER certificate file");
+                    }
                 }
                 "transport.iroh_lan_discovery" => {
                     config.transport.iroh_lan_discovery = v.parse().context("expected bool")?;

@@ -42,6 +42,8 @@ rustls-pemfile.workspace = true
 tokio-socks.workspace = true
 quinn.workspace = true
 rcgen = "0.13"
+# Reads the issuer of the relay certificate for the status (relay_tls).
+x509-parser = "0.18"
 subtle = "2"
 argon2.workspace = true
 hyper.workspace = true

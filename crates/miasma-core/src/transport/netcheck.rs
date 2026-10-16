@@ -63,6 +63,11 @@ pub enum Note {
     ProxyInUse,
     RelayTcpButNoRelay,
     TunnelApiUnreachable,
+    /// The relay presents a certificate from a CA that is not a public one
+    /// (the network re-signs HTTPS) and this computer does not trust it.
+    RelayCertUntrusted,
+    /// Same, and this computer trusts it (the OS store or the extra CA has it).
+    RelayCertInspectedButTrusted,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -79,6 +84,8 @@ pub struct NetcheckReport {
     /// `(relay URL, round trip in ms)`.
     pub relay_latency: Vec<(String, u64)>,
     pub proxy_from_env: bool,
+    /// The relay's certificate, read with the TLS settings the daemon uses.
+    pub relay_cert: Option<super::relay_tls::RelayCert>,
     pub tcp: Vec<TcpProbe>,
     pub verdict: Verdict,
     pub notes: Vec<Note>,
@@ -136,6 +143,25 @@ pub async fn run_netcheck(
     tcp.push(probe_tcp(TUNNEL_HOST, 443, Duration::from_secs(6)).await);
 
     let proxy = settings.proxy_from_env;
+    // The same TLS settings as the endpoint's (`ca_tls_config`, same extra CA),
+    // so this and the daemon cannot disagree about the certificate.
+    let relay_cert = if proxy {
+        None
+    } else {
+        let extra = match &settings.ca_pem {
+            Some(pem) => super::iroh_direct::parse_ca_roots(pem).unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let tls = super::iroh_direct::ca_tls_config(extra);
+        let mut found = None;
+        for h in &hosts {
+            if let Ok(c) = super::relay_tls::probe(h, 443, &tls, Duration::from_secs(8)).await {
+                found = Some(c);
+                break;
+            }
+        }
+        found
+    };
     let any_relay_tcp = tcp[..tcp.len() - 1].iter().any(|p| p.ok);
     let tunnel_tcp = tcp.last().is_some_and(|p| p.ok);
     let (verdict, notes) = judge(
@@ -147,6 +173,16 @@ pub async fn run_netcheck(
         tunnel_tcp,
         proxy,
     );
+    let mut notes = notes;
+    if let Some(c) = &relay_cert {
+        if !c.public_ca {
+            notes.push(if c.trusted {
+                Note::RelayCertInspectedButTrusted
+            } else {
+                Note::RelayCertUntrusted
+            });
+        }
+    }
     Ok(NetcheckReport {
         udp_v4,
         udp_v6,
@@ -156,6 +192,7 @@ pub async fn run_netcheck(
         preferred_relay,
         relay_latency,
         proxy_from_env: proxy,
+        relay_cert,
         tcp,
         verdict,
         notes,

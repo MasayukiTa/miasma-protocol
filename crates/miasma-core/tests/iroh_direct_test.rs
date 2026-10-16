@@ -1269,3 +1269,41 @@ async fn n0_public_relay_only_connects_through_the_relay_with_the_os_trust_store
     .await
     .expect("timed out");
 }
+
+/// A rebuilt endpoint (what the relay watchdog does) keeps the endpoint ID, the
+/// accept loop answers on it, and a different key is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rebuilt_endpoint_keeps_its_id_and_still_serves() {
+    timeout(Duration::from_secs(120), async {
+        let relay = relay().await;
+        let sender = Sender::new(&relay).await;
+        let (rx, _rx_dir) = receiver(&relay).await;
+        let id_before = sender.iroh.endpoint_id();
+
+        let seed = sender.iroh.endpoint().secret_key().to_bytes();
+        let s = settings(&relay.url, Duration::from_secs(20));
+        let builder = endpoint_builder(Some(&seed), &s, false)
+            .unwrap()
+            .ca_tls_config(CaTlsConfig::insecure_skip_verify());
+        sender.iroh.replace_endpoint(builder).await.unwrap();
+
+        assert_eq!(sender.iroh.endpoint_id(), id_before);
+        assert!(sender.iroh.wait_online(Duration::from_secs(20)).await);
+        let client = rx.client(&id_before).unwrap();
+        let unknown = ContentId::compute(b"never published", &params().to_param_bytes());
+        let got = client.fetch_record(*unknown.as_bytes()).await;
+        assert!(got.unwrap().is_none(), "the rebuilt endpoint must answer");
+
+        // A different key would change the contact ID: refused, old one stays.
+        let other: [u8; 32] = rand::random();
+        let wrong = endpoint_builder(Some(&other), &s, false)
+            .unwrap()
+            .ca_tls_config(CaTlsConfig::insecure_skip_verify());
+        assert!(sender.iroh.replace_endpoint(wrong).await.is_err());
+        assert_eq!(sender.iroh.endpoint_id(), id_before);
+        sender.iroh.shutdown().await;
+        rx.shutdown().await;
+    })
+    .await
+    .expect("timed out");
+}
