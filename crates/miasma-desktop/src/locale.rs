@@ -2004,6 +2004,9 @@ contact_strings! {
     max_size_default_hint, eta_sec, eta_min, eta_min_even, eta_hour, eta_hour_even, eta_day,
     inbox_title, inbox_dir, open_folder, inbox_note, arrival_toast, queued_toast, nav_new, dismiss,
     qr_too_long,
+    sugg_title, sugg_body, sugg_item, sugg_attempts, sugg_add, sugg_ignore, sugg_prefill_note,
+    sugg_now, sugg_min, sugg_hour,
+    open_missing, open_failed, saved_to, earlier_failed, earlier_show, earlier_hide,
 }
 
 pub fn contact_strings(locale: Locale) -> &'static ContactStrings {
@@ -2132,6 +2135,22 @@ static CT_EN: ContactStrings = ContactStrings {
     nav_new: "new",
     dismiss: "Dismiss",
     qr_too_long: "The contact code is too long for a QR code.",
+    sugg_title: "Someone not in your contacts tried to reach you",
+    sugg_body: "Nothing was accepted. If you know who it is, you can add them. Compare the ID with them first.",
+    sugg_item: "ID {id}, {when}",
+    sugg_attempts: "{n} attempts",
+    sugg_add: "Add as contact",
+    sugg_ignore: "Ignore",
+    sugg_prefill_note: "Added from a request. Sending and receiving stay off for this contact until you switch them on.",
+    sugg_now: "just now",
+    sugg_min: "{n} min ago",
+    sugg_hour: "{n} h ago",
+    open_missing: "The file is no longer there: {path}",
+    open_failed: "Could not open it: {path} ({why})",
+    saved_to: "Saved to: {path}",
+    earlier_failed: "{n} earlier failed attempt(s)",
+    earlier_show: "Show",
+    earlier_hide: "Hide",
 };
 
 static CT_JA: ContactStrings = ContactStrings {
@@ -2252,6 +2271,22 @@ static CT_JA: ContactStrings = ContactStrings {
     nav_new: "新着",
     dismiss: "閉じる",
     qr_too_long: "連絡先コードが長すぎて、QRコードにできません。",
+    sugg_title: "連絡先にない人があなたに接続しようとしました",
+    sugg_body: "何も受け付けていません。心当たりがあれば連絡先に追加できます。追加する前に、相手とIDを確認してください。",
+    sugg_item: "ID {id}、{when}",
+    sugg_attempts: "{n}回",
+    sugg_add: "連絡先に追加",
+    sugg_ignore: "無視",
+    sugg_prefill_note: "接続の履歴から追加します。この連絡先は、あなたが許可を入れるまで、送信も受信もオフです。",
+    sugg_now: "たった今",
+    sugg_min: "{n}分前",
+    sugg_hour: "{n}時間前",
+    open_missing: "ファイルが見つかりません。移動または削除された可能性があります: {path}",
+    open_failed: "開けませんでした: {path} ({why})",
+    saved_to: "保存先: {path}",
+    earlier_failed: "以前の失敗 {n} 件",
+    earlier_show: "表示",
+    earlier_hide: "隠す",
 };
 
 // zh-CN
@@ -2373,6 +2408,22 @@ static CT_ZH_CN: ContactStrings = ContactStrings {
     nav_new: "新",
     dismiss: "关闭",
     qr_too_long: "内容太长，无法生成二维码。",
+    sugg_title: "联系人以外的人尝试联系了你",
+    sugg_body: "没有接受任何内容。如果你认识对方，可以添加。添加前请先与对方核对ID。",
+    sugg_item: "ID {id}，{when}",
+    sugg_attempts: "{n}次",
+    sugg_add: "添加为联系人",
+    sugg_ignore: "忽略",
+    sugg_prefill_note: "由联系请求添加。在你打开权限之前，此联系人的发送和接收均保持关闭。",
+    sugg_now: "刚刚",
+    sugg_min: "{n}分钟前",
+    sugg_hour: "{n}小时前",
+    open_missing: "找不到该文件，可能已被移动或删除：{path}",
+    open_failed: "无法打开：{path}（{why}）",
+    saved_to: "保存位置：{path}",
+    earlier_failed: "此前失败 {n} 次",
+    earlier_show: "显示",
+    earlier_hide: "隐藏",
 };
 
 // ─── Chat (one-to-one messages between registered contacts) ─────────────────
@@ -2410,6 +2461,7 @@ chat_strings! {
     a11y_conversations, a11y_messages, a11y_composer, a11y_send, a11y_attach, a11y_back,
     a11y_row, a11y_unread, nav_new, dismiss,
     state_read, receipts_on, receipts_off, receipts_hint, receipts_global_off, a11y_receipts,
+    system_label, file_waiting, file_sending, file_done, file_failed,
 }
 
 pub fn chat_strings(locale: Locale) -> &'static ChatStrings {
@@ -2439,7 +2491,7 @@ static CH_EN: ChatStrings = ChatStrings {
     pick_send_off: "Sending to this contact is switched off.",
     pick_close: "Close",
     preview_you: "You: {text}",
-    preview_file: "Sent a file: {name}",
+    preview_file: "File: {name}",
     time_today: "Today {time}",
     time_yesterday: "Yesterday",
     time_date: "{m}/{d}",
@@ -2504,6 +2556,11 @@ static CH_EN: ChatStrings = ChatStrings {
     receipts_hint: "When on, this contact sees that you have read their messages, and you see when they have read yours. It works only when both of you have it on. Press to switch.",
     receipts_global_off: "Read receipts are switched off for everyone in the settings, so none are sent or shown.",
     a11y_receipts: "Switch read receipts for this contact",
+    system_label: "Status",
+    file_waiting: "Waiting to send: {name}",
+    file_sending: "Sending: {name} ({pct}%)",
+    file_done: "File sent: {name}",
+    file_failed: "File not sent: {name}",
 };
 
 static CH_JA: ChatStrings = ChatStrings {
@@ -2525,7 +2582,7 @@ static CH_JA: ChatStrings = ChatStrings {
     pick_send_off: "この人には送らない設定です。",
     pick_close: "閉じる",
     preview_you: "あなた: {text}",
-    preview_file: "ファイルを送りました: {name}",
+    preview_file: "ファイル: {name}",
     time_today: "今日 {time}",
     time_yesterday: "昨日",
     time_date: "{m}月{d}日",
@@ -2590,6 +2647,11 @@ static CH_JA: ChatStrings = ChatStrings {
     receipts_hint: "オンにすると、あなたがメッセージを読んだことが相手に伝わり、相手が読んだこともあなたに表示されます。お互いにオンのときだけ働きます。押すと切り替わります。",
     receipts_global_off: "設定で、すべての相手への既読表示がオフになっています。既読は送られず、表示もされません。",
     a11y_receipts: "この人との既読表示を切り替える",
+    system_label: "状況",
+    file_waiting: "送信待ち: {name}",
+    file_sending: "送信中: {name} ({pct}%)",
+    file_done: "ファイルを送りました: {name}",
+    file_failed: "ファイルを送れませんでした: {name}",
 };
 
 // zh-CN: a first translation; to be reviewed by a native speaker before it is called finished.
@@ -2612,7 +2674,7 @@ static CH_ZH_CN: ChatStrings = ChatStrings {
     pick_send_off: "已关闭向此联系人发送。",
     pick_close: "关闭",
     preview_you: "你: {text}",
-    preview_file: "已发送文件：{name}",
+    preview_file: "文件：{name}",
     time_today: "今天 {time}",
     time_yesterday: "昨天",
     time_date: "{m}月{d}日",
@@ -2677,6 +2739,11 @@ static CH_ZH_CN: ChatStrings = ChatStrings {
     receipts_hint: "开启后，对方会看到你已读其消息，你也会看到对方已读你的消息。只有双方都开启时才会生效。点击可切换。",
     receipts_global_off: "已在设置中对所有人关闭已读回执，因此不会发送也不会显示。",
     a11y_receipts: "切换与此联系人的已读回执",
+    system_label: "状态",
+    file_waiting: "等待发送：{name}",
+    file_sending: "正在发送：{name}（{pct}%）",
+    file_done: "文件已发送：{name}",
+    file_failed: "文件未能发送：{name}",
 };
 
 // ─── Logs (memory-only logging, opt-in diagnostic logging) ──────────────────
