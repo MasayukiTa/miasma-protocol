@@ -2860,6 +2860,117 @@ static LG_ZH_CN: LogStrings = LogStrings {
     legacy_failed: "有 {n} 个文件无法删除。请关闭正在使用它们的其他程序，下次启动时再试。",
 };
 
+// ─── Storage (stored shares: listing and deletion) ──────────────────────────
+
+/// Declares `StorageStrings` and a field listing for the completeness test from one field list.
+macro_rules! storage_strings {
+    ($($f:ident),* $(,)?) => {
+        /// Strings of the Storage section in Settings: the shares this device keeps, and
+        /// deleting them. `{name}`-style holes are filled with `str::replace`.
+        pub struct StorageStrings { $(pub $f: &'static str),* }
+        impl StorageStrings {
+            /// Every field with its name, for the completeness test.
+            #[cfg(test)]
+            fn all(&self) -> Vec<(&'static str, &'static str)> {
+                vec![$((stringify!($f), self.$f)),*]
+            }
+        }
+    };
+}
+
+storage_strings! {
+    heading, desc, show, hide, refresh, loading, empty, total, in_use,
+    delete_old, days_label, delete_old_button, delete_all_button, bad_days,
+    confirm_title, confirm_body, confirm_button, cancel,
+    deleted, skipped, nothing, note_unsupported, note_unavailable,
+}
+
+pub fn storage_strings(locale: Locale) -> &'static StorageStrings {
+    match locale {
+        Locale::En => &SG_EN,
+        Locale::Ja => &SG_JA,
+        Locale::ZhCn => &SG_ZH_CN,
+    }
+}
+
+static SG_EN: StorageStrings = StorageStrings {
+    heading: "Storage",
+    desc: "These are the shares this device keeps: pieces of files you have shared, and pieces of other people's files it holds for them. Deleting a share frees space on this computer. Shares that are in use right now are kept.",
+    show: "Show stored shares",
+    hide: "Hide",
+    refresh: "Refresh",
+    loading: "Loading...",
+    empty: "No stored shares.",
+    total: "{count} share(s), {size} in total",
+    in_use: "in use",
+    delete_old: "Delete shares last used more than",
+    days_label: "days ago",
+    delete_old_button: "Delete old shares",
+    delete_all_button: "Delete all shares",
+    bad_days: "Enter the number of days as a whole number.",
+    confirm_title: "Delete stored shares?",
+    confirm_body: "People who received a share ID for these files will no longer be able to download them.",
+    confirm_button: "Delete",
+    cancel: "Cancel",
+    deleted: "Deleted {n} share(s), freed {size}.",
+    skipped: "Left in place (in use or unsafe): {ids}",
+    nothing: "Nothing was deleted.",
+    note_unsupported: "This background service is older and does not support storage management. Close Miasma completely and start it again.",
+    note_unavailable: "The background service is not running, so the stored shares cannot be listed. Start it with the button at the top of the window.",
+};
+
+static SG_JA: StorageStrings = StorageStrings {
+    heading: "ストレージ",
+    desc: "この端末が保管している共有です。あなたが共有したファイルの断片と、ほかの人のファイルを預かっている断片があります。共有を削除すると、このパソコンの空き容量が増えます。いま使用中の共有は削除されません。",
+    show: "保存している共有を表示",
+    hide: "隠す",
+    refresh: "更新",
+    loading: "読み込み中です...",
+    empty: "保存している共有はありません。",
+    total: "共有 {count} 件、合計 {size}",
+    in_use: "使用中",
+    delete_old: "最後に使われてから次の日数より古い共有を削除:",
+    days_label: "日以上",
+    delete_old_button: "古い共有を削除",
+    delete_all_button: "すべての共有を削除",
+    bad_days: "日数を整数で入力してください。",
+    confirm_title: "保存している共有を削除しますか?",
+    confirm_body: "これらのファイルの共有IDを受け取った人は、もうダウンロードできなくなります。",
+    confirm_button: "削除",
+    cancel: "キャンセル",
+    deleted: "共有 {n} 件を削除し、{size} を解放しました。",
+    skipped: "そのまま残しました(使用中または安全でないため): {ids}",
+    nothing: "削除したものはありません。",
+    note_unsupported: "このバックグラウンド機能は古く、ストレージ管理に対応していません。Miasmaを完全に終了して、もう一度起動してください。",
+    note_unavailable: "バックグラウンド機能が起動していないため、保存している共有を一覧できません。画面上部のボタンで起動してください。",
+};
+
+static SG_ZH_CN: StorageStrings = StorageStrings {
+    heading: "存储",
+    desc: "这是本设备保存的共享：您共享的文件片段，以及代他人保管的文件片段。删除共享可以释放这台电脑的空间。正在使用的共享会保留。",
+    show: "显示已保存的共享",
+    hide: "隐藏",
+    refresh: "刷新",
+    loading: "正在加载...",
+    empty: "没有已保存的共享。",
+    total: "共 {count} 个共享，合计 {size}",
+    in_use: "使用中",
+    delete_old: "删除超过以下天数未使用的共享:",
+    days_label: "天",
+    delete_old_button: "删除旧共享",
+    delete_all_button: "删除全部共享",
+    bad_days: "请以整数输入天数。",
+    confirm_title: "要删除已保存的共享吗？",
+    confirm_body: "收到这些文件共享 ID 的人将无法再下载它们。",
+    confirm_button: "删除",
+    cancel: "取消",
+    deleted: "已删除 {n} 个共享，释放 {size}。",
+    skipped: "已保留（使用中或不安全）：{ids}",
+    nothing: "没有删除任何内容。",
+    note_unsupported: "此背景服务版本较旧，不支持存储管理。请完全关闭 Miasma 后重新启动。",
+    note_unavailable: "背景服务未运行，无法列出已保存的共享。请点击窗口上方的按钮启动。",
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3291,5 +3402,51 @@ mod tests {
     #[test]
     fn default_locale_is_english() {
         assert_eq!(Locale::default(), Locale::En);
+    }
+
+    #[test]
+    fn every_storage_string_exists_in_every_locale() {
+        for lang in Locale::ALL {
+            for (name, value) in storage_strings(lang).all() {
+                assert!(!value.trim().is_empty(), "{lang:?} storage.{name} is empty");
+            }
+            let st = storage_strings(lang);
+            // A translation that dropped a placeholder would silently show a blank.
+            assert!(
+                st.total.contains("{count}"),
+                "{lang:?} total lost {{count}}"
+            );
+            assert!(st.total.contains("{size}"), "{lang:?} total lost {{size}}");
+            assert!(st.deleted.contains("{n}"), "{lang:?} deleted lost {{n}}");
+            assert!(
+                st.deleted.contains("{size}"),
+                "{lang:?} deleted lost {{size}}"
+            );
+            assert!(
+                st.skipped.contains("{ids}"),
+                "{lang:?} skipped lost {{ids}}"
+            );
+        }
+    }
+
+    #[test]
+    fn japanese_storage_texts_say_what_matters() {
+        let ja = storage_strings(Locale::Ja);
+        for bad in ["デーモン", "指紋", "カード", "iroh", "`"] {
+            for (name, value) in ja.all() {
+                assert!(!value.contains(bad), "ja storage.{name} says {bad}");
+            }
+        }
+        assert!(ja.note_unavailable.contains("バックグラウンド機能"));
+        assert!(ja.confirm_button != ja.cancel);
+    }
+
+    #[test]
+    fn the_storage_delete_confirmation_names_the_consequence() {
+        // The owner asked for this sentence word for word in English.
+        assert_eq!(
+            storage_strings(Locale::En).confirm_body,
+            "People who received a share ID for these files will no longer be able to download them."
+        );
     }
 }
