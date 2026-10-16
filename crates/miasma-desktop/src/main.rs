@@ -19,6 +19,8 @@
 
 mod app;
 mod buildinfo;
+mod chat;
+mod chat_ui;
 mod contacts;
 mod errors;
 mod fonts;

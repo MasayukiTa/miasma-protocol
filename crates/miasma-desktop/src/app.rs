@@ -8,6 +8,7 @@
 use eframe::egui::{self, RichText};
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::chat_ui::{ChatAction, ChatUi};
 use crate::contacts::ContactsUi;
 use crate::errors::{ErrorKind, UiError};
 use crate::locale::{self, Locale, LogStrings, Strings, TransferStrings};
@@ -40,6 +41,7 @@ fn pal() -> Palette {
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum Tab {
     Contacts,
+    Chat,
     Transfers,
     Store,
     Retrieve,
@@ -107,6 +109,8 @@ pub struct MiasmaApp {
     transfers: TransfersUi,
     /// Contacts screen (trusted-contact push).
     contacts: ContactsUi,
+    /// Chat screen (one-to-one messages between registered contacts).
+    chat: ChatUi,
     /// `miasma-share:` links handed over by later launches (see `link.rs`), and the instance lock
     /// that makes this window the one they are handed to.
     link_rx: Option<std::sync::mpsc::Receiver<String>>,
@@ -295,8 +299,9 @@ use crate::ux::MsgLevel as MsgKind;
 
 /// The tabs of the navigation bar, left to right. The Import tab is last and shows only while an
 /// import is active.
-const NAV_TABS: [Tab; 10] = [
+const NAV_TABS: [Tab; 11] = [
     Tab::Contacts,
+    Tab::Chat,
     Tab::Transfers,
     Tab::Store,
     Tab::Retrieve,
@@ -400,6 +405,7 @@ impl MiasmaApp {
 
             transfers: TransfersUi::default(),
             contacts: ContactsUi::default(),
+            chat: ChatUi::default(),
             link_rx: None,
             _instance: None,
 
@@ -688,6 +694,7 @@ impl MiasmaApp {
                     self.last_envelope_id = None;
                     self.peer_id.clear();
                     self.contacts = ContactsUi::default();
+                    self.chat = ChatUi::default();
                     self.transfers = TransfersUi::default();
                     // Finished, not failed: the success colour.
                     self.set_msg(MsgKind::Success, self.s().wipe_done);
@@ -824,6 +831,13 @@ impl MiasmaApp {
                         .set_error_context(self.locale, !self.mode.is_easy());
                     self.contacts.on_reply(c, req, reply);
                     for n in self.contacts.take_notices() {
+                        self.set_msg(MsgKind::Success, n);
+                    }
+                }
+                WorkerResult::ChatReply { req, reply } => {
+                    let c = locale::chat_strings(self.locale);
+                    self.chat.on_reply(c, req, reply);
+                    for n in self.chat.take_notices() {
                         self.set_msg(MsgKind::Success, n);
                     }
                 }
@@ -2705,6 +2719,20 @@ impl eframe::App for MiasmaApp {
                 .drain(|req| tx.try_send(WorkerCmd::Push(req)).is_ok());
         }
 
+        // Chat: a light poll for arrivals in the background; quick only while the tab is open
+        // (or a send is in flight, which the chat screen tracks itself).
+        {
+            let open = self.tab == Tab::Chat;
+            if open {
+                self.chat.mark_seen();
+            }
+            self.chat
+                .tick(open, self.daemon_state == DaemonState::Connected);
+            let tx = self.worker.tx.clone();
+            self.chat
+                .drain(|req| tx.try_send(WorkerCmd::Chat(req)).is_ok());
+        }
+
         let s = self.s();
         let easy = self.mode.is_easy();
 
@@ -2751,6 +2779,8 @@ impl eframe::App for MiasmaApp {
                     0 => ct.tab.to_owned(),
                     n => format!("{} ({n} {})", ct.tab, ct.nav_new),
                 };
+                let chat_label =
+                    crate::chat::nav_label(locale::chat_strings(self.locale), self.chat.unseen());
                 let send_label = if easy { s.tab_send_easy } else { s.tab_send };
                 let inbox_label = if easy { s.tab_inbox_easy } else { s.tab_inbox };
                 let outbox_label = if easy {
@@ -2761,6 +2791,7 @@ impl eframe::App for MiasmaApp {
                 let label_for = |tab: Tab| -> &str {
                     match tab {
                         Tab::Contacts => contacts_label.as_str(),
+                        Tab::Chat => chat_label.as_str(),
                         Tab::Transfers => tr_label,
                         Tab::Store => store_label,
                         Tab::Retrieve => retrieve_label,
@@ -2843,6 +2874,35 @@ impl eframe::App for MiasmaApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(pal().bg))
             .show(ctx, |ui| {
+                // Chat keeps its own scrolling (the message list scrolls, the composer stays in
+                // view), so it is drawn outside the page's scroll area.
+                if self.tab == Tab::Chat {
+                    let mut action = None;
+                    kit::column(ui, |ui| {
+                        if self.logs.writes_files {
+                            kit::notice(ui, Level::Warn, self.lg().diag_banner);
+                        }
+                        self.connection_header(ui);
+                        let c = locale::chat_strings(self.locale);
+                        let connected = self.daemon_state == DaemonState::Connected;
+                        action = self
+                            .chat
+                            .show(ui, c, connected, self.contacts.contact_list());
+                    });
+                    match action {
+                        Some(ChatAction::OpenContacts) => self.tab = Tab::Contacts,
+                        Some(ChatAction::SendFiles(id)) => {
+                            let ct = locale::contact_strings(self.locale);
+                            let names = self.contacts.pick_and_send_files(ct, &id);
+                            self.chat.note_files_sent(&id, &names);
+                            for n in self.contacts.take_notices() {
+                                self.set_msg(MsgKind::Success, n);
+                            }
+                        }
+                        None => {}
+                    }
+                    return;
+                }
                 egui::ScrollArea::vertical()
                     .auto_shrink([false; 2])
                     .show(ui, |ui| {
@@ -2859,6 +2919,8 @@ impl eframe::App for MiasmaApp {
                                     let connected = self.daemon_state == DaemonState::Connected;
                                     self.contacts.show(ui, c, connected, !easy);
                                 }
+                                // Drawn above, outside the scroll area.
+                                Tab::Chat => {}
                                 Tab::Transfers => self.transfers_panel(ui),
                                 Tab::Store => self.store_panel(ui),
                                 Tab::Retrieve => self.retrieve_panel(ui),
