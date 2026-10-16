@@ -17,10 +17,12 @@
 //!
 //! ```text
 //! u8 kind (1 = text) | [16] message id | u64 seq | u64 sent_ms | u16 len | utf-8 text
+//! u8 kind (2 = read receipt) | [16] receipt id | u64 up_to_seq
 //! ```
 //!
 //! `seq` counts the sender's messages to this contact (1, 2, ...); the receiver
-//! applies each `seq` once.
+//! applies each `seq` once. A read receipt is padded into the same buckets as
+//! a text, so on the wire it is the size of a short message.
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -43,6 +45,7 @@ pub const CLOSE_UNSUPPORTED: u32 = 426;
 pub const CLOSE_RATE: u32 = 429;
 
 const KIND_TEXT: u8 = 1;
+const KIND_READ: u8 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ProtoError {
@@ -277,9 +280,102 @@ impl Message {
     }
 }
 
+// ─── Read receipt record ─────────────────────────────────────────────────────
+
+/// "I have read your messages up to number `up_to_seq`." It travels in the same
+/// sealed, padded envelope as a text and carries no text of its own.
+///
+/// ```text
+/// u8 kind (2 = read receipt) | [16] receipt id | u64 up_to_seq
+/// ```
+///
+/// A receipt has no sequence number of its own and is never answered by
+/// another receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadReceipt {
+    pub id: [u8; 16],
+    pub up_to_seq: u64,
+}
+
+impl ReadReceipt {
+    pub fn encode(&self) -> Result<Vec<u8>, ProtoError> {
+        if self.up_to_seq == 0 {
+            return Err(ProtoError::Malformed("receipt"));
+        }
+        let mut v = Vec::with_capacity(1 + 16 + 8);
+        v.push(KIND_READ);
+        v.extend_from_slice(&self.id);
+        v.extend_from_slice(&self.up_to_seq.to_be_bytes());
+        Ok(v)
+    }
+
+    pub fn decode(b: &[u8]) -> Result<Self, ProtoError> {
+        let bad = |_| ProtoError::Malformed("receipt");
+        let mut r = Rd::new(b);
+        if r.u8().map_err(bad)? != KIND_READ {
+            return Err(ProtoError::Malformed("receipt kind"));
+        }
+        let id = r.arr::<16>().map_err(bad)?;
+        let up_to_seq = r.u64().map_err(bad)?;
+        if !r.done() || up_to_seq == 0 {
+            return Err(ProtoError::Malformed("receipt"));
+        }
+        Ok(Self { id, up_to_seq })
+    }
+}
+
+/// What a decrypted envelope holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Record {
+    Text(Message),
+    Read(ReadReceipt),
+}
+
+impl Record {
+    pub fn decode(b: &[u8]) -> Result<Self, ProtoError> {
+        match b.first() {
+            Some(&KIND_TEXT) => Message::decode(b).map(Record::Text),
+            Some(&KIND_READ) => ReadReceipt::decode(b).map(Record::Read),
+            _ => Err(ProtoError::Malformed("record kind")),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn receipts_round_trip_and_reject_damage() {
+        let r = ReadReceipt {
+            id: rand::random(),
+            up_to_seq: 42,
+        };
+        let bytes = r.encode().unwrap();
+        assert_eq!(ReadReceipt::decode(&bytes).unwrap(), r);
+        assert_eq!(Record::decode(&bytes).unwrap(), Record::Read(r));
+        for n in 0..bytes.len() {
+            assert!(ReadReceipt::decode(&bytes[..n]).is_err(), "prefix {n}");
+        }
+        let mut longer = bytes.clone();
+        longer.push(0);
+        assert!(ReadReceipt::decode(&longer).is_err());
+        assert!(ReadReceipt {
+            id: [0; 16],
+            up_to_seq: 0
+        }
+        .encode()
+        .is_err());
+        let mut zero = bytes.clone();
+        zero[17..].fill(0);
+        assert!(ReadReceipt::decode(&zero).is_err());
+        // A text is not a receipt and the other way round.
+        let t = msg("hi").encode().unwrap();
+        assert!(ReadReceipt::decode(&t).is_err());
+        assert!(Message::decode(&bytes).is_err());
+        assert!(Record::decode(&[]).is_err());
+        assert!(Record::decode(&[9, 0, 0]).is_err());
+    }
 
     fn msg(text: &str) -> Message {
         Message {

@@ -27,7 +27,7 @@ use tracing::{debug, info, warn};
 
 use super::{
     crypto::Identity,
-    engine::{now_ms, ChatCore, EnqueueError, PrepareError},
+    engine::{now_ms, ChatCore, EnqueueError, MarkOutcome, PrepareError},
     outbox::Outbox,
     proto::{
         self, fail, Ack, AckStatus, Frame, CLOSE_BAD_REQUEST, CLOSE_NOT_ALLOWED, CLOSE_OK,
@@ -206,6 +206,7 @@ pub fn start_for_daemon(
         store,
         settings,
     )?;
+    svc.core().set_receipts_global(cfg.chat.read_receipts);
     services()
         .lock()
         .unwrap()
@@ -349,6 +350,24 @@ impl ChatService {
         Ok(id)
     }
 
+    /// The person is looking at the conversation with `contact` and has seen
+    /// the messages received up to number `up_to`: queue a read receipt when
+    /// receipts are on.
+    pub fn mark_read(
+        self: &Arc<Self>,
+        contact: &Contact,
+        up_to: u64,
+    ) -> Result<MarkOutcome, super::store::StoreError> {
+        let peer = contact
+            .endpoint_bytes()
+            .ok_or(super::store::StoreError::Damaged)?;
+        let out = self.core.mark_read(&peer, up_to, now_ms())?;
+        if out == MarkOutcome::Queued && contact.allow_send {
+            self.kick(&peer);
+        }
+        Ok(out)
+    }
+
     /// Start or wake the worker of `peer`: it tries its queue at once.
     pub fn kick(self: &Arc<Self>, peer: &[u8; 32]) {
         let mut w = self.workers.lock().unwrap();
@@ -385,6 +404,12 @@ impl ChatService {
                     }
                 }
             };
+            // A read receipt is only worth sending soon: past its expiry it
+            // is dropped, quietly (it never reaches the history).
+            if self.core.receipt_expired(&entry, now_ms()) {
+                self.core.outbox.remove(&entry.id);
+                continue;
+            }
             match self.attempt(&peer, &entry.id, &mut conn).await {
                 Outcome::Delivered => {
                     failures = 0;

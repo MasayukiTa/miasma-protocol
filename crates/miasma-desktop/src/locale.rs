@@ -2362,6 +2362,7 @@ chat_strings! {
     err_internal, err_other,
     a11y_conversations, a11y_messages, a11y_composer, a11y_send, a11y_attach, a11y_back,
     a11y_row, a11y_unread, nav_new, dismiss,
+    state_read, receipts_on, receipts_off, receipts_hint, receipts_global_off, a11y_receipts,
 }
 
 pub fn chat_strings(locale: Locale) -> &'static ChatStrings {
@@ -2449,6 +2450,12 @@ static CH_EN: ChatStrings = ChatStrings {
     a11y_unread: "{n} unread",
     nav_new: "new",
     dismiss: "Dismiss",
+    state_read: "Read",
+    receipts_on: "Read receipts: on",
+    receipts_off: "Read receipts: off",
+    receipts_hint: "When on, this contact sees that you have read their messages, and you see when they have read yours. It works only when both of you have it on. Press to switch.",
+    receipts_global_off: "Read receipts are switched off for everyone in the settings, so none are sent or shown.",
+    a11y_receipts: "Switch read receipts for this contact",
 };
 
 static CH_JA: ChatStrings = ChatStrings {
@@ -2528,6 +2535,12 @@ static CH_JA: ChatStrings = ChatStrings {
     a11y_unread: "{n}件の未読",
     nav_new: "新着",
     dismiss: "閉じる",
+    state_read: "既読",
+    receipts_on: "既読表示: オン",
+    receipts_off: "既読表示: オフ",
+    receipts_hint: "オンにすると、あなたがメッセージを読んだことが相手に伝わり、相手が読んだこともあなたに表示されます。お互いにオンのときだけ働きます。押すと切り替わります。",
+    receipts_global_off: "設定で、すべての相手への既読表示がオフになっています。既読は送られず、表示もされません。",
+    a11y_receipts: "この人との既読表示を切り替える",
 };
 
 // zh-CN: a first translation; to be reviewed by a native speaker before it is called finished.
@@ -2608,6 +2621,12 @@ static CH_ZH_CN: ChatStrings = ChatStrings {
     a11y_unread: "{n} 条未读",
     nav_new: "新消息",
     dismiss: "关闭",
+    state_read: "已读",
+    receipts_on: "已读回执：开",
+    receipts_off: "已读回执：关",
+    receipts_hint: "开启后，对方会看到你已读其消息，你也会看到对方已读你的消息。只有双方都开启时才会生效。点击可切换。",
+    receipts_global_off: "已在设置中对所有人关闭已读回执，因此不会发送也不会显示。",
+    a11y_receipts: "切换与此联系人的已读回执",
 };
 
 // ─── Logs (memory-only logging, opt-in diagnostic logging) ──────────────────
@@ -2791,6 +2810,7 @@ mod tests {
         assert_eq!(ja.state_sending, "送信中");
         assert_eq!(ja.state_queued, "送信済み（相手に届くのを待っています）");
         assert_eq!(ja.state_delivered, "届きました");
+        assert_eq!(ja.state_read, "既読");
         assert_eq!(ja.state_failed, "送信に失敗しました");
         assert_eq!(ja.retry, "もう一度送る");
         assert_eq!(

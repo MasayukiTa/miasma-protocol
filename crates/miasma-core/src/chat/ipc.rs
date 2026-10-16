@@ -37,6 +37,22 @@ pub enum ChatRequest {
     Events {
         since: u64,
     },
+    /// The conversation is on screen and the messages received from `contact`
+    /// up to number `up_to_seq` have been seen: send a read receipt (if
+    /// receipts are on for both the setting and this contact).
+    MarkRead {
+        contact: String,
+        up_to_seq: u64,
+    },
+    /// Switch read receipts on or off for one contact.
+    SetReadReceipts {
+        contact: String,
+        enabled: bool,
+    },
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,7 +63,7 @@ pub struct MessageInfo {
     pub outgoing: bool,
     pub seq: u64,
     pub text: String,
-    /// `queued`, `sending`, `delivered`, `failed` or `received`.
+    /// `queued`, `sending`, `delivered`, `read`, `failed` or `received`.
     pub state: String,
     /// For `failed`: a stable reason; for `queued`: why the last attempt failed.
     pub reason: Option<String>,
@@ -66,6 +82,10 @@ pub struct ConversationInfo {
     pub last_ms: u64,
     /// Messages still waiting to be delivered.
     pub pending: u32,
+    /// Read receipts are in effect for this contact (the global setting and
+    /// the contact's own switch are both on).
+    #[serde(default = "default_true")]
+    pub read_receipts: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +95,9 @@ pub struct StatusInfo {
     pub outbox: u32,
     pub outbox_max: u32,
     pub max_message_bytes: u32,
+    /// The global read-receipt setting (`chat.read_receipts`).
+    #[serde(default = "default_true")]
+    pub read_receipts: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,7 +105,8 @@ pub struct EventInfo {
     pub seq: u64,
     pub endpoint_id: String,
     pub label: Option<String>,
-    /// `received`, `delivered` or `failed`.
+    /// `received`, `delivered`, `read` or `failed`. For `read`, `message.seq`
+    /// is the number the contact has read up to.
     pub kind: String,
     pub message: MessageInfo,
 }
@@ -100,6 +124,20 @@ pub enum ChatResponse {
     },
     Deleted {
         count: u32,
+    },
+    /// Answer to `MarkRead`: `sent` is true when a receipt was queued;
+    /// `disabled` is true when receipts are off (so none will ever be);
+    /// `wait` is true when it was too soon after the last one and the caller
+    /// should ask again later.
+    ReadMarked {
+        sent: bool,
+        disabled: bool,
+        #[serde(default)]
+        wait: bool,
+    },
+    /// Answer to `SetReadReceipts`.
+    ReceiptsSet {
+        enabled: bool,
     },
     Status(StatusInfo),
     Events {
@@ -224,6 +262,7 @@ pub fn handle_with(
                         messages: c.count,
                         last_ms: c.last_ms,
                         pending: core.outbox.count_for(&c.peer) as u32,
+                        read_receipts: core.receipts_enabled(&c.peer),
                     }
                 })
                 .collect();
@@ -279,10 +318,48 @@ pub fn handle_with(
         ChatRequest::Status {} => ChatResponse::Status(StatusInfo {
             history_saved: core.store.settings().history_save,
             conversations: core.store.conversations().len() as u32,
-            outbox: core.outbox.len() as u32,
+            outbox: core.outbox.text_len() as u32,
             outbox_max: core.store.settings().outbox_max as u32,
             max_message_bytes: core.max_text() as u32,
+            read_receipts: core.receipts_global(),
         }),
+        ChatRequest::MarkRead { contact, up_to_seq } => {
+            let Some(c) = svc.contacts().find(&contact) else {
+                return unknown(&contact);
+            };
+            match svc.mark_read(&c, up_to_seq) {
+                Ok(super::engine::MarkOutcome::Queued) => ChatResponse::ReadMarked {
+                    sent: true,
+                    disabled: false,
+                    wait: false,
+                },
+                Ok(super::engine::MarkOutcome::Nothing) => ChatResponse::ReadMarked {
+                    sent: false,
+                    disabled: false,
+                    wait: false,
+                },
+                Ok(super::engine::MarkOutcome::TooSoon) => ChatResponse::ReadMarked {
+                    sent: false,
+                    disabled: false,
+                    wait: true,
+                },
+                Ok(super::engine::MarkOutcome::Disabled) => ChatResponse::ReadMarked {
+                    sent: false,
+                    disabled: true,
+                    wait: false,
+                },
+                Err(e) => err("internal", e.to_string()),
+            }
+        }
+        ChatRequest::SetReadReceipts { contact, enabled } => {
+            let Some((peer, _)) = resolve(&contact) else {
+                return unknown(&contact);
+            };
+            match core.set_receipts(&peer, enabled) {
+                Ok(()) => ChatResponse::ReceiptsSet { enabled },
+                Err(e) => err("internal", e.to_string()),
+            }
+        }
         ChatRequest::Events { since } => {
             let (next, events) = core.events_since(since);
             ChatResponse::Events {
@@ -296,6 +373,7 @@ pub fn handle_with(
                         kind: match e.kind {
                             super::engine::EventKind::Received => "received",
                             super::engine::EventKind::Delivered => "delivered",
+                            super::engine::EventKind::Read => "read",
                             super::engine::EventKind::Failed => "failed",
                         }
                         .to_owned(),

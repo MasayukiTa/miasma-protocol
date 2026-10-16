@@ -1726,6 +1726,7 @@ fn cmd_config_loaded(
                 "chat.max_message_bytes" => println!("{}", config.chat.max_message_bytes),
                 "chat.outbox_max" => println!("{}", config.chat.outbox_max),
                 "chat.retention_days" => println!("{}", config.chat.retention_days),
+                "chat.read_receipts" => println!("{}", config.chat.read_receipts),
                 "privacy.diagnostic_logging" => {
                     println!("{}", config.privacy.diagnostic_logging)
                 }
@@ -1817,6 +1818,9 @@ fn cmd_config_loaded(
                 }
                 "chat.retention_days" => {
                     config.chat.retention_days = v.parse().context("expected a number of days")?;
+                }
+                "chat.read_receipts" => {
+                    config.chat.read_receipts = v.parse().context("expected bool")?;
                 }
                 "privacy.diagnostic_logging" => {
                     config.privacy.diagnostic_logging = v.parse().context("expected bool")?;

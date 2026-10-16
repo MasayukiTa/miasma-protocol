@@ -612,6 +612,8 @@ pub enum Delivery {
     /// Waiting on this device for the other side.
     Queued,
     Delivered,
+    /// Delivered and the other person has read it (both sides have receipts on).
+    Read,
     Failed,
     /// An incoming message.
     Received,
@@ -624,6 +626,7 @@ pub fn delivery_of(m: &MessageInfo) -> Delivery {
         (true, "sending") => Delivery::Sending,
         (true, "queued") => Delivery::Queued,
         (true, "delivered") => Delivery::Delivered,
+        (true, "read") => Delivery::Read,
         (true, "failed") => Delivery::Failed,
         (true, _) => Delivery::Unknown,
     }
@@ -635,9 +638,23 @@ pub fn state_label(c: &ChatStrings, d: Delivery) -> Option<&'static str> {
         Delivery::Sending => Some(c.state_sending),
         Delivery::Queued => Some(c.state_queued),
         Delivery::Delivered => Some(c.state_delivered),
+        Delivery::Read => Some(c.state_read),
         Delivery::Failed => Some(c.state_failed),
         Delivery::Received | Delivery::Unknown => None,
     }
+}
+
+/// The highest sequence number among the received messages at `visible` positions of `items`
+/// (the rows really on screen), or 0 when there is none. This is what a read receipt reports:
+/// never a message the person has not had in view.
+pub fn newest_seen_seq(items: &[MessageInfo], visible: &[usize]) -> u64 {
+    visible
+        .iter()
+        .filter_map(|&i| items.get(i))
+        .filter(|m| !m.outgoing && m.ord > 0)
+        .map(|m| m.seq)
+        .max()
+        .unwrap_or(0)
 }
 
 /// The sentence for why a message failed, from the service's stable reason.
@@ -816,7 +833,26 @@ mod tests {
             messages: 3,
             last_ms,
             pending: 0,
+            read_receipts: true,
         }
+    }
+
+    #[test]
+    fn a_receipt_reports_only_received_messages_that_were_in_view() {
+        let items = vec![
+            msg(1, "a", false, "received"),
+            msg(2, "b", true, "delivered"),
+            msg(3, "c", false, "received"),
+            msg(4, "d", false, "received"),
+            msg(0, "q", true, "queued"),
+        ];
+        // Nothing in view, nothing to report.
+        assert_eq!(newest_seen_seq(&items, &[]), 0);
+        // Only the rows in view count, whatever is newer below them.
+        assert_eq!(newest_seen_seq(&items, &[0, 1, 2]), 3);
+        assert_eq!(newest_seen_seq(&items, &[0, 1, 2, 3]), 4);
+        // My own messages and queued ones are never reported, and a bad index is ignored.
+        assert_eq!(newest_seen_seq(&items, &[1, 4, 99]), 0);
     }
 
     // 2026-10-15 14:30:00 UTC.
@@ -1133,6 +1169,9 @@ mod tests {
             Some("送信済み（相手に届くのを待っています）")
         );
         assert_eq!(w(&msg(1, "a", true, "delivered")), Some("届きました"));
+        assert_eq!(w(&msg(1, "a", true, "read")), Some("既読"));
+        // Only my own messages carry a state; a received one never reads "read".
+        assert_eq!(w(&msg(1, "a", false, "read")), None);
         assert_eq!(w(&msg(1, "a", true, "failed")), Some("送信に失敗しました"));
         assert_eq!(w(&msg(1, "a", false, "received")), None);
         assert_eq!(w(&msg(1, "a", true, "something-new")), None);

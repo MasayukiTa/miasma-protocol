@@ -113,6 +113,13 @@ pub struct ChatConfig {
     /// Saved messages older than this many days are removed (0 = keep).
     #[serde(default)]
     pub retention_days: u64,
+    /// Tell a contact when its messages have been read, and show when yours
+    /// have been (default on). Both sides must have it on for a message to
+    /// show as read; with it off here nothing is sent and what arrives is
+    /// hidden. Each contact can also be switched off on its own. Takes effect
+    /// when the daemon starts.
+    #[serde(default = "default_true")]
+    pub read_receipts: bool,
 }
 
 pub const DEFAULT_CHAT_MAX_MESSAGE_BYTES: usize = 4096;
@@ -133,6 +140,7 @@ impl Default for ChatConfig {
             max_message_bytes: DEFAULT_CHAT_MAX_MESSAGE_BYTES,
             outbox_max: DEFAULT_CHAT_OUTBOX_MAX,
             retention_days: 0,
+            read_receipts: true,
         }
     }
 }
