@@ -52,7 +52,8 @@ pub struct Palette {
     pub text: Color32,
     /// Secondary text.
     pub muted: Color32,
-    /// Meta text (timestamps, hints). Lower contrast than `muted`: never for anything needed to act.
+    /// Meta text (timestamps, hints). A step softer than `muted` but still at least 4.5:1 on every
+    /// surface (and above 5.5:1 on the page background).
     pub faint: Color32,
     /// Text/outline colour of the primary action.
     pub accent: Color32,
@@ -88,8 +89,8 @@ impl Palette {
             border: hex(0xD8D6CF),
             border_strong: hex(0xB0AEA6),
             text: hex(0x18181B),
-            muted: hex(0x5F5F66),
-            faint: hex(0x65656D),
+            muted: hex(0x4F4F57),
+            faint: hex(0x56565E),
             accent: hex(0xB63A0A),
             accent_fill: hex(0xB63A0A),
             success: hex(0x136B33),
@@ -108,8 +109,8 @@ impl Palette {
             border: hex(0x2E2E2E),
             border_strong: hex(0x4A4A4A),
             text: hex(0xF4F4F5),
-            muted: hex(0xA1A1AA),
-            faint: hex(0x8C8C96),
+            muted: hex(0xB4B4BC),
+            faint: hex(0xA6A6B0),
             accent: hex(0xF97316),
             accent_fill: hex(0xC2410C),
             success: hex(0x22C55E),
@@ -244,31 +245,34 @@ pub fn resolve_dark(mode: ThemeMode, system: Option<eframe::Theme>) -> bool {
     }
 }
 
+/// WCAG 2.x relative luminance.
+#[cfg(test)]
+pub(crate) fn luminance(c: Color32) -> f64 {
+    let f = |v: u8| {
+        let x = v as f64 / 255.0;
+        if x <= 0.03928 {
+            x / 12.92
+        } else {
+            ((x + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * f(c.r()) + 0.7152 * f(c.g()) + 0.0722 * f(c.b())
+}
+
+/// WCAG 2.x contrast ratio of two opaque colours (1.0 to 21.0).
+#[cfg(test)]
+pub(crate) fn contrast(a: Color32, b: Color32) -> f64 {
+    let (la, lb) = (luminance(a), luminance(b));
+    let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn rgb(c: Color32) -> u32 {
         ((c.r() as u32) << 16) | ((c.g() as u32) << 8) | c.b() as u32
-    }
-
-    /// WCAG 2.x relative luminance.
-    fn luminance(c: Color32) -> f64 {
-        let f = |v: u8| {
-            let x = v as f64 / 255.0;
-            if x <= 0.03928 {
-                x / 12.92
-            } else {
-                ((x + 0.055) / 1.055).powf(2.4)
-            }
-        };
-        0.2126 * f(c.r()) + 0.7152 * f(c.g()) + 0.0722 * f(c.b())
-    }
-
-    fn contrast(a: Color32, b: Color32) -> f64 {
-        let (la, lb) = (luminance(a), luminance(b));
-        let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
-        (hi + 0.05) / (lo + 0.05)
     }
 
     #[test]
@@ -282,8 +286,8 @@ mod tests {
             (p.border, 0xD8D6CF),
             (p.border_strong, 0xB0AEA6),
             (p.text, 0x18181B),
-            (p.muted, 0x5F5F66),
-            (p.faint, 0x65656D),
+            (p.muted, 0x4F4F57),
+            (p.faint, 0x56565E),
             (p.accent, 0xB63A0A),
             (p.accent_fill, 0xB63A0A),
             (p.success, 0x136B33),
@@ -307,8 +311,8 @@ mod tests {
             (p.border, 0x2E2E2E),
             (p.border_strong, 0x4A4A4A),
             (p.text, 0xF4F4F5),
-            (p.muted, 0xA1A1AA),
-            (p.faint, 0x8C8C96),
+            (p.muted, 0xB4B4BC),
+            (p.faint, 0xA6A6B0),
             (p.accent, 0xF97316),
             (p.accent_fill, 0xC2410C),
             (p.success, 0x22C55E),

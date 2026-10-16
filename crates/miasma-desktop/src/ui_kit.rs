@@ -49,6 +49,12 @@ pub const COMPACT_H: f32 = 24.0;
 /// Narrowest a regular button gets, so a row of buttons looks like a row.
 pub const BTN_MIN_W: f32 = 96.0;
 
+/// Smallest text size anywhere (hints, labels): egui's `Small`.
+pub const MIN_TEXT_PX: f32 = 12.5;
+/// Size of secondary lines that people read to know what is going on (message state, time,
+/// system lines): between hint and body, so they never read as fine print.
+pub const META_PX: f32 = 13.5;
+
 const SURFACE_ROUNDING: f32 = 8.0;
 
 /// The palette in force.
@@ -63,6 +69,23 @@ fn section_style() -> TextStyle {
     S.get_or_init(|| TextStyle::Name("Section".into())).clone()
 }
 
+/// The type scale: nothing is smaller than [`MIN_TEXT_PX`].
+pub fn type_scale() -> [(TextStyle, FontId); 6] {
+    [
+        (TextStyle::Heading, FontId::proportional(22.0)),
+        (section_style(), FontId::proportional(16.0)),
+        (TextStyle::Body, FontId::proportional(14.0)),
+        (TextStyle::Button, FontId::proportional(14.0)),
+        (TextStyle::Small, FontId::proportional(MIN_TEXT_PX)),
+        (TextStyle::Monospace, FontId::monospace(13.0)),
+    ]
+}
+
+/// Secondary text that must be read (message state, times, system lines): [`META_PX`] in `color`.
+pub fn meta_text(text: impl Into<String>, color: Color32) -> RichText {
+    RichText::new(text).size(META_PX).color(color)
+}
+
 /// Make `dark` the colour palette in force and (re)build visuals, type scale and spacing.
 /// The single place where egui's global style is set.
 pub fn apply_theme(ctx: &egui::Context, dark: bool) {
@@ -73,15 +96,7 @@ pub fn apply_theme(ctx: &egui::Context, dark: bool) {
 
     // Type scale. Meiryo (see fonts.rs) is tall with a generous line gap, which already gives
     // Japanese text its ~1.5 line height; sizes are chosen so nothing is below 12.5 px.
-    style.text_styles = [
-        (TextStyle::Heading, FontId::proportional(22.0)),
-        (section_style(), FontId::proportional(16.0)),
-        (TextStyle::Body, FontId::proportional(14.0)),
-        (TextStyle::Button, FontId::proportional(14.0)),
-        (TextStyle::Small, FontId::proportional(12.5)),
-        (TextStyle::Monospace, FontId::monospace(13.0)),
-    ]
-    .into();
+    style.text_styles = type_scale().into();
 
     style.spacing.item_spacing = vec2(SP_2, SP_2);
     style.spacing.button_padding = vec2(SP_4, 6.0);
@@ -934,5 +949,95 @@ mod tests {
             widths.windows(2).all(|w| (w[0] - w[1]).abs() < 0.5),
             "{widths:?}"
         );
+    }
+
+    /// Every named text colour the kit draws with, against each background it is drawn on.
+    /// Printed with `--nocapture` to record before/after numbers.
+    #[test]
+    fn every_named_text_colour_is_at_least_4_5_to_1_on_its_backgrounds() {
+        use crate::theme::{contrast, Palette};
+        for (mode, p) in [("light", Palette::light()), ("dark", Palette::dark())] {
+            let backgrounds = [
+                ("bg", p.bg),
+                ("surface", p.surface),
+                ("surface_subtle", p.surface_subtle),
+                ("selected", p.selected),
+            ];
+            let texts = [
+                ("text", p.text),
+                ("muted", p.muted),
+                ("faint", p.faint),
+                ("success", p.success),
+                ("warning", p.warning),
+                ("danger", p.danger),
+                ("info", p.info),
+                ("accent", p.accent),
+            ];
+            for (tn, t) in texts {
+                for (bn, b) in backgrounds {
+                    let r = contrast(t, b);
+                    println!("{mode}: {tn} on {bn} = {r:.2}");
+                    assert!(r >= 4.5, "{mode}: {tn} on {bn} = {r:.2}");
+                }
+            }
+            // Secondary text that people read to act (state lines, times, system lines) is
+            // `muted` or better, which is held to 7:1 on the page and card backgrounds.
+            for (bn, b) in &backgrounds[..3] {
+                let r = contrast(p.muted, *b);
+                assert!(r >= 7.0, "{mode}: muted on {bn} = {r:.2}");
+            }
+            // The chat bubbles: text on the own-message and the received-message fill.
+            for (bn, b) in [("own bubble", p.selected), ("their bubble", p.surface)] {
+                let r = contrast(p.text, b);
+                assert!(r >= 7.0, "{mode}: text on {bn} = {r:.2}");
+            }
+            assert!(contrast(p.on_accent(), p.accent_fill) >= 4.5, "{mode}");
+        }
+    }
+
+    #[test]
+    fn nothing_is_set_smaller_than_the_minimum_text_size() {
+        for (style, font) in type_scale() {
+            assert!(font.size >= MIN_TEXT_PX, "{style:?} = {}", font.size);
+        }
+        assert!(META_PX >= MIN_TEXT_PX);
+        assert!(META_PX < 14.0, "meta text stays below body size");
+    }
+
+    /// Literal font sizes in the chat, contacts and transfers screens: none below the minimum.
+    #[test]
+    fn no_screen_hard_codes_a_size_below_the_minimum() {
+        let files = [
+            ("chat_ui.rs", include_str!("chat_ui.rs")),
+            ("contacts.rs", include_str!("contacts.rs")),
+            ("transfers.rs", include_str!("transfers.rs")),
+        ];
+        for (name, src) in files {
+            for pat in [".size(", "proportional(", "single_line(ui, "] {
+                for (at, _) in src.match_indices(pat) {
+                    if src[..at].ends_with("Spinner::new()") {
+                        continue; // a spinner's diameter, not text
+                    }
+                    let rest = &src[at + pat.len()..];
+                    let rest = if pat.starts_with("single_line") {
+                        // single_line(ui, text, SIZE, ...): the size is the third argument.
+                        match rest.splitn(3, ',').nth(2) {
+                            Some(r) => r,
+                            None => continue,
+                        }
+                    } else {
+                        rest
+                    };
+                    let num: String = rest
+                        .trim_start()
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit() || *c == '.')
+                        .collect();
+                    if let Ok(px) = num.parse::<f32>() {
+                        assert!(px >= MIN_TEXT_PX, "{name}: {pat}{px}");
+                    }
+                }
+            }
+        }
     }
 }
