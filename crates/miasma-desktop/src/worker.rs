@@ -275,6 +275,8 @@ pub enum WorkerResult {
         proxy_type: Option<String>,
         obfs_quic_port: u16,
         transport_statuses: Vec<TransportStatusInfo>,
+        /// `Some` while the iroh home relay is not connected.
+        relay_down: Option<RelayDown>,
     },
     /// Distress wipe complete.
     Wiped,
@@ -389,10 +391,12 @@ impl fmt::Debug for WorkerResult {
                 proxy_type,
                 obfs_quic_port,
                 transport_statuses,
+                relay_down,
             } => f
                 .debug_struct("Status")
                 .field("peer_id", peer_id)
                 .field("peer_count", peer_count)
+                .field("relay_down", relay_down)
                 .field("share_count", share_count)
                 .field("used_mb", used_mb)
                 .field("quota_mb", quota_mb)
@@ -1235,6 +1239,22 @@ async fn retrieve_mid_to_file(
     }
 }
 
+/// The iroh home relay is down: for how long and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayDown {
+    pub secs: u64,
+    pub cause: miasma_core::transport::relay_watchdog::RelayCause,
+    /// Set when the relay's certificate is from a non-public CA (inspection).
+    pub inspected: Option<Inspected>,
+}
+
+/// The network re-signs HTTPS: who signed, and whether this computer trusts it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Inspected {
+    pub issuer: String,
+    pub trusted: bool,
+}
+
 async fn get_status(data_dir: &Path) -> WorkerResult {
     match daemon_request(data_dir, ControlRequest::Status).await {
         Ok(ControlResponse::Status(s)) => {
@@ -1257,6 +1277,23 @@ async fn get_status(data_dir: &Path) -> WorkerResult {
                 proxy_configured: s.proxy_configured,
                 proxy_type: s.proxy_type,
                 obfs_quic_port: s.obfs_quic_port,
+                relay_down: s.iroh.as_ref().and_then(|i| {
+                    if i.relay_connected {
+                        return None;
+                    }
+                    Some(RelayDown {
+                        secs: i.relay_down_secs.unwrap_or(0),
+                        cause: miasma_core::transport::relay_watchdog::RelayCause::classify(
+                            i.last_error.as_deref().unwrap_or(""),
+                        ),
+                        inspected: i.relay_cert.as_ref().filter(|c| !c.public_ca).map(|c| {
+                            Inspected {
+                                issuer: c.issuer.clone(),
+                                trusted: c.trusted,
+                            }
+                        }),
+                    })
+                }),
                 transport_statuses: s
                     .transport_readiness
                     .into_iter()

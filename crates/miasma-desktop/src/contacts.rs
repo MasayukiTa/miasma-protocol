@@ -289,6 +289,11 @@ fn lost_inbound(r: &Row) -> bool {
     }
 }
 
+/// The core's diagnosis for "this computer is not connected to a relay server".
+pub fn error_is_local_relay(error: &str) -> bool {
+    error.contains("not connected to a relay server")
+}
+
 pub fn classify_failure(error: &str) -> FailClass {
     let e = error.to_ascii_lowercase();
     if e.contains("cannot reach")
@@ -426,6 +431,16 @@ pub fn row_guidance(c: &ContactStrings, r: &Row) -> Option<String> {
 
 /// [`row_guidance`], with the core's own wording only when `technical`.
 pub fn row_guidance_for(c: &ContactStrings, r: &Row, technical: bool) -> Option<String> {
+    // The core says so in its error when this computer's own relay link is the problem.
+    if r.outbound
+        && matches!(
+            r.state,
+            PushState::Failed | PushState::Queued | PushState::Connecting
+        )
+        && r.error.as_deref().is_some_and(error_is_local_relay)
+    {
+        return Some(c.fail_relay_down.to_owned());
+    }
     match r.state {
         PushState::Rejected => Some(
             match r.reject_reason.as_deref() {
@@ -2147,6 +2162,24 @@ mod tests {
         let c = contact_strings(Locale::En);
         assert_eq!(error_text_for(c, "weird", "boom", false), c.err_other);
         assert!(error_text_for(c, "weird", "boom", true).contains("boom"));
+    }
+
+    #[test]
+    fn a_local_relay_error_says_the_relay_is_not_connected() {
+        let c = contact_strings(Locale::En);
+        let mut info = t("r1", Direction::Out, "bob", PushState::Failed, 1);
+        info.error = Some(
+            "cannot reach the sender over iroh; this computer is not connected to a relay \
+             server (unable to connect)"
+                .into(),
+        );
+        let r = rows(vec![info]).remove(0);
+        assert_eq!(row_guidance_for(c, &r, false).unwrap(), c.fail_relay_down);
+        // The same wording on an inbound row is not about this computer's relay.
+        let mut incoming = t("r2", Direction::In, "bob", PushState::Failed, 1);
+        incoming.error = Some("this computer is not connected to a relay server".into());
+        let r = rows(vec![incoming]).remove(0);
+        assert_ne!(row_guidance_for(c, &r, false).unwrap(), c.fail_relay_down);
     }
 
     #[test]

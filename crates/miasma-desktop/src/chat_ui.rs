@@ -72,6 +72,9 @@ enum View {
 }
 
 pub struct ChatUi {
+    /// Set by the window from the daemon status: the home relay is not connected, so a waiting
+    /// message is waiting on this computer, not on the other person.
+    pub relay_down: bool,
     availability: Availability,
     was_connected: bool,
     initial_sent: bool,
@@ -143,6 +146,7 @@ impl Default for ChatUi {
     fn default() -> Self {
         let now = Instant::now();
         Self {
+            relay_down: false,
             availability: Availability::Unknown,
             was_connected: false,
             initial_sent: false,
@@ -1124,6 +1128,7 @@ impl ChatUi {
             .get(&o.contact_id)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
+        let relay_down = self.relay_down;
         let msgs = self.window.items();
         let timeline = &self.timeline;
         let heights = &mut self.heights;
@@ -1170,7 +1175,7 @@ impl ChatUi {
                         }
                     }
                     let r = ui.vertical(|ui| match *e {
-                        Entry::Msg(i) => message_row(ui, c, &msgs[i], clock, bubble_w),
+                        Entry::Msg(i) => message_row(ui, c, &msgs[i], clock, bubble_w, relay_down),
                         Entry::File(i) => {
                             file_row(ui, c, &notes[i], clock);
                             None
@@ -1493,6 +1498,7 @@ fn message_row(
     m: &MessageInfo,
     clock: Clock,
     bubble_w: f32,
+    relay_down: bool,
 ) -> Option<()> {
     let p = pal();
     let own = m.outgoing;
@@ -1537,7 +1543,12 @@ fn message_row(
     match delivery {
         Delivery::Queued => {
             ui.with_layout(layout, |ui| {
-                ui.label(RichText::new(c.queued_note).small().color(p.faint));
+                let note = if relay_down {
+                    c.queued_note_relay
+                } else {
+                    c.queued_note
+                };
+                ui.label(RichText::new(note).small().color(p.faint));
             });
         }
         Delivery::Failed => {
