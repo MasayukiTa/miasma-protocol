@@ -123,6 +123,9 @@ pub enum WorkerCmd {
     /// One trusted-contact push request (contacts, send, queue, ...); the answer comes back as
     /// [`WorkerResult::PushReply`] together with the request, so the UI knows what it was for.
     Push(miasma_core::push::PushRequest),
+    /// One chat request (send, conversations, history, delete, status, events). The answer comes
+    /// back as [`WorkerResult::ChatReply`] together with the request.
+    Chat(miasma_core::chat::ChatRequest),
     /// Read the background service's in-memory log buffer. Answered with
     /// [`WorkerResult::Logs`], [`WorkerResult::LogsUnsupported`] or
     /// [`WorkerResult::LogsUnavailable`].
@@ -219,6 +222,8 @@ impl fmt::Debug for WorkerCmd {
             Self::TransferClearFinished => f.write_str("TransferClearFinished"),
             // Contact codes, labels and file paths are not logged.
             Self::Push(_) => f.write_str("Push(<redacted>)"),
+            // Message text is never logged.
+            Self::Chat(_) => f.write_str("Chat(<redacted>)"),
             Self::LogsFetch => f.write_str("LogsFetch"),
             Self::SetDiagnostic(on) => f.debug_tuple("SetDiagnostic").field(on).finish(),
             Self::LogsClear => f.write_str("LogsClear"),
@@ -323,6 +328,12 @@ pub enum WorkerResult {
     PushReply {
         req: miasma_core::push::PushRequest,
         reply: Result<miasma_core::push::PushResponse, PushFail>,
+    },
+    /// Answer to [`WorkerCmd::Chat`]: the request that was sent, and the service's answer or why
+    /// there was none.
+    ChatReply {
+        req: miasma_core::chat::ChatRequest,
+        reply: Result<miasma_core::chat::ChatResponse, ChatFail>,
     },
     /// The background service's log buffer (oldest line first) and its logging state.
     Logs {
@@ -461,6 +472,11 @@ impl fmt::Debug for WorkerResult {
             Self::TransferError(message) => f.debug_tuple("TransferError").field(message).finish(),
             Self::PushReply { reply, .. } => f
                 .debug_struct("PushReply")
+                .field("ok", &reply.is_ok())
+                .finish(),
+            // Message text, names and error texts are never printed.
+            Self::ChatReply { reply, .. } => f
+                .debug_struct("ChatReply")
                 .field("ok", &reply.is_ok())
                 .finish(),
             // Log lines are never printed, only their number.
@@ -877,6 +893,7 @@ fn worker_thread(
                 ControlRequest::TransferClearFinished,
             )),
             WorkerCmd::Push(req) => rt.block_on(do_push(&data_dir, req)),
+            WorkerCmd::Chat(req) => rt.block_on(do_chat(&data_dir, req)),
             WorkerCmd::LogsFetch => rt.block_on(do_logs_fetch(&data_dir)),
             WorkerCmd::SetDiagnostic(on) => rt.block_on(do_set_diagnostic(&data_dir, on)),
             WorkerCmd::LogsClear => rt.block_on(do_logs_clear(&data_dir)),
@@ -1804,6 +1821,68 @@ async fn do_push(data_dir: &Path, req: miasma_core::push::PushRequest) -> Worker
     WorkerResult::PushReply { req, reply }
 }
 
+/// Why a chat request got no answer from the background service. Carries no text: the screen
+/// words it from the kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatFail {
+    /// The background service is not running.
+    DaemonDown,
+    /// It runs but does not know chat requests (an older version).
+    NotSupported,
+    /// No answer in time, or an answer that makes no sense.
+    Other,
+}
+
+/// Longest wait for one chat request; the service answers from memory and its own store.
+const CHAT_REQUEST_TIMEOUT_SECS: u64 = 10;
+
+/// Sort out the outcome of a chat request. `status_ok` tells, for a failed request, whether a
+/// request every version knows still gets an answer (so the service is there, but too old).
+pub fn classify_chat_outcome(
+    outcome: Option<anyhow::Result<ControlResponse>>,
+    status_ok: impl FnOnce() -> bool,
+) -> Result<miasma_core::chat::ChatResponse, ChatFail> {
+    match outcome {
+        Some(Ok(ControlResponse::Chat(r))) => Ok(r),
+        // A daemon that predates chat answers an unknown request with an error.
+        Some(Ok(ControlResponse::Error(_))) => Err(ChatFail::NotSupported),
+        Some(Ok(_)) => Err(ChatFail::Other),
+        Some(Err(e)) => {
+            if is_daemon_down(&format!("{e:#}")) {
+                Err(ChatFail::DaemonDown)
+            } else if status_ok() {
+                // Some old daemons just drop the connection on a request they do not know.
+                Err(ChatFail::NotSupported)
+            } else {
+                Err(ChatFail::DaemonDown)
+            }
+        }
+        None => Err(ChatFail::Other),
+    }
+}
+
+async fn do_chat(data_dir: &Path, req: miasma_core::chat::ChatRequest) -> WorkerResult {
+    let first = tokio::time::timeout(
+        std::time::Duration::from_secs(CHAT_REQUEST_TIMEOUT_SECS),
+        daemon_request(data_dir, ControlRequest::Chat(req.clone())),
+    )
+    .await
+    .ok();
+    // Only a failed request needs the second question.
+    let status_ok = if matches!(first, Some(Err(_))) {
+        matches!(
+            timed_request(data_dir, ControlRequest::Status).await,
+            Some(Ok(ControlResponse::Status(_)))
+        )
+    } else {
+        false
+    };
+    WorkerResult::ChatReply {
+        req,
+        reply: classify_chat_outcome(first, || status_ok),
+    }
+}
+
 async fn do_transfer_cancel(data_dir: &Path, id: &str) -> WorkerResult {
     match daemon_request(
         data_dir,
@@ -1864,9 +1943,10 @@ fn parse_retention(s: &str) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        bridge_import_args, parse_mids_from_stdout, wipe_needs_direct_path, wipe_without_daemon,
-        DirectedInboxItem, WorkerCmd, WorkerResult,
+        bridge_import_args, classify_chat_outcome, parse_mids_from_stdout, wipe_needs_direct_path,
+        wipe_without_daemon, ChatFail, DirectedInboxItem, WorkerCmd, WorkerResult,
     };
+    use miasma_core::ControlResponse;
     use std::ffi::OsString;
     use std::path::Path;
 
@@ -1938,6 +2018,84 @@ mod tests {
         ] {
             assert!(!format!("{c:?}").is_empty());
         }
+    }
+
+    #[test]
+    fn chat_variants_never_print_message_text() {
+        let secret = "SECRET-CHAT-MESSAGE-TEXT";
+        let cmd = WorkerCmd::Chat(miasma_core::chat::ChatRequest::Send {
+            contact: "alice".into(),
+            text: secret.into(),
+        });
+        assert!(!format!("{cmd:?}").contains(secret));
+        let ok = WorkerResult::ChatReply {
+            req: miasma_core::chat::ChatRequest::Send {
+                contact: "alice".into(),
+                text: secret.into(),
+            },
+            reply: Ok(miasma_core::chat::ChatResponse::History {
+                endpoint_id: "00".into(),
+                label: Some(secret.into()),
+                messages: vec![miasma_core::chat::ipc::MessageInfo {
+                    ord: 1,
+                    id: "00".into(),
+                    outgoing: true,
+                    seq: 1,
+                    text: secret.into(),
+                    state: "delivered".into(),
+                    reason: None,
+                    sent_ms: 0,
+                    at_ms: 0,
+                }],
+            }),
+        };
+        let shown = format!("{ok:?}");
+        assert!(!shown.contains(secret), "{shown}");
+        assert!(shown.contains("ChatReply"), "{shown}");
+        let failed = WorkerResult::ChatReply {
+            req: miasma_core::chat::ChatRequest::Status {},
+            reply: Err(ChatFail::NotSupported),
+        };
+        assert!(format!("{failed:?}").contains("ok: false"));
+    }
+
+    #[test]
+    fn chat_outcomes_tell_an_old_service_from_a_stopped_one() {
+        use miasma_core::chat::ChatResponse;
+        let chat = Some(Ok(ControlResponse::Chat(ChatResponse::Deleted {
+            count: 1,
+        })));
+        assert!(matches!(
+            classify_chat_outcome(chat, || panic!("no second question when it worked")),
+            Ok(ChatResponse::Deleted { count: 1 })
+        ));
+        // An error answer to a chat request: the service runs but does not know chat.
+        let old = Some(Ok(ControlResponse::Error("unknown variant".into())));
+        assert_eq!(
+            classify_chat_outcome(old, || false).unwrap_err(),
+            ChatFail::NotSupported
+        );
+        // No connection at all.
+        let down = Some(Err(anyhow::anyhow!("daemon.port not found")));
+        assert_eq!(
+            classify_chat_outcome(down, || true).unwrap_err(),
+            ChatFail::DaemonDown
+        );
+        // A dropped connection: old service if the status question still gets an answer.
+        let dropped = || Some(Err(anyhow::anyhow!("connection reset")));
+        assert_eq!(
+            classify_chat_outcome(dropped(), || true).unwrap_err(),
+            ChatFail::NotSupported
+        );
+        assert_eq!(
+            classify_chat_outcome(dropped(), || false).unwrap_err(),
+            ChatFail::DaemonDown
+        );
+        // Timeout.
+        assert_eq!(
+            classify_chat_outcome(None, || false).unwrap_err(),
+            ChatFail::Other
+        );
     }
 
     const MAGNET: &str = "magnet:?xt=urn:btih:abcdef0123456789abcdef0123456789abcdef01";

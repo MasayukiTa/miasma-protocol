@@ -368,3 +368,28 @@ miasma chat delete taro --all         # the whole conversation, waiting messages
 
 Times are shown in UTC. If `chat` says the daemon does not support it, restart
 the daemon after updating.
+
+## Chat in the desktop app
+
+The **Chat** tab (チャット, next to Contacts) is the same chat with a window.
+
+- **Start.** Register the other person on the Contacts tab (both sides), then
+  press **New conversation** (新しい会話) and choose the contact. Only
+  registered contacts are listed; with none yet, the tab points to Contacts.
+- **List.** One row per conversation: name, the start of the last message
+  ("You: " in front of your own; a file you sent from here is shown as "Sent a
+  file: name"), the time, and a number for unread messages. The Chat tab shows
+  how many messages arrived while you were elsewhere.
+- **Write.** Enter sends, Shift+Enter starts a new line. The counter follows the
+  size limit of a message (in bytes, so about a third as many Japanese
+  characters as ASCII ones); a message that is too long cannot be sent. Each
+  of your messages says *Sending*, *Sent (waiting for them to receive it)*,
+  *Delivered* or *Could not send* with **Send again**.
+- **Send a file** uses the Contacts tab's own file sending; follow it there.
+- **Delete this conversation's history** removes it from this device only,
+  after a confirmation (it cannot be undone; the other person keeps theirs).
+- When the history is kept in memory only (`chat.history_save` off), the tab
+  says so at the top.
+- Only the newest few hundred messages of the open conversation are held in
+  memory; older ones load as you scroll up.
+- Unread counts live in the window: they start from zero when the app starts.

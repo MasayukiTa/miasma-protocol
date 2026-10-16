@@ -278,6 +278,8 @@ struct Step {
     transfers: Option<TransfersView>,
     /// A `ContactsUi::fixture` name (Contacts tab with fake data).
     contacts: Option<&'static str>,
+    /// A `ChatUi::fixture` name (Chat tab with fake data).
+    chat: Option<&'static str>,
     /// Window size to render at.
     size: Option<(f32, f32)>,
 }
@@ -391,6 +393,7 @@ impl Tour {
             daemon: None,
             transfers: None,
             contacts: None,
+            chat: None,
             size: None,
         });
         for (theme, tname) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
@@ -404,6 +407,7 @@ impl Tour {
                         daemon: Some(DaemonState::Connected),
                         transfers: None,
                         contacts: None,
+                        chat: None,
                         size: None,
                     });
                 }
@@ -436,6 +440,7 @@ impl Tour {
                         daemon: Some(DaemonState::Connected),
                         transfers: Some(v),
                         contacts: None,
+                        chat: None,
                         size: None,
                     });
                 }
@@ -452,6 +457,7 @@ impl Tour {
                         daemon: Some(d),
                         transfers: None,
                         contacts: None,
+                        chat: None,
                         size: None,
                     });
                 }
@@ -474,6 +480,30 @@ impl Tour {
                         daemon: Some(DaemonState::Connected),
                         transfers: None,
                         contacts: Some(fx),
+                        chat: None,
+                        size: Some((w, h)),
+                    });
+                }
+            }
+        }
+        // The Chat tab with fake data: every fixture, wide and at the 700 px minimum.
+        // MIASMA_UI_TOUR_FILTER=chat_ keeps just these.
+        for fx in crate::chat_ui::FIXTURES {
+            for (w, h, wname) in [(1400.0, 900.0, "wide"), (700.0, 900.0, "narrow")] {
+                for (theme, tname, locale, lname) in [
+                    (ThemeMode::Light, "light", Locale::Ja, "ja"),
+                    (ThemeMode::Dark, "dark", Locale::Ja, "ja"),
+                    (ThemeMode::Light, "light", Locale::En, "en"),
+                ] {
+                    steps.push(Step {
+                        name: format!("chat_{fx}_{tname}_{lname}_{wname}"),
+                        theme,
+                        locale,
+                        tab: Tab::Chat,
+                        daemon: Some(DaemonState::Connected),
+                        transfers: None,
+                        contacts: None,
+                        chat: Some(fx),
                         size: Some((w, h)),
                     });
                 }
@@ -526,6 +556,26 @@ impl Tour {
                 }
                 if let Some(ui) = crate::contacts::ContactsUi::fixture(
                     fx,
+                    crate::locale::contact_strings(step.locale),
+                ) {
+                    app.contacts = ui;
+                }
+            }
+            if step.chat.is_some() {
+                // The old-log-files question is not what these screenshots are about.
+                app.logs.legacy = None;
+            }
+            if let Some(fx) = step.chat {
+                if let Some((w, h)) = step.size {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
+                }
+                if let Some(ui) = crate::chat_ui::ChatUi::fixture(fx) {
+                    app.chat = ui;
+                }
+                // The registered contacts the chat fixtures refer to (ids a and b).
+                let contacts = if fx == "nocontacts" { "empty" } else { "two" };
+                if let Some(ui) = crate::contacts::ContactsUi::fixture(
+                    contacts,
                     crate::locale::contact_strings(step.locale),
                 ) {
                     app.contacts = ui;
