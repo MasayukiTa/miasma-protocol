@@ -137,18 +137,18 @@ fn the_same_envelope_twice_is_stored_once() {
 }
 
 #[test]
-fn a_repeated_sequence_number_in_a_new_envelope_is_not_applied_twice() {
+fn a_resend_after_the_lost_acknowledgement_is_the_same_bytes_and_applied_once() {
     let a = side();
     let b = side();
     let id = a.core.enqueue(&b.id(), "same message", 1).unwrap();
     let (w1, _) = a.core.prepare_wire(&id).unwrap();
     assert_eq!(b.core.accept(&a.id(), &w1, 2).status, AckStatus::Stored);
-    // The sender restarts before it saw the acknowledgement and seals the
-    // same message again with a new key.
+    // The sender restarts before it saw the acknowledgement. The sealed
+    // envelope was kept, so the very same bytes go out again.
     let mut a = a;
     a.restart();
     let (w2, _) = a.core.prepare_wire(&id).unwrap();
-    assert_ne!(w1, w2);
+    assert_eq!(w1, w2);
     assert_eq!(b.core.accept(&a.id(), &w2, 3).status, AckStatus::Duplicate);
     assert_eq!(b.texts(&a.id()), ["same message"]);
 }

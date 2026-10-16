@@ -11,9 +11,11 @@
 pub mod crypto;
 pub mod engine;
 pub mod ipc;
+pub mod mailbox;
 pub mod outbox;
 pub mod proto;
 pub mod store;
+pub mod sync;
 
 #[cfg(feature = "iroh")]
 pub mod service;
@@ -24,3 +26,5 @@ pub use ipc::{handle_ipc, ChatRequest, ChatResponse};
 mod engine_tests;
 #[cfg(test)]
 mod receipt_tests;
+#[cfg(test)]
+pub(crate) mod offline_tests;
