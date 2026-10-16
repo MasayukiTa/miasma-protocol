@@ -13,13 +13,17 @@ env:
 
 jobs:
   spike:
-    name: spike (${{ matrix.os }})
+    name: spike (${{ matrix.os }}${{ matrix.nocmake && ' nocmake' || '' }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            nocmake: true
+    continue-on-error: ${{ matrix.nocmake == true }}
     defaults:
       run:
         working-directory: spikes/call-stack
@@ -29,6 +33,12 @@ jobs:
       - name: Install ALSA headers (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+
+      - name: Hide cmake (no-cmake variant)
+        if: matrix.nocmake == true
+        run: |
+          for p in $(which -a cmake ninja); do sudo mv "$p" "$p.hidden"; done
+          (command -v cmake) && echo "cmake still visible" || echo "cmake hidden"
 
       - name: Toolchain info
         shell: bash
@@ -78,7 +88,11 @@ jobs:
         shell: pwsh
         run: |
           $p = Start-Process -FilePath ./target/release/call-stack-spike.exe -NoNewWindow -PassThru
-          $p.WaitForExit()
-          try { $p.Refresh(); Write-Host ("PEAK_WORKING_SET_MB=" + [math]::Round($p.PeakWorkingSet64 / 1MB, 1)) } catch { Write-Host "peak rss not readable: $_" }
+          $peak = 0
+          while (-not $p.HasExited) {
+            try { $p.Refresh(); if ($p.PeakWorkingSet64 -gt $peak) { $peak = $p.PeakWorkingSet64 } } catch {}
+            Start-Sleep -Milliseconds 25
+          }
+          Write-Host ("PEAK_WORKING_SET_MB_polled=" + [math]::Round($peak / 1MB, 1))
           Write-Host "run exit=$($p.ExitCode)"
           exit $p.ExitCode
