@@ -74,10 +74,16 @@ pub struct StoreSettings {
     /// Text bytes the outbox may hold.
     pub outbox_bytes: usize,
     pub outbox_expiry_days: u64,
+    /// A read receipt that could not be delivered within this many
+    /// milliseconds is dropped.
+    pub receipt_expiry_ms: u64,
     /// Tests and benchmarks only: do not write the session state per message;
     /// the caller writes it with `flush_all`. Off in the service.
     pub defer_flush: bool,
 }
+
+/// Default life of a read receipt that cannot be delivered: one day.
+pub const DEFAULT_RECEIPT_EXPIRY_MS: u64 = 24 * 3_600_000;
 
 impl Default for StoreSettings {
     fn default() -> Self {
@@ -90,6 +96,7 @@ impl Default for StoreSettings {
             outbox_max_per_contact: 100,
             outbox_bytes: 1024 * 1024,
             outbox_expiry_days: 30,
+            receipt_expiry_ms: DEFAULT_RECEIPT_EXPIRY_MS,
             defer_flush: false,
         }
     }
@@ -102,6 +109,9 @@ pub enum MsgState {
     Delivered,
     Failed,
     Received,
+    /// Delivered and the contact has read it. Only ever derived for display
+    /// from the contact's receipts; a saved message is never stored as read.
+    Read,
 }
 
 impl MsgState {
@@ -109,7 +119,7 @@ impl MsgState {
         match self {
             Self::Queued => 0,
             Self::Sending => 1,
-            Self::Delivered => 2,
+            Self::Delivered | Self::Read => 2,
             Self::Failed => 3,
             Self::Received => 4,
         }
@@ -131,6 +141,7 @@ impl MsgState {
             Self::Delivered => "delivered",
             Self::Failed => "failed",
             Self::Received => "received",
+            Self::Read => "read",
         }
     }
 }
@@ -248,9 +259,15 @@ pub struct PeerState {
     pub count: u64,
     pub last_ms: u64,
     pub session: Option<Session>,
+    /// The contact has read our messages up to this number (from its receipts).
+    pub read_up_to: u64,
+    /// We have told the contact that we read its messages up to this number.
+    pub read_reported: u64,
+    /// Read receipts are switched off for this contact (on by default).
+    pub receipts_off: bool,
 }
 
-const PEER_VERSION: u8 = 1;
+const PEER_VERSION: u8 = 2;
 
 impl PeerState {
     pub fn new(peer: [u8; 32]) -> Self {
@@ -264,7 +281,19 @@ impl PeerState {
             count: 0,
             last_ms: 0,
             session: None,
+            read_up_to: 0,
+            read_reported: 0,
+            receipts_off: false,
         }
+    }
+
+    /// The highest sequence number received from the contact so far.
+    pub fn max_recv_seq(&self) -> u64 {
+        self.recv_above
+            .last()
+            .copied()
+            .unwrap_or(0)
+            .max(self.recv_floor)
     }
 
     pub fn next_seq(&mut self) -> u64 {
@@ -345,12 +374,17 @@ impl PeerState {
             }
             None => w.push(0),
         }
+        w.extend_from_slice(&self.read_up_to.to_be_bytes());
+        w.extend_from_slice(&self.read_reported.to_be_bytes());
+        w.push(u8::from(self.receipts_off));
         w
     }
 
     fn from_bytes(b: &[u8]) -> Option<Self> {
         let mut r = Rd::new(b);
-        if r.u8().ok()? != PEER_VERSION {
+        // Version 1 had no receipt fields; its files still open.
+        let version = r.u8().ok()?;
+        if version != 1 && version != PEER_VERSION {
             return None;
         }
         let peer = r.arr::<32>().ok()?;
@@ -393,6 +427,18 @@ impl PeerState {
             }
             _ => return None,
         };
+        let (read_up_to, read_reported, receipts_off) = if version >= 2 {
+            let up = r.u64().ok()?;
+            let rep = r.u64().ok()?;
+            let off = match r.u8().ok()? {
+                0 => false,
+                1 => true,
+                _ => return None,
+            };
+            (up, rep, off)
+        } else {
+            (0, 0, false)
+        };
         if !r.done() {
             return None;
         }
@@ -406,6 +452,9 @@ impl PeerState {
             count,
             last_ms,
             session,
+            read_up_to,
+            read_reported,
+            receipts_off,
         })
     }
 }
@@ -1053,6 +1102,39 @@ mod tests {
         for n in 0..b.len() {
             assert!(PeerState::from_bytes(&b[..n]).is_none(), "prefix {n}");
         }
+    }
+
+    #[test]
+    fn old_session_files_without_receipt_fields_still_open() {
+        let mut p = PeerState::new([5u8; 32]);
+        p.send_seq = 4;
+        p.read_up_to = 3;
+        p.read_reported = 2;
+        p.receipts_off = true;
+        let bytes = p.to_bytes();
+        let back = PeerState::from_bytes(&bytes).unwrap();
+        assert_eq!(
+            (back.read_up_to, back.read_reported, back.receipts_off),
+            (3, 2, true)
+        );
+        // The same state as version 1 wrote it: the receipt fields are missing.
+        let mut v1 = bytes.to_vec();
+        v1[0] = 1;
+        v1.truncate(v1.len() - 17);
+        let old = PeerState::from_bytes(&v1).unwrap();
+        assert_eq!(old.send_seq, 4);
+        assert_eq!(
+            (old.read_up_to, old.read_reported, old.receipts_off),
+            (0, 0, false)
+        );
+        // Damage is still refused.
+        let mut bad = bytes.to_vec();
+        bad.push(0);
+        assert!(PeerState::from_bytes(&bad).is_none());
+        let last = bytes.len() - 1;
+        let mut bad_flag = bytes.to_vec();
+        bad_flag[last] = 7;
+        assert!(PeerState::from_bytes(&bad_flag).is_none());
     }
 
     #[test]

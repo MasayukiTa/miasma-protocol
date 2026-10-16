@@ -640,3 +640,139 @@ async fn the_push_alpn_is_unaffected_and_a_missing_chat_handler_closes_politely(
         .await
         .is_ok());
 }
+
+fn mark_read(p: &Peer, label: &str, up_to: u64) -> ChatResponse {
+    handle_with(
+        &p.svc,
+        ChatRequest::MarkRead {
+            contact: label.into(),
+            up_to_seq: up_to,
+        },
+    )
+}
+
+fn outgoing_states(p: &Peer, other: &[u8; 32]) -> Vec<MsgState> {
+    p.svc
+        .core()
+        .history(other, None, 200)
+        .into_iter()
+        .filter(|m| m.outgoing)
+        .map(|m| m.state)
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn read_receipts_travel_between_two_nodes_and_respect_both_switches() {
+    let r = relay().await;
+    let (a, b) = (peer(&r).await, peer(&r).await);
+    register(&a, b.id(), "bob");
+    register(&b, a.id(), "alice");
+    b.svc.core().set_receipt_interval_ms(0);
+    for t in ["one", "two"] {
+        send(&a, "bob", t);
+    }
+    until(30, "both texts delivered", || {
+        outgoing_states(&a, &b.id()) == [MsgState::Delivered; 2]
+    })
+    .await;
+    // Arrival alone sends nothing.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(b.svc.core().outbox.is_empty());
+
+    // Both on: bob has the conversation in view, alice sees "read".
+    assert!(matches!(
+        mark_read(&b, "alice", 2),
+        ChatResponse::ReadMarked {
+            sent: true,
+            disabled: false,
+            ..
+        }
+    ));
+    until(30, "the receipt at alice", || {
+        outgoing_states(&a, &b.id()) == [MsgState::Read; 2]
+    })
+    .await;
+    until(30, "the receipt leaving bob's outbox", || {
+        b.svc.core().outbox.is_empty()
+    })
+    .await;
+    // The same point again sends nothing more.
+    assert!(matches!(
+        mark_read(&b, "alice", 2),
+        ChatResponse::ReadMarked {
+            sent: false,
+            disabled: false,
+            ..
+        }
+    ));
+    // The events say so too.
+    match handle_with(&a.svc, ChatRequest::Events { since: 0 }) {
+        ChatResponse::Events { events, .. } => {
+            assert_eq!(events.iter().filter(|e| e.kind == "read").count(), 1)
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // Bob switches receipts off for alice: nothing is sent for new texts.
+    assert!(matches!(
+        handle_with(
+            &b.svc,
+            ChatRequest::SetReadReceipts {
+                contact: "alice".into(),
+                enabled: false
+            }
+        ),
+        ChatResponse::ReceiptsSet { enabled: false }
+    ));
+    send(&a, "bob", "three");
+    until(30, "the third text", || {
+        outgoing_states(&a, &b.id()).len() == 3
+            && outgoing_states(&a, &b.id())[2] == MsgState::Delivered
+    })
+    .await;
+    assert!(matches!(
+        mark_read(&b, "alice", 3),
+        ChatResponse::ReadMarked {
+            sent: false,
+            disabled: true,
+            ..
+        }
+    ));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        outgoing_states(&a, &b.id()),
+        [MsgState::Read, MsgState::Read, MsgState::Delivered]
+    );
+
+    // Alice switches hers off: what bob would send is hidden from her.
+    handle_with(
+        &b.svc,
+        ChatRequest::SetReadReceipts {
+            contact: "alice".into(),
+            enabled: true,
+        },
+    );
+    handle_with(
+        &a.svc,
+        ChatRequest::SetReadReceipts {
+            contact: "bob".into(),
+            enabled: false,
+        },
+    );
+    assert!(matches!(
+        mark_read(&b, "alice", 3),
+        ChatResponse::ReadMarked { sent: true, .. }
+    ));
+    until(30, "the hidden receipt to be taken", || {
+        b.svc.core().outbox.is_empty()
+    })
+    .await;
+    assert_eq!(
+        outgoing_states(&a, &b.id()),
+        [
+            MsgState::Delivered,
+            MsgState::Delivered,
+            MsgState::Delivered
+        ]
+    );
+}

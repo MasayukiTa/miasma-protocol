@@ -15,16 +15,24 @@
 //!   again after a lost acknowledgement, is answered as a duplicate.
 
 use std::{
-    collections::VecDeque,
-    sync::{Mutex, MutexGuard},
+    collections::{HashMap, VecDeque},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Mutex, MutexGuard,
+    },
 };
 
 use super::{
     crypto::{CryptoError, Envelope, Identity, Session},
-    outbox::{new_entry, OutEntry, Outbox},
-    proto::{AckStatus, Message, MAX_TEXT_BYTES},
+    outbox::{new_entry, new_receipt, OutEntry, OutKind, Outbox},
+    proto::{AckStatus, Message, ReadReceipt, Record, MAX_TEXT_BYTES},
     store::{ChatStore, MsgState, NewMessage, StoreError, StoredMessage},
 };
+
+/// At most one read receipt per contact in this many milliseconds.
+pub const RECEIPT_MIN_INTERVAL_MS: u64 = 5_000;
+/// Contacts whose last receipt time is remembered (the map is cleared above it).
+const RECEIPT_CLOCK_CAP: usize = 1024;
 
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -64,6 +72,22 @@ pub enum EventKind {
     Received,
     Delivered,
     Failed,
+    /// The contact read our messages; `message.seq` is the number it read up
+    /// to (the other fields of `message` carry no content).
+    Read,
+}
+
+/// What [`ChatCore::mark_read`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkOutcome {
+    /// A receipt was queued.
+    Queued,
+    /// Nothing to report (already reported, or nothing received).
+    Nothing,
+    /// Too soon after the last receipt to this contact: ask again later.
+    TooSoon,
+    /// Read receipts are off, for everyone or for this contact.
+    Disabled,
 }
 
 const EVENT_CAP: usize = 200;
@@ -86,6 +110,11 @@ pub struct ChatCore {
     max_text: usize,
     gate: Mutex<()>,
     events: Mutex<Events>,
+    /// Global switch for read receipts (`chat.read_receipts`).
+    receipts_global: AtomicBool,
+    receipt_interval_ms: AtomicU64,
+    /// When the last receipt for each contact was queued.
+    receipt_clock: Mutex<HashMap<[u8; 32], u64>>,
 }
 
 impl ChatCore {
@@ -105,7 +134,95 @@ impl ChatCore {
                 next: 1,
                 items: VecDeque::new(),
             }),
+            receipts_global: AtomicBool::new(true),
+            receipt_interval_ms: AtomicU64::new(RECEIPT_MIN_INTERVAL_MS),
+            receipt_clock: Mutex::new(HashMap::new()),
         }
+    }
+
+    // ── Read receipts: switches ──────────────────────────────────────────────
+
+    /// Set the global switch (`chat.read_receipts`).
+    pub fn set_receipts_global(&self, on: bool) {
+        self.receipts_global.store(on, Ordering::Relaxed);
+    }
+
+    pub fn receipts_global(&self) -> bool {
+        self.receipts_global.load(Ordering::Relaxed)
+    }
+
+    /// Change the shortest time between two receipts to one contact.
+    pub fn set_receipt_interval_ms(&self, ms: u64) {
+        self.receipt_interval_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// Receipts are sent to, and shown from, `peer` only when both the global
+    /// switch and the switch of this contact are on. With either off nothing
+    /// is sent, what arrives is not kept, and what was kept is not shown.
+    pub fn receipts_enabled(&self, peer: &[u8; 32]) -> bool {
+        self.receipts_global() && !self.store.peek_peer(peer, |st| st.receipts_off)
+    }
+
+    /// Switch read receipts on or off for one contact. Switching off also
+    /// drops a receipt that is still waiting to go out.
+    pub fn set_receipts(&self, peer: &[u8; 32], on: bool) -> Result<(), StoreError> {
+        let _g = self.gate();
+        self.store.with_peer(peer, |st| st.receipts_off = !on);
+        self.store.flush_peer(peer)?;
+        if !on {
+            if let Some(e) = self.outbox.receipt_for(peer) {
+                self.outbox.remove(&e.id);
+            }
+        }
+        Ok(())
+    }
+
+    /// The person is looking at the conversation with `peer` and has seen the
+    /// messages received from it up to number `up_to`: tell the contact, once
+    /// per advance and at most once per interval. A receipt for a receipt is
+    /// impossible by construction: only text numbers are ever reported.
+    pub fn mark_read(
+        &self,
+        peer: &[u8; 32],
+        up_to: u64,
+        now: u64,
+    ) -> Result<MarkOutcome, StoreError> {
+        let _g = self.gate();
+        if !self.receipts_enabled(peer) {
+            return Ok(MarkOutcome::Disabled);
+        }
+        let (newest, reported) = self
+            .store
+            .peek_peer(peer, |st| (st.max_recv_seq(), st.read_reported));
+        let up_to = up_to.min(newest);
+        if up_to == 0 || up_to <= reported {
+            return Ok(MarkOutcome::Nothing);
+        }
+        let interval = self.receipt_interval_ms.load(Ordering::Relaxed);
+        {
+            let clock = self.receipt_clock.lock().unwrap();
+            if let Some(&last) = clock.get(peer) {
+                if now.saturating_sub(last) < interval {
+                    return Ok(MarkOutcome::TooSoon);
+                }
+            }
+        }
+        self.outbox
+            .push_receipt(new_receipt(rand::random(), *peer, up_to, now))?;
+        self.store.with_peer(peer, |st| st.read_reported = up_to);
+        self.store.flush_peer(peer)?;
+        let mut clock = self.receipt_clock.lock().unwrap();
+        if clock.len() >= RECEIPT_CLOCK_CAP {
+            clock.clear();
+        }
+        clock.insert(*peer, now);
+        Ok(MarkOutcome::Queued)
+    }
+
+    /// True when a queued receipt has outlived its expiry.
+    pub fn receipt_expired(&self, e: &OutEntry, now: u64) -> bool {
+        e.kind == OutKind::Read
+            && now.saturating_sub(e.created_ms) > self.store.settings().receipt_expiry_ms
     }
 
     pub fn own_id(&self) -> [u8; 32] {
@@ -156,7 +273,7 @@ impl ChatCore {
             return Err(EnqueueError::TooBig);
         }
         let _g = self.gate();
-        if self.outbox.len() >= self.store.settings().outbox_max {
+        if self.outbox.text_len() >= self.store.settings().outbox_max {
             return Err(EnqueueError::OutboxFull);
         }
         let seq = self.store.with_peer(peer, |p| p.next_seq());
@@ -186,15 +303,21 @@ impl ChatCore {
                 return Ok((s.clone(), env.id));
             }
         }
-        let msg = Message {
-            id: e.id,
-            seq: e.seq,
-            sent_ms: e.sent_ms,
-            text: e.text.clone(),
-        };
-        let plain = msg
-            .encode()
-            .map_err(|er| PrepareError::Session(er.to_string()))?;
+        let plain = match e.kind {
+            OutKind::Text => Message {
+                id: e.id,
+                seq: e.seq,
+                sent_ms: e.sent_ms,
+                text: e.text.clone(),
+            }
+            .encode(),
+            OutKind::Read => ReadReceipt {
+                id: e.id,
+                up_to_seq: e.seq,
+            }
+            .encode(),
+        }
+        .map_err(|er| PrepareError::Session(er.to_string()))?;
         let peer = e.peer;
         let me = &self.identity;
         let env = self
@@ -256,6 +379,11 @@ impl ChatCore {
 
     fn finish(&self, id: &[u8; 16], state: MsgState, reason: Option<String>, now: u64) {
         let Some(e) = self.outbox.get(id) else { return };
+        if e.kind == OutKind::Read {
+            // A receipt leaves no trace: delivered or given up, it just goes.
+            self.outbox.remove(id);
+            return;
+        }
         let nm = Self::stored_from(&e, state, reason.clone(), now);
         match self.store.record(&e.peer, nm, false) {
             Ok(ord) => {
@@ -300,6 +428,7 @@ impl ChatCore {
             .outbox
             .pending_for(peer)
             .into_iter()
+            .filter(|e| e.kind == OutKind::Text)
             .map(|e| StoredMessage {
                 ord: 0,
                 outgoing: true,
@@ -316,7 +445,20 @@ impl ChatCore {
                 text: e.text.clone(),
             })
             .collect();
-        self.store.history(peer, before, limit, pending)
+        let mut page = self.store.history(peer, before, limit, pending);
+        // A delivered message the contact has read is shown as read, unless
+        // receipts are off (then what the contact told us stays hidden).
+        if self.receipts_enabled(peer) {
+            let read_up_to = self.store.peek_peer(peer, |st| st.read_up_to);
+            if read_up_to > 0 {
+                for m in page.iter_mut() {
+                    if m.outgoing && m.state == MsgState::Delivered && m.seq <= read_up_to {
+                        m.state = MsgState::Read;
+                    }
+                }
+            }
+        }
+        page
     }
 
     /// Delete one message locally: from the history, or cancel it when it is
@@ -359,7 +501,7 @@ impl ChatCore {
             Done(AckStatus),
             Open {
                 session: Session,
-                message: Message,
+                record: Record,
                 replaced: bool,
                 new_ek: Option<[u8; 32]>,
             },
@@ -419,10 +561,10 @@ impl ChatCore {
                 }
             }
             match result {
-                Some(Ok((session, pt))) => match Message::decode(&pt) {
-                    Ok(message) => Step::Open {
+                Some(Ok((session, pt))) => match Record::decode(&pt) {
+                    Ok(record) => Step::Open {
                         session,
-                        message,
+                        record,
                         replaced,
                         new_ek,
                     },
@@ -431,14 +573,63 @@ impl ChatCore {
                 _ => Step::Done(AckStatus::BadRequest),
             }
         });
-        let (session, message, replaced, new_ek) = match step {
+        let (session, record, replaced, new_ek) = match step {
             Step::Done(s) => return plain(s),
             Step::Open {
                 session,
-                message,
+                record,
                 replaced,
                 new_ek,
-            } => (session, message, replaced, new_ek),
+            } => (session, record, replaced, new_ek),
+        };
+        let message = match record {
+            Record::Text(m) => m,
+            Record::Read(rc) => {
+                // A receipt: no history record, no sequence number, and never
+                // an answer of its own. It is applied only when receipts are
+                // on here; otherwise it is acknowledged and forgotten.
+                let enabled = self.receipts_enabled(peer);
+                let mut applied = false;
+                self.store.with_peer(peer, |st| {
+                    st.session = Some(session);
+                    if let Some(ek) = new_ek {
+                        st.remember_ek(ek);
+                    }
+                    st.remember_envelope(env.id);
+                    // Only numbers this side really sent can be read.
+                    if enabled && rc.up_to_seq <= st.send_seq && rc.up_to_seq > st.read_up_to {
+                        st.read_up_to = rc.up_to_seq;
+                        applied = true;
+                    }
+                });
+                if self.store.flush_peer(peer).is_err() {
+                    return plain(AckStatus::Failed);
+                }
+                if replaced {
+                    self.void_sealed(peer);
+                }
+                if applied {
+                    self.push_event(
+                        *peer,
+                        EventKind::Read,
+                        StoredMessage {
+                            ord: 0,
+                            outgoing: true,
+                            id: rc.id,
+                            seq: rc.up_to_seq,
+                            sent_ms: 0,
+                            at_ms: now,
+                            state: MsgState::Read,
+                            reason: None,
+                            text: String::new(),
+                        },
+                    );
+                }
+                return AcceptOutcome {
+                    status: AckStatus::Stored,
+                    session_replaced: replaced,
+                };
+            }
         };
 
         // Step 2: a number already applied is a duplicate; the key it used is

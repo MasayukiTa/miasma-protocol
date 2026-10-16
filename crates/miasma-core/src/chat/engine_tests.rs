@@ -14,14 +14,14 @@ use super::{
 };
 use crate::state_crypto::StateKeys;
 
-struct Side {
-    dir: TempDir,
-    seed: [u8; 32],
-    master: [u8; 32],
-    core: ChatCore,
+pub(super) struct Side {
+    pub(super) dir: TempDir,
+    pub(super) seed: [u8; 32],
+    pub(super) master: [u8; 32],
+    pub(super) core: ChatCore,
 }
 
-fn open_core(
+pub(super) fn open_core(
     dir: &std::path::Path,
     seed: &[u8; 32],
     master: &[u8; 32],
@@ -36,7 +36,7 @@ fn open_core(
     ChatCore::new(store, outbox, id, max)
 }
 
-fn side_with(s: StoreSettings, max: usize) -> Side {
+pub(super) fn side_with(s: StoreSettings, max: usize) -> Side {
     let dir = tempfile::tempdir().unwrap();
     let seed: [u8; 32] = rand::random();
     let master: [u8; 32] = rand::random();
@@ -49,16 +49,16 @@ fn side_with(s: StoreSettings, max: usize) -> Side {
     }
 }
 
-fn side() -> Side {
+pub(super) fn side() -> Side {
     side_with(StoreSettings::default(), 4096)
 }
 
 impl Side {
-    fn id(&self) -> [u8; 32] {
+    pub(super) fn id(&self) -> [u8; 32] {
         self.core.own_id()
     }
 
-    fn restart(&mut self) {
+    pub(super) fn restart(&mut self) {
         self.core.store.close();
         self.core = open_core(
             self.dir.path(),
@@ -69,7 +69,7 @@ impl Side {
         );
     }
 
-    fn texts(&self, peer: &[u8; 32]) -> Vec<String> {
+    pub(super) fn texts(&self, peer: &[u8; 32]) -> Vec<String> {
         self.core
             .history(peer, None, 200)
             .into_iter()
@@ -79,7 +79,7 @@ impl Side {
 }
 
 /// Send one queued message of `from` to `to`; returns the status.
-fn deliver_next(from: &Side, to: &Side) -> Option<AckStatus> {
+pub(super) fn deliver_next(from: &Side, to: &Side) -> Option<AckStatus> {
     let peer = to.id();
     let e = from.core.outbox.first_for(&peer)?;
     let (wire, _) = from.core.prepare_wire(&e.id).unwrap();

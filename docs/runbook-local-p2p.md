@@ -358,6 +358,16 @@ encrypted. `--value auto` removes the setting (back to the default: saved).
 (0 = keep); other keys: `chat.enabled`, `chat.max_message_bytes`,
 `chat.outbox_max`. They take effect when the daemon starts.
 
+**Read receipts.** They are on by default. When you have a conversation open and
+in front, your Miasma tells the other side which of their messages you have
+seen, and `history` then marks your own messages *read* once the other side did
+the same. A message shows as read only when both sides have receipts on:
+`chat.read_receipts` (default `true`, applied when the daemon starts) switches
+them for everyone, and `miasma chat receipts <contact> --off` (or `--on`; no
+flag shows the state) switches them for one contact right away. With them off,
+nothing is sent and what arrives is not shown. Receipts are small and are
+padded like any message; an undelivered one is dropped after a day.
+
 **Delete (on this device only; the other person keeps their copy).**
 
 ```sh
