@@ -209,13 +209,16 @@ fn a_message_reaches_an_offline_recipient_through_a_third_trusted_node() {
     assert_eq!(a.core.outbox.len(), 1);
     let e = a.core.outbox.first_for(&b.id()).unwrap();
     let (wire, _) = a.core.prepare_wire(&e.id).unwrap();
-    assert_eq!(b.core.accept(&a.id(), &wire, 3_000).status, AckStatus::Stored);
-    a.core.mark_delivered(&e.id, 3_001);
     assert_eq!(
-        b.received(&a.id()),
+        b.core.accept(&a.id(), &wire, 3_000).status,
+        AckStatus::Stored
+    );
+    a.core.mark_delivered(&e.id, 3_001);
+    assert_eq!(b.received(&a.id()), ["while you were away", "and a second"]);
+    assert_eq!(
+        a.delivered(&b.id()),
         ["while you were away", "and a second"]
     );
-    assert_eq!(a.delivered(&b.id()), ["while you were away", "and a second"]);
 }
 
 #[test]
@@ -298,7 +301,14 @@ fn a_holder_that_is_down_or_off_is_skipped() {
     // A contact the holder does not trust cannot use it.
     let stranger = side();
     let cs = client(&net, stranger.id(), 1);
-    let rep = cs.deposit(&[c.id()], &stranger.id(), &b.id(), ItemId([5; 16]), b"abc", 5);
+    let rep = cs.deposit(
+        &[c.id()],
+        &stranger.id(),
+        &b.id(),
+        ItemId([5; 16]),
+        b"abc",
+        5,
+    );
     assert!(rep.held_by.is_empty());
     assert_eq!(
         rep.failed[0].1,
@@ -310,7 +320,14 @@ fn a_holder_that_is_down_or_off_is_skipped() {
 fn an_item_expires_and_the_message_is_then_delivered_directly() {
     let (a, b, c) = (side(), side(), side());
     let net = Arc::new(Net::default());
-    net.add_holder(c.id(), CustodyLimits { ttl_ms: DAY, ..on() }, &[a.id(), b.id()]);
+    net.add_holder(
+        c.id(),
+        CustodyLimits {
+            ttl_ms: DAY,
+            ..on()
+        },
+        &[a.id(), b.id()],
+    );
     a.core.enqueue(&b.id(), "late", 1).unwrap();
     let ca = client(&net, a.id(), 1);
     deposit_oldest(&ca, &a, &b, &[c.id()], 0);
@@ -324,7 +341,10 @@ fn an_item_expires_and_the_message_is_then_delivered_directly() {
     assert_eq!(a.core.outbox.len(), 1);
     let e = a.core.outbox.first_for(&b.id()).unwrap();
     let (wire, _) = a.core.prepare_wire(&e.id).unwrap();
-    assert_eq!(b.core.accept(&a.id(), &wire, DAY + 1).status, AckStatus::Stored);
+    assert_eq!(
+        b.core.accept(&a.id(), &wire, DAY + 1).status,
+        AckStatus::Stored
+    );
     assert_eq!(b.received(&a.id()), ["late"]);
 }
 
@@ -344,7 +364,14 @@ fn the_holder_limits_hold_under_a_flood() {
     let mut stored = 0;
     let mut budget = 0;
     for n in 0..50u8 {
-        let rep = ca.deposit(&[c.id()], &a.id(), &b.id(), ItemId([n; 16]), &[7u8; 1000], 1);
+        let rep = ca.deposit(
+            &[c.id()],
+            &a.id(),
+            &b.id(),
+            ItemId([n; 16]),
+            &[7u8; 1000],
+            1,
+        );
         match rep.failed.first() {
             None => stored += 1,
             Some((_, MailboxError::Refused(CustodyError::DepositorBudget))) => budget += 1,
@@ -358,7 +385,14 @@ fn the_holder_limits_hold_under_a_flood() {
     let mut b_stored = 0;
     for n in 100..130u8 {
         if cb
-            .deposit(&[c.id()], &b.id(), &a.id(), ItemId([n; 16]), &[7u8; 1000], 1)
+            .deposit(
+                &[c.id()],
+                &b.id(),
+                &a.id(),
+                ItemId([n; 16]),
+                &[7u8; 1000],
+                1,
+            )
             .failed
             .is_empty()
         {
@@ -378,10 +412,7 @@ fn the_holder_limits_hold_under_a_flood() {
         &vec![1u8; MAX_ITEM_BYTES],
         1,
     );
-    assert_eq!(
-        rep.failed[0].1,
-        MailboxError::Refused(CustodyError::TooBig)
-    );
+    assert_eq!(rep.failed[0].1, MailboxError::Refused(CustodyError::TooBig));
 }
 
 #[test]

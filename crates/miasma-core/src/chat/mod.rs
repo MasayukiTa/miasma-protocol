@@ -25,6 +25,6 @@ pub use ipc::{handle_ipc, ChatRequest, ChatResponse};
 #[cfg(test)]
 mod engine_tests;
 #[cfg(test)]
-mod receipt_tests;
-#[cfg(test)]
 pub(crate) mod offline_tests;
+#[cfg(test)]
+mod receipt_tests;

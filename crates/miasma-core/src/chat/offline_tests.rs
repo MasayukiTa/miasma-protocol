@@ -60,9 +60,9 @@ impl Side {
     }
 
     fn session_bytes(&self, peer: &[u8; 32]) -> Option<Vec<u8>> {
-        self.core
-            .store
-            .peek_peer(peer, |st| st.session.as_ref().map(|s| s.to_bytes().to_vec()))
+        self.core.store.peek_peer(peer, |st| {
+            st.session.as_ref().map(|s| s.to_bytes().to_vec())
+        })
     }
 
     /// Texts received from `peer`, in the order they were applied.
@@ -128,7 +128,10 @@ fn a_resend_after_a_restart_sends_the_identical_bytes() {
     assert_eq!(a.session_bytes(&b.id()).unwrap(), ratchet);
     // The receiver applies it once, however often it arrives.
     assert_eq!(b.core.accept(&a.id(), &w1, 2).status, AckStatus::Stored);
-    assert_eq!(b.core.accept(&a.id(), &again, 3).status, AckStatus::Duplicate);
+    assert_eq!(
+        b.core.accept(&a.id(), &again, 3).status,
+        AckStatus::Duplicate
+    );
     a.core.mark_delivered(&first, 4);
     assert_eq!(push_one(&a, &b, false), Some(AckStatus::Stored));
     assert_eq!(b.received(&a.id()), ["first", "second"]);
@@ -294,7 +297,10 @@ fn catch_up_never_closes_what_the_peer_has_not_applied() {
     a.core.enqueue(&other.id(), "elsewhere", 1).unwrap();
     let elsewhere = a.core.outbox.first_for(&other.id()).unwrap().id;
     let bogus = vec![[0xEE; 16], elsewhere, asked[0].id];
-    assert_eq!(sync::apply_reply(&a.core, &b.id(), &asked[1..], &bogus, 8), 0);
+    assert_eq!(
+        sync::apply_reply(&a.core, &b.id(), &asked[1..], &bogus, 8),
+        0
+    );
     assert_eq!(a.core.outbox.len(), 3);
     // The one it did ask about is closed when named.
     assert_eq!(sync::apply_reply(&a.core, &b.id(), &asked, &bogus, 8), 1);
@@ -305,7 +311,9 @@ fn catch_up_never_closes_what_the_peer_has_not_applied() {
 fn a_message_the_peer_would_refuse_for_its_size_is_not_reported_as_had() {
     let a = side();
     let b = side_with_max(10);
-    a.core.enqueue(&b.id(), "this is longer than ten bytes", 1).unwrap();
+    a.core
+        .enqueue(&b.id(), "this is longer than ten bytes", 1)
+        .unwrap();
     let asked = sync::request_for(&a.core, &b.id());
     // The receiver did apply the number (it answered `TooBig`) ...
     assert_eq!(push_one(&a, &b, true), Some(AckStatus::TooBig));

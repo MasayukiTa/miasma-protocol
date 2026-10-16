@@ -128,12 +128,8 @@ pub trait CustodyStore: Send + Sync {
     ) -> Result<Option<Vec<u8>>, CustodyError>;
 
     /// Remove an item (the recipient has it). True when something was held.
-    fn delete(
-        &self,
-        who: &[u8; 32],
-        tag: RecipientTag,
-        item: ItemId,
-    ) -> Result<bool, CustodyError>;
+    fn delete(&self, who: &[u8; 32], tag: RecipientTag, item: ItemId)
+        -> Result<bool, CustodyError>;
 
     /// Drop every expired item; returns how many.
     fn sweep(&self, now_ms: u64) -> usize;
@@ -397,10 +393,7 @@ mod tests {
             Err(CustodyError::NotTrusted)
         );
         s.deposit(&A, tag(), id(1), b"x", 0).unwrap();
-        assert_eq!(
-            s.list(&STRANGER, tag(), 0),
-            Err(CustodyError::NotTrusted)
-        );
+        assert_eq!(s.list(&STRANGER, tag(), 0), Err(CustodyError::NotTrusted));
         assert_eq!(
             s.fetch(&STRANGER, tag(), id(1), 0),
             Err(CustodyError::NotTrusted)
@@ -417,7 +410,10 @@ mod tests {
     #[test]
     fn item_size_is_limited() {
         let s = store(on());
-        assert_eq!(s.deposit(&A, tag(), id(1), b"", 0), Err(CustodyError::TooBig));
+        assert_eq!(
+            s.deposit(&A, tag(), id(1), b"", 0),
+            Err(CustodyError::TooBig)
+        );
         let big = vec![0u8; MAX_ITEM_BYTES + 1];
         assert_eq!(
             s.deposit(&A, tag(), id(1), &big, 0),
@@ -453,7 +449,13 @@ mod tests {
             s.deposit(&B, tag(), id(7), &[0; 10], 0),
             Err(CustodyError::Full)
         );
-        assert_eq!(s.stats(), CustodyStats { items: 5, bytes: 50 });
+        assert_eq!(
+            s.stats(),
+            CustodyStats {
+                items: 5,
+                bytes: 50
+            }
+        );
         // Bytes are limited too.
         let t = store(CustodyLimits {
             max_total_bytes: 25,
@@ -486,14 +488,20 @@ mod tests {
 
     #[test]
     fn items_expire() {
-        let s = store(CustodyLimits { ttl_ms: 1000, ..on() });
+        let s = store(CustodyLimits {
+            ttl_ms: 1000,
+            ..on()
+        });
         s.deposit(&A, tag(), id(1), b"old", 0).unwrap();
         s.deposit(&A, tag(), id(2), b"new", 900).unwrap();
         assert_eq!(s.list(&B, tag(), 999).unwrap(), vec![id(1), id(2)]);
         // At the expiry time the first is gone; the second still there.
         assert_eq!(s.list(&B, tag(), 1000).unwrap(), vec![id(2)]);
         assert_eq!(s.fetch(&B, tag(), id(1), 1000).unwrap(), None);
-        assert_eq!(s.fetch(&B, tag(), id(2), 1000).unwrap(), Some(b"new".to_vec()));
+        assert_eq!(
+            s.fetch(&B, tag(), id(2), 1000).unwrap(),
+            Some(b"new".to_vec())
+        );
         assert_eq!(s.sweep(1900), 1);
         assert_eq!(s.stats(), CustodyStats::default());
         // Expired room is usable again by the next deposit.
@@ -503,14 +511,26 @@ mod tests {
             ..on()
         });
         t.deposit(&A, tag(), id(1), b"x", 0).unwrap();
-        assert_eq!(t.deposit(&A, tag(), id(2), b"x", 5), Err(CustodyError::Full));
-        assert_eq!(t.deposit(&A, tag(), id(2), b"x", 10), Ok(DepositOutcome::Stored));
+        assert_eq!(
+            t.deposit(&A, tag(), id(2), b"x", 5),
+            Err(CustodyError::Full)
+        );
+        assert_eq!(
+            t.deposit(&A, tag(), id(2), b"x", 10),
+            Ok(DepositOutcome::Stored)
+        );
     }
 
     #[test]
     fn the_same_item_twice_is_held_once_and_not_extended() {
-        let s = store(CustodyLimits { ttl_ms: 100, ..on() });
-        assert_eq!(s.deposit(&A, tag(), id(1), b"x", 0), Ok(DepositOutcome::Stored));
+        let s = store(CustodyLimits {
+            ttl_ms: 100,
+            ..on()
+        });
+        assert_eq!(
+            s.deposit(&A, tag(), id(1), b"x", 0),
+            Ok(DepositOutcome::Stored)
+        );
         assert_eq!(
             s.deposit(&B, tag(), id(1), b"x", 90),
             Ok(DepositOutcome::Duplicate)
@@ -523,7 +543,8 @@ mod tests {
     fn items_for_other_recipients_are_not_listed() {
         let s = store(on());
         s.deposit(&A, tag(), id(1), b"x", 0).unwrap();
-        s.deposit(&A, RecipientTag([8; 16]), id(2), b"y", 0).unwrap();
+        s.deposit(&A, RecipientTag([8; 16]), id(2), b"y", 0)
+            .unwrap();
         assert_eq!(s.list(&B, tag(), 0).unwrap(), vec![id(1)]);
         assert_eq!(s.fetch(&B, tag(), id(2), 0).unwrap(), None);
     }

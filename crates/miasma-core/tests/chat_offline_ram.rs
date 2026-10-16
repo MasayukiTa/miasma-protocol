@@ -95,7 +95,10 @@ const LIMITS_ITEMS: usize = 64;
 fn cycle(from: &ChatCore, to: &ChatCore, custody: &MemoryCustody, i: u64) {
     let now = 1_700_000_000_000 + i * 10;
     let (fid, tid) = (from.own_id(), to.own_id());
-    let text = format!("message {i}: こんにちは、今日はいい天気ですね。 {}", i % 997);
+    let text = format!(
+        "message {i}: こんにちは、今日はいい天気ですね。 {}",
+        i % 997
+    );
     let id = from.enqueue(&tid, &text, now).unwrap();
     let (wire, env_id) = from.prepare_wire(&id).unwrap();
     let tag = RecipientTag::for_recipient(&tid);
@@ -198,7 +201,9 @@ fn the_offline_queues_are_bounded_and_flat_over_twenty_thousand_messages() {
     assert!(max_sealed <= SEALED_BUDGET);
     assert!(max_held <= 64, "held items: {max_held}");
     assert!(max_held_bytes <= 64 * 1024, "held bytes: {max_held_bytes}");
-    println!("max kept envelope bytes {max_sealed}, max held items {max_held} ({max_held_bytes} bytes)");
+    println!(
+        "max kept envelope bytes {max_sealed}, max held items {max_held} ({max_held_bytes} bytes)"
+    );
     match resident_bytes() {
         Some(_) => {
             let growth = peak.saturating_sub(baseline);
