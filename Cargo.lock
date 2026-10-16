@@ -5270,7 +5270,7 @@ dependencies = [
 
 [[package]]
 name = "miasma-bridge"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "bs58",
@@ -5290,7 +5290,7 @@ dependencies = [
 
 [[package]]
 name = "miasma-cli"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -5307,7 +5307,7 @@ dependencies = [
 
 [[package]]
 name = "miasma-core"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -5361,7 +5361,7 @@ dependencies = [
 
 [[package]]
 name = "miasma-desktop"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "bs58",
@@ -5385,7 +5385,7 @@ dependencies = [
 
 [[package]]
 name = "miasma-ffi"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "libp2p",
@@ -5401,7 +5401,7 @@ dependencies = [
 
 [[package]]
 name = "miasma-wasm"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "aes-gcm",
  "bincode",
