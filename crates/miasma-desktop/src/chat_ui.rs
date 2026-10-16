@@ -42,6 +42,10 @@ const COMPOSER_RESERVE: f32 = 190.0;
 const CULL_MARGIN: f32 = 240.0;
 /// The service's default limit of one message, until its status says otherwise.
 const DEFAULT_MAX_BYTES: usize = 4096;
+/// The shortest time between two asks for a read receipt.
+const READ_EVERY: Duration = Duration::from_secs(2);
+/// Contacts whose read point is remembered (cleared above it).
+const MAX_READ_ASKED: usize = 200;
 /// Drafts remembered while another conversation is open.
 const MAX_DRAFTS: usize = 20;
 
@@ -104,6 +108,14 @@ pub struct ChatUi {
     page_msg: Option<String>,
 
     unread: Unread,
+    /// Read receipts in effect per contact (endpoint ID), as the service last said.
+    receipts: HashMap<String, bool>,
+    /// The global read-receipt setting (`chat.read_receipts`); on until the service says otherwise.
+    receipts_global: bool,
+    /// Per contact: the newest received number a read receipt was already asked for.
+    read_asked: HashMap<String, u64>,
+    read_inflight: Option<Instant>,
+    last_read_ask: Option<Instant>,
     event_cursor: Option<u64>,
     want_newest: bool,
     list_dirty: bool,
@@ -162,6 +174,11 @@ impl Default for ChatUi {
             deleting: None,
             page_msg: None,
             unread: Unread::default(),
+            receipts: HashMap::new(),
+            receipts_global: true,
+            read_asked: HashMap::new(),
+            read_inflight: None,
+            last_read_ask: None,
             event_cursor: None,
             want_newest: false,
             list_dirty: false,
@@ -390,6 +407,7 @@ impl ChatUi {
         self.page_msg = None;
         self.picker_open = false;
         self.delete_target = None;
+        self.read_inflight = None;
     }
 
     // ─── Answers ────────────────────────────────────────────────────────────
@@ -408,6 +426,7 @@ impl ChatUi {
             ChatRequest::Events { .. } => self.events_inflight = None,
             ChatRequest::Conversations {} => self.list_inflight = None,
             ChatRequest::Status {} => self.status_inflight = None,
+            ChatRequest::MarkRead { .. } => self.read_inflight = None,
             ChatRequest::History {
                 contact,
                 before,
@@ -458,7 +477,9 @@ impl ChatUi {
                     ChatRequest::Send { text, .. } => {
                         self.send_failed(text, error_text(c, &kind));
                     }
-                    ChatRequest::Events { .. } | ChatRequest::Conversations {} => {}
+                    ChatRequest::Events { .. }
+                    | ChatRequest::Conversations {}
+                    | ChatRequest::MarkRead { .. } => {}
                     _ => {
                         if kind != "unavailable" {
                             self.page_msg = Some(error_text(c, &kind).to_owned());
@@ -470,6 +491,30 @@ impl ChatUi {
                 self.availability = Availability::Ok;
                 self.history_saved = s.history_saved;
                 self.max_bytes = (s.max_message_bytes as usize).max(1);
+                self.receipts_global = s.read_receipts;
+            }
+            ChatResponse::ReadMarked { disabled, wait, .. } => {
+                // Asked once per advance; "too soon" is asked again later.
+                if let ChatRequest::MarkRead { contact, up_to_seq } = req {
+                    if !wait {
+                        if self.read_asked.len() >= MAX_READ_ASKED {
+                            self.read_asked.clear();
+                        }
+                        self.read_asked.insert(contact.clone(), *up_to_seq);
+                    }
+                    if disabled {
+                        self.receipts.insert(contact.clone(), false);
+                    }
+                }
+            }
+            ChatResponse::ReceiptsSet { enabled } => {
+                if let ChatRequest::SetReadReceipts { contact, .. } = req {
+                    self.receipts.insert(contact.clone(), enabled);
+                    // Switched on again: what was seen meanwhile may be reported now.
+                    self.read_asked.remove(contact);
+                }
+                self.list_dirty = true;
+                self.want_newest = true;
             }
             ChatResponse::Conversations(list) => {
                 self.availability = Availability::Ok;
@@ -569,6 +614,9 @@ impl ChatUi {
     }
 
     fn on_conversations(&mut self, list: Vec<ConversationInfo>) {
+        for c in &list {
+            self.receipts.insert(c.endpoint_id.clone(), c.read_receipts);
+        }
         self.conversations = list;
         self.conv_loaded = true;
         self.rows = list_rows(&self.conversations);
@@ -614,6 +662,51 @@ impl ChatUi {
             self.wrap_px,
             m.outgoing && m.state == "failed",
         )
+    }
+
+    // ─── Read receipts ──────────────────────────────────────────────────────
+
+    /// Receipts are in effect with this contact (the setting and the contact's own switch).
+    fn receipts_on(&self, endpoint: &str) -> bool {
+        self.receipts_global && self.receipts.get(endpoint).copied().unwrap_or(true)
+    }
+
+    /// Switch receipts for one contact now (the answer confirms it).
+    fn set_receipts(&mut self, endpoint: &str, enabled: bool) {
+        self.receipts.insert(endpoint.to_owned(), enabled);
+        self.out.push_back(ChatRequest::SetReadReceipts {
+            contact: endpoint.to_owned(),
+            enabled,
+        });
+    }
+
+    /// The open conversation shows received messages up to number `seen` right now. A read receipt
+    /// is asked for only when the window is in front, the Chat tab is open, receipts are on, the
+    /// number is new and the last ask was a moment ago: never for what merely arrived.
+    fn note_seen(&mut self, endpoint: &str, seen: u64, window_focused: bool) {
+        if self.frozen || !window_focused || !self.area_open || seen == 0 {
+            return;
+        }
+        if !self.receipts_on(endpoint) {
+            return;
+        }
+        if self.read_asked.get(endpoint).is_some_and(|&n| n >= seen) {
+            return;
+        }
+        self.read_inflight = stale(self.read_inflight);
+        if self.read_inflight.is_some() {
+            return;
+        }
+        if self.last_read_ask.is_some_and(|t| t.elapsed() < READ_EVERY) {
+            return;
+        }
+        let now = Instant::now();
+        self.read_inflight = Some(now);
+        self.last_read_ask = Some(now);
+        self.out.push_back(ChatRequest::MarkRead {
+            contact: endpoint.to_owned(),
+            up_to_seq: seen,
+        });
     }
 
     // ─── Actions ────────────────────────────────────────────────────────────
@@ -908,17 +1001,41 @@ impl ChatUi {
             )
             .on_hover_text(name);
         });
+        let receipts_global = self.receipts_global;
+        let receipts_on = self.receipts_on(&o.endpoint_id);
+        let mut switch_receipts = false;
         ui.horizontal_wrapped(|ui| {
             let r = ui.add_enabled(send_allowed, kit::secondary_button(c.send_file));
             r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, c.a11y_attach));
             if r.on_hover_text(c.send_file_hint).clicked() {
                 send_file = true;
             }
+            if receipts_global {
+                let label = if receipts_on {
+                    c.receipts_on
+                } else {
+                    c.receipts_off
+                };
+                let r = ui.add(kit::secondary_button(label));
+                r.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, c.a11y_receipts)
+                });
+                if r.on_hover_text(c.receipts_hint).clicked() {
+                    switch_receipts = true;
+                }
+            }
             if ui.add(kit::danger_button(c.delete_history)).clicked() {
                 ask_delete = true;
             }
         });
+        if switch_receipts {
+            self.set_receipts(&o.endpoint_id, !receipts_on);
+        }
         ui.add_space(kit::SP_1);
+        if !receipts_global {
+            kit::notice(ui, Level::Info, c.receipts_global_off);
+            ui.add_space(kit::SP_2);
+        }
         self.memory_only_note(ui, c);
         if back {
             self.close_conversation();
@@ -1015,6 +1132,8 @@ impl ChatUi {
         let thread_loaded = self.thread_loaded;
         let mut retry: Option<(String, String)> = None;
         let mut moved = false;
+        // Messages whose rows really overlap the visible part (not the culling margin).
+        let mut in_view: Vec<usize> = Vec::new();
         let out = area.show_viewport(ui, |ui, viewport| {
             ui.spacing_mut().item_spacing.y = kit::SP_2;
             let spacing = kit::SP_2;
@@ -1045,6 +1164,11 @@ impl ChatUi {
                 let visible =
                     y + h >= viewport.min.y - CULL_MARGIN && y <= viewport.max.y + CULL_MARGIN;
                 if visible {
+                    if let Entry::Msg(i) = *e {
+                        if y + h >= viewport.min.y && y <= viewport.max.y {
+                            in_view.push(i);
+                        }
+                    }
                     let r = ui.vertical(|ui| match *e {
                         Entry::Msg(i) => message_row(ui, c, &msgs[i], clock, bubble_w),
                         Entry::File(i) => {
@@ -1071,6 +1195,12 @@ impl ChatUi {
             ui.ctx().request_repaint();
         }
         self.scroll_offset = out.state.offset.y;
+        // The conversation is on screen with the window in front: what is in view is read.
+        if thread_loaded {
+            let seen = newest_seen_seq(self.window.items(), &in_view);
+            let focused = ui.ctx().input(|i| i.focused);
+            self.note_seen(&o.endpoint_id, seen, focused);
+        }
         if let Some((id, text)) = retry {
             self.retry(&id, &text);
         }
@@ -1392,7 +1522,7 @@ fn message_row(
     let state = state_label(c, delivery);
     let state_color = match delivery {
         Delivery::Failed => p.danger,
-        Delivery::Delivered => p.success,
+        Delivery::Delivered | Delivery::Read => p.success,
         _ => p.muted,
     };
     let mut retry = None;
@@ -1488,6 +1618,7 @@ impl ChatUi {
                 messages: n,
                 last_ms,
                 pending,
+                read_receipts: true,
             }
         };
         let msg = |ord: u64, outgoing: bool, state: &str, text: &str, at: u64| MessageInfo {
@@ -1566,7 +1697,7 @@ impl ChatUi {
                         "はい、大丈夫です。\n明日の会議は10時からです。資料は共有フォルダに置きました。",
                         NOW - 3 * MIN,
                     ),
-                    msg(4, true, "delivered", "ありがとうございます。確認します。", NOW - 2 * MIN),
+                    msg(4, true, "read", "ありがとうございます。確認します。", NOW - 2 * MIN),
                     msg(0, true, "sending", "確認しました。", NOW - 30_000),
                     msg(0, true, "queued", "あとで電話します。", NOW - 10_000),
                 ];
@@ -1693,6 +1824,156 @@ mod tests {
 
     fn c() -> &'static ChatStrings {
         chat_strings(Locale::Ja)
+    }
+
+    fn marked(sent: bool, disabled: bool, wait: bool) -> Result<ChatResponse, ChatFail> {
+        Ok(ChatResponse::ReadMarked {
+            sent,
+            disabled,
+            wait,
+        })
+    }
+
+    fn mark(contact: &str, up_to_seq: u64) -> ChatRequest {
+        ChatRequest::MarkRead {
+            contact: contact.into(),
+            up_to_seq,
+        }
+    }
+
+    #[test]
+    fn a_read_receipt_is_asked_only_when_the_window_is_in_front_and_the_tab_is_open() {
+        let mut ui = ready();
+        // The tab is closed: nothing is read, however much is "in view".
+        ui.area_open = false;
+        ui.note_seen("ep", 3, true);
+        assert!(requests(&mut ui).is_empty());
+        ui.area_open = true;
+        // The window is behind another one.
+        ui.note_seen("ep", 3, false);
+        assert!(requests(&mut ui).is_empty());
+        // Nothing received is in view.
+        ui.note_seen("ep", 0, true);
+        assert!(requests(&mut ui).is_empty());
+        // In front, with a message in view: asked, once.
+        ui.note_seen("ep", 3, true);
+        let r = requests(&mut ui);
+        assert!(
+            matches!(&r[..], [ChatRequest::MarkRead { contact, up_to_seq: 3 }] if contact == "ep")
+        );
+        ui.note_seen("ep", 4, true);
+        assert!(requests(&mut ui).is_empty(), "one ask at a time");
+        // Dev fixtures never ask the service.
+        let mut frozen = ready();
+        frozen.area_open = true;
+        frozen.frozen = true;
+        frozen.note_seen("ep", 3, true);
+        assert!(requests(&mut frozen).is_empty());
+    }
+
+    #[test]
+    fn the_same_point_is_not_asked_twice_and_a_new_one_is() {
+        let mut ui = ready();
+        ui.area_open = true;
+        ui.note_seen("ep", 3, true);
+        requests(&mut ui);
+        ui.on_reply(c(), mark("ep", 3), marked(true, false, false));
+        ui.last_read_ask = None; // (skip the pause between two asks)
+        ui.note_seen("ep", 3, true);
+        assert!(requests(&mut ui).is_empty(), "already reported");
+        ui.note_seen("ep", 2, true);
+        assert!(requests(&mut ui).is_empty(), "never backwards");
+        ui.note_seen("ep", 5, true);
+        let r = requests(&mut ui);
+        assert!(matches!(
+            &r[..],
+            [ChatRequest::MarkRead { up_to_seq: 5, .. }]
+        ));
+        // Another contact has its own point.
+        ui.on_reply(c(), mark("ep", 5), marked(true, false, false));
+        ui.last_read_ask = None;
+        ui.note_seen("other", 1, true);
+        assert!(matches!(
+            &requests(&mut ui)[..],
+            [ChatRequest::MarkRead { contact, up_to_seq: 1 }] if contact == "other"
+        ));
+    }
+
+    #[test]
+    fn a_too_soon_answer_is_asked_again_and_a_disabled_one_is_not() {
+        let mut ui = ready();
+        ui.area_open = true;
+        ui.note_seen("ep", 3, true);
+        requests(&mut ui);
+        ui.on_reply(c(), mark("ep", 3), marked(false, false, true));
+        ui.last_read_ask = None;
+        ui.note_seen("ep", 3, true);
+        assert!(
+            matches!(
+                &requests(&mut ui)[..],
+                [ChatRequest::MarkRead { up_to_seq: 3, .. }]
+            ),
+            "asked again after 'too soon'"
+        );
+        // The service says receipts are off for this contact: no more asking.
+        ui.on_reply(c(), mark("ep", 3), marked(false, true, false));
+        assert!(!ui.receipts_on("ep"));
+        ui.last_read_ask = None;
+        ui.note_seen("ep", 9, true);
+        assert!(requests(&mut ui).is_empty());
+    }
+
+    #[test]
+    fn with_receipts_off_nothing_is_asked_and_the_switch_asks_the_service() {
+        let mut ui = ready();
+        ui.area_open = true;
+        // Off for the contact (as the list says).
+        ui.receipts.insert("ep".into(), false);
+        ui.note_seen("ep", 3, true);
+        assert!(requests(&mut ui).is_empty());
+        // Off for everyone (as the status says).
+        ui.receipts.insert("ep".into(), true);
+        ui.receipts_global = false;
+        ui.note_seen("ep", 3, true);
+        assert!(requests(&mut ui).is_empty());
+        ui.receipts_global = true;
+        // Switching a contact off asks the service; the answer confirms it.
+        ui.set_receipts("ep", false);
+        assert!(matches!(
+            &requests(&mut ui)[..],
+            [ChatRequest::SetReadReceipts { contact, enabled: false }] if contact == "ep"
+        ));
+        assert!(!ui.receipts_on("ep"));
+        ui.read_asked.insert("ep".into(), 7);
+        ui.on_reply(
+            c(),
+            ChatRequest::SetReadReceipts {
+                contact: "ep".into(),
+                enabled: true,
+            },
+            Ok(ChatResponse::ReceiptsSet { enabled: true }),
+        );
+        assert!(ui.receipts_on("ep"));
+        // Switched on again: what is in view may be reported again.
+        assert!(!ui.read_asked.contains_key("ep"));
+    }
+
+    #[test]
+    fn an_error_answer_to_a_receipt_is_silent() {
+        let mut ui = ready();
+        ui.area_open = true;
+        ui.note_seen("ep", 3, true);
+        requests(&mut ui);
+        ui.on_reply(
+            c(),
+            mark("ep", 3),
+            Ok(ChatResponse::Error {
+                kind: "internal".into(),
+                message: "x".into(),
+            }),
+        );
+        assert!(ui.page_msg.is_none());
+        assert!(ui.read_inflight.is_none());
     }
 
     #[test]
@@ -2026,6 +2307,7 @@ mod tests {
             messages: 2,
             last_ms: last,
             pending: 0,
+            read_receipts: true,
         };
         ui.on_reply(
             c(),
@@ -2160,6 +2442,7 @@ mod tests {
                 outbox: 0,
                 outbox_max: 10,
                 max_message_bytes: 2000,
+                read_receipts: true,
             })),
         );
         assert_eq!(ui.availability, Availability::Ok);

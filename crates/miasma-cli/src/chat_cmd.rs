@@ -53,6 +53,16 @@ pub enum ChatCmd {
         #[arg(long)]
         all: bool,
     },
+    /// Show or change read receipts for a contact. They are on by default; a message shows as "read" only when both sides have them on. With neither flag, shows the current state.
+    Receipts {
+        contact: String,
+        /// Send and show read receipts with this contact.
+        #[arg(long, overrides_with = "off")]
+        on: bool,
+        /// Stop sending read receipts to this contact and hide the ones that arrive.
+        #[arg(long, overrides_with = "on")]
+        off: bool,
+    },
 }
 
 // ─── Messages ────────────────────────────────────────────────────────────────
@@ -71,6 +81,11 @@ enum M<'a> {
     TemporaryHistory,
     ApiError(&'a str),
     Hint(&'a str),
+    /// A contact's read receipts: label, in effect, global setting on.
+    ReceiptsState(&'a str, bool, bool),
+    ReceiptsSet(&'a str, bool),
+    /// The contact has read our messages up to this number.
+    ReadUpTo(u64),
 }
 
 impl M<'_> {
@@ -101,6 +116,23 @@ impl M<'_> {
             M::Following => "Waiting for new messages (Ctrl+C to stop)...".into(),
             M::TemporaryHistory => "Note: the history is temporary here (chat.history_save is false): it is kept in memory only and is gone when the daemon stops. Messages are saved by default; run `miasma config --key chat.history_save --value auto` and restart the daemon to save them.".into(),
             M::ApiError(e) => format!("error: {e}"),
+            M::ReceiptsState(label, on, global) => {
+                if !global {
+                    format!("Read receipts are off for everyone (chat.read_receipts is false), so none are sent or shown for \"{label}\".")
+                } else if *on {
+                    format!("Read receipts with \"{label}\" are on. A message shows as read when both sides have them on.")
+                } else {
+                    format!("Read receipts with \"{label}\" are off: none are sent and the ones that arrive are hidden.")
+                }
+            }
+            M::ReceiptsSet(label, on) => {
+                if *on {
+                    format!("Read receipts with \"{label}\" are now on.")
+                } else {
+                    format!("Read receipts with \"{label}\" are now off.")
+                }
+            }
+            M::ReadUpTo(n) => format!("(they have read your messages up to number {n})"),
             M::Hint(kind) => match *kind {
                 "unknown_contact" => "No such contact. See `miasma contact list`.".into(),
                 "send_disabled" => "Sending to this contact is switched off (`miasma contact set <contact> --allow-send`).".into(),
@@ -134,6 +166,23 @@ impl M<'_> {
             M::Following => "新しいメッセージを待っています(Ctrl+C で終了)...".into(),
             M::TemporaryHistory => "注意: 履歴は一時的です(chat.history_save が false)。メモリにだけ置かれ、デーモンを止めると消えます。既定では保存されます。保存するには `miasma config --key chat.history_save --value auto` を実行してデーモンを再起動してください。".into(),
             M::ApiError(e) => format!("エラー: {e}"),
+            M::ReceiptsState(label, on, global) => {
+                if !global {
+                    format!("既読表示は全体でオフです(chat.read_receipts が false)。「{label}」には送らず、届いても表示しません。")
+                } else if *on {
+                    format!("「{label}」との既読表示はオンです。双方がオンのときだけ「既読」と表示されます。")
+                } else {
+                    format!("「{label}」との既読表示はオフです。既読は送らず、届いた既読も表示しません。")
+                }
+            }
+            M::ReceiptsSet(label, on) => {
+                if *on {
+                    format!("「{label}」との既読表示をオンにしました。")
+                } else {
+                    format!("「{label}」との既読表示をオフにしました。")
+                }
+            }
+            M::ReadUpTo(n) => format!("(相手が {n} 番目のメッセージまで読みました)"),
             M::Hint(kind) => match *kind {
                 "unknown_contact" => "その連絡先はありません。`miasma contact list` で確認してください。".into(),
                 "send_disabled" => "この連絡先への送信はオフになっています(`miasma contact set <連絡先> --allow-send`)。".into(),
@@ -176,10 +225,12 @@ fn state_word(state: &str, ja: bool) -> &'static str {
         ("queued", false) => "waiting",
         ("sending", false) => "sending",
         ("delivered", false) => "delivered",
+        ("read", false) => "read",
         ("failed", false) => "FAILED",
         ("queued", true) => "送信待ち",
         ("sending", true) => "送信中",
         ("delivered", true) => "届きました",
+        ("read", true) => "既読",
         ("failed", true) => "失敗",
         _ => "",
     }
@@ -304,6 +355,47 @@ pub async fn run_chat(data_dir: &Path, cmd: ChatCmd) -> Result<()> {
             }
             Ok(())
         }
+        ChatCmd::Receipts { contact, on, off } => {
+            if on || off {
+                return match call(
+                    data_dir,
+                    ChatRequest::SetReadReceipts {
+                        contact: contact.clone(),
+                        enabled: on,
+                    },
+                )
+                .await?
+                {
+                    ChatResponse::ReceiptsSet { enabled } => {
+                        println!("{}", M::ReceiptsSet(&contact, enabled).t());
+                        Ok(())
+                    }
+                    ChatResponse::Error { kind, message } => Err(api_error(&kind, &message)),
+                    other => bail!("unexpected response: {other:?}"),
+                };
+            }
+            let global = match call(data_dir, ChatRequest::Status {}).await? {
+                ChatResponse::Status(s) => s.read_receipts,
+                ChatResponse::Error { kind, message } => return Err(api_error(&kind, &message)),
+                other => bail!("unexpected response: {other:?}"),
+            };
+            let sel = contact.to_lowercase();
+            let effective = match call(data_dir, ChatRequest::Conversations {}).await? {
+                ChatResponse::Conversations(list) => list
+                    .iter()
+                    .find(|c| {
+                        c.endpoint_id == sel
+                            || c.contact_id.as_deref() == Some(contact.as_str())
+                            || c.label.as_deref().map(str::to_lowercase).as_deref() == Some(&sel)
+                    })
+                    .map(|c| c.read_receipts),
+                _ => None,
+            };
+            // Without a conversation yet, only the global setting is known.
+            let on = effective.unwrap_or(global);
+            println!("{}", M::ReceiptsState(&contact, on && global, global).t());
+            Ok(())
+        }
         ChatCmd::Delete {
             contact,
             message,
@@ -388,8 +480,13 @@ async fn follow_events(data_dir: &Path, endpoint_id: &str, label: &str) -> Resul
         match call(data_dir, ChatRequest::Events { since }).await? {
             ChatResponse::Events { next, events } => {
                 for e in events {
-                    if e.endpoint_id == endpoint_id && e.kind == "received" {
-                        println!("{}", M::Line(&e.message).t());
+                    if e.endpoint_id != endpoint_id {
+                        continue;
+                    }
+                    match e.kind.as_str() {
+                        "received" => println!("{}", M::Line(&e.message).t()),
+                        "read" => println!("{}", M::ReadUpTo(e.message.seq).t()),
+                        _ => {}
                     }
                 }
                 since = next;
@@ -435,12 +532,14 @@ mod tests {
             messages: 3,
             last_ms: 1_700_000_000_000,
             pending: 1,
+            read_receipts: true,
         };
         let removed = ConversationInfo {
             label: None,
             ..conv.clone()
         };
         let m_out = msg(true, "delivered");
+        let m_read = msg(true, "read");
         let m_in = msg(false, "received");
         let failed = MessageInfo {
             reason: Some("not_allowed".into()),
@@ -455,6 +554,13 @@ mod tests {
             M::ConversationRow(&conv),
             M::ConversationRow(&removed),
             M::Line(&m_out),
+            M::Line(&m_read),
+            M::ReceiptsState("Taro", true, true),
+            M::ReceiptsState("Taro", false, true),
+            M::ReceiptsState("Taro", true, false),
+            M::ReceiptsSet("Taro", true),
+            M::ReceiptsSet("Taro", false),
+            M::ReadUpTo(3),
             M::Line(&m_in),
             M::Line(&failed),
             M::Deleted(2),
@@ -480,6 +586,9 @@ mod tests {
             assert!(!M::Hint(k).ja().is_empty(), "{k}");
         }
         assert!(M::ConversationsNone.ja().contains("連絡先"));
+        assert!(M::Line(&m_read).en().contains("[read]"));
+        assert!(M::Line(&m_read).ja().contains("[既読]"));
+        assert!(M::Line(&m_out).en().contains("[delivered]"));
         assert!(M::Queued("Taro").ja().contains("Taro"));
     }
 }

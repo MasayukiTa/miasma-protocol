@@ -32,10 +32,23 @@ use crate::state_crypto::{Label, LogReader, LogRewrite, LogWriter, StateKeys};
 
 const REC_PUT: u8 = 1;
 const REC_DONE: u8 = 2;
+const REC_PUT_READ: u8 = 3;
+
+/// What an outbox entry carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutKind {
+    /// A message the person wrote.
+    Text,
+    /// A read receipt; `seq` holds the number it reports up to and `text` is
+    /// empty. It never reaches the history, and it is dropped (not failed)
+    /// when it expires.
+    Read,
+}
 
 #[derive(Debug, Clone)]
 pub struct OutEntry {
     pub id: [u8; 16],
+    pub kind: OutKind,
     pub peer: [u8; 32],
     pub seq: u64,
     pub sent_ms: u64,
@@ -52,6 +65,15 @@ pub struct OutEntry {
 impl OutEntry {
     fn put_record(&self) -> Vec<u8> {
         let mut v = Vec::with_capacity(1 + 16 + 32 + 24 + 2 + self.text.len());
+        if self.kind == OutKind::Read {
+            v.push(REC_PUT_READ);
+            v.extend_from_slice(&self.id);
+            v.extend_from_slice(&self.peer);
+            v.extend_from_slice(&self.seq.to_be_bytes());
+            v.extend_from_slice(&self.sent_ms.to_be_bytes());
+            v.extend_from_slice(&self.created_ms.to_be_bytes());
+            return v;
+        }
         v.push(REC_PUT);
         v.extend_from_slice(&self.id);
         v.extend_from_slice(&self.peer);
@@ -61,6 +83,34 @@ impl OutEntry {
         v.extend_from_slice(&(self.text.len() as u16).to_be_bytes());
         v.extend_from_slice(self.text.as_bytes());
         v
+    }
+
+    fn parse_put_read(b: &[u8]) -> Option<Self> {
+        let mut r = Rd::new(b);
+        if r.u8().ok()? != REC_PUT_READ {
+            return None;
+        }
+        let id = r.arr::<16>().ok()?;
+        let peer = r.arr::<32>().ok()?;
+        let seq = r.u64().ok()?;
+        let sent_ms = r.u64().ok()?;
+        let created_ms = r.u64().ok()?;
+        if !r.done() || seq == 0 {
+            return None;
+        }
+        Some(Self {
+            id,
+            kind: OutKind::Read,
+            peer,
+            seq,
+            sent_ms,
+            created_ms,
+            text: String::new(),
+            attempts: 0,
+            sealed: None,
+            sending: false,
+            last_error: None,
+        })
     }
 
     fn parse_put(b: &[u8]) -> Option<Self> {
@@ -83,6 +133,7 @@ impl OutEntry {
         }
         Some(Self {
             id,
+            kind: OutKind::Text,
             peer,
             seq,
             sent_ms,
@@ -131,6 +182,10 @@ impl Outbox {
                             Some(e) => entries.push_back(e),
                             None => garbage += 1,
                         },
+                        Some(&REC_PUT_READ) => match OutEntry::parse_put_read(&rec) {
+                            Some(e) => entries.push_back(e),
+                            None => garbage += 1,
+                        },
                         Some(&REC_DONE) if rec.len() == 17 => {
                             let id: [u8; 16] = rec[1..17].try_into().unwrap_or_default();
                             if let Some(i) = entries.iter().position(|e| e.id == id) {
@@ -162,12 +217,20 @@ impl Outbox {
         let expiry_ms = settings.outbox_expiry_days.saturating_mul(86_400_000);
         let mut expired = Vec::new();
         if expiry_ms > 0 {
-            let (old, keep): (Vec<_>, Vec<_>) = entries
-                .into_iter()
-                .partition(|e| now_ms.saturating_sub(e.created_ms) > expiry_ms);
+            let (old, keep): (Vec<_>, Vec<_>) = entries.into_iter().partition(|e| {
+                e.kind == OutKind::Text && now_ms.saturating_sub(e.created_ms) > expiry_ms
+            });
             expired = old;
             entries = keep.into();
         }
+        // Receipts are not worth a late delivery: past their own, shorter
+        // expiry they are dropped without a trace in the history.
+        let before = entries.len();
+        entries.retain(|e| {
+            e.kind != OutKind::Read
+                || now_ms.saturating_sub(e.created_ms) <= settings.receipt_expiry_ms
+        });
+        garbage += before - entries.len();
         let text_bytes = entries.iter().map(|e| e.text.len()).sum();
         let ob = Self {
             path: path.to_path_buf(),
@@ -206,21 +269,73 @@ impl Outbox {
         }
     }
 
+    /// Every entry, receipts included.
     pub fn len(&self) -> usize {
         self.inner.lock().unwrap().entries.len()
+    }
+
+    /// Messages waiting (receipts are not counted: they have a bound of their
+    /// own, one per contact).
+    pub fn text_len(&self) -> usize {
+        let g = self.inner.lock().unwrap();
+        g.entries.iter().filter(|e| e.kind == OutKind::Text).count()
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    /// Queue a read receipt for its contact, replacing the one that is still
+    /// waiting (a newer receipt reports at least as much). At most one receipt
+    /// per contact is ever held, so this needs no limit of its own. Durable
+    /// before it returns.
+    pub fn push_receipt(&self, e: OutEntry) -> Result<(), StoreError> {
+        debug_assert_eq!(e.kind, OutKind::Read);
+        let old: Vec<[u8; 16]> = {
+            let g = self.inner.lock().unwrap();
+            g.entries
+                .iter()
+                .filter(|x| x.kind == OutKind::Read && x.peer == e.peer)
+                .map(|x| x.id)
+                .collect()
+        };
+        for id in old {
+            self.remove(&id);
+        }
+        let mut g = self.inner.lock().unwrap();
+        let rec = e.put_record();
+        let durable = !self.settings.defer_flush;
+        self.with_writer(&mut g, |w| {
+            if durable {
+                w.append_durable(&rec)
+            } else {
+                w.append(&rec)
+            }
+        })?;
+        g.entries.push_back(e);
+        Ok(())
+    }
+
+    /// The receipt waiting for `peer`, if any.
+    pub fn receipt_for(&self, peer: &[u8; 32]) -> Option<OutEntry> {
+        let g = self.inner.lock().unwrap();
+        g.entries
+            .iter()
+            .find(|e| e.kind == OutKind::Read && &e.peer == peer)
+            .cloned()
+    }
+
     /// Queue a message. Durable before it returns.
     pub fn push(&self, e: OutEntry) -> Result<(), StoreError> {
         let mut g = self.inner.lock().unwrap();
-        if g.entries.len() >= self.settings.outbox_max {
+        let texts = g.entries.iter().filter(|x| x.kind == OutKind::Text);
+        if texts.count() >= self.settings.outbox_max {
             return Err(StoreError::OutboxFull);
         }
-        if g.entries.iter().filter(|x| x.peer == e.peer).count()
+        if g.entries
+            .iter()
+            .filter(|x| x.kind == OutKind::Text && x.peer == e.peer)
+            .count()
             >= self.settings.outbox_max_per_contact
         {
             return Err(StoreError::OutboxFull);
@@ -274,9 +389,13 @@ impl Outbox {
             .collect()
     }
 
+    /// Messages (not receipts) waiting for `peer`.
     pub fn count_for(&self, peer: &[u8; 32]) -> usize {
         let g = self.inner.lock().unwrap();
-        g.entries.iter().filter(|e| &e.peer == peer).count()
+        g.entries
+            .iter()
+            .filter(|e| e.kind == OutKind::Text && &e.peer == peer)
+            .count()
     }
 
     /// Contacts that have something waiting (each once, oldest first).
@@ -339,11 +458,29 @@ impl Outbox {
 pub fn new_entry(id: [u8; 16], peer: [u8; 32], seq: u64, sent_ms: u64, text: String) -> OutEntry {
     OutEntry {
         id,
+        kind: OutKind::Text,
         peer,
         seq,
         sent_ms,
         created_ms: sent_ms,
         text,
+        attempts: 0,
+        sealed: None,
+        sending: false,
+        last_error: None,
+    }
+}
+
+/// An entry for a read receipt that reports up to `up_to_seq`.
+pub fn new_receipt(id: [u8; 16], peer: [u8; 32], up_to_seq: u64, now_ms: u64) -> OutEntry {
+    OutEntry {
+        id,
+        kind: OutKind::Read,
+        peer,
+        seq: up_to_seq,
+        sent_ms: now_ms,
+        created_ms: now_ms,
+        text: String::new(),
         attempts: 0,
         sealed: None,
         sending: false,
