@@ -3404,11 +3404,9 @@ async fn cmd_netcheck(
     .await
     .context("netcheck failed")?;
     let text = if json {
-        format!(
-            "{}
-",
-            serde_json::to_string_pretty(&report)?
-        )
+        let mut t = serde_json::to_string_pretty(&report)?;
+        t.push('\n');
+        t
     } else {
         i18n::format_netcheck(&report, i18n::lang())
     };
@@ -3436,11 +3434,9 @@ async fn cmd_netcheck_matrix(
     let opts = MatrixOptions::from_settings(&settings, user);
     let report = run_matrix(&SystemNet::new(settings), &opts).await;
     let text = if json {
-        format!(
-            "{}
-",
-            serde_json::to_string_pretty(&report)?
-        )
+        let mut t = serde_json::to_string_pretty(&report)?;
+        t.push('\n');
+        t
     } else {
         i18n::format_matrix(&report, i18n::lang())
     };
@@ -3944,6 +3940,39 @@ mod via_flag_tests {
         let mut v = vec!["miasma"];
         v.extend_from_slice(args);
         Cli::try_parse_from(v)
+    }
+
+    #[test]
+    fn netcheck_matrix_takes_repeatable_probes_and_an_output_file() {
+        let cli = parse(&[
+            "netcheck",
+            "--matrix",
+            "--json",
+            "--probe",
+            "wss://one.example/x",
+            "--probe",
+            "wss://two.example:8443",
+            "--out",
+            "m.json",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Netcheck {
+                matrix,
+                json,
+                probe,
+                out,
+                ..
+            } => {
+                assert!(matrix && json);
+                assert_eq!(probe, ["wss://one.example/x", "wss://two.example:8443"]);
+                assert_eq!(out.as_deref(), Some(std::path::Path::new("m.json")));
+            }
+            _ => panic!("wrong command"),
+        }
+        // Plain netcheck is unchanged, and --probe needs --matrix.
+        assert!(parse(&["netcheck"]).is_ok());
+        assert!(parse(&["netcheck", "--probe", "wss://one.example"]).is_err());
     }
 
     #[test]
