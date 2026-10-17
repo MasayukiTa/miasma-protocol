@@ -1,8 +1,5 @@
 package dev.miasma.ui
 
-import android.content.Context
-import android.net.Uri
-import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
@@ -18,8 +15,6 @@ import androidx.compose.ui.unit.dp
 import dev.miasma.MiasmaViewModel
 import dev.miasma.R
 import java.io.File
-import java.io.IOException
-import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -38,7 +33,7 @@ fun SendScreen(vm: MiasmaViewModel) {
 
     var recipientContact by remember { mutableStateOf("") }
     var message by remember { mutableStateOf("") }
-    var selectedFile by remember { mutableStateOf<StagedFile?>(null) }
+    var selectedFile by remember { mutableStateOf<StagedContentFile?>(null) }
     var isStagingFile by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     var password by remember { mutableStateOf("") }
@@ -59,7 +54,7 @@ fun SendScreen(vm: MiasmaViewModel) {
         sendError = null
         scope.launch {
             try {
-                val staged = withContext(Dispatchers.IO) { stageSelectedFile(context, uri, fileTooLargeText, fileOpenFailedText) }
+                val staged = withContext(Dispatchers.IO) { stageContentUri(context, uri, "miasma-send", tooLargeText = fileTooLargeText, openFailedText = fileOpenFailedText) }
                 val previous = selectedFile
                 selectedFile = staged
                 if (previous != null && previous.path != staged.path) File(previous.path).delete()
@@ -162,7 +157,7 @@ fun SendScreen(vm: MiasmaViewModel) {
         }
         selectedFile?.let { file ->
             Text(
-                stringResource(R.string.send_selected_file, file.name, formatSelectedFileSize(file.size)),
+                stringResource(R.string.send_selected_file, file.name, formatStagedFileSize(file.size)),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 4.dp),
@@ -278,81 +273,5 @@ fun SendScreen(vm: MiasmaViewModel) {
             Spacer(Modifier.height(8.dp))
             Text(sendError!!, color = MaterialTheme.colorScheme.error)
         }
-    }
-}
-
-private const val MAX_DIRECTED_FILE_BYTES = 100L * 1024 * 1024
-
-private data class StagedFile(
-    val path: String,
-    val name: String,
-    val size: Long,
-)
-
-private fun stageSelectedFile(context: Context, uri: Uri, tooLargeText: String, openFailedText: String): StagedFile {
-    val resolver = context.contentResolver
-    var displayName: String? = null
-    var declaredSize = -1L
-    resolver.query(
-        uri,
-        arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE),
-        null,
-        null,
-        null,
-    )?.use { cursor ->
-        if (cursor.moveToFirst()) {
-            val nameColumn = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-            val sizeColumn = cursor.getColumnIndex(OpenableColumns.SIZE)
-            if (nameColumn >= 0 && !cursor.isNull(nameColumn)) displayName = cursor.getString(nameColumn)
-            if (sizeColumn >= 0 && !cursor.isNull(sizeColumn)) declaredSize = cursor.getLong(sizeColumn)
-        }
-    }
-    if (declaredSize > MAX_DIRECTED_FILE_BYTES) {
-        throw IOException(tooLargeText)
-    }
-
-    val safeName = (displayName ?: uri.lastPathSegment ?: "miasma-file")
-        .substringAfterLast('/')
-        .substringAfterLast('\\')
-        .replace("\u0000", "")
-        .take(255)
-        .ifBlank { "miasma-file" }
-
-    val stagingDir = File(context.cacheDir, "miasma-send").apply { mkdirs() }
-    val staged = File(stagingDir, "${UUID.randomUUID()}.tmp")
-    var total = 0L
-    try {
-        val input = resolver.openInputStream(uri) ?: throw IOException(openFailedText)
-        input.buffered().use { source ->
-            staged.outputStream().buffered().use { target ->
-                val buffer = ByteArray(64 * 1024)
-                while (true) {
-                    val read = source.read(buffer)
-                    if (read < 0) break
-                    total += read
-                    if (total > MAX_DIRECTED_FILE_BYTES) {
-                        throw IOException(tooLargeText)
-                    }
-                    target.write(buffer, 0, read)
-                }
-            }
-        }
-        return StagedFile(staged.absolutePath, safeName, total)
-    } catch (e: Exception) {
-        staged.delete()
-        throw e
-    }
-}
-
-private fun formatSelectedFileSize(bytes: Long): String = when {
-    bytes < 1024 -> "$bytes B"
-    bytes < 1024 * 1024 -> "%.1f KiB".format(bytes / 1024.0)
-    else -> "%.1f MiB".format(bytes / 1024.0 / 1024.0)
-}
-
-private fun cleanupOldStagingFiles(cacheDir: File, directory: String) {
-    val cutoff = System.currentTimeMillis() - 24L * 60 * 60 * 1000
-    File(cacheDir, directory).listFiles()?.forEach { file ->
-        if (file.isFile && file.lastModified() < cutoff) file.delete()
     }
 }

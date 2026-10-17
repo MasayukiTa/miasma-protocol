@@ -100,4 +100,28 @@ All locally stored shares become permanently unreadable. This cannot be undone.<
     <string name="status_revoked">Revoked</string>
     <string name="status_deleted">Deleted</string>
     <string name="status_failed">Failed</string>
+
+    <string name="retrieve_title">Get a file back</string>
+    <string name="retrieve_description">Enter a Content ID and choose where to save the recovered file.</string>
+    <string name="retrieve_daemon_unavailable">Node is not ready. Retrieval is unavailable.</string>
+    <string name="retrieve_content_id">Content ID</string>
+    <string name="retrieve_invalid_mid">Enter a valid Miasma Content ID.</string>
+    <string name="retrieve_paste">Paste Content ID</string>
+    <string name="retrieve_save_to_device">Save to device</string>
+    <string name="retrieve_scan">Scan</string>
+    <string name="retrieve_scan_prompt">Scan a Miasma Content ID</string>
+    <string name="retrieve_in_progress">Retrieving and verifying...</string>
+
+    <string name="save_title">Save content</string>
+    <string name="save_description">Encrypt and store your content securely.</string>
+    <string name="save_text_label">Text</string>
+    <string name="save_text_placeholder">Paste or type content here...</string>
+    <string name="save_text_button">Save text</string>
+    <string name="save_choose_file">Choose a file</string>
+    <string name="save_encrypting">Encrypting and publishing...</string>
+    <string name="save_content_saved">Content saved</string>
+    <string name="save_share_mid_hint">Keep this Content ID. It is required to retrieve the content.</string>
+    <string name="save_mid_copied">Content ID copied</string>
+    <string name="save_copy_mid">Copy Content ID</string>
+    <string name="save_qr_mid">QR code for Content ID</string>
 </resources>

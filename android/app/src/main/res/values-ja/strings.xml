@@ -100,4 +100,28 @@
     <string name="status_revoked">取消済み</string>
     <string name="status_deleted">削除済み</string>
     <string name="status_failed">失敗</string>
+
+    <string name="retrieve_title">ファイルを復元</string>
+    <string name="retrieve_description">コンテンツIDを入力し、復元したファイルの保存先を選択します。</string>
+    <string name="retrieve_daemon_unavailable">ノードの準備ができていないため、復元できません。</string>
+    <string name="retrieve_content_id">コンテンツID</string>
+    <string name="retrieve_invalid_mid">有効なMiasmaコンテンツIDを入力してください。</string>
+    <string name="retrieve_paste">コンテンツIDを貼り付け</string>
+    <string name="retrieve_save_to_device">端末に保存</string>
+    <string name="retrieve_scan">スキャン</string>
+    <string name="retrieve_scan_prompt">MiasmaコンテンツIDをスキャン</string>
+    <string name="retrieve_in_progress">復元して検証しています...</string>
+
+    <string name="save_title">コンテンツを保存</string>
+    <string name="save_description">コンテンツを暗号化して安全に保存します。</string>
+    <string name="save_text_label">テキスト</string>
+    <string name="save_text_placeholder">ここにテキストを入力または貼り付け...</string>
+    <string name="save_text_button">テキストを保存</string>
+    <string name="save_choose_file">ファイルを選択</string>
+    <string name="save_encrypting">暗号化して公開しています...</string>
+    <string name="save_content_saved">保存しました</string>
+    <string name="save_share_mid_hint">このコンテンツIDは復元に必要です。安全な場所に保管してください。</string>
+    <string name="save_mid_copied">コンテンツIDをコピーしました</string>
+    <string name="save_copy_mid">コンテンツIDをコピー</string>
+    <string name="save_qr_mid">コンテンツIDのQRコード</string>
 </resources>
