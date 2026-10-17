@@ -594,7 +594,13 @@ export class MiasmaBridge {
       jsonStr = this._wasm.dissolve_bytes(data, k, n);
     }
     const result = JSON.parse(jsonStr);
-    return { mid: result.mid, shares: result.shares, networkPublished: false };
+    return {
+      mid: result.mid,
+      shares: result.shares,
+      data_shards: result.data_shards,
+      total_shards: result.total_shards,
+      networkPublished: false,
+    };
   }
 
   _startPolling() {

@@ -414,7 +414,14 @@ async function handleMidInput() {
       const prefix = Array.from(digestBytes.slice(0, 8))
         .map(b => b.toString(16).padStart(2, '0'))
         .join('');
-      const localShares = await getSharesByMidPrefix(prefix);
+      const needed = Math.max(1, parseInt(document.getElementById('retrieve-k').value) || 10);
+      const localShares = await getSharesByMidPrefix(prefix, needed, (row) => {
+        try {
+          return wasm.verify_share(JSON.stringify(row.data), midStr);
+        } catch (_) {
+          return false;
+        }
+      });
       if (localShares.length > 0) {
         retrieveShares = localShares.map(s => s.data);
         document.getElementById('local-share-count').textContent = localShares.length.toString();

@@ -448,9 +448,10 @@ fn validate_params(k: usize, n: usize) -> Result<(), MiasmaError> {
 
 // ── Pipeline: dissolve ────────────────────────────────────────────────
 
-fn dissolve_inner(
+fn dissolve_inner_at(
     plaintext: &[u8],
     params: DissolutionParams,
+    timestamp: u64,
 ) -> Result<(ContentId, Vec<MiasmaShare>), MiasmaError> {
     validate_params(params.data_shards, params.total_shards)?;
 
@@ -482,14 +483,6 @@ fn dissolve_inner(
         params.total_shards as u8,
     )?;
 
-    #[cfg(target_arch = "wasm32")]
-    let timestamp = (js_sys::Date::now() / 1000.0) as u64;
-    #[cfg(not(target_arch = "wasm32"))]
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
     let shares: Vec<MiasmaShare> = shards
         .into_iter()
         .zip(key_shares)
@@ -509,6 +502,26 @@ fn dissolve_inner(
         .collect();
 
     Ok((mid, shares))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn current_timestamp_secs() -> u64 {
+    (js_sys::Date::now() / 1000.0) as u64
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn current_timestamp_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn dissolve_inner(
+    plaintext: &[u8],
+    params: DissolutionParams,
+) -> Result<(ContentId, Vec<MiasmaShare>), MiasmaError> {
+    dissolve_inner_at(plaintext, params, current_timestamp_secs())
 }
 
 // ── Pipeline: retrieve ────────────────────────────────────────────────
@@ -600,17 +613,30 @@ struct DissolveResult {
 
 #[derive(Serialize, Deserialize)]
 struct ShareJson {
+    #[serde(default)]
     version: u8,
+    #[serde(default)]
     mid_prefix: String,
+    #[serde(default)]
     segment_index: u32,
+    #[serde(default)]
     slot_index: u16,
-    shard_data: String, // base64
-    key_share: String,  // base64
-    shard_hash: String, // hex
-    nonce: String,      // hex
+    // Legacy field-level representation. New output leaves these empty and serializes only
+    // `bincode`, avoiding a second base64 copy of the large shard payload.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    shard_data: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    key_share: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    shard_hash: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    nonce: String,
+    #[serde(default)]
     original_len: u32,
+    #[serde(default)]
     timestamp: u64,
     /// bincode-serialized share bytes (base64), for cross-platform interop.
+    #[serde(default)]
     bincode: String,
 }
 
@@ -621,10 +647,10 @@ fn share_to_json(share: &MiasmaShare) -> ShareJson {
         mid_prefix: hex::encode(share.mid_prefix),
         segment_index: share.segment_index,
         slot_index: share.slot_index,
-        shard_data: base64_encode(&share.shard_data),
-        key_share: base64_encode(&share.key_share),
-        shard_hash: hex::encode(share.shard_hash),
-        nonce: hex::encode(share.nonce),
+        shard_data: String::new(),
+        key_share: String::new(),
+        shard_hash: String::new(),
+        nonce: String::new(),
         original_len: share.original_len,
         timestamp: share.timestamp,
         bincode: base64_encode(&bincode_bytes),
@@ -1003,6 +1029,15 @@ mod tests {
     // ── Full Pipeline ──
 
     #[test]
+    fn supplied_timestamp_is_used_for_every_share() {
+        let params = DissolutionParams::default();
+        let timestamp = 1_799_999_999;
+        let (_, shares) = dissolve_inner_at(TEST_CONTENT, params, timestamp).unwrap();
+        assert!(!shares.is_empty());
+        assert!(shares.iter().all(|share| share.timestamp == timestamp));
+    }
+
+    #[test]
     fn dissolve_and_retrieve_default_params() {
         let params = DissolutionParams::default();
         let (mid, shares) = dissolve_inner(TEST_CONTENT, params).unwrap();
@@ -1129,9 +1164,14 @@ mod tests {
             1700000000,
         );
         let json = share_to_json(&share);
-        // bincode field should be populated
+        // New JSON carries one large representation only: exact bincode bytes.
         assert!(!json.bincode.is_empty());
-        // Deserialization should prefer bincode path
+        assert!(json.shard_data.is_empty());
+        assert!(json.key_share.is_empty());
+        let encoded = serde_json::to_string(&json).unwrap();
+        assert!(!encoded.contains("shard_data"));
+        assert!(!encoded.contains("key_share"));
+        // Deserialization should prefer bincode path.
         let recovered = share_from_json(&json).unwrap();
         assert_eq!(share.shard_data, recovered.shard_data);
         assert_eq!(share.key_share, recovered.key_share);
