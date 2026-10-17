@@ -45,6 +45,9 @@ private fun ffiNotLoaded(): Nothing =
 fun initializeNode(dataDir: String, storageMb: ULong, bandwidthMbDay: ULong): Unit = ffiNotLoaded()
 
 @Throws(MiasmaFfiException::class)
+fun setBootstrapPeers(dataDir: String, bootstrapPeers: List<String>): Unit = ffiNotLoaded()
+
+@Throws(MiasmaFfiException::class)
 fun dissolveBytes(dataDir: String, data: ByteArray): String = ffiNotLoaded()
 
 @Throws(MiasmaFfiException::class)

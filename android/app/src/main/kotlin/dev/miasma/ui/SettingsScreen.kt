@@ -195,8 +195,9 @@ fun SettingsScreen() {
                 Prefs.setBandwidthMbDay(context, bMb)
                 Prefs.setBootstrapPeers(context, peers)
 
-                MiasmaService.stopNode(context)
-                MiasmaService.startNode(context, context.filesDir.absolutePath, sMb, bMb)
+                // A changed request restarts the running service in-place. Avoid a
+                // stop/start race where onDestroy() could tear down the new daemon.
+                MiasmaService.startNode(context, context.filesDir.absolutePath, sMb, bMb, peers)
 
                 scope.launch {
                     snackbarHostState.showSnackbar("Settings saved — daemon restarted")

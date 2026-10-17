@@ -50,6 +50,7 @@ class MainActivity : ComponentActivity() {
             filesDir.absolutePath,
             Prefs.storageMb(this),
             Prefs.bandwidthMbDay(this),
+            Prefs.bootstrapPeers(this),
         )
 
         // Poll for daemon status to update ViewModel once daemon is ready.

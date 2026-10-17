@@ -34,7 +34,7 @@ use std::sync::Arc;
 use zeroize::Zeroizing;
 
 use miasma_core::{
-    config::{NetworkConfig, NodeConfig, StorageConfig},
+    config::NodeConfig,
     daemon::DaemonServer,
     directed, dissolve,
     network::{node::MiasmaNode, types::NodeType},
@@ -262,12 +262,62 @@ fn open_store_for_daemon(
     open_store_inner(data_dir, true)
 }
 
+const MAX_MOBILE_BOOTSTRAP_PEERS: usize = 64;
+const MAX_MOBILE_BOOTSTRAP_ADDR_LEN: usize = 2_048;
+
+fn normalize_bootstrap_peers(peers: Vec<String>) -> Result<Vec<String>, MiasmaFfiError> {
+    let mut normalized = Vec::with_capacity(peers.len().min(MAX_MOBILE_BOOTSTRAP_PEERS));
+    for (index, raw) in peers.into_iter().enumerate() {
+        let value = raw.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if value.len() > MAX_MOBILE_BOOTSTRAP_ADDR_LEN {
+            return Err(MiasmaFfiError::Other {
+                msg: format!("bootstrap peer {} is too long", index + 1),
+            });
+        }
+        let addr: libp2p::Multiaddr = value.parse().map_err(|_| MiasmaFfiError::Other {
+            msg: format!("bootstrap peer {} is not a valid multiaddr", index + 1),
+        })?;
+        let has_peer_id = addr
+            .iter()
+            .any(|p| matches!(p, libp2p::multiaddr::Protocol::P2p(_)));
+        if !has_peer_id {
+            return Err(MiasmaFfiError::Other {
+                msg: format!("bootstrap peer {} is missing /p2p/<peer-id>", index + 1),
+            });
+        }
+        let canonical = addr.to_string();
+        if !normalized.contains(&canonical) {
+            if normalized.len() == MAX_MOBILE_BOOTSTRAP_PEERS {
+                return Err(MiasmaFfiError::Other {
+                    msg: format!("too many bootstrap peers (max {MAX_MOBILE_BOOTSTRAP_PEERS})"),
+                });
+            }
+            normalized.push(canonical);
+        }
+    }
+    Ok(normalized)
+}
+
+fn apply_mobile_limits(
+    mut config: NodeConfig,
+    storage_mb: u64,
+    bandwidth_mb_day: u64,
+) -> NodeConfig {
+    config.storage.quota_mb = storage_mb;
+    config.storage.bandwidth_mb_day = bandwidth_mb_day;
+    config
+}
+
 // ─── Exported functions ───────────────────────────────────────────────────────
 
 /// Initialise a new Miasma node at `data_dir`.
 ///
-/// Creates the data directory, generates a master key, and writes a default
-/// config. Idempotent — safe to call again if the node is already initialised.
+/// Creates the data directory and master key when absent. On an existing node it
+/// only updates the mobile storage/bandwidth limits and preserves the rest of
+/// `config.toml`, including bootstrap peers and transport settings.
 #[uniffi::export]
 pub fn initialize_node(
     data_dir: String,
@@ -282,21 +332,21 @@ pub fn initialize_node(
         }
     })?;
 
-    let config = NodeConfig {
-        storage: StorageConfig {
-            quota_mb: storage_mb,
-            bandwidth_mb_day,
-            ..StorageConfig::default()
-        },
-        network: NetworkConfig {
-            listen_addr: "/ip4/0.0.0.0/udp/0/quic-v1".into(),
-            bootstrap_peers: vec![],
-        },
-        transport: Default::default(),
-        push: Default::default(),
-        chat: Default::default(),
-        privacy: Default::default(),
+    // Re-running initialization updates mobile quota knobs without destroying
+    // the rest of config.toml. In particular, bootstrap peers and transport
+    // settings must survive every embedded-daemon restart.
+    let config_path = miasma_core::paths::config_file(&path);
+    let config = if config_path.exists() {
+        NodeConfig::load(&path).map_err(|e| {
+            tracing::warn!("config load error during initialize: {e}");
+            MiasmaFfiError::Other {
+                msg: "failed to load existing config".into(),
+            }
+        })?
+    } else {
+        NodeConfig::default()
     };
+    let config = apply_mobile_limits(config, storage_mb, bandwidth_mb_day);
     config.save(&path).map_err(|e| {
         tracing::warn!("config save error: {e}");
         MiasmaFfiError::Other {
@@ -313,6 +363,35 @@ pub fn initialize_node(
     })?;
 
     Ok(())
+}
+
+/// Replace the persisted bootstrap peer list used by the embedded mobile daemon.
+///
+/// Entries are normalized as libp2p multiaddrs, must include a `/p2p/<peer-id>`
+/// component, and are deduplicated while preserving order.
+#[uniffi::export]
+pub fn set_bootstrap_peers(
+    data_dir: String,
+    bootstrap_peers: Vec<String>,
+) -> Result<(), MiasmaFfiError> {
+    let path = validate_data_dir(&data_dir)?;
+    if !miasma_core::paths::config_file(&path).exists() {
+        return Err(MiasmaFfiError::NotInitialized { data_dir });
+    }
+    let normalized = normalize_bootstrap_peers(bootstrap_peers)?;
+    let mut config = NodeConfig::load(&path).map_err(|e| {
+        tracing::warn!("config load error while setting bootstrap peers: {e}");
+        MiasmaFfiError::Other {
+            msg: "failed to load config".into(),
+        }
+    })?;
+    config.network.bootstrap_peers = normalized;
+    config.save(&path).map_err(|e| {
+        tracing::warn!("config save error while setting bootstrap peers: {e}");
+        MiasmaFfiError::Other {
+            msg: "failed to save bootstrap peers".into(),
+        }
+    })
 }
 
 /// Dissolve raw bytes into encrypted shares and store them locally.
@@ -893,4 +972,63 @@ pub fn get_sharing_contact() -> String {
         .as_ref()
         .map(|d| d.sharing_contact.clone())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod mobile_config_tests {
+    use super::*;
+
+    #[test]
+    fn bootstrap_peer_normalization_deduplicates_and_trims() {
+        let peer = libp2p::PeerId::random();
+        let addr = format!("/ip4/127.0.0.1/udp/4001/quic-v1/p2p/{peer}");
+        let got = normalize_bootstrap_peers(vec![format!("  {addr}  "), addr.clone()]).unwrap();
+        assert_eq!(got, vec![addr]);
+    }
+
+    #[test]
+    fn bootstrap_peer_normalization_rejects_missing_peer_id() {
+        let err =
+            normalize_bootstrap_peers(vec!["/ip4/127.0.0.1/udp/4001/quic-v1".into()]).unwrap_err();
+        assert!(matches!(err, MiasmaFfiError::Other { .. }));
+    }
+
+    #[test]
+    fn bootstrap_peer_normalization_caps_nonempty_unique_input() {
+        let peers = (0..=MAX_MOBILE_BOOTSTRAP_PEERS)
+            .map(|i| {
+                let peer = libp2p::PeerId::random();
+                format!("/ip4/192.0.2.{}/udp/443/quic-v1/p2p/{peer}", (i % 250) + 1)
+            })
+            .collect();
+        assert!(normalize_bootstrap_peers(peers).is_err());
+    }
+
+    #[test]
+    fn bootstrap_peer_normalization_ignores_blank_lines_before_cap() {
+        let blanks = vec![String::new(); MAX_MOBILE_BOOTSTRAP_PEERS + 10];
+        assert!(normalize_bootstrap_peers(blanks).unwrap().is_empty());
+    }
+    #[test]
+    fn mobile_limit_update_preserves_network_and_transport_config() {
+        let peer = libp2p::PeerId::random();
+        let bootstrap = format!("/ip4/192.0.2.1/udp/443/quic-v1/p2p/{peer}");
+        let mut config = NodeConfig::default();
+        config.network.listen_addr = "/ip4/127.0.0.1/udp/9000/quic-v1".into();
+        config.network.bootstrap_peers = vec![bootstrap.clone()];
+        config.transport.wss_port = 9443;
+        config.storage.hosted_quota_mb = 777;
+
+        let updated = apply_mobile_limits(config, 512, 100);
+
+        assert_eq!(updated.storage.quota_mb, 512);
+        assert_eq!(updated.storage.bandwidth_mb_day, 100);
+        assert_eq!(updated.storage.hosted_quota_mb, 777);
+        assert_eq!(updated.network.bootstrap_peers, vec![bootstrap]);
+        assert_eq!(
+            updated.network.listen_addr,
+            "/ip4/127.0.0.1/udp/9000/quic-v1"
+        );
+        assert_eq!(updated.transport.wss_port, 9443);
+    }
 }

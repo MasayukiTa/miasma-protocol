@@ -11,6 +11,7 @@ import dev.miasma.uniffi.EmbeddedDaemonStatus
 import dev.miasma.uniffi.NodeStatusFfi
 import dev.miasma.uniffi.getNodeStatus
 import dev.miasma.uniffi.initializeNode
+import dev.miasma.uniffi.setBootstrapPeers
 import dev.miasma.uniffi.startEmbeddedDaemon
 import dev.miasma.uniffi.stopEmbeddedDaemon
 import kotlinx.coroutines.CoroutineScope
@@ -36,6 +37,7 @@ class MiasmaService : Service() {
         val dataDir: String,
         val storageMb: Long,
         val bandwidthMbDay: Long,
+        val bootstrapPeers: List<String>,
     )
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -58,6 +60,8 @@ class MiasmaService : Service() {
             storageMb = intent?.getLongExtra(EXTRA_STORAGE_MB, DEFAULT_STORAGE_MB) ?: DEFAULT_STORAGE_MB,
             bandwidthMbDay = intent?.getLongExtra(EXTRA_BANDWIDTH_MB_DAY, DEFAULT_BANDWIDTH_MB_DAY)
                 ?: DEFAULT_BANDWIDTH_MB_DAY,
+            bootstrapPeers = intent?.getStringArrayListExtra(EXTRA_BOOTSTRAP_PEERS)?.toList()
+                ?: emptyList(),
         )
 
         startForeground(NOTIF_ID, buildNotification("Starting..."))
@@ -78,6 +82,7 @@ class MiasmaService : Service() {
             val dataDir = request.dataDir
             val storageMb = request.storageMb
             val bandwidthMbDay = request.bandwidthMbDay
+            val bootstrapPeers = request.bootstrapPeers
             lastDaemonStatus = null
             lastDaemonError = null
 
@@ -97,8 +102,11 @@ class MiasmaService : Service() {
                 } catch (_: Exception) { /* Keystore may not have key yet on first run */ }
             }
 
-            // Start the embedded daemon (initialises node + networking + HTTP bridge).
+            // Persist the mobile settings first. initializeNode is intentionally
+            // idempotent and now preserves network/transport config across restarts.
             try {
+                initializeNode(dataDir, storageMb.toULong(), bandwidthMbDay.toULong())
+                setBootstrapPeers(dataDir, bootstrapPeers)
                 val daemonStatus = startEmbeddedDaemon(dataDir, storageMb.toULong(), bandwidthMbDay.toULong())
                 updateNotification("Connected · port ${daemonStatus.httpPort}")
                 // Notify the ViewModel if the activity is active.
@@ -206,6 +214,7 @@ class MiasmaService : Service() {
         private const val EXTRA_DATA_DIR = "data_dir"
         private const val EXTRA_STORAGE_MB = "storage_mb"
         private const val EXTRA_BANDWIDTH_MB_DAY = "bandwidth_mb_day"
+        private const val EXTRA_BOOTSTRAP_PEERS = "bootstrap_peers"
         private const val DEFAULT_STORAGE_MB = 512L
         private const val DEFAULT_BANDWIDTH_MB_DAY = 100L
 
@@ -223,11 +232,13 @@ class MiasmaService : Service() {
             dataDir: String,
             storageMb: Long = DEFAULT_STORAGE_MB,
             bandwidthMbDay: Long = DEFAULT_BANDWIDTH_MB_DAY,
+            bootstrapPeers: List<String> = emptyList(),
         ) {
             val intent = Intent(context, MiasmaService::class.java).apply {
                 putExtra(EXTRA_DATA_DIR, dataDir)
                 putExtra(EXTRA_STORAGE_MB, storageMb)
                 putExtra(EXTRA_BANDWIDTH_MB_DAY, bandwidthMbDay)
+                putStringArrayListExtra(EXTRA_BOOTSTRAP_PEERS, ArrayList(bootstrapPeers))
             }
             context.startForegroundService(intent)
         }
