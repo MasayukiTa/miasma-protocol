@@ -5322,6 +5322,7 @@ dependencies = [
  "criterion",
  "directories 5.0.1",
  "ed25519-dalek 2.2.0",
+ "flate2",
  "futures",
  "hex",
  "hkdf 0.12.4",
