@@ -370,6 +370,10 @@ fn why_texts(kind: &str, dir: Direction) -> Option<(&'static str, &'static str)>
             "the contact was removed or sending to it was switched off",
             "連絡先が削除されたか、送信がオフになりました",
         ),
+        "source_changed" => (
+            "the file was changed or replaced after it was queued; send it again",
+            "ファイルが、送信を予約したあとに変更または差し替えられました。もう一度送ってください",
+        ),
         _ => return None,
     })
 }
@@ -527,6 +531,7 @@ fn state_label(s: PushState) -> &'static str {
             PushState::Failed => "失敗",
             PushState::Rejected => "断られました",
             PushState::Cancelled => "中止",
+            PushState::Waiting => "再試行待ち",
         };
     }
     match s {
@@ -539,7 +544,82 @@ fn state_label(s: PushState) -> &'static str {
         PushState::Failed => "failed",
         PushState::Rejected => "rejected",
         PushState::Cancelled => "cancelled",
+        PushState::Waiting => "waiting to retry",
     }
+}
+
+/// "in 2 min" / "in 40 s" / "now", for the time left until `at_ms`.
+fn in_words(at_ms: u64, now_ms: u64) -> String {
+    let s = at_ms.saturating_sub(now_ms).div_ceil(1000);
+    let ja = lang() == Lang::Ja;
+    if s == 0 {
+        return if ja { "まもなく" } else { "now" }.to_owned();
+    }
+    if s < 90 {
+        return if ja {
+            format!("{s}秒後")
+        } else {
+            format!("in {s} s")
+        };
+    }
+    let m = s.div_ceil(60);
+    if m < 120 {
+        return if ja {
+            format!("{m}分後")
+        } else {
+            format!("in {m} min")
+        };
+    }
+    let h = m.div_ceil(60);
+    if ja {
+        format!("{h}時間後")
+    } else {
+        format!("in {h} h")
+    }
+}
+
+/// What a waiting send says: that it will try again by itself, when, and (if
+/// the other side is simply offline) why. `None` for any other state.
+fn waiting_note(t: &PushTransferInfo, now_ms: u64) -> Option<String> {
+    if t.state != PushState::Waiting {
+        return None;
+    }
+    let ja = lang() == Lang::Ja;
+    let attempt = t.attempt.unwrap_or(1);
+    let when = t
+        .next_attempt_at_ms
+        .map(|at| in_words(at, now_ms))
+        .unwrap_or_default();
+    let mut s = if ja {
+        format!("再試行待ち(次の試行は{when}、{attempt}回目)")
+    } else {
+        format!("Waiting to retry (next attempt {when}, attempt {attempt})")
+    };
+    if t.error
+        .as_deref()
+        .is_some_and(|e| e.contains("not connected to a relay server"))
+    {
+        // It is this computer's relay link that is down, not the other side.
+        s.push_str(if ja {
+            "。一時停止中: この PC がリレーサーバに接続できていません"
+        } else {
+            ". Paused: this computer is not connected to a relay server"
+        });
+    } else if t.error_kind.as_deref() == Some("unreachable") {
+        s.push_str(if ja {
+            "。一時停止中: 相手がオフラインです"
+        } else {
+            ". Paused: the other side is offline"
+        });
+    }
+    Some(s)
+}
+
+fn clock_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn progress_line(t: &PushTransferInfo) -> String {
@@ -563,6 +643,9 @@ fn progress_line(t: &PushTransferInfo) -> String {
     );
     if t.rate_bps > 0 {
         s.push_str(&format!(" {}/s", human_bytes(t.rate_bps)));
+    }
+    if let Some(n) = waiting_note(t, clock_ms()) {
+        s.push_str(&format!(" - {n}"));
     }
     s
 }
@@ -723,6 +806,25 @@ pub async fn run_push_status(data_dir: &Path) -> Result<()> {
     }
 }
 
+/// `miasma push-retry <id>`: a waiting send tries again now.
+pub async fn run_push_retry(data_dir: &Path, id: &str) -> Result<()> {
+    match call(data_dir, PushRequest::RetryNow { id: id.to_owned() }).await? {
+        PushResponse::Retrying => {
+            println!(
+                "{}",
+                if lang() == Lang::Ja {
+                    "すぐに再試行します"
+                } else {
+                    "Trying again now"
+                }
+            );
+            Ok(())
+        }
+        PushResponse::Error { kind, message } => Err(api_error(&kind, &message)),
+        other => bail!("unexpected response: {other:?}"),
+    }
+}
+
 pub async fn run_push_inbox(data_dir: &Path) -> Result<()> {
     match call(data_dir, PushRequest::Inbox).await? {
         PushResponse::Inbox { dir } => {
@@ -768,6 +870,7 @@ mod tests {
             "file_unreadable",
             "write_failed",
             "contact_changed",
+            "source_changed",
         ];
         for k in kinds {
             for dir in [Direction::Out, Direction::In] {
@@ -822,6 +925,8 @@ mod tests {
             saved_as: None,
             created_at_ms: 0,
             updated_at_ms: 0,
+            next_attempt_at_ms: None,
+            attempt: None,
         };
         assert_eq!(explain(&t).as_deref(), Some("raw daemon text"));
         let mut known = t.clone();

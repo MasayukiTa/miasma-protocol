@@ -468,6 +468,12 @@ enum Commands {
     /// Show running and recent contact transfers (both directions).
     PushStatus,
 
+    /// Make a waiting contact transfer try again now (see `push-status` for the id).
+    PushRetry {
+        /// Transfer id.
+        id: String,
+    },
+
     /// Print the folder where files pushed to you are saved.
     PushInbox,
 
@@ -730,6 +736,7 @@ async fn main() -> Result<()> {
         Commands::Contact { action } => push_cmd::run_contact(&data_dir, action).await,
         Commands::Push(args) => push_cmd::run_push(&data_dir, args).await,
         Commands::PushStatus => push_cmd::run_push_status(&data_dir).await,
+        Commands::PushRetry { id } => push_cmd::run_push_retry(&data_dir, &id).await,
         Commands::PushInbox => push_cmd::run_push_inbox(&data_dir).await,
         Commands::Chat { action } => chat_cmd::run_chat(&data_dir, action).await,
         Commands::Storage { action } => storage_cmd::run_storage(&data_dir, action).await,
