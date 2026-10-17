@@ -205,9 +205,12 @@ async fn a_thousand_queued_jobs_are_small_and_the_curve_is_flat() {
         }
         panic!("the queue did not drain");
     }
-    // Warm-up.
-    let ids = cycle(&svc);
-    drain(&svc, &ids).await;
+    // Warm-up: the history of finished sends (kept in memory up to a fixed size, trimmed at
+    // 2000 entries) has to reach its ceiling first, or its one-time fill reads as a leak.
+    for _ in 0..6 {
+        let ids = cycle(&svc);
+        drain(&svc, &ids).await;
+    }
     let base = resident_bytes().unwrap_or(0);
     let mut curve = Vec::new();
     for round in 1..=20usize {
