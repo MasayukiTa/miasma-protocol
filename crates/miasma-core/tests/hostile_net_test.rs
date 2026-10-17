@@ -24,6 +24,7 @@ use iroh::tls::CaTlsConfig;
 use miasma_core::{
     config::{IrohMode, PushConfig},
     push::{
+        retry::RetryPolicy,
         service::{PushService, PushSettings},
         ContactCode, PushState,
     },
@@ -709,8 +710,15 @@ async fn relay_only_peer(relay_url: &str) -> PushPeer {
     let inbox = dir.path().join("inbox");
     let mut settings = PushSettings::from_config(&PushConfig::default(), dir.path());
     settings.min_free_bytes = 0;
-    settings.retry_delays = vec![Duration::from_secs(1); 60];
+    settings.retry = RetryPolicy {
+        ladder: vec![Duration::from_secs(1)],
+        then_every: Duration::from_secs(1),
+        window: Some(Duration::from_secs(600)),
+        jitter: 0.0,
+        min_gap: Duration::from_millis(500),
+    };
     settings.idle_timeout = Duration::from_secs(20);
+    settings.stall_timeout = Duration::from_secs(10);
     let svc = PushService::start(dir.path(), node.clone(), settings);
     std::mem::forget(store_dir);
     PushPeer {
@@ -748,14 +756,9 @@ fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
 }
 
 /// 20 MiB between two relay-only peers while the relay path is cut for 1.5 s
-/// every 6 s and capped at 6 MiB/s: the file arrives complete and identical.
-///
-/// Ignored until the push resilience work (waiting and retrying on its own,
-/// resuming after drops) is on main: without it a dropped connection ends the
-/// transfer. Run it with
-/// `cargo test --package miasma-core --test hostile_net_test push_of_20_mib -- --ignored --nocapture`.
+/// every 6 s and capped at 6 MiB/s: the file arrives complete and identical,
+/// each cut ending an attempt that the sender then resumes on a new connection.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs push resume after drops, which is not on main yet"]
 async fn push_of_20_mib_completes_over_a_path_with_periodic_disconnects() {
     timeout(Duration::from_secs(300), async {
         let relay = local_relay().await;
