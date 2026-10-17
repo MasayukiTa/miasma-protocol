@@ -179,6 +179,110 @@ processes where the system allows it, but dumps written earlier, the page file a
 hibernation files, and records the operating system keeps about any program that
 ran (Prefetch, event logs, endpoint-security tools) are outside its control.
 
+## Updates (check at start, update in place)
+
+Miasma can look for a newer build and install it. Everything is off the data
+path: the only connection it makes for this is one HTTPS request to the public
+GitHub API (`api.github.com`, then `github.com` for the download), with no
+token, no cookie and no identifier beyond `User-Agent: miasma-update/<version>`.
+
+### Settings (`config.toml`, `[update]`)
+
+```
+miasma config --key update.mode --value notify    # off | notify (default) | auto
+miasma config --key update.channel --value beta   # stable | beta (default)
+miasma config --key update.check_at_start --value true
+miasma config --key update.local_build_dir --value C:\build\release   # developers
+```
+
+| mode     | what happens                                                                 |
+|----------|------------------------------------------------------------------------------|
+| `off`    | Nothing. No connection, no program is started to look at a build folder.     |
+| `notify` | One check after the start; the window shows a banner (Update now / Later / Skip this version). Nothing is installed until you agree. |
+| `auto`   | One check after the start; the update is downloaded, verified and installed by itself, but only while no transfer, push or chat send is running. The window then restarts itself. |
+
+The check never runs in the first 60 seconds after start (plus up to 60 seconds
+of random delay), only once per start, and a failed check (offline, rate limit)
+is silent in the window and is reported as `failed`, never as "up to date".
+The Settings page has an Updates section with the same mode switch, a
+**Check now** button (at most one answer per 30 seconds) and the status.
+
+### Command line
+
+```
+miasma update check    # prints available / none / failed, exit code tells them apart
+miasma update apply    # download, verify, install (nothing while a transfer is running)
+miasma update status   # settings, running build, any update in progress
+```
+
+Exit codes: `0` nothing newer (or installed), `10` available, `11` a newer
+release exists but cannot be installed here (no file for this platform, or no
+`SHA256SUMS.txt`), `20` the check failed, `30` updates are off, `40` busy,
+`41` refused (did not verify), `42` the new version did not start and the old
+one was restored, `43` this installation cannot be updated in place, `44` other
+error.
+
+### What is checked before anything is replaced
+
+* Releases are ordered by semantic version (a pre-release such as
+  `0.4.0-beta.2` is below `0.4.0`); the `stable` channel ignores pre-releases.
+* The release must contain `SHA256SUMS.txt`, and the downloaded archive must
+  match its line. A release without it is refused.
+* If public keys are pinned in the program, `SHA256SUMS.txt.sig` (a detached
+  Ed25519 signature over `SHA256SUMS.txt`) must verify under one of them. No key
+  is pinned yet, so only the SHA-256 check applies (integrity, not who
+  published).
+* The archive is read as untrusted: unsafe paths (`..`, absolute, drive
+  letters, links) refuse the whole archive; only the Miasma programs are
+  extracted. The download lives in `<data dir>/update/` and is deleted after.
+
+### How the swap works, and the way back
+
+A running program cannot be overwritten on Windows but can be renamed:
+
+```
+miasma.exe          -> miasma.exe.old.<id>
+miasma.exe.new      -> miasma.exe
+miasma.exe --version must answer within 10 s       (else everything is renamed back)
+miasma.exe.old.<id> -> miasma.exe.prev             (the one backup that is kept)
+```
+
+The same is done for `miasma-desktop.exe` and `miasma-bridge.exe`. Only
+`miasma.exe` is started for the check, never the desktop program. A small
+journal (`update/journal.json`) records the phase, so an update interrupted by a
+crash or a power cut is finished or undone at the next start. On macOS the
+`.app` bundle is replaced the same way (`Miasma.app.prev` is the backup); if
+the folder is not writable the update is not attempted and the window says so.
+To go back by hand, stop Miasma and rename `<program>.prev` over `<program>`.
+
+Restart Miasma after an update. A background service the window started stops
+when the window closes, so the new one starts with it; a service you started
+yourself keeps running the old version until you stop and start it. Launcher
+scripts such as `Miasma.cmd` are not touched.
+
+The GitHub requests use the same certificate trust as the relay connections: the
+operating system's store, plus the file named by `transport.iroh_extra_ca_pem`
+when a network re-signs HTTPS. If GitHub cannot be reached the status says it
+could not check (never "up to date") and Miasma keeps working as before.
+
+### Developer rebuild flow
+
+With `update.local_build_dir` set to a build folder, a build there whose
+`miasma --version` build id differs from the running one and whose file is newer
+is offered like a release (no network, no checksum file: the folder is trusted
+because you chose it). To copy a fresh build into an install folder without the
+app, from outside it:
+
+```
+.\scripts\dev-update.ps1 -BuildDir target\release -InstallDir C:\Tools\miasma
+.\scripts\dev-update.ps1 -InstallDir C:\Tools\miasma -StopOwn   # stop only processes running from that folder
+```
+
+It does the same rename-swap and `.prev` rotation, refuses while a Miasma
+process runs from the install folder (unless `-StopOwn`, which stops exactly the
+processes whose path is inside it, by process id), and puts the old files back if
+the new `miasma.exe` does not answer `--version`.
+
 ## State files are encrypted at rest
 
 Miasma's own records (the contact list, the transfer history and transfer
