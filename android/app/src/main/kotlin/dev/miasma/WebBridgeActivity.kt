@@ -1,17 +1,14 @@
 package dev.miasma
 
 import android.annotation.SuppressLint
+import android.net.Uri
 import android.os.Bundle
 import android.webkit.JavascriptInterface
+import android.webkit.WebResourceRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import dev.miasma.uniffi.*
 
@@ -30,7 +27,6 @@ import dev.miasma.uniffi.*
 class WebBridgeActivity : ComponentActivity() {
 
     private lateinit var webView: WebView
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val dataDir: String by lazy { filesDir.absolutePath }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -42,13 +38,40 @@ class WebBridgeActivity : ComponentActivity() {
             settings.domStorageEnabled = true
             settings.allowFileAccess = false
             settings.allowContentAccess = false
+            settings.javaScriptCanOpenWindowsAutomatically = false
+            settings.setSupportMultipleWindows(false)
             webChromeClient = WebChromeClient()
-            webViewClient = WebViewClient()
+            webViewClient = LocalAssetsOnlyWebViewClient()
         }
 
-        webView.addJavascriptInterface(MiasmaBridge(this), "miasma")
+        webView.addJavascriptInterface(MiasmaBridge(), "miasma")
         setContentView(webView)
         webView.loadUrl("file:///android_asset/web/index.html")
+    }
+
+    /**
+     * The JavaScript interface is privileged: never let a remote document become
+     * the top-level page while that interface is attached. The bundled PWA has a
+     * restrictive CSP as a second layer, but navigation is enforced natively too.
+     */
+    private class LocalAssetsOnlyWebViewClient : WebViewClient() {
+        override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest): Boolean =
+            !isAllowedAppUrl(request.url)
+
+        @Suppress("DEPRECATION")
+        override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean =
+            !isAllowedAppUrl(url?.let(Uri::parse))
+
+        companion object {
+            private const val APP_ASSET_PATH_PREFIX = "/android_asset/web/"
+
+            private fun isAllowedAppUrl(uri: Uri?): Boolean {
+                if (uri == null || uri.scheme != "file" || !uri.authority.isNullOrEmpty()) return false
+                val path = uri.path ?: return false
+                if (!path.startsWith(APP_ASSET_PATH_PREFIX)) return false
+                return path.split('/').none { it == ".." }
+            }
+        }
     }
 
     override fun onDestroy() {
@@ -60,16 +83,12 @@ class WebBridgeActivity : ComponentActivity() {
     /**
      * JavaScript bridge interface.
      *
-     * All methods are synchronous from the JS perspective — they block on
-     * the WebView's internal thread while the FFI call runs on IO.  This is
-     * acceptable because the user expects to wait for dissolve/retrieve
-     * operations.
-     *
-     * Note: `@JavascriptInterface` methods run on a binder thread, not the
-     * main thread.  FFI calls are safe to make here (they use a shared
-     * tokio runtime internally).
+     * All methods are synchronous from JavaScript's perspective. Android invokes
+     * `@JavascriptInterface` methods on the WebView Java bridge thread rather than
+     * the UI thread; direct FFI calls block that bridge thread until Rust returns.
+     * The Rust side owns its shared Tokio runtime for async protocol work.
      */
-    inner class MiasmaBridge(private val activity: WebBridgeActivity) {
+    inner class MiasmaBridge {
 
         @JavascriptInterface
         fun ping(): String = """{"ok":true}"""
