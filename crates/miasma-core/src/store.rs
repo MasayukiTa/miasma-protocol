@@ -19,7 +19,7 @@
 ///   store_index.json    ← LRU index {address → {size_bytes, last_accessed_secs}}
 /// ```
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::Write as _,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -147,6 +147,55 @@ pub enum ShareOrigin {
     Hosted,
 }
 
+/// Length of the short id a listing shows.
+pub const SHORT_ID_LEN: usize = 8;
+
+/// First 8 characters of a content address: the short id a listing shows and a
+/// user types back to delete one share.
+pub fn short_share_id(address: &str) -> String {
+    address.chars().take(SHORT_ID_LEN).collect()
+}
+
+/// One stored share as a listing shows it, built from the index and the blob's
+/// own metadata. Nothing is decrypted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredShare {
+    /// Short id (first 8 characters of the content address).
+    pub id: String,
+    /// Full content address (the share file's name without `.ms`).
+    pub address: String,
+    /// Size of the stored blob on disk, in bytes.
+    pub size_bytes: u64,
+    /// Last modification time of the blob file as UNIX seconds (0 = unknown).
+    pub modified_secs: u64,
+    /// True while the share is pending replication or part of an active
+    /// transfer. Such a share must not be deleted.
+    pub in_use: bool,
+}
+
+/// Which stored shares a delete request names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ShareSelection {
+    /// Explicit share ids: a short id from a listing, or a full address.
+    Ids(Vec<String>),
+    /// Every stored share.
+    All,
+    /// Shares whose blob was last modified at least this many days ago.
+    OlderThanDays(u64),
+}
+
+/// What a delete removed and what it left behind.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeleteSharesOutcome {
+    /// Number of shares deleted.
+    pub deleted: usize,
+    /// Bytes freed on disk.
+    pub freed_bytes: u64,
+    /// Short ids that matched the request but were not deleted: shares in use
+    /// and ids refused because they resolved outside the shares directory.
+    pub skipped: Vec<String>,
+}
+
 /// Identifies the logical "slot" a hosted share occupies: the same
 /// `(mid_prefix, segment_index, slot_index)` triple that
 /// `redistribute_segment` (best-effort repair) or a second dissolution of
@@ -228,6 +277,18 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+/// Last modification time of `path` as UNIX seconds, or `None` when it cannot
+/// be read (missing file, unsupported clock).
+fn file_modified_secs(path: &Path) -> Option<u64> {
+    std::fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
 }
 
 /// Read the share index. It is encrypted at rest under a key derived from the
@@ -478,6 +539,10 @@ pub struct LocalShareStore {
     write_lock: std::sync::Mutex<()>,
     /// Parsed index for read-only piece lookups; see [`CachedIndex`].
     index_cache: std::sync::Mutex<Option<CachedIndex>>,
+    /// Addresses currently marked in use (pending replication or part of an
+    /// active transfer). The daemon refreshes this before listing or deleting;
+    /// an empty set means nothing is known to be in use.
+    in_use: std::sync::Mutex<HashSet<String>>,
 }
 
 impl LocalShareStore {
@@ -518,6 +583,7 @@ impl LocalShareStore {
             hosted_quota_bytes: 0,
             write_lock: std::sync::Mutex::new(()),
             index_cache: std::sync::Mutex::new(None),
+            in_use: std::sync::Mutex::new(HashSet::new()),
         })
     }
 
@@ -931,6 +997,185 @@ impl LocalShareStore {
         let mut index = load_index(&self.data_dir);
         index.remove(address);
         save_index(&self.data_dir, &index)
+    }
+
+    /// Every stored share, with its size, age and in-use flag.
+    ///
+    /// Built from the persisted index plus each blob's own metadata, with no
+    /// decryption. An index entry whose file is gone is left out. Sorted oldest
+    /// first, then by address.
+    pub fn list_shares(&self) -> Vec<StoredShare> {
+        let index = load_index(&self.data_dir);
+        let in_use = self.in_use.lock().map(|s| s.clone()).unwrap_or_default();
+        let mut shares = Vec::with_capacity(index.len());
+        for address in index.into_keys() {
+            let Ok(meta) = std::fs::symlink_metadata(self.share_path(&address)) else {
+                continue;
+            };
+            let modified_secs = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            shares.push(StoredShare {
+                id: short_share_id(&address),
+                address: address.clone(),
+                size_bytes: meta.len(),
+                modified_secs,
+                in_use: in_use.contains(&address),
+            });
+        }
+        shares.sort_by(|a, b| {
+            a.modified_secs
+                .cmp(&b.modified_secs)
+                .then_with(|| a.address.cmp(&b.address))
+        });
+        shares
+    }
+
+    /// Record which shares are currently in use (pending replication or part of
+    /// an active transfer). Replaces the previous set. The daemon refreshes it
+    /// before listing or deleting; an empty set means "nothing known in use".
+    pub fn set_in_use_shares<I: IntoIterator<Item = String>>(&self, addresses: I) {
+        let mut set = self.in_use.lock().unwrap_or_else(|e| e.into_inner());
+        set.clear();
+        set.extend(addresses);
+    }
+
+    fn address_in_use(&self, address: &str) -> bool {
+        self.in_use
+            .lock()
+            .map(|s| s.contains(address))
+            .unwrap_or(false)
+    }
+
+    /// Addresses of stored shares whose recorded piece belongs to `prefix` (the
+    /// first 8 bytes of a MID). Shares stored before piece keys existed report
+    /// nothing here until they are looked up once.
+    pub fn addresses_with_mid_prefix(&self, prefix: &[u8; 8]) -> Vec<String> {
+        self.index_snapshot()
+            .iter()
+            .filter(|(_, e)| e.piece.as_ref().is_some_and(|p| p.mid_prefix == *prefix))
+            .map(|(address, _)| address.clone())
+            .collect()
+    }
+
+    /// Delete stored shares named by `selection`, skipping in-use ones.
+    ///
+    /// In-use shares (pending replication or part of an active transfer) are
+    /// never deleted; they are reported in the outcome's `skipped` list. Each
+    /// blob is overwritten before it is unlinked
+    /// ([`state_crypto::overwrite_and_remove`]), the persisted index is
+    /// rewritten and the cached index dropped, so `list()`, `used_bytes()` and
+    /// `miasma status` are correct immediately.
+    ///
+    /// Symlinks and any path that does not resolve inside the shares directory
+    /// are refused (also reported as skipped): a crafted id can never delete
+    /// something outside the store.
+    pub fn delete_shares(
+        &self,
+        selection: &ShareSelection,
+    ) -> Result<DeleteSharesOutcome, MiasmaError> {
+        let _guard = self
+            .write_lock
+            .lock()
+            .map_err(|_| MiasmaError::Storage("store write lock poisoned".into()))?;
+        let mut index = load_index(&self.data_dir);
+        let shares_dir =
+            std::fs::canonicalize(&self.shares_dir).unwrap_or_else(|_| self.shares_dir.clone());
+        let now = now_secs();
+        if index.is_empty() {
+            // Nothing to delete. Also never write back an index that merely
+            // failed to load.
+            return Ok(DeleteSharesOutcome::default());
+        }
+        let mut outcome_skipped: Vec<String> = Vec::new();
+
+        let mut targets: Vec<String> = match selection {
+            ShareSelection::Ids(ids) => {
+                let mut t = Vec::new();
+                for id in ids {
+                    // Shorter than a short id would match far too much.
+                    if id.len() < SHORT_ID_LEN {
+                        continue;
+                    }
+                    let matched: Vec<&String> = index
+                        .keys()
+                        .filter(|address| {
+                            address.as_str() == id.as_str() || address.starts_with(id.as_str())
+                        })
+                        .collect();
+                    let exact = matched.iter().any(|a| a.as_str() == id.as_str());
+                    if matched.len() > 1 && !exact {
+                        // A short id shared by several shares: delete none of
+                        // them, report the id.
+                        outcome_skipped.push(id.chars().take(SHORT_ID_LEN).collect());
+                        continue;
+                    }
+                    t.extend(matched.into_iter().cloned());
+                }
+                t
+            }
+            ShareSelection::All => index.keys().cloned().collect(),
+            ShareSelection::OlderThanDays(days) => {
+                let cutoff = days.saturating_mul(24 * 60 * 60);
+                index
+                    .keys()
+                    .filter(|address| {
+                        file_modified_secs(&self.share_path(address))
+                            .map(|m| now.saturating_sub(m) >= cutoff)
+                            .unwrap_or(false)
+                    })
+                    .cloned()
+                    .collect()
+            }
+        };
+        targets.sort();
+        targets.dedup();
+
+        let mut outcome = DeleteSharesOutcome {
+            skipped: outcome_skipped,
+            ..Default::default()
+        };
+        let mut first_error: Option<MiasmaError> = None;
+        for address in targets {
+            let path = self.share_path(&address);
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                // The blob is already gone; drop the stale index entry.
+                index.remove(&address);
+                continue;
+            };
+            if self.address_in_use(&address) {
+                outcome.skipped.push(short_share_id(&address));
+                continue;
+            }
+            let resolved = std::fs::canonicalize(&path).ok();
+            let inside = resolved
+                .as_deref()
+                .map(|p| p.starts_with(&shares_dir))
+                .unwrap_or(false);
+            if meta.file_type().is_symlink() || !inside {
+                outcome.skipped.push(short_share_id(&address));
+                continue;
+            }
+            if let Err(e) = state_crypto::overwrite_and_remove(&path) {
+                if first_error.is_none() {
+                    first_error = Some(e.into());
+                }
+                continue;
+            }
+            index.remove(&address);
+            outcome.deleted += 1;
+            outcome.freed_bytes = outcome.freed_bytes.saturating_add(meta.len());
+        }
+
+        save_index(&self.data_dir, &index)?;
+        *self.index_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(outcome),
+        }
     }
 
     /// **Distress wipe**: delete the master key, making all stored shares
@@ -1655,5 +1900,242 @@ mod tests {
             last = std::time::Instant::now();
         }
         let _ = last;
+    }
+
+    // ── Stored-share listing and deletion ───────────────────────────────────
+
+    /// Set a blob's modification time to `secs_ago` seconds before now.
+    fn set_mtime(path: &Path, secs_ago: u64) {
+        let when = SystemTime::now() - std::time::Duration::from_secs(secs_ago);
+        let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        f.set_modified(when).unwrap();
+    }
+
+    fn blob_path(dir: &Path, address: &str) -> PathBuf {
+        dir.join(SHARES_DIR).join(format!("{address}{SHARE_EXT}"))
+    }
+
+    #[test]
+    fn list_shares_reports_id_size_time_and_in_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        let address = store.put(&dummy_share(90)).unwrap();
+
+        let shares = store.list_shares();
+        assert_eq!(shares.len(), 1);
+        let share = &shares[0];
+        assert_eq!(share.id, address[..8]);
+        assert_eq!(share.address, address);
+        assert!(share.size_bytes > 0);
+        assert!(share.modified_secs > 0);
+        assert!(!share.in_use);
+
+        store.set_in_use_shares([address.clone()]);
+        assert!(store.list_shares()[0].in_use);
+    }
+
+    #[test]
+    fn delete_by_explicit_id_removes_blob_and_keeps_index_consistent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        let keep = store.put(&dummy_share(100)).unwrap();
+        let dropped = store.put(&dummy_share(101)).unwrap();
+        assert!(blob_path(dir.path(), &dropped).exists());
+        let before = store.used_bytes();
+
+        let out = store
+            .delete_shares(&ShareSelection::Ids(vec![dropped[..8].to_string()]))
+            .unwrap();
+        assert_eq!(out.deleted, 1);
+        assert!(out.freed_bytes > 0);
+        assert!(out.skipped.is_empty());
+        assert!(!blob_path(dir.path(), &dropped).exists());
+        assert!(!store.list().contains(&dropped));
+        assert!(store.list().contains(&keep));
+        assert!(store.used_bytes() < before);
+        assert_eq!(store.list().len(), 1);
+
+        // The persisted index is consistent after a reopen too.
+        drop(store);
+        let reopened = LocalShareStore::open(dir.path(), 100).unwrap();
+        assert!(!reopened.list().contains(&dropped));
+        assert!(reopened.list().contains(&keep));
+        assert_eq!(
+            reopened.used_bytes(),
+            reopened
+                .list_shares()
+                .iter()
+                .map(|s| s.size_bytes)
+                .sum::<u64>(),
+            "used_bytes and the listing must agree after delete"
+        );
+    }
+
+    #[test]
+    fn delete_all_removes_every_share() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        for i in 110..115u16 {
+            store.put(&dummy_share(i)).unwrap();
+        }
+        let out = store.delete_shares(&ShareSelection::All).unwrap();
+        assert_eq!(out.deleted, 5);
+        assert!(store.list().is_empty());
+        assert_eq!(store.used_bytes(), 0);
+        assert!(store.list_shares().is_empty());
+    }
+
+    #[test]
+    fn delete_older_than_uses_file_times() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        let old = store.put(&dummy_share(120)).unwrap();
+        let fresh = store.put(&dummy_share(121)).unwrap();
+        set_mtime(&blob_path(dir.path(), &old), 10 * 24 * 60 * 60);
+        set_mtime(&blob_path(dir.path(), &fresh), 60);
+
+        let out = store
+            .delete_shares(&ShareSelection::OlderThanDays(5))
+            .unwrap();
+        assert_eq!(out.deleted, 1);
+        assert!(!store.list().contains(&old));
+        assert!(store.list().contains(&fresh));
+    }
+
+    #[test]
+    fn delete_skips_in_use_shares_and_reports_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        let busy = store.put(&dummy_share(130)).unwrap();
+        let free = store.put(&dummy_share(131)).unwrap();
+        store.set_in_use_shares([busy.clone()]);
+
+        let out = store.delete_shares(&ShareSelection::All).unwrap();
+        assert_eq!(out.deleted, 1);
+        assert_eq!(out.skipped, vec![busy[..8].to_string()]);
+        assert!(store.list().contains(&busy));
+        assert!(!store.list().contains(&free));
+        assert!(blob_path(dir.path(), &busy).exists());
+    }
+
+    #[test]
+    fn delete_ignores_ids_that_could_escape_the_shares_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        let address = store.put(&dummy_share(140)).unwrap();
+        // A file a blindly-joined traversal id would name.
+        let outside = dir.path().join("outside.ms");
+        std::fs::write(&outside, b"do not touch").unwrap();
+
+        let out = store
+            .delete_shares(&ShareSelection::Ids(vec![
+                "../../outside".to_string(),
+                "../outside".to_string(),
+                address.clone(),
+            ]))
+            .unwrap();
+        // Only the real share matched; the traversal ids name no stored share.
+        assert_eq!(out.deleted, 1);
+        assert!(outside.exists(), "a path outside the store must survive");
+    }
+
+    #[test]
+    fn delete_ignores_ids_shorter_than_a_short_id_and_ambiguous_prefixes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        let shares_dir = dir.path().join(SHARES_DIR);
+        for name in ["aaaaaaaa11", "aaaaaaaa22", "bbbbbbbb33"] {
+            std::fs::write(shares_dir.join(format!("{name}{SHARE_EXT}")), b"blob").unwrap();
+        }
+        rebuild_index(dir.path(), &shares_dir);
+
+        // Anything shorter than a short id is too short to name a share.
+        let out = store
+            .delete_shares(&ShareSelection::Ids(vec!["a".into(), "aaaaaaa".into()]))
+            .unwrap();
+        assert_eq!(out.deleted, 0);
+
+        // The short id "aaaaaaaa" fits two shares: neither is deleted.
+        let out = store
+            .delete_shares(&ShareSelection::Ids(vec!["aaaaaaaa".into()]))
+            .unwrap();
+        assert_eq!(out.deleted, 0);
+        assert_eq!(out.skipped, vec!["aaaaaaaa".to_string()]);
+        assert_eq!(store.list().len(), 3);
+
+        // A unique short id and a full address still work.
+        let out = store
+            .delete_shares(&ShareSelection::Ids(vec![
+                "bbbbbbbb".into(),
+                "aaaaaaaa11".into(),
+            ]))
+            .unwrap();
+        assert_eq!(out.deleted, 2);
+        assert_eq!(store.list(), vec!["aaaaaaaa22".to_string()]);
+    }
+
+    #[test]
+    fn delete_on_an_empty_index_does_not_write_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        let index_path = dir.path().join(INDEX_FILE);
+        let before = index_path.exists();
+        let out = store.delete_shares(&ShareSelection::All).unwrap();
+        assert_eq!(out, DeleteSharesOutcome::default());
+        assert_eq!(index_path.exists(), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_refuses_symlinked_blobs() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        let address = store.put(&dummy_share(150)).unwrap();
+        let target = dir.path().join("target.bin");
+        std::fs::write(&target, b"secret target").unwrap();
+        let blob = blob_path(dir.path(), &address);
+        std::fs::remove_file(&blob).unwrap();
+        symlink(&target, &blob).unwrap();
+
+        let out = store
+            .delete_shares(&ShareSelection::Ids(vec![address.clone()]))
+            .unwrap();
+        assert_eq!(out.deleted, 0);
+        assert_eq!(out.skipped.len(), 1);
+        assert!(
+            target.exists(),
+            "a symlink target outside the store must survive"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_overwrites_the_blob_before_unlinking_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        let address = store.put(&dummy_share(160)).unwrap();
+        let shares_dir = dir.path().join(SHARES_DIR);
+        let blob = blob_path(dir.path(), &address);
+        let original = std::fs::read(&blob).unwrap();
+
+        // A read-only directory still lets the file be opened for writing but
+        // refuses to unlink it. If the bytes changed, the overwrite ran first.
+        std::fs::set_permissions(&shares_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let result = store.delete_shares(&ShareSelection::Ids(vec![address.clone()]));
+        std::fs::set_permissions(&shares_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(result.is_err(), "unlink must fail on a read-only directory");
+        assert!(
+            blob.exists(),
+            "the blob is still there after the failed unlink"
+        );
+        let after = std::fs::read(&blob).unwrap();
+        assert_ne!(
+            after, original,
+            "the blob was overwritten before the unlink"
+        );
+        assert_eq!(after.len(), original.len());
     }
 }

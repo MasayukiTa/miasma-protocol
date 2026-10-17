@@ -1015,6 +1015,43 @@ pub struct BridgeLiveState {
     pub control_auth: Arc<control_auth::ControlAuth>,
 }
 
+/// Mark the shares that are pending replication or part of an active send as
+/// in use, so a storage delete never removes them.
+fn refresh_in_use_shares(
+    store: &LocalShareStore,
+    queue: &Mutex<ReplicationQueue>,
+    data_dir: &std::path::Path,
+) {
+    use std::collections::HashSet;
+    let mut set = HashSet::new();
+    {
+        let q = queue.lock().unwrap_or_else(|e| e.into_inner());
+        for item in q.pending() {
+            let prefix =
+                crate::crypto::hash::ContentId::from_digest(item.record.mid_digest).prefix();
+            for loc in &item.record.locations {
+                if let Some(address) = store.find_piece(&prefix, loc.segment_index, loc.shard_index)
+                {
+                    set.insert(address);
+                }
+            }
+        }
+    }
+    for status in crate::transfer::jobs::registry_for(data_dir).list() {
+        let active = matches!(
+            status.state,
+            crate::transfer::TransferState::Running | crate::transfer::TransferState::Paused
+        );
+        if !active || status.kind != crate::transfer::TransferKind::Send {
+            continue;
+        }
+        if let Ok(mid) = crate::crypto::hash::ContentId::from_str(&status.mid) {
+            set.extend(store.addresses_with_mid_prefix(&mid.prefix()));
+        }
+    }
+    store.set_in_use_shares(set);
+}
+
 pub(crate) async fn process_request(
     req: ControlRequest,
     coord: Arc<MiasmaCoordinator>,
@@ -1215,6 +1252,28 @@ pub(crate) async fn process_request(
 
         ControlRequest::TransferList => {
             ControlResponse::TransferList(crate::transfer::jobs::registry_for(&data_dir).list())
+        }
+
+        ControlRequest::StorageList => {
+            refresh_in_use_shares(&store, &queue, &data_dir);
+            let shares = store.list_shares();
+            let total_bytes = shares.iter().map(|s| s.size_bytes).sum();
+            ControlResponse::StorageList {
+                shares,
+                total_bytes,
+            }
+        }
+
+        ControlRequest::StorageDelete { selection } => {
+            refresh_in_use_shares(&store, &queue, &data_dir);
+            match store.delete_shares(&selection) {
+                Ok(outcome) => ControlResponse::StorageDeleted {
+                    deleted: outcome.deleted,
+                    freed_bytes: outcome.freed_bytes,
+                    skipped: outcome.skipped,
+                },
+                Err(e) => ControlResponse::Error(e.to_string()),
+            }
         }
 
         ControlRequest::TransferCancel { id } => {
