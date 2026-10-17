@@ -160,7 +160,7 @@ class MiasmaService : Service() {
 
     private fun buildNotification(text: String) =
         NotificationCompat.Builder(this, MiasmaApp.CHANNEL_DAEMON)
-            .setSmallIcon(android.R.drawable.ic_dialog_info)   // replace with real icon in assets
+            .setSmallIcon(R.drawable.ic_stat_miasma)
             .setContentTitle("Miasma Node")
             .setContentText(text)
             .setOngoing(true)
@@ -179,7 +179,7 @@ class MiasmaService : Service() {
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setPublicVersion(
                 NotificationCompat.Builder(this, MiasmaApp.CHANNEL_DAEMON)
-                    .setSmallIcon(android.R.drawable.ic_dialog_info)
+                    .setSmallIcon(R.drawable.ic_stat_miasma)
                     .setContentTitle("Miasma Node")
                     .setContentText("Running")
                     .build()
