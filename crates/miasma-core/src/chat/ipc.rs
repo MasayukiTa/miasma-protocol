@@ -49,6 +49,8 @@ pub enum ChatRequest {
         contact: String,
         enabled: bool,
     },
+    /// Group chat (create, add, remove, leave, send, history, list).
+    Group(super::group::ipc::GroupRequest),
 }
 
 fn default_true() -> bool {
@@ -145,6 +147,8 @@ pub enum ChatResponse {
         next: u64,
         events: Vec<EventInfo>,
     },
+    /// Answer to [`ChatRequest::Group`].
+    Group(super::group::ipc::GroupResponse),
     /// `kind` is stable (`unavailable`, `unknown_contact`, `send_disabled`,
     /// `empty`, `too_big`, `outbox_full`, `bad_message_id`, `internal`);
     /// `message` is for people.
@@ -221,6 +225,10 @@ pub fn handle_with(
     let core = svc.core();
 
     match req {
+        ChatRequest::Group(g) => match svc.groups() {
+            Some(gs) => ChatResponse::Group(super::group::ipc::handle_with(gs, g)),
+            None => err("unavailable", "group chat is not running"),
+        },
         ChatRequest::Send { contact, text } => {
             let Some(c) = svc.contacts().find(&contact) else {
                 return unknown(&contact);
@@ -252,6 +260,8 @@ pub fn handle_with(
                 .store
                 .conversations()
                 .into_iter()
+                // Someone known only from a shared group is not a conversation.
+                .filter(|c| c.count > 0 || svc.contacts().by_endpoint(&c.peer).is_some())
                 .map(|c| {
                     let contact = svc.contacts().by_endpoint(&c.peer);
                     ConversationInfo {

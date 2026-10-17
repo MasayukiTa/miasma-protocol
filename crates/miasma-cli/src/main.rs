@@ -17,6 +17,7 @@ use tracing::info;
 use zeroize::{Zeroize, Zeroizing};
 
 mod chat_cmd;
+mod chat_group_cmd;
 mod i18n;
 mod push_cmd;
 mod tunnel;

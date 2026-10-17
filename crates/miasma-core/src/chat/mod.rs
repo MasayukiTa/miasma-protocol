@@ -10,6 +10,7 @@
 
 pub mod crypto;
 pub mod engine;
+pub mod group;
 pub mod ipc;
 pub mod mailbox;
 pub mod outbox;
