@@ -333,6 +333,10 @@ pub struct Row {
     pub saved_as: Option<String>,
     /// Last change, milliseconds since the epoch.
     pub at_ms: u64,
+    /// Waiting to retry: when the next attempt is made (ms since the epoch).
+    pub next_attempt_at_ms: Option<u64>,
+    /// Waiting to retry: how many attempts in a row have failed.
+    pub attempt: Option<u32>,
 }
 
 impl Row {
@@ -359,6 +363,8 @@ impl From<&PushTransferInfo> for Row {
             source_path: t.source_path.clone(),
             saved_as: t.saved_as.clone(),
             at_ms: t.updated_at_ms,
+            next_attempt_at_ms: t.next_attempt_at_ms,
+            attempt: t.attempt,
         }
     }
 }
@@ -385,6 +391,8 @@ impl From<&HistoryEntry> for Row {
             source_path: h.source_path.clone(),
             saved_as: h.saved_as.clone(),
             at_ms: h.finished_at_ms,
+            next_attempt_at_ms: None,
+            attempt: None,
         }
     }
 }
@@ -420,7 +428,48 @@ pub fn state_label(c: &ContactStrings, s: PushState) -> &'static str {
         PushState::Failed => c.st_failed,
         PushState::Rejected => c.st_rejected,
         PushState::Cancelled => c.st_cancelled,
+        PushState::Waiting => c.st_waiting,
     }
+}
+
+/// "2 min", "40 s", "3 h": the wait until `at_ms`, rounded up, in the person's language.
+fn wait_in_text(c: &ContactStrings, at_ms: u64, now_ms: u64) -> String {
+    let s = at_ms.saturating_sub(now_ms).div_ceil(1000);
+    let (tpl, n) = if s < 90 {
+        (c.wait_in_sec, s.max(1))
+    } else if s < 120 * 60 {
+        (c.wait_in_min, s.div_ceil(60))
+    } else {
+        (c.wait_in_hour, s.div_ceil(3600))
+    };
+    fill(tpl, &[("n", &n.to_string())])
+}
+
+/// What a send that is waiting to retry says: that it keeps trying by itself, when it tries
+/// next, and, when the other side is simply offline, that.
+pub fn waiting_text(c: &ContactStrings, r: &Row, now_ms: u64) -> String {
+    let t = r
+        .next_attempt_at_ms
+        .map(|at| wait_in_text(c, at, now_ms))
+        .unwrap_or_default();
+    let mut s = fill(
+        c.wait_retry,
+        &[("t", &t), ("n", &r.attempt.unwrap_or(1).to_string())],
+    );
+    // "The other side is offline" would be wrong when it is this computer's relay link that is down.
+    let local_relay = r.error.as_deref().is_some_and(error_is_local_relay);
+    if r.error_kind.as_deref() == Some("unreachable") && !local_relay {
+        s.push(' ');
+        s.push_str(c.wait_offline);
+    }
+    s
+}
+
+fn clock_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Guidance for a finished row that did not succeed, or the live retry note for a row that is
@@ -433,17 +482,40 @@ pub fn row_guidance(c: &ContactStrings, r: &Row) -> Option<String> {
 
 /// [`row_guidance`], with the core's own wording only when `technical`.
 pub fn row_guidance_for(c: &ContactStrings, r: &Row, technical: bool) -> Option<String> {
+    row_guidance_at(c, r, technical, clock_ms())
+}
+
+/// [`row_guidance_for`] at a given time (the countdown of a waiting send depends on it).
+pub fn row_guidance_at(
+    c: &ContactStrings,
+    r: &Row,
+    technical: bool,
+    now_ms: u64,
+) -> Option<String> {
     // The core says so in its error when this computer's own relay link is the problem.
-    if r.outbound
+    let local_relay = r.outbound && r.error.as_deref().is_some_and(error_is_local_relay);
+    if local_relay
         && matches!(
             r.state,
             PushState::Failed | PushState::Queued | PushState::Connecting
         )
-        && r.error.as_deref().is_some_and(error_is_local_relay)
     {
         return Some(c.fail_relay_down.to_owned());
     }
     match r.state {
+        PushState::Waiting if r.outbound => {
+            let mut s = waiting_text(c, r, now_ms);
+            if local_relay {
+                s.push(' ');
+                s.push_str(c.fail_relay_down);
+            }
+            Some(s)
+        }
+        PushState::Failed
+            if r.outbound && r.error_kind.as_deref() == Some("source_changed") =>
+        {
+            Some(c.fail_source_changed.to_owned())
+        }
         PushState::Rejected => Some(
             match r.reject_reason.as_deref() {
                 Some("too_large") => c.rej_too_large,
@@ -684,7 +756,10 @@ pub fn file_status_in(
         .max_by(|a, b| a.at_ms.cmp(&b.at_ms).then_with(|| a.id.cmp(&b.id)));
     match newest {
         Some(r) => match r.state {
-            PushState::Queued | PushState::Preparing | PushState::Connecting => FileStatus::Waiting,
+            PushState::Queued
+            | PushState::Preparing
+            | PushState::Connecting
+            | PushState::Waiting => FileStatus::Waiting,
             PushState::Sending | PushState::Verifying => FileStatus::Sending {
                 percent: (fraction(r.size, r.bytes, false) * 100.0).min(99.0) as u8,
             },
@@ -1256,7 +1331,8 @@ impl ContactsUi {
             }
             PushRequest::ContactRemove { .. }
             | PushRequest::ContactUpdate { .. }
-            | PushRequest::Cancel { .. } => {
+            | PushRequest::Cancel { .. }
+            | PushRequest::RetryNow { .. } => {
                 self.page_msg = Some((text, true));
                 self.refresh_soon();
             }
@@ -1327,7 +1403,7 @@ impl ContactsUi {
                 }
             }
             PushResponse::Transfer(_) => {}
-            PushResponse::Cancelled => self.refresh_soon(),
+            PushResponse::Cancelled | PushResponse::Retrying => self.refresh_soon(),
             PushResponse::History(h) => {
                 self.history = h;
                 self.rebuild_rows();
@@ -2086,6 +2162,7 @@ impl ContactsUi {
                     .color(pal().muted),
                 );
                 let color = match r.state {
+                    PushState::Waiting => pal().warning,
                     PushState::Done => pal().success,
                     PushState::Failed | PushState::Rejected => pal().danger,
                     PushState::Cancelled => pal().faint,
@@ -2151,9 +2228,14 @@ impl ContactsUi {
                     .on_hover_text(full);
                 }
             }
-            if can_cancel || can_retry || received {
+            let can_try_now = r.outbound && r.state == PushState::Waiting;
+            if can_cancel || can_retry || can_try_now || received {
                 ui.add_space(4.0);
                 ui.horizontal_wrapped(|ui| {
+                    if can_try_now && ui.button(c.btn_try_now).clicked() {
+                        self.out.push_back(PushRequest::RetryNow { id: r.id.clone() });
+                        self.refresh_soon();
+                    }
                     if can_cancel && ui.button(c.btn_cancel).clicked() {
                         self.out.push_back(PushRequest::Cancel { id: r.id.clone() });
                     }
@@ -2316,6 +2398,8 @@ impl ContactsUi {
             saved_as: None,
             created_at_ms: at,
             updated_at_ms: at,
+            next_attempt_at_ms: None,
+            attempt: None,
         };
         let mib = 1u64 << 20;
         let a = contact("a", "田中", "0CS3Y-09W9N-5B5WM-QMMCX", true, None);
@@ -2509,6 +2593,8 @@ mod tests {
             saved_as: None,
             created_at_ms: at,
             updated_at_ms: at,
+            next_attempt_at_ms: None,
+            attempt: None,
         }
     }
 
