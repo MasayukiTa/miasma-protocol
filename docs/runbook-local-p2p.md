@@ -403,3 +403,162 @@ The **Chat** tab (チャット, next to Contacts) is the same chat with a window
 - Only the newest few hundred messages of the open conversation are held in
   memory; older ones load as you scroll up.
 - Unread counts live in the window: they start from zero when the app starts.
+
+## Restricted networks
+
+Some networks block or degrade parts of the internet: name lookups that fail,
+ports that are closed, UDP that does not get out, TLS handshakes that are cut,
+or HTTPS that is re-signed by a gateway. Miasma can tell you which of these you
+are standing in, so that you can choose a configuration from what was observed
+instead of guessing. Everything below uses ordinary connection attempts only.
+
+### Read the matrix
+
+```
+miasma netcheck --matrix
+miasma netcheck --matrix --json --out matrix.json
+miasma netcheck --matrix --probe wss://my-relay.example/ --probe wss://other.example:8443/x
+```
+
+The matrix tries each path one by one, at most four at a time and in under 40
+seconds, and prints one row per path: `OK` or `NG`, the kind of path, what it
+was for, the host that was probed, and a classified reason. Add `--lang ja` for
+Japanese. No user data is sent. The JSON report (stable `schema` number) names
+only the probed hosts: no address of this computer, no endpoint ID, no resolved
+address, and for `--probe` only the host, not the path.
+
+| Row | What it does | Reasons you may see |
+| --- | --- | --- |
+| DNS | Resolves each host with the system resolver, and asks two public resolvers directly over UDP | `works`, `name does not exist (NXDOMAIN)`, `no answer in time`, `answer differs from the public resolvers'`, `system DNS works; UDP DNS ... gets no answer` |
+| TCP | Connects to the first two addresses of each host | `works`, `connection refused`, `connection reset`, `no answer in time` (packets vanish), `no route` |
+| TLS | One handshake with the real server name | `works`, `cut during the TLS / upgrade handshake`, `no answer in time`, `certificate comes from a CA that is not a public one` (the issuer's name is shown), `certificate refused` |
+| SNI | The same address with the real name and with a neutral name; says whether the two were treated differently | `works` (same result), `treated differently` (both results are shown) |
+| UDP, QUIC | iroh's net report: does UDP get out, and does QUIC reach a relay | `works`, `UDP does not get out` |
+| Relay | A small round trip and a 1 MiB transfer through the relay, between two short-lived endpoints that can only use the relay; for `--probe` endpoints, a WebSocket upgrade and a ping | `works` with the round trip in ms and the rate in KiB/s, or where it stopped |
+| LAN | Whether local-network discovery (mDNS) finds a second endpoint on this computer | `works`, `no answer in time` |
+
+Rows that cannot work because an earlier step failed are marked `not tried`
+with the reason (no address, no reachable relay).
+
+Reading it, in this order:
+
+1. **DNS rows.** `name does not exist` or `answer differs` for the relay hosts
+   means the names themselves are the problem, not the connection. A relay
+   you run yourself (below) does not depend on n0's names. When the system
+   resolver fails but a public resolver answers, the TCP rows use that address
+   and say so, so a name problem and a path problem are not mixed up.
+2. **TCP, then TLS rows.** `refused` or `no route`: that port or network is
+   closed. TCP `works` but TLS `cut during the handshake` or `no answer in
+   time`: the connection is accepted and then interfered with. Compare the
+   SNI row: if the neutral name gets through and the real one does not, the
+   network treats the two names differently.
+3. **A certificate from a non-public CA.** The network re-signs HTTPS. The row
+   shows the issuer's name and whether this computer trusts it (`trusted=true`
+   or `trusted=false`). If you trust that CA, install it in the operating
+   system's certificate store, or save it as a PEM or DER file and run
+   `miasma config --key transport.iroh_extra_ca_pem --value <file>`.
+4. **UDP and QUIC.** If they do not work, transfers go through the relay only,
+   which is slower (about 1 MiB/s on a public relay). The relay row shows the
+   rate measured here.
+5. **LAN.** If it works, two computers on the same local network can find each
+   other without the internet (`transport.iroh_lan_discovery`).
+
+The last section, "Suggested configuration", maps what was observed to the
+configuration keys that exist (`transport.iroh_mode`,
+`transport.iroh_relay_urls`, `transport.iroh_discovery`,
+`transport.iroh_extra_ca_pem`, `transport.iroh_lan_discovery`) and to the
+tunnel. It says what was observed to work and what was not; it does not promise
+that a path will keep working.
+
+### Run your own relay
+
+When the public relays are not reachable, or you want the traffic to stay on a
+machine you control, run iroh's relay server on a machine whose address you can
+reach, and point Miasma at it. The relay carries only encrypted traffic and the
+metadata a relay always sees (which endpoint talks to which).
+
+On the machine you control, with a certificate for a host name that points at
+it (shown with Let's Encrypt; ports 80 and 443 must be reachable from outside):
+
+```
+cargo install iroh-relay --version 1.3.0 --features server --locked
+```
+
+Save this as `relay.toml`:
+
+```toml
+enable_relay = true
+http_bind_addr = "[::]:80"
+
+[tls]
+hostname = "relay.example.org"
+cert_mode = "LetsEncrypt"
+contact = "you@example.org"
+https_bind_addr = "[::]:443"
+```
+
+and start it:
+
+```
+iroh-relay --config-path relay.toml
+```
+
+With a certificate you already have, use `cert_mode = "Manual"` with
+`cert_dir = "/path/to/dir"` (the files `default.crt` and `default.key` are read
+from it) in the `[tls]` table instead.
+
+For a trial on a trusted local network only, `iroh-relay --dev` runs the relay
+over plain HTTP on port 3340 with no certificate; use `http://<its address>:3340`
+as the URL below. Do not expose that mode to the internet.
+
+On every computer that should use it (sender and receiver both):
+
+```
+miasma config --key transport.iroh_mode --value custom
+miasma config --key transport.iroh_relay_urls --value https://relay.example.org
+```
+
+Each call to `transport.iroh_relay_urls` adds one URL; an empty value clears the
+list. Restart the daemon: the setting is read at start. In `custom` mode only
+your relays are used. n0's discovery service is still used unless you turn it
+off with `miasma config --key transport.iroh_discovery --value false`; with it
+off, a receiver reaches a sender only through the relay URLs, so give both sides
+the same `transport.iroh_relay_urls`. Run `miasma netcheck --matrix` again: the
+relay row now probes your relay, and you can add another with
+`--probe wss://relay.example.org/`.
+
+A relay in `custom` mode may be reached through a certificate from a private CA;
+set `transport.iroh_extra_ca_pem` to that CA's file on every computer.
+
+### Same local network only
+
+Two computers on one local network can find each other with mDNS, without the
+internet:
+
+```
+miasma config --key transport.iroh_lan_discovery --value true
+miasma config --key transport.iroh_discovery --value false
+```
+
+The announcement carries the endpoint ID and the LAN addresses and is visible to
+everyone on that network; turn it off (`false`) on a network you do not trust.
+The LAN row of the matrix says whether mDNS works on the network you are on. To
+keep the daemon from contacting n0's relays at all, use `transport.iroh_mode =
+custom` with a relay on that network, as above (`iroh-relay --dev` is enough for
+a trusted LAN).
+
+### Tunnel
+
+If only outbound HTTPS gets out, the sender can expose its WebSocket share
+server through a tunnel instead. `cloudflared` must already be installed:
+
+```
+miasma daemon --wss-port 8443
+miasma tunnel
+```
+
+`miasma tunnel` prints a `wss://...` URL; the receiver uses it with
+`miasma network-get <share-id> -o <file> --via wss://...`. The matrix tells you
+whether the tunnel service's API host was reached from where you are (the
+`tunnel` rows). A tunnel makes the sender's share server reachable by anyone who
+has the URL; share the URL only with the person who should have the file.

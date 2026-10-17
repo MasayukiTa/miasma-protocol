@@ -13,7 +13,7 @@ miasma-bridge/src/bridge.rs | 6 | bridge inbox marker/.processed dir, moving imp
 miasma-bridge/src/index.rs | 1 | append-only BitTorrent info-hash to MID table
 miasma-bridge/src/main.rs | 1 | bridge data dir creation (log setup lives in miasma-core logging)
 miasma-bridge/src/torrent.rs | 1 | torrent download directory creation
-miasma-cli/src/main.rs | 4 | data dir creation, -o output, directed retrieve save
+miasma-cli/src/main.rs | 5 | data dir creation, -o output, directed retrieve save, netcheck --out report (path given by the user)
 miasma-core/src/config.rs | 4 | config.toml and version stamp writers
 miasma-core/src/daemon/control_auth.rs | 3 | daemon.token creation (restricted, create_new)
 miasma-core/src/daemon/ipc.rs | 2 | daemon.port and daemon.http discovery files
