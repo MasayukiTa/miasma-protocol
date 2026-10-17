@@ -102,10 +102,23 @@ class WebBridgeActivity : ComponentActivity() {
 
         @JavascriptInterface
         fun status(): String {
+            val port = httpPort()
+            if (port > 0) {
+                try {
+                    return DirectedApi.status(dataDir, port).apply {
+                        put("network_ready", true)
+                    }.toString()
+                } catch (_: Exception) {
+                    // The embedded daemon may be between lifecycle states. Fall through
+                    // to a local snapshot without claiming network connectivity.
+                }
+            }
+
             return try {
                 val s = getNodeStatus(dataDir)
                 JSONObject().apply {
-                    put("peer_count", 0) // NodeStatusFfi does not expose live peer count yet
+                    put("network_ready", false)
+                    put("peer_count", 0)
                     put("share_count", s.shareCount.toLong())
                     put("storage_used_bytes", (s.usedMb * 1024 * 1024).toLong())
                     put("listen_addrs", org.json.JSONArray())

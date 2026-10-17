@@ -118,6 +118,10 @@ object DirectedApi {
         }
     }
 
+    /** Full live daemon status used by the embedded WebView surface. */
+    fun status(dataDir: String, port: Int): JSONObject =
+        httpGet(dataDir, port, "/api/status")
+
     // ─── Directed sharing operations ────────────────────────────────────
 
     // Network content operations. File variants keep payload bytes out of JSON/base64.

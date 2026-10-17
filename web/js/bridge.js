@@ -40,7 +40,9 @@ export class MiasmaBridge {
         const parsed = typeof result === 'string' ? JSON.parse(result) : result;
         if (parsed && parsed.ok) {
           this._mode = MODE_WEBVIEW;
-          this._connected = true;
+          // A native host can exist while Android has stopped its background
+          // daemon. Query status before claiming that a network backend exists.
+          await this.status();
           this._startPolling();
           return;
         }
@@ -83,7 +85,7 @@ export class MiasmaBridge {
       try {
         const result = await Promise.resolve(window.miasma.status());
         this._lastStatus = typeof result === 'string' ? JSON.parse(result) : result;
-        this._setConnected(true);
+        this._setConnected(this._lastStatus?.network_ready === true);
         return this._lastStatus;
       } catch (e) {
         this._setConnected(false);
