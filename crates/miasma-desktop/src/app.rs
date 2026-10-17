@@ -191,6 +191,8 @@ struct StorageState {
     confirm: Option<miasma_core::store::ShareSelection>,
     /// The "delete older than" threshold, edited as text.
     days: String,
+    /// Addresses ticked in the list for "Delete selected".
+    selected: std::collections::HashSet<String>,
 }
 
 impl StorageState {
@@ -203,6 +205,7 @@ impl StorageState {
             note: None,
             confirm: None,
             days: "30".to_owned(),
+            selected: std::collections::HashSet::new(),
         }
     }
 }
@@ -1003,6 +1006,10 @@ impl MiasmaApp {
                 } => {
                     self.storage.loading = false;
                     self.storage.note = None;
+                    // Keep only ticks that still name a stored, unused share.
+                    self.storage
+                        .selected
+                        .retain(|a| shares.iter().any(|s| &s.address == a && !s.in_use));
                     self.storage.shares = shares;
                     self.storage.total_bytes = total_bytes;
                 }
@@ -2341,38 +2348,52 @@ impl MiasmaApp {
             kit::paragraph(ui, &summary);
 
             let locale = self.locale;
-            let mut rows = String::new();
-            for (i, s) in self.storage.shares.iter().enumerate() {
-                if i > 0 {
-                    rows.push('\n');
-                }
-                let when = if s.modified_secs == 0 {
-                    "-".to_owned()
-                } else {
-                    format_epoch(s.modified_secs, locale)
-                };
-                let mark = if s.in_use {
-                    format!("  ({})", st.in_use)
-                } else {
-                    String::new()
-                };
-                rows.push_str(&format!(
-                    "{}  {}  {when}{mark}",
-                    s.id,
-                    format_size(s.size_bytes)
-                ));
-            }
             egui::ScrollArea::vertical()
                 .id_source("settings_storage_view")
                 .max_height(220.0)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
-                    ui.add(egui::Label::new(RichText::new(&rows).monospace()));
+                    for s in &self.storage.shares {
+                        let when = if s.modified_secs == 0 {
+                            "-".to_owned()
+                        } else {
+                            format_epoch(s.modified_secs, locale)
+                        };
+                        let mark = if s.in_use {
+                            format!("  ({})", st.in_use)
+                        } else {
+                            String::new()
+                        };
+                        let label = RichText::new(format!(
+                            "{}  {}  {when}{mark}",
+                            s.id,
+                            format_size(s.size_bytes)
+                        ))
+                        .monospace();
+                        let mut on = self.storage.selected.contains(&s.address);
+                        let changed = ui
+                            .add_enabled(!s.in_use, egui::Checkbox::new(&mut on, label))
+                            .changed();
+                        if changed {
+                            if on {
+                                self.storage.selected.insert(s.address.clone());
+                            } else {
+                                self.storage.selected.remove(&s.address);
+                            }
+                        }
+                    }
                 });
 
             ui.add_space(kit::SP_2);
             let mut delete: Option<miasma_core::store::ShareSelection> = None;
             kit::button_row(ui, |ui| {
+                let none = self.storage.selected.is_empty();
+                let btn = ui.add_enabled(!none, kit::danger_button(st.delete_selected_button));
+                if btn.clicked() {
+                    let mut ids: Vec<String> = self.storage.selected.iter().cloned().collect();
+                    ids.sort();
+                    delete = Some(miasma_core::store::ShareSelection::Ids(ids));
+                }
                 if ui.add(kit::danger_button(st.delete_all_button)).clicked() {
                     delete = Some(miasma_core::store::ShareSelection::All);
                 }
