@@ -1,0 +1,5 @@
+[bindings.kotlin]
+package_name = "dev.miasma.uniffi"
+cdylib_name = "miasma_ffi"
+android = true
+kotlin_target_version = "1.9.24"

@@ -1,183 +1,301 @@
-#!/bin/bash
-# build-android.sh — Build Miasma Android APK from source
+#!/usr/bin/env bash
+# Build Miasma for Android / Google Play.
 #
-# Prerequisites (install once):
-#   1. Android SDK with API 34: sdkmanager "platforms;android-34" "build-tools;34.0.0"
-#   2. Android NDK:             sdkmanager "ndk;27.0.12077973"
-#   3. Rust Android targets:    rustup target add aarch64-linux-android x86_64-linux-android
-#   4. cargo-ndk:               cargo install cargo-ndk
+# Debug:   ./scripts/build-android.sh
+# Release: ./scripts/build-android.sh --release   # signed AAB for Play
+# Verify-only release: ./scripts/build-android.sh --release --unsigned-release
+# Setup:   ./scripts/build-android.sh --setup
 #
-# Usage:
-#   ./scripts/build-android.sh              # Build debug APK
-#   ./scripts/build-android.sh --release    # Build release APK
-#   ./scripts/build-android.sh --setup      # Install all prerequisites
-#
-# Environment variables:
-#   ANDROID_HOME    — Android SDK root (default: ~/Android/Sdk)
-#   ANDROID_NDK_HOME — NDK root (auto-detected from SDK if unset)
+# The Android app compiles against API 36 and pins NDK r30. Rust is built for
+# arm64-v8a (devices) and x86_64 (emulators). UniFFI bindings are generated from
+# the same Android cdylib that is packaged into the app, then the checked-in
+# development stub is restored so a build does not dirty the worktree.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+ANDROID_DIR="$PROJECT_DIR/android"
 
+ANDROID_API=36
+BUILD_TOOLS_VERSION="36.0.0"
+NDK_VERSION="30.0.16248370"
+MIN_GRADLE_VERSION="8.13"
 BUILD_TYPE="debug"
 SETUP_ONLY=false
+ALLOW_UNSIGNED_RELEASE=false
 
 for arg in "$@"; do
     case "$arg" in
         --release) BUILD_TYPE="release" ;;
-        --setup)   SETUP_ONLY=true ;;
+        --setup) SETUP_ONLY=true ;;
+        --unsigned-release) ALLOW_UNSIGNED_RELEASE=true ;;
+        *) echo "Unknown argument: $arg" >&2; exit 2 ;;
     esac
 done
 
-# ── Default paths ────────────────────────────────────────────────────────────
-ANDROID_HOME="${ANDROID_HOME:-$HOME/Android/Sdk}"
+ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}}"
 export ANDROID_HOME
 export ANDROID_SDK_ROOT="$ANDROID_HOME"
 
-if [ -z "${ANDROID_NDK_HOME:-}" ]; then
-    # Auto-detect NDK from SDK
-    NDK_DIR=$(find "$ANDROID_HOME/ndk" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort -V | tail -1 || true)
-    if [ -n "$NDK_DIR" ]; then
-        export ANDROID_NDK_HOME="$NDK_DIR"
-    fi
+PINNED_NDK="$ANDROID_HOME/ndk/$NDK_VERSION"
+if [ -d "$PINNED_NDK" ]; then
+    export ANDROID_NDK_HOME="$PINNED_NDK"
+elif [ -z "${ANDROID_NDK_HOME:-}" ]; then
+    export ANDROID_NDK_HOME="$PINNED_NDK"
 fi
 
-# ── Setup mode ───────────────────────────────────────────────────────────────
+SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+if [ ! -x "$SDKMANAGER" ] && [ -x "$SDKMANAGER.bat" ]; then
+    SDKMANAGER="$SDKMANAGER.bat"
+fi
+
 if [ "$SETUP_ONLY" = true ]; then
     echo "=== Setting up Android build prerequisites ==="
-    echo ""
-
-    # 1. Android SDK
-    if [ ! -f "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
-        echo "Install Android command-line tools first:"
-        echo "  https://developer.android.com/studio#command-line-tools-only"
-        echo "  Extract to: $ANDROID_HOME/cmdline-tools/latest/"
+    if [ ! -x "$SDKMANAGER" ] && [[ "$SDKMANAGER" != *.bat ]]; then
+        echo "ERROR: Android command-line tools not found under:"
+        echo "  $ANDROID_HOME/cmdline-tools/latest/"
+        echo "Install Android Studio or the command-line tools first."
         exit 1
     fi
 
-    SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-    echo "Installing SDK components..."
-    yes | "$SDKMANAGER" --licenses 2>/dev/null || true
-    "$SDKMANAGER" "platforms;android-34" "build-tools;34.0.0" "platform-tools" "ndk;27.0.12077973"
+    yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+    "$SDKMANAGER" \
+        "platforms;android-$ANDROID_API" \
+        "build-tools;$BUILD_TOOLS_VERSION" \
+        "platform-tools" \
+        "ndk;$NDK_VERSION"
 
-    # 2. Rust targets
-    echo ""
-    echo "Installing Rust Android targets..."
     rustup target add aarch64-linux-android x86_64-linux-android
+    if ! command -v cargo-ndk >/dev/null 2>&1; then
+        cargo install cargo-ndk
+    fi
 
-    # 3. cargo-ndk
-    echo ""
-    echo "Installing cargo-ndk..."
-    cargo install cargo-ndk
-
-    echo ""
-    echo "=== Setup complete ==="
+    echo
+    echo "SDK/NDK/Rust targets are ready."
+    echo "Gradle $MIN_GRADLE_VERSION+ is also required when the repository has no Gradle wrapper."
     exit 0
 fi
 
-# ── Verify prerequisites ────────────────────────────────────────────────────
-echo "=== Miasma Android Build ==="
-echo "  Build type:    $BUILD_TYPE"
-echo "  ANDROID_HOME:  $ANDROID_HOME"
-echo "  NDK:           ${ANDROID_NDK_HOME:-not set}"
-echo ""
-
-ERRORS=0
-check() {
-    if ! command -v "$1" >/dev/null 2>&1; then
-        echo "ERROR: $1 not found. $2"
-        ERRORS=$((ERRORS + 1))
-    fi
+fail() {
+    echo "ERROR: $*" >&2
+    exit 1
 }
 
-check "cargo" "Install Rust: https://rustup.rs"
-check "cargo-ndk" "Install: cargo install cargo-ndk"
-check "java" "Install JDK 17+: apt install openjdk-17-jdk"
+need_command() {
+    command -v "$1" >/dev/null 2>&1 || fail "$1 not found. $2"
+}
 
-if ! rustup target list --installed | grep -q "aarch64-linux-android"; then
-    echo "ERROR: Rust target aarch64-linux-android not installed."
-    echo "  Run: rustup target add aarch64-linux-android x86_64-linux-android"
-    ERRORS=$((ERRORS + 1))
+check_elf_alignment() {
+    local so="$1"
+    local saw_load=false
+    local bad_alignment=false
+    local line
+    while IFS= read -r line; do
+        if [[ "$line" =~ LOAD.*align[[:space:]]+2\*\*([0-9]+) ]]; then
+            saw_load=true
+            if (( BASH_REMATCH[1] < 14 )); then
+                echo "  bad: $so: $line" >&2
+                bad_alignment=true
+            fi
+        fi
+    done < <("$OBJDUMP" -p "$so")
+    [ "$saw_load" = true ] || fail "Could not read LOAD alignment from $so"
+    [ "$bad_alignment" = false ] || fail "$so is not 16 KiB page-size aligned"
+}
+
+verify_archive_native_alignment() {
+    local archive="$1"
+    local unpack
+    local found=false
+    unpack="$(mktemp -d "${TMPDIR:-/tmp}/miasma-android-native.XXXXXX")"
+    (
+        cd "$unpack"
+        jar xf "$archive"
+    )
+    while IFS= read -r -d '' so; do
+        found=true
+        check_elf_alignment "$so"
+        echo "  ok: ${so#"$unpack"/}"
+    done < <(find "$unpack" -type f -name '*.so' -print0)
+    rm -rf "$unpack"
+    [ "$found" = true ] || fail "No native libraries found in $archive"
+}
+
+need_command cargo "Install Rust from https://rustup.rs"
+need_command rustup "Install Rust from https://rustup.rs"
+need_command cargo-ndk "Run: cargo install cargo-ndk"
+need_command java "Install JDK 17 or newer"
+need_command jar "Install a full JDK 17 or newer"
+
+[ -d "$ANDROID_HOME/platforms/android-$ANDROID_API" ] || \
+    fail "Android platform API $ANDROID_API is missing. Run ./scripts/build-android.sh --setup"
+[ -d "$ANDROID_NDK_HOME" ] || \
+    fail "NDK r$NDK_VERSION is missing at $ANDROID_NDK_HOME. Run ./scripts/build-android.sh --setup"
+
+if [ -f "$ANDROID_NDK_HOME/source.properties" ]; then
+    ACTUAL_NDK="$(sed -n 's/^Pkg.Revision[[:space:]]*=[[:space:]]*//p' "$ANDROID_NDK_HOME/source.properties" | head -1)"
+    [ "$ACTUAL_NDK" = "$NDK_VERSION" ] || \
+        fail "Expected NDK $NDK_VERSION, found ${ACTUAL_NDK:-unknown} at $ANDROID_NDK_HOME"
 fi
 
-if [ "$ERRORS" -gt 0 ]; then
-    echo ""
-    echo "Fix the above errors or run: ./scripts/build-android.sh --setup"
-    exit 1
+for target in aarch64-linux-android x86_64-linux-android; do
+    rustup target list --installed | grep -qx "$target" || \
+        fail "Rust target $target is missing. Run: rustup target add $target"
+done
+
+JAVA_MAJOR="$(java -version 2>&1 | sed -n '1{s/.*version "\([0-9][0-9]*\).*/\1/p}')"
+[ -n "$JAVA_MAJOR" ] || fail "Could not determine Java version"
+[ "$JAVA_MAJOR" -ge 17 ] || fail "JDK 17+ is required; found Java $JAVA_MAJOR"
+
+if [ -x "$ANDROID_DIR/gradlew" ]; then
+    GRADLE=("$ANDROID_DIR/gradlew")
+elif [ -f "$ANDROID_DIR/gradlew.bat" ]; then
+    GRADLE=("$ANDROID_DIR/gradlew.bat")
+elif command -v gradle >/dev/null 2>&1; then
+    GRADLE=(gradle)
+    GRADLE_VERSION="$(gradle --version | sed -n 's/^Gradle \([0-9][0-9.]*\)$/\1/p' | head -1)"
+    if [ -n "$GRADLE_VERSION" ]; then
+        LOWEST="$(printf '%s\n%s\n' "$MIN_GRADLE_VERSION" "$GRADLE_VERSION" | sort -V | head -1)"
+        [ "$LOWEST" = "$MIN_GRADLE_VERSION" ] || \
+            fail "Gradle $MIN_GRADLE_VERSION+ is required by AGP 8.11; found $GRADLE_VERSION"
+    fi
+else
+    fail "Gradle not found and android/gradlew is absent. Install Gradle $MIN_GRADLE_VERSION+ or add the wrapper."
 fi
 
-# ── Step 1: Build Rust FFI for Android targets ───────────────────────────────
-echo "=== Step 1: Building miasma-ffi for Android ==="
-
-CARGO_NDK_FLAGS=""
+PROFILE="debug"
+CARGO_PROFILE_ARGS=()
 if [ "$BUILD_TYPE" = "release" ]; then
-    CARGO_NDK_FLAGS="--release"
+    PROFILE="release"
+    CARGO_PROFILE_ARGS=(--release)
+
+    if [ "$ALLOW_UNSIGNED_RELEASE" = false ]; then
+        for name in \
+            MIASMA_ANDROID_KEYSTORE \
+            MIASMA_ANDROID_STORE_PASSWORD \
+            MIASMA_ANDROID_KEY_ALIAS \
+            MIASMA_ANDROID_KEY_PASSWORD; do
+            [ -n "${!name:-}" ] || fail "$name is required for a signed Play release (or pass --unsigned-release for verification only)"
+        done
+        [ -f "$MIASMA_ANDROID_KEYSTORE" ] || fail "Keystore not found: $MIASMA_ANDROID_KEYSTORE"
+    fi
 fi
 
-JNI_LIBS="$PROJECT_DIR/android/app/src/main/jniLibs"
-mkdir -p "$JNI_LIBS"
+JNI_LIBS="$ANDROID_DIR/app/src/main/jniLibs"
+KOTLIN_ROOT="$ANDROID_DIR/app/src/main/kotlin"
+GENERATED_BINDING="$KOTLIN_ROOT/dev/miasma/uniffi/miasma_ffi.kt"
+UNIFFI_CONFIG="$PROJECT_DIR/crates/miasma-ffi/uniffi.toml"
 
+STUB_BACKUP="$(mktemp "${TMPDIR:-/tmp}/miasma-ffi-stub.XXXXXX")"
+HAD_STUB=false
+if [ -f "$GENERATED_BINDING" ]; then
+    cp "$GENERATED_BINDING" "$STUB_BACKUP"
+    HAD_STUB=true
+fi
+
+restore_stub() {
+    if [ "$HAD_STUB" = true ]; then
+        mkdir -p "$(dirname "$GENERATED_BINDING")"
+        cp "$STUB_BACKUP" "$GENERATED_BINDING"
+    else
+        rm -f "$GENERATED_BINDING"
+    fi
+    rm -f "$STUB_BACKUP"
+}
+trap restore_stub EXIT
+
+cd "$PROJECT_DIR"
+
+echo "=== Miasma Android build ==="
+echo "  type:        $BUILD_TYPE"
+echo "  SDK:         API $ANDROID_API"
+echo "  NDK:         $NDK_VERSION"
+echo "  Android SDK: $ANDROID_HOME"
+echo
+
+echo "[1/5] Building Rust FFI libraries..."
+rm -rf "$JNI_LIBS/arm64-v8a" "$JNI_LIBS/x86_64"
+mkdir -p "$JNI_LIBS"
 cargo ndk \
     -t arm64-v8a \
     -t x86_64 \
     -o "$JNI_LIBS" \
-    build $CARGO_NDK_FLAGS -p miasma-ffi
+    build "${CARGO_PROFILE_ARGS[@]}" -p miasma-ffi --lib
 
-echo "  JNI libs:"
-find "$JNI_LIBS" -name "*.so" -exec echo "    {}" \;
+LIB_PATH="$PROJECT_DIR/target/aarch64-linux-android/$PROFILE/libmiasma_ffi.so"
+[ -f "$LIB_PATH" ] || fail "Expected UniFFI library not found: $LIB_PATH"
 
-# ── Step 2: Generate UniFFI Kotlin bindings ──────────────────────────────────
-echo ""
-echo "=== Step 2: Generating UniFFI Kotlin bindings ==="
+echo "[2/5] Checking 16 KiB ELF segment alignment..."
+OBJDUMP=""
+for candidate in "$ANDROID_NDK_HOME"/toolchains/llvm/prebuilt/*/bin/llvm-objdump "$ANDROID_NDK_HOME"/toolchains/llvm/prebuilt/*/bin/llvm-objdump.exe; do
+    if [ -x "$candidate" ] || [ -f "$candidate" ]; then
+        OBJDUMP="$candidate"
+        break
+    fi
+done
+[ -n "$OBJDUMP" ] || fail "llvm-objdump not found in NDK $ANDROID_NDK_HOME"
 
-# Find the compiled library (prefer release if available)
-if [ "$BUILD_TYPE" = "release" ]; then
-    LIB_PATH="$PROJECT_DIR/target/aarch64-linux-android/release/libmiasma_ffi.so"
-else
-    LIB_PATH="$PROJECT_DIR/target/aarch64-linux-android/debug/libmiasma_ffi.so"
-fi
+for so in "$JNI_LIBS"/*/libmiasma_ffi.so; do
+    [ -f "$so" ] || continue
+    check_elf_alignment "$so"
+    echo "  ok: $(basename "$(dirname "$so")")"
+done
 
-if [ ! -f "$LIB_PATH" ]; then
-    # Fallback: try to find from host target for bindgen
-    LIB_PATH=$(find "$PROJECT_DIR/target" -name "libmiasma_ffi.so" -path "*/aarch64*" | head -1)
-fi
-
-KOTLIN_OUT="$PROJECT_DIR/android/app/src/main/kotlin/dev/miasma/uniffi"
-mkdir -p "$KOTLIN_OUT"
-
-# Generate Kotlin bindings from the compiled library
-uniffi-bindgen generate \
-    --library "$LIB_PATH" \
+echo "[3/5] Generating Kotlin UniFFI bindings from the packaged cdylib..."
+# Generate to the Kotlin source root. UniFFI appends dev/miasma/uniffi from
+# uniffi.toml and overwrites the development stub for the duration of this build.
+cargo run --quiet \
+    -p miasma-ffi \
+    --features bindgen-cli \
+    --bin miasma-uniffi-bindgen \
+    -- \
+    generate \
+    --library \
+    --metadata-no-deps \
     --language kotlin \
-    --out-dir "$KOTLIN_OUT"
+    --config "$UNIFFI_CONFIG" \
+    --out-dir "$KOTLIN_ROOT" \
+    "$LIB_PATH"
 
-echo "  Kotlin bindings: $KOTLIN_OUT"
-ls -la "$KOTLIN_OUT"/*.kt 2>/dev/null || echo "  (no .kt files generated)"
+[ -f "$GENERATED_BINDING" ] || fail "UniFFI did not generate $GENERATED_BINDING"
+grep -q '^package dev\.miasma\.uniffi$' "$GENERATED_BINDING" || \
+    fail "Generated Kotlin binding has the wrong package"
+grep -q 'startEmbeddedDaemon' "$GENERATED_BINDING" || \
+    fail "Generated bindings are missing startEmbeddedDaemon"
 
-# ── Step 3: Build Android APK ────────────────────────────────────────────────
-echo ""
-echo "=== Step 3: Building Android APK ==="
-
-cd "$PROJECT_DIR/android"
-
-GRADLE_TASK="assembleDebug"
-APK_DIR="app/build/outputs/apk/debug"
+echo "[4/5] Building Android application..."
+cd "$ANDROID_DIR"
 if [ "$BUILD_TYPE" = "release" ]; then
-    GRADLE_TASK="assembleRelease"
-    APK_DIR="app/build/outputs/apk/release"
-fi
-
-# Use system Gradle or wrapper
-if [ -f "./gradlew" ]; then
-    chmod +x ./gradlew
-    ./gradlew "$GRADLE_TASK"
+    "${GRADLE[@]}" --no-daemon bundleRelease
 else
-    gradle "$GRADLE_TASK"
+    "${GRADLE[@]}" --no-daemon assembleDebug
 fi
 
-echo ""
-echo "=== Build complete ==="
-find "$APK_DIR" -name "*.apk" -exec echo "  APK: {}" \;
-find "$APK_DIR" -name "*.apk" -exec ls -lh {} \;
+echo "[5/5] Verifying outputs..."
+if [ "$BUILD_TYPE" = "release" ]; then
+    OUTPUT="$ANDROID_DIR/app/build/outputs/bundle/release/app-release.aab"
+    [ -f "$OUTPUT" ] || fail "Release AAB not found: $OUTPUT"
+    echo "  AAB: $OUTPUT"
+
+    if command -v bundletool >/dev/null 2>&1; then
+        CONFIG_DUMP="$(bundletool dump config --bundle="$OUTPUT" 2>/dev/null || true)"
+        if printf '%s' "$CONFIG_DUMP" | grep -q 'PAGE_ALIGNMENT_16K'; then
+            echo "  bundle alignment: PAGE_ALIGNMENT_16K"
+        else
+            echo "WARNING: bundletool did not report PAGE_ALIGNMENT_16K" >&2
+        fi
+    else
+        echo "  bundletool: not installed; AAB alignment metadata check skipped"
+    fi
+else
+    OUTPUT="$ANDROID_DIR/app/build/outputs/apk/debug/app-debug.apk"
+    [ -f "$OUTPUT" ] || fail "Debug APK not found: $OUTPUT"
+    echo "  APK: $OUTPUT"
+fi
+
+echo "  verifying every packaged native library (including JNA)..."
+verify_archive_native_alignment "$OUTPUT"
+
+ls -lh "$OUTPUT"
+echo "=== Android build complete ==="

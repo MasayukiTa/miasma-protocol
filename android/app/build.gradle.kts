@@ -3,20 +3,53 @@ plugins {
     alias(libs.plugins.kotlin.android)
 }
 
+
+val releaseVersionCode = System.getenv("MIASMA_ANDROID_VERSION_CODE")?.toIntOrNull() ?: 1
+val releaseVersionName = System.getenv("MIASMA_ANDROID_VERSION_NAME")?.takeIf { it.isNotBlank() } ?: "0.3.2"
+val releaseKeystore = System.getenv("MIASMA_ANDROID_KEYSTORE")
+val releaseStorePassword = System.getenv("MIASMA_ANDROID_STORE_PASSWORD")
+val releaseKeyAlias = System.getenv("MIASMA_ANDROID_KEY_ALIAS")
+val releaseKeyPassword = System.getenv("MIASMA_ANDROID_KEY_PASSWORD")
+val hasReleaseSigning = listOf(
+    releaseKeystore,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+).all { !it.isNullOrBlank() }
+
 android {
     namespace   = "dev.miasma"
-    compileSdk  = 34
+    compileSdk  = 36
+    ndkVersion = "30.0.16248370"
 
     defaultConfig {
         applicationId = "dev.miasma"
         minSdk        = 26          // Android 8 — QUIC support baseline
-        targetSdk     = 34
-        versionCode   = 1
-        versionName   = "0.3.2"
+        targetSdk     = 36
+        versionCode   = releaseVersionCode
+        versionName   = releaseVersionName
+        ndk {
+            // Keep the packaged JNA ABI set identical to the Rust cdylibs we build.
+            abiFilters += listOf("arm64-v8a", "x86_64")
+        }
+    }
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = rootProject.file(releaseKeystore!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
     }
 
     buildTypes {
         release {
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
@@ -44,6 +77,12 @@ android {
 
     // JNI libs produced by `cargo ndk … -o android/app/src/main/jniLibs`
     sourceSets["main"].jniLibs.srcDirs("src/main/jniLibs")
+    packaging {
+        jniLibs {
+            // AGP 8.11 then stores native libraries with modern page alignment.
+            useLegacyPackaging = false
+        }
+    }
 }
 
 dependencies {
@@ -52,6 +91,9 @@ dependencies {
     implementation(libs.lifecycle.runtime.ktx)
     implementation(libs.lifecycle.viewmodel.compose)
     implementation(libs.kotlinx.coroutines.android)
+
+    // UniFFI Kotlin bindings call the Rust cdylib through JNA. Android needs the AAR artifact.
+    implementation("net.java.dev.jna:jna:${libs.versions.jna.get()}@aar")
 
     // Compose (via BOM so all versions stay in sync)
     val composeBom = platform(libs.compose.bom)

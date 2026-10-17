@@ -11,6 +11,13 @@ license.workspace = true
 [lib]
 crate-type = ["cdylib", "staticlib"]
 
+[features]
+bindgen-cli = ["uniffi/cli"]
+
+[[bin]]
+name = "miasma-uniffi-bindgen"
+path = "src/bin/miasma-uniffi-bindgen.rs"
+required-features = ["bindgen-cli"]
 [dependencies]
 miasma-core = { path = "../miasma-core" }
 tokio    = { version = "1", features = ["rt-multi-thread", "sync", "time"] }

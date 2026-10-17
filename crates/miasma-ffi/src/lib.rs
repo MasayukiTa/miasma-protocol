@@ -17,11 +17,12 @@
 //! cargo ndk -t arm64-v8a -t x86_64 -o android/app/src/main/jniLibs \
 //!     build --release -p miasma-ffi
 //!
-//! # 2. Generate Kotlin bindings from the compiled library:
-//! uniffi-bindgen generate \
-//!     --library target/debug/libmiasma_ffi.so \
-//!     --language kotlin \
-//!     --out-dir android/app/src/main/kotlin/dev/miasma/uniffi/
+//! # 2. Generate Kotlin bindings with the repository-pinned UniFFI CLI:
+//! cargo run -p miasma-ffi --features bindgen-cli --bin miasma-uniffi-bindgen -- \
+//!     generate --library --metadata-no-deps --language kotlin \
+//!     --config crates/miasma-ffi/uniffi.toml \
+//!     --out-dir android/app/src/main/kotlin \
+//!     target/aarch64-linux-android/release/libmiasma_ffi.so
 //! ```
 //!
 //! The generated file will be placed at

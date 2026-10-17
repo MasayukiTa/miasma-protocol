@@ -11,3 +11,9 @@
 # Kotlin coroutines
 -keepnames class kotlinx.coroutines.internal.MainDispatcherFactory {}
 -keepnames class kotlinx.coroutines.CoroutineExceptionHandler {}
+# JNA is used by UniFFI at runtime. It performs reflective/native lookups that
+# R8 cannot prove are reachable from the generated Kotlin wrapper.
+-dontwarn java.awt.**
+-keep class com.sun.jna.** { *; }
+-keep class * extends com.sun.jna.** { *; }
+-keepclassmembers class * extends com.sun.jna.** { public *; }
