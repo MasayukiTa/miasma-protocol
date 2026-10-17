@@ -1,11 +1,8 @@
 package dev.miasma
 
-import android.Manifest
-import android.content.pm.PackageManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
@@ -23,7 +20,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
-import androidx.core.content.ContextCompat
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
@@ -45,9 +41,6 @@ class MainActivity : ComponentActivity() {
 
     private val vm: MiasmaViewModel by viewModels()
 
-    private val requestCameraPermission =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* handled in screen */ }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -58,13 +51,6 @@ class MainActivity : ComponentActivity() {
             Prefs.storageMb(this),
             Prefs.bandwidthMbDay(this),
         )
-
-        // Pre-request camera permission (QR scanner).
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
-            != PackageManager.PERMISSION_GRANTED
-        ) {
-            requestCameraPermission.launch(Manifest.permission.CAMERA)
-        }
 
         // Poll for daemon status to update ViewModel once daemon is ready.
         lifecycleScope.launch {
