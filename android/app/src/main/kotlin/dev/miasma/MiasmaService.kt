@@ -91,17 +91,12 @@ class MiasmaService : Service() {
             try { KeystoreHelper.ensureKey() } catch (_: Exception) { }
 
             val dataDirFile = java.io.File(dataDir)
-            val masterKeyFile = dataDirFile.resolve("master.key")
 
-            // If master.key is missing but wrapped blob exists, unwrap from Keystore.
-            if (!masterKeyFile.exists()) {
-                try {
-                    val unwrapped = KeystoreHelper.unwrapKey(dataDirFile)
-                    if (unwrapped != null) {
-                        masterKeyFile.writeBytes(unwrapped)
-                    }
-                } catch (_: Exception) { /* Keystore may not have key yet on first run */ }
-            }
+            // If master.key is missing but a wrapped recovery copy exists, restore it.
+            // The helper zeroes the temporary plaintext ByteArray after the file write.
+            try {
+                KeystoreHelper.restorePlaintextKeyIfNeeded(dataDirFile)
+            } catch (_: Exception) { /* Keystore may not have key yet on first run */ }
 
             // Persist the mobile settings first. initializeNode is intentionally
             // idempotent and now preserves network/transport config across restarts.
@@ -114,13 +109,12 @@ class MiasmaService : Service() {
                 lastDaemonStatus = daemonStatus
                 lastDaemonError = null
 
-                // Wrap the master key into Keystore (idempotent — overwrites existing blob).
-                // This ensures the key is Keystore-backed even if it was just created by FFI.
-                if (masterKeyFile.exists()) {
-                    try {
-                        KeystoreHelper.wrapKey(dataDirFile, masterKeyFile.readBytes())
-                    } catch (_: Exception) { /* Keystore wrapping failure is non-fatal for now */ }
-                }
+                // Refresh the Keystore-protected recovery copy. The current Rust
+                // store still needs master.key on disk; the helper only eliminates the
+                // extra JVM plaintext ByteArray after wrapping.
+                try {
+                    KeystoreHelper.wrapPlaintextKeyFile(dataDirFile)
+                } catch (_: Exception) { /* Keystore wrapping failure is non-fatal for now */ }
             } catch (e: Exception) {
                 updateNotification("Daemon error: ${e.message}")
                 lastDaemonError = e.message
