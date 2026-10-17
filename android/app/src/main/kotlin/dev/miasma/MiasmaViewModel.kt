@@ -83,14 +83,38 @@ class MiasmaViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             _ui.value = _ui.value.copy(isLoading = true, error = null, lastMid = null)
             try {
-                val mid = withContext(Dispatchers.IO) { dissolveBytes(dataDir, data) }
+                val port = _daemonHttpPort.value
+                val mid = withContext(Dispatchers.IO) {
+                    if (port > 0) DirectedApi.publishBytes(dataDir, port, data)
+                    else dissolveBytes(dataDir, data)
+                }
                 _ui.value = _ui.value.copy(isLoading = false, lastMid = mid)
                 refreshStatus()
             } catch (e: MiasmaFfiException) {
                 _ui.value = _ui.value.copy(isLoading = false, error = e.message)
             } catch (e: Exception) {
-                // Sanitize unexpected exception messages before showing in UI.
-                _ui.value = _ui.value.copy(isLoading = false, error = "Dissolution failed")
+                _ui.value = _ui.value.copy(isLoading = false, error = e.message ?: "Dissolution failed")
+            }
+        }
+    }
+
+    fun dissolveFile(filePath: String, callback: (mid: String?, error: String?) -> Unit) {
+        val port = _daemonHttpPort.value
+        if (port == 0) {
+            callback(null, "Daemon not running")
+            return
+        }
+        viewModelScope.launch {
+            _ui.value = _ui.value.copy(isLoading = true, error = null, lastMid = null)
+            try {
+                val mid = withContext(Dispatchers.IO) { DirectedApi.publishFile(dataDir, port, filePath) }
+                _ui.value = _ui.value.copy(isLoading = false, lastMid = mid)
+                refreshStatus()
+                callback(mid, null)
+            } catch (e: Exception) {
+                val message = e.message ?: "Dissolution failed"
+                _ui.value = _ui.value.copy(isLoading = false, error = message)
+                callback(null, message)
             }
         }
     }
@@ -117,6 +141,28 @@ class MiasmaViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ──── Distress wipe ──────────────────────────────────────────────────────
+
+    fun retrieveMidToFile(
+        mid: String,
+        outputPath: String,
+        callback: (result: DirectedApi.RetrieveMidToFileResult?, error: String?) -> Unit,
+    ) {
+        val port = _daemonHttpPort.value
+        if (port == 0) {
+            callback(null, "Daemon not running")
+            return
+        }
+        viewModelScope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    DirectedApi.retrieveMidToFile(dataDir, port, mid, outputPath)
+                }
+                callback(result, null)
+            } catch (e: Exception) {
+                callback(null, e.message ?: "Retrieval failed")
+            }
+        }
+    }
 
     /**
      * Emergency distress wipe:

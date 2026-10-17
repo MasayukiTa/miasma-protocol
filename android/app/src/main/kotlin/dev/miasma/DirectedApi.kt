@@ -1,5 +1,6 @@
 package dev.miasma
 
+import android.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -118,6 +119,53 @@ object DirectedApi {
     }
 
     // ─── Directed sharing operations ────────────────────────────────────
+
+    // Network content operations. File variants keep payload bytes out of JSON/base64.
+    fun publishBytes(dataDir: String, port: Int, data: ByteArray, k: Int = 10, n: Int = 20): String {
+        val body = JSONObject().apply {
+            put("data", Base64.encodeToString(data, Base64.NO_WRAP))
+            put("data_shards", k)
+            put("total_shards", n)
+        }
+        val resp = httpPost(dataDir, port, "/api/publish", body, FILE_OPERATION_TIMEOUT_MS)
+        if (resp.has("error")) throw RuntimeException(resp.getString("error"))
+        return resp.getString("mid")
+    }
+
+    fun publishFile(dataDir: String, port: Int, filePath: String, k: Int = 10, n: Int = 20): String {
+        val body = JSONObject().apply {
+            put("file_path", filePath)
+            put("data_shards", k)
+            put("total_shards", n)
+        }
+        val resp = httpPost(dataDir, port, "/api/publish-file", body, FILE_OPERATION_TIMEOUT_MS)
+        if (resp.has("error")) throw RuntimeException(resp.getString("error"))
+        return resp.getString("mid")
+    }
+
+    fun retrieveMidToFile(
+        dataDir: String,
+        port: Int,
+        mid: String,
+        outputPath: String,
+        k: Int = 10,
+        n: Int = 20,
+    ): RetrieveMidToFileResult {
+        val body = JSONObject().apply {
+            put("mid", mid)
+            put("output_path", outputPath)
+            put("data_shards", k)
+            put("total_shards", n)
+        }
+        val resp = httpPost(dataDir, port, "/api/retrieve-to-file", body, FILE_OPERATION_TIMEOUT_MS)
+        if (resp.has("error")) throw RuntimeException(resp.getString("error"))
+        return RetrieveMidToFileResult(
+            outputPath = resp.getString("output_path"),
+            bytesWritten = resp.optLong("bytes_written", 0),
+        )
+    }
+
+    data class RetrieveMidToFileResult(val outputPath: String, val bytesWritten: Long)
 
     /** Get sharing key and contact. */
     fun sharingKey(dataDir: String, port: Int): SharingKeyResult {

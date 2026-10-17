@@ -189,6 +189,8 @@ pub fn classify_endpoint(method: &str, path: &str) -> RateLimitClass {
 
         // Heavyweight
         ("POST", "/api/retrieve")
+        | ("POST", "/api/retrieve-to-file")
+        | ("POST", "/api/publish-file")
         | ("POST", "/api/directed/retrieve")
         | ("POST", "/api/directed/retrieve-to-file")
         | ("POST", "/api/directed/send-file")
@@ -378,6 +380,14 @@ mod tests {
         );
         assert_eq!(
             classify_endpoint("POST", "/api/directed/retrieve-to-file"),
+            RateLimitClass::HeavyApi
+        );
+        assert_eq!(
+            classify_endpoint("POST", "/api/publish-file"),
+            RateLimitClass::HeavyApi
+        );
+        assert_eq!(
+            classify_endpoint("POST", "/api/retrieve-to-file"),
             RateLimitClass::HeavyApi
         );
     }
