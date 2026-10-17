@@ -147,10 +147,13 @@ pub enum ShareOrigin {
     Hosted,
 }
 
+/// Length of the short id a listing shows.
+pub const SHORT_ID_LEN: usize = 8;
+
 /// First 8 characters of a content address: the short id a listing shows and a
 /// user types back to delete one share.
 pub fn short_share_id(address: &str) -> String {
-    address.chars().take(8).collect()
+    address.chars().take(SHORT_ID_LEN).collect()
 }
 
 /// One stored share as a listing shows it, built from the index and the blob's
@@ -1082,24 +1085,35 @@ impl LocalShareStore {
         let shares_dir =
             std::fs::canonicalize(&self.shares_dir).unwrap_or_else(|_| self.shares_dir.clone());
         let now = now_secs();
+        if index.is_empty() {
+            // Nothing to delete. Also never write back an index that merely
+            // failed to load.
+            return Ok(DeleteSharesOutcome::default());
+        }
+        let mut outcome_skipped: Vec<String> = Vec::new();
 
         let mut targets: Vec<String> = match selection {
             ShareSelection::Ids(ids) => {
                 let mut t = Vec::new();
                 for id in ids {
-                    if id.is_empty() {
+                    // Shorter than a short id would match far too much.
+                    if id.len() < SHORT_ID_LEN {
                         continue;
                     }
-                    t.extend(
-                        index
-                            .keys()
-                            .filter(|address| {
-                                address.as_str() == id.as_str()
-                                    || (id.len() < address.len()
-                                        && address.starts_with(id.as_str()))
-                            })
-                            .cloned(),
-                    );
+                    let matched: Vec<&String> = index
+                        .keys()
+                        .filter(|address| {
+                            address.as_str() == id.as_str() || address.starts_with(id.as_str())
+                        })
+                        .collect();
+                    let exact = matched.iter().any(|a| a.as_str() == id.as_str());
+                    if matched.len() > 1 && !exact {
+                        // A short id shared by several shares: delete none of
+                        // them, report the id.
+                        outcome_skipped.push(id.chars().take(SHORT_ID_LEN).collect());
+                        continue;
+                    }
+                    t.extend(matched.into_iter().cloned());
                 }
                 t
             }
@@ -1120,7 +1134,10 @@ impl LocalShareStore {
         targets.sort();
         targets.dedup();
 
-        let mut outcome = DeleteSharesOutcome::default();
+        let mut outcome = DeleteSharesOutcome {
+            skipped: outcome_skipped,
+            ..Default::default()
+        };
         let mut first_error: Option<MiasmaError> = None;
         for address in targets {
             let path = self.share_path(&address);
@@ -2020,6 +2037,52 @@ mod tests {
         // Only the real share matched; the traversal ids name no stored share.
         assert_eq!(out.deleted, 1);
         assert!(outside.exists(), "a path outside the store must survive");
+    }
+
+    #[test]
+    fn delete_ignores_ids_shorter_than_a_short_id_and_ambiguous_prefixes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        let shares_dir = dir.path().join(SHARES_DIR);
+        for name in ["aaaaaaaa11", "aaaaaaaa22", "bbbbbbbb33"] {
+            std::fs::write(shares_dir.join(format!("{name}{SHARE_EXT}")), b"blob").unwrap();
+        }
+        rebuild_index(dir.path(), &shares_dir);
+
+        // Anything shorter than a short id is too short to name a share.
+        let out = store
+            .delete_shares(&ShareSelection::Ids(vec!["a".into(), "aaaaaaa".into()]))
+            .unwrap();
+        assert_eq!(out.deleted, 0);
+
+        // The short id "aaaaaaaa" fits two shares: neither is deleted.
+        let out = store
+            .delete_shares(&ShareSelection::Ids(vec!["aaaaaaaa".into()]))
+            .unwrap();
+        assert_eq!(out.deleted, 0);
+        assert_eq!(out.skipped, vec!["aaaaaaaa".to_string()]);
+        assert_eq!(store.list().len(), 3);
+
+        // A unique short id and a full address still work.
+        let out = store
+            .delete_shares(&ShareSelection::Ids(vec![
+                "bbbbbbbb".into(),
+                "aaaaaaaa11".into(),
+            ]))
+            .unwrap();
+        assert_eq!(out.deleted, 2);
+        assert_eq!(store.list(), vec!["aaaaaaaa22".to_string()]);
+    }
+
+    #[test]
+    fn delete_on_an_empty_index_does_not_write_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        let index_path = dir.path().join(INDEX_FILE);
+        let before = index_path.exists();
+        let out = store.delete_shares(&ShareSelection::All).unwrap();
+        assert_eq!(out, DeleteSharesOutcome::default());
+        assert_eq!(index_path.exists(), before);
     }
 
     #[cfg(unix)]
