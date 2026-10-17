@@ -80,7 +80,7 @@ async fn peer(relay: &Relay, tweak: impl FnOnce(&mut PushSettings)) -> Peer {
     let inbox = dir.path().join("inbox");
     let mut settings = PushSettings::from_config(&PushConfig::default(), dir.path());
     settings.min_free_bytes = 0;
-    settings.retry_delays = vec![];
+    settings.retry = miasma_core::push::retry::RetryPolicy::never();
     settings.idle_timeout = Duration::from_secs(20);
     tweak(&mut settings);
     let svc = PushService::start(dir.path(), node.clone(), settings);

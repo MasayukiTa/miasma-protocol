@@ -52,13 +52,17 @@ pub enum PushRequest {
         contact: String,
         path: String,
     },
-    /// Unfinished transfers (queued, preparing, connecting, sending, verifying).
+    /// Unfinished transfers (queued, preparing, connecting, sending, waiting, verifying).
     Queue,
     /// All known transfers (running and recently finished), or one by id.
     Status {
         id: Option<String>,
     },
     Cancel {
+        id: String,
+    },
+    /// Try a waiting send now instead of at its timer ("Try now").
+    RetryNow {
         id: String,
     },
     /// Persisted history, newest first.
@@ -104,6 +108,8 @@ pub enum PushResponse {
     Transfers(Vec<PushTransferInfo>),
     Transfer(PushTransferInfo),
     Cancelled,
+    /// A waiting send was told to try now.
+    Retrying,
     History(Vec<HistoryEntry>),
     Inbox {
         dir: String,
@@ -253,6 +259,13 @@ pub fn handle_with(
                 PushResponse::Cancelled
             } else {
                 err("not_found", format!("no running transfer {id}"))
+            }
+        }
+        PushRequest::RetryNow { id } => {
+            if svc.retry_now(&id) {
+                PushResponse::Retrying
+            } else {
+                err("not_found", format!("no waiting transfer {id}"))
             }
         }
         PushRequest::History { limit } => {

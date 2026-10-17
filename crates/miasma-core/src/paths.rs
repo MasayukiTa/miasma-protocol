@@ -365,6 +365,28 @@ spec!(
     "Trim copy of the history file (renamed over the original)."
 );
 spec!(
+    PUSH_OUTBOX,
+    "push_outbox.log",
+    File,
+    DataDir,
+    State,
+    Encrypt,
+    CryptoEraseOverwriteRemove,
+    "D14",
+    "Files queued for sending to a contact: source path, size, hash, progress."
+);
+spec!(
+    PUSH_OUTBOX_TMP,
+    "push_outbox.log.tmp",
+    File,
+    DataDir,
+    State,
+    Encrypt,
+    CryptoEraseOverwriteRemove,
+    "D14",
+    "Compaction copy of the send queue (renamed over the original)."
+);
+spec!(
     TRANSFERS_DIR,
     "transfers",
     Dir,
@@ -896,6 +918,8 @@ pub const REGISTRY: &[PathSpec] = &[
     CONTACTS_CORRUPT,
     PUSH_HISTORY,
     PUSH_HISTORY_TMP,
+    PUSH_OUTBOX,
+    PUSH_OUTBOX_TMP,
     TRANSFERS_DIR,
     RECV_JOURNAL,
     SEND_JOURNAL,
@@ -1290,6 +1314,8 @@ mod tests {
         assert_eq!(DESKTOP_PREFS.in_dir(d), join("desktop-prefs.toml"));
         assert_eq!(CONTACTS.in_dir(d), join("contacts.json"));
         assert_eq!(PUSH_HISTORY.in_dir(d), join("push_history.jsonl"));
+        assert_eq!(PUSH_OUTBOX.in_dir(d), join("push_outbox.log"));
+        assert_eq!(PUSH_OUTBOX_TMP.in_dir(d), join("push_outbox.log.tmp"));
         assert_eq!(default_push_inbox(d), join("inbox"));
         assert_eq!(transfers_dir(d), join("transfers"));
         assert_eq!(directed_incoming_dir(d), join("directed/incoming"));
