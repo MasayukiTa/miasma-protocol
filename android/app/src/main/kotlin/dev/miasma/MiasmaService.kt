@@ -15,33 +15,69 @@ import dev.miasma.uniffi.startEmbeddedDaemon
 import dev.miasma.uniffi.stopEmbeddedDaemon
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
- * Foreground Service that keeps the Miasma node alive while the app is in the
- * background.  The node itself runs on a coroutine (Dispatchers.IO); this
- * service just owns the lifecycle.
+ * Foreground Service that owns the embedded Miasma node while Android permits
+ * the data-sync foreground-service session. Android 15+ applies a background
+ * time budget to this service type, so the app must tolerate a clean stop and
+ * restart the node when the user returns.
  *
  * Start via [startNode] / stop via [stopNode] companion helpers.
  */
 class MiasmaService : Service() {
 
+    private data class NodeRequest(
+        val dataDir: String,
+        val storageMb: Long,
+        val bandwidthMbDay: Long,
+    )
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var nodeJob: Job? = null
+    private var currentRequest: NodeRequest? = null
 
     // ──── Lifecycle ──────────────────────────────────────────────────────────
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val dataDir = intent?.getStringExtra(EXTRA_DATA_DIR) ?: filesDir.absolutePath
-        val storageMb = intent?.getLongExtra(EXTRA_STORAGE_MB, DEFAULT_STORAGE_MB) ?: DEFAULT_STORAGE_MB
-        val bandwidthMbDay = intent?.getLongExtra(EXTRA_BANDWIDTH_MB_DAY, DEFAULT_BANDWIDTH_MB_DAY)
-            ?: DEFAULT_BANDWIDTH_MB_DAY
+        if (intent?.action == ACTION_STOP) {
+            lastDaemonStatus = null
+            lastDaemonError = null
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
 
-        startForeground(NOTIF_ID, buildNotification("Starting…"))
+        val request = NodeRequest(
+            dataDir = intent?.getStringExtra(EXTRA_DATA_DIR) ?: filesDir.absolutePath,
+            storageMb = intent?.getLongExtra(EXTRA_STORAGE_MB, DEFAULT_STORAGE_MB) ?: DEFAULT_STORAGE_MB,
+            bandwidthMbDay = intent?.getLongExtra(EXTRA_BANDWIDTH_MB_DAY, DEFAULT_BANDWIDTH_MB_DAY)
+                ?: DEFAULT_BANDWIDTH_MB_DAY,
+        )
 
-        scope.launch {
+        startForeground(NOTIF_ID, buildNotification("Starting..."))
+
+        // Activity recreation can send startForegroundService() again while the node is
+        // already healthy. Treat an identical request as idempotent instead of creating
+        // a second polling loop or daemon start attempt.
+        if (currentRequest == request && nodeJob?.isActive == true && lastDaemonError == null) {
+            return START_NOT_STICKY
+        }
+
+        val previousJob = nodeJob
+        currentRequest = request
+        nodeJob = scope.launch {
+            previousJob?.cancelAndJoin()
+            try { stopEmbeddedDaemon() } catch (_: Exception) { }
+
+            val dataDir = request.dataDir
+            val storageMb = request.storageMb
+            val bandwidthMbDay = request.bandwidthMbDay
             lastDaemonStatus = null
             lastDaemonError = null
 
@@ -93,11 +129,23 @@ class MiasmaService : Service() {
             }
         }
 
-        return START_STICKY
+        return START_NOT_STICKY
+    }
+
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        // Android 15+ limits background time for dataSync foreground services.
+        // Stop promptly instead of waiting for the system to escalate this to an ANR.
+        lastDaemonStatus = null
+        lastDaemonError = "Background node session ended by Android. Open Miasma to restart."
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf(startId)
     }
 
     override fun onDestroy() {
-        // Stop the embedded daemon gracefully.
+        // Stop the embedded daemon gracefully and make stale ports invisible to the UI.
+        lastDaemonStatus = null
+        currentRequest = null
+        nodeJob?.cancel()
         try { stopEmbeddedDaemon() } catch (_: Exception) { }
         scope.cancel()
         super.onDestroy()
@@ -114,6 +162,16 @@ class MiasmaService : Service() {
             .setContentText(text)
             .setOngoing(true)
             .setSilent(true)
+            .addAction(
+                android.R.drawable.ic_menu_close_clear_cancel,
+                "Stop node",
+                PendingIntent.getService(
+                    this,
+                    1,
+                    Intent(this, MiasmaService::class.java).setAction(ACTION_STOP),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                ),
+            )
             // Hide details on lock screen — only show "Miasma Node" title.
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setPublicVersion(
@@ -144,6 +202,7 @@ class MiasmaService : Service() {
 
     companion object {
         private const val NOTIF_ID = 1001
+        private const val ACTION_STOP = "dev.miasma.action.STOP_NODE"
         private const val EXTRA_DATA_DIR = "data_dir"
         private const val EXTRA_STORAGE_MB = "storage_mb"
         private const val EXTRA_BANDWIDTH_MB_DAY = "bandwidth_mb_day"
