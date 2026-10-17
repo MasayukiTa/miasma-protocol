@@ -165,6 +165,9 @@ pub struct MiasmaApp {
 
     // Storage (the shares this node keeps: listing and deletion)
     storage: StorageState,
+
+    // Updates (check once after start, Settings section, banner)
+    updates: crate::updates::UpdatesUi,
 }
 
 /// Why the stored-share list cannot be shown.
@@ -451,6 +454,7 @@ impl MiasmaApp {
             launch_attempts: 0,
             logs: LogsState::new(&data_dir),
             storage: StorageState::new(),
+            updates: crate::updates::UpdatesUi::new(data_dir.clone()),
 
             transfers: TransfersUi::default(),
             contacts: ContactsUi::default(),
@@ -2185,6 +2189,8 @@ impl MiasmaApp {
             });
 
             // ── Logs ─────────────────────────────────────────────────
+            self.updates.section(ui, self.locale, !easy);
+
             self.logs_section(ui);
 
             // ── Storage ──────────────────────────────────────────────
@@ -2967,6 +2973,7 @@ impl eframe::App for MiasmaApp {
         }
 
         self.poll_worker();
+        self.updates.tick(ctx);
 
         // Messages that go away by themselves: success and progress notes. Errors stay until
         // they are closed.
@@ -3172,6 +3179,7 @@ impl eframe::App for MiasmaApp {
                         if self.logs.writes_files {
                             kit::notice(ui, Level::Warn, self.lg().diag_banner);
                         }
+                        self.updates.banner(ui, self.locale);
                         self.connection_header(ui);
                         let c = locale::chat_strings(self.locale);
                         let connected = self.daemon_state == DaemonState::Connected;
@@ -3208,6 +3216,7 @@ impl eframe::App for MiasmaApp {
                             if self.logs.writes_files {
                                 kit::notice(ui, Level::Warn, self.lg().diag_banner);
                             }
+                            self.updates.banner(ui, self.locale);
                             // Connection state first, when not connected.
                             self.connection_header(ui);
                             match self.tab {

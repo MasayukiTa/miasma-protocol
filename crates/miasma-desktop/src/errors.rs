@@ -47,6 +47,11 @@ pub enum ErrorKind {
     WipeNotConfirmed,
     NoSuchTransfer,
     PushNoReply,
+    UpdateCheckFailed,
+    UpdateVerifyFailed,
+    UpdateApplyFailed,
+    UpdateBusy,
+    UpdateNotWritable,
     /// Anything not recognised. Keep last: the completeness test counts on it.
     Other,
 }
@@ -54,7 +59,7 @@ pub enum ErrorKind {
 impl ErrorKind {
     /// Every kind, for the completeness tests.
     #[cfg(test)]
-    pub const ALL: [ErrorKind; 33] = [
+    pub const ALL: [ErrorKind; 38] = [
         Self::RuntimeStartFailed,
         Self::DaemonAutostartFailed,
         Self::InitDaemonFailed,
@@ -87,6 +92,11 @@ impl ErrorKind {
         Self::WipeNotConfirmed,
         Self::NoSuchTransfer,
         Self::PushNoReply,
+        Self::UpdateCheckFailed,
+        Self::UpdateVerifyFailed,
+        Self::UpdateApplyFailed,
+        Self::UpdateBusy,
+        Self::UpdateNotWritable,
         Self::Other,
     ];
 
@@ -125,6 +135,11 @@ impl ErrorKind {
             Self::WipeNotConfirmed => "wipe_not_confirmed",
             Self::NoSuchTransfer => "no_such_transfer",
             Self::PushNoReply => "push_no_reply",
+            Self::UpdateCheckFailed => "update_check_failed",
+            Self::UpdateVerifyFailed => "update_verify_failed",
+            Self::UpdateApplyFailed => "update_apply_failed",
+            Self::UpdateBusy => "update_busy",
+            Self::UpdateNotWritable => "update_not_writable",
             Self::Other => "other",
         }
     }
@@ -292,6 +307,31 @@ impl ErrorKind {
                 "The contacts feature did not respond. Close Miasma and open it again.",
                 "連絡先の機能から応答がありません。Miasmaを閉じてから、もう一度開いてください。",
                 "联系人功能没有响应。请关闭 Miasma 后重新打开。",
+            ],
+            Self::UpdateCheckFailed => [
+                "Could not check for updates. Check your internet connection. Miasma keeps working as it is.",
+                "更新を確認できませんでした。インターネットの接続を確認してください。Miasmaはそのまま使えます。",
+                "无法检查更新。请检查网络连接。Miasma 仍可照常使用。",
+            ],
+            Self::UpdateVerifyFailed => [
+                "The update was refused because it could not be verified. Nothing was changed. Try again later.",
+                "更新ファイルを検証できなかったため、更新を取りやめました。何も変更していません。しばらくしてからもう一度お試しください。",
+                "无法验证更新文件，已取消更新。未做任何更改。请稍后重试。",
+            ],
+            Self::UpdateApplyFailed => [
+                "The update could not be installed, and the current version was kept. Try again later.",
+                "更新をインストールできませんでした。現在のバージョンのまま使えます。しばらくしてからもう一度お試しください。",
+                "无法安装更新，已保留当前版本。请稍后重试。",
+            ],
+            Self::UpdateBusy => [
+                "Miasma is busy sending or receiving. The update waits until it is idle.",
+                "Miasmaは送受信の最中です。終わってから更新します。",
+                "Miasma 正在收发数据。将在空闲后再更新。",
+            ],
+            Self::UpdateNotWritable => [
+                "This installation cannot be updated from here. Install the new version yourself.",
+                "このインストール先は、ここから更新できません。新しいバージョンを自分でインストールしてください。",
+                "无法从此处更新当前安装。请自行安装新版本。",
             ],
             Self::Other => [
                 "Something went wrong. Try again. If it keeps happening, save the report in Settings and contact support.",
