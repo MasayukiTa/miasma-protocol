@@ -221,11 +221,28 @@ pub struct PushConfig {
     /// removed after this many days (default 7; 0 = keep them forever).
     #[serde(default = "default_push_part_retention_days")]
     pub part_retention_days: u64,
+    /// How long a send keeps retrying by itself after the other side cannot be
+    /// reached, in hours, counted from the last time bytes moved (default 24;
+    /// 0 = never give up).
+    #[serde(default = "default_push_retry_window_hours")]
+    pub retry_window_hours: u64,
+    /// A send that moves no byte for this many seconds is treated as a lost
+    /// connection and resumed on a new one (default 30).
+    #[serde(default = "default_push_stall_secs")]
+    pub stall_timeout_secs: u64,
 }
 
 pub const DEFAULT_PUSH_PART_RETENTION_DAYS: u64 = 7;
 pub const DEFAULT_PUSH_MAX_FILE_SIZE: u64 = 20 * 1024 * 1024 * 1024;
 pub const DEFAULT_PUSH_MIN_FREE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+pub const DEFAULT_PUSH_RETRY_WINDOW_HOURS: u64 = 24;
+pub const DEFAULT_PUSH_STALL_SECS: u64 = 30;
+fn default_push_retry_window_hours() -> u64 {
+    DEFAULT_PUSH_RETRY_WINDOW_HOURS
+}
+fn default_push_stall_secs() -> u64 {
+    DEFAULT_PUSH_STALL_SECS
+}
 
 fn default_push_max_file_size() -> u64 {
     DEFAULT_PUSH_MAX_FILE_SIZE
@@ -248,6 +265,8 @@ impl Default for PushConfig {
             min_free_bytes: DEFAULT_PUSH_MIN_FREE_BYTES,
             max_concurrent_inbound: 2,
             part_retention_days: DEFAULT_PUSH_PART_RETENTION_DAYS,
+            retry_window_hours: DEFAULT_PUSH_RETRY_WINDOW_HOURS,
+            stall_timeout_secs: DEFAULT_PUSH_STALL_SECS,
         }
     }
 }

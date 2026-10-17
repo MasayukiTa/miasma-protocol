@@ -2,7 +2,7 @@
 //! the sending side (per-contact sequential queues), and the bookkeeping the
 //! IPC layer exposes.
 //!
-//! Identity: the only identity of a peer is `Connection::remote_id()`, proven
+//! Identity: the only identity of a peer is `Link::remote_id()`, proven
 //! by the QUIC/TLS handshake. Nothing in a message is believed about who the
 //! peer is.
 
@@ -10,22 +10,25 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
-use iroh::endpoint::{Connection, RecvStream, SendStream};
 use tokio::{
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter},
-    sync::{watch, Semaphore},
+    sync::{broadcast, watch, Notify, Semaphore},
+    time::Instant,
 };
 use tracing::{debug, info};
 
 use super::{
     contact::{fingerprint, ContactCode},
+    link::{BoxRx, BoxTx, CloseInfo, Dialer, IrohDialer, IrohLink, Link},
+    outbox::{OutJob, Outbox},
     proto::{
         self, Done, Header, ProtoError, RejectReason, Reply, CLOSE_BAD_REQUEST, CLOSE_NOT_ALLOWED,
         CLOSE_OK, PROTOCOL_VERSION,
     },
+    retry::RetryPolicy,
     state::{
         error_kind, now_ms, Board, Direction, History, HistoryEntry, PushState, PushTransferInfo,
         RateMeter, MAX_ACTIVE,
@@ -35,7 +38,7 @@ use super::{
 use crate::{
     config::PushConfig,
     transfer::manifest::sanitize_file_name,
-    transport::iroh_direct::{IrohClientError, IrohNode, PushConnectionHandler, PUSH_ALPN},
+    transport::iroh_direct::{IrohClientError, IrohNode, PushConnectionHandler},
 };
 
 /// Sending reads and the receiver's writes use chunks of this size.
@@ -45,6 +48,12 @@ const MAX_STREAMS_PER_CONNECTION: usize = 10_000;
 const MAX_QUEUED_PER_SERVICE: usize = MAX_ACTIVE;
 /// How often old partial files are looked for (the first look is at start).
 const PART_SWEEP_EVERY: Duration = Duration::from_secs(24 * 3600);
+/// Close code of a connection the sender gives up on because it is stuck or
+/// broken, to be resumed on a new one. Any code except "cancelled" keeps the
+/// receiver's partial file.
+const CLOSE_RETRY: u32 = 408;
+/// Close code of a receive that a newer connection for the same file replaced.
+const CLOSE_SUPERSEDED: u32 = 409;
 
 type FreeSpaceFn = Arc<dyn Fn(&Path) -> Option<u64> + Send + Sync>;
 
@@ -55,13 +64,17 @@ pub struct PushSettings {
     pub max_file_size: u64,
     pub min_free_bytes: u64,
     pub max_concurrent_inbound: usize,
-    /// No byte moved for this long => the transfer is abandoned.
+    /// Receiving: no byte arrived for this long => the transfer is left
+    /// unfinished (its partial file is kept for a resume).
     pub idle_timeout: Duration,
+    /// Sending: no byte accepted by the connection for this long => the
+    /// connection is closed and the send resumes on a new one.
+    pub stall_timeout: Duration,
     /// How long to wait for the other side's reply to the header and for the
     /// final verification (hashing a multi-GB file takes a while).
     pub reply_timeout: Duration,
-    /// Waits between retries after a dropped connection.
-    pub retry_delays: Vec<Duration>,
+    /// When a send tries again after the other side could not be reached.
+    pub retry: RetryPolicy,
     /// Unfinished `.part` files older than this are removed (at start and once
     /// a day). `Duration::ZERO` keeps them forever.
     pub part_retention: Duration,
@@ -77,12 +90,9 @@ impl PushSettings {
             min_free_bytes: cfg.min_free_bytes,
             max_concurrent_inbound: cfg.max_concurrent_inbound.clamp(1, 16),
             idle_timeout: Duration::from_secs(60),
+            stall_timeout: Duration::from_secs(cfg.stall_timeout_secs.max(1)),
             reply_timeout: Duration::from_secs(600),
-            retry_delays: vec![
-                Duration::from_secs(2),
-                Duration::from_secs(5),
-                Duration::from_secs(10),
-            ],
+            retry: RetryPolicy::from_config(cfg),
             part_retention: Duration::from_secs(cfg.part_retention_days.saturating_mul(86_400)),
             free_space: None,
         }
@@ -165,10 +175,23 @@ impl Limiter {
 
 // ─── The service ─────────────────────────────────────────────────────────────
 
+/// Why a waiting send is told to try again before its timer is up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Wake {
+    /// The home relay is connected again, or the network changed.
+    All,
+    /// This contact opened a connection to us: it is online.
+    Contact(String),
+    /// The person pressed "Try now" on this transfer.
+    Job(String),
+}
+
 struct Job {
     id: String,
     path: PathBuf,
     cancel: watch::Receiver<bool>,
+    /// What is stored for this job in the send queue.
+    rec: OutJob,
 }
 
 #[derive(Default)]
@@ -183,9 +206,14 @@ pub struct PushService {
     board: Board,
     history: History,
     own_id: [u8; 32],
-    node: Arc<IrohNode>,
+    dialer: Arc<dyn Dialer>,
+    /// Files waiting to be sent; survives a restart.
+    outbox: Outbox,
+    wake: broadcast::Sender<Wake>,
     inbound_slots: Arc<Semaphore>,
-    active_parts: Mutex<HashSet<PathBuf>>,
+    /// `.part` files being written, each with the handle that asks the writer
+    /// to let go (a newer connection for the same file takes over).
+    active_parts: Mutex<HashMap<PathBuf, Arc<Notify>>>,
     limiter: Mutex<Limiter>,
     queues: Mutex<HashMap<String, ContactQueue>>,
     shutdown: watch::Sender<bool>,
@@ -194,21 +222,74 @@ pub struct PushService {
 /// Why one attempt to send failed.
 enum AttemptError {
     /// Worth retrying (resume picks up where it stopped). `kind` is the stable
-    /// [`error_kind`] shown if the retries run out.
+    /// [`error_kind`] shown while waiting and if the retries run out.
     Retry(&'static str, String),
     /// Retry once from scratch (the receiver's hash check failed).
     Restart(String),
     Fatal(String),
     Rejected(RejectReason),
     Cancelled,
+    /// The service is shutting down; the job stays queued for the next start.
+    Shutdown,
+}
+
+/// What one attempt learned, kept by the caller whatever the outcome.
+#[derive(Default)]
+struct AttemptStats {
+    /// The offset the receiver said it already had (set once it accepted).
+    accepted: Option<u64>,
+}
+
+/// Bookkeeping of one job across its attempts.
+struct RetryState {
+    /// Failed attempts in a row since bytes last moved.
+    failures: u32,
+    /// The last time the receiver's confirmed offset grew (or the job began).
+    last_progress: Instant,
+    /// The largest offset the receiver has confirmed so far.
+    best_offset: u64,
+    /// When the last attempt began.
+    last_start: Option<Instant>,
+}
+
+/// Size and modification time of a file, as stored with the queued job.
+fn stamp(m: &std::fs::Metadata) -> (u64, u64) {
+    let mtime = m
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    (m.len(), mtime)
 }
 
 impl PushService {
     /// Create the service and install it as the PUSH_ALPN handler of `node`.
+    /// Sends that were queued before the last stop are picked up again.
     pub fn start(data_dir: &Path, node: Arc<IrohNode>, settings: PushSettings) -> Arc<Self> {
+        let svc = Self::start_with_dialer(
+            data_dir,
+            node.endpoint_id(),
+            Arc::new(IrohDialer(node.clone())),
+            settings,
+        );
+        node.set_push_handler(svc.clone());
+        Self::watch_network(&svc, &node);
+        svc
+    }
+
+    /// As [`start`](Self::start) over any [`Dialer`]; the caller routes
+    /// incoming connections to [`serve_link`](Self::serve_link). This is the
+    /// seam fault-injection tests use.
+    pub fn start_with_dialer(
+        data_dir: &Path,
+        own_id: [u8; 32],
+        dialer: Arc<dyn Dialer>,
+        settings: PushSettings,
+    ) -> Arc<Self> {
         let contacts = Arc::new(ContactStore::open(data_dir));
-        let own_id = node.endpoint_id();
         let (shutdown, _) = watch::channel(false);
+        let (wake, _) = broadcast::channel(64);
         let svc = Arc::new(Self {
             inbound_slots: Arc::new(Semaphore::new(settings.max_concurrent_inbound)),
             settings,
@@ -216,13 +297,14 @@ impl PushService {
             board: Board::new(),
             history: History::open(data_dir),
             own_id,
-            node: node.clone(),
-            active_parts: Mutex::new(HashSet::new()),
+            dialer,
+            outbox: Outbox::open(data_dir),
+            wake,
+            active_parts: Mutex::new(HashMap::new()),
             limiter: Mutex::new(Limiter::new()),
             queues: Mutex::new(HashMap::new()),
             shutdown,
         });
-        node.set_push_handler(svc.clone());
         // Old partial files of transfers the sender never resumed: once now, then daily.
         {
             let me = svc.clone();
@@ -240,11 +322,118 @@ impl PushService {
                 }
             });
         }
+        let restored = svc.restore_jobs();
         info!(
             contacts = svc.contacts.list().len(),
+            resumed_sends = restored,
             "trusted-contact push is on"
         );
         svc
+    }
+
+    /// Put the sends stored by an earlier run back in their queues.
+    fn restore_jobs(self: &Arc<Self>) -> usize {
+        let mut n = 0;
+        for rec in self.outbox.jobs() {
+            let Some(contact) = self.contacts.find(&rec.contact_id) else {
+                self.outbox.remove(&rec.id);
+                continue;
+            };
+            if n >= MAX_QUEUED_PER_SERVICE {
+                self.outbox.remove(&rec.id);
+                continue;
+            }
+            let (id, cancel) = self.board.create_with_id(
+                rec.id.clone(),
+                Direction::Out,
+                &contact.id,
+                &contact.label,
+                &rec.name,
+                rec.size,
+                PushState::Queued,
+            );
+            let (shown, offset) = (rec.path.clone(), rec.offset);
+            self.board.update(&id, |i| {
+                i.source_path = Some(shown);
+                i.bytes = offset;
+            });
+            // The time the daemon was off does not count against the retry window.
+            let rec = OutJob { attempt: 0, ..rec };
+            self.enqueue_job(
+                &contact.id,
+                Job {
+                    id,
+                    path: PathBuf::from(&rec.path),
+                    cancel,
+                    rec,
+                },
+            );
+            n += 1;
+        }
+        n
+    }
+
+    /// Follow the endpoint: when the home relay connects, or the network the
+    /// endpoint sees changes, every waiting send tries again at once.
+    fn watch_network(svc: &Arc<Self>, node: &Arc<IrohNode>) {
+        use iroh::Watcher;
+        let ep = node.endpoint().clone();
+        let weak = Arc::downgrade(svc);
+        let mut stop = svc.shutdown.subscribe();
+        tokio::spawn(async move {
+            let mut relay = ep.home_relay_status();
+            let mut report = ep.net_report();
+            let mut was_up = relay.get().iter().any(|r| r.is_connected());
+            let mut last_net = None;
+            loop {
+                tokio::select! {
+                    _ = stop.changed() => return,
+                    r = relay.updated() => {
+                        let Ok(v) = r else { return };
+                        let up = v.iter().any(|r| r.is_connected());
+                        if up && !was_up {
+                            let Some(s) = weak.upgrade() else { return };
+                            s.notify_relay_connected();
+                        }
+                        was_up = up;
+                    }
+                    r = report.updated() => {
+                        let Ok(v) = r else { return };
+                        let now = v.map(|r| (r.udp_v4, r.udp_v6, r.global_v4, r.global_v6, r.preferred_relay));
+                        if now.is_some() && last_net.is_some() && now != last_net {
+                            let Some(s) = weak.upgrade() else { return };
+                            s.notify_network_change();
+                        }
+                        if now.is_some() {
+                            last_net = now;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    /// The home relay is connected again: waiting sends try again now.
+    pub fn notify_relay_connected(&self) {
+        let _ = self.wake.send(Wake::All);
+    }
+
+    /// The network changed (new address, interface or path): waiting sends
+    /// try again now.
+    pub fn notify_network_change(&self) {
+        let _ = self.wake.send(Wake::All);
+    }
+
+    /// Try a waiting send now instead of at its timer. `false` if `id` is not
+    /// a send that is waiting.
+    pub fn retry_now(&self, id: &str) -> bool {
+        match self.board.get(id) {
+            Some(i) if i.direction == Direction::Out && i.state == PushState::Waiting => {
+                let _ = self.wake.send(Wake::Job(id.to_owned()));
+                true
+            }
+            _ => false,
+        }
     }
 
     pub fn shutdown(&self) {
@@ -342,7 +531,7 @@ impl PushService {
     /// own name pattern, directly inside a contact folder of the inbox, and not
     /// in use. Returns how many were removed.
     pub fn sweep_partials(&self) -> usize {
-        let active = self.active_parts.lock().unwrap().clone();
+        let active: HashSet<PathBuf> = self.active_parts.lock().unwrap().keys().cloned().collect();
         sweep_partials_in(
             &self.settings.inbox_dir,
             self.settings.part_retention,
@@ -358,7 +547,7 @@ impl PushService {
         let Ok(rd) = std::fs::read_dir(&dir) else {
             return;
         };
-        let active = self.active_parts.lock().unwrap().clone();
+        let active: HashSet<PathBuf> = self.active_parts.lock().unwrap().keys().cloned().collect();
         for e in rd.flatten() {
             let p = e.path();
             let n = e.file_name().to_string_lossy().into_owned();
@@ -376,7 +565,8 @@ impl PushService {
 
     // ── Sending ──────────────────────────────────────────────────────────────
 
-    /// Queue `path` for `selector`'s contact. Returns the transfer id.
+    /// Queue `path` for `selector`'s contact. Returns the transfer id. The
+    /// send is stored, so it continues after a restart of the daemon.
     pub fn queue_send(self: &Arc<Self>, selector: &str, path: &Path) -> Result<String, String> {
         let contact = self
             .contacts
@@ -411,28 +601,55 @@ impl PushService {
             PushState::Queued,
         );
         let shown_path = path.to_string_lossy().into_owned();
-        self.board.update(&id, |i| i.source_path = Some(shown_path));
-        let start_worker = {
-            let mut q = self.queues.lock().unwrap();
-            let cq = q.entry(contact.id.clone()).or_default();
-            cq.jobs.push_back(Job {
+        self.board
+            .update(&id, |i| i.source_path = Some(shown_path.clone()));
+        let (size, mtime_ms) = stamp(&meta);
+        let rec = OutJob {
+            id: id.clone(),
+            contact_id: contact.id.clone(),
+            path: shown_path,
+            name,
+            size,
+            mtime_ms,
+            hash: None,
+            offset: 0,
+            attempt: 0,
+            created_at_ms: now_ms(),
+        };
+        self.outbox.put(&rec, true);
+        self.enqueue_job(
+            &contact.id,
+            Job {
                 id: id.clone(),
                 path: path.to_path_buf(),
                 cancel,
-            });
+                rec,
+            },
+        );
+        Ok(id)
+    }
+
+    fn enqueue_job(self: &Arc<Self>, contact_id: &str, job: Job) {
+        let start_worker = {
+            let mut q = self.queues.lock().unwrap();
+            let cq = q.entry(contact_id.to_owned()).or_default();
+            cq.jobs.push_back(job);
             !std::mem::replace(&mut cq.running, true)
         };
         if start_worker {
             let me = self.clone();
-            let cid = contact.id.clone();
+            let cid = contact_id.to_owned();
             tokio::spawn(async move { me.worker(cid).await });
         }
-        Ok(id)
     }
 
     async fn worker(self: Arc<Self>, contact_id: String) {
-        let mut conn: Option<Connection> = None;
+        let mut conn: Option<Arc<dyn Link>> = None;
+        let stop = self.shutdown.subscribe();
         loop {
+            if *stop.borrow() {
+                break;
+            }
             let job = {
                 let mut q = self.queues.lock().unwrap();
                 let Some(cq) = q.get_mut(&contact_id) else {
@@ -449,7 +666,7 @@ impl PushService {
             self.run_job(&contact_id, &mut conn, job).await;
         }
         if let Some(c) = conn {
-            c.close(CLOSE_OK.into(), b"done");
+            c.close(CLOSE_OK, b"done");
         }
     }
 
@@ -471,12 +688,16 @@ impl PushService {
         reason: Option<RejectReason>,
         kind: Option<&str>,
     ) {
+        // Whatever the ending, the send is no longer wanted after a restart.
+        self.outbox.remove(id);
         self.board.update(id, |i| {
             i.state = state;
             i.error = error;
             i.reject_reason = reason.map(|r| r.as_str().to_owned());
             i.error_kind = kind.map(str::to_owned);
             i.rate_bps = 0;
+            i.next_attempt_at_ms = None;
+            i.attempt = None;
             if state == PushState::Done {
                 i.bytes = i.size;
             }
@@ -500,8 +721,9 @@ impl PushService {
         }
     }
 
-    async fn run_job(&self, contact_id: &str, conn: &mut Option<Connection>, mut job: Job) {
+    async fn run_job(&self, contact_id: &str, conn: &mut Option<Arc<dyn Link>>, mut job: Job) {
         let id = job.id.clone();
+        let mut stop = self.shutdown.subscribe();
         if *job.cancel.borrow() {
             return self.finish(&id, PushState::Cancelled, None, None);
         }
@@ -532,35 +754,71 @@ impl PushService {
             );
         };
 
-        // Hash first: the header carries it, and it is the resume key.
-        self.board.update(&id, |i| i.state = PushState::Preparing);
-        let (hash, size) = match hash_file(&job.path, job.cancel.clone()).await {
-            Ok(Some(v)) => v,
-            Ok(None) => return self.finish(&id, PushState::Cancelled, None, None),
-            Err(e) => {
-                return self.finish_kind(
-                    &id,
-                    PushState::Failed,
-                    Some(format!("cannot read the file: {e}")),
-                    None,
-                    Some(error_kind::FILE_UNREADABLE),
-                )
+        // The file must still be the one that was queued.
+        if let Err((kind, m)) = self.check_source(&job) {
+            return self.finish_kind(&id, PushState::Failed, Some(m), None, Some(kind));
+        }
+
+        // Hash first: the header carries it, and it is the resume key. A hash
+        // stored with the queued job (a restart) is not computed again.
+        let size = job.rec.size;
+        let hash = match job.rec.hash.clone() {
+            Some(h) => h,
+            None => {
+                self.board.update(&id, |i| i.state = PushState::Preparing);
+                match hash_file(&job.path, job.cancel.clone()).await {
+                    Ok(Some((h, total))) if total == size => {
+                        job.rec.hash = Some(h.clone());
+                        self.outbox.put(&job.rec, false);
+                        h
+                    }
+                    Ok(Some(_)) => {
+                        return self.finish_kind(
+                            &id,
+                            PushState::Failed,
+                            Some("the file changed after it was queued".into()),
+                            None,
+                            Some(error_kind::SOURCE_CHANGED),
+                        )
+                    }
+                    Ok(None) => return self.finish(&id, PushState::Cancelled, None, None),
+                    Err(e) => {
+                        return self.finish_kind(
+                            &id,
+                            PushState::Failed,
+                            Some(format!("cannot read the file: {e}")),
+                            None,
+                            Some(error_kind::FILE_UNREADABLE),
+                        )
+                    }
+                }
             }
         };
         self.board.update(&id, |i| i.size = size);
-        let name = job
-            .path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let name = job.rec.name.clone();
 
-        let mut attempt = 0usize;
+        let mut st = RetryState {
+            failures: 0,
+            last_progress: Instant::now(),
+            best_offset: 0,
+            last_start: None,
+        };
         let mut restarted = false;
         loop {
             if *job.cancel.borrow() {
                 return self.finish(&id, PushState::Cancelled, None, None);
             }
-            self.board.update(&id, |i| i.state = PushState::Connecting);
+            if *stop.borrow() {
+                return;
+            }
+            if let Err((kind, m)) = self.check_source(&job) {
+                return self.finish_kind(&id, PushState::Failed, Some(m), None, Some(kind));
+            }
+            self.board.update(&id, |i| {
+                i.state = PushState::Connecting;
+                i.next_attempt_at_ms = None;
+            });
+            st.last_start = Some(Instant::now());
             let c = match self.ensure_conn(conn, &target).await {
                 Ok(c) => c,
                 Err(e) => {
@@ -568,18 +826,38 @@ impl PushService {
                         IrohClientError::Unreachable(_) => error_kind::UNREACHABLE,
                         _ => error_kind::CONNECTION_LOST,
                     };
-                    return self.finish_kind(
-                        &id,
-                        PushState::Failed,
-                        Some(describe_dial_error(&e)),
-                        None,
-                        Some(kind),
-                    );
+                    if self
+                        .wait_retry(&mut job, &mut st, kind, describe_dial_error(&e), &mut stop)
+                        .await
+                    {
+                        continue;
+                    }
+                    return;
                 }
             };
+            let mut stats = AttemptStats::default();
             let res = self
-                .attempt_send(&c, &id, &job.path, &name, size, &hash, &mut job.cancel)
+                .attempt_send(
+                    &*c,
+                    &id,
+                    &job.path,
+                    &name,
+                    size,
+                    &hash,
+                    &mut job.cancel,
+                    &mut stop,
+                    &mut stats,
+                )
                 .await;
+            // The receiver confirmed more than it had before: the transfer
+            // is moving, so the waits start from the short end again.
+            if let Some(a) = stats.accepted {
+                if a > st.best_offset {
+                    st.best_offset = a;
+                    st.failures = 0;
+                    st.last_progress = Instant::now();
+                }
+            }
             match res {
                 Ok(saved) => {
                     self.board.update(&id, |i| i.saved_as = saved);
@@ -590,8 +868,28 @@ impl PushService {
                     // purpose (it then deletes its partial file); a connection that
                     // merely dies keeps the partial for a later resume.
                     *conn = None;
-                    c.close(proto::CLOSE_CANCELLED.into(), b"cancelled");
+                    c.close(proto::CLOSE_CANCELLED, b"cancelled");
                     return self.finish(&id, PushState::Cancelled, None, None);
+                }
+                Err(AttemptError::Shutdown) => {
+                    *conn = None;
+                    c.close(CLOSE_OK, b"shutdown");
+                    return;
+                }
+                Err(AttemptError::Rejected(RejectReason::Busy)) => {
+                    // The receiver still holds the previous attempt; it lets go soon.
+                    if !self
+                        .wait_retry(
+                            &mut job,
+                            &mut st,
+                            error_kind::CONNECTION_LOST,
+                            reject_text(RejectReason::Busy),
+                            &mut stop,
+                        )
+                        .await
+                    {
+                        return;
+                    }
                 }
                 Err(AttemptError::Rejected(r)) => {
                     return self.finish(&id, PushState::Rejected, Some(reject_text(r)), Some(r));
@@ -613,73 +911,172 @@ impl PushService {
                     restarted = true;
                 }
                 Err(AttemptError::Retry(kind, m)) => {
+                    // Let go of the broken connection on purpose, so the receiver
+                    // frees the partial file for the next attempt at once.
                     *conn = None;
-                    let Some(delay) = self.settings.retry_delays.get(attempt).copied() else {
-                        return self.finish_kind(&id, PushState::Failed, Some(m), None, Some(kind));
-                    };
-                    attempt += 1;
-                    debug!("push {id}: {m}; retrying in {delay:?}");
-                    self.board.update(&id, |i| {
-                        i.error = Some(m);
-                        i.error_kind = Some(kind.to_owned());
-                    });
-                    let mut cancel = job.cancel.clone();
-                    tokio::select! {
-                        _ = tokio::time::sleep(delay) => {}
-                        _ = wait_cancel(&mut cancel) => {}
+                    c.close(CLOSE_RETRY, b"retry");
+                    if !self.wait_retry(&mut job, &mut st, kind, m, &mut stop).await {
+                        return;
                     }
                 }
             }
         }
     }
 
+    /// The source file must still be what was queued.
+    fn check_source(&self, job: &Job) -> Result<(), (&'static str, String)> {
+        match std::fs::metadata(&job.path) {
+            Ok(m) if m.is_file() && stamp(&m) == (job.rec.size, job.rec.mtime_ms) => Ok(()),
+            Ok(_) => Err((
+                error_kind::SOURCE_CHANGED,
+                "the file changed after it was queued; send it again".into(),
+            )),
+            Err(e) => Err((
+                error_kind::FILE_UNREADABLE,
+                format!("cannot read the file: {e}"),
+            )),
+        }
+    }
+
+    /// The other side could not be reached (or the connection broke): show
+    /// `Waiting`, store the progress, and sleep until the timer runs out, a
+    /// wake-up arrives, or the send is cancelled. `true` = try again; `false`
+    /// = the job has been finished (or the service is stopping), return.
+    async fn wait_retry(
+        &self,
+        job: &mut Job,
+        st: &mut RetryState,
+        kind: &'static str,
+        msg: String,
+        stop: &mut watch::Receiver<bool>,
+    ) -> bool {
+        let id = job.id.clone();
+        st.failures += 1;
+        let policy = &self.settings.retry;
+        if policy.exhausted(st.last_progress.elapsed()) {
+            let text = match policy.window {
+                Some(w) if !w.is_zero() => format!(
+                    "gave up after retrying for {} min: {msg}",
+                    (w.as_secs() / 60).max(1)
+                ),
+                _ => msg,
+            };
+            self.finish_kind(&id, PushState::Failed, Some(text), None, Some(kind));
+            return false;
+        }
+        let delay = policy.delay(st.failures, rand::random::<f64>());
+        let at = now_ms().saturating_add(delay.as_millis() as u64);
+        let failures = st.failures;
+        let mut offset = 0;
+        self.board.update(&id, |i| {
+            offset = i.bytes;
+            i.state = PushState::Waiting;
+            i.error = Some(msg);
+            i.error_kind = Some(kind.to_owned());
+            i.next_attempt_at_ms = Some(at);
+            i.attempt = Some(failures);
+            i.rate_bps = 0;
+        });
+        job.rec.offset = offset;
+        job.rec.attempt = failures;
+        self.outbox.put(&job.rec, false);
+
+        let mut wake = self.wake.subscribe();
+        let mut cancel = job.cancel.clone();
+        let timer = tokio::time::sleep(delay);
+        tokio::pin!(timer);
+        let mut pressed = false;
+        loop {
+            tokio::select! {
+                _ = &mut timer => break,
+                _ = wait_cancel(&mut cancel) => {
+                    self.finish(&id, PushState::Cancelled, None, None);
+                    return false;
+                }
+                _ = stop.changed() => return false,
+                ev = wake.recv() => match ev {
+                    Ok(Wake::All) => break,
+                    Ok(Wake::Contact(c)) if c == job.rec.contact_id => break,
+                    Ok(Wake::Job(j)) if j == id => {
+                        pressed = true;
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Lagged(_)) => break,
+                    Err(broadcast::error::RecvError::Closed) => {}
+                }
+            }
+        }
+        // A burst of wake-ups must not become a storm of dials ("Try now" is
+        // the person's own request and is not held back).
+        if !pressed {
+            if let Some(t) = st.last_start {
+                let gap = self.settings.retry.min_gap;
+                if t.elapsed() < gap {
+                    let rest = gap - t.elapsed();
+                    tokio::select! {
+                        _ = tokio::time::sleep(rest) => {}
+                        _ = wait_cancel(&mut cancel) => {
+                            self.finish(&id, PushState::Cancelled, None, None);
+                            return false;
+                        }
+                        _ = stop.changed() => return false,
+                    }
+                }
+            }
+        }
+        true
+    }
+
     async fn ensure_conn(
         &self,
-        slot: &mut Option<Connection>,
+        slot: &mut Option<Arc<dyn Link>>,
         target: &[u8; 32],
-    ) -> Result<Connection, IrohClientError> {
+    ) -> Result<Arc<dyn Link>, IrohClientError> {
         if let Some(c) = slot.as_ref() {
-            if c.close_reason().is_none() {
+            if c.close_info().is_none() {
                 return Ok(c.clone());
             }
         }
-        let c = self.node.connect_alpn(target, PUSH_ALPN).await?;
+        let c = match tokio::time::timeout(Duration::from_secs(120), self.dialer.dial(target)).await
+        {
+            Ok(r) => r?,
+            Err(_) => return Err(IrohClientError::Unreachable("the dial timed out".into())),
+        };
         *slot = Some(c.clone());
         Ok(c)
     }
 
     /// If the connection was closed by the receiver as "not allowed".
-    fn closed_as_not_allowed(conn: &Connection) -> bool {
-        matches!(
-            conn.close_reason(),
-            Some(iroh::endpoint::ConnectionError::ApplicationClosed(c))
-                if u64::from(c.error_code) == u64::from(CLOSE_NOT_ALLOWED)
-        )
+    fn closed_as_not_allowed(conn: &dyn Link) -> bool {
+        conn.close_info() == Some(CloseInfo::App(u64::from(CLOSE_NOT_ALLOWED)))
     }
 
     #[allow(clippy::too_many_arguments)]
     async fn attempt_send(
         &self,
-        conn: &Connection,
+        conn: &dyn Link,
         id: &str,
         path: &Path,
         name: &str,
         size: u64,
         hash: &str,
         cancel: &mut watch::Receiver<bool>,
+        stop: &mut watch::Receiver<bool>,
+        stats: &mut AttemptStats,
     ) -> Result<Option<String>, AttemptError> {
-        let idle = self.settings.idle_timeout;
-        let broken = |conn: &Connection, what: &str, e: String| {
+        let stall = self.settings.stall_timeout;
+        let broken = |conn: &dyn Link, what: &str, e: String| {
             if Self::closed_as_not_allowed(conn) {
                 AttemptError::Rejected(RejectReason::NotAllowed)
             } else {
                 AttemptError::Retry(error_kind::CONNECTION_LOST, format!("{what}: {e}"))
             }
         };
-        let (mut tx, mut rx) =
+        let (mut tx, mut rx): (BoxTx, BoxRx) =
             match tokio::time::timeout(Duration::from_secs(30), conn.open_bi()).await {
                 Ok(Ok(s)) => s,
-                Ok(Err(e)) => return Err(broken(conn, "open stream", e.to_string())),
+                Ok(Err(e)) => return Err(broken(conn, "open stream", e)),
                 Err(_) => {
                     return Err(AttemptError::Retry(
                         error_kind::TIMED_OUT,
@@ -697,10 +1094,10 @@ impl PushService {
         if let Err(e) = proto::write_frame(&mut tx, &header).await {
             return Err(broken(conn, "send header", e.to_string()));
         }
-        let reply: Reply =
-            match tokio::time::timeout(self.settings.reply_timeout, proto::read_frame(&mut rx))
-                .await
-            {
+        let reply: Reply = tokio::select! {
+            _ = wait_cancel(cancel) => return Err(AttemptError::Cancelled),
+            _ = stop.changed() => return Err(AttemptError::Shutdown),
+            r = tokio::time::timeout(self.settings.reply_timeout, proto::read_frame(&mut rx)) => match r {
                 Ok(Ok(r)) => r,
                 Ok(Err(e)) => return Err(broken(conn, "no reply", e.to_string())),
                 Err(_) => {
@@ -709,7 +1106,8 @@ impl PushService {
                         "the other side did not reply".into(),
                     ))
                 }
-            };
+            }
+        };
         let offset = match reply {
             Reply::Reject { reason } => return Err(AttemptError::Rejected(reason)),
             Reply::Accept { offset } if offset <= size => offset,
@@ -719,12 +1117,15 @@ impl PushService {
                 ))
             }
         };
+        stats.accepted = Some(offset);
 
         self.board.update(id, |i| {
             i.state = PushState::Sending;
             i.bytes = offset;
             i.error = None;
             i.error_kind = None;
+            i.next_attempt_at_ms = None;
+            i.attempt = None;
         });
         let mut file = tokio::fs::File::open(path)
             .await
@@ -758,10 +1159,14 @@ impl PushService {
             }
             tokio::select! {
                 _ = wait_cancel(cancel) => return Err(AttemptError::Cancelled),
-                w = tokio::time::timeout(idle, AsyncWriteExt::write_all(&mut tx, &buf[..n])) => match w {
+                _ = stop.changed() => return Err(AttemptError::Shutdown),
+                w = tokio::time::timeout(stall, AsyncWriteExt::write_all(&mut tx, &buf[..n])) => match w {
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => return Err(broken(conn, "send", e.to_string())),
-                    Err(_) => return Err(AttemptError::Retry(error_kind::TIMED_OUT, "the other side stopped accepting data".into())),
+                    Err(_) => return Err(AttemptError::Retry(
+                        error_kind::TIMED_OUT,
+                        format!("no data moved for {} s; reconnecting", stall.as_secs()),
+                    )),
                 }
             }
             sent += n as u64;
@@ -773,13 +1178,14 @@ impl PushService {
                 }
             });
         }
-        let _ = tx.finish();
+        tx.finish();
         self.board.update(id, |i| {
             i.state = PushState::Verifying;
             i.rate_bps = 0;
         });
         let done: Done = tokio::select! {
             _ = wait_cancel(cancel) => return Err(AttemptError::Cancelled),
+            _ = stop.changed() => return Err(AttemptError::Shutdown),
             r = tokio::time::timeout(self.settings.reply_timeout, proto::read_frame(&mut rx)) => match r {
                 Ok(Ok(d)) => d,
                 Ok(Err(e)) => return Err(broken(conn, "no confirmation", e.to_string())),
@@ -807,16 +1213,16 @@ impl PushService {
     /// Returns `false` if the connection was closed.
     async fn receive_one(
         &self,
-        conn: &Connection,
+        conn: &dyn Link,
         contact: Contact,
-        mut tx: SendStream,
-        mut rx: RecvStream,
+        mut tx: BoxTx,
+        mut rx: BoxRx,
     ) -> bool {
         let header: Header =
             match tokio::time::timeout(Duration::from_secs(30), proto::read_frame(&mut rx)).await {
                 Ok(Ok(h)) => h,
                 _ => {
-                    conn.close(CLOSE_BAD_REQUEST.into(), b"");
+                    conn.close(CLOSE_BAD_REQUEST, b"");
                     return false;
                 }
             };
@@ -885,15 +1291,26 @@ impl PushService {
                 );
                 false
             }
+            RxEnd::Superseded => {
+                self.finish_kind(
+                    &tid,
+                    PushState::Failed,
+                    Some("the sender continued on a new connection".into()),
+                    None,
+                    Some(error_kind::CONNECTION_LOST),
+                );
+                conn.close(CLOSE_SUPERSEDED, b"superseded");
+                false
+            }
             RxEnd::Cancelled => {
                 self.finish(&tid, PushState::Cancelled, None, None);
-                conn.close(proto::CLOSE_CANCELLED.into(), b"cancelled");
+                conn.close(proto::CLOSE_CANCELLED, b"cancelled");
                 false
             }
         }
     }
 
-    async fn reject(&self, tx: &mut SendStream, reason: RejectReason) -> bool {
+    async fn reject(&self, tx: &mut BoxTx, reason: RejectReason) -> bool {
         if proto::write_frame(tx, &Reply::Reject { reason })
             .await
             .is_err()
@@ -907,13 +1324,13 @@ impl PushService {
     #[allow(clippy::too_many_arguments)]
     async fn receive_body(
         &self,
-        conn: &Connection,
+        conn: &dyn Link,
         contact: &Contact,
         name: &str,
         header: &Header,
         tid: &str,
-        tx: &mut SendStream,
-        rx: &mut RecvStream,
+        tx: &mut BoxTx,
+        rx: &mut BoxRx,
         cancel: &mut watch::Receiver<bool>,
     ) -> RxEnd {
         let size = header.size;
@@ -924,8 +1341,29 @@ impl PushService {
         // The part file is keyed by content (hash + size), not by name, so a
         // resume finds it whatever the name and no name can be too long.
         let part = dir.join(crate::paths::push_part_name(&header.hash[..32], size));
-        if !self.active_parts.lock().unwrap().insert(part.clone()) {
-            return RxEnd::Rejected(RejectReason::Busy);
+        // A newer connection for the same file (the sender gave up on the old
+        // one) takes over: the old writer is asked to flush and let go, and
+        // the partial file it leaves is what the new one resumes from.
+        let me = Arc::new(Notify::new());
+        let mut waited = 0u32;
+        loop {
+            let holder = {
+                let mut g = self.active_parts.lock().unwrap();
+                match g.get(&part) {
+                    Some(h) => Some(h.clone()),
+                    None => {
+                        g.insert(part.clone(), me.clone());
+                        None
+                    }
+                }
+            };
+            let Some(holder) = holder else { break };
+            holder.notify_one();
+            waited += 1;
+            if waited > 100 {
+                return RxEnd::Rejected(RejectReason::Busy);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
         let _guard = PartGuard {
             set: &self.active_parts,
@@ -1002,6 +1440,13 @@ impl PushService {
                     drop(w);
                     let _ = std::fs::remove_file(&part);
                     return RxEnd::Cancelled;
+                }
+                _ = me.notified() => {
+                    // A newer connection for this file wants it: keep what is
+                    // written, close this one, let the newcomer resume.
+                    let _ = w.flush().await;
+                    drop(w);
+                    return RxEnd::Superseded;
                 }
                 r = tokio::time::timeout(idle, AsyncReadExt::read(rx, &mut buf[..want])) => match r {
                     Err(_) => {
@@ -1085,7 +1530,7 @@ impl PushService {
 
     async fn reply_done(
         &self,
-        tx: &mut SendStream,
+        tx: &mut BoxTx,
         ok: bool,
         saved_as: Option<String>,
         error: Option<&str>,
@@ -1115,16 +1560,18 @@ impl PushService {
 
 #[async_trait::async_trait]
 impl PushConnectionHandler for PushService {
-    async fn handle(&self, conn: Connection) {
-        self.serve_borrowed(conn).await
+    async fn handle(&self, conn: iroh::endpoint::Connection) {
+        self.serve_link(Arc::new(IrohLink(conn))).await
     }
 }
 
 impl PushService {
-    async fn serve_borrowed(&self, conn: Connection) {
+    /// Serve one incoming connection until it ends. Used by the iroh handler
+    /// and by tests that bring their own [`Link`].
+    pub async fn serve_link(&self, conn: Arc<dyn Link>) {
         // Looked up for every stream: a contact removed or switched off
         // mid-connection stops being served at once.
-        let remote = *conn.remote_id().as_bytes();
+        let remote = conn.remote_id();
         let mut shutdown = self.shutdown.subscribe();
         for _ in 0..MAX_STREAMS_PER_CONNECTION {
             let contact = match self.contacts.by_endpoint(&remote) {
@@ -1135,10 +1582,12 @@ impl PushService {
                     if loud {
                         debug!(peer = %fingerprint(&remote), "push refused: not a contact that may send");
                     }
-                    conn.close(CLOSE_NOT_ALLOWED.into(), b"");
+                    conn.close(CLOSE_NOT_ALLOWED, b"");
                     return;
                 }
             };
+            // The contact is online: its waiting sends to us can go now.
+            let _ = self.wake.send(Wake::Contact(contact.id.clone()));
             let (tx, rx) = tokio::select! {
                 _ = shutdown.changed() => break,
                 r = tokio::time::timeout(self.settings.idle_timeout, conn.accept_bi()) => match r {
@@ -1146,11 +1595,11 @@ impl PushService {
                     _ => break,
                 }
             };
-            if !self.receive_one(&conn, contact, tx, rx).await {
+            if !self.receive_one(&*conn, contact, tx, rx).await {
                 return;
             }
         }
-        conn.close(CLOSE_OK.into(), b"done");
+        conn.close(CLOSE_OK, b"done");
     }
 }
 
@@ -1164,6 +1613,8 @@ enum RxEnd {
     PeerCancelled,
     /// Stopped on this side (the person, or the contact was removed).
     Cancelled,
+    /// A newer connection for the same file took over; the partial is kept.
+    Superseded,
 }
 
 /// The inbound stream broke. If the sender closed the connection on purpose
@@ -1171,7 +1622,7 @@ enum RxEnd {
 /// other loss (network, the sender's process died) keeps the partial for a
 /// resume; the retention sweep removes it if the sender never comes back.
 async fn rx_broke(
-    conn: &Connection,
+    conn: &dyn Link,
     mut w: BufWriter<tokio::fs::File>,
     part: &Path,
     kind: &'static str,
@@ -1188,23 +1639,21 @@ async fn rx_broke(
 
 /// Did the other side close `conn` with the "cancelled" application code?
 /// The close frame may arrive a moment after the read error that revealed it.
-async fn closed_by_peer_cancel(conn: &Connection) -> bool {
-    let reason = match conn.close_reason() {
+async fn closed_by_peer_cancel(conn: &dyn Link) -> bool {
+    let reason = match conn.close_info() {
         Some(r) => Some(r),
         None => tokio::time::timeout(Duration::from_millis(500), conn.closed())
             .await
             .ok(),
     };
-    matches!(
-        reason,
-        Some(iroh::endpoint::ConnectionError::ApplicationClosed(c))
-            if u64::from(c.error_code) == u64::from(proto::CLOSE_CANCELLED)
-    )
+    reason == Some(CloseInfo::App(u64::from(proto::CLOSE_CANCELLED)))
 }
 
 /// Stable kind of a sender-side `Fatal` message (they are our own texts).
 fn fatal_kind(m: &str) -> Option<&'static str> {
-    if m.starts_with("cannot read the file") || m.starts_with("the file changed") {
+    if m.starts_with("the file changed") {
+        Some(error_kind::SOURCE_CHANGED)
+    } else if m.starts_with("cannot read the file") {
         Some(error_kind::FILE_UNREADABLE)
     } else if m.starts_with("the receiver could not save") {
         Some(error_kind::WRITE_FAILED)
@@ -1275,7 +1724,7 @@ pub fn sweep_partials_in(
 }
 
 struct PartGuard<'a> {
-    set: &'a Mutex<HashSet<PathBuf>>,
+    set: &'a Mutex<HashMap<PathBuf, Arc<Notify>>>,
     path: PathBuf,
 }
 
@@ -1291,8 +1740,8 @@ fn contact_leaf(dir: &Path) -> String {
         .unwrap_or_default()
 }
 
-async fn finish_stream(tx: &mut SendStream) {
-    let _ = tx.finish();
+async fn finish_stream(tx: &mut BoxTx) {
+    tx.finish();
     // Let the peer read the answer before the stream can be torn down.
     let _ = tokio::time::timeout(Duration::from_secs(10), tx.stopped()).await;
 }
