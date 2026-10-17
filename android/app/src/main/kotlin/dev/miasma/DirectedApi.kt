@@ -132,6 +132,17 @@ object DirectedApi {
         return resp.getString("mid")
     }
 
+    fun retrieveBytes(dataDir: String, port: Int, mid: String, k: Int = 10, n: Int = 20): ByteArray {
+        val body = JSONObject().apply {
+            put("mid", mid)
+            put("data_shards", k)
+            put("total_shards", n)
+        }
+        val resp = httpPost(dataDir, port, "/api/retrieve", body, FILE_OPERATION_TIMEOUT_MS)
+        if (resp.has("error")) throw RuntimeException(resp.getString("error"))
+        return Base64.decode(resp.getString("data"), Base64.DEFAULT)
+    }
+
     fun publishFile(dataDir: String, port: Int, filePath: String, k: Int = 10, n: Int = 20): String {
         val body = JSONObject().apply {
             put("file_path", filePath)

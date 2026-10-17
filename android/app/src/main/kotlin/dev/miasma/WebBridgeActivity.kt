@@ -105,7 +105,7 @@ class WebBridgeActivity : ComponentActivity() {
             return try {
                 val s = getNodeStatus(dataDir)
                 JSONObject().apply {
-                    put("peer_count", 0) // FFI status is local-only for now
+                    put("peer_count", 0) // NodeStatusFfi does not expose live peer count yet
                     put("share_count", s.shareCount.toLong())
                     put("storage_used_bytes", (s.usedMb * 1024 * 1024).toLong())
                     put("listen_addrs", org.json.JSONArray())
@@ -119,8 +119,10 @@ class WebBridgeActivity : ComponentActivity() {
         @JavascriptInterface
         fun dissolve(dataBase64: String, k: Int, n: Int): String {
             return try {
+                val port = httpPort()
+                if (port == 0) return daemonUnavailable()
                 val bytes = android.util.Base64.decode(dataBase64, android.util.Base64.DEFAULT)
-                val mid = dissolveBytes(dataDir, bytes)
+                val mid = DirectedApi.publishBytes(dataDir, port, bytes, k, n)
                 JSONObject().put("mid", mid).toString()
             } catch (e: Exception) {
                 errorJson(e.message)
@@ -130,7 +132,9 @@ class WebBridgeActivity : ComponentActivity() {
         @JavascriptInterface
         fun retrieve(mid: String, k: Int, n: Int): String {
             return try {
-                val bytes = retrieveBytes(dataDir, mid)
+                val port = httpPort()
+                if (port == 0) return daemonUnavailable()
+                val bytes = DirectedApi.retrieveBytes(dataDir, port, mid, k, n)
                 val b64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
                 JSONObject().put("data", b64).toString()
             } catch (e: Exception) {
