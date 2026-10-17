@@ -476,6 +476,28 @@ spec!(
     "Chat messages waiting to be delivered."
 );
 spec!(
+    CHAT_GROUP,
+    "chat/*.grp",
+    Pattern,
+    DataDir,
+    State,
+    Encrypt,
+    CryptoEraseOverwriteRemove,
+    "D27",
+    "Chat group: membership chain, message counters and waiting deliveries (file name is a keyed hash)."
+);
+spec!(
+    CHAT_GROUP_HISTORY,
+    "chat/*.gmsgs",
+    Pattern,
+    DataDir,
+    State,
+    Encrypt,
+    CryptoEraseOverwriteRemove,
+    "D27",
+    "Messages of one chat group (encrypted record log; absent in ephemeral mode)."
+);
+spec!(
     CHAT_TMP,
     "chat/*.tmp",
     Pattern,
@@ -884,6 +906,8 @@ pub const REGISTRY: &[PathSpec] = &[
     CHAT_SESSION,
     CHAT_HISTORY,
     CHAT_OUTBOX,
+    CHAT_GROUP,
+    CHAT_GROUP_HISTORY,
     CHAT_TMP,
     DAEMON_PORT,
     DAEMON_HTTP,
@@ -1092,6 +1116,21 @@ pub fn chat_session_file(chat_dir: &Path, stem: &str) -> PathBuf {
 /// `<chat dir>/outbox.log`
 pub fn chat_outbox_file(chat_dir: &Path) -> PathBuf {
     chat_dir.join("outbox.log")
+}
+
+/// `<chat dir>/<stem>.grp`: the state document of one group.
+pub fn chat_group_file(chat_dir: &Path, stem: &str) -> PathBuf {
+    chat_dir.join(format!("{stem}.grp"))
+}
+
+/// `<chat dir>/<stem>.gmsgs`: the saved messages of one group.
+pub fn chat_group_history_file(chat_dir: &Path, stem: &str) -> PathBuf {
+    chat_dir.join(format!("{stem}.gmsgs"))
+}
+
+/// True for a group state document name.
+pub fn is_chat_group_file(p: &Path) -> bool {
+    p.extension().is_some_and(|e| e == "grp")
 }
 
 /// True for a per-contact session document name.

@@ -91,6 +91,12 @@ pub trait ChatConnectionHandler: Send + Sync {
 
 type ChatSlot = Arc<OnceLock<Arc<dyn ChatConnectionHandler>>>;
 
+/// Group chat: the same pairwise sealed records as the one-to-one chat, on a
+/// connection of their own. A peer that predates groups does not list this
+/// ALPN, so the handshake for it fails there and its one-to-one connection is
+/// never involved.
+pub const GROUP_ALPN: &[u8] = b"miasma/chat-group/1";
+
 /// mDNS service name: keeps Miasma's announcements apart from other iroh apps'.
 const LAN_SERVICE_NAME: &str = "miasma";
 
@@ -316,6 +322,7 @@ pub fn endpoint_builder(
             IROH_ALPN.to_vec(),
             PUSH_ALPN.to_vec(),
             CHAT_ALPN.to_vec(),
+            GROUP_ALPN.to_vec(),
         ]);
     }
     Ok(b)
@@ -372,6 +379,7 @@ pub struct IrohNode {
     ctx: Arc<ServeCtx>,
     push: PushSlot,
     chat: ChatSlot,
+    group: ChatSlot,
     health: StdMutex<RelayHealth>,
     watchdog: StdMutex<Option<(watch::Sender<bool>, JoinHandle<()>)>>,
     /// One refresh or rebuild at a time.
@@ -422,12 +430,14 @@ impl IrohNode {
             .map_err(|e| MiasmaError::Network(format!("cannot start the iroh endpoint: {e}")))?;
         let push: PushSlot = Arc::new(OnceLock::new());
         let chat: ChatSlot = Arc::new(OnceLock::new());
+        let group: ChatSlot = Arc::new(OnceLock::new());
         let ctx = Arc::new(ServeCtx {
             store,
             records,
             limits,
             push: push.clone(),
             chat: chat.clone(),
+            group: group.clone(),
         });
         let server = tokio::spawn(accept_loop(endpoint.clone(), ctx.clone()));
         Ok(Arc::new(Self {
@@ -445,6 +455,7 @@ impl IrohNode {
             }),
             watchdog: StdMutex::new(None),
             rebuild_lock: Mutex::new(()),
+            group,
         }))
     }
 
@@ -588,6 +599,12 @@ impl IrohNode {
     /// ignored).
     pub fn set_chat_handler(&self, handler: Arc<dyn ChatConnectionHandler>) {
         let _ = self.chat.set(handler);
+    }
+
+    /// Install the handler for [`GROUP_ALPN`] connections (once; later calls
+    /// are ignored).
+    pub fn set_group_handler(&self, handler: Arc<dyn ChatConnectionHandler>) {
+        let _ = self.group.set(handler);
     }
 
     /// Install the handler for [`PUSH_ALPN`] connections (once; later calls are
@@ -803,6 +820,7 @@ struct ServeCtx {
     limits: IrohServerLimits,
     push: PushSlot,
     chat: ChatSlot,
+    group: ChatSlot,
 }
 
 async fn accept_loop(endpoint: Endpoint, ctx: Arc<ServeCtx>) {
@@ -841,6 +859,13 @@ async fn accept_loop(endpoint: Endpoint, ctx: Arc<ServeCtx>) {
             }
             if conn.alpn() == CHAT_ALPN {
                 match ctx.chat.get() {
+                    Some(h) => h.handle(conn).await,
+                    None => conn.close(3u32.into(), b"unavailable"),
+                }
+                return;
+            }
+            if conn.alpn() == GROUP_ALPN {
+                match ctx.group.get() {
                     Some(h) => h.handle(conn).await,
                     None => conn.close(3u32.into(), b"unavailable"),
                 }
