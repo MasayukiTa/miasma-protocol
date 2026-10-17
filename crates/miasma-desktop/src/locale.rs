@@ -2413,7 +2413,7 @@ static CT_ZH_CN: ContactStrings = ContactStrings {
     fail_peer_cancelled: "发送方取消了此传输。",
     fail_source_changed: "文件在加入队列后被修改或替换，因此未发送。请重新发送。",
     wait_retry: "等待重试（{t}后进行下一次尝试，第 {n} 次）",
-    wait_offline: "已暂停：对方不在线。",
+    wait_offline: "已暂停：对方已离线。",
     wait_in_sec: "{n} 秒",
     wait_in_min: "{n} 分钟",
     wait_in_hour: "{n} 小时",
