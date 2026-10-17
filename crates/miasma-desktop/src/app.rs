@@ -11,7 +11,7 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::chat_ui::{ChatAction, ChatUi};
 use crate::contacts::ContactsUi;
 use crate::errors::{ErrorKind, UiError};
-use crate::locale::{self, Locale, LogStrings, Strings, TransferStrings};
+use crate::locale::{self, Locale, LogStrings, StorageStrings, Strings, TransferStrings};
 use crate::theme::{self, Palette, ThemeMode};
 use crate::transfers::TransfersUi;
 use crate::ui_kit::{self as kit, Level};
@@ -162,6 +162,52 @@ pub struct MiasmaApp {
 
     // Logs (memory-only by default; opt-in diagnostic files)
     logs: LogsState,
+
+    // Storage (the shares this node keeps: listing and deletion)
+    storage: StorageState,
+}
+
+/// Why the stored-share list cannot be shown.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StorageNote {
+    /// The background service is older and does not know the storage request.
+    Unsupported,
+    /// The background service is not reachable.
+    Unavailable,
+}
+
+/// State of the Storage section in Settings.
+struct StorageState {
+    /// True once the person has opened the section; the list is asked for on first open.
+    open: bool,
+    /// Asking the service for the listing right now.
+    loading: bool,
+    /// The listing, oldest first.
+    shares: Vec<miasma_core::store::StoredShare>,
+    total_bytes: u64,
+    /// Set when the listing cannot be shown at all.
+    note: Option<StorageNote>,
+    /// A delete waiting for the person to confirm.
+    confirm: Option<miasma_core::store::ShareSelection>,
+    /// The "delete older than" threshold, edited as text.
+    days: String,
+    /// Addresses ticked in the list for "Delete selected".
+    selected: std::collections::HashSet<String>,
+}
+
+impl StorageState {
+    fn new() -> Self {
+        Self {
+            open: false,
+            loading: false,
+            shares: Vec::new(),
+            total_bytes: 0,
+            note: None,
+            confirm: None,
+            days: "30".to_owned(),
+            selected: std::collections::HashSet::new(),
+        }
+    }
 }
 
 /// Why the background service's log lines are not shown.
@@ -404,6 +450,7 @@ impl MiasmaApp {
             last_status_poll: now,
             launch_attempts: 0,
             logs: LogsState::new(&data_dir),
+            storage: StorageState::new(),
 
             transfers: TransfersUi::default(),
             contacts: ContactsUi::default(),
@@ -457,6 +504,11 @@ impl MiasmaApp {
     /// Transfers screen string table.
     fn tr(&self) -> &'static TransferStrings {
         locale::transfer_strings(self.locale)
+    }
+
+    /// Storage section string table.
+    fn st(&self) -> &'static StorageStrings {
+        locale::storage_strings(self.locale)
     }
 
     /// An error in the UI language; Technical mode adds the original wording.
@@ -610,6 +662,32 @@ impl MiasmaApp {
                         .try_send(WorkerCmd::DirectedRevoke { envelope_id: id });
                 }
                 Answer::Cancel => self.revoke_confirm = None,
+                Answer::Pending => {}
+            }
+        }
+
+        // Deleting stored shares: what it frees, and who it affects.
+        if let Some(selection) = self.storage.confirm.clone() {
+            let st = self.st();
+            let answer = ux::confirm::show(
+                ctx,
+                "storage_delete_confirm",
+                st.confirm_title,
+                st.confirm_button,
+                st.cancel,
+                |ui| {
+                    kit::paragraph(ui, st.confirm_body);
+                },
+            );
+            match answer {
+                Answer::Confirm => {
+                    self.storage.confirm = None;
+                    let _ = self
+                        .worker
+                        .tx
+                        .try_send(WorkerCmd::StorageDelete { selection });
+                }
+                Answer::Cancel => self.storage.confirm = None,
                 Answer::Pending => {}
             }
         }
@@ -921,6 +999,55 @@ impl MiasmaApp {
                             self.set_msg(MsgKind::Success, msg);
                         }
                     }
+                }
+                WorkerResult::StorageShares {
+                    shares,
+                    total_bytes,
+                } => {
+                    self.storage.loading = false;
+                    self.storage.note = None;
+                    // Keep only ticks that still name a stored, unused share.
+                    self.storage
+                        .selected
+                        .retain(|a| shares.iter().any(|s| &s.address == a && !s.in_use));
+                    self.storage.shares = shares;
+                    self.storage.total_bytes = total_bytes;
+                }
+                WorkerResult::StorageDeleted {
+                    deleted,
+                    freed_bytes,
+                    skipped,
+                } => {
+                    let st = self.st();
+                    if deleted == 0 && skipped.is_empty() {
+                        self.set_msg(MsgKind::Info, st.nothing);
+                    } else {
+                        let msg = st
+                            .deleted
+                            .replace("{n}", &deleted.to_string())
+                            .replace("{size}", &format_size(freed_bytes));
+                        self.set_msg(MsgKind::Success, msg);
+                    }
+                    if !skipped.is_empty() {
+                        let msg = st.skipped.replace("{ids}", &skipped.join(", "));
+                        self.set_msg(MsgKind::Info, msg);
+                    }
+                    // Show the effect at once.
+                    self.storage.loading = true;
+                    let _ = self.worker.tx.try_send(WorkerCmd::StorageList);
+                }
+                WorkerResult::StorageUnavailable => {
+                    self.storage.loading = false;
+                    self.storage.note = Some(StorageNote::Unavailable);
+                }
+                WorkerResult::StorageUnsupported => {
+                    self.storage.loading = false;
+                    self.storage.note = Some(StorageNote::Unsupported);
+                }
+                WorkerResult::StorageFailed(e) => {
+                    self.storage.loading = false;
+                    let text = self.error_text(&e);
+                    self.set_msg(MsgKind::Error, text);
                 }
                 WorkerResult::Err(e) => {
                     self.busy = false;
@@ -2060,6 +2187,9 @@ impl MiasmaApp {
             // ── Logs ─────────────────────────────────────────────────
             self.logs_section(ui);
 
+            // ── Storage ──────────────────────────────────────────────
+            self.storage_section(ui);
+
             // ── How it works ─────────────────────────────────────────
             kit::section(ui, s.settings_how, |ui| {
                 kit::paragraph(
@@ -2166,6 +2296,124 @@ impl MiasmaApp {
                     let _ = self.worker.tx.try_send(WorkerCmd::LogsClear);
                 }
             });
+        });
+    }
+
+    /// The shares this device keeps: the listing and the delete controls. The
+    /// service answers with its current view of what is in use.
+    fn storage_section(&mut self, ui: &mut egui::Ui) {
+        let st = self.st();
+        kit::section(ui, st.heading, |ui| {
+            kit::paragraph_muted(ui, st.desc);
+            kit::button_row(ui, |ui| {
+                let toggle = if self.storage.open { st.hide } else { st.show };
+                if ui.add(kit::secondary_button(toggle)).clicked() {
+                    self.storage.open = !self.storage.open;
+                    if self.storage.open {
+                        self.storage.loading = true;
+                        let _ = self.worker.tx.try_send(WorkerCmd::StorageList);
+                    }
+                }
+                if self.storage.open && ui.add(kit::secondary_button(st.refresh)).clicked() {
+                    self.storage.loading = true;
+                    let _ = self.worker.tx.try_send(WorkerCmd::StorageList);
+                }
+            });
+            if !self.storage.open {
+                return;
+            }
+            if let Some(note) = self.storage.note {
+                let text = match note {
+                    StorageNote::Unsupported => st.note_unsupported,
+                    StorageNote::Unavailable => st.note_unavailable,
+                };
+                kit::paragraph_muted(ui, text);
+                return;
+            }
+            if self.storage.shares.is_empty() {
+                kit::hint(
+                    ui,
+                    if self.storage.loading {
+                        st.loading
+                    } else {
+                        st.empty
+                    },
+                );
+                return;
+            }
+            let summary = st
+                .total
+                .replace("{count}", &self.storage.shares.len().to_string())
+                .replace("{size}", &format_size(self.storage.total_bytes));
+            kit::paragraph(ui, &summary);
+
+            let locale = self.locale;
+            egui::ScrollArea::vertical()
+                .id_source("settings_storage_view")
+                .max_height(220.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    for s in &self.storage.shares {
+                        let when = if s.modified_secs == 0 {
+                            "-".to_owned()
+                        } else {
+                            format_epoch(s.modified_secs, locale)
+                        };
+                        let mark = if s.in_use {
+                            format!("  ({})", st.in_use)
+                        } else {
+                            String::new()
+                        };
+                        let label = RichText::new(format!(
+                            "{}  {}  {when}{mark}",
+                            s.id,
+                            format_size(s.size_bytes)
+                        ))
+                        .monospace();
+                        let mut on = self.storage.selected.contains(&s.address);
+                        let changed = ui
+                            .add_enabled(!s.in_use, egui::Checkbox::new(&mut on, label))
+                            .changed();
+                        if changed {
+                            if on {
+                                self.storage.selected.insert(s.address.clone());
+                            } else {
+                                self.storage.selected.remove(&s.address);
+                            }
+                        }
+                    }
+                });
+
+            ui.add_space(kit::SP_2);
+            let mut delete: Option<miasma_core::store::ShareSelection> = None;
+            kit::button_row(ui, |ui| {
+                let none = self.storage.selected.is_empty();
+                let btn = ui.add_enabled(!none, kit::danger_button(st.delete_selected_button));
+                if btn.clicked() {
+                    let mut ids: Vec<String> = self.storage.selected.iter().cloned().collect();
+                    ids.sort();
+                    delete = Some(miasma_core::store::ShareSelection::Ids(ids));
+                }
+                if ui.add(kit::danger_button(st.delete_all_button)).clicked() {
+                    delete = Some(miasma_core::store::ShareSelection::All);
+                }
+            });
+            kit::button_row(ui, |ui| {
+                ui.label(st.delete_old);
+                ui.add(kit::input(&mut self.storage.days).desired_width(56.0));
+                ui.label(st.days_label);
+                if ui.add(kit::danger_button(st.delete_old_button)).clicked() {
+                    match self.storage.days.trim().parse::<u64>() {
+                        Ok(d) if d > 0 => {
+                            delete = Some(miasma_core::store::ShareSelection::OlderThanDays(d))
+                        }
+                        _ => self.set_msg(MsgKind::Error, st.bad_days),
+                    }
+                }
+            });
+            if let Some(sel) = delete {
+                self.storage.confirm = Some(sel);
+            }
         });
     }
 

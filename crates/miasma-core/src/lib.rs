@@ -74,7 +74,7 @@ pub use retrieval::{
     StreamingRetrievalCoordinator,
 };
 pub use share::{MiasmaShare, ShareVerification};
-pub use store::LocalShareStore;
+pub use store::{DeleteSharesOutcome, LocalShareStore, ShareSelection, StoredShare};
 pub use transport::obfuscated::{
     BrowserFingerprint, ObfuscatedConfig, ObfuscatedQuicPayloadTransport, ObfuscatedQuicServer,
 };
