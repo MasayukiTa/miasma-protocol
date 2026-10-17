@@ -41,9 +41,7 @@ use super::{
         Chain, DescError, Descriptor, Member, Role, MAX_HINT_BYTES, MAX_MEMBERS, MAX_NAME_BYTES,
     },
     record::{self, GroupText, Record},
-    state::{
-        CtrlKind, GroupState, LedgerEntry, PendingMsg, Status, MAX_PENDING,
-    },
+    state::{CtrlKind, GroupState, LedgerEntry, PendingMsg, Status, MAX_PENDING},
     store::{GroupMsg, GroupStore},
 };
 use crate::chat::{
@@ -391,7 +389,10 @@ impl GroupCore {
 
     /// The newest descriptor we hold for a group.
     pub fn latest_descriptor(&self, gid: &[u8; 16]) -> Option<Descriptor> {
-        self.lock().groups.get(gid).map(|s| s.chain.latest().clone())
+        self.lock()
+            .groups
+            .get(gid)
+            .map(|s| s.chain.latest().clone())
     }
 
     pub fn status_of(&self, gid: &[u8; 16]) -> Option<Status> {
@@ -820,8 +821,12 @@ impl GroupCore {
             return;
         };
         match work {
-            Work::Descs { .. } => st.ctrl.retain(|c| !(&c.to == peer && c.kind == CtrlKind::Descs)),
-            Work::Sync { .. } => st.ctrl.retain(|c| !(&c.to == peer && c.kind == CtrlKind::Sync)),
+            Work::Descs { .. } => st
+                .ctrl
+                .retain(|c| !(&c.to == peer && c.kind == CtrlKind::Descs)),
+            Work::Sync { .. } => st
+                .ctrl
+                .retain(|c| !(&c.to == peer && c.kind == CtrlKind::Sync)),
             Work::Text { id, .. } => {
                 if let Some(p) = st.pending.iter_mut().find(|p| &p.id == id) {
                     p.to.retain(|t| t != peer);
@@ -939,9 +944,7 @@ impl GroupCore {
         if !st.chain.latest().is_member(peer) {
             return AckStatus::NotAllowed;
         }
-        if t.text.len() > self.max_text
-            || (!trusted(peer) && t.text.len() > UNVERIFIED_MAX_TEXT)
-        {
+        if t.text.len() > self.max_text || (!trusted(peer) && t.text.len() > UNVERIFIED_MAX_TEXT) {
             return AckStatus::TooBig;
         }
         if !st.vectors.get(peer).is_none_or(|v| v.is_new(t.counter)) {
@@ -1025,7 +1028,9 @@ impl GroupCore {
             Self::push_event(
                 g,
                 gid,
-                if matches!(new_status, Status::Pending { .. }) && !matches!(was, Status::Pending { .. }) {
+                if matches!(new_status, Status::Pending { .. })
+                    && !matches!(was, Status::Pending { .. })
+                {
                     GroupEventKind::Invited
                 } else {
                     GroupEventKind::Changed
@@ -1101,9 +1106,7 @@ impl GroupCore {
             .into_iter()
             .map(|(m, gap)| MessageView {
                 delivery: if m.outgoing {
-                    ledger
-                        .get(&m.id)
-                        .map(|l| (l.total, l.delivered, l.failed))
+                    ledger.get(&m.id).map(|l| (l.total, l.delivered, l.failed))
                 } else {
                     None
                 },
@@ -1204,7 +1207,10 @@ mod display_tests {
     fn a_senders_counters_keep_their_order_even_with_a_skewed_clock() {
         // Sender 1's second message claims an earlier time than its first.
         let shown = display_order(vec![m(1, 2, 50), m(1, 1, 100), m(2, 1, 70)]);
-        let order: Vec<(u8, u64)> = shown.iter().map(|(x, _)| (x.sender[0], x.counter)).collect();
+        let order: Vec<(u8, u64)> = shown
+            .iter()
+            .map(|(x, _)| (x.sender[0], x.counter))
+            .collect();
         let p1 = order.iter().position(|x| *x == (1, 1)).unwrap();
         let p2 = order.iter().position(|x| *x == (1, 2)).unwrap();
         assert!(p1 < p2);

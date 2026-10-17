@@ -110,7 +110,12 @@ fn group_state_is_small_when_idle_and_flat_with_thirty_two_members() {
         let n = open(&d0, &seed0, keys0.clone());
         for g in 0..32 {
             let others: Vec<([u8; 32], String)> = (0..31)
-                .map(|_| (Identity::from_seed(&rand::random()).id(), "member".to_owned()))
+                .map(|_| {
+                    (
+                        Identity::from_seed(&rand::random()).id(),
+                        "member".to_owned(),
+                    )
+                })
                 .collect();
             let gid = n.core.create(&format!("group {g}"), &others, 1).unwrap();
             for k in 0..5 {
@@ -187,7 +192,11 @@ fn group_state_is_small_when_idle_and_flat_with_thirty_two_members() {
         round += 1;
         nodes[from]
             .core
-            .send(&gid, &format!("message {k}: こんにちは、今日はいい天気ですね。"), 100 + round)
+            .send(
+                &gid,
+                &format!("message {k}: こんにちは、今日はいい天気ですね。"),
+                100 + round,
+            )
             .unwrap();
         pump(from);
     };

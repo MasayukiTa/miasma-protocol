@@ -215,7 +215,10 @@ fn add_remove_and_leave_advance_the_epoch_for_everyone() {
     a.core.add(&gid, &[(d.id(), "dee".into(), false)]).unwrap();
     pump(&nodes);
     assert_eq!(a.core.list()[0].epoch, 2);
-    assert!(matches!(d.core.status_of(&gid), Some(Status::Pending { .. })));
+    assert!(matches!(
+        d.core.status_of(&gid),
+        Some(Status::Pending { .. })
+    ));
     d.core.accept_invite(&gid).unwrap();
     pump(&nodes);
     for n in &nodes {
@@ -272,7 +275,10 @@ fn a_removed_member_receives_nothing_after_the_removal() {
     pump(&nodes);
     assert_eq!(c.texts(&gid), vec!["before".to_owned()]);
     assert!(b.texts(&gid).contains(&"after".to_owned()));
-    assert!(matches!(c.core.send(&gid, "still here?", 40), Err(GroupError::NotJoined)));
+    assert!(matches!(
+        c.core.send(&gid, "still here?", 40),
+        Err(GroupError::NotJoined)
+    ));
 }
 
 #[test]
@@ -300,7 +306,9 @@ fn a_removed_member_that_missed_the_removal_cannot_write() {
             .0
     };
     let a = &nodes[0];
-    let acc = a.core.accept(&nodes[2].id(), &wire, 6, &|id| a.is_trusted(id));
+    let acc = a
+        .core
+        .accept(&nodes[2].id(), &wire, 6, &|id| a.is_trusted(id));
     assert_eq!(acc.status, AckStatus::NotAllowed);
     assert!(!a.texts(&gid).contains(&"let me in".to_owned()));
 }
@@ -398,7 +406,14 @@ fn a_member_who_is_not_trusted_stays_unverified_and_is_limited() {
     // Once c adds b for itself, the member is verified.
     c.trusts(b);
     let detail = c.core.detail(&gid, &|id| c.is_trusted(id)).unwrap();
-    assert!(detail.members.iter().find(|m| m.id == b.id()).unwrap().verified);
+    assert!(
+        detail
+            .members
+            .iter()
+            .find(|m| m.id == b.id())
+            .unwrap()
+            .verified
+    );
 }
 
 #[test]
@@ -406,7 +421,9 @@ fn an_invitation_from_someone_who_is_not_trusted_creates_nothing() {
     let nodes = friends(2);
     let (a, b) = (&nodes[0], &nodes[1]);
     b.trust.lock().unwrap().clear();
-    a.core.create("surprise", &[(b.id(), String::new())], 1).unwrap();
+    a.core
+        .create("surprise", &[(b.id(), String::new())], 1)
+        .unwrap();
     let log = pump(&nodes);
     assert!(log.iter().all(|l| l.2 == AckStatus::NotAllowed));
     assert!(b.core.list().is_empty());
@@ -527,12 +544,22 @@ fn thirty_two_members_fit_and_a_thirty_third_does_not() {
     let gid = a.core.create("big", &others, 1).unwrap();
     assert_eq!(a.core.members_of(&gid).len(), 32);
     assert_eq!(
-        a.core.add(&gid, &[(Identity::from_seed(&rand::random()).id(), String::new(), false)]),
+        a.core.add(
+            &gid,
+            &[(
+                Identity::from_seed(&rand::random()).id(),
+                String::new(),
+                false
+            )]
+        ),
         Err(GroupError::TooManyMembers)
     );
     let mut more = others.clone();
     more.push((Identity::from_seed(&rand::random()).id(), String::new()));
-    assert_eq!(a.core.create("bigger", &more, 1), Err(GroupError::TooManyMembers));
+    assert_eq!(
+        a.core.create("bigger", &more, 1),
+        Err(GroupError::TooManyMembers)
+    );
     // One message is queued for 31 members, each with its own copy.
     let o = a.core.send(&gid, "to everyone", 2).unwrap();
     assert_eq!(o.recipients.len(), 31);
@@ -582,7 +609,10 @@ fn groups_and_pending_messages_survive_a_restart() {
 fn history_on_disk_is_encrypted_and_a_group_can_be_forgotten() {
     let nodes = friends(2);
     let gid = make_group(&nodes, "secret group");
-    nodes[0].core.send(&gid, "GROUP-SECRET-TEXT-98765", 10).unwrap();
+    nodes[0]
+        .core
+        .send(&gid, "GROUP-SECRET-TEXT-98765", 10)
+        .unwrap();
     pump(&nodes);
     for n in &nodes {
         n.core.close();

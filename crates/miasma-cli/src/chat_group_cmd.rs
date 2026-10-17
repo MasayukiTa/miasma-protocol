@@ -291,7 +291,17 @@ pub async fn run(data_dir: &Path, cmd: GroupCmd) -> Result<()> {
             group,
             members,
             admin,
-        } => done(group_call(data_dir, GroupRequest::Add { group, members, admin }).await?)?,
+        } => done(
+            group_call(
+                data_dir,
+                GroupRequest::Add {
+                    group,
+                    members,
+                    admin,
+                },
+            )
+            .await?,
+        )?,
         GroupCmd::Remove { group, member } => {
             done(group_call(data_dir, GroupRequest::Remove { group, member }).await?)?
         }

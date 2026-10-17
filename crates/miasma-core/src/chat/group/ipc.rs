@@ -13,11 +13,16 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GroupRequest {
     /// Create a group of the named contacts (and yourself).
-    Create { name: String, members: Vec<String> },
+    Create {
+        name: String,
+        members: Vec<String>,
+    },
     /// Every group on this device.
     List {},
     /// One group with its member list.
-    Show { group: String },
+    Show {
+        group: String,
+    },
     /// Add contacts (admin only).
     Add {
         group: String,
@@ -25,19 +30,31 @@ pub enum GroupRequest {
         admin: bool,
     },
     /// Remove a member (admin only).
-    Remove { group: String, member: String },
+    Remove {
+        group: String,
+        member: String,
+    },
     /// Leave the group.
-    Leave { group: String },
-    Send { group: String, text: String },
+    Leave {
+        group: String,
+    },
+    Send {
+        group: String,
+        text: String,
+    },
     History {
         group: String,
         before: Option<u64>,
         limit: Option<u32>,
     },
     /// Say yes to an invitation.
-    Accept { group: String },
+    Accept {
+        group: String,
+    },
     /// Say no to an invitation, or delete a group you left or were removed from.
-    Decline { group: String },
+    Decline {
+        group: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -410,7 +427,10 @@ mod run {
                 let Some(summary) = core.list().into_iter().find(|s| s.gid == gid) else {
                     return from_error(GroupError::NotFound);
                 };
-                let members = core.detail(&gid, &trusted).map(|d| d.members).unwrap_or_default();
+                let members = core
+                    .detail(&gid, &trusted)
+                    .map(|d| d.members)
+                    .unwrap_or_default();
                 GroupResponse::History {
                     group: info_of(&summary),
                     messages: msgs

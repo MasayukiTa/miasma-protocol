@@ -33,7 +33,9 @@ pub const MAX_VECTORS: usize = 256;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     /// Invited by this person (a trusted contact); not joined yet.
-    Pending { invited_by: [u8; 32] },
+    Pending {
+        invited_by: [u8; 32],
+    },
     Joined,
     /// We left.
     Left,
@@ -499,9 +501,19 @@ mod tests {
         for n in 0..bytes.len() {
             assert!(GroupState::decode(&bytes[..n]).is_none(), "prefix {n}");
         }
-        let pending = GroupState::new(chain(), Status::Pending { invited_by: [8; 32] });
+        let pending = GroupState::new(
+            chain(),
+            Status::Pending {
+                invited_by: [8; 32],
+            },
+        );
         let again = GroupState::decode(&pending.encode()).unwrap();
-        assert_eq!(again.status, Status::Pending { invited_by: [8; 32] });
+        assert_eq!(
+            again.status,
+            Status::Pending {
+                invited_by: [8; 32]
+            }
+        );
     }
 
     #[test]

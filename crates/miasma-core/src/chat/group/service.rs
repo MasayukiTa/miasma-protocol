@@ -78,7 +78,11 @@ pub struct GroupService {
 impl GroupService {
     /// Start group chat next to a running chat service and install it as the
     /// handler of the group ALPN.
-    pub fn start(chat: &Arc<ChatService>, seed: &[u8; 32], keys: Arc<StateKeys>) -> Option<Arc<Self>> {
+    pub fn start(
+        chat: &Arc<ChatService>,
+        seed: &[u8; 32],
+        keys: Arc<StateKeys>,
+    ) -> Option<Arc<Self>> {
         let core_chat = chat.core().clone();
         let store_settings = core_chat.store.settings().clone();
         let store = match GroupStore::open(
@@ -94,7 +98,12 @@ impl GroupService {
             }
         };
         let core = Arc::new(GroupCore::new(core_chat, store, seed)?);
-        Self::start_with(core, chat.node().clone(), chat.contacts().clone(), chat.settings().clone())
+        Self::start_with(
+            core,
+            chat.node().clone(),
+            chat.contacts().clone(),
+            chat.settings().clone(),
+        )
     }
 
     /// As [`start`](Self::start) from parts (tests).
@@ -147,7 +156,9 @@ impl GroupService {
     /// Whether `id` is a trusted contact: in the contact list and allowed to
     /// write to us.
     pub fn is_trusted(&self, id: &[u8; 32]) -> bool {
-        self.contacts.by_endpoint(id).is_some_and(|c| c.allow_receive)
+        self.contacts
+            .by_endpoint(id)
+            .is_some_and(|c| c.allow_receive)
     }
 
     // ── Sending ──────────────────────────────────────────────────────────────

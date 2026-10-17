@@ -147,7 +147,9 @@ impl Record {
                 for _ in 0..n {
                     let len = r.u16().map_err(bad)? as usize;
                     let raw = r.bytes(len).map_err(bad)?;
-                    ds.push(Descriptor::decode(raw).map_err(|_: DescError| RecordError::Malformed)?);
+                    ds.push(
+                        Descriptor::decode(raw).map_err(|_: DescError| RecordError::Malformed)?,
+                    );
                 }
                 if !r.done() {
                     return Err(RecordError::Malformed);
@@ -250,10 +252,7 @@ mod tests {
         let gid = [7u8; 16];
         assert_eq!(
             Record::decode(&encode_sync(&gid, 4)).unwrap(),
-            Record::Sync {
-                gid,
-                have_epoch: 4
-            }
+            Record::Sync { gid, have_epoch: 4 }
         );
         assert!(Record::decode(&[KIND_DESCS, 0]).is_err());
         assert!(Record::decode(&[KIND_SYNC, 1, 2]).is_err());

@@ -572,10 +572,7 @@ mod tests {
             Err(DescError::NotAuthorized)
         );
         // b leaves.
-        assert_eq!(
-            chain.push(next(&d1, without_b, &b)),
-            Ok(Pushed::Advanced)
-        );
+        assert_eq!(chain.push(next(&d1, without_b, &b)), Ok(Pushed::Advanced));
         assert!(!chain.latest().is_member(&id(&b)));
     }
 
@@ -655,7 +652,11 @@ mod tests {
     fn a_root_must_be_signed_by_one_of_its_own_admins() {
         let (a, b) = (key(), key());
         let d = create(&a, &[&b]);
-        let by_member = Descriptor { epoch: 1, ..d.clone() }.signed(&b);
+        let by_member = Descriptor {
+            epoch: 1,
+            ..d.clone()
+        }
+        .signed(&b);
         assert_eq!(Chain::from_root(by_member), Err(DescError::NotAuthorized));
         let mut bad = d;
         bad.sig[0] ^= 1;

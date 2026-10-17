@@ -21,8 +21,7 @@ use miasma_core::{
     push::{ContactCode, ContactStore},
     state_crypto::StateKeys,
     transport::iroh_direct::{
-        endpoint_builder, IrohNode, IrohServerLimits, IrohSettings, CHAT_ALPN, IROH_ALPN,
-        PUSH_ALPN,
+        endpoint_builder, IrohNode, IrohServerLimits, IrohSettings, CHAT_ALPN, IROH_ALPN, PUSH_ALPN,
     },
     LocalShareStore,
 };
@@ -200,7 +199,10 @@ async fn a_group_works_over_the_network_and_a_peer_without_groups_keeps_its_priv
             members: vec!["bob".into(), "carol".into(), "oldie".into()],
         },
     );
-    assert!(matches!(created, GroupResponse::Created { recipients: 3, .. }));
+    assert!(matches!(
+        created,
+        GroupResponse::Created { recipients: 3, .. }
+    ));
     // bob and carol are invited, and accept.
     for p in [&b, &c] {
         until(30, "the invitation", || {
@@ -208,12 +210,22 @@ async fn a_group_works_over_the_network_and_a_peer_without_groups_keeps_its_priv
         })
         .await;
         assert!(matches!(
-            g(p, GroupRequest::Accept { group: "weekend".into() }),
+            g(
+                p,
+                GroupRequest::Accept {
+                    group: "weekend".into()
+                }
+            ),
             GroupResponse::Done {}
         ));
     }
     // Neither of them registered the other: each is an unverified member.
-    match g(&b, GroupRequest::Show { group: "weekend".into() }) {
+    match g(
+        &b,
+        GroupRequest::Show {
+            group: "weekend".into(),
+        },
+    ) {
         GroupResponse::Detail(d) => {
             let carol = d
                 .members
@@ -221,15 +233,27 @@ async fn a_group_works_over_the_network_and_a_peer_without_groups_keeps_its_priv
                 .find(|m| m.endpoint_id == hex::encode(c.id()))
                 .unwrap();
             assert!(!carol.verified && carol.label.is_none());
-            assert!(d.members.iter().any(|m| m.verified && m.label.as_deref() == Some("alice")));
+            assert!(d
+                .members
+                .iter()
+                .any(|m| m.verified && m.label.as_deref() == Some("alice")));
         }
         other => panic!("{other:?}"),
     }
-    assert!(b.contacts.by_endpoint(&c.id()).is_none(), "nobody became a contact");
+    assert!(
+        b.contacts.by_endpoint(&c.id()).is_none(),
+        "nobody became a contact"
+    );
 
     // Messages from several members reach everyone who has joined.
     assert!(matches!(
-        g(&a, GroupRequest::Send { group: "weekend".into(), text: "hello group".into() }),
+        g(
+            &a,
+            GroupRequest::Send {
+                group: "weekend".into(),
+                text: "hello group".into()
+            }
+        ),
         GroupResponse::Queued { .. }
     ));
     until(30, "the group message at bob and carol", || {
@@ -237,7 +261,13 @@ async fn a_group_works_over_the_network_and_a_peer_without_groups_keeps_its_priv
             && gtexts(&c, "weekend").contains(&"hello group".to_owned())
     })
     .await;
-    g(&b, GroupRequest::Send { group: "weekend".into(), text: "こんにちは".into() });
+    g(
+        &b,
+        GroupRequest::Send {
+            group: "weekend".into(),
+            text: "こんにちは".into(),
+        },
+    );
     until(30, "bob's message at carol and alice", || {
         gtexts(&c, "weekend").contains(&"こんにちは".to_owned())
             && gtexts(&a, "weekend").contains(&"こんにちは".to_owned())
@@ -275,14 +305,26 @@ async fn a_group_works_over_the_network_and_a_peer_without_groups_keeps_its_priv
 
     // Removing bob: carol still gets later messages, bob does not.
     assert!(matches!(
-        g(&a, GroupRequest::Remove { group: "weekend".into(), member: "bob".into() }),
+        g(
+            &a,
+            GroupRequest::Remove {
+                group: "weekend".into(),
+                member: "bob".into()
+            }
+        ),
         GroupResponse::Done {}
     ));
     until(30, "bob learns of the removal", || {
         groups(&b).first().is_some_and(|x| x.status == "removed")
     })
     .await;
-    g(&a, GroupRequest::Send { group: "weekend".into(), text: "after bob left".into() });
+    g(
+        &a,
+        GroupRequest::Send {
+            group: "weekend".into(),
+            text: "after bob left".into(),
+        },
+    );
     until(30, "the message at carol", || {
         gtexts(&c, "weekend").contains(&"after bob left".to_owned())
     })
