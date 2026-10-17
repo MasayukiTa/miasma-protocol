@@ -22,6 +22,16 @@ data class EmbeddedDaemonStatus(
     val sharingContact: String,
 )
 
+data class EnvelopeSummaryFfi(
+    val id: String,
+    val senderKey: String,
+    val senderPeerId: String?,
+    val state: String,
+    val challengeCode: String?,
+    val createdAt: ULong,
+    val expiresAt: ULong,
+)
+
 sealed class MiasmaFfiException(message: String) : Exception(message) {
     class NotInitialized(val dataDir: String) :
         MiasmaFfiException("Node not initialised at '$dataDir'. Call initialize_node first.")
@@ -60,6 +70,18 @@ fun getNodeStatus(dataDir: String): NodeStatusFfi = ffiNotLoaded()
 fun distressWipe(dataDir: String): Unit = ffiNotLoaded()
 
 @Throws(MiasmaFfiException::class)
+fun getSharingKey(dataDir: String): String = ffiNotLoaded()
+
+@Throws(MiasmaFfiException::class)
+fun listDirectedInbox(dataDir: String): List<EnvelopeSummaryFfi> = ffiNotLoaded()
+
+@Throws(MiasmaFfiException::class)
+fun listDirectedOutbox(dataDir: String): List<EnvelopeSummaryFfi> = ffiNotLoaded()
+
+@Throws(MiasmaFfiException::class)
+fun deleteDirectedEnvelope(dataDir: String, envelopeId: String): Unit = ffiNotLoaded()
+
+@Throws(MiasmaFfiException::class)
 fun startEmbeddedDaemon(
     dataDir: String,
     storageMb: ULong,
@@ -71,3 +93,5 @@ fun stopEmbeddedDaemon(): Unit = ffiNotLoaded()
 fun getDaemonHttpPort(): UShort = ffiNotLoaded()
 
 fun isDaemonRunning(): Boolean = ffiNotLoaded()
+
+fun getSharingContact(): String = ffiNotLoaded()
