@@ -56,7 +56,7 @@
       <div class="home-hero">
         <h1 data-i18n="hero_title">Miasma Protocol</h1>
         <p class="hero-sub" data-i18n="hero_sub">Local content protection in your browser</p>
-        <p class="hero-desc" data-i18n="hero_desc">Encrypt and split content into shares. Reconstruct from any k-of-n shares. All processing runs locally — nothing leaves your device.</p>
+        <p class="hero-desc" data-i18n="hero_desc">Encrypt and split content into shares. Reconstruct from any k-of-n shares. Cryptography runs on your device; connected clients can publish encrypted shares to the P2P network.</p>
       </div>
       <div class="home-actions">
         <button class="action-card card-dissolve" data-view="dissolve">
@@ -631,8 +631,8 @@
           <div class="about-info">
             <p id="version-info"></p>
             <p>Protocol Version: 1</p>
-            <p data-i18n="about_desc">Miasma Web is a local-only browser tool for the Miasma Protocol. All cryptographic operations run in WebAssembly on your device. No data is sent to any server.</p>
-            <p data-i18n="about_scope">This tool does not connect to the Miasma network. It cannot discover peers, retrieve content from other devices, or provide the anonymity features available in the desktop client. Shares must be transferred between devices manually via Export/Import.</p>
+            <p data-i18n="about_desc">Miasma Web is the browser interface for the Miasma Protocol. Cryptographic work runs on your device through WebAssembly or the native Miasma backend.</p>
+            <p data-i18n="about_scope">Standalone browser mode is local-only and uses Export/Import for moving shares. When a local Miasma daemon or native mobile host is available, the same interface can publish to and retrieve from the P2P network.</p>
           </div>
         </div>
 
