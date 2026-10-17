@@ -8,6 +8,12 @@
 export function dissolve_bytes(data: Uint8Array, k: number, n: number): string;
 
 /**
+ * Binary-first dissolve path for browsers. The returned bundle contains the MID and each
+ * bincode-serialized share exactly once, with no JSON/base64 expansion.
+ */
+export function dissolve_bytes_bundle(data: Uint8Array, k: number, n: number): Uint8Array;
+
+/**
  * Dissolve text content into shares.
  * Returns JSON: { mid, shares, data_shards, total_shards }
  */
@@ -17,6 +23,12 @@ export function dissolve_text(plaintext: string, k: number, n: number): string;
  * Get the protocol version string.
  */
 export function protocol_version(): string;
+
+/**
+ * Reconstruct from a compact length-prefixed share bundle produced by the browser storage
+ * adapter. The bundle format is local to the browser boundary, not the network protocol.
+ */
+export function retrieve_from_share_bundle(mid_str: string, share_bundle: Uint8Array, k: number, n: number): Uint8Array;
 
 /**
  * Retrieve content from shares JSON.
@@ -30,15 +42,23 @@ export function retrieve_from_shares(mid_str: string, shares_json: string, k: nu
  */
 export function verify_share(share_json: string, mid_str: string): boolean;
 
+/**
+ * Verify a bincode-serialized share directly, avoiding the JSON/base64 compatibility path.
+ */
+export function verify_share_bytes(share_bytes: Uint8Array, mid_str: string): boolean;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly dissolve_bytes: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly dissolve_bytes_bundle: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly dissolve_text: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly protocol_version: () => [number, number];
+    readonly retrieve_from_share_bundle: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly retrieve_from_shares: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly verify_share: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly verify_share_bytes: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;

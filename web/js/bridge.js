@@ -1,3 +1,4 @@
+import { parseDissolveBundle } from './storage.js';
 // Miasma Web — Bridge Abstraction Layer
 //
 // Detects the runtime environment and routes API calls accordingly:
@@ -587,12 +588,18 @@ export class MiasmaBridge {
   // ── Private ──────────────────────────────────────────────────────
 
   _dissolveLocal(data, k, n) {
-    let jsonStr;
-    if (typeof data === 'string') {
-      jsonStr = this._wasm.dissolve_text(data, k, n);
-    } else {
-      jsonStr = this._wasm.dissolve_bytes(data, k, n);
+    const raw = typeof data === 'string' ? new TextEncoder().encode(data) : data;
+    // New generated WASM packages return a compact binary bundle. Keep the old JSON path as a
+    // compatibility fallback so an app update is not coupled to the generated pkg landing first.
+    if (typeof this._wasm.dissolve_bytes_bundle === 'function') {
+      const result = parseDissolveBundle(this._wasm.dissolve_bytes_bundle(raw, k, n));
+      for (const share of result.shares) share.original_len = raw.byteLength;
+      return { ...result, networkPublished: false };
     }
+
+    let jsonStr;
+    if (typeof data === 'string') jsonStr = this._wasm.dissolve_text(data, k, n);
+    else jsonStr = this._wasm.dissolve_bytes(data, k, n);
     const result = JSON.parse(jsonStr);
     return {
       mid: result.mid,

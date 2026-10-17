@@ -1,7 +1,7 @@
 // Miasma Web — Main Application
 
 import { t, getLang, setLang, applyTranslations } from './i18n.js';
-import { initDB, saveShares, getSharesByMidPrefix, getShareCount, getMidCount, getStorageEstimate, clearAll } from './storage.js';
+import { initDB, saveShares, getSharesByMidPrefix, getShareCount, getMidCount, getStorageEstimate, clearAll, shareBinaryBytes, shareToPortableJson, shareSerializedSize, packShareBundle } from './storage.js';
 import { MiasmaBridge, getAuthState, onAuthChange } from './bridge.js';
 import { createTransfers } from './transfers.js';
 
@@ -329,7 +329,7 @@ async function handleDissolve() {
       // Local mode: show share details
       document.getElementById('result-share-count').textContent =
         `${bridgeResult.shares.length} shares (k=${k}, n=${n})`;
-      const totalSize = JSON.stringify(bridgeResult.shares).length;
+      const totalSize = bridgeResult.shares.reduce((sum, share) => sum + shareSerializedSize(share), 0);
       document.getElementById('result-share-size').textContent = formatBytes(totalSize);
       document.getElementById('btn-save-shares').style.display = '';
       document.getElementById('btn-export-shares').style.display = '';
@@ -377,7 +377,7 @@ function handleExportShares() {
     mid: dissolveResult.mid,
     data_shards: dissolveResult.data_shards,
     total_shards: dissolveResult.total_shards,
-    shares: dissolveResult.shares,
+    shares: dissolveResult.shares.map(shareToPortableJson),
     exported_at: new Date().toISOString(),
   };
   const json = JSON.stringify(exportData, null, 2);
@@ -417,7 +417,11 @@ async function handleMidInput() {
       const needed = Math.max(1, parseInt(document.getElementById('retrieve-k').value) || 10);
       const localShares = await getSharesByMidPrefix(prefix, needed, (row) => {
         try {
-          return wasm.verify_share(JSON.stringify(row.data), midStr);
+          const binary = shareBinaryBytes(row.data);
+          if (binary && typeof wasm.verify_share_bytes === 'function') {
+            return wasm.verify_share_bytes(binary, midStr);
+          }
+          return wasm.verify_share(JSON.stringify(shareToPortableJson(row.data)), midStr);
         } catch (_) {
           return false;
         }
@@ -588,9 +592,15 @@ async function handleRetrieve() {
       // Connected mode: retrieve from P2P network via daemon
       bytes = await bridge.retrieve(midStr, k, n);
     } else {
-      // Local mode: reconstruct from manually collected shares
-      const sharesJson = JSON.stringify(retrieveShares);
-      bytes = wasm.retrieve_from_shares(midStr, sharesJson, k, n);
+      // Local mode: use the compact binary boundary when available; older generated WASM
+      // packages and imported legacy JSON remain compatible.
+      const allBinary = retrieveShares.every((share) => !!shareBinaryBytes(share));
+      if (allBinary && typeof wasm.retrieve_from_share_bundle === 'function') {
+        bytes = wasm.retrieve_from_share_bundle(midStr, packShareBundle(retrieveShares), k, n);
+      } else {
+        const sharesJson = JSON.stringify(retrieveShares.map(shareToPortableJson));
+        bytes = wasm.retrieve_from_shares(midStr, sharesJson, k, n);
+      }
     }
 
     const resultSection = document.getElementById('retrieve-result');
