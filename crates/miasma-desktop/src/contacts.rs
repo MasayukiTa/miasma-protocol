@@ -511,9 +511,7 @@ pub fn row_guidance_at(
             }
             Some(s)
         }
-        PushState::Failed
-            if r.outbound && r.error_kind.as_deref() == Some("source_changed") =>
-        {
+        PushState::Failed if r.outbound && r.error_kind.as_deref() == Some("source_changed") => {
             Some(c.fail_source_changed.to_owned())
         }
         PushState::Rejected => Some(
@@ -2233,7 +2231,8 @@ impl ContactsUi {
                 ui.add_space(4.0);
                 ui.horizontal_wrapped(|ui| {
                     if can_try_now && ui.button(c.btn_try_now).clicked() {
-                        self.out.push_back(PushRequest::RetryNow { id: r.id.clone() });
+                        self.out
+                            .push_back(PushRequest::RetryNow { id: r.id.clone() });
                         self.refresh_soon();
                     }
                     if can_cancel && ui.button(c.btn_cancel).clicked() {

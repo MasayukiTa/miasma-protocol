@@ -162,9 +162,7 @@ impl AsyncWrite for GTx {
 
 impl TxStream for GTx {
     fn finish(&mut self) {}
-    fn stopped<'a>(
-        &'a mut self,
-    ) -> Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+    fn stopped<'a>(&'a mut self) -> Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async {})
     }
 }
@@ -642,7 +640,12 @@ async fn refused_dials_wait_on_the_ladder_and_then_the_transfer_goes_through() {
     let times = p.net.dial_times.lock().unwrap().clone();
     assert_eq!(times.len(), 5);
     let gaps: Vec<u64> = times.windows(2).map(|w| (w[1] - w[0]).as_secs()).collect();
-    assert_eq!(gaps, vec![5, 15, 45, 120], "{gaps:?} after {:?}", t0.elapsed());
+    assert_eq!(
+        gaps,
+        vec![5, 15, 45, 120],
+        "{gaps:?} after {:?}",
+        t0.elapsed()
+    );
     let seq = sequence(&p, &id);
     assert!(seq.contains(&PushState::Waiting));
     assert_eq!(*seq.last().unwrap(), PushState::Done);
@@ -671,7 +674,10 @@ async fn a_stalled_link_is_closed_after_thirty_seconds_and_resumed() {
     let times = p.net.dial_times.lock().unwrap().clone();
     assert_eq!(times.len(), 2);
     let gap = (times[1] - times[0]).as_secs();
-    assert!((30..=40).contains(&gap), "second dial {gap} s after the first");
+    assert!(
+        (30..=40).contains(&gap),
+        "second dial {gap} s after the first"
+    );
     let _ = stall_seen;
 }
 
@@ -784,7 +790,11 @@ async fn cancel_while_waiting_ends_it_and_removes_it_from_the_queue() {
     assert_eq!(t.state, PushState::Cancelled);
     let dials = p.net.dial_count();
     tokio::time::sleep(Duration::from_secs(3600)).await;
-    assert_eq!(p.net.dial_count(), dials, "it kept dialing after the cancel");
+    assert_eq!(
+        p.net.dial_count(),
+        dials,
+        "it kept dialing after the cancel"
+    );
     // And after a restart it does not come back.
     p.alice.shutdown();
     let again = PushService::start_with_dialer(
@@ -810,7 +820,11 @@ async fn when_the_window_is_used_up_it_fails_with_a_kind() {
     let t = finished(&p.alice, &id, 4 * 3600).await;
     assert_eq!(t.state, PushState::Failed);
     assert_eq!(t.error_kind.as_deref(), Some("unreachable"));
-    assert!(t.error.as_deref().unwrap_or("").contains("gave up"), "{:?}", t.error);
+    assert!(
+        t.error.as_deref().unwrap_or("").contains("gave up"),
+        "{:?}",
+        t.error
+    );
     assert!(
         t.updated_at_ms >= t.created_at_ms,
         "sanity: {} {}",
@@ -1139,8 +1153,12 @@ async fn the_wire_is_the_old_one_a_stub_peer_of_the_old_protocol_gets_header_the
         have: data[..123_456].to_vec(),
         ok: AtomicBool::new(true),
     });
-    let alice =
-        PushService::start_with_dialer(adir.path(), id_a, stub.clone(), settings(adir.path(), |_| {}));
+    let alice = PushService::start_with_dialer(
+        adir.path(),
+        id_a,
+        stub.clone(),
+        settings(adir.path(), |_| {}),
+    );
     alice
         .add_contact(&ContactCode::new(id_b), Some("bob"))
         .unwrap();

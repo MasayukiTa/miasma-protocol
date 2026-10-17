@@ -176,12 +176,8 @@ async fn a_thousand_queued_jobs_are_small_and_the_curve_is_flat() {
     let sdir = tempfile::tempdir().unwrap();
     let mut settings = PushSettings::from_config(&PushConfig::default(), sdir.path());
     settings.retry.window = None;
-    let svc = PushService::start_with_dialer(
-        sdir.path(),
-        rand::random(),
-        Arc::new(Offline),
-        settings,
-    );
+    let svc =
+        PushService::start_with_dialer(sdir.path(), rand::random(), Arc::new(Offline), settings);
     svc.add_contact(&ContactCode::new(rand::random()), Some("bob"))
         .unwrap();
     let file = sdir.path().join("tiny.bin");
@@ -232,6 +228,11 @@ async fn a_thousand_queued_jobs_are_small_and_the_curve_is_flat() {
             curve.push((round, resident_bytes().unwrap_or(0)));
         }
     }
-    check_flat("500 waiting sends, 20 rounds", base, &curve, 6 * 1024 * 1024);
+    check_flat(
+        "500 waiting sends, 20 rounds",
+        base,
+        &curve,
+        6 * 1024 * 1024,
+    );
     svc.shutdown();
 }
