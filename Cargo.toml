@@ -86,7 +86,7 @@ quinn = "0.11"
 shadowsocks-crypto = { version = "0.6", default-features = false, features = ["v2"] }
 
 # HTTP bridge for web client
-hyper = { version = "1", features = ["http1", "server"] }
+hyper = { version = "1", features = ["http1", "client", "server"] }
 http-body-util = "0.1"
 hyper-util = { version = "0.1", features = ["tokio"] }
 base64 = "0.22"

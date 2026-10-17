@@ -295,6 +295,8 @@ pub fn initialize_node(
         push: Default::default(),
         chat: Default::default(),
         privacy: Default::default(),
+        // Mobile apps are updated by their store; the self-updater stays off.
+        update: miasma_core::update::UpdateConfig::stealth_preset(),
     };
     config.save(&path).map_err(|e| {
         tracing::warn!("config save error: {e}");
