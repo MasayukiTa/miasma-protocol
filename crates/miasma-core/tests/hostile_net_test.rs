@@ -655,10 +655,20 @@ async fn the_matrix_classifies_each_hostile_behaviour() {
         row(&r, "tls:relay:blackhole.test").outcome,
         Outcome::Timeout
     );
-    assert_eq!(
-        row(&r, "tls:relay:down.test").outcome,
-        Outcome::ResetInHandshake
-    );
+    // A path that resets on arrival: the reset may reach the TCP probe itself
+    // (it then shows as a TCP reset and nothing is handshaken) or, if the
+    // connect returned first, the TLS handshake. Both are the same behaviour.
+    let down_tcp = row(&r, "tcp:relay:down.test#1").outcome;
+    match down_tcp {
+        Outcome::Ok => assert_eq!(
+            row(&r, "tls:relay:down.test").outcome,
+            Outcome::ResetInHandshake
+        ),
+        other => {
+            assert_eq!(other, Outcome::Reset);
+            assert_eq!(row(&r, "tls:relay:down.test").outcome, Outcome::Skipped);
+        }
+    }
     // Nothing is handshaken on a port that refused.
     assert_eq!(row(&r, "tls:relay:refused.test").outcome, Outcome::Skipped);
     // SNI: the first reachable relay is pass.test, which treats both names alike.
@@ -755,15 +765,16 @@ fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
     None
 }
 
-/// 20 MiB between two relay-only peers while the relay path is cut for 1.5 s
-/// every 6 s and capped at 6 MiB/s: the file arrives complete and identical,
-/// each cut ending an attempt that the sender then resumes on a new connection.
+/// 20 MiB between two relay-only peers while the relay path is cut for 1 s
+/// every 6 s and capped at 2 MiB/s (so the transfer cannot finish before the
+/// first cut): the file arrives complete and identical, each cut ending an
+/// attempt that the sender then resumes on a new connection.
 #[tokio::test(flavor = "multi_thread")]
 async fn push_of_20_mib_completes_over_a_path_with_periodic_disconnects() {
     timeout(Duration::from_secs(300), async {
         let relay = local_relay().await;
         let shim = TcpShim::start(relay.addr).await;
-        shim.set_bandwidth(Some(6 * 1024 * 1024));
+        shim.set_bandwidth(Some(2 * 1024 * 1024));
         let url = shim.url();
         let alice = relay_only_peer(&url).await;
         let bob = relay_only_peer(&url).await;
@@ -781,10 +792,10 @@ async fn push_of_20_mib_completes_over_a_path_with_periodic_disconnects() {
         let id = alice.svc.queue_send("bob", &src).unwrap();
 
         // Cuts start once the transfer has begun.
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
         let cuts = shim.run_schedule(OutageSchedule::periodic(
             Duration::from_secs(6),
-            Duration::from_millis(1500),
+            Duration::from_secs(1),
         ));
         let end = Instant::now() + Duration::from_secs(240);
         let done = loop {
