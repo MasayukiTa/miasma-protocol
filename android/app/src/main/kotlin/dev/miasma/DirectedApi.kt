@@ -41,6 +41,15 @@ object DirectedApi {
 
     // ─── GET helpers ────────────────────────────────────────────────────
 
+    private fun responseError(code: Int, body: String): IOException {
+        val message = try {
+            JSONObject(body).optString("error").takeIf { it.isNotBlank() }
+        } catch (_: org.json.JSONException) {
+            null
+        }
+        return IOException(message ?: "HTTP $code")
+    }
+
     private fun httpGet(dataDir: String, port: Int, path: String): JSONObject {
         val conn = authenticatedConnection(dataDir, port, path)
         conn.requestMethod = "GET"
@@ -51,12 +60,13 @@ object DirectedApi {
             val body = if (code in 200..299) {
                 conn.inputStream.bufferedReader().readText()
             } else {
-                conn.errorStream?.bufferedReader()?.readText() ?: """{"error":"HTTP $code"}"""
+                conn.errorStream?.bufferedReader()?.readText().orEmpty()
             }
+            if (code !in 200..299) throw responseError(code, body)
             return try {
                 JSONObject(body)
             } catch (_: org.json.JSONException) {
-                JSONObject().apply { put("error", "Malformed response") }
+                throw IOException("Malformed response")
             }
         } finally {
             conn.disconnect()
@@ -73,12 +83,13 @@ object DirectedApi {
             val body = if (code in 200..299) {
                 conn.inputStream.bufferedReader().readText()
             } else {
-                "[]"
+                conn.errorStream?.bufferedReader()?.readText().orEmpty()
             }
+            if (code !in 200..299) throw responseError(code, body)
             return try {
                 JSONArray(body)
             } catch (_: org.json.JSONException) {
-                JSONArray()
+                throw IOException("Malformed response")
             }
         } finally {
             conn.disconnect()

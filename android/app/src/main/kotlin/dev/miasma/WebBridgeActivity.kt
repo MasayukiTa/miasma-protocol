@@ -222,7 +222,7 @@ class WebBridgeActivity : ComponentActivity() {
                     }
                 }.toString()
             } catch (e: Exception) {
-                "[]"
+                errorJson(e.message)
             }
         }
 
@@ -249,7 +249,7 @@ class WebBridgeActivity : ComponentActivity() {
                     }
                 }.toString()
             } catch (e: Exception) {
-                "[]"
+                errorJson(e.message)
             }
         }
 

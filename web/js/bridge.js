@@ -437,8 +437,10 @@ export class MiasmaBridge {
       try {
         const result = await Promise.resolve(window.miasma.directedInbox());
         const parsed = typeof result === 'string' ? JSON.parse(result) : result;
-        return Array.isArray(parsed) ? parsed : [];
-      } catch (_) { return []; }
+        if (parsed?.error) throw new Error(parsed.error);
+        if (!Array.isArray(parsed)) throw new Error('Malformed inbox response');
+        return parsed;
+      } catch (e) { throw e; }
     }
 
     if (this._mode === MODE_HTTP) {
@@ -462,8 +464,10 @@ export class MiasmaBridge {
       try {
         const result = await Promise.resolve(window.miasma.directedOutbox());
         const parsed = typeof result === 'string' ? JSON.parse(result) : result;
-        return Array.isArray(parsed) ? parsed : [];
-      } catch (_) { return []; }
+        if (parsed?.error) throw new Error(parsed.error);
+        if (!Array.isArray(parsed)) throw new Error('Malformed outbox response');
+        return parsed;
+      } catch (e) { throw e; }
     }
 
     if (this._mode === MODE_HTTP) {

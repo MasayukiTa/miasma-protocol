@@ -32,3 +32,17 @@ test('WebView host presence does not imply the embedded daemon is network-ready'
   assert.equal(status.peer_count, 2);
   assert.equal(bridge.connected, true);
 });
+
+
+test('WebView inbox errors are not disguised as an empty inbox', async (t) => {
+  installWindow(true);
+  window.miasma.directedInbox = () => JSON.stringify({ error: 'authorization failed' });
+  const bridge = new MiasmaBridge();
+  t.after(() => {
+    if (bridge._pollTimer) clearInterval(bridge._pollTimer);
+    delete globalThis.window;
+  });
+
+  await bridge.init({});
+  await assert.rejects(() => bridge.directedInbox(), /authorization failed/);
+});
