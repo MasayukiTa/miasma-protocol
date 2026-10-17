@@ -239,7 +239,10 @@ fn validate_journal(j: &Journal, data_dir: &Path) -> Result<(), UpdateError> {
             && s.chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
     };
-    let no_parent = |p: &Path| !p.components().any(|c| matches!(c, std::path::Component::ParentDir));
+    let no_parent = |p: &Path| {
+        !p.components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    };
     if !plain(&j.id) {
         return bad("the update id");
     }
@@ -1384,7 +1387,9 @@ mod tests {
         j.work_dir = victim.clone();
         cases.push(j);
         let mut j = good.clone();
-        j.work_dir = crate::paths::update_dir(&f.data).join("..").join("precious");
+        j.work_dir = crate::paths::update_dir(&f.data)
+            .join("..")
+            .join("precious");
         cases.push(j);
         let mut j = good.clone();
         j.names = vec!["..\\..\\evil.exe".into()];

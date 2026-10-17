@@ -89,13 +89,11 @@ fn emit_version() {
     let label = std::env::var("MIASMA_PRERELEASE").unwrap_or_default();
     let label = label.trim().trim_start_matches('-');
     let valid = !label.is_empty()
-        && label
-            .split('.')
-            .all(|p| {
-                !p.is_empty()
-                    && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-                    && !(p.len() > 1 && p.starts_with('0') && p.chars().all(|c| c.is_ascii_digit()))
-            });
+        && label.split('.').all(|p| {
+            !p.is_empty()
+                && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                && !(p.len() > 1 && p.starts_with('0') && p.chars().all(|c| c.is_ascii_digit()))
+        });
     let version = if valid && !base.contains('-') {
         format!("{base}-{label}")
     } else {

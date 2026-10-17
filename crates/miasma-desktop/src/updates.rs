@@ -131,11 +131,8 @@ pub struct UpdatesUi {
 impl UpdatesUi {
     pub fn new(data_dir: PathBuf) -> Self {
         let node = NodeConfig::load(&data_dir).ok();
-        let cfg = node
-            .as_ref()
-            .map(|c| c.update.clone())
-            .unwrap_or_default();
-        let extra_ca = node.and_then(|c| c.transport.iroh_extra_ca_pem);
+        let cfg = node.as_ref().map(|c| c.update.clone()).unwrap_or_default();
+        let extra_ca = node.and_then(|c| c.transport.iroh_extra_ca_pem.clone());
         let (tx, rx) = channel();
         Self {
             data_dir,
