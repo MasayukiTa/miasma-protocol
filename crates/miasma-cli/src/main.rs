@@ -22,6 +22,7 @@ mod i18n;
 mod push_cmd;
 mod storage_cmd;
 mod tunnel;
+mod update_cmd;
 mod web_link;
 use i18n::{Lang, Msg};
 
@@ -519,6 +520,16 @@ enum Commands {
         action: storage_cmd::StorageCmd,
     },
 
+    /// Look for, fetch and install newer builds (see `update.*` in the config).
+    ///
+    ///   miasma update check    available / none / failed (distinct exit codes)
+    ///   miasma update apply    download, verify and install; the old version stays as .prev
+    ///   miasma update status   settings, running build, any update in progress
+    Update {
+        #[command(subcommand)]
+        cmd: update_cmd::UpdateCmd,
+    },
+
     /// Probe WebSocket/WSS connectivity to a URL.
     ///
     /// Connects via TCP (+ TLS for wss:// or https://) and performs a WebSocket
@@ -633,6 +644,15 @@ async fn main() -> Result<()> {
         } => cmd_daemon(&data_dir, &bootstrap, wss_port, no_iroh, &log_settings).await,
 
         Commands::Tunnel { port } => cmd_tunnel(&data_dir, port).await,
+
+        Commands::Update { cmd } => {
+            let code = update_cmd::run(&data_dir, cmd).await?;
+            if code != 0 {
+                let _ = io::stdout().flush();
+                std::process::exit(code);
+            }
+            Ok(())
+        }
 
         Commands::Diagnostics { json } => cmd_diagnostics(&data_dir, json).await,
 
@@ -800,6 +820,7 @@ fn cmd_init(
         push: Default::default(),
         chat: Default::default(),
         privacy: Default::default(),
+        update: Default::default(),
     };
     config.save(data_dir).context("cannot save config")?;
 
@@ -1812,6 +1833,12 @@ fn cmd_config_loaded(
                     println!("{}", config.privacy.diagnostic_logging)
                 }
                 "privacy.log_buffer_mib" => println!("{}", config.privacy.log_buffer_mib),
+                "update.mode" => println!("{}", config.update.mode),
+                "update.channel" => println!("{}", config.update.channel),
+                "update.check_at_start" => println!("{}", config.update.check_at_start),
+                "update.local_build_dir" => {
+                    println!("{}", config.update.local_build_dir.as_deref().unwrap_or(""))
+                }
                 "network.listen_addr" => println!("{}", config.network.listen_addr),
                 "network.bootstrap_peers" => {
                     for peer in &config.network.bootstrap_peers {
@@ -1921,6 +1948,22 @@ fn cmd_config_loaded(
                         bail!("expected 1-8 MiB");
                     }
                     config.privacy.log_buffer_mib = mib;
+                }
+                "update.mode" => {
+                    config.update.mode = v.parse().map_err(anyhow::Error::msg)?;
+                }
+                "update.channel" => {
+                    config.update.channel = v.parse().map_err(anyhow::Error::msg)?;
+                }
+                "update.check_at_start" => {
+                    config.update.check_at_start = v.parse().context("expected bool")?;
+                }
+                "update.local_build_dir" => {
+                    config.update.local_build_dir = if v.trim().is_empty() {
+                        None
+                    } else {
+                        Some(v.trim().into())
+                    };
                 }
                 "network.listen_addr" => {
                     config.network.listen_addr = v.into();
