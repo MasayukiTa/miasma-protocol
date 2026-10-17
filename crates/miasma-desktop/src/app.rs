@@ -2604,7 +2604,7 @@ impl MiasmaApp {
 
         d.push_str(&format!(
             "Desktop version: {} (beta)\n",
-            env!("CARGO_PKG_VERSION")
+            env!("MIASMA_VERSION")
         ));
         d.push_str(&format!(
             "Build:           {}\n",

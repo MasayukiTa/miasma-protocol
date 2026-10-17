@@ -168,7 +168,7 @@ impl UpdatesUi {
         Engine::new(
             &self.data_dir,
             self.cfg.clone(),
-            env!("CARGO_PKG_VERSION"),
+            env!("MIASMA_VERSION"),
             BUILD_ID,
         )
         .map(|e| e.with_extra_ca_file(self.extra_ca.clone()))

@@ -73,7 +73,7 @@ fn engine(data_dir: &Path) -> Result<Engine> {
     Engine::new(
         data_dir,
         node.update,
-        env!("CARGO_PKG_VERSION"),
+        env!("MIASMA_VERSION"),
         env!("MIASMA_BUILD_ID"),
     )
     .map(|e| e.with_extra_ca_file(ca_file))
@@ -272,7 +272,7 @@ async fn status(data_dir: &Path) -> Result<i32> {
     );
     println!(
         "running:         {} ({})",
-        env!("CARGO_PKG_VERSION"),
+        env!("MIASMA_VERSION"),
         env!("MIASMA_BUILD_ID")
     );
     if UPDATE_PUBKEYS.is_empty() {

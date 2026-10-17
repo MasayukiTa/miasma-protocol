@@ -2,6 +2,7 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=assets/miasma.ico");
     emit_build_id();
+    emit_version();
     // Embed Windows resources: icon, version info, and file description.
     // This makes miasma-desktop.exe show the Miasma icon in Explorer, taskbar,
     // Start Menu shortcuts, and Alt-Tab.
@@ -76,4 +77,29 @@ fn emit_build_id() {
         .or_else(|| git_output(&["rev-parse", "--short=9", "HEAD"]))
         .unwrap_or_else(|| "unknown".to_owned());
     println!("cargo:rustc-env=MIASMA_BUILD_ID={id}");
+}
+
+/// `MIASMA_VERSION`: the crate version, plus the pre-release label from the
+/// optional `MIASMA_PRERELEASE` (for example `beta.3` gives `0.3.2-beta.3`). The
+/// update check compares this string, so pre-release builds order correctly.
+/// Unset, empty or malformed: the crate version alone, exactly as before.
+fn emit_version() {
+    println!("cargo:rerun-if-env-changed=MIASMA_PRERELEASE");
+    let base = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
+    let label = std::env::var("MIASMA_PRERELEASE").unwrap_or_default();
+    let label = label.trim().trim_start_matches('-');
+    let valid = !label.is_empty()
+        && label
+            .split('.')
+            .all(|p| {
+                !p.is_empty()
+                    && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                    && !(p.len() > 1 && p.starts_with('0') && p.chars().all(|c| c.is_ascii_digit()))
+            });
+    let version = if valid && !base.contains('-') {
+        format!("{base}-{label}")
+    } else {
+        base
+    };
+    println!("cargo:rustc-env=MIASMA_VERSION={version}");
 }

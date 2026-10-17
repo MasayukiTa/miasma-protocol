@@ -103,6 +103,18 @@ mod tests {
     }
 
     #[test]
+    fn beta_builds_order_between_themselves_and_below_the_release() {
+        // A build that embeds its label (`0.3.2-beta.2`) sees beta.3 as newer,
+        // and the plain release as newer still; never the other way round.
+        let (b2, b3, rel) = (v("0.3.2-beta.2"), v("0.3.2-beta.3"), v("0.3.2"));
+        assert!(precedence(&b2, &b3) == Ordering::Less && precedence(&b3, &rel) == Ordering::Less);
+        assert!(is_newer(&b2, &b3) && is_newer(&b3, &rel) && is_newer(&b2, &rel));
+        assert!(!is_newer(&b3, &b2) && !is_newer(&rel, &b3) && !is_newer(&b3, &b3));
+        // Tags of the real releases parse to exactly these versions.
+        assert_eq!(parse_tag("v0.3.2-beta.3"), Some(b3));
+    }
+
+    #[test]
     fn a_release_is_newer_than_its_own_prerelease_and_not_the_reverse() {
         assert!(is_newer(&v("0.3.2-beta.2"), &v("0.3.2")));
         assert!(!is_newer(&v("0.3.2"), &v("0.3.2-beta.2")));
