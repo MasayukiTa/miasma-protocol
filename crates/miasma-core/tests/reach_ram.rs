@@ -157,6 +157,12 @@ async fn running_the_matrix_over_and_over_does_not_grow_memory() {
     let mid = samples[2].unwrap();
     let growth = last.saturating_sub(base);
     let late = last.saturating_sub(mid);
-    assert!(growth <= 3 * 1024 * 1024, "grew {growth} bytes: {samples:?}");
-    assert!(late <= 1024 * 1024, "still growing: {late} bytes: {samples:?}");
+    assert!(
+        growth <= 3 * 1024 * 1024,
+        "grew {growth} bytes: {samples:?}"
+    );
+    assert!(
+        late <= 1024 * 1024,
+        "still growing: {late} bytes: {samples:?}"
+    );
 }
