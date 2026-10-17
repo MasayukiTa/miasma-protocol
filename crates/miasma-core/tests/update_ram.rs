@@ -89,7 +89,7 @@ fn release_list() -> Vec<u8> {
         } else {
             format!("v0.{i}.0")
         };
-        let assets: Vec<String> = (0..20)
+        let assets: Vec<String> = (0..40)
             .map(|k| {
                 format!(
                     r#"{{"name":"file-{i}-{k}.bin","browser_download_url":"https://dl.invalid/file-{i}-{k}.bin","size":{k}}}"#
