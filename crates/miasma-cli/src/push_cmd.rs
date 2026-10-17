@@ -595,7 +595,14 @@ fn waiting_note(t: &PushTransferInfo, now_ms: u64) -> Option<String> {
     } else {
         format!("Waiting to retry (next attempt {when}, attempt {attempt})")
     };
-    if t.error_kind.as_deref() == Some("unreachable") {
+    if t.error.as_deref().is_some_and(|e| e.contains("not connected to a relay server")) {
+        // It is this computer's relay link that is down, not the other side.
+        s.push_str(if ja {
+            "。一時停止中: この PC がリレーサーバに接続できていません"
+        } else {
+            ". Paused: this computer is not connected to a relay server"
+        });
+    } else if t.error_kind.as_deref() == Some("unreachable") {
         s.push_str(if ja {
             "。一時停止中: 相手がオフラインです"
         } else {
