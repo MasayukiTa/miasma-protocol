@@ -15,9 +15,17 @@ import androidx.compose.ui.unit.dp
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.platform.LocalContext
 import dev.miasma.DirectedApi
 import dev.miasma.MiasmaViewModel
+import java.io.File
+import java.io.IOException
+import java.util.UUID
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 fun InboxScreen(vm: MiasmaViewModel) {
@@ -79,7 +87,43 @@ private fun InboxCard(item: DirectedApi.EnvelopeItem, vm: MiasmaViewModel) {
     val context = LocalContext.current
     var password by remember { mutableStateOf("") }
     var retrieveError by remember { mutableStateOf<String?>(null) }
+    var retrieveResult by remember { mutableStateOf<String?>(null) }
     var isRetrieving by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) { cleanupOldRetrieveFiles(context.cacheDir) }
+    }
+
+    val saveLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream"),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val dir = File(context.cacheDir, "miasma-retrieve").apply { mkdirs() }
+        val temp = File(dir, "${UUID.randomUUID()}.tmp")
+        isRetrieving = true
+        retrieveError = null
+        retrieveResult = null
+        vm.retrieveDirectedToFile(item.envelopeId, password, temp.absolutePath) { result, error ->
+            if (error != null || result == null) {
+                temp.delete()
+                isRetrieving = false
+                retrieveError = error ?: "Retrieve failed"
+            } else {
+                scope.launch {
+                    try {
+                        withContext(Dispatchers.IO) { copyRetrievedFile(context, temp, uri) }
+                        retrieveResult = "Saved ${formatBytes(result.bytesWritten)}"
+                    } catch (e: Exception) {
+                        retrieveError = e.message ?: "Could not save retrieved file"
+                    } finally {
+                        temp.delete()
+                        isRetrieving = false
+                    }
+                }
+            }
+        }
+    }
 
     val (badgeColor, badgeLabel) = inboxStateBadge(item.state)
 
@@ -170,12 +214,9 @@ private fun InboxCard(item: DirectedApi.EnvelopeItem, vm: MiasmaViewModel) {
                 Spacer(Modifier.height(4.dp))
                 Button(
                     onClick = {
-                        isRetrieving = true
                         retrieveError = null
-                        vm.retrieveDirected(item.envelopeId, password) { error ->
-                            isRetrieving = false
-                            retrieveError = error
-                        }
+                        retrieveResult = null
+                        saveLauncher.launch(item.filename?.takeIf { it.isNotBlank() } ?: "miasma-retrieved")
                     },
                     enabled = password.isNotEmpty() && !isRetrieving,
                 ) {
@@ -190,6 +231,9 @@ private fun InboxCard(item: DirectedApi.EnvelopeItem, vm: MiasmaViewModel) {
                 }
                 if (retrieveError != null) {
                     Text(retrieveError!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
+                if (retrieveResult != null) {
+                    Text(retrieveResult!!, color = Color(0xFF4CAF50), style = MaterialTheme.typography.bodySmall)
                 }
             }
 
@@ -237,4 +281,26 @@ private fun formatBytes(bytes: Long): String = when {
     bytes < 1024 -> "$bytes B"
     bytes < 1024 * 1024 -> "${"%.1f".format(bytes / 1024.0)} KiB"
     else -> "${"%.1f".format(bytes / 1024.0 / 1024.0)} MiB"
+}
+
+private fun copyRetrievedFile(context: Context, source: File, destination: android.net.Uri) {
+    val output = context.contentResolver.openOutputStream(destination, "w")
+        ?: throw IOException("Could not open destination")
+    source.inputStream().buffered().use { input ->
+        output.buffered().use { out ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                out.write(buffer, 0, read)
+            }
+        }
+    }
+}
+
+private fun cleanupOldRetrieveFiles(cacheDir: File) {
+    val cutoff = System.currentTimeMillis() - 24L * 60 * 60 * 1000
+    File(cacheDir, "miasma-retrieve").listFiles()?.forEach { file ->
+        if (file.isFile && file.lastModified() < cutoff) file.delete()
+    }
 }

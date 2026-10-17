@@ -188,9 +188,11 @@ pub fn classify_endpoint(method: &str, path: &str) -> RateLimitClass {
         }
 
         // Heavyweight
-        ("POST", "/api/retrieve") | ("POST", "/api/directed/retrieve") | ("POST", "/api/wipe") => {
-            RateLimitClass::HeavyApi
-        }
+        ("POST", "/api/retrieve")
+        | ("POST", "/api/directed/retrieve")
+        | ("POST", "/api/directed/retrieve-to-file")
+        | ("POST", "/api/directed/send-file")
+        | ("POST", "/api/wipe") => RateLimitClass::HeavyApi,
 
         // All other POST endpoints are write operations
         _ => RateLimitClass::WriteApi,
@@ -368,6 +370,14 @@ mod tests {
         );
         assert_eq!(
             classify_endpoint("POST", "/api/wipe"),
+            RateLimitClass::HeavyApi
+        );
+        assert_eq!(
+            classify_endpoint("POST", "/api/directed/send-file"),
+            RateLimitClass::HeavyApi
+        );
+        assert_eq!(
+            classify_endpoint("POST", "/api/directed/retrieve-to-file"),
             RateLimitClass::HeavyApi
         );
     }

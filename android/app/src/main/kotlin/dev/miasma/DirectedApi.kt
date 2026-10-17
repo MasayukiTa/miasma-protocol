@@ -3,6 +3,8 @@ package dev.miasma
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
+import java.io.File
+import java.io.IOException
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
@@ -17,13 +19,29 @@ import java.net.URL
  */
 object DirectedApi {
 
+    private const val FILE_OPERATION_TIMEOUT_MS = 30 * 60 * 1000
+
     private fun bridgeUrl(port: Int, path: String): URL =
         URL("http://127.0.0.1:$port$path")
 
+    private fun authenticatedConnection(dataDir: String, port: Int, path: String): HttpURLConnection {
+        val token = try {
+            File(dataDir, "daemon.token").readText(Charsets.UTF_8).trim()
+        } catch (_: Exception) {
+            throw IOException("Daemon authorization unavailable")
+        }
+        if (token.length != 64 || token.any { it !in '0'..'9' && it !in 'a'..'f' && it !in 'A'..'F' }) {
+            throw IOException("Daemon authorization unavailable")
+        }
+        return (bridgeUrl(port, path).openConnection() as HttpURLConnection).apply {
+            setRequestProperty("Authorization", "Bearer $token")
+        }
+    }
+
     // ─── GET helpers ────────────────────────────────────────────────────
 
-    private fun httpGet(port: Int, path: String): JSONObject {
-        val conn = bridgeUrl(port, path).openConnection() as HttpURLConnection
+    private fun httpGet(dataDir: String, port: Int, path: String): JSONObject {
+        val conn = authenticatedConnection(dataDir, port, path)
         conn.requestMethod = "GET"
         conn.connectTimeout = 5_000
         conn.readTimeout = 30_000
@@ -44,8 +62,8 @@ object DirectedApi {
         }
     }
 
-    private fun httpGetArray(port: Int, path: String): JSONArray {
-        val conn = bridgeUrl(port, path).openConnection() as HttpURLConnection
+    private fun httpGetArray(dataDir: String, port: Int, path: String): JSONArray {
+        val conn = authenticatedConnection(dataDir, port, path)
         conn.requestMethod = "GET"
         conn.connectTimeout = 5_000
         conn.readTimeout = 30_000
@@ -68,13 +86,19 @@ object DirectedApi {
 
     // ─── POST helper ────────────────────────────────────────────────────
 
-    private fun httpPost(port: Int, path: String, body: JSONObject): JSONObject {
-        val conn = bridgeUrl(port, path).openConnection() as HttpURLConnection
+    private fun httpPost(
+        dataDir: String,
+        port: Int,
+        path: String,
+        body: JSONObject,
+        readTimeoutMs: Int = 60_000,
+    ): JSONObject {
+        val conn = authenticatedConnection(dataDir, port, path)
         conn.requestMethod = "POST"
         conn.doOutput = true
         conn.setRequestProperty("Content-Type", "application/json")
         conn.connectTimeout = 5_000
-        conn.readTimeout = 60_000
+        conn.readTimeout = readTimeoutMs
         try {
             OutputStreamWriter(conn.outputStream).use { it.write(body.toString()) }
             val code = conn.responseCode
@@ -96,8 +120,8 @@ object DirectedApi {
     // ─── Directed sharing operations ────────────────────────────────────
 
     /** Get sharing key and contact. */
-    fun sharingKey(port: Int): SharingKeyResult {
-        val resp = httpGet(port, "/api/sharing-key")
+    fun sharingKey(dataDir: String, port: Int): SharingKeyResult {
+        val resp = httpGet(dataDir, port, "/api/sharing-key")
         return SharingKeyResult(
             key = resp.optString("key", ""),
             contact = resp.optString("contact", ""),
@@ -105,19 +129,20 @@ object DirectedApi {
     }
 
     /** List incoming directed envelopes. */
-    fun inbox(port: Int): List<EnvelopeItem> {
-        val arr = httpGetArray(port, "/api/directed/inbox")
+    fun inbox(dataDir: String, port: Int): List<EnvelopeItem> {
+        val arr = httpGetArray(dataDir, port, "/api/directed/inbox")
         return parseEnvelopes(arr)
     }
 
     /** List outgoing directed envelopes. */
-    fun outbox(port: Int): List<EnvelopeItem> {
-        val arr = httpGetArray(port, "/api/directed/outbox")
+    fun outbox(dataDir: String, port: Int): List<EnvelopeItem> {
+        val arr = httpGetArray(dataDir, port, "/api/directed/outbox")
         return parseEnvelopes(arr)
     }
 
     /** Send a directed share. */
     fun send(
+        dataDir: String,
         port: Int,
         recipientContact: String,
         data: ByteArray,
@@ -133,28 +158,50 @@ object DirectedApi {
             put("retention_secs", retentionSecs)
             if (filename != null) put("filename", filename)
         }
-        val resp = httpPost(port, "/api/directed/send", body)
+        val resp = httpPost(dataDir, port, "/api/directed/send", body)
+        if (resp.has("error")) throw RuntimeException(resp.getString("error"))
+        return resp.getString("envelope_id")
+    }
+
+    /** Send a directed share from a daemon-readable local file. */
+    fun sendFile(
+        dataDir: String,
+        port: Int,
+        recipientContact: String,
+        filePath: String,
+        password: String,
+        retentionSecs: Long,
+        filename: String? = null,
+    ): String {
+        val body = JSONObject().apply {
+            put("recipient_contact", recipientContact)
+            put("file_path", filePath)
+            put("password", password)
+            put("retention_secs", retentionSecs)
+            if (filename != null) put("filename", filename)
+        }
+        val resp = httpPost(dataDir, port, "/api/directed/send-file", body, FILE_OPERATION_TIMEOUT_MS)
         if (resp.has("error")) throw RuntimeException(resp.getString("error"))
         return resp.getString("envelope_id")
     }
 
     /** Confirm a challenge code (sender confirms recipient). */
-    fun confirm(port: Int, envelopeId: String, challengeCode: String) {
+    fun confirm(dataDir: String, port: Int, envelopeId: String, challengeCode: String) {
         val body = JSONObject().apply {
             put("envelope_id", envelopeId)
             put("challenge_code", challengeCode)
         }
-        val resp = httpPost(port, "/api/directed/confirm", body)
+        val resp = httpPost(dataDir, port, "/api/directed/confirm", body)
         if (resp.has("error")) throw RuntimeException(resp.getString("error"))
     }
 
     /** Retrieve directed content with password. */
-    fun retrieve(port: Int, envelopeId: String, password: String): RetrieveResult {
+    fun retrieve(dataDir: String, port: Int, envelopeId: String, password: String): RetrieveResult {
         val body = JSONObject().apply {
             put("envelope_id", envelopeId)
             put("password", password)
         }
-        val resp = httpPost(port, "/api/directed/retrieve", body)
+        val resp = httpPost(dataDir, port, "/api/directed/retrieve", body)
         if (resp.has("error")) throw RuntimeException(resp.getString("error"))
         val dataB64 = resp.getString("data")
         val data = android.util.Base64.decode(dataB64, android.util.Base64.DEFAULT)
@@ -164,12 +211,34 @@ object DirectedApi {
         )
     }
 
+    /** Retrieve directed content directly into a daemon-readable file path. */
+    fun retrieveToFile(
+        dataDir: String,
+        port: Int,
+        envelopeId: String,
+        password: String,
+        outputPath: String,
+    ): RetrieveToFileResult {
+        val body = JSONObject().apply {
+            put("envelope_id", envelopeId)
+            put("password", password)
+            put("output_path", outputPath)
+        }
+        val resp = httpPost(dataDir, port, "/api/directed/retrieve-to-file", body, FILE_OPERATION_TIMEOUT_MS)
+        if (resp.has("error")) throw RuntimeException(resp.getString("error"))
+        return RetrieveToFileResult(
+            outputPath = resp.getString("output_path"),
+            filename = resp.optString("filename", null),
+            bytesWritten = resp.optLong("bytes_written", 0),
+        )
+    }
+
     /** Revoke a directed share. */
-    fun revoke(port: Int, envelopeId: String) {
+    fun revoke(dataDir: String, port: Int, envelopeId: String) {
         val body = JSONObject().apply {
             put("envelope_id", envelopeId)
         }
-        val resp = httpPost(port, "/api/directed/revoke", body)
+        val resp = httpPost(dataDir, port, "/api/directed/revoke", body)
         if (resp.has("error")) throw RuntimeException(resp.getString("error"))
     }
 
@@ -177,6 +246,7 @@ object DirectedApi {
 
     data class SharingKeyResult(val key: String, val contact: String)
     data class RetrieveResult(val data: ByteArray, val filename: String?)
+    data class RetrieveToFileResult(val outputPath: String, val filename: String?, val bytesWritten: Long)
 
     data class EnvelopeItem(
         val envelopeId: String,

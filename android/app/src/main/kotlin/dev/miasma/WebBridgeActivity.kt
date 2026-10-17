@@ -132,7 +132,7 @@ class WebBridgeActivity : ComponentActivity() {
             return try {
                 val port = httpPort()
                 if (port == 0) return """{"error":"daemon not running"}"""
-                val result = DirectedApi.sharingKey(port)
+                val result = DirectedApi.sharingKey(dataDir, port)
                 """{"key":"${result.key}","contact":"${result.contact}"}"""
             } catch (e: Exception) {
                 """{"error":"${e.message?.replace("\"", "\\\"")}"}"""
@@ -144,7 +144,7 @@ class WebBridgeActivity : ComponentActivity() {
             return try {
                 val port = httpPort()
                 if (port == 0) return """{"error":"daemon not running"}"""
-                val items = DirectedApi.inbox(port)
+                val items = DirectedApi.inbox(dataDir, port)
                 org.json.JSONArray().also { arr ->
                     items.forEach { item ->
                         arr.put(JSONObject().apply {
@@ -171,7 +171,7 @@ class WebBridgeActivity : ComponentActivity() {
             return try {
                 val port = httpPort()
                 if (port == 0) return """{"error":"daemon not running"}"""
-                val items = DirectedApi.outbox(port)
+                val items = DirectedApi.outbox(dataDir, port)
                 org.json.JSONArray().also { arr ->
                     items.forEach { item ->
                         arr.put(JSONObject().apply {
@@ -199,7 +199,7 @@ class WebBridgeActivity : ComponentActivity() {
                 val port = httpPort()
                 if (port == 0) return """{"error":"daemon not running"}"""
                 val data = android.util.Base64.decode(dataBase64, android.util.Base64.DEFAULT)
-                val envelopeId = DirectedApi.send(port, recipientContact, data, password, retentionSecs, filename)
+                val envelopeId = DirectedApi.send(dataDir, port, recipientContact, data, password, retentionSecs, filename)
                 """{"envelope_id":"$envelopeId"}"""
             } catch (e: Exception) {
                 """{"error":"${e.message?.replace("\"", "\\\"")}"}"""
@@ -211,7 +211,7 @@ class WebBridgeActivity : ComponentActivity() {
             return try {
                 val port = httpPort()
                 if (port == 0) return """{"error":"daemon not running"}"""
-                DirectedApi.confirm(port, envelopeId, challengeCode)
+                DirectedApi.confirm(dataDir, port, envelopeId, challengeCode)
                 """{"ok":true}"""
             } catch (e: Exception) {
                 """{"error":"${e.message?.replace("\"", "\\\"")}"}"""
@@ -223,7 +223,7 @@ class WebBridgeActivity : ComponentActivity() {
             return try {
                 val port = httpPort()
                 if (port == 0) return """{"error":"daemon not running"}"""
-                val result = DirectedApi.retrieve(port, envelopeId, password)
+                val result = DirectedApi.retrieve(dataDir, port, envelopeId, password)
                 val b64 = android.util.Base64.encodeToString(result.data, android.util.Base64.NO_WRAP)
                 val escapedFilename = result.filename?.replace("\\", "\\\\")?.replace("\"", "\\\"")
                 """{"data":"$b64"${if (escapedFilename != null) ""","filename":"$escapedFilename"""" else ""}}"""
@@ -237,7 +237,7 @@ class WebBridgeActivity : ComponentActivity() {
             return try {
                 val port = httpPort()
                 if (port == 0) return """{"error":"daemon not running"}"""
-                DirectedApi.revoke(port, envelopeId)
+                DirectedApi.revoke(dataDir, port, envelopeId)
                 """{"ok":true}"""
             } catch (e: Exception) {
                 """{"error":"${e.message?.replace("\"", "\\\"")}"}"""
