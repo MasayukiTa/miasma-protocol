@@ -354,7 +354,9 @@ fn part_len(inbox: &Path) -> u64 {
             if let Ok(files) = std::fs::read_dir(d.path()) {
                 for f in files.flatten() {
                     if f.file_name().to_string_lossy().ends_with(".part") {
-                        total += f.metadata().map(|m| m.len()).unwrap_or(0);
+                        // Not `DirEntry::metadata`: on Windows that is the size cached in the
+                        // directory listing, which stays 0 while the file is open for writing.
+                        total += std::fs::metadata(f.path()).map(|m| m.len()).unwrap_or(0);
                     }
                 }
             }
