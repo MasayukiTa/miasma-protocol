@@ -36,6 +36,7 @@ pub enum StorageCmd {
     /// Delete shares this node stores. Shares in use (being replicated, or part of a running transfer) are left alone.
     Delete {
         /// Short ids from `miasma storage list` (or full addresses) to delete.
+        #[arg(long = "id", value_name = "ID", num_args = 1..)]
         id: Vec<String>,
         /// Delete every stored share.
         #[arg(long)]
@@ -201,11 +202,12 @@ async fn fetch_list(data_dir: &Path) -> Result<(Vec<StoredShare>, u64)> {
 fn matches(share: &StoredShare, selection: &ShareSelection, now: u64) -> bool {
     match selection {
         ShareSelection::Ids(ids) => ids.iter().any(|id| {
-            !id.is_empty() && (share.id == *id || share.address.starts_with(id.as_str()))
+            id.len() >= miasma_core::store::SHORT_ID_LEN && share.address.starts_with(id.as_str())
         }),
         ShareSelection::All => true,
         ShareSelection::OlderThanDays(days) => {
-            now.saturating_sub(share.modified_secs) >= days.saturating_mul(24 * 60 * 60)
+            share.modified_secs > 0
+                && now.saturating_sub(share.modified_secs) >= days.saturating_mul(24 * 60 * 60)
         }
     }
 }

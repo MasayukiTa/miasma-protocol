@@ -4004,7 +4004,7 @@ mod storage_flag_tests {
 
     #[test]
     fn storage_delete_takes_ids_all_older_than_and_yes() {
-        match parse(&["storage", "delete", "deadbeef", "cafebabe"])
+        match parse(&["storage", "delete", "--id", "deadbeef", "cafebabe"])
             .unwrap()
             .command
         {
