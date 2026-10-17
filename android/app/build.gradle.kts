@@ -12,7 +12,7 @@ android {
         minSdk        = 26          // Android 8 — QUIC support baseline
         targetSdk     = 34
         versionCode   = 1
-        versionName   = "0.2.0"
+        versionName   = "0.3.2"
     }
 
     buildTypes {
@@ -28,6 +28,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
     composeOptions {
         kotlinCompilerExtensionVersion = "1.5.14"

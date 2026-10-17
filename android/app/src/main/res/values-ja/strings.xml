@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Miasma</string>
+    <string name="nav_home">ホーム</string>
+    <string name="nav_files">ファイル</string>
+    <string name="nav_status">状態</string>
+    <string name="nav_settings">設定</string>
+
+    <string name="home_tagline">プライベートで障害に強いファイル共有・保存</string>
+    <string name="home_node_active">ノード稼働中</string>
+    <string name="home_ready">ファイルの送受信・保存ができます</string>
+    <string name="home_getting_ready">準備中</string>
+    <string name="home_initializing">ファイルを保存するとノードが初期化されます</string>
+    <string name="home_what_to_do">何をしますか？</string>
+    <string name="home_shares">シェア</string>
+    <string name="home_peers">ピア</string>
+    <string name="home_storage">ストレージ</string>
+
+    <string name="action_send_file">ファイルを送る</string>
+    <string name="action_receive_file">ファイルを受け取る</string>
+    <string name="action_save_securely">安全に保存する</string>
+    <string name="files_title">ファイル</string>
+    <string name="files_description">ファイルの送受信、復元、保存をここから行えます。</string>
+    <string name="files_inbox">受け取ったファイル</string>
+    <string name="files_outbox">送ったファイル</string>
+    <string name="files_get_back">ファイルを復元する</string>
+
+    <string name="version_label">Miasma v%1$s Beta</string>
+    <string name="wipe_title">緊急消去</string>
+    <string name="wipe_message">マスターキーを今すぐ破棄しますか？
+
+端末内に保存されたシェアは永久に読み取れなくなります。この操作は取り消せません。</string>
+    <string name="wipe_now">今すぐ消去</string>
+    <string name="cancel">キャンセル</string>
+</resources>

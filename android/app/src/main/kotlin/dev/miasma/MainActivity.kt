@@ -12,12 +12,8 @@ import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Home
-import androidx.compose.material.icons.outlined.CloudUpload
-import androidx.compose.material.icons.outlined.CloudDownload
+import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Analytics
-import androidx.compose.material.icons.outlined.Inbox
-import androidx.compose.material.icons.outlined.Outbox
-import androidx.compose.material.icons.outlined.Send
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
@@ -26,6 +22,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.core.content.ContextCompat
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
@@ -34,6 +31,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import dev.miasma.ui.DissolveScreen
+import dev.miasma.ui.FilesScreen
 import dev.miasma.ui.HomeScreen
 import dev.miasma.ui.InboxScreen
 import dev.miasma.ui.OutboxScreen
@@ -100,9 +98,10 @@ class MainActivity : ComponentActivity() {
                     bottomBar = {
                         NavigationBar {
                             NAV_ITEMS.forEach { item ->
+                                val label = stringResource(item.labelRes)
                                 NavigationBarItem(
-                                    icon = { Icon(item.icon, contentDescription = item.label) },
-                                    label = { Text(item.label) },
+                                    icon = { Icon(item.icon, contentDescription = label) },
+                                    label = { Text(label) },
                                     selected = currentDestination?.hierarchy?.any { it.route == item.route } == true,
                                     onClick = {
                                         navController.navigate(item.route) {
@@ -123,7 +122,23 @@ class MainActivity : ComponentActivity() {
                         startDestination = "home",
                         modifier = Modifier.padding(innerPadding),
                     ) {
-                        composable("home")     { HomeScreen(vm) }
+                        composable("home") {
+                            HomeScreen(
+                                vm = vm,
+                                onSend = { navController.navigate("send") },
+                                onReceive = { navController.navigate("inbox") },
+                                onSave = { navController.navigate("dissolve") },
+                            )
+                        }
+                        composable("files") {
+                            FilesScreen(
+                                onSend = { navController.navigate("send") },
+                                onInbox = { navController.navigate("inbox") },
+                                onOutbox = { navController.navigate("outbox") },
+                                onSave = { navController.navigate("dissolve") },
+                                onRetrieve = { navController.navigate("retrieve") },
+                            )
+                        }
                         composable("send")     { SendScreen(vm) }
                         composable("inbox")    { InboxScreen(vm) }
                         composable("outbox")   { OutboxScreen(vm) }
@@ -138,15 +153,15 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private data class NavItem(val route: String, val label: String, val icon: androidx.compose.ui.graphics.vector.ImageVector)
+private data class NavItem(
+    val route: String,
+    val labelRes: Int,
+    val icon: androidx.compose.ui.graphics.vector.ImageVector,
+)
 
 private val NAV_ITEMS = listOf(
-    NavItem("home",     "Home",     Icons.Outlined.Home),
-    NavItem("send",     "Send",     Icons.Outlined.Send),
-    NavItem("inbox",    "Inbox",    Icons.Outlined.Inbox),
-    NavItem("outbox",   "Outbox",   Icons.Outlined.Outbox),
-    NavItem("dissolve", "Save",     Icons.Outlined.CloudUpload),
-    NavItem("retrieve", "Get Back", Icons.Outlined.CloudDownload),
-    NavItem("status",   "Status",   Icons.Outlined.Analytics),
-    NavItem("settings", "Settings", Icons.Outlined.Settings),
+    NavItem("home", R.string.nav_home, Icons.Outlined.Home),
+    NavItem("files", R.string.nav_files, Icons.Outlined.Folder),
+    NavItem("status", R.string.nav_status, Icons.Outlined.Analytics),
+    NavItem("settings", R.string.nav_settings, Icons.Outlined.Settings),
 )
