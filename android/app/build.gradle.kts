@@ -4,6 +4,22 @@ plugins {
 }
 
 
+
+// Keep the WebView surface on the same canonical web/ tree as the standalone PWA.
+// The generated directory is under build/ so Android packaging never requires a
+// second checked-in copy that can drift from the browser release.
+val canonicalWebDir = rootProject.projectDir.parentFile.resolve("web")
+val generatedWebAssetsDir = layout.buildDirectory.dir("generated/miasmaWebAssets")
+val syncMiasmaWebAssets by tasks.registering(org.gradle.api.tasks.Sync::class) {
+    from(canonicalWebDir) {
+        exclude("tests/**")
+        exclude("pkg/.gitignore")
+        exclude("pkg/*.d.ts")
+        exclude("pkg/package.json")
+    }
+    into(generatedWebAssetsDir.map { it.dir("web") })
+}
+
 val releaseVersionCode = System.getenv("MIASMA_ANDROID_VERSION_CODE")?.toIntOrNull() ?: 1
 val releaseVersionName = System.getenv("MIASMA_ANDROID_VERSION_NAME")?.takeIf { it.isNotBlank() } ?: "0.3.2"
 val releaseKeystore = System.getenv("MIASMA_ANDROID_KEYSTORE")
@@ -77,6 +93,7 @@ android {
 
     // JNI libs produced by `cargo ndk … -o android/app/src/main/jniLibs`
     sourceSets["main"].jniLibs.srcDirs("src/main/jniLibs")
+    sourceSets["main"].assets.srcDir(generatedWebAssetsDir)
     packaging {
         jniLibs {
             // AGP 8.11 then stores native libraries with modern page alignment.
@@ -108,4 +125,9 @@ dependencies {
 
     // QR code
     implementation(libs.zxing.embedded)
+}
+
+// Android assets must exist before resource merging for every build variant.
+tasks.named("preBuild").configure {
+    dependsOn(syncMiasmaWebAssets)
 }

@@ -128,6 +128,11 @@ need_command cargo-ndk "Run: cargo install cargo-ndk"
 need_command java "Install JDK 17 or newer"
 need_command jar "Install a full JDK 17 or newer"
 
+[ -f "$PROJECT_DIR/web/index.html" ] || \
+    fail "Canonical web UI is missing: $PROJECT_DIR/web/index.html"
+[ -f "$PROJECT_DIR/web/pkg/miasma_wasm_bg.wasm" ] || \
+    fail "Web WASM bundle is missing: build web/pkg before the Android package"
+
 [ -d "$ANDROID_HOME/platforms/android-$ANDROID_API" ] || \
     fail "Android platform API $ANDROID_API is missing. Run ./scripts/build-android.sh --setup"
 [ -d "$ANDROID_NDK_HOME" ] || \
