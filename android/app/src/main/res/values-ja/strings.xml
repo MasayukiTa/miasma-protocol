@@ -32,4 +32,72 @@
 端末内に保存されたシェアは永久に読み取れなくなります。この操作は取り消せません。</string>
     <string name="wipe_now">今すぐ消去</string>
     <string name="cancel">キャンセル</string>
+
+    <string name="refresh">更新</string>
+    <string name="send_title">送信</string>
+    <string name="send_daemon_unavailable">ノードの準備ができていないため送信できません。</string>
+    <string name="send_your_contact">あなたの共有用連絡先</string>
+    <string name="send_recipient_contact">送信先の連絡先（msk:…@PeerId）</string>
+    <string name="send_recipient_invalid">連絡先は「msk:」で始まり、「@」を含む必要があります。</string>
+    <string name="send_message_content">メッセージ / 内容</string>
+    <string name="send_choose_file">ファイルを選択</string>
+    <string name="send_change_file">ファイルを変更</string>
+    <string name="send_selected_file">選択中: %1$s（%2$s）</string>
+    <string name="send_use_text">テキスト入力に戻す</string>
+    <string name="send_password">パスワード（受信者と共有）</string>
+    <string name="send_retention_hours">保持期間（時間）</string>
+    <string name="send_retention_default">時間の指定が無効なため24時間を使用します。</string>
+    <string name="send_securely">安全に送信</string>
+    <string name="send_sent">送信しました</string>
+    <string name="send_envelope">エンベロープ: %1$s…</string>
+    <string name="send_confirm_hint">受信者から確認コードを受け取ったら、「送信済み」で確認してください。</string>
+    <string name="send_file_too_large">ファイルが大きすぎます（最大100 MiB）。</string>
+    <string name="send_file_open_failed">選択したファイルを開けませんでした。</string>
+    <string name="send_file_read_failed">選択したファイルを読み込めませんでした。</string>
+
+    <string name="inbox_title">受信ファイル</string>
+    <string name="directed_daemon_unavailable">ノードの準備ができていないため、安全なファイル共有を利用できません。</string>
+    <string name="inbox_empty">受信したファイルはまだありません。</string>
+    <string name="inbox_from">送信元: %1$s…</string>
+    <string name="file_label">ファイル: %1$s</string>
+    <string name="size_label">サイズ: %1$s</string>
+    <string name="challenge_share_sender">確認コード — このコードを送信者に伝えてください:</string>
+    <string name="password">パスワード</string>
+    <string name="retrieve">受け取る</string>
+    <string name="saved_size">%1$s を保存しました</string>
+    <string name="retrieve_failed">取得に失敗しました。</string>
+    <string name="save_retrieved_failed">取得したファイルを保存できませんでした。</string>
+    <string name="destination_open_failed">保存先を開けませんでした。</string>
+    <string name="retrieved_file_default">miasma-retrieved</string>
+    <string name="content_retrieved">取得済み</string>
+    <string name="expired">期限切れ</string>
+    <string name="revoked_by_sender">送信者が取り消しました</string>
+    <string name="challenge_failed">確認コードが一致しませんでした</string>
+    <string name="password_exhausted">パスワード試行回数を使い切りました</string>
+    <string name="delete">削除</string>
+
+    <string name="outbox_title">送信済み</string>
+    <string name="outbox_empty">送信したファイルはまだありません。</string>
+    <string name="outbox_to">送信先: %1$s…</string>
+    <string name="challenge_enter_recipient">受信者から受け取った確認コードを入力してください:</string>
+    <string name="confirm">確認</string>
+    <string name="confirmed">確認済み</string>
+    <string name="confirmed_waiting">確認済み — 受信者の取得待ち</string>
+    <string name="retrieved_by_recipient">受信者が取得しました</string>
+    <string name="revoked_by_you">この共有を取り消しました</string>
+    <string name="deleted_by_recipient">受信者が削除しました</string>
+    <string name="revoke">取り消す</string>
+    <string name="revoke_title">この共有を取り消しますか？</string>
+    <string name="revoke_message">受信者は取得できなくなります。この操作は元に戻せません。</string>
+
+    <string name="status_pending">保留中</string>
+    <string name="status_waiting">待機中</string>
+    <string name="status_challenge">確認待ち</string>
+    <string name="status_confirm">確認</string>
+    <string name="status_confirmed">確認済み</string>
+    <string name="status_retrieved">取得済み</string>
+    <string name="status_expired">期限切れ</string>
+    <string name="status_revoked">取消済み</string>
+    <string name="status_deleted">削除済み</string>
+    <string name="status_failed">失敗</string>
 </resources>

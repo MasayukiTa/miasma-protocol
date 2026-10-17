@@ -32,4 +32,72 @@
 All locally stored shares become permanently unreadable. This cannot be undone.</string>
     <string name="wipe_now">WIPE NOW</string>
     <string name="cancel">Cancel</string>
+
+    <string name="refresh">Refresh</string>
+    <string name="send_title">Send</string>
+    <string name="send_daemon_unavailable">Node is not ready. Sending is unavailable.</string>
+    <string name="send_your_contact">Your sharing contact</string>
+    <string name="send_recipient_contact">Recipient contact (msk:…@PeerId)</string>
+    <string name="send_recipient_invalid">Contact must start with &quot;msk:&quot; and contain &quot;@&quot;.</string>
+    <string name="send_message_content">Message / content</string>
+    <string name="send_choose_file">Choose a file</string>
+    <string name="send_change_file">Change file</string>
+    <string name="send_selected_file">Selected: %1$s (%2$s)</string>
+    <string name="send_use_text">Use text instead</string>
+    <string name="send_password">Password (shared with recipient)</string>
+    <string name="send_retention_hours">Retention (hours)</string>
+    <string name="send_retention_default">Invalid hours — using 24 hours.</string>
+    <string name="send_securely">Send securely</string>
+    <string name="send_sent">Sent</string>
+    <string name="send_envelope">Envelope: %1$s…</string>
+    <string name="send_confirm_hint">When the recipient gives you a challenge code, confirm it under Sent files.</string>
+    <string name="send_file_too_large">File too large (maximum 100 MiB).</string>
+    <string name="send_file_open_failed">Could not open the selected file.</string>
+    <string name="send_file_read_failed">Could not read the selected file.</string>
+
+    <string name="inbox_title">Received files</string>
+    <string name="directed_daemon_unavailable">Node is not ready. Secure file sharing is unavailable.</string>
+    <string name="inbox_empty">No received files yet.</string>
+    <string name="inbox_from">From: %1$s…</string>
+    <string name="file_label">File: %1$s</string>
+    <string name="size_label">Size: %1$s</string>
+    <string name="challenge_share_sender">Challenge code — send this to the sender:</string>
+    <string name="password">Password</string>
+    <string name="retrieve">Retrieve</string>
+    <string name="saved_size">Saved %1$s</string>
+    <string name="retrieve_failed">Retrieve failed.</string>
+    <string name="save_retrieved_failed">Could not save the retrieved file.</string>
+    <string name="destination_open_failed">Could not open the selected destination.</string>
+    <string name="retrieved_file_default">miasma-retrieved</string>
+    <string name="content_retrieved">Content retrieved</string>
+    <string name="expired">Expired</string>
+    <string name="revoked_by_sender">Revoked by sender</string>
+    <string name="challenge_failed">Challenge failed</string>
+    <string name="password_exhausted">Password attempts exhausted</string>
+    <string name="delete">Delete</string>
+
+    <string name="outbox_title">Sent files</string>
+    <string name="outbox_empty">No sent files yet.</string>
+    <string name="outbox_to">To: %1$s…</string>
+    <string name="challenge_enter_recipient">Enter the challenge code from the recipient:</string>
+    <string name="confirm">Confirm</string>
+    <string name="confirmed">Confirmed</string>
+    <string name="confirmed_waiting">Confirmed — waiting for retrieval</string>
+    <string name="retrieved_by_recipient">Content retrieved by recipient</string>
+    <string name="revoked_by_you">You revoked this share</string>
+    <string name="deleted_by_recipient">Deleted by recipient</string>
+    <string name="revoke">Revoke</string>
+    <string name="revoke_title">Revoke this share?</string>
+    <string name="revoke_message">The recipient will no longer be able to retrieve it. This cannot be undone.</string>
+
+    <string name="status_pending">Pending</string>
+    <string name="status_waiting">Waiting</string>
+    <string name="status_challenge">Challenge</string>
+    <string name="status_confirm">Confirm</string>
+    <string name="status_confirmed">Confirmed</string>
+    <string name="status_retrieved">Retrieved</string>
+    <string name="status_expired">Expired</string>
+    <string name="status_revoked">Revoked</string>
+    <string name="status_deleted">Deleted</string>
+    <string name="status_failed">Failed</string>
 </resources>
