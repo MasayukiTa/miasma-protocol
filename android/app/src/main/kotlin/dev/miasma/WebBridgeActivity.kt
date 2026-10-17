@@ -81,7 +81,7 @@ class WebBridgeActivity : ComponentActivity() {
                 val s = getNodeStatus(dataDir)
                 JSONObject().apply {
                     put("peer_count", 0) // FFI status is local-only for now
-                    put("share_count", s.shareCount)
+                    put("share_count", s.shareCount.toLong())
                     put("storage_used_bytes", (s.usedMb * 1024 * 1024).toLong())
                     put("listen_addrs", org.json.JSONArray())
                     put("peer_id", "")

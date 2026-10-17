@@ -13,7 +13,6 @@ import dev.miasma.uniffi.getNodeStatus
 import dev.miasma.uniffi.initializeNode
 import dev.miasma.uniffi.startEmbeddedDaemon
 import dev.miasma.uniffi.stopEmbeddedDaemon
-import dev.miasma.uniffi.isDaemonRunning
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -64,7 +63,7 @@ class MiasmaService : Service() {
 
             // Start the embedded daemon (initialises node + networking + HTTP bridge).
             try {
-                val daemonStatus = startEmbeddedDaemon(dataDir, storageMb, bandwidthMbDay)
+                val daemonStatus = startEmbeddedDaemon(dataDir, storageMb.toULong(), bandwidthMbDay.toULong())
                 updateNotification("Connected · port ${daemonStatus.httpPort}")
                 // Notify the ViewModel if the activity is active.
                 lastDaemonStatus = daemonStatus
@@ -81,7 +80,7 @@ class MiasmaService : Service() {
                 updateNotification("Daemon error: ${e.message}")
                 lastDaemonError = e.message
                 // Fall back to local-only initialisation.
-                try { initializeNode(dataDir, storageMb, bandwidthMbDay) } catch (_: Exception) { }
+                try { initializeNode(dataDir, storageMb.toULong(), bandwidthMbDay.toULong()) } catch (_: Exception) { }
             }
 
             // Poll status and update the notification every 30 s.

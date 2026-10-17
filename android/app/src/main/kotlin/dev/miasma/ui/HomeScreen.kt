@@ -250,8 +250,8 @@ fun HomeScreen(
                             stringResource(R.string.home_storage),
                             style = MaterialTheme.typography.titleMedium,
                         )
-                        val pct = if (status.quotaMb > 0)
-                            (status.usedMb / status.quotaMb * 100).toFloat()
+                        val pct = if (status.quotaMb > 0uL)
+                            (status.usedMb / status.quotaMb.toDouble() * 100).toFloat()
                         else 0f
                         Text(
                             "${"%.0f".format(pct)}%",
@@ -265,8 +265,8 @@ fun HomeScreen(
                     }
                     Spacer(Modifier.height(8.dp))
 
-                    val progress = if (status.quotaMb > 0)
-                        (status.usedMb / status.quotaMb).toFloat().coerceIn(0f, 1f)
+                    val progress = if (status.quotaMb > 0uL)
+                        (status.usedMb / status.quotaMb.toDouble()).toFloat().coerceIn(0f, 1f)
                     else 0f
                     LinearProgressIndicator(
                         progress = { progress },
