@@ -448,6 +448,18 @@ enum Commands {
         /// Print the report as JSON.
         #[arg(long)]
         json: bool,
+        /// Try every path one by one (DNS, TCP, TLS, UDP/QUIC, relay, local
+        /// network) and say which ones work on this network, then suggest
+        /// settings. Only ordinary connection attempts, under 40 seconds.
+        #[arg(long)]
+        matrix: bool,
+        /// With --matrix: also test this endpoint (wss://host[:port][/path]).
+        /// Repeat for several.
+        #[arg(long, value_name = "URL", requires = "matrix")]
+        probe: Vec<String>,
+        /// Write the report to this file instead of the screen.
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
     },
 
     /// Trusted contacts: register the other person once, then `miasma push`.
@@ -729,8 +741,18 @@ async fn main() -> Result<()> {
             store_dir,
         } => cmd_redundancy_bench(size_mib, &preset, store_dir.as_deref()),
 
-        Commands::Netcheck { timeout_secs, json } => {
-            cmd_netcheck(&data_dir, timeout_secs, json).await
+        Commands::Netcheck {
+            timeout_secs,
+            json,
+            matrix,
+            probe,
+            out,
+        } => {
+            if matrix {
+                cmd_netcheck_matrix(&data_dir, json, &probe, out.as_deref()).await
+            } else {
+                cmd_netcheck(&data_dir, timeout_secs, json, out.as_deref()).await
+            }
         }
 
         Commands::Contact { action } => push_cmd::run_contact(&data_dir, action).await,
@@ -3366,7 +3388,12 @@ async fn cmd_transfer_remove(
 ///
 /// Exit 0 on session success (or data-phase error → connection itself worked).
 /// Exit 1 on session failure.
-async fn cmd_netcheck(data_dir: &std::path::Path, timeout_secs: u64, json: bool) -> Result<()> {
+async fn cmd_netcheck(
+    data_dir: &std::path::Path,
+    timeout_secs: u64,
+    json: bool,
+    out: Option<&std::path::Path>,
+) -> Result<()> {
     use miasma_core::transport::{iroh_direct::IrohSettings, netcheck::run_netcheck};
     let config = NodeConfig::load(data_dir).context("cannot load config")?;
     let settings = IrohSettings::from_config(&config.transport);
@@ -3376,10 +3403,59 @@ async fn cmd_netcheck(data_dir: &std::path::Path, timeout_secs: u64, json: bool)
     )
     .await
     .context("netcheck failed")?;
-    if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+    let text = if json {
+        format!(
+            "{}
+",
+            serde_json::to_string_pretty(&report)?
+        )
     } else {
-        print!("{}", i18n::format_netcheck(&report, i18n::lang()));
+        i18n::format_netcheck(&report, i18n::lang())
+    };
+    emit_report(&text, out)
+}
+
+/// `miasma netcheck --matrix`: every path, one row each, then suggestions.
+async fn cmd_netcheck_matrix(
+    data_dir: &std::path::Path,
+    json: bool,
+    probes: &[String],
+    out: Option<&std::path::Path>,
+) -> Result<()> {
+    use miasma_core::transport::{
+        iroh_direct::IrohSettings,
+        reach::{run_matrix, MatrixOptions, UserProbe},
+        reach_net::SystemNet,
+    };
+    let user = probes
+        .iter()
+        .map(|p| UserProbe::parse(p).map_err(|e| anyhow::anyhow!("--probe: {e}")))
+        .collect::<Result<Vec<_>>>()?;
+    let config = NodeConfig::load(data_dir).context("cannot load config")?;
+    let settings = IrohSettings::from_config(&config.transport);
+    let opts = MatrixOptions::from_settings(&settings, user);
+    let report = run_matrix(&SystemNet::new(settings), &opts).await;
+    let text = if json {
+        format!(
+            "{}
+",
+            serde_json::to_string_pretty(&report)?
+        )
+    } else {
+        i18n::format_matrix(&report, i18n::lang())
+    };
+    emit_report(&text, out)
+}
+
+/// Print a report, or write it to `out` and say where.
+fn emit_report(text: &str, out: Option<&std::path::Path>) -> Result<()> {
+    match out {
+        Some(path) => {
+            std::fs::write(path, text)
+                .with_context(|| format!("cannot write {}", path.display()))?;
+            eprintln!("{}", i18n::report_written(path, i18n::lang()));
+        }
+        None => print!("{text}"),
     }
     Ok(())
 }

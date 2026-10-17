@@ -1117,6 +1117,359 @@ pub fn format_netcheck(r: &miasma_core::transport::netcheck::NetcheckReport, lan
     o
 }
 
+// ─── `miasma netcheck --matrix` ──────────────────────────────────────────────
+
+/// The label of a probe group (the "path" column).
+pub fn matrix_group_text(g: miasma_core::transport::reach::Group, lang: Lang) -> &'static str {
+    use miasma_core::transport::reach::Group;
+    let ja = lang == Lang::Ja;
+    match (g, ja) {
+        (Group::Dns, false) => "DNS",
+        (Group::Dns, true) => "名前解決",
+        (Group::Tcp, _) => "TCP",
+        (Group::Tls, _) => "TLS",
+        (Group::Sni, _) => "SNI",
+        (Group::Udp, _) => "UDP",
+        (Group::Quic, _) => "QUIC",
+        (Group::Relay, false) => "Relay",
+        (Group::Relay, true) => "中継",
+        (Group::Lan, _) => "LAN",
+    }
+}
+
+/// The label of a probe role (the "for" column).
+pub fn matrix_role_text(r: miasma_core::transport::reach::Role, lang: Lang) -> &'static str {
+    use miasma_core::transport::reach::Role;
+    let ja = lang == Lang::Ja;
+    match (r, ja) {
+        (Role::Relay, false) => "relay",
+        (Role::Relay, true) => "中継",
+        (Role::Discovery, false) => "discovery",
+        (Role::Discovery, true) => "探索",
+        (Role::Tunnel, false) => "tunnel",
+        (Role::Tunnel, true) => "トンネル",
+        (Role::Neutral, false) => "control",
+        (Role::Neutral, true) => "対照",
+        (Role::Custom, _) => "--probe",
+        (Role::Local, false) => "this computer",
+        (Role::Local, true) => "この端末",
+    }
+}
+
+/// What a classified outcome means, in words.
+pub fn matrix_outcome_text(o: miasma_core::transport::reach::Outcome, lang: Lang) -> &'static str {
+    use miasma_core::transport::reach::Outcome as O;
+    let (en, jp) = match o {
+        O::Ok => ("works", "通る"),
+        O::Nxdomain => (
+            "the system resolver says the name does not exist (NXDOMAIN)",
+            "システムの名前解決が「名前が存在しない」と返した(NXDOMAIN)",
+        ),
+        O::Timeout => ("no answer in time", "時間内に応答がない"),
+        O::AnswerDiffers => (
+            "the answer differs from the public resolvers' (possible tampering, or a host that answers by location)",
+            "公開リゾルバーの答えと食い違う(改変の可能性。場所ごとに答えを変えるホストの場合もある)",
+        ),
+        O::UdpDnsBlocked => (
+            "system DNS works; UDP DNS to public resolvers gets no answer",
+            "システムの名前解決は通る。公開リゾルバーへの UDP DNS は応答がない",
+        ),
+        O::Refused => ("connection refused", "接続を拒否された"),
+        O::Reset => ("connection reset", "接続がリセットされた"),
+        O::Unreachable => (
+            "no route to the network or host",
+            "ネットワークまたはホストへの経路がない",
+        ),
+        O::ResetInHandshake => (
+            "connection cut during the TLS / upgrade handshake",
+            "TLS / アップグレードのハンドシェイク中に接続が切られた",
+        ),
+        O::NonPublicCa => (
+            "certificate comes from a CA that is not a public one",
+            "証明書が公開 CA ではない CA から出ている",
+        ),
+        O::CertUntrusted => (
+            "certificate refused (public issuer, but not valid for this name)",
+            "証明書が受け入れられない(公開 CA の発行だが、この名前に対して有効でない)",
+        ),
+        O::SniDiffers => (
+            "the real and a neutral server name are treated differently",
+            "本来のサーバー名と中立な名前で扱いが違う",
+        ),
+        O::UdpBlocked => ("UDP does not get out", "UDP が外に出ない"),
+        O::Failed => ("failed", "失敗"),
+        O::Skipped => (
+            "not tried (an earlier step shows it cannot work)",
+            "未実施(前の段階で通らないと分かったため)",
+        ),
+    };
+    if lang == Lang::Ja {
+        jp
+    } else {
+        en
+    }
+}
+
+/// One suggestion. Each says what was observed; none promises a path works.
+pub fn matrix_advice_text(
+    c: miasma_core::transport::reach::AdviceCode,
+    lang: Lang,
+) -> &'static str {
+    use miasma_core::transport::reach::AdviceCode as A;
+    let (en, jp) = match c {
+        A::RelayObserved => (
+            "The relay servers were reached from here, so the current setting (transport.iroh_mode) was observed to work.",
+            "この場所から中継サーバーに届きました。現在の設定(transport.iroh_mode)で通ることが確認できました。",
+        ),
+        A::DirectUdpObserved => (
+            "UDP and QUIC to a relay worked, so a direct path between two computers may form. No setting is needed for that.",
+            "中継サーバーへの UDP と QUIC が通りました。2 台の間に直接の経路ができる可能性があります。そのための設定は要りません。",
+        ),
+        A::UdpNotObserved => (
+            "UDP / QUIC was not observed to work. Transfers can then only use the relay, which is slower.",
+            "UDP / QUIC は通りませんでした。転送は中継サーバー経由だけになり、遅くなります。",
+        ),
+        A::TlsInspectedTrusted => (
+            "The relay's certificate comes from a CA that is not a public one (this network re-signs HTTPS), and this computer trusts it.",
+            "中継サーバーの証明書は公開 CA ではない CA から出ています(このネットワークは HTTPS を再署名しています)。このコンピューターはその CA を信頼しています。",
+        ),
+        A::TlsInspectedUntrusted => (
+            "The relay's certificate comes from a CA that is not a public one and this computer does not trust it. If you trust that CA, add it to the operating system's certificate store, or put it in a file and set transport.iroh_extra_ca_pem.",
+            "中継サーバーの証明書が公開 CA ではない CA から出ていて、このコンピューターはそれを信頼していません。その CA を信頼できるなら、OS の証明書ストアに追加するか、ファイルにして transport.iroh_extra_ca_pem に指定してください。",
+        ),
+        A::HandshakeCut => (
+            "The relay hosts accept TCP connections but the TLS handshake does not complete. Other paths: a relay you run yourself (transport.iroh_mode = custom with transport.iroh_relay_urls), or a tunnel. See \"Restricted networks\" in docs/runbook-local-p2p.md.",
+            "中継サーバーの TCP 接続は受け付けられますが、TLS ハンドシェイクが完了しません。ほかの経路として、自分で動かす中継サーバー(transport.iroh_mode = custom と transport.iroh_relay_urls)、またはトンネルがあります。docs/runbook-local-p2p.md の「Restricted networks」を参照してください。",
+        ),
+        A::DnsProblem => (
+            "The relay host names did not resolve as expected here. A relay you run yourself (transport.iroh_relay_urls) does not depend on n0's names; the DNS setting of this network may also be worth checking.",
+            "この場所では中継サーバーの名前が期待どおりに引けませんでした。自分で動かす中継サーバー(transport.iroh_relay_urls)なら n0 の名前に頼りません。このネットワークの DNS 設定の確認も有効かもしれません。",
+        ),
+        A::DiscoveryNotObserved => (
+            "n0's discovery service was not reached. With transport.iroh_discovery = false the daemon does not use it; a receiver then reaches senders only through transport.iroh_relay_urls.",
+            "n0 の探索サービスに届きませんでした。transport.iroh_discovery = false にすると使わなくなります。その場合、受け取る側は transport.iroh_relay_urls を通してだけ送信者に届きます。",
+        ),
+        A::LanObserved => (
+            "Local-network discovery (mDNS) worked: computers on this network can find each other with transport.iroh_lan_discovery = true.",
+            "同じネットワーク内の探索(mDNS)が動きました。transport.iroh_lan_discovery = true で、同じネットワークの端末どうしが見つけ合えます。",
+        ),
+        A::LanNotObserved => (
+            "Local-network discovery (mDNS) did not work here, so two computers on this network may not find each other that way.",
+            "同じネットワーク内の探索(mDNS)はここでは動きませんでした。この方法では同じネットワークの端末どうしが見つけ合えない可能性があります。",
+        ),
+        A::TunnelObserved => (
+            "api.trycloudflare.com was reached, so `miasma tunnel` and --via wss://… were observed to be reachable from here.",
+            "api.trycloudflare.com に届きました。ここから `miasma tunnel` と --via wss://… の経路に届くことが確認できました。",
+        ),
+        A::TunnelNotObserved => (
+            "api.trycloudflare.com was not reached, so `miasma tunnel` was not observed to work from here.",
+            "api.trycloudflare.com に届きませんでした。ここからは `miasma tunnel` が通ることを確認できませんでした。",
+        ),
+        A::CustomEndpointObserved => (
+            "An endpoint given with --probe answered the WebSocket upgrade.",
+            "--probe で指定したエンドポイントが WebSocket のアップグレードに応答しました。",
+        ),
+        A::CustomEndpointNotObserved => (
+            "An endpoint given with --probe did not answer the WebSocket upgrade (its rows above show where it stopped).",
+            "--probe で指定したエンドポイントは WebSocket のアップグレードに応答しませんでした(どこで止まったかは上の行を参照)。",
+        ),
+        A::NothingObserved => (
+            "No path was observed to work. Check the connection, proxy and VPN. Two computers on the same local network may still reach each other directly.",
+            "通る経路は確認できませんでした。接続、プロキシ、VPN を確認してください。同じネットワーク内の 2 台なら、直接つながる場合があります。",
+        ),
+    };
+    if lang == Lang::Ja {
+        jp
+    } else {
+        en
+    }
+}
+
+/// The text of `miasma netcheck --matrix`: a table, then the suggestions.
+pub fn format_matrix(r: &miasma_core::transport::reach::MatrixReport, lang: Lang) -> String {
+    let ja = lang == Lang::Ja;
+    let mut o = String::new();
+    o.push_str(&if ja {
+        format!(
+            "到達性マトリクス(iroh モード: {}、{:.1} 秒)\n\n",
+            r.iroh_mode,
+            r.elapsed_ms as f64 / 1000.0
+        )
+    } else {
+        format!(
+            "Reachability matrix (iroh mode: {}, {:.1} s)\n\n",
+            r.iroh_mode,
+            r.elapsed_ms as f64 / 1000.0
+        )
+    });
+    for p in &r.probes {
+        let mark = if p.ok { "OK" } else { "NG" };
+        let mut res = matrix_outcome_text(p.outcome, lang).to_owned();
+        if let Some(d) = &p.detail {
+            res.push_str(&format!(" [{d}]"));
+        }
+        let mut nums = Vec::new();
+        if let Some(ms) = p.millis {
+            nums.push(format!("{ms} ms"));
+        }
+        if let Some(ms) = p.rtt_ms {
+            nums.push(format!(
+                "{} {ms} ms",
+                if ja { "往復" } else { "round trip" }
+            ));
+        }
+        if let Some(k) = p.kib_per_s {
+            nums.push(format!("{k} KiB/s"));
+        }
+        let nums = if nums.is_empty() {
+            String::new()
+        } else {
+            format!("  ({})", nums.join(", "))
+        };
+        o.push_str(&format!(
+            "{mark}  {:<6} {:<13} {:<30} {res}{nums}\n",
+            matrix_group_text(p.group, lang),
+            matrix_role_text(p.role, lang),
+            p.target,
+        ));
+    }
+    o.push('\n');
+    o.push_str(if ja {
+        "設定の目安\n"
+    } else {
+        "Suggested configuration\n"
+    });
+    o.push_str(if ja {
+        "(確認できたことだけを書いています。通ると約束するものではありません)\n"
+    } else {
+        "(only what was observed here; none of this promises that a path will work)\n"
+    });
+    for a in &r.advice {
+        o.push_str(&format!("- {}\n", matrix_advice_text(a.code, lang)));
+        if !a.config_keys.is_empty() {
+            o.push_str(&format!(
+                "  {}: {}\n",
+                if ja { "関連する設定" } else { "settings" },
+                a.config_keys.join(", ")
+            ));
+        }
+    }
+    o
+}
+
+/// The line printed on stderr after `--out` wrote a report.
+pub fn report_written(path: &std::path::Path, lang: Lang) -> String {
+    if lang == Lang::Ja {
+        format!("レポートを書き出しました: {}", path.display())
+    } else {
+        format!("Report written to {}", path.display())
+    }
+}
+
+#[cfg(test)]
+mod matrix_tests {
+    use super::*;
+    use miasma_core::transport::reach::{
+        Advice, AdviceCode, Group, MatrixReport, Outcome, ProbeResult, Role,
+    };
+
+    fn has_non_ascii(s: &str) -> bool {
+        s.chars().any(|c| !c.is_ascii())
+    }
+
+    #[test]
+    fn every_matrix_text_exists_in_both_languages() {
+        for o in Outcome::ALL {
+            let (en, jp) = (
+                matrix_outcome_text(o, Lang::En),
+                matrix_outcome_text(o, Lang::Ja),
+            );
+            assert!(!en.is_empty() && !jp.is_empty(), "{o:?}");
+            assert!(!has_non_ascii(en), "{o:?}: English text has non-ASCII");
+            assert!(has_non_ascii(jp), "{o:?}: Japanese text is not Japanese");
+        }
+        for a in AdviceCode::ALL {
+            let (en, jp) = (
+                matrix_advice_text(a, Lang::En),
+                matrix_advice_text(a, Lang::Ja),
+            );
+            assert!(!en.is_empty() && !jp.is_empty(), "{a:?}");
+            assert!(
+                !has_non_ascii(&en.replace('…', "...")),
+                "{a:?}: English text has non-ASCII"
+            );
+            assert!(has_non_ascii(jp), "{a:?}: Japanese text is not Japanese");
+            // Plain sentences, never a promise.
+            for banned in ["will work", "guarantee", "always works"] {
+                assert!(!en.to_lowercase().contains(banned), "{a:?}: {banned}");
+            }
+        }
+        for g in Group::ALL {
+            assert!(!matrix_group_text(g, Lang::En).is_empty());
+            assert!(!matrix_group_text(g, Lang::Ja).is_empty());
+        }
+        for r in Role::ALL {
+            assert!(!matrix_role_text(r, Lang::En).is_empty());
+            assert!(!matrix_role_text(r, Lang::Ja).is_empty());
+        }
+    }
+
+    fn report(probes: Vec<ProbeResult>, advice: Vec<Advice>) -> MatrixReport {
+        MatrixReport {
+            schema: 1,
+            iroh_mode: "n0".into(),
+            elapsed_ms: 2500,
+            probes,
+            advice,
+        }
+    }
+
+    #[test]
+    fn advice_that_names_a_setting_names_it_in_both_languages() {
+        let r = report(
+            vec![],
+            vec![Advice {
+                code: AdviceCode::HandshakeCut,
+                config_keys: vec!["transport.iroh_mode", "transport.iroh_relay_urls"],
+            }],
+        );
+        for lang in [Lang::En, Lang::Ja] {
+            let t = format_matrix(&r, lang);
+            assert!(t.contains("transport.iroh_relay_urls"), "{t}");
+            assert!(t.contains("transport.iroh_mode"), "{t}");
+        }
+    }
+
+    #[test]
+    fn the_table_reads_in_both_languages() {
+        let r = report(
+            vec![ProbeResult {
+                id: "tls:relay:relay.example".into(),
+                group: Group::Tls,
+                role: Role::Relay,
+                target: "relay.example".into(),
+                ok: false,
+                outcome: Outcome::NonPublicCa,
+                millis: Some(87),
+                rtt_ms: Some(40),
+                kib_per_s: Some(512),
+                detail: Some("issuer=Test Inspection CA; trusted=false".into()),
+            }],
+            vec![],
+        );
+        let en = format_matrix(&r, Lang::En);
+        assert!(en.contains("NG  TLS"), "{en}");
+        assert!(en.contains("relay.example"));
+        assert!(en.contains("Test Inspection CA"));
+        assert!(en.contains("87 ms"));
+        assert!(en.contains("512 KiB/s"));
+        assert!(en.contains("Suggested configuration"));
+        let jp = format_matrix(&r, Lang::Ja);
+        assert!(jp.contains("設定の目安"), "{jp}");
+        assert!(jp.contains("公開 CA ではない CA"));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
