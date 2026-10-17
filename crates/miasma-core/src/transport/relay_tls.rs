@@ -101,14 +101,8 @@ pub fn issuer_name(der: &[u8]) -> Option<String> {
     Some(name)
 }
 
-/// Handshake with `host:port` using `tls` (what the endpoint trusts) and report
-/// the certificate. `Err` when nothing was presented (no TCP, no TLS).
-pub async fn probe(
-    host: &str,
-    port: u16,
-    tls: &CaTlsConfig,
-    limit: Duration,
-) -> Result<RelayCert, String> {
+/// The client config that records the certificate, and the recorder.
+fn recording_config(tls: &CaTlsConfig) -> Result<(Arc<Recorder>, rustls::ClientConfig), String> {
     let provider: Arc<CryptoProvider> = Arc::new(rustls::crypto::ring::default_provider());
     let inner = tls
         .server_cert_verifier(provider.clone())
@@ -127,6 +121,78 @@ pub async fn probe(
         .dangerous()
         .with_custom_certificate_verifier(rec.clone())
         .with_no_client_auth();
+    Ok((rec, cfg))
+}
+
+/// How a TLS handshake to a known address ended (see [`handshake`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HandshakeEnd {
+    /// The server presented a certificate (accepted or not).
+    Certificate(RelayCert),
+    /// The connection was reset, aborted or closed before any certificate.
+    Reset,
+    /// Nothing came back in time.
+    Timeout,
+    /// Any other failure (the text is for the person reading the report).
+    Other(String),
+}
+
+/// One TLS handshake to the address `addr` with the server name `sni`, nothing
+/// sent afterwards. Unlike [`probe`] the address is given, so two server names
+/// can be tried against the same address, and the way a failure ends is kept
+/// (reset or silence) instead of one error text.
+pub async fn handshake(
+    addr: std::net::SocketAddr,
+    sni: &str,
+    tls: &CaTlsConfig,
+    limit: Duration,
+) -> HandshakeEnd {
+    let (rec, cfg) = match recording_config(tls) {
+        Ok(v) => v,
+        Err(e) => return HandshakeEnd::Other(e),
+    };
+    let Ok(name) = ServerName::try_from(sni.to_owned()) else {
+        return HandshakeEnd::Other("the server name is not valid".into());
+    };
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(cfg));
+    let attempt = async {
+        let tcp = tokio::net::TcpStream::connect(addr).await?;
+        connector.connect(name, tcp).await.map(|_| ())
+    };
+    let result = tokio::time::timeout(limit, attempt).await;
+    let seen = rec.seen.lock().unwrap().take();
+    if let Some((der, trusted, public_ca)) = seen {
+        return HandshakeEnd::Certificate(RelayCert {
+            issuer: issuer_name(&der).unwrap_or_default(),
+            public_ca,
+            trusted,
+        });
+    }
+    match result {
+        Err(_) => HandshakeEnd::Timeout,
+        Ok(Ok(())) => HandshakeEnd::Other("the handshake ended without a certificate".into()),
+        Ok(Err(e)) => {
+            use std::io::ErrorKind as K;
+            match e.kind() {
+                K::ConnectionReset | K::ConnectionAborted | K::UnexpectedEof | K::BrokenPipe => {
+                    HandshakeEnd::Reset
+                }
+                K::TimedOut => HandshakeEnd::Timeout,
+                _ => HandshakeEnd::Other(e.to_string()),
+            }
+        }
+    }
+}
+
+/// Handshake with `host:port` using `tls` (what the endpoint trusts) and report
+/// the certificate. `Err` when nothing was presented (no TCP, no TLS).
+pub async fn probe(
+    host: &str,
+    port: u16,
+    tls: &CaTlsConfig,
+    limit: Duration,
+) -> Result<RelayCert, String> {
+    let (rec, cfg) = recording_config(tls)?;
     let name = ServerName::try_from(host.to_owned()).map_err(|e| e.to_string())?;
     let connector = tokio_rustls::TlsConnector::from(Arc::new(cfg));
     let attempt = async {
