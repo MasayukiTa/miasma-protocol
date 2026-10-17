@@ -13,8 +13,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
-import uniffi.miasma_ffi.*
-import dev.miasma.uniffi.getDaemonHttpPort
+import dev.miasma.uniffi.*
 
 /**
  * WebView-hosted Miasma web UI with a JavaScript bridge to native FFI.
