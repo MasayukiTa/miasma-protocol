@@ -194,6 +194,13 @@ pub(crate) mod inventory {
             names: |l| vec![locale::strings(l).status_storage],
         },
         Entry {
+            file: "group_ui.rs",
+            func: "group_row",
+            role: Role::Named,
+            // "<group name>, <n> members", plus unread count and preview built by the caller.
+            names: |l| vec![locale::group_strings(l).a11y_row],
+        },
+        Entry {
             file: "speed.rs",
             func: "paint_spark",
             // The sparkline repeats the speed that the text line beside it states.

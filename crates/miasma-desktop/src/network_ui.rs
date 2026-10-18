@@ -487,7 +487,7 @@ impl NetworkUi {
                     let elapsed = started.elapsed();
                     let fraction =
                         (elapsed.as_secs_f32() / TOTAL_BUDGET.as_secs_f32()).clamp(0.0, 0.97);
-                    kit::progress(ui, fraction, false);
+                    kit::progress(ui, s.check_button, fraction, false);
                     kit::hint(
                         ui,
                         &s.check_running
