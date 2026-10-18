@@ -1687,7 +1687,7 @@ impl ContactsUi {
             });
             if self.show_qr {
                 ui.add_space(8.0);
-                if !crate::transfers::draw_qr(ui, &qr_payload(&code), 240.0) {
+                if !crate::transfers::draw_qr(ui, &qr_payload(&code), 240.0, c.qr_note) {
                     ui.label(egui::RichText::new(c.qr_too_long).color(pal().danger));
                 }
                 ui.add_space(2.0);
@@ -2062,6 +2062,12 @@ impl ContactsUi {
         let Some((id, label)) = self.remove_target.clone() else {
             return;
         };
+        crate::a11y::dialog_enter(ctx, "contact_remove");
+        if crate::a11y::esc_pressed(ctx) {
+            self.remove_target = None;
+            crate::a11y::dialog_leave(ctx, "contact_remove");
+            return;
+        }
         egui::Window::new(c.remove_title)
             .collapsible(false)
             .resizable(false)
@@ -2086,9 +2092,13 @@ impl ContactsUi {
                         self.contacts.retain(|x| x.id != id);
                         self.edits.remove(&id);
                         self.remove_target = None;
+                        crate::a11y::dialog_leave(ui.ctx(), "contact_remove");
                     }
-                    if ui.button(c.cancel).clicked() {
+                    let cancel = ui.button(c.cancel);
+                    crate::a11y::dialog_focus_safe_button(ui.ctx(), "contact_remove", &cancel);
+                    if cancel.clicked() {
                         self.remove_target = None;
+                        crate::a11y::dialog_leave(ui.ctx(), "contact_remove");
                     }
                 });
             });
@@ -2159,8 +2169,15 @@ impl ContactsUi {
         inner_frame().show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal_top(|ui| {
-                let (rect, _) =
+                let (rect, arrow) =
                     ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
+                // The arrow is drawn with lines; say which way the file goes.
+                arrow.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Label,
+                        if r.outbound { c.dir_out } else { c.dir_in },
+                    )
+                });
                 crate::transfers::paint_arrow(ui.painter(), rect.center(), r.outbound, pal().muted);
                 let name = ui.add(
                     egui::Label::new(egui::RichText::new(shorten_name(&r.name, 40)).strong())

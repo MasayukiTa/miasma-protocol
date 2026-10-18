@@ -977,8 +977,12 @@ impl TransfersUi {
                             });
                             if self.show_qr {
                                 ui.add_space(kit::SP_1);
-                                if draw_qr(ui, &miasma_core::transfer::qr_payload(share_id), 260.0)
-                                {
+                                if draw_qr(
+                                    ui,
+                                    &miasma_core::transfer::qr_payload(share_id),
+                                    260.0,
+                                    t.qr_note,
+                                ) {
                                     kit::hint(ui, t.qr_note);
                                 } else {
                                     kit::notice(ui, Level::Error, t.qr_failed);
@@ -1135,6 +1139,13 @@ impl TransfersUi {
         // The outer rect leaves room for the resume marker to stick out above and below.
         let (outer, resp) =
             ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), egui::Sense::hover());
+        resp.widget_info(|| {
+            crate::a11y::segments_info(
+                t.segments_label,
+                job.segments_done as u64,
+                job.segments_total as u64,
+            )
+        });
         let painter = ui.painter_at(outer);
         let rect = outer.shrink2(egui::vec2(0.0, 3.0));
         painter.rect_filled(rect, 3.0, p.border);
@@ -1944,7 +1955,7 @@ fn fit_text(painter: &egui::Painter, text: &str, font: &egui::FontId, max_w: f32
 
 /// Draw `text` as a QR code: dark modules on a white quiet zone whatever the theme, so it scans.
 /// Returns false if the text cannot be encoded.
-pub(crate) fn draw_qr(ui: &mut egui::Ui, text: &str, side: f32) -> bool {
+pub(crate) fn draw_qr(ui: &mut egui::Ui, text: &str, side: f32, name: &str) -> bool {
     use qrcode::{Color, QrCode};
     let Ok(code) = QrCode::new(text.as_bytes()) else {
         return false;
@@ -1956,7 +1967,9 @@ pub(crate) fn draw_qr(ui: &mut egui::Ui, text: &str, side: f32) -> bool {
     // Whole pixels per module keep the edges sharp.
     let module = (side / cells).floor().max(1.0);
     let size = module * cells;
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    // An image to a screen reader: the caller passes the sentence that says what it is for.
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, name));
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, egui::Color32::WHITE);
     for y in 0..n {
@@ -2003,6 +2016,20 @@ fn job_row(
         egui::vec2(ui.available_width(), ROW_H),
         egui::Sense::click(),
     );
+    // The row is painted, not built from labels: name it for screen readers.
+    resp.widget_info(|| {
+        let label = crate::a11y::transfer_row_label(
+            if job.kind == TransferKind::Send {
+                t.send
+            } else {
+                t.receive
+            },
+            &title_of(job),
+            state_label(t, job.state),
+            &format_permille(permille(job.bytes_done, job.bytes_total, job.state)),
+        );
+        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, selected, label)
+    });
     let painter = ui.painter_at(rect);
     if selected {
         painter.rect_filled(rect, 6.0, p.selected);
@@ -2016,6 +2043,9 @@ fn job_row(
             rect.bottom() - 0.5,
             egui::Stroke::new(1.0, p.border),
         );
+    }
+    if resp.has_focus() {
+        kit::focus_ring(&painter, rect.shrink(1.0), 6.0);
     }
 
     let chip = chip_for(job.state);

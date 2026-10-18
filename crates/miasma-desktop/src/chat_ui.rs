@@ -1375,8 +1375,10 @@ impl ChatUi {
         if !self.picker_open {
             return;
         }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        crate::a11y::dialog_enter(ctx, "chat_picker");
+        if crate::a11y::esc_pressed(ctx) {
             self.picker_open = false;
+            crate::a11y::dialog_leave(ctx, "chat_picker");
             return;
         }
         let mut chosen: Option<(String, String, String)> = None;
@@ -1412,15 +1414,19 @@ impl ChatUi {
                         }
                     });
                 ui.add_space(kit::SP_1);
-                if ui.add(kit::secondary_button(c.pick_close)).clicked() {
+                let close_button = ui.add(kit::secondary_button(c.pick_close));
+                crate::a11y::dialog_focus_safe_button(ui.ctx(), "chat_picker", &close_button);
+                if close_button.clicked() {
                     close = true;
                 }
             });
         if let Some((id, endpoint, label)) = chosen {
             self.picker_open = false;
+            crate::a11y::dialog_leave(ctx, "chat_picker");
             self.open_conversation(&id, &endpoint, &label);
         } else if close {
             self.picker_open = false;
+            crate::a11y::dialog_leave(ctx, "chat_picker");
         }
     }
 }
@@ -1481,7 +1487,7 @@ fn conversation_row(
         painter.rect_filled(rect, 6.0, p.text.gamma_multiply(0.06));
     }
     if resp.has_focus() {
-        painter.rect_stroke(rect, 6.0, Stroke::new(1.5, p.accent));
+        kit::focus_ring(painter, rect.shrink(1.0), 6.0);
     }
     painter.hline(
         rect.x_range(),
