@@ -388,7 +388,7 @@ impl MiasmaApp {
         data_dir: std::path::PathBuf,
         intent: LaunchIntent,
     ) -> Self {
-        crate::fonts::install(&cc.egui_ctx);
+        crate::fonts::install(&cc.egui_ctx, locale);
         let dark = theme::resolve_dark(theme_mode, cc.integration_info.system_theme);
         kit::apply_theme(&cc.egui_ctx, dark);
         let worker = WorkerHandle::spawn(data_dir.clone(), cc.egui_ctx.clone());
@@ -2144,6 +2144,8 @@ impl MiasmaApp {
                 let options = Locale::ALL.map(|l| (l, l.display_name()));
                 if kit::segmented(ui, &mut lang, &options) {
                     self.locale = lang;
+                    // Read the fonts the new language needs (the others stay lazy).
+                    crate::fonts::set_locale(ui.ctx(), lang);
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Title(
                         crate::buildinfo::window_title(lang),
                     ));
@@ -2806,6 +2808,12 @@ impl MiasmaApp {
                     d.push_str(&format!("    {f}\n"));
                 }
             }
+            if !detection.deferred.is_empty() {
+                d.push_str("  Available, read when a character needs them:\n");
+                for f in &detection.deferred {
+                    d.push_str(&format!("    {f}\n"));
+                }
+            }
         }
 
         d.push_str("\n(end of report)\n");
@@ -3321,6 +3329,10 @@ impl eframe::App for MiasmaApp {
                         });
                     });
             });
+
+        // The page is drawn: a CJK character on it that no loaded font can draw reads the next
+        // font (dialogs, drawn below, are looked at in the following frame).
+        crate::fonts::ensure_glyphs(ctx);
 
         self.legacy_logs_notice(ctx);
 
