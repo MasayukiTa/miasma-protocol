@@ -241,11 +241,7 @@ pub fn load_journal(data_dir: &Path, install_dir: &Path) -> Result<Option<Journa
 /// deletes whatever it names. So it is not trusted: ids and program names must
 /// be plain words, the download folder must lie inside `update/`, and the
 /// install folder must be exactly the one the running program would update.
-fn validate_journal(
-    j: &Journal,
-    data_dir: &Path,
-    install_dir: &Path,
-) -> Result<(), UpdateError> {
+fn validate_journal(j: &Journal, data_dir: &Path, install_dir: &Path) -> Result<(), UpdateError> {
     let bad = |what: &str| Err(UpdateError::Journal(format!("{what} is not valid")));
     let plain = |s: &str| {
         !s.is_empty()
@@ -1530,7 +1526,10 @@ mod tests {
         save_journal(&f.data, &j).unwrap();
         fs::remove_file(j.archive.as_ref().unwrap()).unwrap();
         let (p, a) = (FileProber::new(), FixedActivity(Busy::Idle));
-        assert_eq!(resume(&env(&f, &p, &a), &f.install).unwrap(), Resumed::Nothing);
+        assert_eq!(
+            resume(&env(&f, &p, &a), &f.install).unwrap(),
+            Resumed::Nothing
+        );
         assert!(load_journal(&f.data, &f.install).unwrap().is_none());
     }
 
@@ -1538,7 +1537,10 @@ mod tests {
     fn with_no_journal_resume_does_nothing() {
         let f = fixture();
         let (p, a) = (FileProber::new(), FixedActivity(Busy::Idle));
-        assert_eq!(resume(&env(&f, &p, &a), &f.install).unwrap(), Resumed::Nothing);
+        assert_eq!(
+            resume(&env(&f, &p, &a), &f.install).unwrap(),
+            Resumed::Nothing
+        );
     }
 
     // ── macOS bundle ──
@@ -1769,7 +1771,10 @@ mod tests {
         for j in cases {
             save_journal(&f.data, &j).unwrap();
             assert!(
-                matches!(load_journal(&f.data, &f.install), Err(UpdateError::Journal(_))),
+                matches!(
+                    load_journal(&f.data, &f.install),
+                    Err(UpdateError::Journal(_))
+                ),
                 "{j:?}"
             );
             assert!(matches!(
