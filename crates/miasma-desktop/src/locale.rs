@@ -3163,6 +3163,95 @@ static UP_ZH_CN: UpdateStrings = UpdateStrings {
     config_save_failed: "无法保存该设置。请重试。",
 };
 
+// ─── Transfer speed (rate text, path badge, settings) ───────────────────────
+
+/// Declares `SpeedStrings` and a field listing for the completeness test from one field list.
+macro_rules! speed_strings {
+    ($($f:ident),* $(,)?) => {
+        /// Strings of the live speed display in the transfer rows and its two settings.
+        /// `{speed}`, `{secs}`, `{n}`, `{ms}` holes are filled with `transfers::fill`.
+        pub struct SpeedStrings { $(pub $f: &'static str),* }
+        impl SpeedStrings {
+            /// Every field with its name, for the completeness test.
+            #[cfg(test)]
+            fn all(&self) -> Vec<(&'static str, &'static str)> {
+                vec![$((stringify!($f), self.$f)),*]
+            }
+        }
+    };
+}
+
+speed_strings! {
+    path_direct, path_relay, path_mixed, reason_udp, reason_nat, avg, total, rtt, stalled,
+    settings_unit, unit_bits, unit_bytes, settings_shown, shown_both, shown_bits, shown_bytes,
+}
+
+pub fn speed_strings(locale: Locale) -> &'static SpeedStrings {
+    match locale {
+        Locale::En => &SP_EN,
+        Locale::Ja => &SP_JA,
+        Locale::ZhCn => &SP_ZH_CN,
+    }
+}
+
+static SP_EN: SpeedStrings = SpeedStrings {
+    path_direct: "Direct",
+    path_relay: "Via relay (slower)",
+    path_mixed: "Direct + relay",
+    reason_udp: "Your network blocks direct connections (no UDP gets out).",
+    reason_nat:
+        "Your router changes the address per destination, so a direct connection cannot be set up.",
+    avg: "avg {speed}, {secs} s",
+    total: "Now: {speed} ({n})",
+    rtt: "RTT {ms} ms",
+    stalled: "stalled {secs} s",
+    settings_unit: "Speed shown first in",
+    unit_bits: "Bits (Mbps)",
+    unit_bytes: "Bytes (MB/s, MiB/s)",
+    settings_shown: "Speed units",
+    shown_both: "Both",
+    shown_bits: "Bits only",
+    shown_bytes: "Bytes only",
+};
+
+static SP_JA: SpeedStrings = SpeedStrings {
+    path_direct: "直接接続",
+    path_relay: "リレー経由(遅い)",
+    path_mixed: "直接+リレー",
+    reason_udp: "お使いのネットワークが直接接続を遮断しています(UDP が外に出ていません)。",
+    reason_nat: "ルーターが宛先ごとにアドレスを変えるため、直接接続を確立できません。",
+    avg: "平均 {speed}、{secs} 秒",
+    total: "現在: {speed}({n} 件)",
+    rtt: "RTT {ms} ms",
+    stalled: "停止 {secs} 秒",
+    settings_unit: "速度の主表示",
+    unit_bits: "ビット(Mbps)",
+    unit_bytes: "バイト(MB/s、MiB/s)",
+    settings_shown: "速度の単位",
+    shown_both: "両方",
+    shown_bits: "ビットのみ",
+    shown_bytes: "バイトのみ",
+};
+
+static SP_ZH_CN: SpeedStrings = SpeedStrings {
+    path_direct: "直连",
+    path_relay: "经中继(较慢)",
+    path_mixed: "直连+中继",
+    reason_udp: "你的网络阻止了直接连接(UDP 无法发出)。",
+    reason_nat: "你的路由器按目标改变地址，无法建立直接连接。",
+    avg: "平均 {speed}，{secs} 秒",
+    total: "当前: {speed}({n} 个)",
+    rtt: "RTT {ms} ms",
+    stalled: "停滞 {secs} 秒",
+    settings_unit: "速度优先显示",
+    unit_bits: "比特(Mbps)",
+    unit_bytes: "字节(MB/s、MiB/s)",
+    settings_shown: "速度单位",
+    shown_both: "两者",
+    shown_bits: "仅比特",
+    shown_bytes: "仅字节",
+};
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -3201,6 +3290,27 @@ mod tests {
     }
 
     use super::*;
+    #[test]
+    fn every_speed_string_exists_in_every_locale() {
+        for lang in Locale::ALL {
+            for (name, value) in speed_strings(lang).all() {
+                assert!(!value.trim().is_empty(), "{lang:?} speed.{name} is empty");
+            }
+            let s = speed_strings(lang);
+            assert!(
+                s.avg.contains("{speed}") && s.avg.contains("{secs}"),
+                "{lang:?}"
+            );
+            assert!(
+                s.total.contains("{speed}") && s.total.contains("{n}"),
+                "{lang:?}"
+            );
+            assert!(
+                s.rtt.contains("{ms}") && s.stalled.contains("{secs}"),
+                "{lang:?}"
+            );
+        }
+    }
 
     #[test]
     fn every_log_string_exists_in_every_locale() {

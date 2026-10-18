@@ -19,6 +19,7 @@ use crate::ux::{self, Answer, RefreshGate};
 use crate::variant::ProductMode;
 use crate::worker::{DaemonState, WorkerCmd, WorkerHandle, WorkerResult};
 use crate::LaunchIntent;
+use miasma_core::push::speed_fmt::{SpeedShown, SpeedUnit};
 
 // Compatibility: `contacts.rs` still imports its drawing helpers from here. They are the kit's
 // own (`ui_kit.rs`); remove this line when contacts.rs imports `ui_kit` directly.
@@ -64,6 +65,8 @@ pub struct MiasmaApp {
     locale: Locale,
     /// User's appearance choice (System / Light / Dark), persisted.
     theme_mode: ThemeMode,
+    /// `ui.speed_unit` / `ui.speed_units_shown`.
+    speed_prefs: crate::speed::SpeedPrefs,
     /// Which palette is currently applied to egui (None until the first frame is styled).
     applied_dark: Option<bool>,
     #[cfg(feature = "ui-tour")]
@@ -407,6 +410,13 @@ impl MiasmaApp {
             mode,
             locale,
             theme_mode,
+            speed_prefs: {
+                let p = crate::variant::DesktopPrefs::load(&data_dir);
+                crate::speed::SpeedPrefs {
+                    unit: p.speed_unit,
+                    shown: p.speed_units_shown,
+                }
+            },
             applied_dark: Some(dark),
             #[cfg(feature = "ui-tour")]
             tour: tour::Tour::from_env(),
@@ -561,6 +571,8 @@ impl MiasmaApp {
             mode: self.mode,
             locale: self.locale,
             theme: self.theme_mode,
+            speed_unit: self.speed_prefs.unit,
+            speed_units_shown: self.speed_prefs.shown,
         };
         prefs.save(&self.data_dir);
     }
@@ -2155,6 +2167,32 @@ impl MiasmaApp {
                     self.save_prefs();
                 }
             });
+            {
+                let sp = crate::speed::speed_strings(self.locale);
+                kit::form_row(ui, sp.settings_unit, None, |ui| {
+                    let mut unit = self.speed_prefs.unit;
+                    let options = [
+                        (SpeedUnit::Bits, sp.unit_bits),
+                        (SpeedUnit::Bytes, sp.unit_bytes),
+                    ];
+                    if kit::segmented(ui, &mut unit, &options) {
+                        self.speed_prefs.unit = unit;
+                        self.save_prefs();
+                    }
+                });
+                kit::form_row(ui, sp.settings_shown, None, |ui| {
+                    let mut shown = self.speed_prefs.shown;
+                    let options = [
+                        (SpeedShown::Both, sp.shown_both),
+                        (SpeedShown::BitsOnly, sp.shown_bits),
+                        (SpeedShown::BytesOnly, sp.shown_bytes),
+                    ];
+                    if kit::segmented(ui, &mut shown, &options) {
+                        self.speed_prefs.shown = shown;
+                        self.save_prefs();
+                    }
+                });
+            }
             ui.add_space(kit::SP_4);
 
             // ── Paths ────────────────────────────────────────────────
@@ -3008,6 +3046,11 @@ impl eframe::App for MiasmaApp {
             let open = self.tab == Tab::Contacts;
             if open {
                 self.contacts.mark_seen();
+            }
+            {
+                let sp = self.contacts.speed_mut();
+                sp.prefs = self.speed_prefs;
+                sp.locale = self.locale;
             }
             self.contacts
                 .tick(open, self.daemon_state == DaemonState::Connected);
