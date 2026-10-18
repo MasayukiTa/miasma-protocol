@@ -217,6 +217,8 @@ fn dot_line(ui: &mut Ui, dot: Color32, text_color: Color32, text: &str) -> Respo
         vec2(DOT_W + galley.size().x, galley.size().y),
         Sense::hover(),
     );
+    // The text is painted, not a Label: give it to screen readers as the widget's name.
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, text));
     if ui.is_rect_visible(rect) {
         let first_line = galley
             .rows
@@ -652,7 +654,12 @@ pub fn segmented<T: Copy + PartialEq>(ui: &mut Ui, current: &mut T, options: &[(
             if selected {
                 button = button.fill(p.selected).stroke(Stroke::new(1.5, p.accent));
             }
-            if ui.add(button).clicked() && !selected {
+            let resp = ui.add(button);
+            // A choice among several: report which one is selected.
+            resp.widget_info(|| {
+                egui::WidgetInfo::selected(egui::WidgetType::RadioButton, selected, *label)
+            });
+            if resp.clicked() && !selected {
                 *current = *value;
                 changed = true;
             }
@@ -698,15 +705,38 @@ pub fn nav_tab(ui: &mut Ui, selected: bool, label: &str) -> Response {
             );
             painter.rect_filled(underline, 1.0, p.accent);
         }
+        if resp.has_focus() {
+            focus_ring(painter, rect.shrink2(vec2(1.0, 3.0)), 6.0);
+        }
     }
     resp
 }
 
+/// Thickness of the keyboard focus ring on hand-painted controls.
+pub const FOCUS_RING_PX: f32 = 2.0;
+
+/// The focus ring colour: the accent, which is held to 4.5:1 on every surface (and so clears the
+/// 3:1 that non-text indicators need).
+pub fn focus_ring_color(p: &Palette) -> Color32 {
+    p.accent
+}
+
+/// Outline a hand-painted control that has keyboard focus. Stock widgets get egui's own focus
+/// look; call this from any control drawn with the painter.
+pub fn focus_ring(painter: &egui::Painter, rect: egui::Rect, rounding: f32) {
+    painter.rect_stroke(
+        rect,
+        rounding,
+        Stroke::new(FOCUS_RING_PX, focus_ring_color(&pal())),
+    );
+}
+
 /// A thin determinate bar across the available width. Neutral; turns to the warning colour when
-/// `warn`.
-pub fn progress(ui: &mut Ui, fraction: f32, warn: bool) {
+/// `warn`. `name` is what a screen reader calls it ("Storage"); `fraction` is its value.
+pub fn progress(ui: &mut Ui, name: &str, fraction: f32, warn: bool) {
     let p = pal();
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 6.0), Sense::hover());
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 6.0), Sense::hover());
+    resp.widget_info(|| crate::a11y::progress_info(name, fraction));
     ui.painter().rect_filled(rect, 3.0, p.border);
     let w = rect.width() * fraction.clamp(0.0, 1.0);
     if w > 0.5 {
