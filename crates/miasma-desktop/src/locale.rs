@@ -2451,6 +2451,10 @@ static CT_ZH_CN: ContactStrings = ContactStrings {
     earlier_hide: "隐藏",
 };
 
+// Group conversations of the Chat area (their own file: `locale/group.rs`).
+mod group;
+pub use group::{group_strings, GroupStrings};
+
 // ─── Chat (one-to-one messages between registered contacts) ─────────────────
 
 /// Declares `ChatStrings` and a field listing for the completeness test from one field list.
