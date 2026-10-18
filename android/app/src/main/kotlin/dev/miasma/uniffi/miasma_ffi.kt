@@ -16,6 +16,11 @@ data class NodeStatusFfi(
     val bootstrapCount: ULong,
 )
 
+data class FileReceiveResultFfi(
+    val outputPath: String,
+    val bytesWritten: ULong,
+)
+
 data class EmbeddedDaemonStatus(
     val httpPort: UShort,
     val peerId: String,
@@ -62,6 +67,12 @@ fun dissolveBytes(dataDir: String, data: ByteArray): String = ffiNotLoaded()
 
 @Throws(MiasmaFfiException::class)
 fun retrieveBytes(dataDir: String, midStr: String): ByteArray = ffiNotLoaded()
+
+@Throws(MiasmaFfiException::class)
+fun publishFile(dataDir: String, filePath: String): String = ffiNotLoaded()
+
+@Throws(MiasmaFfiException::class)
+fun retrieveToFile(dataDir: String, midStr: String, outputPath: String): FileReceiveResultFfi = ffiNotLoaded()
 
 @Throws(MiasmaFfiException::class)
 fun getNodeStatus(dataDir: String): NodeStatusFfi = ffiNotLoaded()

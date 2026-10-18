@@ -295,6 +295,12 @@ grep -q '^package dev\.miasma\.uniffi$' "$GENERATED_BINDING" || \
     fail "Generated Kotlin binding has the wrong package"
 grep -q 'startEmbeddedDaemon' "$GENERATED_BINDING" || \
     fail "Generated bindings are missing startEmbeddedDaemon"
+grep -q 'publishFile' "$GENERATED_BINDING" || \
+    fail "Generated bindings are missing publishFile"
+grep -q 'retrieveToFile' "$GENERATED_BINDING" || \
+    fail "Generated bindings are missing retrieveToFile"
+grep -q 'FileReceiveResultFfi' "$GENERATED_BINDING" || \
+    fail "Generated bindings are missing FileReceiveResultFfi"
 
 echo "[4/5] Building Android application..."
 cd "$ANDROID_DIR"

@@ -8,7 +8,9 @@ import dev.miasma.uniffi.MiasmaFfiException
 import dev.miasma.uniffi.NodeStatusFfi
 import dev.miasma.uniffi.dissolveBytes
 import dev.miasma.uniffi.getNodeStatus
+import dev.miasma.uniffi.publishFile as ffiPublishFile
 import dev.miasma.uniffi.retrieveBytes
+import dev.miasma.uniffi.retrieveToFile as ffiRetrieveToFile
 import dev.miasma.uniffi.distressWipe as ffiDistressWipe
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -107,7 +109,7 @@ class MiasmaViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             _ui.value = _ui.value.copy(isLoading = true, error = null, lastMid = null)
             try {
-                val mid = withContext(Dispatchers.IO) { DirectedApi.publishFile(dataDir, port, filePath) }
+                val mid = withContext(Dispatchers.IO) { ffiPublishFile(dataDir, filePath) }
                 _ui.value = _ui.value.copy(isLoading = false, lastMid = mid)
                 refreshStatus()
                 callback(mid, null)
@@ -154,9 +156,13 @@ class MiasmaViewModel(app: Application) : AndroidViewModel(app) {
         }
         viewModelScope.launch {
             try {
-                val result = withContext(Dispatchers.IO) {
-                    DirectedApi.retrieveMidToFile(dataDir, port, mid, outputPath)
+                val ffiResult = withContext(Dispatchers.IO) {
+                    ffiRetrieveToFile(dataDir, mid, outputPath)
                 }
+                val result = DirectedApi.RetrieveMidToFileResult(
+                    outputPath = ffiResult.outputPath,
+                    bytesWritten = ffiResult.bytesWritten.toLong(),
+                )
                 callback(result, null)
             } catch (e: Exception) {
                 callback(null, e.message ?: "Retrieval failed")

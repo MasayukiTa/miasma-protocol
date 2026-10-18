@@ -35,7 +35,11 @@ use zeroize::Zeroizing;
 
 use miasma_core::{
     config::{NetworkConfig, NodeConfig, StorageConfig},
-    daemon::DaemonServer,
+    daemon::{
+        control_auth,
+        ipc::{daemon_request, ControlRequest, ControlResponse},
+        DaemonServer,
+    },
     directed, dissolve,
     network::{node::MiasmaNode, types::NodeType},
     store::LocalShareStore,
@@ -103,6 +107,15 @@ pub struct NodeStatusFfi {
     pub listen_addr: String,
     /// Number of bootstrap peers in config.
     pub bootstrap_count: u64,
+}
+
+/// Result of a file-path retrieval that kept plaintext out of the FFI byte boundary.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FileReceiveResultFfi {
+    /// Absolute destination path reported by the daemon.
+    pub output_path: String,
+    /// Number of plaintext bytes written after full MID verification.
+    pub bytes_written: u64,
 }
 
 // ─── Error type ───────────────────────────────────────────────────────────────
@@ -311,6 +324,42 @@ fn apply_mobile_limits(
     config
 }
 
+const DEFAULT_DATA_SHARDS: u8 = 10;
+const DEFAULT_TOTAL_SHARDS: u8 = 20;
+
+fn validate_ffi_file_path(
+    value: &str,
+    field: &'static str,
+    require_existing_file: bool,
+) -> Result<PathBuf, MiasmaFfiError> {
+    let path = control_auth::validate_output_path(value).map_err(|e| {
+        tracing::warn!(field, error = %e, "FFI file path rejected");
+        MiasmaFfiError::Other {
+            msg: format!("{field} must be an absolute path without '..'"),
+        }
+    })?;
+    if require_existing_file && !path.is_file() {
+        return Err(MiasmaFfiError::Other {
+            msg: format!("{field} must name an existing file"),
+        });
+    }
+    Ok(path)
+}
+
+fn daemon_call(
+    data_dir: &PathBuf,
+    request: ControlRequest,
+) -> Result<ControlResponse, MiasmaFfiError> {
+    shared_runtime()
+        .block_on(daemon_request(data_dir, request))
+        .map_err(|e| {
+            tracing::warn!("FFI daemon request failed: {e}");
+            MiasmaFfiError::Other {
+                msg: "daemon is not available".into(),
+            }
+        })
+}
+
 // ─── Exported functions ───────────────────────────────────────────────────────
 
 /// Initialise a new Miasma node at `data_dir`.
@@ -427,8 +476,8 @@ pub fn dissolve_bytes(data_dir: String, data: Vec<u8>) -> Result<String, MiasmaF
 
     let (config, store) = open_store(&data_dir)?;
     let params = DissolutionParams {
-        data_shards: 10,
-        total_shards: 20,
+        data_shards: DEFAULT_DATA_SHARDS as usize,
+        total_shards: DEFAULT_TOTAL_SHARDS as usize,
     };
 
     let (mid, shares) = dissolve(&data, params).map_err(MiasmaFfiError::from)?;
@@ -455,8 +504,8 @@ pub fn retrieve_bytes(data_dir: String, mid_str: String) -> Result<Vec<u8>, Mias
 
     let mid = ContentId::from_str(&mid_str).map_err(MiasmaFfiError::from)?;
     let params = DissolutionParams {
-        data_shards: 10,
-        total_shards: 20,
+        data_shards: DEFAULT_DATA_SHARDS as usize,
+        total_shards: DEFAULT_TOTAL_SHARDS as usize,
     };
 
     // Use the shared static runtime instead of creating a new one per call.
@@ -466,6 +515,81 @@ pub fn retrieve_bytes(data_dir: String, mid_str: String) -> Result<Vec<u8>, Mias
     })?;
 
     Ok(plaintext)
+}
+
+/// Publish a local file through the running daemon without copying the file
+/// contents through UniFFI. The daemon streams dissolution segment by segment.
+///
+/// `file_path` must be absolute, contain no `..` component, and already exist.
+/// The embedded daemon must have been started first.
+#[uniffi::export]
+pub fn publish_file(data_dir: String, file_path: String) -> Result<String, MiasmaFfiError> {
+    let data_path = validate_data_dir(&data_dir)?;
+    let file_path = validate_ffi_file_path(&file_path, "file_path", true)?;
+    let response = daemon_call(
+        &data_path,
+        ControlRequest::PublishFile {
+            file_path: file_path.to_string_lossy().into_owned(),
+            data_shards: DEFAULT_DATA_SHARDS,
+            total_shards: DEFAULT_TOTAL_SHARDS,
+        },
+    )?;
+    match response {
+        ControlResponse::Published { mid } => Ok(mid),
+        ControlResponse::Error(message) => {
+            tracing::warn!("daemon publish_file error: {message}");
+            Err(MiasmaFfiError::Other {
+                msg: "file publish failed".into(),
+            })
+        }
+        _ => Err(MiasmaFfiError::Other {
+            msg: "unexpected daemon response".into(),
+        }),
+    }
+}
+
+/// Retrieve a MID through the running daemon and stream verified plaintext
+/// directly to `output_path`, avoiding a whole-file `Vec<u8>` crossing UniFFI.
+///
+/// `output_path` must be absolute and contain no `..` component. The embedded
+/// daemon must have been started first.
+#[uniffi::export]
+pub fn retrieve_to_file(
+    data_dir: String,
+    mid_str: String,
+    output_path: String,
+) -> Result<FileReceiveResultFfi, MiasmaFfiError> {
+    let data_path = validate_data_dir(&data_dir)?;
+    let mid = ContentId::from_str(&mid_str).map_err(MiasmaFfiError::from)?;
+    let output_path = validate_ffi_file_path(&output_path, "output_path", false)?;
+    let requested_path = output_path.to_string_lossy().into_owned();
+    let response = daemon_call(
+        &data_path,
+        ControlRequest::GetToFile {
+            mid: mid.to_string(),
+            data_shards: DEFAULT_DATA_SHARDS,
+            total_shards: DEFAULT_TOTAL_SHARDS,
+            output_path: requested_path,
+        },
+    )?;
+    match response {
+        ControlResponse::RetrievedToFile {
+            output_path,
+            bytes_written,
+        } => Ok(FileReceiveResultFfi {
+            output_path,
+            bytes_written,
+        }),
+        ControlResponse::Error(message) => {
+            tracing::warn!("daemon retrieve_to_file error: {message}");
+            Err(MiasmaFfiError::Other {
+                msg: "file retrieval failed".into(),
+            })
+        }
+        _ => Err(MiasmaFfiError::Other {
+            msg: "unexpected daemon response".into(),
+        }),
+    }
 }
 
 /// Return a snapshot of the node's current status.
@@ -1042,5 +1166,24 @@ mod mobile_config_tests {
             "/ip4/127.0.0.1/udp/9000/quic-v1"
         );
         assert_eq!(updated.transport.wss_port, 9443);
+    }
+
+    #[test]
+    fn ffi_file_path_requires_absolute_non_traversing_path() {
+        let err = validate_ffi_file_path("relative.bin", "output_path", false).unwrap_err();
+        assert!(matches!(err, MiasmaFfiError::Other { .. }));
+
+        let traversal = std::env::temp_dir().join("..").join("escape.bin");
+        let err =
+            validate_ffi_file_path(traversal.to_str().unwrap(), "output_path", false).unwrap_err();
+        assert!(matches!(err, MiasmaFfiError::Other { .. }));
+    }
+
+    #[test]
+    fn ffi_publish_path_requires_existing_file() {
+        let missing =
+            std::env::temp_dir().join(format!("miasma-ffi-missing-{}", std::process::id()));
+        let err = validate_ffi_file_path(missing.to_str().unwrap(), "file_path", true).unwrap_err();
+        assert!(matches!(err, MiasmaFfiError::Other { .. }));
     }
 }
