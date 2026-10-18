@@ -5412,6 +5412,7 @@ dependencies = [
  "bs58",
  "getrandom 0.2.17",
  "js-sys",
+ "miasma-core",
  "rand 0.8.8",
  "reed-solomon-simd",
  "serde",
