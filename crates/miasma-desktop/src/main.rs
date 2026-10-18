@@ -24,6 +24,8 @@ mod chat_ui;
 mod contacts;
 mod errors;
 mod fonts;
+mod group;
+mod group_ui;
 mod link;
 pub mod locale;
 mod open_path;
