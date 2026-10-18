@@ -38,6 +38,22 @@ ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}}"
 export ANDROID_HOME
 export ANDROID_SDK_ROOT="$ANDROID_HOME"
 
+# Recent Windows JDKs implement NIO Pipe with a temporary Unix-domain socket.
+# A long inherited TEMP path can exceed the Windows AF_UNIX path limit and make
+# Gradle fail before it even starts ("Unable to establish loopback connection").
+# Keep the Java temp root intentionally short on Git Bash/MSYS/Cygwin. Override
+# MIASMA_WINDOWS_BUILD_TMP when C: is unavailable.
+case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*)
+        WINDOWS_BUILD_TMP="${MIASMA_WINDOWS_BUILD_TMP:-C:\miasma-tmp}"
+        if command -v cygpath >/dev/null 2>&1; then
+            mkdir -p "$(cygpath -u "$WINDOWS_BUILD_TMP")"
+        fi
+        export TEMP="$WINDOWS_BUILD_TMP"
+        export TMP="$WINDOWS_BUILD_TMP"
+        ;;
+esac
+
 PINNED_NDK="$ANDROID_HOME/ndk/$NDK_VERSION"
 if [ -d "$PINNED_NDK" ]; then
     export ANDROID_NDK_HOME="$PINNED_NDK"
@@ -228,7 +244,18 @@ cargo ndk \
     -o "$JNI_LIBS" \
     build "${CARGO_PROFILE_ARGS[@]}" -p miasma-ffi --lib
 
-LIB_PATH="$PROJECT_DIR/target/aarch64-linux-android/$PROFILE/libmiasma_ffi.so"
+# cargo-ndk may surface cdylib artifacts from transitive dependencies alongside
+# the actual FFI library. They are not DT_NEEDED by libmiasma_ffi.so and only
+# bloat the APK/AAB, so package exactly the public JNI library we own.
+find "$JNI_LIBS" -mindepth 2 -maxdepth 2 -type f -name '*.so' \
+    ! -name 'libmiasma_ffi.so' -delete
+for abi in arm64-v8a x86_64; do
+    [ -f "$JNI_LIBS/$abi/libmiasma_ffi.so" ] || \
+        fail "Missing Rust JNI library for $abi: $JNI_LIBS/$abi/libmiasma_ffi.so"
+done
+
+CARGO_OUTPUT_ROOT="${CARGO_TARGET_DIR:-$PROJECT_DIR/target}"
+LIB_PATH="$CARGO_OUTPUT_ROOT/aarch64-linux-android/$PROFILE/libmiasma_ffi.so"
 [ -f "$LIB_PATH" ] || fail "Expected UniFFI library not found: $LIB_PATH"
 
 echo "[2/5] Checking 16 KiB ELF segment alignment..."
@@ -297,6 +324,16 @@ else
     OUTPUT="$ANDROID_DIR/app/build/outputs/apk/debug/app-debug.apk"
     [ -f "$OUTPUT" ] || fail "Debug APK not found: $OUTPUT"
     echo "  APK: $OUTPUT"
+
+    ZIPALIGN="$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION/zipalign"
+    if [ ! -x "$ZIPALIGN" ] && [ -f "$ZIPALIGN.exe" ]; then
+        ZIPALIGN="$ZIPALIGN.exe"
+    fi
+    [ -x "$ZIPALIGN" ] || [ -f "$ZIPALIGN" ] || \
+        fail "zipalign not found for build-tools $BUILD_TOOLS_VERSION"
+    "$ZIPALIGN" -c -P 16 4 "$OUTPUT" || \
+        fail "APK native libraries are not 16 KiB ZIP aligned"
+    echo "  APK ZIP alignment: 16 KiB OK"
 fi
 
 echo "  verifying every packaged native library (including JNA)..."
