@@ -149,6 +149,9 @@ pub struct PushTransferInfo {
     /// `Waiting` only: the number of the attempt that failed (1 = the first
     /// try failed), counted since the last time bytes moved.
     pub attempt: Option<u32>,
+    /// Live rate in bits per second, path, round trip, stalls (see
+    /// [`stats`](super::stats)). Absent from daemons that predate it.
+    pub stats: Option<super::stats::TransferStats>,
 }
 
 /// The JSON form of [`PushTransferInfo`]. Every field added after the first
@@ -182,6 +185,8 @@ struct InfoWire {
     next_attempt_at_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     attempt: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stats: Option<super::stats::TransferStats>,
 }
 
 impl From<&PushTransferInfo> for InfoWire {
@@ -206,6 +211,7 @@ impl From<&PushTransferInfo> for InfoWire {
             updated_at_ms: i.updated_at_ms,
             next_attempt_at_ms: i.next_attempt_at_ms,
             attempt: i.attempt,
+            stats: i.stats.clone(),
         }
     }
 }
@@ -231,6 +237,7 @@ impl From<InfoWire> for PushTransferInfo {
             updated_at_ms: w.updated_at_ms,
             next_attempt_at_ms: w.next_attempt_at_ms,
             attempt: w.attempt,
+            stats: w.stats,
         }
     }
 }
@@ -307,8 +314,9 @@ struct Entry {
 }
 
 /// The set of transfers, running and recently finished.
+#[derive(Clone)]
 pub struct Board {
-    inner: Mutex<HashMap<String, Entry>>,
+    inner: std::sync::Arc<Mutex<HashMap<String, Entry>>>,
     /// Every change of a transfer's state (id, new state), for whoever wants
     /// to follow the sequence rather than poll. Slow readers miss old ones.
     changes: broadcast::Sender<(String, PushState)>,
@@ -317,7 +325,7 @@ pub struct Board {
 impl Default for Board {
     fn default() -> Self {
         Self {
-            inner: Mutex::new(HashMap::new()),
+            inner: std::sync::Arc::new(Mutex::new(HashMap::new())),
             changes: broadcast::channel(256).0,
         }
     }
@@ -389,6 +397,7 @@ impl Board {
             updated_at_ms: now,
             next_attempt_at_ms: None,
             attempt: None,
+            stats: None,
         };
         let mut g = self.inner.lock().unwrap();
         g.insert(id.clone(), Entry { info, cancel: tx });
