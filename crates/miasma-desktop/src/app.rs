@@ -171,6 +171,7 @@ pub struct MiasmaApp {
 
     // Updates (check once after start, Settings section, banner)
     updates: crate::updates::UpdatesUi,
+    network: crate::network_ui::NetworkUi,
 }
 
 /// Why the stored-share list cannot be shown.
@@ -465,6 +466,7 @@ impl MiasmaApp {
             logs: LogsState::new(&data_dir),
             storage: StorageState::new(),
             updates: crate::updates::UpdatesUi::new(data_dir.clone()),
+            network: crate::network_ui::NetworkUi::new(data_dir.clone()),
 
             transfers: TransfersUi::default(),
             contacts: ContactsUi::default(),
@@ -2228,6 +2230,8 @@ impl MiasmaApp {
 
             // ── Logs ─────────────────────────────────────────────────
             self.updates.section(ui, self.locale, !easy);
+
+            self.network.section(ui, self.locale);
 
             self.logs_section(ui);
 
