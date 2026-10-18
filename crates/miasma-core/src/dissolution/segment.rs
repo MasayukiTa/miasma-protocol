@@ -38,7 +38,38 @@ pub fn dissolve_segment(
     offset_bytes: u64,
     params: DissolutionParams,
 ) -> Result<(SegmentMeta, Vec<MiasmaShare>), MiasmaError> {
-    dissolve_segment_with(segment_data, mid, segment_index, offset_bytes, params, None)
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    dissolve_segment_at(
+        segment_data,
+        mid,
+        segment_index,
+        offset_bytes,
+        params,
+        timestamp,
+    )
+}
+
+/// Deterministic-clock variant of [`dissolve_segment`].
+pub fn dissolve_segment_at(
+    segment_data: &[u8],
+    mid: &ContentId,
+    segment_index: u32,
+    offset_bytes: u64,
+    params: DissolutionParams,
+    timestamp: u64,
+) -> Result<(SegmentMeta, Vec<MiasmaShare>), MiasmaError> {
+    dissolve_segment_with_at(
+        segment_data,
+        mid,
+        segment_index,
+        offset_bytes,
+        params,
+        None,
+        timestamp,
+    )
 }
 
 /// As [`dissolve_segment`], optionally mixing a password-derived key into the
@@ -57,6 +88,34 @@ pub fn dissolve_segment_with(
     offset_bytes: u64,
     params: DissolutionParams,
     password_key: Option<&UnlockedKey>,
+) -> Result<(SegmentMeta, Vec<MiasmaShare>), MiasmaError> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    dissolve_segment_with_at(
+        segment_data,
+        mid,
+        segment_index,
+        offset_bytes,
+        params,
+        password_key,
+        timestamp,
+    )
+}
+
+/// Deterministic-clock variant of [`dissolve_segment_with`].
+///
+/// The caller supplies the Unix timestamp embedded in every generated share.
+/// Cryptographic randomness remains fresh and is intentionally unaffected.
+pub fn dissolve_segment_with_at(
+    segment_data: &[u8],
+    mid: &ContentId,
+    segment_index: u32,
+    offset_bytes: u64,
+    params: DissolutionParams,
+    password_key: Option<&UnlockedKey>,
+    timestamp: u64,
 ) -> Result<(SegmentMeta, Vec<MiasmaShare>), MiasmaError> {
     // 1. Encrypt segment plaintext → (ciphertext, K_enc, nonce).
     let (ciphertext, k_enc, nonce) = match password_key {
@@ -83,11 +142,6 @@ pub fn dissolve_segment_with(
         params.total_shards as u8,
     )?;
     debug_assert_eq!(key_shares.len(), params.total_shards);
-
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
 
     // 4. Assemble one MiasmaShare per shard.
     let shares: Vec<MiasmaShare> = shards
@@ -208,6 +262,19 @@ mod tests {
 
     fn mid() -> ContentId {
         ContentId::compute(DATA, b"k=10,n=20,v=1")
+    }
+
+    #[test]
+    fn dissolve_segment_at_uses_supplied_timestamp() {
+        let params = DissolutionParams::default();
+        let m = mid();
+        let timestamp = 1_799_999_999;
+        let (meta, shares) = dissolve_segment_at(DATA, &m, 2, 128, params, timestamp).unwrap();
+
+        assert_eq!(meta.index, 2);
+        assert!(!shares.is_empty());
+        assert!(shares.iter().all(|share| share.timestamp == timestamp));
+        assert_eq!(retrieve_segment(&m, &shares, &meta, params).unwrap(), DATA);
     }
 
     #[test]

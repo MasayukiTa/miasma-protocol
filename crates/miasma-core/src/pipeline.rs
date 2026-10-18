@@ -68,6 +68,24 @@ pub fn dissolve(
     plaintext: &[u8],
     params: DissolutionParams,
 ) -> Result<(ContentId, Vec<MiasmaShare>), MiasmaError> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    dissolve_at(plaintext, params, timestamp)
+}
+
+/// Dissolve content using a caller-supplied Unix timestamp.
+///
+/// This is the deterministic-clock variant of [`dissolve`]. The timestamp is
+/// metadata only: it does not affect the MID, encryption key, nonce, or shard
+/// contents. Platform adapters and protocol-compatibility fixtures should use
+/// this entry point instead of reading a wall clock inside protocol logic.
+pub fn dissolve_at(
+    plaintext: &[u8],
+    params: DissolutionParams,
+    timestamp: u64,
+) -> Result<(ContentId, Vec<MiasmaShare>), MiasmaError> {
     // 1. Compute MID from plaintext before encryption.
     let param_bytes = params.to_param_bytes();
     let mid = ContentId::compute(plaintext, &param_bytes);
@@ -86,11 +104,6 @@ pub fn dissolve(
         params.total_shards as u8,
     )?;
     debug_assert_eq!(key_shares.len(), params.total_shards);
-
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
 
     // 5. Assemble MiasmaShare for each shard.
     let shares: Vec<MiasmaShare> = shards
@@ -216,6 +229,19 @@ mod tests {
     const TEST_CONTENT: &[u8] = b"Miasma dissolution pipeline test content. \
         This is a realistic-length payload that exercises all pipeline stages. \
         The content must survive encrypt-encode-split-combine-decode-decrypt.";
+
+    #[test]
+    fn dissolve_at_uses_supplied_timestamp_without_changing_mid() {
+        let params = DissolutionParams::default();
+        let timestamp = 1_799_999_999;
+        let expected_mid = ContentId::compute(TEST_CONTENT, &params.to_param_bytes());
+        let (mid, shares) = dissolve_at(TEST_CONTENT, params, timestamp).unwrap();
+
+        assert_eq!(mid, expected_mid);
+        assert!(!shares.is_empty());
+        assert!(shares.iter().all(|share| share.timestamp == timestamp));
+        assert_eq!(retrieve(&mid, &shares, params).unwrap(), TEST_CONTENT);
+    }
 
     #[test]
     fn dissolve_and_retrieve_default_params() {

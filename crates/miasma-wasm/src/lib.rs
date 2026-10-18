@@ -1232,6 +1232,54 @@ mod tests {
     }
 
     #[test]
+    fn native_core_and_wasm_share_wire_formats_are_bidirectionally_compatible() {
+        let params = DissolutionParams {
+            data_shards: 3,
+            total_shards: 5,
+        };
+        let native_params = miasma_core::pipeline::DissolutionParams {
+            data_shards: params.data_shards,
+            total_shards: params.total_shards,
+        };
+        let timestamp = 1_799_999_999;
+
+        // Native core -> browser kernel. This exercises the exact serialized share
+        // bytes rather than comparing parallel JSON representations.
+        let (native_mid, native_shares) =
+            miasma_core::pipeline::dissolve_at(TEST_CONTENT, native_params, timestamp).unwrap();
+        let wasm_mid = ContentId::from_mid_str(&native_mid.to_string()).unwrap();
+        let wasm_shares: Vec<MiasmaShare> = native_shares
+            .iter()
+            .map(|share| MiasmaShare::from_bytes(&share.to_bytes().unwrap()).unwrap())
+            .collect();
+        assert!(wasm_shares.iter().all(|share| share.timestamp == timestamp));
+        assert_eq!(
+            retrieve_inner(&wasm_mid, &wasm_shares, params).unwrap(),
+            TEST_CONTENT
+        );
+
+        // Browser kernel -> native core. Random keys/nonces differ between the two
+        // dissolutions by design, but the wire format, MID semantics and retrieval
+        // pipeline must remain mutually readable.
+        let (wasm_mid, wasm_shares) = dissolve_inner_at(TEST_CONTENT, params, timestamp).unwrap();
+        let native_mid =
+            miasma_core::crypto::hash::ContentId::from_str(&wasm_mid.to_mid_string()).unwrap();
+        let native_shares: Vec<miasma_core::share::MiasmaShare> = wasm_shares
+            .iter()
+            .map(|share| {
+                miasma_core::share::MiasmaShare::from_bytes(&share.to_bytes().unwrap()).unwrap()
+            })
+            .collect();
+        assert!(native_shares
+            .iter()
+            .all(|share| share.timestamp == timestamp));
+        assert_eq!(
+            miasma_core::pipeline::retrieve(&native_mid, &native_shares, native_params).unwrap(),
+            TEST_CONTENT
+        );
+    }
+
+    #[test]
     fn supplied_timestamp_is_used_for_every_share() {
         let params = DissolutionParams::default();
         let timestamp = 1_799_999_999;
