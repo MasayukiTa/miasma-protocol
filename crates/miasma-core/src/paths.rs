@@ -656,6 +656,53 @@ spec!(
     "A protected state file that failed to open (wrong key or damage), set aside instead of being overwritten."
 );
 
+// ── Self-update ─────────────────────────────────────────────────────────────
+
+spec!(
+    UPDATE_DIR,
+    "update",
+    Dir,
+    DataDir,
+    Runtime,
+    Skippable,
+    Remove,
+    "D40",
+    "Self-update work area; exists only while an update is downloaded or being applied."
+);
+spec!(
+    UPDATE_JOURNAL,
+    "update/journal.json",
+    File,
+    DataDir,
+    Runtime,
+    Skippable,
+    Remove,
+    "D40",
+    "Progress of an update (phase, install folder, program names, expected hashes) so an interrupted one can be finished or undone."
+);
+spec!(
+    UPDATE_WORK,
+    "update/work-*",
+    Pattern,
+    DataDir,
+    Runtime,
+    Skippable,
+    Remove,
+    "D40",
+    "Downloaded release archive, deleted once the update is applied or refused."
+);
+spec!(
+    UPDATE_STATE,
+    "update-state.json",
+    File,
+    DataDir,
+    State,
+    Skippable,
+    Remove,
+    "D40",
+    "The version the person chose to skip and an update that failed its start check; holds no times."
+);
+
 // ── Logs ────────────────────────────────────────────────────────────────────
 
 spec!(
@@ -944,6 +991,10 @@ pub const REGISTRY: &[PathSpec] = &[
     STATE_MIGRATION_LOCK,
     PREMIGRATE_COPY,
     STATE_CORRUPT_ASIDE,
+    UPDATE_DIR,
+    UPDATE_JOURNAL,
+    UPDATE_WORK,
+    UPDATE_STATE,
     DAEMON_LOG,
     DESKTOP_LOG,
     BRIDGE_LOG,
@@ -998,6 +1049,22 @@ pub fn version_stamp(data_dir: &Path) -> PathBuf {
 /// `<data>/shares`
 pub fn shares_dir(data_dir: &Path) -> PathBuf {
     SHARES_DIR.in_dir(data_dir)
+}
+/// `<data>/update`
+pub fn update_dir(data_dir: &Path) -> PathBuf {
+    UPDATE_DIR.in_dir(data_dir)
+}
+/// `<data>/update/journal.json`
+pub fn update_journal(data_dir: &Path) -> PathBuf {
+    UPDATE_JOURNAL.in_dir(data_dir)
+}
+/// `<data>/update-state.json`
+pub fn update_state(data_dir: &Path) -> PathBuf {
+    UPDATE_STATE.in_dir(data_dir)
+}
+/// `<data>/update/work-<id>`
+pub fn update_work_dir(data_dir: &Path, id: &str) -> PathBuf {
+    update_dir(data_dir).join(format!("work-{id}"))
 }
 /// `<data>/lg`
 pub fn diag_log_dir(data_dir: &Path) -> PathBuf {

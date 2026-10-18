@@ -50,6 +50,12 @@ hyper.workspace = true
 http-body-util.workspace = true
 hyper-util.workspace = true
 base64.workspace = true
+# Self-update: semver ordering of release tags, and reading the release archive.
+semver = "1"
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
+# zip only enables flate2 without a backend; pick the pure Rust one explicitly so
+# this crate builds on its own (not only when another crate selects it).
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 shadowsocks-crypto.workspace = true
 # Direct transport by public key (see src/transport/iroh_direct.rs). ring TLS
 # only: no aws-lc/cmake, no portmapper, no metrics. platform-verifier: relay and

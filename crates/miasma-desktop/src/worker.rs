@@ -993,6 +993,7 @@ fn do_init(data_dir: &Path) -> anyhow::Result<()> {
         push: Default::default(),
         chat: Default::default(),
         privacy: Default::default(),
+        update: Default::default(),
     };
     config.save(data_dir)?;
 

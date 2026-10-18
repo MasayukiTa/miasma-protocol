@@ -2999,8 +2999,207 @@ static SG_ZH_CN: StorageStrings = StorageStrings {
     note_unavailable: "背景服务未运行，无法列出已保存的共享。请点击窗口上方的按钮启动。",
 };
 
+// ─── Updates (Settings section and the update banner) ───────────────────────
+
+/// Declares `UpdateStrings` and a field listing for the completeness test from one field list.
+macro_rules! update_strings {
+    ($($f:ident),* $(,)?) => {
+        /// Strings of the Updates section in Settings and of the update banner.
+        pub struct UpdateStrings { $(pub $f: &'static str),* }
+        impl UpdateStrings {
+            /// Every field with its name, for the completeness test.
+            #[cfg(test)]
+            fn all(&self) -> Vec<(&'static str, &'static str)> {
+                vec![$((stringify!($f), self.$f)),*]
+            }
+        }
+    };
+}
+
+update_strings! {
+    heading, mode_label, mode_off, mode_notify, mode_auto,
+    mode_desc_off, mode_desc_notify, mode_desc_auto,
+    version_label, check_now, checking, last_check_label, never_checked,
+    ago_seconds, ago_minutes, ago_hours,
+    result_up_to_date, result_available, result_failed, result_disabled,
+    result_no_asset, result_unverifiable, result_local,
+    status_downloading, status_applying, status_ready, status_waiting_idle,
+    status_installed, status_rolled_back, status_skipped, wait_before_recheck,
+    banner_available, banner_installed, update_now, later, skip_version,
+    restart_now, backup_note, config_save_failed,
+}
+
+pub fn update_strings(locale: Locale) -> &'static UpdateStrings {
+    match locale {
+        Locale::En => &UP_EN,
+        Locale::Ja => &UP_JA,
+        Locale::ZhCn => &UP_ZH_CN,
+    }
+}
+
+static UP_EN: UpdateStrings = UpdateStrings {
+    heading: "Updates",
+    mode_label: "Updates:",
+    mode_off: "Off",
+    mode_notify: "Tell me",
+    mode_auto: "Automatic",
+    mode_desc_off: "Miasma never looks for updates and makes no connection to GitHub.",
+    mode_desc_notify: "Miasma looks once after it starts and tells you. Nothing is installed until you agree.",
+    mode_desc_auto: "Miasma looks once after it starts and installs the new version by itself, only while nothing is being sent or received.",
+    version_label: "Version:",
+    check_now: "Check now",
+    checking: "Checking...",
+    last_check_label: "Last check:",
+    never_checked: "Not checked since Miasma started.",
+    ago_seconds: "{n} seconds ago",
+    ago_minutes: "{n} minutes ago",
+    ago_hours: "{n} hours ago",
+    result_up_to_date: "You have the newest version.",
+    result_available: "Version {v} is available.",
+    result_failed: "Could not check. This does not mean you are up to date.",
+    result_disabled: "Updates are off.",
+    result_no_asset: "Version {v} exists, but there is no download for this computer yet.",
+    result_unverifiable: "Version {v} exists, but it cannot be verified and is not offered.",
+    result_local: "A newer build was found in the developer build folder.",
+    status_downloading: "Downloading and checking the update... {pct}%",
+    status_applying: "Installing the update...",
+    status_ready: "The update is downloaded and checked. It will be installed when Miasma is idle.",
+    status_waiting_idle: "Waiting until nothing is being sent or received.",
+    status_installed: "Version {v} is installed. Restart Miasma to use it.",
+    status_rolled_back: "The new version did not start, so the old one was put back.",
+    status_skipped: "You chose to skip version {v}.",
+    wait_before_recheck: "Please wait {n} seconds before checking again.",
+    banner_available: "A new version of Miasma is available: {v}.",
+    banner_installed: "Miasma {v} is installed. Restart to use it.",
+    update_now: "Update now",
+    later: "Later",
+    skip_version: "Skip this version",
+    restart_now: "Restart now",
+    backup_note: "The version you had is kept as a backup next to the program.",
+    config_save_failed: "The setting could not be saved. Please try again.",
+};
+
+static UP_JA: UpdateStrings = UpdateStrings {
+    heading: "更新",
+    mode_label: "更新:",
+    mode_off: "オフ",
+    mode_notify: "知らせる",
+    mode_auto: "自動",
+    mode_desc_off: "更新を確認せず、GitHubへの接続も行いません。",
+    mode_desc_notify: "起動後に一度だけ確認して知らせます。同意するまでインストールしません。",
+    mode_desc_auto: "起動後に一度だけ確認し、送受信をしていないときに新しいバージョンを自動でインストールします。",
+    version_label: "バージョン:",
+    check_now: "今すぐ確認",
+    checking: "確認しています...",
+    last_check_label: "前回の確認:",
+    never_checked: "起動してからまだ確認していません。",
+    ago_seconds: "{n} 秒前",
+    ago_minutes: "{n} 分前",
+    ago_hours: "{n} 時間前",
+    result_up_to_date: "最新のバージョンです。",
+    result_available: "バージョン {v} が利用できます。",
+    result_failed: "確認できませんでした。最新であるという意味ではありません。",
+    result_disabled: "更新はオフです。",
+    result_no_asset: "バージョン {v} はありますが、このパソコン向けのダウンロードはまだありません。",
+    result_unverifiable: "バージョン {v} はありますが、検証できないため案内しません。",
+    result_local: "開発用のビルドフォルダに、より新しいビルドがあります。",
+    status_downloading: "更新をダウンロードして確認しています... {pct}%",
+    status_applying: "更新をインストールしています...",
+    status_ready: "更新のダウンロードと確認が済みました。Miasmaが使われていないときにインストールします。",
+    status_waiting_idle: "送受信が終わるまで待っています。",
+    status_installed: "バージョン {v} をインストールしました。再起動すると使えます。",
+    status_rolled_back: "新しいバージョンが起動しなかったため、元のバージョンに戻しました。",
+    status_skipped: "バージョン {v} はスキップに設定されています。",
+    wait_before_recheck: "もう一度確認するには {n} 秒お待ちください。",
+    banner_available: "Miasmaの新しいバージョン {v} が利用できます。",
+    banner_installed: "Miasma {v} をインストールしました。再起動すると使えます。",
+    update_now: "今すぐ更新",
+    later: "あとで",
+    skip_version: "このバージョンをスキップ",
+    restart_now: "今すぐ再起動",
+    backup_note: "更新前のバージョンは、プログラムの横にバックアップとして残してあります。",
+    config_save_failed: "設定を保存できませんでした。もう一度お試しください。",
+};
+
+static UP_ZH_CN: UpdateStrings = UpdateStrings {
+    heading: "更新",
+    mode_label: "更新：",
+    mode_off: "关闭",
+    mode_notify: "通知我",
+    mode_auto: "自动",
+    mode_desc_off: "Miasma 不会检查更新，也不会连接 GitHub。",
+    mode_desc_notify: "Miasma 启动后只检查一次并通知您。在您同意之前不会安装。",
+    mode_desc_auto: "Miasma 启动后只检查一次，并在没有收发数据时自动安装新版本。",
+    version_label: "版本：",
+    check_now: "立即检查",
+    checking: "正在检查...",
+    last_check_label: "上次检查：",
+    never_checked: "启动后尚未检查。",
+    ago_seconds: "{n} 秒前",
+    ago_minutes: "{n} 分钟前",
+    ago_hours: "{n} 小时前",
+    result_up_to_date: "您使用的已是最新版本。",
+    result_available: "有新版本 {v} 可用。",
+    result_failed: "无法检查。这并不表示已是最新版本。",
+    result_disabled: "更新已关闭。",
+    result_no_asset: "已有版本 {v}，但暂时没有适用于这台电脑的下载。",
+    result_unverifiable: "已有版本 {v}，但无法验证，因此不提供。",
+    result_local: "在开发者构建文件夹中发现了更新的构建。",
+    status_downloading: "正在下载并检查更新... {pct}%",
+    status_applying: "正在安装更新...",
+    status_ready: "更新已下载并检查完毕。将在 Miasma 空闲时安装。",
+    status_waiting_idle: "正在等待收发数据结束。",
+    status_installed: "已安装版本 {v}。重新启动后即可使用。",
+    status_rolled_back: "新版本未能启动，已恢复为原来的版本。",
+    status_skipped: "您已选择跳过版本 {v}。",
+    wait_before_recheck: "请等待 {n} 秒后再检查。",
+    banner_available: "Miasma 有新版本可用：{v}。",
+    banner_installed: "已安装 Miasma {v}。重新启动后即可使用。",
+    update_now: "立即更新",
+    later: "稍后",
+    skip_version: "跳过此版本",
+    restart_now: "立即重新启动",
+    backup_note: "更新前的版本已作为备份保留在程序旁边。",
+    config_save_failed: "无法保存该设置。请重试。",
+};
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_update_string_exists_in_every_locale_and_keeps_its_placeholders() {
+        for lang in Locale::ALL {
+            let u = update_strings(lang);
+            for (name, value) in u.all() {
+                assert!(!value.trim().is_empty(), "{lang:?} updates.{name} is empty");
+            }
+            for (name, value, ph) in [
+                ("result_available", u.result_available, "{v}"),
+                ("result_no_asset", u.result_no_asset, "{v}"),
+                ("result_unverifiable", u.result_unverifiable, "{v}"),
+                ("status_installed", u.status_installed, "{v}"),
+                ("status_skipped", u.status_skipped, "{v}"),
+                ("banner_available", u.banner_available, "{v}"),
+                ("banner_installed", u.banner_installed, "{v}"),
+                ("status_downloading", u.status_downloading, "{pct}"),
+                ("wait_before_recheck", u.wait_before_recheck, "{n}"),
+                ("ago_seconds", u.ago_seconds, "{n}"),
+                ("ago_minutes", u.ago_minutes, "{n}"),
+                ("ago_hours", u.ago_hours, "{n}"),
+            ] {
+                assert!(value.contains(ph), "{lang:?} updates.{name} lost {ph}");
+            }
+        }
+        // The three languages are not copies of each other.
+        let (en, ja, zh) = (
+            update_strings(Locale::En),
+            update_strings(Locale::Ja),
+            update_strings(Locale::ZhCn),
+        );
+        assert_ne!(en.mode_desc_auto, ja.mode_desc_auto);
+        assert_ne!(en.mode_desc_auto, zh.mode_desc_auto);
+        assert_ne!(ja.mode_desc_auto, zh.mode_desc_auto);
+    }
+
     use super::*;
 
     #[test]

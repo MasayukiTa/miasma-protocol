@@ -26,6 +26,9 @@ pub struct NodeConfig {
     /// Logging and traces left on this machine.
     #[serde(default)]
     pub privacy: PrivacyConfig,
+    /// Looking for, and installing, newer builds.
+    #[serde(default)]
+    pub update: crate::update::UpdateConfig,
 }
 
 /// `[privacy]` in `config.toml`: what the programs may leave behind.
