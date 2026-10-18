@@ -33,6 +33,7 @@ miasma-core/src/update/state.rs | 2 | self-update: the skipped version / failed 
 miasma-desktop/src/app/tour.rs | 4 | GUI screenshots, only when MIASMA_UI_SNAP is set (dev/QA)
 miasma-desktop/src/app.rs | 6 | user-initiated Save As and diagnostics export
 miasma-desktop/src/link.rs | 3 | instance lock, pending-link hand-off, URL scheme marker
+miasma-desktop/src/network_ui.rs | 1 | user-initiated Save report (the file chosen in the save dialog)
 miasma-desktop/src/main.rs | 1 | data dir creation (log setup lives in miasma-core logging)
 miasma-desktop/src/worker.rs | 1 | data dir creation on node init
 miasma-ffi/src/lib.rs | 2 | mobile data dir creation and key-file overwrite during wipe
