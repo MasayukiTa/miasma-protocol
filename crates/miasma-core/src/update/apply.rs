@@ -10,6 +10,11 @@
 //!   miasma.exe.old.<id> -> miasma.exe.prev      (the one backup that is kept)
 //! ```
 //!
+//! With several programs the renames run in two passes (all current files
+//! aside first, then all new files in), so the folder holds a mix of versions
+//! for as short a time as possible. The journal must name the install folder
+//! the running program itself would update, or it is refused.
+//!
 //! If the health check fails, or the swap breaks half way, the old files are
 //! renamed back. A small JSON journal records the phase at every step, so a
 //! process that dies in the middle (power cut, kill) is repaired at the next
@@ -132,6 +137,9 @@ pub enum Phase {
     Verifying,
     Done,
     RolledBack,
+    /// An undo was needed but a program could not be put back. The journal and
+    /// the `*.old.<id>` files stay; [`resume`] tries again at the next start.
+    RestoreFailed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,13 +220,16 @@ pub fn now_unix() -> u64 {
 
 // ── journal files ───────────────────────────────────────────────────────────
 
-pub fn load_journal(data_dir: &Path) -> Result<Option<Journal>, UpdateError> {
+/// Read the journal. `install_dir` is the folder this program itself would
+/// update (see `engine::install_dir_of`); a journal that names any other folder
+/// is refused.
+pub fn load_journal(data_dir: &Path, install_dir: &Path) -> Result<Option<Journal>, UpdateError> {
     let p = crate::paths::update_journal(data_dir);
     match fs::read(&p) {
         Ok(b) => {
             let j: Journal =
                 serde_json::from_slice(&b).map_err(|e| UpdateError::Journal(e.to_string()))?;
-            validate_journal(&j, data_dir)?;
+            validate_journal(&j, data_dir, install_dir)?;
             Ok(Some(j))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -228,8 +239,13 @@ pub fn load_journal(data_dir: &Path) -> Result<Option<Journal>, UpdateError> {
 
 /// The journal is a file in the user's data folder, and `resume` renames and
 /// deletes whatever it names. So it is not trusted: ids and program names must
-/// be plain words, and the download folder must lie inside `update/`.
-fn validate_journal(j: &Journal, data_dir: &Path) -> Result<(), UpdateError> {
+/// be plain words, the download folder must lie inside `update/`, and the
+/// install folder must be exactly the one the running program would update.
+fn validate_journal(
+    j: &Journal,
+    data_dir: &Path,
+    install_dir: &Path,
+) -> Result<(), UpdateError> {
     let bad = |what: &str| Err(UpdateError::Journal(format!("{what} is not valid")));
     let plain = |s: &str| {
         !s.is_empty()
@@ -267,7 +283,11 @@ fn validate_journal(j: &Journal, data_dir: &Path) -> Result<(), UpdateError> {
             return bad("the downloaded file");
         }
     }
-    if !no_parent(&j.dir) {
+    if !j.dir.is_absolute()
+        || !install_dir.is_absolute()
+        || !no_parent(&j.dir)
+        || j.dir != install_dir
+    {
         return bad("the install folder");
     }
     Ok(())
@@ -374,9 +394,7 @@ pub fn apply(env: &Env, j: &mut Journal) -> Result<Applied, UpdateError> {
     j.phase = Phase::Swapping;
     save_journal(env.data_dir, j)?;
     if let Err(e) = swap(j) {
-        rollback(j);
-        j.phase = Phase::RolledBack;
-        let _ = save_journal(env.data_dir, j);
+        undo(env, j)?;
         return Err(e);
     }
 
@@ -385,13 +403,29 @@ pub fn apply(env: &Env, j: &mut Journal) -> Result<Applied, UpdateError> {
     finish(env, j)
 }
 
+/// Undo the swap and record the outcome: `RolledBack` when every program is
+/// back, `RestoreFailed` (and an error) when one could not be put back.
+fn undo(env: &Env, j: &mut Journal) -> Result<(), UpdateError> {
+    match rollback(j) {
+        Ok(()) => {
+            j.phase = Phase::RolledBack;
+            let _ = save_journal(env.data_dir, j);
+            Ok(())
+        }
+        Err(why) => {
+            tracing::error!("update: the previous version could not be restored");
+            j.phase = Phase::RestoreFailed;
+            let _ = save_journal(env.data_dir, j);
+            Err(UpdateError::RestoreFailed(why))
+        }
+    }
+}
+
 /// Health check, then keep or undo. Shared by [`apply`] and [`resume`].
 fn finish(env: &Env, j: &mut Journal) -> Result<Applied, UpdateError> {
     if let Err(why) = health(env, j) {
         tracing::warn!("update: the new version did not pass the start check, restoring");
-        rollback(j);
-        j.phase = Phase::RolledBack;
-        let _ = save_journal(env.data_dir, j);
+        undo(env, j)?;
         return Err(UpdateError::HealthCheck(why));
     }
     finalize(j);
@@ -477,13 +511,20 @@ fn make_executable(p: &Path) {
 #[cfg(not(unix))]
 fn make_executable(_p: &Path) {}
 
+/// Two passes, so the time in which the folder mixes two versions is only the
+/// short run of renames in the second pass: first every current program is
+/// moved aside, then every staged one is moved in. A stop between any two
+/// renames is repaired by `complete_forward` or `rollback`.
 fn swap(j: &Journal) -> Result<(), UpdateError> {
-    for name in j.units() {
-        let cur = j.dir.join(&name);
+    let units = j.units();
+    for name in &units {
+        let cur = j.dir.join(name);
         if cur.exists() {
-            fs::rename(&cur, j.old_of(&name))?;
+            fs::rename(&cur, j.old_of(name))?;
         }
-        fs::rename(j.new_of(&name), &cur)?;
+    }
+    for name in &units {
+        fs::rename(j.new_of(name), j.dir.join(name))?;
     }
     Ok(())
 }
@@ -514,8 +555,11 @@ fn health(env: &Env, j: &Journal) -> Result<(), String> {
     Ok(())
 }
 
-/// Undo the swap: put the old files back, remove the new ones.
-fn rollback(j: &Journal) {
+/// Undo the swap: put the old files back, remove the new ones. Fails (after
+/// trying every unit) when an old program could not be put back; the files of
+/// that unit are then left where they are so a later try can finish the job.
+fn rollback(j: &Journal) -> Result<(), String> {
+    let mut failed: Vec<String> = Vec::new();
     for (i, name) in j.units().iter().enumerate() {
         let cur = j.dir.join(name);
         let old = j.old_of(name);
@@ -526,6 +570,13 @@ fn rollback(j: &Journal) {
             }
             if let Err(e) = fs::rename(&old, &cur) {
                 tracing::error!("update: cannot restore a program: {e}");
+                failed.push(format!("{name}: {e}"));
+                // Leave something runnable where the program belongs.
+                if !cur.exists() {
+                    let _ = fs::rename(j.failed_of(name), &cur);
+                }
+                remove_any(&j.new_of(name));
+                continue;
             }
         } else if cur.exists() {
             // A program that did not exist before: remove only what we put there.
@@ -539,6 +590,39 @@ fn rollback(j: &Journal) {
         }
         remove_any(&j.failed_of(name));
         remove_any(&j.new_of(name));
+    }
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(failed.join("; "))
+    }
+}
+
+/// Every unit must have its program in place. One that is missing (a stop or
+/// a failure between two renames) is brought back from `*.old.<id>`, else from
+/// the kept `.prev`. A unit with nothing to restore from is left alone: it did
+/// not exist before the update.
+fn ensure_present(j: &Journal) -> Result<(), String> {
+    let mut failed: Vec<String> = Vec::new();
+    for name in j.units() {
+        let cur = j.dir.join(&name);
+        if cur.exists() {
+            continue;
+        }
+        let Some(src) = [j.old_of(&name), j.prev_of(&name)]
+            .into_iter()
+            .find(|p| p.exists())
+        else {
+            continue;
+        };
+        if let Err(e) = fs::rename(&src, &cur) {
+            failed.push(format!("{name}: {e}"));
+        }
+    }
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(failed.join("; "))
     }
 }
 
@@ -573,12 +657,27 @@ pub enum Resumed {
 
 /// Look at the journal left by an earlier run and bring the install folder to a
 /// consistent state: finish the swap, undo it, or discard stale scraps.
-pub fn resume(env: &Env) -> Result<Resumed, UpdateError> {
-    let Some(mut j) = load_journal(env.data_dir)? else {
+///
+/// `install_dir` is the folder this program would update; a journal naming any
+/// other folder is refused before anything is touched.
+pub fn resume(env: &Env, install_dir: &Path) -> Result<Resumed, UpdateError> {
+    let Some(mut j) = load_journal(env.data_dir, install_dir)? else {
         return Ok(Resumed::Nothing);
     };
     match j.phase {
+        Phase::RestoreFailed => {
+            // An earlier undo did not finish: try it again.
+            undo(env, &mut j)?;
+            Ok(Resumed::RolledBack("restored".into()))
+        }
         Phase::Done | Phase::RolledBack => {
+            // Before the leftovers (which hold the old files) are swept, make
+            // sure the programs themselves are there.
+            if let Err(why) = ensure_present(&j) {
+                j.phase = Phase::RestoreFailed;
+                let _ = save_journal(env.data_dir, &j);
+                return Err(UpdateError::RestoreFailed(why));
+            }
             sweep_leftovers(&j, false);
             clear_journal(env.data_dir);
             clear_work(&j);
@@ -603,9 +702,7 @@ pub fn resume(env: &Env) -> Result<Resumed, UpdateError> {
         Phase::Swapping | Phase::Verifying => {
             if !complete_forward(&j) {
                 tracing::warn!("update: an interrupted update cannot be completed, undoing it");
-                rollback(&j);
-                j.phase = Phase::RolledBack;
-                let _ = save_journal(env.data_dir, &j);
+                undo(env, &mut j)?;
                 return Ok(Resumed::RolledBack("interrupted".into()));
             }
             j.phase = Phase::Verifying;
@@ -848,7 +945,7 @@ mod tests {
                 "miasma.exe.prev"
             ]
         );
-        assert!(load_journal(&f.data).unwrap().is_none());
+        assert!(load_journal(&f.data, &f.install).unwrap().is_none());
         assert!(!j.work_dir.exists());
         // The check ran the command line program only, never the desktop one.
         let calls = p.calls.lock().unwrap();
@@ -1057,7 +1154,7 @@ mod tests {
         assert!(f.install.join("miasma-desktop.exe.new").exists());
 
         let (p, a) = (FileProber::new(), FixedActivity(Busy::Idle));
-        match resume(&env(&f, &p, &a)).unwrap() {
+        match resume(&env(&f, &p, &a), &f.install).unwrap() {
             Resumed::Completed(done) => assert_eq!(done.version, "0.4.0"),
             other => panic!("{other:?}"),
         }
@@ -1076,7 +1173,7 @@ mod tests {
         assert!(!files(&f.install)
             .iter()
             .any(|n| n.ends_with(".new") || n.contains(".old.")));
-        assert!(load_journal(&f.data).unwrap().is_none());
+        assert!(load_journal(&f.data, &f.install).unwrap().is_none());
     }
 
     #[test]
@@ -1091,7 +1188,7 @@ mod tests {
 
         let (p, a) = (FileProber::new(), FixedActivity(Busy::Idle));
         assert!(matches!(
-            resume(&env(&f, &p, &a)).unwrap(),
+            resume(&env(&f, &p, &a), &f.install).unwrap(),
             Resumed::Completed(_)
         ));
         assert_eq!(
@@ -1111,7 +1208,7 @@ mod tests {
 
         let (p, a) = (FileProber::new(), FixedActivity(Busy::Idle));
         assert!(matches!(
-            resume(&env(&f, &p, &a)).unwrap(),
+            resume(&env(&f, &p, &a), &f.install).unwrap(),
             Resumed::RolledBack(_)
         ));
         assert_eq!(
@@ -1145,13 +1242,263 @@ mod tests {
         crash_after(&f, &mut j, 2, Phase::Verifying);
         let (p, a) = (FileProber::new(), FixedActivity(Busy::Idle));
         assert!(matches!(
-            resume(&env(&f, &p, &a)).unwrap(),
+            resume(&env(&f, &p, &a), &f.install).unwrap(),
             Resumed::RolledBack(_)
         ));
         assert_eq!(
             fs::read_to_string(f.install.join("miasma.exe")).unwrap(),
             OLD
         );
+    }
+
+    /// The folder as the two-pass swap leaves it when the process stops after
+    /// `away` programs were moved aside and `inn` new ones were moved in
+    /// (`inn <= away`; the first pass finishes before the second begins, so
+    /// `inn > 0` implies `away == all`).
+    fn crash_two_pass(f: &Fixture, j: &mut Journal, away: usize, inn: usize, phase: Phase) {
+        let mut a = Archive::open(j.archive.as_ref().unwrap()).unwrap();
+        let names: Vec<&str> = j.names.iter().map(String::as_str).collect();
+        let got = a.extract_named(&names, &j.dir, ".new").unwrap();
+        j.hashes = got.iter().map(|g| g.sha256.clone()).collect();
+        for name in j.names.clone().iter().take(away) {
+            fs::rename(f.install.join(name), j.old_of(name)).unwrap();
+        }
+        for name in j.names.clone().iter().take(inn) {
+            fs::rename(j.new_of(name), f.install.join(name)).unwrap();
+        }
+        j.phase = phase;
+        save_journal(&f.data, j).unwrap();
+    }
+
+    /// Every place a stop can fall in the two passes: 0..=2 moved aside, then
+    /// 0..=2 moved in.
+    fn stop_points() -> Vec<(usize, usize)> {
+        vec![(0, 0), (1, 0), (2, 0), (2, 1), (2, 2)]
+    }
+
+    #[test]
+    fn a_stop_between_any_two_renames_of_the_two_passes_is_completed() {
+        for (away, inn) in stop_points() {
+            let f = fixture();
+            install_old(&f);
+            let mut j = journal(&f, NEW);
+            crash_two_pass(&f, &mut j, away, inn, Phase::Swapping);
+            let (p, a) = (FileProber::new(), FixedActivity(Busy::Idle));
+            match resume(&env(&f, &p, &a), &f.install).unwrap() {
+                Resumed::Completed(done) => assert_eq!(done.version, "0.4.0"),
+                other => panic!("stop {away}/{inn}: {other:?}"),
+            }
+            assert_eq!(
+                fs::read_to_string(f.install.join("miasma.exe")).unwrap(),
+                NEW,
+                "stop {away}/{inn}"
+            );
+            assert_eq!(
+                fs::read(f.install.join("miasma-desktop.exe")).unwrap(),
+                b"new desktop",
+                "stop {away}/{inn}"
+            );
+            assert_eq!(
+                fs::read_to_string(f.install.join("miasma.exe.prev")).unwrap(),
+                OLD,
+                "stop {away}/{inn}"
+            );
+            assert_eq!(
+                fs::read(f.install.join("miasma-desktop.exe.prev")).unwrap(),
+                b"old desktop",
+                "stop {away}/{inn}"
+            );
+            assert!(!files(&f.install)
+                .iter()
+                .any(|n| n.ends_with(".new") || n.contains(".old.")));
+        }
+    }
+
+    #[test]
+    fn a_stop_between_any_two_renames_is_undone_when_the_new_program_fails() {
+        for (away, inn) in stop_points() {
+            let f = fixture();
+            install_old(&f);
+            let mut j = release_journal(
+                &f.data,
+                &f.install,
+                &["miasma.exe", "miasma-desktop.exe"],
+                &[
+                    ("miasma.exe", b"BROKEN"),
+                    ("miasma-desktop.exe", b"new desktop"),
+                ],
+                "0.4.0",
+            );
+            crash_two_pass(&f, &mut j, away, inn, Phase::Swapping);
+            let (p, a) = (FileProber::new(), FixedActivity(Busy::Idle));
+            assert!(
+                matches!(
+                    resume(&env(&f, &p, &a), &f.install).unwrap(),
+                    Resumed::RolledBack(_)
+                ),
+                "stop {away}/{inn}"
+            );
+            assert_eq!(
+                fs::read_to_string(f.install.join("miasma.exe")).unwrap(),
+                OLD,
+                "stop {away}/{inn}"
+            );
+            assert_eq!(
+                fs::read(f.install.join("miasma-desktop.exe")).unwrap(),
+                b"old desktop",
+                "stop {away}/{inn}"
+            );
+            assert_eq!(
+                files(&f.install),
+                vec!["Miasma.cmd", "miasma-desktop.exe", "miasma.exe"],
+                "stop {away}/{inn}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stop_between_the_passes_with_a_lost_staged_file_is_undone() {
+        for (away, inn) in [(2, 0), (2, 1)] {
+            let f = fixture();
+            install_old(&f);
+            let mut j = journal(&f, NEW);
+            crash_two_pass(&f, &mut j, away, inn, Phase::Swapping);
+            // The staged copy of the last program is gone.
+            let lost = f.install.join("miasma-desktop.exe.new");
+            if lost.exists() {
+                fs::remove_file(lost).unwrap();
+            } else {
+                fs::remove_file(f.install.join("miasma-desktop.exe")).unwrap();
+            }
+            let (p, a) = (FileProber::new(), FixedActivity(Busy::Idle));
+            assert!(matches!(
+                resume(&env(&f, &p, &a), &f.install).unwrap(),
+                Resumed::RolledBack(_)
+            ));
+            assert_eq!(
+                fs::read_to_string(f.install.join("miasma.exe")).unwrap(),
+                OLD
+            );
+            assert_eq!(
+                fs::read(f.install.join("miasma-desktop.exe")).unwrap(),
+                b"old desktop"
+            );
+        }
+    }
+
+    #[test]
+    fn a_swap_that_fails_in_the_second_pass_moves_all_programs_aside_first() {
+        let f = fixture();
+        install_old(&f);
+        let mut j = journal(&f, NEW);
+        // The second program's staged file is missing, so the second pass fails
+        // after the first program was moved in.
+        let mut a = Archive::open(j.archive.as_ref().unwrap()).unwrap();
+        let names: Vec<&str> = j.names.iter().map(String::as_str).collect();
+        let got = a.extract_named(&names, &j.dir, ".new").unwrap();
+        j.hashes = got.iter().map(|g| g.sha256.clone()).collect();
+        fs::remove_file(f.install.join("miasma-desktop.exe.new")).unwrap();
+        assert!(swap(&j).is_err());
+        // Both programs were moved aside before the failing move-in.
+        assert!(j.old_of("miasma.exe").exists());
+        assert!(j.old_of("miasma-desktop.exe").exists());
+        rollback(&j).unwrap();
+        assert_eq!(
+            fs::read_to_string(f.install.join("miasma.exe")).unwrap(),
+            OLD
+        );
+        assert_eq!(
+            fs::read(f.install.join("miasma-desktop.exe")).unwrap(),
+            b"old desktop"
+        );
+    }
+
+    /// A state in which `rollback` cannot put the first program back: the
+    /// program's place holds a non-empty folder and so does the `.failed` name.
+    fn block_restore(f: &Fixture, j: &mut Journal) {
+        crash_two_pass(f, j, 1, 0, Phase::Swapping);
+        // The staged file of the second program is gone, so the swap cannot be
+        // completed and must be undone.
+        fs::remove_file(f.install.join("miasma-desktop.exe.new")).unwrap();
+        let cur = f.install.join("miasma.exe");
+        fs::create_dir_all(&cur).unwrap();
+        fs::write(cur.join("x"), "x").unwrap();
+        let failed = j.failed_of("miasma.exe");
+        fs::create_dir_all(&failed).unwrap();
+        fs::write(failed.join("x"), "x").unwrap();
+    }
+
+    #[test]
+    fn a_restore_that_fails_is_reported_and_retried_at_the_next_start() {
+        let f = fixture();
+        install_old(&f);
+        let mut j = journal(&f, NEW);
+        block_restore(&f, &mut j);
+        let (p, a) = (FileProber::new(), FixedActivity(Busy::Idle));
+        match resume(&env(&f, &p, &a), &f.install) {
+            Err(UpdateError::RestoreFailed(_)) => {}
+            other => panic!("{other:?}"),
+        }
+        // The journal says so and the old file is still there to restore from.
+        let saved = load_journal(&f.data, &f.install).unwrap().unwrap();
+        assert_eq!(saved.phase, Phase::RestoreFailed);
+        assert!(j.old_of("miasma.exe").exists());
+        // Still blocked: still reported, still kept.
+        assert!(matches!(
+            resume(&env(&f, &p, &a), &f.install),
+            Err(UpdateError::RestoreFailed(_))
+        ));
+        // The obstacle goes away: the next start restores the old program.
+        fs::remove_dir_all(f.install.join("miasma.exe")).unwrap();
+        fs::remove_dir_all(j.failed_of("miasma.exe")).unwrap();
+        assert!(matches!(
+            resume(&env(&f, &p, &a), &f.install).unwrap(),
+            Resumed::RolledBack(_)
+        ));
+        assert_eq!(
+            fs::read_to_string(f.install.join("miasma.exe")).unwrap(),
+            OLD
+        );
+        assert_eq!(
+            fs::read(f.install.join("miasma-desktop.exe")).unwrap(),
+            b"old desktop"
+        );
+        // And the next one finds nothing left to do.
+        assert_eq!(
+            resume(&env(&f, &p, &a), &f.install).unwrap(),
+            Resumed::Nothing
+        );
+        assert!(load_journal(&f.data, &f.install).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_rolled_back_or_done_journal_restores_a_missing_program_before_clearing() {
+        for phase in [Phase::RolledBack, Phase::Done] {
+            let f = fixture();
+            install_old(&f);
+            let mut j = journal(&f, NEW);
+            j.phase = phase;
+            save_journal(&f.data, &j).unwrap();
+            // The program is gone; its backup is there.
+            fs::remove_file(f.install.join("miasma.exe")).unwrap();
+            let backup = if phase == Phase::RolledBack {
+                j.old_of("miasma.exe")
+            } else {
+                j.prev_of("miasma.exe")
+            };
+            fs::write(&backup, OLD).unwrap();
+            let (p, a) = (FileProber::new(), FixedActivity(Busy::Idle));
+            assert_eq!(
+                resume(&env(&f, &p, &a), &f.install).unwrap(),
+                Resumed::Nothing
+            );
+            assert_eq!(
+                fs::read_to_string(f.install.join("miasma.exe")).unwrap(),
+                OLD,
+                "{phase:?}"
+            );
+            assert!(load_journal(&f.data, &f.install).unwrap().is_none());
+        }
     }
 
     #[test]
@@ -1164,7 +1511,7 @@ mod tests {
         fs::write(f.install.join("miasma.exe.new"), "half").unwrap();
 
         let (p, a) = (FileProber::new(), FixedActivity(Busy::Idle));
-        match resume(&env(&f, &p, &a)).unwrap() {
+        match resume(&env(&f, &p, &a), &f.install).unwrap() {
             Resumed::Pending(pj) => assert_eq!(pj.phase, Phase::Downloaded),
             other => panic!("{other:?}"),
         }
@@ -1183,15 +1530,15 @@ mod tests {
         save_journal(&f.data, &j).unwrap();
         fs::remove_file(j.archive.as_ref().unwrap()).unwrap();
         let (p, a) = (FileProber::new(), FixedActivity(Busy::Idle));
-        assert_eq!(resume(&env(&f, &p, &a)).unwrap(), Resumed::Nothing);
-        assert!(load_journal(&f.data).unwrap().is_none());
+        assert_eq!(resume(&env(&f, &p, &a), &f.install).unwrap(), Resumed::Nothing);
+        assert!(load_journal(&f.data, &f.install).unwrap().is_none());
     }
 
     #[test]
     fn with_no_journal_resume_does_nothing() {
         let f = fixture();
         let (p, a) = (FileProber::new(), FixedActivity(Busy::Idle));
-        assert_eq!(resume(&env(&f, &p, &a)).unwrap(), Resumed::Nothing);
+        assert_eq!(resume(&env(&f, &p, &a), &f.install).unwrap(), Resumed::Nothing);
     }
 
     // ── macOS bundle ──
@@ -1286,7 +1633,7 @@ mod tests {
         save_journal(&f.data, &j).unwrap();
         let (p, act) = (FileProber::new(), FixedActivity(Busy::Idle));
         assert!(matches!(
-            resume(&mac_env(&f, &p, &act)).unwrap(),
+            resume(&mac_env(&f, &p, &act), &f.install).unwrap(),
             Resumed::Completed(_)
         ));
         let cli = f
@@ -1360,14 +1707,14 @@ mod tests {
         let f = fixture();
         let j = journal(&f, NEW);
         save_journal(&f.data, &j).unwrap();
-        assert_eq!(load_journal(&f.data).unwrap().unwrap(), j);
+        assert_eq!(load_journal(&f.data, &f.install).unwrap().unwrap(), j);
         fs::write(crate::paths::update_journal(&f.data), b"{ not json").unwrap();
         assert!(matches!(
-            load_journal(&f.data),
+            load_journal(&f.data, &f.install),
             Err(UpdateError::Journal(_))
         ));
         clear_journal(&f.data);
-        assert!(load_journal(&f.data).unwrap().is_none());
+        assert!(load_journal(&f.data, &f.install).unwrap().is_none());
         assert_eq!(sha256_bytes(b""), sha256_bytes(b""));
     }
 
@@ -1406,23 +1753,34 @@ mod tests {
         let mut j = good.clone();
         j.dir = f.install.join("..").join("..");
         cases.push(j);
+        // An absolute folder that is not the install folder of this program.
+        let mut j = good.clone();
+        j.dir = f._t.path().join("somewhere-else");
+        cases.push(j);
+        let mut j = good.clone();
+        j.dir = victim.clone();
+        cases.push(j);
+        // A relative folder.
+        let mut j = good.clone();
+        j.dir = PathBuf::from("install");
+        cases.push(j);
 
         let (p, a) = (FileProber::new(), FixedActivity(Busy::Idle));
         for j in cases {
             save_journal(&f.data, &j).unwrap();
             assert!(
-                matches!(load_journal(&f.data), Err(UpdateError::Journal(_))),
+                matches!(load_journal(&f.data, &f.install), Err(UpdateError::Journal(_))),
                 "{j:?}"
             );
             assert!(matches!(
-                resume(&env(&f, &p, &a)),
+                resume(&env(&f, &p, &a), &f.install),
                 Err(UpdateError::Journal(_))
             ));
             assert_eq!(fs::read_to_string(victim.join("keep.txt")).unwrap(), "mine");
         }
         // The real thing still loads.
         save_journal(&f.data, &good).unwrap();
-        assert!(load_journal(&f.data).unwrap().is_some());
+        assert!(load_journal(&f.data, &f.install).unwrap().is_some());
     }
 
     #[test]
