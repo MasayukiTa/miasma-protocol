@@ -31,7 +31,7 @@ pub fn title_for(version: &str, build_id: &str, locale: Locale) -> String {
 
 /// Title of the running build.
 pub fn window_title(locale: Locale) -> String {
-    title_for(env!("CARGO_PKG_VERSION"), BUILD_ID, locale)
+    title_for(env!("MIASMA_VERSION"), BUILD_ID, locale)
 }
 
 /// Label of the "Build" row in Settings.
@@ -45,7 +45,7 @@ pub fn build_row_label(locale: Locale) -> &'static str {
 
 /// Value of the "Build" row: `0.3.2 · 1a2b3c4d5`.
 pub fn build_row_value() -> String {
-    version_with_build(env!("CARGO_PKG_VERSION"), BUILD_ID)
+    version_with_build(env!("MIASMA_VERSION"), BUILD_ID)
 }
 
 #[cfg(test)]
@@ -75,7 +75,7 @@ mod tests {
     fn running_build_has_a_nonempty_id_and_the_crate_version() {
         assert!(!BUILD_ID.trim().is_empty());
         assert!(BUILD_ID.chars().all(|c| c.is_ascii_alphanumeric()));
-        assert!(build_row_value().starts_with(env!("CARGO_PKG_VERSION")));
+        assert!(build_row_value().starts_with(env!("MIASMA_VERSION")));
         assert!(window_title(Locale::En).contains(BUILD_ID));
     }
 }

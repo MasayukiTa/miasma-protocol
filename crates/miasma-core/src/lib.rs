@@ -33,6 +33,7 @@ pub mod state_crypto;
 pub mod store;
 pub mod transfer;
 pub mod transport;
+pub mod update;
 
 pub use config::{default_data_dir, NodeConfig, TransportConfig};
 pub use cover_traffic::{CoverTrafficConfig, CoverTrafficEngine};
