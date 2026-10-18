@@ -28,6 +28,7 @@ mod link;
 pub mod locale;
 mod open_path;
 mod os_locale;
+mod speed;
 mod theme;
 mod transfers;
 mod ui_kit;

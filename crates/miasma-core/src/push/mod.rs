@@ -10,7 +10,9 @@ pub mod ipc;
 pub mod outbox;
 pub mod proto;
 pub mod retry;
+pub mod speed_fmt;
 pub mod state;
+pub mod stats;
 pub mod store;
 
 #[cfg(feature = "iroh")]

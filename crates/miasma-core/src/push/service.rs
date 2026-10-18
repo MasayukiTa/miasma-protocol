@@ -1048,6 +1048,12 @@ impl PushService {
     }
 
     /// If the connection was closed by the receiver as "not allowed".
+    /// Reads the network report for the "why is it slow" hint of a transfer row.
+    fn block_probe(&self) -> Option<super::stats::BlockProbe> {
+        let dialer = self.dialer.clone();
+        Some(Arc::new(move || dialer.block_reason()))
+    }
+
     fn closed_as_not_allowed(conn: &dyn Link) -> bool {
         conn.close_info() == Some(CloseInfo::App(u64::from(CLOSE_NOT_ALLOWED)))
     }
@@ -1146,6 +1152,15 @@ impl PushService {
         // row that starts at the resumed offset.
         let mut sent = offset;
         let mut meter = RateMeter::new(sent);
+        let progress = Arc::new(std::sync::atomic::AtomicU64::new(sent));
+        let sampler = super::stats::Sampler::spawn(
+            self.board.clone(),
+            id.to_owned(),
+            progress.clone(),
+            conn.path_probe(),
+            self.block_probe(),
+            true,
+        );
         while sent < size {
             let want = (size - sent).min(CHUNK as u64) as usize;
             let n = file
@@ -1170,6 +1185,7 @@ impl PushService {
                 }
             }
             sent += n as u64;
+            progress.store(sent, std::sync::atomic::Ordering::Relaxed);
             let rate = meter.sample(sent);
             self.board.update(id, |i| {
                 i.bytes = sent;
@@ -1179,9 +1195,11 @@ impl PushService {
             });
         }
         tx.finish();
+        let final_stats = sampler.finish(sent);
         self.board.update(id, |i| {
             i.state = PushState::Verifying;
             i.rate_bps = 0;
+            i.stats = Some(final_stats);
         });
         let done: Done = tokio::select! {
             _ = wait_cancel(cancel) => return Err(AttemptError::Cancelled),
@@ -1432,6 +1450,15 @@ impl PushService {
         // `got` is the receiver's side of the progress count described in `attempt_send`.
         let mut got = offset;
         let mut meter = RateMeter::new(got);
+        let progress = Arc::new(std::sync::atomic::AtomicU64::new(got));
+        let sampler = super::stats::Sampler::spawn(
+            self.board.clone(),
+            tid.to_owned(),
+            progress.clone(),
+            conn.path_probe(),
+            self.block_probe(),
+            false,
+        );
         let idle = self.settings.idle_timeout;
         while got < size {
             let want = (size - got).min(CHUNK as u64) as usize;
@@ -1474,6 +1501,7 @@ impl PushService {
                 );
             }
             got += n as u64;
+            progress.store(got, std::sync::atomic::Ordering::Relaxed);
             let rate = meter.sample(got);
             self.board.update(tid, |i| {
                 i.bytes = got;
@@ -1495,9 +1523,11 @@ impl PushService {
         }
         drop(file);
 
+        let final_stats = sampler.finish(got);
         self.board.update(tid, |i| {
             i.state = PushState::Verifying;
             i.rate_bps = 0;
+            i.stats = Some(final_stats);
         });
         if hasher.finalize().to_hex().as_str() != header.hash.to_ascii_lowercase() {
             let _ = std::fs::remove_file(&part);
