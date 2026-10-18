@@ -5346,6 +5346,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "shadowsocks-crypto",
+ "socket2 0.6.5",
  "subtle",
  "tempfile",
  "thiserror 1.0.69",

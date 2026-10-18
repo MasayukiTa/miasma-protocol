@@ -47,12 +47,22 @@ pub trait Link: Send + Sync {
     fn close_info(&self) -> Option<CloseInfo>;
     /// Resolves when the connection has ended.
     async fn closed(&self) -> CloseInfo;
+    /// Reads this connection's network paths for the live statistics; `None`
+    /// when the link cannot tell (the path is then shown as unknown).
+    fn path_probe(&self) -> Option<super::stats::PathProbe> {
+        None
+    }
 }
 
 /// Opens connections to contacts.
 #[async_trait::async_trait]
 pub trait Dialer: Send + Sync {
     async fn dial(&self, target: &[u8; 32]) -> Result<Arc<dyn Link>, IrohClientError>;
+    /// Why a direct path is unlikely, from this computer's network report;
+    /// `None` when unknown or when nothing speaks against it.
+    fn block_reason(&self) -> Option<super::stats::BlockReason> {
+        None
+    }
 }
 
 // ─── iroh ────────────────────────────────────────────────────────────────────
@@ -104,6 +114,12 @@ impl Link for IrohLink {
     async fn closed(&self) -> CloseInfo {
         info(self.0.closed().await)
     }
+    fn path_probe(&self) -> Option<super::stats::PathProbe> {
+        let conn = self.0.clone();
+        Some(std::sync::Arc::new(move |sending| {
+            super::stats::path_samples(&conn, sending)
+        }))
+    }
 }
 
 /// Dials contacts over the iroh endpoint of this daemon.
@@ -114,5 +130,8 @@ impl Dialer for IrohDialer {
     async fn dial(&self, target: &[u8; 32]) -> Result<Arc<dyn Link>, IrohClientError> {
         let c = self.0.connect_alpn(target, PUSH_ALPN).await?;
         Ok(Arc::new(IrohLink(c)))
+    }
+    fn block_reason(&self) -> Option<super::stats::BlockReason> {
+        super::stats::endpoint_block_reason(&self.0.endpoint())
     }
 }

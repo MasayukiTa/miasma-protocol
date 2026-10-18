@@ -19,7 +19,7 @@ use crate::app::{card_frame, danger_button, primary_button, section_heading};
 use crate::locale::{ContactStrings, Locale};
 use crate::open_path::{self, Action, Resolved};
 use crate::theme::{self, Palette};
-use crate::transfers::{fill, format_bytes, format_eta, format_rate};
+use crate::transfers::{fill, format_bytes, format_eta};
 use crate::worker::PushFail;
 
 fn pal() -> Palette {
@@ -337,6 +337,8 @@ pub struct Row {
     pub next_attempt_at_ms: Option<u64>,
     /// Waiting to retry: how many attempts in a row have failed.
     pub attempt: Option<u32>,
+    /// Live speed / path (daemons that predate it: none).
+    pub stats: Option<miasma_core::push::stats::TransferStats>,
 }
 
 impl Row {
@@ -365,6 +367,7 @@ impl From<&PushTransferInfo> for Row {
             at_ms: t.updated_at_ms,
             next_attempt_at_ms: t.next_attempt_at_ms,
             attempt: t.attempt,
+            stats: t.stats.clone(),
         }
     }
 }
@@ -393,6 +396,7 @@ impl From<&HistoryEntry> for Row {
             at_ms: h.finished_at_ms,
             next_attempt_at_ms: None,
             attempt: None,
+            stats: None,
         }
     }
 }
@@ -898,6 +902,9 @@ pub struct ContactsUi {
     /// original wording. Set by the app before it hands over a reply.
     err_locale: Locale,
     err_technical: bool,
+
+    /// Speed units, the sparklines' data, and the UI language for their words.
+    speed: crate::speed::SpeedUi,
 }
 
 impl Default for ContactsUi {
@@ -954,6 +961,7 @@ impl Default for ContactsUi {
             frozen: false,
             err_locale: Locale::En,
             err_technical: false,
+            speed: Default::default(),
         }
     }
 }
@@ -1254,6 +1262,14 @@ impl ContactsUi {
 
     fn rebuild_rows(&mut self) {
         self.rows = merge_rows(&self.board, &self.history);
+        self.speed
+            .sparks
+            .observe(miasma_core::push::state::now_ms(), &self.rows);
+    }
+
+    /// Speed units and language, set by the app from its settings.
+    pub fn speed_mut(&mut self) -> &mut crate::speed::SpeedUi {
+        &mut self.speed
     }
 
     /// Say how failures are worded from now on (UI language; Technical adds the original text).
@@ -2083,6 +2099,9 @@ impl ContactsUi {
             ui.set_width(ui.available_width());
             ui.horizontal_wrapped(|ui| {
                 section_title(ui, c.tr_title);
+                if let Some(t) = self.speed.header_total(&self.rows, ui.max_rect().width()) {
+                    ui.label(egui::RichText::new(t).color(pal().muted));
+                }
                 if self
                     .rows
                     .iter()
@@ -2171,8 +2190,8 @@ impl ContactsUi {
             if !r.finished() {
                 let f = fraction(r.size, r.bytes, false);
                 let mut line = format!("{:.1}%", f * 100.0);
-                if r.rate_bps > 0 {
-                    line.push_str(&format!("  ·  {}", format_rate(r.rate_bps as f64)));
+                if let Some(t) = self.speed.rate_text(r, ui.available_width()) {
+                    line.push_str(&format!("  ·  {t}"));
                 }
                 if let Some(e) = eta_secs(r.size, r.bytes, r.rate_bps) {
                     line.push_str(&format!("  ·  {}", fill(c.eta, &[("t", &eta_text(c, e))])));
@@ -2188,6 +2207,7 @@ impl ContactsUi {
                     );
                 });
             }
+            self.speed.row_extras(ui, r);
             if let Some(g) = row_guidance_for(c, r, self.err_technical) {
                 let color = if r.state == PushState::Cancelled {
                     pal().muted
@@ -2399,6 +2419,7 @@ impl ContactsUi {
             updated_at_ms: at,
             next_attempt_at_ms: None,
             attempt: None,
+            stats: None,
         };
         let mib = 1u64 << 20;
         let a = contact("a", "田中", "0CS3Y-09W9N-5B5WM-QMMCX", true, None);
@@ -2594,6 +2615,7 @@ mod tests {
             updated_at_ms: at,
             next_attempt_at_ms: None,
             attempt: None,
+            stats: None,
         }
     }
 
