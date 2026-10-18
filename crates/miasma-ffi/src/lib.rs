@@ -34,7 +34,7 @@ use std::sync::Arc;
 use zeroize::Zeroizing;
 
 use miasma_core::{
-    config::NodeConfig,
+    config::{NetworkConfig, NodeConfig, StorageConfig},
     daemon::DaemonServer,
     directed, dissolve,
     network::{node::MiasmaNode, types::NodeType},
@@ -334,7 +334,8 @@ pub fn initialize_node(
 
     // Re-running initialization updates mobile quota knobs without destroying
     // the rest of config.toml. In particular, bootstrap peers and transport
-    // settings must survive every embedded-daemon restart.
+    // settings must survive every embedded-daemon restart. New mobile nodes use
+    // a store-managed update policy because Google Play/App Store own updates.
     let config_path = miasma_core::paths::config_file(&path);
     let config = if config_path.exists() {
         NodeConfig::load(&path).map_err(|e| {
@@ -344,7 +345,18 @@ pub fn initialize_node(
             }
         })?
     } else {
-        NodeConfig::default()
+        NodeConfig {
+            storage: StorageConfig::default(),
+            network: NetworkConfig {
+                listen_addr: "/ip4/0.0.0.0/udp/0/quic-v1".into(),
+                bootstrap_peers: vec![],
+            },
+            transport: Default::default(),
+            push: Default::default(),
+            chat: Default::default(),
+            privacy: Default::default(),
+            update: miasma_core::update::UpdateConfig::stealth_preset(),
+        }
     };
     let config = apply_mobile_limits(config, storage_mb, bandwidth_mb_day);
     config.save(&path).map_err(|e| {

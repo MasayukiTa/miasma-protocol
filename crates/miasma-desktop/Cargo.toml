@@ -27,6 +27,7 @@ toml.workspace = true
 bs58.workspace = true
 hex.workspace = true
 directories.workspace = true
+serde_json.workspace = true
 
 # GUI — egui immediate-mode, cross-platform (Windows/macOS/Linux)
 egui   = "0.27"

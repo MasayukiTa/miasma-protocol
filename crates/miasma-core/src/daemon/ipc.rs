@@ -195,6 +195,15 @@ pub enum ControlRequest {
     TransferClearFinished,
     /// Return daemon status metrics.
     Status,
+    /// List the shares this node stores: short id, size, age and whether each
+    /// is in use. Added after the first release; an older daemon does not know
+    /// it, which a caller treats as "not supported".
+    StorageList,
+    /// Delete stored shares. Shares in use (pending replication or part of an
+    /// active transfer) are never deleted; they come back in `skipped`.
+    StorageDelete {
+        selection: crate::store::ShareSelection,
+    },
     /// Distress-wipe, step 1: ask for a confirmation challenge. Nothing is
     /// destroyed; the daemon answers `WipeChallenge` and remembers the nonce
     /// (single use, short lived).
@@ -428,6 +437,11 @@ impl fmt::Debug for ControlRequest {
                 .field("output_path", &"<redacted>")
                 .finish(),
             Self::Status => f.write_str("Status"),
+            Self::StorageList => f.write_str("StorageList"),
+            Self::StorageDelete { selection } => f
+                .debug_struct("StorageDelete")
+                .field("selection", selection)
+                .finish(),
             Self::LogsTail {
                 max_lines,
                 since_seq,
@@ -568,6 +582,19 @@ pub enum ControlResponse {
         reason: crate::transfer::jobs::RemoveRefusal,
     },
     Status(DaemonStatus),
+    /// Answer to `StorageList`.
+    StorageList {
+        shares: Vec<crate::store::StoredShare>,
+        total_bytes: u64,
+    },
+    /// Answer to `StorageDelete`.
+    StorageDeleted {
+        deleted: usize,
+        freed_bytes: u64,
+        /// Short ids that matched but were left in place (in use, or refused as
+        /// unsafe).
+        skipped: Vec<String>,
+    },
     /// Distress wipe completed successfully.
     Wiped,
     /// Answer to `Wipe`: the nonce to echo in `WipeConfirm` within its
@@ -688,6 +715,24 @@ impl fmt::Debug for ControlResponse {
                 .field("reason", reason)
                 .finish(),
             Self::Status(status) => f.debug_tuple("Status").field(status).finish(),
+            Self::StorageList {
+                shares,
+                total_bytes,
+            } => f
+                .debug_struct("StorageList")
+                .field("shares", &shares.len())
+                .field("total_bytes", total_bytes)
+                .finish(),
+            Self::StorageDeleted {
+                deleted,
+                freed_bytes,
+                skipped,
+            } => f
+                .debug_struct("StorageDeleted")
+                .field("deleted", deleted)
+                .field("freed_bytes", freed_bytes)
+                .field("skipped", &skipped.len())
+                .finish(),
             Self::Wiped => f.write_str("Wiped"),
             Self::WipeChallenge { .. } => f
                 .debug_struct("WipeChallenge")

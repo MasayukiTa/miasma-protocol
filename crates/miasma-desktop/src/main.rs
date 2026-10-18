@@ -17,6 +17,7 @@
 //! └──────────────────────────────────────────────────┘
 //! ```
 
+mod a11y;
 mod app;
 mod buildinfo;
 mod chat;
@@ -24,14 +25,21 @@ mod chat_ui;
 mod contacts;
 mod errors;
 mod fonts;
+mod group;
+mod group_ui;
 mod link;
 pub mod locale;
+mod network_model;
+mod network_strings;
+mod network_ui;
 mod open_path;
 mod os_locale;
+mod speed;
 mod theme;
 mod transfers;
 mod ui_kit;
 mod uitext;
+mod updates;
 mod ux;
 pub mod variant;
 mod worker;
@@ -159,7 +167,7 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native(
+    let result = eframe::run_native(
         "Miasma",
         native_options,
         Box::new(move |cc| {
@@ -176,5 +184,10 @@ fn main() -> eframe::Result<()> {
             }
             Box::new(app)
         }),
-    )
+    );
+    // After an update the window asks to be started again; this runs once the window is gone.
+    if updates::take_relaunch() {
+        updates::spawn_relaunch();
+    }
+    result
 }

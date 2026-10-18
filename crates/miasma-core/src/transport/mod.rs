@@ -37,6 +37,12 @@ pub mod netcheck;
 pub mod obfuscated;
 pub mod payload;
 pub mod proxy;
+#[cfg(feature = "iroh")]
+pub mod reach;
+#[cfg(feature = "iroh")]
+pub mod reach_dns;
+#[cfg(feature = "iroh")]
+pub mod reach_net;
 pub mod reality;
 #[cfg(feature = "iroh")]
 pub mod relay_tls;

@@ -13,7 +13,7 @@ miasma-bridge/src/bridge.rs | 6 | bridge inbox marker/.processed dir, moving imp
 miasma-bridge/src/index.rs | 1 | append-only BitTorrent info-hash to MID table
 miasma-bridge/src/main.rs | 1 | bridge data dir creation (log setup lives in miasma-core logging)
 miasma-bridge/src/torrent.rs | 1 | torrent download directory creation
-miasma-cli/src/main.rs | 4 | data dir creation, -o output, directed retrieve save
+miasma-cli/src/main.rs | 5 | data dir creation, -o output, directed retrieve save, netcheck --out report (path given by the user)
 miasma-core/src/config.rs | 4 | config.toml and version stamp writers
 miasma-core/src/daemon/control_auth.rs | 3 | daemon.token creation (restricted, create_new)
 miasma-core/src/daemon/ipc.rs | 2 | daemon.port and daemon.http discovery files
@@ -25,9 +25,15 @@ miasma-core/src/push/store.rs | 2 | setting an unreadable contacts file aside (c
 miasma-core/src/secure_file.rs | 6 | restricted-permission write primitives used by the stores
 miasma-core/src/store.rs | 9 | master key, share blobs (the index is written through state_crypto)
 miasma-core/src/transfer/receive.rs | 6 | resumable receive: .part file and final rename
+miasma-core/src/update/apply.rs | 13 | self-update: progress journal, the rename-swap of the program files (*.new, *.old.<id>, *.prev) and the write probe
+miasma-core/src/update/archive.rs | 4 | self-update: extracting the verified release zip into the install folder
+miasma-core/src/update/engine.rs | 1 | self-update: the download folder below update/ in the data directory
+miasma-core/src/update/http.rs | 1 | self-update: streaming a release download to a file
+miasma-core/src/update/state.rs | 2 | self-update: the skipped version / failed update note
 miasma-desktop/src/app/tour.rs | 4 | GUI screenshots, only when MIASMA_UI_SNAP is set (dev/QA)
 miasma-desktop/src/app.rs | 6 | user-initiated Save As and diagnostics export
 miasma-desktop/src/link.rs | 3 | instance lock, pending-link hand-off, URL scheme marker
+miasma-desktop/src/network_ui.rs | 1 | user-initiated Save report (the file chosen in the save dialog)
 miasma-desktop/src/main.rs | 1 | data dir creation (log setup lives in miasma-core logging)
 miasma-desktop/src/worker.rs | 1 | data dir creation on node init
 miasma-ffi/src/lib.rs | 2 | mobile data dir creation and key-file overwrite during wipe
@@ -36,3 +42,4 @@ miasma-core/src/state_crypto/log.rs | 6 | encrypted record log: create, append, 
 miasma-core/src/state_crypto/migrate.rs | 4 | one-time conversion of plaintext state files: lock file, staging, rename, wipe of the plaintext
 miasma-core/src/state_crypto/mod.rs | 5 | master key creation on first use, overwrite-and-remove, set-aside of unreadable files
 miasma-core/src/chat/store.rs | 1 | chat folder creation (the files in it are written through state_crypto)
+miasma-core/src/chat/group/store.rs | 1 | chat folder creation (the group files in it are written through state_crypto)

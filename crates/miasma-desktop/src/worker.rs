@@ -136,6 +136,15 @@ pub enum WorkerCmd {
     LogsClear,
     /// Answer the old-log-files notice: `delete` removes them, otherwise they are kept.
     LegacyLogs { delete: bool },
+    /// List the shares this node stores. Answered with [`WorkerResult::StorageShares`],
+    /// [`WorkerResult::StorageUnsupported`], [`WorkerResult::StorageUnavailable`] or
+    /// [`WorkerResult::StorageFailed`].
+    StorageList,
+    /// Delete the stored shares named by `selection`. Answered with
+    /// [`WorkerResult::StorageDeleted`] or (on failure) the variants above.
+    StorageDelete {
+        selection: miasma_core::store::ShareSelection,
+    },
 }
 
 impl fmt::Debug for WorkerCmd {
@@ -230,6 +239,11 @@ impl fmt::Debug for WorkerCmd {
             Self::LegacyLogs { delete } => f
                 .debug_struct("LegacyLogs")
                 .field("delete", delete)
+                .finish(),
+            Self::StorageList => f.write_str("StorageList"),
+            Self::StorageDelete { selection } => f
+                .debug_struct("StorageDelete")
+                .field("selection", selection)
                 .finish(),
         }
     }
@@ -355,6 +369,23 @@ pub enum WorkerResult {
         failed: usize,
         kept: bool,
     },
+    /// Answer to [`WorkerCmd::StorageList`]: the stored shares (oldest first) and their total size.
+    StorageShares {
+        shares: Vec<miasma_core::store::StoredShare>,
+        total_bytes: u64,
+    },
+    /// Answer to [`WorkerCmd::StorageDelete`].
+    StorageDeleted {
+        deleted: usize,
+        freed_bytes: u64,
+        skipped: Vec<String>,
+    },
+    /// A storage request got no answer because the background service is not reachable.
+    StorageUnavailable,
+    /// The background service answers but does not know the storage request (older version).
+    StorageUnsupported,
+    /// A storage request failed for another reason.
+    StorageFailed(UiError),
     /// Any error.
     Err(UiError),
 }
@@ -511,6 +542,27 @@ impl fmt::Debug for WorkerResult {
                 .field("failed", failed)
                 .field("kept", kept)
                 .finish(),
+            Self::StorageShares {
+                shares,
+                total_bytes,
+            } => f
+                .debug_struct("StorageShares")
+                .field("shares", &shares.len())
+                .field("total_bytes", total_bytes)
+                .finish(),
+            Self::StorageDeleted {
+                deleted,
+                freed_bytes,
+                skipped,
+            } => f
+                .debug_struct("StorageDeleted")
+                .field("deleted", deleted)
+                .field("freed_bytes", freed_bytes)
+                .field("skipped", &skipped.len())
+                .finish(),
+            Self::StorageUnavailable => f.write_str("StorageUnavailable"),
+            Self::StorageUnsupported => f.write_str("StorageUnsupported"),
+            Self::StorageFailed(message) => f.debug_tuple("StorageFailed").field(message).finish(),
             Self::Err(message) => f.debug_tuple("Err").field(message).finish(),
         }
     }
@@ -902,6 +954,10 @@ fn worker_thread(
             WorkerCmd::SetDiagnostic(on) => rt.block_on(do_set_diagnostic(&data_dir, on)),
             WorkerCmd::LogsClear => rt.block_on(do_logs_clear(&data_dir)),
             WorkerCmd::LegacyLogs { delete } => do_legacy_logs(&data_dir, delete),
+            WorkerCmd::StorageList => rt.block_on(do_storage_list(&data_dir)),
+            WorkerCmd::StorageDelete { selection } => {
+                rt.block_on(do_storage_delete(&data_dir, selection))
+            }
         };
 
         if tx.send(res).is_err() {
@@ -937,6 +993,7 @@ fn do_init(data_dir: &Path) -> anyhow::Result<()> {
         push: Default::default(),
         chat: Default::default(),
         privacy: Default::default(),
+        update: Default::default(),
     };
     config.save(data_dir)?;
 
@@ -1920,6 +1977,53 @@ async fn do_chat(data_dir: &Path, req: miasma_core::chat::ChatRequest) -> Worker
     }
 }
 
+/// Sort out why a storage request got no answer: the service is down, too old, or unreachable.
+async fn storage_failure(data_dir: &Path, e: &anyhow::Error) -> WorkerResult {
+    if is_daemon_down(&format!("{e:#}")) {
+        return WorkerResult::StorageUnavailable;
+    }
+    // A request every version knows still gets an answer, so the service is there but too old.
+    match timed_request(data_dir, ControlRequest::Status).await {
+        Some(Ok(ControlResponse::Status(_))) => WorkerResult::StorageUnsupported,
+        _ => WorkerResult::StorageUnavailable,
+    }
+}
+
+async fn do_storage_list(data_dir: &Path) -> WorkerResult {
+    match daemon_request(data_dir, ControlRequest::StorageList).await {
+        Ok(ControlResponse::StorageList {
+            shares,
+            total_bytes,
+        }) => WorkerResult::StorageShares {
+            shares,
+            total_bytes,
+        },
+        Ok(ControlResponse::Error(e)) => WorkerResult::StorageFailed(UiError::from_text(e)),
+        Ok(other) => WorkerResult::StorageFailed(UiError::unexpected(&other)),
+        Err(e) => storage_failure(data_dir, &e).await,
+    }
+}
+
+async fn do_storage_delete(
+    data_dir: &Path,
+    selection: miasma_core::store::ShareSelection,
+) -> WorkerResult {
+    match daemon_request(data_dir, ControlRequest::StorageDelete { selection }).await {
+        Ok(ControlResponse::StorageDeleted {
+            deleted,
+            freed_bytes,
+            skipped,
+        }) => WorkerResult::StorageDeleted {
+            deleted,
+            freed_bytes,
+            skipped,
+        },
+        Ok(ControlResponse::Error(e)) => WorkerResult::StorageFailed(UiError::from_text(e)),
+        Ok(other) => WorkerResult::StorageFailed(UiError::unexpected(&other)),
+        Err(e) => storage_failure(data_dir, &e).await,
+    }
+}
+
 async fn do_transfer_cancel(data_dir: &Path, id: &str) -> WorkerResult {
     match daemon_request(
         data_dir,
@@ -2052,6 +2156,47 @@ mod tests {
             WorkerCmd::SetDiagnostic(true),
             WorkerCmd::LogsClear,
             WorkerCmd::LegacyLogs { delete: true },
+        ] {
+            assert!(!format!("{c:?}").is_empty());
+        }
+    }
+
+    #[test]
+    fn storage_variants_debug_counts_only_and_stay_printable() {
+        // The listing Debug shows a count, never the content addresses.
+        let r = WorkerResult::StorageShares {
+            shares: vec![miasma_core::store::StoredShare {
+                id: "deadbeef".into(),
+                address: "SECRET-ADDRESS-VALUE".into(),
+                size_bytes: 1,
+                modified_secs: 0,
+                in_use: false,
+            }],
+            total_bytes: 1,
+        };
+        let shown = format!("{r:?}");
+        assert!(!shown.contains("SECRET-ADDRESS-VALUE"), "{shown}");
+        assert!(shown.contains("shares: 1"), "{shown}");
+        for r in [
+            WorkerResult::StorageDeleted {
+                deleted: 1,
+                freed_bytes: 2,
+                skipped: vec!["deadbeef".into()],
+            },
+            WorkerResult::StorageUnavailable,
+            WorkerResult::StorageUnsupported,
+            WorkerResult::StorageFailed(crate::errors::UiError::new(
+                crate::errors::ErrorKind::DiskError,
+                "x",
+            )),
+        ] {
+            assert!(!format!("{r:?}").is_empty());
+        }
+        for c in [
+            WorkerCmd::StorageList,
+            WorkerCmd::StorageDelete {
+                selection: miasma_core::store::ShareSelection::OlderThanDays(7),
+            },
         ] {
             assert!(!format!("{c:?}").is_empty());
         }

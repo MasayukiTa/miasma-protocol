@@ -365,6 +365,28 @@ spec!(
     "Trim copy of the history file (renamed over the original)."
 );
 spec!(
+    PUSH_OUTBOX,
+    "push_outbox.log",
+    File,
+    DataDir,
+    State,
+    Encrypt,
+    CryptoEraseOverwriteRemove,
+    "D14",
+    "Files queued for sending to a contact: source path, size, hash, progress."
+);
+spec!(
+    PUSH_OUTBOX_TMP,
+    "push_outbox.log.tmp",
+    File,
+    DataDir,
+    State,
+    Encrypt,
+    CryptoEraseOverwriteRemove,
+    "D14",
+    "Compaction copy of the send queue (renamed over the original)."
+);
+spec!(
     TRANSFERS_DIR,
     "transfers",
     Dir,
@@ -474,6 +496,28 @@ spec!(
     CryptoEraseOverwriteRemove,
     "D27",
     "Chat messages waiting to be delivered."
+);
+spec!(
+    CHAT_GROUP,
+    "chat/*.grp",
+    Pattern,
+    DataDir,
+    State,
+    Encrypt,
+    CryptoEraseOverwriteRemove,
+    "D27",
+    "Chat group: membership chain, message counters and waiting deliveries (file name is a keyed hash)."
+);
+spec!(
+    CHAT_GROUP_HISTORY,
+    "chat/*.gmsgs",
+    Pattern,
+    DataDir,
+    State,
+    Encrypt,
+    CryptoEraseOverwriteRemove,
+    "D27",
+    "Messages of one chat group (encrypted record log; absent in ephemeral mode)."
 );
 spec!(
     CHAT_TMP,
@@ -610,6 +654,53 @@ spec!(
     CryptoEraseOverwriteRemove,
     "D22",
     "A protected state file that failed to open (wrong key or damage), set aside instead of being overwritten."
+);
+
+// ── Self-update ─────────────────────────────────────────────────────────────
+
+spec!(
+    UPDATE_DIR,
+    "update",
+    Dir,
+    DataDir,
+    Runtime,
+    Skippable,
+    Remove,
+    "D40",
+    "Self-update work area; exists only while an update is downloaded or being applied."
+);
+spec!(
+    UPDATE_JOURNAL,
+    "update/journal.json",
+    File,
+    DataDir,
+    Runtime,
+    Skippable,
+    Remove,
+    "D40",
+    "Progress of an update (phase, install folder, program names, expected hashes) so an interrupted one can be finished or undone."
+);
+spec!(
+    UPDATE_WORK,
+    "update/work-*",
+    Pattern,
+    DataDir,
+    Runtime,
+    Skippable,
+    Remove,
+    "D40",
+    "Downloaded release archive, deleted once the update is applied or refused."
+);
+spec!(
+    UPDATE_STATE,
+    "update-state.json",
+    File,
+    DataDir,
+    State,
+    Skippable,
+    Remove,
+    "D40",
+    "The version the person chose to skip and an update that failed its start check; holds no times."
 );
 
 // ── Logs ────────────────────────────────────────────────────────────────────
@@ -874,6 +965,8 @@ pub const REGISTRY: &[PathSpec] = &[
     CONTACTS_CORRUPT,
     PUSH_HISTORY,
     PUSH_HISTORY_TMP,
+    PUSH_OUTBOX,
+    PUSH_OUTBOX_TMP,
     TRANSFERS_DIR,
     RECV_JOURNAL,
     SEND_JOURNAL,
@@ -884,6 +977,8 @@ pub const REGISTRY: &[PathSpec] = &[
     CHAT_SESSION,
     CHAT_HISTORY,
     CHAT_OUTBOX,
+    CHAT_GROUP,
+    CHAT_GROUP_HISTORY,
     CHAT_TMP,
     DAEMON_PORT,
     DAEMON_HTTP,
@@ -896,6 +991,10 @@ pub const REGISTRY: &[PathSpec] = &[
     STATE_MIGRATION_LOCK,
     PREMIGRATE_COPY,
     STATE_CORRUPT_ASIDE,
+    UPDATE_DIR,
+    UPDATE_JOURNAL,
+    UPDATE_WORK,
+    UPDATE_STATE,
     DAEMON_LOG,
     DESKTOP_LOG,
     BRIDGE_LOG,
@@ -950,6 +1049,22 @@ pub fn version_stamp(data_dir: &Path) -> PathBuf {
 /// `<data>/shares`
 pub fn shares_dir(data_dir: &Path) -> PathBuf {
     SHARES_DIR.in_dir(data_dir)
+}
+/// `<data>/update`
+pub fn update_dir(data_dir: &Path) -> PathBuf {
+    UPDATE_DIR.in_dir(data_dir)
+}
+/// `<data>/update/journal.json`
+pub fn update_journal(data_dir: &Path) -> PathBuf {
+    UPDATE_JOURNAL.in_dir(data_dir)
+}
+/// `<data>/update-state.json`
+pub fn update_state(data_dir: &Path) -> PathBuf {
+    UPDATE_STATE.in_dir(data_dir)
+}
+/// `<data>/update/work-<id>`
+pub fn update_work_dir(data_dir: &Path, id: &str) -> PathBuf {
+    update_dir(data_dir).join(format!("work-{id}"))
 }
 /// `<data>/lg`
 pub fn diag_log_dir(data_dir: &Path) -> PathBuf {
@@ -1092,6 +1207,21 @@ pub fn chat_session_file(chat_dir: &Path, stem: &str) -> PathBuf {
 /// `<chat dir>/outbox.log`
 pub fn chat_outbox_file(chat_dir: &Path) -> PathBuf {
     chat_dir.join("outbox.log")
+}
+
+/// `<chat dir>/<stem>.grp`: the state document of one group.
+pub fn chat_group_file(chat_dir: &Path, stem: &str) -> PathBuf {
+    chat_dir.join(format!("{stem}.grp"))
+}
+
+/// `<chat dir>/<stem>.gmsgs`: the saved messages of one group.
+pub fn chat_group_history_file(chat_dir: &Path, stem: &str) -> PathBuf {
+    chat_dir.join(format!("{stem}.gmsgs"))
+}
+
+/// True for a group state document name.
+pub fn is_chat_group_file(p: &Path) -> bool {
+    p.extension().is_some_and(|e| e == "grp")
 }
 
 /// True for a per-contact session document name.
@@ -1251,6 +1381,8 @@ mod tests {
         assert_eq!(DESKTOP_PREFS.in_dir(d), join("desktop-prefs.toml"));
         assert_eq!(CONTACTS.in_dir(d), join("contacts.json"));
         assert_eq!(PUSH_HISTORY.in_dir(d), join("push_history.jsonl"));
+        assert_eq!(PUSH_OUTBOX.in_dir(d), join("push_outbox.log"));
+        assert_eq!(PUSH_OUTBOX_TMP.in_dir(d), join("push_outbox.log.tmp"));
         assert_eq!(default_push_inbox(d), join("inbox"));
         assert_eq!(transfers_dir(d), join("transfers"));
         assert_eq!(directed_incoming_dir(d), join("directed/incoming"));

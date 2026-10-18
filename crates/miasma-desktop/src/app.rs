@@ -11,7 +11,7 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::chat_ui::{ChatAction, ChatUi};
 use crate::contacts::ContactsUi;
 use crate::errors::{ErrorKind, UiError};
-use crate::locale::{self, Locale, LogStrings, Strings, TransferStrings};
+use crate::locale::{self, Locale, LogStrings, StorageStrings, Strings, TransferStrings};
 use crate::theme::{self, Palette, ThemeMode};
 use crate::transfers::TransfersUi;
 use crate::ui_kit::{self as kit, Level};
@@ -19,6 +19,7 @@ use crate::ux::{self, Answer, RefreshGate};
 use crate::variant::ProductMode;
 use crate::worker::{DaemonState, WorkerCmd, WorkerHandle, WorkerResult};
 use crate::LaunchIntent;
+use miasma_core::push::speed_fmt::{SpeedShown, SpeedUnit};
 
 // Compatibility: `contacts.rs` still imports its drawing helpers from here. They are the kit's
 // own (`ui_kit.rs`); remove this line when contacts.rs imports `ui_kit` directly.
@@ -66,6 +67,8 @@ pub struct MiasmaApp {
     locale: Locale,
     /// User's appearance choice (System / Light / Dark), persisted.
     theme_mode: ThemeMode,
+    /// `ui.speed_unit` / `ui.speed_units_shown`.
+    speed_prefs: crate::speed::SpeedPrefs,
     /// Which palette is currently applied to egui (None until the first frame is styled).
     applied_dark: Option<bool>,
     #[cfg(feature = "ui-tour")]
@@ -164,6 +167,56 @@ pub struct MiasmaApp {
 
     // Logs (memory-only by default; opt-in diagnostic files)
     logs: LogsState,
+
+    // Storage (the shares this node keeps: listing and deletion)
+    storage: StorageState,
+
+    // Updates (check once after start, Settings section, banner)
+    updates: crate::updates::UpdatesUi,
+    network: crate::network_ui::NetworkUi,
+}
+
+/// Why the stored-share list cannot be shown.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StorageNote {
+    /// The background service is older and does not know the storage request.
+    Unsupported,
+    /// The background service is not reachable.
+    Unavailable,
+}
+
+/// State of the Storage section in Settings.
+struct StorageState {
+    /// True once the person has opened the section; the list is asked for on first open.
+    open: bool,
+    /// Asking the service for the listing right now.
+    loading: bool,
+    /// The listing, oldest first.
+    shares: Vec<miasma_core::store::StoredShare>,
+    total_bytes: u64,
+    /// Set when the listing cannot be shown at all.
+    note: Option<StorageNote>,
+    /// A delete waiting for the person to confirm.
+    confirm: Option<miasma_core::store::ShareSelection>,
+    /// The "delete older than" threshold, edited as text.
+    days: String,
+    /// Addresses ticked in the list for "Delete selected".
+    selected: std::collections::HashSet<String>,
+}
+
+impl StorageState {
+    fn new() -> Self {
+        Self {
+            open: false,
+            loading: false,
+            shares: Vec::new(),
+            total_bytes: 0,
+            note: None,
+            confirm: None,
+            days: "30".to_owned(),
+            selected: std::collections::HashSet::new(),
+        }
+    }
 }
 
 /// Why the background service's log lines are not shown.
@@ -389,6 +442,13 @@ impl MiasmaApp {
             mode,
             locale,
             theme_mode,
+            speed_prefs: {
+                let p = crate::variant::DesktopPrefs::load(&data_dir);
+                crate::speed::SpeedPrefs {
+                    unit: p.speed_unit,
+                    shown: p.speed_units_shown,
+                }
+            },
             applied_dark: Some(dark),
             #[cfg(feature = "ui-tour")]
             tour: tour::Tour::from_env(),
@@ -435,6 +495,9 @@ impl MiasmaApp {
             last_status_poll: now,
             launch_attempts: 0,
             logs: LogsState::new(&data_dir),
+            storage: StorageState::new(),
+            updates: crate::updates::UpdatesUi::new(data_dir.clone()),
+            network: crate::network_ui::NetworkUi::new(data_dir.clone()),
 
             transfers: TransfersUi::default(),
             contacts: ContactsUi::default(),
@@ -490,6 +553,11 @@ impl MiasmaApp {
         locale::transfer_strings(self.locale)
     }
 
+    /// Storage section string table.
+    fn st(&self) -> &'static StorageStrings {
+        locale::storage_strings(self.locale)
+    }
+
     /// An error in the UI language; Technical mode adds the original wording.
     fn error_text(&self, e: &UiError) -> String {
         e.text(self.locale, !self.mode.is_easy())
@@ -536,11 +604,21 @@ impl MiasmaApp {
             mode: self.mode,
             locale: self.locale,
             theme: self.theme_mode,
+            speed_unit: self.speed_prefs.unit,
+            speed_units_shown: self.speed_prefs.shown,
         };
         prefs.save(&self.data_dir);
     }
 
     // ── Dialogs ──────────────────────────────────────────────────────────
+
+    /// Whether one of the dialogs drawn by [`Self::dialogs`] is open.
+    fn dialog_is_open(&self) -> bool {
+        self.show_close_confirm
+            || self.show_wipe_confirm
+            || self.revoke_confirm.is_some()
+            || self.storage.confirm.is_some()
+    }
 
     /// The "are you sure" dialogs. One is open at a time; each is answered with a button or Esc.
     fn dialogs(&mut self, ctx: &egui::Context) {
@@ -641,6 +719,32 @@ impl MiasmaApp {
                         .try_send(WorkerCmd::DirectedRevoke { envelope_id: id });
                 }
                 Answer::Cancel => self.revoke_confirm = None,
+                Answer::Pending => {}
+            }
+        }
+
+        // Deleting stored shares: what it frees, and who it affects.
+        if let Some(selection) = self.storage.confirm.clone() {
+            let st = self.st();
+            let answer = ux::confirm::show(
+                ctx,
+                "storage_delete_confirm",
+                st.confirm_title,
+                st.confirm_button,
+                st.cancel,
+                |ui| {
+                    kit::paragraph(ui, st.confirm_body);
+                },
+            );
+            match answer {
+                Answer::Confirm => {
+                    self.storage.confirm = None;
+                    let _ = self
+                        .worker
+                        .tx
+                        .try_send(WorkerCmd::StorageDelete { selection });
+                }
+                Answer::Cancel => self.storage.confirm = None,
                 Answer::Pending => {}
             }
         }
@@ -953,6 +1057,55 @@ impl MiasmaApp {
                         }
                     }
                 }
+                WorkerResult::StorageShares {
+                    shares,
+                    total_bytes,
+                } => {
+                    self.storage.loading = false;
+                    self.storage.note = None;
+                    // Keep only ticks that still name a stored, unused share.
+                    self.storage
+                        .selected
+                        .retain(|a| shares.iter().any(|s| &s.address == a && !s.in_use));
+                    self.storage.shares = shares;
+                    self.storage.total_bytes = total_bytes;
+                }
+                WorkerResult::StorageDeleted {
+                    deleted,
+                    freed_bytes,
+                    skipped,
+                } => {
+                    let st = self.st();
+                    if deleted == 0 && skipped.is_empty() {
+                        self.set_msg(MsgKind::Info, st.nothing);
+                    } else {
+                        let msg = st
+                            .deleted
+                            .replace("{n}", &deleted.to_string())
+                            .replace("{size}", &format_size(freed_bytes));
+                        self.set_msg(MsgKind::Success, msg);
+                    }
+                    if !skipped.is_empty() {
+                        let msg = st.skipped.replace("{ids}", &skipped.join(", "));
+                        self.set_msg(MsgKind::Info, msg);
+                    }
+                    // Show the effect at once.
+                    self.storage.loading = true;
+                    let _ = self.worker.tx.try_send(WorkerCmd::StorageList);
+                }
+                WorkerResult::StorageUnavailable => {
+                    self.storage.loading = false;
+                    self.storage.note = Some(StorageNote::Unavailable);
+                }
+                WorkerResult::StorageUnsupported => {
+                    self.storage.loading = false;
+                    self.storage.note = Some(StorageNote::Unsupported);
+                }
+                WorkerResult::StorageFailed(e) => {
+                    self.storage.loading = false;
+                    let text = self.error_text(&e);
+                    self.set_msg(MsgKind::Error, text);
+                }
                 WorkerResult::Err(e) => {
                     self.busy = false;
                     if self.import_state == ImportState::InProgress {
@@ -1215,7 +1368,7 @@ impl MiasmaApp {
                     );
                     if self.quota_mb > 0 {
                         ui.add_space(kit::SP_1);
-                        kit::progress(ui, (pct / 100.0) as f32, pct > 90.0);
+                        kit::progress(ui, s.status_storage, (pct / 100.0) as f32, pct > 90.0);
                     }
                     if self.peer_count == 0 {
                         kit::notice(ui, Level::Warn, s.health_no_peers);
@@ -1922,7 +2075,12 @@ impl MiasmaApp {
         } else {
             ui.label(used_text);
         }
-        kit::progress(ui, (pct / 100.0) as f32, pct > 90.0);
+        kit::progress(
+            ui,
+            self.s().status_storage,
+            (pct / 100.0) as f32,
+            pct > 90.0,
+        );
     }
 
     /// Technical-mode status: full diagnostics, one section per topic.
@@ -2143,6 +2301,32 @@ impl MiasmaApp {
                     self.save_prefs();
                 }
             });
+            {
+                let sp = crate::speed::speed_strings(self.locale);
+                kit::form_row(ui, sp.settings_unit, None, |ui| {
+                    let mut unit = self.speed_prefs.unit;
+                    let options = [
+                        (SpeedUnit::Bits, sp.unit_bits),
+                        (SpeedUnit::Bytes, sp.unit_bytes),
+                    ];
+                    if kit::segmented(ui, &mut unit, &options) {
+                        self.speed_prefs.unit = unit;
+                        self.save_prefs();
+                    }
+                });
+                kit::form_row(ui, sp.settings_shown, None, |ui| {
+                    let mut shown = self.speed_prefs.shown;
+                    let options = [
+                        (SpeedShown::Both, sp.shown_both),
+                        (SpeedShown::BitsOnly, sp.shown_bits),
+                        (SpeedShown::BytesOnly, sp.shown_bytes),
+                    ];
+                    if kit::segmented(ui, &mut shown, &options) {
+                        self.speed_prefs.shown = shown;
+                        self.save_prefs();
+                    }
+                });
+            }
             ui.add_space(kit::SP_4);
 
             // ── Paths ────────────────────────────────────────────────
@@ -2177,7 +2361,14 @@ impl MiasmaApp {
             });
 
             // ── Logs ─────────────────────────────────────────────────
+            self.updates.section(ui, self.locale, !easy);
+
+            self.network.section(ui, self.locale);
+
             self.logs_section(ui);
+
+            // ── Storage ──────────────────────────────────────────────
+            self.storage_section(ui);
 
             // ── How it works ─────────────────────────────────────────
             kit::section(ui, s.settings_how, |ui| {
@@ -2288,6 +2479,124 @@ impl MiasmaApp {
         });
     }
 
+    /// The shares this device keeps: the listing and the delete controls. The
+    /// service answers with its current view of what is in use.
+    fn storage_section(&mut self, ui: &mut egui::Ui) {
+        let st = self.st();
+        kit::section(ui, st.heading, |ui| {
+            kit::paragraph_muted(ui, st.desc);
+            kit::button_row(ui, |ui| {
+                let toggle = if self.storage.open { st.hide } else { st.show };
+                if ui.add(kit::secondary_button(toggle)).clicked() {
+                    self.storage.open = !self.storage.open;
+                    if self.storage.open {
+                        self.storage.loading = true;
+                        let _ = self.worker.tx.try_send(WorkerCmd::StorageList);
+                    }
+                }
+                if self.storage.open && ui.add(kit::secondary_button(st.refresh)).clicked() {
+                    self.storage.loading = true;
+                    let _ = self.worker.tx.try_send(WorkerCmd::StorageList);
+                }
+            });
+            if !self.storage.open {
+                return;
+            }
+            if let Some(note) = self.storage.note {
+                let text = match note {
+                    StorageNote::Unsupported => st.note_unsupported,
+                    StorageNote::Unavailable => st.note_unavailable,
+                };
+                kit::paragraph_muted(ui, text);
+                return;
+            }
+            if self.storage.shares.is_empty() {
+                kit::hint(
+                    ui,
+                    if self.storage.loading {
+                        st.loading
+                    } else {
+                        st.empty
+                    },
+                );
+                return;
+            }
+            let summary = st
+                .total
+                .replace("{count}", &self.storage.shares.len().to_string())
+                .replace("{size}", &format_size(self.storage.total_bytes));
+            kit::paragraph(ui, &summary);
+
+            let locale = self.locale;
+            egui::ScrollArea::vertical()
+                .id_source("settings_storage_view")
+                .max_height(220.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    for s in &self.storage.shares {
+                        let when = if s.modified_secs == 0 {
+                            "-".to_owned()
+                        } else {
+                            format_epoch(s.modified_secs, locale)
+                        };
+                        let mark = if s.in_use {
+                            format!("  ({})", st.in_use)
+                        } else {
+                            String::new()
+                        };
+                        let label = RichText::new(format!(
+                            "{}  {}  {when}{mark}",
+                            s.id,
+                            format_size(s.size_bytes)
+                        ))
+                        .monospace();
+                        let mut on = self.storage.selected.contains(&s.address);
+                        let changed = ui
+                            .add_enabled(!s.in_use, egui::Checkbox::new(&mut on, label))
+                            .changed();
+                        if changed {
+                            if on {
+                                self.storage.selected.insert(s.address.clone());
+                            } else {
+                                self.storage.selected.remove(&s.address);
+                            }
+                        }
+                    }
+                });
+
+            ui.add_space(kit::SP_2);
+            let mut delete: Option<miasma_core::store::ShareSelection> = None;
+            kit::button_row(ui, |ui| {
+                let none = self.storage.selected.is_empty();
+                let btn = ui.add_enabled(!none, kit::danger_button(st.delete_selected_button));
+                if btn.clicked() {
+                    let mut ids: Vec<String> = self.storage.selected.iter().cloned().collect();
+                    ids.sort();
+                    delete = Some(miasma_core::store::ShareSelection::Ids(ids));
+                }
+                if ui.add(kit::danger_button(st.delete_all_button)).clicked() {
+                    delete = Some(miasma_core::store::ShareSelection::All);
+                }
+            });
+            kit::button_row(ui, |ui| {
+                ui.label(st.delete_old);
+                ui.add(kit::input(&mut self.storage.days).desired_width(56.0));
+                ui.label(st.days_label);
+                if ui.add(kit::danger_button(st.delete_old_button)).clicked() {
+                    match self.storage.days.trim().parse::<u64>() {
+                        Ok(d) if d > 0 => {
+                            delete = Some(miasma_core::store::ShareSelection::OlderThanDays(d))
+                        }
+                        _ => self.set_msg(MsgKind::Error, st.bad_days),
+                    }
+                }
+            });
+            if let Some(sel) = delete {
+                self.storage.confirm = Some(sel);
+            }
+        });
+    }
+
     /// The old-log-files notice: a window until the person chooses.
     fn legacy_logs_notice(&mut self, ctx: &egui::Context) {
         if self.logs.legacy.is_none() {
@@ -2298,6 +2607,9 @@ impl MiasmaApp {
             miasma_core::logging::legacy::record_notice_shown(&self.data_dir);
         }
         let l = self.lg();
+        crate::a11y::dialog_enter(ctx, "legacy_logs");
+        // Esc keeps the files (the choice that cannot lose anything).
+        let mut keep = crate::a11y::esc_pressed(ctx);
         egui::Window::new(l.legacy_title)
             .collapsible(false)
             .resizable(false)
@@ -2312,15 +2624,20 @@ impl MiasmaApp {
                             .worker
                             .tx
                             .try_send(WorkerCmd::LegacyLogs { delete: true });
+                        crate::a11y::dialog_leave(ui.ctx(), "legacy_logs");
                     }
-                    if ui.add(kit::secondary_button(l.legacy_keep)).clicked() {
-                        let _ = self
-                            .worker
-                            .tx
-                            .try_send(WorkerCmd::LegacyLogs { delete: false });
-                    }
+                    let keep_button = ui.add(kit::secondary_button(l.legacy_keep));
+                    crate::a11y::dialog_focus_safe_button(ui.ctx(), "legacy_logs", &keep_button);
+                    keep |= keep_button.clicked();
                 });
             });
+        if keep {
+            let _ = self
+                .worker
+                .tx
+                .try_send(WorkerCmd::LegacyLogs { delete: false });
+            crate::a11y::dialog_leave(ctx, "legacy_logs");
+        }
     }
 
     // ── Import panel (magnet / .torrent) ──────────────────────────────────
@@ -2469,7 +2786,7 @@ impl MiasmaApp {
 
         d.push_str(&format!(
             "Desktop version: {} (beta)\n",
-            env!("CARGO_PKG_VERSION")
+            env!("MIASMA_VERSION")
         ));
         d.push_str(&format!(
             "Build:           {}\n",
@@ -2838,6 +3155,7 @@ impl eframe::App for MiasmaApp {
         }
 
         self.poll_worker();
+        self.updates.tick(ctx);
 
         // Messages that go away by themselves: success and progress notes. Errors stay until
         // they are closed.
@@ -2873,6 +3191,11 @@ impl eframe::App for MiasmaApp {
             if open {
                 self.contacts.mark_seen();
             }
+            {
+                let sp = self.contacts.speed_mut();
+                sp.prefs = self.speed_prefs;
+                sp.locale = self.locale;
+            }
             self.contacts
                 .tick(open, self.daemon_state == DaemonState::Connected);
             let tx = self.worker.tx.clone();
@@ -2887,6 +3210,7 @@ impl eframe::App for MiasmaApp {
             if open {
                 self.chat.mark_seen();
             }
+            self.chat.set_locale(self.locale);
             self.chat
                 .tick(open, self.daemon_state == DaemonState::Connected);
             let tx = self.worker.tx.clone();
@@ -3029,7 +3353,15 @@ impl eframe::App for MiasmaApp {
                             MsgKind::Error => Level::Error,
                         };
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.add(kit::compact_button(s.dismiss)).clicked() {
+                            // This bar is created before the page, so a focusable button here
+                            // would be first in Tab order but is last on screen: it is reached
+                            // with Esc (below) or by assistive technology instead.
+                            let dismiss = kit::compact_button(s.dismiss).sense(egui::Sense {
+                                click: true,
+                                drag: false,
+                                focusable: false,
+                            });
+                            if ui.add(dismiss).clicked() {
                                 self.status_msg = None;
                             }
                             ui.with_layout(
@@ -3055,6 +3387,7 @@ impl eframe::App for MiasmaApp {
                         if self.logs.writes_files {
                             kit::notice(ui, Level::Warn, self.lg().diag_banner);
                         }
+                        self.updates.banner(ui, self.locale);
                         self.connection_header(ui);
                         let c = locale::chat_strings(self.locale);
                         let connected = self.daemon_state == DaemonState::Connected;
@@ -3079,6 +3412,10 @@ impl eframe::App for MiasmaApp {
                         Some(ChatAction::RetryFile { contact_id, path }) => {
                             self.contacts.resend_file(&contact_id, &path);
                         }
+                        Some(ChatAction::AddContact(code)) => {
+                            self.contacts.prefill_add(&code);
+                            self.tab = Tab::Contacts;
+                        }
                         None => {}
                     }
                     return;
@@ -3091,6 +3428,7 @@ impl eframe::App for MiasmaApp {
                             if self.logs.writes_files {
                                 kit::notice(ui, Level::Warn, self.lg().diag_banner);
                             }
+                            self.updates.banner(ui, self.locale);
                             // Connection state first, when not connected.
                             self.connection_header(ui);
                             match self.tab {
@@ -3119,7 +3457,14 @@ impl eframe::App for MiasmaApp {
 
         self.legacy_logs_notice(ctx);
 
+        let dialog_open = self.dialog_is_open();
         self.dialogs(ctx);
+
+        // Esc dismisses the message in the bottom bar when no dialog is open (a dialog takes
+        // Esc for itself).
+        if self.status_msg.is_some() && !dialog_open && crate::a11y::esc_pressed(ctx) {
+            self.status_msg = None;
+        }
     }
 }
 

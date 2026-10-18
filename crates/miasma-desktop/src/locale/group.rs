@@ -1,0 +1,489 @@
+//! Strings of the group conversations in the Chat area (`group.rs`, `group_ui.rs`).
+//!
+//! Kept in its own file so the table stays easy to read next to the others in `locale.rs`;
+//! `{name}`-style holes are filled with `transfers::fill`.
+
+use super::Locale;
+
+macro_rules! group_strings {
+    ($($f:ident),* $(,)?) => {
+        /// Every sentence of the group screens, one table per language.
+        pub struct GroupStrings { $(pub $f: &'static str),* }
+        impl GroupStrings {
+            /// Every field with its name, for the completeness test.
+            #[cfg(test)]
+            fn all(&self) -> Vec<(&'static str, &'static str)> {
+                vec![$((stringify!($f), self.$f)),*]
+            }
+        }
+    };
+}
+
+group_strings! {
+    // List
+    new_group, a11y_new_group, a11y_row, row_members, row_invited, row_left, row_removed,
+    preview_sender, list_empty_groups,
+    // New group
+    ng_title, ng_name_label, ng_name_hint, ng_members_label, ng_none, ng_count, ng_note,
+    ng_create, ng_cancel, ng_err_name, ng_err_members, ng_err_limit, ng_created,
+    a11y_ng_name, a11y_ng_member,
+    // Conversation
+    info_button, a11y_info, back_to_messages, a11y_back_to_messages,
+    unverified_badge, unverified_tip, member_fallback, add_as_contact, a11y_add_contact,
+    unverified_header, a11y_messages, a11y_composer, a11y_send,
+    state_waiting, state_all, state_partial, state_failed_all, state_alone, gap_note,
+    older_button, not_joined_note, invited_note, accept, decline, a11y_accept, a11y_decline,
+    unsupported, unavailable,
+    // Information panel
+    info_title, members_title, role_admin, role_member, you_tag, marker_verified,
+    marker_unverified, code_label, add_member, a11y_add_member, admin_only_hint, full_hint,
+    remove, a11y_remove, leave, a11y_leave, delete_history, a11y_delete_history,
+    delete_history_hint, a11y_member,
+    // Add members
+    add_title, add_none, add_count, add_confirm, add_cancel, a11y_add_pick,
+    // Confirmations
+    leave_title, leave_body, leave_confirm, leave_cancel,
+    delete_title, delete_body, delete_confirm, delete_cancel,
+    remove_title, remove_body, remove_confirm, remove_cancel,
+    left_done, deleted_done, removed_done, added_done, accepted_done, declined_done,
+    // Errors
+    err_unknown_group, err_ambiguous_group, err_not_joined, err_not_admin, err_not_member,
+    err_already_member, err_too_many_groups, err_too_many_members, err_last_admin,
+    err_queue_full, err_bad_request,
+}
+
+pub fn group_strings(locale: Locale) -> &'static GroupStrings {
+    match locale {
+        Locale::En => &GR_EN,
+        Locale::Ja => &GR_JA,
+        Locale::ZhCn => &GR_ZH_CN,
+    }
+}
+
+static GR_EN: GroupStrings = GroupStrings {
+    new_group: "New group",
+    a11y_new_group: "Create a new group",
+    a11y_row: "Group {name}, {n} members",
+    row_members: "{n} members",
+    row_invited: "Invitation to join this group",
+    row_left: "You left this group",
+    row_removed: "You were removed from this group",
+    preview_sender: "{name}: {text}",
+    list_empty_groups: "No conversations yet. Choose \"New conversation\" or \"New group\" to start.",
+    ng_title: "New group",
+    ng_name_label: "Group name",
+    ng_name_hint: "Name of the group",
+    ng_members_label: "Members (choose from your contacts)",
+    ng_none: "None of your contacts can receive messages right now. Add a contact on the Contacts tab first.",
+    ng_count: "{n} of {max} members chosen, including you",
+    ng_note: "Adding people to a group does not make them your contacts, or each other's. Every member decides for themselves whom to add.",
+    ng_create: "Create group",
+    ng_cancel: "Cancel",
+    ng_err_name: "Enter a name for the group.",
+    ng_err_members: "Choose at least one contact.",
+    ng_err_limit: "A group holds at most {max} members, including you.",
+    ng_created: "Created the group {name}",
+    a11y_ng_name: "Group name input",
+    a11y_ng_member: "Include {name} in the group",
+    info_button: "Group information",
+    a11y_info: "Show the members and settings of this group",
+    back_to_messages: "Back to messages",
+    a11y_back_to_messages: "Back to the messages of this group",
+    unverified_badge: "Unverified member",
+    unverified_tip: "This person is not one of your contacts. The name shown is what someone else calls them and has not been checked. Compare the verification code with them before you add them.",
+    member_fallback: "Member {code}",
+    add_as_contact: "Add as contact",
+    a11y_add_contact: "Add {name} as a contact",
+    unverified_header: "{n} members are not your contacts yet. Their messages are marked as unverified. Add each of them yourself to verify them.",
+    a11y_messages: "Group messages",
+    a11y_composer: "Group message input",
+    a11y_send: "Send message to the group",
+    state_waiting: "Delivered to {d} of {n} members so far",
+    state_all: "Delivered to all {n} members",
+    state_partial: "Delivered to {d} of {n} members. {f} could not be reached.",
+    state_failed_all: "Could not be sent to any member",
+    state_alone: "There is no other member to deliver to",
+    gap_note: "{n} earlier messages from this member have not arrived.",
+    older_button: "Show older messages",
+    not_joined_note: "You are no longer in this group, so you cannot send messages here.",
+    invited_note: "You have been invited to this group. Accept to see and send messages.",
+    accept: "Accept",
+    decline: "Decline",
+    a11y_accept: "Accept the invitation to this group",
+    a11y_decline: "Decline the invitation to this group",
+    unsupported: "The background service does not support groups. Update Miasma and the background service to use them.",
+    unavailable: "Groups are not available right now.",
+    info_title: "Group information",
+    members_title: "Members ({n})",
+    role_admin: "Admin",
+    role_member: "Member",
+    you_tag: "You",
+    marker_verified: "Verified contact",
+    marker_unverified: "Unverified",
+    code_label: "Verification code",
+    add_member: "Add member",
+    a11y_add_member: "Add a member to this group",
+    admin_only_hint: "Only the creator and admins can add or remove members.",
+    full_hint: "This group already has {max} members, the most it can hold. Remove someone before adding another.",
+    remove: "Remove",
+    a11y_remove: "Remove {name} from this group",
+    leave: "Leave group",
+    a11y_leave: "Leave this group",
+    delete_history: "Delete history",
+    a11y_delete_history: "Delete the history of this group from this device",
+    delete_history_hint: "Leave the group first. The history is then deleted from this device together with the group.",
+    a11y_member: "{name}, {role}, {state}",
+    add_title: "Add members",
+    add_none: "None of your contacts can be added. They may already be in the group, or sending to them is switched off.",
+    add_count: "{n} of {max} members after adding",
+    add_confirm: "Add",
+    add_cancel: "Cancel",
+    a11y_add_pick: "Add {name} to the group",
+    leave_title: "Leave this group?",
+    leave_body: "You will no longer receive messages from {name}, and the other members are told that you left. The history stays on this device until you delete it.",
+    leave_confirm: "Leave",
+    leave_cancel: "Cancel",
+    delete_title: "Delete the history of this group?",
+    delete_body: "All messages of {name} will be deleted from this device only. This cannot be undone. The other members keep their own copies.",
+    delete_confirm: "Delete",
+    delete_cancel: "Cancel",
+    remove_title: "Remove this member?",
+    remove_body: "{who} will be removed from {name} and will receive nothing more from the group.",
+    remove_confirm: "Remove",
+    remove_cancel: "Cancel",
+    left_done: "You left {name}",
+    deleted_done: "Deleted the history of {name}",
+    removed_done: "Removed {who} from {name}",
+    added_done: "Added to {name}",
+    accepted_done: "You joined {name}",
+    declined_done: "Declined the invitation to {name}",
+    err_unknown_group: "That group no longer exists on this device.",
+    err_ambiguous_group: "More than one group matches. Open it from the list.",
+    err_not_joined: "You are not in this group.",
+    err_not_admin: "Only the creator or an admin can do that.",
+    err_not_member: "That person is not in the group.",
+    err_already_member: "That person is already in the group.",
+    err_too_many_groups: "You are in as many groups as Miasma allows ({max}). Leave or delete one first.",
+    err_too_many_members: "A group holds at most {max} members.",
+    err_last_admin: "You are the only admin of this group, so you cannot leave it yet.",
+    err_queue_full: "Too many messages are waiting to be delivered. Wait until the members are online.",
+    err_bad_request: "The request was not valid. Try again.",
+};
+
+static GR_JA: GroupStrings = GroupStrings {
+    new_group: "新しいグループ",
+    a11y_new_group: "新しいグループを作る",
+    a11y_row: "グループ {name}、{n}人",
+    row_members: "{n}人",
+    row_invited: "このグループへの招待があります",
+    row_left: "このグループから退出しました",
+    row_removed: "このグループから外されました",
+    preview_sender: "{name}: {text}",
+    list_empty_groups: "まだ会話がありません。「新しい会話」か「新しいグループ」から始めてください。",
+    ng_title: "新しいグループ",
+    ng_name_label: "グループ名",
+    ng_name_hint: "グループの名前",
+    ng_members_label: "メンバー（登録した連絡先から選びます）",
+    ng_none: "いま、メッセージを受け取れる連絡先がありません。先に「連絡先」タブで連絡先を追加してください。",
+    ng_count: "{max}人中{n}人を選択中（あなたを含む）",
+    ng_note: "グループに入れても、その人があなたの連絡先になることも、メンバー同士が連絡先になることもありません。連絡先に加えるかどうかは、メンバーそれぞれが自分で決めます。",
+    ng_create: "グループを作る",
+    ng_cancel: "キャンセル",
+    ng_err_name: "グループ名を入力してください。",
+    ng_err_members: "連絡先を1人以上選んでください。",
+    ng_err_limit: "グループは、あなたを含めて最大{max}人までです。",
+    ng_created: "グループ「{name}」を作りました",
+    a11y_ng_name: "グループ名の入力欄",
+    a11y_ng_member: "{name}をグループに入れる",
+    info_button: "グループの情報",
+    a11y_info: "このグループのメンバーと設定を表示する",
+    back_to_messages: "メッセージに戻る",
+    a11y_back_to_messages: "このグループのメッセージに戻る",
+    unverified_badge: "未確認のメンバー",
+    unverified_tip: "この人はあなたの連絡先ではありません。表示されている名前は、ほかの人がつけたもので、確認されていません。連絡先に加える前に、本人と確認用コードを照らし合わせてください。",
+    member_fallback: "メンバー {code}",
+    add_as_contact: "連絡先に追加",
+    a11y_add_contact: "{name}を連絡先に追加する",
+    unverified_header: "あなたの連絡先ではないメンバーが{n}人います。その人のメッセージには「未確認」と表示されます。確認するには、1人ずつ自分で連絡先に追加してください。",
+    a11y_messages: "グループのメッセージ",
+    a11y_composer: "グループへのメッセージ入力欄",
+    a11y_send: "グループにメッセージを送る",
+    state_waiting: "{n}人中{d}人に届きました（待機中）",
+    state_all: "メンバー{n}人全員に届きました",
+    state_partial: "{n}人中{d}人に届きました。{f}人には届けられませんでした。",
+    state_failed_all: "どのメンバーにも送れませんでした",
+    state_alone: "届ける相手のメンバーがいません",
+    gap_note: "このメンバーの、これより前のメッセージが{n}件届いていません。",
+    older_button: "古いメッセージを表示",
+    not_joined_note: "このグループには参加していないため、メッセージを送れません。",
+    invited_note: "このグループに招待されています。参加すると、メッセージを読み書きできます。",
+    accept: "参加する",
+    decline: "断る",
+    a11y_accept: "このグループへの招待を受ける",
+    a11y_decline: "このグループへの招待を断る",
+    unsupported: "バックグラウンド機能がグループに対応していません。グループを使うには、アプリとバックグラウンド機能を最新にしてください。",
+    unavailable: "グループは、いまは使えない状態です。",
+    info_title: "グループの情報",
+    members_title: "メンバー（{n}人）",
+    role_admin: "管理者",
+    role_member: "メンバー",
+    you_tag: "あなた",
+    marker_verified: "確認済みの連絡先",
+    marker_unverified: "未確認",
+    code_label: "確認用コード",
+    add_member: "メンバーを追加",
+    a11y_add_member: "このグループにメンバーを追加する",
+    admin_only_hint: "メンバーの追加と削除ができるのは、作成者と管理者だけです。",
+    full_hint: "このグループは上限の{max}人に達しています。追加する前に、だれかを外してください。",
+    remove: "外す",
+    a11y_remove: "{name}をこのグループから外す",
+    leave: "グループから退出",
+    a11y_leave: "このグループから退出する",
+    delete_history: "履歴を削除",
+    a11y_delete_history: "このグループの履歴をこの端末から削除する",
+    delete_history_hint: "先にグループから退出してください。履歴は、グループといっしょにこの端末から削除されます。",
+    a11y_member: "{name}、{role}、{state}",
+    add_title: "メンバーを追加",
+    add_none: "追加できる連絡先がありません。すでにグループに入っているか、その連絡先への送信が切ってあります。",
+    add_count: "追加後は{max}人中{n}人",
+    add_confirm: "追加する",
+    add_cancel: "キャンセル",
+    a11y_add_pick: "{name}をグループに追加する",
+    leave_title: "このグループから退出しますか？",
+    leave_body: "「{name}」のメッセージを受け取らなくなり、ほかのメンバーには退出したことが伝わります。履歴は、削除するまでこの端末に残ります。",
+    leave_confirm: "退出する",
+    leave_cancel: "キャンセル",
+    delete_title: "このグループの履歴を削除しますか？",
+    delete_body: "「{name}」のメッセージをすべて、この端末からだけ削除します。元に戻せません。ほかのメンバーの手元には残ります。",
+    delete_confirm: "削除する",
+    delete_cancel: "キャンセル",
+    remove_title: "このメンバーを外しますか？",
+    remove_body: "{who}を「{name}」から外します。外されたメンバーには、このグループから何も届かなくなります。",
+    remove_confirm: "外す",
+    remove_cancel: "キャンセル",
+    left_done: "「{name}」から退出しました",
+    deleted_done: "「{name}」の履歴を削除しました",
+    removed_done: "{who}を「{name}」から外しました",
+    added_done: "「{name}」にメンバーを追加しました",
+    accepted_done: "「{name}」に参加しました",
+    declined_done: "「{name}」への招待を断りました",
+    err_unknown_group: "そのグループは、この端末にもうありません。",
+    err_ambiguous_group: "該当するグループが複数あります。一覧から開いてください。",
+    err_not_joined: "このグループには参加していません。",
+    err_not_admin: "それができるのは、作成者と管理者だけです。",
+    err_not_member: "その人はグループにいません。",
+    err_already_member: "その人はすでにグループに入っています。",
+    err_too_many_groups: "Miasmaで入れるグループの上限（{max}件）に達しています。先にどれかから退出するか、削除してください。",
+    err_too_many_members: "グループは最大{max}人までです。",
+    err_last_admin: "あなたはこのグループの唯一の管理者のため、まだ退出できません。",
+    err_queue_full: "届けられていないメッセージが多すぎます。メンバーがオンラインになるまで待ってください。",
+    err_bad_request: "リクエストが正しくありませんでした。もう一度試してください。",
+};
+
+static GR_ZH_CN: GroupStrings = GroupStrings {
+    new_group: "新建群组",
+    a11y_new_group: "创建新群组",
+    a11y_row: "群组 {name}，{n} 人",
+    row_members: "{n} 人",
+    row_invited: "收到加入此群组的邀请",
+    row_left: "你已退出此群组",
+    row_removed: "你已被移出此群组",
+    preview_sender: "{name}：{text}",
+    list_empty_groups: "还没有会话。请选择“新建会话”或“新建群组”开始。",
+    ng_title: "新建群组",
+    ng_name_label: "群组名称",
+    ng_name_hint: "群组的名称",
+    ng_members_label: "成员（从你的联系人中选择）",
+    ng_none: "目前没有可以接收消息的联系人。请先在“联系人”标签页添加联系人。",
+    ng_count: "已选 {n} 人，上限 {max} 人（含你自己）",
+    ng_note: "把人加入群组，并不会让他们成为你的联系人，也不会让成员之间互为联系人。是否添加联系人，由每位成员自己决定。",
+    ng_create: "创建群组",
+    ng_cancel: "取消",
+    ng_err_name: "请输入群组名称。",
+    ng_err_members: "请至少选择一位联系人。",
+    ng_err_limit: "群组最多容纳 {max} 人（含你自己）。",
+    ng_created: "已创建群组“{name}”",
+    a11y_ng_name: "群组名称输入框",
+    a11y_ng_member: "将 {name} 加入群组",
+    info_button: "群组信息",
+    a11y_info: "查看此群组的成员和设置",
+    back_to_messages: "返回消息",
+    a11y_back_to_messages: "返回此群组的消息",
+    unverified_badge: "未验证的成员",
+    unverified_tip: "此人不在你的联系人中。显示的名字是别人给他起的，未经核实。添加之前，请先与本人核对验证码。",
+    member_fallback: "成员 {code}",
+    add_as_contact: "添加为联系人",
+    a11y_add_contact: "将 {name} 添加为联系人",
+    unverified_header: "有 {n} 位成员还不是你的联系人，他们的消息会标为未验证。请逐一自己添加，才能完成验证。",
+    a11y_messages: "群组消息",
+    a11y_composer: "群组消息输入框",
+    a11y_send: "向群组发送消息",
+    state_waiting: "{n} 人中已有 {d} 人收到（等待中）",
+    state_all: "全部 {n} 位成员都已收到",
+    state_partial: "{n} 人中 {d} 人已收到，{f} 人未能送达。",
+    state_failed_all: "无法发送给任何成员",
+    state_alone: "没有其他成员可以送达",
+    gap_note: "此成员更早的 {n} 条消息尚未到达。",
+    older_button: "显示更早的消息",
+    not_joined_note: "你已不在此群组中，无法在这里发送消息。",
+    invited_note: "你收到了此群组的邀请。接受后即可查看和发送消息。",
+    accept: "接受",
+    decline: "拒绝",
+    a11y_accept: "接受加入此群组的邀请",
+    a11y_decline: "拒绝加入此群组的邀请",
+    unsupported: "后台服务不支持群组。请将应用和后台服务都更新到最新版本。",
+    unavailable: "群组目前不可用。",
+    info_title: "群组信息",
+    members_title: "成员（{n}）",
+    role_admin: "管理员",
+    role_member: "成员",
+    you_tag: "你",
+    marker_verified: "已验证的联系人",
+    marker_unverified: "未验证",
+    code_label: "验证码",
+    add_member: "添加成员",
+    a11y_add_member: "向此群组添加成员",
+    admin_only_hint: "只有创建者和管理员可以添加或移出成员。",
+    full_hint: "此群组已达到 {max} 人的上限。请先移出一位成员，再添加新成员。",
+    remove: "移出",
+    a11y_remove: "将 {name} 移出此群组",
+    leave: "退出群组",
+    a11y_leave: "退出此群组",
+    delete_history: "删除历史记录",
+    a11y_delete_history: "从本设备删除此群组的历史记录",
+    delete_history_hint: "请先退出群组。历史记录会随群组一起从本设备删除。",
+    a11y_member: "{name}，{role}，{state}",
+    add_title: "添加成员",
+    add_none: "没有可添加的联系人。他们可能已在群组中，或已关闭向其发送。",
+    add_count: "添加后共 {n} 人，上限 {max} 人",
+    add_confirm: "添加",
+    add_cancel: "取消",
+    a11y_add_pick: "将 {name} 添加到群组",
+    leave_title: "退出此群组？",
+    leave_body: "你将不再收到“{name}”的消息，其他成员会得知你已退出。历史记录会保留在本设备上，直到你删除。",
+    leave_confirm: "退出",
+    leave_cancel: "取消",
+    delete_title: "删除此群组的历史记录？",
+    delete_body: "“{name}”的所有消息只会从本设备删除，且无法恢复。其他成员仍保留自己的副本。",
+    delete_confirm: "删除",
+    delete_cancel: "取消",
+    remove_title: "移出此成员？",
+    remove_body: "{who}将被移出“{name}”，此后不会再收到该群组的任何消息。",
+    remove_confirm: "移出",
+    remove_cancel: "取消",
+    left_done: "你已退出“{name}”",
+    deleted_done: "已删除“{name}”的历史记录",
+    removed_done: "已将{who}移出“{name}”",
+    added_done: "已向“{name}”添加成员",
+    accepted_done: "你已加入“{name}”",
+    declined_done: "已拒绝加入“{name}”的邀请",
+    err_unknown_group: "本设备上已没有该群组。",
+    err_ambiguous_group: "有多个群组匹配。请从列表中打开。",
+    err_not_joined: "你不在此群组中。",
+    err_not_admin: "只有创建者或管理员可以执行此操作。",
+    err_not_member: "此人不在群组中。",
+    err_already_member: "此人已在群组中。",
+    err_too_many_groups: "你加入的群组数量已达 Miasma 的上限（{max} 个）。请先退出或删除一个。",
+    err_too_many_members: "群组最多容纳 {max} 人。",
+    err_last_admin: "你是此群组唯一的管理员，暂时无法退出。",
+    err_queue_full: "等待送达的消息太多。请等成员上线后再试。",
+    err_bad_request: "请求无效。请重试。",
+};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_group_string_exists_in_every_locale() {
+        for lang in Locale::ALL {
+            for (name, value) in group_strings(lang).all() {
+                assert!(!value.trim().is_empty(), "{lang:?} group.{name} is empty");
+            }
+        }
+    }
+
+    #[test]
+    fn group_placeholders_survive_translation() {
+        for lang in Locale::ALL {
+            let g = group_strings(lang);
+            for (name, value, holes) in [
+                ("a11y_row", g.a11y_row, &["{name}", "{n}"][..]),
+                ("row_members", g.row_members, &["{n}"]),
+                ("preview_sender", g.preview_sender, &["{name}", "{text}"]),
+                ("ng_count", g.ng_count, &["{n}", "{max}"]),
+                ("ng_err_limit", g.ng_err_limit, &["{max}"]),
+                ("ng_created", g.ng_created, &["{name}"]),
+                ("a11y_ng_member", g.a11y_ng_member, &["{name}"]),
+                ("member_fallback", g.member_fallback, &["{code}"]),
+                ("a11y_add_contact", g.a11y_add_contact, &["{name}"]),
+                ("unverified_header", g.unverified_header, &["{n}"]),
+                ("state_waiting", g.state_waiting, &["{d}", "{n}"]),
+                ("state_all", g.state_all, &["{n}"]),
+                ("state_partial", g.state_partial, &["{d}", "{n}", "{f}"]),
+                ("gap_note", g.gap_note, &["{n}"]),
+                ("members_title", g.members_title, &["{n}"]),
+                ("full_hint", g.full_hint, &["{max}"]),
+                ("a11y_remove", g.a11y_remove, &["{name}"]),
+                (
+                    "a11y_member",
+                    g.a11y_member,
+                    &["{name}", "{role}", "{state}"],
+                ),
+                ("add_count", g.add_count, &["{n}", "{max}"]),
+                ("a11y_add_pick", g.a11y_add_pick, &["{name}"]),
+                ("leave_body", g.leave_body, &["{name}"]),
+                ("delete_body", g.delete_body, &["{name}"]),
+                ("remove_body", g.remove_body, &["{who}", "{name}"]),
+                ("left_done", g.left_done, &["{name}"]),
+                ("deleted_done", g.deleted_done, &["{name}"]),
+                ("removed_done", g.removed_done, &["{who}", "{name}"]),
+                ("added_done", g.added_done, &["{name}"]),
+                ("accepted_done", g.accepted_done, &["{name}"]),
+                ("declined_done", g.declined_done, &["{name}"]),
+                ("err_too_many_groups", g.err_too_many_groups, &["{max}"]),
+                ("err_too_many_members", g.err_too_many_members, &["{max}"]),
+            ] {
+                for hole in holes {
+                    assert!(value.contains(hole), "{lang:?} group.{name} lost {hole}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn languages_are_not_copies_and_use_the_contact_words() {
+        let (en, ja, zh) = (
+            group_strings(Locale::En),
+            group_strings(Locale::Ja),
+            group_strings(Locale::ZhCn),
+        );
+        assert_ne!(en.unverified_badge, ja.unverified_badge);
+        assert_ne!(en.unverified_badge, zh.unverified_badge);
+        assert_ne!(ja.unverified_badge, zh.unverified_badge);
+        for (name, value) in ja.all() {
+            for bad in ["指紋", "カード", "フィンガープリント", "デーモン"] {
+                assert!(!value.contains(bad), "ja group.{name} says {bad}");
+            }
+        }
+        // The same words as the Contacts tab for the same things.
+        let ct = super::super::contact_strings(Locale::Ja);
+        assert_eq!(ja.code_label, ct.fingerprint);
+    }
+
+    #[test]
+    fn no_emoji_in_any_group_string() {
+        for lang in Locale::ALL {
+            for (name, value) in group_strings(lang).all() {
+                for ch in value.chars() {
+                    let n = ch as u32;
+                    let emoji = (0x1F000..=0x1FAFF).contains(&n)
+                        || (0x2600..=0x27BF).contains(&n)
+                        || (0x2B00..=0x2BFF).contains(&n)
+                        || n == 0xFE0F;
+                    assert!(!emoji, "{lang:?} group.{name} has an emoji: {ch}");
+                }
+            }
+        }
+    }
+}

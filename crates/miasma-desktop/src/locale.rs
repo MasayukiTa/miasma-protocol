@@ -2038,10 +2038,11 @@ contact_strings! {
     drop_folder, drop_pick_contact, fingerprint, send_disabled_note,
     tr_title, tr_empty, dir_out, dir_in,
     st_queued, st_preparing, st_connecting, st_sending, st_verifying, st_done, st_failed,
-    st_rejected, st_cancelled,
-    btn_cancel, btn_retry, btn_open_file, btn_show_folder, btn_clear_finished, eta,
+    st_rejected, st_cancelled, st_waiting,
+    btn_cancel, btn_try_now, btn_retry, btn_open_file, btn_show_folder, btn_clear_finished, eta,
     rej_too_large, rej_no_space, rej_not_allowed, rej_busy, rej_bad_name, rej_bad_request,
     fail_unreachable, fail_relay_down, fail_other, fail_lost_in, fail_peer_cancelled,
+    fail_source_changed, wait_retry, wait_offline, wait_in_sec, wait_in_min, wait_in_hour,
     max_size_default_hint, eta_sec, eta_min, eta_min_even, eta_hour, eta_hour_even, eta_day,
     inbox_title, inbox_dir, open_folder, inbox_note, arrival_toast, queued_toast, nav_new, dismiss,
     qr_too_long,
@@ -2143,7 +2144,9 @@ static CT_EN: ContactStrings = ContactStrings {
     st_failed: "Failed",
     st_rejected: "Refused",
     st_cancelled: "Cancelled",
+    st_waiting: "Waiting to retry",
     btn_cancel: "Cancel",
+    btn_try_now: "Try now",
     btn_retry: "Send again",
     btn_open_file: "Open file",
     btn_show_folder: "Show in folder",
@@ -2160,6 +2163,12 @@ static CT_EN: ContactStrings = ContactStrings {
     fail_other: "The transfer failed",
     fail_lost_in: "The connection was interrupted. If the other person sends it again, it continues where it stopped.",
     fail_peer_cancelled: "The sender cancelled this transfer.",
+    fail_source_changed: "The file was changed or replaced after it was queued, so it was not sent. Send it again.",
+    wait_retry: "Waiting to retry (next attempt in {t}, attempt {n})",
+    wait_offline: "Paused: the other side is offline.",
+    wait_in_sec: "{n} s",
+    wait_in_min: "{n} min",
+    wait_in_hour: "{n} h",
     max_size_default_hint: "empty = default limit ({limit})",
     eta_sec: "00:00:{s2}",
     eta_min: "00:{m2}:{s2}",
@@ -2279,6 +2288,8 @@ static CT_JA: ContactStrings = ContactStrings {
     st_failed: "失敗",
     st_rejected: "断られました",
     st_cancelled: "中止",
+    st_waiting: "再試行待ち",
+    btn_try_now: "今すぐ試す",
     btn_cancel: "中止",
     btn_retry: "もう一度送る",
     btn_open_file: "ファイルを開く",
@@ -2296,6 +2307,12 @@ static CT_JA: ContactStrings = ContactStrings {
     fail_other: "転送に失敗しました",
     fail_lost_in: "通信が途切れました。相手が再び送ると、続きから受け取れます。",
     fail_peer_cancelled: "相手が転送を中止しました。",
+    fail_source_changed: "ファイルが、送信を予約したあとに変更または差し替えられたため、送りませんでした。もう一度送ってください。",
+    wait_retry: "再試行待ち(次の試行は{t}後、{n}回目)",
+    wait_offline: "一時停止中: 相手がオフラインです。",
+    wait_in_sec: "{n} 秒",
+    wait_in_min: "{n} 分",
+    wait_in_hour: "{n} 時間",
     max_size_default_hint: "空欄 = 既定の上限（{limit}）",
     eta_sec: "{s} 秒",
     eta_min: "{m} 分 {s} 秒",
@@ -2416,6 +2433,8 @@ static CT_ZH_CN: ContactStrings = ContactStrings {
     st_failed: "失败",
     st_rejected: "被拒绝",
     st_cancelled: "已取消",
+    st_waiting: "等待重试",
+    btn_try_now: "立即重试",
     btn_cancel: "取消",
     btn_retry: "重新发送",
     btn_open_file: "打开文件",
@@ -2433,6 +2452,12 @@ static CT_ZH_CN: ContactStrings = ContactStrings {
     fail_other: "传输失败",
     fail_lost_in: "连接中断了。如果对方重新发送，会从中断处继续。",
     fail_peer_cancelled: "发送方取消了此传输。",
+    fail_source_changed: "文件在加入队列后被修改或替换，因此未发送。请重新发送。",
+    wait_retry: "等待重试（{t}后进行下一次尝试，第 {n} 次）",
+    wait_offline: "已暂停：对方已离线。",
+    wait_in_sec: "{n} 秒",
+    wait_in_min: "{n} 分钟",
+    wait_in_hour: "{n} 小时",
     max_size_default_hint: "留空 = 默认上限 ({limit})",
     eta_sec: "00:00:{s2}",
     eta_min: "00:{m2}:{s2}",
@@ -2466,6 +2491,10 @@ static CT_ZH_CN: ContactStrings = ContactStrings {
     earlier_show: "显示",
     earlier_hide: "隐藏",
 };
+
+// Group conversations of the Chat area (their own file: `locale/group.rs`).
+mod group;
+pub use group::{group_strings, GroupStrings};
 
 // ─── Chat (one-to-one messages between registered contacts) ─────────────────
 
@@ -2901,9 +2930,432 @@ static LG_ZH_CN: LogStrings = LogStrings {
     legacy_failed: "有 {n} 个文件无法删除。请关闭正在使用它们的其他程序，下次启动时再试。",
 };
 
+// ─── Storage (stored shares: listing and deletion) ──────────────────────────
+
+/// Declares `StorageStrings` and a field listing for the completeness test from one field list.
+macro_rules! storage_strings {
+    ($($f:ident),* $(,)?) => {
+        /// Strings of the Storage section in Settings: the shares this device keeps, and
+        /// deleting them. `{name}`-style holes are filled with `str::replace`.
+        pub struct StorageStrings { $(pub $f: &'static str),* }
+        impl StorageStrings {
+            /// Every field with its name, for the completeness test.
+            #[cfg(test)]
+            fn all(&self) -> Vec<(&'static str, &'static str)> {
+                vec![$((stringify!($f), self.$f)),*]
+            }
+        }
+    };
+}
+
+storage_strings! {
+    heading, desc, show, hide, refresh, loading, empty, total, in_use,
+    delete_old, days_label, delete_old_button, delete_selected_button, delete_all_button, bad_days,
+    confirm_title, confirm_body, confirm_button, cancel,
+    deleted, skipped, nothing, note_unsupported, note_unavailable,
+}
+
+pub fn storage_strings(locale: Locale) -> &'static StorageStrings {
+    match locale {
+        Locale::En => &SG_EN,
+        Locale::Ja => &SG_JA,
+        Locale::ZhCn => &SG_ZH_CN,
+    }
+}
+
+static SG_EN: StorageStrings = StorageStrings {
+    heading: "Storage",
+    desc: "These are the shares this device keeps: pieces of files you have shared, and pieces of other people's files it holds for them. Deleting a share frees space on this computer. Shares that are in use right now are kept.",
+    show: "Show stored shares",
+    hide: "Hide",
+    refresh: "Refresh",
+    loading: "Loading...",
+    empty: "No stored shares.",
+    total: "{count} share(s), {size} in total",
+    in_use: "in use",
+    delete_old: "Delete shares stored for at least",
+    days_label: "days",
+    delete_old_button: "Delete old shares",
+    delete_selected_button: "Delete selected",
+    delete_all_button: "Delete all shares",
+    bad_days: "Enter the number of days as a whole number.",
+    confirm_title: "Delete stored shares?",
+    confirm_body: "People who received a share ID for these files will no longer be able to download them.",
+    confirm_button: "Delete",
+    cancel: "Cancel",
+    deleted: "Deleted {n} share(s), freed {size}.",
+    skipped: "Left in place (in use or unsafe): {ids}",
+    nothing: "Nothing was deleted.",
+    note_unsupported: "This background service is older and does not support storage management. Close Miasma completely and start it again.",
+    note_unavailable: "The background service is not running, so the stored shares cannot be listed. Start it with the button at the top of the window.",
+};
+
+static SG_JA: StorageStrings = StorageStrings {
+    heading: "ストレージ",
+    desc: "この端末が保管している共有です。あなたが共有したファイルの断片と、ほかの人のファイルを預かっている断片があります。共有を削除すると、このパソコンの空き容量が増えます。いま使用中の共有は削除されません。",
+    show: "保存している共有を表示",
+    hide: "隠す",
+    refresh: "更新",
+    loading: "読み込み中です...",
+    empty: "保存している共有はありません。",
+    total: "共有 {count} 件、合計 {size}",
+    in_use: "使用中",
+    delete_old: "保存から次の日数以上たった共有を削除：",
+    days_label: "日",
+    delete_old_button: "古い共有を削除",
+    delete_selected_button: "選択した共有を削除",
+    delete_all_button: "すべての共有を削除",
+    bad_days: "日数を整数で入力してください。",
+    confirm_title: "保存している共有を削除しますか？",
+    confirm_body: "これらのファイルの共有IDを受け取った人は、もうダウンロードできなくなります。",
+    confirm_button: "削除",
+    cancel: "キャンセル",
+    deleted: "共有 {n} 件を削除し、{size} を解放しました。",
+    skipped: "そのまま残しました(使用中または安全でないため): {ids}",
+    nothing: "削除したものはありません。",
+    note_unsupported: "このバックグラウンド機能は古く、ストレージ管理に対応していません。Miasmaを完全に終了して、もう一度起動してください。",
+    note_unavailable: "バックグラウンド機能が起動していないため、保存している共有を一覧できません。画面上部のボタンで起動してください。",
+};
+
+static SG_ZH_CN: StorageStrings = StorageStrings {
+    heading: "存储",
+    desc: "这是本设备保存的共享：您共享的文件片段，以及代他人保管的文件片段。删除共享可以释放这台电脑的空间。正在使用的共享会保留。",
+    show: "显示已保存的共享",
+    hide: "隐藏",
+    refresh: "刷新",
+    loading: "正在加载...",
+    empty: "没有已保存的共享。",
+    total: "共 {count} 个共享，合计 {size}",
+    in_use: "使用中",
+    delete_old: "删除已保存至少以下天数的共享：",
+    days_label: "天",
+    delete_old_button: "删除旧共享",
+    delete_selected_button: "删除所选共享",
+    delete_all_button: "删除全部共享",
+    bad_days: "请以整数输入天数。",
+    confirm_title: "要删除已保存的共享吗？",
+    confirm_body: "收到这些文件共享 ID 的人将无法再下载它们。",
+    confirm_button: "删除",
+    cancel: "取消",
+    deleted: "已删除 {n} 个共享，释放 {size}。",
+    skipped: "已保留（使用中或不安全）：{ids}",
+    nothing: "没有删除任何内容。",
+    note_unsupported: "此背景服务版本较旧，不支持存储管理。请完全关闭 Miasma 后重新启动。",
+    note_unavailable: "背景服务未运行，无法列出已保存的共享。请点击窗口上方的按钮启动。",
+};
+
+// ─── Updates (Settings section and the update banner) ───────────────────────
+
+/// Declares `UpdateStrings` and a field listing for the completeness test from one field list.
+macro_rules! update_strings {
+    ($($f:ident),* $(,)?) => {
+        /// Strings of the Updates section in Settings and of the update banner.
+        pub struct UpdateStrings { $(pub $f: &'static str),* }
+        impl UpdateStrings {
+            /// Every field with its name, for the completeness test.
+            #[cfg(test)]
+            fn all(&self) -> Vec<(&'static str, &'static str)> {
+                vec![$((stringify!($f), self.$f)),*]
+            }
+        }
+    };
+}
+
+update_strings! {
+    heading, mode_label, mode_off, mode_notify, mode_auto,
+    mode_desc_off, mode_desc_notify, mode_desc_auto,
+    version_label, check_now, checking, last_check_label, never_checked,
+    ago_seconds, ago_minutes, ago_hours,
+    result_up_to_date, result_available, result_failed, result_disabled,
+    result_no_asset, result_unverifiable, result_local,
+    status_downloading, status_applying, status_ready, status_waiting_idle,
+    status_installed, status_rolled_back, status_skipped, wait_before_recheck,
+    banner_available, banner_installed, update_now, later, skip_version,
+    restart_now, backup_note, config_save_failed,
+}
+
+pub fn update_strings(locale: Locale) -> &'static UpdateStrings {
+    match locale {
+        Locale::En => &UP_EN,
+        Locale::Ja => &UP_JA,
+        Locale::ZhCn => &UP_ZH_CN,
+    }
+}
+
+static UP_EN: UpdateStrings = UpdateStrings {
+    heading: "Updates",
+    mode_label: "Updates:",
+    mode_off: "Off",
+    mode_notify: "Tell me",
+    mode_auto: "Automatic",
+    mode_desc_off: "Miasma never looks for updates and makes no connection to GitHub.",
+    mode_desc_notify: "Miasma looks once after it starts and tells you. Nothing is installed until you agree.",
+    mode_desc_auto: "Miasma looks once after it starts and installs the new version by itself, only while nothing is being sent or received.",
+    version_label: "Version:",
+    check_now: "Check now",
+    checking: "Checking...",
+    last_check_label: "Last check:",
+    never_checked: "Not checked since Miasma started.",
+    ago_seconds: "{n} seconds ago",
+    ago_minutes: "{n} minutes ago",
+    ago_hours: "{n} hours ago",
+    result_up_to_date: "You have the newest version.",
+    result_available: "Version {v} is available.",
+    result_failed: "Could not check. This does not mean you are up to date.",
+    result_disabled: "Updates are off.",
+    result_no_asset: "Version {v} exists, but there is no download for this computer yet.",
+    result_unverifiable: "Version {v} exists, but it cannot be verified and is not offered.",
+    result_local: "A newer build was found in the developer build folder.",
+    status_downloading: "Downloading and checking the update... {pct}%",
+    status_applying: "Installing the update...",
+    status_ready: "The update is downloaded and checked. It will be installed when Miasma is idle.",
+    status_waiting_idle: "Waiting until nothing is being sent or received.",
+    status_installed: "Version {v} is installed. Restart Miasma to use it.",
+    status_rolled_back: "The new version did not start, so the old one was put back.",
+    status_skipped: "You chose to skip version {v}.",
+    wait_before_recheck: "Please wait {n} seconds before checking again.",
+    banner_available: "A new version of Miasma is available: {v}.",
+    banner_installed: "Miasma {v} is installed. Restart to use it.",
+    update_now: "Update now",
+    later: "Later",
+    skip_version: "Skip this version",
+    restart_now: "Restart now",
+    backup_note: "The version you had is kept as a backup next to the program.",
+    config_save_failed: "The setting could not be saved. Please try again.",
+};
+
+static UP_JA: UpdateStrings = UpdateStrings {
+    heading: "更新",
+    mode_label: "更新:",
+    mode_off: "オフ",
+    mode_notify: "知らせる",
+    mode_auto: "自動",
+    mode_desc_off: "更新を確認せず、GitHubへの接続も行いません。",
+    mode_desc_notify: "起動後に一度だけ確認して知らせます。同意するまでインストールしません。",
+    mode_desc_auto: "起動後に一度だけ確認し、送受信をしていないときに新しいバージョンを自動でインストールします。",
+    version_label: "バージョン:",
+    check_now: "今すぐ確認",
+    checking: "確認しています...",
+    last_check_label: "前回の確認:",
+    never_checked: "起動してからまだ確認していません。",
+    ago_seconds: "{n} 秒前",
+    ago_minutes: "{n} 分前",
+    ago_hours: "{n} 時間前",
+    result_up_to_date: "最新のバージョンです。",
+    result_available: "バージョン {v} が利用できます。",
+    result_failed: "確認できませんでした。最新であるという意味ではありません。",
+    result_disabled: "更新はオフです。",
+    result_no_asset: "バージョン {v} はありますが、このパソコン向けのダウンロードはまだありません。",
+    result_unverifiable: "バージョン {v} はありますが、検証できないため案内しません。",
+    result_local: "開発用のビルドフォルダに、より新しいビルドがあります。",
+    status_downloading: "更新をダウンロードして確認しています... {pct}%",
+    status_applying: "更新をインストールしています...",
+    status_ready: "更新のダウンロードと確認が済みました。Miasmaが使われていないときにインストールします。",
+    status_waiting_idle: "送受信が終わるまで待っています。",
+    status_installed: "バージョン {v} をインストールしました。再起動すると使えます。",
+    status_rolled_back: "新しいバージョンが起動しなかったため、元のバージョンに戻しました。",
+    status_skipped: "バージョン {v} はスキップに設定されています。",
+    wait_before_recheck: "もう一度確認するには {n} 秒お待ちください。",
+    banner_available: "Miasmaの新しいバージョン {v} が利用できます。",
+    banner_installed: "Miasma {v} をインストールしました。再起動すると使えます。",
+    update_now: "今すぐ更新",
+    later: "あとで",
+    skip_version: "このバージョンをスキップ",
+    restart_now: "今すぐ再起動",
+    backup_note: "更新前のバージョンは、プログラムの横にバックアップとして残してあります。",
+    config_save_failed: "設定を保存できませんでした。もう一度お試しください。",
+};
+
+static UP_ZH_CN: UpdateStrings = UpdateStrings {
+    heading: "更新",
+    mode_label: "更新：",
+    mode_off: "关闭",
+    mode_notify: "通知我",
+    mode_auto: "自动",
+    mode_desc_off: "Miasma 不会检查更新，也不会连接 GitHub。",
+    mode_desc_notify: "Miasma 启动后只检查一次并通知您。在您同意之前不会安装。",
+    mode_desc_auto: "Miasma 启动后只检查一次，并在没有收发数据时自动安装新版本。",
+    version_label: "版本：",
+    check_now: "立即检查",
+    checking: "正在检查...",
+    last_check_label: "上次检查：",
+    never_checked: "启动后尚未检查。",
+    ago_seconds: "{n} 秒前",
+    ago_minutes: "{n} 分钟前",
+    ago_hours: "{n} 小时前",
+    result_up_to_date: "您使用的已是最新版本。",
+    result_available: "有新版本 {v} 可用。",
+    result_failed: "无法检查。这并不表示已是最新版本。",
+    result_disabled: "更新已关闭。",
+    result_no_asset: "已有版本 {v}，但暂时没有适用于这台电脑的下载。",
+    result_unverifiable: "已有版本 {v}，但无法验证，因此不提供。",
+    result_local: "在开发者构建文件夹中发现了更新的构建。",
+    status_downloading: "正在下载并检查更新... {pct}%",
+    status_applying: "正在安装更新...",
+    status_ready: "更新已下载并检查完毕。将在 Miasma 空闲时安装。",
+    status_waiting_idle: "正在等待收发数据结束。",
+    status_installed: "已安装版本 {v}。重新启动后即可使用。",
+    status_rolled_back: "新版本未能启动，已恢复为原来的版本。",
+    status_skipped: "您已选择跳过版本 {v}。",
+    wait_before_recheck: "请等待 {n} 秒后再检查。",
+    banner_available: "Miasma 有新版本可用：{v}。",
+    banner_installed: "已安装 Miasma {v}。重新启动后即可使用。",
+    update_now: "立即更新",
+    later: "稍后",
+    skip_version: "跳过此版本",
+    restart_now: "立即重新启动",
+    backup_note: "更新前的版本已作为备份保留在程序旁边。",
+    config_save_failed: "无法保存该设置。请重试。",
+};
+
+// ─── Transfer speed (rate text, path badge, settings) ───────────────────────
+
+/// Declares `SpeedStrings` and a field listing for the completeness test from one field list.
+macro_rules! speed_strings {
+    ($($f:ident),* $(,)?) => {
+        /// Strings of the live speed display in the transfer rows and its two settings.
+        /// `{speed}`, `{secs}`, `{n}`, `{ms}` holes are filled with `transfers::fill`.
+        pub struct SpeedStrings { $(pub $f: &'static str),* }
+        impl SpeedStrings {
+            /// Every field with its name, for the completeness test.
+            #[cfg(test)]
+            fn all(&self) -> Vec<(&'static str, &'static str)> {
+                vec![$((stringify!($f), self.$f)),*]
+            }
+        }
+    };
+}
+
+speed_strings! {
+    path_direct, path_relay, path_mixed, reason_udp, reason_nat, avg, total, rtt, stalled,
+    settings_unit, unit_bits, unit_bytes, settings_shown, shown_both, shown_bits, shown_bytes,
+}
+
+pub fn speed_strings(locale: Locale) -> &'static SpeedStrings {
+    match locale {
+        Locale::En => &SP_EN,
+        Locale::Ja => &SP_JA,
+        Locale::ZhCn => &SP_ZH_CN,
+    }
+}
+
+static SP_EN: SpeedStrings = SpeedStrings {
+    path_direct: "Direct",
+    path_relay: "Via relay (slower)",
+    path_mixed: "Direct + relay",
+    reason_udp: "Your network blocks direct connections (no UDP gets out).",
+    reason_nat:
+        "Your router changes the address per destination, so a direct connection cannot be set up.",
+    avg: "avg {speed}, {secs} s",
+    total: "Now: {speed} ({n})",
+    rtt: "RTT {ms} ms",
+    stalled: "stalled {secs} s",
+    settings_unit: "Speed shown first in",
+    unit_bits: "Bits (Mbps)",
+    unit_bytes: "Bytes (MB/s, MiB/s)",
+    settings_shown: "Speed units",
+    shown_both: "Both",
+    shown_bits: "Bits only",
+    shown_bytes: "Bytes only",
+};
+
+static SP_JA: SpeedStrings = SpeedStrings {
+    path_direct: "直接接続",
+    path_relay: "リレー経由(遅い)",
+    path_mixed: "直接+リレー",
+    reason_udp: "お使いのネットワークが直接接続を遮断しています(UDP が外に出ていません)。",
+    reason_nat: "ルーターが宛先ごとにアドレスを変えるため、直接接続を確立できません。",
+    avg: "平均 {speed}、{secs} 秒",
+    total: "現在: {speed}({n} 件)",
+    rtt: "RTT {ms} ms",
+    stalled: "停止 {secs} 秒",
+    settings_unit: "速度の主表示",
+    unit_bits: "ビット(Mbps)",
+    unit_bytes: "バイト(MB/s、MiB/s)",
+    settings_shown: "速度の単位",
+    shown_both: "両方",
+    shown_bits: "ビットのみ",
+    shown_bytes: "バイトのみ",
+};
+
+static SP_ZH_CN: SpeedStrings = SpeedStrings {
+    path_direct: "直连",
+    path_relay: "经中继(较慢)",
+    path_mixed: "直连+中继",
+    reason_udp: "你的网络阻止了直接连接(UDP 无法发出)。",
+    reason_nat: "你的路由器按目标改变地址，无法建立直接连接。",
+    avg: "平均 {speed}，{secs} 秒",
+    total: "当前: {speed}({n} 个)",
+    rtt: "RTT {ms} ms",
+    stalled: "停滞 {secs} 秒",
+    settings_unit: "速度优先显示",
+    unit_bits: "比特(Mbps)",
+    unit_bytes: "字节(MB/s、MiB/s)",
+    settings_shown: "速度单位",
+    shown_both: "两者",
+    shown_bits: "仅比特",
+    shown_bytes: "仅字节",
+};
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_update_string_exists_in_every_locale_and_keeps_its_placeholders() {
+        for lang in Locale::ALL {
+            let u = update_strings(lang);
+            for (name, value) in u.all() {
+                assert!(!value.trim().is_empty(), "{lang:?} updates.{name} is empty");
+            }
+            for (name, value, ph) in [
+                ("result_available", u.result_available, "{v}"),
+                ("result_no_asset", u.result_no_asset, "{v}"),
+                ("result_unverifiable", u.result_unverifiable, "{v}"),
+                ("status_installed", u.status_installed, "{v}"),
+                ("status_skipped", u.status_skipped, "{v}"),
+                ("banner_available", u.banner_available, "{v}"),
+                ("banner_installed", u.banner_installed, "{v}"),
+                ("status_downloading", u.status_downloading, "{pct}"),
+                ("wait_before_recheck", u.wait_before_recheck, "{n}"),
+                ("ago_seconds", u.ago_seconds, "{n}"),
+                ("ago_minutes", u.ago_minutes, "{n}"),
+                ("ago_hours", u.ago_hours, "{n}"),
+            ] {
+                assert!(value.contains(ph), "{lang:?} updates.{name} lost {ph}");
+            }
+        }
+        // The three languages are not copies of each other.
+        let (en, ja, zh) = (
+            update_strings(Locale::En),
+            update_strings(Locale::Ja),
+            update_strings(Locale::ZhCn),
+        );
+        assert_ne!(en.mode_desc_auto, ja.mode_desc_auto);
+        assert_ne!(en.mode_desc_auto, zh.mode_desc_auto);
+        assert_ne!(ja.mode_desc_auto, zh.mode_desc_auto);
+    }
+
     use super::*;
+    #[test]
+    fn every_speed_string_exists_in_every_locale() {
+        for lang in Locale::ALL {
+            for (name, value) in speed_strings(lang).all() {
+                assert!(!value.trim().is_empty(), "{lang:?} speed.{name} is empty");
+            }
+            let s = speed_strings(lang);
+            assert!(
+                s.avg.contains("{speed}") && s.avg.contains("{secs}"),
+                "{lang:?}"
+            );
+            assert!(
+                s.total.contains("{speed}") && s.total.contains("{n}"),
+                "{lang:?}"
+            );
+            assert!(
+                s.rtt.contains("{ms}") && s.stalled.contains("{secs}"),
+                "{lang:?}"
+            );
+        }
+    }
 
     #[test]
     fn every_log_string_exists_in_every_locale() {
@@ -3332,5 +3784,51 @@ mod tests {
     #[test]
     fn default_locale_is_english() {
         assert_eq!(Locale::default(), Locale::En);
+    }
+
+    #[test]
+    fn every_storage_string_exists_in_every_locale() {
+        for lang in Locale::ALL {
+            for (name, value) in storage_strings(lang).all() {
+                assert!(!value.trim().is_empty(), "{lang:?} storage.{name} is empty");
+            }
+            let st = storage_strings(lang);
+            // A translation that dropped a placeholder would silently show a blank.
+            assert!(
+                st.total.contains("{count}"),
+                "{lang:?} total lost {{count}}"
+            );
+            assert!(st.total.contains("{size}"), "{lang:?} total lost {{size}}");
+            assert!(st.deleted.contains("{n}"), "{lang:?} deleted lost {{n}}");
+            assert!(
+                st.deleted.contains("{size}"),
+                "{lang:?} deleted lost {{size}}"
+            );
+            assert!(
+                st.skipped.contains("{ids}"),
+                "{lang:?} skipped lost {{ids}}"
+            );
+        }
+    }
+
+    #[test]
+    fn japanese_storage_texts_say_what_matters() {
+        let ja = storage_strings(Locale::Ja);
+        for bad in ["デーモン", "指紋", "カード", "iroh", "`"] {
+            for (name, value) in ja.all() {
+                assert!(!value.contains(bad), "ja storage.{name} says {bad}");
+            }
+        }
+        assert!(ja.note_unavailable.contains("バックグラウンド機能"));
+        assert!(ja.confirm_button != ja.cancel);
+    }
+
+    #[test]
+    fn the_storage_delete_confirmation_names_the_consequence() {
+        // The owner asked for this sentence word for word in English.
+        assert_eq!(
+            storage_strings(Locale::En).confirm_body,
+            "People who received a share ID for these files will no longer be able to download them."
+        );
     }
 }

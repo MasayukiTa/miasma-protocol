@@ -7,10 +7,16 @@
 pub mod contact;
 pub mod disk;
 pub mod ipc;
+pub mod outbox;
 pub mod proto;
+pub mod retry;
+pub mod speed_fmt;
 pub mod state;
+pub mod stats;
 pub mod store;
 
+#[cfg(feature = "iroh")]
+pub mod link;
 #[cfg(feature = "iroh")]
 pub mod service;
 

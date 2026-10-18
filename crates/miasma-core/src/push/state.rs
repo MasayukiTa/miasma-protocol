@@ -11,7 +11,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::watch;
+use tokio::sync::{broadcast, watch};
 use tracing::warn;
 
 use crate::state_crypto::{self, Label, LogReader, LogRewrite, LogWriter, StateKeys};
@@ -34,6 +34,8 @@ pub enum Direction {
 
 /// Lifecycle of a transfer. `Preparing` (hashing the file before the header
 /// can be sent) and `Cancelled` are additions to the states in the design.
+/// `Waiting` is not an ending: the other side cannot be reached right now and
+/// the sender will try again by itself (see `PushTransferInfo::next_attempt_at_ms`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PushState {
@@ -46,6 +48,56 @@ pub enum PushState {
     Failed,
     Rejected,
     Cancelled,
+    Waiting,
+}
+
+/// The states a client from before `Waiting` existed knows. The wire carries
+/// one of these in `state` (a `Waiting` transfer shows as `queued` to such a
+/// client) and the real state in `phase` for clients that know it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum LegacyState {
+    Queued,
+    Preparing,
+    Connecting,
+    Sending,
+    Verifying,
+    Done,
+    Failed,
+    Rejected,
+    Cancelled,
+}
+
+impl From<PushState> for LegacyState {
+    fn from(s: PushState) -> Self {
+        match s {
+            PushState::Queued | PushState::Waiting => Self::Queued,
+            PushState::Preparing => Self::Preparing,
+            PushState::Connecting => Self::Connecting,
+            PushState::Sending => Self::Sending,
+            PushState::Verifying => Self::Verifying,
+            PushState::Done => Self::Done,
+            PushState::Failed => Self::Failed,
+            PushState::Rejected => Self::Rejected,
+            PushState::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+impl From<LegacyState> for PushState {
+    fn from(s: LegacyState) -> Self {
+        match s {
+            LegacyState::Queued => Self::Queued,
+            LegacyState::Preparing => Self::Preparing,
+            LegacyState::Connecting => Self::Connecting,
+            LegacyState::Sending => Self::Sending,
+            LegacyState::Verifying => Self::Verifying,
+            LegacyState::Done => Self::Done,
+            LegacyState::Failed => Self::Failed,
+            LegacyState::Rejected => Self::Rejected,
+            LegacyState::Cancelled => Self::Cancelled,
+        }
+    }
 }
 
 impl PushState {
@@ -58,7 +110,11 @@ impl PushState {
 }
 
 /// What a poll returns for one transfer.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// On the wire the `state` field only ever holds a value that older clients
+/// know; a `waiting` transfer is sent as `queued` with the real state in
+/// `phase`, which older clients ignore.
+#[derive(Debug, Clone, PartialEq)]
 pub struct PushTransferInfo {
     pub id: String,
     pub direction: Direction,
@@ -72,26 +128,130 @@ pub struct PushTransferInfo {
     /// Smoothed throughput, bytes per second.
     pub rate_bps: u64,
     pub state: PushState,
-    /// Human-readable failure text.
-    #[serde(default)]
+    /// Human-readable failure text (while `Waiting`: why the last attempt failed).
     pub error: Option<String>,
     /// `too_large`, `no_space`, `not_allowed`, `busy`, `bad_name` when rejected.
-    #[serde(default)]
     pub reject_reason: Option<String>,
-    /// Stable machine-readable kind of a non-rejection ending (see [`error_kind`]).
+    /// Stable machine-readable kind of a non-rejection ending, or of the
+    /// failure behind a `Waiting` state (see [`error_kind`]).
     /// `error` stays the English text; UIs map this to their own words.
-    #[serde(default)]
     pub error_kind: Option<String>,
     /// Outbound only: the file this transfer sends, so a UI (or a later
     /// session) can offer "send again" without guessing.
-    #[serde(default)]
     pub source_path: Option<String>,
     /// Where an inbound file was saved / the name the receiver reported.
-    #[serde(default)]
     pub saved_as: Option<String>,
     /// Milliseconds since the Unix epoch.
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
+    /// `Waiting` only: when the next attempt is made (ms since the Unix epoch).
+    pub next_attempt_at_ms: Option<u64>,
+    /// `Waiting` only: the number of the attempt that failed (1 = the first
+    /// try failed), counted since the last time bytes moved.
+    pub attempt: Option<u32>,
+    /// Live rate in bits per second, path, round trip, stalls (see
+    /// [`stats`](super::stats)). Absent from daemons that predate it.
+    pub stats: Option<super::stats::TransferStats>,
+}
+
+/// The JSON form of [`PushTransferInfo`]. Every field added after the first
+/// release is optional, so an older reader still parses it.
+#[derive(Serialize, Deserialize)]
+struct InfoWire {
+    id: String,
+    direction: Direction,
+    contact_id: String,
+    contact_label: String,
+    name: String,
+    size: u64,
+    bytes: u64,
+    rate_bps: u64,
+    state: LegacyState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    phase: Option<PushState>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    reject_reason: Option<String>,
+    #[serde(default)]
+    error_kind: Option<String>,
+    #[serde(default)]
+    source_path: Option<String>,
+    #[serde(default)]
+    saved_as: Option<String>,
+    created_at_ms: u64,
+    updated_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    next_attempt_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attempt: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stats: Option<super::stats::TransferStats>,
+}
+
+impl From<&PushTransferInfo> for InfoWire {
+    fn from(i: &PushTransferInfo) -> Self {
+        Self {
+            phase: (i.state == PushState::Waiting).then_some(PushState::Waiting),
+            state: i.state.into(),
+            id: i.id.clone(),
+            direction: i.direction,
+            contact_id: i.contact_id.clone(),
+            contact_label: i.contact_label.clone(),
+            name: i.name.clone(),
+            size: i.size,
+            bytes: i.bytes,
+            rate_bps: i.rate_bps,
+            error: i.error.clone(),
+            reject_reason: i.reject_reason.clone(),
+            error_kind: i.error_kind.clone(),
+            source_path: i.source_path.clone(),
+            saved_as: i.saved_as.clone(),
+            created_at_ms: i.created_at_ms,
+            updated_at_ms: i.updated_at_ms,
+            next_attempt_at_ms: i.next_attempt_at_ms,
+            attempt: i.attempt,
+            stats: i.stats.clone(),
+        }
+    }
+}
+
+impl From<InfoWire> for PushTransferInfo {
+    fn from(w: InfoWire) -> Self {
+        Self {
+            state: w.phase.unwrap_or_else(|| w.state.into()),
+            id: w.id,
+            direction: w.direction,
+            contact_id: w.contact_id,
+            contact_label: w.contact_label,
+            name: w.name,
+            size: w.size,
+            bytes: w.bytes,
+            rate_bps: w.rate_bps,
+            error: w.error,
+            reject_reason: w.reject_reason,
+            error_kind: w.error_kind,
+            source_path: w.source_path,
+            saved_as: w.saved_as,
+            created_at_ms: w.created_at_ms,
+            updated_at_ms: w.updated_at_ms,
+            next_attempt_at_ms: w.next_attempt_at_ms,
+            attempt: w.attempt,
+            stats: w.stats,
+        }
+    }
+}
+
+impl Serialize for PushTransferInfo {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        InfoWire::from(self).serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for PushTransferInfo {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        InfoWire::deserialize(d).map(Into::into)
+    }
 }
 
 /// One persisted line of history.
@@ -136,6 +296,9 @@ pub mod error_kind {
     pub const WRITE_FAILED: &str = "write_failed";
     /// Outbound: the contact was removed / sending to it was switched off.
     pub const CONTACT_CHANGED: &str = "contact_changed";
+    /// Outbound: the file was changed, moved or replaced after it was queued,
+    /// so what is on disk is no longer what was meant to be sent.
+    pub const SOURCE_CHANGED: &str = "source_changed";
 }
 
 pub fn now_ms() -> u64 {
@@ -151,14 +314,31 @@ struct Entry {
 }
 
 /// The set of transfers, running and recently finished.
-#[derive(Default)]
+#[derive(Clone)]
 pub struct Board {
-    inner: Mutex<HashMap<String, Entry>>,
+    inner: std::sync::Arc<Mutex<HashMap<String, Entry>>>,
+    /// Every change of a transfer's state (id, new state), for whoever wants
+    /// to follow the sequence rather than poll. Slow readers miss old ones.
+    changes: broadcast::Sender<(String, PushState)>,
+}
+
+impl Default for Board {
+    fn default() -> Self {
+        Self {
+            inner: std::sync::Arc::new(Mutex::new(HashMap::new())),
+            changes: broadcast::channel(256).0,
+        }
+    }
 }
 
 impl Board {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Follow state changes of all transfers.
+    pub fn subscribe(&self) -> broadcast::Receiver<(String, PushState)> {
+        self.changes.subscribe()
     }
 
     /// Register a transfer; returns its id and a receiver that turns `true`
@@ -172,7 +352,30 @@ impl Board {
         size: u64,
         state: PushState,
     ) -> (String, watch::Receiver<bool>) {
-        let id = hex::encode(rand::random::<[u8; 8]>());
+        self.create_with_id(
+            hex::encode(rand::random::<[u8; 8]>()),
+            direction,
+            contact_id,
+            contact_label,
+            name,
+            size,
+            state,
+        )
+    }
+
+    /// As [`create`](Self::create) with a given id (a transfer restored after
+    /// a restart keeps the id it had).
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_with_id(
+        &self,
+        id: String,
+        direction: Direction,
+        contact_id: &str,
+        contact_label: &str,
+        name: &str,
+        size: u64,
+        state: PushState,
+    ) -> (String, watch::Receiver<bool>) {
         let now = now_ms();
         let (tx, rx) = watch::channel(false);
         let info = PushTransferInfo {
@@ -192,10 +395,14 @@ impl Board {
             saved_as: None,
             created_at_ms: now,
             updated_at_ms: now,
+            next_attempt_at_ms: None,
+            attempt: None,
+            stats: None,
         };
         let mut g = self.inner.lock().unwrap();
         g.insert(id.clone(), Entry { info, cancel: tx });
         Self::trim(&mut g);
+        let _ = self.changes.send((id.clone(), state));
         (id, rx)
     }
 
@@ -224,8 +431,12 @@ impl Board {
 
     pub fn update(&self, id: &str, f: impl FnOnce(&mut PushTransferInfo)) {
         if let Some(e) = self.inner.lock().unwrap().get_mut(id) {
+            let before = e.info.state;
             f(&mut e.info);
             e.info.updated_at_ms = now_ms();
+            if e.info.state != before {
+                let _ = self.changes.send((e.info.id.clone(), e.info.state));
+            }
         }
     }
 

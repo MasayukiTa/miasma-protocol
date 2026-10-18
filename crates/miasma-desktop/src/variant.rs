@@ -53,6 +53,10 @@ pub struct DesktopPrefs {
     pub mode: ProductMode,
     pub locale: Locale,
     pub theme: ThemeMode,
+    /// `ui.speed_unit`: which unit leads in a speed text.
+    pub speed_unit: miasma_core::push::speed_fmt::SpeedUnit,
+    /// `ui.speed_units_shown`: both | bits_only | bytes_only.
+    pub speed_units_shown: miasma_core::push::speed_fmt::SpeedShown,
 }
 
 impl DesktopPrefs {
@@ -214,12 +218,39 @@ mod tests {
             mode: ProductMode::Technical,
             locale: Locale::Ja,
             theme: ThemeMode::Light,
+            speed_unit: miasma_core::push::speed_fmt::SpeedUnit::Bytes,
+            speed_units_shown: miasma_core::push::speed_fmt::SpeedShown::BitsOnly,
         };
         let toml_str = toml::to_string_pretty(&prefs).unwrap();
         let back: DesktopPrefs = toml::from_str(&toml_str).unwrap();
         assert_eq!(back.mode, ProductMode::Technical);
         assert_eq!(back.locale, Locale::Ja);
         assert_eq!(back.theme, ThemeMode::Light);
+        assert_eq!(
+            back.speed_unit,
+            miasma_core::push::speed_fmt::SpeedUnit::Bytes
+        );
+        assert_eq!(
+            back.speed_units_shown,
+            miasma_core::push::speed_fmt::SpeedShown::BitsOnly
+        );
+    }
+
+    #[test]
+    fn speed_settings_default_to_bits_first_and_both_shown() {
+        use miasma_core::push::speed_fmt::{SpeedShown, SpeedUnit};
+        let tmp = std::env::temp_dir().join("miasma-test-prefs-speed-default");
+        let _ = std::fs::create_dir_all(&tmp);
+        // A file from before the speed settings existed.
+        std::fs::write(
+            tmp.join(PREFS_FILE),
+            "mode = \"easy\"\nlocale = \"en\"\ntheme = \"dark\"\n",
+        )
+        .unwrap();
+        let prefs = DesktopPrefs::load(&tmp);
+        assert_eq!(prefs.speed_unit, SpeedUnit::Bits);
+        assert_eq!(prefs.speed_units_shown, SpeedShown::Both);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

@@ -17,7 +17,11 @@ use anyhow::{bail, Result};
 use clap::{Args, Subcommand};
 use miasma_core::{
     daemon_request,
-    push::{ContactInfo, Direction, PushRequest, PushResponse, PushState, PushTransferInfo},
+    push::{
+        speed_fmt::{format_speed, SpeedShown, SpeedUnit},
+        stats::PathKind,
+        ContactInfo, Direction, PushRequest, PushResponse, PushState, PushTransferInfo,
+    },
     ControlRequest, ControlResponse,
 };
 
@@ -370,6 +374,10 @@ fn why_texts(kind: &str, dir: Direction) -> Option<(&'static str, &'static str)>
             "the contact was removed or sending to it was switched off",
             "連絡先が削除されたか、送信がオフになりました",
         ),
+        "source_changed" => (
+            "the file was changed or replaced after it was queued; send it again",
+            "ファイルが、送信を予約したあとに変更または差し替えられました。もう一度送ってください",
+        ),
         _ => return None,
     })
 }
@@ -527,6 +535,7 @@ fn state_label(s: PushState) -> &'static str {
             PushState::Failed => "失敗",
             PushState::Rejected => "断られました",
             PushState::Cancelled => "中止",
+            PushState::Waiting => "再試行待ち",
         };
     }
     match s {
@@ -539,7 +548,82 @@ fn state_label(s: PushState) -> &'static str {
         PushState::Failed => "failed",
         PushState::Rejected => "rejected",
         PushState::Cancelled => "cancelled",
+        PushState::Waiting => "waiting to retry",
     }
+}
+
+/// "in 2 min" / "in 40 s" / "now", for the time left until `at_ms`.
+fn in_words(at_ms: u64, now_ms: u64) -> String {
+    let s = at_ms.saturating_sub(now_ms).div_ceil(1000);
+    let ja = lang() == Lang::Ja;
+    if s == 0 {
+        return if ja { "まもなく" } else { "now" }.to_owned();
+    }
+    if s < 90 {
+        return if ja {
+            format!("{s}秒後")
+        } else {
+            format!("in {s} s")
+        };
+    }
+    let m = s.div_ceil(60);
+    if m < 120 {
+        return if ja {
+            format!("{m}分後")
+        } else {
+            format!("in {m} min")
+        };
+    }
+    let h = m.div_ceil(60);
+    if ja {
+        format!("{h}時間後")
+    } else {
+        format!("in {h} h")
+    }
+}
+
+/// What a waiting send says: that it will try again by itself, when, and (if
+/// the other side is simply offline) why. `None` for any other state.
+fn waiting_note(t: &PushTransferInfo, now_ms: u64) -> Option<String> {
+    if t.state != PushState::Waiting {
+        return None;
+    }
+    let ja = lang() == Lang::Ja;
+    let attempt = t.attempt.unwrap_or(1);
+    let when = t
+        .next_attempt_at_ms
+        .map(|at| in_words(at, now_ms))
+        .unwrap_or_default();
+    let mut s = if ja {
+        format!("再試行待ち(次の試行は{when}、{attempt}回目)")
+    } else {
+        format!("Waiting to retry (next attempt {when}, attempt {attempt})")
+    };
+    if t.error
+        .as_deref()
+        .is_some_and(|e| e.contains("not connected to a relay server"))
+    {
+        // It is this computer's relay link that is down, not the other side.
+        s.push_str(if ja {
+            "。一時停止中: この PC がリレーサーバに接続できていません"
+        } else {
+            ". Paused: this computer is not connected to a relay server"
+        });
+    } else if t.error_kind.as_deref() == Some("unreachable") {
+        s.push_str(if ja {
+            "。一時停止中: 相手がオフラインです"
+        } else {
+            ". Paused: the other side is offline"
+        });
+    }
+    Some(s)
+}
+
+fn clock_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn progress_line(t: &PushTransferInfo) -> String {
@@ -561,10 +645,95 @@ fn progress_line(t: &PushTransferInfo) -> String {
         human_bytes(t.bytes),
         human_bytes(t.size)
     );
-    if t.rate_bps > 0 {
-        s.push_str(&format!(" {}/s", human_bytes(t.rate_bps)));
+    s.push_str(&live_suffix(
+        t,
+        speed_unit(),
+        speed_shown(),
+        lang() == Lang::Ja,
+    ));
+    if let Some(n) = waiting_note(t, clock_ms()) {
+        s.push_str(&format!(" - {n}"));
     }
     s
+}
+
+/// `MIASMA_SPEED_UNIT=bytes` leads with the byte units instead of Mbps and
+/// `MIASMA_SPEED_UNITS_SHOWN=both|bits_only|bytes_only` picks what is shown
+/// (the desktop's `ui.speed_unit` / `ui.speed_units_shown`).
+fn speed_unit() -> SpeedUnit {
+    std::env::var("MIASMA_SPEED_UNIT")
+        .ok()
+        .and_then(|v| SpeedUnit::parse(&v))
+        .unwrap_or_default()
+}
+
+fn speed_shown() -> SpeedShown {
+    std::env::var("MIASMA_SPEED_UNITS_SHOWN")
+        .ok()
+        .and_then(|v| SpeedShown::parse(&v))
+        .unwrap_or_default()
+}
+
+/// ` 42 Mbps (5.2 MB/s / 5.0 MiB/s), direct, RTT 12 ms` for a running transfer;
+/// ` avg 45 Mbps (5.6 MB/s / 5.4 MiB/s), 20 s, direct` for a finished one. An old daemon
+/// reports no stats: its byte rate is shown alone.
+fn live_suffix(t: &PushTransferInfo, unit: SpeedUnit, shown: SpeedShown, ja: bool) -> String {
+    let Some(st) = &t.stats else {
+        return if t.rate_bps > 0 {
+            format!(
+                " {}",
+                format_speed(t.rate_bps.saturating_mul(8), unit, shown)
+            )
+        } else {
+            String::new()
+        };
+    };
+    let path = match (st.path, ja) {
+        (PathKind::Direct, false) => Some("direct"),
+        (PathKind::Direct, true) => Some("直接"),
+        (PathKind::Relay, false) => Some("via relay (slower)"),
+        (PathKind::Relay, true) => Some("リレー経由(遅い)"),
+        (PathKind::Mixed, false) => Some("direct + relay"),
+        (PathKind::Mixed, true) => Some("直接+リレー"),
+        (PathKind::Unknown, _) => None,
+    };
+    let mut parts: Vec<String> = Vec::new();
+    if t.state.is_finished() {
+        if st.avg_bits > 0 {
+            let secs = (st.active_ms + 500) / 1000;
+            parts.push(if ja {
+                format!(
+                    "平均 {}, {} 秒",
+                    format_speed(st.avg_bits, unit, shown),
+                    secs
+                )
+            } else {
+                format!("avg {}, {} s", format_speed(st.avg_bits, unit, shown), secs)
+            });
+        }
+    } else if st.rate_bits > 0 {
+        parts.push(format_speed(st.rate_bits, unit, shown));
+    }
+    if let Some(p) = path {
+        parts.push(p.to_owned());
+    }
+    if !t.state.is_finished() {
+        if let Some(r) = st.rtt_ms {
+            parts.push(format!("RTT {r} ms"));
+        }
+        if st.stall_ms >= 1000 {
+            parts.push(if ja {
+                format!("停止 {} 秒", st.stall_ms / 1000)
+            } else {
+                format!("stalled {} s", st.stall_ms / 1000)
+            });
+        }
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", parts.join(", "))
+    }
 }
 
 fn print_hint(t: &PushTransferInfo) {
@@ -723,6 +892,25 @@ pub async fn run_push_status(data_dir: &Path) -> Result<()> {
     }
 }
 
+/// `miasma push-retry <id>`: a waiting send tries again now.
+pub async fn run_push_retry(data_dir: &Path, id: &str) -> Result<()> {
+    match call(data_dir, PushRequest::RetryNow { id: id.to_owned() }).await? {
+        PushResponse::Retrying => {
+            println!(
+                "{}",
+                if lang() == Lang::Ja {
+                    "すぐに再試行します"
+                } else {
+                    "Trying again now"
+                }
+            );
+            Ok(())
+        }
+        PushResponse::Error { kind, message } => Err(api_error(&kind, &message)),
+        other => bail!("unexpected response: {other:?}"),
+    }
+}
+
 pub async fn run_push_inbox(data_dir: &Path) -> Result<()> {
     match call(data_dir, PushRequest::Inbox).await? {
         PushResponse::Inbox { dir } => {
@@ -737,6 +925,73 @@ pub async fn run_push_inbox(data_dir: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use miasma_core::push::stats::TransferStats;
+
+    fn info_with(stats: Option<TransferStats>, state: PushState, rate: u64) -> PushTransferInfo {
+        PushTransferInfo {
+            id: "i".into(),
+            direction: Direction::Out,
+            contact_id: "c".into(),
+            contact_label: "L".into(),
+            name: "n".into(),
+            size: 1,
+            bytes: 0,
+            rate_bps: rate,
+            state,
+            error: None,
+            reject_reason: None,
+            error_kind: None,
+            source_path: None,
+            saved_as: None,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            next_attempt_at_ms: None,
+            attempt: None,
+            stats,
+        }
+    }
+
+    #[test]
+    fn live_text_running_finished_and_old_daemon() {
+        let running = TransferStats {
+            rate_bits: 41_943_040,
+            path: PathKind::Relay,
+            rtt_ms: Some(180),
+            stall_ms: 3500,
+            ..Default::default()
+        };
+        let t = info_with(Some(running), PushState::Sending, 5 << 20);
+        assert_eq!(
+            live_suffix(&t, SpeedUnit::Bits, SpeedShown::Both, false),
+            " 42 Mbps (5.2 MB/s / 5.0 MiB/s), via relay (slower), RTT 180 ms, stalled 3 s"
+        );
+        assert_eq!(
+            live_suffix(&t, SpeedUnit::Bytes, SpeedShown::Both, false),
+            " 5.2 MB/s / 5.0 MiB/s (42 Mbps), via relay (slower), RTT 180 ms, stalled 3 s"
+        );
+        let done = TransferStats {
+            avg_bits: 45_000_000,
+            active_ms: 20_300,
+            path: PathKind::Direct,
+            ..Default::default()
+        };
+        let t = info_with(Some(done), PushState::Done, 0);
+        assert_eq!(
+            live_suffix(&t, SpeedUnit::Bits, SpeedShown::Both, false),
+            " avg 45 Mbps (5.6 MB/s / 5.4 MiB/s), 20 s, direct"
+        );
+        // A daemon that predates the stats: bytes per second only.
+        let t = info_with(None, PushState::Sending, 5 << 20);
+        assert_eq!(
+            live_suffix(&t, SpeedUnit::Bits, SpeedShown::Both, false),
+            " 42 Mbps (5.2 MB/s / 5.0 MiB/s)"
+        );
+        let t = info_with(None, PushState::Queued, 0);
+        assert_eq!(
+            live_suffix(&t, SpeedUnit::Bits, SpeedShown::Both, false),
+            ""
+        );
+    }
 
     #[test]
     fn sizes() {
@@ -768,6 +1023,7 @@ mod tests {
             "file_unreadable",
             "write_failed",
             "contact_changed",
+            "source_changed",
         ];
         for k in kinds {
             for dir in [Direction::Out, Direction::In] {
@@ -822,6 +1078,9 @@ mod tests {
             saved_as: None,
             created_at_ms: 0,
             updated_at_ms: 0,
+            next_attempt_at_ms: None,
+            attempt: None,
+            stats: None,
         };
         assert_eq!(explain(&t).as_deref(), Some("raw daemon text"));
         let mut known = t.clone();

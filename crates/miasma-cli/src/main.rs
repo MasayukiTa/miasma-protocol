@@ -17,9 +17,12 @@ use tracing::info;
 use zeroize::{Zeroize, Zeroizing};
 
 mod chat_cmd;
+mod chat_group_cmd;
 mod i18n;
 mod push_cmd;
+mod storage_cmd;
 mod tunnel;
+mod update_cmd;
 mod web_link;
 use i18n::{Lang, Msg};
 
@@ -29,7 +32,7 @@ use i18n::{Lang, Msg};
 #[command(
     name = "miasma",
     about = "Miasma Protocol — censorship-resistant decentralized file sharing",
-    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("MIASMA_BUILD_ID"), ")")
+    version = concat!(env!("MIASMA_VERSION"), " (", env!("MIASMA_BUILD_ID"), ")")
 )]
 struct Cli {
     /// Override the data directory (default: platform-specific ~/.local/share/miasma).
@@ -446,6 +449,18 @@ enum Commands {
         /// Print the report as JSON.
         #[arg(long)]
         json: bool,
+        /// Try every path one by one (DNS, TCP, TLS, UDP/QUIC, relay, local
+        /// network) and say which ones work on this network, then suggest
+        /// settings. Only ordinary connection attempts, under 40 seconds.
+        #[arg(long)]
+        matrix: bool,
+        /// With --matrix: also test this endpoint (wss://host[:port][/path]).
+        /// Repeat for several.
+        #[arg(long, value_name = "URL", requires = "matrix")]
+        probe: Vec<String>,
+        /// Write the report to this file instead of the screen.
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
     },
 
     /// Trusted contacts: register the other person once, then `miasma push`.
@@ -466,6 +481,12 @@ enum Commands {
     /// Show running and recent contact transfers (both directions).
     PushStatus,
 
+    /// Make a waiting contact transfer try again now (see `push-status` for the id).
+    PushRetry {
+        /// Transfer id.
+        id: String,
+    },
+
     /// Print the folder where files pushed to you are saved.
     PushInbox,
 
@@ -481,6 +502,32 @@ enum Commands {
     Chat {
         #[command(subcommand)]
         action: chat_cmd::ChatCmd,
+    },
+
+    /// List and delete the shares this node stores (held for other people, or left over from your own).
+    ///
+    /// `storage list` shows each share's short id, size and age. `storage delete` removes
+    /// shares by id, all of them, or everything older than some days. Shares in use (being
+    /// replicated, or part of a running transfer) are never deleted.
+    ///
+    /// With the app open, the running daemon does the work and knows what is in use; with no
+    /// daemon, the shares are read and deleted straight from disk.
+    ///
+    /// Example: miasma storage list
+    ///          miasma storage delete --older-than 30
+    Storage {
+        #[command(subcommand)]
+        action: storage_cmd::StorageCmd,
+    },
+
+    /// Look for, fetch and install newer builds (see `update.*` in the config).
+    ///
+    ///   miasma update check    available / none / failed (distinct exit codes)
+    ///   miasma update apply    download, verify and install; the old version stays as .prev
+    ///   miasma update status   settings, running build, any update in progress
+    Update {
+        #[command(subcommand)]
+        cmd: update_cmd::UpdateCmd,
     },
 
     /// Probe WebSocket/WSS connectivity to a URL.
@@ -598,6 +645,15 @@ async fn main() -> Result<()> {
 
         Commands::Tunnel { port } => cmd_tunnel(&data_dir, port).await,
 
+        Commands::Update { cmd } => {
+            let code = update_cmd::run(&data_dir, cmd).await?;
+            if code != 0 {
+                let _ = io::stdout().flush();
+                std::process::exit(code);
+            }
+            Ok(())
+        }
+
         Commands::Diagnostics { json } => cmd_diagnostics(&data_dir, json).await,
 
         Commands::SharingKey => cmd_sharing_key(&data_dir).await,
@@ -705,15 +761,27 @@ async fn main() -> Result<()> {
             store_dir,
         } => cmd_redundancy_bench(size_mib, &preset, store_dir.as_deref()),
 
-        Commands::Netcheck { timeout_secs, json } => {
-            cmd_netcheck(&data_dir, timeout_secs, json).await
+        Commands::Netcheck {
+            timeout_secs,
+            json,
+            matrix,
+            probe,
+            out,
+        } => {
+            if matrix {
+                cmd_netcheck_matrix(&data_dir, json, &probe, out.as_deref()).await
+            } else {
+                cmd_netcheck(&data_dir, timeout_secs, json, out.as_deref()).await
+            }
         }
 
         Commands::Contact { action } => push_cmd::run_contact(&data_dir, action).await,
         Commands::Push(args) => push_cmd::run_push(&data_dir, args).await,
         Commands::PushStatus => push_cmd::run_push_status(&data_dir).await,
+        Commands::PushRetry { id } => push_cmd::run_push_retry(&data_dir, &id).await,
         Commands::PushInbox => push_cmd::run_push_inbox(&data_dir).await,
         Commands::Chat { action } => chat_cmd::run_chat(&data_dir, action).await,
+        Commands::Storage { action } => storage_cmd::run_storage(&data_dir, action).await,
 
         Commands::WssProbe {
             url,
@@ -752,6 +820,7 @@ fn cmd_init(
         push: Default::default(),
         chat: Default::default(),
         privacy: Default::default(),
+        update: Default::default(),
     };
     config.save(data_dir).context("cannot save config")?;
 
@@ -1164,7 +1233,7 @@ async fn cmd_logs(
 async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<()> {
     use miasma_core::{daemon_request, ControlRequest, ControlResponse};
 
-    let version = env!("CARGO_PKG_VERSION");
+    let version = env!("MIASMA_VERSION");
     let config_info = NodeConfig::load(data_dir).map(|mut config| {
         let info = (
             config.storage.quota_mb,
@@ -1764,6 +1833,12 @@ fn cmd_config_loaded(
                     println!("{}", config.privacy.diagnostic_logging)
                 }
                 "privacy.log_buffer_mib" => println!("{}", config.privacy.log_buffer_mib),
+                "update.mode" => println!("{}", config.update.mode),
+                "update.channel" => println!("{}", config.update.channel),
+                "update.check_at_start" => println!("{}", config.update.check_at_start),
+                "update.local_build_dir" => {
+                    println!("{}", config.update.local_build_dir.as_deref().unwrap_or(""))
+                }
                 "network.listen_addr" => println!("{}", config.network.listen_addr),
                 "network.bootstrap_peers" => {
                     for peer in &config.network.bootstrap_peers {
@@ -1873,6 +1948,22 @@ fn cmd_config_loaded(
                         bail!("expected 1-8 MiB");
                     }
                     config.privacy.log_buffer_mib = mib;
+                }
+                "update.mode" => {
+                    config.update.mode = v.parse().map_err(anyhow::Error::msg)?;
+                }
+                "update.channel" => {
+                    config.update.channel = v.parse().map_err(anyhow::Error::msg)?;
+                }
+                "update.check_at_start" => {
+                    config.update.check_at_start = v.parse().context("expected bool")?;
+                }
+                "update.local_build_dir" => {
+                    config.update.local_build_dir = if v.trim().is_empty() {
+                        None
+                    } else {
+                        Some(v.trim().into())
+                    };
                 }
                 "network.listen_addr" => {
                     config.network.listen_addr = v.into();
@@ -2738,7 +2829,7 @@ async fn cmd_network_get(
 // ─── transfers (background receive, progress, resume) ────────────────────────
 
 /// `1.5 GiB`, `312 MiB`, `4 KiB`, `17 B`.
-fn human_bytes(n: u64) -> String {
+pub(crate) fn human_bytes(n: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut v = n as f64;
     let mut u = 0;
@@ -3340,7 +3431,12 @@ async fn cmd_transfer_remove(
 ///
 /// Exit 0 on session success (or data-phase error → connection itself worked).
 /// Exit 1 on session failure.
-async fn cmd_netcheck(data_dir: &std::path::Path, timeout_secs: u64, json: bool) -> Result<()> {
+async fn cmd_netcheck(
+    data_dir: &std::path::Path,
+    timeout_secs: u64,
+    json: bool,
+    out: Option<&std::path::Path>,
+) -> Result<()> {
     use miasma_core::transport::{iroh_direct::IrohSettings, netcheck::run_netcheck};
     let config = NodeConfig::load(data_dir).context("cannot load config")?;
     let settings = IrohSettings::from_config(&config.transport);
@@ -3350,10 +3446,55 @@ async fn cmd_netcheck(data_dir: &std::path::Path, timeout_secs: u64, json: bool)
     )
     .await
     .context("netcheck failed")?;
-    if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+    let text = if json {
+        let mut t = serde_json::to_string_pretty(&report)?;
+        t.push('\n');
+        t
     } else {
-        print!("{}", i18n::format_netcheck(&report, i18n::lang()));
+        i18n::format_netcheck(&report, i18n::lang())
+    };
+    emit_report(&text, out)
+}
+
+/// `miasma netcheck --matrix`: every path, one row each, then suggestions.
+async fn cmd_netcheck_matrix(
+    data_dir: &std::path::Path,
+    json: bool,
+    probes: &[String],
+    out: Option<&std::path::Path>,
+) -> Result<()> {
+    use miasma_core::transport::{
+        iroh_direct::IrohSettings,
+        reach::{run_matrix, MatrixOptions, UserProbe},
+        reach_net::SystemNet,
+    };
+    let user = probes
+        .iter()
+        .map(|p| UserProbe::parse(p).map_err(|e| anyhow::anyhow!("--probe: {e}")))
+        .collect::<Result<Vec<_>>>()?;
+    let config = NodeConfig::load(data_dir).context("cannot load config")?;
+    let settings = IrohSettings::from_config(&config.transport);
+    let opts = MatrixOptions::from_settings(&settings, user);
+    let report = run_matrix(&SystemNet::new(settings), &opts).await;
+    let text = if json {
+        let mut t = serde_json::to_string_pretty(&report)?;
+        t.push('\n');
+        t
+    } else {
+        i18n::format_matrix(&report, i18n::lang())
+    };
+    emit_report(&text, out)
+}
+
+/// Print a report, or write it to `out` and say where.
+fn emit_report(text: &str, out: Option<&std::path::Path>) -> Result<()> {
+    match out {
+        Some(path) => {
+            std::fs::write(path, text)
+                .with_context(|| format!("cannot write {}", path.display()))?;
+            eprintln!("{}", i18n::report_written(path, i18n::lang()));
+        }
+        None => print!("{text}"),
     }
     Ok(())
 }
@@ -3845,6 +3986,39 @@ mod via_flag_tests {
     }
 
     #[test]
+    fn netcheck_matrix_takes_repeatable_probes_and_an_output_file() {
+        let cli = parse(&[
+            "netcheck",
+            "--matrix",
+            "--json",
+            "--probe",
+            "wss://one.example/x",
+            "--probe",
+            "wss://two.example:8443",
+            "--out",
+            "m.json",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Netcheck {
+                matrix,
+                json,
+                probe,
+                out,
+                ..
+            } => {
+                assert!(matrix && json);
+                assert_eq!(probe, ["wss://one.example/x", "wss://two.example:8443"]);
+                assert_eq!(out.as_deref(), Some(std::path::Path::new("m.json")));
+            }
+            _ => panic!("wrong command"),
+        }
+        // Plain netcheck is unchanged, and --probe needs --matrix.
+        assert!(parse(&["netcheck"]).is_ok());
+        assert!(parse(&["netcheck", "--probe", "wss://one.example"]).is_err());
+    }
+
+    #[test]
     fn network_get_takes_repeatable_via_and_a_ca_file() {
         let cli = parse(&[
             "network-get",
@@ -3954,5 +4128,91 @@ mod remove_flag_tests {
             _ => panic!("wrong command"),
         }
         assert!(parse(&["transfer-remove"]).is_err(), "an id is required");
+    }
+}
+
+#[cfg(test)]
+mod storage_flag_tests {
+    use super::{Cli, Commands};
+    use clap::Parser;
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        let mut v = vec!["miasma"];
+        v.extend_from_slice(args);
+        Cli::try_parse_from(v)
+    }
+
+    #[test]
+    fn storage_list_is_text_by_default_and_json_on_request() {
+        match parse(&["storage", "list"]).unwrap().command {
+            Commands::Storage {
+                action: crate::storage_cmd::StorageCmd::List { json },
+            } => assert!(!json),
+            _ => panic!("wrong command"),
+        }
+        match parse(&["storage", "list", "--json"]).unwrap().command {
+            Commands::Storage {
+                action: crate::storage_cmd::StorageCmd::List { json },
+            } => assert!(json),
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn storage_delete_takes_ids_all_older_than_and_yes() {
+        match parse(&["storage", "delete", "--id", "deadbeef", "cafebabe"])
+            .unwrap()
+            .command
+        {
+            Commands::Storage {
+                action:
+                    crate::storage_cmd::StorageCmd::Delete {
+                        id,
+                        all,
+                        older_than,
+                        yes,
+                    },
+            } => {
+                assert_eq!(id, ["deadbeef", "cafebabe"]);
+                assert!(!all);
+                assert!(older_than.is_none());
+                assert!(!yes);
+            }
+            _ => panic!("wrong command"),
+        }
+        match parse(&["storage", "delete", "--all", "--yes"])
+            .unwrap()
+            .command
+        {
+            Commands::Storage {
+                action:
+                    crate::storage_cmd::StorageCmd::Delete {
+                        id,
+                        all,
+                        older_than,
+                        yes,
+                    },
+            } => {
+                assert!(id.is_empty());
+                assert!(all);
+                assert!(older_than.is_none());
+                assert!(yes);
+            }
+            _ => panic!("wrong command"),
+        }
+        match parse(&["storage", "delete", "--older-than", "30"])
+            .unwrap()
+            .command
+        {
+            Commands::Storage {
+                action: crate::storage_cmd::StorageCmd::Delete { older_than, .. },
+            } => assert_eq!(older_than, Some(30)),
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn storage_delete_rejects_a_non_numeric_age() {
+        assert!(parse(&["storage", "delete", "--older-than", "soon"]).is_err());
     }
 }

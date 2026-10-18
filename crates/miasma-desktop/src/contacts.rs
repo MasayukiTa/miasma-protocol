@@ -19,7 +19,7 @@ use crate::app::{card_frame, danger_button, primary_button, section_heading};
 use crate::locale::{ContactStrings, Locale};
 use crate::open_path::{self, Action, Resolved};
 use crate::theme::{self, Palette};
-use crate::transfers::{fill, format_bytes, format_eta, format_rate};
+use crate::transfers::{fill, format_bytes, format_eta};
 use crate::worker::PushFail;
 
 fn pal() -> Palette {
@@ -333,6 +333,12 @@ pub struct Row {
     pub saved_as: Option<String>,
     /// Last change, milliseconds since the epoch.
     pub at_ms: u64,
+    /// Waiting to retry: when the next attempt is made (ms since the epoch).
+    pub next_attempt_at_ms: Option<u64>,
+    /// Waiting to retry: how many attempts in a row have failed.
+    pub attempt: Option<u32>,
+    /// Live speed / path (daemons that predate it: none).
+    pub stats: Option<miasma_core::push::stats::TransferStats>,
 }
 
 impl Row {
@@ -359,6 +365,9 @@ impl From<&PushTransferInfo> for Row {
             source_path: t.source_path.clone(),
             saved_as: t.saved_as.clone(),
             at_ms: t.updated_at_ms,
+            next_attempt_at_ms: t.next_attempt_at_ms,
+            attempt: t.attempt,
+            stats: t.stats.clone(),
         }
     }
 }
@@ -385,6 +394,9 @@ impl From<&HistoryEntry> for Row {
             source_path: h.source_path.clone(),
             saved_as: h.saved_as.clone(),
             at_ms: h.finished_at_ms,
+            next_attempt_at_ms: None,
+            attempt: None,
+            stats: None,
         }
     }
 }
@@ -420,7 +432,48 @@ pub fn state_label(c: &ContactStrings, s: PushState) -> &'static str {
         PushState::Failed => c.st_failed,
         PushState::Rejected => c.st_rejected,
         PushState::Cancelled => c.st_cancelled,
+        PushState::Waiting => c.st_waiting,
     }
+}
+
+/// "2 min", "40 s", "3 h": the wait until `at_ms`, rounded up, in the person's language.
+fn wait_in_text(c: &ContactStrings, at_ms: u64, now_ms: u64) -> String {
+    let s = at_ms.saturating_sub(now_ms).div_ceil(1000);
+    let (tpl, n) = if s < 90 {
+        (c.wait_in_sec, s.max(1))
+    } else if s < 120 * 60 {
+        (c.wait_in_min, s.div_ceil(60))
+    } else {
+        (c.wait_in_hour, s.div_ceil(3600))
+    };
+    fill(tpl, &[("n", &n.to_string())])
+}
+
+/// What a send that is waiting to retry says: that it keeps trying by itself, when it tries
+/// next, and, when the other side is simply offline, that.
+pub fn waiting_text(c: &ContactStrings, r: &Row, now_ms: u64) -> String {
+    let t = r
+        .next_attempt_at_ms
+        .map(|at| wait_in_text(c, at, now_ms))
+        .unwrap_or_default();
+    let mut s = fill(
+        c.wait_retry,
+        &[("t", &t), ("n", &r.attempt.unwrap_or(1).to_string())],
+    );
+    // "The other side is offline" would be wrong when it is this computer's relay link that is down.
+    let local_relay = r.error.as_deref().is_some_and(error_is_local_relay);
+    if r.error_kind.as_deref() == Some("unreachable") && !local_relay {
+        s.push(' ');
+        s.push_str(c.wait_offline);
+    }
+    s
+}
+
+fn clock_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Guidance for a finished row that did not succeed, or the live retry note for a row that is
@@ -433,17 +486,38 @@ pub fn row_guidance(c: &ContactStrings, r: &Row) -> Option<String> {
 
 /// [`row_guidance`], with the core's own wording only when `technical`.
 pub fn row_guidance_for(c: &ContactStrings, r: &Row, technical: bool) -> Option<String> {
+    row_guidance_at(c, r, technical, clock_ms())
+}
+
+/// [`row_guidance_for`] at a given time (the countdown of a waiting send depends on it).
+pub fn row_guidance_at(
+    c: &ContactStrings,
+    r: &Row,
+    technical: bool,
+    now_ms: u64,
+) -> Option<String> {
     // The core says so in its error when this computer's own relay link is the problem.
-    if r.outbound
+    let local_relay = r.outbound && r.error.as_deref().is_some_and(error_is_local_relay);
+    if local_relay
         && matches!(
             r.state,
             PushState::Failed | PushState::Queued | PushState::Connecting
         )
-        && r.error.as_deref().is_some_and(error_is_local_relay)
     {
         return Some(c.fail_relay_down.to_owned());
     }
     match r.state {
+        PushState::Waiting if r.outbound => {
+            let mut s = waiting_text(c, r, now_ms);
+            if local_relay {
+                s.push(' ');
+                s.push_str(c.fail_relay_down);
+            }
+            Some(s)
+        }
+        PushState::Failed if r.outbound && r.error_kind.as_deref() == Some("source_changed") => {
+            Some(c.fail_source_changed.to_owned())
+        }
         PushState::Rejected => Some(
             match r.reject_reason.as_deref() {
                 Some("too_large") => c.rej_too_large,
@@ -684,7 +758,10 @@ pub fn file_status_in(
         .max_by(|a, b| a.at_ms.cmp(&b.at_ms).then_with(|| a.id.cmp(&b.id)));
     match newest {
         Some(r) => match r.state {
-            PushState::Queued | PushState::Preparing | PushState::Connecting => FileStatus::Waiting,
+            PushState::Queued
+            | PushState::Preparing
+            | PushState::Connecting
+            | PushState::Waiting => FileStatus::Waiting,
             PushState::Sending | PushState::Verifying => FileStatus::Sending {
                 percent: (fraction(r.size, r.bytes, false) * 100.0).min(99.0) as u8,
             },
@@ -825,6 +902,9 @@ pub struct ContactsUi {
     /// original wording. Set by the app before it hands over a reply.
     err_locale: Locale,
     err_technical: bool,
+
+    /// Speed units, the sparklines' data, and the UI language for their words.
+    speed: crate::speed::SpeedUi,
 }
 
 impl Default for ContactsUi {
@@ -881,6 +961,7 @@ impl Default for ContactsUi {
             frozen: false,
             err_locale: Locale::En,
             err_technical: false,
+            speed: Default::default(),
         }
     }
 }
@@ -1073,6 +1154,17 @@ impl ContactsUi {
         self.add_result = None;
     }
 
+    /// "Add as contact" from outside this tab (a group member): fill the add form with the
+    /// contact code. As with a suggestion, nothing is added until the person gives a label and
+    /// presses the form's button, and then with sending and receiving off.
+    pub fn prefill_add(&mut self, code: &str) {
+        self.add_text = code.trim().to_owned();
+        self.add_from_suggestion = Some(self.add_text.clone());
+        self.add_label.clear();
+        self.add_error = None;
+        self.add_result = None;
+    }
+
     fn has_active(&self) -> bool {
         self.rows.iter().any(|r| !r.finished())
     }
@@ -1181,6 +1273,14 @@ impl ContactsUi {
 
     fn rebuild_rows(&mut self) {
         self.rows = merge_rows(&self.board, &self.history);
+        self.speed
+            .sparks
+            .observe(miasma_core::push::state::now_ms(), &self.rows);
+    }
+
+    /// Speed units and language, set by the app from its settings.
+    pub fn speed_mut(&mut self) -> &mut crate::speed::SpeedUi {
+        &mut self.speed
     }
 
     /// Say how failures are worded from now on (UI language; Technical adds the original text).
@@ -1256,7 +1356,8 @@ impl ContactsUi {
             }
             PushRequest::ContactRemove { .. }
             | PushRequest::ContactUpdate { .. }
-            | PushRequest::Cancel { .. } => {
+            | PushRequest::Cancel { .. }
+            | PushRequest::RetryNow { .. } => {
                 self.page_msg = Some((text, true));
                 self.refresh_soon();
             }
@@ -1327,7 +1428,7 @@ impl ContactsUi {
                 }
             }
             PushResponse::Transfer(_) => {}
-            PushResponse::Cancelled => self.refresh_soon(),
+            PushResponse::Cancelled | PushResponse::Retrying => self.refresh_soon(),
             PushResponse::History(h) => {
                 self.history = h;
                 self.rebuild_rows();
@@ -1597,7 +1698,7 @@ impl ContactsUi {
             });
             if self.show_qr {
                 ui.add_space(8.0);
-                if !crate::transfers::draw_qr(ui, &qr_payload(&code), 240.0) {
+                if !crate::transfers::draw_qr(ui, &qr_payload(&code), 240.0, c.qr_note) {
                     ui.label(egui::RichText::new(c.qr_too_long).color(pal().danger));
                 }
                 ui.add_space(2.0);
@@ -1972,6 +2073,12 @@ impl ContactsUi {
         let Some((id, label)) = self.remove_target.clone() else {
             return;
         };
+        crate::a11y::dialog_enter(ctx, "contact_remove");
+        if crate::a11y::esc_pressed(ctx) {
+            self.remove_target = None;
+            crate::a11y::dialog_leave(ctx, "contact_remove");
+            return;
+        }
         egui::Window::new(c.remove_title)
             .collapsible(false)
             .resizable(false)
@@ -1996,9 +2103,13 @@ impl ContactsUi {
                         self.contacts.retain(|x| x.id != id);
                         self.edits.remove(&id);
                         self.remove_target = None;
+                        crate::a11y::dialog_leave(ui.ctx(), "contact_remove");
                     }
-                    if ui.button(c.cancel).clicked() {
+                    let cancel = ui.button(c.cancel);
+                    crate::a11y::dialog_focus_safe_button(ui.ctx(), "contact_remove", &cancel);
+                    if cancel.clicked() {
                         self.remove_target = None;
+                        crate::a11y::dialog_leave(ui.ctx(), "contact_remove");
                     }
                 });
             });
@@ -2009,6 +2120,9 @@ impl ContactsUi {
             ui.set_width(ui.available_width());
             ui.horizontal_wrapped(|ui| {
                 section_title(ui, c.tr_title);
+                if let Some(t) = self.speed.header_total(&self.rows, ui.max_rect().width()) {
+                    ui.label(egui::RichText::new(t).color(pal().muted));
+                }
                 if self
                     .rows
                     .iter()
@@ -2066,8 +2180,15 @@ impl ContactsUi {
         inner_frame().show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal_top(|ui| {
-                let (rect, _) =
+                let (rect, arrow) =
                     ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::hover());
+                // The arrow is drawn with lines; say which way the file goes.
+                arrow.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::Label,
+                        if r.outbound { c.dir_out } else { c.dir_in },
+                    )
+                });
                 crate::transfers::paint_arrow(ui.painter(), rect.center(), r.outbound, pal().muted);
                 let name = ui.add(
                     egui::Label::new(egui::RichText::new(shorten_name(&r.name, 40)).strong())
@@ -2086,6 +2207,7 @@ impl ContactsUi {
                     .color(pal().muted),
                 );
                 let color = match r.state {
+                    PushState::Waiting => pal().warning,
                     PushState::Done => pal().success,
                     PushState::Failed | PushState::Rejected => pal().danger,
                     PushState::Cancelled => pal().faint,
@@ -2096,8 +2218,8 @@ impl ContactsUi {
             if !r.finished() {
                 let f = fraction(r.size, r.bytes, false);
                 let mut line = format!("{:.1}%", f * 100.0);
-                if r.rate_bps > 0 {
-                    line.push_str(&format!("  ·  {}", format_rate(r.rate_bps as f64)));
+                if let Some(t) = self.speed.rate_text(r, ui.available_width()) {
+                    line.push_str(&format!("  ·  {t}"));
                 }
                 if let Some(e) = eta_secs(r.size, r.bytes, r.rate_bps) {
                     line.push_str(&format!("  ·  {}", fill(c.eta, &[("t", &eta_text(c, e))])));
@@ -2113,6 +2235,7 @@ impl ContactsUi {
                     );
                 });
             }
+            self.speed.row_extras(ui, r);
             if let Some(g) = row_guidance_for(c, r, self.err_technical) {
                 let color = if r.state == PushState::Cancelled {
                     pal().muted
@@ -2151,9 +2274,15 @@ impl ContactsUi {
                     .on_hover_text(full);
                 }
             }
-            if can_cancel || can_retry || received {
+            let can_try_now = r.outbound && r.state == PushState::Waiting;
+            if can_cancel || can_retry || can_try_now || received {
                 ui.add_space(4.0);
                 ui.horizontal_wrapped(|ui| {
+                    if can_try_now && ui.button(c.btn_try_now).clicked() {
+                        self.out
+                            .push_back(PushRequest::RetryNow { id: r.id.clone() });
+                        self.refresh_soon();
+                    }
                     if can_cancel && ui.button(c.btn_cancel).clicked() {
                         self.out.push_back(PushRequest::Cancel { id: r.id.clone() });
                     }
@@ -2316,6 +2445,9 @@ impl ContactsUi {
             saved_as: None,
             created_at_ms: at,
             updated_at_ms: at,
+            next_attempt_at_ms: None,
+            attempt: None,
+            stats: None,
         };
         let mib = 1u64 << 20;
         let a = contact("a", "田中", "0CS3Y-09W9N-5B5WM-QMMCX", true, None);
@@ -2509,6 +2641,9 @@ mod tests {
             saved_as: None,
             created_at_ms: at,
             updated_at_ms: at,
+            next_attempt_at_ms: None,
+            attempt: None,
+            stats: None,
         }
     }
 
@@ -3720,6 +3855,21 @@ mod tests {
         );
         assert!(ui.suggestions.is_empty());
         assert!(ui.add_text.is_empty() && ui.add_from_suggestion.is_none());
+    }
+
+    #[test]
+    fn a_code_given_from_outside_fills_the_form_and_adds_with_permissions_off() {
+        let mut ui = ContactsUi::default();
+        ui.add_label = "old".into();
+        ui.prefill_add("  miasma-contact:fromgroup \n");
+        assert_eq!(ui.add_text, "miasma-contact:fromgroup");
+        assert!(ui.add_label.is_empty(), "a name is never filled in");
+        assert!(ui.add_is_from_suggestion());
+        ui.queue_add("Ken".into());
+        assert!(matches!(
+            ui.out.back(),
+            Some(PushRequest::ContactAddOff { code, .. }) if code == "miasma-contact:fromgroup"
+        ));
     }
 
     #[test]

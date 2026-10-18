@@ -85,10 +85,16 @@ pub enum Label {
     ChatSessions,
     /// Chat messages waiting to be delivered.
     ChatOutbox,
+    /// Group chat state: membership chain, counters, deliveries (one document per group).
+    ChatGroups,
+    /// Group chat messages (one record log per group).
+    ChatGroupHistory,
+    /// Files waiting to be pushed to a trusted contact (path, size, hash, progress).
+    PushOutbox,
 }
 
 impl Label {
-    pub const ALL: [Label; 10] = [
+    pub const ALL: [Label; 13] = [
         Label::Contacts,
         Label::PushHistory,
         Label::ReplicationWal,
@@ -99,6 +105,9 @@ impl Label {
         Label::ChatHistory,
         Label::ChatSessions,
         Label::ChatOutbox,
+        Label::ChatGroups,
+        Label::ChatGroupHistory,
+        Label::PushOutbox,
     ];
 
     /// The id stored in file headers.
@@ -114,6 +123,9 @@ impl Label {
             Label::ChatHistory => 8,
             Label::ChatSessions => 9,
             Label::ChatOutbox => 10,
+            Label::ChatGroups => 11,
+            Label::ChatGroupHistory => 12,
+            Label::PushOutbox => 13,
         }
     }
 
@@ -134,6 +146,9 @@ impl Label {
             Label::ChatHistory => "chat-history",
             Label::ChatSessions => "chat-sessions",
             Label::ChatOutbox => "chat-outbox",
+            Label::ChatGroups => "chat-groups",
+            Label::ChatGroupHistory => "chat-group-history",
+            Label::PushOutbox => "push-outbox",
         }
     }
 
