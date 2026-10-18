@@ -581,6 +581,14 @@ impl MiasmaApp {
 
     // ── Dialogs ──────────────────────────────────────────────────────────
 
+    /// Whether one of the dialogs drawn by [`Self::dialogs`] is open.
+    fn dialog_is_open(&self) -> bool {
+        self.show_close_confirm
+            || self.show_wipe_confirm
+            || self.revoke_confirm.is_some()
+            || self.storage.confirm.is_some()
+    }
+
     /// The "are you sure" dialogs. One is open at a time; each is answered with a button or Esc.
     fn dialogs(&mut self, ctx: &egui::Context) {
         let s = self.s();
@@ -1241,7 +1249,7 @@ impl MiasmaApp {
                     );
                     if self.quota_mb > 0 {
                         ui.add_space(kit::SP_1);
-                        kit::progress(ui, (pct / 100.0) as f32, pct > 90.0);
+                        kit::progress(ui, s.status_storage, (pct / 100.0) as f32, pct > 90.0);
                     }
                     if self.peer_count == 0 {
                         kit::notice(ui, Level::Warn, s.health_no_peers);
@@ -1948,7 +1956,12 @@ impl MiasmaApp {
         } else {
             ui.label(used_text);
         }
-        kit::progress(ui, (pct / 100.0) as f32, pct > 90.0);
+        kit::progress(
+            ui,
+            self.s().status_storage,
+            (pct / 100.0) as f32,
+            pct > 90.0,
+        );
     }
 
     /// Technical-mode status: full diagnostics, one section per topic.
@@ -2475,6 +2488,9 @@ impl MiasmaApp {
             miasma_core::logging::legacy::record_notice_shown(&self.data_dir);
         }
         let l = self.lg();
+        crate::a11y::dialog_enter(ctx, "legacy_logs");
+        // Esc keeps the files (the choice that cannot lose anything).
+        let mut keep = crate::a11y::esc_pressed(ctx);
         egui::Window::new(l.legacy_title)
             .collapsible(false)
             .resizable(false)
@@ -2489,15 +2505,20 @@ impl MiasmaApp {
                             .worker
                             .tx
                             .try_send(WorkerCmd::LegacyLogs { delete: true });
+                        crate::a11y::dialog_leave(ui.ctx(), "legacy_logs");
                     }
-                    if ui.add(kit::secondary_button(l.legacy_keep)).clicked() {
-                        let _ = self
-                            .worker
-                            .tx
-                            .try_send(WorkerCmd::LegacyLogs { delete: false });
-                    }
+                    let keep_button = ui.add(kit::secondary_button(l.legacy_keep));
+                    crate::a11y::dialog_focus_safe_button(ui.ctx(), "legacy_logs", &keep_button);
+                    keep |= keep_button.clicked();
                 });
             });
+        if keep {
+            let _ = self
+                .worker
+                .tx
+                .try_send(WorkerCmd::LegacyLogs { delete: false });
+            crate::a11y::dialog_leave(ctx, "legacy_logs");
+        }
     }
 
     // ── Import panel (magnet / .torrent) ──────────────────────────────────
@@ -3201,7 +3222,15 @@ impl eframe::App for MiasmaApp {
                             MsgKind::Error => Level::Error,
                         };
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.add(kit::compact_button(s.dismiss)).clicked() {
+                            // This bar is created before the page, so a focusable button here
+                            // would be first in Tab order but is last on screen: it is reached
+                            // with Esc (below) or by assistive technology instead.
+                            let dismiss = kit::compact_button(s.dismiss).sense(egui::Sense {
+                                click: true,
+                                drag: false,
+                                focusable: false,
+                            });
+                            if ui.add(dismiss).clicked() {
                                 self.status_msg = None;
                             }
                             ui.with_layout(
@@ -3295,7 +3324,14 @@ impl eframe::App for MiasmaApp {
 
         self.legacy_logs_notice(ctx);
 
+        let dialog_open = self.dialog_is_open();
         self.dialogs(ctx);
+
+        // Esc dismisses the message in the bottom bar when no dialog is open (a dialog takes
+        // Esc for itself).
+        if self.status_msg.is_some() && !dialog_open && crate::a11y::esc_pressed(ctx) {
+            self.status_msg = None;
+        }
     }
 }
 

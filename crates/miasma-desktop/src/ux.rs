@@ -139,7 +139,10 @@ pub mod confirm {
         body: impl FnOnce(&mut egui::Ui),
     ) -> Answer {
         let mut answer = Answer::Pending;
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        // Remember which control opened the dialog; focus goes back to it when it closes.
+        crate::a11y::dialog_enter(ctx, id);
+        if crate::a11y::esc_pressed(ctx) {
+            crate::a11y::dialog_leave(ctx, id);
             return Answer::Cancel;
         }
         egui::Window::new(title)
@@ -155,11 +158,17 @@ pub mod confirm {
                     if ui.add(kit::danger_button(confirm_label)).clicked() {
                         answer = Answer::Confirm;
                     }
-                    if ui.add(kit::secondary_button(cancel_label)).clicked() {
+                    // Focus starts on Cancel, the choice that cannot lose anything.
+                    let cancel = ui.add(kit::secondary_button(cancel_label));
+                    crate::a11y::dialog_focus_safe_button(ui.ctx(), id, &cancel);
+                    if cancel.clicked() {
                         answer = Answer::Cancel;
                     }
                 });
             });
+        if answer != Answer::Pending {
+            crate::a11y::dialog_leave(ctx, id);
+        }
         answer
     }
 }
