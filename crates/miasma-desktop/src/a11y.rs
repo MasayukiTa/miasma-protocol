@@ -194,6 +194,13 @@ pub(crate) mod inventory {
             names: |l| vec![locale::strings(l).status_storage],
         },
         Entry {
+            file: "speed.rs",
+            func: "paint_spark",
+            // The sparkline repeats the speed that the text line beside it states.
+            role: Role::Decoration,
+            names: none,
+        },
+        Entry {
             file: "chat_ui.rs",
             func: "conversation_row",
             role: Role::Named,
