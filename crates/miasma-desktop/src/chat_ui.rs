@@ -16,7 +16,9 @@ use miasma_core::push::ContactInfo;
 
 use crate::chat::*;
 use crate::contacts::{ContactsUi, FileStatus, SentFile};
-use crate::locale::{ChatStrings, ContactStrings};
+use crate::group::{merge_list, ListEntry};
+use crate::group_ui::GroupUi;
+use crate::locale::{ChatStrings, ContactStrings, Locale};
 use crate::theme::{self, Palette};
 use crate::transfers::fill;
 use crate::ui_kit::{self as kit, Level};
@@ -59,6 +61,9 @@ pub enum ChatAction {
     SendFiles(String),
     /// Send this file to this contact again (a file line that did not go through).
     RetryFile { contact_id: String, path: String },
+    /// Open the add-contact form with this contact code filled in (a group member who is not a
+    /// contact yet). Nothing is added until the person presses the form's button.
+    AddContact(String),
 }
 
 #[derive(Debug, Clone)]
@@ -147,6 +152,8 @@ pub struct ChatUi {
     clock_override: Option<Clock>,
     /// Dev-only screenshot fixtures: show what was set up, never ask the service.
     frozen: bool,
+    /// Group conversations (`group_ui.rs`): listed with the conversations above.
+    group: GroupUi,
 }
 
 impl Default for ChatUi {
@@ -210,6 +217,7 @@ impl Default for ChatUi {
             notices: Vec::new(),
             clock_override: None,
             frozen: false,
+            group: GroupUi::default(),
         }
     }
 }
@@ -223,17 +231,25 @@ impl ChatUi {
 
     /// New arrivals the navigation item still announces.
     pub fn unseen(&self) -> u32 {
-        self.unread.unseen()
+        self.unread.unseen().saturating_add(self.group.unseen())
     }
 
     /// The Chat area is open: the arrivals are seen (the badges of single conversations stay).
     pub fn mark_seen(&mut self) {
         self.unread.mark_seen();
+        self.group.mark_seen();
+    }
+
+    /// The language of the group screens (their words are in `locale/group.rs`).
+    pub fn set_locale(&mut self, locale: Locale) {
+        self.group.set_locale(locale);
     }
 
     /// Texts for the app's toast, oldest first.
     pub fn take_notices(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.notices)
+        let mut v = std::mem::take(&mut self.notices);
+        v.extend(self.group.take_notices());
+        v
     }
 
     /// Hand queued requests to the worker; stops at the first one the channel does not take.
@@ -242,9 +258,10 @@ impl ChatUi {
             if try_send(req) {
                 self.out.pop_front();
             } else {
-                break;
+                return;
             }
         }
+        self.group.drain(&mut try_send);
     }
 
     /// Files were queued for `contact_id` from this screen: remember them for the conversation
@@ -323,6 +340,7 @@ impl ChatUi {
             self.preview_inflight.clear();
             self.event_cursor = None;
             self.availability = Availability::Unknown;
+            self.group.on_reconnect();
         }
         self.was_connected = connected;
         if was_open && !area_open {
@@ -360,6 +378,7 @@ impl ChatUi {
         if !was_open && area_open {
             // Just opened: everything on screen is due at once.
             self.list_dirty = true;
+            self.group.on_area_opened();
             self.thread_loaded = false;
             if self.status_inflight.is_none() {
                 self.ask_status(now);
@@ -373,6 +392,7 @@ impl ChatUi {
         if self.events_inflight.is_none() && now.duration_since(self.last_events) >= every {
             self.ask_events(now);
         }
+        self.group.tick(area_open);
         if !area_open {
             return;
         }
@@ -441,6 +461,7 @@ impl ChatUi {
         self.picker_open = false;
         self.delete_target = None;
         self.read_inflight = None;
+        self.group.on_area_closed();
     }
 
     // ─── Answers ────────────────────────────────────────────────────────────
@@ -453,6 +474,12 @@ impl ChatUi {
         reply: Result<ChatResponse, ChatFail>,
     ) {
         if self.frozen {
+            return;
+        }
+        // A group request is answered by the group screen; a service that does not do groups
+        // does not make the one-to-one chat unusable.
+        if let ChatRequest::Group(g) = &req {
+            self.group.on_reply(g, reply);
             return;
         }
         match &req {
@@ -643,7 +670,7 @@ impl ChatUi {
                     }
                 }
             }
-            // Group chat has no screen yet; the command line uses it.
+            // Group answers go to the group screen (see `on_reply`).
             ChatResponse::Group(_) => {}
         }
     }
@@ -882,12 +909,19 @@ impl ChatUi {
             }
             _ => {}
         }
+        if self.group.is_open() {
+            let (clock, max_bytes) = (self.clock(), self.max_bytes);
+            action = self.group.conversation_view(ui, clock, max_bytes);
+            self.group.dialogs(ui.ctx(), contacts);
+            return action;
+        }
         match self.view.clone() {
             View::List => self.list_view(ui, c, contacts, &mut action),
             View::Conversation(o) => self.conversation_view(ui, c, contacts, &o, &mut action),
         }
         self.picker_dialog(ui.ctx(), c, contacts);
         self.delete_dialog(ui.ctx(), c);
+        self.group.dialogs(ui.ctx(), contacts);
         if action.is_none() {
             action = self.file_action.take();
         }
@@ -947,6 +981,7 @@ impl ChatUi {
                 if resp.clicked() {
                     new_chat = true;
                 }
+                self.group.new_group_button(ui, !contacts.is_empty());
             },
             |_| {},
         );
@@ -956,7 +991,8 @@ impl ChatUi {
         self.memory_only_note(ui, c);
         let clock = self.clock();
         let mut open_row: Option<usize> = None;
-        if self.rows.is_empty() {
+        let mut open_group: Option<usize> = None;
+        if self.rows.is_empty() && self.group.rows().is_empty() {
             if !self.conv_loaded {
                 ui.label(RichText::new(c.loading).color(pal().muted));
                 return;
@@ -982,7 +1018,18 @@ impl ChatUi {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                for (i, row) in self.rows.iter().enumerate() {
+                // Groups sit among the conversations, newest first.
+                for entry in merge_list(&self.rows, self.group.rows()) {
+                    let i = match entry {
+                        ListEntry::Direct(i) => i,
+                        ListEntry::Group(j) => {
+                            if self.group.row(ui, j, clock) {
+                                open_group = Some(j);
+                            }
+                            continue;
+                        }
+                    };
+                    let row = &self.rows[i];
                     let note = self.notes.get(&row.contact_id).and_then(|n| n.last());
                     let stored = self
                         .previews
@@ -1005,6 +1052,9 @@ impl ChatUi {
         if let Some(i) = open_row {
             let r = self.rows[i].clone();
             self.open_conversation(&r.contact_id, &r.endpoint_id, &r.label);
+        }
+        if let Some(j) = open_group {
+            self.group.open_index(j);
         }
     }
 

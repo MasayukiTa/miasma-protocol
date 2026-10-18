@@ -3066,6 +3066,7 @@ impl eframe::App for MiasmaApp {
             if open {
                 self.chat.mark_seen();
             }
+            self.chat.set_locale(self.locale);
             self.chat
                 .tick(open, self.daemon_state == DaemonState::Connected);
             let tx = self.worker.tx.clone();
@@ -3246,6 +3247,10 @@ impl eframe::App for MiasmaApp {
                         }
                         Some(ChatAction::RetryFile { contact_id, path }) => {
                             self.contacts.resend_file(&contact_id, &path);
+                        }
+                        Some(ChatAction::AddContact(code)) => {
+                            self.contacts.prefill_add(&code);
+                            self.tab = Tab::Contacts;
                         }
                         None => {}
                     }

@@ -1154,6 +1154,17 @@ impl ContactsUi {
         self.add_result = None;
     }
 
+    /// "Add as contact" from outside this tab (a group member): fill the add form with the
+    /// contact code. As with a suggestion, nothing is added until the person gives a label and
+    /// presses the form's button, and then with sending and receiving off.
+    pub fn prefill_add(&mut self, code: &str) {
+        self.add_text = code.trim().to_owned();
+        self.add_from_suggestion = Some(self.add_text.clone());
+        self.add_label.clear();
+        self.add_error = None;
+        self.add_result = None;
+    }
+
     fn has_active(&self) -> bool {
         self.rows.iter().any(|r| !r.finished())
     }
@@ -3827,6 +3838,21 @@ mod tests {
         );
         assert!(ui.suggestions.is_empty());
         assert!(ui.add_text.is_empty() && ui.add_from_suggestion.is_none());
+    }
+
+    #[test]
+    fn a_code_given_from_outside_fills_the_form_and_adds_with_permissions_off() {
+        let mut ui = ContactsUi::default();
+        ui.add_label = "old".into();
+        ui.prefill_add("  miasma-contact:fromgroup \n");
+        assert_eq!(ui.add_text, "miasma-contact:fromgroup");
+        assert!(ui.add_label.is_empty(), "a name is never filled in");
+        assert!(ui.add_is_from_suggestion());
+        ui.queue_add("Ken".into());
+        assert!(matches!(
+            ui.out.back(),
+            Some(PushRequest::ContactAddOff { code, .. }) if code == "miasma-contact:fromgroup"
+        ));
     }
 
     #[test]
