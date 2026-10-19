@@ -45,7 +45,7 @@ use crate::{
     pipeline::{dissolve, DissolutionParams},
     retrieval::{
         coordinator::RetrievalCoordinator, dht_source::DhtShareSource,
-        transport_source::FallbackShareSource,
+        transport_source::FallbackShareSource, FetchPolicy,
     },
     share::MiasmaShare,
     store::LocalShareStore,
@@ -1048,7 +1048,7 @@ impl MiasmaCoordinator {
     ) -> Result<Vec<u8>, MiasmaError> {
         let dht_exec = DirectDhtExecutor::new(self.dht_handle.clone());
         let source = FallbackShareSource::new(dht_exec, self.transport_selector.clone());
-        let coord = RetrievalCoordinator::new(source);
+        let coord = RetrievalCoordinator::with_fetch_policy(source, FetchPolicy::direct_network());
 
         // Determine segment count from DHT record.
         let max_seg = {
@@ -1112,7 +1112,10 @@ impl MiasmaCoordinator {
     > {
         let dht_exec = DirectDhtExecutor::new(self.dht_handle.clone());
         let source = FallbackShareSource::new(dht_exec, self.transport_selector.clone());
-        let coord = crate::retrieval::StreamingRetrievalCoordinator::new(Arc::new(source));
+        let coord = crate::retrieval::StreamingRetrievalCoordinator::with_fetch_policy(
+            Arc::new(source),
+            FetchPolicy::direct_network(),
+        );
 
         // Determine segment count from DHT record (same lookup as
         // `retrieve_from_network_once`).
@@ -1150,7 +1153,7 @@ impl MiasmaCoordinator {
     ) -> Result<(Vec<u8>, Vec<TransportAttempt>), MiasmaError> {
         let dht_exec = DirectDhtExecutor::new(self.dht_handle.clone());
         let source = FallbackShareSource::new(dht_exec, self.transport_selector.clone());
-        let result = RetrievalCoordinator::new(source)
+        let result = RetrievalCoordinator::with_fetch_policy(source, FetchPolicy::direct_network())
             .retrieve(mid, params)
             .await;
         // Note: drain_attempts is called after retrieve, capturing all attempts.

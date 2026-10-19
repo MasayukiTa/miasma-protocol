@@ -31,12 +31,14 @@
 ///   are found, minimising information exposure.
 pub mod coordinator;
 pub mod dht_source;
+pub mod fetch;
 pub mod source;
 pub mod streaming;
 pub mod transport_source;
 
 pub use coordinator::RetrievalCoordinator;
 pub use dht_source::DhtShareSource;
+pub use fetch::FetchPolicy;
 pub use source::{LocalShareSource, ShareSource};
 pub use streaming::StreamingRetrievalCoordinator;
 pub use transport_source::FallbackShareSource;

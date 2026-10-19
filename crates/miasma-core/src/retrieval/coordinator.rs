@@ -23,20 +23,37 @@ use crate::{
     crypto::hash::ContentId,
     dissolution::{DissolutionManifest, SegmentMeta},
     pipeline::{self, DissolutionParams},
-    share::{MiasmaShare, ShareVerification},
+    share::MiasmaShare,
     MiasmaError,
 };
 
-use super::source::ShareSource;
+use super::{
+    fetch::{collect_verified_shares, FetchPolicy},
+    source::ShareSource,
+};
 
 /// Orchestrates share collection and reconstruction.
 pub struct RetrievalCoordinator<Src> {
     source: Src,
+    fetch_policy: FetchPolicy,
 }
 
 impl<Src: ShareSource> RetrievalCoordinator<Src> {
     pub fn new(source: Src) -> Self {
-        Self { source }
+        Self {
+            source,
+            fetch_policy: FetchPolicy::Sequential,
+        }
+    }
+
+    /// Construct a coordinator with an explicit holder-fetch overlap policy.
+    /// Direct network retrieval may opt into bounded hedging; anonymity-sensitive
+    /// relay paths keep the default sequential policy.
+    pub fn with_fetch_policy(source: Src, fetch_policy: FetchPolicy) -> Self {
+        Self {
+            source,
+            fetch_policy,
+        }
     }
 
     /// Retrieve single-segment content by MID.
@@ -155,24 +172,15 @@ impl<Src: ShareSource> RetrievalCoordinator<Src> {
         // Shuffle — random request order prevents shard-index timing correlation.
         candidates.shuffle(&mut rand::thread_rng());
 
-        let mut valid: Vec<MiasmaShare> = Vec::with_capacity(params.data_shards);
-
-        for addr in &candidates {
-            if valid.len() >= params.data_shards {
-                break;
-            }
-            match self.source.fetch(addr).await? {
-                Some(share)
-                    if share.segment_index == segment_index
-                        && ShareVerification::coarse_verify(&share, mid) =>
-                {
-                    valid.push(share);
-                }
-                _ => {
-                    // Not found, wrong segment, or failed coarse verify — skip silently.
-                }
-            }
-        }
+        let valid = collect_verified_shares(
+            &self.source,
+            candidates,
+            mid,
+            segment_index,
+            params.data_shards,
+            self.fetch_policy,
+        )
+        .await?;
 
         if valid.len() < params.data_shards {
             return Err(MiasmaError::InsufficientShares {
@@ -197,22 +205,15 @@ impl<Src: ShareSource> RetrievalCoordinator<Src> {
         let mut shuffled: Vec<&String> = candidates.iter().collect();
         shuffled.shuffle(&mut rand::thread_rng());
 
-        let mut valid: Vec<MiasmaShare> = Vec::with_capacity(params.data_shards);
-
-        for addr in shuffled {
-            if valid.len() >= params.data_shards {
-                break;
-            }
-            match self.source.fetch(addr).await? {
-                Some(share)
-                    if share.segment_index == meta.index
-                        && ShareVerification::coarse_verify(&share, mid) =>
-                {
-                    valid.push(share);
-                }
-                _ => {}
-            }
-        }
+        let valid = collect_verified_shares(
+            &self.source,
+            shuffled.into_iter().cloned().collect(),
+            mid,
+            meta.index,
+            params.data_shards,
+            self.fetch_policy,
+        )
+        .await?;
 
         if valid.len() < params.data_shards {
             return Err(MiasmaError::InsufficientShares {
