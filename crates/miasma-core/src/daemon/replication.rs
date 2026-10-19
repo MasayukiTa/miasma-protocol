@@ -608,6 +608,23 @@ impl ReplicationQueue {
     pub fn get(&self, mid_digest: &[u8; 32]) -> Option<&PendingReplication> {
         self.items.get(mid_digest)
     }
+
+    /// Every item regardless of state, including those already replicated.
+    pub fn all_items(&self) -> impl Iterator<Item = &PendingReplication> {
+        self.items.values()
+    }
+
+    /// Replace the stored record of an existing item (same MID) and persist it.
+    /// The item's replication state and backoff schedule are left untouched, so
+    /// this never causes an extra announce by itself. Unknown MIDs are ignored.
+    pub fn update_record(&mut self, record: DhtRecord) -> Result<()> {
+        let Some(existing) = self.items.get(&record.mid_digest) else {
+            return Ok(());
+        };
+        let mut item = existing.clone();
+        item.record = record;
+        self.push(item)
+    }
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -674,6 +691,36 @@ mod tests {
             assert!(next >= t + 20, "next={next} too low for t={t}");
             assert!(next <= t + 60, "next={next} too high for t={t}");
         }
+    }
+
+    #[test]
+    fn update_record_keeps_state_and_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let digest = dummy_record(7).mid_digest;
+        {
+            let mut q = ReplicationQueue::load_or_create(dir.path()).unwrap();
+            q.push(dummy_item(7)).unwrap();
+            q.mark_replicated(&digest).unwrap();
+
+            let mut updated = dummy_record(7);
+            updated.published_at = 999;
+            q.update_record(updated).unwrap();
+            // Unknown MIDs are ignored rather than created.
+            q.update_record(dummy_record(8)).unwrap();
+
+            assert_eq!(q.all_items().count(), 1);
+            let item = q.get(&digest).unwrap();
+            assert_eq!(item.record.published_at, 999);
+            assert_eq!(
+                item.state,
+                ItemState::Replicated,
+                "no re-announce scheduled"
+            );
+        }
+        let q = ReplicationQueue::load_or_create(dir.path()).unwrap();
+        let item = q.get(&digest).unwrap();
+        assert_eq!(item.record.published_at, 999);
+        assert_eq!(item.state, ItemState::Replicated);
     }
 
     // ── WAL persistence tests ────────────────────────────────────────────────

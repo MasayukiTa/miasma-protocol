@@ -752,6 +752,11 @@ impl MiasmaCoordinator {
         &self.store
     }
 
+    /// The share-exchange handle, for background piece maintenance probes.
+    pub fn share_exchange_handle(&self) -> &ShareExchangeHandle {
+        &self.share_handle
+    }
+
     /// This node's PeerId bytes, as announced in `ShardLocation`s.
     pub(crate) fn local_peer_bytes(&self) -> Vec<u8> {
         self.peer_id.to_bytes()

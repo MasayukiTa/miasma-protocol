@@ -21,6 +21,7 @@
 pub mod control_auth;
 pub mod http_bridge;
 pub mod ipc;
+pub mod maintenance_exec;
 pub mod rate_limit;
 pub mod replication;
 pub mod self_heal;
@@ -785,10 +786,16 @@ impl DaemonServer {
             environment_detector_loop(env_coord, env_snapshot).await;
         });
 
+        // ── Autonomous piece maintenance ──────────────────────────────────────
+        let maintenance =
+            maintenance_exec::start(coord.clone(), store.clone(), queue.clone(), &self.data_dir);
+
         // ── Wait for shutdown ─────────────────────────────────────────────────
         shutdown_rx.recv().await;
         info!("daemon shutdown signal received");
 
+        // First: no new probes or pushes once shutdown (or a wipe) has begun.
+        maintenance.stop().await;
         ipc_handle.abort();
         rep_handle.abort();
         env_handle.abort();
@@ -1756,6 +1763,8 @@ pub(crate) async fn process_request(
                     "wipe not confirmed: missing, expired or wrong confirmation nonce".into(),
                 );
             }
+            // Stop background piece maintenance before anything is erased.
+            maintenance_exec::cancel_for(&data_dir);
             // Wipe store key material first, then take the exclusive directed-key
             // lock. The write lock waits for every in-flight send/retrieve read
             // guard before Zeroizing the final shared secret copy.
