@@ -2298,6 +2298,8 @@ impl MiasmaApp {
                 let options = Locale::ALL.map(|l| (l, l.display_name()));
                 if kit::segmented(ui, &mut lang, &options) {
                     self.locale = lang;
+                    // A banner already on screen is in the old language; drop it.
+                    self.status_msg = None;
                     // Read the fonts the new language needs (the others stay lazy).
                     crate::fonts::set_locale(ui.ctx(), lang);
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Title(

@@ -673,6 +673,10 @@ fn arrange(step: &Step, app: &mut MiasmaApp, ctx: &egui::Context, first: bool) {
     }
     if matches!(step.daemon, Some(DaemonState::Connected)) {
         mock_app(app);
+        // The real worker runs in the background of a tour and reports that no service is
+        // there; that banner is not what a connected screen shows.
+        app.status_msg = None;
+        app.last_error = None;
     }
 }
 
