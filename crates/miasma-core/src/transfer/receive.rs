@@ -174,109 +174,24 @@ async fn run_inner<S: PieceSource + ?Sized>(
     // discover it after the pieces have been fetched.
     check_output_target(&output_path)?;
 
-    // ── 1. The record, the manifest and the parameters must agree. ──────────
-    if record.mid_digest != *mid.as_bytes() {
-        return Err(MiasmaError::InvalidMid(
-            "the record is not for the requested MID".into(),
-        ));
-    }
-    // The record comes from the network. Nothing in it may size an allocation or
-    // a loop until it has been bounded (C-02).
-    record.validate()?;
-    // Who published it, before the manifest is trusted for anything: with a
-    // share ID the record must be signed by exactly the ID's publisher, carry a
-    // manifest that names that publisher, and agree on protection and MID (C-01,
-    // C-06). Without one, the record is accepted unauthenticated.
-    if let Some(id) = &expect {
-        if id.mid_bytes() != mid.as_bytes() {
-            return Err(MiasmaError::ShareMismatch(ShareMismatch::MidMismatch));
-        }
-        id.check_record(
-            &record.mid_digest,
-            record_signer.as_ref(),
-            manifest.as_ref(),
-        )
-        .map_err(MiasmaError::ShareMismatch)?;
-        progress.set_publisher_authenticated(true);
-    } else if let (Some(m), Some(signer)) = (&manifest, &record_signer) {
-        if &m.publisher != signer {
-            return Err(MiasmaError::InvalidManifest(
-                "the manifest names a different publisher than the one that signed the record"
-                    .into(),
-            ));
-        }
-    }
-    let params = match &manifest {
-        Some(m) => {
-            m.validate()?;
-            if m.mid != record.mid_digest {
-                return Err(MiasmaError::InvalidManifest(
-                    "manifest MID does not match the record".into(),
-                ));
-            }
-            if m.data_shards != record.data_shards || m.total_shards != record.total_shards {
-                return Err(MiasmaError::InvalidManifest(
-                    "manifest shard counts do not match the record".into(),
-                ));
-            }
-            m.params()
-        }
-        None => DissolutionParams {
-            data_shards: record.data_shards as usize,
-            total_shards: record.total_shards as usize,
-        },
-    };
-    let k = params.data_shards;
-
-    // ── 2. The password, before any piece is fetched. ───────────────────────
-    let key: Option<Arc<UnlockedKey>> = match (manifest.as_ref().map(|m| &m.protection), password) {
-        (Some(Protection::Password(prot)), Some(pw)) => {
-            let prot = prot.clone();
-            let unlocked = tokio::task::spawn_blocking(move || prot.unlock(pw.as_str()))
-                .await
-                .map_err(|e| MiasmaError::Decryption(format!("password KDF task: {e}")))??;
-            Some(Arc::new(unlocked))
-        }
-        (Some(Protection::Password(_)), None) => return Err(MiasmaError::PasswordRequired),
-        (_, Some(_)) => {
-            return Err(MiasmaError::InvalidManifest(
-                "a password was supplied but this transfer is not password-protected; \
-                 refusing to ignore it"
-                    .into(),
-            ))
-        }
-        (_, None) => None,
-    };
-
-    // ── 3. Candidates per segment, data shards first (no RS reconstruction). ─
-    let segment_count: u32 = match &manifest {
-        Some(m) => m.segments.len() as u32,
-        // `record.validate()` bounded every index below MAX_SEGMENTS, so this
-        // cannot overflow or ask for an absurd table; the checks stay so that
-        // remains true if that ever changes.
-        None => record
-            .locations
-            .iter()
-            .map(|l| l.segment_index)
-            .max()
-            .map_or(Some(1), |m| m.checked_add(1))
-            .filter(|&c| c <= MAX_SEGMENTS)
-            .ok_or_else(|| {
-                MiasmaError::InvalidManifest("invalid record: segment table too large".into())
-            })?,
-    };
-    let total_bytes = manifest.as_ref().map_or(0, |m| m.total_bytes);
-    progress.set_totals(segment_count, total_bytes);
-
-    let mut candidates: Vec<Vec<(u16, ShardLocation)>> = vec![Vec::new(); segment_count as usize];
-    for loc in &record.locations {
-        if let Some(bucket) = candidates.get_mut(loc.segment_index as usize) {
-            bucket.push((loc.shard_index, loc.clone()));
-        }
-    }
-    for bucket in &mut candidates {
-        bucket.sort_by_key(|(slot, _)| *slot);
-    }
+    let Prepared {
+        params,
+        k,
+        key,
+        segment_count,
+        total_bytes,
+        candidates,
+        expect,
+    } = prepare(
+        &mid,
+        &record,
+        &manifest,
+        password,
+        expect,
+        record_signer,
+        progress,
+    )
+    .await?;
 
     // ── 4. Fresh start or resume. ───────────────────────────────────────────
     if let Some(parent) = output_path.parent() {
@@ -501,6 +416,145 @@ async fn run_inner<S: PieceSource + ?Sized>(
     Ok(ReceiveOutcome::Complete { bytes: bytes_done })
 }
 
+/// What the engine knows once the record, the manifest and the password have
+/// been checked and before any piece is fetched.
+pub(super) struct Prepared {
+    pub(super) params: DissolutionParams,
+    pub(super) k: usize,
+    pub(super) key: Option<Arc<UnlockedKey>>,
+    pub(super) segment_count: u32,
+    pub(super) total_bytes: u64,
+    /// Per segment: the holders, data slots first.
+    pub(super) candidates: Vec<Vec<(u16, ShardLocation)>>,
+    pub(super) expect: Option<ShareId>,
+}
+
+/// Steps 1 to 3 of a receive, shared by the file engine and the RAM-only stream:
+/// the record, the manifest and the parameters must agree; a password is checked
+/// before any piece is fetched; candidates are listed per segment.
+pub(super) async fn prepare(
+    mid: &ContentId,
+    record: &DhtRecord,
+    manifest: &Option<TransferManifest>,
+    password: Option<Zeroizing<String>>,
+    expect: Option<ShareId>,
+    record_signer: Option<[u8; 32]>,
+    progress: &Arc<TransferProgress>,
+) -> Result<Prepared, MiasmaError> {
+    // ── 1. The record, the manifest and the parameters must agree. ──────────
+    if record.mid_digest != *mid.as_bytes() {
+        return Err(MiasmaError::InvalidMid(
+            "the record is not for the requested MID".into(),
+        ));
+    }
+    // The record comes from the network. Nothing in it may size an allocation or
+    // a loop until it has been bounded (C-02).
+    record.validate()?;
+    // Who published it, before the manifest is trusted for anything: with a
+    // share ID the record must be signed by exactly the ID's publisher, carry a
+    // manifest that names that publisher, and agree on protection and MID (C-01,
+    // C-06). Without one, the record is accepted unauthenticated.
+    if let Some(id) = &expect {
+        if id.mid_bytes() != mid.as_bytes() {
+            return Err(MiasmaError::ShareMismatch(ShareMismatch::MidMismatch));
+        }
+        id.check_record(
+            &record.mid_digest,
+            record_signer.as_ref(),
+            manifest.as_ref(),
+        )
+        .map_err(MiasmaError::ShareMismatch)?;
+        progress.set_publisher_authenticated(true);
+    } else if let (Some(m), Some(signer)) = (&manifest, &record_signer) {
+        if &m.publisher != signer {
+            return Err(MiasmaError::InvalidManifest(
+                "the manifest names a different publisher than the one that signed the record"
+                    .into(),
+            ));
+        }
+    }
+    let params = match &manifest {
+        Some(m) => {
+            m.validate()?;
+            if m.mid != record.mid_digest {
+                return Err(MiasmaError::InvalidManifest(
+                    "manifest MID does not match the record".into(),
+                ));
+            }
+            if m.data_shards != record.data_shards || m.total_shards != record.total_shards {
+                return Err(MiasmaError::InvalidManifest(
+                    "manifest shard counts do not match the record".into(),
+                ));
+            }
+            m.params()
+        }
+        None => DissolutionParams {
+            data_shards: record.data_shards as usize,
+            total_shards: record.total_shards as usize,
+        },
+    };
+    let k = params.data_shards;
+
+    // ── 2. The password, before any piece is fetched. ───────────────────────
+    let key: Option<Arc<UnlockedKey>> = match (manifest.as_ref().map(|m| &m.protection), password) {
+        (Some(Protection::Password(prot)), Some(pw)) => {
+            let prot = prot.clone();
+            let unlocked = tokio::task::spawn_blocking(move || prot.unlock(pw.as_str()))
+                .await
+                .map_err(|e| MiasmaError::Decryption(format!("password KDF task: {e}")))??;
+            Some(Arc::new(unlocked))
+        }
+        (Some(Protection::Password(_)), None) => return Err(MiasmaError::PasswordRequired),
+        (_, Some(_)) => {
+            return Err(MiasmaError::InvalidManifest(
+                "a password was supplied but this transfer is not password-protected; \
+                 refusing to ignore it"
+                    .into(),
+            ))
+        }
+        (_, None) => None,
+    };
+
+    // ── 3. Candidates per segment, data shards first (no RS reconstruction). ─
+    let segment_count: u32 = match &manifest {
+        Some(m) => m.segments.len() as u32,
+        // `record.validate()` bounded every index below MAX_SEGMENTS, so this
+        // cannot overflow or ask for an absurd table; the checks stay so that
+        // remains true if that ever changes.
+        None => record
+            .locations
+            .iter()
+            .map(|l| l.segment_index)
+            .max()
+            .map_or(Some(1), |m| m.checked_add(1))
+            .filter(|&c| c <= MAX_SEGMENTS)
+            .ok_or_else(|| {
+                MiasmaError::InvalidManifest("invalid record: segment table too large".into())
+            })?,
+    };
+    let total_bytes = manifest.as_ref().map_or(0, |m| m.total_bytes);
+    progress.set_totals(segment_count, total_bytes);
+
+    let mut candidates: Vec<Vec<(u16, ShardLocation)>> = vec![Vec::new(); segment_count as usize];
+    for loc in &record.locations {
+        if let Some(bucket) = candidates.get_mut(loc.segment_index as usize) {
+            bucket.push((loc.shard_index, loc.clone()));
+        }
+    }
+    for bucket in &mut candidates {
+        bucket.sort_by_key(|(slot, _)| *slot);
+    }
+    Ok(Prepared {
+        params,
+        k,
+        key,
+        segment_count,
+        total_bytes,
+        candidates,
+        expect,
+    })
+}
+
 /// An I/O failure with the path and the OS error kind in the message, so a
 /// report from another machine (a macOS permission prompt, a read-only volume)
 /// says what was refused and where.
@@ -681,7 +735,7 @@ pub fn check_output_target(output: &Path) -> Result<(), MiasmaError> {
 }
 
 /// A piece that passed verification, with the holder it came from.
-struct PooledPiece {
+pub(super) struct PooledPiece {
     share: MiasmaShare,
     peer: Vec<u8>,
 }
@@ -692,22 +746,22 @@ const RECOVERY_EXTRA_PIECES: usize = 4;
 const MAX_DECODE_ATTEMPTS: usize = 16;
 
 /// Everything `decode_with_fallback` needs to know about one segment.
-struct SegmentCtx<'a> {
-    mid: &'a ContentId,
-    seg: u32,
-    candidates: &'a [(u16, ShardLocation)],
-    k: usize,
-    params: DissolutionParams,
-    key: Option<&'a Arc<UnlockedKey>>,
-    entry: Option<&'a SegmentEntry>,
-    manifest: Option<&'a TransferManifest>,
+pub(super) struct SegmentCtx<'a> {
+    pub(super) mid: &'a ContentId,
+    pub(super) seg: u32,
+    pub(super) candidates: &'a [(u16, ShardLocation)],
+    pub(super) k: usize,
+    pub(super) params: DissolutionParams,
+    pub(super) key: Option<&'a Arc<UnlockedKey>>,
+    pub(super) entry: Option<&'a SegmentEntry>,
+    pub(super) manifest: Option<&'a TransferManifest>,
 }
 
 /// Top `pool` up to `want` verified pieces, refusing any that do not match the
 /// manifest. Slots already in the pool and pieces previously found suspect are
 /// skipped; a rejected piece leaves the slot open for the next holder listed.
 #[allow(clippy::too_many_arguments)]
-async fn fill_pool<S: PieceSource + ?Sized>(
+pub(super) async fn fill_pool<S: PieceSource + ?Sized>(
     source: &S,
     mid: &ContentId,
     seg: u32,
@@ -767,7 +821,7 @@ fn is_recoverable(e: &MiasmaError) -> bool {
 async fn decode_once(
     ctx: &SegmentCtx<'_>,
     pieces: Vec<MiasmaShare>,
-) -> Result<Vec<u8>, MiasmaError> {
+) -> Result<Zeroizing<Vec<u8>>, MiasmaError> {
     let plaintext_len = match ctx.entry {
         Some(e) => e.plaintext_len,
         // No manifest: the most common `original_len` among the pieces.
@@ -785,7 +839,16 @@ async fn decode_once(
     let expected = ctx.entry.map(|e| (e.plaintext_len, e.plain_hash));
     let seg = ctx.seg;
     tokio::task::spawn_blocking(move || {
-        let plaintext = retrieve_segment_with(&mid, &pieces, &meta, params, key.as_deref())?;
+        // Held in a zeroizing buffer from the moment it exists, so a mismatch
+        // below, or a result nobody collects because the caller went away, wipes
+        // it instead of freeing it as-is.
+        let plaintext = Zeroizing::new(retrieve_segment_with(
+            &mid,
+            &pieces,
+            &meta,
+            params,
+            key.as_deref(),
+        )?);
         if let Some((len, hash)) = expected {
             if plaintext.len() != len as usize || *blake3::hash(&plaintext).as_bytes() != hash {
                 return Err(MiasmaError::InvalidManifest(format!(
@@ -819,13 +882,13 @@ fn most_common_len(pieces: &[MiasmaShare]) -> u32 {
 /// time (bounded by [`MAX_DECODE_ATTEMPTS`]). The piece swapped out of the
 /// combination that finally decodes is recorded as suspect and is not reused in
 /// this run. If nothing works, the first error is returned.
-async fn decode_with_fallback<S: PieceSource + ?Sized>(
+pub(super) async fn decode_with_fallback<S: PieceSource + ?Sized>(
     source: &S,
     ctx: &SegmentCtx<'_>,
     progress: &Arc<TransferProgress>,
     suspects: &mut HashSet<(u32, u16, Vec<u8>)>,
     pool: &mut Vec<PooledPiece>,
-) -> Result<Vec<u8>, MiasmaError> {
+) -> Result<Zeroizing<Vec<u8>>, MiasmaError> {
     let k = ctx.k;
     pool.sort_by_key(|p| p.share.slot_index);
     let pick = |pool: &[PooledPiece], idx: &[usize]| -> Vec<MiasmaShare> {

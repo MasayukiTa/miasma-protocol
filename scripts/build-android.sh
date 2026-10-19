@@ -301,6 +301,10 @@ grep -q 'retrieveToFile' "$GENERATED_BINDING" || \
     fail "Generated bindings are missing retrieveToFile"
 grep -q 'FileReceiveResultFfi' "$GENERATED_BINDING" || \
     fail "Generated bindings are missing FileReceiveResultFfi"
+grep -q 'receiveStream' "$GENERATED_BINDING" || \
+    fail "Generated bindings are missing receiveStream"
+grep -q 'PlaintextSink' "$GENERATED_BINDING" || \
+    fail "Generated bindings are missing PlaintextSink"
 
 echo "[4/5] Building Android application..."
 cd "$ANDROID_DIR"

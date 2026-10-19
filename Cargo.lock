@@ -5395,6 +5395,7 @@ name = "miasma-ffi"
 version = "0.3.2"
 dependencies = [
  "anyhow",
+ "async-trait",
  "libp2p",
  "miasma-core",
  "thiserror 1.0.69",

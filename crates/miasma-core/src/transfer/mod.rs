@@ -6,6 +6,9 @@
 //! * [`protection`] — password as an encryption factor (Argon2id → HKDF).
 //! * [`manifest`] — the per-piece index that travels with the DHT record.
 //! * [`receive`] — the verified, resumable receive engine.
+//! * [`receive_stream`] — the RAM-only variant: plaintext goes segment by segment
+//!   into a caller-owned sink, nothing is written to disk.
+//! * [`stream_host`] — how a front end finds the node that runs such a receive.
 //! * [`direct`] — the same engine fed from a WebSocket endpoint (`--via`), no DHT.
 //! * [`progress`] — live status of a transfer.
 //! * [`journal`] — the small file that lets a stopped transfer resume.
@@ -24,7 +27,9 @@ pub mod protection;
 pub mod publish;
 pub mod publish_journal;
 pub mod receive;
+pub mod receive_stream;
 pub mod share_id;
+pub mod stream_host;
 
 pub use invite::{extract_share_id, invitation_text, qr_payload, share_id_from_link, InviteLang};
 pub use share_id::{parse_transfer_id, ShareId, ShareIdError, ShareMismatch, TransferId};
@@ -36,6 +41,11 @@ pub use manifest::{
 pub use progress::{Phase, TransferKind, TransferProgress, TransferState, TransferStatus};
 pub use protection::{PasswordProtection, Protection, UnlockedKey};
 pub use receive::{run_receive, PieceSource, ReceiveOutcome, ReceiveSpec, RetryConfig};
+pub use receive_stream::{
+    receive_stream, SegmentBuf, SegmentSink, SinkError, StreamOutcome, StreamSpec, StreamStats,
+    StreamStatsSnapshot,
+};
+pub use stream_host::{host_for, register_host, unregister_host, StreamHost};
 
 #[cfg(test)]
 mod receive_tests;
