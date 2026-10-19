@@ -44,11 +44,53 @@ pub const ONION_PAD_TARGET: usize = 8 * 1024;
 /// The outer layer carries the serialized second layer, which is larger than
 /// `ONION_PAD_TARGET` by a few hundred bytes and varies with the length of the
 /// address fields. Padding it to a fixed 9 KiB makes every first-hop cell the
-/// same length on the wire regardless of body size or address length, so a
-/// cover cell can be built to the identical length. The receiver strips the
-/// padding through the length prefix, so this stays compatible with peers that
-/// pad to the smaller target.
+/// same length on the wire for every request within the bounds
+/// [`ONION_MAX_BODY_LEN`], [`ONION_MAX_R2_ADDR_LEN`] and
+/// [`ONION_MAX_PEER_ID_LEN`] (and [`ONION_MAX_E2E_REQUEST_LEN`] for
+/// `build_e2e`), so a cover cell can be built to the identical length. A request
+/// outside the bounds is refused with an error; it is never sent as a longer
+/// cell. The receiver strips the padding through the length prefix, so this
+/// stays compatible with peers that pad to the smaller target.
 pub const ONION_OUTER_PAD_TARGET: usize = 9 * 1024;
+
+/// Longest peer identifier accepted for the relay hop. The padded size of the
+/// outer layer is adjusted for the actual length, so the cell length does not
+/// depend on it within this bound.
+pub const ONION_MAX_PEER_ID_LEN: usize = 64;
+
+/// Longest return address (the second relay's address) a request may carry.
+pub const ONION_MAX_R2_ADDR_LEN: usize = 256;
+
+/// Fixed serialized overhead of the second layer around its variable parts:
+/// the layer header and tag (32 + 24 + 8 + 16), the optional next hop (1 + 8),
+/// the data length and its prefix (8 + 4), the return key (1 + 32) and the
+/// return-path fields that do not vary (16 + 8 + 32 + 32 + 8).
+const LAYER2_FIXED_BYTES: usize = (32 + 24 + 8 + 16) + (1 + 8) + (8 + 4) + (1 + 32) + 96;
+
+/// Largest `body` that [`OnionPacketBuilder::build`] accepts. Every request
+/// within this and the other bounds produces the same first-hop cell length.
+/// The limit is the largest body for which the serialized second layer, with a
+/// full-length return address and peer identifiers, still fits the padded outer
+/// layer.
+pub const ONION_MAX_BODY_LEN: usize = ONION_OUTER_PAD_TARGET
+    - (ONION_MAX_PEER_ID_LEN - FIRST_HOP_PEER_ID_LEN) // outer pad target shrinks with a longer id
+    - 4 // outer length prefix
+    - LAYER2_FIXED_BYTES
+    - ONION_MAX_PEER_ID_LEN // target peer id
+    - ONION_MAX_R2_ADDR_LEN;
+
+/// Largest request body that [`OnionPacketBuilder::build_e2e`] accepts. Up to
+/// this length the end-to-end layer is padded to one size, so it does not grow
+/// with the request.
+pub const ONION_MAX_E2E_REQUEST_LEN: usize = ONION_PAD_TARGET - 4;
+
+/// Serialized length of the end-to-end layer built from a request of at most
+/// [`ONION_MAX_E2E_REQUEST_LEN`] bytes: header and tag (80), no next hop (1),
+/// padded data with its length (8 + 8192) and the session key (1 + 32).
+const E2E_LAYER_BYTES: usize = (32 + 24 + 8 + 16) + 1 + (8 + ONION_PAD_TARGET) + (1 + 32);
+
+// A maximal end-to-end request must fit the largest body `build` accepts.
+const _: () = assert!(E2E_LAYER_BYTES <= ONION_MAX_BODY_LEN);
 
 /// Length in bytes of the serialized peer identifier carried in the first-hop
 /// `next_hop` field (an Ed25519 libp2p peer id). A cover cell has no next hop,
@@ -235,6 +277,29 @@ impl OnionPacketBuilder {
         r2_addr: Vec<u8>,
         body: Vec<u8>,
     ) -> Result<(OnionPacket, ReturnPath), MiasmaError> {
+        // Every accepted request has one first-hop cell length. Inputs that
+        // would make the cell longer are refused rather than sent as a cell
+        // of a different size.
+        if r2_peer_id.len() > ONION_MAX_PEER_ID_LEN || target_peer_id.len() > ONION_MAX_PEER_ID_LEN
+        {
+            return Err(MiasmaError::Encryption(format!(
+                "onion peer id too long: at most {ONION_MAX_PEER_ID_LEN} bytes"
+            )));
+        }
+        if r2_addr.len() > ONION_MAX_R2_ADDR_LEN {
+            return Err(MiasmaError::Encryption(format!(
+                "onion return address too long: {} bytes, at most {ONION_MAX_R2_ADDR_LEN}",
+                r2_addr.len()
+            )));
+        }
+        if body.len() > ONION_MAX_BODY_LEN {
+            return Err(MiasmaError::Encryption(format!(
+                "onion request body too large: {} bytes, at most {ONION_MAX_BODY_LEN}",
+                body.len()
+            )));
+        }
+        let outer_pad_target = ONION_OUTER_PAD_TARGET + FIRST_HOP_PEER_ID_LEN
+            - r2_peer_id.len().min(ONION_MAX_PEER_ID_LEN);
         let circuit_id = CircuitId::random();
 
         // Generate return-path symmetric keys (used for response re-encryption).
@@ -270,6 +335,13 @@ impl OnionPacketBuilder {
         // ── Outer layer (R1 → R2) ──────────────────────────────────────────
         let layer2_bytes =
             bincode::serialize(&layer2).map_err(|e| MiasmaError::Serialization(e.to_string()))?;
+        // Defence in depth: the bounds above guarantee this, but a cell that
+        // does not fit must never be emitted at another length.
+        if 4 + layer2_bytes.len() > outer_pad_target {
+            return Err(MiasmaError::Encryption(
+                "onion request does not fit the first-hop cell".into(),
+            ));
+        }
 
         let layer1 = Self::encrypt_layer_padded(
             r1_static_pubkey,
@@ -278,7 +350,7 @@ impl OnionPacketBuilder {
                 data: layer2_bytes,
                 return_key: Some(*r1_init_key),
             },
-            ONION_OUTER_PAD_TARGET,
+            outer_pad_target,
         )?;
 
         Ok((
@@ -308,6 +380,12 @@ impl OnionPacketBuilder {
         r2_addr: Vec<u8>,
         body: Vec<u8>,
     ) -> Result<(OnionPacket, ReturnPath, Zeroizing<[u8; 32]>), MiasmaError> {
+        if body.len() > ONION_MAX_E2E_REQUEST_LEN {
+            return Err(MiasmaError::Encryption(format!(
+                "onion request too large: {} bytes, at most {ONION_MAX_E2E_REQUEST_LEN}",
+                body.len()
+            )));
+        }
         // Generate a response session key known only to the initiator and target.
         // It is carried inside the target-addressed encrypted LayerPayload, never
         // outside that layer where R2 could read it.
@@ -733,5 +811,179 @@ mod tests {
         let k1 = derive_onion_static_key(&master).unwrap();
         let k2 = derive_onion_static_key(&master).unwrap();
         assert_eq!(k1.as_ref(), k2.as_ref());
+    }
+
+    // ── First-hop cell length ────────────────────────────────────────────────
+
+    fn wire_len(packet: &OnionPacket) -> usize {
+        bincode::serialize(packet).unwrap().len()
+    }
+
+    /// Wire length of the request frame for this packet: the packet plus the
+    /// 4-byte frame prefix and the 4-byte enum tag.
+    fn frame_len(packet: &OnionPacket) -> usize {
+        wire_len(packet) + 8
+    }
+
+    #[test]
+    fn every_legal_request_has_one_first_hop_length() {
+        use rand::Rng as _;
+        let (r1_sec, r1_pub) = make_relay_keypair();
+        let (r2_sec, r2_pub) = make_relay_keypair();
+        let mut rng = rand::thread_rng();
+        let mut lens = std::collections::BTreeSet::new();
+
+        // Corners first, then random combinations across the whole legal range.
+        let mut cases: Vec<(usize, usize, usize, usize)> = vec![
+            (0, 0, 1, 1),
+            (ONION_MAX_R2_ADDR_LEN, ONION_MAX_BODY_LEN, 64, 64),
+            (ONION_MAX_R2_ADDR_LEN, 0, 38, 38),
+            (0, ONION_MAX_BODY_LEN, 1, 1),
+            (ONION_MAX_R2_ADDR_LEN, ONION_MAX_E2E_REQUEST_LEN, 38, 38),
+        ];
+        for _ in 0..120 {
+            cases.push((
+                rng.gen_range(0..=ONION_MAX_R2_ADDR_LEN),
+                rng.gen_range(0..=ONION_MAX_BODY_LEN),
+                rng.gen_range(1..=ONION_MAX_PEER_ID_LEN),
+                rng.gen_range(1..=ONION_MAX_PEER_ID_LEN),
+            ));
+        }
+        for (addr_len, body_len, r2_id, target_id) in cases {
+            let body = vec![0x5A; body_len];
+            let (packet, _rp) = OnionPacketBuilder::build(
+                &r1_pub,
+                &r2_pub,
+                vec![2; r2_id],
+                vec![3; target_id],
+                vec![4; addr_len],
+                body.clone(),
+            )
+            .unwrap_or_else(|e| panic!("build {addr_len}/{body_len}/{r2_id}/{target_id}: {e}"));
+            lens.insert(wire_len(&packet));
+
+            // The request still decodes through both relays.
+            let p1 = OnionLayerProcessor::peel(&r1_sec, &packet.layer).unwrap();
+            assert_eq!(p1.next_hop.as_deref().map(<[u8]>::len), Some(r2_id));
+            let l2: OnionLayer = bincode::deserialize(&p1.data).unwrap();
+            let p2 = OnionLayerProcessor::peel(&r2_sec, &l2).unwrap();
+            let inner: InnerPayload = bincode::deserialize(&p2.data).unwrap();
+            assert_eq!(inner.body, body);
+            assert_eq!(inner.return_path.r2_addr.len(), addr_len);
+        }
+
+        // The end-to-end entry point, across its own legal range.
+        let (_t_sec, t_pub) = make_relay_keypair();
+        for _ in 0..40 {
+            let body = vec![0x77; rng.gen_range(0..=ONION_MAX_E2E_REQUEST_LEN)];
+            let (packet, _rp, _key) = OnionPacketBuilder::build_e2e(
+                &r1_pub,
+                &r2_pub,
+                &t_pub,
+                vec![2; 38],
+                vec![3; 38],
+                vec![4; rng.gen_range(0..=ONION_MAX_R2_ADDR_LEN)],
+                body,
+            )
+            .unwrap();
+            lens.insert(wire_len(&packet));
+        }
+
+        assert_eq!(
+            lens.len(),
+            1,
+            "first-hop cells of different lengths: {lens:?}"
+        );
+    }
+
+    #[test]
+    fn first_hop_length_matches_the_cover_cell() {
+        let (_r1_sec, r1_pub) = make_relay_keypair();
+        let (_r2_sec, r2_pub) = make_relay_keypair();
+        let (packet, _) = OnionPacketBuilder::build(
+            &r1_pub,
+            &r2_pub,
+            vec![2; FIRST_HOP_PEER_ID_LEN],
+            vec![3; FIRST_HOP_PEER_ID_LEN],
+            vec![4; 20],
+            vec![1; 50],
+        )
+        .unwrap();
+        let mut cover_payload = vec![0u8; 600];
+        cover_payload[0] = crate::cover_traffic::COVER_TAG;
+        let cover = OnionPacketBuilder::build_cover(&r1_pub, cover_payload).unwrap();
+        assert_eq!(frame_len(&packet), FIRST_HOP_FRAME_BYTES);
+        assert_eq!(frame_len(&cover), FIRST_HOP_FRAME_BYTES);
+    }
+
+    #[test]
+    fn inputs_past_the_bounds_are_refused_not_sent_at_another_length() {
+        let (_s1, r1_pub) = make_relay_keypair();
+        let (_s2, r2_pub) = make_relay_keypair();
+        let build = |r2_id: usize, target_id: usize, addr: usize, body: usize| {
+            OnionPacketBuilder::build(
+                &r1_pub,
+                &r2_pub,
+                vec![2; r2_id],
+                vec![3; target_id],
+                vec![4; addr],
+                vec![5; body],
+            )
+        };
+        assert!(build(38, 38, ONION_MAX_R2_ADDR_LEN, ONION_MAX_BODY_LEN).is_ok());
+        assert!(build(38, 38, ONION_MAX_R2_ADDR_LEN + 1, 10).is_err());
+        assert!(build(38, 38, 10, ONION_MAX_BODY_LEN + 1).is_err());
+        assert!(build(ONION_MAX_PEER_ID_LEN + 1, 38, 10, 10).is_err());
+        assert!(build(38, ONION_MAX_PEER_ID_LEN + 1, 10, 10).is_err());
+        let err = build(38, 38, ONION_MAX_R2_ADDR_LEN + 1, 10).unwrap_err();
+        assert!(err.to_string().contains("return address too long"), "{err}");
+
+        let (_s3, t_pub) = make_relay_keypair();
+        let e2e = |body: usize| {
+            OnionPacketBuilder::build_e2e(
+                &r1_pub,
+                &r2_pub,
+                &t_pub,
+                vec![2; 38],
+                vec![3; 38],
+                vec![4; 10],
+                vec![5; body],
+            )
+        };
+        assert!(e2e(ONION_MAX_E2E_REQUEST_LEN).is_ok());
+        assert!(e2e(ONION_MAX_E2E_REQUEST_LEN + 1).is_err());
+    }
+
+    #[test]
+    fn cells_padded_to_the_older_smaller_size_still_decode() {
+        // An older build pads the outer layer to the same size as the inner
+        // one. The reader strips padding by its length prefix, so a cell of
+        // that size, and a current cell, both give back the same data.
+        let (r1_sec, r1_pub) = make_relay_keypair();
+        let data = vec![0xC3u8; 1500];
+        for pad in [
+            ONION_PAD_TARGET,
+            ONION_OUTER_PAD_TARGET,
+            ONION_OUTER_PAD_TARGET + 40,
+        ] {
+            let layer = OnionPacketBuilder::encrypt_layer_padded(
+                &r1_pub,
+                LayerPayload {
+                    next_hop: Some(vec![9; 38]),
+                    data: data.clone(),
+                    return_key: Some([7; 32]),
+                },
+                pad,
+            )
+            .unwrap();
+            let peeled = OnionLayerProcessor::peel(&r1_sec, &layer).unwrap();
+            assert_eq!(peeled.data, data, "pad target {pad}");
+            assert_eq!(peeled.next_hop, Some(vec![9; 38]));
+        }
+        // The reader itself: prefix, data, then anything.
+        for len in [0usize, 1, 100, 8188, 9000] {
+            let padded = pad_to_fixed_size(&vec![1u8; len], ONION_OUTER_PAD_TARGET);
+            assert_eq!(unpad_fixed_size(&padded).unwrap(), vec![1u8; len]);
+        }
     }
 }
