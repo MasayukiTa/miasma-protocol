@@ -566,9 +566,11 @@ impl PushService {
         let active: HashSet<PathBuf> = self.active_parts.lock().unwrap().keys().cloned().collect();
         let partials = match (selector, contact) {
             (None, _) => shred_partials_in(&self.settings.inbox_dir, None, &active),
-            (Some(_), Some(Some(c))) => {
-                shred_partials_in(&self.settings.inbox_dir, Some(&self.contact_dir(&c.label)), &active)
-            }
+            (Some(_), Some(Some(c))) => shred_partials_in(
+                &self.settings.inbox_dir,
+                Some(&self.contact_dir(&c.label)),
+                &active,
+            ),
             _ => 0,
         };
         Ok(ClearReport {

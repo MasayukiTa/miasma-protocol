@@ -1002,7 +1002,10 @@ mod tests {
                 assert_eq!(left_behind.len(), old.len());
                 assert_eq!(surviving_windows(&old, &left_behind), 0, "old bytes remain");
             } else {
-                assert_eq!(left_behind, old, "control: a plain commit leaves the old file");
+                assert_eq!(
+                    left_behind, old,
+                    "control: a plain commit leaves the old file"
+                );
             }
         }
     }

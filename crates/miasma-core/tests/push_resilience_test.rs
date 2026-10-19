@@ -1265,7 +1265,11 @@ async fn clearing_finished_transfers_deletes_them_for_good_and_keeps_the_running
     assert!(p.alice.history().list(100).is_empty());
     assert!(p.alice.board().get(&id_a).is_none());
     assert!(p.alice.board().get(&id_b).is_none());
-    let back = p.alice.board().get(&id_w).expect("the waiting send survived");
+    let back = p
+        .alice
+        .board()
+        .get(&id_w)
+        .expect("the waiting send survived");
     assert!(!back.state.is_finished());
     // Nothing of the cleared names is in the clear anywhere in the data dir.
     for e in std::fs::read_dir(p.adir.path()).unwrap().flatten() {

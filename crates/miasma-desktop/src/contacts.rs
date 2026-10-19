@@ -3217,7 +3217,11 @@ mod tests {
         let (msg, is_err) = ui.page_msg.clone().unwrap();
         assert!(is_err);
         assert_eq!(msg, c.clear_old_daemon);
-        assert_eq!(ui.rows.len(), 1, "the rows are still there: nothing was deleted");
+        assert_eq!(
+            ui.rows.len(),
+            1,
+            "the rows are still there: nothing was deleted"
+        );
         assert_eq!(ui.availability, Availability::Ok);
     }
 
