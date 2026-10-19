@@ -610,7 +610,7 @@ pub fn make_share(mid: &[u8; 32], segment: u32, slot: u16) -> MiasmaShare {
         slot,
         vec![slot as u8; 100],
         vec![7; 32],
-        [3u8; 12],
+        rand::random::<[u8; 12]>(),
         100,
         1,
     )
