@@ -1309,6 +1309,9 @@ impl PushService {
             header.size,
             PushState::Preparing,
         );
+        // The sender's final answer is held back until the row on the board has its
+        // final state: whoever sees the sender's "done" must find this side final too.
+        let mut ack: Option<Done> = None;
         let outcome = self
             .receive_body(
                 conn,
@@ -1319,10 +1322,11 @@ impl PushService {
                 &mut tx,
                 &mut rx,
                 &mut cancel,
+                &mut ack,
             )
             .await;
         drop(permit);
-        match outcome {
+        let keep_open = match outcome {
             RxEnd::Done(saved) => {
                 self.board.update(&tid, |i| i.saved_as = Some(saved));
                 self.finish(&tid, PushState::Done, None, None);
@@ -1367,7 +1371,14 @@ impl PushService {
                 conn.close(proto::CLOSE_CANCELLED, b"cancelled");
                 false
             }
+        };
+        if let Some(done) = ack {
+            // The state and the history are written; now the sender may learn the result.
+            if self.send_done(&mut tx, &done).await.is_err() {
+                return false;
+            }
         }
+        keep_open
     }
 
     async fn reject(&self, tx: &mut BoxTx, reason: RejectReason) -> bool {
@@ -1392,6 +1403,7 @@ impl PushService {
         tx: &mut BoxTx,
         rx: &mut BoxRx,
         cancel: &mut watch::Receiver<bool>,
+        ack: &mut Option<Done>,
     ) -> RxEnd {
         let size = header.size;
         let dir = self.contact_dir(&contact.label);
@@ -1536,7 +1548,7 @@ impl PushService {
             };
             hasher.update(&buf[..n]);
             if let Err(e) = w.write_all(&buf[..n]).await {
-                let _ = self.reply_done(tx, false, None, Some("write_failed")).await;
+                *ack = Some(done_frame(false, None, Some("write_failed")));
                 return RxEnd::FailedKind(
                     error_kind::WRITE_FAILED,
                     format!("cannot write to the inbox: {e}"),
@@ -1553,7 +1565,7 @@ impl PushService {
             });
         }
         if let Err(e) = w.flush().await {
-            let _ = self.reply_done(tx, false, None, Some("write_failed")).await;
+            *ack = Some(done_frame(false, None, Some("write_failed")));
             return RxEnd::FailedKind(
                 error_kind::WRITE_FAILED,
                 format!("cannot write to the inbox: {e}"),
@@ -1573,9 +1585,7 @@ impl PushService {
         });
         if hasher.finalize().to_hex().as_str() != header.hash.to_ascii_lowercase() {
             let _ = std::fs::remove_file(&part);
-            let _ = self
-                .reply_done(tx, false, None, Some("hash_mismatch"))
-                .await;
+            *ack = Some(done_frame(false, None, Some("hash_mismatch")));
             return RxEnd::FailedKind(
                 error_kind::DAMAGED,
                 "the file arrived damaged (checksum mismatch)".into(),
@@ -1588,34 +1598,19 @@ impl PushService {
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| name.to_owned());
                 let shown = format!("{}/{}", contact_leaf(&dir), saved);
-                let _ = self.reply_done(tx, true, Some(saved), None).await;
+                *ack = Some(done_frame(true, Some(saved), None));
                 RxEnd::Done(shown)
             }
             Err(e) => {
-                let _ = self
-                    .reply_done(tx, false, None, Some("rename_failed"))
-                    .await;
+                *ack = Some(done_frame(false, None, Some("rename_failed")));
                 RxEnd::Failed(format!("cannot save the file: {e}"))
             }
         }
     }
 
-    async fn reply_done(
-        &self,
-        tx: &mut BoxTx,
-        ok: bool,
-        saved_as: Option<String>,
-        error: Option<&str>,
-    ) -> Result<(), ProtoError> {
-        proto::write_frame(
-            tx,
-            &Done {
-                ok,
-                saved_as,
-                error: error.map(str::to_owned),
-            },
-        )
-        .await?;
+    /// Send the final answer for a transfer and close the stream.
+    async fn send_done(&self, tx: &mut BoxTx, done: &Done) -> Result<(), ProtoError> {
+        proto::write_frame(tx, done).await?;
         finish_stream(tx).await;
         Ok(())
     }
@@ -1672,6 +1667,14 @@ impl PushService {
             }
         }
         conn.close(CLOSE_OK, b"done");
+    }
+}
+
+fn done_frame(ok: bool, saved_as: Option<String>, error: Option<&str>) -> Done {
+    Done {
+        ok,
+        saved_as,
+        error: error.map(str::to_owned),
     }
 }
 

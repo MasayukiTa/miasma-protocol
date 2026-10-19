@@ -260,6 +260,59 @@ async fn registered_both_ways_file_arrives_identical_with_japanese_name() {
     );
 }
 
+/// Whoever learns the result from the sender's final answer must find the receiver's
+/// row final too: no polling, the board is read the moment the answer arrives. The
+/// receiver used to answer first and write `Done` afterwards, so this read could
+/// still see `Verifying`.
+#[tokio::test(flavor = "multi_thread")]
+async fn receiver_row_is_final_when_the_sender_gets_its_answer() {
+    let relay = relay().await;
+    let alice = peer(&relay, |_| {}).await;
+    let bob = peer(&relay, |_| {}).await;
+    register(&bob, &alice, "alice");
+    register(&alice, &bob, "bob");
+
+    let row = |name: &str| {
+        bob.svc
+            .board()
+            .list()
+            .into_iter()
+            .find(|i| i.direction == Direction::In && i.name == name)
+            .unwrap_or_else(|| panic!("no inbound row for {name}"))
+    };
+
+    for n in 0..25u8 {
+        let name = format!("ok{n}.bin");
+        let data = content(20_000 + n as usize, n as u32);
+        let (raw, reply) = raw_open(&alice, &bob, &header(&name, &data)).await;
+        assert_eq!(reply, Reply::Accept { offset: 0 });
+        let done = raw_finish(raw, &data).await;
+        assert!(done.ok);
+        let r = row(&name);
+        assert_eq!(r.state, PushState::Done, "run {n}");
+        assert!(r.saved_as.is_some());
+        assert!(bob
+            .svc
+            .history()
+            .list(100)
+            .iter()
+            .any(|e| e.name == name && e.state == PushState::Done));
+    }
+
+    // A refused file: the failure is on the board before the sender hears of it.
+    for n in 0..10u8 {
+        let name = format!("bad{n}.bin");
+        let data = content(20_000, 100 + n as u32);
+        let mut h = header(&name, &data);
+        h.hash = hash(b"something else");
+        let (raw, reply) = raw_open(&alice, &bob, &h).await;
+        assert_eq!(reply, Reply::Accept { offset: 0 });
+        let done = raw_finish(raw, &data).await;
+        assert!(!done.ok);
+        assert_eq!(row(&name).state, PushState::Failed, "run {n}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn ipc_surface_round_trip() {
     let relay = relay().await;
