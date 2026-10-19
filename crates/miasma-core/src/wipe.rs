@@ -13,6 +13,8 @@
 //! blocks are physically overwritten.
 
 use std::future::Future;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tokio::sync::watch;
@@ -46,6 +48,34 @@ struct GateState {
 /// Shared quiesce switch. Cheap to create; owned by the store.
 pub struct WipeGate {
     state: watch::Sender<GateState>,
+    /// Test hook: when set, [`stall_point`](WipeGate::stall_point) never
+    /// returns on its own (only cancellation ends it).
+    stall: AtomicBool,
+    /// Test hook: how many callers are parked in `stall_point` right now.
+    stalled: AtomicUsize,
+}
+
+/// Removes a file on drop unless it was kept. Used so that a cancelled or
+/// failed write never leaves partial output behind.
+struct PartialOutput<'a> {
+    path: &'a Path,
+    keep: bool,
+}
+
+impl Drop for PartialOutput<'_> {
+    fn drop(&mut self) {
+        if !self.keep {
+            let _ = std::fs::remove_file(self.path);
+        }
+    }
+}
+
+struct StallCount<'a>(&'a AtomicUsize);
+
+impl Drop for StallCount<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl Default for WipeGate {
@@ -73,7 +103,59 @@ impl WipeGate {
             wiping: false,
             in_flight: 0,
         });
-        Self { state }
+        Self {
+            state,
+            stall: AtomicBool::new(false),
+            stalled: AtomicUsize::new(0),
+        }
+    }
+
+    /// Turn the test stall on or off. Off by default; no request can set it.
+    #[doc(hidden)]
+    pub fn set_stall_for_tests(&self, on: bool) {
+        self.stall.store(on, Ordering::SeqCst);
+    }
+
+    /// How many operations are currently parked at a stall point.
+    #[doc(hidden)]
+    pub fn stalled_for_tests(&self) -> usize {
+        self.stalled.load(Ordering::SeqCst)
+    }
+
+    /// A point where an operation can be held for a test. Returns at once
+    /// unless the test stall is on, in which case it waits until the caller's
+    /// future is dropped (by a wipe).
+    pub async fn stall_point(&self) {
+        if !self.stall.load(Ordering::SeqCst) {
+            return;
+        }
+        self.stalled.fetch_add(1, Ordering::SeqCst);
+        let _count = StallCount(&self.stalled);
+        std::future::pending::<()>().await;
+    }
+
+    /// Write `data` to `path` as one gated step, for use inside
+    /// [`run_result`](Self::run_result) (so a wipe that lands before the write
+    /// drops this future and nothing is written). The file is created only
+    /// while no wipe is running, and is removed again if a wipe began while it
+    /// was being written or if the write fails part-way.
+    pub async fn write_output(&self, path: &Path, data: &[u8]) -> Result<(), MiasmaError> {
+        // The gap between "the data is in memory" and "the file exists".
+        self.stall_point().await;
+        if self.is_wiping() {
+            return Err(WipeInProgress.into());
+        }
+        let mut partial = PartialOutput { path, keep: false };
+        std::fs::write(path, data).map_err(|e| {
+            MiasmaError::Storage(format!("cannot write to {}: {e}", path.display()))
+        })?;
+        // The write above does not yield, so a wipe that began meanwhile has
+        // not cancelled us: check once more before reporting success.
+        if self.is_wiping() {
+            return Err(WipeInProgress.into());
+        }
+        partial.keep = true;
+        Ok(())
     }
 
     /// `true` once [`begin_wipe`](Self::begin_wipe) has been called.
@@ -170,7 +252,6 @@ impl WipeGate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
     struct SetOnDrop(Arc<AtomicBool>);
@@ -240,6 +321,66 @@ mod tests {
             .await;
         assert!(res.is_err());
         assert!(!ran.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn write_output_writes_when_no_wipe_is_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out.bin");
+        let gate = WipeGate::new();
+        gate.run_result(gate.write_output(&out, b"payload"))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), b"payload");
+    }
+
+    #[tokio::test]
+    async fn write_output_is_cancelled_in_the_gap_before_the_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out.bin");
+        let gate = Arc::new(WipeGate::new());
+        gate.set_stall_for_tests(true);
+
+        let task = {
+            let (gate, out) = (gate.clone(), out.clone());
+            tokio::spawn(async move {
+                gate.run_result(gate.write_output(&out, b"secret plaintext"))
+                    .await
+            })
+        };
+        while gate.stalled_for_tests() == 0 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!out.exists(), "nothing is written while parked in the gap");
+
+        gate.begin_wipe();
+        assert!(gate.drained(Duration::from_secs(5)).await);
+        assert!(task.await.unwrap().is_err());
+        assert!(!out.exists(), "a wipe in the gap must leave no output");
+        assert_eq!(gate.stalled_for_tests(), 0);
+    }
+
+    #[tokio::test]
+    async fn write_output_refuses_once_a_wipe_began_and_removes_a_late_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out.bin");
+        let gate = WipeGate::new();
+        gate.begin_wipe();
+        assert!(gate.write_output(&out, b"x").await.is_err());
+        assert!(!out.exists());
+    }
+
+    #[tokio::test]
+    async fn write_output_reports_a_failed_write() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory cannot be written as a file: the write fails with a
+        // clear error and the directory is left alone.
+        let out = dir.path().join("sub");
+        std::fs::create_dir(&out).unwrap();
+        let gate = WipeGate::new();
+        let err = gate.write_output(&out, b"x").await.unwrap_err();
+        assert!(err.to_string().contains("cannot write to"));
+        assert!(out.is_dir());
     }
 
     #[tokio::test]

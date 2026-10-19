@@ -143,48 +143,65 @@ impl TransferRegistry {
         let sources = direct_sources(&self.data_dir, &target, via, iroh_ca_pem);
         let has_direct = sources.has_any();
         let watched = progress.clone();
+        let for_wipe = progress.clone();
+        let store = coord.share_store().clone();
         let task = tokio::spawn(async move {
-            // The outcome is recorded in `progress` by the engine itself.
-            let direct_failures = if has_direct {
-                match try_receive_direct(
-                    &sources,
-                    &target,
-                    &output_path,
-                    password.clone(),
-                    &journal_dir,
-                    restart,
-                    progress.clone(),
-                )
-                .await
-                {
-                    DirectOutcome::Finished(_) => return,
-                    DirectOutcome::Unavailable(failures) => failures,
-                }
-            } else {
-                Vec::new()
-            };
-            let result = coord
-                .receive_file_id(
-                    &target,
-                    &output_path,
-                    password,
-                    &journal_dir,
-                    restart,
-                    progress.clone(),
-                )
+            // Registered with the wipe gate: a wipe drops this whole job (and
+            // with it every open file), and a job that starts after a wipe
+            // began is refused.
+            let gated = store
+                .wipe_gate()
+                .run_result(async move {
+                    // The outcome is recorded in `progress` by the engine itself.
+                    let direct_failures = if has_direct {
+                        match try_receive_direct(
+                            &sources,
+                            &target,
+                            &output_path,
+                            password.clone(),
+                            &journal_dir,
+                            restart,
+                            progress.clone(),
+                        )
+                        .await
+                        {
+                            DirectOutcome::Finished(_) => return Ok(()),
+                            DirectOutcome::Unavailable(failures) => failures,
+                        }
+                    } else {
+                        Vec::new()
+                    };
+                    let result = coord
+                        .receive_file_id(
+                            &target,
+                            &output_path,
+                            password,
+                            &journal_dir,
+                            restart,
+                            progress.clone(),
+                        )
+                        .await;
+                    // The DHT was the last resort: if it failed too, say what every
+                    // earlier source said as well.
+                    if let Err(e) = result {
+                        if !direct_failures.is_empty()
+                            && progress.snapshot().state == TransferState::Failed
+                        {
+                            let earlier = direct_failures
+                                .iter()
+                                .map(|(source, why)| format!("{source}: {why}"))
+                                .collect::<Vec<_>>()
+                                .join("; ");
+                            progress.note_error(format!("{e}; earlier direct attempts: {earlier}"));
+                        }
+                    }
+                    Ok(())
+                })
                 .await;
-            // The DHT was the last resort: if it failed too, say what every
-            // earlier source said as well.
-            if let Err(e) = result {
-                if !direct_failures.is_empty() && progress.snapshot().state == TransferState::Failed
-                {
-                    let earlier = direct_failures
-                        .iter()
-                        .map(|(source, why)| format!("{source}: {why}"))
-                        .collect::<Vec<_>>()
-                        .join("; ");
-                    progress.note_error(format!("{e}; earlier direct attempts: {earlier}"));
-                }
+            // Only a wipe makes the gate return an error here (the job itself
+            // always reports through `progress`).
+            if let Err(e) = gated {
+                for_wipe.set_state(TransferState::Failed, Some(e.to_string()), false);
             }
         });
         // If the task panics the progress cell would say Running forever.
@@ -234,9 +251,26 @@ impl TransferRegistry {
             restart,
         };
         let watched = progress.clone();
+        let for_wipe = progress.clone();
+        let store = coord.share_store().clone();
+        let hold = store.clone();
         let task = tokio::spawn(async move {
-            // The outcome is recorded in `progress` by the engine itself.
-            let _ = coord.publish_file_job(spec, Some(progress)).await;
+            // Registered with the wipe gate: a wipe drops the job (and the
+            // segment buffer and open files with it), and a job that starts
+            // after a wipe began is refused.
+            let gated = store
+                .wipe_gate()
+                .run_result(async move {
+                    // Test hold point; returns at once outside tests.
+                    hold.wipe_gate().stall_point().await;
+                    // The outcome is recorded in `progress` by the engine itself.
+                    let _ = coord.publish_file_job(spec, Some(progress)).await;
+                    Ok(())
+                })
+                .await;
+            if let Err(e) = gated {
+                for_wipe.set_state(TransferState::Failed, Some(e.to_string()), false);
+            }
         });
         tokio::spawn(async move {
             if let Err(e) = task.await {
@@ -415,6 +449,48 @@ impl TransferRegistry {
             ReceiveJournal::remove(jpath);
         } else {
             PublishJournal::remove(jpath);
+        }
+    }
+
+    /// Wipe support: remove what background jobs leave on disk. Call it after
+    /// the jobs were stopped through the wipe gate and before the state key is
+    /// erased (a receive journal can only be read, to find its partial file,
+    /// while the key is still there). Removes every receive's partial file that
+    /// is known from a live job or a journal, then every file in the transfers
+    /// directory. A logical removal only: it does not promise that earlier
+    /// storage blocks are overwritten.
+    pub fn wipe_artifacts(&self) {
+        let jobs: Vec<Arc<TransferProgress>> =
+            self.jobs.lock().unwrap().values().cloned().collect();
+        for p in jobs {
+            p.cancel();
+            let s = p.snapshot();
+            let out = Path::new(&s.name);
+            if s.kind == TransferKind::Receive
+                && s.state != TransferState::Complete
+                && !s.name.is_empty()
+                && !out.is_dir()
+            {
+                let _ = std::fs::remove_file(part_path_for(out));
+            }
+        }
+        let Ok(entries) = std::fs::read_dir(self.journal_dir()) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let path = e.path();
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with("recv-") && name.ends_with(".json") {
+                if let Some(j) = ReceiveJournal::load(&path) {
+                    let expected = part_path_for(Path::new(&j.output_path));
+                    if expected == Path::new(&j.part_path) {
+                        let _ = std::fs::remove_file(&expected);
+                    }
+                }
+            }
+            if path.is_file() {
+                let _ = std::fs::remove_file(&path);
+            }
         }
     }
 

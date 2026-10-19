@@ -57,11 +57,11 @@ struct Core {
 }
 
 impl Core {
-    fn new(keys: &StateKeys, label: Label, salt: [u8; 16]) -> Self {
-        let doc_key = keys.doc_key(label);
+    fn new(keys: &StateKeys, label: Label, salt: [u8; 16]) -> Result<Self, StateError> {
+        let doc_key = keys.doc_key(label)?;
         let key = keyderive::derive_state_log_key(doc_key.as_ref(), &salt)
             .expect("HKDF expand of 32 bytes cannot fail");
-        Self { key, label, salt }
+        Ok(Self { key, label, salt })
     }
 
     fn max_body(&self) -> usize {
@@ -204,7 +204,7 @@ impl LogReader {
             let h: [u8; LOG_HEADER_LEN] = read_array(&mut r)?;
             let salt = parse_header(&h, label)?;
             (
-                Some(Core::new(keys, label, salt)),
+                Some(Core::new(keys, label, salt)?),
                 LOG_HEADER_LEN as u64,
                 false,
             )
@@ -354,7 +354,7 @@ impl LogWriter {
             .open(path)?;
         let h: [u8; LOG_HEADER_LEN] = read_array(&mut file)?;
         let salt = parse_header(&h, label)?;
-        let core = Core::new(keys, label, salt);
+        let core = Core::new(keys, label, salt)?;
         let scan = Self::scan(path, &core, len)?;
         if scan.valid_len < len {
             file.set_len(scan.valid_len)?;
@@ -380,7 +380,7 @@ impl LogWriter {
             std::fs::create_dir_all(parent)?;
         }
         let salt: [u8; 16] = rand::random();
-        let core = Core::new(keys, label, salt);
+        let core = Core::new(keys, label, salt)?;
         let header = core.header();
         crate::secure_file::write_restricted(path, &header)?;
         let mut file = std::fs::OpenOptions::new()
