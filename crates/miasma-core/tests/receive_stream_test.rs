@@ -7,7 +7,10 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 
@@ -143,6 +146,7 @@ struct Src {
     /// Cancel this transfer from inside the first fetch of this segment, then
     /// fail that fetch (return nothing).
     cancel_then_fail: Option<(u32, Arc<TransferProgress>)>,
+    cancel_done: AtomicBool,
 }
 
 impl Src {
@@ -153,6 +157,7 @@ impl Src {
             missing_segment: None,
             hang_on: None,
             cancel_then_fail: None,
+            cancel_done: AtomicBool::new(false),
         }
     }
 }
@@ -171,7 +176,10 @@ impl PieceSource for Src {
             std::future::pending::<()>().await;
         }
         if let Some((seg, progress)) = &self.cancel_then_fail {
-            if *seg == segment {
+            if *seg == segment && !self.cancel_done.swap(true, Ordering::SeqCst) {
+                // Yield past the first cancel poll (it fires at once), then
+                // cancel while this fetch is still in flight and fail it.
+                tokio::time::sleep(Duration::from_millis(5)).await;
                 progress.cancel();
                 return Ok(None);
             }
@@ -458,8 +466,10 @@ async fn cancelling_while_a_fetch_hangs_returns_promptly() {
 
 #[tokio::test]
 async fn a_fetch_that_fails_because_of_a_cancel_ends_as_cancelled_not_as_an_error() {
-    // The retry pause (1 ms) is far shorter than the 20 ms cancel poll, so the
-    // retries run out before the poll could see the flag.
+    // The cancel lands mid-fetch after the first cancel poll; the retries (1 ms
+    // pauses) then run out well inside the 20 ms poll interval, so only the
+    // explicit cancel check can report Cancelled. Fails on the unfixed code with
+    // Err(InsufficientShares).
     let w = build_world(6, true, false);
     let log: Log = Arc::default();
     let progress = TransferProgress::new(w.mid.to_string());
