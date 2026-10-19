@@ -82,7 +82,10 @@ fn d2() -> Descriptor {
         1,
         [0; 32],
         "pair",
-        vec![member(1, Role::Admin, "alice"), member(2, Role::Member, "bob")],
+        vec![
+            member(1, Role::Admin, "alice"),
+            member(2, Role::Member, "bob"),
+        ],
         1,
     )
 }
@@ -92,7 +95,17 @@ fn d32() -> Descriptor {
     let name = "n".repeat(MAX_NAME_BYTES);
     let hint = "h".repeat(MAX_HINT_BYTES);
     let members = (1..=MAX_MEMBERS as u8)
-        .map(|n| member(n, if n % 2 == 1 { Role::Admin } else { Role::Member }, &hint))
+        .map(|n| {
+            member(
+                n,
+                if n % 2 == 1 {
+                    Role::Admin
+                } else {
+                    Role::Member
+                },
+                &hint,
+            )
+        })
         .collect();
     desc(1, [0; 32], &name, members, 1)
 }
@@ -104,7 +117,10 @@ fn chain3() -> Vec<Descriptor> {
         1,
         [0; 32],
         "team",
-        vec![member(1, Role::Admin, "alice"), member(2, Role::Member, "bob")],
+        vec![
+            member(1, Role::Admin, "alice"),
+            member(2, Role::Member, "bob"),
+        ],
         1,
     );
     let c2 = desc(
@@ -122,7 +138,10 @@ fn chain3() -> Vec<Descriptor> {
         3,
         c2.hash(),
         "team",
-        vec![member(1, Role::Admin, "alice"), member(3, Role::Admin, "carol")],
+        vec![
+            member(1, Role::Admin, "alice"),
+            member(3, Role::Admin, "carol"),
+        ],
         2,
     );
     vec![c1, c2, c3]
@@ -232,7 +251,11 @@ fn regenerate_fixtures() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/group_v1");
     std::fs::create_dir_all(dir).unwrap();
     for (name, bytes) in all() {
-        std::fs::write(format!("{dir}/{name}.hex"), format!("{}\n", hex::encode(bytes))).unwrap();
+        std::fs::write(
+            format!("{dir}/{name}.hex"),
+            format!("{}\n", hex::encode(bytes)),
+        )
+        .unwrap();
     }
 }
 
@@ -394,7 +417,7 @@ fn thirty_three_members_are_refused_as_malformed() {
     let d = desc(1, [0; 32], "big", members, 1);
     let bytes = d.encode(); // the encoder itself does not stop at 32
     assert_eq!(bytes[66], 33); // count byte, right after the 3-byte name
-    // The decoder refuses the count before reading any member.
+                               // The decoder refuses the count before reading any member.
     assert_eq!(Descriptor::decode(&bytes), Err(DescError::Malformed));
     // A one-byte count: 255 cannot even be written for 256 members.
     let mut b = frozen("desc_32members_max");
@@ -455,7 +478,11 @@ fn limits_of_the_descriptor_are_enforced_at_decode() {
     // Truncated anywhere.
     let b = frozen("desc_2members");
     for n in [0, 1, 17, 66, b.len() - 1] {
-        assert_eq!(Descriptor::decode(&b[..n]), Err(DescError::Malformed), "{n}");
+        assert_eq!(
+            Descriptor::decode(&b[..n]),
+            Err(DescError::Malformed),
+            "{n}"
+        );
     }
 }
 
@@ -473,7 +500,11 @@ fn unknown_record_kinds_and_bad_shapes_are_refused() {
     for k in [0x00u8, 0x01, 0x02, 0x0F, 0x13, 0x20, 0xFF] {
         let mut b = frozen("record_sync");
         b[0] = k;
-        assert_eq!(Record::decode(&b), Err(RecordError::UnknownKind(k)), "{k:#x}");
+        assert_eq!(
+            Record::decode(&b),
+            Err(RecordError::UnknownKind(k)),
+            "{k:#x}"
+        );
     }
     // Text: zero counter, empty text, bad UTF-8.
     let mut t = frozen("record_text_ascii");
@@ -484,7 +515,10 @@ fn unknown_record_kinds_and_bad_shapes_are_refused() {
     t[n - 1] = 0xFF;
     assert_eq!(Record::decode(&t), Err(RecordError::Malformed));
     // Descs: zero descriptors.
-    assert_eq!(Record::decode(&[KIND_DESCS, 0]), Err(RecordError::Malformed));
+    assert_eq!(
+        Record::decode(&[KIND_DESCS, 0]),
+        Err(RecordError::Malformed)
+    );
 }
 
 // ─── (d) trailing bytes ──────────────────────────────────────────────────────
