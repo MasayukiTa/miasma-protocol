@@ -294,12 +294,17 @@ async fn a_record_signed_by_another_node_costs_no_probe_and_no_push() {
         }
         assert!(held, "precondition: M stores P's record");
 
-        // One of the record's holders dies, so a repair would be planned.
-        let victim = foreign.locations[0].peer_id_bytes.clone();
-        let dead = hosts
+        // One of the record's holders dies, so a repair would be planned. Placement is random:
+        // a holder can be P or M themselves, so pick a holder that is one of the spare hosts.
+        let dead = foreign
+            .locations
             .iter()
-            .find(|(h, _)| h.peer_id().to_bytes() == victim)
-            .expect("holder is one of the hosts");
+            .find_map(|l| {
+                hosts
+                    .iter()
+                    .find(|(h, _)| h.peer_id().to_bytes() == l.peer_id_bytes)
+            })
+            .expect("at least one holder is one of the hosts");
         dead.0.shutdown().await;
 
         let coord_m = Arc::new(coord_m);
