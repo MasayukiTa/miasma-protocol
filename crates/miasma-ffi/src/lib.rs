@@ -1187,3 +1187,8 @@ mod mobile_config_tests {
         assert!(matches!(err, MiasmaFfiError::Other { .. }));
     }
 }
+
+mod privacy;
+pub use privacy::{
+    get_privacy_profile, set_privacy_profile, PrivacyProfileApplyResultFfi, PrivacyProfileFfi,
+};

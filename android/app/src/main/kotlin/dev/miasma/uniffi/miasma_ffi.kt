@@ -106,3 +106,24 @@ fun getDaemonHttpPort(): UShort = ffiNotLoaded()
 fun isDaemonRunning(): Boolean = ffiNotLoaded()
 
 fun getSharingContact(): String = ffiNotLoaded()
+
+
+data class PrivacyProfileFfi(
+    val stealthMode: Boolean,
+    val diagnosticLogging: Boolean,
+    val logBufferMib: UInt,
+)
+
+data class PrivacyProfileApplyResultFfi(
+    val restartRequired: Boolean,
+    val writesLogFilesAfterRestart: Boolean,
+)
+
+@Throws(MiasmaFfiException::class)
+fun getPrivacyProfile(dataDir: String): PrivacyProfileFfi = ffiNotLoaded()
+
+@Throws(MiasmaFfiException::class)
+fun setPrivacyProfile(
+    dataDir: String,
+    profile: PrivacyProfileFfi,
+): PrivacyProfileApplyResultFfi = ffiNotLoaded()
