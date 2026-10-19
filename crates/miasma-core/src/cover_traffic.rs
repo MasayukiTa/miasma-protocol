@@ -23,11 +23,90 @@ use serde::{Deserialize, Serialize};
 // rand 0.8 requires the `small_rng` feature for SmallRng.
 // Instead use StdRng which is always available and is Send.
 use rand::rngs::StdRng;
-use std::time::Duration;
+use std::{
+    fmt,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 use tokio::{sync::watch, task::JoinHandle, time::sleep};
 use tracing::{debug, trace};
 
 // ─── Configuration ────────────────────────────────────────────────────────────
+
+/// Optional traffic-shaping profile applied above individual transports.
+///
+/// Protocol-required padding (for example the authenticated 8 KiB onion cell)
+/// remains in force even when this policy is `Off`; `Off` means no additional
+/// optional shaping layer.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TrafficShapePolicy {
+    #[default]
+    Off,
+    FixedPadding,
+    Bucketed,
+    CoverBasic,
+    ConstantRate,
+    Adaptive,
+}
+
+impl TrafficShapePolicy {
+    pub fn is_implemented(self) -> bool {
+        matches!(
+            self,
+            Self::Off | Self::FixedPadding | Self::Bucketed | Self::CoverBasic
+        )
+    }
+}
+
+impl fmt::Display for TrafficShapePolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Self::Off => "off",
+            Self::FixedPadding => "fixed_padding",
+            Self::Bucketed => "bucketed",
+            Self::CoverBasic => "cover_basic",
+            Self::ConstantRate => "constant_rate",
+            Self::Adaptive => "adaptive",
+        };
+        f.write_str(name)
+    }
+}
+
+/// Serializable snapshot of production cover-traffic activity.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CoverTrafficMetricsSnapshot {
+    pub generated_packets: u64,
+    pub enqueued_packets: u64,
+    pub dropped_packets: u64,
+    pub estimated_enqueued_bytes: u64,
+    pub budget_pauses: u64,
+}
+
+/// Lock-free counters shared by the daemon status path and cover engine.
+#[derive(Debug, Default)]
+pub struct CoverTrafficMetrics {
+    generated_packets: AtomicU64,
+    enqueued_packets: AtomicU64,
+    dropped_packets: AtomicU64,
+    estimated_enqueued_bytes: AtomicU64,
+    budget_pauses: AtomicU64,
+}
+
+impl CoverTrafficMetrics {
+    pub fn snapshot(&self) -> CoverTrafficMetricsSnapshot {
+        CoverTrafficMetricsSnapshot {
+            generated_packets: self.generated_packets.load(Ordering::Relaxed),
+            enqueued_packets: self.enqueued_packets.load(Ordering::Relaxed),
+            dropped_packets: self.dropped_packets.load(Ordering::Relaxed),
+            estimated_enqueued_bytes: self.estimated_enqueued_bytes.load(Ordering::Relaxed),
+            budget_pauses: self.budget_pauses.load(Ordering::Relaxed),
+        }
+    }
+}
 
 /// Configuration for cover traffic generation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,6 +178,7 @@ pub(crate) fn is_cover_payload(payload: &[u8]) -> bool {
 pub struct CoverTrafficEngine {
     stop_tx: watch::Sender<bool>,
     handle: JoinHandle<()>,
+    metrics: Arc<CoverTrafficMetrics>,
 }
 
 impl CoverTrafficEngine {
@@ -114,7 +194,28 @@ impl CoverTrafficEngine {
     where
         F: FnMut(Vec<u8>) + Send + Sync + 'static,
     {
+        Self::start_with_metrics(
+            config,
+            Arc::new(CoverTrafficMetrics::default()),
+            move |packet| {
+                send_fn(packet);
+                true
+            },
+        )
+    }
+
+    /// Start with externally-owned counters and an enqueue callback that reports
+    /// whether the bounded network command queue accepted the cover cell.
+    pub fn start_with_metrics<F>(
+        config: CoverTrafficConfig,
+        metrics: Arc<CoverTrafficMetrics>,
+        mut send_fn: F,
+    ) -> Self
+    where
+        F: FnMut(Vec<u8>) -> bool + Send + Sync + 'static,
+    {
         let (stop_tx, mut stop_rx) = watch::channel(false);
+        let task_metrics = metrics.clone();
 
         let handle = tokio::spawn(async move {
             if !config.enabled || config.rate_bytes_per_sec == 0 || config.daily_budget_bytes == 0 {
@@ -149,6 +250,7 @@ impl CoverTrafficEngine {
                     budget_used = 0;
                 }
                 if budget_used.saturating_add(COVER_ENVELOPE_ESTIMATE) > config.daily_budget_bytes {
+                    task_metrics.budget_pauses.fetch_add(1, Ordering::Relaxed);
                     let until_reset = Duration::from_secs(86_400)
                         .saturating_sub(now.duration_since(budget_window_started));
                     tokio::select! {
@@ -162,12 +264,25 @@ impl CoverTrafficEngine {
                 }
 
                 let packet = make_cover_packet(&mut rng);
+                task_metrics
+                    .generated_packets
+                    .fetch_add(1, Ordering::Relaxed);
                 trace!(payload_bytes = packet.len(), "cover packet queued");
-                send_fn(packet);
-                budget_used = budget_used.saturating_add(COVER_ENVELOPE_ESTIMATE);
+                if send_fn(packet) {
+                    task_metrics
+                        .enqueued_packets
+                        .fetch_add(1, Ordering::Relaxed);
+                    task_metrics
+                        .estimated_enqueued_bytes
+                        .fetch_add(COVER_ENVELOPE_ESTIMATE, Ordering::Relaxed);
+                    budget_used = budget_used.saturating_add(COVER_ENVELOPE_ESTIMATE);
+                } else {
+                    task_metrics.dropped_packets.fetch_add(1, Ordering::Relaxed);
+                }
 
-                // Apply jitter to the gap.
-                let jitter_range = (nom_gap_us * config.pattern_jitter_pct as u64) / 100;
+                // Apply bounded jitter to the gap.
+                let jitter_pct = config.pattern_jitter_pct.min(50) as u64;
+                let jitter_range = (nom_gap_us * jitter_pct) / 100;
                 let gap_us = if jitter_range == 0 {
                     nom_gap_us
                 } else {
@@ -182,7 +297,15 @@ impl CoverTrafficEngine {
             debug!("Cover traffic engine stopped");
         });
 
-        Self { stop_tx, handle }
+        Self {
+            stop_tx,
+            handle,
+            metrics,
+        }
+    }
+
+    pub fn metrics(&self) -> CoverTrafficMetricsSnapshot {
+        self.metrics.snapshot()
     }
 
     /// Stop the cover traffic engine.  Returns when the background task exits.
@@ -267,5 +390,33 @@ mod tests {
         let cfg = CoverTrafficConfig::default();
         assert!(!cfg.enabled);
         assert!(cfg.daily_budget_bytes >= 24 * 60 * 60 * cfg.rate_bytes_per_sec);
+    }
+
+    #[tokio::test]
+    async fn metrics_distinguish_enqueued_and_dropped_cover_cells() {
+        let metrics = Arc::new(CoverTrafficMetrics::default());
+        let accepted = Arc::new(AtomicU64::new(0));
+        let accepted_for_cb = accepted.clone();
+        let engine = CoverTrafficEngine::start_with_metrics(
+            CoverTrafficConfig {
+                enabled: true,
+                rate_bytes_per_sec: 1_000_000,
+                ..Default::default()
+            },
+            metrics.clone(),
+            move |_| accepted_for_cb.fetch_add(1, Ordering::Relaxed) % 2 == 0,
+        );
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        engine.stop().await;
+        let snap = metrics.snapshot();
+        assert!(snap.generated_packets > 0);
+        assert_eq!(
+            snap.generated_packets,
+            snap.enqueued_packets + snap.dropped_packets
+        );
+        assert_eq!(
+            snap.estimated_enqueued_bytes,
+            snap.enqueued_packets * COVER_ENVELOPE_ESTIMATE
+        );
     }
 }

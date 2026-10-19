@@ -464,6 +464,11 @@ pub struct TransportConfig {
     #[serde(default)]
     pub tor: crate::transport::tor::TorConfig,
 
+    /// Optional shaping profile above individual transports. Protocol-required
+    /// padding remains active even when this is `off`.
+    #[serde(default)]
+    pub traffic_shape_policy: crate::cover_traffic::TrafficShapePolicy,
+
     /// Low-rate one-hop cover traffic carried inside the normal encrypted onion
     /// request envelope. Disabled by default for mobile/metered-network safety.
     #[serde(default)]
@@ -494,6 +499,7 @@ impl Default for TransportConfig {
             obfuscated_quic_fallback_url: None,
             shadowsocks: Default::default(),
             tor: Default::default(),
+            traffic_shape_policy: Default::default(),
             cover_traffic: Default::default(),
         }
     }
@@ -529,6 +535,7 @@ impl fmt::Debug for TransportConfig {
             )
             .field("shadowsocks", &self.shadowsocks)
             .field("tor", &self.tor)
+            .field("traffic_shape_policy", &self.traffic_shape_policy)
             .field("cover_traffic", &self.cover_traffic)
             .finish()
     }
@@ -742,7 +749,15 @@ bandwidth_mb_day = 512
         let d = TransportConfig::default();
         assert_eq!(d.iroh_mode, IrohMode::N0);
         assert!(d.iroh_discovery);
+        assert_eq!(
+            t.traffic_shape_policy,
+            crate::cover_traffic::TrafficShapePolicy::Off
+        );
         assert!(!t.cover_traffic.enabled);
+        assert_eq!(
+            d.traffic_shape_policy,
+            crate::cover_traffic::TrafficShapePolicy::Off
+        );
         assert!(!d.cover_traffic.enabled);
     }
 

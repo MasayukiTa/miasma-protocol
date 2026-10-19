@@ -36,7 +36,10 @@ pub mod transport;
 pub mod update;
 
 pub use config::{default_data_dir, NodeConfig, TransportConfig};
-pub use cover_traffic::{CoverTrafficConfig, CoverTrafficEngine};
+pub use cover_traffic::{
+    CoverTrafficConfig, CoverTrafficEngine, CoverTrafficMetrics, CoverTrafficMetricsSnapshot,
+    TrafficShapePolicy,
+};
 pub use crypto::hash::ContentId;
 pub use daemon::{
     ipc::{

@@ -135,9 +135,13 @@ pub struct DaemonServer {
     shadowsocks_configured: bool,
     /// Whether Tor is configured.
     tor_configured: bool,
+    /// Optional traffic-shaping profile above individual transports.
+    traffic_shape_policy: crate::cover_traffic::TrafficShapePolicy,
     /// Optional low-rate cover traffic policy. The task itself starts in run()
     /// so shutdown has a single owner and can await it before the node exits.
     cover_traffic_config: crate::cover_traffic::CoverTrafficConfig,
+    /// Live cover counters shared with status surfaces.
+    cover_traffic_metrics: Arc<crate::cover_traffic::CoverTrafficMetrics>,
     /// Control-channel token and wipe-challenge state.
     control_auth: Arc<control_auth::ControlAuth>,
     // Single-consumer resources moved into run():
@@ -199,6 +203,12 @@ impl DaemonServer {
         let parsed_obfs_probe_secret = transport_config
             .parsed_obfuscated_quic_secret()
             .map_err(anyhow::Error::msg)?;
+        if !transport_config.traffic_shape_policy.is_implemented() {
+            anyhow::bail!(
+                "traffic shaping policy '{}' is recognized but not implemented in this build",
+                transport_config.traffic_shape_policy
+            );
+        }
         let preflight_obfs_config = if transport_config.obfuscated_quic_enabled {
             let probe_secret = parsed_obfs_probe_secret
                 .as_ref()
@@ -504,6 +514,7 @@ impl DaemonServer {
         let rate_limiter = Arc::new(Mutex::new(rate_limit::RateLimiter::default()));
         let health_monitor = Arc::new(Mutex::new(ConnectionHealthMonitor::default()));
         let env_snapshot = Arc::new(Mutex::new(EnvironmentSnapshot::default()));
+        let cover_traffic_metrics = Arc::new(crate::cover_traffic::CoverTrafficMetrics::default());
 
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
@@ -528,6 +539,8 @@ impl DaemonServer {
                 env_snapshot: env_snapshot.clone(),
                 shadowsocks_configured,
                 tor_configured,
+                traffic_shape_policy: transport_config.traffic_shape_policy,
+                cover_traffic_metrics: cover_traffic_metrics.clone(),
                 daemon_shutdown_tx: shutdown_tx.clone(),
                 control_auth: control_auth.clone(),
             },
@@ -580,7 +593,9 @@ impl DaemonServer {
             env_snapshot,
             shadowsocks_configured,
             tor_configured,
+            traffic_shape_policy: transport_config.traffic_shape_policy,
             cover_traffic_config: transport_config.cover_traffic.clone(),
+            cover_traffic_metrics,
             listener: Some(listener),
             rep_success_rx: Some(rep_rx),
             topology_rx: Some(topo_rx),
@@ -674,22 +689,32 @@ impl DaemonServer {
 
         // Cover traffic rides inside the real encrypted onion request protocol.
         // Best-effort try_send ensures it can never backpressure application work.
-        let cover_engine = if self.cover_traffic_config.enabled {
+        let mut cover_config = self.cover_traffic_config.clone();
+        if self.traffic_shape_policy == crate::cover_traffic::TrafficShapePolicy::CoverBasic {
+            cover_config.enabled = true;
+        }
+        let cover_engine = if cover_config.enabled {
             let dht = coord.dht_handle().clone();
-            let config = self.cover_traffic_config.clone();
+            let metrics = self.cover_traffic_metrics.clone();
             info!(
-                rate_bytes_per_sec = config.rate_bytes_per_sec,
-                daily_budget_bytes = config.daily_budget_bytes,
+                policy = %self.traffic_shape_policy,
+                rate_bytes_per_sec = cover_config.rate_bytes_per_sec,
+                daily_budget_bytes = cover_config.daily_budget_bytes,
                 "cover traffic enabled"
             );
-            Some(crate::cover_traffic::CoverTrafficEngine::start(
-                config,
-                move |packet| {
-                    if !dht.try_send_cover(packet) {
-                        trace!("cover packet dropped before network queue");
-                    }
-                },
-            ))
+            Some(
+                crate::cover_traffic::CoverTrafficEngine::start_with_metrics(
+                    cover_config,
+                    metrics,
+                    move |packet| {
+                        let accepted = dht.try_send_cover(packet);
+                        if !accepted {
+                            trace!("cover packet dropped before network queue");
+                        }
+                        accepted
+                    },
+                ),
+            )
         } else {
             None
         };
@@ -713,6 +738,8 @@ impl DaemonServer {
             env_snapshot: self.env_snapshot.clone(),
             shadowsocks_configured: self.shadowsocks_configured,
             tor_configured: self.tor_configured,
+            traffic_shape_policy: self.traffic_shape_policy,
+            cover_traffic_metrics: self.cover_traffic_metrics.clone(),
             daemon_shutdown_tx: self.shutdown_tx.clone(),
             control_auth: self.control_auth.clone(),
         };
@@ -1035,6 +1062,8 @@ pub struct BridgeLiveState {
     pub env_snapshot: Arc<Mutex<EnvironmentSnapshot>>,
     pub shadowsocks_configured: bool,
     pub tor_configured: bool,
+    pub traffic_shape_policy: crate::cover_traffic::TrafficShapePolicy,
+    pub cover_traffic_metrics: Arc<crate::cover_traffic::CoverTrafficMetrics>,
     /// Outer daemon lifecycle signal. A successful distress wipe uses this to
     /// terminate IPC/HTTP/network tasks so master-derived identity material in
     /// the libp2p swarm is dropped as part of the wipe boundary.
@@ -1544,6 +1573,7 @@ pub(crate) async fn process_request(
             let ret_stats = coord.retrieval_stats();
             let reconn_metrics = coord.reconnection_metrics().await.unwrap_or_default();
             let dir_relay = coord.directed_relay_stats().await.unwrap_or_default();
+            let cover_metrics = bridge_state.cover_traffic_metrics.snapshot();
 
             ControlResponse::Status(DaemonStatus {
                 iroh: iroh_status_for(&data_dir),
@@ -1680,6 +1710,12 @@ pub(crate) async fn process_request(
                 // Censorship resistance
                 shadowsocks_configured: bridge_state.shadowsocks_configured,
                 tor_configured: bridge_state.tor_configured,
+                traffic_shape_policy: bridge_state.traffic_shape_policy.to_string(),
+                cover_packets_generated: cover_metrics.generated_packets,
+                cover_packets_enqueued: cover_metrics.enqueued_packets,
+                cover_packets_dropped: cover_metrics.dropped_packets,
+                cover_estimated_enqueued_bytes: cover_metrics.estimated_enqueued_bytes,
+                cover_budget_pauses: cover_metrics.budget_pauses,
                 // Network environment — from live snapshot
                 network_environment: {
                     let env = bridge_state.env_snapshot.lock().unwrap();
