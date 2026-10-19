@@ -911,7 +911,7 @@ async fn cancelling_a_slow_relay_stream_at_any_moment_leaves_nothing_behind() {
                 },
             );
         }
-        let at = Duration::from_millis(r.gen_range(1..600));
+        let at = Duration::from_millis(r.gen_range(1..2200));
         let ran = run_stream(&st, Duration::from_millis(r.gen_range(0..15)), Some(at)).await;
         assert_clean_buffers(&ran.stats, &format!("seed {seed}"));
         assert_eq!(st.direct_attempts.load(Ordering::SeqCst), 0);
