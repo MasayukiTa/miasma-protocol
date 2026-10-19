@@ -48,6 +48,9 @@ pub enum RejectReason {
     BadName,
     /// Malformed header or unsupported protocol version.
     BadRequest,
+    /// A reason a newer build added; this build only knows that it was refused.
+    #[serde(other)]
+    Unknown,
 }
 
 impl RejectReason {
@@ -59,6 +62,7 @@ impl RejectReason {
             Self::Busy => "busy",
             Self::BadName => "bad_name",
             Self::BadRequest => "bad_request",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -66,8 +70,15 @@ impl RejectReason {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum Reply {
-    Accept { offset: u64 },
-    Reject { reason: RejectReason },
+    Accept {
+        offset: u64,
+    },
+    Reject {
+        reason: RejectReason,
+    },
+    /// A reply kind a newer build added; the sender stops with a clear text.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,7 +158,9 @@ pub async fn read_frame<R: AsyncRead + Unpin, T: for<'de> Deserialize<'de>>(
 impl Header {
     /// Structural checks that need no policy: version, hash shape, lengths.
     pub fn validate(&self) -> Result<(), ProtoError> {
-        if self.v != PROTOCOL_VERSION {
+        // Later versions only add optional fields to this header, so any
+        // version from 1 up is read; 0 was never sent.
+        if self.v < PROTOCOL_VERSION {
             return Err(ProtoError::Version(self.v));
         }
         if self.hash.len() != 64 || !self.hash.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -274,8 +287,8 @@ mod tests {
     #[test]
     fn validation() {
         let mut h = header();
-        h.v = 2;
-        assert!(matches!(h.validate(), Err(ProtoError::Version(2))));
+        h.v = 0;
+        assert!(matches!(h.validate(), Err(ProtoError::Version(0))));
         let mut h = header();
         h.hash = "zz".repeat(32);
         assert!(h.validate().is_err());

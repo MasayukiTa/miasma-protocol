@@ -286,7 +286,7 @@ impl GroupService {
             Ok(c) => c,
             // Includes a peer whose software has no group chat: the handshake
             // for this ALPN fails there and nothing else is touched.
-            Err(_) => return Outcome::Retry("unreachable"),
+            Err(e) => return Outcome::Retry(e.reason_code(proto::fail::PEER_NO_GROUP)),
         };
         let (wire, env_id) = match self.core.chat().seal_for(peer, plain) {
             Ok(w) => w,
@@ -336,6 +336,7 @@ impl GroupService {
             AckStatus::Rate => Outcome::Retry("rate_limited"),
             AckStatus::Busy => Outcome::Retry("peer_busy"),
             AckStatus::Failed => Outcome::Retry("peer_failed"),
+            AckStatus::Unknown => Outcome::Retry("peer_status_unknown"),
         }
     }
 

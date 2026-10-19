@@ -378,6 +378,15 @@ fn why_texts(kind: &str, dir: Direction) -> Option<(&'static str, &'static str)>
             "the file was changed or replaced after it was queued; send it again",
             "ファイルが、送信を予約したあとに変更または差し替えられました。もう一度送ってください",
         ),
+        "peer_no_push" => (
+            "the other side's Miasma is an older version without file push: ask them to update",
+            "相手のMiasmaが古く、ファイルの受け取りに対応していません。相手に更新してもらってください",
+        ),
+        "unknown" => (
+            "the other side refused the file for a reason this version does not know (it may be \
+             a newer Miasma)",
+            "相手が、このバージョンでは分からない理由で断りました(相手のほうが新しいMiasmaかもしれません)",
+        ),
         _ => return None,
     })
 }
@@ -1024,6 +1033,8 @@ mod tests {
             "write_failed",
             "contact_changed",
             "source_changed",
+            "peer_no_push",
+            "unknown",
         ];
         for k in kinds {
             for dir in [Direction::Out, Direction::In] {

@@ -2228,6 +2228,7 @@ mod tests {
                     reason: None,
                     sent_ms: 0,
                     at_ms: 0,
+                    tried_ms: 0,
                 }],
             }),
         };

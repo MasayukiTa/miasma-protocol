@@ -823,6 +823,7 @@ impl PushService {
                 Ok(c) => c,
                 Err(e) => {
                     let kind = match e {
+                        _ if e.is_alpn_refused() => error_kind::PEER_NO_PUSH,
                         IrohClientError::Unreachable(_) => error_kind::UNREACHABLE,
                         _ => error_kind::CONNECTION_LOST,
                     };
@@ -1116,6 +1117,7 @@ impl PushService {
         };
         let offset = match reply {
             Reply::Reject { reason } => return Err(AttemptError::Rejected(reason)),
+            Reply::Unknown => return Err(AttemptError::Rejected(RejectReason::Unknown)),
             Reply::Accept { offset } if offset <= size => offset,
             Reply::Accept { .. } => {
                 return Err(AttemptError::Fatal(
@@ -1797,11 +1799,19 @@ fn reject_text(r: RejectReason) -> String {
         RejectReason::Busy => "the receiver is busy; try again in a moment",
         RejectReason::BadName => "the receiver refused the file name",
         RejectReason::BadRequest => "the receiver did not understand the request (version?)",
+        RejectReason::Unknown => {
+            "the receiver refused the file for a reason this version does not know; it may run a newer Miasma"
+        }
     }
     .to_owned()
 }
 
 fn describe_dial_error(e: &IrohClientError) -> String {
+    if e.is_alpn_refused() {
+        return "the other side answered but its Miasma has no file push: it is an older version; \
+                ask them to update"
+            .to_owned();
+    }
     match e {
         IrohClientError::Unreachable(m) => format!(
             "cannot reach the other side: {m}. Is their Miasma running? Run `miasma netcheck` to \

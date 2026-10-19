@@ -630,10 +630,10 @@ async fn malformed_requests_do_not_hurt_the_service() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     conn.close(0u32.into(), b"");
 
-    // Wrong version.
+    // Version 0 was never sent (later versions are read: they only add fields).
     let data = b"abc".to_vec();
     let mut h = header("v.txt", &data);
-    h.v = 9;
+    h.v = 0;
     let (raw, reply) = raw_open(&alice, &bob, &h).await;
     assert_eq!(
         reply,
