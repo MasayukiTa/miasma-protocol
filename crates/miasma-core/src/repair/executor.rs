@@ -8,6 +8,7 @@
 //!
 //! One pass:
 //!
+//! 0. skip records the backend refuses to maintain, before any traffic;
 //! 1. re-commit any record update that did not reach the backend last time;
 //! 2. probe holders that are due (bounded count, charged to the traffic budget),
 //!    feeding [`EvidenceBook`];
@@ -89,6 +90,21 @@ pub trait MaintenanceBackend: Send + Sync {
         share: &MiasmaShare,
     ) -> Result<ShardLocation, String>;
 
+    /// May this node maintain `record`? Called once per record at the start of
+    /// a pass, before any probe or push, so that no traffic is spent on content
+    /// whose rewrite would be refused at commit time. The default allows it.
+    async fn verify_record(&self, _record: &DhtRecord) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Durably remember `updated` right after a replica was pushed, before the
+    /// record is announced. If the process stops (or the announce fails) after
+    /// the push, the next pass starts from this record instead of pushing the
+    /// same share again. The default keeps nothing.
+    async fn stage_record(&self, _updated: &DhtRecord) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Persist and re-announce the updated record.
     async fn commit_record(&self, updated: DhtRecord) -> Result<(), String>;
 
@@ -143,6 +159,9 @@ pub struct TickReport {
     pub paused: bool,
     pub records_seen: usize,
     pub records_invalid: usize,
+    /// Records the backend refused to maintain (not this node's own); they
+    /// cost no probe and no push.
+    pub records_not_maintainable: usize,
     pub probes: usize,
     pub probe_bytes: u64,
     /// Slots the planner found short of replicas or diversity.
@@ -311,6 +330,12 @@ impl MaintenanceCore {
                 report.records_invalid += 1;
                 continue;
             };
+            // Before any traffic: is this a record the node may rewrite at all?
+            if let Err(why) = backend.verify_record(&record).await {
+                report.records_not_maintainable += 1;
+                debug!("maintenance: record skipped: {why}");
+                continue;
+            }
             let mut working = record.clone();
             let segments: BTreeSet<u32> =
                 record.locations.iter().map(|l| l.segment_index).collect();
@@ -346,6 +371,7 @@ impl MaintenanceCore {
                         continue;
                     }
                     actions_left -= 1;
+                    let repaired_before = report.repaired;
                     self.run_action(
                         backend,
                         &mut working,
@@ -358,6 +384,16 @@ impl MaintenanceCore {
                         &mut report,
                     )
                     .await;
+                    if report.repaired > repaired_before {
+                        // The share is on its new holder: make that durable now.
+                        let mut staged = working.clone();
+                        staged.published_at = now.max(record.published_at.saturating_add(1));
+                        if check_record_update(&record, &staged).is_ok() {
+                            if let Err(e) = backend.stage_record(&staged).await {
+                                warn!("maintenance: could not keep the pushed replica: {e}");
+                            }
+                        }
+                    }
                 }
             }
 
@@ -687,6 +723,10 @@ mod tests {
         no_source: bool,
         paused: bool,
         probe_bytes: u64,
+        /// Refuse every record before any traffic.
+        refuse_records: bool,
+        /// Stand-in for the persistent record store: `stage_record` writes it.
+        stage_persists: bool,
     }
 
     struct Fake(Mutex<State>);
@@ -759,6 +799,19 @@ mod tests {
                 segment_index: share.segment_index,
                 addrs: vec![],
             })
+        }
+        async fn verify_record(&self, _record: &DhtRecord) -> Result<(), String> {
+            if self.0.lock().unwrap().refuse_records {
+                return Err("not this node's record".into());
+            }
+            Ok(())
+        }
+        async fn stage_record(&self, updated: &DhtRecord) -> Result<(), String> {
+            let mut s = self.0.lock().unwrap();
+            if s.stage_persists {
+                s.record = Some(updated.clone());
+            }
+            Ok(())
         }
         async fn commit_record(&self, updated: DhtRecord) -> Result<(), String> {
             let mut s = self.0.lock().unwrap();
@@ -1071,6 +1124,51 @@ mod tests {
             .locations
             .iter()
             .any(|l| l.shard_index == 1 && holder_id_of(l) == holder("new")));
+    }
+
+    #[tokio::test]
+    async fn a_restart_after_a_failed_commit_does_not_push_the_share_again() {
+        let backend = Fake::new(
+            three_slot_record(),
+            vec![cand("new", None), cand("other", None)],
+        );
+        backend.kill("h1");
+        {
+            let mut s = backend.0.lock().unwrap();
+            s.fail_commit = usize::MAX;
+            s.stage_persists = true;
+        }
+        let mut core = MaintenanceCore::new(cfg(), 0);
+        let r = core.tick(&backend, 1_000).await;
+        assert_eq!((r.repaired, r.commit_failures), (1, 1), "{r:?}");
+
+        // The process restarts: the executor's RAM state is gone, only what the
+        // backend kept remains.
+        let mut restarted = MaintenanceCore::new(cfg(), 0);
+        let r = restarted.tick(&backend, 2_000).await;
+        assert_eq!(r.repaired, 0, "{r:?}");
+        assert_eq!(
+            backend.0.lock().unwrap().pushes.len(),
+            1,
+            "the share must not be pushed a second time"
+        );
+        assert!(backend
+            .record()
+            .locations
+            .iter()
+            .any(|l| l.shard_index == 1 && holder_id_of(l) == holder("new")));
+    }
+
+    #[tokio::test]
+    async fn a_refused_record_costs_no_probe_and_no_push() {
+        let backend = Fake::new(three_slot_record(), vec![cand("new", None)]);
+        backend.kill("h1");
+        backend.0.lock().unwrap().refuse_records = true;
+        let mut core = MaintenanceCore::new(cfg(), 0);
+        let r = core.tick(&backend, 1_000).await;
+        assert_eq!(r.records_not_maintainable, 1, "{r:?}");
+        let s = backend.0.lock().unwrap();
+        assert_eq!((s.probes, s.pushes.len(), s.commits), (0, 0, 0));
     }
 
     #[test]

@@ -61,6 +61,19 @@ pub trait RecordSource: Send + Sync {
     fn records(&self) -> Vec<DhtRecord>;
     /// Store the updated record for its MID.
     fn replace(&self, record: DhtRecord);
+
+    /// The record kept for `mid_digest`, if any.
+    fn find(&self, mid_digest: &[u8; 32]) -> Option<DhtRecord> {
+        self.records()
+            .into_iter()
+            .find(|r| &r.mid_digest == mid_digest)
+    }
+
+    /// Keep a rewritten record whose announce is not confirmed yet, so that it
+    /// survives a restart and is announced again. Defaults to [`replace`](Self::replace).
+    fn stage(&self, record: DhtRecord) {
+        self.replace(record);
+    }
 }
 
 /// The daemon's replication queue as a record source. Replacing a record keeps
@@ -80,6 +93,22 @@ impl RecordSource for QueueRecordSource {
         if let Ok(mut q) = self.0.lock() {
             if let Err(e) = q.update_record(record) {
                 warn!("maintenance: could not persist updated record: {e}");
+            }
+        }
+    }
+
+    fn find(&self, mid_digest: &[u8; 32]) -> Option<DhtRecord> {
+        self.0
+            .lock()
+            .ok()?
+            .get(mid_digest)
+            .map(|i| i.record.clone())
+    }
+
+    fn stage(&self, record: DhtRecord) {
+        if let Ok(mut q) = self.0.lock() {
+            if let Err(e) = q.update_record_and_requeue(record) {
+                warn!("maintenance: could not persist staged record: {e}");
             }
         }
     }
@@ -143,6 +172,39 @@ impl CoordinatorBackend {
         let address = self.store.find_piece(&mid.prefix(), segment, slot)?;
         let share = self.store.get_untouched(&address).ok()?;
         piece_matches(&share, mid, segment, slot).then_some(share)
+    }
+
+    /// The record this node published for `mid`, with its manifest, if any.
+    ///
+    /// The DHT store of the running node is in memory only: after a restart it
+    /// is empty until something announces the record again, and a record that
+    /// is already `Replicated` is not announced again. The record source (the
+    /// replication queue, persisted and written only by this node's own
+    /// publishes) is therefore the fallback; its records carry no manifest,
+    /// because they are announced without one.
+    ///
+    /// A record in the local DHT store must be signed by this node's own key;
+    /// without a signing key nothing can be called "own", so nothing is.
+    async fn own_record(
+        &self,
+        mid: [u8; 32],
+    ) -> Result<(DhtRecord, Option<crate::transfer::TransferManifest>), String> {
+        let dht = self.coord.dht_handle();
+        let own_key = dht
+            .publisher_key()
+            .ok_or("no record-signing key; cannot tell which records are this node's own")?;
+        match dht.local_record_value(mid).await {
+            Some(envelope) => {
+                let found = crate::transfer::open_signed_record(&mid, &envelope, Some(&own_key))
+                    .map_err(|e| format!("current record unusable: {e:?}"))?;
+                Ok((found.record, found.manifest))
+            }
+            None => self
+                .source
+                .find(&mid)
+                .map(|record| (record, None))
+                .ok_or_else(|| "own record not found; refusing to rewrite it".to_string()),
+        }
     }
 
     async fn fetch_from(
@@ -299,28 +361,42 @@ impl MaintenanceBackend for CoordinatorBackend {
         }
     }
 
-    async fn commit_record(&self, updated: DhtRecord) -> Result<(), String> {
-        let dht = self.coord.dht_handle();
-        let mid = updated.mid_digest;
-        let own_key = dht.publisher_key();
+    async fn verify_record(&self, record: &DhtRecord) -> Result<(), String> {
+        let (current, _) = self.own_record(record.mid_digest).await?;
+        if current.data_shards != record.data_shards || current.total_shards != record.total_shards
+        {
+            return Err("k/n differ from the published record".into());
+        }
+        Ok(())
+    }
 
-        // The record this node itself holds carries the manifest, if any. It
-        // must travel with the new record: re-announcing without it would turn
-        // a protected transfer into a legacy one. If it cannot be read, refuse
-        // instead of guessing.
-        let envelope = dht
-            .local_record_value(mid)
-            .await
-            .ok_or("own record not found locally; refusing to rewrite without its manifest")?;
-        let current = crate::transfer::open_signed_record(&mid, &envelope, own_key.as_ref())
-            .map_err(|e| format!("current record unusable: {e:?}"))?;
-        if current.record.data_shards != updated.data_shards
-            || current.record.total_shards != updated.total_shards
+    async fn stage_record(&self, updated: &DhtRecord) -> Result<(), String> {
+        let (_, manifest) = self.own_record(updated.mid_digest).await?;
+        if manifest.is_some() {
+            // A queued re-announce would carry no manifest: only keep the
+            // record; the commit announces it with the manifest.
+            self.source.replace(updated.clone());
+        } else {
+            self.source.stage(updated.clone());
+        }
+        Ok(())
+    }
+
+    async fn commit_record(&self, updated: DhtRecord) -> Result<(), String> {
+        let mid = updated.mid_digest;
+        // The manifest of the current record must travel with the new one:
+        // re-announcing without it would turn a protected transfer into a
+        // legacy one. If the record cannot be read, refuse instead of guessing.
+        let (current, manifest) = self.own_record(mid).await?;
+        if current.data_shards != updated.data_shards
+            || current.total_shards != updated.total_shards
         {
             return Err("refusing to change k/n of a published record".into());
         }
 
-        dht.put_with_manifest(updated.clone(), current.manifest.as_ref())
+        self.coord
+            .dht_handle()
+            .put_with_manifest(updated.clone(), manifest.as_ref())
             .await
             .map_err(|e| e.to_string())?;
         self.source.replace(updated);
