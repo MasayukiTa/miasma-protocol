@@ -24,6 +24,19 @@ struct TestDaemon {
     dir: tempfile::TempDir,
     store: Arc<LocalShareStore>,
     run: JoinHandle<anyhow::Result<()>>,
+    shutdown: tokio::sync::mpsc::Sender<()>,
+}
+
+/// Wait until the daemon has registered itself as the RAM-only receive host.
+async fn wait_for_host(data_dir: &Path) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while miasma_core::transfer::stream_host::host_for(data_dir).is_none() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the running daemon never registered its stream host"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 async fn start_daemon() -> TestDaemon {
@@ -37,8 +50,31 @@ async fn start_daemon() -> TestDaemon {
     let server = DaemonServer::start(node, store.clone(), dir.path().to_owned())
         .await
         .unwrap();
+    let shutdown = server.shutdown_handle();
     let run = tokio::spawn(server.run());
-    TestDaemon { dir, store, run }
+    TestDaemon {
+        dir,
+        store,
+        run,
+        shutdown,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stream_host_is_registered_while_the_daemon_runs_and_gone_after_stop() {
+    let d = start_daemon().await;
+    let data_dir = d.dir.path().to_owned();
+    wait_for_host(&data_dir).await;
+
+    d.shutdown.send(()).await.unwrap();
+    let exit = tokio::time::timeout(Duration::from_secs(20), d.run)
+        .await
+        .expect("daemon did not stop");
+    exit.unwrap().expect("daemon exited with an error");
+    assert!(
+        miasma_core::transfer::stream_host::host_for(&data_dir).is_none(),
+        "the stream host must be gone after the daemon stopped"
+    );
 }
 
 fn files_under(dir: &Path) -> Vec<std::path::PathBuf> {
@@ -61,6 +97,7 @@ async fn wipe_through_the_control_interface_stops_work_and_leaves_no_output() {
     let d = start_daemon().await;
     let data_dir = d.dir.path().to_owned();
     let gate = d.store.wipe_gate();
+    wait_for_host(&data_dir).await;
 
     // Something to read back, published before the hold points are switched on.
     let payload = b"plaintext that must not reach the disk after a wipe".to_vec();
@@ -170,6 +207,10 @@ async fn wipe_through_the_control_interface_stops_work_and_leaves_no_output() {
         .expect("wipe did not answer in time")
         .unwrap();
     assert!(matches!(resp, ControlResponse::Wiped), "got {resp:?}");
+    assert!(
+        miasma_core::transfer::stream_host::host_for(&data_dir).is_none(),
+        "the stream host must be gone after a wipe"
+    );
 
     // The operations ended without success.
     for (name, task) in [("get", get), ("publish", publish)] {

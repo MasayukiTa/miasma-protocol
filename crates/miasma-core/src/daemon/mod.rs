@@ -694,6 +694,11 @@ impl DaemonServer {
         let store = self.store.clone();
         let listen_addrs = self.listen_addrs.clone();
 
+        // Let front ends that only know the data directory (the UniFFI layer)
+        // find this node for RAM-only receives. Removed again on shutdown and
+        // at the start of a wipe.
+        crate::transfer::stream_host::register_host(&self.data_dir, coord.clone());
+
         // Cover traffic rides inside the real encrypted onion request protocol.
         // Best-effort try_send ensures it can never backpressure application work.
         let cover_config = crate::cover_traffic::effective_cover_config(
@@ -802,6 +807,7 @@ impl DaemonServer {
 
         // First: no new probes or pushes once shutdown (or a wipe) has begun.
         maintenance.stop().await;
+        crate::transfer::stream_host::unregister_host(&self.data_dir);
         ipc_handle.abort();
         rep_handle.abort();
         env_handle.abort();
@@ -1844,6 +1850,8 @@ pub(crate) async fn process_request(
             // before anything is erased so it cannot probe or push with a key
             // that is being destroyed.
             maintenance_exec::cancel_for(&data_dir);
+            // No new RAM-only receive may find this node from now on.
+            crate::transfer::stream_host::unregister_host(&data_dir);
             if !store
                 .wipe_gate()
                 .drained(std::time::Duration::from_secs(5))
