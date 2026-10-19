@@ -68,9 +68,9 @@ fn holder_of(record: &DhtRecord, slot: u16) -> Vec<u8> {
 async fn killed_holder_is_replaced_and_content_survives_without_the_publisher() {
     let result = tokio::time::timeout(Duration::from_secs(150), async {
         let (coord_a, store_a) = spawn_node(0xA7, 0).await;
-        let (coord_b, _sb) = spawn_node(0xB7, 50).await;
-        let (coord_c, _sc) = spawn_node(0xC7, 50).await;
-        let (coord_d, _sd) = spawn_node(0xD7, 50).await;
+        let (coord_b, store_b) = spawn_node(0xB7, 50).await;
+        let (coord_c, store_c) = spawn_node(0xC7, 50).await;
+        let (coord_d, store_d) = spawn_node(0xD7, 50).await;
         let (coord_e, store_e) = spawn_node(0xE7, 50).await;
 
         for host in [&coord_b, &coord_c, &coord_d, &coord_e] {
@@ -103,14 +103,23 @@ async fn killed_holder_is_replaced_and_content_survives_without_the_publisher() 
         assert_eq!(before.locations.len(), 3);
 
         // Which coordinator holds which slot.
-        let all = [&coord_b, &coord_c, &coord_d];
+        // Four hosts, three slots: placement is randomised, so find out which
+        // host is the spare that holds nothing.
+        let all = [&coord_b, &coord_c, &coord_d, &coord_e];
+        let stores = [&store_b, &store_c, &store_d, &store_e];
         let owner_of = |slot: u16| -> usize {
             let bytes = holder_of(&before, slot);
             all.iter()
                 .position(|c| c.peer_id().to_bytes() == bytes)
-                .expect("holder is one of B, C, D")
+                .expect("holder is one of the four hosts")
         };
         let (dead_idx, second_idx, survivor_idx) = (owner_of(0), owner_of(1), owner_of(2));
+        let spare_idx = (0..all.len())
+            .find(|i| ![dead_idx, second_idx, survivor_idx].contains(i))
+            .expect("one host holds no slot");
+        let spare = all[spare_idx];
+        let store_spare = stores[spare_idx];
+        assert_eq!(store_spare.used_hosted_bytes(), 0, "the spare starts empty");
 
         // ── The holder of slot 0 dies. ──────────────────────────────────────
         all[dead_idx].shutdown().await;
@@ -159,7 +168,7 @@ async fn killed_holder_is_replaced_and_content_survives_without_the_publisher() 
             3,
             "slots preserved, none added or lost"
         );
-        assert_eq!(holder_of(&after, 0), coord_e.peer_id().to_bytes());
+        assert_eq!(holder_of(&after, 0), spare.peer_id().to_bytes());
         assert_eq!(holder_of(&after, 1), holder_of(&before, 1));
         assert_eq!(holder_of(&after, 2), holder_of(&before, 2));
         assert!(
@@ -167,18 +176,18 @@ async fn killed_holder_is_replaced_and_content_survives_without_the_publisher() 
             "the rewritten record must supersede the old one"
         );
         assert!(
-            store_e.used_hosted_bytes() > 0,
-            "E must now physically hold the pushed share"
+            store_spare.used_hosted_bytes() > 0,
+            "the spare must now physically hold the pushed share"
         );
         assert_eq!(ContentId::from_digest(after.mid_digest), mid);
 
-        // ── Proof of real durability: only one original host + E remain. ───
+        // ── Proof of real durability: one original host + the spare remain. ─
         coord_a.shutdown().await;
         all[second_idx].shutdown().await;
         let survivor = all[survivor_idx];
 
         let (coord_f, _sf) = spawn_node(0xF7, 0).await;
-        for seed in [survivor, &coord_e] {
+        for seed in [survivor, spare] {
             let addr: Multiaddr = seed.listen_addrs()[0].parse().unwrap();
             coord_f
                 .add_bootstrap_peer(*seed.peer_id(), addr)
@@ -186,7 +195,7 @@ async fn killed_holder_is_replaced_and_content_survives_without_the_publisher() 
                 .unwrap();
         }
         coord_f.bootstrap_dht().await.unwrap();
-        for seed in [survivor, &coord_e] {
+        for seed in [survivor, spare] {
             coord_f
                 .wait_until_peer_connected(*seed.peer_id(), Duration::from_secs(10))
                 .await
@@ -195,10 +204,10 @@ async fn killed_holder_is_replaced_and_content_survives_without_the_publisher() 
         let recovered = coord_f
             .retrieve_from_network(&mid, params)
             .await
-            .expect("retrieval needs the repaired replica on E (k=2, two hosts left)");
+            .expect("retrieval needs the repaired replica on the spare (k=2, two hosts left)");
         assert_eq!(recovered.as_slice(), content as &[u8]);
 
-        for c in [survivor, &coord_e, &coord_f] {
+        for c in [survivor, spare, &coord_f] {
             c.shutdown().await;
         }
     })
