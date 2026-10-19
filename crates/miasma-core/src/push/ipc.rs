@@ -71,6 +71,17 @@ pub enum PushRequest {
     },
     /// The inbox folder path.
     Inbox,
+    /// Delete the records of finished transfers (done, failed, cancelled,
+    /// rejected) for good: the live rows, the saved history (overwritten on
+    /// disk), the ended sends in the send queue's log, and the unused partial
+    /// files. `contact` limits it to one contact (label, id or endpoint ID);
+    /// `None` clears every contact. Running, queued and waiting transfers and
+    /// received files are untouched. Daemons that predate this request answer
+    /// that they do not know it. Appended last: older variants keep their wire
+    /// position.
+    ClearFinished {
+        contact: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +132,15 @@ pub enum PushResponse {
     Error {
         kind: String,
         message: String,
+    },
+    /// Answer to [`PushRequest::ClearFinished`]: what was deleted. Appended last.
+    Cleared {
+        /// Live rows dropped.
+        transfers: u32,
+        /// Saved-history entries removed (and overwritten on disk).
+        history: u32,
+        /// Unfinished partial files overwritten and removed.
+        partials: u32,
     },
 }
 
@@ -273,6 +293,14 @@ pub fn handle_with(
         }
         PushRequest::Inbox => PushResponse::Inbox {
             dir: svc.inbox_dir().to_string_lossy().into_owned(),
+        },
+        PushRequest::ClearFinished { contact } => match svc.clear_finished(contact.as_deref()) {
+            Ok(r) => PushResponse::Cleared {
+                transfers: r.transfers,
+                history: r.history,
+                partials: r.partials,
+            },
+            Err(m) => err("internal", format!("could not clear the history: {m}")),
         },
     }
 }
