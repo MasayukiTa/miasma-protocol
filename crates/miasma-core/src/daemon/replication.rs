@@ -625,6 +625,24 @@ impl ReplicationQueue {
         item.record = record;
         self.push(item)
     }
+
+    /// As [`update_record`](Self::update_record), and make the item due for a
+    /// fresh announce: it goes back to `Pending` with its backoff cleared. Used
+    /// for a record rewritten by maintenance whose announce has not been
+    /// confirmed: the node's in-memory DHT store is empty after a restart, and
+    /// only a non-`Replicated` item is announced again. Persisted before it
+    /// returns. Unknown MIDs are ignored.
+    pub fn update_record_and_requeue(&mut self, record: DhtRecord) -> Result<()> {
+        let Some(existing) = self.items.get(&record.mid_digest) else {
+            return Ok(());
+        };
+        let mut item = existing.clone();
+        item.record = record;
+        item.state = ItemState::Pending;
+        item.attempt_count = 0;
+        item.next_attempt_secs = now_secs();
+        self.push(item)
+    }
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -721,6 +739,30 @@ mod tests {
         let item = q.get(&digest).unwrap();
         assert_eq!(item.record.published_at, 999);
         assert_eq!(item.state, ItemState::Replicated);
+    }
+
+    #[test]
+    fn requeued_record_is_announced_again_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let digest = dummy_record(7).mid_digest;
+        {
+            let mut q = ReplicationQueue::load_or_create(dir.path()).unwrap();
+            q.push(dummy_item(7)).unwrap();
+            q.mark_replicated(&digest).unwrap();
+            assert_eq!(q.pending_count(), 0);
+
+            let mut updated = dummy_record(7);
+            updated.published_at = 999;
+            q.update_record_and_requeue(updated).unwrap();
+            q.update_record_and_requeue(dummy_record(8)).unwrap();
+            assert_eq!(q.all_items().count(), 1, "unknown MIDs are ignored");
+        }
+        let q = ReplicationQueue::load_or_create(dir.path()).unwrap();
+        let item = q.get(&digest).unwrap();
+        assert_eq!(item.record.published_at, 999);
+        assert_eq!(item.state, ItemState::Pending);
+        assert_eq!(q.pending_count(), 1);
+        assert_eq!(q.due_items(now_secs()).len(), 1, "due right away");
     }
 
     // ── WAL persistence tests ────────────────────────────────────────────────
