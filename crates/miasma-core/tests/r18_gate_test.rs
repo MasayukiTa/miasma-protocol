@@ -1823,7 +1823,7 @@ fn legacy_pad(data: &[u8], target: usize) -> Vec<u8> {
 }
 
 fn onion_key(shared: &[u8]) -> [u8; 32] {
-    let mut key = [0u8; 32];
+    let mut key = rand::random::<[u8; 32]>();
     Hkdf::<Sha256>::new(None, shared)
         .expand(b"miasma-onion-enc-v1", &mut key)
         .unwrap();
@@ -1838,8 +1838,7 @@ fn legacy_layer(recipient: &[u8; 32], mut payload: LayerPayload) -> OnionLayer {
     let eph_pub = PublicKey::from(&eph);
     let shared = eph.diffie_hellman(&PublicKey::from(*recipient));
     let key = onion_key(shared.as_bytes());
-    let mut nonce = [0u8; 24];
-    OsRng.fill_bytes(&mut nonce);
+    let nonce = rand::random::<[u8; 24]>();
     let plain = bincode::serialize(&payload).unwrap();
     let ciphertext = XChaCha20Poly1305::new((&key).into())
         .encrypt(XNonce::from_slice(&nonce), plain.as_slice())
