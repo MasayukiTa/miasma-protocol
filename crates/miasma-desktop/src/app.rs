@@ -1638,7 +1638,12 @@ impl MiasmaApp {
                 }
 
                 kit::form_row(ui, s.send_contact_label, None, |ui| {
-                    ui.add(kit::input(&mut self.send_contact).hint_text(s.send_contact_hint));
+                    let hint = if self.mode.is_easy() {
+                        s.send_contact_hint_easy
+                    } else {
+                        s.send_contact_hint
+                    };
+                    ui.add(kit::input(&mut self.send_contact).hint_text(hint));
                 });
                 kit::form_row(ui, s.send_password_label, None, |ui| {
                     ui.add(
@@ -1650,7 +1655,7 @@ impl MiasmaApp {
                 kit::form_row(
                     ui,
                     s.send_retention_label,
-                    Some("(e.g. 24h, 7d, 30d)"),
+                    Some(s.send_retention_hint),
                     |ui| {
                         ui.add(kit::input(&mut self.send_retention).desired_width(120.0));
                     },
@@ -3052,8 +3057,9 @@ fn format_epoch(epoch_secs: u64, locale: Locale) -> String {
 /// Map envelope state string to a (level, label) for outbox display.
 fn outbox_state_display<'a>(s: &'a crate::locale::Strings, state: &'a str) -> (Level, &'a str) {
     match state {
-        "Pending" => (Level::Warn, s.outbox_waiting_challenge),
-        "ChallengeIssued" => (Level::Warn, s.outbox_confirm_heading),
+        // The sentence for these two is shown under the details; the header is one short word.
+        "Pending" => (Level::Warn, s.envelope_waiting),
+        "ChallengeIssued" => (Level::Warn, s.envelope_needs_action),
         "Confirmed" => (Level::Ok, s.outbox_confirmed),
         "Retrieved" => (Level::Ok, s.outbox_retrieved),
         "Expired" => (Level::Error, s.outbox_expired),
@@ -3068,14 +3074,16 @@ fn outbox_state_display<'a>(s: &'a crate::locale::Strings, state: &'a str) -> (L
 /// Map envelope state string to a (level, label) for inbox display.
 fn inbox_state_display<'a>(s: &'a crate::locale::Strings, state: &'a str) -> (Level, &'a str) {
     match state {
-        "Pending" | "ChallengeIssued" => (Level::Warn, s.inbox_state),
+        // Short words only: the sentence that explains a problem is shown under the details,
+        // so the header must not say the same thing twice.
+        "Pending" | "ChallengeIssued" => (Level::Warn, s.envelope_waiting),
         "Confirmed" => (Level::Ok, s.outbox_confirmed),
-        "Retrieved" => (Level::Ok, s.inbox_retrieved),
-        "Expired" => (Level::Error, s.inbox_expired),
-        "SenderRevoked" => (Level::Error, s.inbox_revoked),
+        "Retrieved" => (Level::Ok, s.outbox_retrieved),
+        "Expired" => (Level::Error, s.outbox_expired),
+        "SenderRevoked" => (Level::Error, s.outbox_revoked),
         "RecipientDeleted" => (Level::Muted, s.outbox_revoked),
         "ChallengeFailed" => (Level::Error, s.outbox_challenge_failed),
-        "PasswordFailed" => (Level::Error, s.inbox_attempts_exhausted),
+        "PasswordFailed" => (Level::Error, s.outbox_password_failed),
         _ => (Level::Muted, state),
     }
 }

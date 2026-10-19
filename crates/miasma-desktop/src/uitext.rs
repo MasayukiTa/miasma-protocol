@@ -13,15 +13,15 @@ fn pick(locale: Locale, en: &'static str, ja: &'static str, zh: &'static str) ->
 }
 
 pub fn created_label(l: Locale) -> &'static str {
-    pick(l, "Created:", "作成:", "创建时间：")
+    pick(l, "Created:", "作成:", "创建时间:")
 }
 
 pub fn expires_label(l: Locale) -> &'static str {
-    pick(l, "Expires:", "期限:", "到期时间：")
+    pick(l, "Expires:", "期限:", "到期时间:")
 }
 
 pub fn envelope_id_label(l: Locale) -> &'static str {
-    pick(l, "Envelope ID:", "送付ID:", "信封 ID：")
+    pick(l, "Envelope ID:", "送付ID:", "信封 ID:")
 }
 
 pub fn text_files_filter(l: Locale) -> &'static str {

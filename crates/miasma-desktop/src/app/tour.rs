@@ -708,7 +708,15 @@ fn easy_steps() -> Vec<Step> {
                 transfers: None,
                 contacts: None,
                 chat: None,
-                size: Some((w, h)),
+                // Long pages get a taller window so what is below the fold is seen too.
+                size: Some((
+                    w,
+                    if matches!(tab, Tab::Settings | Tab::Transfers) {
+                        h * 2.0
+                    } else {
+                        h
+                    },
+                )),
                 mode: Some(ProductMode::Easy),
             };
             for (tab, tname) in screens {

@@ -1737,7 +1737,9 @@ impl TransfersUi {
                     EasyChoice::Balanced => (t.easy_bal, t.easy_bal_desc),
                     EasyChoice::Safest => (t.easy_safe, t.easy_safe_desc),
                 };
-                ui.horizontal(|ui| {
+                // Wrapping row: the description drops to the next line at the 700 px minimum
+                // instead of pushing the card past the window edge.
+                ui.horizontal_wrapped(|ui| {
                     if ui.radio(current == Some(choice), label).clicked() {
                         self.send_preset = choice.preset_index();
                     }
