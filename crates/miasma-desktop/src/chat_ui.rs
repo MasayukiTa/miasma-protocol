@@ -1762,6 +1762,7 @@ impl ChatUi {
             reason: None,
             sent_ms: at,
             at_ms: at,
+            tried_ms: 0,
         };
         let mut ui = ChatUi {
             frozen: true,
@@ -1931,6 +1932,7 @@ mod tests {
             reason: None,
             sent_ms: ord,
             at_ms: ord,
+            tried_ms: 0,
         }
     }
 
@@ -2576,8 +2578,6 @@ mod tests {
                 outbox_max: 10,
                 max_message_bytes: 2000,
                 read_receipts: true,
-                pending_reason: None,
-                pending_tried_ms: 0,
             })),
         );
         assert_eq!(ui.availability, Availability::Ok);

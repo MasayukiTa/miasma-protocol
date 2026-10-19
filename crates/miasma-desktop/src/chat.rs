@@ -839,6 +839,7 @@ mod tests {
             reason: None,
             sent_ms: ord * 1000,
             at_ms: ord * 1000,
+            tried_ms: 0,
         }
     }
 
