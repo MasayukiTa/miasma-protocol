@@ -44,6 +44,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::network::AnonymityPolicy;
 use crate::share::MiasmaShare;
 
 // ─── Transport identification ────────────────────────────────────────────────
@@ -63,6 +64,42 @@ pub enum PayloadTransportKind {
     RelayHop,
     /// REALITY-style obfuscated QUIC. Active-probing resistant.
     ObfuscatedQuic,
+}
+
+/// What a payload transport reveals to the share holder it talks to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportPrivacyClass {
+    /// The holder sees the requester's network address (or that of its proxy
+    /// exit): every transport that connects to the holder itself.
+    Direct,
+    /// The request reaches the holder through an intermediate relay, so the
+    /// holder does not see the requester's address.
+    Relayed,
+}
+
+impl PayloadTransportKind {
+    pub fn privacy_class(self) -> TransportPrivacyClass {
+        match self {
+            Self::RelayHop => TransportPrivacyClass::Relayed,
+            Self::DirectLibp2p | Self::TcpDirect | Self::WssTunnel | Self::ObfuscatedQuic => {
+                TransportPrivacyClass::Direct
+            }
+        }
+    }
+
+    /// Whether this transport may carry a request under `policy`.
+    ///
+    /// `Required` anonymity forbids every transport that connects to the holder
+    /// directly. `Direct` and `Opportunistic` allow all of them (the latter
+    /// prefers relays at a higher layer and documents the direct fallback).
+    pub fn permitted_under(self, policy: AnonymityPolicy) -> bool {
+        match policy {
+            AnonymityPolicy::Direct | AnonymityPolicy::Opportunistic => true,
+            AnonymityPolicy::Required { .. } => {
+                self.privacy_class() == TransportPrivacyClass::Relayed
+            }
+        }
+    }
 }
 
 impl fmt::Display for PayloadTransportKind {
@@ -153,6 +190,37 @@ impl fmt::Display for TransportExhaustedError {
 }
 
 impl std::error::Error for TransportExhaustedError {}
+
+/// Failure of a policy-constrained fetch.
+#[derive(Debug)]
+pub enum PolicyFetchError {
+    /// The policy forbids every configured transport. Nothing was attempted.
+    NoPermittedTransport {
+        policy: AnonymityPolicy,
+        configured: Vec<PayloadTransportKind>,
+    },
+    /// Every permitted transport was tried and failed (or the share is absent).
+    Exhausted(TransportExhaustedError),
+}
+
+impl fmt::Display for PolicyFetchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoPermittedTransport { policy, configured } => {
+                let names: Vec<String> = configured.iter().map(|k| k.to_string()).collect();
+                write!(
+                    f,
+                    "anonymity policy {policy} forbids every configured payload transport \
+                     ({}); refusing to fall back to a forbidden one",
+                    names.join(", ")
+                )
+            }
+            Self::Exhausted(e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for PolicyFetchError {}
 
 // ─── PayloadTransport trait ──────────────────────────────────────────────────
 
@@ -259,9 +327,54 @@ impl PayloadTransportSelector {
         slot_index: u16,
         segment_index: u32,
     ) -> Result<TransportedShare, TransportExhaustedError> {
+        let order = self.adaptive_order();
+        self.fetch_in_order(order, peer_addr, mid_digest, slot_index, segment_index)
+            .await
+    }
+
+    /// Like [`fetch_share`](Self::fetch_share), but only transports permitted
+    /// under `policy` are ever attempted. The health-aware order is computed
+    /// first and then filtered, so a forbidden transport can never be the
+    /// fallback, however healthy it is and however many permitted ones failed.
+    ///
+    /// When no configured transport is permitted, no network attempt is made
+    /// and [`PolicyFetchError::NoPermittedTransport`] is returned: the request
+    /// fails instead of silently downgrading.
+    pub async fn fetch_share_with_policy(
+        &self,
+        policy: AnonymityPolicy,
+        peer_addr: &str,
+        mid_digest: [u8; 32],
+        slot_index: u16,
+        segment_index: u32,
+    ) -> Result<TransportedShare, PolicyFetchError> {
+        let order: Vec<usize> = self
+            .adaptive_order()
+            .into_iter()
+            .filter(|&idx| self.transports[idx].kind().permitted_under(policy))
+            .collect();
+        if order.is_empty() {
+            return Err(PolicyFetchError::NoPermittedTransport {
+                policy,
+                configured: self.transport_names(),
+            });
+        }
+        self.fetch_in_order(order, peer_addr, mid_digest, slot_index, segment_index)
+            .await
+            .map_err(PolicyFetchError::Exhausted)
+    }
+
+    async fn fetch_in_order(
+        &self,
+        order: Vec<usize>,
+        peer_addr: &str,
+        mid_digest: [u8; 32],
+        slot_index: u16,
+        segment_index: u32,
+    ) -> Result<TransportedShare, TransportExhaustedError> {
         let mut attempts = Vec::with_capacity(self.transports.len());
 
-        for idx in self.adaptive_order() {
+        for idx in order {
             let transport = &self.transports[idx];
             let start = Instant::now();
             let kind = transport.kind();

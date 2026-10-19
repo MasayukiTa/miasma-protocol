@@ -1000,6 +1000,24 @@ impl MiasmaCoordinator {
         mid: &ContentId,
         params: DissolutionParams,
     ) -> Result<Vec<u8>, MiasmaError> {
+        self.retrieve_from_network_with_fetch_policy(
+            mid,
+            params,
+            FetchPolicy::for_anonymity(AnonymityPolicy::Direct),
+        )
+        .await
+    }
+
+    /// `retrieve_from_network` with an explicit holder-fetch overlap policy.
+    /// Callers derive it from the anonymity policy in force with
+    /// [`FetchPolicy::for_anonymity`], so a retrieval that must not overlap
+    /// requests never hedges.
+    async fn retrieve_from_network_with_fetch_policy(
+        &self,
+        mid: &ContentId,
+        params: DissolutionParams,
+        fetch_policy: FetchPolicy,
+    ) -> Result<Vec<u8>, MiasmaError> {
         // Phase 2.2: retry on InsufficientShares -- the record may not have
         // propagated to this node's view of the DHT yet, or a shard-holder may
         // not be reachable on the first attempt. Reuses the same backoff engine
@@ -1016,7 +1034,10 @@ impl MiasmaCoordinator {
         };
         let mut attempt: u32 = 0;
         loop {
-            match self.retrieve_from_network_once(mid, params).await {
+            match self
+                .retrieve_from_network_once(mid, params, fetch_policy)
+                .await
+            {
                 Ok(data) => return Ok(data),
                 Err(MiasmaError::InsufficientShares { need, got })
                     if attempt < policy.max_attempts =>
@@ -1050,10 +1071,11 @@ impl MiasmaCoordinator {
         &self,
         mid: &ContentId,
         params: DissolutionParams,
+        fetch_policy: FetchPolicy,
     ) -> Result<Vec<u8>, MiasmaError> {
         let dht_exec = DirectDhtExecutor::new(self.dht_handle.clone());
         let source = FallbackShareSource::new(dht_exec, self.transport_selector.clone());
-        let coord = RetrievalCoordinator::with_fetch_policy(source, FetchPolicy::direct_network());
+        let coord = RetrievalCoordinator::with_fetch_policy(source, fetch_policy);
 
         // Determine segment count from DHT record.
         let max_seg = {
@@ -1266,7 +1288,15 @@ impl MiasmaCoordinator {
                         }
                     }
                 }
-                let result = self.retrieve_from_network(mid, params).await;
+                // The direct fallback keeps the sequential holder order the relay
+                // attempt used: overlapping requests would link them in time.
+                let result = self
+                    .retrieve_from_network_with_fetch_policy(
+                        mid,
+                        params,
+                        FetchPolicy::for_anonymity(AnonymityPolicy::Opportunistic),
+                    )
+                    .await;
                 if result.is_ok() {
                     if let Ok(mut s) = self.retrieval_stats.lock() {
                         s.opportunistic_direct_fallbacks += 1;

@@ -7,12 +7,17 @@
 /// emits a background stream of indistinguishable traffic.
 ///
 /// # Design
-/// - A background `tokio` task sends random-length packets (512–2048 bytes)
-///   over the node's swarm at the configured rate.
-/// - Jitter (±`pattern_jitter_pct`%) is applied to inter-packet gaps so that
-///   the packet cadence is not metronomic.
-/// - Cover packets use a reserved Miasma protocol tag (0xFF) that relay nodes
-///   discard after a single hop — they never reach the DHT or data plane.
+/// - A background `tokio` task emits cover cells at the configured rate. Each
+///   carries a random payload of 512–2048 bytes inside an encrypted first-hop
+///   onion cell, padded so the cell has exactly the length of a real first-hop
+///   request (see `COVER_ENVELOPE_ESTIMATE`).
+/// - Jitter (±`pattern_jitter_pct`%, uniform) is applied to inter-cell gaps so
+///   that the cadence is not metronomic. This is the only timing claim: a
+///   configured mean rate with bounded uniform jitter, not resemblance to any
+///   other protocol's timing.
+/// - The reserved Miasma tag (0xFF) is visible only after the cell
+///   authenticates; the relay discards the cell after a single hop and it never
+///   reaches the DHT or data plane.
 ///
 /// # Integration
 /// Call `CoverTrafficEngine::start()` after building `MiasmaNode`.
@@ -55,11 +60,59 @@ pub enum TrafficShapePolicy {
 
 impl TrafficShapePolicy {
     pub fn is_implemented(self) -> bool {
-        matches!(
-            self,
-            Self::Off | Self::FixedPadding | Self::Bucketed | Self::CoverBasic
-        )
+        self.unsupported_reason().is_none()
     }
+
+    /// Why this policy cannot be selected in this release, or `None` when it
+    /// is supported. The text is shown to the operator at startup.
+    ///
+    /// # `Adaptive`
+    /// Not supported. An adaptive policy needs an explicit, measurable profile:
+    /// cell sizes plus the parameters of a timing distribution, stored in
+    /// configuration and compared against a reference population. This release
+    /// has no such reference profile, and a Miasma-specific randomized
+    /// distribution would itself be a distinguishing feature. What this release
+    /// does claim is narrower: every first-hop cell, real or cover, has the same
+    /// length, and cover cells follow a configured mean rate with bounded
+    /// uniform jitter (`CoverBasic`). It does not claim that the timing resembles
+    /// any other protocol.
+    ///
+    /// # `ConstantRate`
+    /// Not supported: it would spend bandwidth and power while idle and has not
+    /// been implemented.
+    pub fn unsupported_reason(self) -> Option<&'static str> {
+        match self {
+            Self::Off | Self::FixedPadding | Self::Bucketed | Self::CoverBasic => None,
+            Self::ConstantRate => Some("constant-rate shaping is not implemented"),
+            Self::Adaptive => Some(
+                "adaptive shaping has no measurable profile specification yet; \
+                 use cover_basic for a configured rate with fixed-length cells",
+            ),
+        }
+    }
+
+    /// Policies a user may select in this release.
+    pub fn supported() -> &'static [TrafficShapePolicy] {
+        &[
+            Self::Off,
+            Self::FixedPadding,
+            Self::Bucketed,
+            Self::CoverBasic,
+        ]
+    }
+}
+
+/// Cover configuration after applying the shaping policy: `CoverBasic` turns
+/// cover emission on, every other policy leaves the explicit setting alone.
+pub fn effective_cover_config(
+    policy: TrafficShapePolicy,
+    base: &CoverTrafficConfig,
+) -> CoverTrafficConfig {
+    let mut cfg = base.clone();
+    if policy == TrafficShapePolicy::CoverBasic {
+        cfg.enabled = true;
+    }
+    cfg
 }
 
 impl fmt::Display for TrafficShapePolicy {
@@ -147,10 +200,13 @@ impl Default for CoverTrafficConfig {
 pub(crate) const COVER_MIN_BYTES: usize = 512;
 pub(crate) const COVER_MAX_BYTES: usize = 2_048;
 
-/// Estimated encrypted onion request bytes used for rate/budget accounting.
-/// The real outer layer pads its data field to 8 KiB and adds X25519/nonce/AEAD
-/// metadata plus request framing. This estimate intentionally rounds upward.
-pub(crate) const COVER_ENVELOPE_ESTIMATE: u64 = crate::onion::packet::ONION_PAD_TARGET as u64 + 512;
+/// Encrypted onion request frame size used for rate/budget accounting.
+///
+/// A cover cell is built to the same ciphertext length as a first-hop onion
+/// request (see `OnionPacketBuilder::build_cover`), so this is the exact
+/// length-prefixed request frame handed to the transport, not an estimate. Noise
+/// and multiplexing overhead below the request frame is not included.
+pub(crate) const COVER_ENVELOPE_ESTIMATE: u64 = crate::onion::packet::FIRST_HOP_FRAME_BYTES as u64;
 
 /// Protocol tag for cover packets (relay nodes discard after 1 hop).
 pub const COVER_TAG: u8 = 0xFF;
@@ -316,6 +372,10 @@ impl CoverTrafficEngine {
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+#[path = "cover_traffic_wire_shape.rs"]
+mod wire_shape;
 
 #[cfg(test)]
 mod tests {

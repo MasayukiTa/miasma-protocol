@@ -204,10 +204,16 @@ impl DaemonServer {
         let parsed_obfs_probe_secret = transport_config
             .parsed_obfuscated_quic_secret()
             .map_err(anyhow::Error::msg)?;
-        if !transport_config.traffic_shape_policy.is_implemented() {
+        if let Some(reason) = transport_config.traffic_shape_policy.unsupported_reason() {
             anyhow::bail!(
-                "traffic shaping policy '{}' is recognized but not implemented in this build",
-                transport_config.traffic_shape_policy
+                "traffic shaping policy '{}' is not supported in this release: {}. Supported policies: {}",
+                transport_config.traffic_shape_policy,
+                reason,
+                crate::cover_traffic::TrafficShapePolicy::supported()
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
         }
         let preflight_obfs_config = if transport_config.obfuscated_quic_enabled {
@@ -690,10 +696,10 @@ impl DaemonServer {
 
         // Cover traffic rides inside the real encrypted onion request protocol.
         // Best-effort try_send ensures it can never backpressure application work.
-        let mut cover_config = self.cover_traffic_config.clone();
-        if self.traffic_shape_policy == crate::cover_traffic::TrafficShapePolicy::CoverBasic {
-            cover_config.enabled = true;
-        }
+        let cover_config = crate::cover_traffic::effective_cover_config(
+            self.traffic_shape_policy,
+            &self.cover_traffic_config,
+        );
         let cover_engine = if cover_config.enabled {
             let dht = coord.dht_handle().clone();
             let metrics = self.cover_traffic_metrics.clone();

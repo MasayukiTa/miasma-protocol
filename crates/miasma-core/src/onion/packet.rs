@@ -39,6 +39,40 @@ const ONION_ENC_LABEL: &[u8] = b"miasma-onion-enc-v1";
 /// 64 KiB onion message limit.
 pub const ONION_PAD_TARGET: usize = 8 * 1024;
 
+/// Padded size of the `data` field of the outermost (first-hop) layer.
+///
+/// The outer layer carries the serialized second layer, which is larger than
+/// `ONION_PAD_TARGET` by a few hundred bytes and varies with the length of the
+/// address fields. Padding it to a fixed 9 KiB makes every first-hop cell the
+/// same length on the wire regardless of body size or address length, so a
+/// cover cell can be built to the identical length. The receiver strips the
+/// padding through the length prefix, so this stays compatible with peers that
+/// pad to the smaller target.
+pub const ONION_OUTER_PAD_TARGET: usize = 9 * 1024;
+
+/// Length in bytes of the serialized peer identifier carried in the first-hop
+/// `next_hop` field (an Ed25519 libp2p peer id). A cover cell has no next hop,
+/// so it is padded by this amount to reach the same ciphertext length.
+pub(crate) const FIRST_HOP_PEER_ID_LEN: usize = 38;
+
+/// Serialized length of a first-hop request frame on the onion relay protocol:
+/// 4-byte frame length prefix, 4-byte enum tag, 16-byte circuit id, the layer
+/// header (32-byte ephemeral key, 24-byte nonce, 8-byte ciphertext length) and
+/// the AEAD ciphertext of a layer whose plaintext holds an optional next hop, a
+/// padded data field and an optional return key (16-byte tag).
+pub(crate) const FIRST_HOP_FRAME_BYTES: usize =
+    4 + 4 + CIRCUIT_ID_LEN + X25519_KEY_LEN + 24 + 8 + FIRST_HOP_PLAINTEXT_BYTES + 16;
+
+/// Plaintext length of a first-hop layer: `Some(next_hop)` (tag + length +
+/// peer id), the padded data field (length + bytes) and `Some(return_key)`.
+const FIRST_HOP_PLAINTEXT_BYTES: usize =
+    (1 + 8 + FIRST_HOP_PEER_ID_LEN) + (8 + ONION_OUTER_PAD_TARGET) + (1 + 32);
+
+/// Padded `data` length of a cover layer so that its plaintext, and therefore
+/// its ciphertext, has the same length as a first-hop layer. A cover layer
+/// carries no next hop and no return key (two one-byte `None` tags).
+const COVER_PAD_TARGET: usize = FIRST_HOP_PLAINTEXT_BYTES - 2 - 8;
+
 // ─── CircuitId ────────────────────────────────────────────────────────────────
 
 /// Ephemeral, unique-per-circuit identifier.
@@ -237,13 +271,14 @@ impl OnionPacketBuilder {
         let layer2_bytes =
             bincode::serialize(&layer2).map_err(|e| MiasmaError::Serialization(e.to_string()))?;
 
-        let layer1 = Self::encrypt_layer(
+        let layer1 = Self::encrypt_layer_padded(
             r1_static_pubkey,
             LayerPayload {
                 next_hop: Some(r2_peer_id),
                 data: layer2_bytes,
                 return_key: Some(*r1_init_key),
             },
+            ONION_OUTER_PAD_TARGET,
         )?;
 
         Ok((
@@ -315,13 +350,14 @@ impl OnionPacketBuilder {
         if !crate::cover_traffic::is_cover_payload(&payload) {
             return Err(MiasmaError::Encryption("invalid cover payload".into()));
         }
-        let layer = Self::encrypt_layer(
+        let layer = Self::encrypt_layer_padded(
             recipient_static_pubkey,
             LayerPayload {
                 next_hop: None,
                 data: payload,
                 return_key: None,
             },
+            COVER_PAD_TARGET,
         )?;
         Ok(OnionPacket {
             circuit_id: CircuitId::random(),
@@ -336,10 +372,20 @@ impl OnionPacketBuilder {
     /// ciphertext size, preventing packet-size correlation across hops.
     pub(crate) fn encrypt_layer(
         recipient_static_pubkey: &[u8; X25519_KEY_LEN],
+        payload: LayerPayload,
+    ) -> Result<OnionLayer, MiasmaError> {
+        Self::encrypt_layer_padded(recipient_static_pubkey, payload, ONION_PAD_TARGET)
+    }
+
+    /// Like `encrypt_layer` with an explicit padded size for the `data` field.
+    /// Data longer than `pad_target` is carried unpadded plus its length prefix.
+    pub(crate) fn encrypt_layer_padded(
+        recipient_static_pubkey: &[u8; X25519_KEY_LEN],
         mut payload: LayerPayload,
+        pad_target: usize,
     ) -> Result<OnionLayer, MiasmaError> {
         // Pad the data field to a fixed size to prevent traffic analysis.
-        payload.data = pad_to_fixed_size(&payload.data, ONION_PAD_TARGET);
+        payload.data = pad_to_fixed_size(&payload.data, pad_target);
 
         // Generate ephemeral X25519 keypair for this hop.
         let ephemeral_secret = EphemeralSecret::random_from_rng(rand::rngs::OsRng);

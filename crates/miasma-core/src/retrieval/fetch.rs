@@ -4,6 +4,7 @@ use futures::{stream::FuturesUnordered, StreamExt};
 
 use crate::{
     crypto::hash::ContentId,
+    network::AnonymityPolicy,
     share::{MiasmaShare, ShareVerification},
     MiasmaError,
 };
@@ -34,6 +35,28 @@ impl FetchPolicy {
     pub fn direct_network() -> Self {
         Self::Hedged {
             delay: Duration::from_millis(250),
+        }
+    }
+
+    /// Hedging policy for a retrieval under `anonymity`.
+    ///
+    /// A hedge sends a second request to another holder while the first is still
+    /// outstanding. That is acceptable when the requester is not hiding its
+    /// address (`Direct`). Under `Opportunistic` or `Required` anonymity the
+    /// requests would be linkable by timing, and a hedge launched after a relay
+    /// path stalled could also leave the path class the policy chose, so those
+    /// retrievals stay sequential: one holder at a time, in shuffled order.
+    pub fn for_anonymity(anonymity: AnonymityPolicy) -> Self {
+        Self::direct_network().constrained_by(anonymity)
+    }
+
+    /// Clamp this policy to what `anonymity` allows: hedging is only permitted
+    /// when the anonymity policy is `Direct`; every other policy forces
+    /// `Sequential`.
+    pub fn constrained_by(self, anonymity: AnonymityPolicy) -> Self {
+        match anonymity {
+            AnonymityPolicy::Direct => self,
+            AnonymityPolicy::Opportunistic | AnonymityPolicy::Required { .. } => Self::Sequential,
         }
     }
 }
@@ -274,5 +297,242 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert_eq!(source.calls.load(Ordering::SeqCst), 3);
         assert_ne!(got[0].slot_index, got[1].slot_index);
+    }
+
+    // ── slow-holder / cancel cleanup / hedging policy ───────────────────────
+
+    /// Decrements the in-flight counter when the fetch future finishes or is
+    /// dropped, so a cancelled fetch is visible as `in_flight == 0`.
+    struct InFlightGuard(Arc<AtomicUsize>);
+
+    impl Drop for InFlightGuard {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    #[derive(Clone)]
+    struct TrackedSource {
+        entries: Arc<HashMap<String, (Duration, MiasmaShare)>>,
+        started: Arc<AtomicUsize>,
+        completed: Arc<AtomicUsize>,
+        in_flight: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+    }
+
+    impl TrackedSource {
+        fn new(entries: Vec<(&str, Duration, MiasmaShare)>) -> Self {
+            Self {
+                entries: Arc::new(
+                    entries
+                        .into_iter()
+                        .map(|(addr, delay, share)| (addr.to_string(), (delay, share)))
+                        .collect(),
+                ),
+                started: Arc::new(AtomicUsize::new(0)),
+                completed: Arc::new(AtomicUsize::new(0)),
+                in_flight: Arc::new(AtomicUsize::new(0)),
+                peak: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ShareSource for TrackedSource {
+        async fn list_candidates(&self, _mid: &ContentId) -> Vec<String> {
+            self.entries.keys().cloned().collect()
+        }
+
+        async fn fetch(&self, address: &str) -> Result<Option<MiasmaShare>, MiasmaError> {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            let _guard = InFlightGuard(self.in_flight.clone());
+            let Some((delay, share)) = self.entries.get(address) else {
+                return Ok(None);
+            };
+            tokio::time::sleep(*delay).await;
+            self.completed.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(share.clone()))
+        }
+    }
+
+    fn tracked_fixture(count: usize, delay: Duration) -> (TrackedSource, ContentId, Vec<String>) {
+        let (mid, shares) = dissolve(b"slow holder fixture", DissolutionParams::default()).unwrap();
+        assert!(shares.len() >= count, "fixture needs {count} shares");
+        let names: Vec<String> = (0..count).map(|i| format!("holder-{i}")).collect();
+        let entries = names
+            .iter()
+            .zip(shares)
+            .map(|(name, share)| (name.as_str(), delay, share))
+            .collect();
+        (TrackedSource::new(entries), mid, names)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hedged_fetch_cancels_the_slow_holder_once_enough_shares_arrive() {
+        let (mid, shares) = dissolve(b"slow holder fixture", DissolutionParams::default()).unwrap();
+        let source = TrackedSource::new(vec![
+            ("slow", Duration::from_secs(60), shares[0].clone()),
+            ("fast", Duration::from_millis(1), shares[1].clone()),
+        ]);
+        let began = tokio::time::Instant::now();
+        let got = collect_verified_shares(
+            &source,
+            vec!["slow".into(), "fast".into()],
+            &mid,
+            0,
+            1,
+            FetchPolicy::Hedged {
+                delay: Duration::from_millis(10),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].slot_index, 1);
+        assert!(
+            began.elapsed() < Duration::from_secs(1),
+            "waited for the slow holder"
+        );
+        assert_eq!(source.started.load(Ordering::SeqCst), 2);
+        assert_eq!(source.completed.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            source.in_flight.load(Ordering::SeqCst),
+            0,
+            "slow holder's fetch was not cancelled"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hedged_fetch_never_has_more_than_two_requests_in_flight() {
+        let (source, mid, names) = tracked_fixture(6, Duration::from_millis(100));
+        let got = collect_verified_shares(
+            &source,
+            names,
+            &mid,
+            0,
+            3,
+            FetchPolicy::Hedged {
+                delay: Duration::from_millis(10),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(got.len(), 3);
+        assert!(
+            source.peak.load(Ordering::SeqCst) <= 2,
+            "more than one secondary"
+        );
+        assert!(
+            source.peak.load(Ordering::SeqCst) >= 2,
+            "hedge never started"
+        );
+        assert_eq!(
+            source.in_flight.load(Ordering::SeqCst),
+            0,
+            "leftover requests"
+        );
+        assert!(source.started.load(Ordering::SeqCst) < 6, "fetched past k");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hedged_fetch_dropped_by_the_caller_leaves_nothing_in_flight() {
+        let (source, mid, names) = tracked_fixture(4, Duration::from_secs(3_600));
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(500),
+            collect_verified_shares(
+                &source,
+                names,
+                &mid,
+                0,
+                2,
+                FetchPolicy::Hedged {
+                    delay: Duration::from_millis(10),
+                },
+            ),
+        )
+        .await;
+
+        assert!(
+            outcome.is_err(),
+            "every holder is slow, the caller must time out"
+        );
+        assert!(
+            source.started.load(Ordering::SeqCst) >= 2,
+            "hedge never started"
+        );
+        assert_eq!(source.completed.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            source.in_flight.load(Ordering::SeqCst),
+            0,
+            "cancelling the retrieval must drop every outstanding fetch"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hedged_fetch_with_a_single_slow_holder_waits_for_it() {
+        let (source, mid, names) = tracked_fixture(1, Duration::from_millis(400));
+        let got = collect_verified_shares(
+            &source,
+            names,
+            &mid,
+            0,
+            1,
+            FetchPolicy::Hedged {
+                delay: Duration::from_millis(10),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(source.started.load(Ordering::SeqCst), 1);
+        assert_eq!(source.in_flight.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn hedging_is_only_allowed_when_the_anonymity_policy_is_direct() {
+        assert_eq!(
+            FetchPolicy::for_anonymity(AnonymityPolicy::Direct),
+            FetchPolicy::direct_network()
+        );
+        for policy in [
+            AnonymityPolicy::Opportunistic,
+            AnonymityPolicy::Required { min_hops: 1 },
+            AnonymityPolicy::Required { min_hops: 3 },
+        ] {
+            assert_eq!(FetchPolicy::for_anonymity(policy), FetchPolicy::Sequential);
+            assert_eq!(
+                FetchPolicy::direct_network().constrained_by(policy),
+                FetchPolicy::Sequential,
+                "{policy} must clamp a hedged policy"
+            );
+        }
+        let hedged = FetchPolicy::Hedged {
+            delay: Duration::from_millis(5),
+        };
+        assert_eq!(hedged.constrained_by(AnonymityPolicy::Direct), hedged);
+        assert_eq!(
+            FetchPolicy::Sequential.constrained_by(AnonymityPolicy::Direct),
+            FetchPolicy::Sequential
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn required_anonymity_never_overlaps_holder_requests() {
+        let (source, mid, names) = tracked_fixture(5, Duration::from_millis(100));
+        let policy = FetchPolicy::for_anonymity(AnonymityPolicy::Required { min_hops: 2 });
+        let got = collect_verified_shares(&source, names, &mid, 0, 2, policy)
+            .await
+            .unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(
+            source.peak.load(Ordering::SeqCst),
+            1,
+            "a required-anonymity retrieval must not hedge"
+        );
+        assert_eq!(source.started.load(Ordering::SeqCst), 2);
     }
 }

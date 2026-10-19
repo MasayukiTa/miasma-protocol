@@ -87,8 +87,9 @@ pub use transport::obfuscated::{
 };
 pub use transport::payload::{
     Libp2pPayloadTransport, PayloadTransport, PayloadTransportError, PayloadTransportKind,
-    PayloadTransportSelector, TcpDirectPayloadTransport, TransportAttempt, TransportExhaustedError,
-    TransportPhase, TransportReadiness, TransportStats, TransportedShare,
+    PayloadTransportSelector, PolicyFetchError, TcpDirectPayloadTransport, TransportAttempt,
+    TransportExhaustedError, TransportPhase, TransportPrivacyClass, TransportReadiness,
+    TransportStats, TransportedShare,
 };
 pub use transport::proxy::ProxyConfig;
 pub use transport::websocket::{WebSocketConfig, WssPayloadTransport, WssShareServer};
