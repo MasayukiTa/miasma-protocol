@@ -1748,6 +1748,8 @@ impl ChatUi {
                 last_ms,
                 pending,
                 read_receipts: true,
+                pending_reason: None,
+                pending_tried_ms: 0,
             }
         };
         let msg = |ord: u64, outgoing: bool, state: &str, text: &str, at: u64| MessageInfo {
@@ -1760,6 +1762,7 @@ impl ChatUi {
             reason: None,
             sent_ms: at,
             at_ms: at,
+            tried_ms: 0,
         };
         let mut ui = ChatUi {
             frozen: true,
@@ -1929,6 +1932,7 @@ mod tests {
             reason: None,
             sent_ms: ord,
             at_ms: ord,
+            tried_ms: 0,
         }
     }
 
@@ -2437,6 +2441,8 @@ mod tests {
             last_ms: last,
             pending: 0,
             read_receipts: true,
+            pending_reason: None,
+            pending_tried_ms: 0,
         };
         ui.on_reply(
             c(),

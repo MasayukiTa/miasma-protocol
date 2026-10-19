@@ -414,6 +414,7 @@ impl ChatCore {
                         at_ms: now,
                         state,
                         reason,
+                        tried_ms: 0,
                         text: e.text.clone(),
                     },
                 );
@@ -451,6 +452,7 @@ impl ChatCore {
                     MsgState::Queued
                 },
                 reason: e.last_error.clone(),
+                tried_ms: e.last_try_ms,
                 text: e.text.clone(),
             })
             .collect();
@@ -593,6 +595,28 @@ impl ChatCore {
         };
         let message = match record {
             Record::Text(m) => m,
+            Record::Unknown(_) => {
+                // A record kind from a newer build: the envelope opened, so
+                // the session moves on and it is acknowledged; there is
+                // nothing here to show.
+                self.store.with_peer(peer, |st| {
+                    st.session = Some(session);
+                    if let Some(ek) = new_ek {
+                        st.remember_ek(ek);
+                    }
+                    st.remember_envelope(env.id);
+                });
+                if self.store.flush_peer(peer).is_err() {
+                    return plain(AckStatus::Failed);
+                }
+                if replaced {
+                    self.void_sealed(peer);
+                }
+                return AcceptOutcome {
+                    status: AckStatus::Stored,
+                    session_replaced: replaced,
+                };
+            }
             Record::Read(rc) => {
                 // A receipt: no history record, no sequence number, and never
                 // an answer of its own. It is applied only when receipts are
@@ -630,6 +654,7 @@ impl ChatCore {
                             at_ms: now,
                             state: MsgState::Read,
                             reason: None,
+                            tried_ms: 0,
                             text: String::new(),
                         },
                     );
@@ -668,6 +693,7 @@ impl ChatCore {
                         at_ms: now,
                         state: MsgState::Received,
                         reason: None,
+                        tried_ms: 0,
                         text: message.text.clone(),
                     })
                 }

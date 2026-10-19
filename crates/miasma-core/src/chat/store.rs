@@ -160,6 +160,9 @@ pub struct StoredMessage {
     pub at_ms: u64,
     pub state: MsgState,
     pub reason: Option<String>,
+    /// For a message still waiting: when the last delivery attempt started
+    /// (0 = none yet). Not stored.
+    pub tried_ms: u64,
     pub text: String,
 }
 
@@ -221,6 +224,7 @@ impl StoredMessage {
             at_ms,
             state,
             reason,
+            tried_ms: 0,
             text,
         })
     }
@@ -708,6 +712,7 @@ impl ChatStore {
             at_ms: m.at_ms,
             state: m.state,
             reason: m.reason,
+            tried_ms: 0,
             text: m.text,
         };
         {

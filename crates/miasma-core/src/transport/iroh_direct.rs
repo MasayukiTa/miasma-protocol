@@ -974,6 +974,48 @@ impl IrohClientError {
     pub fn is_permanent(&self) -> bool {
         matches!(self, Self::Unreachable(_) | Self::Protocol(_))
     }
+
+    /// True when the peer answered the handshake but does not list the
+    /// application protocol we asked for: a build from before that protocol
+    /// existed (or with it switched off).
+    pub fn is_alpn_refused(&self) -> bool {
+        let Self::Unreachable(m) = self else {
+            return false;
+        };
+        let m = m.to_ascii_lowercase();
+        m.contains("application protocol")
+            || m.contains("no_application_protocol")
+            || m.contains("alpn")
+            || m.contains("any known protocol")
+            || m.contains("crypto error 120")
+            || m.contains("0x178")
+    }
+
+    /// A stable word for why a dial failed, for the sender-visible state of a
+    /// message or transfer that is waiting. `alpn_refused` is the word used
+    /// when the peer lacks the protocol (`peer_no_chat`, `peer_no_push`, ...).
+    pub fn reason_code(&self, alpn_refused: &'static str) -> &'static str {
+        if self.is_alpn_refused() {
+            return alpn_refused;
+        }
+        match self {
+            Self::Unreachable(m) if m.contains("no connection within") => dial_reason::NO_ROUTE,
+            Self::Unreachable(_) => dial_reason::CONNECT_FAILED,
+            Self::Connection(_) => dial_reason::CONNECTION_LOST,
+            Self::Protocol(_) => dial_reason::PROTOCOL,
+        }
+    }
+}
+
+/// Words for [`IrohClientError::reason_code`]. Stored with a waiting message
+/// and shown by the CLI.
+pub mod dial_reason {
+    /// No connection within the time limit: offline, or no route found.
+    pub const NO_ROUTE: &str = "no_route";
+    /// The handshake failed for another reason.
+    pub const CONNECT_FAILED: &str = "connect_failed";
+    pub const CONNECTION_LOST: &str = "connection_lost";
+    pub const PROTOCOL: &str = "protocol";
 }
 
 impl std::fmt::Display for IrohClientError {

@@ -445,3 +445,42 @@ fn events_report_arrivals_and_results() {
     let (_, ev) = a.core.events_since(0);
     assert_eq!(ev.len(), 1);
 }
+
+// ─── Skew with other releases ────────────────────────────────────────────────
+
+#[test]
+fn a_record_kind_from_a_newer_build_is_acknowledged_and_the_session_goes_on() {
+    let a = side();
+    let b = side();
+    a.core.enqueue(&b.id(), "first", 1).unwrap();
+    assert_eq!(deliver_next(&a, &b), Some(AckStatus::Stored));
+    // A kind this build does not know, sealed in a real envelope.
+    let (wire, _) = a.core.seal_for(&b.id(), &[77, 1, 2, 3, 4]).unwrap();
+    assert_eq!(b.core.accept(&a.id(), &wire, 3).status, AckStatus::Stored);
+    // The same bytes again are a duplicate, and later messages still arrive.
+    assert_eq!(
+        b.core.accept(&a.id(), &wire, 4).status,
+        AckStatus::Duplicate
+    );
+    a.core.enqueue(&b.id(), "second", 5).unwrap();
+    assert_eq!(deliver_next(&a, &b), Some(AckStatus::Stored));
+    assert_eq!(b.texts(&a.id()), ["first", "second"]);
+}
+
+#[test]
+fn a_text_record_with_fields_appended_by_a_newer_build_is_read() {
+    let a = side();
+    let b = side();
+    let mut plain = super::proto::Message {
+        id: rand::random(),
+        seq: 1,
+        sent_ms: 1_700_000_000_000,
+        text: "hello".into(),
+    }
+    .encode()
+    .unwrap();
+    plain.extend_from_slice(&[0xAA, 0xBB, 0xCC]);
+    let (wire, _) = a.core.seal_for(&b.id(), &plain).unwrap();
+    assert_eq!(b.core.accept(&a.id(), &wire, 2).status, AckStatus::Stored);
+    assert_eq!(b.texts(&a.id()), ["hello"]);
+}

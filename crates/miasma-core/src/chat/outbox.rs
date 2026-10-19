@@ -72,6 +72,9 @@ pub struct OutEntry {
     pub sealed: Option<Vec<u8>>,
     pub sending: bool,
     pub last_error: Option<String>,
+    /// When the last delivery attempt started (ms since the epoch; 0 = none
+    /// yet in this process). Not persisted.
+    pub last_try_ms: u64,
 }
 
 impl OutEntry {
@@ -122,6 +125,7 @@ impl OutEntry {
             sealed: None,
             sending: false,
             last_error: None,
+            last_try_ms: 0,
         })
     }
 
@@ -155,6 +159,7 @@ impl OutEntry {
             sealed: None,
             sending: false,
             last_error: None,
+            last_try_ms: 0,
         })
     }
 }
@@ -601,6 +606,7 @@ pub fn new_entry(id: [u8; 16], peer: [u8; 32], seq: u64, sent_ms: u64, text: Str
         sealed: None,
         sending: false,
         last_error: None,
+        last_try_ms: 0,
     }
 }
 
@@ -618,5 +624,6 @@ pub fn new_receipt(id: [u8; 16], peer: [u8; 32], up_to_seq: u64, now_ms: u64) ->
         sealed: None,
         sending: false,
         last_error: None,
+        last_try_ms: 0,
     }
 }

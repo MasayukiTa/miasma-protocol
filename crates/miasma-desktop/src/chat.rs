@@ -839,6 +839,7 @@ mod tests {
             reason: None,
             sent_ms: ord * 1000,
             at_ms: ord * 1000,
+            tried_ms: 0,
         }
     }
 
@@ -852,6 +853,8 @@ mod tests {
             last_ms,
             pending: 0,
             read_receipts: true,
+            pending_reason: None,
+            pending_tried_ms: 0,
         }
     }
 
