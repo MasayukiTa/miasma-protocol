@@ -5,11 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="theme-color" content="#f7f6f2">
   <script src="js/theme.js"></script>
-  <meta name="description" content="Miasma Protocol — censorship-resistant content dissolution and retrieval in your browser">
+  <meta name="description" content="Private encrypted content protection, splitting, and recovery in your browser">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' http://127.0.0.1:* http://localhost:*; frame-ancestors 'none'; base-uri 'self'; form-action 'self';">
   <title>Miasma Web</title>
   <link rel="stylesheet" href="css/style.css">
   <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" sizes="180x180" href="icons/apple-touch-icon.png">
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='45' fill='%23f7f6f2' stroke='%2318181b' stroke-width='5'/><circle cx='50' cy='50' r='20' fill='none' stroke='%2318181b' stroke-width='3' stroke-dasharray='8 4'/><circle cx='50' cy='50' r='6' fill='%2318181b'/></svg>">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
@@ -55,7 +56,7 @@
       <div class="home-hero">
         <h1 data-i18n="hero_title">Miasma Protocol</h1>
         <p class="hero-sub" data-i18n="hero_sub">Local content protection in your browser</p>
-        <p class="hero-desc" data-i18n="hero_desc">Encrypt and split content into shares. Reconstruct from any k-of-n shares. All processing runs locally — nothing leaves your device.</p>
+        <p class="hero-desc" data-i18n="hero_desc">Encrypt and split content into shares. Reconstruct from any k-of-n shares. Cryptography runs on your device; connected clients can publish encrypted shares to the P2P network.</p>
       </div>
       <div class="home-actions">
         <button class="action-card card-dissolve" data-view="dissolve">
@@ -630,8 +631,8 @@
           <div class="about-info">
             <p id="version-info"></p>
             <p>Protocol Version: 1</p>
-            <p data-i18n="about_desc">Miasma Web is a local-only browser tool for the Miasma Protocol. All cryptographic operations run in WebAssembly on your device. No data is sent to any server.</p>
-            <p data-i18n="about_scope">This tool does not connect to the Miasma network. It cannot discover peers, retrieve content from other devices, or provide the anonymity features available in the desktop client. Shares must be transferred between devices manually via Export/Import.</p>
+            <p data-i18n="about_desc">Miasma Web is the browser interface for the Miasma Protocol. Cryptographic work runs on your device through WebAssembly or the native Miasma backend.</p>
+            <p data-i18n="about_scope">Standalone browser mode is local-only and uses Export/Import for moving shares. When a local Miasma daemon or native mobile host is available, the same interface can publish to and retrieve from the P2P network.</p>
           </div>
         </div>
 

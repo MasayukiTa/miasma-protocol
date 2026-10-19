@@ -21,6 +21,7 @@
 pub mod control_auth;
 pub mod http_bridge;
 pub mod ipc;
+pub mod maintenance_exec;
 pub mod rate_limit;
 pub mod replication;
 pub mod self_heal;
@@ -36,7 +37,7 @@ use anyhow::{Context, Result};
 #[allow(unused_imports)]
 use libp2p::PeerId;
 use tokio::{net::TcpListener, sync::mpsc, task::JoinHandle, time::Duration};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 use zeroize::Zeroizing;
 
 use crate::{
@@ -135,6 +136,13 @@ pub struct DaemonServer {
     shadowsocks_configured: bool,
     /// Whether Tor is configured.
     tor_configured: bool,
+    /// Optional traffic-shaping profile above individual transports.
+    traffic_shape_policy: crate::cover_traffic::TrafficShapePolicy,
+    /// Optional low-rate cover traffic policy. The task itself starts in run()
+    /// so shutdown has a single owner and can await it before the node exits.
+    cover_traffic_config: crate::cover_traffic::CoverTrafficConfig,
+    /// Live cover counters shared with status surfaces.
+    cover_traffic_metrics: Arc<crate::cover_traffic::CoverTrafficMetrics>,
     /// Control-channel token and wipe-challenge state.
     control_auth: Arc<control_auth::ControlAuth>,
     // Single-consumer resources moved into run():
@@ -196,6 +204,18 @@ impl DaemonServer {
         let parsed_obfs_probe_secret = transport_config
             .parsed_obfuscated_quic_secret()
             .map_err(anyhow::Error::msg)?;
+        if let Some(reason) = transport_config.traffic_shape_policy.unsupported_reason() {
+            anyhow::bail!(
+                "traffic shaping policy '{}' is not supported in this release: {}. Supported policies: {}",
+                transport_config.traffic_shape_policy,
+                reason,
+                crate::cover_traffic::TrafficShapePolicy::supported()
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
         let preflight_obfs_config = if transport_config.obfuscated_quic_enabled {
             let probe_secret = parsed_obfs_probe_secret
                 .as_ref()
@@ -225,12 +245,12 @@ impl DaemonServer {
             if master_bytes.len() != 32 {
                 anyhow::bail!("{} has wrong length", master_key_path.display());
             }
-            let mut master_key = zeroize::Zeroizing::new([0u8; 32]);
-            master_key.copy_from_slice(&master_bytes);
-            if master_key.iter().all(|byte| *byte == 0) {
+            // Derive straight from the one zeroizing read buffer; no second
+            // copy of the root key is made here.
+            if master_bytes.iter().all(|byte| *byte == 0) {
                 anyhow::bail!("{} is erased/all-zero", master_key_path.display());
             }
-            let secret = crate::crypto::keyderive::derive_sharing_key(master_key.as_ref())
+            let secret = crate::crypto::keyderive::derive_sharing_key(master_bytes.as_slice())
                 .context("cannot derive directed-sharing key")?;
             let static_secret = x25519_dalek::StaticSecret::from(*secret);
             let pubkey = x25519_dalek::PublicKey::from(&static_secret);
@@ -501,6 +521,7 @@ impl DaemonServer {
         let rate_limiter = Arc::new(Mutex::new(rate_limit::RateLimiter::default()));
         let health_monitor = Arc::new(Mutex::new(ConnectionHealthMonitor::default()));
         let env_snapshot = Arc::new(Mutex::new(EnvironmentSnapshot::default()));
+        let cover_traffic_metrics = Arc::new(crate::cover_traffic::CoverTrafficMetrics::default());
 
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
@@ -525,6 +546,8 @@ impl DaemonServer {
                 env_snapshot: env_snapshot.clone(),
                 shadowsocks_configured,
                 tor_configured,
+                traffic_shape_policy: transport_config.traffic_shape_policy,
+                cover_traffic_metrics: cover_traffic_metrics.clone(),
                 daemon_shutdown_tx: shutdown_tx.clone(),
                 control_auth: control_auth.clone(),
             },
@@ -577,6 +600,9 @@ impl DaemonServer {
             env_snapshot,
             shadowsocks_configured,
             tor_configured,
+            traffic_shape_policy: transport_config.traffic_shape_policy,
+            cover_traffic_config: transport_config.cover_traffic.clone(),
+            cover_traffic_metrics,
             listener: Some(listener),
             rep_success_rx: Some(rep_rx),
             topology_rx: Some(topo_rx),
@@ -668,6 +694,49 @@ impl DaemonServer {
         let store = self.store.clone();
         let listen_addrs = self.listen_addrs.clone();
 
+        // Let front ends that only know the data directory (the UniFFI layer)
+        // find this node for RAM-only receives. Removed again on shutdown and
+        // at the start of a wipe.
+        // Every such receive is registered with the store's wipe gate, so a
+        // wipe cancels it and waits for it like any other gated operation.
+        crate::transfer::stream_host::register_gated_host(
+            &self.data_dir,
+            coord.clone(),
+            store.wipe_gate_handle(),
+        );
+
+        // Cover traffic rides inside the real encrypted onion request protocol.
+        // Best-effort try_send ensures it can never backpressure application work.
+        let cover_config = crate::cover_traffic::effective_cover_config(
+            self.traffic_shape_policy,
+            &self.cover_traffic_config,
+        );
+        let cover_engine = if cover_config.enabled {
+            let dht = coord.dht_handle().clone();
+            let metrics = self.cover_traffic_metrics.clone();
+            info!(
+                policy = %self.traffic_shape_policy,
+                rate_bytes_per_sec = cover_config.rate_bytes_per_sec,
+                daily_budget_bytes = cover_config.daily_budget_bytes,
+                "cover traffic enabled"
+            );
+            Some(
+                crate::cover_traffic::CoverTrafficEngine::start_with_metrics(
+                    cover_config,
+                    metrics,
+                    move |packet| {
+                        let accepted = dht.try_send_cover(packet);
+                        if !accepted {
+                            trace!("cover packet dropped before network queue");
+                        }
+                        accepted
+                    },
+                ),
+            )
+        } else {
+            None
+        };
+
         // ── IPC server task ───────────────────────────────────────────────────
         let ipc_coord = coord.clone();
         let ipc_queue = queue.clone();
@@ -687,6 +756,8 @@ impl DaemonServer {
             env_snapshot: self.env_snapshot.clone(),
             shadowsocks_configured: self.shadowsocks_configured,
             tor_configured: self.tor_configured,
+            traffic_shape_policy: self.traffic_shape_policy,
+            cover_traffic_metrics: self.cover_traffic_metrics.clone(),
             daemon_shutdown_tx: self.shutdown_tx.clone(),
             control_auth: self.control_auth.clone(),
         };
@@ -732,10 +803,17 @@ impl DaemonServer {
             environment_detector_loop(env_coord, env_snapshot).await;
         });
 
+        // ── Autonomous piece maintenance ──────────────────────────────────────
+        let maintenance =
+            maintenance_exec::start(coord.clone(), store.clone(), queue.clone(), &self.data_dir);
+
         // ── Wait for shutdown ─────────────────────────────────────────────────
         shutdown_rx.recv().await;
         info!("daemon shutdown signal received");
 
+        // First: no new probes or pushes once shutdown (or a wipe) has begun.
+        maintenance.stop().await;
+        crate::transfer::stream_host::unregister_host(&self.data_dir);
         ipc_handle.abort();
         rep_handle.abort();
         env_handle.abort();
@@ -751,6 +829,9 @@ impl DaemonServer {
             let _ = handle.await;
         }
 
+        if let Some(engine) = cover_engine {
+            engine.stop().await;
+        }
         if self.iroh_enabled {
             stop_iroh(&self.data_dir).await;
         }
@@ -1006,6 +1087,8 @@ pub struct BridgeLiveState {
     pub env_snapshot: Arc<Mutex<EnvironmentSnapshot>>,
     pub shadowsocks_configured: bool,
     pub tor_configured: bool,
+    pub traffic_shape_policy: crate::cover_traffic::TrafficShapePolicy,
+    pub cover_traffic_metrics: Arc<crate::cover_traffic::CoverTrafficMetrics>,
     /// Outer daemon lifecycle signal. A successful distress wipe uses this to
     /// terminate IPC/HTTP/network tasks so master-derived identity material in
     /// the libp2p swarm is dropped as part of the wipe boundary.
@@ -1052,7 +1135,52 @@ fn refresh_in_use_shares(
     store.set_in_use_shares(set);
 }
 
-pub(crate) async fn process_request(
+/// Handle one control request.
+///
+/// The request future is large (every request kind is an arm of one state
+/// machine), and an un-optimised build reserves stack in the caller for each
+/// future it awaits. This entry point therefore returns a boxed future built
+/// inside this small function, so a caller (the HTTP router awaits one of
+/// these per route) keeps a pointer on its stack instead of the whole state
+/// machine, and the polling frames of the router and the connection task stay
+/// small.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn process_request(
+    req: ControlRequest,
+    coord: Arc<MiasmaCoordinator>,
+    queue: Arc<Mutex<ReplicationQueue>>,
+    store: Arc<LocalShareStore>,
+    listen_addrs: Vec<String>,
+    wss_port: u16,
+    wss_tls_enabled: bool,
+    proxy_configured: bool,
+    proxy_type: Option<String>,
+    obfs_quic_port: u16,
+    sharing_secret: SharingSecretState,
+    sharing_pubkey: [u8; 32],
+    data_dir: PathBuf,
+    bridge_state: BridgeLiveState,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ControlResponse> + Send>> {
+    Box::pin(process_request_inner(
+        req,
+        coord,
+        queue,
+        store,
+        listen_addrs,
+        wss_port,
+        wss_tls_enabled,
+        proxy_configured,
+        proxy_type,
+        obfs_quic_port,
+        sharing_secret,
+        sharing_pubkey,
+        data_dir,
+        bridge_state,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn process_request_inner(
     req: ControlRequest,
     coord: Arc<MiasmaCoordinator>,
     queue: Arc<Mutex<ReplicationQueue>>,
@@ -1079,15 +1207,17 @@ pub(crate) async fn process_request(
                 data_shards: data_shards as usize,
                 total_shards: total_shards as usize,
             };
-            match publish_content(
-                data.as_slice(),
-                params,
-                &coord,
-                &queue,
-                &store,
-                &listen_addrs,
-            )
-            .await
+            match store
+                .wipe_gate()
+                .run_result(publish_content(
+                    data.as_slice(),
+                    params,
+                    &coord,
+                    &queue,
+                    &store,
+                    &listen_addrs,
+                ))
+                .await
             {
                 Ok(mid) => ControlResponse::Published { mid },
                 Err(e) => ControlResponse::Error(e.to_string()),
@@ -1104,7 +1234,15 @@ pub(crate) async fn process_request(
                 total_shards: total_shards as usize,
             };
             let path = std::path::Path::new(&file_path);
-            match coord.dissolve_and_publish_file(path, params).await {
+            let gate = store.wipe_gate();
+            match gate
+                .run_result(async {
+                    // Test hold point; returns at once outside tests.
+                    gate.stall_point().await;
+                    coord.dissolve_and_publish_file(path, params).await
+                })
+                .await
+            {
                 Ok(mid) => ControlResponse::Published {
                     mid: mid.to_string(),
                 },
@@ -1314,7 +1452,11 @@ pub(crate) async fn process_request(
                 total_shards: total_shards as usize,
             };
             match crate::crypto::hash::ContentId::from_str(&mid) {
-                Ok(content_id) => match coord.retrieve_from_network(&content_id, params).await {
+                Ok(content_id) => match store
+                    .wipe_gate()
+                    .run_result(coord.retrieve_from_network(&content_id, params))
+                    .await
+                {
                     Ok(data) => ControlResponse::Retrieved { data },
                     Err(e) => ControlResponse::Error(e.to_string()),
                 },
@@ -1332,22 +1474,65 @@ pub(crate) async fn process_request(
                 data_shards: data_shards as usize,
                 total_shards: total_shards as usize,
             };
+            // Registered so a wipe waits for (and cancels) this receive; the
+            // partial plaintext file is removed by the error path below.
+            let wipe_gate = store.wipe_gate();
+            let _wipe_op = match wipe_gate.enter() {
+                Ok(guard) => guard,
+                Err(e) => return ControlResponse::Error(e.to_string()),
+            };
             match crate::crypto::hash::ContentId::from_str(&mid) {
                 Ok(content_id) => {
-                    match coord
-                        .retrieve_from_network_streaming(&content_id, params)
-                        .await
-                    {
+                    // The record lookup is cancellable too: a wipe must not
+                    // wait for the network before the output file is refused.
+                    let opened = tokio::select! {
+                        biased;
+                        _ = wipe_gate.cancelled() => {
+                            Err(crate::wipe::WipeInProgress.into())
+                        }
+                        r = coord.retrieve_from_network_streaming(&content_id, params) => r,
+                    };
+                    match opened {
                         Ok(mut stream) => {
                             use futures::StreamExt;
                             use tokio::io::AsyncWriteExt;
 
+                            if wipe_gate.is_wiping() {
+                                return ControlResponse::Error(
+                                    "wipe in progress; receive cancelled".into(),
+                                );
+                            }
                             match tokio::fs::File::create(&output_path).await {
                                 Ok(mut file) => {
                                     let mut bytes_written: u64 = 0;
                                     let mut write_err: Option<String> = None;
                                     let mut content_hasher = blake3::Hasher::new();
-                                    while let Some(chunk) = stream.next().await {
+                                    // Test hold point: the output file exists
+                                    // but no data has been written yet.
+                                    tokio::select! {
+                                        biased;
+                                        _ = wipe_gate.cancelled() => {
+                                            write_err = Some(
+                                                "wipe in progress; receive cancelled".into(),
+                                            );
+                                        }
+                                        _ = wipe_gate.stall_point() => {}
+                                    }
+                                    loop {
+                                        if write_err.is_some() {
+                                            break;
+                                        }
+                                        let next = tokio::select! {
+                                            biased;
+                                            _ = wipe_gate.cancelled() => {
+                                                write_err = Some(
+                                                    "wipe in progress; receive cancelled".into(),
+                                                );
+                                                break;
+                                            }
+                                            next = stream.next() => next,
+                                        };
+                                        let Some(chunk) = next else { break };
                                         match chunk {
                                             Ok(bytes) => {
                                                 content_hasher.update(&bytes);
@@ -1515,6 +1700,7 @@ pub(crate) async fn process_request(
             let ret_stats = coord.retrieval_stats();
             let reconn_metrics = coord.reconnection_metrics().await.unwrap_or_default();
             let dir_relay = coord.directed_relay_stats().await.unwrap_or_default();
+            let cover_metrics = bridge_state.cover_traffic_metrics.snapshot();
 
             ControlResponse::Status(DaemonStatus {
                 iroh: iroh_status_for(&data_dir),
@@ -1651,6 +1837,12 @@ pub(crate) async fn process_request(
                 // Censorship resistance
                 shadowsocks_configured: bridge_state.shadowsocks_configured,
                 tor_configured: bridge_state.tor_configured,
+                traffic_shape_policy: bridge_state.traffic_shape_policy.to_string(),
+                cover_packets_generated: cover_metrics.generated_packets,
+                cover_packets_enqueued: cover_metrics.enqueued_packets,
+                cover_packets_dropped: cover_metrics.dropped_packets,
+                cover_estimated_enqueued_bytes: cover_metrics.estimated_enqueued_bytes,
+                cover_budget_pauses: cover_metrics.budget_pauses,
                 // Network environment — from live snapshot
                 network_environment: {
                     let env = bridge_state.env_snapshot.lock().unwrap();
@@ -1674,6 +1866,14 @@ pub(crate) async fn process_request(
                 reconnection_failures: reconn_metrics.failures,
                 reconnection_circuit_breaker_trips: reconn_metrics.circuit_breaker_trips,
                 reconnection_recovery_actions: reconn_metrics.recovery_actions_triggered,
+                key_memory_lock: store
+                    .key_memory_status()
+                    .map(|(lock, _)| lock.as_str().to_string())
+                    .unwrap_or_else(|| "wiped".to_string()),
+                key_memory_dump_excluded: store
+                    .key_memory_status()
+                    .map(|(_, dump)| dump)
+                    .unwrap_or(false),
             })
         }
 
@@ -1691,10 +1891,35 @@ pub(crate) async fn process_request(
                     "wipe not confirmed: missing, expired or wrong confirmation nonce".into(),
                 );
             }
-            // Wipe store key material first, then take the exclusive directed-key
-            // lock. The write lock waits for every in-flight send/retrieve read
-            // guard before Zeroizing the final shared secret copy.
+            // Order: quiesce (refuse new work, cancel in-flight publish, file
+            // receive and RAM-only receive streams (all registered with the
+            // gate) and the piece maintenance executor, then wait for the gated
+            // operations to be dropped) -> zeroize + crypto-erase the store
+            // key -> erase state keys -> take the exclusive directed-key lock
+            // -> shutdown.
+            store.begin_wipe();
+            // Background piece maintenance is not a gated operation; stop it
+            // before anything is erased so it cannot probe or push with a key
+            // that is being destroyed.
+            maintenance_exec::cancel_for(&data_dir);
+            // No new RAM-only receive may find this node from now on.
+            crate::transfer::stream_host::unregister_host(&data_dir);
+            if !store
+                .wipe_gate()
+                .drained(std::time::Duration::from_secs(5))
+                .await
+            {
+                warn!("wipe: some in-flight operations did not stop within 5s; erasing anyway");
+            }
+            // Transfer journals and partial receive files are written by
+            // background jobs (now stopped); remove them while the key that
+            // can still name them is available.
+            crate::transfer::jobs::registry_for(&data_dir).wipe_artifacts();
             let store_result = store.distress_wipe();
+            // Other components still hold derived state keys; erase them in
+            // place so no later seal/open can use them.
+            let erased_keys = crate::state_crypto::erase_state_keys(&data_dir);
+            info!("wipe: erased {erased_keys} in-memory state key(s)");
             let mut directed_key = sharing_secret.write().await;
             *directed_key = None;
             // Once key erasure starts, the runtime must not remain alive even
@@ -1762,20 +1987,22 @@ pub(crate) async fn process_request(
                     "directed sharing unavailable after distress wipe".into(),
                 );
             };
-            match process_directed_send(
-                &**secret,
-                &recipient_contact,
-                data.as_slice(),
-                password.as_str(),
-                retention_secs,
-                filename,
-                &coord,
-                &queue,
-                &store,
-                &listen_addrs,
-                &data_dir,
-            )
-            .await
+            match store
+                .wipe_gate()
+                .run_result(process_directed_send(
+                    secret,
+                    &recipient_contact,
+                    data.as_slice(),
+                    password.as_str(),
+                    retention_secs,
+                    filename,
+                    &coord,
+                    &queue,
+                    &store,
+                    &listen_addrs,
+                    &data_dir,
+                ))
+                .await
             {
                 Ok(envelope_id) => ControlResponse::DirectedSent { envelope_id },
                 Err(e) => ControlResponse::Error(e.to_string()),
@@ -1809,20 +2036,22 @@ pub(crate) async fn process_request(
                     "directed sharing unavailable after distress wipe".into(),
                 );
             };
-            match process_directed_send(
-                &**secret,
-                &recipient_contact,
-                data.as_slice(),
-                password.as_str(),
-                retention_secs,
-                fname,
-                &coord,
-                &queue,
-                &store,
-                &listen_addrs,
-                &data_dir,
-            )
-            .await
+            match store
+                .wipe_gate()
+                .run_result(process_directed_send(
+                    secret,
+                    &recipient_contact,
+                    data.as_slice(),
+                    password.as_str(),
+                    retention_secs,
+                    fname,
+                    &coord,
+                    &queue,
+                    &store,
+                    &listen_addrs,
+                    &data_dir,
+                ))
+                .await
             {
                 Ok(envelope_id) => ControlResponse::DirectedSent { envelope_id },
                 Err(e) => ControlResponse::Error(e.to_string()),
@@ -1859,14 +2088,16 @@ pub(crate) async fn process_request(
                     "directed sharing unavailable after distress wipe".into(),
                 );
             };
-            match process_directed_retrieve(
-                &**secret,
-                &envelope_id,
-                password.as_str(),
-                &coord,
-                &data_dir,
-            )
-            .await
+            match store
+                .wipe_gate()
+                .run_result(process_directed_retrieve(
+                    secret,
+                    &envelope_id,
+                    password.as_str(),
+                    &coord,
+                    &data_dir,
+                ))
+                .await
             {
                 Ok((data, filename)) => ControlResponse::DirectedRetrieved { data, filename },
                 Err(e) => ControlResponse::Error(e.to_string()),
@@ -1885,29 +2116,32 @@ pub(crate) async fn process_request(
                     "directed sharing unavailable after distress wipe".into(),
                 );
             };
-            match process_directed_retrieve(
-                &**secret,
-                &envelope_id,
-                password.as_str(),
-                &coord,
-                &data_dir,
-            )
-            .await
-            {
-                Ok((data, filename)) => {
+            // Retrieve and write are one registered operation, so a wipe that
+            // lands between "decrypted in memory" and "file written" cancels
+            // the write instead of waiting for it, and removes any output.
+            let gate = store.wipe_gate();
+            match gate
+                .run_result(async {
+                    let (data, filename) = process_directed_retrieve(
+                        secret,
+                        &envelope_id,
+                        password.as_str(),
+                        &coord,
+                        &data_dir,
+                    )
+                    .await?;
                     let data = Zeroizing::new(data);
-                    // Write decrypted content to the requested output path.
-                    match std::fs::write(&output_path, data.as_slice()) {
-                        Ok(_) => ControlResponse::DirectedRetrievedToFile {
-                            output_path,
-                            filename,
-                            bytes_written: data.len() as u64,
-                        },
-                        Err(e) => {
-                            ControlResponse::Error(format!("cannot write to {output_path}: {e}"))
-                        }
-                    }
-                }
+                    gate.write_output(std::path::Path::new(&output_path), data.as_slice())
+                        .await?;
+                    Ok((data.len() as u64, filename))
+                })
+                .await
+            {
+                Ok((bytes_written, filename)) => ControlResponse::DirectedRetrievedToFile {
+                    output_path,
+                    filename,
+                    bytes_written,
+                },
                 Err(e) => ControlResponse::Error(e.to_string()),
             }
         }

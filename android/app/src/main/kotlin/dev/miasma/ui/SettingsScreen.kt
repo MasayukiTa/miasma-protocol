@@ -44,6 +44,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import android.content.Intent
 import dev.miasma.MiasmaService
+import dev.miasma.BuildConfig
 import dev.miasma.Prefs
 import dev.miasma.WebBridgeActivity
 import kotlinx.coroutines.launch
@@ -194,8 +195,9 @@ fun SettingsScreen() {
                 Prefs.setBandwidthMbDay(context, bMb)
                 Prefs.setBootstrapPeers(context, peers)
 
-                MiasmaService.stopNode(context)
-                MiasmaService.startNode(context, context.filesDir.absolutePath, sMb, bMb)
+                // A changed request restarts the running service in-place. Avoid a
+                // stop/start race where onDestroy() could tear down the new daemon.
+                MiasmaService.startNode(context, context.filesDir.absolutePath, sMb, bMb, peers)
 
                 scope.launch {
                     snackbarHostState.showSnackbar("Settings saved — daemon restarted")
@@ -253,7 +255,7 @@ fun SettingsScreen() {
                 }
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "Miasma v0.3.1 Beta\n" +
+                    "Miasma v${BuildConfig.VERSION_NAME} Beta\n" +
                     "Plausibly-deniable distributed storage protocol\n" +
                     "AGPL-3.0 License",
                     style = MaterialTheme.typography.bodySmall,

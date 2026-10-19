@@ -161,6 +161,9 @@ impl libp2p::request_response::Codec for OnionRelayCodec {
 
 /// Result of processing an onion relay request at a relay node.
 pub enum OnionRelayAction {
+    /// Authenticated one-hop cover cell. Discard locally and do not touch the
+    /// DHT, share store, or forwarding plane.
+    DiscardCover,
     /// Forward the inner layer to the next hop (R1 → R2).
     ForwardToNext {
         next_hop_peer_id: Vec<u8>,
@@ -192,6 +195,17 @@ pub fn process_onion_layer(
     use crate::onion::packet::OnionLayerProcessor;
 
     let payload = OnionLayerProcessor::peel(relay_static_secret, layer)?;
+
+    // A cover cell uses the exact encrypted Packet envelope of a real first hop.
+    // Its marker is visible only after successful AEAD authentication. A genuine
+    // target-addressed e2e layer may also have no next_hop, but always carries a
+    // response return key, so it cannot be confused with this one-hop discard.
+    if payload.next_hop.is_none()
+        && payload.return_key.is_none()
+        && crate::cover_traffic::is_cover_payload(&payload.data)
+    {
+        return Ok(OnionRelayAction::DiscardCover);
+    }
 
     let next_hop = payload
         .next_hop
@@ -419,5 +433,16 @@ mod tests {
         assert!(e2e_payload.next_hop.is_none()); // final destination
         assert_eq!(e2e_payload.data, body);
         assert_eq!(e2e_payload.return_key, Some(*session_key));
+    }
+
+    #[test]
+    fn authenticated_cover_packet_discards_after_one_hop() {
+        let (relay_secret, relay_public) = make_keypair();
+        let mut payload = vec![crate::cover_traffic::COVER_TAG; 513];
+        payload[1] = 7;
+        let packet =
+            crate::onion::packet::OnionPacketBuilder::build_cover(&relay_public, payload).unwrap();
+        let action = process_onion_layer(&relay_secret, packet.circuit_id, &packet.layer).unwrap();
+        assert!(matches!(action, OnionRelayAction::DiscardCover));
     }
 }

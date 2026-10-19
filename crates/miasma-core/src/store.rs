@@ -33,6 +33,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::{
+    secure_memory::SecureKeyVault,
     share::MiasmaShare,
     state_crypto::{self, Label, StateError, StateKeys},
     MiasmaError,
@@ -341,7 +342,7 @@ fn atomic_write(path: &Path, data: &[u8]) -> Result<(), MiasmaError> {
 ///
 /// The master key is used to derive per-file XChaCha20-Poly1305 keys via HKDF.
 /// Deleting this file instantly renders all stored shares unreadable (distress wipe).
-fn load_or_create_master_key(data_dir: &Path) -> Result<Zeroizing<[u8; 32]>, MiasmaError> {
+fn load_or_create_master_key(data_dir: &Path) -> Result<SecureKeyVault, MiasmaError> {
     let key_path = data_dir.join(MASTER_KEY_FILE);
     if key_path.exists() {
         let bytes = Zeroizing::new(std::fs::read(&key_path)?);
@@ -357,7 +358,7 @@ fn load_or_create_master_key(data_dir: &Path) -> Result<Zeroizing<[u8; 32]>, Mia
                 "master.key is erased/all-zero; refusing known key material".into(),
             ));
         }
-        Ok(arr)
+        Ok(SecureKeyVault::from_slice(&arr))
     } else {
         let mut arr = Zeroizing::new([0u8; 32]);
         rand::RngCore::fill_bytes(&mut OsRng, arr.as_mut());
@@ -373,7 +374,7 @@ fn load_or_create_master_key(data_dir: &Path) -> Result<Zeroizing<[u8; 32]>, Mia
             ))
         })?;
 
-        Ok(arr)
+        Ok(SecureKeyVault::from_slice(&arr))
     }
 }
 
@@ -517,7 +518,7 @@ pub struct LocalShareStore {
     /// In-memory master key. `None` means distress wipe has completed for this
     /// process. Key-dependent operations hold this lock until completion so a
     /// completed wipe cannot race with an in-flight decrypt/write.
-    master_key: std::sync::Mutex<Option<Zeroizing<[u8; 32]>>>,
+    master_key: std::sync::Mutex<Option<SecureKeyVault>>,
     /// Quota in bytes for `Owned` shares (produced by this node's own
     /// dissolutions).
     quota_bytes: u64,
@@ -543,6 +544,8 @@ pub struct LocalShareStore {
     /// active transfer). The daemon refreshes this before listing or deleting;
     /// an empty set means nothing is known to be in use.
     in_use: std::sync::Mutex<HashSet<String>>,
+    /// Quiesce switch for the wipe sequence; see [`crate::wipe`].
+    wipe_gate: std::sync::Arc<crate::wipe::WipeGate>,
 }
 
 impl LocalShareStore {
@@ -584,6 +587,7 @@ impl LocalShareStore {
             write_lock: std::sync::Mutex::new(()),
             index_cache: std::sync::Mutex::new(None),
             in_use: std::sync::Mutex::new(HashSet::new()),
+            wipe_gate: std::sync::Arc::new(crate::wipe::WipeGate::new()),
         })
     }
 
@@ -630,18 +634,46 @@ impl LocalShareStore {
         self.hosted_quota_bytes
     }
 
+    /// The quiesce gate shared with the daemon's wipe sequence.
+    pub fn wipe_gate(&self) -> &crate::wipe::WipeGate {
+        &self.wipe_gate
+    }
+
+    /// A shared handle to the same gate, for components that outlive a borrow
+    /// of the store (for example the RAM-only receive host).
+    pub fn wipe_gate_handle(&self) -> std::sync::Arc<crate::wipe::WipeGate> {
+        self.wipe_gate.clone()
+    }
+
+    /// Start the wipe sequence: refuse new gated work and cancel running
+    /// gated work. Does not touch the key; call [`distress_wipe`](Self::distress_wipe)
+    /// afterwards (optionally after `wipe_gate().drained(..)`).
+    pub fn begin_wipe(&self) {
+        self.wipe_gate.begin_wipe();
+    }
+
+    /// Page-lock outcome and dump-exclusion flag of the in-memory root key,
+    /// or `None` once the key has been wiped. Both are best-effort hardening
+    /// reports, not guarantees.
+    pub fn key_memory_status(&self) -> Option<(crate::secure_memory::MemoryLockStatus, bool)> {
+        let guard = self.master_key.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .as_ref()
+            .map(|v| (v.lock_status(), v.dump_exclusion_requested()))
+    }
+
     fn lock_master_key(
         &self,
-    ) -> Result<std::sync::MutexGuard<'_, Option<Zeroizing<[u8; 32]>>>, MiasmaError> {
+    ) -> Result<std::sync::MutexGuard<'_, Option<SecureKeyVault>>, MiasmaError> {
         self.master_key
             .lock()
             .map_err(|_| MiasmaError::Storage("master key lock poisoned".into()))
     }
 
-    fn live_master_key(guard: &Option<Zeroizing<[u8; 32]>>) -> Result<&[u8; 32], MiasmaError> {
+    fn live_master_key(guard: &Option<SecureKeyVault>) -> Result<&[u8; 32], MiasmaError> {
         guard
             .as_ref()
-            .map(|key| &**key)
+            .map(SecureKeyVault::key)
             .ok_or_else(|| MiasmaError::Storage("store has been distress-wiped".into()))
     }
 
@@ -667,8 +699,8 @@ impl LocalShareStore {
         let address = Self::address_of(share)?;
         let file_path = self.share_path(&address);
 
-        // Serialize share to plaintext bytes.
-        let plaintext = share.to_bytes()?;
+        // Serialize share to plaintext bytes (cleared when dropped).
+        let plaintext = Zeroizing::new(share.to_bytes()?);
         let size = plaintext.len() as u64;
 
         // Ensure quota.
@@ -755,7 +787,7 @@ impl LocalShareStore {
         let address = Self::address_of(share)?;
         let file_path = self.share_path(&address);
 
-        let plaintext = share.to_bytes()?;
+        let plaintext = Zeroizing::new(share.to_bytes()?);
         let size = plaintext.len() as u64;
 
         let mut index = load_index(&self.data_dir);
@@ -876,7 +908,7 @@ impl LocalShareStore {
         let blob = std::fs::read(&file_path)?;
 
         let file_key = derive_file_key(master_key, address)?;
-        let plaintext = decrypt_share(&file_key, &blob)?;
+        let plaintext = Zeroizing::new(decrypt_share(&file_key, &blob)?);
         MiasmaShare::from_bytes(&plaintext)
     }
 
@@ -1186,26 +1218,46 @@ impl LocalShareStore {
     ///
     /// Returns `Ok(())` on success.
     pub fn distress_wipe(&self) -> Result<(), MiasmaError> {
+        // 1. Quiesce: refuse new async work and cancel running work that
+        //    registered with the gate. (Idempotent; a daemon that wants to
+        //    wait for that work calls `begin_wipe` + `wipe_gate().drained`
+        //    first.)
+        self.wipe_gate.begin_wipe();
+
         // Serialize against writers. Readers serialize on the master-key lock;
         // waiting for it here guarantees no pre-wipe decrypt remains in flight
         // when this method returns.
-        let _write_guard = self
-            .write_lock
-            .lock()
-            .map_err(|_| MiasmaError::Storage("store write lock poisoned".into()))?;
-        let mut master_guard = self.lock_master_key()?;
+        //
+        // A lock poisoned by an earlier panic must not stop the wipe: the data
+        // behind it is exactly what has to be erased, so take the guard anyway.
+        let _write_guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut master_guard = self.master_key.lock().unwrap_or_else(|e| e.into_inner());
 
-        // Dropping `Zeroizing` immediately erases the in-process key. Even if
-        // disk cleanup fails, this store instance remains fail-closed.
+        // 2. Zeroize the vault while its storage is still owned, then drop it.
+        //    Even if disk cleanup fails, this store instance stays fail-closed.
+        if let Some(vault) = master_guard.as_mut() {
+            vault.zeroize_in_place();
+        }
         *master_guard = None;
+        // Plaintext buffers kept for reuse go the same way (the quiesce step
+        // already emptied the pool; this catches anything handed back since).
+        self.wipe_gate.wipe_plaintext_pool();
+
+        // 3. Crypto-erase: the on-disk key is overwritten and removed. This is
+        //    a logical erase; it does not promise that earlier storage blocks
+        //    (for example on an SSD) are physically overwritten.
 
         let mut cleanup_errors = Vec::new();
         let key_path = self.data_dir.join(MASTER_KEY_FILE);
         if key_path.exists() {
+            // Both steps are always attempted: a failed overwrite (a locked or
+            // read-only file) must not leave the real key on disk when it can
+            // still be removed.
             let zeros = vec![0u8; 32];
             if let Err(e) = atomic_write(&key_path, &zeros) {
                 cleanup_errors.push(format!("erase master.key: {e}"));
-            } else if let Err(e) = std::fs::remove_file(&key_path) {
+            }
+            if let Err(e) = std::fs::remove_file(&key_path) {
                 cleanup_errors.push(format!("remove erased master.key: {e}"));
             }
         }
@@ -1457,6 +1509,264 @@ mod tests {
             store.put(&dummy_share(23)).is_err(),
             "same process must not write after wipe"
         );
+    }
+
+    fn walk_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for entry in rd.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    walk_files(&p, out);
+                } else {
+                    out.push(p);
+                }
+            }
+        }
+    }
+
+    fn contains_subslice(hay: &[u8], needle: &[u8]) -> bool {
+        hay.windows(needle.len()).any(|w| w == needle)
+    }
+
+    #[test]
+    fn no_root_key_operation_succeeds_after_wipe() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100)
+            .unwrap()
+            .with_hosted_quota_mb(50);
+        let share = dummy_share(40);
+        let addr = store.put(&share).unwrap();
+        assert!(store.key_memory_status().is_some());
+
+        store.distress_wipe().unwrap();
+
+        assert!(store.key_memory_status().is_none(), "no live vault");
+        assert!(store.put(&dummy_share(41)).is_err());
+        assert!(store.put_hosted(&dummy_share(42)).is_err());
+        assert!(store.put_hosted_by(&dummy_share(43), "peer-a").is_err());
+        assert!(store.get(&addr).is_err());
+        assert!(store.get_untouched(&addr).is_err());
+        assert!(store.search_by_mid_prefix(&share.mid_prefix).is_empty());
+        assert!(
+            !dir.path().join(MASTER_KEY_FILE).exists(),
+            "no operation may recreate the key after a wipe"
+        );
+        // A second wipe is harmless and stays fail-closed.
+        let _ = store.distress_wipe();
+        assert!(store.get(&addr).is_err());
+    }
+
+    #[test]
+    fn wipe_concurrent_with_puts_leaves_no_temp_or_plaintext() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(LocalShareStore::open(dir.path(), 100).unwrap());
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut workers = Vec::new();
+        for t in 0..4u16 {
+            let store = store.clone();
+            let stop = stop.clone();
+            workers.push(std::thread::spawn(move || {
+                let mut ok_after_stop = 0usize;
+                for i in 0..400u16 {
+                    let was_stopped = stop.load(std::sync::atomic::Ordering::SeqCst);
+                    let r = store.put(&dummy_share(t * 400 + i));
+                    if was_stopped && r.is_ok() {
+                        ok_after_stop += 1;
+                    }
+                }
+                ok_after_stop
+            }));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        store.distress_wipe().unwrap();
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let late_ok: usize = workers.into_iter().map(|h| h.join().unwrap()).sum();
+        assert_eq!(late_ok, 0, "a put that began after the wipe must fail");
+        assert!(store.put(&dummy_share(9000)).is_err());
+
+        let mut files = Vec::new();
+        walk_files(dir.path(), &mut files);
+        let marker = [0xAAu8; 32];
+        for f in &files {
+            let name = f.file_name().unwrap().to_string_lossy().to_lowercase();
+            assert!(!name.contains("tmp"), "leftover temp file: {name}");
+            let bytes = std::fs::read(f).unwrap();
+            assert!(
+                !contains_subslice(&bytes, &marker),
+                "plaintext share bytes found in {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn wipe_concurrent_with_vault_reads_never_yields_wrong_data() {
+        // Each round: readers hammer `get_untouched` while the wipe runs.
+        // Every successful read must return exactly the stored share (never
+        // bytes derived from a half-erased or freed key), and once the wipe
+        // has returned every read must fail.
+        for _round in 0..10 {
+            let dir = tempfile::tempdir().unwrap();
+            let store = std::sync::Arc::new(LocalShareStore::open(dir.path(), 100).unwrap());
+            let share = dummy_share(7);
+            let expected = share.to_bytes().unwrap();
+            let addr = store.put(&share).unwrap();
+            let wiped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+            let mut readers = Vec::new();
+            for _ in 0..6 {
+                let store = store.clone();
+                let addr = addr.clone();
+                let expected = expected.clone();
+                let wiped = wiped.clone();
+                readers.push(std::thread::spawn(move || {
+                    for _ in 0..300 {
+                        let after = wiped.load(std::sync::atomic::Ordering::SeqCst);
+                        if let Ok(s) = store.get_untouched(&addr) {
+                            assert!(!after, "read succeeded after wipe returned");
+                            assert_eq!(s.to_bytes().unwrap(), expected);
+                        }
+                    }
+                }));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            store.distress_wipe().unwrap();
+            wiped.store(true, std::sync::atomic::Ordering::SeqCst);
+            for r in readers {
+                r.join().unwrap();
+            }
+            assert!(store.get_untouched(&addr).is_err());
+        }
+    }
+
+    /// Removes its file when dropped, like a receive/publish scratch file.
+    struct ScratchFile(PathBuf);
+    impl Drop for ScratchFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn in_flight_operations_are_cancelled_before_the_key_is_erased() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(LocalShareStore::open(dir.path(), 100).unwrap());
+        let scratch_path = dir.path().join("in-flight-plaintext.scratch");
+        let started = std::sync::Arc::new(tokio::sync::Notify::new());
+
+        let op = {
+            let store = store.clone();
+            let scratch_path = scratch_path.clone();
+            let started = started.clone();
+            tokio::spawn(async move {
+                store
+                    .wipe_gate()
+                    .run_result(async {
+                        // Receive-like: plaintext lands in a scratch file that
+                        // must not outlive the operation.
+                        std::fs::write(&scratch_path, [0xAAu8; 64])?;
+                        let _scratch = ScratchFile(scratch_path.clone());
+                        started.notify_one();
+                        // Publish-like: keep storing shares until cancelled.
+                        for i in 0..=u16::MAX {
+                            store.put(&dummy_share(i))?;
+                            tokio::task::yield_now().await;
+                        }
+                        Ok::<(), MiasmaError>(())
+                    })
+                    .await
+            })
+        };
+        started.notified().await;
+        assert!(scratch_path.exists());
+
+        // Quiesce first.
+        store.begin_wipe();
+        assert!(
+            store
+                .wipe_gate()
+                .drained(std::time::Duration::from_secs(10))
+                .await
+        );
+        // The operation has been dropped, and the key has not been erased yet.
+        assert!(
+            store.key_memory_status().is_some(),
+            "the key must still be present when work is cancelled"
+        );
+        assert!(dir.path().join(MASTER_KEY_FILE).exists());
+        assert!(!scratch_path.exists(), "scratch plaintext must be gone");
+        assert!(op.await.unwrap().is_err());
+        // New gated work is refused from now on.
+        assert!(store.wipe_gate().enter().is_err());
+
+        // Then zeroize and erase.
+        store.distress_wipe().unwrap();
+        assert!(store.key_memory_status().is_none());
+        assert!(!dir.path().join(MASTER_KEY_FILE).exists());
+        let mut files = Vec::new();
+        walk_files(dir.path(), &mut files);
+        for f in files {
+            let name = f.file_name().unwrap().to_string_lossy().to_lowercase();
+            assert!(!name.contains("tmp") && !name.contains("scratch"), "{name}");
+        }
+    }
+
+    /// Poison a std mutex by panicking while its guard is held.
+    fn poison<T: Send>(m: &std::sync::Mutex<T>) {
+        std::thread::scope(|s| {
+            let h = s.spawn(|| {
+                let _g = m.lock().unwrap();
+                panic!("poison the lock on purpose");
+            });
+            assert!(h.join().is_err());
+        });
+        assert!(m.is_poisoned());
+    }
+
+    #[test]
+    fn distress_wipe_still_erases_when_both_locks_are_poisoned() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        assert!(dir.path().join(MASTER_KEY_FILE).exists());
+        poison(&store.write_lock);
+        poison(&store.master_key);
+
+        store
+            .distress_wipe()
+            .expect("a poisoned lock must not stop the wipe");
+        assert!(store.key_memory_status().is_none(), "vault is gone");
+        assert!(
+            !dir.path().join(MASTER_KEY_FILE).exists(),
+            "master.key must be removed"
+        );
+    }
+
+    #[test]
+    fn distress_wipe_removes_the_key_file_even_if_the_overwrite_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        let key_path = dir.path().join(MASTER_KEY_FILE);
+        // A directory where the overwrite wants its temporary file makes the
+        // zero-overwrite fail.
+        std::fs::create_dir(crate::paths::atomic_tmp(&key_path)).unwrap();
+
+        let err = store.distress_wipe().unwrap_err();
+        assert!(err.to_string().contains("erase master.key"), "{err}");
+        assert!(store.key_memory_status().is_none());
+        assert!(
+            !key_path.exists(),
+            "the key file must be removed although the overwrite failed"
+        );
+    }
+
+    #[test]
+    fn key_memory_status_reports_best_effort_state_without_claiming_a_guarantee() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalShareStore::open(dir.path(), 100).unwrap();
+        let (lock, _dump) = store.key_memory_status().expect("live key");
+        assert!(matches!(
+            lock.as_str(),
+            "lock_request_accepted" | "lock_request_denied" | "unsupported"
+        ));
     }
 
     #[test]

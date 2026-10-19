@@ -45,7 +45,7 @@ use crate::{
     pipeline::{dissolve, DissolutionParams},
     retrieval::{
         coordinator::RetrievalCoordinator, dht_source::DhtShareSource,
-        transport_source::FallbackShareSource,
+        transport_source::FallbackShareSource, FetchPolicy,
     },
     share::MiasmaShare,
     store::LocalShareStore,
@@ -752,6 +752,11 @@ impl MiasmaCoordinator {
         &self.store
     }
 
+    /// The share-exchange handle, for background piece maintenance probes.
+    pub fn share_exchange_handle(&self) -> &ShareExchangeHandle {
+        &self.share_handle
+    }
+
     /// This node's PeerId bytes, as announced in `ShardLocation`s.
     pub(crate) fn local_peer_bytes(&self) -> Vec<u8> {
         self.peer_id.to_bytes()
@@ -995,6 +1000,24 @@ impl MiasmaCoordinator {
         mid: &ContentId,
         params: DissolutionParams,
     ) -> Result<Vec<u8>, MiasmaError> {
+        self.retrieve_from_network_with_fetch_policy(
+            mid,
+            params,
+            FetchPolicy::for_anonymity(AnonymityPolicy::Direct),
+        )
+        .await
+    }
+
+    /// `retrieve_from_network` with an explicit holder-fetch overlap policy.
+    /// Callers derive it from the anonymity policy in force with
+    /// [`FetchPolicy::for_anonymity`], so a retrieval that must not overlap
+    /// requests never hedges.
+    async fn retrieve_from_network_with_fetch_policy(
+        &self,
+        mid: &ContentId,
+        params: DissolutionParams,
+        fetch_policy: FetchPolicy,
+    ) -> Result<Vec<u8>, MiasmaError> {
         // Phase 2.2: retry on InsufficientShares -- the record may not have
         // propagated to this node's view of the DHT yet, or a shard-holder may
         // not be reachable on the first attempt. Reuses the same backoff engine
@@ -1011,7 +1034,10 @@ impl MiasmaCoordinator {
         };
         let mut attempt: u32 = 0;
         loop {
-            match self.retrieve_from_network_once(mid, params).await {
+            match self
+                .retrieve_from_network_once(mid, params, fetch_policy)
+                .await
+            {
                 Ok(data) => return Ok(data),
                 Err(MiasmaError::InsufficientShares { need, got })
                     if attempt < policy.max_attempts =>
@@ -1045,10 +1071,11 @@ impl MiasmaCoordinator {
         &self,
         mid: &ContentId,
         params: DissolutionParams,
+        fetch_policy: FetchPolicy,
     ) -> Result<Vec<u8>, MiasmaError> {
         let dht_exec = DirectDhtExecutor::new(self.dht_handle.clone());
         let source = FallbackShareSource::new(dht_exec, self.transport_selector.clone());
-        let coord = RetrievalCoordinator::new(source);
+        let coord = RetrievalCoordinator::with_fetch_policy(source, fetch_policy);
 
         // Determine segment count from DHT record.
         let max_seg = {
@@ -1106,13 +1133,20 @@ impl MiasmaCoordinator {
         params: DissolutionParams,
     ) -> Result<
         std::pin::Pin<
-            Box<dyn futures::Stream<Item = Result<Vec<u8>, MiasmaError>> + Send + 'static>,
+            Box<
+                dyn futures::Stream<Item = Result<zeroize::Zeroizing<Vec<u8>>, MiasmaError>>
+                    + Send
+                    + 'static,
+            >,
         >,
         MiasmaError,
     > {
         let dht_exec = DirectDhtExecutor::new(self.dht_handle.clone());
         let source = FallbackShareSource::new(dht_exec, self.transport_selector.clone());
-        let coord = crate::retrieval::StreamingRetrievalCoordinator::new(Arc::new(source));
+        let coord = crate::retrieval::StreamingRetrievalCoordinator::with_fetch_policy(
+            Arc::new(source),
+            FetchPolicy::direct_network(),
+        );
 
         // Determine segment count from DHT record (same lookup as
         // `retrieve_from_network_once`).
@@ -1150,7 +1184,7 @@ impl MiasmaCoordinator {
     ) -> Result<(Vec<u8>, Vec<TransportAttempt>), MiasmaError> {
         let dht_exec = DirectDhtExecutor::new(self.dht_handle.clone());
         let source = FallbackShareSource::new(dht_exec, self.transport_selector.clone());
-        let result = RetrievalCoordinator::new(source)
+        let result = RetrievalCoordinator::with_fetch_policy(source, FetchPolicy::direct_network())
             .retrieve(mid, params)
             .await;
         // Note: drain_attempts is called after retrieve, capturing all attempts.
@@ -1258,7 +1292,15 @@ impl MiasmaCoordinator {
                         }
                     }
                 }
-                let result = self.retrieve_from_network(mid, params).await;
+                // The direct fallback keeps the sequential holder order the relay
+                // attempt used: overlapping requests would link them in time.
+                let result = self
+                    .retrieve_from_network_with_fetch_policy(
+                        mid,
+                        params,
+                        FetchPolicy::for_anonymity(AnonymityPolicy::Opportunistic),
+                    )
+                    .await;
                 if result.is_ok() {
                     if let Ok(mut s) = self.retrieval_stats.lock() {
                         s.opportunistic_direct_fallbacks += 1;
@@ -1316,6 +1358,16 @@ impl MiasmaCoordinator {
         mode: &str,
         min_relay_hops: usize,
     ) -> Result<Vec<u8>, MiasmaError> {
+        // The policy the piece fetches below run under: `Required` never
+        // reaches a holder over a direct transport.
+        let policy = if mode == "required" {
+            AnonymityPolicy::Required {
+                min_hops: min_relay_hops.min(u8::MAX as usize) as u8,
+            }
+        } else {
+            AnonymityPolicy::Opportunistic
+        };
+
         // Pre-retrieval: probe stale relay candidates to improve path decisions.
         self.probe_stale_relay_candidates().await;
 
@@ -1395,7 +1447,7 @@ impl MiasmaCoordinator {
                                     "routing via rendezvous introduction points"
                                 );
                                 match self
-                                    .retrieve_via_rendezvous(mid, params, intro_points)
+                                    .retrieve_via_rendezvous(mid, params, intro_points, policy)
                                     .await
                                 {
                                     Ok(data) => {
@@ -1455,7 +1507,8 @@ impl MiasmaCoordinator {
             relay_peer_id: *relay_peer_id,
             relay_addr: relay_addr.clone(),
         };
-        let source = FallbackShareSource::new(relay_exec, self.transport_selector.clone());
+        let source = FallbackShareSource::new(relay_exec, self.transport_selector.clone())
+            .with_policy(policy);
         let result = RetrievalCoordinator::new(source)
             .retrieve(mid, params)
             .await;
@@ -2100,6 +2153,7 @@ impl MiasmaCoordinator {
         mid: &ContentId,
         params: DissolutionParams,
         intro_pseudonyms: &[[u8; 32]],
+        policy: AnonymityPolicy,
     ) -> Result<Vec<u8>, MiasmaError> {
         if let Ok(mut s) = self.retrieval_stats.lock() {
             s.rendezvous_attempts += 1;
@@ -2138,7 +2192,8 @@ impl MiasmaCoordinator {
                 relay_peer_id: intro.peer_id,
                 relay_addr,
             };
-            let source = FallbackShareSource::new(relay_exec, self.transport_selector.clone());
+            let source = FallbackShareSource::new(relay_exec, self.transport_selector.clone())
+                .with_policy(policy);
             match RetrievalCoordinator::new(source)
                 .retrieve(mid, params)
                 .await

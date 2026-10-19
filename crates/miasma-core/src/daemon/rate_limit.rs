@@ -76,17 +76,23 @@ pub enum RateLimitClass {
     ReadApi,
     /// Write/mutation API calls (publish, send, confirm, revoke).
     WriteApi,
-    /// Heavyweight operations (retrieve, wipe).
+    /// Heavyweight operations (retrieve, file transfers).
     HeavyApi,
+    /// The distress wipe. Never rate limited, so it cannot be refused because
+    /// of earlier traffic; the request still has to carry the control token
+    /// (that check runs before the limiter) and a wipe needs a fresh
+    /// confirmation nonce.
+    Emergency,
 }
 
 /// Default rate limits per class (requests per minute).
 impl RateLimitClass {
     pub fn default_rpm(self) -> u32 {
         match self {
-            Self::ReadApi => 120, // 2/sec
-            Self::WriteApi => 30, // 0.5/sec
-            Self::HeavyApi => 10, // ~1 per 6 sec
+            Self::ReadApi => 120,        // 2/sec
+            Self::WriteApi => 30,        // 0.5/sec
+            Self::HeavyApi => 10,        // ~1 per 6 sec
+            Self::Emergency => u32::MAX, // not limited
         }
     }
 }
@@ -120,6 +126,9 @@ impl Default for RateLimiter {
 impl RateLimiter {
     /// Check if a request of the given class is allowed.
     pub fn check(&mut self, class: RateLimitClass) -> bool {
+        if class == RateLimitClass::Emergency {
+            return true;
+        }
         if let Some(bucket) = self.buckets.get_mut(&class) {
             if bucket.try_consume() {
                 true
@@ -188,9 +197,16 @@ pub fn classify_endpoint(method: &str, path: &str) -> RateLimitClass {
         }
 
         // Heavyweight
-        ("POST", "/api/retrieve") | ("POST", "/api/directed/retrieve") | ("POST", "/api/wipe") => {
-            RateLimitClass::HeavyApi
-        }
+        ("POST", "/api/retrieve")
+        | ("POST", "/api/retrieve-to-file")
+        | ("POST", "/api/publish-file")
+        | ("POST", "/api/directed/retrieve")
+        | ("POST", "/api/directed/retrieve-to-file")
+        | ("POST", "/api/directed/send-file") => RateLimitClass::HeavyApi,
+
+        // The wipe has its own, unlimited class: file operations must not be
+        // able to use up its allowance.
+        ("POST", "/api/wipe") => RateLimitClass::Emergency,
 
         // All other POST endpoints are write operations
         _ => RateLimitClass::WriteApi,
@@ -367,9 +383,36 @@ mod tests {
             RateLimitClass::HeavyApi
         );
         assert_eq!(
-            classify_endpoint("POST", "/api/wipe"),
+            classify_endpoint("POST", "/api/directed/send-file"),
             RateLimitClass::HeavyApi
         );
+        assert_eq!(
+            classify_endpoint("POST", "/api/directed/retrieve-to-file"),
+            RateLimitClass::HeavyApi
+        );
+        assert_eq!(
+            classify_endpoint("POST", "/api/publish-file"),
+            RateLimitClass::HeavyApi
+        );
+        assert_eq!(
+            classify_endpoint("POST", "/api/retrieve-to-file"),
+            RateLimitClass::HeavyApi
+        );
+    }
+
+    #[test]
+    fn the_wipe_is_never_limited_even_after_heavy_traffic() {
+        let mut rl = RateLimiter::default();
+        let heavy = classify_endpoint("POST", "/api/retrieve-to-file");
+        for _ in 0..50 {
+            rl.check(heavy);
+        }
+        assert!(!rl.check(heavy), "file operations are limited");
+        let wipe = classify_endpoint("POST", "/api/wipe");
+        assert_eq!(wipe, RateLimitClass::Emergency);
+        for _ in 0..100 {
+            assert!(rl.check(wipe));
+        }
     }
 
     #[test]

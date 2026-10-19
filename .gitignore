@@ -14,3 +14,14 @@
 /docs/security/
 /docs/research/
 /validation-output/
+
+# Android generated files and local signing material
+/android/.gradle/
+/android/.cxx/
+/android/app/.cxx/
+/android/app/build/
+/android/app/src/main/jniLibs/
+/android/local.properties
+/android/keystore.properties
+*.jks
+*.keystore

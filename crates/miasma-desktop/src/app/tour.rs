@@ -375,6 +375,7 @@ impl Tour {
         let out = PathBuf::from(std::env::var_os("MIASMA_UI_TOUR")?);
         let _ = std::fs::create_dir_all(&out);
         let mut steps = Vec::new();
+        let easy_store_tour = std::env::var_os("MIASMA_UI_TOUR_EASY").is_some();
         let tabs = [
             (Tab::Contacts, "contacts"),
             (Tab::Store, "store"),
@@ -398,6 +399,21 @@ impl Tour {
         });
         for (theme, tname) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
             for (locale, lname) in [(Locale::En, "en"), (Locale::Ja, "ja")] {
+                if easy_store_tour {
+                    for (tab, name) in [(Tab::Home, "home"), (Tab::Files, "files")] {
+                        steps.push(Step {
+                            name: format!("{tname}_{lname}_{name}"),
+                            theme,
+                            locale,
+                            tab,
+                            daemon: Some(DaemonState::Connected),
+                            transfers: None,
+                            contacts: None,
+                            chat: None,
+                            size: None,
+                        });
+                    }
+                }
                 for (tab, name) in tabs {
                     steps.push(Step {
                         name: format!("{tname}_{lname}_{name}"),

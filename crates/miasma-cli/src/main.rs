@@ -1567,6 +1567,30 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
                 }
             }
 
+            // Root-key memory protection (best-effort hardening, not a guarantee)
+            if !s.key_memory_lock.is_empty() {
+                println!();
+                println!("Key Memory (best effort, not a guarantee):");
+                let lock_text = match s.key_memory_lock.as_str() {
+                    "lock_request_accepted" => "page-lock request accepted by the OS",
+                    "lock_request_denied" => "page-lock request DENIED (key may be pageable)",
+                    "unsupported" => {
+                        "page locking unsupported on this target (key may be pageable)"
+                    }
+                    "wiped" => "key wiped",
+                    other => other,
+                };
+                println!("  Page lock:             {lock_text}");
+                println!(
+                    "  Core-dump exclusion:   {}",
+                    if s.key_memory_dump_excluded {
+                        "requested and accepted"
+                    } else {
+                        "not in effect"
+                    }
+                );
+            }
+
             // Connection health
             println!();
             println!("Connection Health:");

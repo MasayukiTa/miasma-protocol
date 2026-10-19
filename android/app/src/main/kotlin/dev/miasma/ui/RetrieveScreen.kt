@@ -1,8 +1,8 @@
 package dev.miasma.ui
 
-import android.content.Intent
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -20,7 +20,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.QrCodeScanner
-import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -32,35 +31,107 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import dev.miasma.MiasmaViewModel
-import dev.miasma.ui.theme.MiasmaColors
+import dev.miasma.R
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 fun RetrieveScreen(vm: MiasmaViewModel) {
-    val ui by vm.ui.collectAsState()
+    val daemonPort by vm.daemonHttpPort.collectAsState()
     val context = LocalContext.current
     val clipboardManager = LocalClipboardManager.current
+    val scope = rememberCoroutineScope()
+
     var midInput by remember { mutableStateOf("") }
+    var isRetrieving by remember { mutableStateOf(false) }
+    var retrieveError by remember { mutableStateOf<String?>(null) }
+    var retrieveResult by remember { mutableStateOf<String?>(null) }
+
+    val invalidMidText = stringResource(R.string.retrieve_invalid_mid)
+    val destinationOpenFailedText = stringResource(R.string.destination_open_failed)
+    val saveFailedText = stringResource(R.string.save_retrieved_failed)
+    val defaultFilename = stringResource(R.string.retrieved_file_default)
+    val scanPrompt = stringResource(R.string.retrieve_scan_prompt)
+
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            cleanupOldStagingFiles(context.cacheDir, "miasma-retrieve-mid")
+        }
+    }
 
     val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
         result.contents?.let { scanned ->
-            if (scanned.startsWith("miasma:") && scanned.length <= 60) {
+            if (isValidMidInput(scanned)) {
                 midInput = scanned
             } else {
-                Toast.makeText(context, "Invalid Miasma content ID", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, invalidMidText, Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    val saveLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream"),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val mid = midInput.trim()
+        if (!isValidMidInput(mid)) {
+            Toast.makeText(context, invalidMidText, Toast.LENGTH_SHORT).show()
+            return@rememberLauncherForActivityResult
+        }
+
+        val temp = newPrivateTempFile(context, "miasma-retrieve-mid")
+        isRetrieving = true
+        retrieveError = null
+        retrieveResult = null
+        vm.retrieveMidToFile(mid, temp.absolutePath) { result, error ->
+            if (error != null || result == null) {
+                temp.delete()
+                try {
+                    context.contentResolver.delete(uri, null, null)
+                } catch (_: Exception) {
+                    // The provider may leave an empty document; retrieval still failed safely.
+                }
+                isRetrieving = false
+                retrieveError = error ?: context.getString(R.string.retrieve_failed)
+            } else {
+                scope.launch {
+                    try {
+                        withContext(Dispatchers.IO) {
+                            copyFileToUri(context, temp, uri, destinationOpenFailedText)
+                        }
+                        retrieveResult = context.getString(
+                            R.string.saved_size,
+                            formatStagedFileSize(result.bytesWritten),
+                        )
+                    } catch (e: Exception) {
+                        retrieveError = e.message ?: saveFailedText
+                        try {
+                            context.contentResolver.delete(uri, null, null)
+                        } catch (_: Exception) {
+                            // The provider may not support delete. Keep the original error.
+                        }
+                    } finally {
+                        temp.delete()
+                        isRetrieving = false
+                    }
+                }
             }
         }
     }
@@ -71,47 +142,67 @@ fun RetrieveScreen(vm: MiasmaViewModel) {
             .verticalScroll(rememberScrollState())
             .padding(20.dp),
     ) {
-        Text("Get Content Back", style = MaterialTheme.typography.headlineMedium)
+        Text(stringResource(R.string.retrieve_title), style = MaterialTheme.typography.headlineMedium)
         Spacer(Modifier.height(4.dp))
         Text(
-            "Enter a Content ID to retrieve your content",
+            stringResource(R.string.retrieve_description),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(20.dp))
 
-        // ── Input card ──
+        if (daemonPort == 0) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+            ) {
+                Text(
+                    stringResource(R.string.retrieve_daemon_unavailable),
+                    modifier = Modifier.padding(16.dp),
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                )
+            }
+            Spacer(Modifier.height(12.dp))
+        }
+
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(12.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surface,
-            ),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
-                    "Content ID",
+                    stringResource(R.string.retrieve_content_id),
                     style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.primary,
                 )
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
                     value = midInput,
-                    onValueChange = { midInput = it },
+                    onValueChange = {
+                        midInput = it
+                        retrieveError = null
+                        retrieveResult = null
+                    },
                     placeholder = { Text("miasma:...") },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true,
                     shape = RoundedCornerShape(8.dp),
                     trailingIcon = {
-                        // Paste from clipboard
-                        IconButton(onClick = {
-                            clipboardManager.getText()?.text?.let {
-                                if (it.startsWith("miasma:")) midInput = it
-                            }
-                        }) {
+                        IconButton(
+                            onClick = {
+                                clipboardManager.getText()?.text?.let { text ->
+                                    if (isValidMidInput(text)) {
+                                        midInput = text
+                                    } else {
+                                        Toast.makeText(context, invalidMidText, Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            },
+                        ) {
                             Icon(
                                 Icons.Outlined.ContentCopy,
-                                contentDescription = "Paste",
+                                contentDescription = stringResource(R.string.retrieve_paste),
                                 modifier = Modifier.size(20.dp),
                             )
                         }
@@ -127,19 +218,21 @@ fun RetrieveScreen(vm: MiasmaViewModel) {
                     Button(
                         onClick = {
                             val mid = midInput.trim()
-                            if (mid.startsWith("miasma:")) {
-                                vm.retrieve(mid)
+                            if (isValidMidInput(mid)) {
+                                retrieveError = null
+                                retrieveResult = null
+                                saveLauncher.launch(defaultFilename)
                             } else {
-                                Toast.makeText(context, "MID must start with 'miasma:'", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, invalidMidText, Toast.LENGTH_SHORT).show()
                             }
                         },
-                        enabled = midInput.isNotBlank() && !ui.isLoading,
+                        enabled = daemonPort > 0 && midInput.isNotBlank() && !isRetrieving,
                         modifier = Modifier.weight(1f),
                         shape = RoundedCornerShape(8.dp),
                     ) {
                         Icon(Icons.Outlined.Download, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
-                        Text("Retrieve")
+                        Text(stringResource(R.string.retrieve_save_to_device))
                     }
 
                     FilledTonalButton(
@@ -147,23 +240,23 @@ fun RetrieveScreen(vm: MiasmaViewModel) {
                             scanLauncher.launch(
                                 ScanOptions().apply {
                                     setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                                    setPrompt("Scan Miasma Content ID")
+                                    setPrompt(scanPrompt)
                                     setBeepEnabled(false)
-                                }
+                                },
                             )
                         },
+                        enabled = !isRetrieving,
                         shape = RoundedCornerShape(8.dp),
                     ) {
                         Icon(Icons.Outlined.QrCodeScanner, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(4.dp))
-                        Text("Scan")
+                        Text(stringResource(R.string.retrieve_scan))
                     }
                 }
             }
         }
 
-        // ── Loading ──
-        if (ui.isLoading) {
+        if (isRetrieving) {
             Spacer(Modifier.height(24.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -172,12 +265,11 @@ fun RetrieveScreen(vm: MiasmaViewModel) {
             ) {
                 CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
                 Spacer(Modifier.width(12.dp))
-                Text("Retrieving...", style = MaterialTheme.typography.bodyMedium)
+                Text(stringResource(R.string.retrieve_in_progress), style = MaterialTheme.typography.bodyMedium)
             }
         }
 
-        // ── Error ──
-        ui.error?.let { err ->
+        retrieveError?.let { error ->
             Spacer(Modifier.height(16.dp))
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -187,7 +279,7 @@ fun RetrieveScreen(vm: MiasmaViewModel) {
                 shape = RoundedCornerShape(8.dp),
             ) {
                 Text(
-                    err,
+                    error,
                     modifier = Modifier.padding(12.dp),
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodySmall,
@@ -195,105 +287,25 @@ fun RetrieveScreen(vm: MiasmaViewModel) {
             }
         }
 
-        // ── Result card ──
-        ui.retrievedBytes?.let { bytes ->
-            Spacer(Modifier.height(20.dp))
+        retrieveResult?.let { result ->
+            Spacer(Modifier.height(16.dp))
             Card(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MiasmaColors.AccentGlow,
-                ),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+                shape = RoundedCornerShape(8.dp),
             ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            "Retrieved",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MiasmaColors.Green,
-                        )
-                        Text(
-                            formatSize(bytes.size.toLong()),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-
-                    // Preview text content if decodable
-                    val textContent = try {
-                        val text = bytes.toString(Charsets.UTF_8)
-                        if (text.any { it < ' ' && it != '\n' && it != '\r' && it != '\t' }) null
-                        else text
-                    } catch (_: Exception) { null }
-
-                    if (textContent != null) {
-                        Spacer(Modifier.height(12.dp))
-                        Card(
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(8.dp),
-                            colors = CardDefaults.cardColors(
-                                containerColor = MaterialTheme.colorScheme.surface,
-                            ),
-                        ) {
-                            Text(
-                                text = if (textContent.length > 500) textContent.take(500) + "..." else textContent,
-                                modifier = Modifier.padding(12.dp),
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                        }
-                    }
-
-                    Spacer(Modifier.height(12.dp))
-
-                    // Action buttons
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        if (textContent != null) {
-                            FilledTonalButton(
-                                onClick = {
-                                    clipboardManager.setText(AnnotatedString(textContent))
-                                    Toast.makeText(context, "Content copied", Toast.LENGTH_SHORT).show()
-                                },
-                                modifier = Modifier.weight(1f),
-                                shape = RoundedCornerShape(8.dp),
-                            ) {
-                                Icon(Icons.Outlined.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(Modifier.width(4.dp))
-                                Text("Copy")
-                            }
-                        }
-
-                        Button(
-                            onClick = {
-                                val shareText = textContent ?: "[${bytes.size} bytes binary data]"
-                                val sendIntent = Intent(Intent.ACTION_SEND).apply {
-                                    type = "text/plain"
-                                    putExtra(Intent.EXTRA_TEXT, shareText)
-                                }
-                                context.startActivity(Intent.createChooser(sendIntent, "Share content"))
-                            },
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(8.dp),
-                        ) {
-                            Icon(Icons.Outlined.Share, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("Share")
-                        }
-                    }
-                }
+                Text(
+                    result,
+                    modifier = Modifier.padding(12.dp),
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
             }
         }
     }
 }
 
-private fun formatSize(bytes: Long): String = when {
-    bytes >= 1024 * 1024 -> "${"%.1f".format(bytes / 1048576.0)} MiB"
-    bytes >= 1024 -> "${"%.1f".format(bytes / 1024.0)} KiB"
-    else -> "$bytes bytes"
+private fun isValidMidInput(value: String): Boolean {
+    val trimmed = value.trim()
+    return trimmed.startsWith("miasma:") && trimmed.length in 8..128
 }

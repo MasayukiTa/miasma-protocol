@@ -41,8 +41,10 @@ fn pal() -> Palette {
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum Tab {
+    Home,
     Contacts,
     Chat,
+    Files,
     Transfers,
     Store,
     Retrieve,
@@ -359,9 +361,9 @@ enum RevokeSide {
 
 use crate::ux::MsgLevel as MsgKind;
 
-/// The tabs of the navigation bar, left to right. The Import tab is last and shows only while an
-/// import is active.
-const NAV_TABS: [Tab; 11] = [
+/// Detailed navigation used by Technical mode. Import stays last because it is only shown
+/// while an import is active.
+const TECH_NAV_TABS: [Tab; 11] = [
     Tab::Contacts,
     Tab::Chat,
     Tab::Transfers,
@@ -375,14 +377,43 @@ const NAV_TABS: [Tab; 11] = [
     Tab::Import,
 ];
 
-/// The first tab of the navigation bar: where a normal launch starts.
-const FIRST_TAB: Tab = NAV_TABS[0];
+/// Store-facing navigation used by Easy mode. Internal file states stay separate but are
+/// grouped under Files so a new user does not need to learn protocol structure first.
+const EASY_NAV_TABS: [Tab; 5] = [
+    Tab::Home,
+    Tab::Chat,
+    Tab::Files,
+    Tab::Contacts,
+    Tab::Settings,
+];
 
-/// The tab shown when the window opens. A normal launch starts on the first tab in the
-/// navigation; opening a magnet link or a torrent file goes straight to the Import tab.
-fn initial_tab(intent: &LaunchIntent) -> Tab {
+fn is_file_tab(tab: Tab) -> bool {
+    matches!(
+        tab,
+        Tab::Files
+            | Tab::Transfers
+            | Tab::Store
+            | Tab::Retrieve
+            | Tab::Send
+            | Tab::Inbox
+            | Tab::Outbox
+            | Tab::Import
+    )
+}
+
+fn easy_nav_selected(current: Tab, item: Tab) -> bool {
+    match item {
+        Tab::Files => is_file_tab(current),
+        _ => current == item,
+    }
+}
+
+/// Easy mode starts on a task-oriented Home screen; Technical mode keeps Contacts first.
+/// External magnet/torrent launches still open Import directly in either mode.
+fn initial_tab(intent: &LaunchIntent, mode: ProductMode) -> Tab {
     match intent {
-        LaunchIntent::Normal => FIRST_TAB,
+        LaunchIntent::Normal if mode.is_easy() => Tab::Home,
+        LaunchIntent::Normal => Tab::Contacts,
         LaunchIntent::Magnet(_) | LaunchIntent::TorrentFile(_) => Tab::Import,
     }
 }
@@ -402,7 +433,7 @@ impl MiasmaApp {
         let worker = WorkerHandle::spawn(data_dir.clone(), cc.egui_ctx.clone());
 
         // If launched with a magnet/torrent intent, go to Import tab.
-        let first_tab = initial_tab(&intent);
+        let first_tab = initial_tab(&intent, mode);
         let (import_intent, import_state) = match &intent {
             LaunchIntent::Normal => (None, ImportState::Idle),
             LaunchIntent::Magnet(_) | LaunchIntent::TorrentFile(_) => {
@@ -1211,6 +1242,94 @@ impl MiasmaApp {
     }
 
     // ── Store panel ──────────────────────────────────────────────────────
+
+    // ── Easy-mode Home / Files ────────────────────────────────────────
+
+    fn home_panel(&mut self, ui: &mut egui::Ui) {
+        let s = self.s();
+        let connected = self.daemon_state == DaemonState::Connected;
+        let peers = self.peer_count;
+        let shares = self.share_count;
+        let storage = if self.quota_mb > 0 {
+            format!("{:.0}%", (self.used_mb / self.quota_mb as f64) * 100.0)
+        } else {
+            s.dashboard_no_data.to_owned()
+        };
+
+        kit::page(ui, s.home_heading_easy, Some(s.home_desc_easy), |ui| {
+            kit::section(ui, s.dashboard_quick_status, |ui| {
+                let (level, state) = match self.daemon_state {
+                    DaemonState::Connected => (Level::Ok, s.status_ready),
+                    DaemonState::Starting => (Level::Info, s.starting),
+                    DaemonState::Stopped => (Level::Error, s.offline),
+                    DaemonState::NeedsInit => (Level::Warn, s.setup_needed),
+                };
+                kit::status_dot(ui, level, state);
+                kit::stats(
+                    ui,
+                    &[
+                        (s.dashboard_storage_label, storage, Level::Muted),
+                        (
+                            s.dashboard_peers_label,
+                            peers.to_string(),
+                            if peers > 0 { Level::Ok } else { Level::Warn },
+                        ),
+                        (s.status_items_stored, shares.to_string(), Level::Muted),
+                    ],
+                );
+            });
+
+            ui.add_space(kit::SP_3);
+            kit::surface(ui, |ui| {
+                if kit::primary(ui, connected, s.home_send_action).clicked() {
+                    self.tab = Tab::Send;
+                }
+                ui.add_space(kit::SP_1);
+                if ui
+                    .add_enabled(connected, kit::secondary_button(s.home_receive_action))
+                    .clicked()
+                {
+                    self.tab = Tab::Inbox;
+                }
+                ui.add_space(kit::SP_1);
+                if ui
+                    .add_enabled(connected, kit::secondary_button(s.home_save_action))
+                    .clicked()
+                {
+                    self.tab = Tab::Store;
+                }
+            });
+        });
+    }
+
+    fn files_panel(&mut self, ui: &mut egui::Ui) {
+        let s = self.s();
+        let connected = self.daemon_state == DaemonState::Connected;
+        let transfer_label = self.tr().tab_easy;
+
+        kit::page(ui, s.files_heading_easy, Some(s.files_desc_easy), |ui| {
+            kit::surface(ui, |ui| {
+                if kit::primary(ui, connected, s.home_send_action).clicked() {
+                    self.tab = Tab::Send;
+                }
+                for (label, tab) in [
+                    (s.home_receive_action, Tab::Inbox),
+                    (s.home_save_action, Tab::Store),
+                    (s.tab_retrieve_easy, Tab::Retrieve),
+                    (transfer_label, Tab::Transfers),
+                    (s.tab_outbox_easy, Tab::Outbox),
+                ] {
+                    ui.add_space(kit::SP_1);
+                    if ui
+                        .add_enabled(connected, kit::secondary_button(label))
+                        .clicked()
+                    {
+                        self.tab = tab;
+                    }
+                }
+            });
+        });
+    }
 
     fn store_panel(&mut self, ui: &mut egui::Ui) {
         let s = self.s();
@@ -3214,7 +3333,9 @@ impl eframe::App for MiasmaApp {
                 };
                 let label_for = |tab: Tab| -> &str {
                     match tab {
+                        Tab::Home => s.tab_home_easy,
                         Tab::Contacts => contacts_label.as_str(),
+                        Tab::Files => s.tab_files_easy,
                         Tab::Chat => chat_label.as_str(),
                         Tab::Transfers => tr_label,
                         Tab::Store => store_label,
@@ -3227,19 +3348,29 @@ impl eframe::App for MiasmaApp {
                         Tab::Import => s.tab_import,
                     }
                 };
-                // The Import tab shows only while an import is active.
-                let show_import =
-                    self.import_intent.is_some() || self.import_state != ImportState::Idle;
-                let count = if show_import {
-                    NAV_TABS.len()
-                } else {
-                    NAV_TABS.len() - 1
-                };
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
-                    for tab in &NAV_TABS[..count] {
-                        if kit::nav_tab(ui, self.tab == *tab, label_for(*tab)).clicked() {
-                            self.tab = *tab;
+                    if easy {
+                        for tab in EASY_NAV_TABS {
+                            if kit::nav_tab(ui, easy_nav_selected(self.tab, tab), label_for(tab))
+                                .clicked()
+                            {
+                                self.tab = tab;
+                            }
+                        }
+                    } else {
+                        // Import is the only conditional Technical-mode tab.
+                        let show_import =
+                            self.import_intent.is_some() || self.import_state != ImportState::Idle;
+                        let count = if show_import {
+                            TECH_NAV_TABS.len()
+                        } else {
+                            TECH_NAV_TABS.len() - 1
+                        };
+                        for tab in &TECH_NAV_TABS[..count] {
+                            if kit::nav_tab(ui, self.tab == *tab, label_for(*tab)).clicked() {
+                                self.tab = *tab;
+                            }
                         }
                     }
                 });
@@ -3359,6 +3490,7 @@ impl eframe::App for MiasmaApp {
                             // Connection state first, when not connected.
                             self.connection_header(ui);
                             match self.tab {
+                                Tab::Home => self.home_panel(ui),
                                 Tab::Contacts => {
                                     let c = locale::contact_strings(self.locale);
                                     let connected = self.daemon_state == DaemonState::Connected;
@@ -3366,6 +3498,7 @@ impl eframe::App for MiasmaApp {
                                 }
                                 // Drawn above, outside the scroll area.
                                 Tab::Chat => {}
+                                Tab::Files => self.files_panel(ui),
                                 Tab::Transfers => self.transfers_panel(ui),
                                 Tab::Store => self.store_panel(ui),
                                 Tab::Retrieve => self.retrieve_panel(ui),
@@ -3402,19 +3535,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_normal_launch_starts_on_the_first_tab_of_the_navigation() {
-        assert_eq!(initial_tab(&LaunchIntent::Normal), NAV_TABS[0]);
-        assert_eq!(initial_tab(&LaunchIntent::Normal), Tab::Contacts);
+    fn easy_normal_launch_starts_on_home() {
+        assert_eq!(
+            initial_tab(&LaunchIntent::Normal, ProductMode::Easy),
+            Tab::Home
+        );
+    }
+
+    #[test]
+    fn technical_normal_launch_keeps_contacts_first() {
+        assert_eq!(
+            initial_tab(&LaunchIntent::Normal, ProductMode::Technical),
+            Tab::Contacts
+        );
     }
 
     #[test]
     fn opening_a_magnet_or_torrent_still_goes_to_import() {
         assert_eq!(
-            initial_tab(&LaunchIntent::Magnet("magnet:?xt=urn:btih:abc".into())),
+            initial_tab(
+                &LaunchIntent::Magnet("magnet:?xt=urn:btih:abc".into()),
+                ProductMode::Easy
+            ),
             Tab::Import
         );
         assert_eq!(
-            initial_tab(&LaunchIntent::TorrentFile("a.torrent".into())),
+            initial_tab(
+                &LaunchIntent::TorrentFile("a.torrent".into()),
+                ProductMode::Technical
+            ),
             Tab::Import
         );
     }
@@ -3453,13 +3602,38 @@ mod tests {
     }
 
     #[test]
-    fn every_tab_is_in_the_navigation_exactly_once() {
-        for (i, a) in NAV_TABS.iter().enumerate() {
-            for b in &NAV_TABS[i + 1..] {
+    fn technical_navigation_is_unique_and_keeps_import_last() {
+        for (i, a) in TECH_NAV_TABS.iter().enumerate() {
+            for b in &TECH_NAV_TABS[i + 1..] {
                 assert_ne!(a, b);
             }
         }
-        // Import is the one that is hidden unless an import is active, so it stays last.
-        assert_eq!(NAV_TABS[NAV_TABS.len() - 1], Tab::Import);
+        assert_eq!(TECH_NAV_TABS[TECH_NAV_TABS.len() - 1], Tab::Import);
+    }
+
+    #[test]
+    fn easy_navigation_has_five_task_oriented_items() {
+        assert_eq!(
+            EASY_NAV_TABS,
+            [
+                Tab::Home,
+                Tab::Chat,
+                Tab::Files,
+                Tab::Contacts,
+                Tab::Settings
+            ]
+        );
+        for file_tab in [
+            Tab::Files,
+            Tab::Transfers,
+            Tab::Store,
+            Tab::Retrieve,
+            Tab::Send,
+            Tab::Inbox,
+            Tab::Outbox,
+            Tab::Import,
+        ] {
+            assert!(easy_nav_selected(file_tab, Tab::Files));
+        }
     }
 }

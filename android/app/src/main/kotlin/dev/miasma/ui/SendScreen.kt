@@ -1,23 +1,41 @@
 package dev.miasma.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import dev.miasma.MiasmaViewModel
+import dev.miasma.R
+import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SendScreen(vm: MiasmaViewModel) {
     val daemonPort by vm.daemonHttpPort.collectAsState()
     val sharingContact by vm.sharingContact.collectAsState()
+    val context = LocalContext.current
+
+    val fileTooLargeText = stringResource(R.string.send_file_too_large)
+    val fileOpenFailedText = stringResource(R.string.send_file_open_failed)
+    val fileReadFailedText = stringResource(R.string.send_file_read_failed)
+    val recipientInvalidText = stringResource(R.string.send_recipient_invalid)
 
     var recipientContact by remember { mutableStateOf("") }
     var message by remember { mutableStateOf("") }
+    var selectedFile by remember { mutableStateOf<StagedContentFile?>(null) }
+    var isStagingFile by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
     var password by remember { mutableStateOf("") }
     var retentionHours by remember { mutableStateOf("24") }
     var isSending by remember { mutableStateOf(false) }
@@ -26,13 +44,36 @@ fun SendScreen(vm: MiasmaViewModel) {
     var recipientFormatError by remember { mutableStateOf<String?>(null) }
     var retentionFallbackUsed by remember { mutableStateOf(false) }
 
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) { cleanupOldStagingFiles(context.cacheDir, "miasma-send") }
+    }
+
+    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        isStagingFile = true
+        sendError = null
+        scope.launch {
+            try {
+                val staged = withContext(Dispatchers.IO) { stageContentUri(context, uri, "miasma-send", tooLargeText = fileTooLargeText, openFailedText = fileOpenFailedText) }
+                val previous = selectedFile
+                selectedFile = staged
+                if (previous != null && previous.path != staged.path) File(previous.path).delete()
+                message = ""
+            } catch (e: Exception) {
+                sendError = e.message ?: fileReadFailedText
+            } finally {
+                isStagingFile = false
+            }
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(16.dp)
             .verticalScroll(rememberScrollState()),
     ) {
-        Text("Send", style = MaterialTheme.typography.headlineMedium)
+        Text(stringResource(R.string.send_title), style = MaterialTheme.typography.headlineMedium)
         Spacer(Modifier.height(8.dp))
 
         if (daemonPort == 0) {
@@ -41,7 +82,7 @@ fun SendScreen(vm: MiasmaViewModel) {
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
             ) {
                 Text(
-                    "Daemon not running — sending unavailable",
+                    stringResource(R.string.send_daemon_unavailable),
                     modifier = Modifier.padding(16.dp),
                     color = MaterialTheme.colorScheme.onErrorContainer,
                 )
@@ -56,7 +97,7 @@ fun SendScreen(vm: MiasmaViewModel) {
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
             ) {
                 Column(modifier = Modifier.padding(12.dp)) {
-                    Text("Your sharing contact:", style = MaterialTheme.typography.labelSmall)
+                    Text(stringResource(R.string.send_your_contact), style = MaterialTheme.typography.labelSmall)
                     Text(
                         sharingContact,
                         style = MaterialTheme.typography.bodySmall,
@@ -74,10 +115,10 @@ fun SendScreen(vm: MiasmaViewModel) {
             onValueChange = {
                 recipientContact = it
                 recipientFormatError = if (it.isNotBlank() && (!it.trimStart().startsWith("msk:") || !it.contains("@"))) {
-                    "Must start with \"msk:\" and contain \"@\" separator"
+                    recipientInvalidText
                 } else null
             },
-            label = { Text("Recipient contact (msk:…@PeerId)") },
+            label = { Text(stringResource(R.string.send_recipient_contact)) },
             singleLine = true,
             isError = recipientFormatError != null,
             modifier = Modifier.fillMaxWidth(),
@@ -96,17 +137,43 @@ fun SendScreen(vm: MiasmaViewModel) {
         OutlinedTextField(
             value = message,
             onValueChange = { message = it },
-            label = { Text("Message / content") },
+            label = { Text(stringResource(R.string.send_message_content)) },
             modifier = Modifier.fillMaxWidth().height(120.dp),
             maxLines = 6,
+            enabled = selectedFile == null && !isStagingFile,
         )
+        Spacer(Modifier.height(8.dp))
+
+        OutlinedButton(
+            onClick = { filePicker.launch("*/*") },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = !isSending && !isStagingFile,
+        ) {
+            if (isStagingFile) {
+                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                Spacer(Modifier.width(8.dp))
+            }
+            Text(stringResource(if (selectedFile == null) R.string.send_choose_file else R.string.send_change_file))
+        }
+        selectedFile?.let { file ->
+            Text(
+                stringResource(R.string.send_selected_file, file.name, formatStagedFileSize(file.size)),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+            TextButton(onClick = {
+                File(file.path).delete()
+                selectedFile = null
+            }) { Text(stringResource(R.string.send_use_text)) }
+        }
         Spacer(Modifier.height(8.dp))
 
         // Password
         OutlinedTextField(
             value = password,
             onValueChange = { password = it },
-            label = { Text("Password (shared with recipient)") },
+            label = { Text(stringResource(R.string.send_password)) },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
@@ -119,13 +186,13 @@ fun SendScreen(vm: MiasmaViewModel) {
                 retentionHours = it.filter { c -> c.isDigit() }
                 retentionFallbackUsed = false
             },
-            label = { Text("Retention (hours)") },
+            label = { Text(stringResource(R.string.send_retention_hours)) },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(0.5f),
         )
         if (retentionFallbackUsed) {
             Text(
-                "Invalid hours — defaulting to 24",
+                stringResource(R.string.send_retention_default),
                 color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.padding(start = 4.dp),
@@ -142,25 +209,44 @@ fun SendScreen(vm: MiasmaViewModel) {
                 val parsedHours = retentionHours.toLongOrNull()
                 if (parsedHours == null) retentionFallbackUsed = true
                 val retSecs = (parsedHours ?: 24) * 3600
-                vm.sendDirected(
-                    recipientContact = recipientContact.trim(),
-                    data = message.toByteArray(Charsets.UTF_8),
-                    password = password,
-                    retentionSecs = retSecs,
-                ) { envelopeId, error ->
+                val staged = selectedFile
+                val callback: (String?, String?) -> Unit = { envelopeId, error ->
                     isSending = false
                     sendResult = envelopeId
                     sendError = error
+                    if (envelopeId != null && error == null && staged != null) {
+                        File(staged.path).delete()
+                        if (selectedFile?.path == staged.path) selectedFile = null
+                    }
+                }
+                if (staged != null) {
+                    vm.sendDirectedFile(
+                        recipientContact = recipientContact.trim(),
+                        filePath = staged.path,
+                        password = password,
+                        retentionSecs = retSecs,
+                        filename = staged.name,
+                        callback = callback,
+                    )
+                } else {
+                    vm.sendDirected(
+                        recipientContact = recipientContact.trim(),
+                        data = message.toByteArray(Charsets.UTF_8),
+                        password = password,
+                        retentionSecs = retSecs,
+                        callback = callback,
+                    )
                 }
             },
-            enabled = recipientContact.isNotBlank() && recipientFormatError == null && message.isNotBlank() && password.isNotBlank() && !isSending,
+            enabled = recipientContact.isNotBlank() && recipientFormatError == null &&
+                (message.isNotBlank() || selectedFile != null) && password.isNotBlank() && !isSending && !isStagingFile,
             modifier = Modifier.fillMaxWidth(),
         ) {
             if (isSending) {
                 CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
                 Spacer(Modifier.width(8.dp))
             }
-            Text("Send Directed Share")
+            Text(stringResource(R.string.send_securely))
         }
 
         // Result
@@ -170,14 +256,14 @@ fun SendScreen(vm: MiasmaViewModel) {
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
             ) {
                 Column(modifier = Modifier.padding(12.dp)) {
-                    Text("Sent!", style = MaterialTheme.typography.labelMedium)
+                    Text(stringResource(R.string.send_sent), style = MaterialTheme.typography.labelMedium)
                     Text(
-                        "Envelope: ${sendResult!!.take(16)}…",
+                        stringResource(R.string.send_envelope, sendResult!!.take(16)),
                         style = MaterialTheme.typography.bodySmall,
                         fontFamily = FontFamily.Monospace,
                     )
                     Text(
-                        "Check Outbox to confirm when the recipient provides their challenge code.",
+                        stringResource(R.string.send_confirm_hint),
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }

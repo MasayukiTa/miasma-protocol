@@ -1,4 +1,127 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Miasma</string>
+    <string name="nav_home">Home</string>
+    <string name="nav_files">Files</string>
+    <string name="nav_status">Status</string>
+    <string name="nav_settings">Settings</string>
+
+    <string name="home_tagline">Private, resilient file sharing and storage</string>
+    <string name="home_node_active">Node active</string>
+    <string name="home_ready">Ready to send, receive, and save files</string>
+    <string name="home_getting_ready">Getting ready</string>
+    <string name="home_initializing">Save a file to initialize your node</string>
+    <string name="home_what_to_do">What would you like to do?</string>
+    <string name="home_shares">Shares</string>
+    <string name="home_peers">Peers</string>
+    <string name="home_storage">Storage</string>
+
+    <string name="action_send_file">Send a file</string>
+    <string name="action_receive_file">Receive a file</string>
+    <string name="action_save_securely">Save securely</string>
+    <string name="files_title">Files</string>
+    <string name="files_description">Send, receive, recover, and review your file activity here.</string>
+    <string name="files_inbox">Received files</string>
+    <string name="files_outbox">Sent files</string>
+    <string name="files_get_back">Get a file back</string>
+
+    <string name="version_label">Miasma v%1$s Beta</string>
+    <string name="wipe_title">Emergency Wipe</string>
+    <string name="wipe_message">Destroy the master key now?
+
+All locally stored shares become permanently unreadable. This cannot be undone.</string>
+    <string name="wipe_now">WIPE NOW</string>
+    <string name="cancel">Cancel</string>
+
+    <string name="refresh">Refresh</string>
+    <string name="send_title">Send</string>
+    <string name="send_daemon_unavailable">Node is not ready. Sending is unavailable.</string>
+    <string name="send_your_contact">Your sharing contact</string>
+    <string name="send_recipient_contact">Recipient contact (msk:…@PeerId)</string>
+    <string name="send_recipient_invalid">Contact must start with &quot;msk:&quot; and contain &quot;@&quot;.</string>
+    <string name="send_message_content">Message / content</string>
+    <string name="send_choose_file">Choose a file</string>
+    <string name="send_change_file">Change file</string>
+    <string name="send_selected_file">Selected: %1$s (%2$s)</string>
+    <string name="send_use_text">Use text instead</string>
+    <string name="send_password">Password (shared with recipient)</string>
+    <string name="send_retention_hours">Retention (hours)</string>
+    <string name="send_retention_default">Invalid hours — using 24 hours.</string>
+    <string name="send_securely">Send securely</string>
+    <string name="send_sent">Sent</string>
+    <string name="send_envelope">Envelope: %1$s…</string>
+    <string name="send_confirm_hint">When the recipient gives you a challenge code, confirm it under Sent files.</string>
+    <string name="send_file_too_large">File too large (maximum 100 MiB).</string>
+    <string name="send_file_open_failed">Could not open the selected file.</string>
+    <string name="send_file_read_failed">Could not read the selected file.</string>
+
+    <string name="inbox_title">Received files</string>
+    <string name="directed_daemon_unavailable">Node is not ready. Secure file sharing is unavailable.</string>
+    <string name="inbox_empty">No received files yet.</string>
+    <string name="inbox_from">From: %1$s…</string>
+    <string name="file_label">File: %1$s</string>
+    <string name="size_label">Size: %1$s</string>
+    <string name="challenge_share_sender">Challenge code — send this to the sender:</string>
+    <string name="password">Password</string>
+    <string name="retrieve">Retrieve</string>
+    <string name="saved_size">Saved %1$s</string>
+    <string name="retrieve_failed">Retrieve failed.</string>
+    <string name="save_retrieved_failed">Could not save the retrieved file.</string>
+    <string name="destination_open_failed">Could not open the selected destination.</string>
+    <string name="retrieved_file_default">miasma-retrieved</string>
+    <string name="content_retrieved">Content retrieved</string>
+    <string name="expired">Expired</string>
+    <string name="revoked_by_sender">Revoked by sender</string>
+    <string name="challenge_failed">Challenge failed</string>
+    <string name="password_exhausted">Password attempts exhausted</string>
+    <string name="delete">Delete</string>
+
+    <string name="outbox_title">Sent files</string>
+    <string name="outbox_empty">No sent files yet.</string>
+    <string name="outbox_to">To: %1$s…</string>
+    <string name="challenge_enter_recipient">Enter the challenge code from the recipient:</string>
+    <string name="confirm">Confirm</string>
+    <string name="confirmed">Confirmed</string>
+    <string name="confirmed_waiting">Confirmed — waiting for retrieval</string>
+    <string name="retrieved_by_recipient">Content retrieved by recipient</string>
+    <string name="revoked_by_you">You revoked this share</string>
+    <string name="deleted_by_recipient">Deleted by recipient</string>
+    <string name="revoke">Revoke</string>
+    <string name="revoke_title">Revoke this share?</string>
+    <string name="revoke_message">The recipient will no longer be able to retrieve it. This cannot be undone.</string>
+
+    <string name="status_pending">Pending</string>
+    <string name="status_waiting">Waiting</string>
+    <string name="status_challenge">Challenge</string>
+    <string name="status_confirm">Confirm</string>
+    <string name="status_confirmed">Confirmed</string>
+    <string name="status_retrieved">Retrieved</string>
+    <string name="status_expired">Expired</string>
+    <string name="status_revoked">Revoked</string>
+    <string name="status_deleted">Deleted</string>
+    <string name="status_failed">Failed</string>
+
+    <string name="retrieve_title">Get a file back</string>
+    <string name="retrieve_description">Enter a Content ID and choose where to save the recovered file.</string>
+    <string name="retrieve_daemon_unavailable">Node is not ready. Retrieval is unavailable.</string>
+    <string name="retrieve_content_id">Content ID</string>
+    <string name="retrieve_invalid_mid">Enter a valid Miasma Content ID.</string>
+    <string name="retrieve_paste">Paste Content ID</string>
+    <string name="retrieve_save_to_device">Save to device</string>
+    <string name="retrieve_scan">Scan</string>
+    <string name="retrieve_scan_prompt">Scan a Miasma Content ID</string>
+    <string name="retrieve_in_progress">Retrieving and verifying...</string>
+
+    <string name="save_title">Save content</string>
+    <string name="save_description">Encrypt and store your content securely.</string>
+    <string name="save_text_label">Text</string>
+    <string name="save_text_placeholder">Paste or type content here...</string>
+    <string name="save_text_button">Save text</string>
+    <string name="save_choose_file">Choose a file</string>
+    <string name="save_encrypting">Encrypting and publishing...</string>
+    <string name="save_content_saved">Content saved</string>
+    <string name="save_share_mid_hint">Keep this Content ID. It is required to retrieve the content.</string>
+    <string name="save_mid_copied">Content ID copied</string>
+    <string name="save_copy_mid">Copy Content ID</string>
+    <string name="save_qr_mid">QR code for Content ID</string>
 </resources>

@@ -1,7 +1,6 @@
 package dev.miasma.ui
 
 import android.graphics.Bitmap
-import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -24,7 +23,6 @@ import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.AttachFile
 import androidx.compose.material.icons.outlined.Send
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -40,6 +38,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -47,13 +46,19 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.google.zxing.BarcodeFormat
 import com.journeyapps.barcodescanner.BarcodeEncoder
 import dev.miasma.MiasmaViewModel
+import dev.miasma.R
 import dev.miasma.ui.theme.MiasmaColors
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import java.io.File
 
 @Composable
 fun DissolveScreen(vm: MiasmaViewModel) {
@@ -62,6 +67,12 @@ fun DissolveScreen(vm: MiasmaViewModel) {
     val clipboardManager = LocalClipboardManager.current
     var inputText by remember { mutableStateOf("") }
     var qrBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var isStagingFile by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val fileTooLargeText = stringResource(R.string.send_file_too_large)
+    val fileOpenFailedText = stringResource(R.string.send_file_open_failed)
+    val fileReadFailedText = stringResource(R.string.send_file_read_failed)
+    val midCopiedText = stringResource(R.string.save_mid_copied)
 
     LaunchedEffect(ui.lastMid) {
         qrBitmap = ui.lastMid?.let { mid ->
@@ -71,17 +82,38 @@ fun DissolveScreen(vm: MiasmaViewModel) {
         }
     }
 
-    val maxFileSize = 100L * 1024 * 1024 // 100 MiB
-    val filePicker = rememberLauncherForActivityResult(
-        ActivityResultContracts.GetContent()
-    ) { uri: Uri? ->
-        uri?.let {
-            val inputStream = context.contentResolver.openInputStream(it) ?: return@let
-            val bytes = inputStream.use { stream -> stream.readBytes() }
-            if (bytes.size > maxFileSize) {
-                Toast.makeText(context, "File too large (max 100 MiB)", Toast.LENGTH_LONG).show()
-            } else if (bytes.isNotEmpty()) {
-                vm.dissolve(bytes)
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) { cleanupOldStagingFiles(context.cacheDir, "miasma-save") }
+    }
+
+    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        isStagingFile = true
+        scope.launch {
+            var staged: StagedContentFile? = null
+            try {
+                val stagedFile = withContext(Dispatchers.IO) {
+                    stageContentUri(
+                        context,
+                        uri,
+                        "miasma-save",
+                        tooLargeText = fileTooLargeText,
+                        openFailedText = fileOpenFailedText,
+                    )
+                }
+                staged = stagedFile
+                val path = stagedFile.path
+                vm.dissolveFile(path) { _, error ->
+                    File(path).delete()
+                    isStagingFile = false
+                    if (error != null) {
+                        Toast.makeText(context, error, Toast.LENGTH_LONG).show()
+                    }
+                }
+            } catch (e: Exception) {
+                staged?.let { File(it.path).delete() }
+                isStagingFile = false
+                Toast.makeText(context, e.message ?: fileReadFailedText, Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -92,10 +124,10 @@ fun DissolveScreen(vm: MiasmaViewModel) {
             .verticalScroll(rememberScrollState())
             .padding(20.dp),
     ) {
-        Text("Save Content", style = MaterialTheme.typography.headlineMedium)
+        Text(stringResource(R.string.save_title), style = MaterialTheme.typography.headlineMedium)
         Spacer(Modifier.height(4.dp))
         Text(
-            "Encrypt and store your content securely",
+            stringResource(R.string.save_description),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -111,7 +143,7 @@ fun DissolveScreen(vm: MiasmaViewModel) {
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
-                    "Text",
+                    stringResource(R.string.save_text_label),
                     style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.primary,
                 )
@@ -119,7 +151,7 @@ fun DissolveScreen(vm: MiasmaViewModel) {
                 OutlinedTextField(
                     value = inputText,
                     onValueChange = { inputText = it },
-                    placeholder = { Text("Paste or type content here...") },
+                    placeholder = { Text(stringResource(R.string.save_text_placeholder)) },
                     modifier = Modifier.fillMaxWidth(),
                     minLines = 4,
                     maxLines = 8,
@@ -136,7 +168,7 @@ fun DissolveScreen(vm: MiasmaViewModel) {
                 ) {
                     Icon(Icons.Outlined.Send, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
-                    Text("Save Text")
+                    Text(stringResource(R.string.save_text_button))
                 }
             }
         }
@@ -146,17 +178,17 @@ fun DissolveScreen(vm: MiasmaViewModel) {
         // ── File picker ──
         FilledTonalButton(
             onClick = { filePicker.launch("*/*") },
-            enabled = !ui.isLoading,
+            enabled = !ui.isLoading && !isStagingFile,
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(8.dp),
         ) {
             Icon(Icons.Outlined.AttachFile, contentDescription = null, modifier = Modifier.size(18.dp))
             Spacer(Modifier.width(8.dp))
-            Text("Choose File")
+            Text(stringResource(R.string.save_choose_file))
         }
 
         // ── Loading ──
-        if (ui.isLoading) {
+        if (ui.isLoading || isStagingFile) {
             Spacer(Modifier.height(24.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -165,7 +197,7 @@ fun DissolveScreen(vm: MiasmaViewModel) {
             ) {
                 CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
                 Spacer(Modifier.width(12.dp))
-                Text("Encrypting...", style = MaterialTheme.typography.bodyMedium)
+                Text(stringResource(R.string.save_encrypting), style = MaterialTheme.typography.bodyMedium)
             }
         }
 
@@ -203,13 +235,13 @@ fun DissolveScreen(vm: MiasmaViewModel) {
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Text(
-                        "Content saved",
+                        stringResource(R.string.save_content_saved),
                         style = MaterialTheme.typography.titleMedium,
                         color = MiasmaColors.Green,
                     )
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "Share this ID to let others retrieve the content",
+                        stringResource(R.string.save_share_mid_hint),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -237,12 +269,12 @@ fun DissolveScreen(vm: MiasmaViewModel) {
                             IconButton(
                                 onClick = {
                                     clipboardManager.setText(AnnotatedString(mid))
-                                    Toast.makeText(context, "MID copied", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(context, midCopiedText, Toast.LENGTH_SHORT).show()
                                 },
                             ) {
                                 Icon(
                                     Icons.Outlined.ContentCopy,
-                                    contentDescription = "Copy MID",
+                                    contentDescription = stringResource(R.string.save_copy_mid),
                                     tint = MaterialTheme.colorScheme.primary,
                                     modifier = Modifier.size(20.dp),
                                 )
@@ -255,7 +287,7 @@ fun DissolveScreen(vm: MiasmaViewModel) {
                         Spacer(Modifier.height(16.dp))
                         Image(
                             bitmap = bmp.asImageBitmap(),
-                            contentDescription = "QR code for MID",
+                            contentDescription = stringResource(R.string.save_qr_mid),
                             modifier = Modifier
                                 .size(200.dp)
                                 .clip(RoundedCornerShape(8.dp)),

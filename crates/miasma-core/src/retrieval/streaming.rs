@@ -33,24 +33,38 @@ use crate::{
     crypto::hash::ContentId,
     dissolution::{retrieve_segment, DissolutionManifest, SegmentMeta},
     pipeline::DissolutionParams,
-    share::{MiasmaShare, ShareVerification},
     MiasmaError,
 };
 
-use super::source::ShareSource;
+use super::{
+    fetch::{collect_verified_shares, FetchPolicy},
+    source::ShareSource,
+};
 use rand::seq::SliceRandom as _;
+use zeroize::Zeroizing;
 
 /// A coordinator that yields reconstructed segments as a `Stream`.
 pub struct StreamingRetrievalCoordinator<Src> {
     source: Src,
+    fetch_policy: FetchPolicy,
 }
 
 impl<Src: ShareSource + Clone + Send + Sync + 'static> StreamingRetrievalCoordinator<Src> {
     pub fn new(source: Src) -> Self {
-        Self { source }
+        Self {
+            source,
+            fetch_policy: FetchPolicy::Sequential,
+        }
     }
 
-    /// Returns an `impl Stream<Item = Result<Vec<u8>, MiasmaError>>` where
+    pub fn with_fetch_policy(source: Src, fetch_policy: FetchPolicy) -> Self {
+        Self {
+            source,
+            fetch_policy,
+        }
+    }
+
+    /// Returns an `impl Stream<Item = Result<Zeroizing<Vec<u8>>, MiasmaError>>` where
     /// each item is one reconstructed plaintext segment in order.
     ///
     /// Segments are fetched sequentially (not concurrently) to cap RAM usage
@@ -58,11 +72,12 @@ impl<Src: ShareSource + Clone + Send + Sync + 'static> StreamingRetrievalCoordin
     pub fn retrieve_streaming(
         &self,
         manifest: DissolutionManifest,
-    ) -> Pin<Box<dyn Stream<Item = Result<Vec<u8>, MiasmaError>> + Send + '_>> {
+    ) -> Pin<Box<dyn Stream<Item = Result<Zeroizing<Vec<u8>>, MiasmaError>> + Send + '_>> {
         let source = self.source.clone();
         let params = manifest.params;
         let mid = manifest.mid.clone();
         let segments = manifest.segments.clone();
+        let fetch_policy = self.fetch_policy;
 
         let s = stream::iter(segments).then(move |meta| {
             let source = source.clone();
@@ -71,22 +86,15 @@ impl<Src: ShareSource + Clone + Send + Sync + 'static> StreamingRetrievalCoordin
                 let mut candidates = source.list_candidates_for_segment(&mid, meta.index).await;
                 candidates.shuffle(&mut rand::thread_rng());
 
-                let mut valid: Vec<MiasmaShare> = Vec::with_capacity(params.data_shards);
-
-                for addr in &candidates {
-                    if valid.len() >= params.data_shards {
-                        break;
-                    }
-                    match source.fetch(addr).await? {
-                        Some(share)
-                            if share.segment_index == meta.index
-                                && ShareVerification::coarse_verify(&share, &mid) =>
-                        {
-                            valid.push(share);
-                        }
-                        _ => {}
-                    }
-                }
+                let valid = collect_verified_shares(
+                    &source,
+                    candidates,
+                    &mid,
+                    meta.index,
+                    params.data_shards,
+                    fetch_policy,
+                )
+                .await?;
 
                 if valid.len() < params.data_shards {
                     return Err(MiasmaError::InsufficientShares {
@@ -99,7 +107,8 @@ impl<Src: ShareSource + Clone + Send + Sync + 'static> StreamingRetrievalCoordin
                 // (RS decode + SSS combine + AES decrypt).
                 // Full-file BLAKE3 verification is the caller's responsibility
                 // after all segments are assembled.
-                retrieve_segment(&mid, &valid, &meta, params)
+                // Wiped when the consumer drops the item, on every path.
+                retrieve_segment(&mid, &valid, &meta, params).map(Zeroizing::new)
             }
         });
 
@@ -128,8 +137,9 @@ impl<Src: ShareSource + Clone + Send + Sync + 'static> StreamingRetrievalCoordin
         mid: ContentId,
         segment_count: u32,
         params: DissolutionParams,
-    ) -> Pin<Box<dyn Stream<Item = Result<Vec<u8>, MiasmaError>> + Send + 'static>> {
+    ) -> Pin<Box<dyn Stream<Item = Result<Zeroizing<Vec<u8>>, MiasmaError>> + Send + 'static>> {
         let source = self.source.clone();
+        let fetch_policy = self.fetch_policy;
 
         let s = stream::iter(0..segment_count).then(move |seg_idx| {
             let source = source.clone();
@@ -138,22 +148,15 @@ impl<Src: ShareSource + Clone + Send + Sync + 'static> StreamingRetrievalCoordin
                 let mut candidates = source.list_candidates_for_segment(&mid, seg_idx).await;
                 candidates.shuffle(&mut rand::thread_rng());
 
-                let mut valid: Vec<MiasmaShare> = Vec::with_capacity(params.data_shards);
-
-                for addr in &candidates {
-                    if valid.len() >= params.data_shards {
-                        break;
-                    }
-                    match source.fetch(addr).await? {
-                        Some(share)
-                            if share.segment_index == seg_idx
-                                && ShareVerification::coarse_verify(&share, &mid) =>
-                        {
-                            valid.push(share);
-                        }
-                        _ => {}
-                    }
-                }
+                let valid = collect_verified_shares(
+                    &source,
+                    candidates,
+                    &mid,
+                    seg_idx,
+                    params.data_shards,
+                    fetch_policy,
+                )
+                .await?;
 
                 if valid.len() < params.data_shards {
                     return Err(MiasmaError::InsufficientShares {
@@ -171,7 +174,8 @@ impl<Src: ShareSource + Clone + Send + Sync + 'static> StreamingRetrievalCoordin
                     share_count: params.total_shards as u16,
                 };
 
-                retrieve_segment(&mid, &valid, &meta, params)
+                // Wiped when the consumer drops the item, on every path.
+                retrieve_segment(&mid, &valid, &meta, params).map(Zeroizing::new)
             }
         });
 
@@ -221,7 +225,7 @@ mod tests {
         let mut stream = coord.retrieve_streaming(manifest.clone());
         let mut recovered: Vec<u8> = Vec::new();
         while let Some(chunk) = stream.next().await {
-            recovered.extend(chunk.unwrap());
+            recovered.extend_from_slice(&chunk.unwrap());
         }
 
         assert_eq!(recovered, data);
@@ -261,7 +265,7 @@ mod tests {
         let mut recovered: Vec<u8> = Vec::new();
         let mut segment_count = 0usize;
         while let Some(chunk) = stream.next().await {
-            recovered.extend(chunk.unwrap());
+            recovered.extend_from_slice(&chunk.unwrap());
             segment_count += 1;
         }
 

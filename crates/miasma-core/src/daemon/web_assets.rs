@@ -30,10 +30,15 @@ macro_rules! asset {
 const HTML: &str = "text/html; charset=utf-8";
 const JS: &str = "text/javascript; charset=utf-8";
 const CSS: &str = "text/css; charset=utf-8";
+const PNG: &str = "image/png";
 
 pub static ASSETS: &[Asset] = &[
     asset!("index.html", HTML),
     asset!("css/style.css", CSS),
+    asset!("icons/apple-touch-icon.png", PNG),
+    asset!("icons/icon-192.png", PNG),
+    asset!("icons/icon-512.png", PNG),
+    asset!("icons/icon-maskable-512.png", PNG),
     asset!("js/app.js", JS),
     asset!("js/bridge.js", JS),
     asset!("js/format.js", JS),

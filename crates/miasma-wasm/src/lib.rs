@@ -23,6 +23,8 @@ const KEY_LEN: usize = 32;
 const NONCE_LEN: usize = 12;
 const MID_PREFIX_LEN: usize = 8;
 const PROTOCOL_VERSION: u8 = 1;
+const DISSOLVE_BUNDLE_MAGIC: &[u8; 4] = b"MDB1";
+const SHARE_BUNDLE_MAGIC: &[u8; 4] = b"MSB1";
 
 // ── Error ──────────────────────────────────────────────────────────────
 
@@ -448,9 +450,10 @@ fn validate_params(k: usize, n: usize) -> Result<(), MiasmaError> {
 
 // ── Pipeline: dissolve ────────────────────────────────────────────────
 
-fn dissolve_inner(
+fn dissolve_inner_at(
     plaintext: &[u8],
     params: DissolutionParams,
+    timestamp: u64,
 ) -> Result<(ContentId, Vec<MiasmaShare>), MiasmaError> {
     validate_params(params.data_shards, params.total_shards)?;
 
@@ -482,14 +485,6 @@ fn dissolve_inner(
         params.total_shards as u8,
     )?;
 
-    #[cfg(target_arch = "wasm32")]
-    let timestamp = (js_sys::Date::now() / 1000.0) as u64;
-    #[cfg(not(target_arch = "wasm32"))]
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
     let shares: Vec<MiasmaShare> = shards
         .into_iter()
         .zip(key_shares)
@@ -509,6 +504,114 @@ fn dissolve_inner(
         .collect();
 
     Ok((mid, shares))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn current_timestamp_secs() -> u64 {
+    (js_sys::Date::now() / 1000.0) as u64
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn current_timestamp_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn dissolve_inner(
+    plaintext: &[u8],
+    params: DissolutionParams,
+) -> Result<(ContentId, Vec<MiasmaShare>), MiasmaError> {
+    dissolve_inner_at(plaintext, params, current_timestamp_secs())
+}
+
+/// Browser-only transfer format for avoiding JSON/base64 copies. This is not part of the
+/// Miasma network wire protocol; it is just a compact WASM <-> JavaScript boundary.
+fn encode_dissolve_bundle(
+    mid: &ContentId,
+    shares: &[MiasmaShare],
+    params: DissolutionParams,
+) -> Result<Vec<u8>, MiasmaError> {
+    if shares.len() > u16::MAX as usize {
+        return Err(MiasmaError::Serialization(
+            "too many shares for browser bundle".into(),
+        ));
+    }
+    let mid_text = mid.to_mid_string();
+    if mid_text.len() > u16::MAX as usize {
+        return Err(MiasmaError::Serialization(
+            "MID too long for browser bundle".into(),
+        ));
+    }
+
+    let mut encoded_shares = Vec::with_capacity(shares.len());
+    let mut total = 4 + 2 + mid_text.len() + 2 + 2 + 2;
+    for share in shares {
+        let bytes = share.to_bytes()?;
+        if bytes.len() > u32::MAX as usize {
+            return Err(MiasmaError::Serialization(
+                "share too large for browser bundle".into(),
+            ));
+        }
+        total = total.saturating_add(4 + bytes.len());
+        encoded_shares.push(bytes);
+    }
+
+    let mut out = Vec::with_capacity(total);
+    out.extend_from_slice(DISSOLVE_BUNDLE_MAGIC);
+    out.extend_from_slice(&(mid_text.len() as u16).to_le_bytes());
+    out.extend_from_slice(mid_text.as_bytes());
+    out.extend_from_slice(&(params.data_shards as u16).to_le_bytes());
+    out.extend_from_slice(&(params.total_shards as u16).to_le_bytes());
+    out.extend_from_slice(&(encoded_shares.len() as u16).to_le_bytes());
+    for bytes in encoded_shares {
+        out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(&bytes);
+    }
+    Ok(out)
+}
+
+fn decode_share_bundle(bundle: &[u8]) -> Result<Vec<MiasmaShare>, MiasmaError> {
+    if bundle.len() < 6 || &bundle[..4] != SHARE_BUNDLE_MAGIC {
+        return Err(MiasmaError::Serialization(
+            "invalid share bundle header".into(),
+        ));
+    }
+    let count = u16::from_le_bytes([bundle[4], bundle[5]]) as usize;
+    if count == 0 || count > MAX_SHARE_COUNT {
+        return Err(MiasmaError::Serialization(format!(
+            "invalid share bundle count: {count}"
+        )));
+    }
+
+    let mut offset = 6usize;
+    let mut shares = Vec::with_capacity(count);
+    for _ in 0..count {
+        let len_end = offset
+            .checked_add(4)
+            .filter(|end| *end <= bundle.len())
+            .ok_or_else(|| MiasmaError::Serialization("truncated share bundle length".into()))?;
+        let len = u32::from_le_bytes(bundle[offset..len_end].try_into().unwrap()) as usize;
+        if len == 0 || len as u64 > MAX_BINCODE_SIZE {
+            return Err(MiasmaError::Serialization(format!(
+                "invalid bundled share length: {len}"
+            )));
+        }
+        offset = len_end;
+        let share_end = offset
+            .checked_add(len)
+            .filter(|end| *end <= bundle.len())
+            .ok_or_else(|| MiasmaError::Serialization("truncated bundled share".into()))?;
+        shares.push(MiasmaShare::from_bytes(&bundle[offset..share_end])?);
+        offset = share_end;
+    }
+    if offset != bundle.len() {
+        return Err(MiasmaError::Serialization(
+            "trailing bytes in share bundle".into(),
+        ));
+    }
+    Ok(shares)
 }
 
 // ── Pipeline: retrieve ────────────────────────────────────────────────
@@ -600,17 +703,30 @@ struct DissolveResult {
 
 #[derive(Serialize, Deserialize)]
 struct ShareJson {
+    #[serde(default)]
     version: u8,
+    #[serde(default)]
     mid_prefix: String,
+    #[serde(default)]
     segment_index: u32,
+    #[serde(default)]
     slot_index: u16,
-    shard_data: String, // base64
-    key_share: String,  // base64
-    shard_hash: String, // hex
-    nonce: String,      // hex
+    // Legacy field-level representation. New output leaves these empty and serializes only
+    // `bincode`, avoiding a second base64 copy of the large shard payload.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    shard_data: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    key_share: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    shard_hash: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    nonce: String,
+    #[serde(default)]
     original_len: u32,
+    #[serde(default)]
     timestamp: u64,
     /// bincode-serialized share bytes (base64), for cross-platform interop.
+    #[serde(default)]
     bincode: String,
 }
 
@@ -621,10 +737,10 @@ fn share_to_json(share: &MiasmaShare) -> ShareJson {
         mid_prefix: hex::encode(share.mid_prefix),
         segment_index: share.segment_index,
         slot_index: share.slot_index,
-        shard_data: base64_encode(&share.shard_data),
-        key_share: base64_encode(&share.key_share),
-        shard_hash: hex::encode(share.shard_hash),
-        nonce: hex::encode(share.nonce),
+        shard_data: String::new(),
+        key_share: String::new(),
+        shard_hash: String::new(),
+        nonce: String::new(),
         original_len: share.original_len,
         timestamp: share.timestamp,
         bincode: base64_encode(&bincode_bytes),
@@ -820,6 +936,44 @@ pub fn verify_share(share_json: &str, mid_str: &str) -> Result<bool, JsError> {
     Ok(coarse_verify(&share, &mid))
 }
 
+/// Binary-first dissolve path for browsers. The returned bundle contains the MID and each
+/// bincode-serialized share exactly once, with no JSON/base64 expansion.
+#[wasm_bindgen]
+pub fn dissolve_bytes_bundle(data: &[u8], k: usize, n: usize) -> Result<Vec<u8>, JsError> {
+    let params = DissolutionParams {
+        data_shards: k,
+        total_shards: n,
+    };
+    let (mid, shares) = dissolve_inner(data, params)?;
+    Ok(encode_dissolve_bundle(&mid, &shares, params)?)
+}
+
+/// Verify a bincode-serialized share directly, avoiding the JSON/base64 compatibility path.
+#[wasm_bindgen]
+pub fn verify_share_bytes(share_bytes: &[u8], mid_str: &str) -> Result<bool, JsError> {
+    let mid = ContentId::from_mid_str(mid_str)?;
+    let share = MiasmaShare::from_bytes(share_bytes)?;
+    Ok(coarse_verify(&share, &mid))
+}
+
+/// Reconstruct from a compact length-prefixed share bundle produced by the browser storage
+/// adapter. The bundle format is local to the browser boundary, not the network protocol.
+#[wasm_bindgen]
+pub fn retrieve_from_share_bundle(
+    mid_str: &str,
+    share_bundle: &[u8],
+    k: usize,
+    n: usize,
+) -> Result<Vec<u8>, JsError> {
+    let mid = ContentId::from_mid_str(mid_str)?;
+    let shares = decode_share_bundle(share_bundle)?;
+    let params = DissolutionParams {
+        data_shards: k,
+        total_shards: n,
+    };
+    Ok(retrieve_inner(&mid, &shares, params)?)
+}
+
 /// Get the protocol version string.
 #[wasm_bindgen]
 pub fn protocol_version() -> String {
@@ -1003,6 +1157,138 @@ mod tests {
     // ── Full Pipeline ──
 
     #[test]
+    fn browser_dissolve_bundle_contains_each_share_once() {
+        let params = DissolutionParams {
+            data_shards: 3,
+            total_shards: 5,
+        };
+        let (mid, shares) = dissolve_inner_at(TEST_CONTENT, params, 42).unwrap();
+        let bundle = encode_dissolve_bundle(&mid, &shares, params).unwrap();
+        assert_eq!(&bundle[..4], DISSOLVE_BUNDLE_MAGIC);
+        let mid_len = u16::from_le_bytes([bundle[4], bundle[5]]) as usize;
+        assert_eq!(
+            std::str::from_utf8(&bundle[6..6 + mid_len]).unwrap(),
+            mid.to_mid_string()
+        );
+        let mut off = 6 + mid_len;
+        assert_eq!(
+            u16::from_le_bytes(bundle[off..off + 2].try_into().unwrap()),
+            3
+        );
+        off += 2;
+        assert_eq!(
+            u16::from_le_bytes(bundle[off..off + 2].try_into().unwrap()),
+            5
+        );
+        off += 2;
+        assert_eq!(
+            u16::from_le_bytes(bundle[off..off + 2].try_into().unwrap()),
+            5
+        );
+        off += 2;
+        for expected in &shares {
+            let len = u32::from_le_bytes(bundle[off..off + 4].try_into().unwrap()) as usize;
+            off += 4;
+            let decoded = MiasmaShare::from_bytes(&bundle[off..off + len]).unwrap();
+            assert_eq!(decoded.slot_index, expected.slot_index);
+            assert_eq!(decoded.shard_data, expected.shard_data);
+            off += len;
+        }
+        assert_eq!(off, bundle.len());
+    }
+
+    #[test]
+    fn compact_share_bundle_round_trips_and_rejects_trailing_bytes() {
+        let params = DissolutionParams::default();
+        let (mid, shares) = dissolve_inner_at(TEST_CONTENT, params, 7).unwrap();
+        let selected = &shares[..params.data_shards];
+        let mut bundle = Vec::from(SHARE_BUNDLE_MAGIC.as_slice());
+        bundle.extend_from_slice(&(selected.len() as u16).to_le_bytes());
+        for share in selected {
+            let bytes = share.to_bytes().unwrap();
+            bundle.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            bundle.extend_from_slice(&bytes);
+        }
+        let decoded = decode_share_bundle(&bundle).unwrap();
+        assert_eq!(decoded.len(), params.data_shards);
+        assert_eq!(
+            retrieve_inner(&mid, &decoded, params).unwrap(),
+            TEST_CONTENT
+        );
+
+        let mut bad = bundle.clone();
+        bad.push(0);
+        assert!(decode_share_bundle(&bad).is_err());
+    }
+
+    #[test]
+    fn verify_share_bytes_accepts_real_share_and_rejects_wrong_mid() {
+        let params = DissolutionParams::default();
+        let (mid, shares) = dissolve_inner_at(TEST_CONTENT, params, 9).unwrap();
+        let bytes = shares[0].to_bytes().unwrap();
+        assert!(verify_share_bytes(&bytes, &mid.to_mid_string()).unwrap());
+        let other = ContentId::compute(b"other", &params.to_param_bytes());
+        assert!(!verify_share_bytes(&bytes, &other.to_mid_string()).unwrap());
+    }
+
+    #[test]
+    fn native_core_and_wasm_share_wire_formats_are_bidirectionally_compatible() {
+        let params = DissolutionParams {
+            data_shards: 3,
+            total_shards: 5,
+        };
+        let native_params = miasma_core::pipeline::DissolutionParams {
+            data_shards: params.data_shards,
+            total_shards: params.total_shards,
+        };
+        let timestamp = 1_799_999_999;
+
+        // Native core -> browser kernel. This exercises the exact serialized share
+        // bytes rather than comparing parallel JSON representations.
+        let (native_mid, native_shares) =
+            miasma_core::pipeline::dissolve_at(TEST_CONTENT, native_params, timestamp).unwrap();
+        let wasm_mid = ContentId::from_mid_str(&native_mid.to_string()).unwrap();
+        let wasm_shares: Vec<MiasmaShare> = native_shares
+            .iter()
+            .map(|share| MiasmaShare::from_bytes(&share.to_bytes().unwrap()).unwrap())
+            .collect();
+        assert!(wasm_shares.iter().all(|share| share.timestamp == timestamp));
+        assert_eq!(
+            retrieve_inner(&wasm_mid, &wasm_shares, params).unwrap(),
+            TEST_CONTENT
+        );
+
+        // Browser kernel -> native core. Random keys/nonces differ between the two
+        // dissolutions by design, but the wire format, MID semantics and retrieval
+        // pipeline must remain mutually readable.
+        let (wasm_mid, wasm_shares) = dissolve_inner_at(TEST_CONTENT, params, timestamp).unwrap();
+        let native_mid =
+            miasma_core::crypto::hash::ContentId::from_str(&wasm_mid.to_mid_string()).unwrap();
+        let native_shares: Vec<miasma_core::share::MiasmaShare> = wasm_shares
+            .iter()
+            .map(|share| {
+                miasma_core::share::MiasmaShare::from_bytes(&share.to_bytes().unwrap()).unwrap()
+            })
+            .collect();
+        assert!(native_shares
+            .iter()
+            .all(|share| share.timestamp == timestamp));
+        assert_eq!(
+            miasma_core::pipeline::retrieve(&native_mid, &native_shares, native_params).unwrap(),
+            TEST_CONTENT
+        );
+    }
+
+    #[test]
+    fn supplied_timestamp_is_used_for_every_share() {
+        let params = DissolutionParams::default();
+        let timestamp = 1_799_999_999;
+        let (_, shares) = dissolve_inner_at(TEST_CONTENT, params, timestamp).unwrap();
+        assert!(!shares.is_empty());
+        assert!(shares.iter().all(|share| share.timestamp == timestamp));
+    }
+
+    #[test]
     fn dissolve_and_retrieve_default_params() {
         let params = DissolutionParams::default();
         let (mid, shares) = dissolve_inner(TEST_CONTENT, params).unwrap();
@@ -1129,9 +1415,14 @@ mod tests {
             1700000000,
         );
         let json = share_to_json(&share);
-        // bincode field should be populated
+        // New JSON carries one large representation only: exact bincode bytes.
         assert!(!json.bincode.is_empty());
-        // Deserialization should prefer bincode path
+        assert!(json.shard_data.is_empty());
+        assert!(json.key_share.is_empty());
+        let encoded = serde_json::to_string(&json).unwrap();
+        assert!(!encoded.contains("shard_data"));
+        assert!(!encoded.contains("key_share"));
+        // Deserialization should prefer bincode path.
         let recovered = share_from_json(&json).unwrap();
         assert_eq!(share.shard_data, recovered.shard_data);
         assert_eq!(share.key_share, recovered.key_share);

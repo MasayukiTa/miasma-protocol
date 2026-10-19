@@ -1,3 +1,4 @@
+import { parseDissolveBundle } from './storage.js';
 // Miasma Web — Bridge Abstraction Layer
 //
 // Detects the runtime environment and routes API calls accordingly:
@@ -39,7 +40,9 @@ export class MiasmaBridge {
         const parsed = typeof result === 'string' ? JSON.parse(result) : result;
         if (parsed && parsed.ok) {
           this._mode = MODE_WEBVIEW;
-          this._connected = true;
+          // A native host can exist while Android has stopped its background
+          // daemon. Query status before claiming that a network backend exists.
+          await this.status();
           this._startPolling();
           return;
         }
@@ -82,7 +85,7 @@ export class MiasmaBridge {
       try {
         const result = await Promise.resolve(window.miasma.status());
         this._lastStatus = typeof result === 'string' ? JSON.parse(result) : result;
-        this._setConnected(true);
+        this._setConnected(this._lastStatus?.network_ready === true);
         return this._lastStatus;
       } catch (e) {
         this._setConnected(false);
@@ -434,8 +437,10 @@ export class MiasmaBridge {
       try {
         const result = await Promise.resolve(window.miasma.directedInbox());
         const parsed = typeof result === 'string' ? JSON.parse(result) : result;
-        return Array.isArray(parsed) ? parsed : [];
-      } catch (_) { return []; }
+        if (parsed?.error) throw new Error(parsed.error);
+        if (!Array.isArray(parsed)) throw new Error('Malformed inbox response');
+        return parsed;
+      } catch (e) { throw e; }
     }
 
     if (this._mode === MODE_HTTP) {
@@ -459,8 +464,10 @@ export class MiasmaBridge {
       try {
         const result = await Promise.resolve(window.miasma.directedOutbox());
         const parsed = typeof result === 'string' ? JSON.parse(result) : result;
-        return Array.isArray(parsed) ? parsed : [];
-      } catch (_) { return []; }
+        if (parsed?.error) throw new Error(parsed.error);
+        if (!Array.isArray(parsed)) throw new Error('Malformed outbox response');
+        return parsed;
+      } catch (e) { throw e; }
     }
 
     if (this._mode === MODE_HTTP) {
@@ -587,14 +594,26 @@ export class MiasmaBridge {
   // ── Private ──────────────────────────────────────────────────────
 
   _dissolveLocal(data, k, n) {
-    let jsonStr;
-    if (typeof data === 'string') {
-      jsonStr = this._wasm.dissolve_text(data, k, n);
-    } else {
-      jsonStr = this._wasm.dissolve_bytes(data, k, n);
+    const raw = typeof data === 'string' ? new TextEncoder().encode(data) : data;
+    // New generated WASM packages return a compact binary bundle. Keep the old JSON path as a
+    // compatibility fallback so an app update is not coupled to the generated pkg landing first.
+    if (typeof this._wasm.dissolve_bytes_bundle === 'function') {
+      const result = parseDissolveBundle(this._wasm.dissolve_bytes_bundle(raw, k, n));
+      for (const share of result.shares) share.original_len = raw.byteLength;
+      return { ...result, networkPublished: false };
     }
+
+    let jsonStr;
+    if (typeof data === 'string') jsonStr = this._wasm.dissolve_text(data, k, n);
+    else jsonStr = this._wasm.dissolve_bytes(data, k, n);
     const result = JSON.parse(jsonStr);
-    return { mid: result.mid, shares: result.shares, networkPublished: false };
+    return {
+      mid: result.mid,
+      shares: result.shares,
+      data_shards: result.data_shards,
+      total_shards: result.total_shards,
+      networkPublished: false,
+    };
   }
 
   _startPolling() {

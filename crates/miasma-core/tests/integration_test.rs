@@ -952,7 +952,7 @@ async fn retrieve_from_network_streaming_single_segment_roundtrip() {
         let mut recovered: Vec<u8> = Vec::new();
         let mut segment_count = 0usize;
         while let Some(chunk) = stream.next().await {
-            recovered.extend(chunk.expect("segment fetch/reconstruct failed"));
+            recovered.extend_from_slice(&chunk.expect("segment fetch/reconstruct failed"));
             segment_count += 1;
         }
 
@@ -1619,7 +1619,7 @@ async fn dissolve_and_publish_file_multi_segment_network_retrieval_is_fast() {
         let mut streamed: Vec<u8> = Vec::new();
         let mut segment_count = 0usize;
         while let Some(chunk) = stream.next().await {
-            streamed.extend(chunk.expect("segment fetch/reconstruct failed"));
+            streamed.extend_from_slice(&chunk.expect("segment fetch/reconstruct failed"));
             segment_count += 1;
         }
         let streaming_elapsed = started.elapsed();
@@ -2765,10 +2765,11 @@ async fn payload_transport_fallback_on_session_failure() {
         .iter()
         .find(|r| r.transport == PayloadTransportKind::TcpDirect)
         .unwrap();
+    // The selector demotes a transport after two consecutive failures, so the
+    // remaining shares go straight to the working transport.
     assert!(
-        libp2p_stat.failure_count >= params.data_shards as u64,
-        "expected {} libp2p failures, got {}",
-        params.data_shards,
+        libp2p_stat.failure_count >= 2,
+        "expected at least 2 libp2p failures before demotion, got {}",
         libp2p_stat.failure_count
     );
     assert!(
@@ -4971,10 +4972,11 @@ async fn forced_transport_failure_fallback_evidence() {
         .iter()
         .find(|r| r.transport == PayloadTransportKind::DirectLibp2p)
         .expect("DirectLibp2p stats missing");
+    // A transport is demoted after two consecutive failures, so later shares
+    // skip it; two failures per failing transport is the guaranteed minimum.
     assert!(
-        libp2p_stat.failure_count >= params.data_shards as u64,
-        "DirectLibp2p should have at least {} session failures, got {}",
-        params.data_shards,
+        libp2p_stat.failure_count >= 2,
+        "DirectLibp2p should have at least 2 session failures, got {}",
         libp2p_stat.failure_count
     );
     assert_eq!(
@@ -4982,7 +4984,7 @@ async fn forced_transport_failure_fallback_evidence() {
         "DirectLibp2p should have no successes"
     );
     assert!(
-        libp2p_stat.session_failures >= params.data_shards as u64,
+        libp2p_stat.session_failures >= 2,
         "DirectLibp2p failures should be session-phase"
     );
     assert_eq!(
@@ -4999,9 +5001,8 @@ async fn forced_transport_failure_fallback_evidence() {
         .find(|r| r.transport == PayloadTransportKind::TcpDirect)
         .expect("TcpDirect stats missing");
     assert!(
-        tcp_stat.failure_count >= params.data_shards as u64,
-        "TcpDirect should have at least {} data failures, got {}",
-        params.data_shards,
+        tcp_stat.failure_count >= 2,
+        "TcpDirect should have at least 2 data failures, got {}",
         tcp_stat.failure_count
     );
     assert_eq!(
@@ -5009,7 +5010,7 @@ async fn forced_transport_failure_fallback_evidence() {
         "TcpDirect should have no successes"
     );
     assert!(
-        tcp_stat.data_failures >= params.data_shards as u64,
+        tcp_stat.data_failures >= 2,
         "TcpDirect failures should be data-phase"
     );
     assert_eq!(

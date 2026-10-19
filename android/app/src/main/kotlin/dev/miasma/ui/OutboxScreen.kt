@@ -5,15 +5,19 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import dev.miasma.DirectedApi
 import dev.miasma.MiasmaViewModel
+import dev.miasma.R
 
 @Composable
 fun OutboxScreen(vm: MiasmaViewModel) {
@@ -30,9 +34,9 @@ fun OutboxScreen(vm: MiasmaViewModel) {
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("Outbox", style = MaterialTheme.typography.headlineMedium)
+            Text(stringResource(R.string.outbox_title), style = MaterialTheme.typography.headlineMedium)
             IconButton(onClick = { vm.refreshOutbox() }) {
-                Text("↻", style = MaterialTheme.typography.titleLarge)
+                Icon(Icons.Outlined.Refresh, contentDescription = stringResource(R.string.refresh))
             }
         }
 
@@ -42,7 +46,7 @@ fun OutboxScreen(vm: MiasmaViewModel) {
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
             ) {
                 Text(
-                    "Daemon not running — directed sharing unavailable",
+                    stringResource(R.string.directed_daemon_unavailable),
                     modifier = Modifier.padding(16.dp),
                     color = MaterialTheme.colorScheme.onErrorContainer,
                 )
@@ -54,7 +58,7 @@ fun OutboxScreen(vm: MiasmaViewModel) {
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center,
             ) {
-                Text("No outgoing shares", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(stringResource(R.string.outbox_empty), color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         } else {
             LazyColumn(
@@ -76,7 +80,8 @@ private fun OutboxCard(item: DirectedApi.EnvelopeItem, vm: MiasmaViewModel) {
     var confirmSuccess by remember { mutableStateOf(false) }
     var showRevokeDialog by remember { mutableStateOf(false) }
 
-    val (badgeColor, badgeLabel) = outboxStateBadge(item.state)
+    val (badgeColor, badgeLabelRes) = outboxStateBadge(item.state)
+    val badgeLabel = stringResource(badgeLabelRes)
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -106,13 +111,13 @@ private fun OutboxCard(item: DirectedApi.EnvelopeItem, vm: MiasmaViewModel) {
 
             // Recipient
             Text(
-                "To: ${item.recipientPubkey.take(20)}…",
+                stringResource(R.string.outbox_to, item.recipientPubkey.take(20)),
                 style = MaterialTheme.typography.bodySmall,
             )
 
             // Filename
             if (!item.filename.isNullOrEmpty()) {
-                Text("File: ${item.filename}", style = MaterialTheme.typography.bodySmall)
+                Text(stringResource(R.string.file_label, item.filename!!), style = MaterialTheme.typography.bodySmall)
             }
 
             // Challenge confirmation (sender confirms with code from recipient)
@@ -125,7 +130,7 @@ private fun OutboxCard(item: DirectedApi.EnvelopeItem, vm: MiasmaViewModel) {
                 ) {
                     Column(modifier = Modifier.padding(8.dp)) {
                         Text(
-                            "Enter the challenge code from recipient:",
+                            stringResource(R.string.challenge_enter_recipient),
                             style = MaterialTheme.typography.labelSmall,
                         )
                         Spacer(Modifier.height(4.dp))
@@ -149,11 +154,11 @@ private fun OutboxCard(item: DirectedApi.EnvelopeItem, vm: MiasmaViewModel) {
                             },
                             enabled = challengeInput.length >= 9,
                         ) {
-                            Text("Confirm")
+                            Text(stringResource(R.string.confirm))
                         }
                         if (confirmSuccess) {
                             Text(
-                                "Confirmed",
+                                stringResource(R.string.confirmed),
                                 color = Color(0xFF4CAF50),
                                 style = MaterialTheme.typography.bodySmall,
                             )
@@ -171,13 +176,13 @@ private fun OutboxCard(item: DirectedApi.EnvelopeItem, vm: MiasmaViewModel) {
 
             // Terminal state messages
             when (item.state) {
-                "Confirmed" -> Text("✓ Confirmed — waiting for retrieval", color = Color(0xFF4CAF50), style = MaterialTheme.typography.bodySmall)
-                "Retrieved" -> Text("✓ Content retrieved by recipient", color = Color(0xFF4CAF50), style = MaterialTheme.typography.bodySmall)
-                "Expired" -> Text("Expired", color = Color(0xFFFF9800), style = MaterialTheme.typography.bodySmall)
-                "SenderRevoked" -> Text("You revoked this share", color = Color(0xFF9E9E9E), style = MaterialTheme.typography.bodySmall)
-                "RecipientDeleted" -> Text("Deleted by recipient", color = Color(0xFF9E9E9E), style = MaterialTheme.typography.bodySmall)
-                "ChallengeFailed" -> Text("Challenge failed", color = Color(0xFFF44336), style = MaterialTheme.typography.bodySmall)
-                "PasswordFailed" -> Text("Password attempts exhausted", color = Color(0xFFF44336), style = MaterialTheme.typography.bodySmall)
+                "Confirmed" -> Text(stringResource(R.string.confirmed_waiting), color = Color(0xFF4CAF50), style = MaterialTheme.typography.bodySmall)
+                "Retrieved" -> Text(stringResource(R.string.retrieved_by_recipient), color = Color(0xFF4CAF50), style = MaterialTheme.typography.bodySmall)
+                "Expired" -> Text(stringResource(R.string.expired), color = Color(0xFFFF9800), style = MaterialTheme.typography.bodySmall)
+                "SenderRevoked" -> Text(stringResource(R.string.revoked_by_you), color = Color(0xFF9E9E9E), style = MaterialTheme.typography.bodySmall)
+                "RecipientDeleted" -> Text(stringResource(R.string.deleted_by_recipient), color = Color(0xFF9E9E9E), style = MaterialTheme.typography.bodySmall)
+                "ChallengeFailed" -> Text(stringResource(R.string.challenge_failed), color = Color(0xFFF44336), style = MaterialTheme.typography.bodySmall)
+                "PasswordFailed" -> Text(stringResource(R.string.password_exhausted), color = Color(0xFFF44336), style = MaterialTheme.typography.bodySmall)
             }
 
             // Actions for non-terminal
@@ -187,26 +192,26 @@ private fun OutboxCard(item: DirectedApi.EnvelopeItem, vm: MiasmaViewModel) {
                     onClick = { showRevokeDialog = true },
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
                 ) {
-                    Text("Revoke")
+                    Text(stringResource(R.string.revoke))
                 }
             }
 
             if (showRevokeDialog) {
                 AlertDialog(
                     onDismissRequest = { showRevokeDialog = false },
-                    title = { Text("Revoke share?") },
-                    text = { Text("Are you sure? This cannot be undone.") },
+                    title = { Text(stringResource(R.string.revoke_title)) },
+                    text = { Text(stringResource(R.string.revoke_message)) },
                     confirmButton = {
                         TextButton(onClick = {
                             showRevokeDialog = false
                             vm.revokeDirected(item.envelopeId)
                         }) {
-                            Text("Revoke", color = MaterialTheme.colorScheme.error)
+                            Text(stringResource(R.string.revoke), color = MaterialTheme.colorScheme.error)
                         }
                     },
                     dismissButton = {
                         TextButton(onClick = { showRevokeDialog = false }) {
-                            Text("Cancel")
+                            Text(stringResource(R.string.cancel))
                         }
                     },
                 )
@@ -215,15 +220,15 @@ private fun OutboxCard(item: DirectedApi.EnvelopeItem, vm: MiasmaViewModel) {
     }
 }
 
-private fun outboxStateBadge(state: String): Pair<Color, String> = when (state) {
-    "Pending" -> Color(0xFFFF9800) to "Waiting"
-    "ChallengeIssued" -> Color(0xFFFF9800) to "Confirm"
-    "Confirmed" -> Color(0xFF4CAF50) to "Confirmed"
-    "Retrieved" -> Color(0xFF4CAF50) to "Retrieved"
-    "Expired" -> Color(0xFF9E9E9E) to "Expired"
-    "SenderRevoked" -> Color(0xFFF44336) to "Revoked"
-    "RecipientDeleted" -> Color(0xFF9E9E9E) to "Deleted"
-    "ChallengeFailed" -> Color(0xFFF44336) to "Failed"
-    "PasswordFailed" -> Color(0xFFF44336) to "Failed"
-    else -> Color(0xFF9E9E9E) to state
+private fun outboxStateBadge(state: String): Pair<Color, Int> = when (state) {
+    "Pending" -> Color(0xFFFF9800) to R.string.status_waiting
+    "ChallengeIssued" -> Color(0xFFFF9800) to R.string.status_confirm
+    "Confirmed" -> Color(0xFF4CAF50) to R.string.status_confirmed
+    "Retrieved" -> Color(0xFF4CAF50) to R.string.status_retrieved
+    "Expired" -> Color(0xFF9E9E9E) to R.string.status_expired
+    "SenderRevoked" -> Color(0xFFF44336) to R.string.status_revoked
+    "RecipientDeleted" -> Color(0xFF9E9E9E) to R.string.status_deleted
+    "ChallengeFailed" -> Color(0xFFF44336) to R.string.status_failed
+    "PasswordFailed" -> Color(0xFFF44336) to R.string.status_failed
+    else -> Color(0xFF9E9E9E) to R.string.status_failed
 }

@@ -47,10 +47,7 @@ use super::{
     state::{CtrlKind, GroupState, LedgerEntry, PendingMsg, Status, MAX_PENDING},
     store::{GroupMsg, GroupStore},
 };
-use crate::chat::{
-    engine::{now_ms, ChatCore},
-    proto::AckStatus,
-};
+use crate::chat::{engine::ChatCore, proto::AckStatus};
 
 /// Groups on one device, whatever their status.
 pub const MAX_GROUPS: usize = 32;
