@@ -26,6 +26,9 @@ pub enum UpdateError {
     Io(String),
     /// The progress file is missing, unreadable or does not fit this install.
     Journal(String),
+    /// Undoing a failed update did not work: a program could not be put back.
+    /// The progress file stays so the next start tries again.
+    RestoreFailed(String),
 }
 
 impl UpdateError {
@@ -44,6 +47,7 @@ impl UpdateError {
             Self::HealthCheck(_) => "health_check",
             Self::Io(_) => "io",
             Self::Journal(_) => "journal",
+            Self::RestoreFailed(_) => "restore_failed",
         }
     }
 }
@@ -66,6 +70,10 @@ impl std::fmt::Display for UpdateError {
             ),
             Self::Io(m) => write!(f, "file error: {m}"),
             Self::Journal(m) => write!(f, "progress file: {m}"),
+            Self::RestoreFailed(m) => write!(
+                f,
+                "the previous version could not be put back ({m}); it will be tried again at the next start"
+            ),
         }
     }
 }

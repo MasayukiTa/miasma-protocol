@@ -338,6 +338,8 @@ pub struct LiveStats {
     stall: StallMeter,
     paths: PathTracker,
     last: TransferStats,
+    /// Set by `finish`: nothing may be published from this record any more.
+    closed: bool,
 }
 
 impl LiveStats {
@@ -349,7 +351,14 @@ impl LiveStats {
             stall: StallMeter::default(),
             paths: PathTracker::new(),
             last: TransferStats::default(),
+            closed: false,
         }
+    }
+
+    /// True once `finish` ran; a refresh that is still in flight must then
+    /// drop its result instead of publishing a live rate over the final one.
+    pub fn is_closed(&self) -> bool {
+        self.closed
     }
 
     /// One refresh. `bytes` counts from byte 0 of the file (a resumed prefix
@@ -376,6 +385,7 @@ impl LiveStats {
     /// The data phase ended with `bytes` moved: the rate drops to zero and the
     /// average of the whole phase is fixed.
     pub fn finish(&mut self, now_ms: u64, bytes: u64, samples: &[PathSample]) -> TransferStats {
+        self.closed = true;
         let mut s = self.tick(now_ms, bytes, samples);
         let active = now_ms.saturating_sub(self.start_ms).max(1);
         let moved = bytes.saturating_sub(self.start_bytes);
@@ -473,7 +483,17 @@ impl Sampler {
                 loop {
                     every.tick().await;
                     let samples = probe.as_ref().map(|p| p(sending)).unwrap_or_default();
-                    let mut s = live.lock().unwrap().tick(
+                    // The board is written while the record is locked, and
+                    // `finish` closes the record under the same lock: a tick
+                    // that was already running when the sampler was stopped
+                    // (`abort` only takes effect at the next await) can then
+                    // no longer put a live rate on the board after the final
+                    // statistics were published.
+                    let mut g = live.lock().unwrap();
+                    if g.is_closed() {
+                        break;
+                    }
+                    let mut s = g.tick(
                         super::state::now_ms(),
                         progress.load(Ordering::Relaxed),
                         &samples,
@@ -482,6 +502,7 @@ impl Sampler {
                         s.direct_blocked = blocked.as_ref().and_then(|b| b());
                     }
                     board.update(&id, |i| i.stats = Some(s));
+                    drop(g);
                 }
             })
         };

@@ -3,14 +3,19 @@
 //! and over (the outbox) and filling then emptying the service's queue (500
 //! waiting sends, again and again) must keep the curve flat.
 //!
-//! How it is measured: the private (commit) bytes of this process (`VmRSS` on
-//! Linux; `GetProcessMemoryInfo` private usage on Windows). A warm-up faults
-//! in the code and allocator arenas first. The test is alone in this file so
-//! no other test shares the process. On other systems it only checks the
-//! data.
+//! How it is measured: with a counting global allocator that tracks the bytes
+//! currently allocated by this process. Process-level counters (resident or
+//! private bytes) move in allocator-sized steps and with the page-touch
+//! behaviour of the build (an instrumented coverage build touches pages at
+//! other moments), so a bounded structure showed up as a rising curve on some
+//! runs. Live heap bytes depend only on what the code keeps. A warm-up first
+//! fills every capped structure so the baseline is taken at steady state. The
+//! test is alone in this file so no other test shares the process.
 
 #![cfg(feature = "iroh")]
 
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use miasma_core::{
@@ -24,53 +29,50 @@ use miasma_core::{
     transport::iroh_direct::IrohClientError,
 };
 
-#[cfg(target_os = "linux")]
-fn resident_bytes() -> Option<u64> {
-    let s = std::fs::read_to_string("/proc/self/status").ok()?;
-    let kb: u64 = s
-        .lines()
-        .find(|l| l.starts_with("VmRSS:"))?
-        .split_whitespace()
-        .nth(1)?
-        .parse()
-        .ok()?;
-    Some(kb * 1024)
-}
+/// Global allocator that keeps a running total of the bytes in use.
+struct Counting;
 
-#[cfg(windows)]
-fn resident_bytes() -> Option<u64> {
-    #[repr(C)]
-    struct Counters {
-        cb: u32,
-        page_fault_count: u32,
-        peak_working_set_size: usize,
-        working_set_size: usize,
-        quota_peak_paged_pool_usage: usize,
-        quota_paged_pool_usage: usize,
-        quota_peak_non_paged_pool_usage: usize,
-        quota_non_paged_pool_usage: usize,
-        pagefile_usage: usize,
-        peak_pagefile_usage: usize,
-    }
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn GetCurrentProcess() -> isize;
-        fn K32GetProcessMemoryInfo(p: isize, c: *mut Counters, cb: u32) -> i32;
-    }
-    // SAFETY: valid pointer to a correctly laid out struct of the stated size.
-    unsafe {
-        let mut c: Counters = std::mem::zeroed();
-        c.cb = std::mem::size_of::<Counters>() as u32;
-        if K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) == 0 {
-            return None;
+static LIVE: AtomicUsize = AtomicUsize::new(0);
+
+// SAFETY: every call is forwarded unchanged to the system allocator; the
+// counter is only updated from the size the caller passed or got back.
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+        let p = System.alloc(l);
+        if !p.is_null() {
+            LIVE.fetch_add(l.size(), Ordering::Relaxed);
         }
-        Some(c.pagefile_usage as u64)
+        p
+    }
+    unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
+        let p = System.alloc_zeroed(l);
+        if !p.is_null() {
+            LIVE.fetch_add(l.size(), Ordering::Relaxed);
+        }
+        p
+    }
+    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+        System.dealloc(p, l);
+        LIVE.fetch_sub(l.size(), Ordering::Relaxed);
+    }
+    unsafe fn realloc(&self, p: *mut u8, l: Layout, new_size: usize) -> *mut u8 {
+        let q = System.realloc(p, l, new_size);
+        if !q.is_null() {
+            if new_size >= l.size() {
+                LIVE.fetch_add(new_size - l.size(), Ordering::Relaxed);
+            } else {
+                LIVE.fetch_sub(l.size() - new_size, Ordering::Relaxed);
+            }
+        }
+        q
     }
 }
 
-#[cfg(not(any(target_os = "linux", windows)))]
-fn resident_bytes() -> Option<u64> {
-    None
+#[global_allocator]
+static ALLOC: Counting = Counting;
+
+fn live_bytes() -> u64 {
+    LIVE.load(Ordering::Relaxed) as u64
 }
 
 fn job(i: usize) -> OutJob {
@@ -98,10 +100,6 @@ impl Dialer for Offline {
 }
 
 fn check_flat(what: &str, base: u64, curve: &[(usize, u64)], max_growth: u64) {
-    if resident_bytes().is_none() {
-        println!("no memory probe on this platform; data checks only");
-        return;
-    }
     let peak = curve.iter().map(|c| c.1).max().unwrap_or(base);
     let growth = peak.saturating_sub(base);
     println!(
@@ -140,13 +138,13 @@ async fn a_thousand_queued_jobs_are_small_and_the_curve_is_flat() {
             w.remove(&job(i).id);
         }
     }
-    let base = resident_bytes().unwrap_or(0);
+    let base = live_bytes();
     let ob = Outbox::open(dir.path());
     for i in 0..1000 {
         ob.put(&job(i), false);
     }
     assert_eq!(ob.len(), 1000);
-    let mut curve = vec![(1000usize, resident_bytes().unwrap_or(0))];
+    let mut curve = vec![(1000usize, live_bytes())];
     // 100 000 progress updates and 50 full replacements of the queue.
     for round in 0..50usize {
         for i in 0..1000 {
@@ -157,7 +155,7 @@ async fn a_thousand_queued_jobs_are_small_and_the_curve_is_flat() {
             ob.update(&job(i).id, |j| j.offset += 1);
         }
         if round % 10 == 9 {
-            curve.push(((round + 1) * 2000, resident_bytes().unwrap_or(0)));
+            curve.push(((round + 1) * 2000, live_bytes()));
         }
     }
     for i in 0..1000 {
@@ -207,7 +205,7 @@ async fn a_thousand_queued_jobs_are_small_and_the_curve_is_flat() {
         let ids = cycle(&svc);
         drain(&svc, &ids).await;
     }
-    let base = resident_bytes().unwrap_or(0);
+    let base = live_bytes();
     let mut curve = Vec::new();
     for round in 1..=20usize {
         let ids = cycle(&svc);
@@ -221,11 +219,11 @@ async fn a_thousand_queued_jobs_are_small_and_the_curve_is_flat() {
         assert_eq!(svc.queue_snapshot().len(), 500);
         if round == 1 {
             // 500 queued: the high-water mark.
-            curve.push((round, resident_bytes().unwrap_or(0)));
+            curve.push((round, live_bytes()));
         }
         drain(&svc, &ids).await;
         if round % 5 == 0 {
-            curve.push((round, resident_bytes().unwrap_or(0)));
+            curve.push((round, live_bytes()));
         }
     }
     check_flat(

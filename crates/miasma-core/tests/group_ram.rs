@@ -1,14 +1,22 @@
 //! Memory cost of group chat: opening the state of 32 groups of 32 members
-//! (with messages waiting) may grow the process by at most 4 MiB, and a
+//! (with messages waiting) may grow the live heap by at most 4 MiB, and a
 //! 32-member group in which every member writes and everyone receives (the
 //! cipher, the history, the vectors and the session state of 32 engines in this
 //! process) may grow it by at most 3 MiB with a flat curve.
 //!
-//! How it is measured: as in `chat_ram.rs` (private bytes of this process,
-//! sampled at fixed intervals after a warm-up that is taken out of the
-//! baseline). The test is alone in this file so no other test shares the
-//! process. On other systems it only checks the data.
+//! How it is measured: with a counting global allocator that tracks the bytes
+//! currently allocated by this process. Process-level counters (resident or
+//! private bytes) were used before, but they move in allocator-sized steps and
+//! with the page-touch behaviour of the build (an instrumented coverage build
+//! maps and touches pages at other moments), so a bounded structure showed up
+//! as a rising curve by a few KiB on some runs. Live heap bytes depend only on
+//! what the code keeps. The soak first runs long enough for every capped
+//! per-peer structure to be full and rotating (before that the curve rises by
+//! design), takes the baseline there and requires the curve to stay flat. The
+//! test is alone in this file so no other test shares the process.
 
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use miasma_core::{
@@ -23,53 +31,50 @@ use miasma_core::{
     state_crypto::StateKeys,
 };
 
-#[cfg(target_os = "linux")]
-fn resident_bytes() -> Option<u64> {
-    let s = std::fs::read_to_string("/proc/self/status").ok()?;
-    let kb: u64 = s
-        .lines()
-        .find(|l| l.starts_with("VmRSS:"))?
-        .split_whitespace()
-        .nth(1)?
-        .parse()
-        .ok()?;
-    Some(kb * 1024)
-}
+/// Global allocator that keeps a running total of the bytes in use.
+struct Counting;
 
-#[cfg(windows)]
-fn resident_bytes() -> Option<u64> {
-    #[repr(C)]
-    struct Counters {
-        cb: u32,
-        page_fault_count: u32,
-        peak_working_set_size: usize,
-        working_set_size: usize,
-        quota_peak_paged_pool_usage: usize,
-        quota_paged_pool_usage: usize,
-        quota_peak_non_paged_pool_usage: usize,
-        quota_non_paged_pool_usage: usize,
-        pagefile_usage: usize,
-        peak_pagefile_usage: usize,
-    }
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn GetCurrentProcess() -> isize;
-        fn K32GetProcessMemoryInfo(p: isize, c: *mut Counters, cb: u32) -> i32;
-    }
-    // SAFETY: valid pointer to a correctly laid out struct of the stated size.
-    unsafe {
-        let mut c: Counters = std::mem::zeroed();
-        c.cb = std::mem::size_of::<Counters>() as u32;
-        if K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) == 0 {
-            return None;
+static LIVE: AtomicUsize = AtomicUsize::new(0);
+
+// SAFETY: every call is forwarded unchanged to the system allocator; the
+// counter is only updated from the size the caller passed or got back.
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+        let p = System.alloc(l);
+        if !p.is_null() {
+            LIVE.fetch_add(l.size(), Ordering::Relaxed);
         }
-        Some(c.pagefile_usage as u64)
+        p
+    }
+    unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
+        let p = System.alloc_zeroed(l);
+        if !p.is_null() {
+            LIVE.fetch_add(l.size(), Ordering::Relaxed);
+        }
+        p
+    }
+    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+        System.dealloc(p, l);
+        LIVE.fetch_sub(l.size(), Ordering::Relaxed);
+    }
+    unsafe fn realloc(&self, p: *mut u8, l: Layout, new_size: usize) -> *mut u8 {
+        let q = System.realloc(p, l, new_size);
+        if !q.is_null() {
+            if new_size >= l.size() {
+                LIVE.fetch_add(new_size - l.size(), Ordering::Relaxed);
+            } else {
+                LIVE.fetch_sub(l.size() - new_size, Ordering::Relaxed);
+            }
+        }
+        q
     }
 }
 
-#[cfg(not(any(target_os = "linux", windows)))]
-fn resident_bytes() -> Option<u64> {
-    None
+#[global_allocator]
+static ALLOC: Counting = Counting;
+
+fn live_bytes() -> u64 {
+    LIVE.load(Ordering::Relaxed) as u64
 }
 
 struct Node {
@@ -130,10 +135,10 @@ fn group_state_is_small_when_idle_and_flat_with_thirty_two_members() {
         let warm = open(&d0, &seed0, keys0.clone());
         let _ = warm.core.list();
     }
-    let idle_base = resident_bytes().unwrap_or(0);
+    let idle_base = live_bytes();
     let n = open(&d0, &seed0, keys0);
     let listed = n.core.list();
-    let idle_peak = resident_bytes().unwrap_or(0);
+    let idle_peak = live_bytes();
     assert_eq!(listed.len(), 32);
     assert!(listed.iter().all(|g| g.members == 32 && g.pending > 0));
     let idle_growth = idle_peak.saturating_sub(idle_base);
@@ -142,12 +147,10 @@ fn group_state_is_small_when_idle_and_flat_with_thirty_two_members() {
         listed.len(),
         idle_growth as f64 / 1048576.0
     );
-    if resident_bytes().is_some() {
-        assert!(
-            idle_growth <= 4 * 1024 * 1024,
-            "idle group state grew by {idle_growth} bytes"
-        );
-    }
+    assert!(
+        idle_growth <= 4 * 1024 * 1024,
+        "idle group state grew by {idle_growth} bytes"
+    );
     drop(n);
 
     // ── Soak: one group of 32, everybody writes, everybody receives ──
@@ -203,17 +206,32 @@ fn group_state_is_small_when_idle_and_flat_with_thirty_two_members() {
     for k in 0..64 {
         step(k);
     }
-    let baseline = resident_bytes().unwrap_or(0);
+    let early_base = live_bytes();
+    // Warm-up: every per-peer structure that has a cap (the ring of recent
+    // envelope ids of each pair holds 64 entries, the event and ledger logs
+    // 200) must be full and rotating before the baseline is taken. In this
+    // round-robin every pair exchanges one message per 32 messages, so the
+    // 64-entry rings are full after 64 * 32 messages; the warm-up goes past
+    // that. Before that point the curve rises by design, in steps (a ring
+    // doubles its buffer when it passes 32 entries), and sampling it there
+    // measures the filling, not the leak.
+    const WARMUP: u64 = 72 * 32;
+    let mut next = 64u64;
+    while next < WARMUP {
+        step(next);
+        next += 1;
+    }
+    let baseline = live_bytes();
     let mut peak = baseline;
-    let mut curve: Vec<(u64, u64)> = Vec::new();
-    let total = 960u64;
+    let mut curve: Vec<(u64, i64)> = Vec::new();
+    let total = 640u64;
     for k in 0..total {
-        step(64 + k);
+        step(next);
+        next += 1;
         if (k + 1) % 160 == 0 {
-            if let Some(r) = resident_bytes() {
-                peak = peak.max(r);
-                curve.push((k + 1, r.saturating_sub(baseline)));
-            }
+            let r = live_bytes();
+            peak = peak.max(r);
+            curve.push((k + 1, r as i64 - baseline as i64));
         }
     }
     // Everybody has everything, once.
@@ -223,31 +241,30 @@ fn group_state_is_small_when_idle_and_flat_with_thirty_two_members() {
         assert_eq!(n.core.list()[0].pending, 0);
     }
     assert_eq!(nodes[5].core.vector_of(&gid, &ids[0]).unwrap().2, 0);
-    match resident_bytes() {
-        Some(_) => {
-            let growth = peak.saturating_sub(baseline);
-            println!(
-                "soak: {total} messages to 32 members: baseline {:.2} MiB, growth {:.2} MiB",
-                baseline as f64 / 1048576.0,
-                growth as f64 / 1048576.0
-            );
-            for (k, over) in &curve {
-                println!(
-                    "  {k:>5} messages: {:.2} MiB over baseline",
-                    *over as f64 / 1048576.0
-                );
-            }
-            assert!(
-                growth <= 3 * 1024 * 1024,
-                "resident memory grew by {growth} bytes"
-            );
-            let first = curve.first().map(|c| c.1).unwrap_or(0);
-            let last = curve.last().map(|c| c.1).unwrap_or(0);
-            assert!(
-                last.saturating_sub(first) <= 512 * 1024,
-                "the curve keeps rising: {first} -> {last}"
-            );
-        }
-        None => println!("no memory probe on this platform; data checks only"),
+
+    let growth = peak.saturating_sub(baseline);
+    let total_growth = peak.saturating_sub(early_base);
+    println!(
+        "soak: warm-up {} messages, baseline {:.2} MiB (early {:.2} MiB), growth after warm-up {:.2} MiB, since the start {:.2} MiB",
+        WARMUP,
+        baseline as f64 / 1048576.0,
+        early_base as f64 / 1048576.0,
+        growth as f64 / 1048576.0,
+        total_growth as f64 / 1048576.0
+    );
+    for (k, over) in &curve {
+        println!(
+            "  {k:>5} messages: {:+.2} MiB over baseline",
+            *over as f64 / 1048576.0
+        );
     }
+    assert!(
+        total_growth <= 3 * 1024 * 1024,
+        "live memory grew by {total_growth} bytes"
+    );
+    let worst = curve.iter().map(|c| c.1).max().unwrap_or(0);
+    assert!(
+        worst <= 512 * 1024,
+        "the curve keeps rising after warm-up: {worst} bytes over the baseline"
+    );
 }
