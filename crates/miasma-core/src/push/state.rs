@@ -299,6 +299,8 @@ pub mod error_kind {
     /// Outbound: the file was changed, moved or replaced after it was queued,
     /// so what is on disk is no longer what was meant to be sent.
     pub const SOURCE_CHANGED: &str = "source_changed";
+    /// Outbound: the other side answered but its build has no file push.
+    pub const PEER_NO_PUSH: &str = "peer_no_push";
 }
 
 pub fn now_ms() -> u64 {

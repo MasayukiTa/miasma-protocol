@@ -97,11 +97,15 @@ pub enum AckStatus {
     Unsupported,
     /// The receiver could not store it (disk, key); try later.
     Failed,
+    /// A status code this build does not know (a newer peer). Never sent;
+    /// the sender treats it as "not delivered yet, try again later".
+    Unknown,
 }
 
 impl AckStatus {
     pub fn code(self) -> u8 {
         match self {
+            Self::Unknown => 255,
             Self::Stored => 0,
             Self::Duplicate => 1,
             Self::NoSession => 2,
@@ -147,6 +151,10 @@ pub mod fail {
     pub const SEND_DISABLED: &str = "send_disabled";
     pub const EXPIRED: &str = "expired";
     pub const SESSION: &str = "session";
+    /// Waiting (not failed): the contact's build has no one-to-one chat.
+    pub const PEER_NO_CHAT: &str = "peer_no_chat";
+    /// Waiting: the contact's build has no group chat.
+    pub const PEER_NO_GROUP: &str = "peer_no_group";
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -223,10 +231,9 @@ pub fn decode_body(body: &[u8]) -> Result<Frame, ProtoError> {
             let mut r = Rd::new(payload);
             let status = r.u8().map_err(|_| ProtoError::Malformed("ack"))?;
             let id = r.arr::<16>().map_err(|_| ProtoError::Malformed("ack"))?;
-            if !r.done() {
-                return Err(ProtoError::Malformed("ack"));
-            }
-            let status = AckStatus::from_code(status).ok_or(ProtoError::Malformed("ack status"))?;
+            // Bytes after the envelope ID are fields a newer build added; a
+            // status code this build does not know is kept as `Unknown`.
+            let status = AckStatus::from_code(status).unwrap_or(AckStatus::Unknown);
             Ok(Frame::Ack(Ack {
                 status,
                 envelope_id: id,
@@ -235,7 +242,8 @@ pub fn decode_body(body: &[u8]) -> Result<Frame, ProtoError> {
         FRAME_SYNC => {
             let bad = |_| ProtoError::Malformed("sync");
             let mut r = Rd::new(payload);
-            if r.u8().map_err(bad)? != SYNC_VERSION {
+            // A later version may only append to this layout.
+            if r.u8().map_err(bad)? < SYNC_VERSION {
                 return Err(ProtoError::Malformed("sync version"));
             }
             let n = r.u16().map_err(bad)? as usize;
@@ -250,15 +258,12 @@ pub fn decode_body(body: &[u8]) -> Result<Frame, ProtoError> {
                     len: r.u16().map_err(bad)?,
                 });
             }
-            if !r.done() {
-                return Err(ProtoError::Malformed("sync"));
-            }
             Ok(Frame::Sync(items))
         }
         FRAME_SYNC_REPLY => {
             let bad = |_| ProtoError::Malformed("sync reply");
             let mut r = Rd::new(payload);
-            if r.u8().map_err(bad)? != SYNC_VERSION {
+            if r.u8().map_err(bad)? < SYNC_VERSION {
                 return Err(ProtoError::Malformed("sync version"));
             }
             let n = r.u16().map_err(bad)? as usize;
@@ -268,9 +273,6 @@ pub fn decode_body(body: &[u8]) -> Result<Frame, ProtoError> {
             let mut ids = Vec::with_capacity(n);
             for _ in 0..n {
                 ids.push(r.arr::<16>().map_err(bad)?);
-            }
-            if !r.done() {
-                return Err(ProtoError::Malformed("sync reply"));
             }
             Ok(Frame::SyncReply(ids))
         }
@@ -362,7 +364,8 @@ impl Message {
         let text = std::str::from_utf8(r.bytes(n).map_err(bad)?)
             .map_err(|_| ProtoError::Malformed("text encoding"))?
             .to_owned();
-        if !r.done() || seq == 0 {
+        // Bytes after the text are fields a newer build appended: ignored.
+        if seq == 0 {
             return Err(ProtoError::Malformed("message"));
         }
         Ok(Self {
@@ -411,7 +414,7 @@ impl ReadReceipt {
         }
         let id = r.arr::<16>().map_err(bad)?;
         let up_to_seq = r.u64().map_err(bad)?;
-        if !r.done() || up_to_seq == 0 {
+        if up_to_seq == 0 {
             return Err(ProtoError::Malformed("receipt"));
         }
         Ok(Self { id, up_to_seq })
@@ -423,6 +426,10 @@ impl ReadReceipt {
 pub enum Record {
     Text(Message),
     Read(ReadReceipt),
+    /// A record kind a newer build added. It authenticated and decrypted, so
+    /// it is acknowledged and set aside rather than answered with an error
+    /// the sender would take for a damaged message.
+    Unknown(u8),
 }
 
 impl Record {
@@ -430,6 +437,7 @@ impl Record {
         match b.first() {
             Some(&KIND_TEXT) => Message::decode(b).map(Record::Text),
             Some(&KIND_READ) => ReadReceipt::decode(b).map(Record::Read),
+            Some(&k) if k != 0 => Ok(Record::Unknown(k)),
             _ => Err(ProtoError::Malformed("record kind")),
         }
     }
@@ -451,9 +459,10 @@ mod tests {
         for n in 0..bytes.len() {
             assert!(ReadReceipt::decode(&bytes[..n]).is_err(), "prefix {n}");
         }
+        // Appended bytes are a newer build's extension: ignored.
         let mut longer = bytes.clone();
         longer.push(0);
-        assert!(ReadReceipt::decode(&longer).is_err());
+        assert_eq!(ReadReceipt::decode(&longer).unwrap(), r);
         assert!(ReadReceipt {
             id: [0; 16],
             up_to_seq: 0
@@ -468,7 +477,9 @@ mod tests {
         assert!(ReadReceipt::decode(&t).is_err());
         assert!(Message::decode(&bytes).is_err());
         assert!(Record::decode(&[]).is_err());
-        assert!(Record::decode(&[9, 0, 0]).is_err());
+        // A kind from a newer build is recognised as "not ours", not damage.
+        assert_eq!(Record::decode(&[9, 0, 0]).unwrap(), Record::Unknown(9));
+        assert!(Record::decode(&[0, 0, 0]).is_err());
     }
 
     fn msg(text: &str) -> Message {
@@ -532,10 +543,13 @@ mod tests {
             wire.push(ty);
             wire.extend_from_slice(&p);
             assert!(decode_frame(&wire).is_err());
-            // A version this build does not know.
+            // A later version that only appended still reads; version 0 does not.
             let mut v2 = wire.clone();
             v2[5] = 2;
-            assert!(decode_frame(&v2).is_err());
+            assert!(decode_frame(&v2).is_err()); // the count above the cap
+            let mut v0 = wire.clone();
+            v0[5] = 0;
+            assert!(decode_frame(&v0).is_err());
         }
     }
 
@@ -591,17 +605,26 @@ mod tests {
         let mut wire = 2u32.to_be_bytes().to_vec();
         wire.extend_from_slice(&[0x7f, 0]);
         assert_eq!(decode_frame(&wire), Err(ProtoError::BadType(0x7f)));
-        // Ack with an unknown status, short, or long.
-        for payload in [
-            vec![200u8; 17],
-            vec![0u8; 5],
-            vec![0u8; 18],
-            Vec::<u8>::new(),
-        ] {
+        // Ack that is short or empty.
+        for payload in [vec![0u8; 5], Vec::<u8>::new()] {
             let mut wire = ((payload.len() + 1) as u32).to_be_bytes().to_vec();
             wire.push(FRAME_ACK);
             wire.extend_from_slice(&payload);
             assert!(decode_frame(&wire).is_err());
+        }
+        // An unknown status and appended fields come from a newer build: the
+        // frame reads, with the status kept as `Unknown`.
+        for payload in [vec![200u8; 17], vec![0u8; 18], vec![0u8; 40]] {
+            let mut wire = ((payload.len() + 1) as u32).to_be_bytes().to_vec();
+            wire.push(FRAME_ACK);
+            wire.extend_from_slice(&payload);
+            match decode_frame(&wire).unwrap().0 {
+                Frame::Ack(a) => {
+                    assert_eq!(a.status == AckStatus::Unknown, payload[0] == 200);
+                    assert_eq!(a.envelope_id, [payload[1]; 16]);
+                }
+                other => panic!("{other:?}"),
+            }
         }
     }
 
@@ -636,7 +659,10 @@ mod tests {
         }
         let mut longer = good.clone();
         longer.push(0);
-        assert!(Message::decode(&longer).is_err());
+        assert_eq!(
+            Message::decode(&longer).unwrap(),
+            Message::decode(&good).unwrap()
+        );
         let mut bad_kind = good.clone();
         bad_kind[0] = 9;
         assert!(Message::decode(&bad_kind).is_err());

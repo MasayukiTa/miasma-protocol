@@ -1748,6 +1748,8 @@ impl ChatUi {
                 last_ms,
                 pending,
                 read_receipts: true,
+                pending_reason: None,
+                pending_tried_ms: 0,
             }
         };
         let msg = |ord: u64, outgoing: bool, state: &str, text: &str, at: u64| MessageInfo {
@@ -2437,6 +2439,8 @@ mod tests {
             last_ms: last,
             pending: 0,
             read_receipts: true,
+            pending_reason: None,
+            pending_tried_ms: 0,
         };
         ui.on_reply(
             c(),
@@ -2572,6 +2576,8 @@ mod tests {
                 outbox_max: 10,
                 max_message_bytes: 2000,
                 read_receipts: true,
+                pending_reason: None,
+                pending_tried_ms: 0,
             })),
         );
         assert_eq!(ui.availability, Availability::Ok);

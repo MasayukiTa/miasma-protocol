@@ -852,6 +852,8 @@ mod tests {
             last_ms,
             pending: 0,
             read_receipts: true,
+            pending_reason: None,
+            pending_tried_ms: 0,
         }
     }
 

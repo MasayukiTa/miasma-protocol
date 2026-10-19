@@ -115,7 +115,7 @@ impl M<'_> {
                 "{}  {} messages{}  last: {}",
                 c.label.clone().unwrap_or_else(|| format!("(removed contact {})", c.fingerprint)),
                 c.messages,
-                if c.pending > 0 { format!(", {} waiting to be delivered", c.pending) } else { String::new() },
+                if c.pending > 0 { format!(", {} waiting to be delivered{}", c.pending, pending_note(c, false)) } else { String::new() },
                 if c.last_ms == 0 { "-".to_owned() } else { stamp(c.last_ms) },
             ),
             M::Line(m) => line(m, false),
@@ -165,7 +165,7 @@ impl M<'_> {
                 "{}  {}件{}  最後: {}",
                 c.label.clone().unwrap_or_else(|| format!("(削除された連絡先 {})", c.fingerprint)),
                 c.messages,
-                if c.pending > 0 { format!("、未配信 {}件", c.pending) } else { String::new() },
+                if c.pending > 0 { format!("、未配信 {}件{}", c.pending, pending_note(c, true)) } else { String::new() },
                 if c.last_ms == 0 { "-".to_owned() } else { stamp(c.last_ms) },
             ),
             M::Line(m) => line(m, true),
@@ -244,6 +244,81 @@ fn state_word(state: &str, ja: bool) -> &'static str {
     }
 }
 
+/// Words for the stable reason stored with a message: why it failed, or why
+/// the last delivery attempt of a waiting message did not get through. A
+/// reason this build has no words for is shown as it is.
+fn reason_words(r: &str, ja: bool) -> String {
+    let (en, jp) = match r {
+        "not_allowed" => (
+            "the other side has not registered you: ask them to add your contact code (they refused the connection, 403)",
+            "相手があなたを登録していません。相手に、あなたの連絡先コードを追加してもらってください(接続が拒否されました・403)",
+        ),
+        "too_big" => ("the other side refused it as too long", "長すぎるため、相手が受け付けませんでした"),
+        "rejected" => ("the other side could not read it", "相手が読み取れませんでした"),
+        "unsupported" => (
+            "the other side's Miasma is a different version that cannot read it",
+            "相手のMiasmaのバージョンが違い、読み取れませんでした",
+        ),
+        "contact_removed" => ("the contact was removed", "連絡先が削除されました"),
+        "send_disabled" => ("sending to this contact is switched off", "この連絡先への送信がオフです"),
+        "expired" => ("it could not be delivered in time", "時間内に届けられませんでした"),
+        "session" => ("the encrypted session could not be set up", "暗号化の準備ができませんでした"),
+        "no_route" => (
+            "no connection within the time limit: they are offline, or no route to them was found",
+            "時間内に接続できませんでした。相手がオフラインか、経路が見つかりません",
+        ),
+        "connect_failed" | "unreachable" => (
+            "could not connect to them",
+            "相手に接続できませんでした",
+        ),
+        "connection_lost" | "no_answer" => ("the connection was lost", "通信が途切れました"),
+        "protocol" | "bad_reply" => (
+            "they answered in a way this version does not understand",
+            "相手の応答をこのバージョンでは理解できませんでした",
+        ),
+        "peer_no_chat" => (
+            "their Miasma does not support chat (an older version): ask them to update",
+            "相手のMiasmaがチャットに対応していません(古いバージョン)。相手に更新してもらってください",
+        ),
+        "peer_no_group" => (
+            "their Miasma does not support group chat (an older version): ask them to update",
+            "相手のMiasmaがグループチャットに対応していません(古いバージョン)。相手に更新してもらってください",
+        ),
+        "timed_out" => ("they did not answer in time", "相手から時間内に返事がありませんでした"),
+        "rate_limited" => ("they asked us to slow down", "相手から、送る速さを落とすよう求められました"),
+        "peer_busy" => ("they are busy", "相手が処理中です"),
+        "peer_failed" => ("they could not store it yet", "相手がまだ保存できませんでした"),
+        "peer_status_unknown" => (
+            "they answered with a status this version does not know (a newer Miasma?)",
+            "相手が、このバージョンでは分からない状態を返しました(相手のほうが新しいMiasmaかもしれません)",
+        ),
+        "storage" => ("this computer could not read its own message store", "このパソコン側で保存領域を読めませんでした"),
+        other => return other.to_owned(),
+    };
+    (if ja { jp } else { en }).to_owned()
+}
+
+/// ` (why the last attempt failed; last tried ...)` for a conversation with
+/// waiting messages, or nothing when no attempt was made yet.
+fn pending_note(c: &ConversationInfo, ja: bool) -> String {
+    let mut parts = Vec::new();
+    if let Some(r) = &c.pending_reason {
+        parts.push(reason_words(r, ja));
+    }
+    if c.pending_tried_ms > 0 {
+        parts.push(if ja {
+            format!("最後に試した時刻 {} UTC", stamp(c.pending_tried_ms))
+        } else {
+            format!("last tried {} UTC", stamp(c.pending_tried_ms))
+        });
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", parts.join(if ja { "。" } else { "; " }))
+    }
+}
+
 fn line(m: &MessageInfo, ja: bool) -> String {
     let when = if m.at_ms == 0 { m.sent_ms } else { m.at_ms };
     let who = match (m.outgoing, ja) {
@@ -255,7 +330,23 @@ fn line(m: &MessageInfo, ja: bool) -> String {
     let state = if m.outgoing {
         let w = state_word(&m.state, ja);
         match (&m.reason, m.state.as_str()) {
-            (Some(r), "failed") => format!(" [{w}: {r}]"),
+            (Some(r), "failed") => format!(" [{w}: {}]", reason_words(r, ja)),
+            // A message that is still waiting says why the last attempt did
+            // not get through, and when it was made.
+            (reason, "queued" | "sending") if reason.is_some() || m.tried_ms > 0 => {
+                let mut parts = Vec::new();
+                if let Some(r) = reason {
+                    parts.push(reason_words(r, ja));
+                }
+                if m.tried_ms > 0 {
+                    parts.push(if ja {
+                        format!("最後に試した時刻 {} UTC", stamp(m.tried_ms))
+                    } else {
+                        format!("last tried {} UTC", stamp(m.tried_ms))
+                    });
+                }
+                format!(" [{w}: {}]", parts.join(if ja { "。" } else { "; " }))
+            }
             _ => format!(" [{w}]"),
         }
     } else {
@@ -521,6 +612,57 @@ mod tests {
             reason: None,
             sent_ms: 1_700_000_000_000,
             at_ms: 1_700_000_000_000,
+            tried_ms: 0,
+        }
+    }
+
+    #[test]
+    fn a_waiting_message_says_why_and_when() {
+        let waiting = MessageInfo {
+            reason: Some("peer_no_chat".into()),
+            tried_ms: 1_700_000_000_000,
+            ..msg(true, "queued")
+        };
+        let en = line(&waiting, false);
+        assert!(en.contains("[waiting:"), "{en}");
+        assert!(en.contains("does not support chat"), "{en}");
+        assert!(en.contains("last tried 2023-11-14 22:13 UTC"), "{en}");
+        let ja = line(&waiting, true);
+        assert!(
+            ja.contains("送信待ち") && ja.contains("2023-11-14 22:13"),
+            "{ja}"
+        );
+        // Not tried yet: just the state, as before.
+        assert!(line(&msg(true, "queued"), false).ends_with(" [waiting]"));
+        // A failure shows words, not the stored code.
+        let failed = MessageInfo {
+            reason: Some("not_allowed".into()),
+            ..msg(true, "failed")
+        };
+        let f = line(&failed, false);
+        assert!(f.contains("403") && !f.contains("not_allowed"), "{f}");
+        // A reason from a newer build is shown as it is.
+        let odd = MessageInfo {
+            reason: Some("brand_new".into()),
+            ..msg(true, "failed")
+        };
+        assert!(line(&odd, false).contains("brand_new"));
+        for r in [
+            "no_route",
+            "connect_failed",
+            "connection_lost",
+            "protocol",
+            "peer_no_chat",
+            "peer_no_group",
+            "timed_out",
+            "peer_status_unknown",
+            "unsupported",
+        ] {
+            assert_ne!(reason_words(r, false), r, "{r}");
+            assert!(
+                reason_words(r, true).chars().any(|c| c as u32 > 0x3000),
+                "{r}"
+            );
         }
     }
 
@@ -542,6 +684,8 @@ mod tests {
             last_ms: 1_700_000_000_000,
             pending: 1,
             read_receipts: true,
+            pending_reason: None,
+            pending_tried_ms: 0,
         };
         let removed = ConversationInfo {
             label: None,
