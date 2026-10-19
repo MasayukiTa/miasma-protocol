@@ -102,6 +102,20 @@ impl PayloadTransportKind {
     }
 }
 
+impl PayloadTransportKind {
+    /// Like [`permitted_under`](Self::permitted_under), for a request to a
+    /// known address. A libp2p dial to a relay-circuit address
+    /// (`.../p2p-circuit/...`) reaches the holder through the relay, so it counts
+    /// as relayed even though the transport kind is direct; every other kind is
+    /// judged by its class alone.
+    pub fn permitted_for(self, policy: AnonymityPolicy, peer_addr: &str) -> bool {
+        self.permitted_under(policy)
+            || (matches!(policy, AnonymityPolicy::Required { .. })
+                && self == Self::DirectLibp2p
+                && peer_addr.contains("/p2p-circuit"))
+    }
+}
+
 impl fmt::Display for PayloadTransportKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -351,7 +365,7 @@ impl PayloadTransportSelector {
         let order: Vec<usize> = self
             .adaptive_order()
             .into_iter()
-            .filter(|&idx| self.transports[idx].kind().permitted_under(policy))
+            .filter(|&idx| self.transports[idx].kind().permitted_for(policy, peer_addr))
             .collect();
         if order.is_empty() {
             return Err(PolicyFetchError::NoPermittedTransport {

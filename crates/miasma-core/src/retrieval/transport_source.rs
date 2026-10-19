@@ -25,8 +25,11 @@ use crate::{
     crypto::hash::ContentId,
     network::dht::OnionAwareDhtExecutor,
     network::types::ShardLocation,
+    network::AnonymityPolicy,
     share::MiasmaShare,
-    transport::payload::{PayloadTransportSelector, TransportAttempt, TransportExhaustedError},
+    transport::payload::{
+        PayloadTransportSelector, PolicyFetchError, TransportAttempt, TransportExhaustedError,
+    },
     MiasmaError,
 };
 
@@ -38,6 +41,10 @@ pub struct FallbackShareSource<D> {
     transport_selector: Arc<PayloadTransportSelector>,
     /// Accumulated transport attempts across all fetches (for diagnostics).
     all_attempts: Mutex<Vec<TransportAttempt>>,
+    /// Anonymity policy of the retrieval this source serves. `Required` limits
+    /// the fetch to transports that reach the holder through a relay; the other
+    /// policies use the whole fallback chain, as before.
+    policy: AnonymityPolicy,
 }
 
 impl<D: OnionAwareDhtExecutor> FallbackShareSource<D> {
@@ -46,7 +53,17 @@ impl<D: OnionAwareDhtExecutor> FallbackShareSource<D> {
             dht,
             transport_selector,
             all_attempts: Mutex::new(Vec::new()),
+            policy: AnonymityPolicy::Direct,
         }
+    }
+
+    /// Serve a retrieval that runs under `policy`. Under
+    /// [`AnonymityPolicy::Required`] no direct transport is ever attempted: if
+    /// none of the configured transports is permitted, `fetch` fails instead of
+    /// downgrading.
+    pub fn with_policy(mut self, policy: AnonymityPolicy) -> Self {
+        self.policy = policy;
+        self
     }
 
     /// Return all transport attempts accumulated during retrieval.
@@ -154,11 +171,33 @@ impl<D: OnionAwareDhtExecutor> ShareSource for FallbackShareSource<D> {
             ""
         };
 
-        match self
-            .transport_selector
-            .fetch_share(peer_addr, mid_digest, slot_index, segment_index)
-            .await
-        {
+        let fetched = if matches!(self.policy, AnonymityPolicy::Required { .. }) {
+            match self
+                .transport_selector
+                .fetch_share_with_policy(
+                    self.policy,
+                    peer_addr,
+                    mid_digest,
+                    slot_index,
+                    segment_index,
+                )
+                .await
+            {
+                Ok(t) => Ok(t),
+                Err(PolicyFetchError::NoPermittedTransport { .. }) => {
+                    return Err(MiasmaError::Network(format!(
+                        "anonymity policy {} forbids every configured payload transport",
+                        self.policy
+                    )));
+                }
+                Err(PolicyFetchError::Exhausted(e)) => Err(e),
+            }
+        } else {
+            self.transport_selector
+                .fetch_share(peer_addr, mid_digest, slot_index, segment_index)
+                .await
+        };
+        match fetched {
             Ok(result) => {
                 // Record all attempts.
                 let mut all = self.all_attempts.lock().unwrap();

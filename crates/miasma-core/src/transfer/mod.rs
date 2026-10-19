@@ -47,7 +47,9 @@ pub use receive_stream::{
     receive_stream, SegmentBuf, SegmentSink, SinkError, StreamOutcome, StreamSpec, StreamStats,
     StreamStatsSnapshot,
 };
-pub use stream_host::{host_for, register_host, unregister_host, StreamHost};
+pub use stream_host::{
+    host_for, register_gated_host, register_host, unregister_host, GatedHost, StreamHost,
+};
 
 #[cfg(test)]
 mod receive_tests;

@@ -697,7 +697,13 @@ impl DaemonServer {
         // Let front ends that only know the data directory (the UniFFI layer)
         // find this node for RAM-only receives. Removed again on shutdown and
         // at the start of a wipe.
-        crate::transfer::stream_host::register_host(&self.data_dir, coord.clone());
+        // Every such receive is registered with the store's wipe gate, so a
+        // wipe cancels it and waits for it like any other gated operation.
+        crate::transfer::stream_host::register_gated_host(
+            &self.data_dir,
+            coord.clone(),
+            store.wipe_gate_handle(),
+        );
 
         // Cover traffic rides inside the real encrypted onion request protocol.
         // Best-effort try_send ensures it can never backpressure application work.
@@ -1885,8 +1891,9 @@ async fn process_request_inner(
                     "wipe not confirmed: missing, expired or wrong confirmation nonce".into(),
                 );
             }
-            // Order: quiesce (refuse new work, cancel in-flight publish/receive
-            // and the piece maintenance executor, then wait for the gated
+            // Order: quiesce (refuse new work, cancel in-flight publish, file
+            // receive and RAM-only receive streams (all registered with the
+            // gate) and the piece maintenance executor, then wait for the gated
             // operations to be dropped) -> zeroize + crypto-erase the store
             // key -> erase state keys -> take the exclusive directed-key lock
             // -> shutdown.
