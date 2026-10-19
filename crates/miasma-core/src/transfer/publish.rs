@@ -411,9 +411,18 @@ impl MiasmaCoordinator {
                 .unwrap_or_default()
                 .as_secs(),
         };
+        // The record and manifest are the ones just signed and announced; both
+        // are bounded by the DHT value limit, so keeping a copy for the
+        // observer does not change the publish's memory profile.
+        let for_observer = self.publish_observer().map(|_| record.clone());
         self.dht_handle()
             .put_with_manifest(record, Some(&manifest))
             .await?;
+        if let (Some(observer), Some(announced)) = (self.publish_observer(), for_observer) {
+            if let Err(e) = observer(&announced, &manifest) {
+                tracing::warn!("published content could not be registered for upkeep: {e}");
+            }
+        }
         if let Some(jp) = &journal_path {
             PublishJournal::remove(jp);
         }

@@ -124,8 +124,54 @@ struct Session {
     started: bool,
 }
 
+impl Session {
+    /// Overwrite the password in place and drop it. Called on every way a
+    /// session ends (release, wipe, node stop), so a password that was never
+    /// handed to a receive does not outlive the session.
+    fn scrub(&mut self) {
+        if let Some(password) = self.password.as_mut() {
+            zeroize::Zeroize::zeroize(&mut **password);
+        }
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.scrub();
+        #[cfg(test)]
+        SESSIONS_DROPPED.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Sessions dropped so far (tests only).
+#[cfg(test)]
+static SESSIONS_DROPPED: AtomicU64 = AtomicU64::new(0);
+
 static SESSIONS: Mutex<Option<HashMap<u64, Session>>> = Mutex::new(None);
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
+
+/// End every receive session of the node that uses `data_dir`: running ones are
+/// cancelled, and each session's password is overwritten and dropped. Called
+/// when that node is wiped or stopped. Returns how many sessions were ended.
+pub(crate) fn clear_sessions_for(data_dir: &std::path::Path) -> usize {
+    let ended: Vec<Session> = with_sessions(|sessions| {
+        let ids: Vec<u64> = sessions
+            .iter()
+            .filter(|(_, s)| s.data_dir == data_dir)
+            .map(|(id, _)| *id)
+            .collect();
+        ids.into_iter()
+            .filter_map(|id| sessions.remove(&id))
+            .collect()
+    });
+    // Cancel and scrub outside the table lock.
+    let count = ended.len();
+    for session in ended {
+        session.progress.cancel();
+        drop(session);
+    }
+    count
+}
 
 fn with_sessions<R>(f: impl FnOnce(&mut HashMap<u64, Session>) -> R) -> R {
     let mut guard = SESSIONS.lock().unwrap_or_else(|p| p.into_inner());
@@ -624,6 +670,119 @@ mod tests {
             MiasmaFfiError::Other { msg } => assert_eq!(msg, "receive failed"),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    /// A different non-empty password on every call; no test carries a fixed one.
+    fn fresh_password() -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let mixed = nanos
+            ^ (u128::from(std::process::id()) << 64)
+            ^ (u128::from(COUNTER.fetch_add(1, Ordering::SeqCst)) << 96);
+        mixed.to_string()
+    }
+
+    fn session_with_password(dir: &str, w: &World, password: &str) -> Session {
+        Session {
+            data_dir: PathBuf::from(dir),
+            target: parse_transfer_id(&w.mid.to_string()).unwrap(),
+            password: Some(Zeroizing::new(password.to_string())),
+            progress: TransferProgress::new(w.mid.to_string()),
+            started: false,
+        }
+    }
+
+    #[test]
+    fn scrubbing_a_session_overwrites_the_password_in_place() {
+        let w = world(1);
+        let secret = fresh_password();
+        let mut s = session_with_password("/stream-ffi-test/scrub", &w, &secret);
+        let (ptr, cap) = {
+            let p = s.password.as_ref().unwrap();
+            (p.as_ptr(), p.capacity())
+        };
+        assert!(cap >= secret.len());
+        s.scrub();
+        // The buffer is still owned by `s`, so reading it here is sound.
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, cap) };
+        assert!(
+            bytes.iter().all(|b| *b == 0),
+            "the password bytes must be zero after a scrub"
+        );
+    }
+
+    #[test]
+    fn releasing_a_session_scrubs_and_drops_it() {
+        let w = world(1);
+        let dir = install(&w, "release-scrub");
+        let before = SESSIONS_DROPPED.load(Ordering::SeqCst);
+        let id = open_session(dir.clone(), &w.mid.to_string(), Some(fresh_password())).unwrap();
+        release_receive_session(id);
+        assert!(receive_progress(id).is_none());
+        assert!(SESSIONS_DROPPED.load(Ordering::SeqCst) > before);
+        unregister_host(&dir);
+    }
+
+    #[test]
+    fn a_wipe_ends_every_session_of_that_node_and_only_that_node() {
+        let w = world(1);
+        let wiped = install(&w, "wipe-a");
+        let other = install(&w, "wipe-b");
+        let a1 = open_session(wiped.clone(), &w.mid.to_string(), Some(fresh_password())).unwrap();
+        let a2 = open_session(wiped.clone(), &w.mid.to_string(), None).unwrap();
+        let b1 = open_session(other.clone(), &w.mid.to_string(), Some(fresh_password())).unwrap();
+        let progress_of = |id: u64| {
+            with_sessions(|s| s.get(&id).map(|x| x.progress.clone())).expect("session present")
+        };
+        let (pa1, pa2, pb1) = (progress_of(a1), progress_of(a2), progress_of(b1));
+        let before = SESSIONS_DROPPED.load(Ordering::SeqCst);
+
+        assert_eq!(clear_sessions_for(&wiped), 2);
+
+        // Wipe, then inspect: nothing of the wiped node's sessions is left.
+        assert!(receive_progress(a1).is_none() && receive_progress(a2).is_none());
+        assert!(!with_sessions(|s| s.values().any(|x| x.data_dir == wiped)));
+        assert!(pa1.is_cancelled() && pa2.is_cancelled());
+        assert!(SESSIONS_DROPPED.load(Ordering::SeqCst) >= before + 2);
+        let sink = Arc::new(Collect::default());
+        assert!(
+            receive_stream(a1, sink).is_err(),
+            "a wiped session cannot run"
+        );
+        // Another node's session is untouched.
+        assert!(receive_progress(b1).is_some());
+        assert!(!pb1.is_cancelled());
+        assert_eq!(clear_sessions_for(&wiped), 0, "clearing is repeatable");
+
+        release_receive_session(b1);
+        unregister_host(&wiped);
+        unregister_host(&other);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn distress_wipe_ends_the_receive_sessions_of_its_data_dir() {
+        let w = world(1);
+        let dir = PathBuf::from(format!("/tmp/stream-ffi-wipe-{}", std::process::id()));
+        register_host(
+            &dir,
+            Arc::new(MemHost {
+                mid: w.mid.clone(),
+                record: w.record.clone(),
+                manifest: w.manifest.clone(),
+                shares: w.shares.clone(),
+            }),
+        );
+        let id = open_session(dir.clone(), &w.mid.to_string(), Some(fresh_password())).unwrap();
+        let progress = with_sessions(|s| s.get(&id).map(|x| x.progress.clone())).unwrap();
+        // The wipe result depends on what is on disk; the sessions go either way.
+        let _ = crate::distress_wipe(dir.to_string_lossy().into_owned());
+        assert!(receive_progress(id).is_none());
+        assert!(progress.is_cancelled());
+        unregister_host(&dir);
     }
 
     #[test]

@@ -585,7 +585,15 @@ pub struct MiasmaCoordinator {
     retrieval_stats: Arc<Mutex<RetrievalStats>>,
     /// Which peers have refused pushed shares, and how many pushes went out.
     push_state: Arc<PushState>,
+    /// Told about every record a streamed file publish has announced.
+    publish_observer: std::sync::OnceLock<PublishObserver>,
 }
+
+/// Called once per completed streamed file publish with the announced record and
+/// its manifest, after the announce. An `Err` is logged by the publisher; the
+/// publish itself has already succeeded.
+pub type PublishObserver =
+    Arc<dyn Fn(&DhtRecord, &crate::transfer::TransferManifest) -> Result<(), String> + Send + Sync>;
 
 impl MiasmaCoordinator {
     /// Spawn the node's event loop and return a coordinator wrapping its handles.
@@ -634,7 +642,19 @@ impl MiasmaCoordinator {
             relay_routing_enabled: false,
             retrieval_stats: Arc::new(Mutex::new(RetrievalStats::default())),
             push_state: Arc::new(PushState::default()),
+            publish_observer: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Register the observer told about every streamed file publish (the daemon
+    /// uses it to put the record into its replication queue). The first call
+    /// wins; later calls are ignored.
+    pub fn set_publish_observer(&self, observer: PublishObserver) {
+        let _ = self.publish_observer.set(observer);
+    }
+
+    pub(crate) fn publish_observer(&self) -> Option<&PublishObserver> {
+        self.publish_observer.get()
     }
 
     /// Like `start`, but appends additional payload transports to the fallback
@@ -729,6 +749,16 @@ impl MiasmaCoordinator {
     /// without re-dissolving it.
     pub async fn publish_record(&self, record: DhtRecord) -> Result<(), MiasmaError> {
         self.dht_handle.put(record).await
+    }
+
+    /// As [`publish_record`](Self::publish_record), carrying the transfer
+    /// manifest inside the same signed value when there is one.
+    pub async fn publish_record_with_manifest(
+        &self,
+        record: DhtRecord,
+        manifest: Option<&crate::transfer::TransferManifest>,
+    ) -> Result<(), MiasmaError> {
+        self.dht_handle.put_with_manifest(record, manifest).await
     }
 
     /// The listen addresses announced by this node (e.g. written into DhtRecords).
