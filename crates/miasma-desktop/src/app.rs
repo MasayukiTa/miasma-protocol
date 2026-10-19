@@ -427,10 +427,31 @@ impl MiasmaApp {
         data_dir: std::path::PathBuf,
         intent: LaunchIntent,
     ) -> Self {
-        crate::fonts::install(&cc.egui_ctx, locale);
-        let dark = theme::resolve_dark(theme_mode, cc.integration_info.system_theme);
-        kit::apply_theme(&cc.egui_ctx, dark);
-        let worker = WorkerHandle::spawn(data_dir.clone(), cc.egui_ctx.clone());
+        Self::new_with_ctx(
+            &cc.egui_ctx,
+            cc.integration_info.system_theme,
+            mode,
+            locale,
+            theme_mode,
+            data_dir,
+            intent,
+        )
+    }
+
+    /// Same as `new`, from a bare egui context (the window-less UI tour has no eframe frame).
+    pub(crate) fn new_with_ctx(
+        ctx: &egui::Context,
+        system_theme: Option<eframe::Theme>,
+        mode: ProductMode,
+        locale: Locale,
+        theme_mode: ThemeMode,
+        data_dir: std::path::PathBuf,
+        intent: LaunchIntent,
+    ) -> Self {
+        crate::fonts::install(ctx, locale);
+        let dark = theme::resolve_dark(theme_mode, system_theme);
+        kit::apply_theme(ctx, dark);
+        let worker = WorkerHandle::spawn(data_dir.clone(), ctx.clone());
 
         // If launched with a magnet/torrent intent, go to Import tab.
         let first_tab = initial_tab(&intent, mode);
@@ -3174,6 +3195,17 @@ impl Drop for MiasmaApp {
 
 impl eframe::App for MiasmaApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.update_frame(ctx, frame.info().system_theme);
+    }
+}
+
+impl MiasmaApp {
+    /// One frame of the app. `system_theme` is the OS light/dark choice, when known.
+    pub(crate) fn update_frame(
+        &mut self,
+        ctx: &egui::Context,
+        system_theme: Option<eframe::Theme>,
+    ) {
         #[cfg(feature = "ui-tour")]
         if let Some(mut t) = self.tour.take() {
             if !t.drive(self, ctx) {
@@ -3184,7 +3216,7 @@ impl eframe::App for MiasmaApp {
         // Theme: resolve the choice against the OS theme every frame (cheap), and re-apply when
         // it changed. eframe itself resets the visuals when the OS theme flips, so also
         // re-apply if the panel colour is no longer ours.
-        let dark = theme::resolve_dark(self.theme_mode, frame.info().system_theme);
+        let dark = theme::resolve_dark(self.theme_mode, system_theme);
         if self.applied_dark != Some(dark) || ctx.style().visuals.panel_fill != pal().bg {
             kit::apply_theme(ctx, dark);
             self.applied_dark = Some(dark);
