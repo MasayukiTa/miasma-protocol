@@ -1133,7 +1133,11 @@ impl MiasmaCoordinator {
         params: DissolutionParams,
     ) -> Result<
         std::pin::Pin<
-            Box<dyn futures::Stream<Item = Result<Vec<u8>, MiasmaError>> + Send + 'static>,
+            Box<
+                dyn futures::Stream<Item = Result<zeroize::Zeroizing<Vec<u8>>, MiasmaError>>
+                    + Send
+                    + 'static,
+            >,
         >,
         MiasmaError,
     > {

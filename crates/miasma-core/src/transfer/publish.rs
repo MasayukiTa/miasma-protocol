@@ -28,6 +28,7 @@ use zeroize::Zeroizing;
 
 use super::{
     manifest::{SegmentEntry, TransferManifest},
+    plaintext_pool::PlaintextPool,
     progress::{Phase, TransferProgress, TransferState},
     protection::{PasswordProtection, Protection, UnlockedKey},
     publish_journal::{
@@ -300,9 +301,20 @@ impl MiasmaCoordinator {
 
         // ── The publish loop. ───────────────────────────────────────────────
         progress.set_phase(Phase::Transferring);
-        let mut reader = std::io::BufReader::new(std::fs::File::open(&file_path)?);
+        // Plaintext copies (audited): the segment is read straight from the file
+        // into one `SegmentBuf` taken from the pool (no `BufReader`, which would
+        // keep a copy of the last bytes it read in a buffer nothing wipes). The
+        // buffer is dropped, and so wiped and handed back to the pool, right
+        // after the shares are made and hashed, i.e. *before* the first `.await`
+        // of the iteration. No plaintext is alive across any `.await` of this
+        // function. Every exit (error, cancel, early return, panic unwinding)
+        // drops it. What remains outside our reach: the copy the AEAD makes
+        // while it encrypts (its output buffer starts as the plaintext and
+        // ends as ciphertext in place; the dependency's internals were not
+        // audited here) and the OS page cache.
+        let mut reader = std::fs::File::open(&file_path)?;
         reader.seek(SeekFrom::Start(offset))?;
-        let mut segment_buf = vec![0u8; segment_size];
+        let plain_pool = PlaintextPool::shared();
 
         for seg in start_segment..segment_count {
             if progress.is_cancelled() {
@@ -310,9 +322,10 @@ impl MiasmaCoordinator {
             }
 
             let expected = (file_len - offset).min(segment_size as u64) as usize;
+            let mut segment_buf = plain_pool.take(expected);
             let mut filled = 0;
             while filled < expected {
-                let n = reader.read(&mut segment_buf[filled..expected])?;
+                let n = reader.read(&mut segment_buf.as_mut_slice()[filled..expected])?;
                 if n == 0 {
                     break;
                 }
@@ -323,12 +336,13 @@ impl MiasmaCoordinator {
                     "source file changed while publishing: segment {seg} expected {expected} bytes, read {filled}"
                 )));
             }
-            let chunk = &segment_buf[..filled];
+            let chunk = segment_buf.as_slice();
 
             let dissolve_started = Instant::now();
             let (_meta, shares) =
                 dissolve_segment_with(chunk, &mid, seg, offset, params, key.as_deref())?;
             manifest.push_segment(SegmentEntry::from_dissolved(seg, &mid, chunk, &shares)?)?;
+            drop(segment_buf); // wiped and returned to the pool before any await
             let dissolve_time = dissolve_started.elapsed();
             let entry = manifest.segments[seg as usize].clone();
 
@@ -478,15 +492,17 @@ impl MiasmaCoordinator {
 
         let good = tokio::task::spawn_blocking(move || -> Result<usize, MiasmaError> {
             let mut f = std::fs::File::open(&path)?;
-            let mut buf = vec![0u8; seg_size as usize];
+            // File plaintext, on a blocking thread: a pooled buffer, wiped on
+            // every exit of this closure (including a panic).
+            let mut buf = PlaintextPool::shared().take(seg_size as usize);
             let mut verified_bytes = 0u64;
             for (i, rec) in records.iter().enumerate() {
                 let len = rec.entry.plaintext_len as usize;
                 f.seek(SeekFrom::Start(i as u64 * seg_size))?;
-                if f.read_exact(&mut buf[..len]).is_err() {
+                if f.read_exact(&mut buf.as_mut_slice()[..len]).is_err() {
                     return Ok(i);
                 }
-                if *blake3::hash(&buf[..len]).as_bytes() != rec.entry.plain_hash {
+                if *blake3::hash(&buf.as_slice()[..len]).as_bytes() != rec.entry.plain_hash {
                     return Ok(i);
                 }
                 // Every share of the segment was stored locally when it was made.
@@ -526,14 +542,16 @@ async fn hash_file(
     tokio::task::spawn_blocking(move || -> Result<Option<ContentId>, MiasmaError> {
         let mut f = std::fs::File::open(&path)?;
         let mut hasher = blake3::Hasher::new();
-        let mut buf = vec![0u8; 4 * 1024 * 1024];
+        // File plaintext: a pooled buffer, wiped on every exit (including the
+        // cancel return and a panic).
+        let mut buf = PlaintextPool::shared().take(4 * 1024 * 1024);
         let mut done = 0u64;
         loop {
-            let n = f.read(&mut buf)?;
+            let n = f.read(buf.as_mut_slice())?;
             if n == 0 {
                 break;
             }
-            hasher.update(&buf[..n]);
+            hasher.update(&buf.as_slice()[..n]);
             done += n as u64;
             progress.set_verified_bytes(done.min(file_len));
             if progress.is_cancelled() {

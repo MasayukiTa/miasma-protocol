@@ -24,19 +24,19 @@
 
 use std::{
     collections::HashSet,
-    io::{Read, Seek, SeekFrom},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use zeroize::Zeroizing;
 
 use super::{
     journal::{journal_path, now_secs, part_path_for, ReceiveJournal, JOURNAL_VERSION},
     manifest::{sanitize_file_name, SegmentEntry, TransferManifest, MAX_SEGMENT_SIZE},
+    plaintext_pool::{PlaintextPool, SegmentBuf},
     progress::{Phase, TransferProgress, TransferState},
     protection::{Protection, UnlockedKey},
     share_id::{ShareId, ShareMismatch},
@@ -256,14 +256,19 @@ async fn run_inner<S: PieceSource + ?Sized>(
     }
     progress.set_resumed(next_segment, bytes_done);
 
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&part_path)
-        .await
-        .map_err(|e| io_context("cannot create the partial file", &part_path, &e))?;
-    file.seek(SeekFrom::Start(bytes_done)).await?;
+    // A plain `std` handle, shared with the blocking task that writes each
+    // segment: `tokio::fs::File` would copy every segment into an internal
+    // buffer of its own that nothing wipes.
+    let file = Arc::new(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&part_path)
+            .map_err(|e| io_context("cannot create the partial file", &part_path, &e))?,
+    );
+    (&*file).seek(SeekFrom::Start(bytes_done))?;
+    let plain_pool = PlaintextPool::shared();
 
     let mut journal = ReceiveJournal {
         version: JOURNAL_VERSION,
@@ -358,17 +363,30 @@ async fn run_inner<S: PieceSource + ?Sized>(
             entry,
             manifest: manifest.as_ref(),
         };
-        let plaintext =
-            decode_with_fallback(source, &ctx, progress, &mut suspects, &mut pool).await?;
+        // The only plaintext of the segment. It is a `SegmentBuf` from the moment
+        // the decoder returns it, so an error, a cancel (this future dropped at
+        // the `.await` below) or a panic wipes it. No other copy is made: the
+        // pieces held across the fetch awaits are ciphertext and key shares.
+        let plaintext = SegmentBuf::adopt_in(
+            decode_with_fallback(source, &ctx, progress, &mut suspects, &mut pool).await?,
+            plain_pool.stats(),
+            plain_pool,
+        );
         let decode_time = decode_started.elapsed();
 
-        // Append, make it durable, then journal it.
+        // Append, make it durable, then journal it. The buffer moves into the
+        // blocking task and comes back: while the write is in flight there is
+        // exactly this one plaintext copy (the one the OS gets is outside our
+        // reach). If this future is dropped meanwhile, the task still owns the
+        // buffer and wipes it when it ends.
         let write_started = Instant::now();
-        let write = async {
-            file.write_all(&plaintext).await?;
-            file.sync_data().await
-        }
-        .await;
+        let f = file.clone();
+        let (plaintext, write) = tokio::task::spawn_blocking(move || {
+            let r = write_segment(&f, plaintext.as_slice());
+            (plaintext, r)
+        })
+        .await
+        .map_err(|e| MiasmaError::Storage(format!("write task: {e}")))?;
         if let Err(e) = write {
             // Out of disk or similar: keep everything; resuming after the
             // condition clears is the whole point.
@@ -381,8 +399,10 @@ async fn run_inner<S: PieceSource + ?Sized>(
                 source_stalled: false,
             });
         }
-        hasher.update(&plaintext);
-        bytes_done += plaintext.len() as u64;
+        let segment_len = plaintext.len() as u64;
+        hasher.update(plaintext.as_slice());
+        drop(plaintext); // wiped here; nothing below needs it
+        bytes_done += segment_len;
         journal.next_segment = seg + 1;
         journal.bytes_done = bytes_done;
         journal.updated_at = now_secs();
@@ -390,7 +410,7 @@ async fn run_inner<S: PieceSource + ?Sized>(
         journal.save(&jpath)?;
         let write_time = write_started.elapsed();
 
-        progress.on_segment_done(plaintext.len() as u64, fetch_time, decode_time, write_time);
+        progress.on_segment_done(segment_len, fetch_time, decode_time, write_time);
     }
 
     // ── 6. Only a file whose MID matches is ever named as the output. ───────
@@ -403,7 +423,10 @@ async fn run_inner<S: PieceSource + ?Sized>(
         ReceiveJournal::remove(&jpath);
         return Err(MiasmaError::HashMismatch);
     }
-    file.sync_all().await?;
+    let f = file.clone();
+    tokio::task::spawn_blocking(move || f.sync_all())
+        .await
+        .map_err(|e| MiasmaError::Storage(format!("sync task: {e}")))??;
     drop(file);
     std::fs::rename(&part_path, &output_path).map_err(|e| {
         io_context(
@@ -553,6 +576,12 @@ pub(super) async fn prepare(
         candidates,
         expect,
     })
+}
+
+/// Append one segment to the partial file and make it durable.
+fn write_segment(file: &std::fs::File, data: &[u8]) -> std::io::Result<()> {
+    (&*file).write_all(data)?;
+    file.sync_data()
 }
 
 /// An I/O failure with the path and the OS error kind in the message, so a

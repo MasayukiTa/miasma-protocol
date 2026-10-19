@@ -41,6 +41,7 @@ use super::{
     source::ShareSource,
 };
 use rand::seq::SliceRandom as _;
+use zeroize::Zeroizing;
 
 /// A coordinator that yields reconstructed segments as a `Stream`.
 pub struct StreamingRetrievalCoordinator<Src> {
@@ -63,7 +64,7 @@ impl<Src: ShareSource + Clone + Send + Sync + 'static> StreamingRetrievalCoordin
         }
     }
 
-    /// Returns an `impl Stream<Item = Result<Vec<u8>, MiasmaError>>` where
+    /// Returns an `impl Stream<Item = Result<Zeroizing<Vec<u8>>, MiasmaError>>` where
     /// each item is one reconstructed plaintext segment in order.
     ///
     /// Segments are fetched sequentially (not concurrently) to cap RAM usage
@@ -71,7 +72,7 @@ impl<Src: ShareSource + Clone + Send + Sync + 'static> StreamingRetrievalCoordin
     pub fn retrieve_streaming(
         &self,
         manifest: DissolutionManifest,
-    ) -> Pin<Box<dyn Stream<Item = Result<Vec<u8>, MiasmaError>> + Send + '_>> {
+    ) -> Pin<Box<dyn Stream<Item = Result<Zeroizing<Vec<u8>>, MiasmaError>> + Send + '_>> {
         let source = self.source.clone();
         let params = manifest.params;
         let mid = manifest.mid.clone();
@@ -106,7 +107,8 @@ impl<Src: ShareSource + Clone + Send + Sync + 'static> StreamingRetrievalCoordin
                 // (RS decode + SSS combine + AES decrypt).
                 // Full-file BLAKE3 verification is the caller's responsibility
                 // after all segments are assembled.
-                retrieve_segment(&mid, &valid, &meta, params)
+                // Wiped when the consumer drops the item, on every path.
+                retrieve_segment(&mid, &valid, &meta, params).map(Zeroizing::new)
             }
         });
 
@@ -135,7 +137,7 @@ impl<Src: ShareSource + Clone + Send + Sync + 'static> StreamingRetrievalCoordin
         mid: ContentId,
         segment_count: u32,
         params: DissolutionParams,
-    ) -> Pin<Box<dyn Stream<Item = Result<Vec<u8>, MiasmaError>> + Send + 'static>> {
+    ) -> Pin<Box<dyn Stream<Item = Result<Zeroizing<Vec<u8>>, MiasmaError>> + Send + 'static>> {
         let source = self.source.clone();
         let fetch_policy = self.fetch_policy;
 
@@ -172,7 +174,8 @@ impl<Src: ShareSource + Clone + Send + Sync + 'static> StreamingRetrievalCoordin
                     share_count: params.total_shards as u16,
                 };
 
-                retrieve_segment(&mid, &valid, &meta, params)
+                // Wiped when the consumer drops the item, on every path.
+                retrieve_segment(&mid, &valid, &meta, params).map(Zeroizing::new)
             }
         });
 
@@ -222,7 +225,7 @@ mod tests {
         let mut stream = coord.retrieve_streaming(manifest.clone());
         let mut recovered: Vec<u8> = Vec::new();
         while let Some(chunk) = stream.next().await {
-            recovered.extend(chunk.unwrap());
+            recovered.extend_from_slice(&chunk.unwrap());
         }
 
         assert_eq!(recovered, data);
@@ -262,7 +265,7 @@ mod tests {
         let mut recovered: Vec<u8> = Vec::new();
         let mut segment_count = 0usize;
         while let Some(chunk) = stream.next().await {
-            recovered.extend(chunk.unwrap());
+            recovered.extend_from_slice(&chunk.unwrap());
             segment_count += 1;
         }
 

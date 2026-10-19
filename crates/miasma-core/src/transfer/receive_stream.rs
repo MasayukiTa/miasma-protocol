@@ -36,18 +36,17 @@
 use std::{
     collections::HashSet,
     future::Future,
-    sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
-        Arc,
-    },
+    sync::Arc,
     time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
+pub use super::plaintext_pool::{SegmentBuf, StreamStats, StreamStatsSnapshot};
 use super::{
     manifest::TransferManifest,
+    plaintext_pool::PlaintextPool,
     progress::{Phase, TransferProgress, TransferState},
     receive::{
         decode_with_fallback, fill_pool, prepare, PieceSource, PooledPiece, Prepared, RetryConfig,
@@ -59,105 +58,6 @@ use crate::{crypto::hash::ContentId, network::types::DhtRecord, MiasmaError};
 
 /// How often a waiting stream looks at its cancel flag.
 const CANCEL_POLL: Duration = Duration::from_millis(20);
-
-// ─── The zeroizing segment buffer ────────────────────────────────────────────
-
-/// Counters of the plaintext buffers one stream created. Cheap, lock-free, and
-/// per stream so that tests (and a front end showing memory use) can read them
-/// without a process-wide hook.
-#[derive(Default)]
-pub struct StreamStats {
-    created: AtomicU64,
-    wiped: AtomicU64,
-    not_clean: AtomicU64,
-    live: AtomicU64,
-    peak_live: AtomicU64,
-    largest: AtomicUsize,
-}
-
-/// A point-in-time copy of [`StreamStats`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StreamStatsSnapshot {
-    /// Buffers created so far.
-    pub created: u64,
-    /// Buffers that were dropped and read back as all zero after wiping.
-    pub wiped: u64,
-    /// Buffers that did **not** read back as zero after wiping. Must stay 0.
-    pub wipe_failures: u64,
-    /// Buffers alive now.
-    pub live: u64,
-    /// The most buffers alive at the same moment.
-    pub peak_live: u64,
-    /// The size of the biggest buffer, in bytes.
-    pub largest_buffer: usize,
-}
-
-impl StreamStats {
-    pub fn snapshot(&self) -> StreamStatsSnapshot {
-        StreamStatsSnapshot {
-            created: self.created.load(Ordering::SeqCst),
-            wiped: self.wiped.load(Ordering::SeqCst),
-            wipe_failures: self.not_clean.load(Ordering::SeqCst),
-            live: self.live.load(Ordering::SeqCst),
-            peak_live: self.peak_live.load(Ordering::SeqCst),
-            largest_buffer: self.largest.load(Ordering::SeqCst),
-        }
-    }
-}
-
-/// One decrypted segment. The bytes are wiped when this is dropped, and the wipe
-/// is checked by reading them back, so a regression that stops wiping shows up in
-/// [`StreamStatsSnapshot::wipe_failures`] rather than silently.
-pub struct SegmentBuf {
-    data: Zeroizing<Vec<u8>>,
-    stats: Arc<StreamStats>,
-}
-
-impl SegmentBuf {
-    /// Take over an already zeroizing buffer (no copy is made).
-    pub fn adopt(data: Zeroizing<Vec<u8>>, stats: &Arc<StreamStats>) -> Self {
-        stats.created.fetch_add(1, Ordering::SeqCst);
-        let live = stats.live.fetch_add(1, Ordering::SeqCst) + 1;
-        stats.peak_live.fetch_max(live, Ordering::SeqCst);
-        stats.largest.fetch_max(data.len(), Ordering::SeqCst);
-        Self {
-            data,
-            stats: stats.clone(),
-        }
-    }
-
-    pub fn as_slice(&self) -> &[u8] {
-        &self.data
-    }
-
-    pub fn len(&self) -> usize {
-        self.data.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
-    }
-}
-
-impl std::fmt::Debug for SegmentBuf {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Never the bytes.
-        write!(f, "SegmentBuf({} bytes)", self.data.len())
-    }
-}
-
-impl Drop for SegmentBuf {
-    fn drop(&mut self) {
-        self.data.as_mut_slice().zeroize();
-        if self.data.iter().all(|b| *b == 0) {
-            self.stats.wiped.fetch_add(1, Ordering::SeqCst);
-        } else {
-            self.stats.not_clean.fetch_add(1, Ordering::SeqCst);
-        }
-        self.stats.live.fetch_sub(1, Ordering::SeqCst);
-        // The `Zeroizing` field wipes (and clears) once more as it drops.
-    }
-}
 
 // ─── The sink ────────────────────────────────────────────────────────────────
 
@@ -401,7 +301,10 @@ async fn run_stream<S: PieceSource + ?Sized>(
                 bytes_delivered: bytes_done,
             });
         };
-        let buf = SegmentBuf::adopt(produced?, &stats);
+        // The decoder allocated this plaintext (inside `retrieve_segment_with`);
+        // it is counted in the shared pool's live total and wiped on drop, but
+        // not kept by the pool.
+        let buf = SegmentBuf::adopt_in(produced?, &stats, PlaintextPool::shared());
         let fetch_time = started.elapsed();
 
         hasher.update(buf.as_slice());
@@ -452,28 +355,6 @@ async fn run_stream<S: PieceSource + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_dropped_buffer_is_wiped_and_counted() {
-        let stats = Arc::new(StreamStats::default());
-        let buf = SegmentBuf::adopt(Zeroizing::new(vec![0xAB; 4096]), &stats);
-        assert_eq!(buf.len(), 4096);
-        assert_eq!(stats.snapshot().live, 1);
-        drop(buf);
-        let s = stats.snapshot();
-        assert_eq!((s.created, s.wiped, s.wipe_failures, s.live), (1, 1, 0, 0));
-        assert_eq!((s.peak_live, s.largest_buffer), (1, 4096));
-    }
-
-    #[test]
-    fn debug_never_prints_the_bytes() {
-        let stats = Arc::new(StreamStats::default());
-        let buf = SegmentBuf::adopt(Zeroizing::new(b"top-secret-marker".to_vec()), &stats);
-        let shown = format!("{buf:?}");
-        assert!(!shown.contains("secret"), "{shown}");
-        assert!(shown.contains("17 bytes"), "{shown}");
-    }
-
     #[tokio::test]
     async fn with_cancel_returns_none_once_cancelled_and_drops_the_future() {
         let progress = TransferProgress::new("miasma:x");

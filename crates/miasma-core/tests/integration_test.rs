@@ -952,7 +952,7 @@ async fn retrieve_from_network_streaming_single_segment_roundtrip() {
         let mut recovered: Vec<u8> = Vec::new();
         let mut segment_count = 0usize;
         while let Some(chunk) = stream.next().await {
-            recovered.extend(chunk.expect("segment fetch/reconstruct failed"));
+            recovered.extend_from_slice(&chunk.expect("segment fetch/reconstruct failed"));
             segment_count += 1;
         }
 
@@ -1619,7 +1619,7 @@ async fn dissolve_and_publish_file_multi_segment_network_retrieval_is_fast() {
         let mut streamed: Vec<u8> = Vec::new();
         let mut segment_count = 0usize;
         while let Some(chunk) = stream.next().await {
-            streamed.extend(chunk.expect("segment fetch/reconstruct failed"));
+            streamed.extend_from_slice(&chunk.expect("segment fetch/reconstruct failed"));
             segment_count += 1;
         }
         let streaming_elapsed = started.elapsed();
