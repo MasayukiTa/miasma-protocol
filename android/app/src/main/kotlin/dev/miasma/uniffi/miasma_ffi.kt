@@ -131,3 +131,49 @@ fun setPrivacyProfile(
     dataDir: String,
     profile: PrivacyProfileFfi,
 ): PrivacyProfileApplyResultFfi = ffiNotLoaded()
+
+// RAM-only receive (crates/miasma-ffi/src/receive_stream_ffi.rs). Plaintext goes
+// to a PlaintextSink the app implements; no file is created. Each ByteArray
+// passed to onChunk belongs to the app, which should clear it after use.
+data class ReceiveProgressFfi(
+    val state: String,
+    val phase: String,
+    val segmentsDone: UInt,
+    val segmentsTotal: UInt,
+    val bytesDone: ULong,
+    val bytesTotal: ULong,
+    val rateBps: Double,
+    val piecesRejected: ULong,
+)
+
+enum class StreamEndFfi {
+    COMPLETE,
+    CANCELLED,
+    SINK_STOPPED,
+}
+
+data class StreamReceiveResultFfi(
+    val end: StreamEndFfi,
+    val segmentsDelivered: UInt,
+    val bytesDelivered: ULong,
+)
+
+interface PlaintextSink {
+    // Return false to stop the receive. Called on the thread running receiveStream.
+    fun onChunk(segment: UInt, data: ByteArray): Boolean
+    fun onProgress(progress: ReceiveProgressFfi)
+    fun onComplete(totalBytes: ULong)
+    fun onAbort()
+}
+
+@Throws(MiasmaFfiException::class)
+fun startReceiveSession(dataDir: String, id: String, password: String?): ULong = ffiNotLoaded()
+
+@Throws(MiasmaFfiException::class)
+fun receiveStream(sessionId: ULong, sink: PlaintextSink): StreamReceiveResultFfi = ffiNotLoaded()
+
+fun cancelReceive(sessionId: ULong): Boolean = ffiNotLoaded()
+
+fun receiveProgress(sessionId: ULong): ReceiveProgressFfi? = ffiNotLoaded()
+
+fun releaseReceiveSession(sessionId: ULong): Unit = ffiNotLoaded()

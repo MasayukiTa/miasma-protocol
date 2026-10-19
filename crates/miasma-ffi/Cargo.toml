@@ -29,6 +29,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 x25519-dalek.workspace = true
 libp2p.workspace = true
 zeroize.workspace = true
+async-trait = "0.1"
 
 [build-dependencies]
 uniffi = { version = "0.28", features = ["build"] }

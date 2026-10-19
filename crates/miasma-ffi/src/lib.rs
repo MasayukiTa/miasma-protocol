@@ -49,6 +49,8 @@ use miasma_core::{
 // Tell UniFFI to generate the FFI scaffolding for this crate.
 uniffi::setup_scaffolding!("miasma_ffi");
 
+mod receive_stream_ffi;
+
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 /// Maximum input size for dissolve (100 MiB).
