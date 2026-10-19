@@ -35,6 +35,7 @@ pub mod store;
 pub mod transfer;
 pub mod transport;
 pub mod update;
+pub mod wipe;
 
 pub use config::{default_data_dir, NodeConfig, TransportConfig};
 pub use cover_traffic::{

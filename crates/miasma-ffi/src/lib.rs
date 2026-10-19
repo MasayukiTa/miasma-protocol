@@ -86,6 +86,20 @@ struct EmbeddedDaemon {
     sharing_contact: String,
     /// Channel to signal daemon shutdown.
     shutdown_tx: mpsc::Sender<()>,
+    /// The daemon's share store, kept only to report the root-key memory
+    /// status (it is the same object the daemon wipes).
+    store: Arc<LocalShareStore>,
+}
+
+/// Root-key memory protection as reported to the UI: the page-lock outcome
+/// (`lock_request_accepted`, `lock_request_denied`, `unsupported`, or `wiped`
+/// once the key was erased) and whether a core-dump exclusion was accepted.
+/// Best-effort hardening, not a guarantee.
+fn key_memory_report(store: &LocalShareStore) -> (String, bool) {
+    match store.key_memory_status() {
+        Some((lock, dump)) => (lock.as_str().to_string(), dump),
+        None => ("wiped".to_string(), false),
+    }
 }
 
 /// Global singleton for the embedded daemon.
@@ -909,6 +923,15 @@ pub struct EmbeddedDaemonStatus {
     pub peer_id: String,
     /// Full sharing contact string (`msk:<base58>@<PeerId>`).
     pub sharing_contact: String,
+    /// Outcome of the page-lock request for the in-memory root key:
+    /// `lock_request_accepted`, `lock_request_denied`, `unsupported`, or
+    /// `wiped` once the key has been erased. Empty from an older build.
+    #[uniffi(default = "")]
+    pub key_memory_lock: String,
+    /// Whether the OS accepted a request to keep the key pages out of core
+    /// dumps (Linux/Android only; `false` elsewhere).
+    #[uniffi(default = false)]
+    pub key_memory_dump_excluded: bool,
 }
 
 /// Start the embedded daemon with full networking and HTTP bridge.
@@ -933,10 +956,13 @@ pub fn start_embedded_daemon(
     {
         let guard = EMBEDDED_DAEMON.lock().unwrap();
         if let Some(ref d) = *guard {
+            let (key_memory_lock, key_memory_dump_excluded) = key_memory_report(&d.store);
             return Ok(EmbeddedDaemonStatus {
                 http_port: d.http_port,
                 peer_id: d.peer_id.clone(),
                 sharing_contact: d.sharing_contact.clone(),
+                key_memory_lock,
+                key_memory_dump_excluded,
             });
         }
     }
@@ -972,6 +998,7 @@ pub fn start_embedded_daemon(
 
     // Start DaemonServer (binds IPC + HTTP bridge + transports).
     let rt = shared_runtime();
+    let status_store = store.clone();
     let result = rt.block_on(async {
         let server =
             DaemonServer::start_with_transport(node, store, path.clone(), transport_config)
@@ -1035,6 +1062,7 @@ pub fn start_embedded_daemon(
             peer_id: peer_id.clone(),
             sharing_contact: sharing_contact.clone(),
             shutdown_tx,
+            store: status_store.clone(),
         });
     }
 
@@ -1057,10 +1085,13 @@ pub fn start_embedded_daemon(
         "embedded daemon started"
     );
 
+    let (key_memory_lock, key_memory_dump_excluded) = key_memory_report(&status_store);
     Ok(EmbeddedDaemonStatus {
         http_port,
         peer_id,
         sharing_contact,
+        key_memory_lock,
+        key_memory_dump_excluded,
     })
 }
 

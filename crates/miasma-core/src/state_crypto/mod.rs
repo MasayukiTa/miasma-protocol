@@ -224,10 +224,86 @@ impl From<StateError> for MiasmaError {
     }
 }
 
+/// Shared storage of one derived state key. It can be erased in place while
+/// other components still hold the [`StateKeys`] that owns it.
+struct KeyCell {
+    key: std::sync::Mutex<Option<Zeroizing<[u8; 32]>>>,
+    /// Test probe: incremented when this cell is dropped.
+    #[cfg(test)]
+    drop_probe: std::sync::Mutex<Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>>,
+}
+
+impl KeyCell {
+    fn erase(&self) -> bool {
+        let mut g = self.key.lock().unwrap_or_else(|e| e.into_inner());
+        match g.take() {
+            // Dropping a `Zeroizing` wipes the bytes.
+            Some(k) => {
+                drop(k);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+impl Drop for KeyCell {
+    fn drop(&mut self) {
+        // Wipe the bytes even if the mutex was poisoned.
+        let slot = self.key.get_mut().unwrap_or_else(|e| e.into_inner());
+        if let Some(k) = slot.take() {
+            drop(k);
+        }
+        #[cfg(test)]
+        if let Some(p) = self
+            .drop_probe
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            p.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+/// Every key cell that was loaded from a data directory, so a wipe can erase
+/// the ones other components still hold.
+type CellRegistry = std::sync::Mutex<Vec<(Option<PathBuf>, PathBuf, std::sync::Weak<KeyCell>)>>;
+static LIVE_CELLS: std::sync::OnceLock<CellRegistry> = std::sync::OnceLock::new();
+
+fn comparable_dir(dir: &Path) -> Option<PathBuf> {
+    std::fs::canonicalize(dir).ok()
+}
+
+/// Erase, in place, every state key that was loaded from `data_dir` and is
+/// still held somewhere in this process. Holders keep their `StateKeys`
+/// object, but every later seal/open on it fails with a key error. Returns how
+/// many live keys were erased.
+pub fn erase_state_keys(data_dir: &Path) -> usize {
+    let Some(reg) = LIVE_CELLS.get() else {
+        return 0;
+    };
+    let canon = comparable_dir(data_dir);
+    let mut erased = 0;
+    let mut g = reg.lock().unwrap_or_else(|e| e.into_inner());
+    g.retain(|(c, raw, weak)| {
+        let Some(cell) = weak.upgrade() else {
+            return false;
+        };
+        let same = raw == data_dir || (c.is_some() && *c == canon);
+        if same && cell.erase() {
+            erased += 1;
+        }
+        true
+    });
+    erased
+}
+
 /// The key hierarchy below the master key. Cheap to create; holds one
-/// zeroizing 32-byte key.
+/// zeroizing 32-byte key that is wiped when the last holder drops it or when
+/// [`erase_state_keys`] runs for its data directory.
 pub struct StateKeys {
-    state_key: Zeroizing<[u8; 32]>,
+    cell: std::sync::Arc<KeyCell>,
 }
 
 impl fmt::Debug for StateKeys {
@@ -246,7 +322,38 @@ impl StateKeys {
         }
         let state_key = keyderive::derive_state_key(master)
             .map_err(|e| StateError::KeyInvalid(e.to_string()))?;
-        Ok(Self { state_key })
+        Ok(Self {
+            cell: std::sync::Arc::new(KeyCell {
+                key: std::sync::Mutex::new(Some(state_key)),
+                #[cfg(test)]
+                drop_probe: std::sync::Mutex::new(None),
+            }),
+        })
+    }
+
+    /// Erase this key in place (see [`erase_state_keys`]).
+    pub fn erase(&self) {
+        self.cell.erase();
+    }
+
+    /// `true` once the key has been erased.
+    pub fn is_erased(&self) -> bool {
+        self.cell
+            .key
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none()
+    }
+
+    fn register(&self, data_dir: &Path) {
+        let reg = LIVE_CELLS.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+        let mut g = reg.lock().unwrap_or_else(|e| e.into_inner());
+        g.retain(|(_, _, w)| w.strong_count() > 0);
+        g.push((
+            comparable_dir(data_dir),
+            data_dir.to_path_buf(),
+            std::sync::Arc::downgrade(&self.cell),
+        ));
     }
 
     /// Read `master.key` from `data_dir`. Never creates it.
@@ -264,7 +371,9 @@ impl StateKeys {
         }
         let mut arr = Zeroizing::new([0u8; 32]);
         arr.copy_from_slice(&bytes);
-        Self::from_master_key(&arr)
+        let keys = Self::from_master_key(&arr)?;
+        keys.register(data_dir);
+        Ok(keys)
     }
 
     /// Like [`load`](Self::load), but a data directory that has never held
@@ -300,9 +409,68 @@ impl StateKeys {
         Err(StateError::KeyMissing)
     }
 
-    pub(crate) fn doc_key(&self, label: Label) -> Zeroizing<[u8; 32]> {
-        keyderive::derive_state_doc_key(self.state_key.as_ref(), label.name())
-            .expect("HKDF expand of 32 bytes cannot fail")
+    pub(crate) fn doc_key(&self, label: Label) -> Result<Zeroizing<[u8; 32]>, StateError> {
+        let g = self.cell.key.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(state_key) = g.as_ref() else {
+            return Err(StateError::KeyInvalid(
+                "the state key was erased by a wipe".into(),
+            ));
+        };
+        Ok(
+            keyderive::derive_state_doc_key(state_key.as_ref(), label.name())
+                .expect("HKDF expand of 32 bytes cannot fail"),
+        )
+    }
+}
+
+#[cfg(test)]
+mod erase_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    fn dir_with_key() -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        let mut key = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut key);
+        std::fs::write(crate::paths::master_key(d.path()), key).unwrap();
+        d
+    }
+
+    #[test]
+    fn erase_state_keys_fails_closed_for_holders_and_drop_wipes_the_cell() {
+        let dir = dir_with_key();
+        let other = dir_with_key();
+        let held = std::sync::Arc::new(StateKeys::load(dir.path()).unwrap());
+        let held_by_component = held.clone();
+        let unrelated = StateKeys::load(other.path()).unwrap();
+        let drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        *held.cell.drop_probe.lock().unwrap() = Some(drops.clone());
+        let unrelated_drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        *unrelated.cell.drop_probe.lock().unwrap() = Some(unrelated_drops.clone());
+
+        assert!(held.doc_key(Label::Contacts).is_ok());
+        let sealed = doc::seal(&held, Label::Contacts, b"ctx", b"hello").unwrap();
+
+        assert!(erase_state_keys(dir.path()) >= 1);
+
+        // The holder still exists, but cannot seal or open anything.
+        assert!(held_by_component.is_erased());
+        assert!(doc::seal(&held_by_component, Label::Contacts, b"ctx", b"x").is_err());
+        assert!(doc::open(&held_by_component, Label::Contacts, b"ctx", sealed).is_err());
+        // Another data directory is untouched.
+        assert!(!unrelated.is_erased());
+        assert!(unrelated.doc_key(Label::Contacts).is_ok());
+
+        // The cell lives while a component holds it; dropping the last holder
+        // drops it exactly once.
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(held);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(held_by_component);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unrelated_drops.load(Ordering::SeqCst), 0);
+        drop(unrelated);
+        assert_eq!(unrelated_drops.load(Ordering::SeqCst), 1);
     }
 }
 

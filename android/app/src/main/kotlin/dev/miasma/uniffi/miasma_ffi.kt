@@ -25,6 +25,10 @@ data class EmbeddedDaemonStatus(
     val httpPort: UShort,
     val peerId: String,
     val sharingContact: String,
+    // Root-key memory protection report: lock_request_accepted,
+    // lock_request_denied, unsupported, or wiped. Empty from an older build.
+    val keyMemoryLock: String = "",
+    val keyMemoryDumpExcluded: Boolean = false,
 )
 
 data class EnvelopeSummaryFfi(

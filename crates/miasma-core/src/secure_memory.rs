@@ -8,6 +8,9 @@
 //! callers can inspect [`MemoryLockStatus`]. A lock request being accepted is
 //! not a guarantee that the secret can never reach swap, hibernation files or
 //! crash dumps, and callers must not describe it as one.
+//!
+//! On Linux/Android the mapping is additionally marked `MADV_DONTDUMP`
+//! (best effort; reported by [`SecureBytes::dump_exclusion_requested`]).
 
 use std::fmt;
 #[cfg(any(unix, windows))]
@@ -30,11 +33,23 @@ pub enum MemoryLockStatus {
     Unsupported,
 }
 
+impl MemoryLockStatus {
+    /// Stable machine-readable name used in status output.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MemoryLockStatus::LockRequestAccepted => "lock_request_accepted",
+            MemoryLockStatus::LockRequestDenied => "lock_request_denied",
+            MemoryLockStatus::Unsupported => "unsupported",
+        }
+    }
+}
+
 enum SecretBacking<const N: usize> {
     #[cfg(any(unix, windows))]
     Mapped {
         ptr: NonNull<u8>,
         lock_requested: bool,
+        dump_excluded: bool,
     },
     Heap(Box<Zeroizing<[u8; N]>>),
 }
@@ -50,7 +65,7 @@ pub struct SecureBytes<const N: usize> {
 
 // SAFETY: the mapped region is uniquely owned by its `SecureBytes`; it is never
 // aliased by another owner, shared references only expose immutable bytes, and
-// the only mutation (zeroize in `Drop`) needs `&mut self`.
+// the only mutation (zeroize in `Drop` / `zeroize_in_place`) needs `&mut self`.
 unsafe impl<const N: usize> Send for SecureBytes<N> {}
 // SAFETY: see the `Send` justification; `&SecureBytes` only permits reads.
 unsafe impl<const N: usize> Sync for SecureBytes<N> {}
@@ -59,16 +74,25 @@ impl<const N: usize> SecureBytes<N> {
     /// Move `value` into protected storage. The by-value argument is zeroized
     /// when a dedicated mapping is used. Copies the caller still holds (for
     /// example the argument's original location) are the caller's to clear.
-    #[cfg_attr(not(any(unix, windows)), allow(unused_mut))]
+    /// Prefer [`SecureBytes::from_slice`] when the source already lives in a
+    /// zeroizing container: it avoids an extra by-value copy of the secret.
     pub fn new(mut value: [u8; N]) -> Self {
+        let out = Self::from_slice(&value);
+        value.zeroize();
+        out
+    }
+
+    /// Copy `value` into protected storage without creating an additional
+    /// by-value temporary of the secret on the stack.
+    pub fn from_slice(value: &[u8; N]) -> Self {
         #[cfg(any(unix, windows))]
         if N != 0 {
-            if let Some((ptr, lock_requested)) = allocate_mapping(&value) {
-                value.zeroize();
+            if let Some((ptr, lock_requested, dump_excluded)) = allocate_mapping(value) {
                 return Self {
                     backing: SecretBacking::Mapped {
                         ptr,
                         lock_requested,
+                        dump_excluded,
                     },
                     status: if lock_requested {
                         MemoryLockStatus::LockRequestAccepted
@@ -85,13 +109,9 @@ impl<const N: usize> SecureBytes<N> {
             MemoryLockStatus::Unsupported
         };
         Self {
-            backing: SecretBacking::Heap(Box::new(Zeroizing::new(value))),
+            backing: SecretBacking::Heap(Box::new(Zeroizing::new(*value))),
             status,
         }
-    }
-
-    pub fn from_slice(value: &[u8; N]) -> Self {
-        Self::new(*value)
     }
 
     /// Status of the page-lock request made at construction time.
@@ -103,6 +123,32 @@ impl<const N: usize> SecureBytes<N> {
     /// hardening, not a guarantee against the secret being written to disk.
     pub fn lock_request_accepted(&self) -> bool {
         self.status == MemoryLockStatus::LockRequestAccepted
+    }
+
+    /// `true` when the OS accepted a request to leave the mapping out of core
+    /// dumps (`MADV_DONTDUMP`, Linux/Android only). Best effort; other
+    /// targets always report `false`.
+    pub fn dump_exclusion_requested(&self) -> bool {
+        match &self.backing {
+            #[cfg(any(unix, windows))]
+            SecretBacking::Mapped { dump_excluded, .. } => *dump_excluded,
+            SecretBacking::Heap(_) => false,
+        }
+    }
+
+    /// Overwrite the secret with zeros now, keeping the storage allocated.
+    /// Afterwards [`as_array`](Self::as_array) reads all zeros. Used by the
+    /// wipe path so the key is gone before the storage is released.
+    pub fn zeroize_in_place(&mut self) {
+        match &mut self.backing {
+            #[cfg(any(unix, windows))]
+            SecretBacking::Mapped { ptr, .. } => {
+                // SAFETY: `ptr` is the N-byte mapping owned by `self`, still
+                // valid until `Drop`; `&mut self` excludes concurrent readers.
+                unsafe { std::slice::from_raw_parts_mut(ptr.as_ptr(), N).zeroize() };
+            }
+            SecretBacking::Heap(bytes) => bytes.as_mut().zeroize(),
+        }
     }
 
     pub fn as_array(&self) -> &[u8; N] {
@@ -153,6 +199,7 @@ impl<const N: usize> Drop for SecureBytes<N> {
             SecretBacking::Mapped {
                 ptr,
                 lock_requested,
+                ..
             } => {
                 // SAFETY: `ptr` points to the N-byte mapping created in
                 // allocate_mapping and still owned by `self` (Drop runs
@@ -185,7 +232,9 @@ impl SecureKeyVault {
     }
 
     pub fn from_slice(root: &[u8; 32]) -> Self {
-        Self::new(*root)
+        Self {
+            root: SecureBytes::from_slice(root),
+        }
     }
 
     pub fn key(&self) -> &[u8; 32] {
@@ -199,6 +248,17 @@ impl SecureKeyVault {
     pub fn lock_request_accepted(&self) -> bool {
         self.root.lock_request_accepted()
     }
+
+    /// See [`SecureBytes::dump_exclusion_requested`].
+    pub fn dump_exclusion_requested(&self) -> bool {
+        self.root.dump_exclusion_requested()
+    }
+
+    /// Zero the root key in place. The vault must not be used for key
+    /// operations afterwards; the owner should drop it.
+    pub fn zeroize_in_place(&mut self) {
+        self.root.zeroize_in_place();
+    }
 }
 
 impl fmt::Debug for SecureKeyVault {
@@ -211,9 +271,10 @@ impl fmt::Debug for SecureKeyVault {
 }
 
 /// Create a dedicated anonymous mapping holding a copy of `value` and request a
-/// page lock. Returns `None` if the mapping itself cannot be created.
+/// page lock. Returns `None` if the mapping itself cannot be created. The
+/// third element reports whether `MADV_DONTDUMP` was accepted (Linux/Android).
 #[cfg(unix)]
-fn allocate_mapping<const N: usize>(value: &[u8; N]) -> Option<(NonNull<u8>, bool)> {
+fn allocate_mapping<const N: usize>(value: &[u8; N]) -> Option<(NonNull<u8>, bool, bool)> {
     // SAFETY: an anonymous private mapping with no address hint cannot alias
     // existing memory. N > 0 is guaranteed by the caller. On success the
     // mapping is at least N bytes and writable, so copying N bytes from `value`
@@ -235,9 +296,15 @@ fn allocate_mapping<const N: usize>(value: &[u8; N]) -> Option<(NonNull<u8>, boo
             let _ = libc::munmap(raw, N);
             return None;
         };
+        // Ask for the pages to be left out of core dumps before the secret is
+        // written into them. Best effort; failure is reported, not fatal.
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let dump_excluded = libc::madvise(raw, N, libc::MADV_DONTDUMP) == 0;
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let dump_excluded = false;
         std::ptr::copy_nonoverlapping(value.as_ptr(), ptr.as_ptr(), N);
         let lock_requested = libc::mlock(raw, N) == 0;
-        Some((ptr, lock_requested))
+        Some((ptr, lock_requested, dump_excluded))
     }
 }
 
@@ -255,8 +322,10 @@ unsafe fn release_mapping(ptr: NonNull<u8>, len: usize, lock_requested: bool) {
 
 /// Create a dedicated committed allocation holding a copy of `value` and
 /// request a page lock. Returns `None` if the allocation cannot be created.
+/// There is no dump-exclusion request on Windows, so the third element is
+/// always `false`.
 #[cfg(windows)]
-fn allocate_mapping<const N: usize>(value: &[u8; N]) -> Option<(NonNull<u8>, bool)> {
+fn allocate_mapping<const N: usize>(value: &[u8; N]) -> Option<(NonNull<u8>, bool, bool)> {
     use windows_sys::Win32::System::Memory::{
         VirtualAlloc, VirtualLock, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE,
     };
@@ -276,7 +345,7 @@ fn allocate_mapping<const N: usize>(value: &[u8; N]) -> Option<(NonNull<u8>, boo
         let ptr = NonNull::new(raw.cast::<u8>())?;
         std::ptr::copy_nonoverlapping(value.as_ptr(), ptr.as_ptr(), N);
         let lock_requested = VirtualLock(raw, N) != 0;
-        Some((ptr, lock_requested))
+        Some((ptr, lock_requested, false))
     }
 }
 
@@ -341,5 +410,71 @@ mod tests {
         let empty = SecureBytes::<0>::new([]);
         assert_eq!(empty.as_array().len(), 0);
         assert_ne!(empty.lock_status(), MemoryLockStatus::LockRequestAccepted);
+    }
+
+    #[test]
+    fn lock_status_names_are_stable_and_distinct() {
+        let names = [
+            MemoryLockStatus::LockRequestAccepted.as_str(),
+            MemoryLockStatus::LockRequestDenied.as_str(),
+            MemoryLockStatus::Unsupported.as_str(),
+        ];
+        assert_eq!(
+            names,
+            [
+                "lock_request_accepted",
+                "lock_request_denied",
+                "unsupported"
+            ]
+        );
+    }
+
+    #[test]
+    fn dump_exclusion_is_only_reported_where_requested() {
+        let vault = SecureKeyVault::from_slice(&[3; 32]);
+        if cfg!(not(any(target_os = "linux", target_os = "android"))) {
+            assert!(!vault.dump_exclusion_requested());
+        }
+        // On Linux the request normally succeeds, but it is best effort, so
+        // only the debug output (which must stay redacted) is checked there.
+        assert!(format!("{vault:?}").contains("<redacted>"));
+    }
+
+    #[test]
+    fn zeroize_in_place_clears_while_storage_is_still_owned() {
+        let mut vault = SecureKeyVault::from_slice(&[0x5C; 32]);
+        let ptr = vault.key().as_ptr();
+        vault.zeroize_in_place();
+        // The storage is still owned by `vault`, so reading it is valid.
+        assert_eq!(vault.key(), &[0u8; 32]);
+        assert_eq!(vault.key().as_ptr(), ptr);
+    }
+
+    #[test]
+    fn from_slice_does_not_alter_the_source_and_new_clears_its_argument() {
+        let src = [0x11u8; 32];
+        let a = SecureBytes::from_slice(&src);
+        assert_eq!(a.as_array(), &src);
+        assert_eq!(src, [0x11u8; 32]);
+    }
+
+    #[test]
+    fn concurrent_readers_see_the_key_or_a_consistent_owner_drop() {
+        // Readers hold `Arc` clones, so the storage is released only after the
+        // last reader is done; every read must observe the full key.
+        let vault = std::sync::Arc::new(SecureKeyVault::from_slice(&[0xAB; 32]));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let v = vault.clone();
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..2000 {
+                    assert_eq!(v.key(), &[0xAB; 32]);
+                }
+            }));
+        }
+        drop(vault);
+        for h in handles {
+            h.join().unwrap();
+        }
     }
 }

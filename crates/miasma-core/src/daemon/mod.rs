@@ -238,12 +238,12 @@ impl DaemonServer {
             if master_bytes.len() != 32 {
                 anyhow::bail!("{} has wrong length", master_key_path.display());
             }
-            let mut master_key = zeroize::Zeroizing::new([0u8; 32]);
-            master_key.copy_from_slice(&master_bytes);
-            if master_key.iter().all(|byte| *byte == 0) {
+            // Derive straight from the one zeroizing read buffer; no second
+            // copy of the root key is made here.
+            if master_bytes.iter().all(|byte| *byte == 0) {
                 anyhow::bail!("{} is erased/all-zero", master_key_path.display());
             }
-            let secret = crate::crypto::keyderive::derive_sharing_key(master_key.as_ref())
+            let secret = crate::crypto::keyderive::derive_sharing_key(master_bytes.as_slice())
                 .context("cannot derive directed-sharing key")?;
             let static_secret = x25519_dalek::StaticSecret::from(*secret);
             let pubkey = x25519_dalek::PublicKey::from(&static_secret);
@@ -1137,15 +1137,17 @@ pub(crate) async fn process_request(
                 data_shards: data_shards as usize,
                 total_shards: total_shards as usize,
             };
-            match publish_content(
-                data.as_slice(),
-                params,
-                &coord,
-                &queue,
-                &store,
-                &listen_addrs,
-            )
-            .await
+            match store
+                .wipe_gate()
+                .run_result(publish_content(
+                    data.as_slice(),
+                    params,
+                    &coord,
+                    &queue,
+                    &store,
+                    &listen_addrs,
+                ))
+                .await
             {
                 Ok(mid) => ControlResponse::Published { mid },
                 Err(e) => ControlResponse::Error(e.to_string()),
@@ -1162,7 +1164,15 @@ pub(crate) async fn process_request(
                 total_shards: total_shards as usize,
             };
             let path = std::path::Path::new(&file_path);
-            match coord.dissolve_and_publish_file(path, params).await {
+            let gate = store.wipe_gate();
+            match gate
+                .run_result(async {
+                    // Test hold point; returns at once outside tests.
+                    gate.stall_point().await;
+                    coord.dissolve_and_publish_file(path, params).await
+                })
+                .await
+            {
                 Ok(mid) => ControlResponse::Published {
                     mid: mid.to_string(),
                 },
@@ -1372,7 +1382,11 @@ pub(crate) async fn process_request(
                 total_shards: total_shards as usize,
             };
             match crate::crypto::hash::ContentId::from_str(&mid) {
-                Ok(content_id) => match coord.retrieve_from_network(&content_id, params).await {
+                Ok(content_id) => match store
+                    .wipe_gate()
+                    .run_result(coord.retrieve_from_network(&content_id, params))
+                    .await
+                {
                     Ok(data) => ControlResponse::Retrieved { data },
                     Err(e) => ControlResponse::Error(e.to_string()),
                 },
@@ -1390,22 +1404,65 @@ pub(crate) async fn process_request(
                 data_shards: data_shards as usize,
                 total_shards: total_shards as usize,
             };
+            // Registered so a wipe waits for (and cancels) this receive; the
+            // partial plaintext file is removed by the error path below.
+            let wipe_gate = store.wipe_gate();
+            let _wipe_op = match wipe_gate.enter() {
+                Ok(guard) => guard,
+                Err(e) => return ControlResponse::Error(e.to_string()),
+            };
             match crate::crypto::hash::ContentId::from_str(&mid) {
                 Ok(content_id) => {
-                    match coord
-                        .retrieve_from_network_streaming(&content_id, params)
-                        .await
-                    {
+                    // The record lookup is cancellable too: a wipe must not
+                    // wait for the network before the output file is refused.
+                    let opened = tokio::select! {
+                        biased;
+                        _ = wipe_gate.cancelled() => {
+                            Err(crate::wipe::WipeInProgress.into())
+                        }
+                        r = coord.retrieve_from_network_streaming(&content_id, params) => r,
+                    };
+                    match opened {
                         Ok(mut stream) => {
                             use futures::StreamExt;
                             use tokio::io::AsyncWriteExt;
 
+                            if wipe_gate.is_wiping() {
+                                return ControlResponse::Error(
+                                    "wipe in progress; receive cancelled".into(),
+                                );
+                            }
                             match tokio::fs::File::create(&output_path).await {
                                 Ok(mut file) => {
                                     let mut bytes_written: u64 = 0;
                                     let mut write_err: Option<String> = None;
                                     let mut content_hasher = blake3::Hasher::new();
-                                    while let Some(chunk) = stream.next().await {
+                                    // Test hold point: the output file exists
+                                    // but no data has been written yet.
+                                    tokio::select! {
+                                        biased;
+                                        _ = wipe_gate.cancelled() => {
+                                            write_err = Some(
+                                                "wipe in progress; receive cancelled".into(),
+                                            );
+                                        }
+                                        _ = wipe_gate.stall_point() => {}
+                                    }
+                                    loop {
+                                        if write_err.is_some() {
+                                            break;
+                                        }
+                                        let next = tokio::select! {
+                                            biased;
+                                            _ = wipe_gate.cancelled() => {
+                                                write_err = Some(
+                                                    "wipe in progress; receive cancelled".into(),
+                                                );
+                                                break;
+                                            }
+                                            next = stream.next() => next,
+                                        };
+                                        let Some(chunk) = next else { break };
                                         match chunk {
                                             Ok(bytes) => {
                                                 content_hasher.update(&bytes);
@@ -1739,6 +1796,14 @@ pub(crate) async fn process_request(
                 reconnection_failures: reconn_metrics.failures,
                 reconnection_circuit_breaker_trips: reconn_metrics.circuit_breaker_trips,
                 reconnection_recovery_actions: reconn_metrics.recovery_actions_triggered,
+                key_memory_lock: store
+                    .key_memory_status()
+                    .map(|(lock, _)| lock.as_str().to_string())
+                    .unwrap_or_else(|| "wiped".to_string()),
+                key_memory_dump_excluded: store
+                    .key_memory_status()
+                    .map(|(_, dump)| dump)
+                    .unwrap_or(false),
             })
         }
 
@@ -1756,10 +1821,26 @@ pub(crate) async fn process_request(
                     "wipe not confirmed: missing, expired or wrong confirmation nonce".into(),
                 );
             }
-            // Wipe store key material first, then take the exclusive directed-key
-            // lock. The write lock waits for every in-flight send/retrieve read
-            // guard before Zeroizing the final shared secret copy.
+            // Order: quiesce (refuse new work, cancel in-flight publish/receive
+            // and wait for them to be dropped) -> zeroize + crypto-erase the
+            // store key -> take the exclusive directed-key lock -> shutdown.
+            store.begin_wipe();
+            if !store
+                .wipe_gate()
+                .drained(std::time::Duration::from_secs(5))
+                .await
+            {
+                warn!("wipe: some in-flight operations did not stop within 5s; erasing anyway");
+            }
+            // Transfer journals and partial receive files are written by
+            // background jobs (now stopped); remove them while the key that
+            // can still name them is available.
+            crate::transfer::jobs::registry_for(&data_dir).wipe_artifacts();
             let store_result = store.distress_wipe();
+            // Other components still hold derived state keys; erase them in
+            // place so no later seal/open can use them.
+            let erased_keys = crate::state_crypto::erase_state_keys(&data_dir);
+            info!("wipe: erased {erased_keys} in-memory state key(s)");
             let mut directed_key = sharing_secret.write().await;
             *directed_key = None;
             // Once key erasure starts, the runtime must not remain alive even
@@ -1827,20 +1908,22 @@ pub(crate) async fn process_request(
                     "directed sharing unavailable after distress wipe".into(),
                 );
             };
-            match process_directed_send(
-                &**secret,
-                &recipient_contact,
-                data.as_slice(),
-                password.as_str(),
-                retention_secs,
-                filename,
-                &coord,
-                &queue,
-                &store,
-                &listen_addrs,
-                &data_dir,
-            )
-            .await
+            match store
+                .wipe_gate()
+                .run_result(process_directed_send(
+                    secret,
+                    &recipient_contact,
+                    data.as_slice(),
+                    password.as_str(),
+                    retention_secs,
+                    filename,
+                    &coord,
+                    &queue,
+                    &store,
+                    &listen_addrs,
+                    &data_dir,
+                ))
+                .await
             {
                 Ok(envelope_id) => ControlResponse::DirectedSent { envelope_id },
                 Err(e) => ControlResponse::Error(e.to_string()),
@@ -1874,20 +1957,22 @@ pub(crate) async fn process_request(
                     "directed sharing unavailable after distress wipe".into(),
                 );
             };
-            match process_directed_send(
-                &**secret,
-                &recipient_contact,
-                data.as_slice(),
-                password.as_str(),
-                retention_secs,
-                fname,
-                &coord,
-                &queue,
-                &store,
-                &listen_addrs,
-                &data_dir,
-            )
-            .await
+            match store
+                .wipe_gate()
+                .run_result(process_directed_send(
+                    secret,
+                    &recipient_contact,
+                    data.as_slice(),
+                    password.as_str(),
+                    retention_secs,
+                    fname,
+                    &coord,
+                    &queue,
+                    &store,
+                    &listen_addrs,
+                    &data_dir,
+                ))
+                .await
             {
                 Ok(envelope_id) => ControlResponse::DirectedSent { envelope_id },
                 Err(e) => ControlResponse::Error(e.to_string()),
@@ -1924,14 +2009,16 @@ pub(crate) async fn process_request(
                     "directed sharing unavailable after distress wipe".into(),
                 );
             };
-            match process_directed_retrieve(
-                &**secret,
-                &envelope_id,
-                password.as_str(),
-                &coord,
-                &data_dir,
-            )
-            .await
+            match store
+                .wipe_gate()
+                .run_result(process_directed_retrieve(
+                    secret,
+                    &envelope_id,
+                    password.as_str(),
+                    &coord,
+                    &data_dir,
+                ))
+                .await
             {
                 Ok((data, filename)) => ControlResponse::DirectedRetrieved { data, filename },
                 Err(e) => ControlResponse::Error(e.to_string()),
@@ -1950,29 +2037,32 @@ pub(crate) async fn process_request(
                     "directed sharing unavailable after distress wipe".into(),
                 );
             };
-            match process_directed_retrieve(
-                &**secret,
-                &envelope_id,
-                password.as_str(),
-                &coord,
-                &data_dir,
-            )
-            .await
-            {
-                Ok((data, filename)) => {
+            // Retrieve and write are one registered operation, so a wipe that
+            // lands between "decrypted in memory" and "file written" cancels
+            // the write instead of waiting for it, and removes any output.
+            let gate = store.wipe_gate();
+            match gate
+                .run_result(async {
+                    let (data, filename) = process_directed_retrieve(
+                        secret,
+                        &envelope_id,
+                        password.as_str(),
+                        &coord,
+                        &data_dir,
+                    )
+                    .await?;
                     let data = Zeroizing::new(data);
-                    // Write decrypted content to the requested output path.
-                    match std::fs::write(&output_path, data.as_slice()) {
-                        Ok(_) => ControlResponse::DirectedRetrievedToFile {
-                            output_path,
-                            filename,
-                            bytes_written: data.len() as u64,
-                        },
-                        Err(e) => {
-                            ControlResponse::Error(format!("cannot write to {output_path}: {e}"))
-                        }
-                    }
-                }
+                    gate.write_output(std::path::Path::new(&output_path), data.as_slice())
+                        .await?;
+                    Ok((data.len() as u64, filename))
+                })
+                .await
+            {
+                Ok((bytes_written, filename)) => ControlResponse::DirectedRetrievedToFile {
+                    output_path,
+                    filename,
+                    bytes_written,
+                },
                 Err(e) => ControlResponse::Error(e.to_string()),
             }
         }

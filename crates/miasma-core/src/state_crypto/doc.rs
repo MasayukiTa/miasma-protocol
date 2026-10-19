@@ -64,7 +64,7 @@ pub fn seal(
     out.push(label.id());
     out.extend_from_slice(&nonce);
     out.extend_from_slice(plaintext);
-    let key = keys.doc_key(label);
+    let key = keys.doc_key(label)?;
     let tag = seal_detached(
         &key,
         &nonce,
@@ -110,7 +110,7 @@ pub fn open(
     let nonce: [u8; NONCE_LEN] = file[6..DOC_HEADER_LEN].try_into().expect("slice length");
     let tag_at = file.len() - TAG_LEN;
     let tag: [u8; TAG_LEN] = file[tag_at..].try_into().expect("slice length");
-    let key = keys.doc_key(label);
+    let key = keys.doc_key(label)?;
     let res = open_detached(
         &key,
         &nonce,

@@ -26,6 +26,24 @@ public struct EmbeddedDaemonStatus {
     public let httpPort: UInt16
     public let peerId: String
     public let sharingContact: String
+    /// Root-key memory protection report: lock_request_accepted,
+    /// lock_request_denied, unsupported, or wiped. Empty from an older build.
+    public let keyMemoryLock: String
+    public let keyMemoryDumpExcluded: Bool
+
+    public init(
+        httpPort: UInt16,
+        peerId: String,
+        sharingContact: String,
+        keyMemoryLock: String = "",
+        keyMemoryDumpExcluded: Bool = false
+    ) {
+        self.httpPort = httpPort
+        self.peerId = peerId
+        self.sharingContact = sharingContact
+        self.keyMemoryLock = keyMemoryLock
+        self.keyMemoryDumpExcluded = keyMemoryDumpExcluded
+    }
 }
 
 public struct EnvelopeSummaryFfi {
