@@ -5358,6 +5358,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "webpki-roots 0.26.11",
+ "windows-sys 0.61.2",
  "x25519-dalek 2.0.1",
  "x509-parser",
  "zeroize",

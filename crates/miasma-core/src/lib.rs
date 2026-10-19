@@ -28,6 +28,7 @@ pub mod push;
 pub mod repair;
 pub mod retrieval;
 pub mod secure_file;
+pub mod secure_memory;
 pub mod share;
 pub mod state_crypto;
 pub mod store;
@@ -77,6 +78,7 @@ pub use retrieval::{
     DhtShareSource, FallbackShareSource, LocalShareSource, RetrievalCoordinator, ShareSource,
     StreamingRetrievalCoordinator,
 };
+pub use secure_memory::{MemoryLockStatus, SecureBytes, SecureKeyVault};
 pub use share::{MiasmaShare, ShareVerification};
 pub use store::{DeleteSharesOutcome, LocalShareStore, ShareSelection, StoredShare};
 pub use transport::obfuscated::{

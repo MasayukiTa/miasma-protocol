@@ -33,6 +33,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::{
+    secure_memory::SecureKeyVault,
     share::MiasmaShare,
     state_crypto::{self, Label, StateError, StateKeys},
     MiasmaError,
@@ -341,7 +342,7 @@ fn atomic_write(path: &Path, data: &[u8]) -> Result<(), MiasmaError> {
 ///
 /// The master key is used to derive per-file XChaCha20-Poly1305 keys via HKDF.
 /// Deleting this file instantly renders all stored shares unreadable (distress wipe).
-fn load_or_create_master_key(data_dir: &Path) -> Result<Zeroizing<[u8; 32]>, MiasmaError> {
+fn load_or_create_master_key(data_dir: &Path) -> Result<SecureKeyVault, MiasmaError> {
     let key_path = data_dir.join(MASTER_KEY_FILE);
     if key_path.exists() {
         let bytes = Zeroizing::new(std::fs::read(&key_path)?);
@@ -357,7 +358,7 @@ fn load_or_create_master_key(data_dir: &Path) -> Result<Zeroizing<[u8; 32]>, Mia
                 "master.key is erased/all-zero; refusing known key material".into(),
             ));
         }
-        Ok(arr)
+        Ok(SecureKeyVault::from_slice(&arr))
     } else {
         let mut arr = Zeroizing::new([0u8; 32]);
         rand::RngCore::fill_bytes(&mut OsRng, arr.as_mut());
@@ -373,7 +374,7 @@ fn load_or_create_master_key(data_dir: &Path) -> Result<Zeroizing<[u8; 32]>, Mia
             ))
         })?;
 
-        Ok(arr)
+        Ok(SecureKeyVault::from_slice(&arr))
     }
 }
 
@@ -517,7 +518,7 @@ pub struct LocalShareStore {
     /// In-memory master key. `None` means distress wipe has completed for this
     /// process. Key-dependent operations hold this lock until completion so a
     /// completed wipe cannot race with an in-flight decrypt/write.
-    master_key: std::sync::Mutex<Option<Zeroizing<[u8; 32]>>>,
+    master_key: std::sync::Mutex<Option<SecureKeyVault>>,
     /// Quota in bytes for `Owned` shares (produced by this node's own
     /// dissolutions).
     quota_bytes: u64,
@@ -632,16 +633,16 @@ impl LocalShareStore {
 
     fn lock_master_key(
         &self,
-    ) -> Result<std::sync::MutexGuard<'_, Option<Zeroizing<[u8; 32]>>>, MiasmaError> {
+    ) -> Result<std::sync::MutexGuard<'_, Option<SecureKeyVault>>, MiasmaError> {
         self.master_key
             .lock()
             .map_err(|_| MiasmaError::Storage("master key lock poisoned".into()))
     }
 
-    fn live_master_key(guard: &Option<Zeroizing<[u8; 32]>>) -> Result<&[u8; 32], MiasmaError> {
+    fn live_master_key(guard: &Option<SecureKeyVault>) -> Result<&[u8; 32], MiasmaError> {
         guard
             .as_ref()
-            .map(|key| &**key)
+            .map(SecureKeyVault::key)
             .ok_or_else(|| MiasmaError::Storage("store has been distress-wiped".into()))
     }
 
