@@ -540,6 +540,44 @@ impl PushService {
         )
     }
 
+    /// Delete the record of every finished transfer (done, failed, cancelled,
+    /// rejected) of `selector`'s contact, or of all contacts when `None`:
+    ///
+    /// * the rows kept in memory for polling;
+    /// * the saved history, rewritten without them with the old file overwritten;
+    /// * the send queue's log, rewritten with only the sends still wanted, old
+    ///   file overwritten (it still held the names and paths of ended sends);
+    /// * the unfinished `.part` files of the scope that no running transfer
+    ///   uses, overwritten and removed (a failed receive's leftovers).
+    ///
+    /// Queued, running and waiting transfers are untouched. Files already
+    /// received and files that were sent from are never touched.
+    /// `selector` may also be the id of a contact that has since been removed.
+    pub fn clear_finished(&self, selector: Option<&str>) -> Result<ClearReport, String> {
+        let contact = selector.map(|s| self.contacts.find(s));
+        let scope_id: Option<String> = match (selector, &contact) {
+            (Some(_), Some(Some(c))) => Some(c.id.clone()),
+            (Some(s), _) => Some(s.trim().to_owned()),
+            (None, _) => None,
+        };
+        let history = self.history.clear_finished(scope_id.as_deref())?;
+        let transfers = self.board.clear_finished(scope_id.as_deref());
+        self.outbox.shred_dead()?;
+        let active: HashSet<PathBuf> = self.active_parts.lock().unwrap().keys().cloned().collect();
+        let partials = match (selector, contact) {
+            (None, _) => shred_partials_in(&self.settings.inbox_dir, None, &active),
+            (Some(_), Some(Some(c))) => {
+                shred_partials_in(&self.settings.inbox_dir, Some(&self.contact_dir(&c.label)), &active)
+            }
+            _ => 0,
+        };
+        Ok(ClearReport {
+            transfers: transfers as u32,
+            history: history as u32,
+            partials: partials as u32,
+        })
+    }
+
     /// Delete the unfinished `.part` files of a contact that is no longer
     /// trusted (those not in use; running transfers delete their own).
     fn clean_partials(&self, c: &Contact) {
@@ -1748,6 +1786,54 @@ pub fn sweep_partials_in(
             if now.duration_since(modified).is_ok_and(|age| age > max_age)
                 && std::fs::remove_file(&p).is_ok()
             {
+                removed += 1;
+            }
+        }
+    }
+    removed
+}
+
+/// What [`PushService::clear_finished`] removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClearReport {
+    /// Rows dropped from the live list.
+    pub transfers: u32,
+    /// Entries dropped from the saved history.
+    pub history: u32,
+    /// Unfinished partial files overwritten and removed.
+    pub partials: u32,
+}
+
+/// Overwrite and remove our `.part` files that no running transfer uses: in
+/// `only_dir` when given, else in every contact folder of `inbox`. Nothing else
+/// is touched. Returns how many were removed.
+fn shred_partials_in(inbox: &Path, only_dir: Option<&Path>, active: &HashSet<PathBuf>) -> usize {
+    let dirs: Vec<PathBuf> = match only_dir {
+        Some(d) => vec![d.to_path_buf()],
+        None => match std::fs::read_dir(inbox) {
+            Ok(rd) => rd
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect(),
+            Err(_) => return 0,
+        },
+    };
+    let mut removed = 0;
+    for dir in dirs {
+        let Ok(files) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for f in files.flatten() {
+            let p = f.path();
+            let name = f.file_name().to_string_lossy().into_owned();
+            if !is_our_part_name(&name) || active.contains(&p) {
+                continue;
+            }
+            if !f.metadata().is_ok_and(|m| m.is_file()) {
+                continue;
+            }
+            if crate::state_crypto::overwrite_and_remove(&p).is_ok() {
                 removed += 1;
             }
         }

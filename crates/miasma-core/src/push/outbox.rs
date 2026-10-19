@@ -121,6 +121,12 @@ impl Outbox {
             Err(_) => damaged = true,
         }
         if damaged {
+            let tmp = crate::paths::PUSH_OUTBOX_TMP.in_dir(path.parent().unwrap_or(Path::new("")));
+            if state_crypto::adopt_staged_log(&keys, Label::PushOutbox, &tmp, &path) {
+                // A rewrite died after overwriting the old file and before the
+                // rename: the staged copy holds the live jobs.
+                return Self::open(data_dir);
+            }
             match state_crypto::set_aside(&path) {
                 Ok(p) => warn!("the send queue cannot be opened; it was moved to {p:?}"),
                 Err(e) => warn!("the send queue cannot be opened: {e}"),
@@ -202,6 +208,42 @@ impl Outbox {
         self.compact_if_needed(false);
     }
 
+    /// Rewrite the log now with only the live jobs, overwriting the old file, so
+    /// the names and paths of jobs that ended no longer sit in dead records.
+    /// Jobs still wanted (queued, running, waiting) are kept as they are.
+    pub fn shred_dead(&self) -> Result<(), String> {
+        let Some(keys) = &self.keys else {
+            return Ok(());
+        };
+        let mut g = self.inner.lock().unwrap();
+        if g.garbage == 0 && !self.path.exists() {
+            return Ok(());
+        }
+        g.writer = None;
+        if self.rewrite_live(keys, &g.jobs) {
+            g.garbage = 0;
+            Ok(())
+        } else {
+            Err("the send queue could not be rewritten".into())
+        }
+    }
+
+    fn rewrite_live(&self, keys: &StateKeys, jobs: &HashMap<String, OutJob>) -> bool {
+        let tmp = crate::paths::PUSH_OUTBOX_TMP.in_dir(self.path.parent().unwrap_or(Path::new("")));
+        let Ok(mut out) = LogRewrite::begin(keys, Label::PushOutbox, &self.path, &tmp) else {
+            return false;
+        };
+        for job in jobs.values() {
+            let Ok(rec) = serde_json::to_vec(&Rec::Put { job: job.clone() }) else {
+                continue;
+            };
+            if out.append(&rec).is_err() {
+                return false;
+            }
+        }
+        out.commit_shredding().is_ok()
+    }
+
     fn append(&self, keys: &StateKeys, g: &mut Inner, rec: &[u8], durable: bool) -> bool {
         if g.writer.is_none() {
             match LogWriter::open_append(keys, Label::PushOutbox, &self.path) {
@@ -235,19 +277,7 @@ impl Outbox {
             return;
         }
         g.writer = None;
-        let tmp = crate::paths::PUSH_OUTBOX_TMP.in_dir(self.path.parent().unwrap_or(Path::new("")));
-        let Ok(mut out) = LogRewrite::begin(keys, Label::PushOutbox, &self.path, &tmp) else {
-            return;
-        };
-        for job in g.jobs.values() {
-            let Ok(rec) = serde_json::to_vec(&Rec::Put { job: job.clone() }) else {
-                continue;
-            };
-            if out.append(&rec).is_err() {
-                return;
-            }
-        }
-        if out.commit().is_ok() {
+        if self.rewrite_live(keys, &g.jobs) {
             g.garbage = 0;
         }
     }

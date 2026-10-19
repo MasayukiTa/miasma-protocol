@@ -1173,3 +1173,106 @@ async fn the_wire_is_the_old_one_a_stub_peer_of_the_old_protocol_gets_header_the
     assert_eq!(h.hash, blake3::hash(&data).to_hex().to_string());
     assert_eq!(*stub.got.lock().unwrap(), data[123_456..].to_vec());
 }
+
+// ─── Clearing finished transfers ────────────────────────────────────────────
+
+/// 32-byte windows of `old` (past the header) that are still found in `now`.
+fn surviving_windows(old: &[u8], now: &[u8]) -> usize {
+    (64..old.len().saturating_sub(32))
+        .step_by(8)
+        .filter(|&i| now.windows(32).any(|w| w == &old[i..i + 32]))
+        .count()
+}
+
+#[tokio::test(start_paused = true)]
+async fn clearing_finished_transfers_deletes_them_for_good_and_keeps_the_running_ones() {
+    let mut p = pair().await;
+    p.alice
+        .add_contact(&ContactCode::new(rand::random()), Some("carol"))
+        .unwrap();
+    let a = write_src(p.adir.path(), "report-ALPHA-zq.bin", &content(50_000, 1));
+    let b = write_src(p.adir.path(), "report-BETA-zq.bin", &content(50_000, 2));
+    let id_a = p.alice.queue_send("bob", &a).unwrap();
+    assert_eq!(finished(&p.alice, &id_a, 120).await.state, PushState::Done);
+    let id_b = p.alice.queue_send("bob", &b).unwrap();
+    assert_eq!(finished(&p.alice, &id_b, 120).await.state, PushState::Done);
+    // One more that cannot go out: it is waiting, not finished.
+    p.net.refuse_all(true);
+    let w = write_src(p.adir.path(), "waiting-GAMMA-zq.bin", &content(50_000, 3));
+    let id_w = p.alice.queue_send("bob", &w).unwrap();
+    in_state(&p.alice, &id_w, PushState::Waiting, 120).await;
+    until("both sends in the history", 30, || {
+        (p.alice.history().list(100).len() == 2 && p.bob.history().list(100).len() == 2)
+            .then_some(())
+    })
+    .await;
+
+    let hist_path = miasma_core::paths::PUSH_HISTORY.in_dir(p.adir.path());
+    let out_path = miasma_core::paths::PUSH_OUTBOX.in_dir(p.adir.path());
+    let old_hist = std::fs::read(&hist_path).unwrap();
+    let old_out = std::fs::read(&out_path).unwrap();
+    assert!(old_hist.len() > 200 && old_out.len() > 200);
+
+    // A contact with nothing finished: nothing changes.
+    let r = p.alice.clear_finished(Some("carol")).unwrap();
+    assert_eq!((r.transfers, r.history, r.partials), (0, 0, 0));
+    assert_eq!(p.alice.history().list(100).len(), 2);
+    assert!(p.alice.board().get(&id_a).is_some());
+    assert_eq!(std::fs::read(&hist_path).unwrap(), old_hist);
+
+    // Bob's rows: clear them for the contact.
+    let r = p.alice.clear_finished(Some("bob")).unwrap();
+    assert_eq!((r.transfers, r.history), (2, 2));
+    assert!(p.alice.board().get(&id_a).is_none());
+    assert!(p.alice.board().get(&id_b).is_none());
+    // The unfinished send is still there, still waiting.
+    assert_eq!(
+        p.alice.board().get(&id_w).unwrap().state,
+        PushState::Waiting
+    );
+    // The old bytes of both logs are gone from the files.
+    assert_eq!(
+        surviving_windows(&old_hist, &std::fs::read(&hist_path).unwrap_or_default()),
+        0
+    );
+    assert_eq!(
+        surviving_windows(&old_out, &std::fs::read(&out_path).unwrap()),
+        0
+    );
+
+    // The receiver clears too; a leftover partial goes, a received file stays.
+    let rx_dir = p.bob.inbox_dir().join("alice");
+    let part = rx_dir.join(format!(".{}-100.part", "ab".repeat(16)));
+    std::fs::write(&part, b"PARTIAL-MARKER-zq").unwrap();
+    std::fs::write(rx_dir.join("keep.txt"), b"mine").unwrap();
+    let r = p.bob.clear_finished(None).unwrap();
+    assert_eq!((r.transfers, r.history, r.partials), (2, 2, 1));
+    assert!(!part.exists());
+    assert!(received(&p, "report-ALPHA-zq.bin").exists());
+    assert!(received(&p, "report-BETA-zq.bin").exists());
+    assert!(rx_dir.join("keep.txt").exists());
+    assert!(p.bob.history().list(100).is_empty());
+
+    // Restart: the cleared rows do not come back; the waiting send does.
+    p.alice.shutdown();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    p.alice = PushService::start_with_dialer(
+        p.adir.path(),
+        p.id_a,
+        Arc::new(NoDial),
+        settings(p.adir.path(), |_| {}),
+    );
+    assert!(p.alice.history().list(100).is_empty());
+    assert!(p.alice.board().get(&id_a).is_none());
+    assert!(p.alice.board().get(&id_b).is_none());
+    let back = p.alice.board().get(&id_w).expect("the waiting send survived");
+    assert!(!back.state.is_finished());
+    // Nothing of the cleared names is in the clear anywhere in the data dir.
+    for e in std::fs::read_dir(p.adir.path()).unwrap().flatten() {
+        if e.path().is_file() && e.file_name().to_string_lossy() != "report-ALPHA-zq.bin" {
+            let raw = std::fs::read(e.path()).unwrap_or_default();
+            assert!(!raw.windows(8).any(|w| w == b"ALPHA-zq"), "{:?}", e.path());
+        }
+    }
+    p.alice.shutdown();
+}

@@ -901,6 +901,43 @@ pub async fn run_push_status(data_dir: &Path) -> Result<()> {
     }
 }
 
+/// `miasma push-status --clear-finished [--contact X]`: delete the records of finished
+/// transfers (saved history overwritten on disk). Received files are not touched.
+pub async fn run_push_clear_finished(data_dir: &Path, contact: Option<String>) -> Result<()> {
+    match call(data_dir, PushRequest::ClearFinished { contact }).await {
+        Ok(PushResponse::Cleared {
+            transfers,
+            history,
+            partials,
+        }) => {
+            println!(
+                "{}",
+                if lang() == Lang::Ja {
+                    format!(
+                        "完了した転送の記録を削除しました（一覧 {transfers} 件、履歴 {history} 件、途中データ {partials} 件）。受け取ったファイルはそのまま残ります。"
+                    )
+                } else {
+                    format!(
+                        "Deleted the records of finished transfers ({transfers} listed, {history} in the history, {partials} partial files). Received files are untouched."
+                    )
+                }
+            );
+            Ok(())
+        }
+        Ok(PushResponse::Error { kind, message }) => Err(api_error(&kind, &message)),
+        Ok(other) => bail!("unexpected response: {other:?}"),
+        Err(e) => {
+            // Down, or from before this request (it does not know it): nothing was deleted.
+            let old = if lang() == Lang::Ja {
+                "何も削除していません。サービスが動いている場合は、履歴の削除に対応していない古いバージョンの可能性があります。Miasmaを更新してサービスを再起動してください。"
+            } else {
+                "Nothing was deleted. If the daemon is running, it may be too old for this request: update Miasma and restart it."
+            };
+            Err(e.context(old))
+        }
+    }
+}
+
 /// `miasma push-retry <id>`: a waiting send tries again now.
 pub async fn run_push_retry(data_dir: &Path, id: &str) -> Result<()> {
     match call(data_dir, PushRequest::RetryNow { id: id.to_owned() }).await? {

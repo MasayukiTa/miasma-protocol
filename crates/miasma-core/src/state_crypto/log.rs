@@ -579,6 +579,43 @@ impl LogRewrite {
         sync_parent_dir(&dest);
         Ok(())
     }
+
+    /// As [`commit`](Self::commit), but the bytes of the file being replaced
+    /// are overwritten with random data first, so the records left out of the
+    /// replacement are not recoverable from the old file's blocks (a plain
+    /// rename only unlinks them). If the process dies between the overwrite and
+    /// the rename, the staged replacement is complete on disk at `tmp`.
+    pub fn commit_shredding(self) -> Result<(), StateError> {
+        let dest = self.dest.clone();
+        let tmp = self.finish()?;
+        fsync_path(&tmp)?;
+        if let Err(e) = super::overwrite_after(&dest, 6) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.into());
+        }
+        // No cleanup if this fails: `dest` is already overwritten, so `tmp` is
+        // the only good copy.
+        std::fs::rename(&tmp, &dest)?;
+        sync_parent_dir(&dest);
+        Ok(())
+    }
+}
+
+/// After [`LogRewrite::commit_shredding`] died between the overwrite and the
+/// rename, `dest` is unreadable and the complete replacement sits at `tmp`.
+/// Move `tmp` into place if it reads cleanly to the end. `true` when adopted.
+pub fn adopt_staged_log(keys: &StateKeys, label: Label, tmp: &Path, dest: &Path) -> bool {
+    let complete = match LogReader::open(keys, label, tmp) {
+        Ok(Some(mut r)) => loop {
+            match r.next_record() {
+                Ok(Some(_)) => {}
+                Ok(None) => break r.torn_at().is_none(),
+                Err(_) => break false,
+            }
+        },
+        _ => false,
+    };
+    complete && std::fs::rename(tmp, dest).is_ok()
 }
 
 impl Drop for LogRewrite {
@@ -923,6 +960,78 @@ mod tests {
             read_all(&k, Label::ReplicationWal, &p).unwrap().0,
             vec![b"x".to_vec(), b"y".to_vec()]
         );
+    }
+
+    /// Windows of `old` (past the header) that are not in `now`: all of them
+    /// must be gone from a file that was really overwritten.
+    fn surviving_windows(old: &[u8], now: &[u8]) -> usize {
+        (64..old.len().saturating_sub(32))
+            .step_by(16)
+            .filter(|&i| now.windows(32).any(|w| w == &old[i..i + 32]))
+            .count()
+    }
+
+    #[test]
+    fn commit_shredding_overwrites_the_old_blocks_and_plain_commit_does_not() {
+        let k = keys(9);
+        let dir = tempfile::tempdir().unwrap();
+        for shred in [false, true] {
+            let p = dir.path().join(format!("s{shred}.log"));
+            let tmp = dir.path().join(format!("s{shred}.tmp"));
+            // A second name for the same file keeps the old blocks reachable
+            // after the swap, as an undelete tool would find them.
+            let alias = dir.path().join(format!("s{shred}.alias"));
+            write_n(&k, Label::PushHistory, &p, 20);
+            let old = std::fs::read(&p).unwrap();
+            std::fs::hard_link(&p, &alias).unwrap();
+            let mut rw = LogRewrite::begin(&k, Label::PushHistory, &p, &tmp).unwrap();
+            rw.append(b"kept").unwrap();
+            if shred {
+                rw.commit_shredding().unwrap();
+            } else {
+                rw.commit().unwrap();
+            }
+            let now = std::fs::read(&p).unwrap();
+            assert_eq!(
+                read_all(&k, Label::PushHistory, &p).unwrap().0,
+                vec![b"kept".to_vec()]
+            );
+            assert_eq!(surviving_windows(&old, &now), 0);
+            let left_behind = std::fs::read(&alias).unwrap();
+            if shred {
+                assert_eq!(left_behind.len(), old.len());
+                assert_eq!(surviving_windows(&old, &left_behind), 0, "old bytes remain");
+            } else {
+                assert_eq!(left_behind, old, "control: a plain commit leaves the old file");
+            }
+        }
+    }
+
+    #[test]
+    fn a_staged_copy_is_adopted_only_when_complete() {
+        let k = keys(10);
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.log");
+        let tmp = dir.path().join("a.tmp");
+        // `dest` was overwritten, the replacement sits at `tmp`.
+        std::fs::write(&p, vec![0xAB; 300]).unwrap();
+        write_n(&k, Label::PushOutbox, &tmp, 3);
+        assert!(adopt_staged_log(&k, Label::PushOutbox, &tmp, &p));
+        assert_eq!(read_all(&k, Label::PushOutbox, &p).unwrap().0.len(), 3);
+        assert!(!tmp.exists());
+        // A truncated staged copy is not adopted.
+        write_n(&k, Label::PushOutbox, &tmp, 3);
+        let len = std::fs::metadata(&tmp).unwrap().len();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&tmp)
+            .unwrap()
+            .set_len(len - 3)
+            .unwrap();
+        assert!(!adopt_staged_log(&k, Label::PushOutbox, &tmp, &p));
+        // No staged copy at all.
+        std::fs::remove_file(&tmp).unwrap();
+        assert!(!adopt_staged_log(&k, Label::PushOutbox, &tmp, &p));
     }
 
     #[test]
