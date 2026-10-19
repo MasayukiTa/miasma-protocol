@@ -2,6 +2,7 @@ pub mod address;
 pub mod admission_policy;
 pub mod connection_health;
 pub mod coordinator;
+pub mod cover_ack;
 pub mod credential;
 pub mod descriptor;
 pub mod dht;

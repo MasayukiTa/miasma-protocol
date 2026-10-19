@@ -90,8 +90,8 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::capability::{
-    negotiate, transcript_binding, Agreed, Capabilities, DowngradeReason, NegotiationError,
-    Requirements, SUITE_CLASSICAL, SUITE_HYBRID_X25519_MLKEM768,
+    negotiate_reported, transcript_binding, Agreed, Capabilities, DowngradeReason, DowngradeReport,
+    NegotiationError, Requirements, SUITE_CLASSICAL, SUITE_HYBRID_X25519_MLKEM768,
 };
 use super::fragment::{
     fragment, FragmentError, HandshakeFragment, PushOutcome, Reassembler, ReassemblyLimits,
@@ -211,7 +211,13 @@ fn plan(cfg: &Config, role: Role) -> Result<Plan, HybridError> {
         },
         features: 0,
     };
-    let agreed = negotiate(&cfg.local, &cfg.remote, &require)?;
+    // Reported, so the downgrade is counted in the daemon status as well.
+    let negotiation = negotiate_reported(&cfg.local, &cfg.remote, &require)?;
+    debug_assert_eq!(
+        negotiation.report.is_downgrade(),
+        negotiation.agreed.downgraded
+    );
+    let agreed = negotiation.agreed;
     let (init, resp) = match role {
         Role::Initiator => (&cfg.local, &cfg.remote),
         Role::Responder => (&cfg.remote, &cfg.local),
@@ -422,6 +428,11 @@ impl Established {
 
     pub fn downgrade_reasons(&self) -> &[DowngradeReason] {
         &self.agreed.reasons
+    }
+
+    /// The downgrade report for this exchange. Read it and show it.
+    pub fn downgrade_report(&self) -> DowngradeReport {
+        DowngradeReport::from_agreed(&self.agreed)
     }
 
     /// The tag this side sends to prove it derived the same keys.

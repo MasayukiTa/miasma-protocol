@@ -1130,6 +1130,11 @@ pub struct DaemonStatus {
     /// Times the daily cover budget paused emission.
     #[serde(default)]
     pub cover_budget_pauses: u64,
+    /// Handshake capability downgrades seen by this process, by reason
+    /// (numbers only, no peer identifiers). A non-zero value means a peer was
+    /// accepted at a lower level than offered, or refused by local policy.
+    #[serde(default)]
+    pub capability_downgrades: crate::protocol::capability::DowngradeCounts,
 
     // ── Network environment (Phase 5) ───────────────────────────────────
     /// Detected network environment.

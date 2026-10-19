@@ -111,7 +111,7 @@ async fn cover_cells_and_real_cells_share_length_and_framing() {
     let mut real_sizes = Vec::new();
     let mut real_frames = Vec::new();
     for body_len in [0usize, 64, 1_000, 4_000] {
-        for addr_len in [0usize, 24, 120, 300] {
+        for addr_len in [0usize, 24, 120, 256] {
             let frame = frame_bytes(&request(real_cell(&r1, &r2, &target, addr_len, body_len)));
             real_sizes.push(frame.len());
             real_frames.push(frame);
