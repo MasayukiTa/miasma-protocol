@@ -196,10 +196,12 @@ impl std::error::Error for PayloadTransportError {}
 
 // ─── Fallback engine ─────────────────────────────────────────────────────────
 
-/// Ordered fallback across multiple payload transports.
+/// Health-aware fallback across multiple payload transports.
 ///
-/// Tries each transport in order. Stops on first success.
-/// Records all attempts for diagnostics.
+/// The configured order remains the tie-breaker and periodic probe order. A
+/// transport is temporarily demoted after repeated consecutive failures, so a
+/// known-good fallback can become the first attempt without permanently locking
+/// the selector to one path. Stops on first success and records all attempts.
 pub struct PayloadTransportSelector {
     transports: Vec<Box<dyn PayloadTransport>>,
     /// Running counters for observability.
@@ -219,7 +221,34 @@ impl PayloadTransportSelector {
         &self.stats
     }
 
-    /// Fetch a share, trying each transport in fallback order.
+    /// Build the attempt order for one request. Every eighth request probes the
+    /// configured order so a previously demoted primary can recover. Otherwise
+    /// transports with at least two consecutive failures move behind healthy
+    /// transports, with the original configuration order as a stable tie-break.
+    fn adaptive_order(&self) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..self.transports.len()).collect();
+        let round = self.stats.next_selection_round();
+        if round % ADAPTIVE_PROBE_INTERVAL == 0 {
+            self.stats.adaptive_probes.fetch_add(1, Ordering::Relaxed);
+            return order;
+        }
+
+        order.sort_by_key(|&idx| {
+            let failures = self.stats.consecutive_failures(self.transports[idx].kind());
+            let demoted = failures >= ADAPTIVE_DEMOTE_AFTER_FAILURES;
+            (demoted, if demoted { failures } else { 0 }, idx)
+        });
+        if order
+            .iter()
+            .enumerate()
+            .any(|(position, &idx)| position != idx)
+        {
+            self.stats.adaptive_reorders.fetch_add(1, Ordering::Relaxed);
+        }
+        order
+    }
+
+    /// Fetch a share, trying transports in the current health-aware order.
     ///
     /// Returns the share + metadata about which transport succeeded and
     /// all attempts made. Returns `TransportExhaustedError` if all fail.
@@ -232,7 +261,8 @@ impl PayloadTransportSelector {
     ) -> Result<TransportedShare, TransportExhaustedError> {
         let mut attempts = Vec::with_capacity(self.transports.len());
 
-        for transport in &self.transports {
+        for idx in self.adaptive_order() {
+            let transport = &self.transports[idx];
             let start = Instant::now();
             let kind = transport.kind();
 
@@ -299,12 +329,16 @@ impl PayloadTransportSelector {
 // ─── Transport statistics ────────────────────────────────────────────────────
 
 /// Per-transport atomic counters for success, failure, and phase breakdown.
+const ADAPTIVE_DEMOTE_AFTER_FAILURES: u64 = 2;
+const ADAPTIVE_PROBE_INTERVAL: u64 = 8;
+
 #[derive(Debug, Default)]
 struct KindCounters {
     success: AtomicU64,
     failure: AtomicU64,
     session_failures: AtomicU64,
     data_failures: AtomicU64,
+    consecutive_failures: AtomicU64,
 }
 
 /// Running counters for payload transport usage.
@@ -319,6 +353,12 @@ pub struct TransportStats {
     last_errors: Mutex<std::collections::HashMap<PayloadTransportKind, String>>,
     /// The transport kind that most recently succeeded (if any).
     last_selected: Mutex<Option<PayloadTransportKind>>,
+    /// Monotonic request sequence used for periodic recovery probes.
+    selection_round: AtomicU64,
+    /// Requests whose order differed from the configured fallback order.
+    adaptive_reorders: AtomicU64,
+    /// Periodic requests that intentionally retried the configured order.
+    adaptive_probes: AtomicU64,
 }
 
 impl TransportStats {
@@ -333,13 +373,16 @@ impl TransportStats {
     }
 
     pub fn record_success(&self, kind: PayloadTransportKind) {
-        self.counters(kind).success.fetch_add(1, Ordering::Relaxed);
+        let counters = self.counters(kind);
+        counters.success.fetch_add(1, Ordering::Relaxed);
+        counters.consecutive_failures.store(0, Ordering::Relaxed);
         *self.last_selected.lock().unwrap() = Some(kind);
     }
 
     pub fn record_failure(&self, kind: PayloadTransportKind, phase: TransportPhase, message: &str) {
         let c = self.counters(kind);
         c.failure.fetch_add(1, Ordering::Relaxed);
+        c.consecutive_failures.fetch_add(1, Ordering::Relaxed);
         match phase {
             TransportPhase::Session => c.session_failures.fetch_add(1, Ordering::Relaxed),
             TransportPhase::Data => c.data_failures.fetch_add(1, Ordering::Relaxed),
@@ -374,7 +417,12 @@ impl TransportStats {
                     session_failures: c.session_failures.load(Ordering::Relaxed),
                     data_failures: c.data_failures.load(Ordering::Relaxed),
                     last_error: errors.get(&kind).cloned(),
-                    reason: None,
+                    reason: {
+                        let consecutive = c.consecutive_failures.load(Ordering::Relaxed);
+                        (consecutive >= ADAPTIVE_DEMOTE_AFTER_FAILURES).then(|| {
+                            format!("temporarily demoted after {consecutive} consecutive failures")
+                        })
+                    },
                 }
             })
             .collect()
@@ -391,6 +439,24 @@ impl TransportStats {
         (
             c.success.load(Ordering::Relaxed),
             c.failure.load(Ordering::Relaxed),
+        )
+    }
+
+    pub fn consecutive_failures(&self, kind: PayloadTransportKind) -> u64 {
+        self.counters(kind)
+            .consecutive_failures
+            .load(Ordering::Relaxed)
+    }
+
+    fn next_selection_round(&self) -> u64 {
+        self.selection_round.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// `(reordered_requests, periodic_probe_requests)` for diagnostics/tests.
+    pub fn adaptive_selection_stats(&self) -> (u64, u64) {
+        (
+            self.adaptive_reorders.load(Ordering::Relaxed),
+            self.adaptive_probes.load(Ordering::Relaxed),
         )
     }
 
@@ -958,6 +1024,60 @@ mod tests {
             .find(|r| r.transport == PayloadTransportKind::TcpDirect)
             .unwrap();
         assert_eq!(tcp.success_count, 2);
+    }
+
+    #[tokio::test]
+    async fn selector_demotes_repeatedly_failing_primary() {
+        let selector = PayloadTransportSelector::new(vec![
+            Box::new(FailTransport {
+                kind: PayloadTransportKind::DirectLibp2p,
+                phase: TransportPhase::Session,
+                message: "blocked".into(),
+            }),
+            Box::new(SuccessTransport {
+                kind: PayloadTransportKind::TcpDirect,
+            }),
+        ]);
+
+        for slot in 0..2 {
+            let result = selector.fetch_share("x", [0u8; 32], slot, 0).await.unwrap();
+            assert_eq!(result.attempts.len(), 2);
+        }
+        let result = selector.fetch_share("x", [0u8; 32], 3, 0).await.unwrap();
+        assert_eq!(result.transport_used, PayloadTransportKind::TcpDirect);
+        assert_eq!(result.attempts.len(), 1);
+        assert_eq!(
+            selector
+                .stats()
+                .consecutive_failures(PayloadTransportKind::DirectLibp2p),
+            2
+        );
+        assert!(selector.stats().adaptive_selection_stats().0 >= 1);
+    }
+
+    #[tokio::test]
+    async fn selector_periodically_reprobes_configured_primary() {
+        let selector = PayloadTransportSelector::new(vec![
+            Box::new(FailTransport {
+                kind: PayloadTransportKind::DirectLibp2p,
+                phase: TransportPhase::Session,
+                message: "blocked".into(),
+            }),
+            Box::new(SuccessTransport {
+                kind: PayloadTransportKind::TcpDirect,
+            }),
+        ]);
+
+        for slot in 0..7 {
+            let _ = selector.fetch_share("x", [0u8; 32], slot, 0).await.unwrap();
+        }
+        let eighth = selector.fetch_share("x", [0u8; 32], 8, 0).await.unwrap();
+        assert_eq!(eighth.attempts.len(), 2);
+        assert_eq!(
+            eighth.attempts[0].transport,
+            PayloadTransportKind::DirectLibp2p
+        );
+        assert_eq!(selector.stats().adaptive_selection_stats().1, 1);
     }
 
     #[test]
