@@ -464,12 +464,13 @@ async fn cancelling_while_a_fetch_hangs_returns_promptly() {
     assert_all_buffers_wiped(&r.stats);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_fetch_that_fails_because_of_a_cancel_ends_as_cancelled_not_as_an_error() {
     // The cancel lands mid-fetch after the first cancel poll; the retries (1 ms
     // pauses) then run out well inside the 20 ms poll interval, so only the
     // explicit cancel check can report Cancelled. Fails on the unfixed code with
-    // Err(InsufficientShares).
+    // Err(InsufficientShares). The clock is paused so the 5 ms / 1 ms / 2 ms
+    // virtual delays are exact (real Windows timers can stretch them past 20 ms).
     let w = build_world(6, true, false);
     let log: Log = Arc::default();
     let progress = TransferProgress::new(w.mid.to_string());
