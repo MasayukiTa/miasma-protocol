@@ -522,7 +522,10 @@ impl GroupUi {
                 self.acting = None;
                 self.page_msg = Some(why);
             }
-            GroupRequest::List {} | GroupRequest::History { .. } | GroupRequest::Show { .. } => {}
+            GroupRequest::List {}
+            | GroupRequest::History { .. }
+            | GroupRequest::Show { .. }
+            | GroupRequest::Settings { .. } => {}
         }
     }
 
@@ -535,8 +538,22 @@ impl GroupUi {
             GroupResponse::Error { kind, .. } => self.on_error(req, &kind),
             GroupResponse::Groups(list) => {
                 self.support = Support::Yes;
+                let known: HashSet<String> = invitations(&self.rows)
+                    .iter()
+                    .map(|r| r.id.clone())
+                    .collect();
                 self.rows = group_rows(&list);
                 self.loaded = true;
+                // A new invitation waiting for an answer is announced once.
+                for r in invitations(&self.rows) {
+                    if !known.contains(&r.id) {
+                        let gs = self.gs();
+                        self.notices.push(fill(
+                            gs.invite_toast,
+                            &[("name", &elide(&r.name, NAME_CHARS))],
+                        ));
+                    }
+                }
                 let viewing = self.open.as_ref().map(|o| o.id.clone());
                 self.unread
                     .on_list(&self.rows, viewing.as_deref(), self.area_open);
@@ -603,6 +620,8 @@ impl GroupUi {
                 self.list_dirty = true;
             }
             GroupResponse::Done {} => self.on_done(),
+            // The change was made in the service; the saved setting is the screen's own.
+            GroupResponse::Settings { .. } => {}
         }
     }
 
@@ -752,16 +771,103 @@ impl GroupUi {
         let Some(o) = self.open.clone() else {
             return;
         };
+        let name = self.open_name();
+        self.answer_invitation(&o.id, &name, accept);
+    }
+
+    /// Say yes or no to the invitation to group `id` (from the open group or from a card).
+    fn answer_invitation(&mut self, id: &str, name: &str, accept: bool) {
         if self.acting.is_some() {
             return;
         }
-        let name = self.open_name();
+        let name = name.to_owned();
+        self.page_msg = None;
         if accept {
             self.acting = Some(Acting::Accept { name });
-            self.push(GroupRequest::Accept { group: o.id });
+            self.push(GroupRequest::Accept {
+                group: id.to_owned(),
+            });
         } else {
             self.acting = Some(Acting::Decline { name });
-            self.push(GroupRequest::Decline { group: o.id });
+            self.push(GroupRequest::Decline {
+                group: id.to_owned(),
+            });
+        }
+    }
+
+    /// Change `chat.group_auto_join` in the running service (the caller saves it in the
+    /// configuration file). A service that predates it answers with an error, which is dropped.
+    pub fn set_auto_join(&mut self, on: bool) {
+        self.push(GroupRequest::Settings {
+            auto_join: Some(on),
+        });
+    }
+
+    /// The invitations waiting for an answer, as cards at the top of the Chat area: who added me,
+    /// what it means to not have answered, and Accept / Decline. Draws nothing when there are none.
+    pub fn invitation_cards(&mut self, ui: &mut egui::Ui, contacts: &[ContactInfo]) {
+        let gs = self.gs();
+        let waiting: Vec<GroupRow> = invitations(&self.rows).into_iter().cloned().collect();
+        if waiting.is_empty() {
+            return;
+        }
+        let busy = self.acting.is_some();
+        let mut answer: Option<(String, String, bool)> = None;
+        kit::notice(
+            ui,
+            Level::Warn,
+            &fill(gs.invites_waiting, &[("n", &waiting.len().to_string())]),
+        );
+        ui.add_space(kit::SP_2);
+        let dismiss = self.cs().dismiss;
+        if let Some(msg) = self.page_msg.clone() {
+            ui.horizontal_wrapped(|ui| {
+                kit::notice(ui, Level::Error, &msg);
+                if ui.add(kit::compact_button(dismiss)).clicked() {
+                    self.page_msg = None;
+                }
+            });
+        }
+        for row in &waiting {
+            let name = elide(&row.name, NAME_CHARS);
+            let who = inviter_name(gs, contacts, row);
+            egui::Frame::none()
+                .stroke(Stroke::new(2.0, pal().accent))
+                .fill(pal().surface)
+                .rounding(8.0)
+                .inner_margin(egui::Margin::same(kit::SP_4))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(
+                        RichText::new(fill(gs.invite_title, &[("name", &name)]))
+                            .strong()
+                            .color(pal().text),
+                    );
+                    kit::paragraph(ui, &fill(gs.invite_body, &[("who", &who)]));
+                    ui.add_space(kit::SP_2);
+                    kit::button_row(ui, |ui| {
+                        let label = fill(gs.a11y_accept_named, &[("name", &name)]);
+                        let r = kit::primary(ui, !busy, gs.accept);
+                        r.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::WidgetType::Button, label.clone())
+                        });
+                        if r.clicked() {
+                            answer = Some((row.id.clone(), row.name.clone(), true));
+                        }
+                        let label = fill(gs.a11y_decline_named, &[("name", &name)]);
+                        let r = ui.add_enabled(!busy, kit::secondary_button(gs.decline));
+                        r.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::WidgetType::Button, label.clone())
+                        });
+                        if r.clicked() {
+                            answer = Some((row.id.clone(), row.name.clone(), false));
+                        }
+                    });
+                });
+            ui.add_space(kit::SP_2);
+        }
+        if let Some((id, name, accept)) = answer {
+            self.answer_invitation(&id, &name, accept);
         }
     }
 
@@ -870,6 +976,14 @@ impl GroupUi {
         } else if self.info_open {
             self.info_view(ui);
         } else {
+            if can_send(status) {
+                if let Some(d) = &self.detail {
+                    for (warn, text) in waiting_notices(gs, &waiting_of(gs, d)) {
+                        kit::notice(ui, if warn { Level::Warn } else { Level::Info }, &text);
+                        ui.add_space(kit::SP_2);
+                    }
+                }
+            }
             self.thread_view(ui, &o, clock);
             if can_send(status) {
                 self.composer_view(ui, max_bytes);
@@ -922,6 +1036,7 @@ impl GroupUi {
         let mut older = false;
         let mut add_code: Option<String> = None;
         let detail = self.detail.as_ref();
+        let added_line = detail.and_then(|d| added_by_line(gs, d));
         let messages = &self.messages;
         let loaded = self.thread_loaded;
         egui::ScrollArea::vertical()
@@ -937,6 +1052,12 @@ impl GroupUi {
                         egui::WidgetInfo::labeled(egui::WidgetType::Button, gs.older_button)
                     });
                     older = r.clicked();
+                }
+                // The system line: the first thing of the group, shown once the oldest messages are.
+                if let Some(line) = &added_line {
+                    if !can_more {
+                        kit::paragraph_muted(ui, line);
+                    }
                 }
                 if messages.is_empty() && loaded {
                     kit::paragraph_muted(ui, cs.empty_thread);
@@ -1094,6 +1215,15 @@ impl GroupUi {
                                             });
                                     }
                                 });
+                                let standing = standing_of(m);
+                                if let Some(t) = standing_text(gs, &standing) {
+                                    let color = match standing {
+                                        Standing::Joined => pal().success,
+                                        Standing::Invited => pal().muted,
+                                        _ => pal().warning,
+                                    };
+                                    ui.label(kit::meta_text(t, color));
+                                }
                                 if !m.you {
                                     ui.label(kit::meta_text(
                                         format!("{}: {}", gs.code_label, m.fingerprint),
@@ -1507,7 +1637,7 @@ fn group_of(req: &GroupRequest) -> Option<&str> {
         | GroupRequest::History { group, .. }
         | GroupRequest::Accept { group }
         | GroupRequest::Decline { group } => Some(group),
-        GroupRequest::Create { .. } | GroupRequest::List {} => None,
+        GroupRequest::Create { .. } | GroupRequest::List {} | GroupRequest::Settings { .. } => None,
     }
 }
 
@@ -1757,6 +1887,8 @@ mod tests {
             label: verified.then(|| format!("label {ep}")),
             verified,
             you,
+            status: Some(if you { "you" } else { "joined" }.into()),
+            reason: None,
         }
     }
 
@@ -1770,6 +1902,7 @@ mod tests {
             group: info("g1", status, members.len() as u32, 2, 1_792_074_000_000),
             members,
             is_admin: admin,
+            added_by: None,
         }
     }
 
@@ -2256,6 +2389,49 @@ mod tests {
     }
 
     #[test]
+    fn an_invitation_card_answers_from_the_list_without_opening_the_group() {
+        let mut ui = ready();
+        assert!(!ui.is_open());
+        ui.answer_invitation("g2", "group g2", true);
+        let r = requests(&mut ui);
+        assert!(matches!(r.as_slice(), [GroupRequest::Accept { group }] if group == "g2"));
+        // A second press while the first is on its way sends nothing.
+        ui.answer_invitation("g2", "group g2", false);
+        assert!(requests(&mut ui).is_empty());
+        reply(&mut ui, r[0].clone(), GroupResponse::Done {});
+        assert_eq!(ui.take_notices().len(), 1, "the joined toast");
+        assert!(ui.list_dirty, "the list is read again");
+        ui.answer_invitation("g2", "group g2", false);
+        let r = requests(&mut ui);
+        assert!(matches!(r.as_slice(), [GroupRequest::Decline { group }] if group == "g2"));
+        // A failure is kept to be shown on the card.
+        ui.on_reply(&r[0], Err(ChatFail::NotSupported));
+        assert!(ui.page_msg.is_some());
+        assert!(ui.acting.is_none(), "the buttons come back");
+    }
+
+    #[test]
+    fn the_setting_is_sent_to_the_running_service() {
+        let mut ui = ready();
+        ui.set_auto_join(false);
+        let r = requests(&mut ui);
+        assert!(matches!(
+            r.as_slice(),
+            [GroupRequest::Settings {
+                auto_join: Some(false)
+            }]
+        ));
+        // The service's answer changes nothing on screen and an old service's error is silent.
+        reply(
+            &mut ui,
+            r[0].clone(),
+            GroupResponse::Settings { auto_join: false },
+        );
+        ui.on_reply(&r[0], Err(ChatFail::NotSupported));
+        assert!(ui.page_msg.is_none());
+    }
+
+    #[test]
     fn answers_for_a_group_that_was_left_are_dropped() {
         let mut ui = opened(true);
         ui.close();
@@ -2378,9 +2554,24 @@ mod tests {
                     "form",
                     "add",
                     "confirm",
+                    "waiting",
+                    "waiting_info",
                 ] {
                     let mut ui = match screen {
                         "list" => ready(),
+                        "waiting" | "waiting_info" => {
+                            let mut u = opened(true);
+                            let d = u.detail.as_mut().unwrap();
+                            d.added_by = Some("amy".into());
+                            d.members[1].status = Some("invited".into());
+                            d.members[2].status = Some("unreachable".into());
+                            d.members[2].reason = Some("not_allowed".into());
+                            let mut extra = member("dee", false, true, false);
+                            extra.status = Some("no_group_support".into());
+                            d.members.push(extra);
+                            u.info_open = screen == "waiting_info";
+                            u
+                        }
                         "invited" => {
                             let mut u = ready();
                             u.open_group("g2", "Team g2");
@@ -2443,6 +2634,7 @@ mod tests {
                                     if ui.is_open() {
                                         let _ = ui.conversation_view(panel, clock(), 4096);
                                     } else {
+                                        ui.invitation_cards(panel, &list);
                                         for i in 0..ui.rows().len() {
                                             let _ = ui.row(panel, i, clock());
                                         }

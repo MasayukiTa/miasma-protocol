@@ -15,6 +15,7 @@ use std::collections::{HashMap, HashSet};
 use miasma_core::chat::group::engine::MAX_GROUPS;
 use miasma_core::chat::group::ipc::{GroupDetailInfo, GroupInfo, GroupMessageInfo, MemberInfo};
 use miasma_core::chat::group::membership::{MAX_MEMBERS, MAX_NAME_BYTES};
+use miasma_core::config::NodeConfig;
 use miasma_core::push::ContactInfo;
 
 use crate::chat::{cap_text, elide, one_line, ListRow, PREVIEW_CHARS};
@@ -65,6 +66,8 @@ pub struct GroupRow {
     pub messages: u64,
     pub last_ms: u64,
     pub pending: u32,
+    /// For an invitation: the endpoint ID of the person who invited me.
+    pub invited_by: Option<String>,
 }
 
 impl From<&GroupInfo> for GroupRow {
@@ -77,7 +80,27 @@ impl From<&GroupInfo> for GroupRow {
             messages: g.messages,
             last_ms: g.last_ms,
             pending: g.pending,
+            invited_by: g.invited_by.clone(),
         }
+    }
+}
+
+/// The invitations waiting for an answer, in list order.
+pub fn invitations(rows: &[GroupRow]) -> Vec<&GroupRow> {
+    rows.iter()
+        .filter(|r| r.status == GroupStatus::Invited)
+        .collect()
+}
+
+/// Who invited me, as the card says it: the contact's label, or a short code when the contact is
+/// gone from the list, or a plain word when the service did not say.
+pub fn inviter_name(g: &GroupStrings, contacts: &[ContactInfo], row: &GroupRow) -> String {
+    let Some(id) = row.invited_by.as_deref() else {
+        return g.inviter_unknown.to_owned();
+    };
+    match contacts.iter().find(|c| c.endpoint_id == id) {
+        Some(c) => one_line(&c.label, NAME_CHARS),
+        None => g.inviter_unknown.to_owned(),
     }
 }
 
@@ -119,11 +142,18 @@ pub struct GroupUnread {
     read: HashMap<String, u64>,
     baseline: bool,
     unseen: u32,
+    /// The invitations already counted for the navigation.
+    invited: HashSet<String>,
 }
 
 impl GroupUnread {
     /// A fresh list of groups arrived. `viewing` is the group on screen with the tab open.
     pub fn on_list(&mut self, rows: &[GroupRow], viewing: Option<&str>, area_open: bool) {
+        // A new invitation is news even on the first list: it is waiting for an answer.
+        let now: HashSet<String> = invitations(rows).iter().map(|r| r.id.clone()).collect();
+        let fresh = now.difference(&self.invited).count() as u32;
+        self.unseen = self.unseen.saturating_add(fresh);
+        self.invited = now;
         for g in rows {
             let on_screen = area_open && viewing == Some(g.id.as_str());
             let before = self.known.get(&g.id).copied();
@@ -282,14 +312,170 @@ pub fn member_summary(g: &GroupStrings, m: &MemberInfo) -> String {
     } else {
         g.marker_unverified
     };
+    let state = match standing_text(g, &standing_of(m)) {
+        Some(s) => format!("{state}, {s}"),
+        None => state.to_owned(),
+    };
     fill(
         g.a11y_member,
         &[
             ("name", &member_name(g, m)),
             ("role", role),
-            ("state", state),
+            ("state", &state),
         ],
     )
+}
+
+// ─── The setting ────────────────────────────────────────────────────────────
+
+/// `chat.group_auto_join` as saved (on when the file says nothing or cannot be read).
+pub fn load_auto_join(data_dir: &std::path::Path) -> bool {
+    NodeConfig::load(data_dir).map_or(true, |c| c.chat.group_auto_join)
+}
+
+/// Save `chat.group_auto_join` the way `miasma config` does: load the file, change the key, save.
+pub fn save_auto_join(data_dir: &std::path::Path, on: bool) -> Result<(), String> {
+    let mut c = NodeConfig::load(data_dir).map_err(|e| e.to_string())?;
+    c.chat.group_auto_join = on;
+    let r = c.save(data_dir).map_err(|e| e.to_string());
+    c.transport.zeroize_secret_copies();
+    r
+}
+
+// ─── Who has joined ─────────────────────────────────────────────────────────
+
+/// What this device knows of one member being in the group, from the service's stable words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Standing {
+    You,
+    Joined,
+    /// Listed; nothing shows yet that they joined.
+    Invited,
+    /// The last attempt to reach them failed, for this reason (the service's word).
+    Unreachable(String),
+    /// Their Miasma has no group chat.
+    NoGroupSupport,
+}
+
+pub fn standing_of(m: &MemberInfo) -> Standing {
+    if m.you {
+        return Standing::You;
+    }
+    match m.status.as_deref() {
+        Some("invited") => Standing::Invited,
+        Some("unreachable") => Standing::Unreachable(m.reason.clone().unwrap_or_default()),
+        Some("no_group_support") => Standing::NoGroupSupport,
+        // "joined", or a service that does not report it.
+        _ => Standing::Joined,
+    }
+}
+
+/// Why a member cannot be reached, in a few words (the service's delivery word).
+pub fn reason_text(g: &GroupStrings, reason: &str) -> &'static str {
+    match reason {
+        "no_route" => g.reason_no_route,
+        "connect_failed" | "protocol" => g.reason_connect_failed,
+        "connection_lost" | "timed_out" | "bad_reply" => g.reason_connection_lost,
+        "not_allowed" => g.reason_not_allowed,
+        "send_disabled" => g.reason_send_disabled,
+        _ => g.reason_other,
+    }
+}
+
+/// The line under a member in the member list. None for me.
+pub fn standing_text(g: &GroupStrings, s: &Standing) -> Option<String> {
+    match s {
+        Standing::You => None,
+        Standing::Joined => Some(g.member_joined.to_owned()),
+        Standing::Invited => Some(g.member_invited.to_owned()),
+        Standing::Unreachable(r) => {
+            Some(fill(g.member_unreachable, &[("reason", reason_text(g, r))]))
+        }
+        Standing::NoGroupSupport => Some(g.member_no_group.to_owned()),
+    }
+}
+
+/// The members who have not joined or cannot be reached, by kind.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Waiting {
+    pub no_group: Vec<String>,
+    pub unreachable: Vec<String>,
+    pub invited: Vec<String>,
+}
+
+impl Waiting {
+    pub fn is_empty(&self) -> bool {
+        self.no_group.is_empty() && self.unreachable.is_empty() && self.invited.is_empty()
+    }
+}
+
+pub fn waiting_of(g: &GroupStrings, d: &GroupDetailInfo) -> Waiting {
+    let mut w = Waiting::default();
+    for m in &d.members {
+        let name = elide(&member_name(g, m), NAME_CHARS);
+        match standing_of(m) {
+            Standing::NoGroupSupport => w.no_group.push(name),
+            Standing::Unreachable(_) => w.unreachable.push(name),
+            Standing::Invited => w.invited.push(name),
+            Standing::You | Standing::Joined => {}
+        }
+    }
+    w
+}
+
+fn names_list(names: &[String]) -> String {
+    const SHOWN: usize = 3;
+    let mut s = names
+        .iter()
+        .take(SHOWN)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if names.len() > SHOWN {
+        s.push_str(&format!(" +{}", names.len() - SHOWN));
+    }
+    s
+}
+
+/// The sentences above the messages for members who have not joined or cannot be reached; the
+/// flag is true for a warning. Their messages are kept and delivered later, and the sentence says
+/// so.
+pub fn waiting_notices(g: &GroupStrings, w: &Waiting) -> Vec<(bool, String)> {
+    let mut out = Vec::new();
+    if !w.no_group.is_empty() {
+        out.push((
+            true,
+            fill(g.banner_no_group, &[("names", &names_list(&w.no_group))]),
+        ));
+    }
+    if !w.unreachable.is_empty() {
+        out.push((
+            true,
+            fill(
+                g.banner_unreachable,
+                &[("names", &names_list(&w.unreachable))],
+            ),
+        ));
+    }
+    if !w.invited.is_empty() {
+        out.push((
+            false,
+            fill(g.banner_invited, &[("names", &names_list(&w.invited))]),
+        ));
+    }
+    out
+}
+
+/// "You were added by X": the system line at the top of a group I joined through an invitation.
+pub fn added_by_line(g: &GroupStrings, d: &GroupDetailInfo) -> Option<String> {
+    let by = d.added_by.as_deref()?;
+    Some(match d.members.iter().find(|m| m.endpoint_id == by) {
+        Some(m) => fill(
+            g.added_by,
+            &[("who", &elide(&member_name(g, m), NAME_CHARS))],
+        ),
+        None => g.added_by_unknown.to_owned(),
+    })
 }
 
 // ─── Delivery ───────────────────────────────────────────────────────────────
@@ -664,6 +850,8 @@ mod tests {
             label: verified.then(|| format!("label {ep}")),
             verified,
             you,
+            status: Some(if you { "you" } else { "joined" }.into()),
+            reason: None,
         }
     }
 
@@ -672,6 +860,7 @@ mod tests {
             group: info("1", status, members.len() as u32, 0, 0),
             members,
             is_admin,
+            added_by: None,
         }
     }
 
@@ -1050,7 +1239,18 @@ mod tests {
         ]);
         u.on_list(&next, None, true);
         assert_eq!(u.of(&next[1]), 1);
-        assert_eq!(u.unseen(), 0, "a group appearing is not a message");
+        assert_eq!(
+            u.unseen(),
+            1,
+            "the invitation is news: it waits for an answer"
+        );
+        let both = group_rows(&[
+            info("g1", "joined", 2, 3, 1),
+            info("g3", "invited", 2, 0, 2),
+            info("g4", "joined", 2, 0, 3),
+        ]);
+        u.on_list(&both, None, true);
+        assert_eq!(u.unseen(), 1, "a group appearing is not a message");
     }
 
     #[test]
@@ -1116,6 +1316,183 @@ mod tests {
             error_text(g(), chat_strings(Locale::En), "not_admin"),
             g().err_not_admin
         );
+    }
+
+    fn with_status(mut m: MemberInfo, status: &str, reason: Option<&str>) -> MemberInfo {
+        m.status = Some(status.into());
+        m.reason = reason.map(str::to_owned);
+        m
+    }
+
+    #[test]
+    fn each_member_shows_whether_they_joined_cannot_be_reached_or_need_an_update() {
+        let ms = [
+            member("me", true, false, true),
+            with_status(member("amy", false, true, false), "joined", None),
+            with_status(member("bob", false, true, false), "invited", None),
+            with_status(
+                member("cy", false, true, false),
+                "unreachable",
+                Some("no_route"),
+            ),
+            with_status(member("dee", false, true, false), "no_group_support", None),
+        ];
+        let want = [
+            Standing::You,
+            Standing::Joined,
+            Standing::Invited,
+            Standing::Unreachable("no_route".into()),
+            Standing::NoGroupSupport,
+        ];
+        for (m, w) in ms.iter().zip(&want) {
+            assert_eq!(&standing_of(m), w);
+        }
+        for lang in crate::locale::Locale::ALL {
+            let g = crate::locale::group_strings(lang);
+            assert_eq!(standing_text(g, &Standing::You), None);
+            for s in &want[1..] {
+                let t = standing_text(g, s).expect("a sentence");
+                assert!(!t.contains('{'), "{lang:?}: {t}");
+            }
+        }
+        assert_eq!(
+            standing_text(g(), &want[2]).as_deref(),
+            Some("Invited, waiting for them to accept")
+        );
+        assert!(standing_text(g(), &want[3])
+            .unwrap()
+            .contains("they seem to be offline"));
+        assert!(standing_text(g(), &want[4])
+            .unwrap()
+            .contains("does not support groups"));
+        // A service that reports nothing is read as joined, not as a problem.
+        let mut old = member("old", false, true, false);
+        old.status = None;
+        assert_eq!(standing_of(&old), Standing::Joined);
+        // The screen-reader name carries it too.
+        assert!(member_summary(g(), &ms[2]).contains("waiting for them to accept"));
+    }
+
+    #[test]
+    fn the_notes_above_the_messages_name_who_is_waiting_and_say_the_messages_are_kept() {
+        let d = detail(
+            "joined",
+            true,
+            vec![
+                member("me", true, false, true),
+                with_status(member("bob", false, true, false), "invited", None),
+                with_status(
+                    member("cy", false, true, false),
+                    "unreachable",
+                    Some("connect_failed"),
+                ),
+                with_status(member("dee", false, true, false), "no_group_support", None),
+            ],
+        );
+        let w = waiting_of(g(), &d);
+        assert_eq!(w.invited, vec!["label bob".to_owned()]);
+        assert_eq!(w.unreachable, vec!["label cy".to_owned()]);
+        assert_eq!(w.no_group, vec!["label dee".to_owned()]);
+        let n = waiting_notices(g(), &w);
+        assert_eq!(n.len(), 3);
+        assert!(n[0].0 && n[0].1.contains("label dee") && n[0].1.contains("update"));
+        assert!(n[1].0 && n[1].1.contains("label cy"));
+        assert!(!n[2].0 && n[2].1.contains("label bob") && n[2].1.contains("kept"));
+        // Everyone joined: nothing to say.
+        let ok = detail(
+            "joined",
+            true,
+            vec![
+                member("me", true, false, true),
+                member("amy", false, true, false),
+            ],
+        );
+        assert!(waiting_of(g(), &ok).is_empty());
+        assert!(waiting_notices(g(), &waiting_of(g(), &ok)).is_empty());
+        // Many names are cut short.
+        let many: Vec<String> = (0..5).map(|i| format!("n{i}")).collect();
+        let n = waiting_notices(
+            g(),
+            &Waiting {
+                invited: many,
+                ..Waiting::default()
+            },
+        );
+        assert!(n[0].1.contains("n0, n1, n2 +2"));
+    }
+
+    #[test]
+    fn the_system_line_says_who_added_me() {
+        let mut d = detail(
+            "joined",
+            false,
+            vec![
+                member("me", true, false, false),
+                member("amy", false, true, true),
+            ],
+        );
+        assert_eq!(added_by_line(g(), &d), None);
+        d.added_by = Some("amy".into());
+        assert_eq!(
+            added_by_line(g(), &d).as_deref(),
+            Some("You were added by label amy")
+        );
+        d.added_by = Some("someone gone".into());
+        assert_eq!(
+            added_by_line(g(), &d).as_deref(),
+            Some("You were added to this group")
+        );
+        for lang in crate::locale::Locale::ALL {
+            let s = crate::locale::group_strings(lang);
+            assert!(s.added_by.contains("{who}"), "{lang:?}");
+        }
+    }
+
+    #[test]
+    fn invitations_are_listed_with_who_invited_and_counted_for_the_navigation() {
+        let mut list = vec![
+            info("g1", "joined", 3, 5, 10),
+            info("g2", "invited", 3, 0, 20),
+            info("g3", "invited", 2, 0, 30),
+        ];
+        list[1].invited_by = Some("amy".into());
+        let rows = group_rows(&list);
+        let inv = invitations(&rows);
+        assert_eq!(
+            inv.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["g2", "g3"]
+        );
+        let contacts = [contact("c-amy", "amy", true)];
+        assert_eq!(inviter_name(g(), &contacts, inv[0]), "Contact c-amy");
+        assert_eq!(inviter_name(g(), &contacts, inv[1]), "A contact");
+        assert_eq!(inviter_name(g(), &[], inv[0]), "A contact");
+        // The navigation announces an invitation once, on the first list too, until it is answered.
+        let mut u = GroupUnread::default();
+        u.on_list(&rows, None, false);
+        assert_eq!(u.unseen(), 2);
+        u.on_list(&rows, None, false);
+        assert_eq!(u.unseen(), 2, "not counted again");
+        u.mark_seen();
+        let mut more = list.clone();
+        more.push(info("g4", "invited", 2, 0, 40));
+        u.on_list(&group_rows(&more), None, false);
+        assert_eq!(u.unseen(), 1, "a new invitation is news");
+        // Every invitation has a badge on its row.
+        assert_eq!(u.of(&rows[1]), 1);
+    }
+
+    #[test]
+    fn the_join_setting_is_read_and_saved_in_the_configuration_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // Nothing saved yet: on.
+        assert!(load_auto_join(dir.path()));
+        for on in [false, true, false] {
+            save_auto_join(dir.path(), on).unwrap();
+            assert_eq!(load_auto_join(dir.path()), on);
+            // The same key the command line reads.
+            let c = NodeConfig::load(dir.path()).unwrap();
+            assert_eq!(c.chat.group_auto_join, on);
+        }
     }
 
     #[test]

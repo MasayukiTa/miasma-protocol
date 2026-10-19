@@ -55,6 +55,14 @@ pub enum GroupRequest {
     Decline {
         group: String,
     },
+    /// Read, or with `auto_join` set change, whether an invitation from a
+    /// trusted administrator is accepted at once (`chat.group_auto_join`).
+    /// The change applies to this running service; the caller saves it in
+    /// `config.toml` for the next start.
+    Settings {
+        #[serde(default)]
+        auto_join: Option<bool>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +96,16 @@ pub struct MemberInfo {
     /// True only for a trusted contact. False is shown as "unverified member".
     pub verified: bool,
     pub you: bool,
+    /// What this device knows of the member's standing: `you`, `joined`,
+    /// `invited` (listed, nothing shows yet that they joined), `unreachable`
+    /// (see `reason`) or `no_group_support` (their Miasma must be updated).
+    /// An older service sends none (read as `joined`).
+    #[serde(default)]
+    pub status: Option<String>,
+    /// For `unreachable`: the delivery word (`no_route`, `connect_failed`,
+    /// `connection_lost`, `not_allowed`, `send_disabled`, ...).
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,6 +113,10 @@ pub struct GroupDetailInfo {
     pub group: GroupInfo,
     pub members: Vec<MemberInfo>,
     pub is_admin: bool,
+    /// The endpoint ID of the person who added you, when you joined through
+    /// an invitation.
+    #[serde(default)]
+    pub added_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,6 +152,10 @@ pub enum GroupResponse {
     Groups(Vec<GroupInfo>),
     Detail(GroupDetailInfo),
     Done {},
+    /// The answer to [`GroupRequest::Settings`].
+    Settings {
+        auto_join: bool,
+    },
     Queued {
         id: String,
         recipients: u32,
@@ -156,7 +182,7 @@ mod run {
     use super::*;
     use crate::{
         chat::group::{
-            engine::{GroupError, GroupSummary},
+            engine::{GroupError, GroupSummary, MemberStatus},
             membership::Role,
             service::GroupService,
             state::Status,
@@ -336,8 +362,14 @@ mod run {
                                 label: label_of(svc, &m.id),
                                 verified: m.verified,
                                 you: m.you,
+                                status: Some(m.status.name().to_owned()),
+                                reason: match &m.status {
+                                    MemberStatus::Unreachable(r) => Some(r.clone()),
+                                    _ => None,
+                                },
                             })
                             .collect(),
+                        added_by: d.added_by.map(hex::encode),
                     }),
                     Err(e) => from_error(e),
                 }
@@ -470,8 +502,19 @@ mod run {
                     Err(e) => return from_error(e),
                 };
                 match core.accept_invite(&gid) {
-                    Ok(()) => GroupResponse::Done {},
+                    Ok(wake) => {
+                        svc.kick_all(&wake);
+                        GroupResponse::Done {}
+                    }
                     Err(e) => from_error(e),
+                }
+            }
+            GroupRequest::Settings { auto_join } => {
+                if let Some(on) = auto_join {
+                    core.set_auto_join(on);
+                }
+                GroupResponse::Settings {
+                    auto_join: core.auto_join(),
                 }
             }
             GroupRequest::Decline { group: sel } => {
