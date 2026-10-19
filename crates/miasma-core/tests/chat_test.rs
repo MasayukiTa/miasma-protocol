@@ -378,8 +378,11 @@ async fn a_removed_contact_keeps_the_conversation_but_cannot_be_written_to() {
     register(&b, a.id(), "alice");
     send(&a, "bob", "before");
     until(30, "first delivery", || texts(&b, &a.id()).len() == 1).await;
-    // A message waits while bob is unreachable for alice (sending switched off
-    // by removing bob), then bob is removed.
+    // Bob has the message as soon as he stored it; alice only counts it in the
+    // conversation once bob's acknowledgement came back and she moved it from
+    // the outbox into her history (the history view shows queued messages too,
+    // the conversation list does not). Wait for that before removing bob.
+    until(30, "acknowledgement", || a.svc.core().outbox.is_empty()).await;
     a.contacts.remove("bob").unwrap();
     match send(&a, "bob", "after removal") {
         ChatResponse::Error { kind, .. } => assert_eq!(kind, "unknown_contact"),
