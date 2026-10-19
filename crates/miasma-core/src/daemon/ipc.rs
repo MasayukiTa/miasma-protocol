@@ -1161,6 +1161,18 @@ pub struct DaemonStatus {
     /// Recovery actions dispatched from partial failures.
     #[serde(default)]
     pub reconnection_recovery_actions: u64,
+
+    // ── Root-key memory protection (best-effort hardening, not a guarantee) ──
+    /// Outcome of the page-lock request for the in-memory root key:
+    /// `lock_request_accepted`, `lock_request_denied`, `unsupported`, or
+    /// `wiped` once the key has been erased. Empty when an older daemon did
+    /// not report it.
+    #[serde(default)]
+    pub key_memory_lock: String,
+    /// Whether the OS accepted a request to keep the key pages out of core
+    /// dumps (Linux/Android only; `false` elsewhere).
+    #[serde(default)]
+    pub key_memory_dump_excluded: bool,
 }
 
 /// Per-transport readiness info for IPC/CLI display.
