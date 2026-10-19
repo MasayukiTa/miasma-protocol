@@ -1129,7 +1129,52 @@ fn refresh_in_use_shares(
     store.set_in_use_shares(set);
 }
 
-pub(crate) async fn process_request(
+/// Handle one control request.
+///
+/// The request future is large (every request kind is an arm of one state
+/// machine), and an un-optimised build reserves stack in the caller for each
+/// future it awaits. This entry point therefore returns a boxed future built
+/// inside this small function, so a caller (the HTTP router awaits one of
+/// these per route) keeps a pointer on its stack instead of the whole state
+/// machine, and the polling frames of the router and the connection task stay
+/// small.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn process_request(
+    req: ControlRequest,
+    coord: Arc<MiasmaCoordinator>,
+    queue: Arc<Mutex<ReplicationQueue>>,
+    store: Arc<LocalShareStore>,
+    listen_addrs: Vec<String>,
+    wss_port: u16,
+    wss_tls_enabled: bool,
+    proxy_configured: bool,
+    proxy_type: Option<String>,
+    obfs_quic_port: u16,
+    sharing_secret: SharingSecretState,
+    sharing_pubkey: [u8; 32],
+    data_dir: PathBuf,
+    bridge_state: BridgeLiveState,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ControlResponse> + Send>> {
+    Box::pin(process_request_inner(
+        req,
+        coord,
+        queue,
+        store,
+        listen_addrs,
+        wss_port,
+        wss_tls_enabled,
+        proxy_configured,
+        proxy_type,
+        obfs_quic_port,
+        sharing_secret,
+        sharing_pubkey,
+        data_dir,
+        bridge_state,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn process_request_inner(
     req: ControlRequest,
     coord: Arc<MiasmaCoordinator>,
     queue: Arc<Mutex<ReplicationQueue>>,
