@@ -74,6 +74,12 @@ pub trait RecordSource: Send + Sync {
     fn stage(&self, record: DhtRecord) {
         self.replace(record);
     }
+
+    /// The transfer manifest that was announced together with the record for
+    /// `mid_digest`, if this source kept it.
+    fn manifest(&self, _mid_digest: &[u8; 32]) -> Option<crate::transfer::TransferManifest> {
+        None
+    }
 }
 
 /// The daemon's replication queue as a record source. Replacing a record keeps
@@ -111,6 +117,14 @@ impl RecordSource for QueueRecordSource {
                 warn!("maintenance: could not persist staged record: {e}");
             }
         }
+    }
+
+    fn manifest(&self, mid_digest: &[u8; 32]) -> Option<crate::transfer::TransferManifest> {
+        self.0
+            .lock()
+            .ok()?
+            .get(mid_digest)
+            .and_then(|i| i.manifest.clone())
     }
 }
 
@@ -180,8 +194,9 @@ impl CoordinatorBackend {
     /// is empty until something announces the record again, and a record that
     /// is already `Replicated` is not announced again. The record source (the
     /// replication queue, persisted and written only by this node's own
-    /// publishes) is therefore the fallback; its records carry no manifest,
-    /// because they are announced without one.
+    /// publishes) is therefore the fallback. It keeps the manifest of a
+    /// streamed publish next to the record; content published without a
+    /// manifest has none.
     ///
     /// A record in the local DHT store must be signed by this node's own key;
     /// without a signing key nothing can be called "own", so nothing is.
@@ -202,7 +217,7 @@ impl CoordinatorBackend {
             None => self
                 .source
                 .find(&mid)
-                .map(|record| (record, None))
+                .map(|record| (record, self.source.manifest(&mid)))
                 .ok_or_else(|| "own record not found; refusing to rewrite it".to_string()),
         }
     }
