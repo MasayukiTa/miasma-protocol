@@ -114,6 +114,7 @@ impl GroupService {
         settings: ChatSettings,
     ) -> Option<Arc<Self>> {
         let (shutdown, _) = watch::channel(false);
+        core.set_auto_join(settings.group_auto_join);
         let svc = Arc::new(Self {
             trusted_rate: Mutex::new(Buckets::new(
                 settings.inbound_burst,
@@ -212,12 +213,14 @@ impl GroupService {
                 Outcome::Delivered => {
                     failures = 0;
                     resets = 0;
+                    self.core.note_delivery(&peer, None);
                     self.core.delivered(&peer, &out.work);
                 }
                 Outcome::Skip => {}
                 Outcome::Permanent(why) => {
                     failures = 0;
                     debug!(peer = %fingerprint(&peer), "group delivery given up: {why}");
+                    self.core.note_delivery(&peer, Some(why));
                     self.core.gave_up(&peer, &out.work);
                 }
                 Outcome::ResetSession => {
@@ -234,6 +237,10 @@ impl GroupService {
                 Outcome::Retry(why) => {
                     failures += 1;
                     debug!(peer = %fingerprint(&peer), "group delivery waits: {why}");
+                    // "peer_busy" is a device that has not joined yet: that is
+                    // the invited state, not a failure to reach it.
+                    self.core
+                        .note_delivery(&peer, (why != "peer_busy").then_some(why));
                     if self.wait(&wake, &mut stop, failures).await {
                         failures = 0;
                     }

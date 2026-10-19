@@ -77,6 +77,8 @@ pub struct ChatSettings {
     /// Messages accepted from one contact: burst and per minute.
     pub inbound_burst: f64,
     pub inbound_per_minute: f64,
+    /// Join a group at once when a trusted administrator adds us (`chat.group_auto_join`).
+    pub group_auto_join: bool,
 }
 
 impl Default for ChatSettings {
@@ -96,6 +98,7 @@ impl Default for ChatSettings {
             ack_timeout: Duration::from_secs(30),
             inbound_burst: 20.0,
             inbound_per_minute: 30.0,
+            group_auto_join: true,
         }
     }
 }
@@ -203,6 +206,7 @@ pub fn start_for_daemon(
     store.outbox_max = cfg.chat.outbox_max.clamp(1, 500);
     let settings = ChatSettings {
         max_message_bytes: cfg.chat.max_message_bytes.clamp(1, proto::MAX_TEXT_BYTES),
+        group_auto_join: cfg.chat.group_auto_join,
         ..ChatSettings::default()
     };
     let svc = ChatService::start(

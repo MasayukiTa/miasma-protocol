@@ -43,6 +43,14 @@ async fn relay() -> Relay {
     }
 }
 
+/// `auto_join`: join a group at once when a trusted contact adds us (`chat.group_auto_join`).
+fn fast_with(auto_join: bool) -> ChatSettings {
+    ChatSettings {
+        group_auto_join: auto_join,
+        ..fast()
+    }
+}
+
 fn fast() -> ChatSettings {
     ChatSettings {
         retry_delays: vec![Duration::from_millis(200)],
@@ -97,7 +105,12 @@ impl Peer {
     }
 }
 
+/// A peer that answers invitations itself (the first group test is about that).
 async fn peer(relay: &Relay, legacy: bool) -> Peer {
+    peer_with(relay, legacy, false).await
+}
+
+async fn peer_with(relay: &Relay, legacy: bool, auto_join: bool) -> Peer {
     let dir = tempfile::tempdir().unwrap();
     let seed: [u8; 32] = rand::random();
     let node = start_node(relay, &seed, legacy).await;
@@ -110,7 +123,7 @@ async fn peer(relay: &Relay, legacy: bool) -> Peer {
         keys,
         contacts.clone(),
         StoreSettings::default(),
-        fast(),
+        fast_with(auto_join),
     )
     .expect("chat starts");
     assert_eq!(Identity::from_seed(&seed).id(), node.endpoint_id());
@@ -150,6 +163,23 @@ fn gtexts(p: &Peer, group: &str) -> Vec<String> {
     ) {
         GroupResponse::History { messages, .. } => messages.into_iter().map(|m| m.text).collect(),
         GroupResponse::Error { .. } => Vec::new(),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// What `viewer` knows of `who` being in `group` (the `status` word of the member list).
+fn member_status(viewer: &Peer, group: &str, who: &Peer) -> Option<String> {
+    match g(
+        viewer,
+        GroupRequest::Show {
+            group: group.into(),
+        },
+    ) {
+        GroupResponse::Detail(d) => d
+            .members
+            .into_iter()
+            .find(|m| m.endpoint_id == hex::encode(who.id()))
+            .and_then(|m| m.status),
         other => panic!("{other:?}"),
     }
 }
@@ -302,6 +332,17 @@ async fn a_group_works_over_the_network_and_a_peer_without_groups_keeps_its_priv
     assert!(groups(&old).is_empty(), "it never saw the group");
     let info = groups(&a);
     assert!(info[0].pending >= 1, "copies for the old peer still wait");
+    // The inviter is told, not left guessing: the old peer's Miasma has no groups, and the
+    // members who joined show as joined.
+    until(30, "the old peer is flagged", || {
+        member_status(&a, "weekend", &old).as_deref() == Some("no_group_support")
+    })
+    .await;
+    until(30, "bob and carol show as joined", || {
+        member_status(&a, "weekend", &b).as_deref() == Some("joined")
+            && member_status(&a, "weekend", &c).as_deref() == Some("joined")
+    })
+    .await;
 
     // Removing bob: carol still gets later messages, bob does not.
     assert!(matches!(
@@ -331,4 +372,112 @@ async fn a_group_works_over_the_network_and_a_peer_without_groups_keeps_its_priv
     .await;
     assert!(!gtexts(&b, "weekend").contains(&"after bob left".to_owned()));
     assert_eq!(groups(&c)[0].epoch, 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_contact_who_adds_you_makes_you_a_member_without_a_click_and_the_setting_can_be_switched()
+{
+    let r = relay().await;
+    let a = peer_with(&r, false, true).await;
+    let b = peer_with(&r, false, true).await;
+    let c = peer_with(&r, false, false).await;
+    for (x, y, l) in [
+        (&a, &b, "bob"),
+        (&a, &c, "carol"),
+        (&b, &a, "alice"),
+        (&c, &a, "alice"),
+    ] {
+        register(x, y, l);
+    }
+    assert!(matches!(
+        g(&a, GroupRequest::Settings { auto_join: None }),
+        GroupResponse::Settings { auto_join: true }
+    ));
+    assert!(matches!(
+        g(&c, GroupRequest::Settings { auto_join: None }),
+        GroupResponse::Settings { auto_join: false }
+    ));
+    g(
+        &a,
+        GroupRequest::Create {
+            name: "easy".into(),
+            members: vec!["bob".into(), "carol".into()],
+        },
+    );
+    // bob joined by himself; carol (who asked to be asked) is invited and held messages wait.
+    until(30, "bob is a member", || {
+        groups(&b).first().is_some_and(|x| x.status == "joined")
+    })
+    .await;
+    until(30, "carol is invited", || {
+        groups(&c).first().is_some_and(|x| x.status == "invited")
+    })
+    .await;
+    match g(
+        &b,
+        GroupRequest::Show {
+            group: "easy".into(),
+        },
+    ) {
+        GroupResponse::Detail(d) => assert_eq!(d.added_by, Some(hex::encode(a.id()))),
+        other => panic!("{other:?}"),
+    }
+    g(
+        &a,
+        GroupRequest::Send {
+            group: "easy".into(),
+            text: "welcome".into(),
+        },
+    );
+    until(30, "the message at bob", || {
+        gtexts(&b, "easy").contains(&"welcome".to_owned())
+    })
+    .await;
+    until(30, "alice sees bob joined and carol waiting", || {
+        member_status(&a, "easy", &b).as_deref() == Some("joined")
+            && member_status(&a, "easy", &c).as_deref() == Some("invited")
+    })
+    .await;
+    assert!(
+        groups(&a)[0].pending >= 1,
+        "the copy for carol is held, not lost"
+    );
+    // Switching the setting on the running service takes effect for the next invitation.
+    assert!(matches!(
+        g(
+            &c,
+            GroupRequest::Settings {
+                auto_join: Some(true)
+            }
+        ),
+        GroupResponse::Settings { auto_join: true }
+    ));
+    // Carol answers the waiting one; the held message arrives.
+    assert!(matches!(
+        g(
+            &c,
+            GroupRequest::Accept {
+                group: "easy".into()
+            }
+        ),
+        GroupResponse::Done {}
+    ));
+    until(30, "the held message at carol", || {
+        gtexts(&c, "easy").contains(&"welcome".to_owned())
+    })
+    .await;
+    until(30, "alice sees carol joined", || {
+        member_status(&a, "easy", &c).as_deref() == Some("joined")
+    })
+    .await;
+    // Leaving is one request.
+    assert!(matches!(
+        g(
+            &b,
+            GroupRequest::Leave {
+                group: "easy".into()
+            }
+        ),
+        GroupResponse::Done {}
+    ));
 }

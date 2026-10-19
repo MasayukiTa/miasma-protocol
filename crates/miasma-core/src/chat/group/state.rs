@@ -18,7 +18,10 @@ use crate::chat::{crypto::Rd, proto::MAX_TEXT_BYTES};
 
 use super::membership::{Chain, Descriptor, MAX_CHAIN, MAX_MEMBERS};
 
-const STATE_VERSION: u8 = 1;
+/// Version 2 appends who added us and who has shown they joined; version 1
+/// documents are still read (both fields empty).
+const STATE_VERSION: u8 = 2;
+const STATE_VERSION_V1: u8 = 1;
 /// Messages of one group that may wait for delivery at once.
 pub const MAX_PENDING: usize = 100;
 /// Entries of the delivery ledger.
@@ -152,9 +155,23 @@ pub struct GroupState {
     pub pending: Vec<PendingMsg>,
     pub ledger: VecDeque<LedgerEntry>,
     pub ctrl: Vec<Ctrl>,
+    /// Who added us (a trusted administrator), once we joined through an invitation.
+    pub added_by: Option<[u8; 32]>,
+    /// Members that have shown they are in the group: something they sent us
+    /// was accepted, or something we sent them was accepted by a joined device.
+    pub confirmed: Vec<[u8; 32]>,
 }
 
 impl GroupState {
+    /// Note that `peer` is in the group. True when this was news.
+    pub fn confirm(&mut self, peer: &[u8; 32]) -> bool {
+        if self.confirmed.contains(peer) || self.confirmed.len() >= MAX_MEMBERS {
+            return false;
+        }
+        self.confirmed.push(*peer);
+        true
+    }
+
     pub fn new(chain: Chain, status: Status) -> Self {
         Self {
             chain,
@@ -167,6 +184,8 @@ impl GroupState {
             pending: Vec::new(),
             ledger: VecDeque::new(),
             ctrl: Vec::new(),
+            added_by: None,
+            confirmed: Vec::new(),
         }
     }
 
@@ -265,12 +284,24 @@ impl GroupState {
             });
             w.extend_from_slice(&c.arg.to_be_bytes());
         }
+        match self.added_by {
+            Some(a) => {
+                w.push(1);
+                w.extend_from_slice(&a);
+            }
+            None => w.push(0),
+        }
+        w.push(self.confirmed.len() as u8);
+        for c in &self.confirmed {
+            w.extend_from_slice(c);
+        }
         w
     }
 
     pub fn decode(b: &[u8]) -> Option<Self> {
         let mut r = Rd::new(b);
-        if r.u8().ok()? != STATE_VERSION {
+        let version = r.u8().ok()?;
+        if version != STATE_VERSION && version != STATE_VERSION_V1 {
             return None;
         }
         let status = match r.u8().ok()? {
@@ -381,6 +412,22 @@ impl GroupState {
                 arg: r.u32().ok()?,
             });
         }
+        let mut added_by = None;
+        let mut confirmed = Vec::new();
+        if version >= 2 {
+            added_by = match r.u8().ok()? {
+                0 => None,
+                1 => Some(r.arr::<32>().ok()?),
+                _ => return None,
+            };
+            let n = r.u8().ok()? as usize;
+            if n > MAX_MEMBERS {
+                return None;
+            }
+            for _ in 0..n {
+                confirmed.push(r.arr::<32>().ok()?);
+            }
+        }
         if !r.done() {
             return None;
         }
@@ -395,6 +442,8 @@ impl GroupState {
             pending,
             ledger,
             ctrl,
+            added_by,
+            confirmed,
         })
     }
 }
@@ -486,8 +535,13 @@ mod tests {
         });
         s.owe([4; 32], CtrlKind::Descs, 0);
         s.owe([5; 32], CtrlKind::Sync, 3);
+        s.added_by = Some([6; 32]);
+        assert!(s.confirm(&[4; 32]));
+        assert!(!s.confirm(&[4; 32]));
         let bytes = s.encode();
         let back = GroupState::decode(&bytes).unwrap();
+        assert_eq!(back.added_by, Some([6; 32]));
+        assert_eq!(back.confirmed, vec![[4; 32]]);
         assert_eq!(back.chain, s.chain);
         assert_eq!(back.status, Status::Joined);
         assert_eq!(
@@ -514,6 +568,19 @@ mod tests {
                 invited_by: [8; 32]
             }
         );
+    }
+
+    #[test]
+    fn a_document_from_before_these_fields_still_reads() {
+        let s = GroupState::new(chain(), Status::Joined);
+        let mut bytes = s.encode().to_vec();
+        // Version 2 ends with "no added_by" (1 byte) and "no confirmed" (1 byte).
+        bytes.truncate(bytes.len() - 2);
+        bytes[0] = STATE_VERSION_V1;
+        let back = GroupState::decode(&bytes).expect("a version 1 document");
+        assert_eq!(back.added_by, None);
+        assert!(back.confirmed.is_empty());
+        assert_eq!(back.status, Status::Joined);
     }
 
     #[test]

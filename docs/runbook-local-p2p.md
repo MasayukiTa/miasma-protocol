@@ -472,6 +472,17 @@ flag shows the state) switches them for one contact right away. With them off,
 nothing is sent and what arrives is not shown. Receipts are small and are
 padded like any message; an undelivered one is dropped after a day.
 
+**Group invitations.** When a trusted contact who administers a group adds you,
+you join at once and the group shows "you were added by ...". Set
+`chat.group_auto_join` to `false` (`miasma config --key chat.group_auto_join
+--value false`, or the Settings page of the desktop app) to be asked first: the
+invitation then waits at the top of the Chat tab until you accept or decline
+it. An invitation from someone who is not a trusted contact is refused either
+way. `miasma chat group list <group>` shows, for every member, whether they
+joined, are invited and have not answered, cannot be reached (with the reason),
+or run a Miasma that does not support groups yet. Messages to a member who has
+not joined are kept and delivered when they do.
+
 **Delete (on this device only; the other person keeps their copy).**
 
 ```sh

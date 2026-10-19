@@ -143,6 +143,10 @@ pub struct MiasmaApp {
     sharing_gate: RefreshGate,
     /// The tab drawn on the previous frame, to notice a tab being opened.
     prev_tab: Tab,
+    /// `chat.group_auto_join` as saved: join a group at once when a trusted contact adds me.
+    group_auto_join: bool,
+    /// Saving that setting failed (shown under it until the next change).
+    group_join_save_failed: bool,
 
     // Settings / general
     data_dir_display: String,
@@ -423,6 +427,8 @@ impl MiasmaApp {
                     shown: p.speed_units_shown,
                 }
             },
+            group_auto_join: crate::group::load_auto_join(&data_dir),
+            group_join_save_failed: false,
             applied_dark: Some(dark),
             #[cfg(feature = "ui-tour")]
             tour: tour::Tour::from_env(),
@@ -2192,6 +2198,36 @@ impl MiasmaApp {
                     self.save_prefs();
                 }
             });
+            {
+                let gs = locale::group_strings(self.locale);
+                kit::form_row(
+                    ui,
+                    gs.settings_join_label,
+                    Some(if self.group_auto_join {
+                        gs.settings_join_auto_desc
+                    } else {
+                        gs.settings_join_ask_desc
+                    }),
+                    |ui| {
+                        let mut on = self.group_auto_join;
+                        let options =
+                            [(true, gs.settings_join_auto), (false, gs.settings_join_ask)];
+                        if kit::segmented(ui, &mut on, &options) {
+                            self.group_auto_join = on;
+                            self.group_join_save_failed =
+                                crate::group::save_auto_join(&self.data_dir, on).is_err();
+                            self.chat.set_group_auto_join(on);
+                        }
+                    },
+                );
+                if self.group_join_save_failed {
+                    kit::notice(
+                        ui,
+                        Level::Error,
+                        locale::update_strings(self.locale).config_save_failed,
+                    );
+                }
+            }
             {
                 let sp = crate::speed::speed_strings(self.locale);
                 kit::form_row(ui, sp.settings_unit, None, |ui| {
