@@ -2040,6 +2040,16 @@ pub struct MiasmaNode {
     /// Keeping them separate prevents cover acknowledgements from entering the
     /// real onion return-key/reply state machine.
     pending_cover_requests: HashMap<request_response::OutboundRequestId, (PeerId, ())>,
+    /// Holds inbound cover acknowledgements for a delay drawn from the forward
+    /// delays this relay has observed (only when cover shaping is enabled).
+    cover_ack: super::cover_ack::CoverAckShaper<(
+        request_response::ResponseChannel<OnionRelayResponse>,
+        Vec<u8>,
+    )>,
+    /// Start time of each cell this relay forwarded to a next hop, used to
+    /// measure the forward delay. Only filled when cover shaping is enabled.
+    onion_forward_started:
+        HashMap<request_response::OutboundRequestId, (PeerId, std::time::Instant)>,
     /// Inbound onion relay response channels: req_id → inbound channel.
     /// When we're a relay and make a sub-request (R1→R2 or R2→Target),
     /// we store the inbound channel here so we can relay the response back.
@@ -2233,6 +2243,8 @@ impl MiasmaNode {
             pending_onion_relays: HashMap::new(),
             pending_onion_replies: HashMap::new(),
             pending_cover_requests: HashMap::new(),
+            cover_ack: super::cover_ack::CoverAckShaper::new(false),
+            onion_forward_started: HashMap::new(),
             pending_onion_inbound_channels: HashMap::new(),
             pending_probe_replies: HashMap::new(),
             onion_auth_failures: HashMap::new(),
@@ -2365,6 +2377,15 @@ impl MiasmaNode {
         }
     }
 
+    /// Enable or disable timing shaping of cover acknowledgements. Follows the
+    /// cover-traffic setting: when on, a cover cell is acknowledged after a
+    /// delay drawn from the forward delays this relay has observed instead of
+    /// at once. Call before the node starts running.
+    pub fn set_cover_ack_shaping(&mut self, enabled: bool) {
+        self.cover_ack = super::cover_ack::CoverAckShaper::new(enabled);
+        self.onion_forward_started.clear();
+    }
+
     /// Allow loopback/private addresses (for local testing only).
     pub fn set_allow_local_addresses(&mut self, allow: bool) {
         self.allow_local_addresses = allow;
@@ -2482,12 +2503,22 @@ impl MiasmaNode {
         bootstrap_interval.tick().await;
 
         loop {
+            // Next held cover acknowledgement, if any (none unless shaping is on).
+            let cover_ack_due = self.cover_ack.next_due();
             tokio::select! {
                 event = self.swarm.next() => {
                     match event {
                         Some(ev) => self.handle_event(ev),
                         None => break,
                     }
+                }
+                _ = async {
+                    match cover_ack_due {
+                        Some(due) => tokio::time::sleep_until(tokio::time::Instant::from_std(due)).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    self.flush_cover_acks();
                 }
                 cmd = self.dht_rx.recv() => {
                     if let Some(cmd) = cmd { self.handle_dht_command(cmd); }
@@ -2505,6 +2536,17 @@ impl MiasmaNode {
             }
         }
         Ok(())
+    }
+
+    /// Send every held cover acknowledgement whose time has come.
+    fn flush_cover_acks(&mut self) {
+        for (channel, ack) in self.cover_ack.drain_due(std::time::Instant::now()) {
+            let _ = self
+                .swarm
+                .behaviour_mut()
+                .onion_relay
+                .send_response(channel, OnionRelayResponse::Data(ack));
+        }
     }
 
     /// Dial one bootstrap peer at its configured address, unless it is already
@@ -3318,6 +3360,8 @@ impl MiasmaNode {
                     self.pending_onion_replies
                         .retain(|_, (pending_peer, _)| *pending_peer != peer_id);
                     self.pending_onion_inbound_channels
+                        .retain(|_, (pending_peer, _)| *pending_peer != peer_id);
+                    self.onion_forward_started
                         .retain(|_, (pending_peer, _)| *pending_peer != peer_id);
                     self.pending_probe_replies
                         .retain(|_, (pending_peer, _)| *pending_peer != peer_id);
@@ -4324,11 +4368,20 @@ impl MiasmaNode {
                                 // random because only transport completion matters to the sender.
                                 let mut ack = vec![0u8; crate::onion::packet::ONION_PAD_TARGET];
                                 rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut ack);
-                                let _ = self
-                                    .swarm
-                                    .behaviour_mut()
-                                    .onion_relay
-                                    .send_response(channel, OnionRelayResponse::Data(ack));
+                                // With shaping on, the answer waits for a delay drawn
+                                // from this relay's observed forward delays, so it
+                                // does not stand out from a forwarded cell's answer.
+                                if let Some((channel, ack)) = self.cover_ack.submit(
+                                    std::time::Instant::now(),
+                                    rand::random::<u64>(),
+                                    (channel, ack),
+                                ) {
+                                    let _ = self
+                                        .swarm
+                                        .behaviour_mut()
+                                        .onion_relay
+                                        .send_response(channel, OnionRelayResponse::Data(ack));
+                                }
                             }
                             Ok(super::onion_relay::OnionRelayAction::ForwardToNext {
                                 next_hop_peer_id,
@@ -4365,6 +4418,10 @@ impl MiasmaNode {
                                 // and store the inbound channel so we can relay the response back.
                                 self.pending_onion_relays
                                     .insert(req_id, (next_peer, return_key));
+                                if self.cover_ack.enabled() {
+                                    self.onion_forward_started
+                                        .insert(req_id, (next_peer, std::time::Instant::now()));
+                                }
                                 // Store the inbound response channel for this relay request.
                                 self.pending_onion_inbound_channels
                                     .insert(req_id, (next_peer, channel));
@@ -4442,6 +4499,16 @@ impl MiasmaNode {
                     trace!("cover response received");
                     return;
                 }
+                if let Some(started) = take_peer_correlated(
+                    &mut self.onion_forward_started,
+                    &request_id,
+                    peer,
+                    "onion_relay.forward_timing",
+                ) {
+                    if matches!(response, OnionRelayResponse::Data(_)) {
+                        self.cover_ack.record_forward_delay(started.elapsed());
+                    }
+                }
                 if let Some(return_key) = take_peer_correlated(
                     &mut self.pending_onion_relays,
                     &request_id,
@@ -4506,6 +4573,12 @@ impl MiasmaNode {
                     return;
                 }
                 warn!("onion_relay.outbound_failure peer={peer} error={error}");
+                let _ = take_peer_correlated(
+                    &mut self.onion_forward_started,
+                    &request_id,
+                    peer,
+                    "onion_relay.failure_timing",
+                );
                 let _ = take_peer_correlated(
                     &mut self.pending_onion_relays,
                     &request_id,

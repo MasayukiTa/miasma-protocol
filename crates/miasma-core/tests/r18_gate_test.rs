@@ -45,7 +45,10 @@ use miasma_core::{
     network::AnonymityPolicy,
     onion::{
         derive_onion_static_key,
-        packet::{LayerPayload, ONION_OUTER_PAD_TARGET, ONION_PAD_TARGET},
+        packet::{
+            LayerPayload, ONION_MAX_BODY_LEN, ONION_MAX_R2_ADDR_LEN, ONION_OUTER_PAD_TARGET,
+            ONION_PAD_TARGET,
+        },
         OnionLayer, OnionLayerProcessor, OnionPacket, OnionPacketBuilder, OnionRelayHandler,
     },
     protocol::{
@@ -453,11 +456,22 @@ fn every_first_hop_cell_has_one_length_whatever_it_carries() {
         size > ONION_OUTER_PAD_TARGET && size < ONION_OUTER_PAD_TARGET + 1024,
         "a 9 KiB cell plus its header, got {size}"
     );
-    // A body past the padded size is carried, only larger: never cut.
-    let big = vec![7u8; ONION_PAD_TARGET * 2];
-    let pkt = onion_packet(&r, 20, &big);
-    assert!(bincode::serialize(&pkt).unwrap().len() > size);
+    // The largest accepted body is carried at the same length, uncut.
+    let big = vec![7u8; ONION_MAX_BODY_LEN];
+    let pkt = onion_packet(&r, ONION_MAX_R2_ADDR_LEN, &big);
+    assert_eq!(bincode::serialize(&pkt).unwrap().len(), size);
     assert_eq!(through_relays(&r, &pkt).unwrap().1, big);
+    // A body past the limit is refused, never sent as a longer cell.
+    let too_big = vec![7u8; ONION_MAX_BODY_LEN + 1];
+    assert!(OnionPacketBuilder::build(
+        &r.r1_pub,
+        &r.r2_pub,
+        peer_id(2),
+        peer_id(3),
+        vec![4; 20],
+        too_big,
+    )
+    .is_err());
 }
 
 #[test]

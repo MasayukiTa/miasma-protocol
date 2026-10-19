@@ -216,6 +216,15 @@ impl DaemonServer {
                     .join(", ")
             );
         }
+        // Cover-cell acknowledgements are timed like forwarded cells only when
+        // cover traffic is on; otherwise they are answered at once.
+        node.set_cover_ack_shaping(
+            crate::cover_traffic::effective_cover_config(
+                transport_config.traffic_shape_policy,
+                &transport_config.cover_traffic,
+            )
+            .enabled,
+        );
         let preflight_obfs_config = if transport_config.obfuscated_quic_enabled {
             let probe_secret = parsed_obfs_probe_secret
                 .as_ref()
@@ -1843,6 +1852,7 @@ async fn process_request_inner(
                 cover_packets_dropped: cover_metrics.dropped_packets,
                 cover_estimated_enqueued_bytes: cover_metrics.estimated_enqueued_bytes,
                 cover_budget_pauses: cover_metrics.budget_pauses,
+                capability_downgrades: crate::protocol::capability::downgrade_counts(),
                 // Network environment — from live snapshot
                 network_environment: {
                     let env = bridge_state.env_snapshot.lock().unwrap();

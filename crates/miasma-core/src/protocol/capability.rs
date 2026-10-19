@@ -17,6 +17,43 @@
 //!   caller can show it. [`transcript_binding`] hashes both offers and the
 //!   result so a handshake can authenticate them and detect tampering.
 //!
+//! # Downgrades are always visible
+//!
+//! A peer's offer can be weaker than ours because it is an older build, or
+//! because the offer was stripped or damaged on the way. The classical baseline
+//! keeps working in every case (that is the compatibility promise), but it is
+//! never silent:
+//!
+//! * [`negotiate_offer`] takes the peer's offer as received (`None` when no
+//!   capability message arrived, bytes that may not decode) and returns a
+//!   [`Negotiation`]. Its [`DowngradeReport`] lists every reason, including
+//!   [`DowngradeReason::OfferMissing`] and [`DowngradeReason::OfferMalformed`].
+//!   Both types are `#[must_use]`: the caller has to read the report.
+//!   [`negotiate_reported`] does the same for an already decoded offer.
+//! * Every reported downgrade, and every refusal by local policy, also
+//!   increments a process-wide counter by reason ([`downgrade_counts`]). The
+//!   counters hold numbers only, no peer identifier, and the daemon status
+//!   shows them.
+//! * [`negotiate`] is the pure computation. It records nothing, so a caller
+//!   that wants visibility uses one of the functions above.
+//!
+//! # Default policy
+//!
+//! With empty [`Requirements`] (compatibility mode, the default) a local side
+//! that offers the hybrid suite and a peer that only has the classical suite
+//! agree on the classical suite. That is not an error: the exchange proceeds,
+//! the report carries [`DowngradeReason::SuitesUnavailable`] with the hybrid
+//! bit, [`DowngradeReport::hybrid_unavailable`] is true, and the
+//! `hybrid_unavailable` counter goes up. A local side that must not accept this
+//! sets `Requirements::suites` to [`SUITE_HYBRID_X25519_MLKEM768`], and
+//! [`negotiate`] then fails with [`NegotiationError::RequirementUnmet`] (also
+//! counted as a refusal).
+//!
+//! What this cannot do: tell a stripped offer from a peer that never had one,
+//! and detect the edit itself. Detection needs the transcript binding checked
+//! over an authenticated channel; without it the report only makes the
+//! outcome visible.
+//!
 //! # Wire encoding (all integers big-endian)
 //!
 //! ```text
@@ -31,6 +68,9 @@
 //! after `ext` are ignored when the version is newer than ours and rejected
 //! otherwise (canonical form).
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Highest capability-structure version this build speaks.
@@ -168,6 +208,211 @@ pub enum DowngradeReason {
     SuitesUnavailable { bits: u32 },
     /// Features we offered that the peer lacks.
     FeaturesUnavailable { bits: u32 },
+    /// No capability message arrived; the peer was treated as
+    /// [`Capabilities::legacy`]. A stripped offer looks exactly like this.
+    OfferMissing,
+    /// A capability message arrived but did not decode; the peer was treated
+    /// as [`Capabilities::legacy`].
+    OfferMalformed,
+}
+
+/// Kind of a [`DowngradeReason`], without its values. Used for counting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DowngradeKind {
+    OfferMissing,
+    OfferMalformed,
+    PeerOlderVersion,
+    SuitesUnavailable,
+    FeaturesUnavailable,
+}
+
+impl DowngradeReason {
+    pub fn kind(&self) -> DowngradeKind {
+        match self {
+            Self::OfferMissing => DowngradeKind::OfferMissing,
+            Self::OfferMalformed => DowngradeKind::OfferMalformed,
+            Self::PeerOlderVersion { .. } => DowngradeKind::PeerOlderVersion,
+            Self::SuitesUnavailable { .. } => DowngradeKind::SuitesUnavailable,
+            Self::FeaturesUnavailable { .. } => DowngradeKind::FeaturesUnavailable,
+        }
+    }
+}
+
+impl std::fmt::Display for DowngradeReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OfferMissing => write!(f, "peer sent no capability offer"),
+            Self::OfferMalformed => write!(f, "peer capability offer did not decode"),
+            Self::PeerOlderVersion { local, remote } => {
+                write!(f, "peer capability version {remote} is older than {local}")
+            }
+            Self::SuitesUnavailable { bits } => {
+                write!(f, "peer lacks suites {bits:#x}")
+            }
+            Self::FeaturesUnavailable { bits } => {
+                write!(f, "peer lacks features {bits:#x}")
+            }
+        }
+    }
+}
+
+/// Every reason a negotiation ended below what the local side offered.
+///
+/// The caller has to read it: show it, log it or act on it.
+#[must_use = "a downgrade must be shown or logged, not dropped"]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DowngradeReport {
+    reasons: Vec<DowngradeReason>,
+}
+
+impl DowngradeReport {
+    /// The report for an agreed result.
+    pub fn from_agreed(agreed: &Agreed) -> Self {
+        Self {
+            reasons: agreed.reasons.clone(),
+        }
+    }
+
+    pub fn is_downgrade(&self) -> bool {
+        !self.reasons.is_empty()
+    }
+
+    pub fn reasons(&self) -> &[DowngradeReason] {
+        &self.reasons
+    }
+
+    /// True when the local side offered the hybrid suite and the agreed set
+    /// lacks it.
+    pub fn hybrid_unavailable(&self) -> bool {
+        self.reasons.iter().any(|r| {
+            matches!(r, DowngradeReason::SuitesUnavailable { bits }
+                if bits & SUITE_HYBRID_X25519_MLKEM768 != 0)
+        })
+    }
+
+    /// One line for a log or a status screen. Empty when there is no downgrade.
+    pub fn summary(&self) -> String {
+        self.reasons
+            .iter()
+            .map(|r| r.to_string())
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+}
+
+/// Outcome of a reported negotiation: the agreed level and why it may be lower.
+#[must_use = "read the downgrade report; a lower level must not go unnoticed"]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Negotiation {
+    pub agreed: Agreed,
+    pub report: DowngradeReport,
+}
+
+/// Numbers of downgrades seen by this process, by reason. No peer identifiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct DowngradeCounts {
+    /// Negotiations that ended below the local offer.
+    #[serde(default)]
+    pub downgraded: u64,
+    /// Negotiations refused because a local requirement was not met.
+    #[serde(default)]
+    pub refused: u64,
+    #[serde(default)]
+    pub offer_missing: u64,
+    #[serde(default)]
+    pub offer_malformed: u64,
+    #[serde(default)]
+    pub peer_older_version: u64,
+    #[serde(default)]
+    pub suites_unavailable: u64,
+    #[serde(default)]
+    pub features_unavailable: u64,
+    /// Subset of `suites_unavailable`: the hybrid suite was offered locally
+    /// and not agreed.
+    #[serde(default)]
+    pub hybrid_unavailable: u64,
+}
+
+/// Counters behind [`DowngradeCounts`]. The process-wide instance is read with
+/// [`downgrade_counts`]; separate instances exist for tests.
+#[derive(Debug, Default)]
+pub struct DowngradeCounters {
+    downgraded: AtomicU64,
+    refused: AtomicU64,
+    offer_missing: AtomicU64,
+    offer_malformed: AtomicU64,
+    peer_older_version: AtomicU64,
+    suites_unavailable: AtomicU64,
+    features_unavailable: AtomicU64,
+    hybrid_unavailable: AtomicU64,
+}
+
+impl DowngradeCounters {
+    pub const fn new() -> Self {
+        Self {
+            downgraded: AtomicU64::new(0),
+            refused: AtomicU64::new(0),
+            offer_missing: AtomicU64::new(0),
+            offer_malformed: AtomicU64::new(0),
+            peer_older_version: AtomicU64::new(0),
+            suites_unavailable: AtomicU64::new(0),
+            features_unavailable: AtomicU64::new(0),
+            hybrid_unavailable: AtomicU64::new(0),
+        }
+    }
+
+    pub fn snapshot(&self) -> DowngradeCounts {
+        DowngradeCounts {
+            downgraded: self.downgraded.load(Ordering::Relaxed),
+            refused: self.refused.load(Ordering::Relaxed),
+            offer_missing: self.offer_missing.load(Ordering::Relaxed),
+            offer_malformed: self.offer_malformed.load(Ordering::Relaxed),
+            peer_older_version: self.peer_older_version.load(Ordering::Relaxed),
+            suites_unavailable: self.suites_unavailable.load(Ordering::Relaxed),
+            features_unavailable: self.features_unavailable.load(Ordering::Relaxed),
+            hybrid_unavailable: self.hybrid_unavailable.load(Ordering::Relaxed),
+        }
+    }
+
+    fn count_reason(&self, reason: &DowngradeReason) {
+        let slot = match reason.kind() {
+            DowngradeKind::OfferMissing => &self.offer_missing,
+            DowngradeKind::OfferMalformed => &self.offer_malformed,
+            DowngradeKind::PeerOlderVersion => &self.peer_older_version,
+            DowngradeKind::SuitesUnavailable => &self.suites_unavailable,
+            DowngradeKind::FeaturesUnavailable => &self.features_unavailable,
+        };
+        slot.fetch_add(1, Ordering::Relaxed);
+        if matches!(reason, DowngradeReason::SuitesUnavailable { bits }
+            if bits & SUITE_HYBRID_X25519_MLKEM768 != 0)
+        {
+            self.hybrid_unavailable.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn record(&self, report: &DowngradeReport) {
+        if !report.is_downgrade() {
+            return;
+        }
+        self.downgraded.fetch_add(1, Ordering::Relaxed);
+        for reason in report.reasons() {
+            self.count_reason(reason);
+        }
+    }
+
+    fn record_refusal(&self, defect: Option<&DowngradeReason>) {
+        self.refused.fetch_add(1, Ordering::Relaxed);
+        if let Some(reason) = defect {
+            self.count_reason(reason);
+        }
+    }
+}
+
+static PROCESS_DOWNGRADES: DowngradeCounters = DowngradeCounters::new();
+
+/// Downgrade counters of this process, for the daemon status.
+pub fn downgrade_counts() -> DowngradeCounts {
+    PROCESS_DOWNGRADES.snapshot()
 }
 
 /// Result of a negotiation.
@@ -212,6 +457,9 @@ impl Agreed {
 
 /// Pick the highest common level. Unknown versions and bits are ignored.
 /// Fails only when `require` demands something that is not agreed.
+///
+/// This is the pure computation: it records nothing. Use [`negotiate_offer`]
+/// or [`negotiate_reported`] to get a [`DowngradeReport`] and the counters.
 pub fn negotiate(
     local: &Capabilities,
     remote: &Capabilities,
@@ -256,6 +504,89 @@ pub fn negotiate(
         downgraded: !reasons.is_empty(),
         reasons,
     })
+}
+
+/// Resolve the peer's offer as received. `None` (no capability message) and
+/// bytes that do not decode both give [`Capabilities::legacy`], together with
+/// the reason, so the caller cannot take the fallback for a real offer.
+pub fn resolve_remote(wire: Option<&[u8]>) -> (Capabilities, Option<DowngradeReason>) {
+    match wire {
+        None => (Capabilities::legacy(), Some(DowngradeReason::OfferMissing)),
+        Some(bytes) => match Capabilities::decode(bytes) {
+            Ok(caps) => (caps, None),
+            Err(_) => (
+                Capabilities::legacy(),
+                Some(DowngradeReason::OfferMalformed),
+            ),
+        },
+    }
+}
+
+/// [`negotiate`] with the downgrade made visible: the result carries a
+/// [`DowngradeReport`] and the process-wide counters are updated.
+pub fn negotiate_reported(
+    local: &Capabilities,
+    remote: &Capabilities,
+    require: &Requirements,
+) -> Result<Negotiation, NegotiationError> {
+    negotiate_reported_with(&PROCESS_DOWNGRADES, local, remote, require)
+}
+
+/// [`negotiate_reported`] counting into the given counters.
+pub fn negotiate_reported_with(
+    counters: &DowngradeCounters,
+    local: &Capabilities,
+    remote: &Capabilities,
+    require: &Requirements,
+) -> Result<Negotiation, NegotiationError> {
+    match negotiate(local, remote, require) {
+        Ok(agreed) => {
+            let report = DowngradeReport::from_agreed(&agreed);
+            counters.record(&report);
+            Ok(Negotiation { agreed, report })
+        }
+        Err(e) => {
+            counters.record_refusal(None);
+            Err(e)
+        }
+    }
+}
+
+/// Negotiate against the peer's offer as it arrived: `None` when no capability
+/// message came, otherwise the raw bytes. A missing or malformed offer is
+/// negotiated as [`Capabilities::legacy`] and reported as such.
+pub fn negotiate_offer(
+    local: &Capabilities,
+    remote_wire: Option<&[u8]>,
+    require: &Requirements,
+) -> Result<Negotiation, NegotiationError> {
+    negotiate_offer_with(&PROCESS_DOWNGRADES, local, remote_wire, require)
+}
+
+/// [`negotiate_offer`] counting into the given counters.
+pub fn negotiate_offer_with(
+    counters: &DowngradeCounters,
+    local: &Capabilities,
+    remote_wire: Option<&[u8]>,
+    require: &Requirements,
+) -> Result<Negotiation, NegotiationError> {
+    let (remote, defect) = resolve_remote(remote_wire);
+    match negotiate(local, &remote, require) {
+        Ok(mut agreed) => {
+            if let Some(reason) = defect {
+                // The root cause comes first.
+                agreed.reasons.insert(0, reason);
+                agreed.downgraded = true;
+            }
+            let report = DowngradeReport::from_agreed(&agreed);
+            counters.record(&report);
+            Ok(Negotiation { agreed, report })
+        }
+        Err(e) => {
+            counters.record_refusal(defect.as_ref());
+            Err(e)
+        }
+    }
 }
 
 const BINDING_CONTEXT: &str = "miasma protocol capability transcript binding v1";
@@ -499,5 +830,152 @@ mod tests {
         // Unknown extension bytes are bound too.
         let ext = a.clone().with_unknown(vec![1]).unwrap();
         assert_ne!(transcript_binding(&ext, &b, &g), honest);
+    }
+
+    // ── Visible downgrades ───────────────────────────────────────────────────
+
+    #[test]
+    fn stripped_offer_is_reported_and_counted() {
+        let counters = DowngradeCounters::new();
+        let n = negotiate_offer_with(
+            &counters,
+            &Capabilities::current(),
+            None,
+            &Requirements::default(),
+        )
+        .unwrap();
+        // Classical still works.
+        assert_eq!(n.agreed.best_suite(), SUITE_CLASSICAL);
+        assert!(n.agreed.downgraded);
+        assert!(n.report.is_downgrade());
+        assert_eq!(n.report.reasons()[0], DowngradeReason::OfferMissing);
+        assert!(n.report.hybrid_unavailable());
+        assert!(n.report.summary().contains("no capability offer"));
+        let c = counters.snapshot();
+        assert_eq!(c.downgraded, 1);
+        assert_eq!(c.offer_missing, 1);
+        assert_eq!(c.offer_malformed, 0);
+        assert_eq!(c.hybrid_unavailable, 1);
+        assert_eq!(c.refused, 0);
+    }
+
+    #[test]
+    fn malformed_offer_is_reported_and_counted_apart_from_a_missing_one() {
+        let counters = DowngradeCounters::new();
+        for bytes in [&[][..], &[1, 2, 3][..], &[0xFF; 40][..]] {
+            let n = negotiate_offer_with(
+                &counters,
+                &Capabilities::current(),
+                Some(bytes),
+                &Requirements::default(),
+            )
+            .unwrap();
+            assert_eq!(n.report.reasons()[0], DowngradeReason::OfferMalformed);
+            assert_eq!(n.agreed.best_suite(), SUITE_CLASSICAL);
+        }
+        let c = counters.snapshot();
+        assert_eq!(
+            (c.offer_malformed, c.offer_missing, c.downgraded),
+            (3, 0, 3)
+        );
+    }
+
+    #[test]
+    fn a_valid_full_offer_is_not_a_downgrade_and_counts_nothing() {
+        let counters = DowngradeCounters::new();
+        let wire = Capabilities::current().encode();
+        let n = negotiate_offer_with(
+            &counters,
+            &Capabilities::current(),
+            Some(&wire),
+            &Requirements::default(),
+        )
+        .unwrap();
+        assert!(!n.report.is_downgrade());
+        assert!(!n.agreed.downgraded);
+        assert_eq!(n.agreed.best_suite(), SUITE_HYBRID_X25519_MLKEM768);
+        assert_eq!(counters.snapshot(), DowngradeCounts::default());
+    }
+
+    #[test]
+    fn default_policy_hybrid_local_classical_peer_is_visible_not_an_error() {
+        let counters = DowngradeCounters::new();
+        let classical = caps(CAPABILITY_VERSION, SUITE_CLASSICAL, KNOWN_FEATURES).encode();
+        let n = negotiate_reported_with(
+            &counters,
+            &Capabilities::current(),
+            &Capabilities::decode(&classical).unwrap(),
+            &Requirements::default(),
+        )
+        .unwrap();
+        assert_eq!(n.agreed.best_suite(), SUITE_CLASSICAL);
+        assert!(n.report.hybrid_unavailable());
+        assert_eq!(
+            n.report.reasons(),
+            &[DowngradeReason::SuitesUnavailable {
+                bits: SUITE_HYBRID_X25519_MLKEM768
+            }]
+        );
+        let c = counters.snapshot();
+        assert_eq!(
+            (
+                c.downgraded,
+                c.suites_unavailable,
+                c.hybrid_unavailable,
+                c.refused
+            ),
+            (1, 1, 1, 0)
+        );
+    }
+
+    #[test]
+    fn strict_refusal_is_counted_including_the_offer_defect() {
+        let counters = DowngradeCounters::new();
+        let strict = Requirements {
+            suites: SUITE_HYBRID_X25519_MLKEM768,
+            features: 0,
+        };
+        assert!(negotiate_offer_with(&counters, &Capabilities::current(), None, &strict).is_err());
+        assert!(negotiate_reported_with(
+            &counters,
+            &Capabilities::current(),
+            &Capabilities::legacy(),
+            &strict
+        )
+        .is_err());
+        let c = counters.snapshot();
+        assert_eq!(c.refused, 2);
+        assert_eq!(c.offer_missing, 1);
+        assert_eq!(c.downgraded, 0, "a refusal is not an accepted downgrade");
+    }
+
+    #[test]
+    fn counters_hold_numbers_only() {
+        let counters = DowngradeCounters::new();
+        let _ = negotiate_offer_with(
+            &counters,
+            &Capabilities::current(),
+            None,
+            &Requirements::default(),
+        )
+        .unwrap();
+        let json = serde_json::to_value(counters.snapshot()).unwrap();
+        let obj = json.as_object().unwrap();
+        assert!(obj.values().all(|v| v.is_u64()), "{json}");
+        // An older status without the field still parses.
+        let back: DowngradeCounts = serde_json::from_str("{}").unwrap();
+        assert_eq!(back, DowngradeCounts::default());
+    }
+
+    #[test]
+    fn process_counters_follow_the_reported_calls() {
+        // Other tests in this process may add to the counters at the same
+        // time, so only a lower bound can be asserted.
+        let before = downgrade_counts();
+        let n = negotiate_offer(&Capabilities::current(), None, &Requirements::default()).unwrap();
+        assert!(n.report.is_downgrade());
+        let after = downgrade_counts();
+        assert!(after.downgraded > before.downgraded);
+        assert!(after.offer_missing > before.offer_missing);
     }
 }
