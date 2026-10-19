@@ -7,7 +7,10 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 
@@ -140,6 +143,10 @@ struct Src {
     missing_segment: Option<u32>,
     /// Never answer for this segment (a holder that hangs).
     hang_on: Option<u32>,
+    /// Cancel this transfer from inside the first fetch of this segment, then
+    /// fail that fetch (return nothing).
+    cancel_then_fail: Option<(u32, Arc<TransferProgress>)>,
+    cancel_done: AtomicBool,
 }
 
 impl Src {
@@ -149,6 +156,8 @@ impl Src {
             log: log.clone(),
             missing_segment: None,
             hang_on: None,
+            cancel_then_fail: None,
+            cancel_done: AtomicBool::new(false),
         }
     }
 }
@@ -165,6 +174,15 @@ impl PieceSource for Src {
         self.log.lock().unwrap().push(Ev::Fetch(segment));
         if self.hang_on == Some(segment) {
             std::future::pending::<()>().await;
+        }
+        if let Some((seg, progress)) = &self.cancel_then_fail {
+            if *seg == segment && !self.cancel_done.swap(true, Ordering::SeqCst) {
+                // Yield past the first cancel poll (it fires at once), then
+                // cancel while this fetch is still in flight and fail it.
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                progress.cancel();
+                return Ok(None);
+            }
         }
         if self.missing_segment == Some(segment) {
             return Ok(None);
@@ -444,6 +462,32 @@ async fn cancelling_while_a_fetch_hangs_returns_promptly() {
     );
     assert_eq!(r.sink.aborted, 1);
     assert_all_buffers_wiped(&r.stats);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fetch_that_fails_because_of_a_cancel_ends_as_cancelled_not_as_an_error() {
+    // The cancel lands mid-fetch after the first cancel poll; the retries (1 ms
+    // pauses) then run out well inside the 20 ms poll interval, so only the
+    // explicit cancel check can report Cancelled. Fails on the unfixed code with
+    // Err(InsufficientShares). The clock is paused so the 5 ms / 1 ms / 2 ms
+    // virtual delays are exact (real Windows timers can stretch them past 20 ms).
+    let w = build_world(6, true, false);
+    let log: Log = Arc::default();
+    let progress = TransferProgress::new(w.mid.to_string());
+    let mut src = Src::new(&w, &log);
+    src.cancel_then_fail = Some((2, progress.clone()));
+    let parts_before = leftover_part_files();
+    let r = run(&w, src, TestSink::new(&log), progress).await;
+    assert_eq!(
+        r.result.unwrap(),
+        StreamOutcome::Cancelled {
+            segments_delivered: 2,
+            bytes_delivered: 2 * SEG as u64
+        }
+    );
+    assert_eq!((r.sink.aborted, r.sink.completes), (1, 0));
+    assert_all_buffers_wiped(&r.stats);
+    assert_eq!(leftover_part_files(), parts_before, "no temp file left");
 }
 
 #[tokio::test]
