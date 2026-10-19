@@ -131,8 +131,11 @@ impl PublishJournal {
         Ok(())
     }
 
+    /// Overwrite and delete the journal (it names the file being published).
     pub fn remove(path: &Path) {
-        let _ = std::fs::remove_file(path);
+        if state_crypto::overwrite_and_remove(path).is_err() {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 

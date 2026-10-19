@@ -82,8 +82,11 @@ impl ReceiveJournal {
         Ok(())
     }
 
+    /// Overwrite and delete the journal (it names the file being received).
     pub fn remove(path: &Path) {
-        let _ = std::fs::remove_file(path);
+        if crate::state_crypto::overwrite_and_remove(path).is_err() {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 

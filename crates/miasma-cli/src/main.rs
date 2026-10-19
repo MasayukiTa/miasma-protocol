@@ -479,7 +479,18 @@ enum Commands {
     Push(push_cmd::PushArgs),
 
     /// Show running and recent contact transfers (both directions).
-    PushStatus,
+    ///
+    /// With --clear-finished, delete the records of finished, failed and cancelled
+    /// transfers instead: they are removed from the saved history and overwritten on
+    /// disk. Running and waiting transfers and files already received are not touched.
+    PushStatus {
+        /// Delete the finished transfers' records for good (see above).
+        #[arg(long)]
+        clear_finished: bool,
+        /// With --clear-finished: only this contact's records (label, id or endpoint ID).
+        #[arg(long, requires = "clear_finished")]
+        contact: Option<String>,
+    },
 
     /// Make a waiting contact transfer try again now (see `push-status` for the id).
     PushRetry {
@@ -777,7 +788,11 @@ async fn main() -> Result<()> {
 
         Commands::Contact { action } => push_cmd::run_contact(&data_dir, action).await,
         Commands::Push(args) => push_cmd::run_push(&data_dir, args).await,
-        Commands::PushStatus => push_cmd::run_push_status(&data_dir).await,
+        Commands::PushStatus {
+            clear_finished: true,
+            contact,
+        } => push_cmd::run_push_clear_finished(&data_dir, contact).await,
+        Commands::PushStatus { .. } => push_cmd::run_push_status(&data_dir).await,
         Commands::PushRetry { id } => push_cmd::run_push_retry(&data_dir, &id).await,
         Commands::PushInbox => push_cmd::run_push_inbox(&data_dir).await,
         Commands::Chat { action } => chat_cmd::run_chat(&data_dir, action).await,

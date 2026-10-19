@@ -38,7 +38,7 @@ miasma-desktop/src/main.rs | 1 | data dir creation (log setup lives in miasma-co
 miasma-desktop/src/worker.rs | 1 | data dir creation on node init
 miasma-ffi/src/lib.rs | 2 | mobile data dir creation and key-file overwrite during wipe
 miasma-core/src/state_crypto/doc.rs | 3 | encrypted single-document writer: temp file, fsync, rename; create-if-absent link
-miasma-core/src/state_crypto/log.rs | 6 | encrypted record log: create, append, cut a torn tail, replace by rename
+miasma-core/src/state_crypto/log.rs | 8 | encrypted record log: create, append, cut a torn tail, replace by rename (also shredding replace)
 miasma-core/src/state_crypto/migrate.rs | 4 | one-time conversion of plaintext state files: lock file, staging, rename, wipe of the plaintext
 miasma-core/src/state_crypto/mod.rs | 5 | master key creation on first use, overwrite-and-remove, set-aside of unreadable files
 miasma-core/src/chat/store.rs | 1 | chat folder creation (the files in it are written through state_crypto)
