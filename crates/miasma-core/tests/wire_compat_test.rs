@@ -615,7 +615,9 @@ fn contact_codes_of_every_release_are_accepted_and_written_the_same() {
     // A version this build does not know says so (it does not look damaged).
     let mut body = vec![2u8];
     body.extend_from_slice(&id);
-    body.extend_from_slice(&[0, 0, 0, 0]);
+    let mut h = blake3::Hasher::new_derive_key("miasma-contact-v1 checksum");
+    h.update(&body);
+    body.extend_from_slice(&h.finalize().as_bytes()[..4]);
     let future = format!("miasma-contact:{}", bs58::encode(body).into_string());
     assert_eq!(
         ContactCode::parse(&future),
