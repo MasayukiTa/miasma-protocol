@@ -22,13 +22,34 @@
 /// The legacy `RepairCoordinator` remains for compatibility while
 /// `PieceMaintenanceEngine` provides the deterministic planner used by the r18
 /// durability work.
+///
+/// The executor side is split into small, individually testable parts:
+/// [`evidence`] (liveness + verified-share checks feeding the planner),
+/// [`select`] (holder choice with failure-domain diversity), [`schedule`]
+/// (protocol-time backoff and traffic pacing) and [`executor`] (the pass that
+/// ties them together behind a transport-independent backend trait).
 pub mod detector;
+pub mod evidence;
+pub mod executor;
 pub mod maintenance;
 pub mod protocol;
+pub mod schedule;
+pub mod select;
 
 pub use detector::{OfflineDetector, PeerHealth};
+pub use evidence::{
+    holder_id_of, EvidenceBook, EvidenceConfig, HolderState, LocatedReplica, ProbeOutcome,
+};
+pub use executor::{
+    check_record_update, spawn_executor, ExecutorHandle, MaintenanceBackend, MaintenanceConfig,
+    MaintenanceCore, ProbeResult, TickReport,
+};
 pub use maintenance::{
     PieceMaintenanceAction, PieceMaintenanceConfig, PieceMaintenanceEngine, PieceMaintenancePlan,
     ReplicaObservation,
 };
 pub use protocol::RepairCoordinator;
+pub use schedule::{
+    AttemptLedger, BackoffPolicy, MaintenanceClock, ManualClock, PieceKey, RateBudget, SystemClock,
+};
+pub use select::{failure_domain_for_addrs, select_holder, Candidate, Selection};

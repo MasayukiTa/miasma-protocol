@@ -21,6 +21,7 @@
 pub mod control_auth;
 pub mod http_bridge;
 pub mod ipc;
+pub mod maintenance_exec;
 pub mod rate_limit;
 pub mod replication;
 pub mod self_heal;
@@ -785,10 +786,16 @@ impl DaemonServer {
             environment_detector_loop(env_coord, env_snapshot).await;
         });
 
+        // ── Autonomous piece maintenance ──────────────────────────────────────
+        let maintenance =
+            maintenance_exec::start(coord.clone(), store.clone(), queue.clone(), &self.data_dir);
+
         // ── Wait for shutdown ─────────────────────────────────────────────────
         shutdown_rx.recv().await;
         info!("daemon shutdown signal received");
 
+        // First: no new probes or pushes once shutdown (or a wipe) has begun.
+        maintenance.stop().await;
         ipc_handle.abort();
         rep_handle.abort();
         env_handle.abort();
@@ -1822,9 +1829,15 @@ pub(crate) async fn process_request(
                 );
             }
             // Order: quiesce (refuse new work, cancel in-flight publish/receive
-            // and wait for them to be dropped) -> zeroize + crypto-erase the
-            // store key -> take the exclusive directed-key lock -> shutdown.
+            // and the piece maintenance executor, then wait for the gated
+            // operations to be dropped) -> zeroize + crypto-erase the store
+            // key -> erase state keys -> take the exclusive directed-key lock
+            // -> shutdown.
             store.begin_wipe();
+            // Background piece maintenance is not a gated operation; stop it
+            // before anything is erased so it cannot probe or push with a key
+            // that is being destroyed.
+            maintenance_exec::cancel_for(&data_dir);
             if !store
                 .wipe_gate()
                 .drained(std::time::Duration::from_secs(5))
