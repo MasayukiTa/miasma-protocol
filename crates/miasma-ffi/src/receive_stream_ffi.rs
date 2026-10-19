@@ -14,10 +14,24 @@
 //! 3. `release_receive_session` forgets the session (its final progress stays
 //!    readable until then).
 //!
-//! What crosses the boundary: each chunk is a copy that the foreign side owns
-//! after the call. The Rust side wipes its own segment buffer; it cannot wipe
-//! the foreign copy, so the app must clear the arrays it receives once it has
-//! used them. Error values carry fixed text only, never data from the object.
+//! What crosses the boundary, exactly:
+//!
+//! * Wiped by the Rust side: the segment buffer inside the core engine (it is
+//!   zeroized when the segment is done, and when a wipe or a cancel drops the
+//!   receive).
+//! * Not wiped by the Rust side: the chunk copy made for each `on_chunk` call
+//!   (`chunk.to_vec()` in `ForeignSink::accept`). The callback takes the
+//!   `Vec<u8>` by value, so the generated binding consumes it while lowering it
+//!   into a buffer for the foreign side; this crate has no handle left to
+//!   overwrite it with, and what the binding allocates in between is outside
+//!   this crate's control. Those copies are freed without being zeroized.
+//! * Owned by the app: the array it receives. The app must clear it once it
+//!   has used it.
+//!
+//! So this surface keeps plaintext off the disk and wipes the engine's own
+//! buffers; it does not promise that no copy of the plaintext lingers in freed
+//! memory of this process or of the app. Error values carry fixed text only,
+//! never data from the object.
 
 use std::{
     collections::HashMap,

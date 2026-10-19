@@ -801,6 +801,16 @@ async fn handle_directed_retrieve_to_file(
     if req.output_path.is_empty() {
         return json_error(StatusCode::BAD_REQUEST, "output_path is required");
     }
+    if let Err(e) = validate_field_length("output_path", &req.output_path, MAX_OUTPUT_PATH_LEN) {
+        return json_error(StatusCode::BAD_REQUEST, &e);
+    }
+    // The same path policy as `retrieve-to-file`.
+    if control_auth::validate_output_path(&req.output_path).is_err() {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "output_path must be absolute and contain no '..'",
+        );
+    }
     let resp = bridge_request(
         state,
         ControlRequest::DirectedRetrieveToFile {

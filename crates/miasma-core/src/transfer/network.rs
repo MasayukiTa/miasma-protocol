@@ -22,21 +22,33 @@ use crate::{
     crypto::hash::ContentId,
     network::{
         types::{DhtRecord, ShardLocation},
-        MiasmaCoordinator,
+        AnonymityPolicy, MiasmaCoordinator,
     },
     share::MiasmaShare,
-    transport::payload::PayloadTransportSelector,
+    transport::payload::{PayloadTransportSelector, PolicyFetchError},
     MiasmaError,
 };
 
 /// The real network as a [`PieceSource`].
 pub struct TransportPieceSource {
     selector: Arc<PayloadTransportSelector>,
+    policy: AnonymityPolicy,
 }
 
 impl TransportPieceSource {
     pub fn new(selector: Arc<PayloadTransportSelector>) -> Self {
-        Self { selector }
+        Self {
+            selector,
+            policy: AnonymityPolicy::Direct,
+        }
+    }
+
+    /// Fetch under `policy`. With [`AnonymityPolicy::Required`] only transports
+    /// that reach the holder through a relay are tried; if there is none the
+    /// fetch fails (it never falls back to a direct transport).
+    pub fn with_policy(mut self, policy: AnonymityPolicy) -> Self {
+        self.policy = policy;
+        self
     }
 }
 
@@ -51,6 +63,23 @@ impl PieceSource for TransportPieceSource {
     ) -> Result<Option<MiasmaShare>, MiasmaError> {
         // Same convention as `FallbackShareSource`: the first announced address.
         let addr = holder.addrs.first().map(String::as_str).unwrap_or("");
+        if matches!(self.policy, AnonymityPolicy::Required { .. }) {
+            return match self
+                .selector
+                .fetch_share_with_policy(self.policy, addr, *mid.as_bytes(), slot, segment)
+                .await
+            {
+                Ok(fetched) => Ok(Some(fetched.share)),
+                Err(PolicyFetchError::NoPermittedTransport { .. }) => {
+                    Err(MiasmaError::Network(format!(
+                        "anonymity policy {} forbids every configured payload transport",
+                        self.policy
+                    )))
+                }
+                // Every permitted transport failed for this holder.
+                Err(PolicyFetchError::Exhausted(_)) => Ok(None),
+            };
+        }
         match self
             .selector
             .fetch_share(addr, *mid.as_bytes(), slot, segment)
@@ -77,7 +106,7 @@ impl MiasmaCoordinator {
     /// payload transports. Public so a latency/throughput probe can time single
     /// fetches without going through a whole transfer.
     pub fn piece_source(&self) -> TransportPieceSource {
-        TransportPieceSource::new(self.transport_selector())
+        TransportPieceSource::new(self.transport_selector()).with_policy(self.anonymity_policy())
     }
 
     /// Read the record and manifest for `mid` from the DHT, retrying with backoff.

@@ -163,16 +163,34 @@ impl WipeGate {
     /// drops this future and nothing is written). The file is created only
     /// while no wipe is running, and is removed again if a wipe began while it
     /// was being written or if the write fails part-way.
+    ///
+    /// Like the streaming `retrieve-to-file` route, an existing target is
+    /// replaced. Only a file this call opened is ever removed: when the open
+    /// itself fails, whatever is at `path` is left exactly as it was.
     pub async fn write_output(&self, path: &Path, data: &[u8]) -> Result<(), MiasmaError> {
+        use std::io::Write;
         // The gap between "the data is in memory" and "the file exists".
         self.stall_point().await;
         if self.is_wiping() {
             return Err(WipeInProgress.into());
         }
-        let mut partial = PartialOutput { path, keep: false };
-        std::fs::write(path, data).map_err(|e| {
+        let cannot = |e: std::io::Error| {
             MiasmaError::Storage(format!("cannot write to {}: {e}", path.display()))
-        })?;
+        };
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)
+            .map_err(cannot)?;
+        // From here on the file is ours: remove it unless everything succeeds.
+        let mut partial = PartialOutput { path, keep: false };
+        file.write_all(data)
+            .and_then(|()| file.flush())
+            .map_err(|e| {
+                MiasmaError::Storage(format!("cannot write to {}: {e}", path.display()))
+            })?;
+        drop(file);
         // The write above does not yield, so a wipe that began meanwhile has
         // not cancelled us: check once more before reporting success.
         if self.is_wiping() {

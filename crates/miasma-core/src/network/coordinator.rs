@@ -1358,6 +1358,16 @@ impl MiasmaCoordinator {
         mode: &str,
         min_relay_hops: usize,
     ) -> Result<Vec<u8>, MiasmaError> {
+        // The policy the piece fetches below run under: `Required` never
+        // reaches a holder over a direct transport.
+        let policy = if mode == "required" {
+            AnonymityPolicy::Required {
+                min_hops: min_relay_hops.min(u8::MAX as usize) as u8,
+            }
+        } else {
+            AnonymityPolicy::Opportunistic
+        };
+
         // Pre-retrieval: probe stale relay candidates to improve path decisions.
         self.probe_stale_relay_candidates().await;
 
@@ -1437,7 +1447,7 @@ impl MiasmaCoordinator {
                                     "routing via rendezvous introduction points"
                                 );
                                 match self
-                                    .retrieve_via_rendezvous(mid, params, intro_points)
+                                    .retrieve_via_rendezvous(mid, params, intro_points, policy)
                                     .await
                                 {
                                     Ok(data) => {
@@ -1497,7 +1507,8 @@ impl MiasmaCoordinator {
             relay_peer_id: *relay_peer_id,
             relay_addr: relay_addr.clone(),
         };
-        let source = FallbackShareSource::new(relay_exec, self.transport_selector.clone());
+        let source = FallbackShareSource::new(relay_exec, self.transport_selector.clone())
+            .with_policy(policy);
         let result = RetrievalCoordinator::new(source)
             .retrieve(mid, params)
             .await;
@@ -2142,6 +2153,7 @@ impl MiasmaCoordinator {
         mid: &ContentId,
         params: DissolutionParams,
         intro_pseudonyms: &[[u8; 32]],
+        policy: AnonymityPolicy,
     ) -> Result<Vec<u8>, MiasmaError> {
         if let Ok(mut s) = self.retrieval_stats.lock() {
             s.rendezvous_attempts += 1;
@@ -2180,7 +2192,8 @@ impl MiasmaCoordinator {
                 relay_peer_id: intro.peer_id,
                 relay_addr,
             };
-            let source = FallbackShareSource::new(relay_exec, self.transport_selector.clone());
+            let source = FallbackShareSource::new(relay_exec, self.transport_selector.clone())
+                .with_policy(policy);
             match RetrievalCoordinator::new(source)
                 .retrieve(mid, params)
                 .await
