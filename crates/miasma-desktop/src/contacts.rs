@@ -881,6 +881,8 @@ pub struct ContactsUi {
     open_rx: std::sync::mpsc::Receiver<String>,
     /// The path the last open was aimed at (named in the notice if it fails).
     last_open: String,
+    /// The notice was just set: bring it into view once.
+    scroll_to_msg: bool,
     /// Hosts whose folded earlier attempts are expanded.
     show_earlier: HashSet<String>,
 
@@ -915,6 +917,7 @@ impl Default for ContactsUi {
             open_tx,
             open_rx,
             last_open: String::new(),
+            scroll_to_msg: false,
             show_earlier: HashSet::new(),
             availability: Availability::Unknown,
             ever_ok: false,
@@ -1063,13 +1066,18 @@ impl ContactsUi {
     /// a file that is gone opens its folder and says so, and a launcher that fails is reported
     /// with the path that was tried.
     fn open_received(&mut self, c: &ContactStrings, r: &Row, action: Action) {
-        let Some(sa) = r.saved_as.as_deref() else {
+        // A received file is in the inbox; a sent one is where it was sent from.
+        let Some(sa) = (if r.outbound {
+            r.source_path.as_deref()
+        } else {
+            r.saved_as.as_deref()
+        }) else {
             return;
         };
         let contact_dir = self
             .contacts
             .iter()
-            .find(|x| x.id == r.contact_id)
+            .find(|x| x.id == r.contact_id && !r.outbound)
             .map(|x| PathBuf::from(&x.inbox_dir));
         match open_path::resolve_saved(sa, contact_dir.as_deref(), self.inbox_root().as_deref()) {
             Resolved::Found(p) => {
@@ -1078,7 +1086,7 @@ impl ContactsUi {
             }
             Resolved::Missing { tried, folder } => {
                 let shown = crate::transfers::plain_path(&tried.to_string_lossy()).to_owned();
-                self.page_msg = Some((fill(c.open_missing, &[("path", &shown)]), true));
+                self.say(fill(c.open_missing, &[("path", &shown)]), true);
                 if let Some(f) = folder {
                     self.last_open = crate::transfers::plain_path(&f.to_string_lossy()).to_owned();
                     open_path::launch(Action::Open, f, self.open_tx.clone());
@@ -1094,23 +1102,28 @@ impl ContactsUi {
             self.last_open = crate::transfers::plain_path(dir).to_owned();
             open_path::launch(Action::Open, p, self.open_tx.clone());
         } else {
-            self.page_msg = Some((
+            self.say(
                 fill(
                     c.open_missing,
                     &[("path", crate::transfers::plain_path(dir))],
                 ),
                 true,
-            ));
+            );
         }
+    }
+
+    /// Show a notice at the top of the page and scroll it into view (the button that caused it
+    /// is usually far below, and a notice nobody sees is the same as nothing happening).
+    fn say(&mut self, text: String, is_err: bool) {
+        self.page_msg = Some((text, is_err));
+        self.scroll_to_msg = true;
     }
 
     /// Failures reported by the launcher threads become a visible notice.
     fn collect_open_failures(&mut self, c: &ContactStrings) {
         while let Ok(why) = self.open_rx.try_recv() {
-            self.page_msg = Some((
-                fill(c.open_failed, &[("path", &self.last_open), ("why", &why)]),
-                true,
-            ));
+            let text = fill(c.open_failed, &[("path", &self.last_open), ("why", &why)]);
+            self.say(text, true);
         }
     }
 
@@ -1582,7 +1595,7 @@ impl ContactsUi {
 
         if let Some((msg, is_err)) = self.page_msg.clone() {
             let color = if is_err { pal().danger } else { pal().success };
-            card_frame().show(ui, |ui| {
+            let card = card_frame().show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.add(egui::Label::new(egui::RichText::new(&msg).color(color)).wrap(true));
                 ui.add_space(4.0);
@@ -1590,6 +1603,9 @@ impl ContactsUi {
                     self.page_msg = None;
                 }
             });
+            if std::mem::take(&mut self.scroll_to_msg) {
+                ui.scroll_to_rect(card.response.rect, Some(egui::Align::TOP));
+            }
             ui.add_space(GAP);
         }
 
@@ -2250,6 +2266,8 @@ impl ContactsUi {
             let can_cancel = !r.finished();
             let can_retry = self.can_retry(r);
             let received = !r.outbound && r.state == PushState::Done && r.saved_as.is_some();
+            let can_open =
+                received || (r.outbound && r.state == PushState::Done && r.source_path.is_some());
             if received {
                 if let Some(sa) = r.saved_as.as_deref() {
                     let contact_dir = self
@@ -2275,7 +2293,7 @@ impl ContactsUi {
                 }
             }
             let can_try_now = r.outbound && r.state == PushState::Waiting;
-            if can_cancel || can_retry || can_try_now || received {
+            if can_cancel || can_retry || can_try_now || can_open {
                 ui.add_space(4.0);
                 ui.horizontal_wrapped(|ui| {
                     if can_try_now && ui.button(c.btn_try_now).clicked() {
@@ -2289,7 +2307,7 @@ impl ContactsUi {
                     if can_retry && ui.button(c.btn_retry).clicked() {
                         self.retry(r);
                     }
-                    if received {
+                    if can_open {
                         if ui.button(c.btn_open_file).clicked() {
                             self.open_received(c, r, Action::Open);
                         }
