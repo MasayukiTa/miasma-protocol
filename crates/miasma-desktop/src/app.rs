@@ -150,6 +150,10 @@ pub struct MiasmaApp {
     status_msg: Option<(String, MsgKind)>,
     /// When `status_msg` was set (for the messages that go away by themselves).
     status_msg_at: std::time::Instant,
+    /// Failures of "open the data folder", reported by the launcher thread.
+    open_tx: std::sync::mpsc::Sender<String>,
+    open_rx: std::sync::mpsc::Receiver<String>,
+    open_last: String,
     show_wipe_confirm: bool,
     /// The "a transfer is running, close anyway?" dialog is open.
     show_close_confirm: bool,
@@ -403,6 +407,7 @@ impl MiasmaApp {
         };
 
         let now = std::time::Instant::now();
+        let (open_tx, open_rx) = std::sync::mpsc::channel();
 
         Self {
             worker,
@@ -452,6 +457,9 @@ impl MiasmaApp {
             busy: false,
             status_msg: None,
             status_msg_at: now,
+            open_tx,
+            open_rx,
+            open_last: String::new(),
             show_wipe_confirm: false,
             show_close_confirm: false,
             close_confirmed: false,
@@ -2286,13 +2294,13 @@ impl MiasmaApp {
                         .add(kit::secondary_button(s.settings_open_folder))
                         .clicked()
                     {
-                        #[cfg(windows)]
-                        let opener = "explorer";
-                        #[cfg(not(windows))]
-                        let opener = "xdg-open";
-                        let _ = std::process::Command::new(opener)
-                            .arg(&self.data_dir_display)
-                            .spawn();
+                        self.open_last =
+                            crate::transfers::plain_path(&self.data_dir_display).to_owned();
+                        crate::open_path::launch(
+                            crate::open_path::Action::Open,
+                            std::path::PathBuf::from(&self.data_dir_display),
+                            self.open_tx.clone(),
+                        );
                     }
                 });
             });
@@ -3045,6 +3053,12 @@ impl eframe::App for MiasmaApp {
 
         self.poll_worker();
         self.updates.tick(ctx);
+        while let Ok(why) = self.open_rx.try_recv() {
+            let c = locale::contact_strings(self.locale);
+            let text =
+                crate::transfers::fill(c.open_failed, &[("path", &self.open_last), ("why", &why)]);
+            self.set_msg(MsgKind::Error, text);
+        }
 
         // Messages that go away by themselves: success and progress notes. Errors stay until
         // they are closed.

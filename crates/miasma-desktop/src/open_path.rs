@@ -9,6 +9,7 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
@@ -172,6 +173,26 @@ pub fn safe_arg(path: &Path) -> OsString {
     }
 }
 
+/// A path in the one form the Windows shell reads correctly: no `\\?\` prefix (`\\?\UNC\server`
+/// becomes `\\server`) and backslashes only. Explorer silently opens the user's Documents
+/// folder for a path it cannot read, so a path that reaches it in another form is not an error
+/// anywhere - it just opens the wrong thing.
+pub fn windows_form(path: &str) -> String {
+    let p = if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = path.strip_prefix(r"\\?\") {
+        rest.to_owned()
+    } else {
+        path.to_owned()
+    };
+    p.replace('/', "\\")
+}
+
+/// The path made absolute (a relative one would be read against the helper's own folder).
+fn absolute(path: &Path) -> PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// What to do with a path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -181,97 +202,131 @@ pub enum Action {
     Reveal,
 }
 
-/// The program and arguments for `action` on `path` on this OS.
-pub fn command_for(action: Action, path: &Path) -> (&'static str, Vec<OsString>) {
-    let arg = safe_arg(path);
-    #[cfg(windows)]
-    {
-        match action {
-            Action::Open => ("explorer", vec![arg]),
-            Action::Reveal => {
-                let mut o = OsString::from("/select,");
-                o.push(arg);
-                ("explorer", vec![o])
-            }
-        }
-    }
+/// The helper program for this OS.
+#[cfg(windows)]
+const PROGRAM: &str = "explorer";
+#[cfg(target_os = "macos")]
+const PROGRAM: &str = "open";
+#[cfg(not(any(windows, target_os = "macos")))]
+const PROGRAM: &str = "xdg-open";
+
+/// The arguments for `action` on `path` on macOS and Linux (one argument per path, so no
+/// quoting is involved).
+#[cfg(not(windows))]
+fn unix_args(action: Action, path: &Path) -> Vec<OsString> {
+    let arg = safe_arg(&absolute(path));
     #[cfg(target_os = "macos")]
     {
         match action {
-            Action::Open => ("open", vec![arg]),
-            Action::Reveal => ("open", vec![OsString::from("-R"), arg]),
+            Action::Open => vec![arg],
+            Action::Reveal => vec![OsString::from("-R"), arg],
         }
     }
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(not(target_os = "macos"))]
     {
         match action {
-            Action::Open => ("xdg-open", vec![arg]),
-            Action::Reveal => (
-                "xdg-open",
-                vec![path.parent().map_or(arg, |d| d.as_os_str().to_owned())],
-            ),
+            Action::Open => vec![arg],
+            Action::Reveal => vec![absolute(path)
+                .parent()
+                .map_or(arg, |d| d.as_os_str().to_owned())],
         }
     }
+}
+
+/// The process to run for `action` on `path`: `program` after `lead` arguments (a test hook).
+///
+/// On Windows the path is passed as ONE raw, quoted argument: `explorer "C:\a b\c"` and
+/// `explorer /select,"C:\a b\c"`. Explorer parses its own command line, and the quoting Rust
+/// applies to an ordinary argument (`"/select,C:\a b\c"`, the quote before the switch) makes it
+/// give up and open Documents instead.
+fn build(program: &std::ffi::OsStr, lead: &[OsString], action: Action, path: &Path) -> Command {
+    let mut cmd = Command::new(program);
+    cmd.args(lead);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let shown = windows_form(&absolute(path).to_string_lossy());
+        let mut raw = OsString::new();
+        if action == Action::Reveal {
+            raw.push("/select,");
+        }
+        raw.push("\"");
+        raw.push(shown);
+        raw.push("\"");
+        cmd.raw_arg(raw);
+    }
+    #[cfg(not(windows))]
+    {
+        cmd.args(unix_args(action, path));
+    }
+    cmd
+}
+
+/// The process that does `action` on `path` on this OS.
+pub fn command_for(action: Action, path: &Path) -> Command {
+    build(std::ffi::OsStr::new(PROGRAM), &[], action, path)
 }
 
 /// Launch `action` in the background and send a short reason down `report` if it fails. The
-/// helper is waited for up to a few seconds so a nonzero exit is seen; on Windows the shell
+/// path is checked first (the shell would otherwise open some other folder without a word), and
+/// the helper is waited for up to a few seconds so a nonzero exit is seen; on Windows the shell
 /// returns 1 even on success, so there only a failure to start counts.
 pub fn launch(action: Action, path: PathBuf, report: Sender<String>) {
     std::thread::spawn(move || {
-        let (cmd, args) = command_for(action, &path);
-        run_and_wait(cmd, &args, &report);
+        if !path.exists() {
+            let _ = report.send("the file or folder is not there".to_owned());
+            return;
+        }
+        run_and_wait(command_for(action, &path), &report);
     });
 }
 
-fn run_and_wait(cmd: &str, args: &[OsString], report: &Sender<String>) {
+fn run_and_wait(mut command: Command, report: &Sender<String>) {
+    let cmd = command.get_program().to_string_lossy().into_owned();
+    let mut child = match command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
     {
-        let mut child = match std::process::Command::new(cmd)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-        {
-            Ok(c) => c,
+        Ok(c) => c,
+        Err(e) => {
+            let _ = report.send(format!("{cmd}: {e}"));
+            return;
+        }
+    };
+    if cfg!(windows) {
+        let _ = child.wait();
+        return;
+    }
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    let mut err = String::new();
+                    if let Some(mut s) = child.stderr.take() {
+                        use std::io::Read;
+                        let mut buf = vec![0u8; 400];
+                        let n = s.read(&mut buf).unwrap_or(0);
+                        err = String::from_utf8_lossy(&buf[..n]).trim().to_owned();
+                    }
+                    let code = status
+                        .code()
+                        .map_or_else(|| "signal".to_owned(), |c| c.to_string());
+                    let _ = report.send(if err.is_empty() {
+                        format!("{cmd} exited with {code}")
+                    } else {
+                        format!("{cmd} exited with {code}: {err}")
+                    });
+                }
+                return;
+            }
+            Ok(None) if start.elapsed() > Duration::from_secs(5) => return,
+            Ok(None) => std::thread::sleep(Duration::from_millis(40)),
             Err(e) => {
                 let _ = report.send(format!("{cmd}: {e}"));
                 return;
-            }
-        };
-        if cfg!(windows) {
-            let _ = child.wait();
-            return;
-        }
-        let start = Instant::now();
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    if !status.success() {
-                        let mut err = String::new();
-                        if let Some(mut s) = child.stderr.take() {
-                            use std::io::Read;
-                            let mut buf = vec![0u8; 400];
-                            let n = s.read(&mut buf).unwrap_or(0);
-                            err = String::from_utf8_lossy(&buf[..n]).trim().to_owned();
-                        }
-                        let code = status
-                            .code()
-                            .map_or_else(|| "signal".to_owned(), |c| c.to_string());
-                        let _ = report.send(if err.is_empty() {
-                            format!("{cmd} exited with {code}")
-                        } else {
-                            format!("{cmd} exited with {code}: {err}")
-                        });
-                    }
-                    return;
-                }
-                Ok(None) if start.elapsed() > Duration::from_secs(5) => return,
-                Ok(None) => std::thread::sleep(Duration::from_millis(40)),
-                Err(e) => {
-                    let _ = report.send(format!("{cmd}: {e}"));
-                    return;
-                }
             }
         }
     }
@@ -397,34 +452,195 @@ mod tests {
             safe_arg(Path::new("plain.txt")),
             OsString::from("plain.txt")
         );
-        let (_, args) = command_for(Action::Open, &p);
-        assert_eq!(args.last().unwrap(), p.as_os_str());
-        assert_eq!(args.len(), 1);
-        let (_, rv) = command_for(Action::Reveal, &p);
-        assert!(!rv.is_empty());
+        let args: Vec<OsString> = command_for(Action::Open, &p)
+            .get_args()
+            .map(|a| a.to_owned())
+            .collect();
+        #[cfg(not(windows))]
+        {
+            assert_eq!(args, vec![absolute(&p).into_os_string()]);
+            let rv: Vec<OsString> = command_for(Action::Reveal, &p)
+                .get_args()
+                .map(|a| a.to_owned())
+                .collect();
+            assert!(!rv.is_empty());
+        }
+        #[cfg(windows)]
+        assert_eq!(args.len(), 1); // the one raw argument
+    }
+
+    #[test]
+    fn windows_form_strips_verbatim_prefixes_and_uses_backslashes() {
+        assert_eq!(windows_form(r"\\?\C:\a b\c.txt"), r"C:\a b\c.txt");
+        assert_eq!(windows_form(r"C:/a b/c.txt"), r"C:\a b\c.txt");
+        assert_eq!(
+            windows_form(r"\\?\UNC\srv\share\f.txt"),
+            r"\\srv\share\f.txt"
+        );
+        assert_eq!(windows_form(r"C:\already\fine.txt"), r"C:\already\fine.txt");
+        // A mix as the daemon and the contact folder together can produce.
+        assert_eq!(
+            windows_form(r"C:\Users\Taro\inbox\bob/写真 1.png"),
+            r"C:\Users\Taro\inbox\bob\写真 1.png"
+        );
+    }
+
+    /// Run by the tests below in a child process: print the exact command line it was given.
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn probe_print_cmdline() {
+        extern "system" {
+            fn GetCommandLineW() -> *const u16;
+        }
+        let s = unsafe {
+            let p = GetCommandLineW();
+            let mut n = 0;
+            while *p.add(n) != 0 {
+                n += 1;
+            }
+            String::from_utf16_lossy(std::slice::from_raw_parts(p, n))
+        };
+        println!("CMDLINE<<{s}>>");
+    }
+
+    /// The exact command line a helper process would receive.
+    #[cfg(windows)]
+    fn windows_cmdline(action: Action, path: &Path) -> String {
+        let lead: Vec<OsString> = [
+            "--exact",
+            "open_path::tests::probe_print_cmdline",
+            "--ignored",
+            "--nocapture",
+        ]
+        .iter()
+        .map(OsString::from)
+        .collect();
+        let exe = std::env::current_exe().unwrap();
+        let out = build(exe.as_os_str(), &lead, action, path)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        let start = text.find("CMDLINE<<").expect(&text) + "CMDLINE<<".len();
+        let end = text[start..].find(">>").expect(&text) + start;
+        text[start..end].to_owned()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_reveal_is_one_raw_select_argument_with_the_path_quoted_inside() {
+        let t = tmp();
+        let p = make(t.path(), "bob smith/写真 1 (a).txt");
+        let plain = windows_form(&p.to_string_lossy());
+        let line = windows_cmdline(Action::Reveal, &p);
+        assert!(
+            line.ends_with(&format!("/select,\"{plain}\"")),
+            "command line was: {line}"
+        );
+        // The quote must come after the comma, never before the switch.
+        assert!(!line.contains("\"/select"), "{line}");
+        // The same path given with a verbatim prefix or forward slashes is rewritten.
+        let verbatim = PathBuf::from(format!(r"\\?\{plain}"));
+        assert!(
+            windows_cmdline(Action::Reveal, &verbatim).ends_with(&format!("/select,\"{plain}\""))
+        );
+        let slashes = PathBuf::from(plain.replace('\\', "/"));
+        assert!(
+            windows_cmdline(Action::Reveal, &slashes).ends_with(&format!("/select,\"{plain}\""))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_open_is_the_quoted_plain_path_alone() {
+        let t = tmp();
+        let p = make(t.path(), "bob smith/it's 日本語 file.txt");
+        let plain = windows_form(&p.to_string_lossy());
+        let line = windows_cmdline(Action::Open, &p);
+        assert!(line.ends_with(&format!(" \"{plain}\"")), "{line}");
+        assert!(!line.contains("/select"), "{line}");
+        let verbatim = PathBuf::from(format!(r"\\?\{plain}"));
+        assert!(windows_cmdline(Action::Open, &verbatim).ends_with(&format!(" \"{plain}\"")));
+        // A folder too.
+        let dir = p.parent().unwrap().to_path_buf();
+        let d = windows_form(&dir.to_string_lossy());
+        assert!(windows_cmdline(Action::Open, &dir).ends_with(&format!(" \"{d}\"")));
     }
 
     #[test]
     fn a_failing_helper_is_reported_not_swallowed() {
         let (tx, rx) = std::sync::mpsc::channel();
         // A program that does not exist is a start failure on every OS.
-        run_and_wait("miasma-no-such-program-xyz", &[], &tx);
+        run_and_wait(Command::new("miasma-no-such-program-xyz"), &tx);
         assert!(rx
             .try_recv()
             .unwrap()
             .contains("miasma-no-such-program-xyz"));
         // A helper that exits nonzero is reported with its code (Unix; Windows ignores it).
         if cfg!(unix) {
-            let args = [
-                OsString::from("-c"),
-                OsString::from("echo boom >&2; exit 3"),
-            ];
-            run_and_wait("sh", &args, &tx);
+            let mut c = Command::new("sh");
+            c.args(["-c", "echo boom >&2; exit 3"]);
+            run_and_wait(c, &tx);
             let m = rx.try_recv().unwrap();
             assert!(m.contains("exited with 3") && m.contains("boom"), "{m}");
-            let ok = [OsString::from("-c"), OsString::from("exit 0")];
-            run_and_wait("sh", &ok, &tx);
+            let mut ok = Command::new("sh");
+            ok.args(["-c", "exit 0"]);
+            run_and_wait(ok, &tx);
             assert!(rx.try_recv().is_err());
         }
+    }
+
+    #[test]
+    fn a_path_that_is_not_there_is_reported_and_nothing_is_launched() {
+        let t = tmp();
+        let (tx, rx) = std::sync::mpsc::channel();
+        launch(Action::Open, t.path().join("gone.png"), tx.clone());
+        let m = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(m.contains("not there"), "{m}");
+        launch(Action::Reveal, t.path().join("gone.png"), tx);
+        assert!(rx.recv_timeout(Duration::from_secs(5)).is_ok());
+    }
+
+    /// Every place the app opens a file or folder goes through this module; a second,
+    /// hand-written `explorer` / `xdg-open` / `open` call is what left the Settings button
+    /// opening nothing on macOS.
+    #[test]
+    fn no_other_file_opens_a_file_manager_by_hand() {
+        fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        assert!(files.len() > 10);
+        let mut bad = Vec::new();
+        for f in files {
+            if f.file_name().is_some_and(|n| n == "open_path.rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&f).unwrap();
+            for needle in [
+                "Command::new(\"explorer\")",
+                "Command::new(\"xdg-open\")",
+                "Command::new(\"open\")",
+                "Command::new(opener)",
+                "\"xdg-open\"",
+                "\"explorer\"",
+            ] {
+                if text.contains(needle) {
+                    bad.push(format!("{}: {needle}", f.display()));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{bad:?}");
     }
 }
