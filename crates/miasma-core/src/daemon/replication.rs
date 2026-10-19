@@ -29,6 +29,7 @@ use tracing::{debug, info, warn};
 
 use crate::network::types::DhtRecord;
 use crate::state_crypto::{self, Label, LogReader, LogRewrite, LogWriter, StateKeys};
+use crate::transfer::TransferManifest;
 
 // ─── Time helper ─────────────────────────────────────────────────────────────
 
@@ -134,6 +135,13 @@ pub struct PendingReplication {
     /// Pending by a topology event.  Higher generation → lower promotion
     /// priority (prevents retry storms).
     pub promotion_generation: u32,
+    /// The transfer manifest announced together with `record`, for content
+    /// published by the streaming file path. Every announce and every record
+    /// rewrite must carry it, or a protected transfer would turn into a plain
+    /// one. `None` for content published without a manifest. Record and
+    /// manifest together stay under the DHT value limit, so this is small.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<TransferManifest>,
 }
 
 impl PendingReplication {
@@ -148,7 +156,15 @@ impl PendingReplication {
             next_attempt_secs: now, // eligible immediately
             state: ItemState::Pending,
             promotion_generation: 0,
+            manifest: None,
         }
+    }
+
+    /// An item for content whose record was announced together with `manifest`.
+    pub fn with_manifest(mid_str: String, record: DhtRecord, manifest: TransferManifest) -> Self {
+        let mut item = Self::new(mid_str, record);
+        item.manifest = Some(manifest);
+        item
     }
 }
 
@@ -334,6 +350,7 @@ impl ReplicationQueue {
                 next_attempt_secs: if state == ItemState::Pending { now } else { 0 },
                 state,
                 promotion_generation: 0,
+                manifest: None,
             };
             self.items.insert(item.record.mid_digest, item);
         }

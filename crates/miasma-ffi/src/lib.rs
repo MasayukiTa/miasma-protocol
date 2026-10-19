@@ -80,6 +80,8 @@ use tokio::sync::mpsc;
 struct EmbeddedDaemon {
     /// Monotonic generation used to avoid an old exiting task clearing a newer daemon.
     generation: u64,
+    /// The data directory this daemon runs on; receive sessions are bound to it.
+    data_dir: PathBuf,
     /// HTTP bridge port on 127.0.0.1.
     http_port: u16,
     /// Peer ID (libp2p).
@@ -637,6 +639,9 @@ pub fn distress_wipe(data_dir: String) -> Result<(), MiasmaFfiError> {
     use miasma_core::daemon::ipc::{daemon_wipe, ControlResponse, PORT_FILE};
 
     let path = validate_data_dir(&data_dir)?;
+    // First, before anything can wait or fail: receive sessions of this node
+    // lose their passwords and are cancelled.
+    receive_stream_ffi::clear_sessions_for(&path);
     let port_path = path.join(PORT_FILE);
     let embedded_shutdown = {
         let guard = EMBEDDED_DAEMON.lock().unwrap();
@@ -1060,6 +1065,7 @@ pub fn start_embedded_daemon(
         let mut guard = EMBEDDED_DAEMON.lock().unwrap();
         *guard = Some(EmbeddedDaemon {
             generation,
+            data_dir: path.clone(),
             http_port,
             peer_id: peer_id.clone(),
             sharing_contact: sharing_contact.clone(),
@@ -1068,16 +1074,26 @@ pub fn start_embedded_daemon(
         });
     }
 
+    let session_dir = path.clone();
     rt.spawn(async move {
         if let Err(e) = server.run().await {
             tracing::warn!("embedded daemon exited: {e}");
         }
-        let mut guard = EMBEDDED_DAEMON.lock().unwrap();
-        if guard
-            .as_ref()
-            .is_some_and(|daemon| daemon.generation == generation)
-        {
-            guard.take();
+        let superseded = {
+            let mut guard = EMBEDDED_DAEMON.lock().unwrap();
+            if guard
+                .as_ref()
+                .is_some_and(|daemon| daemon.generation == generation)
+            {
+                guard.take();
+            }
+            // A newer daemon on the same directory owns the sessions now.
+            guard.is_some()
+        };
+        // The node ended (stop, wipe or failure): receive sessions opened for it
+        // can never run again, and must not keep their passwords.
+        if !superseded {
+            receive_stream_ffi::clear_sessions_for(&session_dir);
         }
     });
 
@@ -1109,6 +1125,7 @@ pub fn stop_embedded_daemon() {
     };
     if let Some(d) = daemon {
         let _ = d.shutdown_tx.try_send(());
+        receive_stream_ffi::clear_sessions_for(&d.data_dir);
         tracing::info!("embedded daemon stop requested");
     }
 }

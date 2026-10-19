@@ -526,6 +526,25 @@ impl DaemonServer {
             .await,
         );
 
+        // A streamed file publish announces its own record; keep it in the
+        // persistent replication queue so announces are retried and piece
+        // maintenance can upkeep it, as for `publish_content`.
+        {
+            let queue = queue.clone();
+            coord.set_publish_observer(Arc::new(move |record, manifest| {
+                let mid = crate::ContentId::from_digest(record.mid_digest).to_string();
+                let pending =
+                    PendingReplication::with_manifest(mid, record.clone(), manifest.clone());
+                let mut q = queue
+                    .lock()
+                    .map_err(|_| "replication queue unavailable".to_string())?;
+                q.push(pending).map_err(|e| e.to_string())?;
+                // The announce just went out in the same call; the engine
+                // marks the item replicated once a remote peer confirms it.
+                Ok(())
+            }));
+        }
+
         // 8. Create shared rate limiter, health monitor, environment snapshot.
         let rate_limiter = Arc::new(Mutex::new(rate_limit::RateLimiter::default()));
         let health_monitor = Arc::new(Mutex::new(ConnectionHealthMonitor::default()));
@@ -2706,7 +2725,11 @@ async fn retry_due(coord: &MiasmaCoordinator, queue: &Arc<Mutex<ReplicationQueue
         // Record the attempt (updates backoff schedule) *before* the network call.
         let _ = queue.lock().unwrap().record_attempt(&mid_digest);
 
-        if let Err(e) = coord.publish_record(item.record).await {
+        // An item published with a manifest is announced with it every time.
+        if let Err(e) = coord
+            .publish_record_with_manifest(item.record, item.manifest.as_ref())
+            .await
+        {
             warn!(mid = %item.mid_str, "replication retry failed: {e}");
         }
         // Marking as replicated happens via the rep_success_rx channel
