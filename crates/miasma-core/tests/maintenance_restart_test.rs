@@ -305,7 +305,6 @@ async fn a_record_signed_by_another_node_costs_no_probe_and_no_push() {
                     .any(|l| l.peer_id_bytes == h.peer_id().to_bytes())
             })
             .expect("at least one holder is one of the hosts");
-            .expect("holder is one of the hosts");
         dead.0.shutdown().await;
 
         let coord_m = Arc::new(coord_m);
