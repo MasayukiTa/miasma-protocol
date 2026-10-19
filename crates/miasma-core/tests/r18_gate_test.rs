@@ -640,7 +640,11 @@ struct Ran {
 }
 
 async fn run_stream(st: &Stage, sink_delay: Duration, cancel_at: Option<Duration>) -> Ran {
-    let spec = gate::stream_spec(&st.world);
+    let mut spec = gate::stream_spec(&st.world);
+    // The retry pacing every production caller uses (one second and up). The
+    // clock is paused, so this costs nothing; a retry shorter than the 20 ms
+    // cancel poll is not a setting the program ever runs with.
+    spec.retry = miasma_core::transfer::RetryConfig::default();
     let stats = spec.stats.clone();
     let progress = TransferProgress::new(st.world.mid.to_string());
     if let Some(at) = cancel_at {
