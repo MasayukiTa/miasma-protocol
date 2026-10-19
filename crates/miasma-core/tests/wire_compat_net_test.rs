@@ -338,11 +338,14 @@ async fn a_peer_of_beta_2_still_becomes_a_suggestion_when_it_is_not_a_contact() 
     // beta.2: direct, push and chat, no group ALPN.
     let old = start_node(&r, &old_seed, Some(vec![IROH_ALPN, PUSH_ALPN, CHAT_ALPN])).await;
     let conn = old.connect_alpn(&a.id, CHAT_ALPN).await.expect("dials");
-    // It writes a delivery as that release does; the answer is a refusal.
-    let (mut tx, _rx) = conn.open_bi().await.unwrap();
-    let junk = proto::encode_frame(&Frame::Deliver(vec![0; 64]));
-    let _ = tokio::io::AsyncWriteExt::write_all(&mut tx, &junk).await;
-    let _ = tx.finish();
+    // It writes a delivery as that release does; the answer is a refusal. The receiver closes a
+    // connection from a stranger as soon as it is accepted, so the refusal can arrive before
+    // this side opens its stream: opening the stream may already fail with that very close.
+    if let Ok((mut tx, _rx)) = conn.open_bi().await {
+        let junk = proto::encode_frame(&Frame::Deliver(vec![0; 64]));
+        let _ = tokio::io::AsyncWriteExt::write_all(&mut tx, &junk).await;
+        let _ = tx.finish();
+    }
     let closed = tokio::time::timeout(Duration::from_secs(10), conn.closed())
         .await
         .expect("the receiver closes the connection");
