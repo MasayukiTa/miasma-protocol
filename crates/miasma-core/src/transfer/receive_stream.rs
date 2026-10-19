@@ -274,7 +274,9 @@ async fn run_stream<S: PieceSource + ?Sized>(
                     Ok(()) => break,
                     Err(MiasmaError::InsufficientShares { need, got }) => {
                         attempt += 1;
-                        if attempt >= retry.max_attempts_per_segment {
+                        // A cancelled receive does not retry; the error is
+                        // turned into `Cancelled` by the caller below.
+                        if progress.is_cancelled() || attempt >= retry.max_attempts_per_segment {
                             return Err(MiasmaError::InsufficientShares { need, got });
                         }
                         progress.segment_retry();
@@ -304,6 +306,14 @@ async fn run_stream<S: PieceSource + ?Sized>(
         // The decoder allocated this plaintext (inside `retrieve_segment_with`);
         // it is counted in the shared pool's live total and wiped on drop, but
         // not kept by the pool.
+        // A fetch that failed because the transfer was cancelled is a cancel,
+        // not a failure, whatever the cancel poll has seen so far.
+        if produced.is_err() && progress.is_cancelled() {
+            return Ok(StreamOutcome::Cancelled {
+                segments_delivered: seg,
+                bytes_delivered: bytes_done,
+            });
+        }
         let buf = SegmentBuf::adopt_in(produced?, &stats, PlaintextPool::shared());
         let fetch_time = started.elapsed();
 

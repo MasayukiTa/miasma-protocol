@@ -140,6 +140,9 @@ struct Src {
     missing_segment: Option<u32>,
     /// Never answer for this segment (a holder that hangs).
     hang_on: Option<u32>,
+    /// Cancel this transfer from inside the first fetch of this segment, then
+    /// fail that fetch (return nothing).
+    cancel_then_fail: Option<(u32, Arc<TransferProgress>)>,
 }
 
 impl Src {
@@ -149,6 +152,7 @@ impl Src {
             log: log.clone(),
             missing_segment: None,
             hang_on: None,
+            cancel_then_fail: None,
         }
     }
 }
@@ -165,6 +169,12 @@ impl PieceSource for Src {
         self.log.lock().unwrap().push(Ev::Fetch(segment));
         if self.hang_on == Some(segment) {
             std::future::pending::<()>().await;
+        }
+        if let Some((seg, progress)) = &self.cancel_then_fail {
+            if *seg == segment {
+                progress.cancel();
+                return Ok(None);
+            }
         }
         if self.missing_segment == Some(segment) {
             return Ok(None);
@@ -444,6 +454,29 @@ async fn cancelling_while_a_fetch_hangs_returns_promptly() {
     );
     assert_eq!(r.sink.aborted, 1);
     assert_all_buffers_wiped(&r.stats);
+}
+
+#[tokio::test]
+async fn a_fetch_that_fails_because_of_a_cancel_ends_as_cancelled_not_as_an_error() {
+    // The retry pause (1 ms) is far shorter than the 20 ms cancel poll, so the
+    // retries run out before the poll could see the flag.
+    let w = build_world(6, true, false);
+    let log: Log = Arc::default();
+    let progress = TransferProgress::new(w.mid.to_string());
+    let mut src = Src::new(&w, &log);
+    src.cancel_then_fail = Some((2, progress.clone()));
+    let parts_before = leftover_part_files();
+    let r = run(&w, src, TestSink::new(&log), progress).await;
+    assert_eq!(
+        r.result.unwrap(),
+        StreamOutcome::Cancelled {
+            segments_delivered: 2,
+            bytes_delivered: 2 * SEG as u64
+        }
+    );
+    assert_eq!((r.sink.aborted, r.sink.completes), (1, 0));
+    assert_all_buffers_wiped(&r.stats);
+    assert_eq!(leftover_part_files(), parts_before, "no temp file left");
 }
 
 #[tokio::test]
