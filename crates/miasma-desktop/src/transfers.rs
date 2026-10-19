@@ -1737,13 +1737,19 @@ impl TransfersUi {
                     EasyChoice::Balanced => (t.easy_bal, t.easy_bal_desc),
                     EasyChoice::Safest => (t.easy_safe, t.easy_safe_desc),
                 };
-                // Wrapping row: the description drops to the next line at the 700 px minimum
-                // instead of pushing the card past the window edge.
-                ui.horizontal_wrapped(|ui| {
+                // The description sits under the name and wraps: beside it, it pushed the card
+                // past the window edge at the 700 px minimum.
+                ui.vertical(|ui| {
                     if ui.radio(current == Some(choice), label).clicked() {
                         self.send_preset = choice.preset_index();
                     }
-                    ui.label(RichText::new(desc).small().color(pal().muted));
+                    ui.horizontal(|ui| {
+                        ui.add_space(kit::SP_5);
+                        ui.add(
+                            egui::Label::new(RichText::new(desc).small().color(pal().muted))
+                                .wrap(true),
+                        );
+                    });
                 });
             }
         } else {
