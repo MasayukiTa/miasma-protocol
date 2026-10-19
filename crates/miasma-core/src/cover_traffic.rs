@@ -19,6 +19,7 @@
 /// The engine runs until `CoverTrafficEngine::stop()` is called or the
 /// returned `JoinHandle` is dropped.
 use rand::{Rng, SeedableRng};
+use serde::{Deserialize, Serialize};
 // rand 0.8 requires the `small_rng` feature for SmallRng.
 // Instead use StdRng which is always available and is Send.
 use rand::rngs::StdRng;
@@ -29,7 +30,7 @@ use tracing::{debug, trace};
 // ─── Configuration ────────────────────────────────────────────────────────────
 
 /// Configuration for cover traffic generation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoverTrafficConfig {
     /// Enable / disable cover traffic entirely.
     pub enabled: bool,
@@ -41,14 +42,22 @@ pub struct CoverTrafficConfig {
     /// Jitter applied to inter-packet intervals as a percentage (0–50).
     /// A value of 20 means each interval is varied by ±20% of the nominal gap.
     pub pattern_jitter_pct: u8,
+
+    /// Approximate maximum encrypted cover-envelope bytes emitted per rolling
+    /// 24-hour window. Transport framing overhead is not included. A value of
+    /// zero disables cover emission even when `enabled` is true.
+    pub daily_budget_bytes: u64,
 }
 
 impl Default for CoverTrafficConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            // Production cover traffic is opt-in because idle bandwidth and
+            // battery costs matter on mobile and metered networks.
+            enabled: false,
             rate_bytes_per_sec: 1_024,
             pattern_jitter_pct: 20,
+            daily_budget_bytes: 96 * 1024 * 1024,
         }
     }
 }
@@ -56,8 +65,13 @@ impl Default for CoverTrafficConfig {
 // ─── Cover packet ─────────────────────────────────────────────────────────────
 
 /// Minimum and maximum cover payload sizes (bytes).
-const COVER_MIN_BYTES: usize = 512;
-const COVER_MAX_BYTES: usize = 2_048;
+pub(crate) const COVER_MIN_BYTES: usize = 512;
+pub(crate) const COVER_MAX_BYTES: usize = 2_048;
+
+/// Estimated encrypted onion request bytes used for rate/budget accounting.
+/// The real outer layer pads its data field to 8 KiB and adds X25519/nonce/AEAD
+/// metadata plus request framing. This estimate intentionally rounds upward.
+pub(crate) const COVER_ENVELOPE_ESTIMATE: u64 = crate::onion::packet::ONION_PAD_TARGET as u64 + 512;
 
 /// Protocol tag for cover packets (relay nodes discard after 1 hop).
 pub const COVER_TAG: u8 = 0xFF;
@@ -70,6 +84,13 @@ fn make_cover_packet(rng: &mut impl Rng) -> Vec<u8> {
     let padding: Vec<u8> = (0..len).map(|_| rng.gen()).collect();
     buf.extend_from_slice(&padding);
     buf
+}
+
+/// Cover payload validation performed only after the surrounding onion layer has
+/// authenticated and decrypted. The marker is therefore not visible on the wire.
+pub(crate) fn is_cover_payload(payload: &[u8]) -> bool {
+    (COVER_MIN_BYTES + 1..=COVER_MAX_BYTES + 1).contains(&payload.len())
+        && payload.first() == Some(&COVER_TAG)
 }
 
 // ─── Engine ───────────────────────────────────────────────────────────────────
@@ -96,21 +117,25 @@ impl CoverTrafficEngine {
         let (stop_tx, mut stop_rx) = watch::channel(false);
 
         let handle = tokio::spawn(async move {
-            if !config.enabled {
-                // Parked until stop signal.
+            if !config.enabled || config.rate_bytes_per_sec == 0 || config.daily_budget_bytes == 0 {
+                // Parked until stop signal. A zero rate/budget is an explicit
+                // no-traffic setting rather than "send one then sleep forever".
                 let _ = stop_rx.changed().await;
                 return;
             }
 
             let mut rng = StdRng::from_entropy();
 
-            // Nominal inter-packet gap derived from rate and average packet size.
-            let avg_packet = (COVER_MIN_BYTES + COVER_MAX_BYTES) / 2;
-            let nom_gap_us: u64 = if config.rate_bytes_per_sec == 0 {
-                1_000_000 // 1 packet/s safety fallback
-            } else {
-                (avg_packet as u64 * 1_000_000) / config.rate_bytes_per_sec
-            };
+            // Rate is budgeted on the encrypted onion envelope, not the small
+            // random marker payload hidden inside it. This prevents a nominal
+            // 1 KiB/s setting from accidentally becoming ~8 KiB/s on wire.
+            let nom_gap_us: u64 = COVER_ENVELOPE_ESTIMATE
+                .saturating_mul(1_000_000)
+                .checked_div(config.rate_bytes_per_sec)
+                .unwrap_or(u64::MAX / 4)
+                .max(1);
+            let mut budget_window_started = tokio::time::Instant::now();
+            let mut budget_used = 0u64;
 
             loop {
                 // Check stop signal without blocking.
@@ -118,9 +143,28 @@ impl CoverTrafficEngine {
                     break;
                 }
 
+                let now = tokio::time::Instant::now();
+                if now.duration_since(budget_window_started) >= Duration::from_secs(86_400) {
+                    budget_window_started = now;
+                    budget_used = 0;
+                }
+                if budget_used.saturating_add(COVER_ENVELOPE_ESTIMATE) > config.daily_budget_bytes {
+                    let until_reset = Duration::from_secs(86_400)
+                        .saturating_sub(now.duration_since(budget_window_started));
+                    tokio::select! {
+                        _ = sleep(until_reset) => {
+                            budget_window_started = tokio::time::Instant::now();
+                            budget_used = 0;
+                            continue;
+                        }
+                        _ = stop_rx.changed() => { break; }
+                    }
+                }
+
                 let packet = make_cover_packet(&mut rng);
-                trace!(bytes = packet.len(), "cover packet");
+                trace!(payload_bytes = packet.len(), "cover packet queued");
                 send_fn(packet);
+                budget_used = budget_used.saturating_add(COVER_ENVELOPE_ESTIMATE);
 
                 // Apply jitter to the gap.
                 let jitter_range = (nom_gap_us * config.pattern_jitter_pct as u64) / 100;
@@ -163,6 +207,7 @@ mod tests {
 
         let engine = CoverTrafficEngine::start(
             CoverTrafficConfig {
+                enabled: true,
                 rate_bytes_per_sec: 100_000,
                 ..Default::default()
             },
@@ -203,5 +248,24 @@ mod tests {
         assert_eq!(pkt[0], COVER_TAG);
         assert!(pkt.len() > COVER_MIN_BYTES);
         assert!(pkt.len() <= COVER_MAX_BYTES + 1);
+    }
+
+    #[test]
+    fn cover_payload_validator_is_bounded() {
+        let mut rng = rand::thread_rng();
+        let pkt = make_cover_packet(&mut rng);
+        assert!(is_cover_payload(&pkt));
+        assert!(!is_cover_payload(&[]));
+        assert!(!is_cover_payload(&vec![COVER_TAG; COVER_MAX_BYTES + 2]));
+        let mut wrong_tag = pkt;
+        wrong_tag[0] = 0;
+        assert!(!is_cover_payload(&wrong_tag));
+    }
+
+    #[test]
+    fn production_default_is_opt_in_and_budgeted() {
+        let cfg = CoverTrafficConfig::default();
+        assert!(!cfg.enabled);
+        assert!(cfg.daily_budget_bytes >= 24 * 60 * 60 * cfg.rate_bytes_per_sec);
     }
 }

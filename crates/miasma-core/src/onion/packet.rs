@@ -305,6 +305,30 @@ impl OnionPacketBuilder {
         Ok((packet, return_path, session_key))
     }
 
+    /// Build a one-hop cover packet that is wire-indistinguishable from the
+    /// outer `Packet` variant of a real onion request to a passive observer.
+    /// The cover marker lives only inside the authenticated encrypted layer.
+    pub(crate) fn build_cover(
+        recipient_static_pubkey: &[u8; X25519_KEY_LEN],
+        payload: Vec<u8>,
+    ) -> Result<OnionPacket, MiasmaError> {
+        if !crate::cover_traffic::is_cover_payload(&payload) {
+            return Err(MiasmaError::Encryption("invalid cover payload".into()));
+        }
+        let layer = Self::encrypt_layer(
+            recipient_static_pubkey,
+            LayerPayload {
+                next_hop: None,
+                data: payload,
+                return_key: None,
+            },
+        )?;
+        Ok(OnionPacket {
+            circuit_id: CircuitId::random(),
+            layer,
+        })
+    }
+
     /// Encrypt one onion layer using ECDH + XChaCha20-Poly1305.
     ///
     /// The `data` field within the payload is padded to `ONION_PAD_TARGET`

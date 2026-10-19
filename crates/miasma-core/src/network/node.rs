@@ -30,7 +30,7 @@ use libp2p::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::{crypto::keyderive::NodeKeys, share::MiasmaShare, store::LocalShareStore, MiasmaError};
 
@@ -824,6 +824,10 @@ pub enum DhtCommand {
         return_key: [u8; 32],
         reply: oneshot::Sender<Result<OnionRelayResponse, MiasmaError>>,
     },
+    /// Queue one cover payload. The node chooses an already-connected peer with
+    /// an authenticated onion key and wraps the marker inside a normal encrypted
+    /// onion Packet envelope. Fire-and-forget by design.
+    SendCover { payload: Vec<u8> },
     /// Query this node's onion static public key.
     GetOnionPubkey { reply: oneshot::Sender<[u8; 32]> },
     /// Query this node's current NAT reachability status.
@@ -1407,6 +1411,16 @@ impl DhtHandle {
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
         self.recv_reply(rx, "send_onion_request").await?
+    }
+
+    /// Best-effort enqueue of one cover payload. Returns false when the bounded
+    /// command channel is full/closed so cover traffic never backpressures real
+    /// application traffic.
+    pub fn try_send_cover(&self, payload: Vec<u8>) -> bool {
+        if !crate::cover_traffic::is_cover_payload(&payload) {
+            return false;
+        }
+        self.tx.try_send(DhtCommand::SendCover { payload }).is_ok()
     }
 
     /// Query this node's onion X25519 static public key.
@@ -2022,6 +2036,10 @@ pub struct MiasmaNode {
             oneshot::Sender<Result<OnionRelayResponse, MiasmaError>>,
         ),
     >,
+    /// Fire-and-forget one-hop cover requests awaiting protocol completion.
+    /// Keeping them separate prevents cover acknowledgements from entering the
+    /// real onion return-key/reply state machine.
+    pending_cover_requests: HashMap<request_response::OutboundRequestId, (PeerId, ())>,
     /// Inbound onion relay response channels: req_id → inbound channel.
     /// When we're a relay and make a sub-request (R1→R2 or R2→Target),
     /// we store the inbound channel here so we can relay the response back.
@@ -2214,6 +2232,7 @@ impl MiasmaNode {
             onion_static_pubkey,
             pending_onion_relays: HashMap::new(),
             pending_onion_replies: HashMap::new(),
+            pending_cover_requests: HashMap::new(),
             pending_onion_inbound_channels: HashMap::new(),
             pending_probe_replies: HashMap::new(),
             onion_auth_failures: HashMap::new(),
@@ -2764,6 +2783,41 @@ impl MiasmaNode {
                     .insert(req_id, (peer_id, return_key));
                 // We need to store the reply sender too — let's use the pending_onion_replies map.
                 self.pending_onion_replies.insert(req_id, (peer_id, reply));
+            }
+            DhtCommand::SendCover { payload } => {
+                if crate::cover_traffic::is_cover_payload(&payload)
+                    && self.pending_cover_requests.len() < 128
+                {
+                    let candidates: Vec<(PeerId, [u8; 32])> = self
+                        .swarm
+                        .connected_peers()
+                        .filter_map(|peer| {
+                            self.descriptor_store
+                                .onion_pubkey_for_peer(peer)
+                                .map(|key| (peer.to_owned(), key))
+                        })
+                        .collect();
+                    if !candidates.is_empty() {
+                        let idx = (rand::random::<u64>() as usize) % candidates.len();
+                        let (peer_id, onion_pubkey) = candidates[idx];
+                        match crate::onion::packet::OnionPacketBuilder::build_cover(
+                            &onion_pubkey,
+                            payload,
+                        ) {
+                            Ok(packet) => {
+                                let req_id = self.swarm.behaviour_mut().onion_relay.send_request(
+                                    &peer_id,
+                                    OnionRelayRequest::Packet {
+                                        circuit_id: packet.circuit_id,
+                                        layer: packet.layer,
+                                    },
+                                );
+                                self.pending_cover_requests.insert(req_id, (peer_id, ()));
+                            }
+                            Err(e) => debug!("cover packet build failed: {e}"),
+                        }
+                    }
+                }
             }
             DhtCommand::GetOnionPubkey { reply } => {
                 let _ = reply.send(self.onion_static_pubkey);
@@ -4264,6 +4318,18 @@ impl MiasmaNode {
                             Err(_) => self.onion_note_auth_failure(&peer),
                         }
                         match peeled {
+                            Ok(super::onion_relay::OnionRelayAction::DiscardCover) => {
+                                // Keep the response in the same encrypted onion protocol and
+                                // roughly the same size class as an onion cell. The payload is
+                                // random because only transport completion matters to the sender.
+                                let mut ack = vec![0u8; crate::onion::packet::ONION_PAD_TARGET];
+                                rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut ack);
+                                let _ = self
+                                    .swarm
+                                    .behaviour_mut()
+                                    .onion_relay
+                                    .send_response(channel, OnionRelayResponse::Data(ack));
+                            }
                             Ok(super::onion_relay::OnionRelayAction::ForwardToNext {
                                 next_hop_peer_id,
                                 circuit_id,
@@ -4365,6 +4431,17 @@ impl MiasmaNode {
                     },
                 ..
             } => {
+                if take_peer_correlated(
+                    &mut self.pending_cover_requests,
+                    &request_id,
+                    peer,
+                    "cover.response",
+                )
+                .is_some()
+                {
+                    trace!("cover response received");
+                    return;
+                }
                 if let Some(return_key) = take_peer_correlated(
                     &mut self.pending_onion_relays,
                     &request_id,
@@ -4417,6 +4494,17 @@ impl MiasmaNode {
                 error,
                 ..
             } => {
+                if take_peer_correlated(
+                    &mut self.pending_cover_requests,
+                    &request_id,
+                    peer,
+                    "cover.failure",
+                )
+                .is_some()
+                {
+                    trace!("cover outbound failure peer={peer} error={error}");
+                    return;
+                }
                 warn!("onion_relay.outbound_failure peer={peer} error={error}");
                 let _ = take_peer_correlated(
                     &mut self.pending_onion_relays,

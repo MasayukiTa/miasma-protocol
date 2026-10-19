@@ -36,7 +36,7 @@ use anyhow::{Context, Result};
 #[allow(unused_imports)]
 use libp2p::PeerId;
 use tokio::{net::TcpListener, sync::mpsc, task::JoinHandle, time::Duration};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 use zeroize::Zeroizing;
 
 use crate::{
@@ -135,6 +135,9 @@ pub struct DaemonServer {
     shadowsocks_configured: bool,
     /// Whether Tor is configured.
     tor_configured: bool,
+    /// Optional low-rate cover traffic policy. The task itself starts in run()
+    /// so shutdown has a single owner and can await it before the node exits.
+    cover_traffic_config: crate::cover_traffic::CoverTrafficConfig,
     /// Control-channel token and wipe-challenge state.
     control_auth: Arc<control_auth::ControlAuth>,
     // Single-consumer resources moved into run():
@@ -577,6 +580,7 @@ impl DaemonServer {
             env_snapshot,
             shadowsocks_configured,
             tor_configured,
+            cover_traffic_config: transport_config.cover_traffic.clone(),
             listener: Some(listener),
             rep_success_rx: Some(rep_rx),
             topology_rx: Some(topo_rx),
@@ -668,6 +672,28 @@ impl DaemonServer {
         let store = self.store.clone();
         let listen_addrs = self.listen_addrs.clone();
 
+        // Cover traffic rides inside the real encrypted onion request protocol.
+        // Best-effort try_send ensures it can never backpressure application work.
+        let cover_engine = if self.cover_traffic_config.enabled {
+            let dht = coord.dht_handle().clone();
+            let config = self.cover_traffic_config.clone();
+            info!(
+                rate_bytes_per_sec = config.rate_bytes_per_sec,
+                daily_budget_bytes = config.daily_budget_bytes,
+                "cover traffic enabled"
+            );
+            Some(crate::cover_traffic::CoverTrafficEngine::start(
+                config,
+                move |packet| {
+                    if !dht.try_send_cover(packet) {
+                        trace!("cover packet dropped before network queue");
+                    }
+                },
+            ))
+        } else {
+            None
+        };
+
         // ── IPC server task ───────────────────────────────────────────────────
         let ipc_coord = coord.clone();
         let ipc_queue = queue.clone();
@@ -751,6 +777,9 @@ impl DaemonServer {
             let _ = handle.await;
         }
 
+        if let Some(engine) = cover_engine {
+            engine.stop().await;
+        }
         if self.iroh_enabled {
             stop_iroh(&self.data_dir).await;
         }

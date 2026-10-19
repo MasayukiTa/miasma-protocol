@@ -463,6 +463,11 @@ pub struct TransportConfig {
     /// Tor transport configuration.
     #[serde(default)]
     pub tor: crate::transport::tor::TorConfig,
+
+    /// Low-rate one-hop cover traffic carried inside the normal encrypted onion
+    /// request envelope. Disabled by default for mobile/metered-network safety.
+    #[serde(default)]
+    pub cover_traffic: crate::cover_traffic::CoverTrafficConfig,
 }
 
 impl Default for TransportConfig {
@@ -489,6 +494,7 @@ impl Default for TransportConfig {
             obfuscated_quic_fallback_url: None,
             shadowsocks: Default::default(),
             tor: Default::default(),
+            cover_traffic: Default::default(),
         }
     }
 }
@@ -523,6 +529,7 @@ impl fmt::Debug for TransportConfig {
             )
             .field("shadowsocks", &self.shadowsocks)
             .field("tor", &self.tor)
+            .field("cover_traffic", &self.cover_traffic)
             .finish()
     }
 }
@@ -735,6 +742,8 @@ bandwidth_mb_day = 512
         let d = TransportConfig::default();
         assert_eq!(d.iroh_mode, IrohMode::N0);
         assert!(d.iroh_discovery);
+        assert!(!t.cover_traffic.enabled);
+        assert!(!d.cover_traffic.enabled);
     }
 
     #[test]
