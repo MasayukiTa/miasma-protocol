@@ -3,6 +3,12 @@
 //! One [`Engine`] is built per operation by whoever needs it (the desktop
 //! worker, the command line); it holds no connection and no buffer, so nothing
 //! stays resident between checks.
+//!
+//! Signing: when the build pins public keys, the checksum file must carry a
+//! valid signature. When it pins none, only the checksum file is checked, which
+//! protects against corruption but not against a replaced release; so in that
+//! case `update.mode = auto` does not install by itself
+//! ([`auto_install_allowed`]) and behaves like `notify`.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -15,7 +21,7 @@ use super::apply::{
     Phase, Prober, ProcessProber, Resumed, TargetKind, HEALTH_TIMEOUT,
 };
 use super::archive::Archive;
-use super::config::{UpdateChannel, UpdateConfig};
+use super::config::{UpdateChannel, UpdateConfig, UpdateMode};
 use super::error::UpdateError;
 use super::http::{Http, HttpError, HttpsClient};
 use super::release::{
@@ -173,6 +179,36 @@ pub fn bundle_root(exe: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
+/// Whether `mode` may install without the person asking. `auto` needs at least
+/// one pinned public key: with none, no signature can be checked, so it falls
+/// back to the `notify` behaviour (download is fine, the install is a click).
+pub fn auto_install_allowed(mode: UpdateMode, keys: &[[u8; 32]]) -> bool {
+    mode == UpdateMode::Auto && !keys.is_empty()
+}
+
+/// The folder an update of the program at `exe` works in (`Target::dir`),
+/// without looking at which files are there. This is what a progress file must
+/// name, also after a crash that left the folder half swapped.
+pub fn install_dir_of(exe: &Path, os: Os) -> Result<PathBuf, UpdateError> {
+    if os == Os::MacOs {
+        if let Some(app) = bundle_root(exe) {
+            return Ok(app
+                .parent()
+                .ok_or_else(|| UpdateError::NoTarget("bundle without a folder".into()))?
+                .to_path_buf());
+        }
+    }
+    Ok(exe
+        .parent()
+        .ok_or_else(|| UpdateError::NoTarget("program without a folder".into()))?
+        .to_path_buf())
+}
+
+/// [`install_dir_of`] for the running program.
+pub fn running_install_dir() -> Result<PathBuf, UpdateError> {
+    install_dir_of(&std::env::current_exe()?, Os::current())
+}
+
 /// Decide what an update would replace for the program at `exe`.
 pub fn detect_target(exe: &Path, os: Os) -> Result<Target, UpdateError> {
     if os == Os::MacOs {
@@ -181,10 +217,7 @@ pub fn detect_target(exe: &Path, os: Os) -> Result<Target, UpdateError> {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .ok_or_else(|| UpdateError::NoTarget("bundle without a name".into()))?;
-            let dir = app
-                .parent()
-                .ok_or_else(|| UpdateError::NoTarget("bundle without a folder".into()))?
-                .to_path_buf();
+            let dir = install_dir_of(exe, os)?;
             return Ok(Target {
                 kind: TargetKind::Bundle,
                 dir,
@@ -193,10 +226,7 @@ pub fn detect_target(exe: &Path, os: Os) -> Result<Target, UpdateError> {
             });
         }
     }
-    let dir = exe
-        .parent()
-        .ok_or_else(|| UpdateError::NoTarget("program without a folder".into()))?
-        .to_path_buf();
+    let dir = install_dir_of(exe, os)?;
     let names: Vec<String> = program_names(os)
         .into_iter()
         .filter(|n| dir.join(n).is_file())
@@ -556,7 +586,19 @@ impl Engine {
     /// every start; it does nothing when no update was in progress, and it does
     /// not touch the network.
     pub fn resume(&self) -> Result<Resumed, UpdateError> {
-        apply::resume(&self.env())
+        let dir = install_dir_of(&self.exe, self.os)?;
+        apply::resume(&self.env(), &dir)
+    }
+
+    /// The progress file of an earlier run, if it names this installation.
+    pub fn load_journal(&self) -> Result<Option<Journal>, UpdateError> {
+        let dir = install_dir_of(&self.exe, self.os)?;
+        apply::load_journal(&self.data_dir, &dir)
+    }
+
+    /// Whether `update.mode = auto` may install without a click in this build.
+    pub fn auto_install_allowed(&self) -> bool {
+        auto_install_allowed(self.cfg.mode, &self.keys)
     }
 
     /// Remember that the person does not want this version.
@@ -1001,6 +1043,41 @@ mod tests {
         r.engine.prepare(&offer, &mut |_, _| {}).unwrap();
         let reqs = r.http.requests.lock().unwrap();
         assert!(!reqs.iter().any(|u| u == SIG_URL), "{reqs:?}");
+    }
+
+    #[test]
+    fn auto_mode_needs_a_pinned_key_to_install_by_itself() {
+        let r = rig(UpdateMode::Auto);
+        assert!(r.engine.keys.is_empty());
+        assert!(
+            !r.engine.auto_install_allowed(),
+            "no key: auto behaves like notify"
+        );
+        assert!(!auto_install_allowed(UpdateMode::Auto, &[]));
+        let key = [[7u8; 32]];
+        assert!(auto_install_allowed(UpdateMode::Auto, &key));
+        // Other modes never install by themselves, keys or not.
+        assert!(!auto_install_allowed(UpdateMode::Notify, &key));
+        assert!(!auto_install_allowed(UpdateMode::Off, &key));
+        let mut r = rig(UpdateMode::Auto);
+        r.engine.keys = key.to_vec();
+        assert!(r.engine.auto_install_allowed());
+    }
+
+    #[test]
+    fn a_progress_file_for_another_folder_is_refused_by_the_engine() {
+        let r = rig(UpdateMode::Notify);
+        serve_release(&r, "miasma 0.4.0 (new000000)\n");
+        let offer = offer_of(r.engine.check());
+        let mut j = r.engine.prepare(&offer, &mut |_, _| {}).unwrap();
+        assert!(matches!(r.engine.resume().unwrap(), Resumed::Pending(_)));
+        j.dir = r._t.path().join("elsewhere");
+        save_journal(&r.data, &j).unwrap();
+        assert!(matches!(r.engine.resume(), Err(UpdateError::Journal(_))));
+        assert!(matches!(
+            r.engine.load_journal(),
+            Err(UpdateError::Journal(_))
+        ));
     }
 
     #[test]

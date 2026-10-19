@@ -11,6 +11,12 @@
 //! * A release without `SHA256SUMS.txt` is refused; when public keys are
 //!   pinned in the binary a valid Ed25519 signature over it is required too
 //!   ([`verify`]).
+//! * `update.mode = auto` installs by itself only when the build pins at least
+//!   one public key ([`engine::auto_install_allowed`]). Without a key no
+//!   signature can be checked, so `auto` behaves like `notify`: the person has
+//!   to ask for the install.
+//! * The progress file is not trusted: it must name the install folder this
+//!   program itself would detect, or it is refused ([`apply`]).
 //! * The archive is read as hostile ([`archive`]); the swap is a sequence of
 //!   renames with a journal and an automatic way back ([`apply`]).
 //! * Nothing is applied while a transfer, push or chat send is running

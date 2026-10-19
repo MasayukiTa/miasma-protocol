@@ -19,7 +19,9 @@ use std::time::{Duration, Instant};
 
 use miasma_core::config::NodeConfig;
 use miasma_core::update::apply::{load_journal, Applied, Journal, Resumed};
+use miasma_core::update::engine::{auto_install_allowed, running_install_dir};
 use miasma_core::update::schedule::{startup_delay, Throttle};
+use miasma_core::update::verify::UPDATE_PUBKEYS;
 use miasma_core::update::{
     CheckFailure, CheckOutcome, Engine, UpdateConfig, UpdateError, UpdateMode, UpdateOffer,
 };
@@ -126,9 +128,19 @@ pub struct UpdatesUi {
     last_apply_try: Option<Instant>,
     guard: bool,
     resume_started: bool,
+    /// The public keys this build verifies releases with. With none, nothing is
+    /// installed without the person asking (see `auto_install`).
+    signing_keys: Vec<[u8; 32]>,
 }
 
 impl UpdatesUi {
+    /// Whether `update.mode = auto` may really install by itself: only when this
+    /// build can verify a signature. Without pinned keys the setting is treated
+    /// like `notify` and the person has to press the install button.
+    fn auto_install(&self) -> bool {
+        auto_install_allowed(self.cfg.mode, &self.signing_keys)
+    }
+
     pub fn new(data_dir: PathBuf) -> Self {
         let node = NodeConfig::load(&data_dir).ok();
         let cfg = node.as_ref().map(|c| c.update.clone()).unwrap_or_default();
@@ -156,6 +168,7 @@ impl UpdatesUi {
             last_apply_try: None,
             guard: std::env::var_os(RELAUNCH_GUARD_ENV).is_some(),
             resume_started: false,
+            signing_keys: UPDATE_PUBKEYS.to_vec(),
         }
     }
 
@@ -265,7 +278,12 @@ impl UpdatesUi {
     fn start_resume(&mut self) {
         self.resume_started = true;
         // Only when an earlier run left a journal; reading it is a local file read.
-        if !matches!(load_journal(&self.data_dir), Ok(Some(_)) | Err(_)) {
+        let have_journal = match running_install_dir() {
+            Ok(dir) => matches!(load_journal(&self.data_dir, &dir), Ok(Some(_)) | Err(_)),
+            // Cannot tell where this program lives: let the engine report it.
+            Err(_) => miasma_core::paths::update_journal(&self.data_dir).exists(),
+        };
+        if !have_journal {
             return;
         }
         self.run(
@@ -327,7 +345,7 @@ impl UpdatesUi {
         }
 
         // Automatic mode: install the downloaded update as soon as the program is idle.
-        if self.cfg.mode == UpdateMode::Auto
+        if self.auto_install()
             && self.phase == Phase::Ready
             && self.journal.is_some()
             && self
@@ -339,7 +357,7 @@ impl UpdatesUi {
 
         // Automatic mode: restart once the update is in (nothing was running, or it
         // would not have been installed).
-        if self.cfg.mode == UpdateMode::Auto && matches!(self.phase, Phase::Installed(_)) {
+        if self.auto_install() && matches!(self.phase, Phase::Installed(_)) {
             request_relaunch();
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -374,7 +392,7 @@ impl UpdatesUi {
                             .engine()
                             .map(|e| self.offer.as_ref().is_some_and(|o| e.failed_before(o)))
                             .unwrap_or(false);
-                        if self.cfg.mode == UpdateMode::Auto && !skipped && !failed_before && auto {
+                        if self.auto_install() && !skipped && !failed_before && auto {
                             self.start_prepare();
                         }
                     }
@@ -392,7 +410,7 @@ impl UpdatesUi {
             Msg::Prepared(Ok(j)) => {
                 self.journal = Some(j);
                 self.phase = Phase::Ready;
-                if self.install_wanted || self.cfg.mode == UpdateMode::Auto {
+                if self.install_wanted || self.auto_install() {
                     self.start_apply();
                 }
             }
@@ -414,12 +432,18 @@ impl UpdatesUi {
                         self.journal = Some(j);
                         self.phase = Phase::Ready;
                         self.waiting_idle = true;
-                        if self.cfg.mode != UpdateMode::Auto {
+                        if !self.auto_install() {
                             self.error = Some(ui_error(&e));
                         }
                     }
                     UpdateError::HealthCheck(_) => {
                         self.phase = Phase::RolledBack;
+                        self.error = Some(ui_error(&e));
+                    }
+                    UpdateError::RestoreFailed(_) => {
+                        // The old version could not be put back. Do not offer the
+                        // install again; the next start retries the restore.
+                        self.phase = Phase::Idle;
                         self.error = Some(ui_error(&e));
                     }
                     _ => {
@@ -602,7 +626,7 @@ impl UpdatesUi {
         }
         let u = locale::update_strings(locale);
         match self.phase.clone() {
-            Phase::Installed(v) if self.cfg.mode != UpdateMode::Auto => {
+            Phase::Installed(v) if !self.auto_install() => {
                 kit::notice(ui, Level::Ok, &u.banner_installed.replace("{v}", &v));
                 kit::button_row(ui, |ui| {
                     if kit::primary(ui, true, u.restart_now).clicked() {
@@ -659,9 +683,10 @@ pub fn ui_error(e: &UpdateError) -> UiError {
         UpdateError::Network(_) | UpdateError::NoAsset | UpdateError::Disabled => {
             ErrorKind::UpdateCheckFailed
         }
-        UpdateError::HealthCheck(_) | UpdateError::Io(_) | UpdateError::Journal(_) => {
-            ErrorKind::UpdateApplyFailed
-        }
+        UpdateError::HealthCheck(_)
+        | UpdateError::Io(_)
+        | UpdateError::Journal(_)
+        | UpdateError::RestoreFailed(_) => ErrorKind::UpdateApplyFailed,
     };
     UiError::new(kind, e.to_string())
 }
@@ -757,6 +782,25 @@ mod tests {
         u.handle(Msg::Applied(Err(UpdateError::HealthCheck("x".into())), j));
         assert_eq!(u.phase, Phase::RolledBack);
         assert_eq!(u.error.as_ref().unwrap().kind, ErrorKind::UpdateApplyFailed);
+    }
+
+    #[test]
+    fn auto_mode_without_signing_keys_does_not_install_by_itself() {
+        let (_d, mut u) = ui();
+        u.cfg.mode = UpdateMode::Auto;
+        u.signing_keys = Vec::new();
+        assert!(!u.auto_install());
+        // A downloaded update waits for the person instead of being applied.
+        u.handle(Msg::Prepared(Ok(Box::new(dummy_journal()))));
+        assert_eq!(u.phase, Phase::Ready);
+        assert!(u.journal.is_some());
+        assert!(!u.waiting_idle);
+        assert!(u.last_apply_try.is_none());
+        // With a key the same setting is honoured; other modes never are.
+        u.signing_keys = vec![[1u8; 32]];
+        assert!(u.auto_install());
+        u.cfg.mode = UpdateMode::Notify;
+        assert!(!u.auto_install());
     }
 
     #[test]
