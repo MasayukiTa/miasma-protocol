@@ -672,6 +672,20 @@ mod tests {
         }
     }
 
+    /// A different non-empty password on every call; no test carries a fixed one.
+    fn fresh_password() -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        format!(
+            "{nanos:x}-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::SeqCst)
+        )
+    }
+
     fn session_with_password(dir: &str, w: &World, password: &str) -> Session {
         Session {
             data_dir: PathBuf::from(dir),
@@ -685,12 +699,13 @@ mod tests {
     #[test]
     fn scrubbing_a_session_overwrites_the_password_in_place() {
         let w = world(1);
-        let mut s = session_with_password("/stream-ffi-test/scrub", &w, "pw-SECRET-0123456789");
+        let secret = fresh_password();
+        let mut s = session_with_password("/stream-ffi-test/scrub", &w, &secret);
         let (ptr, cap) = {
             let p = s.password.as_ref().unwrap();
             (p.as_ptr(), p.capacity())
         };
-        assert!(cap >= "pw-SECRET-0123456789".len());
+        assert!(cap >= secret.len());
         s.scrub();
         // The buffer is still owned by `s`, so reading it here is sound.
         let bytes = unsafe { std::slice::from_raw_parts(ptr, cap) };
@@ -705,7 +720,7 @@ mod tests {
         let w = world(1);
         let dir = install(&w, "release-scrub");
         let before = SESSIONS_DROPPED.load(Ordering::SeqCst);
-        let id = open_session(dir.clone(), &w.mid.to_string(), Some("pw-1-secret".into())).unwrap();
+        let id = open_session(dir.clone(), &w.mid.to_string(), Some(fresh_password())).unwrap();
         release_receive_session(id);
         assert!(receive_progress(id).is_none());
         assert!(SESSIONS_DROPPED.load(Ordering::SeqCst) > before);
@@ -717,9 +732,9 @@ mod tests {
         let w = world(1);
         let wiped = install(&w, "wipe-a");
         let other = install(&w, "wipe-b");
-        let a1 = open_session(wiped.clone(), &w.mid.to_string(), Some("pw-1-a1".into())).unwrap();
+        let a1 = open_session(wiped.clone(), &w.mid.to_string(), Some(fresh_password())).unwrap();
         let a2 = open_session(wiped.clone(), &w.mid.to_string(), None).unwrap();
-        let b1 = open_session(other.clone(), &w.mid.to_string(), Some("pw-1-b1".into())).unwrap();
+        let b1 = open_session(other.clone(), &w.mid.to_string(), Some(fresh_password())).unwrap();
         let progress_of = |id: u64| {
             with_sessions(|s| s.get(&id).map(|x| x.progress.clone())).expect("session present")
         };
@@ -762,7 +777,7 @@ mod tests {
                 shares: w.shares.clone(),
             }),
         );
-        let id = open_session(dir.clone(), &w.mid.to_string(), Some("pw-1-wipe".into())).unwrap();
+        let id = open_session(dir.clone(), &w.mid.to_string(), Some(fresh_password())).unwrap();
         let progress = with_sessions(|s| s.get(&id).map(|x| x.progress.clone())).unwrap();
         // The wipe result depends on what is on disk; the sessions go either way.
         let _ = crate::distress_wipe(dir.to_string_lossy().into_owned());
