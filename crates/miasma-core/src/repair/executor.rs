@@ -665,7 +665,9 @@ mod tests {
             slot,
             vec![slot as u8; 100],
             vec![7; 32],
-            [0; 12],
+            // The fake backend never decrypts: any nonce will do, and a random one keeps the
+            // fixture from carrying a hard-coded cryptographic value.
+            rand::random::<[u8; 12]>(),
             100,
             1,
         )
