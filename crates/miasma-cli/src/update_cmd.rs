@@ -276,7 +276,7 @@ async fn status(data_dir: &Path) -> Result<i32> {
         env!("MIASMA_BUILD_ID")
     );
     if UPDATE_PUBKEYS.is_empty() {
-        println!("signature:       not enforced (no public key is pinned in this build); SHA256SUMS.txt is required");
+        println!("signature:       not enforced (no public key is pinned in this build); SHA256SUMS.txt is required; mode auto does not install by itself");
     } else {
         println!(
             "signature:       required ({} pinned key(s)); SHA256SUMS.txt is required",
@@ -287,7 +287,9 @@ async fn status(data_dir: &Path) -> Result<i32> {
     if let Some(v) = state.skipped_version {
         println!("skipped:         {v}");
     }
-    match load_journal(data_dir) {
+    let journal = miasma_core::update::engine::running_install_dir()
+        .and_then(|dir| load_journal(data_dir, &dir));
+    match journal {
         Ok(Some(j)) => println!("in progress:     {} ({:?})", j.version, j.phase),
         Ok(None) => println!("in progress:     none"),
         Err(e) => println!("in progress:     unreadable ({e})"),
