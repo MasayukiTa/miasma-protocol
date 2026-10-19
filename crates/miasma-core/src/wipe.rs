@@ -8,17 +8,21 @@
 //! until every registered operation has been dropped.
 //!
 //! Ordering used by the daemon: quiesce (this gate) -> zeroize the key vault
-//! -> crypto-erase the on-disk key -> join remaining tasks -> exit. The erase
+//! -> crypto-erase the on-disk key -> join remaining tasks -> exit. Quiescing
+//! also empties the plaintext buffer pool, and the vault step repeats that
+//! (see [`WipeGate::wipe_plaintext_pool`]); neither moves a step. The erase
 //! step removes the key file; it does not and cannot promise that old storage
 //! blocks are physically overwritten.
 
 use std::future::Future;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::watch;
 
+use crate::transfer::PlaintextPool;
 use crate::MiasmaError;
 
 /// Returned when new work is refused because a wipe has started.
@@ -53,6 +57,11 @@ pub struct WipeGate {
     stall: AtomicBool,
     /// Test hook: how many callers are parked in `stall_point` right now.
     stalled: AtomicUsize,
+    /// The pool of reusable plaintext buffers the wipe must empty. Idle
+    /// buffers hold only zeros; wiping the pool frees them and stops buffers
+    /// that are out right now from being kept. Buffers that are out belong to
+    /// work this gate cancels, and are wiped when that work is dropped.
+    plaintext_pool: Arc<PlaintextPool>,
 }
 
 /// Removes a file on drop unless it was kept. Used so that a cancelled or
@@ -99,6 +108,12 @@ impl Drop for OperationGuard<'_> {
 
 impl WipeGate {
     pub fn new() -> Self {
+        Self::with_pool(PlaintextPool::shared().clone())
+    }
+
+    /// A gate that empties `pool` when the wipe runs (the daemon uses the
+    /// process-wide pool; a test can pass its own).
+    pub fn with_pool(pool: Arc<PlaintextPool>) -> Self {
         let (state, _rx) = watch::channel(GateState {
             wiping: false,
             in_flight: 0,
@@ -107,7 +122,16 @@ impl WipeGate {
             state,
             stall: AtomicBool::new(false),
             stalled: AtomicUsize::new(0),
+            plaintext_pool: pool,
         }
+    }
+
+    /// Free every idle plaintext buffer and stop outstanding ones from being
+    /// kept. Part of the wipe sequence: called when the wipe begins (so work
+    /// that is cancelled hands nothing back) and once more after the key vault
+    /// has been zeroized. Idempotent.
+    pub fn wipe_plaintext_pool(&self) -> usize {
+        self.plaintext_pool.wipe()
     }
 
     /// Turn the test stall on or off. Off by default; no request can set it.
@@ -200,6 +224,9 @@ impl WipeGate {
                 true
             }
         });
+        // After the flag is set: a buffer handed back in the meantime is freed
+        // by this call, and later ones are not kept (new generation).
+        self.wipe_plaintext_pool();
     }
 
     /// Resolves once a wipe has begun (immediately if it already has).
@@ -381,6 +408,24 @@ mod tests {
         let err = gate.write_output(&out, b"x").await.unwrap_err();
         assert!(err.to_string().contains("cannot write to"));
         assert!(out.is_dir());
+    }
+
+    #[test]
+    fn begin_wipe_empties_the_plaintext_pool() {
+        let pool = PlaintextPool::new(1 << 20);
+        let (a, b) = (pool.take(4096), pool.take(4096));
+        drop(a);
+        drop(b);
+        assert_eq!(pool.snapshot().idle_buffers, 2);
+        let gate = WipeGate::with_pool(pool.clone());
+        let out = pool.take(1024); // still out when the wipe begins
+        gate.begin_wipe();
+        assert_eq!(pool.snapshot().idle_buffers, 0);
+        drop(out); // returned after the wipe began: freed, not kept
+        let s = pool.snapshot();
+        assert_eq!((s.idle_buffers, s.idle_bytes), (0, 0));
+        assert_eq!(pool.stats().snapshot().wipe_failures, 0);
+        gate.begin_wipe(); // idempotent
     }
 
     #[tokio::test]

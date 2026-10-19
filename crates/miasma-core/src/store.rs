@@ -1233,6 +1233,9 @@ impl LocalShareStore {
             vault.zeroize_in_place();
         }
         *master_guard = None;
+        // Plaintext buffers kept for reuse go the same way (the quiesce step
+        // already emptied the pool; this catches anything handed back since).
+        self.wipe_gate.wipe_plaintext_pool();
 
         // 3. Crypto-erase: the on-disk key is overwritten and removed. This is
         //    a logical erase; it does not promise that earlier storage blocks

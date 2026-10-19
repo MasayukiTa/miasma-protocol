@@ -22,6 +22,7 @@ pub mod manifest;
 pub mod network;
 pub mod password_policy;
 pub mod peek;
+pub mod plaintext_pool;
 pub mod progress;
 pub mod protection;
 pub mod publish;
@@ -38,6 +39,7 @@ pub use manifest::{
     decode_record_value, encode_record_value, open_signed_record, sanitize_file_name,
     FetchedRecord, PieceId, SegmentEntry, SignedRecordError, TransferManifest,
 };
+pub use plaintext_pool::{PlaintextPool, PoolSnapshot};
 pub use progress::{Phase, TransferKind, TransferProgress, TransferState, TransferStatus};
 pub use protection::{PasswordProtection, Protection, UnlockedKey};
 pub use receive::{run_receive, PieceSource, ReceiveOutcome, ReceiveSpec, RetryConfig};
