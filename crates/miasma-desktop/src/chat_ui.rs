@@ -245,6 +245,12 @@ impl ChatUi {
         self.group.set_locale(locale);
     }
 
+    /// The setting "join a group at once when a contact adds me" changed: tell the running
+    /// service (the app saves it in the configuration file).
+    pub fn set_group_auto_join(&mut self, on: bool) {
+        self.group.set_auto_join(on);
+    }
+
     /// Texts for the app's toast, oldest first.
     pub fn take_notices(&mut self) -> Vec<String> {
         let mut v = std::mem::take(&mut self.notices);
@@ -989,6 +995,8 @@ impl ChatUi {
             self.picker_open = true;
         }
         self.memory_only_note(ui, c);
+        // Invitations waiting for an answer come first: they cannot be missed.
+        self.group.invitation_cards(ui, contacts);
         let clock = self.clock();
         let mut open_row: Option<usize> = None;
         let mut open_group: Option<usize> = None;

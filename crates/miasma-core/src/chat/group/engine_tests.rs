@@ -53,6 +53,9 @@ fn open(path: &std::path::Path, seed: &[u8; 32], master: &[u8; 32]) -> (Arc<Chat
     let chat = Arc::new(ChatCore::new(store, outbox, id, 4096));
     let gs = GroupStore::open(&chat_dir, keys, chat.own_id(), s).unwrap();
     let core = GroupCore::new(chat.clone(), gs, seed).expect("same identity");
+    // Most of these tests are about answering an invitation; the ones about
+    // joining at once switch it on.
+    core.set_auto_join(false);
     (chat, core)
 }
 
@@ -638,4 +641,299 @@ fn history_on_disk_is_encrypted_and_a_group_can_be_forgotten() {
     b.core.forget(&gid).unwrap();
     assert!(b.core.list().is_empty());
     assert!(!b.core.store().history_file_exists(&gid));
+}
+
+// -- Joining without asking, and who has joined -------------------------------
+
+use super::engine::{GroupEventKind, MemberStatus, MAX_GROUPS};
+
+fn status_of_member(viewer: &Node, gid: &[u8; 16], who: &Node) -> MemberStatus {
+    viewer
+        .core
+        .detail(gid, &|id| viewer.is_trusted(id))
+        .unwrap()
+        .members
+        .into_iter()
+        .find(|m| m.id == who.id())
+        .unwrap()
+        .status
+}
+
+#[test]
+fn an_invitation_from_a_trusted_admin_joins_at_once_by_default() {
+    let nodes = friends(3);
+    for n in &nodes {
+        n.core.set_auto_join(true);
+    }
+    let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);
+    let members: Vec<([u8; 32], String)> = vec![(b.id(), String::new()), (c.id(), String::new())];
+    let gid = a.core.create("friends", &members, 100).unwrap();
+    pump(&nodes);
+    for n in [b, c] {
+        assert_eq!(n.core.status_of(&gid), Some(Status::Joined));
+        let d = n.core.detail(&gid, &|id| n.is_trusted(id)).unwrap();
+        assert_eq!(
+            d.added_by,
+            Some(a.id()),
+            "the system line needs to know who"
+        );
+    }
+    assert_eq!(a.core.detail(&gid, &|_| true).unwrap().added_by, None);
+    // Nobody pressed anything: messages flow both ways.
+    a.core.send(&gid, "hello", 200).unwrap();
+    b.core.send(&gid, "hi", 210).unwrap();
+    pump(&nodes);
+    for n in &nodes {
+        assert_eq!(n.texts(&gid).len(), 2, "everyone has both");
+    }
+    // The people who added and were added see each other as joined.
+    assert_eq!(status_of_member(a, &gid, c), MemberStatus::Joined);
+    assert_eq!(status_of_member(c, &gid, b), MemberStatus::Joined);
+}
+
+#[test]
+fn joining_at_once_is_announced_and_survives_a_restart() {
+    let mut nodes = friends(2);
+    nodes[1].core.set_auto_join(true);
+    let gid = nodes[0]
+        .core
+        .create("pair", &[(nodes[1].id(), String::new())], 1)
+        .unwrap();
+    pump(&nodes);
+    let (_, ev) = nodes[1].core.events_since(0);
+    assert!(ev
+        .iter()
+        .any(|e| e.gid == gid && e.kind == GroupEventKind::Joined));
+    assert!(!ev.iter().any(|e| e.kind == GroupEventKind::Invited));
+    nodes[1].restart();
+    let b = &nodes[1];
+    assert_eq!(b.core.status_of(&gid), Some(Status::Joined));
+    let d = b.core.detail(&gid, &|id| b.is_trusted(id)).unwrap();
+    assert_eq!(d.added_by, Some(nodes[0].id()));
+}
+
+#[test]
+fn an_invitation_from_someone_who_is_not_trusted_is_still_refused_when_joining_at_once() {
+    let nodes = friends(2);
+    let (a, b) = (&nodes[0], &nodes[1]);
+    b.core.set_auto_join(true);
+    b.trust.lock().unwrap().clear();
+    a.core
+        .create("surprise", &[(b.id(), String::new())], 1)
+        .unwrap();
+    let log = pump(&nodes);
+    assert!(log.iter().all(|l| l.2 == AckStatus::NotAllowed));
+    assert!(b.core.list().is_empty());
+    assert_eq!(a.core.list()[0].pending, 0);
+}
+
+#[test]
+fn an_invitation_from_a_member_who_is_no_admin_is_refused_when_joining_at_once() {
+    let nodes = friends(3);
+    let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);
+    for n in &nodes {
+        n.core.set_auto_join(true);
+    }
+    let gid = a.core.create("g", &[(b.id(), String::new())], 1).unwrap();
+    pump(&nodes);
+    assert_eq!(b.core.status_of(&gid), Some(Status::Joined));
+    // b is a plain member and may not add anyone.
+    assert_eq!(
+        b.core.add(&gid, &[(c.id(), String::new(), false)]),
+        Err(GroupError::NotAdmin)
+    );
+    pump(&nodes);
+    assert!(c.core.status_of(&gid).is_none());
+}
+
+#[test]
+fn asking_first_keeps_the_invitation_pending_until_it_is_answered() {
+    let nodes = friends(2);
+    let (a, b) = (&nodes[0], &nodes[1]);
+    b.core.set_auto_join(false);
+    let gid = a
+        .core
+        .create("ask me", &[(b.id(), String::new())], 1)
+        .unwrap();
+    pump(&nodes);
+    assert!(matches!(
+        b.core.status_of(&gid),
+        Some(Status::Pending { invited_by }) if invited_by == a.id()
+    ));
+    let (_, ev) = b.core.events_since(0);
+    assert!(ev.iter().any(|e| e.kind == GroupEventKind::Invited));
+    // Nothing about the invitation shows the inviter that b joined.
+    assert_eq!(status_of_member(a, &gid, b), MemberStatus::Invited);
+    // Answering yes makes b a member and tells the others.
+    let wake = b.core.accept_invite(&gid).unwrap();
+    assert_eq!(wake, vec![a.id()]);
+    pump(&nodes);
+    assert_eq!(b.core.status_of(&gid), Some(Status::Joined));
+    assert_eq!(status_of_member(a, &gid, b), MemberStatus::Joined);
+    assert_eq!(
+        b.core.detail(&gid, &|_| true).unwrap().added_by,
+        Some(a.id())
+    );
+}
+
+#[test]
+fn a_message_to_a_member_who_has_not_joined_is_held_and_delivered_when_they_join() {
+    let nodes = friends(2);
+    let (a, b) = (&nodes[0], &nodes[1]);
+    b.core.set_auto_join(false);
+    let gid = a
+        .core
+        .create("held", &[(b.id(), String::new())], 1)
+        .unwrap();
+    pump(&nodes);
+    a.core.send(&gid, "before you joined", 10).unwrap();
+    a.core.send(&gid, "me again", 20).unwrap();
+    let log = pump(&nodes);
+    assert!(
+        log.iter().any(|l| l.2 == AckStatus::Busy),
+        "the device that has not joined says busy, not refused"
+    );
+    assert_eq!(a.core.list()[0].pending, 2, "both copies are kept");
+    assert!(b.texts(&gid).is_empty());
+    // The sender's ledger does not count them as failed while they wait.
+    let h = a.core.history(&gid, None, 10).unwrap();
+    assert!(h.iter().all(|v| v.delivery == Some((1, 0, 0))));
+    assert_eq!(status_of_member(a, &gid, b), MemberStatus::Invited);
+
+    b.core.accept_invite(&gid).unwrap();
+    pump(&nodes);
+    assert_eq!(b.texts(&gid), vec!["before you joined", "me again"]);
+    assert_eq!(a.core.list()[0].pending, 0);
+    let h = a.core.history(&gid, None, 10).unwrap();
+    assert!(h.iter().all(|v| v.delivery == Some((1, 1, 0))));
+}
+
+#[test]
+fn a_held_message_is_given_up_when_the_invitation_is_declined() {
+    let nodes = friends(2);
+    let (a, b) = (&nodes[0], &nodes[1]);
+    b.core.set_auto_join(false);
+    let gid = a.core.create("no", &[(b.id(), String::new())], 1).unwrap();
+    pump(&nodes);
+    a.core.send(&gid, "anyone?", 10).unwrap();
+    pump(&nodes);
+    assert_eq!(a.core.list()[0].pending, 1);
+    b.core.forget(&gid).unwrap();
+    pump(&nodes);
+    // b no longer holds the group and refuses, so the copy is not kept for ever.
+    assert_eq!(a.core.list()[0].pending, 0);
+    let h = a.core.history(&gid, None, 10).unwrap();
+    assert_eq!(h[0].delivery, Some((1, 0, 1)));
+}
+
+#[test]
+fn the_waiting_queue_of_a_group_is_bounded() {
+    let nodes = friends(2);
+    let (a, b) = (&nodes[0], &nodes[1]);
+    b.core.set_auto_join(false);
+    let gid = a
+        .core
+        .create("full", &[(b.id(), String::new())], 1)
+        .unwrap();
+    pump(&nodes);
+    let mut last = Ok(());
+    for i in 0..200u64 {
+        last = a.core.send(&gid, "x", i).map(|_| ());
+        if last.is_err() {
+            break;
+        }
+    }
+    assert_eq!(last, Err(GroupError::QueueFull));
+}
+
+#[test]
+fn what_is_known_of_each_member_follows_what_the_network_said() {
+    let nodes = friends(2);
+    let (a, b) = (&nodes[0], &nodes[1]);
+    b.core.set_auto_join(false);
+    let gid = a
+        .core
+        .create("status", &[(b.id(), String::new())], 1)
+        .unwrap();
+    assert_eq!(status_of_member(a, &gid, a), MemberStatus::You);
+    assert_eq!(status_of_member(a, &gid, b), MemberStatus::Invited);
+    // Their software has no groups: the delivery word is "peer_no_group".
+    a.core.note_delivery(&b.id(), Some("peer_no_group"));
+    assert_eq!(status_of_member(a, &gid, b), MemberStatus::NoGroupSupport);
+    a.core.note_delivery(&b.id(), Some("unsupported"));
+    assert_eq!(status_of_member(a, &gid, b), MemberStatus::NoGroupSupport);
+    // Any other failure is "cannot reach", with the word.
+    a.core.note_delivery(&b.id(), Some("no_route"));
+    assert_eq!(
+        status_of_member(a, &gid, b),
+        MemberStatus::Unreachable("no_route".into())
+    );
+    a.core.note_delivery(&b.id(), Some("not_allowed"));
+    assert_eq!(
+        status_of_member(a, &gid, b),
+        MemberStatus::Unreachable("not_allowed".into())
+    );
+    // Reaching them again clears it.
+    a.core.note_delivery(&b.id(), None);
+    assert_eq!(status_of_member(a, &gid, b), MemberStatus::Invited);
+    // Once they are known to be in, later network trouble does not unjoin them.
+    pump(&nodes);
+    b.core.accept_invite(&gid).unwrap();
+    pump(&nodes);
+    assert_eq!(status_of_member(a, &gid, b), MemberStatus::Joined);
+    a.core.note_delivery(&b.id(), Some("no_route"));
+    assert_eq!(status_of_member(a, &gid, b), MemberStatus::Joined);
+    assert_eq!(MemberStatus::NoGroupSupport.name(), "no_group_support");
+}
+
+#[test]
+fn being_added_again_after_leaving_joins_at_once_or_asks_as_set() {
+    for auto in [true, false] {
+        let nodes = friends(2);
+        let (a, b) = (&nodes[0], &nodes[1]);
+        b.core.set_auto_join(true);
+        let gid = a
+            .core
+            .create("again", &[(b.id(), String::new())], 1)
+            .unwrap();
+        pump(&nodes);
+        assert_eq!(b.core.status_of(&gid), Some(Status::Joined));
+        b.core.leave(&gid).unwrap();
+        pump(&nodes);
+        assert_eq!(b.core.status_of(&gid), Some(Status::Left));
+        b.core.set_auto_join(auto);
+        a.core.add(&gid, &[(b.id(), String::new(), false)]).unwrap();
+        pump(&nodes);
+        if auto {
+            assert_eq!(b.core.status_of(&gid), Some(Status::Joined));
+            assert_eq!(
+                b.core.detail(&gid, &|_| true).unwrap().added_by,
+                Some(a.id())
+            );
+        } else {
+            assert!(matches!(
+                b.core.status_of(&gid),
+                Some(Status::Pending { .. })
+            ));
+        }
+    }
+}
+
+#[test]
+fn the_limit_on_groups_still_applies_when_joining_at_once() {
+    // Two creators invite the same person into more groups than a device holds.
+    let nodes = friends(3);
+    let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);
+    c.core.set_auto_join(true);
+    let each = MAX_GROUPS / 2 + 1;
+    for i in 0..each {
+        a.core
+            .create(&format!("a{i}"), &[(c.id(), String::new())], 1)
+            .unwrap();
+        b.core
+            .create(&format!("b{i}"), &[(c.id(), String::new())], 1)
+            .unwrap();
+    }
+    pump(&nodes);
+    assert_eq!(c.core.list().len(), MAX_GROUPS);
 }
