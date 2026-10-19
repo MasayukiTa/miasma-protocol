@@ -679,11 +679,10 @@ mod tests {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
-        format!(
-            "{nanos:x}-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::SeqCst)
-        )
+        let mixed = nanos
+            ^ (u128::from(std::process::id()) << 64)
+            ^ (u128::from(COUNTER.fetch_add(1, Ordering::SeqCst)) << 96);
+        mixed.to_string()
     }
 
     fn session_with_password(dir: &str, w: &World, password: &str) -> Session {
