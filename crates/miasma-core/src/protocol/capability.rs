@@ -322,8 +322,9 @@ mod tests {
         assert_eq!(hex::encode(d), FROZEN_BINDING);
     }
 
-    // Filled from the first verified run; guards the domain string and layout.
-    const FROZEN_BINDING: &str = "";
+    // Guards the domain string and layout of the binding input.
+    const FROZEN_BINDING: &str =
+        "96ad53b290d8ade644d3a0d42472489e232285f9f150f85051f24aef711f7a33";
 
     #[test]
     fn round_trip() {
