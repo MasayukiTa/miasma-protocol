@@ -163,7 +163,8 @@ impl M<'_> {
                             }
                         )
                     };
-                    s.push_str(&format!("\n  {who} ({}){tag}", m.role));
+                    let state = member_state(m.status.as_deref(), m.reason.as_deref(), ja);
+                    s.push_str(&format!("\n  {who} ({}){tag}{state}", m.role));
                 }
                 s
             }
@@ -249,6 +250,28 @@ impl M<'_> {
                 }
             }
         }
+    }
+}
+
+/// The suffix of a member line: what this device knows of their standing.
+/// Joined members (and a service that reports nothing) get no suffix.
+fn member_state(status: Option<&str>, reason: Option<&str>, ja: bool) -> String {
+    match (status, ja) {
+        (Some("invited"), false) => "  [invited: waiting for them to accept or come online]".into(),
+        (Some("invited"), true) => "  [招待済み: 相手の参加またはオンラインを待っています]".into(),
+        (Some("no_group_support"), false) => {
+            "  [their Miasma does not support groups: ask them to update]".into()
+        }
+        (Some("no_group_support"), true) => {
+            "  [相手のMiasmaはグループに対応していません: 更新してもらってください]".into()
+        }
+        (Some("unreachable"), false) => {
+            format!("  [cannot reach them: {}]", reason.unwrap_or("unknown"))
+        }
+        (Some("unreachable"), true) => {
+            format!("  [届けられません: {}]", reason.unwrap_or("不明"))
+        }
+        _ => String::new(),
     }
 }
 
@@ -433,7 +456,10 @@ mod tests {
                 label: None,
                 verified: false,
                 you: false,
+                status: Some("no_group_support".into()),
+                reason: None,
             }],
+            added_by: None,
         };
         let (out, unv, ok) = (msg(true, false), msg(false, false), msg(false, true));
         let all = [

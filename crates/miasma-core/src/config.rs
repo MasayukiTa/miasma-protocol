@@ -128,6 +128,12 @@ pub struct ChatConfig {
     /// whether the in-memory custody store accepts items.
     #[serde(default)]
     pub custody_enabled: bool,
+    /// Join a group at once when a trusted contact who administers it adds
+    /// you (default on). Off: the invitation waits for an answer (Accept or
+    /// Decline). Either way you can leave with one action, and an invitation
+    /// from someone who is not a trusted contact is refused.
+    #[serde(default = "default_true")]
+    pub group_auto_join: bool,
 }
 
 pub const DEFAULT_CHAT_MAX_MESSAGE_BYTES: usize = 4096;
@@ -150,6 +156,7 @@ impl Default for ChatConfig {
             retention_days: 0,
             read_receipts: true,
             custody_enabled: false,
+            group_auto_join: true,
         }
     }
 }
@@ -200,6 +207,27 @@ enabled = true
         assert!(unset.chat.history_saved());
         let none: NodeConfig = toml::from_str("").unwrap();
         assert!(none.chat.history_saved());
+    }
+
+    #[test]
+    fn joining_a_group_at_once_is_on_unless_switched_off_and_round_trips() {
+        assert!(NodeConfig::default().chat.group_auto_join);
+        // A file that never heard of the key keeps the default.
+        let old: NodeConfig = toml::from_str("[chat]\nenabled = true\n").unwrap();
+        assert!(old.chat.group_auto_join);
+        let off: NodeConfig = toml::from_str("[chat]\ngroup_auto_join = false\n").unwrap();
+        assert!(!off.chat.group_auto_join);
+        // Saved and read back, both ways.
+        for on in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut cfg = NodeConfig::default();
+            cfg.chat.group_auto_join = on;
+            cfg.save(dir.path()).unwrap();
+            assert_eq!(
+                NodeConfig::load(dir.path()).unwrap().chat.group_auto_join,
+                on
+            );
+        }
     }
 }
 

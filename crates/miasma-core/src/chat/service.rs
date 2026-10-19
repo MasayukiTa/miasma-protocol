@@ -28,7 +28,7 @@ use tracing::{debug, info, warn};
 use super::{
     crypto::Identity,
     engine::{now_ms, ChatCore, EnqueueError, MarkOutcome, PrepareError},
-    outbox::Outbox,
+    outbox::{OutKind, Outbox},
     proto::{
         self, fail, Ack, AckStatus, Frame, CLOSE_BAD_REQUEST, CLOSE_NOT_ALLOWED, CLOSE_OK,
         CLOSE_RATE, CLOSE_UNSUPPORTED,
@@ -77,6 +77,8 @@ pub struct ChatSettings {
     /// Messages accepted from one contact: burst and per minute.
     pub inbound_burst: f64,
     pub inbound_per_minute: f64,
+    /// Join a group at once when a trusted administrator adds us (`chat.group_auto_join`).
+    pub group_auto_join: bool,
 }
 
 impl Default for ChatSettings {
@@ -96,6 +98,7 @@ impl Default for ChatSettings {
             ack_timeout: Duration::from_secs(30),
             inbound_burst: 20.0,
             inbound_per_minute: 30.0,
+            group_auto_join: true,
         }
     }
 }
@@ -203,6 +206,7 @@ pub fn start_for_daemon(
     store.outbox_max = cfg.chat.outbox_max.clamp(1, 500);
     let settings = ChatSettings {
         max_message_bytes: cfg.chat.max_message_bytes.clamp(1, proto::MAX_TEXT_BYTES),
+        group_auto_join: cfg.chat.group_auto_join,
         ..ChatSettings::default()
     };
     let svc = ChatService::start(
@@ -238,6 +242,9 @@ pub struct ChatService {
     sync_rate: Mutex<Buckets>,
     /// Contacts that did not answer a `Sync` (older builds).
     no_sync: Mutex<HashMap<[u8; 32], Instant>>,
+    /// Contacts whose build answered a read receipt with "bad request" (it
+    /// predates receipts): none are sent to them for a while.
+    no_receipts: Mutex<HashMap<[u8; 32], Instant>>,
     slots: Arc<Semaphore>,
     workers: Mutex<HashMap<[u8; 32], Worker>>,
     shutdown: watch::Sender<bool>,
@@ -301,6 +308,7 @@ impl ChatService {
             )),
             sync_rate: Mutex::new(Buckets::new(4.0, 6.0 / 60.0)),
             no_sync: Mutex::new(HashMap::new()),
+            no_receipts: Mutex::new(HashMap::new()),
             settings,
             slots: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
             workers: Mutex::new(HashMap::new()),
@@ -440,6 +448,16 @@ impl ChatService {
                 self.core.outbox.remove(&entry.id);
                 continue;
             }
+            // A contact on a build from before read receipts answers each one
+            // with "bad request": stop sending them (quietly, as for an
+            // expired one) until it is asked again after an hour.
+            if entry.kind == OutKind::Read && self.peer_lacks_receipts(&peer) {
+                self.core.outbox.remove(&entry.id);
+                continue;
+            }
+            self.core
+                .outbox
+                .update(&entry.id, |e| e.last_try_ms = now_ms());
             match self.attempt(&peer, &entry.id, &mut conn).await {
                 Outcome::Delivered => {
                     failures = 0;
@@ -520,6 +538,26 @@ impl ChatService {
         }
     }
 
+    fn peer_lacks_receipts(&self, peer: &[u8; 32]) -> bool {
+        let mut m = self.no_receipts.lock().unwrap();
+        match m.get(peer) {
+            Some(t) if t.elapsed() < SYNC_RETRY_AFTER => true,
+            Some(_) => {
+                m.remove(peer);
+                false
+            }
+            None => false,
+        }
+    }
+
+    fn note_no_receipts(&self, peer: &[u8; 32]) {
+        let mut m = self.no_receipts.lock().unwrap();
+        if m.len() >= MAX_NO_SYNC && !m.contains_key(peer) {
+            m.clear();
+        }
+        m.insert(*peer, Instant::now());
+    }
+
     fn note_no_sync(&self, peer: &[u8; 32]) {
         let mut m = self.no_sync.lock().unwrap();
         if m.len() >= MAX_NO_SYNC && !m.contains_key(peer) {
@@ -554,7 +592,10 @@ impl ChatService {
             match proto::read_frame(&mut rx).await {
                 Ok(Frame::SyncReply(ids)) => Ok(ids),
                 Ok(_) => Err("bad_reply"),
-                Err(_) => Err("connection_lost"),
+                // A frame that arrived but is not one we read (a build with
+                // a different catch-up) is "no usable answer", not a dead link.
+                Err(proto::ProtoError::Io(_)) => Err("connection_lost"),
+                Err(_) => Err("bad_reply"),
             }
         })
         .await
@@ -580,7 +621,9 @@ impl ChatService {
         }
         let (conn, fresh) = match self.ensure_conn(conn_slot, peer).await {
             Ok(c) => c,
-            Err(_) => return Outcome::Retry("unreachable"),
+            // Why, in a word the person can be shown: no route found, the
+            // handshake failed, or the contact's build has no chat at all.
+            Err(e) => return Outcome::Retry(e.reason_code(fail::PEER_NO_CHAT)),
         };
         // A new connection starts with the catch-up: whatever the contact has
         // already applied is closed here instead of being sent again.
@@ -594,7 +637,7 @@ impl ChatService {
                         return Outcome::Gone;
                     }
                 }
-                Err("no_answer") if conn.close_reason().is_none() => {
+                Err("no_answer" | "bad_reply") if conn.close_reason().is_none() => {
                     // Nobody answered and the link is fine: a build from
                     // before `Sync`. Send on this connection as usual.
                     self.note_no_sync(peer);
@@ -647,7 +690,20 @@ impl ChatService {
                 return Outcome::Retry("timed_out");
             }
         };
+        let is_receipt = self
+            .core
+            .outbox
+            .get(id)
+            .is_some_and(|e| e.kind == OutKind::Read);
         match status {
+            AckStatus::BadRequest if is_receipt => {
+                // The record opened on the other side but was not understood:
+                // a build from before read receipts. Drop this one and send
+                // no more to it for a while; nothing is shown as failed.
+                self.note_no_receipts(peer);
+                Outcome::Permanent(fail::REJECTED)
+            }
+            AckStatus::Unknown => Outcome::Retry("peer_status_unknown"),
             AckStatus::Stored | AckStatus::Duplicate => Outcome::Delivered,
             AckStatus::NoSession => Outcome::ResetSession,
             AckStatus::NotAllowed => Outcome::Permanent(fail::NOT_ALLOWED),
@@ -702,9 +758,18 @@ impl ChatService {
                         proto::read_frame(&mut urx),
                     )
                     .await;
-                    let Ok(Ok(Frame::Sync(items))) = frame else {
-                        conn.close(CLOSE_BAD_REQUEST.into(), b"");
-                        return;
+                    let items = match frame {
+                        Ok(Ok(Frame::Sync(items))) => items,
+                        // A unidirectional frame this build does not know
+                        // (or an old-shaped one): it is not answered, and the
+                        // connection stays up for the messages on it. The
+                        // sender stops waiting for the answer by itself.
+                        Ok(Ok(_)) | Ok(Err(proto::ProtoError::BadType(_)))
+                        | Ok(Err(proto::ProtoError::Malformed(_))) => continue,
+                        _ => {
+                            conn.close(CLOSE_BAD_REQUEST.into(), b"");
+                            return;
+                        }
                     };
                     // Which of the sender's waiting messages we have already.
                     let have = if self.sync_rate.lock().unwrap().allow(remote) {
@@ -738,6 +803,12 @@ impl ChatService {
                 | Ok(Ok(Frame::Sync(_)))
                 | Ok(Ok(Frame::SyncReply(_))) => {
                     conn.close(CLOSE_BAD_REQUEST.into(), b"");
+                    return;
+                }
+                // A frame type from a newer build: tell it so (it can send the
+                // old form) instead of dropping the connection unexplained.
+                Ok(Err(proto::ProtoError::BadType(_))) => {
+                    conn.close(CLOSE_UNSUPPORTED.into(), b"unsupported");
                     return;
                 }
                 _ => break,

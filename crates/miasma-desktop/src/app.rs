@@ -145,6 +145,10 @@ pub struct MiasmaApp {
     sharing_gate: RefreshGate,
     /// The tab drawn on the previous frame, to notice a tab being opened.
     prev_tab: Tab,
+    /// `chat.group_auto_join` as saved: join a group at once when a trusted contact adds me.
+    group_auto_join: bool,
+    /// Saving that setting failed (shown under it until the next change).
+    group_join_save_failed: bool,
 
     // Settings / general
     data_dir_display: String,
@@ -152,6 +156,10 @@ pub struct MiasmaApp {
     status_msg: Option<(String, MsgKind)>,
     /// When `status_msg` was set (for the messages that go away by themselves).
     status_msg_at: std::time::Instant,
+    /// Failures of "open the data folder", reported by the launcher thread.
+    open_tx: std::sync::mpsc::Sender<String>,
+    open_rx: std::sync::mpsc::Receiver<String>,
+    open_last: String,
     show_wipe_confirm: bool,
     /// The "a transfer is running, close anyway?" dialog is open.
     show_close_confirm: bool,
@@ -419,7 +427,7 @@ impl MiasmaApp {
         data_dir: std::path::PathBuf,
         intent: LaunchIntent,
     ) -> Self {
-        crate::fonts::install(&cc.egui_ctx);
+        crate::fonts::install(&cc.egui_ctx, locale);
         let dark = theme::resolve_dark(theme_mode, cc.integration_info.system_theme);
         kit::apply_theme(&cc.egui_ctx, dark);
         let worker = WorkerHandle::spawn(data_dir.clone(), cc.egui_ctx.clone());
@@ -434,6 +442,7 @@ impl MiasmaApp {
         };
 
         let now = std::time::Instant::now();
+        let (open_tx, open_rx) = std::sync::mpsc::channel();
 
         Self {
             worker,
@@ -449,6 +458,8 @@ impl MiasmaApp {
                     shown: p.speed_units_shown,
                 }
             },
+            group_auto_join: crate::group::load_auto_join(&data_dir),
+            group_join_save_failed: false,
             applied_dark: Some(dark),
             #[cfg(feature = "ui-tour")]
             tour: tour::Tour::from_env(),
@@ -483,6 +494,9 @@ impl MiasmaApp {
             busy: false,
             status_msg: None,
             status_msg_at: now,
+            open_tx,
+            open_rx,
+            open_last: String::new(),
             show_wipe_confirm: false,
             show_close_confirm: false,
             close_confirmed: false,
@@ -2263,6 +2277,8 @@ impl MiasmaApp {
                 let options = Locale::ALL.map(|l| (l, l.display_name()));
                 if kit::segmented(ui, &mut lang, &options) {
                     self.locale = lang;
+                    // Read the fonts the new language needs (the others stay lazy).
+                    crate::fonts::set_locale(ui.ctx(), lang);
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Title(
                         crate::buildinfo::window_title(lang),
                     ));
@@ -2301,6 +2317,36 @@ impl MiasmaApp {
                     self.save_prefs();
                 }
             });
+            {
+                let gs = locale::group_strings(self.locale);
+                kit::form_row(
+                    ui,
+                    gs.settings_join_label,
+                    Some(if self.group_auto_join {
+                        gs.settings_join_auto_desc
+                    } else {
+                        gs.settings_join_ask_desc
+                    }),
+                    |ui| {
+                        let mut on = self.group_auto_join;
+                        let options =
+                            [(true, gs.settings_join_auto), (false, gs.settings_join_ask)];
+                        if kit::segmented(ui, &mut on, &options) {
+                            self.group_auto_join = on;
+                            self.group_join_save_failed =
+                                crate::group::save_auto_join(&self.data_dir, on).is_err();
+                            self.chat.set_group_auto_join(on);
+                        }
+                    },
+                );
+                if self.group_join_save_failed {
+                    kit::notice(
+                        ui,
+                        Level::Error,
+                        locale::update_strings(self.locale).config_save_failed,
+                    );
+                }
+            }
             {
                 let sp = crate::speed::speed_strings(self.locale);
                 kit::form_row(ui, sp.settings_unit, None, |ui| {
@@ -2403,13 +2449,13 @@ impl MiasmaApp {
                         .add(kit::secondary_button(s.settings_open_folder))
                         .clicked()
                     {
-                        #[cfg(windows)]
-                        let opener = "explorer";
-                        #[cfg(not(windows))]
-                        let opener = "xdg-open";
-                        let _ = std::process::Command::new(opener)
-                            .arg(&self.data_dir_display)
-                            .spawn();
+                        self.open_last =
+                            crate::transfers::plain_path(&self.data_dir_display).to_owned();
+                        crate::open_path::launch(
+                            crate::open_path::Action::Open,
+                            std::path::PathBuf::from(&self.data_dir_display),
+                            self.open_tx.clone(),
+                        );
                     }
                 });
             });
@@ -2925,6 +2971,12 @@ impl MiasmaApp {
                     d.push_str(&format!("    {f}\n"));
                 }
             }
+            if !detection.deferred.is_empty() {
+                d.push_str("  Available, read when a character needs them:\n");
+                for f in &detection.deferred {
+                    d.push_str(&format!("    {f}\n"));
+                }
+            }
         }
 
         d.push_str("\n(end of report)\n");
@@ -3156,6 +3208,12 @@ impl eframe::App for MiasmaApp {
 
         self.poll_worker();
         self.updates.tick(ctx);
+        while let Ok(why) = self.open_rx.try_recv() {
+            let c = locale::contact_strings(self.locale);
+            let text =
+                crate::transfers::fill(c.open_failed, &[("path", &self.open_last), ("why", &why)]);
+            self.set_msg(MsgKind::Error, text);
+        }
 
         // Messages that go away by themselves: success and progress notes. Errors stay until
         // they are closed.
@@ -3454,6 +3512,10 @@ impl eframe::App for MiasmaApp {
                         });
                     });
             });
+
+        // The page is drawn: a CJK character on it that no loaded font can draw reads the next
+        // font (dialogs, drawn below, are looked at in the following frame).
+        crate::fonts::ensure_glyphs(ctx);
 
         self.legacy_logs_notice(ctx);
 

@@ -540,6 +540,46 @@ impl PushService {
         )
     }
 
+    /// Delete the record of every finished transfer (done, failed, cancelled,
+    /// rejected) of `selector`'s contact, or of all contacts when `None`:
+    ///
+    /// * the rows kept in memory for polling;
+    /// * the saved history, rewritten without them with the old file overwritten;
+    /// * the send queue's log, rewritten with only the sends still wanted, old
+    ///   file overwritten (it still held the names and paths of ended sends);
+    /// * the unfinished `.part` files of the scope that no running transfer
+    ///   uses, overwritten and removed (a failed receive's leftovers).
+    ///
+    /// Queued, running and waiting transfers are untouched. Files already
+    /// received and files that were sent from are never touched.
+    /// `selector` may also be the id of a contact that has since been removed.
+    pub fn clear_finished(&self, selector: Option<&str>) -> Result<ClearReport, String> {
+        let contact = selector.map(|s| self.contacts.find(s));
+        let scope_id: Option<String> = match (selector, &contact) {
+            (Some(_), Some(Some(c))) => Some(c.id.clone()),
+            (Some(s), _) => Some(s.trim().to_owned()),
+            (None, _) => None,
+        };
+        let history = self.history.clear_finished(scope_id.as_deref())?;
+        let transfers = self.board.clear_finished(scope_id.as_deref());
+        self.outbox.shred_dead()?;
+        let active: HashSet<PathBuf> = self.active_parts.lock().unwrap().keys().cloned().collect();
+        let partials = match (selector, contact) {
+            (None, _) => shred_partials_in(&self.settings.inbox_dir, None, &active),
+            (Some(_), Some(Some(c))) => shred_partials_in(
+                &self.settings.inbox_dir,
+                Some(&self.contact_dir(&c.label)),
+                &active,
+            ),
+            _ => 0,
+        };
+        Ok(ClearReport {
+            transfers: transfers as u32,
+            history: history as u32,
+            partials: partials as u32,
+        })
+    }
+
     /// Delete the unfinished `.part` files of a contact that is no longer
     /// trusted (those not in use; running transfers delete their own).
     fn clean_partials(&self, c: &Contact) {
@@ -823,6 +863,7 @@ impl PushService {
                 Ok(c) => c,
                 Err(e) => {
                     let kind = match e {
+                        _ if e.is_alpn_refused() => error_kind::PEER_NO_PUSH,
                         IrohClientError::Unreachable(_) => error_kind::UNREACHABLE,
                         _ => error_kind::CONNECTION_LOST,
                     };
@@ -1116,6 +1157,7 @@ impl PushService {
         };
         let offset = match reply {
             Reply::Reject { reason } => return Err(AttemptError::Rejected(reason)),
+            Reply::Unknown => return Err(AttemptError::Rejected(RejectReason::Unknown)),
             Reply::Accept { offset } if offset <= size => offset,
             Reply::Accept { .. } => {
                 return Err(AttemptError::Fatal(
@@ -1267,6 +1309,9 @@ impl PushService {
             header.size,
             PushState::Preparing,
         );
+        // The sender's final answer is held back until the row on the board has its
+        // final state: whoever sees the sender's "done" must find this side final too.
+        let mut ack: Option<Done> = None;
         let outcome = self
             .receive_body(
                 conn,
@@ -1277,10 +1322,11 @@ impl PushService {
                 &mut tx,
                 &mut rx,
                 &mut cancel,
+                &mut ack,
             )
             .await;
         drop(permit);
-        match outcome {
+        let keep_open = match outcome {
             RxEnd::Done(saved) => {
                 self.board.update(&tid, |i| i.saved_as = Some(saved));
                 self.finish(&tid, PushState::Done, None, None);
@@ -1325,7 +1371,14 @@ impl PushService {
                 conn.close(proto::CLOSE_CANCELLED, b"cancelled");
                 false
             }
+        };
+        if let Some(done) = ack {
+            // The state and the history are written; now the sender may learn the result.
+            if self.send_done(&mut tx, &done).await.is_err() {
+                return false;
+            }
         }
+        keep_open
     }
 
     async fn reject(&self, tx: &mut BoxTx, reason: RejectReason) -> bool {
@@ -1350,6 +1403,7 @@ impl PushService {
         tx: &mut BoxTx,
         rx: &mut BoxRx,
         cancel: &mut watch::Receiver<bool>,
+        ack: &mut Option<Done>,
     ) -> RxEnd {
         let size = header.size;
         let dir = self.contact_dir(&contact.label);
@@ -1494,7 +1548,7 @@ impl PushService {
             };
             hasher.update(&buf[..n]);
             if let Err(e) = w.write_all(&buf[..n]).await {
-                let _ = self.reply_done(tx, false, None, Some("write_failed")).await;
+                *ack = Some(done_frame(false, None, Some("write_failed")));
                 return RxEnd::FailedKind(
                     error_kind::WRITE_FAILED,
                     format!("cannot write to the inbox: {e}"),
@@ -1511,7 +1565,7 @@ impl PushService {
             });
         }
         if let Err(e) = w.flush().await {
-            let _ = self.reply_done(tx, false, None, Some("write_failed")).await;
+            *ack = Some(done_frame(false, None, Some("write_failed")));
             return RxEnd::FailedKind(
                 error_kind::WRITE_FAILED,
                 format!("cannot write to the inbox: {e}"),
@@ -1531,9 +1585,7 @@ impl PushService {
         });
         if hasher.finalize().to_hex().as_str() != header.hash.to_ascii_lowercase() {
             let _ = std::fs::remove_file(&part);
-            let _ = self
-                .reply_done(tx, false, None, Some("hash_mismatch"))
-                .await;
+            *ack = Some(done_frame(false, None, Some("hash_mismatch")));
             return RxEnd::FailedKind(
                 error_kind::DAMAGED,
                 "the file arrived damaged (checksum mismatch)".into(),
@@ -1546,34 +1598,19 @@ impl PushService {
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| name.to_owned());
                 let shown = format!("{}/{}", contact_leaf(&dir), saved);
-                let _ = self.reply_done(tx, true, Some(saved), None).await;
+                *ack = Some(done_frame(true, Some(saved), None));
                 RxEnd::Done(shown)
             }
             Err(e) => {
-                let _ = self
-                    .reply_done(tx, false, None, Some("rename_failed"))
-                    .await;
+                *ack = Some(done_frame(false, None, Some("rename_failed")));
                 RxEnd::Failed(format!("cannot save the file: {e}"))
             }
         }
     }
 
-    async fn reply_done(
-        &self,
-        tx: &mut BoxTx,
-        ok: bool,
-        saved_as: Option<String>,
-        error: Option<&str>,
-    ) -> Result<(), ProtoError> {
-        proto::write_frame(
-            tx,
-            &Done {
-                ok,
-                saved_as,
-                error: error.map(str::to_owned),
-            },
-        )
-        .await?;
+    /// Send the final answer for a transfer and close the stream.
+    async fn send_done(&self, tx: &mut BoxTx, done: &Done) -> Result<(), ProtoError> {
+        proto::write_frame(tx, done).await?;
         finish_stream(tx).await;
         Ok(())
     }
@@ -1630,6 +1667,14 @@ impl PushService {
             }
         }
         conn.close(CLOSE_OK, b"done");
+    }
+}
+
+fn done_frame(ok: bool, saved_as: Option<String>, error: Option<&str>) -> Done {
+    Done {
+        ok,
+        saved_as,
+        error: error.map(str::to_owned),
     }
 }
 
@@ -1753,6 +1798,54 @@ pub fn sweep_partials_in(
     removed
 }
 
+/// What [`PushService::clear_finished`] removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClearReport {
+    /// Rows dropped from the live list.
+    pub transfers: u32,
+    /// Entries dropped from the saved history.
+    pub history: u32,
+    /// Unfinished partial files overwritten and removed.
+    pub partials: u32,
+}
+
+/// Overwrite and remove our `.part` files that no running transfer uses: in
+/// `only_dir` when given, else in every contact folder of `inbox`. Nothing else
+/// is touched. Returns how many were removed.
+fn shred_partials_in(inbox: &Path, only_dir: Option<&Path>, active: &HashSet<PathBuf>) -> usize {
+    let dirs: Vec<PathBuf> = match only_dir {
+        Some(d) => vec![d.to_path_buf()],
+        None => match std::fs::read_dir(inbox) {
+            Ok(rd) => rd
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect(),
+            Err(_) => return 0,
+        },
+    };
+    let mut removed = 0;
+    for dir in dirs {
+        let Ok(files) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for f in files.flatten() {
+            let p = f.path();
+            let name = f.file_name().to_string_lossy().into_owned();
+            if !is_our_part_name(&name) || active.contains(&p) {
+                continue;
+            }
+            if !f.metadata().is_ok_and(|m| m.is_file()) {
+                continue;
+            }
+            if crate::state_crypto::overwrite_and_remove(&p).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    removed
+}
+
 struct PartGuard<'a> {
     set: &'a Mutex<HashMap<PathBuf, Arc<Notify>>>,
     path: PathBuf,
@@ -1797,11 +1890,19 @@ fn reject_text(r: RejectReason) -> String {
         RejectReason::Busy => "the receiver is busy; try again in a moment",
         RejectReason::BadName => "the receiver refused the file name",
         RejectReason::BadRequest => "the receiver did not understand the request (version?)",
+        RejectReason::Unknown => {
+            "the receiver refused the file for a reason this version does not know; it may run a newer Miasma"
+        }
     }
     .to_owned()
 }
 
 fn describe_dial_error(e: &IrohClientError) -> String {
+    if e.is_alpn_refused() {
+        return "the other side answered but its Miasma has no file push: it is an older version; \
+                ask them to update"
+            .to_owned();
+    }
     match e {
         IrohClientError::Unreachable(m) => format!(
             "cannot reach the other side: {m}. Is their Miasma running? Run `miasma netcheck` to \

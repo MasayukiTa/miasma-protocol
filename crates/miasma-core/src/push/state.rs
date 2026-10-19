@@ -299,6 +299,8 @@ pub mod error_kind {
     /// Outbound: the file was changed, moved or replaced after it was queued,
     /// so what is on disk is no longer what was meant to be sent.
     pub const SOURCE_CHANGED: &str = "source_changed";
+    /// Outbound: the other side answered but its build has no file push.
+    pub const PEER_NO_PUSH: &str = "peer_no_push";
 }
 
 pub fn now_ms() -> u64 {
@@ -468,6 +470,17 @@ impl Board {
         }
     }
 
+    /// Forget the finished transfers of `contact_id` (`None` = all). Unfinished
+    /// ones are never touched. Returns how many were removed.
+    pub fn clear_finished(&self, contact_id: Option<&str>) -> usize {
+        let mut g = self.inner.lock().unwrap();
+        let before = g.len();
+        g.retain(|_, e| {
+            !(e.info.state.is_finished() && contact_id.is_none_or(|c| c == e.info.contact_id))
+        });
+        before - g.len()
+    }
+
     /// Cancel every unfinished transfer with `contact_id` in `direction`
     /// (`None` = both). Returns how many were signalled.
     pub fn cancel_contact(&self, contact_id: &str, direction: Option<Direction>) -> usize {
@@ -576,6 +589,11 @@ impl History {
             Ok(None) => false,
             Err(_) => true,
         };
+        if damaged && self.adopt_staged_copy(keys) {
+            // A clear died after overwriting the old file and before the
+            // rename: the staged copy is the history.
+            return self.prepare();
+        }
         if damaged {
             match state_crypto::set_aside(&self.path) {
                 Ok(p) => warn!("the transfer history cannot be opened; it was moved to {p:?}"),
@@ -584,6 +602,14 @@ impl History {
             return 0;
         }
         entries
+    }
+
+    /// If a complete staged copy (`push_history.jsonl.tmp`) exists, move it into
+    /// place. `true` when it was adopted.
+    fn adopt_staged_copy(&self, keys: &StateKeys) -> bool {
+        let tmp =
+            crate::paths::PUSH_HISTORY_TMP.in_dir(self.path.parent().unwrap_or(Path::new("")));
+        state_crypto::adopt_staged_log(keys, Label::PushHistory, &tmp, &self.path)
     }
 
     /// Stream the entries, oldest first, to `f`. A damaged tail ends the walk.
@@ -623,7 +649,8 @@ impl History {
             seen += 1;
         });
         if ok {
-            let _ = out.commit();
+            // The trimmed-away entries are overwritten, not just unlinked.
+            let _ = out.commit_shredding();
         }
     }
 
@@ -647,6 +674,46 @@ impl History {
                 *guard = None;
             }
         }
+    }
+
+    /// Delete the finished entries of `contact_id` (`None` = every contact) from the
+    /// file: the log is rewritten without them and the old file's bytes are
+    /// overwritten before the replacement takes its place, so the removed
+    /// names and paths cannot be read back from the disk. Returns how many
+    /// entries were removed. Everything written after this call starts a new
+    /// file as usual; entries of other contacts are kept in order.
+    pub fn clear_finished(&self, contact_id: Option<&str>) -> Result<usize, String> {
+        let Some(keys) = &self.keys else {
+            return Ok(0);
+        };
+        let mut guard = self.writer.lock().unwrap();
+        *guard = None;
+        let tmp =
+            crate::paths::PUSH_HISTORY_TMP.in_dir(self.path.parent().unwrap_or(Path::new("")));
+        let mut removed = 0usize;
+        let mut failed: Option<String> = None;
+        let mut out = match LogRewrite::begin(keys, Label::PushHistory, &self.path, &tmp) {
+            Ok(o) => o,
+            Err(e) => return Err(e.to_string()),
+        };
+        self.for_each(|e, raw| {
+            let hit = e.state.is_finished() && contact_id.is_none_or(|c| c == e.contact_id);
+            if hit {
+                removed += 1;
+            } else if failed.is_none() {
+                if let Err(err) = out.append(raw) {
+                    failed = Some(err.to_string());
+                }
+            }
+        });
+        if let Some(f) = failed {
+            return Err(f);
+        }
+        if removed == 0 {
+            return Ok(0);
+        }
+        out.commit_shredding().map_err(|e| e.to_string())?;
+        Ok(removed)
     }
 
     /// Newest first, at most `limit` (and never more than the cap).
@@ -713,6 +780,102 @@ mod tests {
         assert_eq!(l[0].id, "2098");
         let total = h.list(100_000).len();
         assert!(total <= HISTORY_KEEP, "{total}");
+    }
+
+    fn named(i: usize, contact: &str, name: &str, state: PushState) -> HistoryEntry {
+        HistoryEntry {
+            contact_id: contact.into(),
+            name: name.into(),
+            state,
+            source_path: Some(format!("C:/private/{name}")),
+            ..entry(i)
+        }
+    }
+
+    #[test]
+    fn clearing_history_removes_entries_for_good_and_only_of_the_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join(HISTORY_FILE);
+        {
+            let h = History::open(dir.path());
+            h.append(&named(1, "a", "secret-alpha.pdf", PushState::Done));
+            h.append(&named(2, "b", "secret-beta.pdf", PushState::Failed));
+            h.append(&named(3, "a", "secret-gamma.pdf", PushState::Rejected));
+            h.append(&named(4, "b", "secret-delta.pdf", PushState::Done));
+            // Hold the old blocks under a second name, as an undelete tool would find them.
+            let alias = dir.path().join("alias");
+            std::fs::hard_link(&p, &alias).unwrap();
+            let before = std::fs::read(&p).unwrap();
+
+            // Per contact: only "a" goes; the order of the rest is kept.
+            assert_eq!(h.clear_finished(Some("a")).unwrap(), 2);
+            let ids: Vec<String> = h.list(10).into_iter().map(|e| e.id).collect();
+            assert_eq!(ids, vec!["0004", "0002"]);
+            // The old file's bytes were overwritten, not unlinked.
+            let left = std::fs::read(&alias).unwrap();
+            assert_eq!(left.len(), before.len());
+            assert_ne!(left, before);
+            std::fs::remove_file(&alias).unwrap();
+            // Nothing to clear for a contact with no entries: no change, no error.
+            assert_eq!(h.clear_finished(Some("nobody")).unwrap(), 0);
+            // Writing continues into the new file.
+            h.append(&named(5, "a", "secret-epsilon.pdf", PushState::Done));
+            assert_eq!(h.list(10).len(), 3);
+            // Everything.
+            assert_eq!(h.clear_finished(None).unwrap(), 3);
+            assert!(h.list(10).is_empty());
+        }
+        // After a restart (reopened from disk) they are still gone.
+        let h = History::open(dir.path());
+        assert!(h.list(10).is_empty());
+        // And the file holds no record any more.
+        h.append(&named(6, "c", "kept.pdf", PushState::Done));
+        assert_eq!(h.list(10).len(), 1);
+    }
+
+    #[test]
+    fn a_clear_that_died_before_the_swap_is_finished_on_the_next_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join(HISTORY_FILE);
+        let tmp = crate::paths::PUSH_HISTORY_TMP.in_dir(dir.path());
+        {
+            let h = History::open(dir.path());
+            h.append(&named(1, "a", "x.pdf", PushState::Done));
+            h.append(&named(2, "b", "y.pdf", PushState::Done));
+        }
+        // The state of a clear of "a" killed between the overwrite and the rename.
+        {
+            let keys = StateKeys::open_or_init(dir.path()).unwrap();
+            let mut out = LogRewrite::begin(&keys, Label::PushHistory, &p, &tmp).unwrap();
+            out.append(&serde_json::to_vec(&named(2, "b", "y.pdf", PushState::Done)).unwrap())
+                .unwrap();
+            drop(out.finish().unwrap());
+        }
+        assert!(state_crypto::overwrite_after(&p, 6).unwrap());
+        let h = History::open(dir.path());
+        let l = h.list(10);
+        assert_eq!(l.len(), 1);
+        assert_eq!(l[0].name, "y.pdf");
+        assert!(!tmp.exists());
+    }
+
+    #[test]
+    fn board_clear_finished_keeps_unfinished_and_other_contacts() {
+        let b = Board::new();
+        let (done_a, _r1) = b.create(Direction::Out, "a", "A", "one", 1, PushState::Queued);
+        let (done_b, _r2) = b.create(Direction::In, "b", "B", "two", 1, PushState::Queued);
+        let (run_a, _r3) = b.create(Direction::Out, "a", "A", "three", 1, PushState::Queued);
+        let (wait_a, _r4) = b.create(Direction::Out, "a", "A", "four", 1, PushState::Queued);
+        b.update(&done_a, |i| i.state = PushState::Done);
+        b.update(&done_b, |i| i.state = PushState::Failed);
+        b.update(&run_a, |i| i.state = PushState::Sending);
+        b.update(&wait_a, |i| i.state = PushState::Waiting);
+        assert_eq!(b.clear_finished(Some("a")), 1);
+        assert!(b.get(&done_a).is_none() && b.get(&done_b).is_some());
+        assert_eq!(b.clear_finished(None), 1);
+        assert!(b.get(&done_b).is_none());
+        assert!(b.get(&run_a).is_some() && b.get(&wait_a).is_some());
+        assert_eq!(b.clear_finished(None), 0);
     }
 
     #[test]

@@ -71,6 +71,11 @@ pub struct MessageInfo {
     pub reason: Option<String>,
     pub sent_ms: u64,
     pub at_ms: u64,
+    /// For `queued` / `sending`: when the last delivery attempt started (ms
+    /// since the epoch), 0 when none has been made yet. Older daemons do not
+    /// send it.
+    #[serde(default)]
+    pub tried_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +93,14 @@ pub struct ConversationInfo {
     /// the contact's own switch are both on).
     #[serde(default = "default_true")]
     pub read_receipts: bool,
+    /// Why the oldest waiting message did not get through on its last attempt
+    /// (a stable word such as `no_route` or `peer_no_chat`); `None` when
+    /// nothing waits or no attempt has been made. Older daemons omit it.
+    #[serde(default)]
+    pub pending_reason: Option<String>,
+    /// When that attempt started (ms since the epoch), 0 if none.
+    #[serde(default)]
+    pub pending_tried_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -200,6 +213,7 @@ fn info_of(m: &super::store::StoredMessage) -> MessageInfo {
         reason: m.reason.clone(),
         sent_ms: m.sent_ms,
         at_ms: m.at_ms,
+        tried_ms: m.tried_ms,
     }
 }
 
@@ -264,7 +278,10 @@ pub fn handle_with(
                 .filter(|c| c.count > 0 || svc.contacts().by_endpoint(&c.peer).is_some())
                 .map(|c| {
                     let contact = svc.contacts().by_endpoint(&c.peer);
+                    let waiting = core.outbox.first_for(&c.peer);
                     ConversationInfo {
+                        pending_reason: waiting.as_ref().and_then(|e| e.last_error.clone()),
+                        pending_tried_ms: waiting.as_ref().map_or(0, |e| e.last_try_ms),
                         endpoint_id: hex::encode(c.peer),
                         fingerprint: fingerprint(&c.peer),
                         label: contact.as_ref().map(|x| x.label.clone()),

@@ -61,7 +61,7 @@ pub mod log;
 pub mod migrate;
 
 pub use doc::{read_document, write_document};
-pub use log::{LogReader, LogRewrite, LogWriter};
+pub use log::{adopt_staged_log, LogReader, LogRewrite, LogWriter};
 
 /// XChaCha20-Poly1305 nonce length.
 pub(crate) const NONCE_LEN: usize = 24;
@@ -623,25 +623,44 @@ pub(crate) fn fsync_path(path: &Path) -> std::io::Result<()> {
 
 /// Overwrite `path` with random bytes, flush, and remove it. Missing is fine.
 pub fn overwrite_and_remove(path: &Path) -> std::io::Result<()> {
-    let len = match std::fs::metadata(path) {
-        Ok(m) => m.len(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e),
-    };
-    {
-        let mut f = std::fs::OpenOptions::new().write(true).open(path)?;
-        let mut buf = vec![0u8; 64 * 1024];
-        let mut left = len;
-        while left > 0 {
-            let n = left.min(buf.len() as u64) as usize;
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut buf[..n]);
-            f.write_all(&buf[..n])?;
-            left -= n as u64;
-        }
-        f.flush()?;
-        f.sync_all()?;
+    if !overwrite_in_place(path)? {
+        return Ok(());
     }
     std::fs::remove_file(path)
+}
+
+/// Overwrite the existing bytes of `path` with random bytes (same length) and
+/// flush them. `Ok(false)` when the file does not exist.
+pub fn overwrite_in_place(path: &Path) -> std::io::Result<bool> {
+    overwrite_after(path, 0)
+}
+
+/// As [`overwrite_in_place`], but the first `keep` bytes stay as they are.
+/// Used for a log that is about to be replaced: the 6 bytes of magic, version
+/// and label say what kind of file it is (they hold nothing private), so the
+/// overwritten file is still recognised as a damaged log, not mistaken for a
+/// file of an older format.
+pub(crate) fn overwrite_after(path: &Path, keep: u64) -> std::io::Result<bool> {
+    use std::io::{Seek, SeekFrom};
+    let len = match std::fs::metadata(path) {
+        Ok(m) => m.len(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    let mut f = std::fs::OpenOptions::new().write(true).open(path)?;
+    let keep = keep.min(len);
+    f.seek(SeekFrom::Start(keep))?;
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut left = len - keep;
+    while left > 0 {
+        let n = left.min(buf.len() as u64) as usize;
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut buf[..n]);
+        f.write_all(&buf[..n])?;
+        left -= n as u64;
+    }
+    f.flush()?;
+    f.sync_all()?;
+    Ok(true)
 }
 
 /// Move an unreadable state file aside (never delete it) so a fresh one can be

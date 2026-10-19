@@ -665,17 +665,14 @@ pub fn fold_attempts<'a>(rows: &[&'a Row]) -> Vec<Group<'a>> {
     groups
 }
 
-/// Hide finished rows that were cleared (`at_ms <= cleared_before_ms`) and cap how many finished
-/// rows are drawn. Unfinished rows are always kept.
-pub fn visible_rows(rows: &[Row], cleared_before_ms: u64, max_finished: usize) -> Vec<&Row> {
+/// Cap how many finished rows are drawn. Unfinished rows are always kept. (Deleting finished
+/// rows is the daemon's job: [`PushRequest::ClearFinished`]; nothing is hidden here.)
+pub fn visible_rows(rows: &[Row], max_finished: usize) -> Vec<&Row> {
     let mut finished = 0usize;
     rows.iter()
         .filter(|r| {
             if !r.finished() {
                 return true;
-            }
-            if r.at_ms <= cleared_before_ms {
-                return false;
             }
             finished += 1;
             finished <= max_finished
@@ -854,7 +851,8 @@ pub struct ContactsUi {
     baseline_done: bool,
     unseen: u32,
     notices: Vec<String>,
-    cleared_before_ms: u64,
+    /// The "delete finished transfers" confirmation is open.
+    clear_confirm: bool,
 
     // card
     show_qr: bool,
@@ -881,6 +879,8 @@ pub struct ContactsUi {
     open_rx: std::sync::mpsc::Receiver<String>,
     /// The path the last open was aimed at (named in the notice if it fails).
     last_open: String,
+    /// The notice was just set: bring it into view once.
+    scroll_to_msg: bool,
     /// Hosts whose folded earlier attempts are expanded.
     show_earlier: HashSet<String>,
 
@@ -915,6 +915,7 @@ impl Default for ContactsUi {
             open_tx,
             open_rx,
             last_open: String::new(),
+            scroll_to_msg: false,
             show_earlier: HashSet::new(),
             availability: Availability::Unknown,
             ever_ok: false,
@@ -938,7 +939,7 @@ impl Default for ContactsUi {
             baseline_done: false,
             unseen: 0,
             notices: Vec::new(),
-            cleared_before_ms: 0,
+            clear_confirm: false,
             show_qr: false,
             copied_at: None,
             invite_copied_at: None,
@@ -1063,13 +1064,18 @@ impl ContactsUi {
     /// a file that is gone opens its folder and says so, and a launcher that fails is reported
     /// with the path that was tried.
     fn open_received(&mut self, c: &ContactStrings, r: &Row, action: Action) {
-        let Some(sa) = r.saved_as.as_deref() else {
+        // A received file is in the inbox; a sent one is where it was sent from.
+        let Some(sa) = (if r.outbound {
+            r.source_path.as_deref()
+        } else {
+            r.saved_as.as_deref()
+        }) else {
             return;
         };
         let contact_dir = self
             .contacts
             .iter()
-            .find(|x| x.id == r.contact_id)
+            .find(|x| x.id == r.contact_id && !r.outbound)
             .map(|x| PathBuf::from(&x.inbox_dir));
         match open_path::resolve_saved(sa, contact_dir.as_deref(), self.inbox_root().as_deref()) {
             Resolved::Found(p) => {
@@ -1078,7 +1084,7 @@ impl ContactsUi {
             }
             Resolved::Missing { tried, folder } => {
                 let shown = crate::transfers::plain_path(&tried.to_string_lossy()).to_owned();
-                self.page_msg = Some((fill(c.open_missing, &[("path", &shown)]), true));
+                self.say(fill(c.open_missing, &[("path", &shown)]), true);
                 if let Some(f) = folder {
                     self.last_open = crate::transfers::plain_path(&f.to_string_lossy()).to_owned();
                     open_path::launch(Action::Open, f, self.open_tx.clone());
@@ -1094,23 +1100,28 @@ impl ContactsUi {
             self.last_open = crate::transfers::plain_path(dir).to_owned();
             open_path::launch(Action::Open, p, self.open_tx.clone());
         } else {
-            self.page_msg = Some((
+            self.say(
                 fill(
                     c.open_missing,
                     &[("path", crate::transfers::plain_path(dir))],
                 ),
                 true,
-            ));
+            );
         }
+    }
+
+    /// Show a notice at the top of the page and scroll it into view (the button that caused it
+    /// is usually far below, and a notice nobody sees is the same as nothing happening).
+    fn say(&mut self, text: String, is_err: bool) {
+        self.page_msg = Some((text, is_err));
+        self.scroll_to_msg = true;
     }
 
     /// Failures reported by the launcher threads become a visible notice.
     fn collect_open_failures(&mut self, c: &ContactStrings) {
         while let Ok(why) = self.open_rx.try_recv() {
-            self.page_msg = Some((
-                fill(c.open_failed, &[("path", &self.last_open), ("why", &why)]),
-                true,
-            ));
+            let text = fill(c.open_failed, &[("path", &self.last_open), ("why", &why)]);
+            self.say(text, true);
         }
     }
 
@@ -1318,7 +1329,20 @@ impl ContactsUi {
                     // Answered with a closed connection or an error frame: no push in that daemon.
                     self.availability = Availability::OldDaemon;
                 }
-                let text = f.message.text(self.err_locale, self.err_technical);
+                let text = if matches!(req, PushRequest::ClearFinished { .. }) && !f.daemon_down {
+                    // A daemon from before this request answers that it does not know it (or
+                    // drops the connection): say so, nothing was deleted.
+                    let mut t = c.clear_old_daemon.to_owned();
+                    if self.err_technical {
+                        t.push_str(&format!(
+                            " ({})",
+                            f.message.text(self.err_locale, self.err_technical)
+                        ));
+                    }
+                    t
+                } else {
+                    f.message.text(self.err_locale, self.err_technical)
+                };
                 self.fail_request(&req, text);
                 return;
             }
@@ -1357,7 +1381,8 @@ impl ContactsUi {
             PushRequest::ContactRemove { .. }
             | PushRequest::ContactUpdate { .. }
             | PushRequest::Cancel { .. }
-            | PushRequest::RetryNow { .. } => {
+            | PushRequest::RetryNow { .. }
+            | PushRequest::ClearFinished { .. } => {
                 self.page_msg = Some((text, true));
                 self.refresh_soon();
             }
@@ -1434,6 +1459,21 @@ impl ContactsUi {
                 self.rebuild_rows();
             }
             PushResponse::Inbox { dir } => self.inbox_dir = Some(dir),
+            PushResponse::Cleared {
+                transfers, history, ..
+            } => {
+                // The daemon deleted them; drop what this screen still holds of them and read
+                // the lists again so only what the daemon has is shown.
+                self.board.retain(|t| !t.state.is_finished());
+                self.history.clear();
+                self.rebuild_rows();
+                let n = transfers.max(history);
+                self.page_msg = Some((fill(c.clear_done, &[("n", &n.to_string())]), false));
+                self.refresh_soon();
+                self.last_history = Instant::now();
+                self.out
+                    .push_back(PushRequest::History { limit: Some(200) });
+            }
             PushResponse::Error { .. } => {}
         }
     }
@@ -1582,7 +1622,7 @@ impl ContactsUi {
 
         if let Some((msg, is_err)) = self.page_msg.clone() {
             let color = if is_err { pal().danger } else { pal().success };
-            card_frame().show(ui, |ui| {
+            let card = card_frame().show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.add(egui::Label::new(egui::RichText::new(&msg).color(color)).wrap(true));
                 ui.add_space(4.0);
@@ -1590,6 +1630,9 @@ impl ContactsUi {
                     self.page_msg = None;
                 }
             });
+            if std::mem::take(&mut self.scroll_to_msg) {
+                ui.scroll_to_rect(card.response.rect, Some(egui::Align::TOP));
+            }
             ui.add_space(GAP);
         }
 
@@ -1608,6 +1651,7 @@ impl ContactsUi {
         ui.add_space(GAP);
         self.inbox_ui(ui, c);
         self.remove_dialog(ui.ctx(), c);
+        self.clear_dialog(ui.ctx(), c);
     }
 
     fn notice_card(
@@ -2069,6 +2113,44 @@ impl ContactsUi {
         }
     }
 
+    /// Confirm deleting the history of finished transfers (it is deleted in the daemon, on disk).
+    fn clear_dialog(&mut self, ctx: &egui::Context, c: &ContactStrings) {
+        if !self.clear_confirm {
+            return;
+        }
+        crate::a11y::dialog_enter(ctx, "clear_finished");
+        if crate::a11y::esc_pressed(ctx) {
+            self.clear_confirm = false;
+            crate::a11y::dialog_leave(ctx, "clear_finished");
+            return;
+        }
+        egui::Window::new(c.clear_title)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .default_width(380.0)
+            .max_width(420.0)
+            .show(ctx, |ui| {
+                ui.set_max_width(400.0);
+                ui.add(egui::Label::new(c.clear_body).wrap(true));
+                ui.add_space(8.0);
+                ui.horizontal_wrapped(|ui| {
+                    if ui.add(danger_button(c.clear_confirm)).clicked() {
+                        self.out
+                            .push_back(PushRequest::ClearFinished { contact: None });
+                        self.clear_confirm = false;
+                        crate::a11y::dialog_leave(ui.ctx(), "clear_finished");
+                    }
+                    let cancel = ui.button(c.cancel);
+                    crate::a11y::dialog_focus_safe_button(ui.ctx(), "clear_finished", &cancel);
+                    if cancel.clicked() {
+                        self.clear_confirm = false;
+                        crate::a11y::dialog_leave(ui.ctx(), "clear_finished");
+                    }
+                });
+            });
+    }
+
     fn remove_dialog(&mut self, ctx: &egui::Context, c: &ContactStrings) {
         let Some((id, label)) = self.remove_target.clone() else {
             return;
@@ -2123,20 +2205,16 @@ impl ContactsUi {
                 if let Some(t) = self.speed.header_total(&self.rows, ui.max_rect().width()) {
                     ui.label(egui::RichText::new(t).color(pal().muted));
                 }
-                if self
-                    .rows
-                    .iter()
-                    .any(|r| r.finished() && r.at_ms > self.cleared_before_ms)
+                if self.rows.iter().any(|r| r.finished())
                     && ui.button(c.btn_clear_finished).clicked()
                 {
-                    self.cleared_before_ms = self.rows.iter().map(|r| r.at_ms).max().unwrap_or(0);
+                    self.clear_confirm = true;
                 }
             });
-            let rows: Vec<Row> =
-                visible_rows(&self.rows, self.cleared_before_ms, MAX_FINISHED_SHOWN)
-                    .into_iter()
-                    .cloned()
-                    .collect();
+            let rows: Vec<Row> = visible_rows(&self.rows, MAX_FINISHED_SHOWN)
+                .into_iter()
+                .cloned()
+                .collect();
             if rows.is_empty() {
                 ui.add(
                     egui::Label::new(egui::RichText::new(c.tr_empty).color(pal().muted)).wrap(true),
@@ -2250,6 +2328,8 @@ impl ContactsUi {
             let can_cancel = !r.finished();
             let can_retry = self.can_retry(r);
             let received = !r.outbound && r.state == PushState::Done && r.saved_as.is_some();
+            let can_open =
+                received || (r.outbound && r.state == PushState::Done && r.source_path.is_some());
             if received {
                 if let Some(sa) = r.saved_as.as_deref() {
                     let contact_dir = self
@@ -2275,7 +2355,7 @@ impl ContactsUi {
                 }
             }
             let can_try_now = r.outbound && r.state == PushState::Waiting;
-            if can_cancel || can_retry || can_try_now || received {
+            if can_cancel || can_retry || can_try_now || can_open {
                 ui.add_space(4.0);
                 ui.horizontal_wrapped(|ui| {
                     if can_try_now && ui.button(c.btn_try_now).clicked() {
@@ -2289,7 +2369,7 @@ impl ContactsUi {
                     if can_retry && ui.button(c.btn_retry).clicked() {
                         self.retry(r);
                     }
-                    if received {
+                    if can_open {
                         if ui.button(c.btn_open_file).clicked() {
                             self.open_received(c, r, Action::Open);
                         }
@@ -3047,7 +3127,7 @@ mod tests {
     }
 
     #[test]
-    fn clear_finished_hides_old_and_caps_the_rest() {
+    fn visible_rows_caps_the_finished_ones_and_never_hides_by_time() {
         let mut v = vec![t("run", Direction::Out, "bob", PushState::Sending, 1)];
         for i in 0..10 {
             v.push(t(
@@ -3059,13 +3139,90 @@ mod tests {
             ));
         }
         let r = rows(v);
-        assert_eq!(visible_rows(&r, 0, 100).len(), 11);
-        assert_eq!(visible_rows(&r, 0, 3).len(), 4);
-        // Cleared up to 14: f0..f4 hidden, running one stays.
-        let vis = visible_rows(&r, 14, 100);
-        assert_eq!(vis.len(), 1 + 5);
-        assert!(vis.iter().any(|x| x.id == "run"));
-        assert_eq!(visible_rows(&r, 1000, 100).len(), 1);
+        assert_eq!(visible_rows(&r, 100).len(), 11);
+        assert_eq!(visible_rows(&r, 3).len(), 4);
+        assert!(visible_rows(&r, 0).iter().all(|x| x.id == "run"));
+    }
+
+    #[test]
+    fn clear_finished_asks_the_daemon_and_shows_what_it_has_afterwards() {
+        let c = contact_strings(Locale::En);
+        let mut ui = ContactsUi::default();
+        let run = t("run", Direction::Out, "bob", PushState::Sending, 1);
+        ui.on_reply(
+            c,
+            PushRequest::Status { id: None },
+            Ok(PushResponse::Transfers(vec![
+                run,
+                t("done", Direction::Out, "bob", PushState::Done, 5),
+            ])),
+        );
+        assert_eq!(ui.rows.len(), 2);
+        ui.out.clear();
+        // The daemon's answer: the finished row leaves, the running one stays, and the lists
+        // are read again from the daemon (no local hiding).
+        ui.on_reply(
+            c,
+            PushRequest::ClearFinished { contact: None },
+            Ok(PushResponse::Cleared {
+                transfers: 1,
+                history: 4,
+                partials: 0,
+            }),
+        );
+        assert_eq!(ui.rows.len(), 1);
+        assert_eq!(ui.rows[0].id, "run");
+        assert!(ui
+            .out
+            .iter()
+            .any(|r| matches!(r, PushRequest::History { .. })));
+        let (msg, is_err) = ui.page_msg.clone().unwrap();
+        assert!(!is_err && msg.contains('4'), "{msg}");
+        // A daemon that still holds the rows would send them again: they show again, which is
+        // the point (nothing is hidden by the screen).
+        ui.on_reply(
+            c,
+            PushRequest::Status { id: None },
+            Ok(PushResponse::Transfers(vec![
+                t("run", Direction::Out, "bob", PushState::Sending, 1),
+                t("done", Direction::Out, "bob", PushState::Done, 5),
+            ])),
+        );
+        assert_eq!(ui.rows.len(), 2);
+    }
+
+    #[test]
+    fn a_daemon_that_predates_clearing_is_told_apart_and_nothing_is_dropped() {
+        let c = contact_strings(Locale::En);
+        let mut ui = ContactsUi::default();
+        ui.on_reply(
+            c,
+            PushRequest::Status { id: None },
+            Ok(PushResponse::Transfers(vec![t(
+                "done",
+                Direction::Out,
+                "bob",
+                PushState::Done,
+                5,
+            )])),
+        );
+        ui.on_reply(
+            c,
+            PushRequest::ClearFinished { contact: None },
+            Err(PushFail {
+                message: "unknown variant `ClearFinished`".into(),
+                daemon_down: false,
+            }),
+        );
+        let (msg, is_err) = ui.page_msg.clone().unwrap();
+        assert!(is_err);
+        assert_eq!(msg, c.clear_old_daemon);
+        assert_eq!(
+            ui.rows.len(),
+            1,
+            "the rows are still there: nothing was deleted"
+        );
+        assert_eq!(ui.availability, Availability::Ok);
     }
 
     #[test]

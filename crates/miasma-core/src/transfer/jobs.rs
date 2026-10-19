@@ -443,7 +443,9 @@ impl TransferRegistry {
             if let Some(j) = ReceiveJournal::load(jpath) {
                 let expected = part_path_for(Path::new(&j.output_path));
                 if expected == Path::new(&j.part_path) {
-                    let _ = std::fs::remove_file(&expected);
+                    if crate::state_crypto::overwrite_and_remove(&expected).is_err() {
+                        let _ = std::fs::remove_file(&expected);
+                    }
                 }
             }
             ReceiveJournal::remove(jpath);

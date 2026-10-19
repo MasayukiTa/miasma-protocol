@@ -99,6 +99,8 @@ fn open(dir: &std::path::Path, seed: &[u8; 32], keys: Arc<StateKeys>) -> Node {
     let chat = Arc::new(ChatCore::new(store, outbox, id, 4096));
     let gs = GroupStore::open(&chat_dir, keys, chat.own_id(), s).unwrap();
     let core = GroupCore::new(chat.clone(), gs, seed).unwrap();
+    // This test measures the answered-invitation path.
+    core.set_auto_join(false);
     Node { chat, core }
 }
 

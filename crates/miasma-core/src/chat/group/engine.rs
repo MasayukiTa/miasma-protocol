@@ -30,7 +30,10 @@
 
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use ed25519_dalek::SigningKey;
@@ -107,8 +110,10 @@ impl From<crate::chat::store::StoreError> for GroupError {
 pub enum GroupEventKind {
     /// A message arrived.
     Received,
-    /// We were invited into a group.
+    /// We were invited into a group and wait for an answer.
     Invited,
+    /// We were added to a group and joined at once (auto-join).
+    Joined,
     /// The member list or our standing changed.
     Changed,
 }
@@ -162,6 +167,36 @@ pub struct GroupSummary {
     pub pending: usize,
 }
 
+/// What this device knows about one member being in the group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemberStatus {
+    /// This device.
+    You,
+    /// The member has shown it is in the group.
+    Joined,
+    /// Listed, but nothing has shown yet that the member joined: it has not
+    /// answered an invitation, or has not been online since.
+    Invited,
+    /// Our last attempt to reach the member failed; the word says how
+    /// (`no_route`, `connect_failed`, `send_disabled`, ...).
+    Unreachable(String),
+    /// The member's Miasma has no group chat: it must be updated.
+    NoGroupSupport,
+}
+
+impl MemberStatus {
+    /// A stable word for IPC and logs.
+    pub fn name(&self) -> &'static str {
+        match self {
+            MemberStatus::You => "you",
+            MemberStatus::Joined => "joined",
+            MemberStatus::Invited => "invited",
+            MemberStatus::Unreachable(_) => "unreachable",
+            MemberStatus::NoGroupSupport => "no_group_support",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MemberView {
     pub id: [u8; 32],
@@ -170,6 +205,7 @@ pub struct MemberView {
     /// A trusted contact of this device.
     pub verified: bool,
     pub you: bool,
+    pub status: MemberStatus,
 }
 
 #[derive(Debug, Clone)]
@@ -178,6 +214,15 @@ pub struct GroupDetail {
     pub members: Vec<MemberView>,
     pub is_admin: bool,
     pub my_counter: u64,
+    /// Who added us, when we joined through an invitation.
+    pub added_by: Option<[u8; 32]>,
+}
+
+/// The delivery failure words that mean the member's software has no group
+/// chat (see [`crate::chat::proto::fail`]).
+fn means_no_group_support(reason: &str) -> bool {
+    reason == crate::chat::proto::fail::PEER_NO_GROUP
+        || reason == crate::chat::proto::fail::UNSUPPORTED
 }
 
 #[derive(Debug, Clone)]
@@ -198,6 +243,9 @@ struct Events {
 struct Inner {
     groups: BTreeMap<[u8; 16], GroupState>,
     events: Events,
+    /// Why the last attempt to deliver to a member failed (memory only; a
+    /// success removes the entry).
+    reasons: HashMap<[u8; 32], String>,
 }
 
 pub struct GroupCore {
@@ -206,6 +254,8 @@ pub struct GroupCore {
     own: [u8; 32],
     store: GroupStore,
     max_text: usize,
+    /// Join at once when a trusted administrator adds us (`chat.group_auto_join`).
+    auto_join: AtomicBool,
     inner: Mutex<Inner>,
 }
 
@@ -238,14 +288,44 @@ impl GroupCore {
             own,
             store,
             max_text,
+            auto_join: AtomicBool::new(true),
             inner: Mutex::new(Inner {
                 groups,
                 events: Events {
                     next: 1,
                     items: VecDeque::new(),
                 },
+                reasons: HashMap::new(),
             }),
         })
+    }
+
+    /// Whether an invitation from a trusted administrator makes us a member
+    /// at once (the default) instead of waiting for an answer.
+    pub fn auto_join(&self) -> bool {
+        self.auto_join.load(Ordering::Relaxed)
+    }
+
+    /// Applies to invitations that arrive from now on; invitations already
+    /// waiting keep waiting.
+    pub fn set_auto_join(&self, on: bool) {
+        self.auto_join.store(on, Ordering::Relaxed);
+    }
+
+    /// The delivery worker's last word about `peer`: `Some(reason)` after a
+    /// failed or refused attempt, `None` after a success.
+    pub fn note_delivery(&self, peer: &[u8; 32], reason: Option<&str>) {
+        let mut g = self.lock();
+        match reason {
+            Some(r) => {
+                if g.reasons.len() < 4 * MAX_MEMBERS || g.reasons.contains_key(peer) {
+                    g.reasons.insert(*peer, r.to_owned());
+                }
+            }
+            None => {
+                g.reasons.remove(peer);
+            }
+        }
     }
 
     pub fn own_id(&self) -> [u8; 32] {
@@ -368,11 +448,29 @@ impl GroupCore {
                     hint: m.hint.clone(),
                     verified: m.id != self.own && trusted(&m.id),
                     you: m.id == self.own,
+                    status: self.member_status(&g, st, &m.id),
                 })
                 .collect(),
             is_admin: latest.is_admin(&self.own),
             my_counter: st.my_counter,
+            added_by: st.added_by,
         })
+    }
+
+    fn member_status(&self, g: &Inner, st: &GroupState, id: &[u8; 32]) -> MemberStatus {
+        if *id == self.own {
+            return MemberStatus::You;
+        }
+        // A member that has shown it is in the group stays joined, whatever
+        // the network does later.
+        if st.confirmed.contains(id) || st.vectors.contains_key(id) {
+            return MemberStatus::Joined;
+        }
+        match g.reasons.get(id) {
+            Some(r) if means_no_group_support(r) => MemberStatus::NoGroupSupport,
+            Some(r) => MemberStatus::Unreachable(r.clone()),
+            None => MemberStatus::Invited,
+        }
     }
 
     /// The members listed now (empty for an unknown group).
@@ -633,20 +731,43 @@ impl GroupCore {
         Ok(others)
     }
 
-    /// Answer an invitation with yes.
-    pub fn accept_invite(&self, gid: &[u8; 16]) -> Result<(), GroupError> {
+    /// Answer an invitation with yes. Returns the members to wake: each is
+    /// owed a request for the newest descriptors, which is also how they learn
+    /// that we joined (a device that has not joined refuses it).
+    pub fn accept_invite(&self, gid: &[u8; 16]) -> Result<Vec<[u8; 32]>, GroupError> {
         let mut g = self.lock();
         let st = g.groups.get_mut(gid).ok_or(GroupError::NotFound)?;
         match st.status {
-            Status::Pending { .. } => {
-                st.status = Status::Joined;
+            Status::Pending { invited_by } => {
+                let others = Self::become_member(st, self.own, invited_by);
                 self.save(st)?;
                 Self::push_event(&mut g, *gid, GroupEventKind::Changed, None);
-                Ok(())
+                Ok(others)
             }
-            Status::Joined => Ok(()),
+            Status::Joined => Ok(Vec::new()),
             _ => Err(GroupError::NotJoined),
         }
+    }
+
+    /// We are in the group now, added by `by`: remember who, and owe each of
+    /// the others a sync request so they (and the person who added us) see
+    /// that we joined and we see that they did.
+    fn become_member(st: &mut GroupState, own: [u8; 32], by: [u8; 32]) -> Vec<[u8; 32]> {
+        st.status = Status::Joined;
+        st.added_by = Some(by);
+        let epoch = st.chain.epoch();
+        let others: Vec<[u8; 32]> = st
+            .chain
+            .latest()
+            .members
+            .iter()
+            .map(|m| m.id)
+            .filter(|id| *id != own)
+            .collect();
+        for o in &others {
+            st.owe(*o, CtrlKind::Sync, epoch);
+        }
+        others
     }
 
     /// Decline an invitation, or drop a group we left or were removed from:
@@ -829,6 +950,11 @@ impl GroupCore {
                     p.to.retain(|t| t != peer);
                 }
                 st.pending.retain(|p| !p.to.is_empty());
+                if delivered {
+                    // A device that has not joined answers "busy": an accepted
+                    // text means the member is in the group.
+                    st.confirm(peer);
+                }
                 if let Some(l) = st.ledger_mut(id) {
                     if delivered {
                         l.delivered = l.delivered.saturating_add(1);
@@ -887,7 +1013,7 @@ impl GroupCore {
         let mut g = self.lock();
         match rec {
             Record::Text(t) => self.handle_text(&mut g, peer, t, now, trusted, kick),
-            Record::Descs(ds) => self.handle_descs(&mut g, peer, ds, now, trusted),
+            Record::Descs(ds) => self.handle_descs(&mut g, peer, ds, now, trusted, kick),
             Record::Sync { gid, .. } => {
                 let Some(st) = g.groups.get_mut(&gid) else {
                     return AckStatus::NotAllowed;
@@ -898,11 +1024,14 @@ impl GroupCore {
                 if matches!(st.status, Status::Pending { .. }) {
                     return AckStatus::Busy;
                 }
-                if st.owe(*peer, CtrlKind::Descs, 0) {
+                // Only a device that joined asks for descriptors.
+                let news = st.chain.latest().is_member(peer) && st.confirm(peer);
+                let owed = st.owe(*peer, CtrlKind::Descs, 0);
+                if owed {
                     kick.push(*peer);
-                    if self.save(st).is_err() {
-                        return AckStatus::Failed;
-                    }
+                }
+                if (owed || news) && self.save(st).is_err() {
+                    return AckStatus::Failed;
                 }
                 AckStatus::Stored
             }
@@ -967,6 +1096,7 @@ impl GroupCore {
             return AckStatus::Failed;
         }
         st.vectors.entry(*peer).or_default().mark(t.counter);
+        st.confirm(peer);
         if self.save(st).is_err() {
             return AckStatus::Failed;
         }
@@ -983,36 +1113,57 @@ impl GroupCore {
         mut ds: Vec<Descriptor>,
         now: u64,
         trusted: &dyn Fn(&[u8; 32]) -> bool,
+        kick: &mut Vec<[u8; 32]>,
     ) -> AckStatus {
         let gid = ds[0].gid;
         if ds.iter().any(|d| d.gid != gid) || !ds.windows(2).all(|w| w[0].epoch < w[1].epoch) {
             return AckStatus::BadRequest;
         }
         ds.shrink_to_fit();
+        let auto_join = self.auto_join();
         let signer_is_peer = ds.last().is_some_and(|d| &d.signer == peer);
         if let Some(st) = g.groups.get_mut(&gid) {
             if !st.chain.ever_member(peer) && !signer_is_peer {
                 return AckStatus::NotAllowed;
             }
             let was = st.status;
-            let before_len = st.chain.latest().clone();
             match st.chain.push_all(ds) {
-                Ok(false) => return AckStatus::Duplicate,
+                Ok(false) => {
+                    // Nothing new, but a device that sends descriptors has
+                    // joined (a device that has not refuses to).
+                    if st.chain.latest().is_member(peer) && st.confirm(peer) {
+                        let _ = self.save(st);
+                    }
+                    return AckStatus::Duplicate;
+                }
                 Ok(true) => {}
                 Err(DescError::Gap) => return AckStatus::BadRequest,
                 Err(_) => return AckStatus::NotAllowed,
             }
-            let _ = before_len;
+            if st.chain.latest().is_member(peer) {
+                st.confirm(peer);
+            }
             let me_listed = st.chain.latest().is_member(&self.own);
+            let mut joined_now = false;
             match (was, me_listed) {
                 (Status::Joined, false) | (Status::Pending { .. }, false) => {
                     st.status = Status::Removed;
                 }
                 (Status::Left | Status::Removed, true) => {
-                    // Added again by someone we trust: ask first, as for a
-                    // new invitation.
+                    // Added again by someone we trust: join at once, or ask
+                    // first, as for a new invitation.
                     if trusted(peer) {
-                        st.status = Status::Pending { invited_by: *peer };
+                        // What we knew of the members before is stale.
+                        st.confirmed.clear();
+                        if st.chain.latest().is_member(peer) {
+                            st.confirm(peer);
+                        }
+                        if auto_join {
+                            kick.extend(Self::become_member(st, self.own, *peer));
+                            joined_now = true;
+                        } else {
+                            st.status = Status::Pending { invited_by: *peer };
+                        }
                     }
                 }
                 _ => {}
@@ -1025,7 +1176,9 @@ impl GroupCore {
             Self::push_event(
                 g,
                 gid,
-                if matches!(new_status, Status::Pending { .. })
+                if joined_now {
+                    GroupEventKind::Joined
+                } else if matches!(new_status, Status::Pending { .. })
                     && !matches!(was, Status::Pending { .. })
                 {
                     GroupEventKind::Invited
@@ -1070,11 +1223,19 @@ impl GroupCore {
         }
         let mut st = GroupState::new(chain, Status::Pending { invited_by: *peer });
         st.last_ms = now;
+        // The person who invited us has joined: they hold the group.
+        st.confirm(peer);
+        let kind = if auto_join {
+            kick.extend(Self::become_member(&mut st, self.own, *peer));
+            GroupEventKind::Joined
+        } else {
+            GroupEventKind::Invited
+        };
         if self.save(&st).is_err() {
             return AckStatus::Failed;
         }
         g.groups.insert(gid, st);
-        Self::push_event(g, gid, GroupEventKind::Invited, None);
+        Self::push_event(g, gid, kind, None);
         AckStatus::Stored
     }
 
