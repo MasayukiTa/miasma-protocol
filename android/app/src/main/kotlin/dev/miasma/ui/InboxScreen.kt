@@ -5,6 +5,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -15,9 +17,19 @@ import androidx.compose.ui.unit.dp
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import dev.miasma.DirectedApi
 import dev.miasma.MiasmaViewModel
+import dev.miasma.R
+import java.io.File
+import java.io.IOException
+import java.util.UUID
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 fun InboxScreen(vm: MiasmaViewModel) {
@@ -35,9 +47,9 @@ fun InboxScreen(vm: MiasmaViewModel) {
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("Inbox", style = MaterialTheme.typography.headlineMedium)
+            Text(stringResource(R.string.inbox_title), style = MaterialTheme.typography.headlineMedium)
             IconButton(onClick = { vm.refreshInbox() }) {
-                Text("↻", style = MaterialTheme.typography.titleLarge)
+                Icon(Icons.Outlined.Refresh, contentDescription = stringResource(R.string.refresh))
             }
         }
 
@@ -47,7 +59,7 @@ fun InboxScreen(vm: MiasmaViewModel) {
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
             ) {
                 Text(
-                    "Daemon not running — directed sharing unavailable",
+                    stringResource(R.string.directed_daemon_unavailable),
                     modifier = Modifier.padding(16.dp),
                     color = MaterialTheme.colorScheme.onErrorContainer,
                 )
@@ -59,7 +71,7 @@ fun InboxScreen(vm: MiasmaViewModel) {
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center,
             ) {
-                Text("No incoming shares", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(stringResource(R.string.inbox_empty), color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         } else {
             LazyColumn(
@@ -79,9 +91,51 @@ private fun InboxCard(item: DirectedApi.EnvelopeItem, vm: MiasmaViewModel) {
     val context = LocalContext.current
     var password by remember { mutableStateOf("") }
     var retrieveError by remember { mutableStateOf<String?>(null) }
+    var retrieveResult by remember { mutableStateOf<String?>(null) }
     var isRetrieving by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
 
-    val (badgeColor, badgeLabel) = inboxStateBadge(item.state)
+    val retrieveFailedText = stringResource(R.string.retrieve_failed)
+    val saveFailedText = stringResource(R.string.save_retrieved_failed)
+    val destinationOpenFailedText = stringResource(R.string.destination_open_failed)
+    val retrievedFileDefault = stringResource(R.string.retrieved_file_default)
+
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) { cleanupOldRetrieveFiles(context.cacheDir) }
+    }
+
+    val saveLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream"),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val dir = File(context.cacheDir, "miasma-retrieve").apply { mkdirs() }
+        val temp = File(dir, "${UUID.randomUUID()}.tmp")
+        isRetrieving = true
+        retrieveError = null
+        retrieveResult = null
+        vm.retrieveDirectedToFile(item.envelopeId, password, temp.absolutePath) { result, error ->
+            if (error != null || result == null) {
+                temp.delete()
+                isRetrieving = false
+                retrieveError = error ?: retrieveFailedText
+            } else {
+                scope.launch {
+                    try {
+                        withContext(Dispatchers.IO) { copyRetrievedFile(context, temp, uri, destinationOpenFailedText) }
+                        retrieveResult = context.getString(R.string.saved_size, formatBytes(result.bytesWritten))
+                    } catch (e: Exception) {
+                        retrieveError = e.message ?: saveFailedText
+                    } finally {
+                        temp.delete()
+                        isRetrieving = false
+                    }
+                }
+            }
+        }
+    }
+
+    val (badgeColor, badgeLabelRes) = inboxStateBadge(item.state)
+    val badgeLabel = stringResource(badgeLabelRes)
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -111,16 +165,16 @@ private fun InboxCard(item: DirectedApi.EnvelopeItem, vm: MiasmaViewModel) {
 
             // Sender
             Text(
-                "From: ${item.senderPubkey.take(20)}…",
+                stringResource(R.string.inbox_from, item.senderPubkey.take(20)),
                 style = MaterialTheme.typography.bodySmall,
             )
 
             // Filename & size
             if (!item.filename.isNullOrEmpty()) {
-                Text("File: ${item.filename}", style = MaterialTheme.typography.bodySmall)
+                Text(stringResource(R.string.file_label, item.filename!!), style = MaterialTheme.typography.bodySmall)
             }
             if (item.fileSize > 0) {
-                Text("Size: ${formatBytes(item.fileSize)}", style = MaterialTheme.typography.bodySmall)
+                Text(stringResource(R.string.size_label, formatBytes(item.fileSize)), style = MaterialTheme.typography.bodySmall)
             }
 
             // Challenge code (for recipient to share with sender)
@@ -133,7 +187,7 @@ private fun InboxCard(item: DirectedApi.EnvelopeItem, vm: MiasmaViewModel) {
                 ) {
                     Column(modifier = Modifier.padding(8.dp)) {
                         Text(
-                            "Challenge code (share with sender):",
+                            stringResource(R.string.challenge_share_sender),
                             style = MaterialTheme.typography.labelSmall,
                         )
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -163,19 +217,16 @@ private fun InboxCard(item: DirectedApi.EnvelopeItem, vm: MiasmaViewModel) {
                 OutlinedTextField(
                     value = password,
                     onValueChange = { password = it },
-                    label = { Text("Password") },
+                    label = { Text(stringResource(R.string.password)) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Spacer(Modifier.height(4.dp))
                 Button(
                     onClick = {
-                        isRetrieving = true
                         retrieveError = null
-                        vm.retrieveDirected(item.envelopeId, password) { error ->
-                            isRetrieving = false
-                            retrieveError = error
-                        }
+                        retrieveResult = null
+                        saveLauncher.launch(item.filename?.takeIf { it.isNotBlank() } ?: retrievedFileDefault)
                     },
                     enabled = password.isNotEmpty() && !isRetrieving,
                 ) {
@@ -186,20 +237,23 @@ private fun InboxCard(item: DirectedApi.EnvelopeItem, vm: MiasmaViewModel) {
                         )
                         Spacer(Modifier.width(8.dp))
                     }
-                    Text("Retrieve")
+                    Text(stringResource(R.string.retrieve))
                 }
                 if (retrieveError != null) {
                     Text(retrieveError!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
+                if (retrieveResult != null) {
+                    Text(retrieveResult!!, color = Color(0xFF4CAF50), style = MaterialTheme.typography.bodySmall)
                 }
             }
 
             // Terminal state messages
             when (item.state) {
-                "Retrieved" -> Text("✓ Content retrieved", color = Color(0xFF4CAF50), style = MaterialTheme.typography.bodySmall)
-                "Expired" -> Text("Expired", color = Color(0xFFFF9800), style = MaterialTheme.typography.bodySmall)
-                "SenderRevoked" -> Text("Revoked by sender", color = Color(0xFFF44336), style = MaterialTheme.typography.bodySmall)
-                "ChallengeFailed" -> Text("Challenge failed", color = Color(0xFFF44336), style = MaterialTheme.typography.bodySmall)
-                "PasswordFailed" -> Text("Password attempts exhausted", color = Color(0xFFF44336), style = MaterialTheme.typography.bodySmall)
+                "Retrieved" -> Text(stringResource(R.string.content_retrieved), color = Color(0xFF4CAF50), style = MaterialTheme.typography.bodySmall)
+                "Expired" -> Text(stringResource(R.string.expired), color = Color(0xFFFF9800), style = MaterialTheme.typography.bodySmall)
+                "SenderRevoked" -> Text(stringResource(R.string.revoked_by_sender), color = Color(0xFFF44336), style = MaterialTheme.typography.bodySmall)
+                "ChallengeFailed" -> Text(stringResource(R.string.challenge_failed), color = Color(0xFFF44336), style = MaterialTheme.typography.bodySmall)
+                "PasswordFailed" -> Text(stringResource(R.string.password_exhausted), color = Color(0xFFF44336), style = MaterialTheme.typography.bodySmall)
             }
 
             // Delete button (non-terminal only)
@@ -209,24 +263,24 @@ private fun InboxCard(item: DirectedApi.EnvelopeItem, vm: MiasmaViewModel) {
                     onClick = { vm.deleteDirectedEnvelope(item.envelopeId, isInbox = true) },
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
                 ) {
-                    Text("Delete")
+                    Text(stringResource(R.string.delete))
                 }
             }
         }
     }
 }
 
-private fun inboxStateBadge(state: String): Pair<Color, String> = when (state) {
-    "Pending" -> Color(0xFFFF9800) to "Pending"
-    "ChallengeIssued" -> Color(0xFFFF9800) to "Challenge"
-    "Confirmed" -> Color(0xFF4CAF50) to "Confirmed"
-    "Retrieved" -> Color(0xFF4CAF50) to "Retrieved"
-    "Expired" -> Color(0xFF9E9E9E) to "Expired"
-    "SenderRevoked" -> Color(0xFFF44336) to "Revoked"
-    "RecipientDeleted" -> Color(0xFF9E9E9E) to "Deleted"
-    "ChallengeFailed" -> Color(0xFFF44336) to "Failed"
-    "PasswordFailed" -> Color(0xFFF44336) to "Failed"
-    else -> Color(0xFF9E9E9E) to state
+private fun inboxStateBadge(state: String): Pair<Color, Int> = when (state) {
+    "Pending" -> Color(0xFFFF9800) to R.string.status_pending
+    "ChallengeIssued" -> Color(0xFFFF9800) to R.string.status_challenge
+    "Confirmed" -> Color(0xFF4CAF50) to R.string.status_confirmed
+    "Retrieved" -> Color(0xFF4CAF50) to R.string.status_retrieved
+    "Expired" -> Color(0xFF9E9E9E) to R.string.status_expired
+    "SenderRevoked" -> Color(0xFFF44336) to R.string.status_revoked
+    "RecipientDeleted" -> Color(0xFF9E9E9E) to R.string.status_deleted
+    "ChallengeFailed" -> Color(0xFFF44336) to R.string.status_failed
+    "PasswordFailed" -> Color(0xFFF44336) to R.string.status_failed
+    else -> Color(0xFF9E9E9E) to R.string.status_failed
 }
 
 private fun isTerminal(state: String): Boolean = state in setOf(
@@ -237,4 +291,26 @@ private fun formatBytes(bytes: Long): String = when {
     bytes < 1024 -> "$bytes B"
     bytes < 1024 * 1024 -> "${"%.1f".format(bytes / 1024.0)} KiB"
     else -> "${"%.1f".format(bytes / 1024.0 / 1024.0)} MiB"
+}
+
+private fun copyRetrievedFile(context: Context, source: File, destination: android.net.Uri, openFailedText: String) {
+    val output = context.contentResolver.openOutputStream(destination, "w")
+        ?: throw IOException(openFailedText)
+    source.inputStream().buffered().use { input ->
+        output.buffered().use { out ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                out.write(buffer, 0, read)
+            }
+        }
+    }
+}
+
+private fun cleanupOldRetrieveFiles(cacheDir: File) {
+    val cutoff = System.currentTimeMillis() - 24L * 60 * 60 * 1000
+    File(cacheDir, "miasma-retrieve").listFiles()?.forEach { file ->
+        if (file.isFile && file.lastModified() < cutoff) file.delete()
+    }
 }

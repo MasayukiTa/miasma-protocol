@@ -48,7 +48,7 @@ The current public release is **v0.3.1-beta.1**, a Windows beta prerelease for t
 - **Automatic discovery is limited to the local network.** Same-network peers now use mDNS; restrictive networks may still need manual bootstrap peers.
 - **No code signing certificate.** Windows SmartScreen will warn on install.
 - **Not audited.** No external security review has been performed.
-- **Mobile not yet operational.** Android and iOS runtime work is pending.
+- **Mobile is not released or device-validated yet.** Android now has an embedded daemon/network path in source, but physical-device/Play validation is still pending; iOS remains a reduced stub.
 - **Bootstrap trust is self-referential.** Early nodes credential each other; the trust bootstrapping problem is real.
 
 ## Threat Model Boundaries
@@ -78,7 +78,7 @@ Be explicit about what this system resists and what it does not.
 |---|---|---|---|
 | **Windows** | Beta (validated) | Full (libp2p, mDNS, DHT, onion, relay) | Desktop GUI + CLI + installer |
 | **Web/PWA** | Foundation (audited) | Desktop: HTTP bridge; Mobile: WebView bridge; Standalone: local-only | Browser dissolve/retrieve + network when bridged |
-| **Android** | Foundation (audited) | WebView bridge (local FFI; network FFI pending) | Compose UI + WebView |
+| **Android** | Store-prep implementation (device validation pending) | Embedded libp2p/DHT daemon + authenticated loopback bridge; iroh disabled on mobile | Compose UI + bundled WebView |
 | **iOS** | Stub | WebView bridge (local FFI; network FFI pending) | SwiftUI + WKWebView |
 
 ### Windows
@@ -97,19 +97,22 @@ Browser-based dissolution and retrieval. Protocol-compatible with miasma-core v1
 
 **Network modes** (detected automatically):
 - **Desktop**: Connects to the local daemon via HTTP bridge. Full P2P network access — dissolve publishes to DHT, retrieve fetches from peers. The bridge needs the daemon's control token, so open the client with the link that `miasma web` prints (`miasma web --open` opens it in your browser): the daemon serves the client itself, and the token travels in the URL fragment, which the browser never sends to a server. The Transfers screen lists large transfers with progress, Stop and Resume, and receives a file to a path on the daemon's computer; large files are sent from the desktop app or the CLI.
-- **Android WebView**: Loaded inside the Android app with a JavaScript bridge to native FFI. Currently local-only (FFI networking not yet exposed).
+- **Android WebView**: Bundled inside the Android app. A constrained JavaScript interface routes publish/retrieve and directed sharing through the app's embedded daemon over an authenticated loopback bridge; standalone fallback remains local-only when the daemon is unavailable.
 - **iOS WKWebView**: Loaded inside the iOS app with a message handler bridge. Currently local-only.
 - **Standalone browser**: Falls back to local-only WASM. Shares stay in IndexedDB, transferred manually via `.miasma` export/import.
 
 ### Android
 
-Android is the intended first-class mobile node target. FFI foundation exists (security-audited, 5 functions exposed via UniFFI). Hard problems still to solve:
+Android is the intended first-class mobile node target. The source tree now includes UniFFI bindings, a foreground-service-owned embedded daemon, Android Keystore wrapping, persistent bootstrap configuration, network publish/retrieve, directed sharing, and a bundled WebView surface. This is still not a validated Play release: the current branch has not been built and exercised on a physical Android device in this environment.
 
-- Battery cost and background execution limits
-- NAT traversal and reconnect behavior
-- Storage pressure and bandwidth caps
-- Keystore integration for master key wrapping (C-1 from audit)
-- FFI networking (not yet exposed)
+Remaining mobile validation work includes:
+
+- Physical-device build/install and Windows <-> Android <-> Web interoperability tests
+- Battery/background-session behavior under Android's foreground-service time limits
+- NAT/reconnect behavior across Wi-Fi/mobile transitions and restrictive networks
+- Storage pressure/bandwidth enforcement under long-running hosting
+- Play Console declarations, signing, Data safety/privacy metadata, and release-track testing
+- Mobile validation of the iroh direct transport before enabling it (currently forced off by the embedded daemon)
 
 ### iOS
 

@@ -9,27 +9,21 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
- * Android Keystore — wraps the Miasma node's master key with a hardware-backed
- * AES-GCM key so that:
+ * Android Keystore wrapper for the Miasma node master key.
  *
- *   1. The raw master key never lives in cleartext outside of TEE/SE.
- *   2. Distress wipe just calls [deleteKey] — the Keystore key is destroyed in
- *      the SE/StrongBox and the wrapped blob on disk becomes permanently
- *      unreadable, satisfying the ≤5s wipe requirement.
+ * A non-exportable AES-GCM key in AndroidKeyStore protects the recovery copy
+ * (`master.key.enc` + `master.key.iv`). The current Rust store still reopens
+ * `master.key` for local FFI operations, so the plaintext file remains in the
+ * app-private directory while the node is usable. This is defense in depth,
+ * not a claim that the 32-byte Miasma master key never exists outside TEE/SE.
  *
- * # File layout (inside `dataDir`):
- *   `master.key.enc`  — AES-GCM ciphertext of the 32-byte master key
- *   `master.key.iv`   — 12-byte GCM IV for the blob above
+ * Distress wipe deletes both the Rust plaintext key and the AndroidKeyStore
+ * wrapping key. Destroying the wrapping key makes the encrypted recovery blob
+ * unusable even if filesystem remnants survive.
  *
- * The plaintext `master.key` used by the Rust FFI layer is written only during
- * [unwrapToFile] and should be deleted after the Rust node has loaded it if a
- * fully TEE-backed flow is desired in Phase 2.  For Phase 1 the node reads it
- * on every start from the wrapper.
- *
- * # Distress wipe integration
- * The Rust FFI [distressWipe] already zeroes and deletes `master.key`.
- * [deleteKey] additionally removes the Keystore entry so the encrypted blob
- * is also unrecoverable.
+ * ByteArrays containing the plaintext are best-effort zeroed by the helpers
+ * below after they have been copied to their destination. The JVM/crypto
+ * provider may still have transient internal copies.
  */
 object KeystoreHelper {
 
@@ -107,6 +101,38 @@ object KeystoreHelper {
         val cipher = Cipher.getInstance(AES_GCM_NOPADDING)
         cipher.init(Cipher.DECRYPT_MODE, secretKey(), spec)
         return cipher.doFinal(ciphertext)
+    }
+
+    /**
+     * Restore `master.key` from the Keystore-wrapped recovery blob when the
+     * plaintext file is absent. Returns true when a key was restored.
+     */
+    fun restorePlaintextKeyIfNeeded(dataDir: java.io.File): Boolean {
+        val masterKeyFile = dataDir.resolve("master.key")
+        if (masterKeyFile.exists()) return false
+        val plaintext = unwrapKey(dataDir) ?: return false
+        return try {
+            masterKeyFile.writeBytes(plaintext)
+            true
+        } finally {
+            plaintext.fill(0)
+        }
+    }
+
+    /**
+     * Refresh the Keystore-wrapped recovery blob from the Rust plaintext key.
+     * The temporary JVM byte array is zeroed on return.
+     */
+    fun wrapPlaintextKeyFile(dataDir: java.io.File): Boolean {
+        val masterKeyFile = dataDir.resolve("master.key")
+        if (!masterKeyFile.exists()) return false
+        val plaintext = masterKeyFile.readBytes()
+        return try {
+            wrapKey(dataDir, plaintext)
+            true
+        } finally {
+            plaintext.fill(0)
+        }
     }
 
     // ──── Private ────────────────────────────────────────────────────────────

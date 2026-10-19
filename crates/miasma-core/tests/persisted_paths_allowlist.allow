@@ -30,6 +30,7 @@ miasma-core/src/update/archive.rs | 4 | self-update: extracting the verified rel
 miasma-core/src/update/engine.rs | 1 | self-update: the download folder below update/ in the data directory
 miasma-core/src/update/http.rs | 1 | self-update: streaming a release download to a file
 miasma-core/src/update/state.rs | 2 | self-update: the skipped version / failed update note
+miasma-core/src/wipe.rs | 1 | gated write of a retrieved file to the output path the user chose (a wipe that lands during the write removes it again)
 miasma-desktop/src/app/tour.rs | 4 | GUI screenshots, only when MIASMA_UI_SNAP is set (dev/QA)
 miasma-desktop/src/app.rs | 6 | user-initiated Save As and diagnostics export
 miasma-desktop/src/link.rs | 3 | instance lock, pending-link hand-off, URL scheme marker

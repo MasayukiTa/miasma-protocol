@@ -24,19 +24,19 @@
 
 use std::{
     collections::HashSet,
-    io::{Read, Seek, SeekFrom},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use zeroize::Zeroizing;
 
 use super::{
     journal::{journal_path, now_secs, part_path_for, ReceiveJournal, JOURNAL_VERSION},
     manifest::{sanitize_file_name, SegmentEntry, TransferManifest, MAX_SEGMENT_SIZE},
+    plaintext_pool::{PlaintextPool, SegmentBuf},
     progress::{Phase, TransferProgress, TransferState},
     protection::{Protection, UnlockedKey},
     share_id::{ShareId, ShareMismatch},
@@ -174,6 +174,296 @@ async fn run_inner<S: PieceSource + ?Sized>(
     // discover it after the pieces have been fetched.
     check_output_target(&output_path)?;
 
+    let Prepared {
+        params,
+        k,
+        key,
+        segment_count,
+        total_bytes,
+        candidates,
+        expect,
+    } = prepare(
+        &mid,
+        &record,
+        &manifest,
+        password,
+        expect,
+        record_signer,
+        progress,
+    )
+    .await?;
+
+    // ── 4. Fresh start or resume. ───────────────────────────────────────────
+    if let Some(parent) = output_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| io_context("cannot create the folder", parent, &e))?;
+        }
+    }
+    let part_path = part_path_for(&output_path);
+    let jpath = journal_path(&journal_dir, &mid);
+    let manifest_hash = manifest
+        .as_ref()
+        .map(|m| m.manifest_hash().map(hex::encode))
+        .transpose()?;
+
+    let mut hasher = blake3::Hasher::new();
+    let mut next_segment: u32 = 0;
+    let mut bytes_done: u64 = 0;
+    let mut started_at = now_secs();
+
+    let prior = if restart {
+        None
+    } else {
+        ReceiveJournal::load(&jpath).filter(|j| {
+            j.mid == mid.to_string()
+                && j.output_path == output_path.to_string_lossy()
+                && j.data_shards == params.data_shards as u8
+                && j.total_shards == params.total_shards as u8
+                && j.segment_count == segment_count
+                && j.total_bytes == total_bytes
+                && j.manifest_hash == manifest_hash
+                && part_path.exists()
+        })
+    };
+
+    if let Some(j) = prior {
+        progress.set_phase(Phase::Verifying);
+        let pp = part_path.clone();
+        let m = manifest.clone();
+        let prog = progress.clone();
+        let (seg, bytes, h) = tokio::task::spawn_blocking(move || {
+            verify_prefix(&pp, m.as_ref(), j.next_segment, j.bytes_done, &prog)
+        })
+        .await
+        .map_err(|e| MiasmaError::Storage(format!("verify task: {e}")))??;
+        started_at = j.started_at;
+        next_segment = seg;
+        bytes_done = bytes;
+        hasher = h;
+        // Drop anything after the last verified byte (a crash between the write
+        // and the journal update leaves a tail).
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&part_path)
+            .map_err(|e| io_context("cannot open the partial file", &part_path, &e))?;
+        f.set_len(bytes_done)
+            .map_err(|e| io_context("cannot trim the partial file", &part_path, &e))?;
+    } else {
+        // Fresh: never inherit a stale partial file.
+        let _ = std::fs::remove_file(&part_path);
+        ReceiveJournal::remove(&jpath);
+    }
+    progress.set_resumed(next_segment, bytes_done);
+
+    // A plain `std` handle, shared with the blocking task that writes each
+    // segment: `tokio::fs::File` would copy every segment into an internal
+    // buffer of its own that nothing wipes.
+    let file = Arc::new(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&part_path)
+            .map_err(|e| io_context("cannot create the partial file", &part_path, &e))?,
+    );
+    (&*file).seek(SeekFrom::Start(bytes_done))?;
+    let plain_pool = PlaintextPool::shared();
+
+    let mut journal = ReceiveJournal {
+        version: JOURNAL_VERSION,
+        mid: mid.to_string(),
+        output_path: output_path.to_string_lossy().into_owned(),
+        part_path: part_path.to_string_lossy().into_owned(),
+        data_shards: params.data_shards as u8,
+        total_shards: params.total_shards as u8,
+        segment_count,
+        total_bytes,
+        manifest_hash,
+        next_segment,
+        bytes_done,
+        started_at,
+        updated_at: now_secs(),
+        last_error: None,
+        share_id: expect.map(|s| s.to_string()),
+    };
+    journal.save(&jpath)?;
+
+    progress.set_phase(Phase::Transferring);
+
+    // ── 5. The transfer loop. ───────────────────────────────────────────────
+    // Pieces that verified but then failed to decode; never reused in this run.
+    let mut suspects: HashSet<(u32, u16, Vec<u8>)> = HashSet::new();
+    for seg in next_segment..segment_count {
+        if progress.is_cancelled() {
+            journal.save(&jpath)?;
+            return Ok(ReceiveOutcome::Cancelled { next_segment: seg });
+        }
+
+        let entry = manifest.as_ref().map(|m| &m.segments[seg as usize]);
+
+        // Collect k verified pieces, retrying the whole segment with backoff.
+        // Verified pieces are kept across attempts.
+        let fetch_started = Instant::now();
+        let mut attempt: u32 = 0;
+        let mut pool: Vec<PooledPiece> = Vec::new();
+        loop {
+            match fill_pool(
+                source,
+                &mid,
+                seg,
+                &candidates[seg as usize],
+                k,
+                manifest.as_ref(),
+                progress,
+                &suspects,
+                &mut pool,
+            )
+            .await
+            {
+                Ok(()) => break,
+                Err(MiasmaError::InsufficientShares { need, got }) => {
+                    attempt += 1;
+                    if progress.is_cancelled() {
+                        journal.save(&jpath)?;
+                        return Ok(ReceiveOutcome::Cancelled { next_segment: seg });
+                    }
+                    if attempt >= retry.max_attempts_per_segment {
+                        let reason = format!(
+                            "segment {seg}: only {got} of {need} valid pieces after {attempt} attempts"
+                        );
+                        journal.last_error = Some(reason.clone());
+                        journal.updated_at = now_secs();
+                        journal.save(&jpath)?;
+                        return Ok(ReceiveOutcome::Paused {
+                            next_segment: seg,
+                            reason,
+                            source_stalled: true,
+                        });
+                    }
+                    progress.segment_retry();
+                    tokio::time::sleep(retry.delay_for(attempt)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        let fetch_time = fetch_started.elapsed();
+
+        // Reassemble and decrypt off the async threads. If the first k verified
+        // pieces still do not decode (only possible without a manifest, or from
+        // a lying publisher), try other pieces before giving up.
+        let decode_started = Instant::now();
+        let ctx = SegmentCtx {
+            mid: &mid,
+            seg,
+            candidates: &candidates[seg as usize],
+            k,
+            params,
+            key: key.as_ref(),
+            entry,
+            manifest: manifest.as_ref(),
+        };
+        // The only plaintext of the segment. It is a `SegmentBuf` from the moment
+        // the decoder returns it, so an error, a cancel (this future dropped at
+        // the `.await` below) or a panic wipes it. No other copy is made: the
+        // pieces held across the fetch awaits are ciphertext and key shares.
+        let plaintext = SegmentBuf::adopt_in(
+            decode_with_fallback(source, &ctx, progress, &mut suspects, &mut pool).await?,
+            plain_pool.stats(),
+            plain_pool,
+        );
+        let decode_time = decode_started.elapsed();
+
+        // Append, make it durable, then journal it. The buffer moves into the
+        // blocking task and comes back: while the write is in flight there is
+        // exactly this one plaintext copy (the one the OS gets is outside our
+        // reach). If this future is dropped meanwhile, the task still owns the
+        // buffer and wipes it when it ends.
+        let write_started = Instant::now();
+        let f = file.clone();
+        let (plaintext, write) = tokio::task::spawn_blocking(move || {
+            let r = write_segment(&f, plaintext.as_slice());
+            (plaintext, r)
+        })
+        .await
+        .map_err(|e| MiasmaError::Storage(format!("write task: {e}")))?;
+        if let Err(e) = write {
+            // Out of disk or similar: keep everything; resuming after the
+            // condition clears is the whole point.
+            let reason = format!("cannot write {}: {e}", part_path.display());
+            journal.last_error = Some(reason.clone());
+            let _ = journal.save(&jpath);
+            return Ok(ReceiveOutcome::Paused {
+                next_segment: seg,
+                reason,
+                source_stalled: false,
+            });
+        }
+        let segment_len = plaintext.len() as u64;
+        hasher.update(plaintext.as_slice());
+        drop(plaintext); // wiped here; nothing below needs it
+        bytes_done += segment_len;
+        journal.next_segment = seg + 1;
+        journal.bytes_done = bytes_done;
+        journal.updated_at = now_secs();
+        journal.last_error = None;
+        journal.save(&jpath)?;
+        let write_time = write_started.elapsed();
+
+        progress.on_segment_done(segment_len, fetch_time, decode_time, write_time);
+    }
+
+    // ── 6. Only a file whose MID matches is ever named as the output. ───────
+    progress.set_phase(Phase::Finalizing);
+    hasher.update(&params.to_param_bytes());
+    let actual = ContentId::from_digest(*hasher.finalize().as_bytes());
+    if actual != mid {
+        drop(file);
+        let _ = std::fs::remove_file(&part_path);
+        ReceiveJournal::remove(&jpath);
+        return Err(MiasmaError::HashMismatch);
+    }
+    let f = file.clone();
+    tokio::task::spawn_blocking(move || f.sync_all())
+        .await
+        .map_err(|e| MiasmaError::Storage(format!("sync task: {e}")))??;
+    drop(file);
+    std::fs::rename(&part_path, &output_path).map_err(|e| {
+        io_context(
+            "cannot move the finished file into place at",
+            &output_path,
+            &e,
+        )
+    })?;
+    ReceiveJournal::remove(&jpath);
+    Ok(ReceiveOutcome::Complete { bytes: bytes_done })
+}
+
+/// What the engine knows once the record, the manifest and the password have
+/// been checked and before any piece is fetched.
+pub(super) struct Prepared {
+    pub(super) params: DissolutionParams,
+    pub(super) k: usize,
+    pub(super) key: Option<Arc<UnlockedKey>>,
+    pub(super) segment_count: u32,
+    pub(super) total_bytes: u64,
+    /// Per segment: the holders, data slots first.
+    pub(super) candidates: Vec<Vec<(u16, ShardLocation)>>,
+    pub(super) expect: Option<ShareId>,
+}
+
+/// Steps 1 to 3 of a receive, shared by the file engine and the RAM-only stream:
+/// the record, the manifest and the parameters must agree; a password is checked
+/// before any piece is fetched; candidates are listed per segment.
+pub(super) async fn prepare(
+    mid: &ContentId,
+    record: &DhtRecord,
+    manifest: &Option<TransferManifest>,
+    password: Option<Zeroizing<String>>,
+    expect: Option<ShareId>,
+    record_signer: Option<[u8; 32]>,
+    progress: &Arc<TransferProgress>,
+) -> Result<Prepared, MiasmaError> {
     // ── 1. The record, the manifest and the parameters must agree. ──────────
     if record.mid_digest != *mid.as_bytes() {
         return Err(MiasmaError::InvalidMid(
@@ -277,228 +567,21 @@ async fn run_inner<S: PieceSource + ?Sized>(
     for bucket in &mut candidates {
         bucket.sort_by_key(|(slot, _)| *slot);
     }
-
-    // ── 4. Fresh start or resume. ───────────────────────────────────────────
-    if let Some(parent) = output_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| io_context("cannot create the folder", parent, &e))?;
-        }
-    }
-    let part_path = part_path_for(&output_path);
-    let jpath = journal_path(&journal_dir, &mid);
-    let manifest_hash = manifest
-        .as_ref()
-        .map(|m| m.manifest_hash().map(hex::encode))
-        .transpose()?;
-
-    let mut hasher = blake3::Hasher::new();
-    let mut next_segment: u32 = 0;
-    let mut bytes_done: u64 = 0;
-    let mut started_at = now_secs();
-
-    let prior = if restart {
-        None
-    } else {
-        ReceiveJournal::load(&jpath).filter(|j| {
-            j.mid == mid.to_string()
-                && j.output_path == output_path.to_string_lossy()
-                && j.data_shards == params.data_shards as u8
-                && j.total_shards == params.total_shards as u8
-                && j.segment_count == segment_count
-                && j.total_bytes == total_bytes
-                && j.manifest_hash == manifest_hash
-                && part_path.exists()
-        })
-    };
-
-    if let Some(j) = prior {
-        progress.set_phase(Phase::Verifying);
-        let pp = part_path.clone();
-        let m = manifest.clone();
-        let prog = progress.clone();
-        let (seg, bytes, h) = tokio::task::spawn_blocking(move || {
-            verify_prefix(&pp, m.as_ref(), j.next_segment, j.bytes_done, &prog)
-        })
-        .await
-        .map_err(|e| MiasmaError::Storage(format!("verify task: {e}")))??;
-        started_at = j.started_at;
-        next_segment = seg;
-        bytes_done = bytes;
-        hasher = h;
-        // Drop anything after the last verified byte (a crash between the write
-        // and the journal update leaves a tail).
-        let f = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&part_path)
-            .map_err(|e| io_context("cannot open the partial file", &part_path, &e))?;
-        f.set_len(bytes_done)
-            .map_err(|e| io_context("cannot trim the partial file", &part_path, &e))?;
-    } else {
-        // Fresh: never inherit a stale partial file.
-        let _ = std::fs::remove_file(&part_path);
-        ReceiveJournal::remove(&jpath);
-    }
-    progress.set_resumed(next_segment, bytes_done);
-
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&part_path)
-        .await
-        .map_err(|e| io_context("cannot create the partial file", &part_path, &e))?;
-    file.seek(SeekFrom::Start(bytes_done)).await?;
-
-    let mut journal = ReceiveJournal {
-        version: JOURNAL_VERSION,
-        mid: mid.to_string(),
-        output_path: output_path.to_string_lossy().into_owned(),
-        part_path: part_path.to_string_lossy().into_owned(),
-        data_shards: params.data_shards as u8,
-        total_shards: params.total_shards as u8,
+    Ok(Prepared {
+        params,
+        k,
+        key,
         segment_count,
         total_bytes,
-        manifest_hash,
-        next_segment,
-        bytes_done,
-        started_at,
-        updated_at: now_secs(),
-        last_error: None,
-        share_id: expect.map(|s| s.to_string()),
-    };
-    journal.save(&jpath)?;
+        candidates,
+        expect,
+    })
+}
 
-    progress.set_phase(Phase::Transferring);
-
-    // ── 5. The transfer loop. ───────────────────────────────────────────────
-    // Pieces that verified but then failed to decode; never reused in this run.
-    let mut suspects: HashSet<(u32, u16, Vec<u8>)> = HashSet::new();
-    for seg in next_segment..segment_count {
-        if progress.is_cancelled() {
-            journal.save(&jpath)?;
-            return Ok(ReceiveOutcome::Cancelled { next_segment: seg });
-        }
-
-        let entry = manifest.as_ref().map(|m| &m.segments[seg as usize]);
-
-        // Collect k verified pieces, retrying the whole segment with backoff.
-        // Verified pieces are kept across attempts.
-        let fetch_started = Instant::now();
-        let mut attempt: u32 = 0;
-        let mut pool: Vec<PooledPiece> = Vec::new();
-        loop {
-            match fill_pool(
-                source,
-                &mid,
-                seg,
-                &candidates[seg as usize],
-                k,
-                manifest.as_ref(),
-                progress,
-                &suspects,
-                &mut pool,
-            )
-            .await
-            {
-                Ok(()) => break,
-                Err(MiasmaError::InsufficientShares { need, got }) => {
-                    attempt += 1;
-                    if progress.is_cancelled() {
-                        journal.save(&jpath)?;
-                        return Ok(ReceiveOutcome::Cancelled { next_segment: seg });
-                    }
-                    if attempt >= retry.max_attempts_per_segment {
-                        let reason = format!(
-                            "segment {seg}: only {got} of {need} valid pieces after {attempt} attempts"
-                        );
-                        journal.last_error = Some(reason.clone());
-                        journal.updated_at = now_secs();
-                        journal.save(&jpath)?;
-                        return Ok(ReceiveOutcome::Paused {
-                            next_segment: seg,
-                            reason,
-                            source_stalled: true,
-                        });
-                    }
-                    progress.segment_retry();
-                    tokio::time::sleep(retry.delay_for(attempt)).await;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        let fetch_time = fetch_started.elapsed();
-
-        // Reassemble and decrypt off the async threads. If the first k verified
-        // pieces still do not decode (only possible without a manifest, or from
-        // a lying publisher), try other pieces before giving up.
-        let decode_started = Instant::now();
-        let ctx = SegmentCtx {
-            mid: &mid,
-            seg,
-            candidates: &candidates[seg as usize],
-            k,
-            params,
-            key: key.as_ref(),
-            entry,
-            manifest: manifest.as_ref(),
-        };
-        let plaintext =
-            decode_with_fallback(source, &ctx, progress, &mut suspects, &mut pool).await?;
-        let decode_time = decode_started.elapsed();
-
-        // Append, make it durable, then journal it.
-        let write_started = Instant::now();
-        let write = async {
-            file.write_all(&plaintext).await?;
-            file.sync_data().await
-        }
-        .await;
-        if let Err(e) = write {
-            // Out of disk or similar: keep everything; resuming after the
-            // condition clears is the whole point.
-            let reason = format!("cannot write {}: {e}", part_path.display());
-            journal.last_error = Some(reason.clone());
-            let _ = journal.save(&jpath);
-            return Ok(ReceiveOutcome::Paused {
-                next_segment: seg,
-                reason,
-                source_stalled: false,
-            });
-        }
-        hasher.update(&plaintext);
-        bytes_done += plaintext.len() as u64;
-        journal.next_segment = seg + 1;
-        journal.bytes_done = bytes_done;
-        journal.updated_at = now_secs();
-        journal.last_error = None;
-        journal.save(&jpath)?;
-        let write_time = write_started.elapsed();
-
-        progress.on_segment_done(plaintext.len() as u64, fetch_time, decode_time, write_time);
-    }
-
-    // ── 6. Only a file whose MID matches is ever named as the output. ───────
-    progress.set_phase(Phase::Finalizing);
-    hasher.update(&params.to_param_bytes());
-    let actual = ContentId::from_digest(*hasher.finalize().as_bytes());
-    if actual != mid {
-        drop(file);
-        let _ = std::fs::remove_file(&part_path);
-        ReceiveJournal::remove(&jpath);
-        return Err(MiasmaError::HashMismatch);
-    }
-    file.sync_all().await?;
-    drop(file);
-    std::fs::rename(&part_path, &output_path).map_err(|e| {
-        io_context(
-            "cannot move the finished file into place at",
-            &output_path,
-            &e,
-        )
-    })?;
-    ReceiveJournal::remove(&jpath);
-    Ok(ReceiveOutcome::Complete { bytes: bytes_done })
+/// Append one segment to the partial file and make it durable.
+fn write_segment(file: &std::fs::File, data: &[u8]) -> std::io::Result<()> {
+    (&*file).write_all(data)?;
+    file.sync_data()
 }
 
 /// An I/O failure with the path and the OS error kind in the message, so a
@@ -681,7 +764,7 @@ pub fn check_output_target(output: &Path) -> Result<(), MiasmaError> {
 }
 
 /// A piece that passed verification, with the holder it came from.
-struct PooledPiece {
+pub(super) struct PooledPiece {
     share: MiasmaShare,
     peer: Vec<u8>,
 }
@@ -692,22 +775,22 @@ const RECOVERY_EXTRA_PIECES: usize = 4;
 const MAX_DECODE_ATTEMPTS: usize = 16;
 
 /// Everything `decode_with_fallback` needs to know about one segment.
-struct SegmentCtx<'a> {
-    mid: &'a ContentId,
-    seg: u32,
-    candidates: &'a [(u16, ShardLocation)],
-    k: usize,
-    params: DissolutionParams,
-    key: Option<&'a Arc<UnlockedKey>>,
-    entry: Option<&'a SegmentEntry>,
-    manifest: Option<&'a TransferManifest>,
+pub(super) struct SegmentCtx<'a> {
+    pub(super) mid: &'a ContentId,
+    pub(super) seg: u32,
+    pub(super) candidates: &'a [(u16, ShardLocation)],
+    pub(super) k: usize,
+    pub(super) params: DissolutionParams,
+    pub(super) key: Option<&'a Arc<UnlockedKey>>,
+    pub(super) entry: Option<&'a SegmentEntry>,
+    pub(super) manifest: Option<&'a TransferManifest>,
 }
 
 /// Top `pool` up to `want` verified pieces, refusing any that do not match the
 /// manifest. Slots already in the pool and pieces previously found suspect are
 /// skipped; a rejected piece leaves the slot open for the next holder listed.
 #[allow(clippy::too_many_arguments)]
-async fn fill_pool<S: PieceSource + ?Sized>(
+pub(super) async fn fill_pool<S: PieceSource + ?Sized>(
     source: &S,
     mid: &ContentId,
     seg: u32,
@@ -767,7 +850,7 @@ fn is_recoverable(e: &MiasmaError) -> bool {
 async fn decode_once(
     ctx: &SegmentCtx<'_>,
     pieces: Vec<MiasmaShare>,
-) -> Result<Vec<u8>, MiasmaError> {
+) -> Result<Zeroizing<Vec<u8>>, MiasmaError> {
     let plaintext_len = match ctx.entry {
         Some(e) => e.plaintext_len,
         // No manifest: the most common `original_len` among the pieces.
@@ -785,7 +868,16 @@ async fn decode_once(
     let expected = ctx.entry.map(|e| (e.plaintext_len, e.plain_hash));
     let seg = ctx.seg;
     tokio::task::spawn_blocking(move || {
-        let plaintext = retrieve_segment_with(&mid, &pieces, &meta, params, key.as_deref())?;
+        // Held in a zeroizing buffer from the moment it exists, so a mismatch
+        // below, or a result nobody collects because the caller went away, wipes
+        // it instead of freeing it as-is.
+        let plaintext = Zeroizing::new(retrieve_segment_with(
+            &mid,
+            &pieces,
+            &meta,
+            params,
+            key.as_deref(),
+        )?);
         if let Some((len, hash)) = expected {
             if plaintext.len() != len as usize || *blake3::hash(&plaintext).as_bytes() != hash {
                 return Err(MiasmaError::InvalidManifest(format!(
@@ -819,13 +911,13 @@ fn most_common_len(pieces: &[MiasmaShare]) -> u32 {
 /// time (bounded by [`MAX_DECODE_ATTEMPTS`]). The piece swapped out of the
 /// combination that finally decodes is recorded as suspect and is not reused in
 /// this run. If nothing works, the first error is returned.
-async fn decode_with_fallback<S: PieceSource + ?Sized>(
+pub(super) async fn decode_with_fallback<S: PieceSource + ?Sized>(
     source: &S,
     ctx: &SegmentCtx<'_>,
     progress: &Arc<TransferProgress>,
     suspects: &mut HashSet<(u32, u16, Vec<u8>)>,
     pool: &mut Vec<PooledPiece>,
-) -> Result<Vec<u8>, MiasmaError> {
+) -> Result<Zeroizing<Vec<u8>>, MiasmaError> {
     let k = ctx.k;
     pool.sort_by_key(|p| p.share.slot_index);
     let pick = |pool: &[PooledPiece], idx: &[usize]| -> Vec<MiasmaShare> {

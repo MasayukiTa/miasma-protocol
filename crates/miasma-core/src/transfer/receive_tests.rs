@@ -918,3 +918,44 @@ async fn the_placeholder_name_is_replaced_by_the_carried_name_and_nothing_else_i
         .unwrap_err();
     assert!(err.to_string().contains("refusing to overwrite"), "{err}");
 }
+
+// ─── Plaintext buffers ──────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn every_plaintext_buffer_of_a_receive_is_wiped_on_success_and_on_cancel() {
+    use super::plaintext_pool::PlaintextPool;
+    let stats = PlaintextPool::shared().stats().clone();
+    let before = stats.snapshot();
+
+    // A receive that completes: one buffer per segment, none left unwiped.
+    let w = world(6_000, 4, 6, None); // 6 segments
+    let run = Run::new();
+    let src = MockSource::new(&w);
+    let outcome = run_receive(&src, run.spec(&w, None, false), progress(&w))
+        .await
+        .unwrap();
+    assert!(matches!(outcome, ReceiveOutcome::Complete { .. }));
+    assert_eq!(std::fs::read(run.out()).unwrap(), w.data);
+    let mid_run = stats.snapshot();
+    assert!(mid_run.created >= before.created + 6, "{mid_run:?}");
+
+    // A receive cancelled part-way: whatever it held is wiped as well.
+    let w = world(8_000, 4, 6, None);
+    let run = Run::new();
+    let src = MockSource::new(&w);
+    let p = progress(&w);
+    *src.cancel_after.lock().unwrap() = Some((10, p.clone()));
+    let outcome = run_receive(&src, run.spec(&w, None, false), p)
+        .await
+        .unwrap();
+    assert!(matches!(outcome, ReceiveOutcome::Cancelled { .. }));
+
+    // Other tests share the process-wide pool, so only what must hold whatever
+    // they do is asserted: nothing ever read back unclean, and the pool keeps
+    // no plaintext of its own.
+    let after = stats.snapshot();
+    assert_eq!(after.wipe_failures, 0, "{after:?}");
+    assert!(after.created >= mid_run.created, "{after:?}");
+    let pool = PlaintextPool::shared();
+    assert!(pool.snapshot().idle_bytes <= pool.idle_cap());
+}

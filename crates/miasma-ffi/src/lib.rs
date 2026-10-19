@@ -17,11 +17,12 @@
 //! cargo ndk -t arm64-v8a -t x86_64 -o android/app/src/main/jniLibs \
 //!     build --release -p miasma-ffi
 //!
-//! # 2. Generate Kotlin bindings from the compiled library:
-//! uniffi-bindgen generate \
-//!     --library target/debug/libmiasma_ffi.so \
-//!     --language kotlin \
-//!     --out-dir android/app/src/main/kotlin/dev/miasma/uniffi/
+//! # 2. Generate Kotlin bindings with the repository-pinned UniFFI CLI:
+//! cargo run -p miasma-ffi --features bindgen-cli --bin miasma-uniffi-bindgen -- \
+//!     generate --library --metadata-no-deps --language kotlin \
+//!     --config crates/miasma-ffi/uniffi.toml \
+//!     --out-dir android/app/src/main/kotlin \
+//!     target/aarch64-linux-android/release/libmiasma_ffi.so
 //! ```
 //!
 //! The generated file will be placed at
@@ -34,7 +35,11 @@ use zeroize::Zeroizing;
 
 use miasma_core::{
     config::{NetworkConfig, NodeConfig, StorageConfig},
-    daemon::DaemonServer,
+    daemon::{
+        control_auth,
+        ipc::{daemon_request, ControlRequest, ControlResponse},
+        DaemonServer,
+    },
     directed, dissolve,
     network::{node::MiasmaNode, types::NodeType},
     store::LocalShareStore,
@@ -43,6 +48,8 @@ use miasma_core::{
 
 // Tell UniFFI to generate the FFI scaffolding for this crate.
 uniffi::setup_scaffolding!("miasma_ffi");
+
+mod receive_stream_ffi;
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -81,6 +88,20 @@ struct EmbeddedDaemon {
     sharing_contact: String,
     /// Channel to signal daemon shutdown.
     shutdown_tx: mpsc::Sender<()>,
+    /// The daemon's share store, kept only to report the root-key memory
+    /// status (it is the same object the daemon wipes).
+    store: Arc<LocalShareStore>,
+}
+
+/// Root-key memory protection as reported to the UI: the page-lock outcome
+/// (`lock_request_accepted`, `lock_request_denied`, `unsupported`, or `wiped`
+/// once the key was erased) and whether a core-dump exclusion was accepted.
+/// Best-effort hardening, not a guarantee.
+fn key_memory_report(store: &LocalShareStore) -> (String, bool) {
+    match store.key_memory_status() {
+        Some((lock, dump)) => (lock.as_str().to_string(), dump),
+        None => ("wiped".to_string(), false),
+    }
 }
 
 /// Global singleton for the embedded daemon.
@@ -102,6 +123,15 @@ pub struct NodeStatusFfi {
     pub listen_addr: String,
     /// Number of bootstrap peers in config.
     pub bootstrap_count: u64,
+}
+
+/// Result of a file-path retrieval that kept plaintext out of the FFI byte boundary.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FileReceiveResultFfi {
+    /// Absolute destination path reported by the daemon.
+    pub output_path: String,
+    /// Number of plaintext bytes written after full MID verification.
+    pub bytes_written: u64,
 }
 
 // ─── Error type ───────────────────────────────────────────────────────────────
@@ -261,12 +291,98 @@ fn open_store_for_daemon(
     open_store_inner(data_dir, true)
 }
 
+const MAX_MOBILE_BOOTSTRAP_PEERS: usize = 64;
+const MAX_MOBILE_BOOTSTRAP_ADDR_LEN: usize = 2_048;
+
+fn normalize_bootstrap_peers(peers: Vec<String>) -> Result<Vec<String>, MiasmaFfiError> {
+    let mut normalized = Vec::with_capacity(peers.len().min(MAX_MOBILE_BOOTSTRAP_PEERS));
+    for (index, raw) in peers.into_iter().enumerate() {
+        let value = raw.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if value.len() > MAX_MOBILE_BOOTSTRAP_ADDR_LEN {
+            return Err(MiasmaFfiError::Other {
+                msg: format!("bootstrap peer {} is too long", index + 1),
+            });
+        }
+        let addr: libp2p::Multiaddr = value.parse().map_err(|_| MiasmaFfiError::Other {
+            msg: format!("bootstrap peer {} is not a valid multiaddr", index + 1),
+        })?;
+        let has_peer_id = addr
+            .iter()
+            .any(|p| matches!(p, libp2p::multiaddr::Protocol::P2p(_)));
+        if !has_peer_id {
+            return Err(MiasmaFfiError::Other {
+                msg: format!("bootstrap peer {} is missing /p2p/<peer-id>", index + 1),
+            });
+        }
+        let canonical = addr.to_string();
+        if !normalized.contains(&canonical) {
+            if normalized.len() == MAX_MOBILE_BOOTSTRAP_PEERS {
+                return Err(MiasmaFfiError::Other {
+                    msg: format!("too many bootstrap peers (max {MAX_MOBILE_BOOTSTRAP_PEERS})"),
+                });
+            }
+            normalized.push(canonical);
+        }
+    }
+    Ok(normalized)
+}
+
+fn apply_mobile_limits(
+    mut config: NodeConfig,
+    storage_mb: u64,
+    bandwidth_mb_day: u64,
+) -> NodeConfig {
+    config.storage.quota_mb = storage_mb;
+    config.storage.bandwidth_mb_day = bandwidth_mb_day;
+    config
+}
+
+const DEFAULT_DATA_SHARDS: u8 = 10;
+const DEFAULT_TOTAL_SHARDS: u8 = 20;
+
+fn validate_ffi_file_path(
+    value: &str,
+    field: &'static str,
+    require_existing_file: bool,
+) -> Result<PathBuf, MiasmaFfiError> {
+    let path = control_auth::validate_output_path(value).map_err(|e| {
+        tracing::warn!(field, error = %e, "FFI file path rejected");
+        MiasmaFfiError::Other {
+            msg: format!("{field} must be an absolute path without '..'"),
+        }
+    })?;
+    if require_existing_file && !path.is_file() {
+        return Err(MiasmaFfiError::Other {
+            msg: format!("{field} must name an existing file"),
+        });
+    }
+    Ok(path)
+}
+
+fn daemon_call(
+    data_dir: &PathBuf,
+    request: ControlRequest,
+) -> Result<ControlResponse, MiasmaFfiError> {
+    shared_runtime()
+        .block_on(daemon_request(data_dir, request))
+        .map_err(|e| {
+            tracing::warn!("FFI daemon request failed: {e}");
+            MiasmaFfiError::Other {
+                msg: "daemon is not available".into(),
+            }
+        })
+}
+
 // ─── Exported functions ───────────────────────────────────────────────────────
 
 /// Initialise a new Miasma node at `data_dir`.
 ///
-/// Creates the data directory, generates a master key, and writes a default
-/// config. Idempotent — safe to call again if the node is already initialised.
+/// Creates the data directory and master key when absent. On an existing node it
+/// only updates the mobile storage/bandwidth limits and preserves the rest of
+/// `config.toml`, including bootstrap peers and transport settings.
 #[uniffi::export]
 pub fn initialize_node(
     data_dir: String,
@@ -281,23 +397,33 @@ pub fn initialize_node(
         }
     })?;
 
-    let config = NodeConfig {
-        storage: StorageConfig {
-            quota_mb: storage_mb,
-            bandwidth_mb_day,
-            ..StorageConfig::default()
-        },
-        network: NetworkConfig {
-            listen_addr: "/ip4/0.0.0.0/udp/0/quic-v1".into(),
-            bootstrap_peers: vec![],
-        },
-        transport: Default::default(),
-        push: Default::default(),
-        chat: Default::default(),
-        privacy: Default::default(),
-        // Mobile apps are updated by their store; the self-updater stays off.
-        update: miasma_core::update::UpdateConfig::stealth_preset(),
+    // Re-running initialization updates mobile quota knobs without destroying
+    // the rest of config.toml. In particular, bootstrap peers and transport
+    // settings must survive every embedded-daemon restart. New mobile nodes use
+    // a store-managed update policy because Google Play/App Store own updates.
+    let config_path = miasma_core::paths::config_file(&path);
+    let config = if config_path.exists() {
+        NodeConfig::load(&path).map_err(|e| {
+            tracing::warn!("config load error during initialize: {e}");
+            MiasmaFfiError::Other {
+                msg: "failed to load existing config".into(),
+            }
+        })?
+    } else {
+        NodeConfig {
+            storage: StorageConfig::default(),
+            network: NetworkConfig {
+                listen_addr: "/ip4/0.0.0.0/udp/0/quic-v1".into(),
+                bootstrap_peers: vec![],
+            },
+            transport: Default::default(),
+            push: Default::default(),
+            chat: Default::default(),
+            privacy: Default::default(),
+            update: miasma_core::update::UpdateConfig::stealth_preset(),
+        }
     };
+    let config = apply_mobile_limits(config, storage_mb, bandwidth_mb_day);
     config.save(&path).map_err(|e| {
         tracing::warn!("config save error: {e}");
         MiasmaFfiError::Other {
@@ -314,6 +440,35 @@ pub fn initialize_node(
     })?;
 
     Ok(())
+}
+
+/// Replace the persisted bootstrap peer list used by the embedded mobile daemon.
+///
+/// Entries are normalized as libp2p multiaddrs, must include a `/p2p/<peer-id>`
+/// component, and are deduplicated while preserving order.
+#[uniffi::export]
+pub fn set_bootstrap_peers(
+    data_dir: String,
+    bootstrap_peers: Vec<String>,
+) -> Result<(), MiasmaFfiError> {
+    let path = validate_data_dir(&data_dir)?;
+    if !miasma_core::paths::config_file(&path).exists() {
+        return Err(MiasmaFfiError::NotInitialized { data_dir });
+    }
+    let normalized = normalize_bootstrap_peers(bootstrap_peers)?;
+    let mut config = NodeConfig::load(&path).map_err(|e| {
+        tracing::warn!("config load error while setting bootstrap peers: {e}");
+        MiasmaFfiError::Other {
+            msg: "failed to load config".into(),
+        }
+    })?;
+    config.network.bootstrap_peers = normalized;
+    config.save(&path).map_err(|e| {
+        tracing::warn!("config save error while setting bootstrap peers: {e}");
+        MiasmaFfiError::Other {
+            msg: "failed to save bootstrap peers".into(),
+        }
+    })
 }
 
 /// Dissolve raw bytes into encrypted shares and store them locally.
@@ -337,8 +492,8 @@ pub fn dissolve_bytes(data_dir: String, data: Vec<u8>) -> Result<String, MiasmaF
 
     let (config, store) = open_store(&data_dir)?;
     let params = DissolutionParams {
-        data_shards: 10,
-        total_shards: 20,
+        data_shards: DEFAULT_DATA_SHARDS as usize,
+        total_shards: DEFAULT_TOTAL_SHARDS as usize,
     };
 
     let (mid, shares) = dissolve(&data, params).map_err(MiasmaFfiError::from)?;
@@ -365,8 +520,8 @@ pub fn retrieve_bytes(data_dir: String, mid_str: String) -> Result<Vec<u8>, Mias
 
     let mid = ContentId::from_str(&mid_str).map_err(MiasmaFfiError::from)?;
     let params = DissolutionParams {
-        data_shards: 10,
-        total_shards: 20,
+        data_shards: DEFAULT_DATA_SHARDS as usize,
+        total_shards: DEFAULT_TOTAL_SHARDS as usize,
     };
 
     // Use the shared static runtime instead of creating a new one per call.
@@ -376,6 +531,81 @@ pub fn retrieve_bytes(data_dir: String, mid_str: String) -> Result<Vec<u8>, Mias
     })?;
 
     Ok(plaintext)
+}
+
+/// Publish a local file through the running daemon without copying the file
+/// contents through UniFFI. The daemon streams dissolution segment by segment.
+///
+/// `file_path` must be absolute, contain no `..` component, and already exist.
+/// The embedded daemon must have been started first.
+#[uniffi::export]
+pub fn publish_file(data_dir: String, file_path: String) -> Result<String, MiasmaFfiError> {
+    let data_path = validate_data_dir(&data_dir)?;
+    let file_path = validate_ffi_file_path(&file_path, "file_path", true)?;
+    let response = daemon_call(
+        &data_path,
+        ControlRequest::PublishFile {
+            file_path: file_path.to_string_lossy().into_owned(),
+            data_shards: DEFAULT_DATA_SHARDS,
+            total_shards: DEFAULT_TOTAL_SHARDS,
+        },
+    )?;
+    match response {
+        ControlResponse::Published { mid } => Ok(mid),
+        ControlResponse::Error(message) => {
+            tracing::warn!("daemon publish_file error: {message}");
+            Err(MiasmaFfiError::Other {
+                msg: "file publish failed".into(),
+            })
+        }
+        _ => Err(MiasmaFfiError::Other {
+            msg: "unexpected daemon response".into(),
+        }),
+    }
+}
+
+/// Retrieve a MID through the running daemon and stream verified plaintext
+/// directly to `output_path`, avoiding a whole-file `Vec<u8>` crossing UniFFI.
+///
+/// `output_path` must be absolute and contain no `..` component. The embedded
+/// daemon must have been started first.
+#[uniffi::export]
+pub fn retrieve_to_file(
+    data_dir: String,
+    mid_str: String,
+    output_path: String,
+) -> Result<FileReceiveResultFfi, MiasmaFfiError> {
+    let data_path = validate_data_dir(&data_dir)?;
+    let mid = ContentId::from_str(&mid_str).map_err(MiasmaFfiError::from)?;
+    let output_path = validate_ffi_file_path(&output_path, "output_path", false)?;
+    let requested_path = output_path.to_string_lossy().into_owned();
+    let response = daemon_call(
+        &data_path,
+        ControlRequest::GetToFile {
+            mid: mid.to_string(),
+            data_shards: DEFAULT_DATA_SHARDS,
+            total_shards: DEFAULT_TOTAL_SHARDS,
+            output_path: requested_path,
+        },
+    )?;
+    match response {
+        ControlResponse::RetrievedToFile {
+            output_path,
+            bytes_written,
+        } => Ok(FileReceiveResultFfi {
+            output_path,
+            bytes_written,
+        }),
+        ControlResponse::Error(message) => {
+            tracing::warn!("daemon retrieve_to_file error: {message}");
+            Err(MiasmaFfiError::Other {
+                msg: "file retrieval failed".into(),
+            })
+        }
+        _ => Err(MiasmaFfiError::Other {
+            msg: "unexpected daemon response".into(),
+        }),
+    }
 }
 
 /// Return a snapshot of the node's current status.
@@ -695,6 +925,15 @@ pub struct EmbeddedDaemonStatus {
     pub peer_id: String,
     /// Full sharing contact string (`msk:<base58>@<PeerId>`).
     pub sharing_contact: String,
+    /// Outcome of the page-lock request for the in-memory root key:
+    /// `lock_request_accepted`, `lock_request_denied`, `unsupported`, or
+    /// `wiped` once the key has been erased. Empty from an older build.
+    #[uniffi(default = "")]
+    pub key_memory_lock: String,
+    /// Whether the OS accepted a request to keep the key pages out of core
+    /// dumps (Linux/Android only; `false` elsewhere).
+    #[uniffi(default = false)]
+    pub key_memory_dump_excluded: bool,
 }
 
 /// Start the embedded daemon with full networking and HTTP bridge.
@@ -719,10 +958,13 @@ pub fn start_embedded_daemon(
     {
         let guard = EMBEDDED_DAEMON.lock().unwrap();
         if let Some(ref d) = *guard {
+            let (key_memory_lock, key_memory_dump_excluded) = key_memory_report(&d.store);
             return Ok(EmbeddedDaemonStatus {
                 http_port: d.http_port,
                 peer_id: d.peer_id.clone(),
                 sharing_contact: d.sharing_contact.clone(),
+                key_memory_lock,
+                key_memory_dump_excluded,
             });
         }
     }
@@ -758,6 +1000,7 @@ pub fn start_embedded_daemon(
 
     // Start DaemonServer (binds IPC + HTTP bridge + transports).
     let rt = shared_runtime();
+    let status_store = store.clone();
     let result = rt.block_on(async {
         let server =
             DaemonServer::start_with_transport(node, store, path.clone(), transport_config)
@@ -821,6 +1064,7 @@ pub fn start_embedded_daemon(
             peer_id: peer_id.clone(),
             sharing_contact: sharing_contact.clone(),
             shutdown_tx,
+            store: status_store.clone(),
         });
     }
 
@@ -843,10 +1087,13 @@ pub fn start_embedded_daemon(
         "embedded daemon started"
     );
 
+    let (key_memory_lock, key_memory_dump_excluded) = key_memory_report(&status_store);
     Ok(EmbeddedDaemonStatus {
         http_port,
         peer_id,
         sharing_contact,
+        key_memory_lock,
+        key_memory_dump_excluded,
     })
 }
 
@@ -895,3 +1142,86 @@ pub fn get_sharing_contact() -> String {
         .map(|d| d.sharing_contact.clone())
         .unwrap_or_default()
 }
+
+#[cfg(test)]
+mod mobile_config_tests {
+    use super::*;
+
+    #[test]
+    fn bootstrap_peer_normalization_deduplicates_and_trims() {
+        let peer = libp2p::PeerId::random();
+        let addr = format!("/ip4/127.0.0.1/udp/4001/quic-v1/p2p/{peer}");
+        let got = normalize_bootstrap_peers(vec![format!("  {addr}  "), addr.clone()]).unwrap();
+        assert_eq!(got, vec![addr]);
+    }
+
+    #[test]
+    fn bootstrap_peer_normalization_rejects_missing_peer_id() {
+        let err =
+            normalize_bootstrap_peers(vec!["/ip4/127.0.0.1/udp/4001/quic-v1".into()]).unwrap_err();
+        assert!(matches!(err, MiasmaFfiError::Other { .. }));
+    }
+
+    #[test]
+    fn bootstrap_peer_normalization_caps_nonempty_unique_input() {
+        let peers = (0..=MAX_MOBILE_BOOTSTRAP_PEERS)
+            .map(|i| {
+                let peer = libp2p::PeerId::random();
+                format!("/ip4/192.0.2.{}/udp/443/quic-v1/p2p/{peer}", (i % 250) + 1)
+            })
+            .collect();
+        assert!(normalize_bootstrap_peers(peers).is_err());
+    }
+
+    #[test]
+    fn bootstrap_peer_normalization_ignores_blank_lines_before_cap() {
+        let blanks = vec![String::new(); MAX_MOBILE_BOOTSTRAP_PEERS + 10];
+        assert!(normalize_bootstrap_peers(blanks).unwrap().is_empty());
+    }
+    #[test]
+    fn mobile_limit_update_preserves_network_and_transport_config() {
+        let peer = libp2p::PeerId::random();
+        let bootstrap = format!("/ip4/192.0.2.1/udp/443/quic-v1/p2p/{peer}");
+        let mut config = NodeConfig::default();
+        config.network.listen_addr = "/ip4/127.0.0.1/udp/9000/quic-v1".into();
+        config.network.bootstrap_peers = vec![bootstrap.clone()];
+        config.transport.wss_port = 9443;
+        config.storage.hosted_quota_mb = 777;
+
+        let updated = apply_mobile_limits(config, 512, 100);
+
+        assert_eq!(updated.storage.quota_mb, 512);
+        assert_eq!(updated.storage.bandwidth_mb_day, 100);
+        assert_eq!(updated.storage.hosted_quota_mb, 777);
+        assert_eq!(updated.network.bootstrap_peers, vec![bootstrap]);
+        assert_eq!(
+            updated.network.listen_addr,
+            "/ip4/127.0.0.1/udp/9000/quic-v1"
+        );
+        assert_eq!(updated.transport.wss_port, 9443);
+    }
+
+    #[test]
+    fn ffi_file_path_requires_absolute_non_traversing_path() {
+        let err = validate_ffi_file_path("relative.bin", "output_path", false).unwrap_err();
+        assert!(matches!(err, MiasmaFfiError::Other { .. }));
+
+        let traversal = std::env::temp_dir().join("..").join("escape.bin");
+        let err =
+            validate_ffi_file_path(traversal.to_str().unwrap(), "output_path", false).unwrap_err();
+        assert!(matches!(err, MiasmaFfiError::Other { .. }));
+    }
+
+    #[test]
+    fn ffi_publish_path_requires_existing_file() {
+        let missing =
+            std::env::temp_dir().join(format!("miasma-ffi-missing-{}", std::process::id()));
+        let err = validate_ffi_file_path(missing.to_str().unwrap(), "file_path", true).unwrap_err();
+        assert!(matches!(err, MiasmaFfiError::Other { .. }));
+    }
+}
+
+mod privacy;
+pub use privacy::{
+    get_privacy_profile, set_privacy_profile, PrivacyProfileApplyResultFfi, PrivacyProfileFfi,
+};

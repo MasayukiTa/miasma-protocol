@@ -2,10 +2,13 @@
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
 export const dissolve_bytes: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+export const dissolve_bytes_bundle: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const dissolve_text: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const protocol_version: () => [number, number];
+export const retrieve_from_share_bundle: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const retrieve_from_shares: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const verify_share: (a: number, b: number, c: number, d: number) => [number, number, number];
+export const verify_share_bytes: (a: number, b: number, c: number, d: number) => [number, number, number];
 export const __wbindgen_exn_store: (a: number) => void;
 export const __externref_table_alloc: () => number;
 export const __wbindgen_externrefs: WebAssembly.Table;

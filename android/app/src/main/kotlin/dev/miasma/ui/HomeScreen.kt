@@ -26,6 +26,8 @@ import androidx.compose.material.icons.outlined.CloudOff
 import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material.icons.outlined.Hub
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -43,14 +45,22 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import dev.miasma.BuildConfig
 import dev.miasma.MiasmaViewModel
+import dev.miasma.R
 import dev.miasma.ui.theme.MiasmaColors
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun HomeScreen(vm: MiasmaViewModel) {
+fun HomeScreen(
+    vm: MiasmaViewModel,
+    onSend: () -> Unit = {},
+    onReceive: () -> Unit = {},
+    onSave: () -> Unit = {},
+) {
     val ui by vm.ui.collectAsState()
     var showEmergencyDialog by remember { mutableStateOf(false) }
 
@@ -81,7 +91,7 @@ fun HomeScreen(vm: MiasmaViewModel) {
                 )
                 Spacer(Modifier.height(2.dp))
                 Text(
-                    text = "Plausibly-deniable distributed storage",
+                    text = stringResource(R.string.home_tagline),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -122,12 +132,12 @@ fun HomeScreen(vm: MiasmaViewModel) {
                     Spacer(Modifier.width(12.dp))
                     Column {
                         Text(
-                            "Node active",
+                            stringResource(R.string.home_node_active),
                             style = MaterialTheme.typography.titleMedium,
                             color = MiasmaColors.Green,
                         )
                         Text(
-                            "Ready to save and retrieve content",
+                            stringResource(R.string.home_ready),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -156,11 +166,11 @@ fun HomeScreen(vm: MiasmaViewModel) {
                     Spacer(Modifier.width(12.dp))
                     Column {
                         Text(
-                            "Getting ready",
+                            stringResource(R.string.home_getting_ready),
                             style = MaterialTheme.typography.titleMedium,
                         )
                         Text(
-                            "Save content to initialize your node",
+                            stringResource(R.string.home_initializing),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -171,6 +181,31 @@ fun HomeScreen(vm: MiasmaViewModel) {
 
         Spacer(Modifier.height(16.dp))
 
+        // Store-facing actions: start with the person's task, not protocol vocabulary.
+        Text(
+            text = stringResource(R.string.home_what_to_do),
+            style = MaterialTheme.typography.titleLarge,
+        )
+        Spacer(Modifier.height(12.dp))
+        Button(
+            onClick = onSend,
+            modifier = Modifier.fillMaxWidth(),
+            enabled = status != null,
+        ) { Text(stringResource(R.string.action_send_file)) }
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(
+            onClick = onReceive,
+            modifier = Modifier.fillMaxWidth(),
+            enabled = status != null,
+        ) { Text(stringResource(R.string.action_receive_file)) }
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(
+            onClick = onSave,
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text(stringResource(R.string.action_save_securely)) }
+
+        Spacer(Modifier.height(20.dp))
+
         // ── Quick stats grid ──
         if (status != null) {
             Row(
@@ -180,14 +215,14 @@ fun HomeScreen(vm: MiasmaViewModel) {
                 StatCard(
                     modifier = Modifier.weight(1f),
                     icon = Icons.Outlined.Storage,
-                    label = "Shares",
+                    label = stringResource(R.string.home_shares),
                     value = status.shareCount.toString(),
                     tint = MiasmaColors.Teal300,
                 )
                 StatCard(
                     modifier = Modifier.weight(1f),
                     icon = Icons.Outlined.Hub,
-                    label = "Peers",
+                    label = stringResource(R.string.home_peers),
                     value = status.bootstrapCount.toString(),
                     tint = MiasmaColors.Blue,
                 )
@@ -212,11 +247,11 @@ fun HomeScreen(vm: MiasmaViewModel) {
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
-                            "Storage",
+                            stringResource(R.string.home_storage),
                             style = MaterialTheme.typography.titleMedium,
                         )
-                        val pct = if (status.quotaMb > 0)
-                            (status.usedMb / status.quotaMb * 100).toFloat()
+                        val pct = if (status.quotaMb > 0uL)
+                            (status.usedMb / status.quotaMb.toDouble() * 100).toFloat()
                         else 0f
                         Text(
                             "${"%.0f".format(pct)}%",
@@ -230,8 +265,8 @@ fun HomeScreen(vm: MiasmaViewModel) {
                     }
                     Spacer(Modifier.height(8.dp))
 
-                    val progress = if (status.quotaMb > 0)
-                        (status.usedMb / status.quotaMb).toFloat().coerceIn(0f, 1f)
+                    val progress = if (status.quotaMb > 0uL)
+                        (status.usedMb / status.quotaMb.toDouble()).toFloat().coerceIn(0f, 1f)
                     else 0f
                     LinearProgressIndicator(
                         progress = { progress },
@@ -273,7 +308,7 @@ fun HomeScreen(vm: MiasmaViewModel) {
         // ── Version footer ──
         Spacer(Modifier.height(32.dp))
         Text(
-            text = "Miasma v0.3.1 Beta",
+            text = stringResource(R.string.version_label, BuildConfig.VERSION_NAME),
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
             textAlign = TextAlign.Center,
@@ -285,13 +320,9 @@ fun HomeScreen(vm: MiasmaViewModel) {
     if (showEmergencyDialog) {
         AlertDialog(
             onDismissRequest = { showEmergencyDialog = false },
-            title = { Text("Emergency Wipe") },
+            title = { Text(stringResource(R.string.wipe_title)) },
             text = {
-                Text(
-                    "Destroy the master key NOW?\n\n" +
-                    "All locally stored shares become permanently unreadable. " +
-                    "This CANNOT be undone."
-                )
+                Text(stringResource(R.string.wipe_message))
             },
             confirmButton = {
                 TextButton(
@@ -299,10 +330,10 @@ fun HomeScreen(vm: MiasmaViewModel) {
                         showEmergencyDialog = false
                         vm.distressWipe()
                     },
-                ) { Text("WIPE NOW", color = MaterialTheme.colorScheme.error) }
+                ) { Text(stringResource(R.string.wipe_now), color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = {
-                TextButton(onClick = { showEmergencyDialog = false }) { Text("Cancel") }
+                TextButton(onClick = { showEmergencyDialog = false }) { Text(stringResource(R.string.cancel)) }
             },
         )
     }

@@ -102,8 +102,8 @@ fun StatusScreen(vm: MiasmaViewModel) {
 
             // ── Storage card ──
             SectionCard(title = "Storage", icon = Icons.Outlined.Storage) {
-                val pct = if (s.quotaMb > 0) (s.usedMb / s.quotaMb * 100).toFloat() else 0f
-                val progress = if (s.quotaMb > 0) (s.usedMb / s.quotaMb).toFloat().coerceIn(0f, 1f) else 0f
+                val pct = if (s.quotaMb > 0uL) (s.usedMb / s.quotaMb.toDouble() * 100).toFloat() else 0f
+                val progress = if (s.quotaMb > 0uL) (s.usedMb / s.quotaMb.toDouble()).toFloat().coerceIn(0f, 1f) else 0f
 
                 DetailRow("Shares stored", s.shareCount.toString())
                 Spacer(Modifier.height(8.dp))

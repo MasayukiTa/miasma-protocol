@@ -8,7 +8,9 @@ import dev.miasma.uniffi.MiasmaFfiException
 import dev.miasma.uniffi.NodeStatusFfi
 import dev.miasma.uniffi.dissolveBytes
 import dev.miasma.uniffi.getNodeStatus
+import dev.miasma.uniffi.publishFile as ffiPublishFile
 import dev.miasma.uniffi.retrieveBytes
+import dev.miasma.uniffi.retrieveToFile as ffiRetrieveToFile
 import dev.miasma.uniffi.distressWipe as ffiDistressWipe
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -83,14 +85,38 @@ class MiasmaViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             _ui.value = _ui.value.copy(isLoading = true, error = null, lastMid = null)
             try {
-                val mid = withContext(Dispatchers.IO) { dissolveBytes(dataDir, data) }
+                val port = _daemonHttpPort.value
+                val mid = withContext(Dispatchers.IO) {
+                    if (port > 0) DirectedApi.publishBytes(dataDir, port, data)
+                    else dissolveBytes(dataDir, data)
+                }
                 _ui.value = _ui.value.copy(isLoading = false, lastMid = mid)
                 refreshStatus()
             } catch (e: MiasmaFfiException) {
                 _ui.value = _ui.value.copy(isLoading = false, error = e.message)
             } catch (e: Exception) {
-                // Sanitize unexpected exception messages before showing in UI.
-                _ui.value = _ui.value.copy(isLoading = false, error = "Dissolution failed")
+                _ui.value = _ui.value.copy(isLoading = false, error = e.message ?: "Dissolution failed")
+            }
+        }
+    }
+
+    fun dissolveFile(filePath: String, callback: (mid: String?, error: String?) -> Unit) {
+        val port = _daemonHttpPort.value
+        if (port == 0) {
+            callback(null, "Daemon not running")
+            return
+        }
+        viewModelScope.launch {
+            _ui.value = _ui.value.copy(isLoading = true, error = null, lastMid = null)
+            try {
+                val mid = withContext(Dispatchers.IO) { ffiPublishFile(dataDir, filePath) }
+                _ui.value = _ui.value.copy(isLoading = false, lastMid = mid)
+                refreshStatus()
+                callback(mid, null)
+            } catch (e: Exception) {
+                val message = e.message ?: "Dissolution failed"
+                _ui.value = _ui.value.copy(isLoading = false, error = message)
+                callback(null, message)
             }
         }
     }
@@ -117,6 +143,32 @@ class MiasmaViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // ──── Distress wipe ──────────────────────────────────────────────────────
+
+    fun retrieveMidToFile(
+        mid: String,
+        outputPath: String,
+        callback: (result: DirectedApi.RetrieveMidToFileResult?, error: String?) -> Unit,
+    ) {
+        val port = _daemonHttpPort.value
+        if (port == 0) {
+            callback(null, "Daemon not running")
+            return
+        }
+        viewModelScope.launch {
+            try {
+                val ffiResult = withContext(Dispatchers.IO) {
+                    ffiRetrieveToFile(dataDir, mid, outputPath)
+                }
+                val result = DirectedApi.RetrieveMidToFileResult(
+                    outputPath = ffiResult.outputPath,
+                    bytesWritten = ffiResult.bytesWritten.toLong(),
+                )
+                callback(result, null)
+            } catch (e: Exception) {
+                callback(null, e.message ?: "Retrieval failed")
+            }
+        }
+    }
 
     /**
      * Emergency distress wipe:
@@ -172,7 +224,7 @@ class MiasmaViewModel(app: Application) : AndroidViewModel(app) {
         if (port == 0) return
         viewModelScope.launch {
             try {
-                val items = withContext(Dispatchers.IO) { DirectedApi.inbox(port) }
+                val items = withContext(Dispatchers.IO) { DirectedApi.inbox(dataDir, port) }
                 _inboxItems.value = items
             } catch (e: Exception) {
                 _ui.value = _ui.value.copy(error = "Inbox refresh failed: ${e.message}")
@@ -185,7 +237,7 @@ class MiasmaViewModel(app: Application) : AndroidViewModel(app) {
         if (port == 0) return
         viewModelScope.launch {
             try {
-                val items = withContext(Dispatchers.IO) { DirectedApi.outbox(port) }
+                val items = withContext(Dispatchers.IO) { DirectedApi.outbox(dataDir, port) }
                 _outboxItems.value = items
             } catch (e: Exception) {
                 _ui.value = _ui.value.copy(error = "Outbox refresh failed: ${e.message}")
@@ -209,7 +261,35 @@ class MiasmaViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val envelopeId = withContext(Dispatchers.IO) {
-                    DirectedApi.send(port, recipientContact, data, password, retentionSecs, filename)
+                    DirectedApi.send(dataDir, port, recipientContact, data, password, retentionSecs, filename)
+                }
+                refreshOutbox()
+                callback(envelopeId, null)
+            } catch (e: Exception) {
+                callback(null, e.message ?: "Send failed")
+            }
+        }
+    }
+
+    fun sendDirectedFile(
+        recipientContact: String,
+        filePath: String,
+        password: String,
+        retentionSecs: Long,
+        filename: String?,
+        callback: (envelopeId: String?, error: String?) -> Unit,
+    ) {
+        val port = _daemonHttpPort.value
+        if (port == 0) {
+            callback(null, "Daemon not running")
+            return
+        }
+        viewModelScope.launch {
+            try {
+                val envelopeId = withContext(Dispatchers.IO) {
+                    DirectedApi.sendFile(
+                        dataDir, port, recipientContact, filePath, password, retentionSecs, filename
+                    )
                 }
                 refreshOutbox()
                 callback(envelopeId, null)
@@ -227,7 +307,7 @@ class MiasmaViewModel(app: Application) : AndroidViewModel(app) {
         }
         viewModelScope.launch {
             try {
-                withContext(Dispatchers.IO) { DirectedApi.confirm(port, envelopeId, challengeCode) }
+                withContext(Dispatchers.IO) { DirectedApi.confirm(dataDir, port, envelopeId, challengeCode) }
                 refreshOutbox()
                 callback(null)
             } catch (e: Exception) {
@@ -245,7 +325,7 @@ class MiasmaViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val result = withContext(Dispatchers.IO) {
-                    DirectedApi.retrieve(port, envelopeId, password)
+                    DirectedApi.retrieve(dataDir, port, envelopeId, password)
                 }
                 // Store retrieved bytes in UI state for display/export.
                 _ui.value = _ui.value.copy(retrievedBytes = result.data)
@@ -257,12 +337,36 @@ class MiasmaViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun retrieveDirectedToFile(
+        envelopeId: String,
+        password: String,
+        outputPath: String,
+        callback: (result: DirectedApi.RetrieveToFileResult?, error: String?) -> Unit,
+    ) {
+        val port = _daemonHttpPort.value
+        if (port == 0) {
+            callback(null, "Daemon not running")
+            return
+        }
+        viewModelScope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    DirectedApi.retrieveToFile(dataDir, port, envelopeId, password, outputPath)
+                }
+                refreshInbox()
+                callback(result, null)
+            } catch (e: Exception) {
+                callback(null, e.message ?: "Retrieve failed")
+            }
+        }
+    }
+
     fun revokeDirected(envelopeId: String) {
         val port = _daemonHttpPort.value
         if (port == 0) return
         viewModelScope.launch {
             try {
-                withContext(Dispatchers.IO) { DirectedApi.revoke(port, envelopeId) }
+                withContext(Dispatchers.IO) { DirectedApi.revoke(dataDir, port, envelopeId) }
                 refreshOutbox()
             } catch (e: Exception) {
                 _ui.value = _ui.value.copy(error = "Revoke failed: ${e.message}")

@@ -1,20 +1,16 @@
 package dev.miasma
 
 import android.annotation.SuppressLint
+import android.net.Uri
 import android.os.Bundle
 import android.webkit.JavascriptInterface
+import android.webkit.WebResourceRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import org.json.JSONObject
-import uniffi.miasma_ffi.*
-import dev.miasma.uniffi.getDaemonHttpPort
+import dev.miasma.uniffi.*
 
 /**
  * WebView-hosted Miasma web UI with a JavaScript bridge to native FFI.
@@ -31,7 +27,6 @@ import dev.miasma.uniffi.getDaemonHttpPort
 class WebBridgeActivity : ComponentActivity() {
 
     private lateinit var webView: WebView
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val dataDir: String by lazy { filesDir.absolutePath }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -43,13 +38,40 @@ class WebBridgeActivity : ComponentActivity() {
             settings.domStorageEnabled = true
             settings.allowFileAccess = false
             settings.allowContentAccess = false
+            settings.javaScriptCanOpenWindowsAutomatically = false
+            settings.setSupportMultipleWindows(false)
             webChromeClient = WebChromeClient()
-            webViewClient = WebViewClient()
+            webViewClient = LocalAssetsOnlyWebViewClient()
         }
 
-        webView.addJavascriptInterface(MiasmaBridge(this), "miasma")
+        webView.addJavascriptInterface(MiasmaBridge(), "miasma")
         setContentView(webView)
         webView.loadUrl("file:///android_asset/web/index.html")
+    }
+
+    /**
+     * The JavaScript interface is privileged: never let a remote document become
+     * the top-level page while that interface is attached. The bundled PWA has a
+     * restrictive CSP as a second layer, but navigation is enforced natively too.
+     */
+    private class LocalAssetsOnlyWebViewClient : WebViewClient() {
+        override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest): Boolean =
+            !isAllowedAppUrl(request.url)
+
+        @Suppress("DEPRECATION")
+        override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean =
+            !isAllowedAppUrl(url?.let(Uri::parse))
+
+        companion object {
+            private const val APP_ASSET_PATH_PREFIX = "/android_asset/web/"
+
+            private fun isAllowedAppUrl(uri: Uri?): Boolean {
+                if (uri == null || uri.scheme != "file" || !uri.authority.isNullOrEmpty()) return false
+                val path = uri.path ?: return false
+                if (!path.startsWith(APP_ASSET_PATH_PREFIX)) return false
+                return path.split('/').none { it == ".." }
+            }
+        }
     }
 
     override fun onDestroy() {
@@ -61,66 +83,101 @@ class WebBridgeActivity : ComponentActivity() {
     /**
      * JavaScript bridge interface.
      *
-     * All methods are synchronous from the JS perspective — they block on
-     * the WebView's internal thread while the FFI call runs on IO.  This is
-     * acceptable because the user expects to wait for dissolve/retrieve
-     * operations.
-     *
-     * Note: `@JavascriptInterface` methods run on a binder thread, not the
-     * main thread.  FFI calls are safe to make here (they use a shared
-     * tokio runtime internally).
+     * All methods are synchronous from JavaScript's perspective. Android invokes
+     * `@JavascriptInterface` methods on the WebView Java bridge thread rather than
+     * the UI thread; direct FFI calls block that bridge thread until Rust returns.
+     * The Rust side owns its shared Tokio runtime for async protocol work.
      */
-    inner class MiasmaBridge(private val activity: WebBridgeActivity) {
+    inner class MiasmaBridge {
+
+        private fun errorJson(message: String?): String =
+            JSONObject().put("error", message ?: "operation failed").toString()
+
+        private fun okJson(): String = JSONObject().put("ok", true).toString()
+
+        private fun daemonUnavailable(): String = errorJson("daemon not running")
 
         @JavascriptInterface
-        fun ping(): String = """{"ok":true}"""
+        fun ping(): String = okJson()
 
         @JavascriptInterface
         fun status(): String {
+            val port = httpPort()
+            if (port > 0) {
+                try {
+                    return DirectedApi.status(dataDir, port).apply {
+                        put("network_ready", true)
+                    }.toString()
+                } catch (_: Exception) {
+                    // The embedded daemon may be between lifecycle states. Fall through
+                    // to a local snapshot without claiming network connectivity.
+                }
+            }
+
             return try {
                 val s = getNodeStatus(dataDir)
                 JSONObject().apply {
-                    put("peer_count", 0) // FFI status is local-only for now
-                    put("share_count", s.shareCount)
+                    put("network_ready", false)
+                    put("peer_count", 0)
+                    put("share_count", s.shareCount.toLong())
                     put("storage_used_bytes", (s.usedMb * 1024 * 1024).toLong())
                     put("listen_addrs", org.json.JSONArray())
                     put("peer_id", "")
                 }.toString()
             } catch (e: Exception) {
-                """{"error":"${e.message?.replace("\"", "\\\"")}"}"""
+                errorJson(e.message)
             }
         }
 
         @JavascriptInterface
         fun dissolve(dataBase64: String, k: Int, n: Int): String {
             return try {
+                val port = httpPort()
+                if (port == 0) return daemonUnavailable()
                 val bytes = android.util.Base64.decode(dataBase64, android.util.Base64.DEFAULT)
-                val mid = dissolveBytes(dataDir, bytes)
-                """{"mid":"$mid"}"""
+                val mid = DirectedApi.publishBytes(dataDir, port, bytes, k, n)
+                JSONObject().put("mid", mid).toString()
             } catch (e: Exception) {
-                """{"error":"${e.message?.replace("\"", "\\\"")}"}"""
+                errorJson(e.message)
             }
         }
 
         @JavascriptInterface
         fun retrieve(mid: String, k: Int, n: Int): String {
             return try {
-                val bytes = retrieveBytes(dataDir, mid)
+                val port = httpPort()
+                if (port == 0) return daemonUnavailable()
+                val bytes = DirectedApi.retrieveBytes(dataDir, port, mid, k, n)
                 val b64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
-                """{"data":"$b64"}"""
+                JSONObject().put("data", b64).toString()
             } catch (e: Exception) {
-                """{"error":"${e.message?.replace("\"", "\\\"")}"}"""
+                errorJson(e.message)
             }
         }
 
         @JavascriptInterface
         fun wipe(): String {
-            return try {
+            var warning = false
+            try {
                 distressWipe(dataDir)
-                """{"ok":true}"""
-            } catch (e: Exception) {
-                """{"error":"${e.message?.replace("\"", "\\\"")}"}"""
+            } catch (_: Exception) {
+                warning = true
             }
+
+            // Rust erases the plaintext and wrapped blobs; Android must also
+            // destroy the non-exportable wrapping key held by AndroidKeyStore.
+            try {
+                KeystoreHelper.deleteKey()
+            } catch (_: Exception) {
+                warning = true
+            }
+            try {
+                MiasmaService.stopNode(this@WebBridgeActivity)
+            } catch (_: Exception) {
+                warning = true
+            }
+
+            return if (warning) errorJson("wipe completed with warnings") else okJson()
         }
 
         // ── Directed sharing (via HTTP bridge) ──────────────────────────
@@ -131,11 +188,14 @@ class WebBridgeActivity : ComponentActivity() {
         fun sharingKey(): String {
             return try {
                 val port = httpPort()
-                if (port == 0) return """{"error":"daemon not running"}"""
-                val result = DirectedApi.sharingKey(port)
-                """{"key":"${result.key}","contact":"${result.contact}"}"""
+                if (port == 0) return daemonUnavailable()
+                val result = DirectedApi.sharingKey(dataDir, port)
+                JSONObject().apply {
+                    put("key", result.key)
+                    put("contact", result.contact)
+                }.toString()
             } catch (e: Exception) {
-                """{"error":"${e.message?.replace("\"", "\\\"")}"}"""
+                errorJson(e.message)
             }
         }
 
@@ -143,8 +203,8 @@ class WebBridgeActivity : ComponentActivity() {
         fun directedInbox(): String {
             return try {
                 val port = httpPort()
-                if (port == 0) return """{"error":"daemon not running"}"""
-                val items = DirectedApi.inbox(port)
+                if (port == 0) return daemonUnavailable()
+                val items = DirectedApi.inbox(dataDir, port)
                 org.json.JSONArray().also { arr ->
                     items.forEach { item ->
                         arr.put(JSONObject().apply {
@@ -162,7 +222,7 @@ class WebBridgeActivity : ComponentActivity() {
                     }
                 }.toString()
             } catch (e: Exception) {
-                "[]"
+                errorJson(e.message)
             }
         }
 
@@ -170,8 +230,8 @@ class WebBridgeActivity : ComponentActivity() {
         fun directedOutbox(): String {
             return try {
                 val port = httpPort()
-                if (port == 0) return """{"error":"daemon not running"}"""
-                val items = DirectedApi.outbox(port)
+                if (port == 0) return daemonUnavailable()
+                val items = DirectedApi.outbox(dataDir, port)
                 org.json.JSONArray().also { arr ->
                     items.forEach { item ->
                         arr.put(JSONObject().apply {
@@ -189,7 +249,7 @@ class WebBridgeActivity : ComponentActivity() {
                     }
                 }.toString()
             } catch (e: Exception) {
-                "[]"
+                errorJson(e.message)
             }
         }
 
@@ -197,12 +257,12 @@ class WebBridgeActivity : ComponentActivity() {
         fun directedSend(recipientContact: String, dataBase64: String, password: String, retentionSecs: Long, filename: String?): String {
             return try {
                 val port = httpPort()
-                if (port == 0) return """{"error":"daemon not running"}"""
+                if (port == 0) return daemonUnavailable()
                 val data = android.util.Base64.decode(dataBase64, android.util.Base64.DEFAULT)
-                val envelopeId = DirectedApi.send(port, recipientContact, data, password, retentionSecs, filename)
-                """{"envelope_id":"$envelopeId"}"""
+                val envelopeId = DirectedApi.send(dataDir, port, recipientContact, data, password, retentionSecs, filename)
+                JSONObject().put("envelope_id", envelopeId).toString()
             } catch (e: Exception) {
-                """{"error":"${e.message?.replace("\"", "\\\"")}"}"""
+                errorJson(e.message)
             }
         }
 
@@ -210,11 +270,11 @@ class WebBridgeActivity : ComponentActivity() {
         fun directedConfirm(envelopeId: String, challengeCode: String): String {
             return try {
                 val port = httpPort()
-                if (port == 0) return """{"error":"daemon not running"}"""
-                DirectedApi.confirm(port, envelopeId, challengeCode)
-                """{"ok":true}"""
+                if (port == 0) return daemonUnavailable()
+                DirectedApi.confirm(dataDir, port, envelopeId, challengeCode)
+                okJson()
             } catch (e: Exception) {
-                """{"error":"${e.message?.replace("\"", "\\\"")}"}"""
+                errorJson(e.message)
             }
         }
 
@@ -222,13 +282,15 @@ class WebBridgeActivity : ComponentActivity() {
         fun directedRetrieve(envelopeId: String, password: String): String {
             return try {
                 val port = httpPort()
-                if (port == 0) return """{"error":"daemon not running"}"""
-                val result = DirectedApi.retrieve(port, envelopeId, password)
+                if (port == 0) return daemonUnavailable()
+                val result = DirectedApi.retrieve(dataDir, port, envelopeId, password)
                 val b64 = android.util.Base64.encodeToString(result.data, android.util.Base64.NO_WRAP)
-                val escapedFilename = result.filename?.replace("\\", "\\\\")?.replace("\"", "\\\"")
-                """{"data":"$b64"${if (escapedFilename != null) ""","filename":"$escapedFilename"""" else ""}}"""
+                JSONObject().apply {
+                    put("data", b64)
+                    if (result.filename != null) put("filename", result.filename)
+                }.toString()
             } catch (e: Exception) {
-                """{"error":"${e.message?.replace("\"", "\\\"")}"}"""
+                errorJson(e.message)
             }
         }
 
@@ -236,11 +298,11 @@ class WebBridgeActivity : ComponentActivity() {
         fun directedRevoke(envelopeId: String): String {
             return try {
                 val port = httpPort()
-                if (port == 0) return """{"error":"daemon not running"}"""
-                DirectedApi.revoke(port, envelopeId)
-                """{"ok":true}"""
+                if (port == 0) return daemonUnavailable()
+                DirectedApi.revoke(dataDir, port, envelopeId)
+                okJson()
             } catch (e: Exception) {
-                """{"error":"${e.message?.replace("\"", "\\\"")}"}"""
+                errorJson(e.message)
             }
         }
     }

@@ -24,19 +24,25 @@ pub mod network;
 pub mod onion;
 pub mod paths;
 pub mod pipeline;
+pub mod protocol;
 pub mod push;
 pub mod repair;
 pub mod retrieval;
 pub mod secure_file;
+pub mod secure_memory;
 pub mod share;
 pub mod state_crypto;
 pub mod store;
 pub mod transfer;
 pub mod transport;
 pub mod update;
+pub mod wipe;
 
 pub use config::{default_data_dir, NodeConfig, TransportConfig};
-pub use cover_traffic::{CoverTrafficConfig, CoverTrafficEngine};
+pub use cover_traffic::{
+    CoverTrafficConfig, CoverTrafficEngine, CoverTrafficMetrics, CoverTrafficMetricsSnapshot,
+    TrafficShapePolicy,
+};
 pub use crypto::hash::ContentId;
 pub use daemon::{
     ipc::{
@@ -74,6 +80,7 @@ pub use retrieval::{
     DhtShareSource, FallbackShareSource, LocalShareSource, RetrievalCoordinator, ShareSource,
     StreamingRetrievalCoordinator,
 };
+pub use secure_memory::{MemoryLockStatus, SecureBytes, SecureKeyVault};
 pub use share::{MiasmaShare, ShareVerification};
 pub use store::{DeleteSharesOutcome, LocalShareStore, ShareSelection, StoredShare};
 pub use transport::obfuscated::{
@@ -81,8 +88,9 @@ pub use transport::obfuscated::{
 };
 pub use transport::payload::{
     Libp2pPayloadTransport, PayloadTransport, PayloadTransportError, PayloadTransportKind,
-    PayloadTransportSelector, TcpDirectPayloadTransport, TransportAttempt, TransportExhaustedError,
-    TransportPhase, TransportReadiness, TransportStats, TransportedShare,
+    PayloadTransportSelector, PolicyFetchError, TcpDirectPayloadTransport, TransportAttempt,
+    TransportExhaustedError, TransportPhase, TransportPrivacyClass, TransportReadiness,
+    TransportStats, TransportedShare,
 };
 pub use transport::proxy::ProxyConfig;
 pub use transport::websocket::{WebSocketConfig, WssPayloadTransport, WssShareServer};

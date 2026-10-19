@@ -12,7 +12,11 @@
 //! | GET    | `/api/ping`     | Connection liveness check                |
 //! | GET    | `/api/status`   | Full `DaemonStatus` snapshot             |
 //! | POST   | `/api/publish`  | Dissolve + publish (base64 data)         |
+//! | POST   | `/api/publish-file` | Stream a daemon-local file into the network |
 //! | POST   | `/api/retrieve` | Network retrieve by MID (returns base64) |
+//! | POST   | `/api/retrieve-to-file` | Stream network retrieval into a daemon-local file |
+//! | POST   | `/api/directed/send-file` | Directed send from a daemon-readable local file |
+//! | POST   | `/api/directed/retrieve-to-file` | Directed retrieve into a daemon-local file |
 //! | POST   | `/api/wipe`     | Distress wipe                            |
 //! | GET    | `/api/transfers`             | Every transfer (running, paused, done) |
 //! | GET    | `/api/transfers/<id>`        | One transfer's status                  |
@@ -57,6 +61,7 @@ use zeroize::Zeroize;
 use crate::{network::coordinator::MiasmaCoordinator, store::LocalShareStore};
 
 use super::{
+    control_auth,
     ipc::{ControlRequest, ControlResponse},
     process_request,
     rate_limit::{
@@ -93,6 +98,15 @@ struct PublishResponse {
 }
 
 #[derive(Deserialize)]
+struct PublishFileRequest {
+    file_path: String,
+    #[serde(default = "default_k")]
+    data_shards: u8,
+    #[serde(default = "default_n")]
+    total_shards: u8,
+}
+
+#[derive(Deserialize)]
 struct RetrieveRequest {
     mid: String,
     #[serde(default = "default_k")]
@@ -105,6 +119,22 @@ struct RetrieveRequest {
 struct RetrieveResponse {
     /// Base64-encoded retrieved plaintext.
     data: String,
+}
+
+#[derive(Deserialize)]
+struct RetrieveToFileRequest {
+    mid: String,
+    output_path: String,
+    #[serde(default = "default_k")]
+    data_shards: u8,
+    #[serde(default = "default_n")]
+    total_shards: u8,
+}
+
+#[derive(Serialize)]
+struct RetrieveToFileResponse {
+    output_path: String,
+    bytes_written: u64,
 }
 
 #[derive(Serialize)]
@@ -319,8 +349,18 @@ async fn handle(
             Err(e) => json_error(StatusCode::BAD_REQUEST, &e.to_string()),
         },
 
+        (Method::POST, "/api/publish-file") => match read_body(req).await {
+            Ok(body) => handle_publish_file(body, state).await,
+            Err(e) => json_error(StatusCode::BAD_REQUEST, &e.to_string()),
+        },
+
         (Method::POST, "/api/retrieve") => match read_body(req).await {
             Ok(body) => handle_retrieve(body, state).await,
+            Err(e) => json_error(StatusCode::BAD_REQUEST, &e.to_string()),
+        },
+
+        (Method::POST, "/api/retrieve-to-file") => match read_body(req).await {
+            Ok(body) => handle_retrieve_to_file(body, state).await,
             Err(e) => json_error(StatusCode::BAD_REQUEST, &e.to_string()),
         },
 
@@ -337,6 +377,11 @@ async fn handle(
             Err(e) => json_error(StatusCode::BAD_REQUEST, &e.to_string()),
         },
 
+        (Method::POST, "/api/directed/send-file") => match read_body(req).await {
+            Ok(body) => handle_directed_send_file(body, state).await,
+            Err(e) => json_error(StatusCode::BAD_REQUEST, &e.to_string()),
+        },
+
         (Method::POST, "/api/directed/confirm") => match read_body(req).await {
             Ok(body) => handle_directed_confirm(body, state).await,
             Err(e) => json_error(StatusCode::BAD_REQUEST, &e.to_string()),
@@ -344,6 +389,11 @@ async fn handle(
 
         (Method::POST, "/api/directed/retrieve") => match read_body(req).await {
             Ok(body) => handle_directed_retrieve(body, state).await,
+            Err(e) => json_error(StatusCode::BAD_REQUEST, &e.to_string()),
+        },
+
+        (Method::POST, "/api/directed/retrieve-to-file") => match read_body(req).await {
+            Ok(body) => handle_directed_retrieve_to_file(body, state).await,
             Err(e) => json_error(StatusCode::BAD_REQUEST, &e.to_string()),
         },
 
@@ -421,6 +471,36 @@ async fn handle_publish(body: Bytes, state: BridgeState) -> Response<Full<Bytes>
     }
 }
 
+async fn handle_publish_file(body: Bytes, state: BridgeState) -> Response<Full<Bytes>> {
+    let req: PublishFileRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("invalid JSON: {e}")),
+    };
+    if let Err(e) = validate_field_length("file_path", &req.file_path, MAX_OUTPUT_PATH_LEN) {
+        return json_error(StatusCode::BAD_REQUEST, &e);
+    }
+    if control_auth::validate_output_path(&req.file_path).is_err() {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "file_path must be absolute and contain no '..'",
+        );
+    }
+    let resp = bridge_request(
+        state,
+        ControlRequest::PublishFile {
+            file_path: req.file_path,
+            data_shards: req.data_shards,
+            total_shards: req.total_shards,
+        },
+    )
+    .await;
+    match resp {
+        ControlResponse::Published { mid } => json_ok(&PublishResponse { mid }),
+        ControlResponse::Error(e) => json_error(StatusCode::BAD_REQUEST, &e),
+        _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "unexpected response"),
+    }
+}
+
 async fn handle_retrieve(body: Bytes, state: BridgeState) -> Response<Full<Bytes>> {
     let req: RetrieveRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
@@ -442,6 +522,47 @@ async fn handle_retrieve(body: Bytes, state: BridgeState) -> Response<Full<Bytes
             data: B64.encode(&data),
         }),
         ControlResponse::Error(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
+        _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "unexpected response"),
+    }
+}
+
+async fn handle_retrieve_to_file(body: Bytes, state: BridgeState) -> Response<Full<Bytes>> {
+    let req: RetrieveToFileRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("invalid JSON: {e}")),
+    };
+    let checks = [
+        validate_field_length("mid", &req.mid, MAX_MID_LEN),
+        validate_field_length("output_path", &req.output_path, MAX_OUTPUT_PATH_LEN),
+    ];
+    if let Some(e) = checks.into_iter().find_map(Result::err) {
+        return json_error(StatusCode::BAD_REQUEST, &e);
+    }
+    if control_auth::validate_output_path(&req.output_path).is_err() {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "output_path must be absolute and contain no '..'",
+        );
+    }
+    let resp = bridge_request(
+        state,
+        ControlRequest::GetToFile {
+            mid: req.mid,
+            data_shards: req.data_shards,
+            total_shards: req.total_shards,
+            output_path: req.output_path,
+        },
+    )
+    .await;
+    match resp {
+        ControlResponse::RetrievedToFile {
+            output_path,
+            bytes_written,
+        } => json_ok(&RetrieveToFileResponse {
+            output_path,
+            bytes_written,
+        }),
+        ControlResponse::Error(e) => json_error(StatusCode::BAD_REQUEST, &e),
         _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "unexpected response"),
     }
 }
@@ -494,6 +615,16 @@ struct DirectedSendRequest {
     filename: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct DirectedSendFileRequest {
+    recipient_contact: String,
+    file_path: String,
+    password: String,
+    retention_secs: u64,
+    #[serde(default)]
+    filename: Option<String>,
+}
+
 #[derive(Serialize)]
 struct DirectedSendResponse {
     envelope_id: String,
@@ -511,11 +642,26 @@ struct DirectedRetrieveRequest {
     password: String,
 }
 
+#[derive(Deserialize)]
+struct DirectedRetrieveToFileRequest {
+    envelope_id: String,
+    password: String,
+    output_path: String,
+}
+
 #[derive(Serialize)]
 struct DirectedRetrieveResponse {
     data: String, // base64
     #[serde(skip_serializing_if = "Option::is_none")]
     filename: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DirectedRetrieveToFileResponse {
+    output_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filename: Option<String>,
+    bytes_written: u64,
 }
 
 #[derive(Deserialize)]
@@ -571,6 +717,34 @@ async fn handle_directed_send(body: Bytes, state: BridgeState) -> Response<Full<
     }
 }
 
+async fn handle_directed_send_file(body: Bytes, state: BridgeState) -> Response<Full<Bytes>> {
+    let req: DirectedSendFileRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("invalid JSON: {e}")),
+    };
+    if req.file_path.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "file_path is required");
+    }
+    let resp = bridge_request(
+        state,
+        ControlRequest::DirectedSendFile {
+            recipient_contact: req.recipient_contact,
+            file_path: req.file_path,
+            password: req.password,
+            retention_secs: req.retention_secs,
+            filename: req.filename,
+        },
+    )
+    .await;
+    match resp {
+        ControlResponse::DirectedSent { envelope_id } => {
+            json_ok(&DirectedSendResponse { envelope_id })
+        }
+        ControlResponse::Error(e) => json_error(StatusCode::BAD_REQUEST, &e),
+        _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "unexpected response"),
+    }
+}
+
 async fn handle_directed_confirm(body: Bytes, state: BridgeState) -> Response<Full<Bytes>> {
     let req: DirectedConfirmRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
@@ -611,6 +785,51 @@ async fn handle_directed_retrieve(body: Bytes, state: BridgeState) -> Response<F
                 filename,
             })
         }
+        ControlResponse::Error(e) => json_error(StatusCode::BAD_REQUEST, &e),
+        _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "unexpected response"),
+    }
+}
+
+async fn handle_directed_retrieve_to_file(
+    body: Bytes,
+    state: BridgeState,
+) -> Response<Full<Bytes>> {
+    let req: DirectedRetrieveToFileRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("invalid JSON: {e}")),
+    };
+    if req.output_path.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "output_path is required");
+    }
+    if let Err(e) = validate_field_length("output_path", &req.output_path, MAX_OUTPUT_PATH_LEN) {
+        return json_error(StatusCode::BAD_REQUEST, &e);
+    }
+    // The same path policy as `retrieve-to-file`.
+    if control_auth::validate_output_path(&req.output_path).is_err() {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "output_path must be absolute and contain no '..'",
+        );
+    }
+    let resp = bridge_request(
+        state,
+        ControlRequest::DirectedRetrieveToFile {
+            envelope_id: req.envelope_id,
+            password: req.password,
+            output_path: req.output_path,
+        },
+    )
+    .await;
+    match resp {
+        ControlResponse::DirectedRetrievedToFile {
+            output_path,
+            filename,
+            bytes_written,
+        } => json_ok(&DirectedRetrieveToFileResponse {
+            output_path,
+            filename,
+            bytes_written,
+        }),
         ControlResponse::Error(e) => json_error(StatusCode::BAD_REQUEST, &e),
         _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, "unexpected response"),
     }
