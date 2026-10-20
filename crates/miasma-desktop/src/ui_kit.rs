@@ -694,6 +694,7 @@ pub fn glyph_button(ui: &mut Ui, glyph: &str, name: &str) -> Response {
     let resp = ui
         .scope(|ui| {
             ui.spacing_mut().button_padding = vec2(SP_2, 2.0);
+            ui.spacing_mut().interact_size = vec2(GLYPH_BTN, GLYPH_BTN);
             let w = &mut ui.visuals_mut().widgets;
             w.inactive.weak_bg_fill = Color32::TRANSPARENT;
             w.inactive.bg_stroke = Stroke::NONE;
