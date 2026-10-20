@@ -155,7 +155,7 @@ pub mod confirm {
             .show(ctx, |ui| {
                 body(ui);
                 ui.add_space(kit::SP_1);
-                kit::button_row(ui, |ui| {
+                kit::dialog_actions(ui, |ui| {
                     if ui.add(kit::danger_button(confirm_label)).clicked() {
                         answer = Answer::Confirm;
                     }
