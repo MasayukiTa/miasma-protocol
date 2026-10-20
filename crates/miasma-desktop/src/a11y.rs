@@ -76,8 +76,28 @@ pub fn dialog_leave(ctx: &egui::Context, key: &'static str) {
     let state: Option<DialogFocus> = ctx.data_mut(|d| d.get_temp(id));
     if let Some(opener) = state.and_then(|s| s.opener) {
         ctx.memory_mut(|m| m.request_focus(opener));
+        // The page behind a dialog is switched off while it is open, and focus on a switched-off
+        // widget is dropped at the end of the frame. Ask again in the next frame.
+        ctx.data_mut(|d| d.insert_temp(restore_id(), opener));
     }
     ctx.data_mut(|d| d.remove::<DialogFocus>(id));
+}
+
+fn restore_id() -> egui::Id {
+    egui::Id::new("a11y_dialog_restore_focus")
+}
+
+/// Call once at the start of every frame: when a dialog closed in the last frame, focus goes to
+/// the control that opened it, unless the person has already moved it somewhere else.
+pub fn restore_pending_focus(ctx: &egui::Context) {
+    let id = restore_id();
+    let pending: Option<egui::Id> = ctx.data_mut(|d| d.get_temp(id));
+    if let Some(opener) = pending {
+        ctx.data_mut(|d| d.remove::<egui::Id>(id));
+        if ctx.memory(|m| m.focused()).is_none() {
+            ctx.memory_mut(|m| m.request_focus(opener));
+        }
+    }
 }
 
 /// Consume an Esc key press (true when there was one). A dialog calls this while it is open.
@@ -382,6 +402,73 @@ mod tests {
                 e.func
             );
         }
+    }
+
+    /// Controls that take input and need a name a screen reader can say. Whoever adds one
+    /// gives it a name within the next lines: `form_check::name(..)` or a `widget_info` of the
+    /// matching type.
+    const NAMED_INPUTS: &[&str] = &[
+        "kit::input(",
+        "kit::input_mono(",
+        "kit::input_multiline(",
+        "egui::TextEdit::",
+        "egui::DragValue::new(",
+        "egui::ComboBox::",
+    ];
+
+    #[test]
+    fn every_text_field_number_field_and_drop_down_is_given_a_name() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rust_files(&root, &mut files);
+        let mut unnamed = Vec::new();
+        let mut seen = 0usize;
+        for f in &files {
+            let rel = f
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            // The helpers that build the controls, and this file's own list.
+            if rel == "a11y.rs" || rel.starts_with("locale") || rel == "form_check.rs" {
+                continue;
+            }
+            let src = std::fs::read_to_string(f).unwrap();
+            let code_end = src
+                .find("\n#[cfg(test)]\nmod ")
+                .or_else(|| src.find("\r\n#[cfg(test)]\r\nmod "))
+                .unwrap_or(src.len());
+            let lines: Vec<&str> = src[..code_end].lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                let t = line.trim_start();
+                if t.starts_with("//") || t.starts_with("pub fn ") || t.starts_with("fn ") {
+                    continue;
+                }
+                if !NAMED_INPUTS.iter().any(|p| line.contains(p)) {
+                    continue;
+                }
+                // A builder chain that continues the previous line is part of that statement.
+                if t.starts_with('.') || (rel == "ui_kit.rs" && t.starts_with("egui::TextEdit::")) {
+                    continue;
+                }
+                seen += 1;
+                let window = &lines[i..(i + 40).min(lines.len())];
+                let named = window.iter().any(|l| {
+                    l.contains("form_check::name(")
+                        || l.contains("WidgetType::TextEdit")
+                        || l.contains("WidgetType::ComboBox")
+                });
+                if !named {
+                    unnamed.push(format!("{rel}:{}: {}", i + 1, line.trim()));
+                }
+            }
+        }
+        assert!(seen > 15, "the scan found only {seen} input controls");
+        assert!(
+            unnamed.is_empty(),
+            "input controls without an accessible name (use form_check::name):\n{}",
+            unnamed.join("\n")
+        );
     }
 
     #[test]

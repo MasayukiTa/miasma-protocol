@@ -156,6 +156,8 @@ pub struct ChatUi {
     ime_composing: bool,
     picker_open: bool,
     delete_target: Option<Open>,
+    /// Which open dialog appeared last (only that one stays open).
+    modals: crate::modal::Order,
     /// The "verify this contact" dialog is open for this conversation.
     verify_target: Option<Open>,
     /// Open the header menu on the next frame (screenshot fixtures).
@@ -233,6 +235,7 @@ impl Default for ChatUi {
             ime_composing: false,
             picker_open: false,
             delete_target: None,
+            modals: crate::modal::Order::default(),
             verify_target: None,
             open_menu_once: false,
             deleting: None,
@@ -960,6 +963,7 @@ impl ChatUi {
             }
             _ => {}
         }
+        self.keep_one_modal();
         if self.group.is_open() {
             let (clock, max_bytes) = (self.clock(), self.max_bytes);
             action = self.group.conversation_view(ui, clock, max_bytes);
@@ -978,6 +982,44 @@ impl ChatUi {
             action = self.file_action.take();
         }
         action
+    }
+
+    /// A dialog of this screen is open (the app switches the page behind it off).
+    pub fn modal_open(&self) -> bool {
+        self.picker_open
+            || self.delete_target.is_some()
+            || self.verify_target.is_some()
+            || !self.group.open_modals().is_empty()
+    }
+
+    /// Only one dialog at a time: when a second one has been opened over the first, the older
+    /// one is closed.
+    fn keep_one_modal(&mut self) {
+        let mut open: Vec<&'static str> = Vec::new();
+        if self.picker_open {
+            open.push("chat_picker");
+        }
+        if self.delete_target.is_some() {
+            open.push("chat_delete");
+        }
+        if self.verify_target.is_some() {
+            open.push("chat_verify");
+        }
+        open.extend(self.group.open_modals());
+        let Some(top) = self.modals.top(&open) else {
+            return;
+        };
+        for key in open {
+            if key == top {
+                continue;
+            }
+            match key {
+                "chat_picker" => self.picker_open = false,
+                "chat_delete" => self.delete_target = None,
+                "chat_verify" => self.verify_target = None,
+                other => self.group.close_modal(other),
+            }
+        }
     }
 
     fn heading(&self, ui: &mut egui::Ui, c: &ChatStrings, actions: impl FnOnce(&mut egui::Ui)) {

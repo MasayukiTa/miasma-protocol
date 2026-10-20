@@ -631,7 +631,9 @@ pub fn primary_button<'a>(text: impl Into<WidgetText>) -> egui::Button<'a> {
 /// instead of a washed-out accent.
 pub fn primary(ui: &mut Ui, enabled: bool, text: &str) -> Response {
     if !enabled {
-        return ui.add_enabled(false, secondary_button(text));
+        let off = ui.add_enabled(false, secondary_button(text));
+        crate::form_check::mark_disabled(&off);
+        return off;
     }
     let p = pal();
     ui.scope(|ui| {
