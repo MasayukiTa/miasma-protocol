@@ -156,12 +156,12 @@ impl ErrorKind {
             Self::DaemonAutostartFailed => [
                 "The background service could not start by itself. Close Miasma and open it again.",
                 "バックグラウンド機能を自動で起動できませんでした。Miasmaを閉じてから、もう一度開いてください。",
-                "后台功能无法自动启动。请关闭 Miasma 后重新打开。",
+                "后台服务无法自动启动。请关闭 Miasma 后重新打开。",
             ],
             Self::InitDaemonFailed => [
                 "Setup is complete, but the background service did not start. Press Start at the top of the window.",
                 "初期設定は完了しましたが、バックグラウンド機能を起動できませんでした。画面上部の「起動」を押してください。",
-                "初始设置已完成，但后台功能未能启动。请点击窗口上方的“启动”。",
+                "初始设置已完成，但后台服务未能启动。请点击窗口顶部的“启动”。",
             ],
             Self::InitFailed => [
                 "Setup could not finish. Check that the data folder can be written to, then try again.",
@@ -171,22 +171,22 @@ impl ErrorKind {
             Self::DaemonStartFailed => [
                 "The background service could not start. Wait a moment, then press Start again.",
                 "バックグラウンド機能を起動できませんでした。しばらく待ってから、もう一度「起動」を押してください。",
-                "后台功能无法启动。请稍等片刻，然后再次点击“启动”。",
+                "后台服务无法启动。请稍等片刻，然后再次点击“启动”。",
             ],
             Self::DaemonAlreadyRunning => [
                 "The background service is already running.",
                 "バックグラウンド機能はすでに動いています。",
-                "后台功能已在运行。",
+                "后台服务已在运行。",
             ],
             Self::DaemonNotReady => [
                 "The background service is slow to start. Wait a moment, then press Start again. Antivirus software may be checking it.",
                 "バックグラウンド機能の準備に時間がかかっています。少し待ってから「起動」を押してください。ウイルス対策ソフトが確認している場合もあります。",
-                "后台功能启动较慢。请稍等片刻后再次点击“启动”。杀毒软件可能正在检查它。",
+                "后台服务启动较慢。请稍等片刻后再次点击“启动”。杀毒软件可能正在检查它。",
             ],
             Self::DaemonUnreachable => [
                 "Not connected to the background service. Press Start at the top of the window. If it still does not work, close all Miasma windows and open Miasma again.",
                 "バックグラウンド機能に接続できません。画面上部の「起動」を押してください。直らないときは、Miasmaのウィンドウをすべて閉じてから、もう一度開いてください。",
-                "未连接到后台功能。请点击窗口上方的“启动”。如果仍无法解决，请关闭所有 Miasma 窗口后重新打开。",
+                "未连接到后台服务。请点击窗口顶部的“启动”。如果仍无法解决，请关闭所有 Miasma 窗口后重新打开。",
             ],
             Self::BackendMissing => [
                 "Miasma's background component was not found. Reinstall Miasma.",
@@ -196,12 +196,12 @@ impl ErrorKind {
             Self::SpawnBlocked => [
                 "The background service could not start. Antivirus software or SmartScreen may be blocking miasma.exe. Allow it, then try again.",
                 "バックグラウンド機能を起動できませんでした。ウイルス対策ソフトやSmartScreenが miasma.exe を止めている可能性があります。許可してから、もう一度お試しください。",
-                "后台功能无法启动。杀毒软件或 SmartScreen 可能拦截了 miasma.exe。请允许它运行后重试。",
+                "后台服务无法启动。杀毒软件或 SmartScreen 可能拦截了 miasma.exe。请允许它运行后重试。",
             ],
             Self::SpawnFailedMac => [
                 "The background service could not start. Reinstall Miasma.app.",
                 "バックグラウンド機能を起動できませんでした。Miasma.app を入れ直してください。",
-                "后台功能无法启动。请重新安装 Miasma.app。",
+                "后台服务无法启动。请重新安装 Miasma.app。",
             ],
             Self::BridgeMissing => [
                 "The import component was not found. Reinstall Miasma.",
@@ -221,7 +221,7 @@ impl ErrorKind {
             Self::UnexpectedResponse => [
                 "The background service answered in an unexpected way. Close Miasma completely and open it again. If it keeps happening, reinstall the latest Miasma.",
                 "バックグラウンド機能の応答が想定と異なります。Miasmaを完全に閉じてから開き直してください。直らないときは、最新のMiasmaを入れ直してください。",
-                "后台功能的响应不符合预期。请完全关闭 Miasma 后重新打开。若仍然如此，请重新安装最新版 Miasma。",
+                "后台服务的响应不符合预期。请完全退出 Miasma 后重新打开。若仍然如此，请重新安装最新版 Miasma。",
             ],
             Self::FileNotFound => [
                 "The file was not found. Check where it is and choose it again.",
@@ -241,7 +241,7 @@ impl ErrorKind {
             Self::Unauthorized => [
                 "The background service did not accept this window. Close Miasma and open it again.",
                 "バックグラウンド機能との接続を確認できませんでした。Miasmaを閉じてから、もう一度開いてください。",
-                "后台功能未接受此窗口的连接。请关闭 Miasma 后重新打开。",
+                "后台服务未接受此窗口的连接。请关闭 Miasma 后重新打开。",
             ],
             Self::InvalidId => [
                 "The share ID is not in the right format. Copy it again and retry.",

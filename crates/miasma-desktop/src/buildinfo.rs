@@ -39,7 +39,7 @@ pub fn build_row_label(locale: Locale) -> &'static str {
     match locale {
         Locale::En => "Build:",
         Locale::Ja => "\u{30d3}\u{30eb}\u{30c9}:",
-        Locale::ZhCn => "\u{6784}\u{5efa}:",
+        Locale::ZhCn => "\u{6784}\u{5efa}\u{ff1a}",
     }
 }
 
@@ -67,7 +67,7 @@ mod tests {
     fn every_locale_has_a_channel_and_build_label() {
         for l in Locale::ALL {
             assert!(!channel_label(l).is_empty());
-            assert!(build_row_label(l).ends_with(':'));
+            assert!(build_row_label(l).ends_with([':', '\u{ff1a}']));
         }
     }
 
