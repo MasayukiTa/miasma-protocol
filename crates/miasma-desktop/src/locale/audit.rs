@@ -226,20 +226,22 @@ mod tests {
     fn reasons_are_short_plain_sentences() {
         for lang in Locale::ALL {
             let a = audit_strings(lang);
-            for (name, value) in [
-                ("need_text", a.need_text),
-                ("need_mid", a.need_mid),
-                ("need_code", a.need_code),
-                ("need_share_id", a.need_share_id),
-                ("need_folder", a.need_folder),
-                ("need_file", a.need_file),
-                ("need_contact", a.need_contact),
-                ("need_password", a.need_password),
-                ("need_connection", a.need_connection),
-            ] {
+            let reasons = [
+                a.need_text,
+                a.need_mid,
+                a.need_code,
+                a.need_share_id,
+                a.need_folder,
+                a.need_file,
+                a.need_contact,
+                a.need_password,
+                a.need_connection,
+            ];
+            for (i, value) in reasons.iter().enumerate() {
+                let long = value.chars().count() > 48;
                 assert!(
-                    value.chars().count() <= 48,
-                    "{lang:?} audit.{name} is long: {value:?}"
+                    !long,
+                    "{lang:?}: reason number {i} is longer than 48 characters"
                 );
             }
         }
