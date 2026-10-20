@@ -58,7 +58,7 @@ pub fn dialog_enter(ctx: &egui::Context, key: &'static str) -> bool {
         state.last_frame = frame;
     }
     ctx.data_mut(|d| d.insert_temp(id, state));
-    segment_begin(ctx);
+    segment_begin(ctx, key);
     fresh
 }
 
@@ -120,6 +120,8 @@ struct Segment {
     start: usize,
     end: Option<usize>,
     title: String,
+    /// The dialog's key: its tree node keeps the same id from frame to frame.
+    key: &'static str,
 }
 
 #[derive(Clone, Default)]
@@ -151,7 +153,7 @@ fn with_segments(ctx: &egui::Context, f: impl FnOnce(&mut Vec<Segment>)) {
 }
 
 /// Called by `dialog_enter` in every frame a dialog is drawn: the dialog's nodes start here.
-fn segment_begin(ctx: &egui::Context) {
+fn segment_begin(ctx: &egui::Context, key: &'static str) {
     let Some(at) = top_level_count(ctx) else {
         return;
     };
@@ -163,6 +165,7 @@ fn segment_begin(ctx: &egui::Context) {
             start: at,
             end: None,
             title: String::new(),
+            key,
         });
     });
 }
@@ -203,27 +206,27 @@ fn seal_dialogs(ctx: &egui::Context) {
             .map(|s| s.list)
             .unwrap_or_default()
     });
-    if segments.is_empty() {
-        return;
-    }
     let root = egui::accesskit_root_id();
     let Some(all) = ctx.accesskit_node_builder(root, |b| b.children().to_vec()) else {
         return;
     };
     // Resolve the ranges against what the root really holds.
-    let mut ranges: Vec<(usize, usize, String)> = Vec::new();
+    let mut ranges: Vec<(usize, usize, String, &'static str)> = Vec::new();
     for (i, s) in segments.iter().enumerate() {
         let next = segments.get(i + 1).map_or(all.len(), |n| n.start);
         let end = s.end.unwrap_or(next).min(all.len());
         let start = s.start.min(end);
         if start < end {
-            ranges.push((start, end, s.title.clone()));
+            ranges.push((start, end, s.title.clone(), s.key));
         }
     }
-    if ranges.is_empty() {
-        return;
-    }
-    let in_dialog = |i: usize| ranges.iter().any(|(a, b, _)| i >= *a && i < *b);
+    // The page always sits under the same wrapper node, with or without a dialog: the platform
+    // side keeps its own copy of the tree and applies each frame as an update, and an update
+    // that moves nodes from one parent to another (root -> wrapper when a dialog opens, back
+    // when it closes) is not applied correctly (see `traverse_orphan` in accesskit_consumer: it
+    // looks up a node it has already dropped and panics). Only the wrapper's hidden flag and the
+    // dialog nodes (new nodes with new children) change.
+    let in_dialog = |i: usize| ranges.iter().any(|(a, b, _, _)| i >= *a && i < *b);
     let page: Vec<accesskit::NodeId> = all
         .iter()
         .enumerate()
@@ -231,17 +234,20 @@ fn seal_dialogs(ctx: &egui::Context) {
         .map(|(_, n)| *n)
         .collect();
 
-    if !page.is_empty() {
-        let bg = egui::Id::new("a11y_inert_background");
-        let _ = ctx.accesskit_node_builder(bg, |b| {
-            b.set_role(accesskit::Role::GenericContainer);
+    let bg = egui::Id::new("a11y_inert_background");
+    let any_dialog = !ranges.is_empty();
+    let _ = ctx.accesskit_node_builder(bg, |b| {
+        b.set_role(accesskit::Role::GenericContainer);
+        if any_dialog {
             b.set_hidden();
-            b.set_children(page);
-        });
-    }
-    let last = ranges.len() - 1;
-    for (k, (start, end, title)) in ranges.iter().enumerate() {
-        let id = egui::Id::new(("a11y_dialog_node", k));
+        }
+        b.set_children(page);
+    });
+    let last = ranges.len().saturating_sub(1);
+    for (k, (start, end, title, key)) in ranges.iter().enumerate() {
+        // One id per dialog (not per position), so a dialog that stays open keeps its node when
+        // another one opens or closes.
+        let id = egui::Id::new(("a11y_dialog_node", *key));
         let kids: Vec<accesskit::NodeId> = all[*start..*end].to_vec();
         let _ = ctx.accesskit_node_builder(id, |b| {
             b.set_role(accesskit::Role::Dialog);
@@ -564,7 +570,7 @@ pub(crate) mod inventory {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::inventory::*;
     use super::*;
     use crate::locale::Locale;
