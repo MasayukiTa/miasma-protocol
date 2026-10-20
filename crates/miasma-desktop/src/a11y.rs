@@ -326,7 +326,23 @@ pub fn trap_finish(ctx: &egui::Context) {
     let open: Option<u64> = ctx.data_mut(|d| d.get_temp(trap_open_id()));
     if open == Some(ctx.frame_nr()) {
         trap_sentinel(ctx, "end");
+        // The widget with focus now: when it is a stop that has no role and no name (the
+        // window's title bar), the next frame moves focus on.
+        if let Some(id) = ctx.memory(|m| m.focused()) {
+            let nameless = ctx
+                .accesskit_node_builder(id, |b| {
+                    b.role() == accesskit::Role::Unknown && b.name().is_none()
+                })
+                .unwrap_or(false);
+            if nameless {
+                ctx.data_mut(|d| d.insert_temp(skip_id(), id));
+            }
+        }
     }
+}
+
+fn skip_id() -> egui::Id {
+    egui::Id::new("a11y_dialog_trap_skip")
 }
 
 /// One invisible one-pixel focus stop at the corner of the window.
@@ -405,8 +421,10 @@ pub fn trap_input(ctx: &egui::Context, raw: &mut egui::RawInput) {
     } else if focused == start {
         (end, true)
     } else {
-        // A window's own stop: keep going the way the last Tab press went.
-        let is_window = ctx.memory(|m| m.layer_ids().any(|l| l.id.with("move") == focused));
+        // A stop with no role and no name (the window's title bar): keep going the way the last
+        // Tab press went.
+        let skip: Option<egui::Id> = ctx.data_mut(|d| d.get_temp(skip_id()));
+        let is_window = skip == Some(focused);
         let last: Option<(bool, u64)> = ctx.data_mut(|d| d.get_temp(tab_dir_id()));
         match last {
             Some((shift, at)) if is_window && at + TAB_RECENT >= frame => (focused, shift),
@@ -1137,6 +1155,7 @@ pub(crate) mod tests {
     #[test]
     fn tab_and_shift_tab_cycle_inside_an_open_dialog() {
         let ctx = egui::Context::default();
+        ctx.enable_accesskit();
         let mut ids = [egui::Id::NULL; 3];
         for _ in 0..6 {
             ids = trap_frame(&ctx, screen(), true);
@@ -1165,7 +1184,10 @@ pub(crate) mod tests {
             trap_id("start").with("area"),
             trap_id("end").with("area"),
             ids,
-            ctx.memory(|m| m.layer_ids().map(|l| (l.id, l.id.with("move"))).collect::<Vec<_>>())
+            ctx.memory(|m| m
+                .layer_ids()
+                .map(|l| (l.id, l.id.with("move")))
+                .collect::<Vec<_>>())
         );
         // Backward from the first button: to the last.
         trap_frame(&ctx, tab(true), true);
