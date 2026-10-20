@@ -1112,7 +1112,13 @@ pub(crate) mod tests {
             }
             seen.push(focused(&ctx));
         }
-        assert_eq!(seen, [Some(ids[1]), Some(ids[2]), Some(ids[0])], "Tab");
+        assert_eq!(
+            seen,
+            [Some(ids[1]), Some(ids[2]), Some(ids[0])],
+            "Tab (start stop {:?}, end stop {:?})",
+            trap_id("start"),
+            trap_id("end")
+        );
         // Backward from the first button: to the last.
         trap_frame(&ctx, tab(true), true);
         for _ in 0..4 {
