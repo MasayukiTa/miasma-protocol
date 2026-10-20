@@ -22,12 +22,14 @@ use miasma_core::chat::{ChatRequest, ChatResponse};
 use miasma_core::push::ContactInfo;
 
 use crate::chat::{
-    cap_text, composer_cap, counter, counter_text, elide, prepare_send, when_list, when_message,
-    Clock, CounterLevel, SendBlock, MAX_PREVIEWS,
+    cap_text, composer_cap, counter, elide, prepare_send, when_list, when_message, Clock,
+    CounterLevel, SendBlock, MAX_PREVIEWS,
 };
 use crate::chat_ui::ChatAction;
 use crate::group::*;
-use crate::locale::{chat_strings, group_strings, ChatStrings, GroupStrings, Locale};
+use crate::locale::{
+    chat_strings, compose_strings, group_strings, ChatStrings, GroupStrings, Locale,
+};
 use crate::theme::{self, Palette};
 use crate::transfers::fill;
 use crate::ui_kit::{self as kit, Level};
@@ -916,51 +918,64 @@ impl GroupUi {
     ) -> Option<ChatAction> {
         let o = self.open.clone()?;
         let (gs, cs) = (self.gs(), self.cs());
+        let ks = compose_strings(self.locale);
         let status = self.status();
         let name = self.open_name();
+        let info_open = self.info_open && status != GroupStatus::Invited;
 
-        let mut back = false;
-        ui.horizontal_wrapped(|ui| {
-            let r = ui.add(kit::secondary_button(cs.back));
-            r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, cs.a11y_back));
-            if r.clicked() {
-                back = true;
-            }
-            ui.label(
-                RichText::new(elide(&name, NAME_CHARS))
-                    .text_style(egui::TextStyle::Heading)
-                    .color(pal().text),
-            )
-            .on_hover_text(&name);
-        });
-        if back {
-            self.close();
-            return None;
-        }
-        if status != GroupStatus::Invited {
-            let (label, a11y) = if self.info_open {
-                (gs.back_to_messages, gs.a11y_back_to_messages)
+        // Header, as for a one-to-one conversation: a small back arrow (to the messages while
+        // the details are open, else to the list), the name with one muted line under it, and one
+        // menu. The members and who has joined are in the details, not among the messages.
+        let members = self.open_row().map_or(0, |r| r.members);
+        let unverified = self
+            .detail
+            .as_ref()
+            .map_or(0, |d| unverified_count(&d.members));
+        let (subtitle, subtitle_color) = if info_open {
+            (gs.info_title.to_owned(), pal().muted)
+        } else if status == GroupStatus::Invited {
+            (gs.row_invited.to_owned(), pal().muted)
+        } else {
+            let base = fill(gs.row_members, &[("n", &members.to_string())]);
+            if unverified > 0 {
+                let extra = fill(ks.unverified_short, &[("u", &unverified.to_string())]);
+                (format!("{base} - {extra}"), pal().warning)
             } else {
-                (gs.info_button, gs.a11y_info)
-            };
-            ui.horizontal_wrapped(|ui| {
-                let r = ui.add(kit::secondary_button(label));
-                r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, a11y));
-                if r.clicked() {
-                    self.info_open = !self.info_open;
-                }
-            });
+                (base, pal().muted)
+            }
+        };
+        let mut open_info = false;
+        let mut menu = |ui: &mut egui::Ui| {
+            if kit::menu_item(ui, gs.info_button, false) {
+                open_info = true;
+            }
+        };
+        let with_menu = !info_open && status != GroupStatus::Invited;
+        let menu_ref: Option<&mut dyn FnMut(&mut egui::Ui)> =
+            if with_menu { Some(&mut menu) } else { None };
+        let back = kit::conversation_header(
+            ui,
+            if info_open {
+                gs.a11y_back_to_messages
+            } else {
+                cs.a11y_back
+            },
+            &elide(&name, NAME_CHARS),
+            Some((subtitle.as_str(), subtitle_color)),
+            ks.a11y_menu,
+            "group",
+            false,
+            menu_ref,
+        );
+        if open_info {
+            self.info_open = true;
         }
-        ui.add_space(kit::SP_1);
-        if let Some(d) = &self.detail {
-            let n = unverified_count(&d.members);
-            if n > 0 && !self.info_open && status != GroupStatus::Invited {
-                kit::notice(
-                    ui,
-                    Level::Warn,
-                    &fill(gs.unverified_header, &[("n", &n.to_string())]),
-                );
-                ui.add_space(kit::SP_2);
+        if back {
+            if info_open {
+                self.info_open = false;
+            } else {
+                self.close();
+                return None;
             }
         }
         if let Some(msg) = self.page_msg.clone() {
@@ -976,14 +991,6 @@ impl GroupUi {
         } else if self.info_open {
             self.info_view(ui);
         } else {
-            if can_send(status) {
-                if let Some(d) = &self.detail {
-                    for (warn, text) in waiting_notices(gs, &waiting_of(gs, d)) {
-                        kit::notice(ui, if warn { Level::Warn } else { Level::Info }, &text);
-                        ui.add_space(kit::SP_2);
-                    }
-                }
-            }
             self.thread_view(ui, &o, clock);
             if can_send(status) {
                 self.composer_view(ui, max_bytes);
@@ -1082,68 +1089,31 @@ impl GroupUi {
     fn composer_view(&mut self, ui: &mut egui::Ui, max_bytes: usize) {
         let (gs, cs) = (self.gs(), self.cs());
         ui.add_space(kit::SP_1);
-        // Japanese input: Enter that confirms a conversion must not send.
-        let composing = ui.input(|i| {
-            i.events.iter().fold(self.ime_composing, |now, e| match e {
-                egui::Event::CompositionStart => true,
-                egui::Event::CompositionUpdate(s) => !s.is_empty(),
-                egui::Event::CompositionEnd(_) => false,
-                _ => now,
-            })
-        });
-        self.ime_composing = composing;
-        let id = egui::Id::new("group_composer");
-        let focused = ui.memory(|m| m.has_focus(id));
-        let mut submit = false;
-        if focused
-            && !self.ime_composing
-            && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
-        {
-            submit = true;
-        }
-        let resp = ui.add(
-            kit::input_multiline(&mut self.composer)
-                .id(id)
-                .desired_rows(3)
-                .hint_text(cs.composer_hint),
+        let spec = kit::ComposerSpec {
+            id: "group_composer",
+            hint: cs.composer_hint,
+            a11y_input: gs.a11y_composer,
+            a11y_send: gs.a11y_send,
+            send_label: cs.send,
+            keys_hint: cs.composer_keys,
+            attach: None,
+        };
+        let view = |text: &str| crate::chat_ui::composer_state(cs, text, max_bytes);
+        let out = kit::composer(
+            ui,
+            &spec,
+            &mut self.composer,
+            &mut self.ime_composing,
+            &mut self.focus_composer,
+            &view,
         );
-        resp.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, gs.a11y_composer)
-        });
-        if resp.changed() && cap_text(&mut self.composer, composer_cap(max_bytes)) {
+        if out.changed && cap_text(&mut self.composer, composer_cap(max_bytes)) {
             self.page_msg = Some(cs.too_long_note.to_owned());
         }
-        if self.focus_composer {
-            resp.request_focus();
-            self.focus_composer = false;
-        }
-        let ctr = counter(&self.composer, max_bytes);
-        let can_send = !matches!(ctr.level, CounterLevel::Empty | CounterLevel::Over);
-        ui.horizontal_wrapped(|ui| {
-            let btn = kit::primary(ui, can_send, cs.send);
-            btn.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, gs.a11y_send));
-            let btn = if can_send {
-                btn
-            } else if ctr.level == CounterLevel::Over {
-                btn.on_disabled_hover_text(cs.too_long_note)
-            } else {
-                btn.on_disabled_hover_text(cs.send_empty_hint)
-            };
-            if btn.clicked() {
-                submit = true;
-            }
-            let color = match ctr.level {
-                CounterLevel::Over => pal().danger,
-                CounterLevel::Near => pal().warning,
-                _ => pal().muted,
-            };
-            ui.label(RichText::new(counter_text(cs, &ctr)).small().color(color));
-            ui.label(RichText::new(cs.composer_keys).small().color(pal().faint));
-        });
-        if submit && can_send {
+        if out.submit && out.can_send {
             self.submit(max_bytes);
             self.focus_composer = true;
-        } else if submit && ctr.level == CounterLevel::Over {
+        } else if out.submit && counter(&self.composer, max_bytes).level == CounterLevel::Over {
             self.page_msg = Some(cs.too_long_note.to_owned());
         }
     }
@@ -1163,7 +1133,22 @@ impl GroupUi {
             ui.label(RichText::new(cs.loading).color(pal().muted));
             return;
         };
-        kit::section(ui, gs.info_title, |_| {});
+        // What used to sit above the messages is here: members who are not contacts yet, and who
+        // the messages have not reached.
+        let n = unverified_count(&d.members);
+        if n > 0 {
+            kit::notice(
+                ui,
+                Level::Warn,
+                &fill(gs.unverified_header, &[("n", &n.to_string())]),
+            );
+        }
+        if can_send(status) {
+            for (warn, text) in waiting_notices(gs, &waiting_of(gs, &d)) {
+                kit::notice(ui, if warn { Level::Warn } else { Level::Info }, &text);
+            }
+        }
+        ui.add_space(kit::SP_2);
         egui::ScrollArea::vertical()
             .id_source("group_info")
             .auto_shrink([false, false])
@@ -1854,7 +1839,109 @@ fn message_row(
     add
 }
 
-/// The most groups the service keeps (shown by the "too many groups" sentence).
+// ─── Dev-only screenshot fixtures ───────────────────────────────────────────
+
+/// Fixture names for the `ui-tour` screenshots (also used by the Chat fixtures).
+#[cfg(any(test, feature = "ui-tour"))]
+pub const FIXTURES: &[&str] = &["grouplist", "group", "groupinfo"];
+
+#[cfg(any(test, feature = "ui-tour"))]
+impl GroupUi {
+    /// A group area filled with fake data (no service). `None` for an unknown name.
+    pub fn fixture(name: &str, locale: Locale) -> Option<Self> {
+        use miasma_core::chat::group::ipc::{GroupInfo, MemberInfo};
+        const NOW: u64 = 1_792_074_600_000; // 2026-10-15 14:30 UTC
+        const MIN: u64 = 60_000;
+        let info = |id: &str, name: &str, status: &str, members: u32, last_ms: u64| GroupInfo {
+            id: id.into(),
+            name: name.into(),
+            epoch: 1,
+            status: status.into(),
+            members,
+            messages: 12,
+            last_ms,
+            pending: 0,
+            invited_by: None,
+        };
+        let member = |ep: &str, you: bool, verified: bool, admin: bool, status: &str| MemberInfo {
+            endpoint_id: ep.into(),
+            fingerprint: format!("{}-4F2K-9QWE-7MNB", ep.to_uppercase()),
+            contact_code: format!("miasma-contact:{ep}"),
+            role: if admin { "admin" } else { "member" }.into(),
+            hint: (!verified && !you).then(|| "山田".to_owned()),
+            label: verified.then(|| "田中".to_owned()),
+            verified,
+            you,
+            status: Some(if you { "you" } else { status }.into()),
+            reason: None,
+        };
+        let msg =
+            |ord: u64, outgoing: bool, verified: bool, text: &str, ago: u64| GroupMessageInfo {
+                ord,
+                id: format!("g{ord}"),
+                outgoing,
+                sender: if outgoing {
+                    "me".into()
+                } else if verified {
+                    "tanaka".into()
+                } else {
+                    "yamada".into()
+                },
+                sender_label: verified.then(|| "田中".to_owned()),
+                sender_hint: Some("山田".to_owned()),
+                sender_fingerprint: "YAMA-4F2K-9QWE-7MNB".into(),
+                verified,
+                counter: ord,
+                epoch: 1,
+                text: text.into(),
+                sent_ms: NOW - ago * MIN,
+                at_ms: NOW - ago * MIN,
+                total: outgoing.then_some(2),
+                delivered: outgoing.then_some(1),
+                failed: outgoing.then_some(0),
+                gap_before: 0,
+            };
+        let mut ui = GroupUi {
+            locale,
+            support: Support::Yes,
+            area_open: true,
+            loaded: true,
+            ..Default::default()
+        };
+        ui.rows = group_rows(&[
+            info("g1", "週次ミーティング", "joined", 3, NOW - 4 * MIN),
+            info("g2", "旅行の計画", "invited", 2, NOW - 3_000 * MIN),
+        ]);
+        match name {
+            "grouplist" => {}
+            "group" | "groupinfo" => {
+                ui.open_group("g1", "週次ミーティング");
+                let members = vec![
+                    member("me", true, false, true, "joined"),
+                    member("tanaka", false, true, false, "joined"),
+                    member("yamada", false, false, false, "invited"),
+                ];
+                ui.detail = Some(GroupDetailInfo {
+                    group: info("g1", "週次ミーティング", "joined", 3, NOW - 4 * MIN),
+                    members,
+                    is_admin: true,
+                    added_by: None,
+                });
+                ui.messages = vec![
+                    msg(1, false, true, "来週の会議は火曜の10時です。", 40),
+                    msg(2, false, false, "資料は共有フォルダに置きました。", 12),
+                    msg(3, true, false, "ありがとうございます。確認します。", 4),
+                ];
+                ui.thread_loaded = true;
+                ui.thread_dirty = false;
+                ui.detail_dirty = false;
+                ui.info_open = name == "groupinfo";
+            }
+            _ => return None,
+        }
+        Some(ui)
+    }
+}
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
@@ -2647,6 +2734,42 @@ mod tests {
                     // Drawing asks the service for nothing.
                     assert!(requests(&mut ui).is_empty(), "{screen} {locale:?}");
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn the_group_fixtures_draw_inside_a_narrow_window_with_the_new_header() {
+        for name in FIXTURES {
+            for locale in Locale::ALL {
+                let mut ui = GroupUi::fixture(name, locale).expect(name);
+                let ctx = egui::Context::default();
+                kit::apply_theme(&ctx, false);
+                for _ in 0..3 {
+                    let input = egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::pos2(0.0, 0.0),
+                            vec2(700.0, 900.0),
+                        )),
+                        ..Default::default()
+                    };
+                    let _ = ctx.run(input, |ctx| {
+                        egui::CentralPanel::default().show(ctx, |panel| {
+                            kit::column(panel, |panel| {
+                                if ui.is_open() {
+                                    let _ = ui.conversation_view(panel, clock(), 4096);
+                                } else {
+                                    for i in 0..ui.rows().len() {
+                                        let _ = ui.row(panel, i, clock());
+                                    }
+                                }
+                            });
+                        });
+                    });
+                }
+                let used = ctx.used_rect();
+                assert!(used.right() <= 700.5, "{name} {locale:?}: {used:?}");
+                assert!(requests(&mut ui).is_empty(), "{name}");
             }
         }
     }

@@ -117,6 +117,8 @@ pub struct MiasmaApp {
     contacts: ContactsUi,
     /// Chat screen (one-to-one messages between registered contacts).
     chat: ChatUi,
+    /// The one send flow: Home, Contacts, Chat and dropped files all open it.
+    send_flow: crate::send_flow::SendFlow,
     /// `miasma-share:` links handed over by later launches (see `link.rs`), and the instance lock
     /// that makes this window the one they are handed to.
     link_rx: Option<std::sync::mpsc::Receiver<String>>,
@@ -537,6 +539,7 @@ impl MiasmaApp {
             transfers: TransfersUi::default(),
             contacts: ContactsUi::default(),
             chat: ChatUi::default(),
+            send_flow: crate::send_flow::SendFlow::default(),
             link_rx: None,
             _instance: None,
 
@@ -631,6 +634,7 @@ impl MiasmaApp {
             || self.import_state == ImportState::InProgress
             || self.transfers.running_count() > 0
             || self.contacts.active_count() > 0
+            || self.send_flow.is_busy()
     }
 
     /// Persist current mode, locale and theme to desktop-prefs.toml.
@@ -653,6 +657,35 @@ impl MiasmaApp {
             || self.show_wipe_confirm
             || self.revoke_confirm.is_some()
             || self.storage.confirm.is_some()
+    }
+
+    /// Files dragged over the window get a "Drop files to send" veil; files dropped on it open
+    /// the send flow. On a conversation, or on a person's row in Contacts, that person is
+    /// already chosen.
+    fn handle_drops(&mut self, ctx: &egui::Context) {
+        let d = crate::send_flow::read_drops(ctx);
+        if d.hovering && !self.dialog_is_open() {
+            crate::send_flow::paint_drop_overlay(
+                ctx,
+                locale::compose_strings(self.locale).drop_overlay,
+            );
+        }
+        if d.paths.is_empty() || self.dialog_is_open() {
+            return;
+        }
+        if self.daemon_state != DaemonState::Connected {
+            let text = self.tr().forms_offline;
+            self.set_msg(MsgKind::Error, text);
+            return;
+        }
+        let contact = match self.tab {
+            Tab::Chat => self.chat.open_contact_id().map(str::to_owned),
+            Tab::Contacts => self.contacts.drop_contact(d.pos),
+            _ => None,
+        }
+        .filter(|id| self.contacts.can_send_to(id));
+        self.send_flow
+            .open_with_files(d.paths, contact, self.contacts.contact_list());
     }
 
     /// The "are you sure" dialogs. One is open at a time; each is answered with a button or Esc.
@@ -1029,6 +1062,7 @@ impl MiasmaApp {
                     }
                 }
                 WorkerResult::TransferStarted { id } => {
+                    self.send_flow.on_started(id.clone());
                     self.transfers.on_started(id);
                     self.set_msg(MsgKind::Success, self.tr().started);
                 }
@@ -1049,7 +1083,13 @@ impl MiasmaApp {
                 }
                 WorkerResult::TransferError(e) => {
                     let text = self.error_text(&e);
-                    self.transfers.on_error(text);
+                    if self.send_flow.on_failed(text.clone()) {
+                        // The send flow's own file: its dialog shows the reason, not the form
+                        // of the Transfers screen.
+                        self.transfers.note_flow_send(false);
+                    } else {
+                        self.transfers.on_error(text);
+                    }
                 }
                 WorkerResult::Logs { daemon_lines, .. } => {
                     self.logs.daemon_lines = daemon_lines;
@@ -1303,7 +1343,8 @@ impl MiasmaApp {
             ui.add_space(kit::SP_3);
             kit::surface(ui, |ui| {
                 if kit::primary(ui, connected, s.home_send_action).clicked() {
-                    self.tab = Tab::Send;
+                    // The one send flow, over this screen.
+                    self.send_flow.open_empty(self.contacts.contact_list());
                 }
                 ui.add_space(kit::SP_1);
                 if ui
@@ -1329,18 +1370,22 @@ impl MiasmaApp {
         let transfer_label = self.tr().tab_easy;
 
         kit::page(ui, s.files_heading_easy, Some(s.files_desc_easy), |ui| {
+            // Sending starts from Home, a contact, a conversation or a dropped file, not from
+            // here: this hub is for what has been sent and received, and for the rest.
             kit::surface(ui, |ui| {
-                if kit::primary(ui, connected, s.home_send_action).clicked() {
-                    self.tab = Tab::Send;
-                }
-                for (label, tab) in [
+                for (i, (label, tab)) in [
                     (s.home_receive_action, Tab::Inbox),
                     (s.home_save_action, Tab::Store),
                     (s.tab_retrieve_easy, Tab::Retrieve),
                     (transfer_label, Tab::Transfers),
                     (s.tab_outbox_easy, Tab::Outbox),
-                ] {
-                    ui.add_space(kit::SP_1);
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    if i > 0 {
+                        ui.add_space(kit::SP_1);
+                    }
                     if ui
                         .add_enabled(connected, kit::secondary_button(label))
                         .clicked()
@@ -3377,6 +3422,17 @@ impl MiasmaApp {
                 .drain(|req| tx.try_send(WorkerCmd::Chat(req)).is_ok());
         }
 
+        // The send flow: files of an invitation-code send go to the worker one at a time, the
+        // next after the daemon answered the one before.
+        if self.daemon_state == DaemonState::Connected {
+            if let Some(out) = self.send_flow.next_command() {
+                self.transfers.note_flow_send(out.protected);
+                if self.worker.tx.try_send(out.cmd).is_err() {
+                    self.send_flow.put_back();
+                }
+            }
+        }
+
         let s = self.s();
         let easy = self.mode.is_easy();
 
@@ -3561,12 +3617,8 @@ impl MiasmaApp {
                     match action {
                         Some(ChatAction::OpenContacts) => self.tab = Tab::Contacts,
                         Some(ChatAction::SendFiles(id)) => {
-                            let ct = locale::contact_strings(self.locale);
-                            let files = self.contacts.pick_and_send_files(ct, &id);
-                            self.chat.note_files_sent(&id, &files);
-                            for n in self.contacts.take_notices() {
-                                self.set_msg(MsgKind::Success, n);
-                            }
+                            // The paperclip opens the one send flow with this contact chosen.
+                            self.send_flow.open_for_contact(&id);
                         }
                         Some(ChatAction::RetryFile { contact_id, path }) => {
                             self.contacts.resend_file(&contact_id, &path);
@@ -3596,6 +3648,11 @@ impl MiasmaApp {
                                     let c = locale::contact_strings(self.locale);
                                     let connected = self.daemon_state == DaemonState::Connected;
                                     self.contacts.show(ui, c, connected, !easy);
+                                    // "Send files" on a person's row: the one send flow, with
+                                    // that person chosen.
+                                    if let Some(id) = self.contacts.take_send_request() {
+                                        self.send_flow.open_for_contact(&id);
+                                    }
                                 }
                                 // Drawn above, outside the scroll area.
                                 Tab::Chat => {}
@@ -3613,6 +3670,32 @@ impl MiasmaApp {
                         });
                     });
             });
+
+        // Files dropped on the window, and the one send flow they (and every other "send") open.
+        self.handle_drops(ctx);
+        {
+            let connected = self.daemon_state == DaemonState::Connected;
+            let out = self.send_flow.show(
+                ctx,
+                locale::compose_strings(self.locale),
+                self.tr(),
+                locale::contact_strings(self.locale),
+                &mut self.contacts,
+                &self.transfers,
+                connected,
+            );
+            if let Some((id, files)) = out.noted {
+                self.chat.note_files_sent(&id, &files);
+                for n in self.contacts.take_notices() {
+                    self.set_msg(MsgKind::Success, n);
+                }
+            }
+            match out.nav {
+                Some(crate::send_flow::FlowNav::Files) => self.tab = Tab::Transfers,
+                Some(crate::send_flow::FlowNav::Contacts) => self.tab = Tab::Contacts,
+                None => {}
+            }
+        }
 
         // The page is drawn: a CJK character on it that no loaded font can draw reads the next
         // font (dialogs, drawn below, are looked at in the following frame).

@@ -189,6 +189,17 @@ pub(crate) mod inventory {
         },
         Entry {
             file: "ui_kit.rs",
+            func: "icon_button",
+            role: Role::Named,
+            // The name is passed in by the caller: back, attach and the conversation menu.
+            names: |l| {
+                let c = locale::chat_strings(l);
+                let k = locale::compose_strings(l);
+                vec![c.a11y_back, c.a11y_attach, k.a11y_menu]
+            },
+        },
+        Entry {
+            file: "ui_kit.rs",
             func: "progress",
             role: Role::Named,
             names: |l| vec![locale::strings(l).status_storage],

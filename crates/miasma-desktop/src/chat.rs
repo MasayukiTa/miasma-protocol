@@ -662,6 +662,27 @@ pub fn state_label(c: &ChatStrings, d: Delivery) -> Option<&'static str> {
     }
 }
 
+/// The one muted line under the contact's name in a conversation header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderStatus {
+    /// Nothing to say: no line is shown.
+    Quiet,
+    /// Messages of mine are waiting for the other person to come online.
+    Waiting,
+    /// Messages of mine are waiting because this computer is not connected to the relay.
+    RelayDown,
+}
+
+/// What the header says: only what is true and useful (there is no "online" light, because the
+/// service does not know whether the other person is there until a message goes through).
+pub fn header_status(relay_down: bool, has_queued: bool) -> HeaderStatus {
+    match (has_queued, relay_down) {
+        (false, _) => HeaderStatus::Quiet,
+        (true, true) => HeaderStatus::RelayDown,
+        (true, false) => HeaderStatus::Waiting,
+    }
+}
+
 /// The highest sequence number among the received messages at `visible` positions of `items`
 /// (the rows really on screen), or 0 when there is none. This is what a read receipt reports:
 /// never a message the person has not had in view.
