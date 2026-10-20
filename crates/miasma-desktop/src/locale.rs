@@ -2904,6 +2904,10 @@ pub use compose::{compose_strings, ComposeStrings};
 mod audit;
 pub use audit::{audit_strings, AuditStrings};
 
+// The Settings category row and the Danger zone (their own file: `locale/settings.rs`).
+mod settings;
+pub use settings::{settings_strings, SettingsStrings};
+
 // ─── Chat (one-to-one messages between registered contacts) ─────────────────
 
 /// Declares `ChatStrings` and a field listing for the completeness test from one field list.
