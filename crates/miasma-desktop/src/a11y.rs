@@ -1371,4 +1371,90 @@ mod tests {
             "collapsing headers without show_a11y: {plain:?}"
         );
     }
+
+    // ── Incremental updates, as the platform adapter receives them ─────────────────────────
+
+    /// The shape of the tree must be sound after every update: every listed child exists, every
+    /// node has exactly one parent, and nothing is left over (`serialize` walks from the root and
+    /// panics on a missing child or a node nobody lists).
+    pub(crate) fn assert_sound(tree: &Tree) {
+        let ser = tree.state().serialize();
+        let mut seen = std::collections::HashSet::new();
+        for (id, data) in &ser.nodes {
+            assert!(seen.insert(*id), "node {id:?} reached twice");
+            for c in data.children() {
+                assert!(
+                    tree.state().node_by_id(*c).is_some(),
+                    "child {c:?} of {id:?} is missing"
+                );
+            }
+        }
+        assert!(
+            tree.state().node_by_id(ser.focus).is_some(),
+            "focus points at a missing node"
+        );
+    }
+
+    /// A copy of the platform's tree.
+    fn copy_tree(tree: &Tree) -> Tree {
+        Tree::new(tree.state().serialize(), true)
+    }
+
+    /// Feeds one frame's update to the platform tree the way the Windows adapter does. egui
+    /// lists the nodes of a frame in a hash map's order, which differs from frame to frame, so
+    /// the same update is also applied with its nodes in other orders (to copies); each result
+    /// must be sound.
+    pub(crate) fn apply_in_every_order(tree: &mut Tree, u: &Update) {
+        let n = u.nodes.len();
+        let mut orders: Vec<Vec<usize>> = vec![(0..n).collect(), (0..n).rev().collect()];
+        // Rotations and a deterministic shuffle.
+        for k in [1usize, n / 3, n / 2, n.saturating_sub(1)] {
+            orders.push((0..n).map(|i| (i + k) % n.max(1)).collect());
+        }
+        let mut x: u64 = n as u64 | 1;
+        for _ in 0..6 {
+            let mut o: Vec<usize> = (0..n).collect();
+            for i in (1..n).rev() {
+                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                o.swap(i, (x >> 33) as usize % (i + 1));
+            }
+            orders.push(o);
+        }
+        for order in orders {
+            let mut copy = copy_tree(tree);
+            let mut v = u.clone();
+            v.nodes = order.iter().map(|&i| u.nodes[i].clone()).collect();
+            copy.update(v);
+            assert_sound(&copy);
+        }
+        tree.update(u.clone());
+        assert_sound(tree);
+    }
+
+    #[test]
+    fn a_dialog_opening_and_closing_keeps_the_platform_tree_sound() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let open = std::cell::Cell::new(false);
+        let mut frame = |ctx: &egui::Context| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let _ = ui.button("Behind");
+                let _ = ui.button("Also behind");
+            });
+            if open.get() {
+                crate::ui_kit::dialog(ctx, "t_sound", "Question", |ui| {
+                    let _ = ui.button("Keep");
+                });
+            }
+            drop_orphan_focus(ctx);
+        };
+        let first = run_tree(&ctx, &mut frame);
+        let mut tree = Tree::new(first, true);
+        assert_sound(&tree);
+        for step in 0..9 {
+            open.set((2..6).contains(&step));
+            let u = run_tree(&ctx, &mut frame);
+            apply_in_every_order(&mut tree, &u);
+        }
+    }
 }
