@@ -2861,6 +2861,10 @@ static CT_ZH_CN: ContactStrings = ContactStrings {
 mod group;
 pub use group::{group_strings, GroupStrings};
 
+// The shared send flow and the conversation header (their own file: `locale/compose.rs`).
+mod compose;
+pub use compose::{compose_strings, ComposeStrings};
+
 // ─── Chat (one-to-one messages between registered contacts) ─────────────────
 
 /// Declares `ChatStrings` and a field listing for the completeness test from one field list.

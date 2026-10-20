@@ -34,6 +34,7 @@ mod network_strings;
 mod network_ui;
 mod open_path;
 mod os_locale;
+mod send_flow;
 mod speed;
 mod theme;
 mod transfers;

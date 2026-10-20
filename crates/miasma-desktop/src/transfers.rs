@@ -201,7 +201,7 @@ fn chip_color(chip: Chip) -> egui::Color32 {
     }
 }
 
-fn state_label(t: &TransferStrings, state: TransferState) -> &'static str {
+pub(crate) fn state_label(t: &TransferStrings, state: TransferState) -> &'static str {
     match state {
         TransferState::Running => t.st_running,
         TransferState::Paused => t.st_paused,
@@ -735,6 +735,14 @@ impl TransfersUi {
         // Read the new row now instead of waiting out the interval.
         self.last_poll = Instant::now() - POLL_EVERY;
         self.in_flight = false;
+    }
+
+    /// The shared send flow is about to start a send: remember whether it carries a password
+    /// (so a later Resume asks for it), exactly as the form's own Send button does. The "new
+    /// transfer" form is left alone.
+    pub fn note_flow_send(&mut self, protected: bool) {
+        self.pending_protected = protected;
+        self.from_form = false;
     }
 
     pub fn on_error(&mut self, message: String) {
@@ -1475,15 +1483,24 @@ impl TransfersUi {
         connected: bool,
         cmds: &mut Vec<WorkerCmd>,
     ) {
+        // Easy mode has one way to send (the shared send flow, opened from Home, Contacts, Chat
+        // or by dropping files), so this card is only the receive form there.
+        if easy {
+            self.form = NewForm::Receive;
+        }
         kit::surface(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(kit::section_text(t.new_heading));
-                ui.add_space(kit::SP_2);
-                let mut form = self.form;
-                let options = [(NewForm::Receive, t.receive), (NewForm::Send, t.send)];
-                if kit::segmented(ui, &mut form, &options) {
-                    self.form = form;
-                    self.form_error = None;
+                if easy {
+                    ui.label(kit::section_text(t.receive));
+                } else {
+                    ui.label(kit::section_text(t.new_heading));
+                    ui.add_space(kit::SP_2);
+                    let mut form = self.form;
+                    let options = [(NewForm::Receive, t.receive), (NewForm::Send, t.send)];
+                    if kit::segmented(ui, &mut form, &options) {
+                        self.form = form;
+                        self.form_error = None;
+                    }
                 }
             });
             ui.add_space(kit::SP_1);
@@ -1832,7 +1849,7 @@ impl TransfersUi {
 
 /// What the send form knows about the password in its field.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum SendPassword {
+pub(crate) enum SendPassword {
     /// Empty: the transfer is not protected (passwords stay optional).
     Unprotected,
     /// Not acceptable for a new protected transfer; the button stays disabled.
@@ -1844,7 +1861,7 @@ enum SendPassword {
 
 /// The publish-side policy, evaluated on the field. The daemon applies the same rule and is the
 /// authority; this only spares a round trip and lets the message be localised.
-fn send_password_state(password: &str) -> SendPassword {
+pub(crate) fn send_password_state(password: &str) -> SendPassword {
     if password.is_empty() {
         return SendPassword::Unprotected;
     }
@@ -1862,7 +1879,7 @@ fn send_ready(connected: bool, path: &str, mismatch: bool, pw: &SendPassword) ->
     connected && !path.trim().is_empty() && !mismatch && !matches!(pw, SendPassword::Weak(_))
 }
 
-fn violation_codes(v: &[PolicyViolation]) -> Vec<&'static str> {
+pub(crate) fn violation_codes(v: &[PolicyViolation]) -> Vec<&'static str> {
     v.iter().map(PolicyViolation::code).collect()
 }
 
@@ -1878,7 +1895,7 @@ fn violation_text(t: &TransferStrings, code: &str) -> Option<&'static str> {
 }
 
 /// `Password not accepted: it is shorter than 6 characters; it has no digit`.
-fn weak_password_text(t: &TransferStrings, codes: &[&str]) -> String {
+pub(crate) fn weak_password_text(t: &TransferStrings, codes: &[&str]) -> String {
     let reasons: Vec<&str> = codes.iter().filter_map(|c| violation_text(t, c)).collect();
     format!("{} {}", t.pw_weak_prefix, reasons.join(t.pw_err_sep))
 }

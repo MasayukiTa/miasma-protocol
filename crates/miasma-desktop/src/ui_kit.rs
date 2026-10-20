@@ -731,6 +731,287 @@ pub fn focus_ring(painter: &egui::Painter, rect: egui::Rect, rounding: f32) {
     );
 }
 
+// ─── Icon buttons and the conversation header ───────────────────────────────
+
+/// The pictures an icon button can show. They are painted with lines and circles, so no icon
+/// font is needed (and no emoji, which not every system font can draw).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Icon {
+    /// An arrow pointing left: back to the list.
+    Back,
+    /// Three dots: the menu with the rare actions.
+    More,
+    /// A paperclip: attach a file.
+    Attach,
+}
+
+/// Side of an icon button (px). Large enough to hit; no frame is drawn around it.
+pub const ICON_BTN: f32 = 32.0;
+
+/// Points of a paperclip in a 24 x 24 box (a polyline through two straight runs and three
+/// half circles).
+fn paperclip_points() -> Vec<(f32, f32)> {
+    fn arc(c: (f32, f32), r: f32, from: f32, to: f32, out: &mut Vec<(f32, f32)>) {
+        const STEPS: usize = 14;
+        for i in 1..=STEPS {
+            let a = (from + (to - from) * i as f32 / STEPS as f32).to_radians();
+            out.push((c.0 + r * a.cos(), c.1 + r * a.sin()));
+        }
+    }
+    let mut v = vec![(21.44, 11.05), (12.25, 20.24)];
+    arc((8.005, 15.995), 6.0, 45.0, 225.0, &mut v);
+    v.push((12.95, 2.56));
+    arc((15.78, 5.39), 4.0, 225.0, 405.0, &mut v);
+    v.push((9.41, 17.41));
+    arc((8.0, 16.0), 2.0, 45.0, 225.0, &mut v);
+    v.push((15.07, 6.10));
+    v
+}
+
+/// A borderless icon button. `name` is what a screen reader says and the tooltip. A disabled
+/// one is drawn faint and does not react.
+pub fn icon_button(ui: &mut Ui, icon: Icon, name: &str, enabled: bool) -> Response {
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, resp) = ui.allocate_exact_size(vec2(ICON_BTN, ICON_BTN), sense);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, name));
+    if ui.is_rect_visible(rect) {
+        let p = pal();
+        let color = if enabled { p.text } else { p.faint };
+        let painter = ui.painter();
+        if enabled && (resp.hovered() || resp.has_focus()) {
+            painter.rect_filled(rect, 6.0, p.text.gamma_multiply(0.08));
+        }
+        let c = rect.center();
+        let stroke = Stroke::new(1.8, color);
+        match icon {
+            Icon::Back => {
+                let (x0, x1) = (c.x - 7.0, c.x + 7.0);
+                painter.line_segment([egui::pos2(x0, c.y), egui::pos2(x1, c.y)], stroke);
+                painter.line_segment(
+                    [egui::pos2(x0, c.y), egui::pos2(x0 + 5.5, c.y - 5.5)],
+                    stroke,
+                );
+                painter.line_segment(
+                    [egui::pos2(x0, c.y), egui::pos2(x0 + 5.5, c.y + 5.5)],
+                    stroke,
+                );
+            }
+            Icon::More => {
+                for dx in [-6.0, 0.0, 6.0] {
+                    painter.circle_filled(egui::pos2(c.x + dx, c.y), 2.0, color);
+                }
+            }
+            Icon::Attach => {
+                let side = 20.0;
+                let s = side / 24.0;
+                let origin = egui::pos2(c.x - side * 0.5, c.y - side * 0.5);
+                let pts: Vec<egui::Pos2> = paperclip_points()
+                    .into_iter()
+                    .map(|(x, y)| origin + vec2(x * s, y * s))
+                    .collect();
+                painter.add(egui::Shape::line(pts, stroke));
+            }
+        }
+        if resp.has_focus() {
+            focus_ring(painter, rect.shrink(1.0), 6.0);
+        }
+    }
+    resp.on_hover_text(name)
+}
+
+/// One row of a menu: the whole row is the button. True when it was pressed.
+pub fn menu_item(ui: &mut Ui, label: &str, danger: bool) -> bool {
+    let p = pal();
+    let text = RichText::new(label).color(if danger { p.danger } else { p.text });
+    let w = ui.available_width();
+    ui.add(
+        egui::Button::new(text)
+            .frame(false)
+            .min_size(vec2(w, CONTROL_H)),
+    )
+    .clicked()
+}
+
+/// A menu row with a check box (a setting that is on or off). Check `changed()` on the result.
+pub fn menu_check(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
+    ui.checkbox(on, label)
+}
+
+/// What the composer shows for the text in it right now.
+pub struct ComposerView {
+    /// Send is available.
+    pub can_send: bool,
+    /// A small line under the composer (the length, when it is close to the limit or over it).
+    pub note: Option<(String, Color32)>,
+    /// What the disabled Send button says when hovered.
+    pub disabled_hover: String,
+}
+
+/// The fixed parts of a composer.
+pub struct ComposerSpec<'a> {
+    /// Id of the text field (also what focus is asked for).
+    pub id: &'static str,
+    pub hint: &'a str,
+    /// Names for a screen reader.
+    pub a11y_input: &'a str,
+    pub a11y_send: &'a str,
+    pub send_label: &'a str,
+    /// What the field says when hovered: the keys.
+    pub keys_hint: &'a str,
+    /// A paperclip on the left: its name, and whether it can be pressed. `None`: no paperclip.
+    pub attach: Option<(&'a str, bool)>,
+}
+
+/// What a frame of the composer did.
+#[derive(Default)]
+pub struct ComposerOut {
+    /// Enter was pressed (and it was not confirming an input-method conversion), or Send was.
+    pub submit: bool,
+    pub attach: bool,
+    pub changed: bool,
+    pub can_send: bool,
+}
+
+/// The composer of a conversation, as in the common messengers: one row with the paperclip on the
+/// left, a text field that grows with what is typed (up to a few lines, then it scrolls), and Send
+/// on the right (disabled while there is nothing to send). Enter sends, Shift+Enter starts a new
+/// line. `view` says, for the text as it is after this frame's typing, whether Send is available.
+pub fn composer(
+    ui: &mut Ui,
+    spec: &ComposerSpec,
+    text: &mut String,
+    ime_composing: &mut bool,
+    focus: &mut bool,
+    view: &dyn Fn(&str) -> ComposerView,
+) -> ComposerOut {
+    // Japanese input: Enter that confirms a conversion must not send.
+    let composing = ui.input(|i| {
+        i.events.iter().fold(*ime_composing, |now, e| match e {
+            egui::Event::CompositionStart => true,
+            egui::Event::CompositionUpdate(s) => !s.is_empty(),
+            egui::Event::CompositionEnd(_) => false,
+            _ => now,
+        })
+    });
+    *ime_composing = composing;
+    let id = egui::Id::new(spec.id);
+    let focused = ui.memory(|m| m.has_focus(id));
+    let mut out = ComposerOut::default();
+    if focused
+        && !composing
+        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
+    {
+        out.submit = true;
+    }
+    let mut note = None;
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = SP_2;
+        if let Some((name, enabled)) = spec.attach {
+            out.attach = icon_button(ui, Icon::Attach, name, enabled).clicked();
+        }
+        let field_w = (ui.available_width() - BTN_MIN_W - SP_2).max(120.0);
+        let resp = ui
+            .allocate_ui(vec2(field_w, 0.0), |ui| {
+                egui::ScrollArea::vertical()
+                    .id_source((spec.id, "scroll"))
+                    .max_height(112.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.add(
+                            input_multiline(text)
+                                .id(id)
+                                .desired_rows(1)
+                                .desired_width(field_w - 2.0 * SP_2)
+                                .hint_text(spec.hint),
+                        )
+                    })
+                    .inner
+            })
+            .inner;
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, spec.a11y_input));
+        out.changed = resp.changed();
+        if *focus {
+            resp.request_focus();
+            *focus = false;
+        }
+        resp.on_hover_text(spec.keys_hint);
+        let v = view(text);
+        let btn = primary(ui, v.can_send, spec.send_label);
+        btn.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, spec.a11y_send));
+        let btn = if v.can_send {
+            btn
+        } else {
+            btn.on_disabled_hover_text(v.disabled_hover.clone())
+        };
+        if btn.clicked() {
+            out.submit = true;
+        }
+        out.can_send = v.can_send;
+        note = v.note;
+    });
+    if let Some((text, color)) = note {
+        ui.label(meta_text(text, color));
+    }
+    out
+}
+
+/// The header of a conversation, in the manner of the common messengers: a small back arrow, the
+/// name with one muted line under it, and one menu button on the right. `menu` draws the rows of
+/// the menu (the rare actions); `None` shows no menu button. Returns true when back was pressed.
+pub fn conversation_header(
+    ui: &mut Ui,
+    back_name: &str,
+    title: &str,
+    subtitle: Option<(&str, Color32)>,
+    menu_name: &str,
+    menu_key: &str,
+    open_menu: bool,
+    menu: Option<&mut dyn FnMut(&mut Ui)>,
+) -> bool {
+    let mut back = false;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = SP_2;
+        back = icon_button(ui, Icon::Back, back_name, true).clicked();
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            ui.add(
+                Label::new(
+                    RichText::new(title)
+                        .font(FontId::proportional(17.0))
+                        .color(pal().text),
+                )
+                .truncate(true),
+            )
+            .on_hover_text(title);
+            if let Some((text, color)) = subtitle {
+                ui.add(Label::new(meta_text(text, color)).truncate(true));
+            }
+        });
+        if let Some(menu) = menu {
+            ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+                let resp = icon_button(ui, Icon::More, menu_name, true);
+                let id = ui.make_persistent_id(("conversation_menu", menu_key));
+                if resp.clicked() {
+                    ui.memory_mut(|m| m.toggle_popup(id));
+                }
+                if open_menu {
+                    ui.memory_mut(|m| m.open_popup(id));
+                }
+                egui::popup::popup_below_widget(ui, id, &resp, |ui| {
+                    ui.set_width(260.0);
+                    menu(ui);
+                });
+            });
+        }
+    });
+    ui.add_space(SP_1);
+    back
+}
+
 /// A thin determinate bar across the available width. Neutral; turns to the warning colour when
 /// `warn`. `name` is what a screen reader calls it ("Storage"); `fraction` is its value.
 pub fn progress(ui: &mut Ui, name: &str, fraction: f32, warn: bool) {

@@ -890,6 +890,8 @@ pub struct ContactsUi {
     remove_target: Option<(String, String)>,
     row_rects: Vec<(String, egui::Rect)>,
     page_msg: Option<(String, bool)>,
+    /// "Send files" was pressed on this contact's row; the app opens the send flow for them.
+    send_request: Option<String>,
 
     /// Failures of "Open file" / "Show in folder" reported by the helper thread.
     open_tx: std::sync::mpsc::Sender<String>,
@@ -971,6 +973,7 @@ impl Default for ContactsUi {
             remove_target: None,
             row_rects: Vec::new(),
             page_msg: None,
+            send_request: None,
             suggestions: Vec::new(),
             ignored: Vec::new(),
             last_suggest: now,
@@ -1009,17 +1012,19 @@ impl ContactsUi {
         &self.contacts
     }
 
-    /// The same file picker and queueing as the "Send files" button of a contact's row, for
-    /// another screen. Returns the names of the files that were queued (none if the dialog was
-    /// cancelled or only folders were picked).
-    pub fn pick_and_send_files(&mut self, c: &ContactStrings, id: &str) -> Vec<SentFile> {
+    /// Queue `paths` for contact `id` (the send flow's way to a registered contact). Returns the
+    /// files that were queued (folders are refused and not returned; an unknown contact queues
+    /// nothing).
+    pub fn queue_files(
+        &mut self,
+        c: &ContactStrings,
+        id: &str,
+        paths: Vec<PathBuf>,
+    ) -> Vec<SentFile> {
         if !self.contacts.iter().any(|x| x.id == id) {
             return Vec::new();
         }
-        let Some(files) = rfd::FileDialog::new().set_title(c.pick_title).pick_files() else {
-            return Vec::new();
-        };
-        let sent: Vec<SentFile> = files
+        let sent: Vec<SentFile> = paths
             .iter()
             .filter(|p| !p.is_dir())
             .map(|p| SentFile {
@@ -1027,8 +1032,25 @@ impl ContactsUi {
                 path: p.to_string_lossy().into_owned(),
             })
             .collect();
-        self.send_paths(c, id, files);
+        self.send_paths(c, id, paths);
         sent
+    }
+
+    /// The contact whose "Send files" button was pressed since the last call: the app opens the
+    /// send flow for them.
+    pub fn take_send_request(&mut self) -> Option<String> {
+        self.send_request.take()
+    }
+
+    /// The contact a drop at `pos` is meant for: the row under the pointer, else the only
+    /// contact. `None` = the person picks in the send flow.
+    pub fn drop_contact(&self, pos: Option<egui::Pos2>) -> Option<String> {
+        drop_target(&self.row_rects, pos, self.contacts.len()).map(str::to_owned)
+    }
+
+    /// Whether `id` is a registered contact the person may send to.
+    pub fn can_send_to(&self, id: &str) -> bool {
+        self.contacts.iter().any(|x| x.id == id && x.allow_send)
     }
 
     /// Where a file sent from the chat screen stands (see [`FileStatus`]).
@@ -1635,8 +1657,6 @@ impl ContactsUi {
             _ => {}
         }
 
-        self.handle_drops(ui, c);
-
         if let Some((msg, is_err)) = self.page_msg.clone() {
             let color = if is_err { pal().danger } else { pal().success };
             let card = card_frame().show(ui, |ui| {
@@ -1914,40 +1934,6 @@ impl ContactsUi {
         });
     }
 
-    fn handle_drops(&mut self, ui: &mut egui::Ui, c: &ContactStrings) {
-        let ctx = ui.ctx();
-        let (hovering, dropped, pos) = ctx.input(|i| {
-            (
-                !i.raw.hovered_files.is_empty(),
-                i.raw
-                    .dropped_files
-                    .iter()
-                    .filter_map(|f| f.path.clone())
-                    .collect::<Vec<_>>(),
-                i.pointer.hover_pos().or(i.pointer.latest_pos()),
-            )
-        });
-        if hovering && !self.contacts.is_empty() {
-            card_frame().show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.add(
-                    egui::Label::new(egui::RichText::new(c.drop_hint).color(pal().accent))
-                        .wrap(true),
-                );
-            });
-            ui.add_space(GAP);
-        }
-        if dropped.is_empty() {
-            return;
-        }
-        let target = drop_target(&self.row_rects, pos, self.contacts.len()).map(str::to_owned);
-        match target {
-            Some(id) => self.send_paths(c, &id, dropped),
-            None if self.contacts.is_empty() => {}
-            None => self.page_msg = Some((c.drop_pick_contact.to_owned(), true)),
-        }
-    }
-
     fn list_ui(&mut self, ui: &mut egui::Ui, c: &ContactStrings, technical: bool) {
         card_frame().show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -2060,9 +2046,8 @@ impl ContactsUi {
                 .add_enabled(can_send, primary_button(c.send_files))
                 .clicked()
             {
-                if let Some(files) = rfd::FileDialog::new().set_title(c.pick_title).pick_files() {
-                    self.send_paths(c, &ct.id, files);
-                }
+                // The one send flow does the choosing of files; it opens with this person.
+                self.send_request = Some(ct.id.clone());
             }
             if ui.button(c.rename).clicked() {
                 self.renaming = Some((ct.id.clone(), ct.label.clone()));

@@ -39,8 +39,8 @@ const RETRY_CLOSED: Duration = Duration::from_secs(30);
 const STALE: Duration = Duration::from_secs(20);
 /// Height of a conversation row.
 const ROW_H: f32 = 62.0;
-/// Room kept under the message list for the composer and its hints.
-const COMPOSER_RESERVE: f32 = 190.0;
+/// Room kept under the message list for the composer (one row, growing to a few lines).
+const COMPOSER_RESERVE: f32 = 120.0;
 /// A row this far outside the visible part of the list is skipped, not laid out.
 const CULL_MARGIN: f32 = 240.0;
 /// The service's default limit of one message, until its status says otherwise.
@@ -73,6 +73,41 @@ struct Open {
     label: String,
 }
 
+/// What a press in a conversation's header, its menu or its composer asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConversationAction {
+    /// The paperclip: send a file to this contact (opens the shared send flow with them).
+    Attach,
+    /// The menu's "Read receipts" check box.
+    ToggleReceipts,
+    /// The menu's "Verify contact".
+    Verify,
+    /// The menu's "Delete this conversation's history" (opens the confirmation).
+    Delete,
+}
+
+/// What the composer shows for `text`: whether Send works, and the length note when the text is
+/// close to the limit or over it (otherwise nothing is drawn).
+pub(crate) fn composer_state(c: &ChatStrings, text: &str, max_bytes: usize) -> kit::ComposerView {
+    let ctr = counter(text, max_bytes);
+    let can_send = !matches!(ctr.level, CounterLevel::Empty | CounterLevel::Over);
+    let note = match ctr.level {
+        CounterLevel::Near => Some((counter_text(c, &ctr), pal().warning)),
+        CounterLevel::Over => Some((counter_text(c, &ctr), pal().danger)),
+        _ => None,
+    };
+    let disabled_hover = if ctr.level == CounterLevel::Over {
+        c.too_long_note
+    } else {
+        c.send_empty_hint
+    };
+    kit::ComposerView {
+        can_send,
+        note,
+        disabled_hover: disabled_hover.to_owned(),
+    }
+}
+
 #[derive(Debug, Clone)]
 enum View {
     List,
@@ -80,6 +115,8 @@ enum View {
 }
 
 pub struct ChatUi {
+    /// The language of the screens (set by the window every frame).
+    locale: Locale,
     /// Set by the window from the daemon status: the home relay is not connected, so a waiting
     /// message is waiting on this computer, not on the other person.
     pub relay_down: bool,
@@ -119,6 +156,10 @@ pub struct ChatUi {
     ime_composing: bool,
     picker_open: bool,
     delete_target: Option<Open>,
+    /// The "verify this contact" dialog is open for this conversation.
+    verify_target: Option<Open>,
+    /// Open the header menu on the next frame (screenshot fixtures).
+    open_menu_once: bool,
     deleting: Option<(String, String)>,
     page_msg: Option<String>,
 
@@ -160,6 +201,7 @@ impl Default for ChatUi {
     fn default() -> Self {
         let now = Instant::now();
         Self {
+            locale: Locale::default(),
             relay_down: false,
             availability: Availability::Unknown,
             was_connected: false,
@@ -191,6 +233,8 @@ impl Default for ChatUi {
             ime_composing: false,
             picker_open: false,
             delete_target: None,
+            verify_target: None,
+            open_menu_once: false,
             deleting: None,
             page_msg: None,
             unread: Unread::default(),
@@ -242,6 +286,7 @@ impl ChatUi {
 
     /// The language of the group screens (their words are in `locale/group.rs`).
     pub fn set_locale(&mut self, locale: Locale) {
+        self.locale = locale;
         self.group.set_locale(locale);
     }
 
@@ -927,6 +972,7 @@ impl ChatUi {
         }
         self.picker_dialog(ui.ctx(), c, contacts);
         self.delete_dialog(ui.ctx(), c);
+        self.verify_dialog(ui.ctx(), contacts);
         self.group.dialogs(ui.ctx(), contacts);
         if action.is_none() {
             action = self.file_action.take();
@@ -1077,75 +1123,65 @@ impl ChatUi {
         action: &mut Option<ChatAction>,
     ) {
         let known = contacts.iter().find(|x| x.id == o.contact_id);
-        let name = known.map_or(o.label.as_str(), |x| x.label.as_str());
+        let name = known
+            .map_or(o.label.as_str(), |x| x.label.as_str())
+            .to_owned();
         let send_allowed = known.map(|x| x.allow_send).unwrap_or(true);
+        let k = crate::locale::compose_strings(self.locale);
 
-        // Header: back, name, and the two things to do with the conversation.
-        let mut back = false;
-        let mut ask_delete = false;
-        let mut send_file = false;
-        ui.horizontal_wrapped(|ui| {
-            let r = ui.add(kit::secondary_button(c.back));
-            r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, c.a11y_back));
-            if r.clicked() {
-                back = true;
-            }
-            ui.label(
-                RichText::new(elide(name, NAME_CHARS))
-                    .text_style(egui::TextStyle::Heading)
-                    .color(pal().text),
-            )
-            .on_hover_text(name);
-        });
+        // Header, as in the common messengers: a small back arrow, the name with one muted line
+        // under it, and one menu with the rare things (read receipts, verifying the contact,
+        // deleting the history). Nothing else is drawn as a box.
         let receipts_global = self.receipts_global;
         let receipts_on = self.receipts_on(&o.endpoint_id);
-        let mut switch_receipts = false;
-        ui.horizontal_wrapped(|ui| {
-            let r = ui.add_enabled(send_allowed, kit::secondary_button(c.send_file));
-            r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, c.a11y_attach));
-            if r.on_hover_text(c.send_file_hint).clicked() {
-                send_file = true;
-            }
+        let has_queued = self
+            .window
+            .items()
+            .iter()
+            .any(|m| delivery_of(m) == Delivery::Queued);
+        let status = match header_status(self.relay_down, has_queued) {
+            HeaderStatus::Quiet => None,
+            HeaderStatus::Waiting => Some(k.header_waiting),
+            HeaderStatus::RelayDown => Some(k.header_relay),
+        };
+        let mut chosen: Option<ConversationAction> = None;
+        let mut menu = |ui: &mut egui::Ui| {
             if receipts_global {
-                let label = if receipts_on {
-                    c.receipts_on
-                } else {
-                    c.receipts_off
-                };
-                let r = ui.add(kit::secondary_button(label));
-                r.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::WidgetType::Button, c.a11y_receipts)
-                });
-                if r.on_hover_text(c.receipts_hint).clicked() {
-                    switch_receipts = true;
+                let mut on = receipts_on;
+                let r =
+                    kit::menu_check(ui, &mut on, k.menu_receipts).on_hover_text(c.receipts_hint);
+                if r.changed() {
+                    chosen = Some(ConversationAction::ToggleReceipts);
                 }
+            } else {
+                kit::hint(ui, c.receipts_global_off);
             }
-            if ui.add(kit::danger_button(c.delete_history)).clicked() {
-                ask_delete = true;
+            if kit::menu_item(ui, k.menu_verify, false) {
+                chosen = Some(ConversationAction::Verify);
             }
-        });
-        if switch_receipts {
-            self.set_receipts(&o.endpoint_id, !receipts_on);
-        }
-        ui.add_space(kit::SP_1);
-        if !receipts_global {
-            kit::notice(ui, Level::Info, c.receipts_global_off);
-            ui.add_space(kit::SP_2);
+            kit::divider(ui);
+            if kit::menu_item(ui, c.delete_history, true) {
+                chosen = Some(ConversationAction::Delete);
+            }
+        };
+        let menu_ref: Option<&mut dyn FnMut(&mut egui::Ui)> = Some(&mut menu);
+        let back = kit::conversation_header(
+            ui,
+            c.a11y_back,
+            &elide(&name, NAME_CHARS),
+            status.map(|s| (s, pal().muted)),
+            k.a11y_menu,
+            "chat",
+            std::mem::take(&mut self.open_menu_once),
+            menu_ref,
+        );
+        if let Some(a) = chosen {
+            self.apply_action(a, o, &name, action);
         }
         self.memory_only_note(ui, c);
         if back {
             self.close_conversation();
             return;
-        }
-        if send_file {
-            *action = Some(ChatAction::SendFiles(o.contact_id.clone()));
-        }
-        if ask_delete {
-            self.delete_target = Some(Open {
-                contact_id: o.contact_id.clone(),
-                endpoint_id: o.endpoint_id.clone(),
-                label: name.to_owned(),
-            });
         }
 
         self.thread_view(ui, c, o);
@@ -1169,10 +1205,54 @@ impl ChatUi {
             });
         }
         if send_allowed {
-            self.composer_view(ui, c);
+            if self.composer_view(ui, c, true) {
+                self.apply_action(ConversationAction::Attach, o, &name, action);
+            }
         } else {
             kit::notice(ui, Level::Warn, c.send_off_note);
         }
+    }
+
+    /// What a press in the header, its menu or the composer does. Nothing here deletes without
+    /// asking: Delete only opens the confirmation.
+    fn apply_action(
+        &mut self,
+        a: ConversationAction,
+        o: &Open,
+        name: &str,
+        action: &mut Option<ChatAction>,
+    ) {
+        match a {
+            ConversationAction::Attach => {
+                *action = Some(ChatAction::SendFiles(o.contact_id.clone()));
+            }
+            ConversationAction::ToggleReceipts => {
+                let on = self.receipts_on(&o.endpoint_id);
+                self.set_receipts(&o.endpoint_id, !on);
+            }
+            ConversationAction::Verify => {
+                self.verify_target = Some(Open {
+                    contact_id: o.contact_id.clone(),
+                    endpoint_id: o.endpoint_id.clone(),
+                    label: name.to_owned(),
+                });
+            }
+            ConversationAction::Delete => {
+                self.delete_target = Some(Open {
+                    contact_id: o.contact_id.clone(),
+                    endpoint_id: o.endpoint_id.clone(),
+                    label: name.to_owned(),
+                });
+            }
+        }
+    }
+
+    /// The contact whose conversation is open (a file dropped on the window goes to them).
+    pub fn open_contact_id(&self) -> Option<&str> {
+        if self.group.is_open() {
+            return None;
+        }
+        self.open().map(|o| o.contact_id.as_str())
     }
 
     fn thread_view(&mut self, ui: &mut egui::Ui, c: &ChatStrings, o: &Open) {
@@ -1331,70 +1411,39 @@ impl ChatUi {
         }
     }
 
-    fn composer_view(&mut self, ui: &mut egui::Ui, c: &ChatStrings) {
+    /// The composer: paperclip, text field, Send. True when the paperclip was pressed.
+    fn composer_view(&mut self, ui: &mut egui::Ui, c: &ChatStrings, can_attach: bool) -> bool {
         ui.add_space(kit::SP_1);
-        // Japanese input: Enter that confirms a conversion must not send.
-        let composing = ui.input(|i| {
-            i.events.iter().fold(self.ime_composing, |now, e| match e {
-                egui::Event::CompositionStart => true,
-                egui::Event::CompositionUpdate(s) => !s.is_empty(),
-                egui::Event::CompositionEnd(_) => false,
-                _ => now,
-            })
-        });
-        self.ime_composing = composing;
-        let id = egui::Id::new("chat_composer");
-        let focused = ui.memory(|m| m.has_focus(id));
-        let mut submit = false;
-        if focused
-            && !self.ime_composing
-            && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
-        {
-            submit = true;
-        }
-        let resp = ui.add(
-            kit::input_multiline(&mut self.composer)
-                .id(id)
-                .desired_rows(3)
-                .hint_text(c.composer_hint),
+        let max_bytes = self.max_bytes;
+        let spec = kit::ComposerSpec {
+            id: "chat_composer",
+            hint: c.composer_hint,
+            a11y_input: c.a11y_composer,
+            a11y_send: c.a11y_send,
+            send_label: c.send,
+            keys_hint: c.composer_keys,
+            attach: Some((c.send_file, can_attach)),
+        };
+        let view = |text: &str| composer_state(c, text, max_bytes);
+        let out = kit::composer(
+            ui,
+            &spec,
+            &mut self.composer,
+            &mut self.ime_composing,
+            &mut self.focus_composer,
+            &view,
         );
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, c.a11y_composer));
-        if resp.changed() && cap_text(&mut self.composer, composer_cap(self.max_bytes)) {
+        if out.changed && cap_text(&mut self.composer, composer_cap(self.max_bytes)) {
             self.page_msg = Some(c.too_long_note.to_owned());
         }
-        if self.focus_composer {
-            resp.request_focus();
-            self.focus_composer = false;
-        }
-        let ctr = counter(&self.composer, self.max_bytes);
-        let can_send = !matches!(ctr.level, CounterLevel::Empty | CounterLevel::Over);
-        ui.horizontal_wrapped(|ui| {
-            let btn = kit::primary(ui, can_send, c.send);
-            btn.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, c.a11y_send));
-            let btn = if can_send {
-                btn
-            } else if ctr.level == CounterLevel::Over {
-                btn.on_disabled_hover_text(c.too_long_note)
-            } else {
-                btn.on_disabled_hover_text(c.send_empty_hint)
-            };
-            if btn.clicked() {
-                submit = true;
-            }
-            let color = match ctr.level {
-                CounterLevel::Over => pal().danger,
-                CounterLevel::Near => pal().warning,
-                _ => pal().muted,
-            };
-            ui.label(RichText::new(counter_text(c, &ctr)).small().color(color));
-            ui.label(RichText::new(c.composer_keys).small().color(pal().faint));
-        });
-        if submit && can_send {
+        if out.submit && out.can_send {
             self.submit(c);
             self.focus_composer = true;
-        } else if submit && ctr.level == CounterLevel::Over {
+        } else if out.submit && counter(&self.composer, self.max_bytes).level == CounterLevel::Over
+        {
             self.page_msg = Some(c.too_long_note.to_owned());
         }
+        out.attach
     }
 
     // ── Dialogs ──────────────────────────────────────────────────────────
@@ -1426,6 +1475,55 @@ impl ChatUi {
             }
             Answer::Cancel => self.delete_target = None,
             Answer::Pending => {}
+        }
+    }
+
+    /// "Verify contact": the contact's verification code, to be compared with the one the other
+    /// person reads out. Nothing is changed by it.
+    fn verify_dialog(&mut self, ctx: &egui::Context, contacts: &[ContactInfo]) {
+        let Some(target) = self.verify_target.clone() else {
+            return;
+        };
+        let k = crate::locale::compose_strings(self.locale);
+        crate::a11y::dialog_enter(ctx, "chat_verify");
+        if crate::a11y::esc_pressed(ctx) {
+            self.verify_target = None;
+            crate::a11y::dialog_leave(ctx, "chat_verify");
+            return;
+        }
+        let code = contacts
+            .iter()
+            .find(|x| x.id == target.contact_id)
+            .map(|x| x.fingerprint.clone())
+            .unwrap_or_default();
+        let name = elide(&target.label, NAME_CHARS);
+        let mut close = false;
+        egui::Window::new(fill(k.verify_title, &[("name", &name)]))
+            .id(egui::Id::new("chat_verify"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .max_width(440.0)
+            .show(ctx, |ui| {
+                ui.set_max_width(420.0);
+                kit::paragraph(ui, &fill(k.verify_body, &[("name", &name)]));
+                ui.add_space(kit::SP_1);
+                ui.label(
+                    RichText::new(code.as_str())
+                        .monospace()
+                        .size(20.0)
+                        .color(pal().text),
+                );
+                ui.add_space(kit::SP_2);
+                let b = ui.add(kit::secondary_button(k.verify_close));
+                crate::a11y::dialog_focus_safe_button(ui.ctx(), "chat_verify", &b);
+                if b.clicked() {
+                    close = true;
+                }
+            });
+        if close {
+            self.verify_target = None;
+            crate::a11y::dialog_leave(ctx, "chat_verify");
         }
     }
 
@@ -1733,6 +1831,11 @@ pub const FIXTURES: &[&str] = &[
     "confirm",
     "picker",
     "notsupported",
+    "menu",
+    "verify",
+    "grouplist",
+    "group",
+    "groupinfo",
 ];
 
 #[cfg(any(test, feature = "ui-tour"))]
@@ -1787,8 +1890,9 @@ impl ChatUi {
         let mut thread: Vec<MessageInfo> = Vec::new();
         let mut open = false;
         match name {
-            "nocontacts" | "empty" | "notsupported" => {}
-            "memory" | "list" | "picker" | "confirm" | "thread" | "long" | "failed" => {
+            "nocontacts" | "empty" | "notsupported" | "group" | "groupinfo" => {}
+            "memory" | "list" | "picker" | "confirm" | "thread" | "long" | "failed" | "menu"
+            | "verify" | "grouplist" => {
                 convs = vec![
                     conv(a_ep, "a", "田中", NOW - 2 * MIN, 12, 0),
                     conv("bb", "b", LONG, NOW - DAY, 40, 1),
@@ -1825,7 +1929,7 @@ impl ChatUi {
             _ => return None,
         }
         match name {
-            "thread" | "confirm" | "memory" => {
+            "thread" | "confirm" | "memory" | "menu" | "verify" => {
                 open = true;
                 thread = vec![
                     msg(1, false, "received", "お疲れさまです。", NOW - DAY),
@@ -1908,6 +2012,19 @@ impl ChatUi {
             ui.window.apply_newest(thread, PAGE);
             ui.thread_loaded = true;
             ui.timeline_dirty = true;
+        }
+        if name == "menu" {
+            ui.open_menu_once = true;
+        }
+        if name == "verify" {
+            ui.verify_target = Some(Open {
+                contact_id: "a".into(),
+                endpoint_id: a_ep.into(),
+                label: "田中".into(),
+            });
+        }
+        if crate::group_ui::FIXTURES.contains(&name) {
+            ui.group = GroupUi::fixture(name, Locale::En).unwrap_or_default();
         }
         if name == "confirm" {
             ui.delete_target = Some(Open {
@@ -2619,6 +2736,129 @@ mod tests {
         assert!(!requests(&mut ui).is_empty());
     }
 
+    fn opened() -> (ChatUi, Open) {
+        let mut ui = ready();
+        ui.open_conversation("a", "ep", "田中");
+        let o = ui.open().cloned().expect("a conversation is open");
+        (ui, o)
+    }
+
+    #[test]
+    fn the_paperclip_opens_the_send_flow_for_this_contact_and_sends_nothing() {
+        let (mut ui, o) = opened();
+        let mut action = None;
+        ui.apply_action(ConversationAction::Attach, &o, "田中", &mut action);
+        assert_eq!(action, Some(ChatAction::SendFiles("a".into())));
+        assert!(requests(&mut ui).is_empty());
+        // The app turns that action into the flow, prefilled with the contact.
+        let mut flow = crate::send_flow::SendFlow::default();
+        flow.open_for_contact("a");
+        assert_eq!(
+            flow.recipient(),
+            &crate::send_flow::Recipient::Contact("a".into())
+        );
+        assert_eq!(ui.open_contact_id(), Some("a"));
+    }
+
+    #[test]
+    fn deleting_the_history_needs_the_confirmation_dialog() {
+        let (mut ui, o) = opened();
+        let mut action = None;
+        ui.apply_action(ConversationAction::Delete, &o, "田中", &mut action);
+        // Only the question is open: nothing was asked of the service, no action for the app.
+        assert!(ui.delete_target.is_some());
+        assert!(requests(&mut ui).is_empty());
+        assert_eq!(action, None);
+        // The confirmation is what deletes.
+        let target = ui.delete_target.clone().unwrap();
+        ui.delete_history(&target);
+        assert!(matches!(
+            &requests(&mut ui)[..],
+            [ChatRequest::DeleteLocal { message_id: None, contact }] if contact == "ep"
+        ));
+    }
+
+    #[test]
+    fn the_menu_toggles_read_receipts_and_opens_the_verification() {
+        let (mut ui, o) = opened();
+        let mut action = None;
+        assert!(ui.receipts_on("ep"));
+        ui.apply_action(ConversationAction::ToggleReceipts, &o, "田中", &mut action);
+        assert!(!ui.receipts_on("ep"));
+        assert!(matches!(
+            &requests(&mut ui)[..],
+            [ChatRequest::SetReadReceipts { contact, enabled: false }] if contact == "ep"
+        ));
+        ui.apply_action(ConversationAction::ToggleReceipts, &o, "田中", &mut action);
+        assert!(ui.receipts_on("ep"));
+        // Verify opens its own dialog and changes nothing.
+        ui.apply_action(ConversationAction::Verify, &o, "田中", &mut action);
+        assert_eq!(
+            ui.verify_target.as_ref().map(|v| v.contact_id.as_str()),
+            Some("a")
+        );
+        assert_eq!(action, None);
+    }
+
+    #[test]
+    fn the_composer_is_disabled_when_empty_and_enabled_with_text() {
+        let c = c();
+        for text in ["", "   ", "\n\n"] {
+            let v = composer_state(c, text, 4096);
+            assert!(!v.can_send, "{text:?}");
+            assert_eq!(v.disabled_hover, c.send_empty_hint);
+            assert!(v.note.is_none(), "no counter for an empty field");
+        }
+        let v = composer_state(c, "こんにちは", 4096);
+        assert!(v.can_send);
+        assert!(v.note.is_none(), "no counter while far from the limit");
+        // Close to the limit: a note; over it: no send, and the reason is the hover text.
+        let near = composer_state(c, &"a".repeat(3800), 4096);
+        assert!(near.can_send && near.note.is_some());
+        let over = composer_state(c, &"a".repeat(5000), 4096);
+        assert!(!over.can_send && over.note.is_some());
+        assert_eq!(over.disabled_hover, c.too_long_note);
+    }
+
+    #[test]
+    fn the_header_says_only_what_is_known() {
+        assert_eq!(header_status(false, false), HeaderStatus::Quiet);
+        assert_eq!(header_status(true, false), HeaderStatus::Quiet);
+        assert_eq!(header_status(false, true), HeaderStatus::Waiting);
+        assert_eq!(header_status(true, true), HeaderStatus::RelayDown);
+    }
+
+    #[test]
+    fn the_open_menu_draws_inside_a_narrow_window() {
+        // The "menu" fixture opens the header menu (receipts, verify, delete) on its first frame.
+        let mut chat = ChatUi::fixture("menu").expect("menu");
+        chat.set_locale(Locale::En);
+        let contacts =
+            crate::contacts::ContactsUi::fixture("two", crate::locale::contact_strings(Locale::En))
+                .unwrap();
+        let list = contacts.contact_list().to_vec();
+        let ctx = egui::Context::default();
+        kit::apply_theme(&ctx, false);
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    vec2(700.0, 900.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    kit::column(ui, |ui| {
+                        let _ = chat.show(ui, chat_strings(Locale::En), true, &list);
+                    });
+                });
+            });
+        }
+        let used = ctx.used_rect();
+        assert!(used.right() <= 700.5, "{used:?}");
+    }
+
     #[test]
     fn every_fixture_draws_without_panicking_at_both_widths() {
         for name in FIXTURES {
@@ -2626,6 +2866,7 @@ mod tests {
                 for locale in Locale::ALL {
                     let strings = chat_strings(locale);
                     let mut chat = ChatUi::fixture(name).expect(name);
+                    chat.set_locale(locale);
                     let contacts = crate::contacts::ContactsUi::fixture(
                         if *name == "nocontacts" {
                             "empty"
