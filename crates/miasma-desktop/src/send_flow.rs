@@ -578,7 +578,7 @@ impl SendFlow {
         let list = contacts.contact_list().to_vec();
         let screen = ctx.screen_rect();
         let width = (screen.width() - 48.0).clamp(280.0, 520.0);
-        let max_h = (screen.height() - 120.0).max(220.0);
+        let max_h = (screen.height() - 72.0 - 72.0).max(220.0);
         let mut action = FormAction::None;
         let mut close = false;
         let mut nav = None;
@@ -586,7 +586,9 @@ impl SendFlow {
             .id(egui::Id::new("send_flow_window"))
             .collapsible(false)
             .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            // Anchored at the top so that the room below (the scroll area's limit) does not
+            // shrink as the dialog grows.
+            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 72.0))
             .show(ctx, |ui| {
                 ui.set_width(width);
                 egui::ScrollArea::vertical()

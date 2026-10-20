@@ -838,10 +838,7 @@ pub fn menu_item(ui: &mut Ui, label: &str, danger: bool) -> bool {
 
 /// A menu row with a check box (a setting that is on or off). Check `changed()` on the result.
 pub fn menu_check(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
-    ui.add_sized(
-        vec2(ui.available_width(), CONTROL_H),
-        egui::Checkbox::new(on, label),
-    )
+    ui.checkbox(on, label)
 }
 
 /// What the composer shows for the text in it right now.
@@ -911,7 +908,7 @@ pub fn composer(
         out.submit = true;
     }
     let mut note = None;
-    ui.horizontal(|ui| {
+    ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = SP_2;
         if let Some((name, enabled)) = spec.attach {
             out.attach = icon_button(ui, Icon::Attach, name, enabled).clicked();
