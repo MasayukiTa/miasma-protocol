@@ -102,7 +102,7 @@ fun SendScreen(vm: MiasmaViewModel) {
                         sharingContact,
                         style = MaterialTheme.typography.bodySmall,
                         fontFamily = FontFamily.Monospace,
-                        maxLines = 2,
+                        softWrap = true,
                     )
                 }
             }

@@ -62,9 +62,12 @@ fun HomeScreen(
     onSave: () -> Unit = {},
 ) {
     val ui by vm.ui.collectAsState()
+    val daemonPort by vm.daemonHttpPort.collectAsState()
     var showEmergencyDialog by remember { mutableStateOf(false) }
 
-    LaunchedEffect(Unit) { vm.refreshStatus() }
+    // Re-read the node status when the embedded daemon comes up or goes away, so a
+    // first launch does not stay on "Getting ready" after initialisation finishes.
+    LaunchedEffect(daemonPort) { vm.refreshStatus() }
 
     Column(
         modifier = Modifier
@@ -97,7 +100,8 @@ fun HomeScreen(
                 )
             }
             // Connection status indicator
-            val isConnected = ui.nodeStatus != null
+            // Initialised storage alone is not a running node: the embedded daemon must be up.
+            val isConnected = ui.nodeStatus != null && daemonPort != 0
             Box(
                 modifier = Modifier
                     .size(12.dp)
@@ -110,7 +114,8 @@ fun HomeScreen(
 
         // ── Status banner ──
         val status = ui.nodeStatus
-        if (status != null) {
+        val nodeRunning = status != null && daemonPort != 0
+        if (nodeRunning) {
             // Connected banner
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -190,13 +195,13 @@ fun HomeScreen(
         Button(
             onClick = onSend,
             modifier = Modifier.fillMaxWidth(),
-            enabled = status != null,
+            enabled = nodeRunning,
         ) { Text(stringResource(R.string.action_send_file)) }
         Spacer(Modifier.height(8.dp))
         OutlinedButton(
             onClick = onReceive,
             modifier = Modifier.fillMaxWidth(),
-            enabled = status != null,
+            enabled = nodeRunning,
         ) { Text(stringResource(R.string.action_receive_file)) }
         Spacer(Modifier.height(8.dp))
         OutlinedButton(
