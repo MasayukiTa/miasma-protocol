@@ -1159,12 +1159,13 @@ pub(crate) mod tests {
         assert_eq!(
             seen,
             [Some(ids[1]), Some(ids[2]), Some(ids[0])],
-            "Tab (start stop {:?}, end stop {:?}, start area {:?}, end area {:?}, ids {:?})",
+            "Tab (start {:?}, end {:?}, start area {:?}, end area {:?}, ids {:?}, layers {:?})",
             trap_id("start"),
             trap_id("end"),
             trap_id("start").with("area"),
             trap_id("end").with("area"),
-            ids
+            ids,
+            ctx.memory(|m| m.layer_ids().map(|l| (l.id, l.id.with("move"))).collect::<Vec<_>>())
         );
         // Backward from the first button: to the last.
         trap_frame(&ctx, tab(true), true);
