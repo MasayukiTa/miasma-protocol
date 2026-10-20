@@ -24,6 +24,7 @@ use miasma_core::transfer::{
 };
 use zeroize::Zeroize;
 
+use crate::a11y::CollapsingExt as _;
 use crate::locale::TransferStrings;
 use crate::theme::{self, Palette};
 use crate::ui_kit::{self as kit, Level};
@@ -959,7 +960,7 @@ impl TransfersUi {
                     egui::CollapsingHeader::new(RichText::new(t.details_label).color(pal().muted))
                         .id_source(("transfer-details", id.clone()))
                         .default_open(false)
-                        .show(ui, |ui| {
+                        .show_a11y(ui, |ui| {
                             if let Some(err) = &job.last_error {
                                 kit::hint(ui, err);
                             }

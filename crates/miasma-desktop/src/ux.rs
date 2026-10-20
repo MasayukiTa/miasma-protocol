@@ -145,6 +145,7 @@ pub mod confirm {
             crate::a11y::dialog_leave(ctx, id);
             return Answer::Cancel;
         }
+        crate::a11y::dialog_title(ctx, title);
         egui::Window::new(title)
             .id(egui::Id::new(id))
             .collapsible(false)
