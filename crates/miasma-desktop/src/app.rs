@@ -1425,7 +1425,13 @@ impl MiasmaApp {
 
         // Status is one muted line; the numbers are behind "Details".
         ui.add_space(kit::SP_3);
-        ui.label(kit::muted_text(s.status_ready));
+        let (_, state_text) = header_chip(
+            &self.daemon_state,
+            self.relay_down.is_some(),
+            s,
+            locale::audit_strings(self.locale),
+        );
+        ui.label(kit::muted_text(state_text));
         ui.add_space(kit::SP_2);
         egui::CollapsingHeader::new(kit::muted_text(s.details_easy))
             .id_source("home_details")

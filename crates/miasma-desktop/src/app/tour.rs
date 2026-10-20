@@ -724,6 +724,7 @@ fn arrange(step: &Step, app: &mut MiasmaApp, ctx: &egui::Context, first: bool) {
         if step.name.contains("_nopeers_") {
             app.peer_count = 0;
         }
+        app.relay_down = None;
         if step.name.contains("_relaydown_") {
             app.relay_down = Some(crate::worker::RelayDown {
                 secs: 420,
