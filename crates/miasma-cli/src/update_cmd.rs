@@ -124,6 +124,13 @@ fn report(out: &CheckOutcome) -> i32 {
             );
             EXIT_DISABLED
         }
+        CheckOutcome::StoreManaged => {
+            say(
+                "store: updates are handled by the Microsoft Store",
+                "ストア: 更新は Microsoft Store が行います",
+            );
+            EXIT_DISABLED
+        }
         CheckOutcome::UpToDate { latest } => {
             match latest {
                 Some(v) => say(
@@ -174,7 +181,7 @@ async fn check(data_dir: &Path) -> Result<i32> {
 
 fn error_code(e: &UpdateError) -> i32 {
     match e {
-        UpdateError::Disabled => EXIT_DISABLED,
+        UpdateError::Disabled | UpdateError::StoreManaged => EXIT_DISABLED,
         UpdateError::Busy(_) => EXIT_BUSY,
         UpdateError::Verify(_) | UpdateError::Unverifiable | UpdateError::Archive(_) => {
             EXIT_REFUSED

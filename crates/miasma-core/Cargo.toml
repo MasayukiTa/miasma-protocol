@@ -76,7 +76,7 @@ rand_core_pqc = { package = "rand_core", version = "0.10", default-features = fa
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_Memory"] }
+windows-sys = { version = "0.61", features = ["Win32_System_Memory", "Win32_Foundation", "Win32_Storage_Packaging_Appx"] }
 
 [features]
 default = ["iroh"]

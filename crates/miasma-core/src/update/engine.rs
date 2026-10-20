@@ -130,6 +130,9 @@ impl std::fmt::Display for CheckFailure {
 pub enum CheckOutcome {
     /// `update.mode = off`: nothing was done, nothing was contacted.
     Disabled,
+    /// The program runs inside a Microsoft Store (MSIX) package: the Store
+    /// updates it, nothing was done, nothing was contacted.
+    StoreManaged,
     /// Looked and found nothing newer. `latest` is the newest version seen.
     UpToDate {
         latest: Option<String>,
@@ -152,6 +155,7 @@ impl CheckOutcome {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Disabled => "disabled",
+            Self::StoreManaged => "store_managed",
             Self::UpToDate { .. } => "up_to_date",
             Self::Available(_) => "available",
             Self::NoAsset { .. } => "no_asset",
@@ -259,6 +263,9 @@ pub struct Engine {
     pub keys: Vec<[u8; 32]>,
     pub repo: String,
     pub health_timeout: Duration,
+    /// The program runs inside an MSIX package ([`super::package::is_packaged`]).
+    /// Then no check, download, swap or repair is done, whatever `cfg` says.
+    pub packaged: bool,
 }
 
 impl Engine {
@@ -288,6 +295,7 @@ impl Engine {
             keys: UPDATE_PUBKEYS.to_vec(),
             repo: REPO.to_owned(),
             health_timeout: HEALTH_TIMEOUT,
+            packaged: super::package::is_packaged(),
         })
     }
 
@@ -310,6 +318,9 @@ impl Engine {
     }
 
     fn require_enabled(&self) -> Result<(), UpdateError> {
+        if self.packaged {
+            return Err(UpdateError::StoreManaged);
+        }
         if self.cfg.is_enabled() {
             Ok(())
         } else {
@@ -322,6 +333,9 @@ impl Engine {
     /// Look for a newer build. With `update.mode = off` this returns
     /// [`CheckOutcome::Disabled`] before doing anything at all.
     pub fn check(&self) -> CheckOutcome {
+        if self.packaged {
+            return CheckOutcome::StoreManaged;
+        }
         if !self.cfg.is_enabled() {
             return CheckOutcome::Disabled;
         }
@@ -586,6 +600,9 @@ impl Engine {
     /// every start; it does nothing when no update was in progress, and it does
     /// not touch the network.
     pub fn resume(&self) -> Result<Resumed, UpdateError> {
+        if self.packaged {
+            return Err(UpdateError::StoreManaged);
+        }
         let dir = install_dir_of(&self.exe, self.os)?;
         apply::resume(&self.env(), &dir)
     }
@@ -598,7 +615,7 @@ impl Engine {
 
     /// Whether `update.mode = auto` may install without a click in this build.
     pub fn auto_install_allowed(&self) -> bool {
-        auto_install_allowed(self.cfg.mode, &self.keys)
+        !self.packaged && auto_install_allowed(self.cfg.mode, &self.keys)
     }
 
     /// Remember that the person does not want this version.
@@ -729,6 +746,7 @@ mod tests {
             keys: Vec::new(),
             repo: REPO.to_owned(),
             health_timeout: Duration::from_secs(1),
+            packaged: false,
         };
         Rig {
             _t: t,
@@ -1238,5 +1256,55 @@ mod tests {
         assert_eq!(t.bundle.as_deref(), Some("Miasma.app"));
         assert_eq!(t.dir, PathBuf::from("/Applications"));
         assert_eq!(bundle_root(Path::new("/usr/local/bin/miasma")), None);
+    }
+
+    // ── Microsoft Store (MSIX) package ──
+
+    #[test]
+    fn a_packaged_engine_checks_nothing_and_contacts_nothing_whatever_the_mode() {
+        for mode in UpdateMode::ALL {
+            let mut r = rig(mode);
+            r.engine.packaged = true;
+            serve_release(&r, "miasma 0.4.0 (new000000)\n");
+            assert_eq!(r.engine.check(), CheckOutcome::StoreManaged, "{mode}");
+            assert_eq!(r.http.count(), 0, "no request may be made when packaged");
+            assert!(!r.engine.auto_install_allowed());
+        }
+    }
+
+    #[test]
+    fn a_packaged_engine_refuses_to_download_apply_or_repair() {
+        // Prepare an update on a normal install, then run it as if packaged.
+        let mut r = rig(UpdateMode::Auto);
+        serve_release(&r, "miasma 0.4.0 (new000000)\n");
+        let offer = offer_of(r.engine.check());
+        let mut j = r.engine.prepare(&offer, &mut |_, _| {}).unwrap();
+        let requests = r.http.count();
+
+        r.engine.packaged = true;
+        assert_eq!(
+            r.engine.prepare(&offer, &mut |_, _| {}).unwrap_err(),
+            UpdateError::StoreManaged
+        );
+        assert_eq!(
+            r.engine.apply(&mut j).unwrap_err(),
+            UpdateError::StoreManaged
+        );
+        assert_eq!(r.engine.resume().unwrap_err(), UpdateError::StoreManaged);
+        assert_eq!(r.http.count(), requests, "nothing may be downloaded");
+        assert_eq!(
+            fs::read_to_string(r.install.join("miasma.exe")).unwrap(),
+            OLD,
+            "no file may be swapped"
+        );
+    }
+
+    #[test]
+    fn the_store_managed_answers_have_stable_codes_and_words() {
+        assert_eq!(CheckOutcome::StoreManaged.code(), "store_managed");
+        assert_eq!(UpdateError::StoreManaged.code(), "store_managed");
+        assert!(UpdateError::StoreManaged
+            .to_string()
+            .contains("Microsoft Store"));
     }
 }

@@ -624,10 +624,7 @@ fn arrange(step: &Step, app: &mut MiasmaApp, ctx: &egui::Context, first: bool) {
         } else if std::env::var_os("MIASMA_UI_TOUR_EASY").is_some() {
             app.mode = crate::variant::ProductMode::Easy;
         }
-        if let Some((w, h)) = std::env::var("MIASMA_UI_TOUR_SIZE").ok().and_then(|v| {
-            let (w, h) = v.split_once('x')?;
-            Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?))
-        }) {
+        if let Some((w, h)) = tour_size() {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
         }
         app.locale = step.locale;
@@ -709,6 +706,65 @@ fn arrange(step: &Step, app: &mut MiasmaApp, ctx: &egui::Context, first: bool) {
         app.status_msg = None;
         app.last_error = None;
     }
+}
+
+/// Smallest and largest window side the tour accepts from `MIASMA_UI_TOUR_SIZE`.
+const TOUR_SIDE_MIN: f32 = 320.0;
+const TOUR_SIDE_MAX: f32 = 8192.0;
+
+/// Read a size such as `1366x768` (width x height in pixels). Anything else, or a side
+/// outside 320..=8192, is not a size.
+fn parse_tour_size(text: &str) -> Option<(f32, f32)> {
+    let (w, h) = text.trim().split_once(['x', 'X'])?;
+    let (w, h) = (w.trim().parse::<f32>().ok()?, h.trim().parse::<f32>().ok()?);
+    let ok = |v: f32| v.is_finite() && (TOUR_SIDE_MIN..=TOUR_SIDE_MAX).contains(&v);
+    (ok(w) && ok(h)).then_some((w, h))
+}
+
+/// `MIASMA_UI_TOUR_SIZE=<w>x<h>`: render every step at this size (for example `1366x768` or
+/// `1920x1080` for the Store screenshots). Unset or unreadable: each step uses its own size.
+fn tour_size() -> Option<(f32, f32)> {
+    std::env::var("MIASMA_UI_TOUR_SIZE")
+        .ok()
+        .and_then(|v| parse_tour_size(&v))
+}
+
+/// The Microsoft Store minimum for a desktop screenshot.
+const STORE_SIZE: (f32, f32) = (1366.0, 768.0);
+
+/// Home, Files, Contacts, Chat and Settings at the Store minimum size, in every language,
+/// with the tour's sample data only (the connected-service mock, the "two" contacts fixture
+/// and the "thread" chat fixture). Names: `store_<en|ja|zh>_<screen>_1366x768`.
+fn store_steps() -> Vec<Step> {
+    use crate::variant::ProductMode;
+    let mut steps = Vec::new();
+    let locales = [(Locale::En, "en"), (Locale::Ja, "ja"), (Locale::ZhCn, "zh")];
+    for (locale, lname) in locales {
+        let base = |screen: &str, tab: Tab| Step {
+            name: format!("store_{lname}_{screen}_1366x768"),
+            theme: ThemeMode::Light,
+            locale,
+            tab,
+            daemon: Some(DaemonState::Connected),
+            transfers: None,
+            contacts: None,
+            chat: None,
+            size: Some(STORE_SIZE),
+            flow: None,
+            hover: false,
+            mode: Some(ProductMode::Easy),
+        };
+        steps.push(base("home", Tab::Home));
+        steps.push(base("files", Tab::Files));
+        let mut contacts = base("contacts", Tab::Contacts);
+        contacts.contacts = Some("two");
+        steps.push(contacts);
+        let mut chat = base("chat", Tab::Chat);
+        chat.chat = Some("thread");
+        steps.push(chat);
+        steps.push(base("settings", Tab::Settings));
+    }
+    steps
 }
 
 /// The Easy-mode Store-facing tour: the five top-level screens, the file screens behind
@@ -837,12 +893,64 @@ fn easy_steps() -> Vec<Step> {
             steps.push(s);
         }
     }
+    steps.extend(store_steps());
     steps
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tour_sizes_are_read_from_width_x_height() {
+        assert_eq!(parse_tour_size("1366x768"), Some((1366.0, 768.0)));
+        assert_eq!(parse_tour_size("1920X1080"), Some((1920.0, 1080.0)));
+        assert_eq!(parse_tour_size(" 1200 x 900 "), Some((1200.0, 900.0)));
+        for bad in [
+            "",
+            "1366",
+            "x768",
+            "1366x",
+            "axb",
+            "100x100",
+            "1366x9999",
+            "-5x700",
+            "1366x768x2",
+            "NaNx768",
+        ] {
+            assert_eq!(parse_tour_size(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_store_steps_cover_the_five_screens_at_the_store_minimum_in_every_language() {
+        let steps = store_steps();
+        assert_eq!(steps.len(), 15);
+        for s in &steps {
+            assert_eq!(s.size, Some((1366.0, 768.0)), "{}", s.name);
+            assert!(s.name.starts_with("store_") && s.name.ends_with("_1366x768"));
+        }
+        for lang in ["en", "ja", "zh"] {
+            for screen in ["home", "files", "contacts", "chat", "settings"] {
+                let name = format!("store_{lang}_{screen}_1366x768");
+                assert!(steps.iter().any(|s| s.name == name), "missing {name}");
+            }
+        }
+        // Sample data only: the fixtures the tour already uses.
+        let chat = steps
+            .iter()
+            .find(|s| s.name == "store_en_chat_1366x768")
+            .unwrap();
+        assert_eq!(chat.chat, Some("thread"));
+        let contacts = steps
+            .iter()
+            .find(|s| s.name == "store_en_contacts_1366x768")
+            .unwrap();
+        assert_eq!(contacts.contacts, Some("two"));
+        // They are part of the default headless tour.
+        let all = easy_steps();
+        assert!(steps.iter().all(|s| all.iter().any(|a| a.name == s.name)));
+    }
 
     /// Window-less tour: renders every step of the Easy tour (or, with `MIASMA_UI_TOUR_ALL`, the
     /// whole GL tour) on the CPU and writes PNG files. Output folder: `MIASMA_UI_TOUR_OUT`, or
@@ -880,11 +988,14 @@ mod tests {
         let mut clock = 0.0f64;
         let mut written = 0usize;
         for step in &steps {
-            let (w, h) = step.size.unwrap_or(if step.transfers.is_some() {
-                (1000.0, 1400.0)
-            } else {
-                (1000.0, 700.0)
-            });
+            // MIASMA_UI_TOUR_SIZE wins over the size a step carries.
+            let (w, h) = tour_size()
+                .or(step.size)
+                .unwrap_or(if step.transfers.is_some() {
+                    (1000.0, 1400.0)
+                } else {
+                    (1000.0, 700.0)
+                });
             let mut last = None;
             for frame in 0..8 {
                 arrange(step, &mut app, &ctx, frame == 0);
