@@ -1115,9 +1115,12 @@ pub(crate) mod tests {
         assert_eq!(
             seen,
             [Some(ids[1]), Some(ids[2]), Some(ids[0])],
-            "Tab (start stop {:?}, end stop {:?})",
+            "Tab (start stop {:?}, end stop {:?}, start area {:?}, end area {:?}, ids {:?})",
             trap_id("start"),
-            trap_id("end")
+            trap_id("end"),
+            trap_id("start").with("area"),
+            trap_id("end").with("area"),
+            ids
         );
         // Backward from the first button: to the last.
         trap_frame(&ctx, tab(true), true);
