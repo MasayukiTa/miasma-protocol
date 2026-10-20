@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui::{self, vec2, Align, Layout, RichText, Sense, Stroke};
 use miasma_core::chat::group::ipc::{
-    GroupDetailInfo, GroupMessageInfo, GroupRequest, GroupResponse,
+    GroupDetailInfo, GroupMessageInfo, GroupRequest, GroupResponse, MemberInfo,
 };
 use miasma_core::chat::{ChatRequest, ChatResponse};
 use miasma_core::push::ContactInfo;
@@ -95,6 +95,15 @@ enum Acting {
     Decline { name: String },
 }
 
+/// What a member row asked for this frame.
+#[derive(Debug, Default)]
+struct MemberOut {
+    /// The contact code to hand to the add-contact form.
+    add_contact: Option<String>,
+    /// (endpoint ID, name) of the member to remove, after the confirmation dialog.
+    remove: Option<(String, String)>,
+}
+
 #[derive(Debug, Clone)]
 struct Preview {
     key: (u64, u64, GroupStatus),
@@ -118,6 +127,11 @@ pub struct GroupUi {
     thread_loaded: bool,
     limit: u32,
     info_open: bool,
+    /// The list stays beside the conversation (set by the Chat screen every frame): no back
+    /// arrow to the list.
+    two_pane: bool,
+    /// Members (by endpoint) whose verification code is shown although they are verified.
+    shown_codes: HashSet<String>,
 
     composer: String,
     drafts: HashMap<String, String>,
@@ -167,6 +181,8 @@ impl Default for GroupUi {
             thread_loaded: false,
             limit: PAGE,
             info_open: false,
+            two_pane: false,
+            shown_codes: HashSet::new(),
             composer: String::new(),
             drafts: HashMap::new(),
             focus_composer: false,
@@ -267,8 +283,24 @@ impl GroupUi {
         self.list_dirty = true;
     }
 
-    /// The tab was left: let go of the messages (they are read again when the tab comes back).
+    /// The Chat screen lays the list beside the conversation (a wide window).
+    pub fn set_two_pane(&mut self, on: bool) {
+        self.two_pane = on;
+    }
+
+    /// Back to the conversation list (the top Chat tab was pressed).
+    pub fn show_list(&mut self) {
+        if self.open.is_some() {
+            self.close();
+        }
+    }
+
+    /// The tab was left: let go of the messages (they are read again when the tab comes back),
+    /// and go back to the conversation list, so the Chat tab always opens on the list and the
+    /// one-to-one conversations are not hidden behind the last group that was open.
     pub fn on_area_closed(&mut self) {
+        self.show_list();
+        self.shown_codes.clear();
         self.messages.clear();
         self.thread_loaded = false;
         self.previews.clear();
@@ -908,7 +940,9 @@ impl GroupUi {
         let preview = preview_line(gs, cs, row, &last);
         let when = when_list(cs, row.last_ms, clock);
         let unread = self.unread.of(row);
-        group_row(ui, gs, cs, row, &preview, &when, unread).clicked()
+        let a11y = row_a11y(gs, cs, row, &last, unread);
+        let selected = self.open.as_ref().is_some_and(|o| o.id == row.id);
+        group_row(ui, row, &a11y, &preview, &when, unread, selected).clicked()
     }
 
     // ─── Drawing: the conversation ──────────────────────────────────────────
@@ -948,32 +982,36 @@ impl GroupUi {
                 (base, pal().muted)
             }
         };
-        let mut open_info = false;
-        let mut menu = |ui: &mut egui::Ui| {
-            if kit::menu_item(ui, gs.info_button, false) {
-                open_info = true;
-            }
+        // The only extra of a group conversation is its information, so the header has one "i"
+        // button for it and no popup (a one-item menu covered the first messages). When a second
+        // action appears, a menu is worth it again.
+        let with_info = !info_open && status != GroupStatus::Invited;
+        // Beside the list there is no way back to the list; the details still go back to the
+        // messages.
+        let back_name = if info_open {
+            Some(gs.a11y_back_to_messages)
+        } else if self.two_pane {
+            None
+        } else {
+            Some(cs.a11y_back)
         };
-        let with_menu = !info_open && status != GroupStatus::Invited;
-        let menu_ref: Option<&mut dyn FnMut(&mut egui::Ui)> =
-            if with_menu { Some(&mut menu) } else { None };
-        let back = kit::conversation_header(
+        let head = kit::conversation_header_ex(
             ui,
-            if info_open {
-                gs.a11y_back_to_messages
-            } else {
-                cs.a11y_back
-            },
+            back_name,
             &elide(&name, NAME_CHARS),
             Some((subtitle.as_str(), subtitle_color)),
-            ks.a11y_menu,
-            "group",
-            false,
-            menu_ref,
+            if with_info {
+                kit::HeaderEnd::Info {
+                    name: gs.info_button,
+                }
+            } else {
+                kit::HeaderEnd::None
+            },
         );
-        if open_info {
+        if head.info {
             self.info_open = true;
         }
+        let back = head.back;
         if back {
             if info_open {
                 self.info_open = false;
@@ -1163,100 +1201,18 @@ impl GroupUi {
                     ui,
                     &fill(gs.members_title, &[("n", &d.members.len().to_string())]),
                     |ui| {
+                        // One compact row per member: name, role / verified / reachability on
+                        // one muted line, a button for the unverified, and a "..." menu. The
+                        // verification code is shown only for a member who is not verified
+                        // yet (or when asked for in the menu); Remove lives in the menu.
                         for m in &d.members {
-                            let name = member_name(gs, m);
-                            kit::surface(ui, |ui| {
-                                let r = ui.add(
-                                    egui::Label::new(
-                                        RichText::new(elide(&name, NAME_CHARS))
-                                            .strong()
-                                            .color(pal().text),
-                                    )
-                                    .wrap(true),
-                                );
-                                r.widget_info(|| {
-                                    egui::WidgetInfo::labeled(
-                                        egui::WidgetType::Label,
-                                        member_summary(gs, m),
-                                    )
-                                });
-                                ui.horizontal_wrapped(|ui| {
-                                    let role = if m.role == "admin" {
-                                        gs.role_admin
-                                    } else {
-                                        gs.role_member
-                                    };
-                                    ui.label(kit::meta_text(role, pal().muted));
-                                    if m.you {
-                                        ui.label(kit::meta_text(gs.you_tag, pal().muted));
-                                    } else if m.verified {
-                                        ui.label(kit::meta_text(gs.marker_verified, pal().success));
-                                    } else {
-                                        egui::Frame::none()
-                                            .stroke(Stroke::new(1.0, pal().warning))
-                                            .rounding(4.0)
-                                            .inner_margin(egui::Margin::symmetric(4.0, 0.0))
-                                            .show(ui, |ui| {
-                                                ui.label(kit::meta_text(
-                                                    gs.marker_unverified,
-                                                    pal().warning,
-                                                ))
-                                                .on_hover_text(gs.unverified_tip);
-                                            });
-                                    }
-                                });
-                                let standing = standing_of(m);
-                                if let Some(t) = standing_text(gs, &standing) {
-                                    let color = match standing {
-                                        Standing::Joined => pal().success,
-                                        Standing::Invited => pal().muted,
-                                        _ => pal().warning,
-                                    };
-                                    ui.label(kit::meta_text(t, color));
-                                }
-                                if !m.you {
-                                    ui.label(kit::meta_text(
-                                        format!("{}: {}", gs.code_label, m.fingerprint),
-                                        pal().muted,
-                                    ));
-                                    kit::button_row(ui, |ui| {
-                                        if !m.verified {
-                                            let r =
-                                                ui.add(kit::secondary_button(gs.add_as_contact));
-                                            let label =
-                                                fill(gs.a11y_add_contact, &[("name", &name)]);
-                                            r.widget_info(|| {
-                                                egui::WidgetInfo::labeled(
-                                                    egui::WidgetType::Button,
-                                                    label.clone(),
-                                                )
-                                            });
-                                            if r.clicked() {
-                                                add_contact = Some(m.contact_code.clone());
-                                            }
-                                        }
-                                        if can_remove(&d, m) {
-                                            let r = crate::form_check::add_enabled(
-                                                ui,
-                                                !busy,
-                                                kit::danger_button(gs.remove),
-                                            );
-                                            let label = fill(gs.a11y_remove, &[("name", &name)]);
-                                            r.widget_info(|| {
-                                                egui::WidgetInfo::labeled(
-                                                    egui::WidgetType::Button,
-                                                    label.clone(),
-                                                )
-                                            });
-                                            if r.clicked() {
-                                                ask_remove =
-                                                    Some((m.endpoint_id.clone(), name.clone()));
-                                            }
-                                        }
-                                    });
-                                }
-                            });
-                            ui.add_space(kit::SP_1);
+                            let out = self.member_row(ui, &d, m, busy);
+                            if let Some(code) = out.add_contact {
+                                add_contact = Some(code);
+                            }
+                            if let Some(who) = out.remove {
+                                ask_remove = Some(who);
+                            }
                         }
                     },
                 );
@@ -1356,6 +1312,90 @@ impl GroupUi {
         if let Some(code) = add_contact {
             self.action = Some(ChatAction::AddContact(code));
         }
+    }
+
+    /// One member of the group, as a single compact row: initial, name, one muted line (role,
+    /// verified or not, reachability), a button for a member who is not a contact yet, and a
+    /// "..." menu with the rare things (the verification code of a verified member, Remove).
+    /// The code of a member who is not verified yet is shown under the row, because comparing
+    /// it is how they get verified.
+    fn member_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        d: &GroupDetailInfo,
+        m: &MemberInfo,
+        busy: bool,
+    ) -> MemberOut {
+        let gs = self.gs();
+        let name = member_name(gs, m);
+        let shown = elide(&name, NAME_CHARS);
+        let subtitle = member_subtitle(gs, m);
+        let level = if !m.you && !m.verified {
+            Level::Warn
+        } else {
+            Level::Muted
+        };
+        let code_asked = self.shown_codes.contains(&m.endpoint_id);
+        let show_code = !m.you && (!m.verified || code_asked);
+        let more = fill(gs.member_more, &[("name", &shown)]);
+        let toggle_label = if code_asked {
+            gs.member_hide_code
+        } else {
+            gs.member_show_code
+        };
+        let mut out = MemberOut::default();
+        let mut toggle = false;
+        kit::list_row(
+            ui,
+            kit::ListRow {
+                avatar: Some(&shown),
+                title: &shown,
+                subtitle: Some((&subtitle, level)),
+            },
+            |ui| {
+                if m.you {
+                    return;
+                }
+                let mut items = vec![kit::MenuItem::new(toggle_label)];
+                if can_remove(d, m) {
+                    items.push(kit::MenuItem::danger(gs.remove).enabled(!busy));
+                }
+                if let Some(i) = kit::row_menu(ui, ("member", &m.endpoint_id), &more, &items) {
+                    if i == 0 {
+                        toggle = true;
+                    } else {
+                        out.remove = Some((m.endpoint_id.clone(), name.clone()));
+                    }
+                }
+                if !m.verified {
+                    let r = ui.add(kit::compact_button(gs.add_as_contact));
+                    let label = fill(gs.a11y_add_contact, &[("name", &name)]);
+                    r.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, label.clone())
+                    });
+                    if r.clicked() {
+                        out.add_contact = Some(m.contact_code.clone());
+                    }
+                }
+            },
+        );
+        if toggle && !self.shown_codes.remove(&m.endpoint_id) {
+            self.shown_codes.insert(m.endpoint_id.clone());
+        }
+        if show_code {
+            ui.horizontal(|ui| {
+                ui.add_space(kit::AVATAR_PX + kit::SP_3);
+                ui.add(
+                    egui::Label::new(kit::meta_text(
+                        format!("{}: {}", gs.code_label, m.fingerprint),
+                        pal().muted,
+                    ))
+                    .wrap(true),
+                );
+            });
+            ui.add_space(kit::SP_1);
+        }
+        out
     }
 
     // ─── Drawing: dialogs ───────────────────────────────────────────────────
@@ -1488,11 +1528,38 @@ impl GroupUi {
                     if offered.is_empty() {
                         kit::paragraph(ui, gs.ng_none);
                     }
+                    // With many contacts, a search field and a "selected only" switch (the
+                    // list can hold up to 32 people).
+                    let searchable = offered.len() >= PICKER_SEARCH_MIN;
+                    if searchable {
+                        ui.horizontal_wrapped(|ui| {
+                            let r = ui.add(
+                                kit::input(&mut form.search)
+                                    .hint_text(gs.ng_search_hint)
+                                    .desired_width(220.0),
+                            );
+                            r.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::WidgetType::TextEdit,
+                                    gs.a11y_ng_search,
+                                )
+                            });
+                            ui.checkbox(&mut form.selected_only, gs.ng_selected_only);
+                        });
+                    }
+                    let shown = if searchable {
+                        filter_picker(&offered, &form.search, form.selected_only, &form.picks)
+                    } else {
+                        offered.clone()
+                    };
+                    if searchable && shown.is_empty() {
+                        kit::paragraph_muted(ui, gs.ng_no_match);
+                    }
                     egui::ScrollArea::vertical()
                         .id_source("group_new_members")
                         .max_height(240.0)
                         .show(ui, |ui| {
-                            for ct in &offered {
+                            for ct in &shown {
                                 let mut on = form.picks.contains(&ct.id);
                                 let label = elide(&ct.label, NAME_CHARS);
                                 let r = ui.checkbox(&mut on, label.clone());
@@ -1701,37 +1768,27 @@ fn single_line(
 /// member count with the last message, and the unread badge.
 fn group_row(
     ui: &mut egui::Ui,
-    gs: &GroupStrings,
-    cs: &ChatStrings,
     row: &GroupRow,
+    a11y: &str,
     preview: &str,
     when: &str,
     unread: u32,
+    selected: bool,
 ) -> egui::Response {
     let w = ui.available_width();
     let (rect, resp) = ui.allocate_exact_size(vec2(w, ROW_H), Sense::click());
     let name = elide(&row.name, NAME_CHARS);
-    let label = {
-        let mut s = row_label(gs, row);
-        if unread > 0 {
-            s.push_str(", ");
-            s.push_str(&fill(
-                cs.a11y_unread,
-                &[("n", &crate::chat::badge_text(unread))],
-            ));
-        }
-        if !preview.is_empty() {
-            s.push_str(", ");
-            s.push_str(preview);
-        }
-        s
-    };
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, label.clone()));
+    // The screen-reader name is built once, by `row_a11y`: the member count is in it, and the
+    // visible second line (which also starts with the count) is not appended to it.
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, a11y));
     if !ui.is_rect_visible(rect) {
         return resp;
     }
     let p = pal();
     let painter = ui.painter();
+    if selected {
+        painter.rect_filled(rect, 6.0, p.selected);
+    }
     if resp.hovered() || resp.has_focus() {
         painter.rect_filled(rect, 6.0, p.text.gamma_multiply(0.06));
     }
@@ -1860,15 +1917,21 @@ fn message_row(
     });
     let when = when_message(cs, m.at_ms, clock);
     let delivery = delivery_of(m);
-    let state = delivery_text(gs, delivery);
+    // A message that is only waiting shows one short word; the exact count is in the hover text
+    // and in what a screen reader is told. The sentence is shown in full once it is stuck.
+    let state = delivery_line(gs, delivery, clock.now_ms.saturating_sub(m.sent_ms));
     let state_color = match delivery {
         GroupDelivery::All { .. } => p.success,
         GroupDelivery::Partial { .. } | GroupDelivery::FailedAll { .. } => p.danger,
         _ => p.muted,
     };
     ui.with_layout(layout, |ui| {
-        if let Some(s) = state {
-            ui.add(egui::Label::new(kit::meta_text(s, state_color)).wrap(true));
+        if let Some(line) = state {
+            let r = ui.add(egui::Label::new(kit::meta_text(&line.shown, state_color)).wrap(true));
+            if let Some(full) = line.full {
+                r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, full.clone()));
+                r.on_hover_text(full);
+            }
         }
         if !when.is_empty() {
             ui.label(kit::meta_text(when, p.muted));
@@ -1976,10 +2039,15 @@ impl GroupUi {
                     is_admin: true,
                     added_by: None,
                 });
+                // One of my messages has waited long (the full sentence shows), the newest has
+                // not (one short word, the count in its hover text).
+                let mut stuck = msg(2, true, false, "来週は私も参加します。", 30);
+                stuck.delivered = Some(0);
                 ui.messages = vec![
                     msg(1, false, true, "来週の会議は火曜の10時です。", 40),
-                    msg(2, false, false, "資料は共有フォルダに置きました。", 12),
-                    msg(3, true, false, "ありがとうございます。確認します。", 4),
+                    stuck,
+                    msg(3, false, false, "資料は共有フォルダに置きました。", 12),
+                    msg(4, true, false, "ありがとうございます。確認します。", 4),
                 ];
                 ui.thread_loaded = true;
                 ui.thread_dirty = false;
@@ -2644,9 +2712,19 @@ mod tests {
         ui.on_area_closed();
         assert!(ui.messages.is_empty() && !ui.thread_loaded);
         assert!(
-            ui.is_open(),
-            "the open group is shown again when the tab returns"
+            !ui.is_open(),
+            "the tab returns on the conversation list, not on the group that was open"
         );
+    }
+
+    #[test]
+    fn the_unsent_text_of_a_group_survives_leaving_the_tab() {
+        let mut ui = opened(true);
+        ui.composer = "unsent".into();
+        ui.on_area_closed();
+        assert!(!ui.is_open());
+        ui.open_group("g1", "Team g1");
+        assert_eq!(ui.composer, "unsent");
     }
 
     // ── Drawing ──────────────────────────────────────────────────────────
@@ -2783,6 +2861,52 @@ mod tests {
                     // Drawing asks the service for nothing.
                     assert!(requests(&mut ui).is_empty(), "{screen} {locale:?}");
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn the_new_group_form_with_many_contacts_draws_with_its_search_in_every_language() {
+        let many: Vec<ContactInfo> = (0..PICKER_SEARCH_MIN + 4)
+            .map(|i| ContactInfo {
+                id: format!("c{i}"),
+                label: format!("Person {i}"),
+                endpoint_id: format!("ep-{i}"),
+                fingerprint: String::new(),
+                added_at: 0,
+                allow_send: true,
+                allow_receive: true,
+                max_file_size: None,
+                default_max_file_size: 0,
+                inbox_dir: String::new(),
+            })
+            .collect();
+        for locale in Locale::ALL {
+            for (search, only) in [("", false), ("person 1", false), ("zzz", false), ("", true)] {
+                let mut ui = ready();
+                ui.open_new_group();
+                {
+                    let form = ui.form.as_mut().unwrap();
+                    form.tick("c2", true);
+                    form.search = search.into();
+                    form.selected_only = only;
+                }
+                ui.set_locale(locale);
+                let ctx = egui::Context::default();
+                kit::apply_theme(&ctx, false);
+                for _ in 0..3 {
+                    let input = egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::pos2(0.0, 0.0),
+                            vec2(700.0, 900.0),
+                        )),
+                        ..Default::default()
+                    };
+                    let _ = ctx.run(input, |ctx| ui.dialogs(ctx, &many));
+                }
+                // Searching changes what is shown, never what is ticked.
+                assert!(ui.form.as_ref().unwrap().picks.contains("c2"));
+                assert!(requests(&mut ui).is_empty());
             }
         }
     }

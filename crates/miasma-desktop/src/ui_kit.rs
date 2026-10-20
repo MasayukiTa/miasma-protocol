@@ -312,8 +312,14 @@ pub fn column_edge(width: f32) -> f32 {
 /// The page column: [`COLUMN_MAX`] wide at most, centred, with side margins and a top and bottom
 /// margin. Everything a tab draws goes inside it.
 pub fn column(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
+    column_max(ui, COLUMN_MAX, add);
+}
+
+/// [`column`] with its own widest width: a screen that is two panes side by side (the Chat list
+/// beside a conversation) uses more of a wide window than a page of text does.
+pub fn column_max(ui: &mut Ui, max: f32, add: impl FnOnce(&mut Ui)) {
     let avail = ui.available_width();
-    let w = (avail - 2.0 * PAGE_MARGIN_X).clamp(0.0, COLUMN_MAX);
+    let w = (avail - 2.0 * PAGE_MARGIN_X).clamp(0.0, max);
     let pad = ((avail - w) * 0.5).floor();
     let spacing = ui.spacing().item_spacing;
     ui.add_space(SP_5);
@@ -884,6 +890,8 @@ pub struct MenuItem<'a> {
     /// `Some` for a destructive item: drawn as red text, and chosen only after the person
     /// confirms in a dialog.
     pub confirm: Option<Confirm<'a>>,
+    /// Drawn as red text without asking in a dialog here (the caller asks itself).
+    pub danger: bool,
 }
 
 impl<'a> MenuItem<'a> {
@@ -892,6 +900,15 @@ impl<'a> MenuItem<'a> {
             label,
             enabled: true,
             confirm: None,
+            danger: false,
+        }
+    }
+
+    /// Red text, chosen at once: for an item whose caller opens its own confirmation.
+    pub fn danger(label: &'a str) -> Self {
+        Self {
+            danger: true,
+            ..Self::new(label)
         }
     }
 
@@ -901,6 +918,7 @@ impl<'a> MenuItem<'a> {
             label,
             enabled: true,
             confirm: Some(confirm),
+            danger: true,
         }
     }
 
@@ -937,9 +955,7 @@ pub fn row_menu(
         ui.set_min_width(MENU_MIN_W);
         for (i, item) in items.iter().enumerate() {
             let r = ui
-                .add_enabled_ui(item.enabled, |ui| {
-                    menu_item(ui, item.label, item.confirm.is_some())
-                })
+                .add_enabled_ui(item.enabled, |ui| menu_item(ui, item.label, item.danger))
                 .inner;
             if r {
                 chosen = Some(i);
@@ -1199,6 +1215,8 @@ pub enum Icon {
     More,
     /// A paperclip: attach a file.
     Attach,
+    /// A circle with an "i": show the information of this conversation.
+    Info,
 }
 
 /// Side of an icon button (px). Large enough to hit; no frame is drawn around it.
@@ -1260,6 +1278,14 @@ pub fn icon_button(ui: &mut Ui, icon: Icon, name: &str, enabled: bool) -> Respon
                 for dx in [-6.0, 0.0, 6.0] {
                     painter.circle_filled(egui::pos2(c.x + dx, c.y), 2.0, color);
                 }
+            }
+            Icon::Info => {
+                painter.circle_stroke(c, 9.0, stroke);
+                painter.circle_filled(egui::pos2(c.x, c.y - 4.0), 1.2, color);
+                painter.line_segment(
+                    [egui::pos2(c.x, c.y - 0.5), egui::pos2(c.x, c.y + 4.5)],
+                    stroke,
+                );
             }
             Icon::Attach => {
                 let side = 20.0;
@@ -1420,6 +1446,7 @@ pub fn composer(
 /// The header of a conversation, in the manner of the common messengers: a small back arrow, the
 /// name with one muted line under it, and one menu button on the right. `menu` draws the rows of
 /// the menu (the rare actions); `None` shows no menu button. Returns true when back was pressed.
+#[allow(dead_code)]
 pub fn conversation_header(
     ui: &mut Ui,
     back_name: &str,
@@ -1430,10 +1457,56 @@ pub fn conversation_header(
     open_menu: bool,
     menu: Option<&mut dyn FnMut(&mut Ui)>,
 ) -> bool {
-    let mut back = false;
+    let end = match menu {
+        Some(menu) => HeaderEnd::Menu {
+            name: menu_name,
+            key: menu_key,
+            open: open_menu,
+            menu,
+        },
+        None => HeaderEnd::None,
+    };
+    conversation_header_ex(ui, Some(back_name), title, subtitle, end).back
+}
+
+/// What the right end of a conversation header holds.
+pub enum HeaderEnd<'a> {
+    /// Nothing.
+    None,
+    /// A "..." button with a popup of rare actions (only worth it with two or more).
+    Menu {
+        name: &'a str,
+        key: &'a str,
+        open: bool,
+        menu: &'a mut dyn FnMut(&mut Ui),
+    },
+    /// One direct "i" button (named `name`): for a conversation whose only extra is its
+    /// information, so no popup covers the messages.
+    Info { name: &'a str },
+}
+
+/// What a press in a conversation header did.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct HeaderOut {
+    pub back: bool,
+    pub info: bool,
+}
+
+/// [`conversation_header`] with a choice of the right end, and without the back arrow when
+/// `back_name` is `None` (a two-pane screen, where the list is always beside the conversation).
+pub fn conversation_header_ex(
+    ui: &mut Ui,
+    back_name: Option<&str>,
+    title: &str,
+    subtitle: Option<(&str, Color32)>,
+    end: HeaderEnd<'_>,
+) -> HeaderOut {
+    let mut out = HeaderOut::default();
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = SP_2;
-        back = icon_button(ui, Icon::Back, back_name, true).clicked();
+        if let Some(back_name) = back_name {
+            out.back = icon_button(ui, Icon::Back, back_name, true).clicked();
+        }
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             ui.add(
@@ -1449,25 +1522,38 @@ pub fn conversation_header(
                 ui.add(Label::new(meta_text(text, color)).truncate(true));
             }
         });
-        if let Some(menu) = menu {
-            ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                let resp = icon_button(ui, Icon::More, menu_name, true);
-                let id = ui.make_persistent_id(("conversation_menu", menu_key));
-                if resp.clicked() {
-                    ui.memory_mut(|m| m.toggle_popup(id));
-                }
-                if open_menu {
-                    ui.memory_mut(|m| m.open_popup(id));
-                }
-                egui::popup::popup_below_widget(ui, id, &resp, |ui| {
-                    ui.set_width(260.0);
-                    menu(ui);
+        match end {
+            HeaderEnd::None => {}
+            HeaderEnd::Menu {
+                name,
+                key,
+                open,
+                menu,
+            } => {
+                ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+                    let resp = icon_button(ui, Icon::More, name, true);
+                    let id = ui.make_persistent_id(("conversation_menu", key));
+                    if resp.clicked() {
+                        ui.memory_mut(|m| m.toggle_popup(id));
+                    }
+                    if open {
+                        ui.memory_mut(|m| m.open_popup(id));
+                    }
+                    egui::popup::popup_below_widget(ui, id, &resp, |ui| {
+                        ui.set_width(260.0);
+                        menu(ui);
+                    });
                 });
-            });
+            }
+            HeaderEnd::Info { name } => {
+                ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+                    out.info = icon_button(ui, Icon::Info, name, true).clicked();
+                });
+            }
         }
     });
     ui.add_space(SP_1);
-    back
+    out
 }
 
 /// A thin determinate bar across the available width. Neutral; turns to the warning colour when

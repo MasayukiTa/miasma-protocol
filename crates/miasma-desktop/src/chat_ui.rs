@@ -18,7 +18,7 @@ use crate::chat::*;
 use crate::contacts::{ContactsUi, FileStatus, SentFile};
 use crate::group::{merge_list, ListEntry};
 use crate::group_ui::GroupUi;
-use crate::locale::{ChatStrings, ContactStrings, Locale};
+use crate::locale::{group_strings, ChatStrings, ContactStrings, Locale};
 use crate::theme::{self, Palette};
 use crate::transfers::fill;
 use crate::ui_kit::{self as kit, Level};
@@ -195,8 +195,28 @@ pub struct ChatUi {
     clock_override: Option<Clock>,
     /// Dev-only screenshot fixtures: show what was set up, never ask the service.
     frozen: bool,
+    /// The window is wide enough for the list and a conversation side by side (set every frame
+    /// by `show`). The list is then kept fresh while a conversation is open.
+    wide: bool,
     /// Group conversations (`group_ui.rs`): listed with the conversations above.
     group: GroupUi,
+}
+
+/// Width of the Chat area (the page column) from which the conversation list sits beside the
+/// open conversation: a window of 900 px or more, less the side margins of the column. Narrower
+/// windows push the conversation over the list, with a back arrow.
+pub const TWO_PANE_MIN: f32 = 900.0 - 2.0 * kit::PAGE_MARGIN_X;
+/// The widest the two-pane Chat area gets (the list stays about a third of it).
+pub const TWO_PANE_MAX: f32 = 1360.0;
+/// The list pane of the two-pane layout: a third of the area, within these bounds.
+const LIST_PANE_MIN: f32 = 280.0;
+const LIST_PANE_MAX: f32 = 400.0;
+/// Space between the list pane and the conversation pane (a hairline is drawn in it).
+const PANE_GAP: f32 = kit::SP_4;
+
+/// Width of the list pane for an area `total` wide.
+pub fn list_pane_width(total: f32) -> f32 {
+    (total / 3.0).clamp(LIST_PANE_MIN, LIST_PANE_MAX)
 }
 
 impl Default for ChatUi {
@@ -264,6 +284,7 @@ impl Default for ChatUi {
             notices: Vec::new(),
             clock_override: None,
             frozen: false,
+            wide: false,
             group: GroupUi::default(),
         }
     }
@@ -450,17 +471,19 @@ impl ChatUi {
         if !area_open {
             return;
         }
+        // The list is read while it is on screen: alone, or beside an open conversation.
+        let list_visible = self.wide || matches!(self.view, View::List);
+        if list_visible
+            && self.list_inflight.is_none()
+            && (self.list_dirty || now.duration_since(self.last_list) >= LIST_EVERY)
+        {
+            self.list_dirty = false;
+            self.last_list = now;
+            self.list_inflight = Some(now);
+            self.out.push_back(ChatRequest::Conversations {});
+        }
         match &self.view {
-            View::List => {
-                if self.list_inflight.is_none()
-                    && (self.list_dirty || now.duration_since(self.last_list) >= LIST_EVERY)
-                {
-                    self.list_dirty = false;
-                    self.last_list = now;
-                    self.list_inflight = Some(now);
-                    self.out.push_back(ChatRequest::Conversations {});
-                }
-            }
+            View::List => {}
             View::Conversation(o) => {
                 if self.newest_inflight.is_none() && !self.window.is_detached() {
                     let busy = self.window.has_unfinished() || self.sends_in_flight > 0;
@@ -499,6 +522,11 @@ impl ChatUi {
     /// The tab was left: let go of the open conversation's messages (they are read again when
     /// the tab comes back).
     fn on_area_closed(&mut self) {
+        // The tab comes back on the conversation list: one-to-one conversations must not be
+        // hidden behind the group (or the thread) that happened to be open when it was left.
+        // The unsent text is kept per conversation.
+        self.stash_draft();
+        self.view = View::List;
         self.window.clear();
         self.heights.clear();
         self.timeline.clear();
@@ -516,6 +544,15 @@ impl ChatUi {
         self.delete_target = None;
         self.read_inflight = None;
         self.group.on_area_closed();
+    }
+
+    /// The top Chat tab was pressed while Chat is already showing: back to the conversation
+    /// list, whatever is open.
+    pub fn show_list(&mut self) {
+        if matches!(self.view, View::Conversation(_)) {
+            self.close_conversation();
+        }
+        self.group.show_list();
     }
 
     // ─── Answers ────────────────────────────────────────────────────────────
@@ -964,15 +1001,23 @@ impl ChatUi {
             _ => {}
         }
         self.keep_one_modal();
-        if self.group.is_open() {
+        // A wide window shows the list beside the open conversation; a narrow one pushes the
+        // conversation over the list.
+        let wide = ui.available_width() >= TWO_PANE_MIN;
+        self.wide = wide;
+        self.group.set_two_pane(wide);
+        if wide {
+            self.two_pane_view(ui, c, contacts, &mut action);
+        } else if self.group.is_open() {
             let (clock, max_bytes) = (self.clock(), self.max_bytes);
             action = self.group.conversation_view(ui, clock, max_bytes);
             self.group.dialogs(ui.ctx(), contacts);
             return action;
-        }
-        match self.view.clone() {
-            View::List => self.list_view(ui, c, contacts, &mut action),
-            View::Conversation(o) => self.conversation_view(ui, c, contacts, &o, &mut action),
+        } else {
+            match self.view.clone() {
+                View::List => self.list_view(ui, c, contacts, &mut action),
+                View::Conversation(o) => self.conversation_view(ui, c, contacts, &o, &mut action),
+            }
         }
         self.picker_dialog(ui.ctx(), c, contacts);
         self.delete_dialog(ui.ctx(), c);
@@ -1062,6 +1107,64 @@ impl ChatUi {
         contacts: &[ContactInfo],
         action: &mut Option<ChatAction>,
     ) {
+        self.list_header(ui, c, contacts);
+        self.list_body(ui, c, contacts, action);
+    }
+
+    /// Wide window: the list on the left, the open conversation (or a hint) on the right. The
+    /// title row with "New conversation" / "New group" spans both.
+    fn two_pane_view(
+        &mut self,
+        ui: &mut egui::Ui,
+        c: &ChatStrings,
+        contacts: &[ContactInfo],
+        action: &mut Option<ChatAction>,
+    ) {
+        self.list_header(ui, c, contacts);
+        let top = ui.cursor().top();
+        let height = (ui.clip_rect().bottom() - top - kit::SP_5).max(240.0);
+        let total = ui.available_width().min(TWO_PANE_MAX);
+        let x0 = ui.cursor().left();
+        let list_w = list_pane_width(total);
+        let left = egui::Rect::from_min_size(egui::pos2(x0, top), vec2(list_w, height));
+        let right = egui::Rect::from_min_size(
+            egui::pos2(x0 + list_w + PANE_GAP, top),
+            vec2((total - list_w - PANE_GAP).max(200.0), height),
+        );
+        let line_x = x0 + list_w + PANE_GAP * 0.5;
+        ui.painter().vline(
+            line_x,
+            egui::Rangef::new(top, top + height),
+            Stroke::new(1.0, pal().border),
+        );
+        ui.allocate_ui_at_rect(left, |ui| {
+            ui.set_clip_rect(left.intersect(ui.clip_rect()));
+            self.list_body(ui, c, contacts, action);
+        });
+        ui.allocate_ui_at_rect(right, |ui| {
+            ui.set_clip_rect(right.intersect(ui.clip_rect()));
+            if self.group.is_open() {
+                let (clock, max_bytes) = (self.clock(), self.max_bytes);
+                let from_group = self.group.conversation_view(ui, clock, max_bytes);
+                if from_group.is_some() {
+                    *action = from_group;
+                }
+            } else {
+                match self.view.clone() {
+                    View::Conversation(o) => self.conversation_view(ui, c, contacts, &o, action),
+                    View::List => {
+                        ui.add_space(kit::SP_5);
+                        kit::paragraph_muted(ui, group_strings(self.locale).pane_empty);
+                    }
+                }
+            }
+        });
+        // Both panes were placed at fixed rectangles: the parent continues below them.
+        ui.allocate_space(vec2(0.0, 0.0));
+    }
+
+    /// The title row with its two buttons, and the note when the history is memory only.
+    fn list_header(&mut self, ui: &mut egui::Ui, c: &ChatStrings, contacts: &[ContactInfo]) {
         let mut new_chat = false;
         kit::page_actions(
             ui,
@@ -1083,6 +1186,16 @@ impl ChatUi {
             self.picker_open = true;
         }
         self.memory_only_note(ui, c);
+    }
+
+    /// Invitations, then the conversations (one-to-one and groups, newest first).
+    fn list_body(
+        &mut self,
+        ui: &mut egui::Ui,
+        c: &ChatStrings,
+        contacts: &[ContactInfo],
+        action: &mut Option<ChatAction>,
+    ) {
         // Invitations waiting for an answer come first: they cannot be missed.
         self.group.invitation_cards(ui, contacts);
         let clock = self.clock();
@@ -1140,7 +1253,11 @@ impl ChatUi {
                     };
                     let when = when_list(c, when_ms, clock);
                     let unread = self.unread.of(&row.endpoint_id);
-                    if conversation_row(ui, c, row, &preview, &when, unread).clicked() {
+                    let selected = matches!(
+                        &self.view,
+                        View::Conversation(o) if o.endpoint_id == row.endpoint_id
+                    );
+                    if conversation_row(ui, c, row, &preview, &when, unread, selected).clicked() {
                         open_row = Some(i);
                     }
                 }
@@ -1225,17 +1342,22 @@ impl ChatUi {
                 chosen = Some(ConversationAction::Delete);
             }
         };
-        let menu_ref: Option<&mut dyn FnMut(&mut egui::Ui)> = Some(&mut menu);
-        let back = kit::conversation_header(
+        let menu_ref: &mut dyn FnMut(&mut egui::Ui) = &mut menu;
+        // Beside the list (a wide window) there is no way back to the list to draw.
+        let back_name = if self.wide { None } else { Some(c.a11y_back) };
+        let back = kit::conversation_header_ex(
             ui,
-            c.a11y_back,
+            back_name,
             &elide(&name, NAME_CHARS),
             status_line.as_deref().map(|s| (s, status_color)),
-            k.a11y_menu,
-            "chat",
-            std::mem::take(&mut self.open_menu_once),
-            menu_ref,
-        );
+            kit::HeaderEnd::Menu {
+                name: k.a11y_menu,
+                key: "chat",
+                open: std::mem::take(&mut self.open_menu_once),
+                menu: menu_ref,
+            },
+        )
+        .back;
         if let Some(a) = chosen {
             self.apply_action(a, o, &name, action);
         }
@@ -1679,6 +1801,7 @@ fn conversation_row(
     preview: &str,
     when: &str,
     unread: u32,
+    selected: bool,
 ) -> egui::Response {
     let w = ui.available_width();
     let (rect, resp) = ui.allocate_exact_size(vec2(w, ROW_H), Sense::click());
@@ -1701,6 +1824,9 @@ fn conversation_row(
     }
     let p = pal();
     let painter = ui.painter();
+    if selected {
+        painter.rect_filled(rect, 6.0, p.selected);
+    }
     if resp.hovered() || resp.has_focus() {
         painter.rect_filled(rect, 6.0, p.text.gamma_multiply(0.06));
     }
@@ -1954,9 +2080,9 @@ impl ChatUi {
         let mut thread: Vec<MessageInfo> = Vec::new();
         let mut open = false;
         match name {
-            "nocontacts" | "empty" | "notsupported" | "group" | "groupinfo" => {}
+            "nocontacts" | "empty" | "notsupported" => {}
             "memory" | "list" | "picker" | "confirm" | "thread" | "long" | "failed" | "menu"
-            | "verify" | "grouplist" => {
+            | "verify" | "grouplist" | "group" | "groupinfo" => {
                 convs = vec![
                     conv(a_ep, "a", "田中", NOW - 2 * MIN, 12, 0),
                     conv("bb", "b", LONG, NOW - DAY, 40, 1),
@@ -2927,6 +3053,103 @@ mod tests {
     }
 
     #[test]
+    fn the_tab_comes_back_on_the_list_and_the_draft_is_kept() {
+        let mut ui = ready();
+        ui.area_open = true;
+        ui.open_conversation("a", "ep", "A");
+        ui.composer = "unsent".into();
+        ui.group = GroupUi::fixture("group", Locale::En).expect("group");
+        assert!(ui.group.is_open());
+        ui.tick(false, true);
+        assert!(
+            matches!(ui.view, View::List),
+            "the list, not the old thread"
+        );
+        assert!(!ui.group.is_open(), "the list, not the old group");
+        ui.open_conversation("a", "ep", "A");
+        assert_eq!(ui.composer, "unsent");
+    }
+
+    #[test]
+    fn pressing_the_chat_tab_again_shows_the_list() {
+        let mut ui = ready();
+        ui.open_conversation("a", "ep", "A");
+        ui.show_list();
+        assert!(matches!(ui.view, View::List));
+        let mut ui = ready();
+        ui.group = GroupUi::fixture("group", Locale::En).expect("group");
+        ui.show_list();
+        assert!(!ui.group.is_open());
+    }
+
+    #[test]
+    fn the_list_is_read_beside_an_open_conversation_only_in_a_wide_window() {
+        for wide in [false, true] {
+            let mut ui = ready();
+            ui.area_open = true;
+            ui.open_conversation("a", "ep", "A");
+            ui.wide = wide;
+            ui.list_dirty = true;
+            ui.tick(true, true);
+            let asked = requests(&mut ui)
+                .iter()
+                .any(|r| matches!(r, ChatRequest::Conversations {}));
+            assert_eq!(asked, wide, "wide: {wide}");
+        }
+    }
+
+    /// Draw `chat` three frames in a window `w` wide, as the app does (the Chat column is the
+    /// wider one). Returns the area used.
+    fn draw_at(chat: &mut ChatUi, w: f32, locale: Locale) -> egui::Rect {
+        let contacts =
+            crate::contacts::ContactsUi::fixture("two", crate::locale::contact_strings(locale))
+                .unwrap();
+        let list = contacts.contact_list().to_vec();
+        let ctx = egui::Context::default();
+        kit::apply_theme(&ctx, false);
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    vec2(w, 900.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    kit::column_max(ui, TWO_PANE_MAX, |ui| {
+                        let _ = chat.show(ui, chat_strings(locale), true, &list);
+                    });
+                });
+            });
+        }
+        ctx.used_rect()
+    }
+
+    #[test]
+    fn a_wide_window_has_two_panes_and_a_narrow_one_keeps_the_push_navigation() {
+        assert_eq!(TWO_PANE_MIN, 852.0, "a 900 px window less its side margins");
+        for name in ["list", "thread", "group", "groupinfo", "menu"] {
+            for locale in Locale::ALL {
+                let mut chat = ChatUi::fixture(name).expect(name);
+                chat.set_locale(locale);
+                let used = draw_at(&mut chat, 1400.0, locale);
+                assert!(chat.wide, "{name}: two panes at 1400 px");
+                assert!(used.right() <= 1400.5, "{name}: {used:?}");
+                let mut chat = ChatUi::fixture(name).expect(name);
+                chat.set_locale(locale);
+                let used = draw_at(&mut chat, 700.0, locale);
+                assert!(!chat.wide, "{name}: one pane at 700 px");
+                assert!(used.right() <= 700.5, "{name}: {used:?}");
+            }
+        }
+        // The list pane is about a third of the area, within bounds.
+        assert_eq!(list_pane_width(900.0), 300.0);
+        assert_eq!(list_pane_width(600.0), LIST_PANE_MIN);
+        assert_eq!(list_pane_width(1360.0), LIST_PANE_MAX);
+    }
+
+    #[test]
     fn every_fixture_draws_without_panicking_at_both_widths() {
         for name in FIXTURES {
             for (w, h) in [(700.0, 900.0), (1400.0, 900.0)] {
@@ -2956,7 +3179,7 @@ mod tests {
                         };
                         let _ = ctx.run(input, |ctx| {
                             egui::CentralPanel::default().show(ctx, |ui| {
-                                kit::column(ui, |ui| {
+                                kit::column_max(ui, TWO_PANE_MAX, |ui| {
                                     let _ = chat.show(ui, strings, true, &list);
                                 });
                             });

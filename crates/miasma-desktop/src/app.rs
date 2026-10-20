@@ -3848,6 +3848,11 @@ impl MiasmaApp {
                             if kit::nav_tab(ui, easy_nav_selected(self.tab, tab), label_for(tab))
                                 .clicked()
                             {
+                                // The Chat tab shows the conversation list, also when pressed
+                                // while a conversation is open.
+                                if tab == Tab::Chat && self.tab == Tab::Chat {
+                                    self.chat.show_list();
+                                }
                                 self.tab = tab;
                             }
                         }
@@ -3860,6 +3865,9 @@ impl MiasmaApp {
                                 // is already open.
                                 if tab == Tab::Files && is_file_tab(self.tab) {
                                     continue;
+                                }
+                                if tab == Tab::Chat && self.tab == Tab::Chat {
+                                    self.chat.show_list();
                                 }
                                 self.tab = if tab == Tab::Files {
                                     Tab::Transfers
@@ -3961,7 +3969,9 @@ impl MiasmaApp {
                 // view), so it is drawn outside the page's scroll area.
                 if self.tab == Tab::Chat {
                     let mut action = None;
-                    kit::column(ui, |ui| {
+                    // Wider than the other pages: a wide window shows the conversation list
+                    // beside the open conversation.
+                    kit::column_max(ui, crate::chat_ui::TWO_PANE_MAX, |ui| {
                         if self.logs.writes_files {
                             kit::notice(ui, Level::Warn, self.lg().diag_banner);
                         }
