@@ -1005,7 +1005,11 @@ pub fn row_menu(
 /// frame inside it).
 pub fn dialog_widths(screen_w: f32) -> (f32, f32) {
     let win = (screen_w - 32.0).clamp(200.0, 460.0);
-    let inner = (win - 2.0 * SP_4 - 2.0).clamp(150.0, 440.0);
+    let inner = if win >= 460.0 {
+        440.0
+    } else {
+        (win - 2.0 * SP_4 - 2.0).clamp(150.0, 440.0)
+    };
     (win, inner)
 }
 
