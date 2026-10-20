@@ -124,6 +124,9 @@ dependencies {
     debugImplementation(libs.compose.ui.tooling)
     implementation(libs.compose.ui.tooling.preview)
 
+    // Serves the bundled web client over https://appassets.androidplatform.net/ in the WebView
+    implementation(libs.androidx.webkit)
+
     // QR code
     implementation(libs.zxing.embedded)
 }

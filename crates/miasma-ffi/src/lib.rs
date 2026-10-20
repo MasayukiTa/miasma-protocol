@@ -238,6 +238,14 @@ fn validate_data_dir(data_dir: &str) -> Result<PathBuf, MiasmaFfiError> {
         || canonical_str.starts_with("/var/mobile/")
         || canonical_str.starts_with("/private/var/")
         || canonical_str.contains("/Library/Application Support/");
+    // Unit tests run on desktop hosts, where the OS temp directory is the only
+    // private scratch location. This widening does not exist in release builds.
+    #[cfg(test)]
+    let allowed = allowed
+        || std::env::temp_dir()
+            .canonicalize()
+            .map(|t| canonical.starts_with(t))
+            .unwrap_or(false);
     if !allowed {
         return Err(MiasmaFfiError::Other {
             msg: "data_dir must be within app private storage".into(),
@@ -986,15 +994,6 @@ pub fn start_embedded_daemon(
     let master_key_path = miasma_core::paths::master_key(&path);
     let master_key = read_master_key_zeroizing(&master_key_path)?;
 
-    // Create MiasmaNode with full networking.
-    let node =
-        MiasmaNode::new(&master_key, NodeType::Full, &config.network.listen_addr).map_err(|e| {
-            tracing::warn!("node create error: {e}");
-            MiasmaFfiError::Other {
-                msg: "failed to create network node".into(),
-            }
-        })?;
-
     // Move the transport config into the daemon; do not duplicate persisted
     // secret Strings into a second long-lived config object.
     let mut transport_config = std::mem::take(&mut config.transport);
@@ -1007,6 +1006,17 @@ pub fn start_embedded_daemon(
     let rt = shared_runtime();
     let status_store = store.clone();
     let result = rt.block_on(async {
+        // Create MiasmaNode with full networking. Building the swarm registers
+        // UDP sockets with the tokio reactor, so it must run inside the runtime:
+        // this function is called from a plain Kotlin/Swift thread that has none.
+        let node = MiasmaNode::new(&master_key, NodeType::Full, &config.network.listen_addr)
+            .map_err(|e| {
+                tracing::warn!("node create error: {e}");
+                MiasmaFfiError::Other {
+                    msg: "failed to create network node".into(),
+                }
+            })?;
+
         let server =
             DaemonServer::start_with_transport(node, store, path.clone(), transport_config)
                 .await
@@ -1242,3 +1252,34 @@ mod privacy;
 pub use privacy::{
     get_privacy_profile, set_privacy_profile, PrivacyProfileApplyResultFfi, PrivacyProfileFfi,
 };
+
+#[cfg(test)]
+mod embedded_daemon_start_tests {
+    use super::*;
+
+    /// The Kotlin and Swift hosts call `start_embedded_daemon` from a plain
+    /// thread that has no tokio runtime context. Building the network node used
+    /// to panic there ("there is no reactor running"), leaving the node dead.
+    #[test]
+    fn starts_from_a_thread_without_a_runtime_context() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("miasma-ffi-start-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let data_dir = dir.to_string_lossy().into_owned();
+
+        let handle = std::thread::spawn(move || start_embedded_daemon(data_dir, 64, 100));
+        let started = handle.join().expect("start_embedded_daemon must not panic");
+
+        let status = started.expect("embedded daemon must start");
+        assert_ne!(status.http_port, 0);
+        assert!(!status.peer_id.is_empty());
+        assert!(is_daemon_running());
+
+        stop_embedded_daemon();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

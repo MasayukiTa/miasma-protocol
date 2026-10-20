@@ -8,6 +8,7 @@ navigation       = "2.7.7"
 coroutines       = "1.8.1"
 zxing-embedded  = "4.3.0"
 jna             = "5.19.1"
+webkit          = "1.11.0"
 
 [libraries]
 # Android Gradle Plugin
@@ -36,6 +37,8 @@ lifecycle-runtime-ktx       = { group = "androidx.lifecycle", name = "lifecycle-
 # Coroutines
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
 
+
+androidx-webkit = { group = "androidx.webkit", name = "webkit", version.ref = "webkit" }
 
 # QR code
 zxing-embedded = { group = "com.journeyapps", name = "zxing-android-embedded", version.ref = "zxing-embedded" }

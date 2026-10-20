@@ -5,18 +5,22 @@ import android.net.Uri
 import android.os.Bundle
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
+import androidx.webkit.WebViewAssetLoader
 import org.json.JSONObject
 import dev.miasma.uniffi.*
 
 /**
  * WebView-hosted Miasma web UI with a JavaScript bridge to native FFI.
  *
- * Loads the web app from app assets (`file:///android_asset/web/index.html`)
- * and injects `window.miasma` with methods that call through to the
+ * Loads the web app from app assets through `WebViewAssetLoader`
+ * (`https://appassets.androidplatform.net/assets/web/index.html`): ES module
+ * scripts cannot be loaded from `file://` URLs, and file access stays disabled.
+ * It injects `window.miasma` with methods that call through to the
  * UniFFI-generated Kotlin bindings and the HTTP bridge for directed sharing.
  *
  * The bridge exposes: ping(), status(), dissolve(data, k, n),
@@ -24,6 +28,18 @@ import dev.miasma.uniffi.*
  * sharingKey(), directedSend(), directedConfirm(), directedRetrieve(),
  * directedRevoke(), directedInbox(), directedOutbox().
  */
+private const val APP_HOST = "appassets.androidplatform.net"
+private const val APP_PATH_PREFIX = "/assets/web/"
+
+/** Only the bundled web client's own https origin may be shown while the bridge is attached. */
+private fun isAllowedAppUrl(uri: Uri?): Boolean {
+    if (uri == null || uri.scheme != "https" || uri.host != APP_HOST || uri.port != -1) return false
+    if (!uri.userInfo.isNullOrEmpty()) return false
+    val path = uri.path ?: return false
+    if (!path.startsWith(APP_PATH_PREFIX)) return false
+    return path.split('/').none { it == ".." }
+}
+
 class WebBridgeActivity : ComponentActivity() {
 
     private lateinit var webView: WebView
@@ -41,12 +57,17 @@ class WebBridgeActivity : ComponentActivity() {
             settings.javaScriptCanOpenWindowsAutomatically = false
             settings.setSupportMultipleWindows(false)
             webChromeClient = WebChromeClient()
-            webViewClient = LocalAssetsOnlyWebViewClient()
+            webViewClient = LocalAssetsOnlyWebViewClient(
+                WebViewAssetLoader.Builder()
+                    .setDomain(APP_HOST)
+                    .addPathHandler("/assets/", BundledAssetsPathHandler(applicationContext))
+                    .build()
+            )
         }
 
         webView.addJavascriptInterface(MiasmaBridge(), "miasma")
         setContentView(webView)
-        webView.loadUrl("file:///android_asset/web/index.html")
+        webView.loadUrl("https://$APP_HOST/assets/web/index.html")
     }
 
     /**
@@ -54,23 +75,57 @@ class WebBridgeActivity : ComponentActivity() {
      * the top-level page while that interface is attached. The bundled PWA has a
      * restrictive CSP as a second layer, but navigation is enforced natively too.
      */
-    private class LocalAssetsOnlyWebViewClient : WebViewClient() {
+    private class LocalAssetsOnlyWebViewClient(
+        private val assetLoader: WebViewAssetLoader,
+    ) : WebViewClient() {
+        override fun shouldInterceptRequest(
+            view: WebView?,
+            request: WebResourceRequest,
+        ): WebResourceResponse? =
+            if (isAllowedAppUrl(request.url)) {
+                assetLoader.shouldInterceptRequest(request.url)
+            } else {
+                // Nothing outside the bundled origin is ever fetched.
+                WebResourceResponse("text/plain", "utf-8", 403, "Forbidden", emptyMap(), null)
+            }
+
         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest): Boolean =
             !isAllowedAppUrl(request.url)
 
         @Suppress("DEPRECATION")
         override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean =
             !isAllowedAppUrl(url?.let(Uri::parse))
+    }
 
-        companion object {
-            private const val APP_ASSET_PATH_PREFIX = "/android_asset/web/"
-
-            private fun isAllowedAppUrl(uri: Uri?): Boolean {
-                if (uri == null || uri.scheme != "file" || !uri.authority.isNullOrEmpty()) return false
-                val path = uri.path ?: return false
-                if (!path.startsWith(APP_ASSET_PATH_PREFIX)) return false
-                return path.split('/').none { it == ".." }
+    /** Serves files from the app's bundled `web/` assets with explicit MIME types. */
+    private class BundledAssetsPathHandler(
+        private val context: android.content.Context,
+    ) : WebViewAssetLoader.PathHandler {
+        override fun handle(path: String): WebResourceResponse? {
+            if (!path.startsWith("web/") || path.split('/').any { it == ".." || it.isEmpty() }) return null
+            val stream = try {
+                context.assets.open(path)
+            } catch (_: java.io.IOException) {
+                return null
             }
+            val response = WebResourceResponse(mimeFor(path), if (isText(path)) "utf-8" else null, stream)
+            response.responseHeaders = mapOf("Cache-Control" to "no-store")
+            return response
+        }
+
+        private fun mimeFor(path: String): String = when (path.substringAfterLast('.', "").lowercase()) {
+            "html" -> "text/html"
+            "js", "mjs" -> "text/javascript"
+            "css" -> "text/css"
+            "json", "webmanifest" -> "application/json"
+            "wasm" -> "application/wasm"
+            "png" -> "image/png"
+            "svg" -> "image/svg+xml"
+            else -> "application/octet-stream"
+        }
+
+        private fun isText(path: String): Boolean = mimeFor(path).let {
+            it.startsWith("text/") || it == "application/json"
         }
     }
 
