@@ -178,6 +178,9 @@ pub struct MiasmaApp {
     // Logs (memory-only by default; opt-in diagnostic files)
     logs: LogsState,
 
+    // Hybrid post-quantum protection of private conversations (`privacy.pqc_mode`)
+    pqc_mode: miasma_core::config::PqcMode,
+
     // Storage (the shares this node keeps: listing and deletion)
     storage: StorageState,
 
@@ -532,6 +535,7 @@ impl MiasmaApp {
             last_status_poll: now,
             launch_attempts: 0,
             logs: LogsState::new(&data_dir),
+            pqc_mode: miasma_core::logging::load_privacy(&data_dir).pqc_mode,
             storage: StorageState::new(),
             updates: crate::updates::UpdatesUi::new(data_dir.clone()),
             network: crate::network_ui::NetworkUi::new(data_dir.clone()),
@@ -584,6 +588,11 @@ impl MiasmaApp {
     /// Logs section string table.
     fn lg(&self) -> &'static LogStrings {
         locale::log_strings(self.locale)
+    }
+
+    /// Quantum-resistant chat protection block string table.
+    fn pq(&self) -> &'static locale::PqcStrings {
+        locale::pqc_strings(self.locale)
     }
 
     /// Transfers screen string table.
@@ -2515,6 +2524,8 @@ impl MiasmaApp {
 
             self.logs_section(ui);
 
+            self.pqc_section(ui);
+
             // ── Storage ──────────────────────────────────────────────
             self.storage_section(ui);
 
@@ -2564,6 +2575,49 @@ impl MiasmaApp {
 
             kit::hint(ui, &crate::buildinfo::window_title(self.locale));
         });
+    }
+
+    // ── Quantum-resistant chat protection (Settings) ──────────────────────
+
+    /// The three choices of `privacy.pqc_mode`, with what each one does. The
+    /// choice is written to the configuration at once; the background service
+    /// reads it when it starts.
+    fn pqc_section(&mut self, ui: &mut egui::Ui) {
+        use miasma_core::config::PqcMode;
+        let p = self.pq();
+        let available = PqcMode::available();
+        let mut chosen = self.pqc_mode;
+        kit::section(ui, p.heading, |ui| {
+            kit::paragraph_muted(ui, p.intro);
+            ui.add_space(kit::SP_1);
+            if !available {
+                kit::notice(ui, Level::Warn, p.unavailable);
+                ui.add_space(kit::SP_1);
+            }
+            for (mode, label, help) in [
+                (PqcMode::Off, p.off, p.off_help),
+                (PqcMode::Prefer, p.prefer, p.prefer_help),
+                (PqcMode::Require, p.require, p.require_help),
+            ] {
+                let r = ui.radio_value(&mut chosen, mode, label);
+                r.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::RadioButton, p.a11y_mode)
+                });
+                kit::hint(ui, help);
+            }
+            ui.add_space(kit::SP_1);
+            kit::hint(ui, p.restart_note);
+            kit::hint(ui, p.review_note);
+        });
+        if chosen != self.pqc_mode {
+            let saved =
+                miasma_core::config::set_pqc_mode_persistent(&self.data_dir, chosen).is_ok();
+            // The configuration is the source of truth for the choice shown.
+            self.pqc_mode = miasma_core::logging::load_privacy(&self.data_dir).pqc_mode;
+            if !saved || self.pqc_mode != chosen {
+                self.set_msg(MsgKind::Error, self.pq().save_failed);
+            }
+        }
     }
 
     // ── Logs section (Settings) ───────────────────────────────────────────

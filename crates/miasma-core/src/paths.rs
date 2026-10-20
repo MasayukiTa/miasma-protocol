@@ -1204,6 +1204,13 @@ pub fn chat_session_file(chat_dir: &Path, stem: &str) -> PathBuf {
     chat_dir.join(format!("{stem}.sess"))
 }
 
+/// `<chat dir>/<stem>.pq`: the hybrid-upgrade document of one contact (only
+/// written by builds with the `pqc` feature and `privacy.pqc_mode` on; other
+/// builds never read or list it).
+pub fn chat_pq_file(chat_dir: &Path, stem: &str) -> PathBuf {
+    chat_dir.join(format!("{stem}.pq"))
+}
+
 /// `<chat dir>/outbox.log`
 pub fn chat_outbox_file(chat_dir: &Path) -> PathBuf {
     chat_dir.join("outbox.log")

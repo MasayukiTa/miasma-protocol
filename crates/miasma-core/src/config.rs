@@ -58,6 +58,83 @@ pub struct PrivacyConfig {
     /// again.
     #[serde(default)]
     pub old_logs_keep: bool,
+    /// Hybrid post-quantum upgrade of private-conversation sessions (default
+    /// **off**). See [`PqcMode`]. Only builds with the `pqc` cargo feature act
+    /// on it; other builds ignore it and report that they cannot.
+    #[serde(default)]
+    pub pqc_mode: PqcMode,
+}
+
+/// `privacy.pqc_mode`: whether private-conversation sessions are upgraded with
+/// a hybrid X25519 + ML-KEM-768 key exchange.
+///
+/// * `off` (default): nothing changes. This build offers nothing and answers
+///   nothing, so every peer sees exactly what it saw before.
+/// * `prefer`: offer the hybrid exchange. Use it when the peer agrees; when the
+///   peer does not, keep the classical session and show "classical only".
+/// * `require`: messages to a contact are sent only once the hybrid exchange
+///   with that contact has completed. If the contact does not offer it, the
+///   messages fail on this device with a stated reason; nothing is sent in the
+///   classical session. The contact's own settings are not affected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PqcMode {
+    #[default]
+    Off,
+    Prefer,
+    Require,
+}
+
+impl PqcMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Prefer => "prefer",
+            Self::Require => "require",
+        }
+    }
+
+    /// True when this build contains the hybrid exchange at all.
+    pub const fn available() -> bool {
+        cfg!(feature = "pqc")
+    }
+}
+
+impl std::str::FromStr for PqcMode {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "off" => Ok(Self::Off),
+            "prefer" => Ok(Self::Prefer),
+            "require" => Ok(Self::Require),
+            other => Err(format!(
+                "unknown pqc mode '{other}': expected off, prefer or require"
+            )),
+        }
+    }
+}
+
+impl fmt::Display for PqcMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Persist `privacy.pqc_mode` in `config.toml` (a running daemon reads it at
+/// its next start). Creates nothing when there is no configuration file yet.
+pub fn set_pqc_mode_persistent(data_dir: &Path, mode: PqcMode) -> std::io::Result<()> {
+    if !crate::paths::config_file(data_dir).exists() {
+        return Ok(());
+    }
+    let mut c = NodeConfig::load(data_dir)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    if c.privacy.pqc_mode != mode {
+        c.privacy.pqc_mode = mode;
+        c.save(data_dir)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+    }
+    c.transport.zeroize_secret_copies();
+    Ok(())
 }
 
 pub const DEFAULT_LOG_BUFFER_MIB: u32 = 2;
@@ -76,6 +153,7 @@ impl Default for PrivacyConfig {
             log_buffer_mib: DEFAULT_LOG_BUFFER_MIB,
             old_logs_notice_shown: false,
             old_logs_keep: false,
+            pqc_mode: PqcMode::Off,
         }
     }
 }

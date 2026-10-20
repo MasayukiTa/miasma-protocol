@@ -13,6 +13,9 @@ crate-type = ["cdylib", "staticlib"]
 
 [features]
 bindgen-cli = ["uniffi/cli"]
+# Opt-in hybrid upgrade of private conversations (off by default); lets the
+# mobile build be checked with the feature. See docs/pqc-session-upgrade.md.
+pqc = ["miasma-core/pqc"]
 
 [[bin]]
 name = "miasma-uniffi-bindgen"

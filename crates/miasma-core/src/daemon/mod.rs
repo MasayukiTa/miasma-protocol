@@ -1872,6 +1872,7 @@ async fn process_request_inner(
                 cover_estimated_enqueued_bytes: cover_metrics.estimated_enqueued_bytes,
                 cover_budget_pauses: cover_metrics.budget_pauses,
                 capability_downgrades: crate::protocol::capability::downgrade_counts(),
+                pqc: crate::chat::ipc::pqc_status(&data_dir),
                 // Network environment — from live snapshot
                 network_environment: {
                     let env = bridge_state.env_snapshot.lock().unwrap();

@@ -991,6 +991,13 @@ async fn cmd_status(data_dir: &std::path::Path) -> Result<()> {
             println!("  Pending replication: {}", s.pending_replication);
             println!("  Replicated items:    {}", s.replicated_count);
             print_logging_status(data_dir);
+            println!(
+                "  Hybrid chat:         {}",
+                pqc_line(
+                    miasma_core::logging::load_privacy(data_dir).pqc_mode,
+                    Some(&s.pqc)
+                )
+            );
             if s.wss_port > 0 {
                 let tls_tag = if s.wss_tls_enabled {
                     " (TLS)"
@@ -1129,6 +1136,29 @@ fn print_logging_status(data_dir: &std::path::Path) {
     if let Some(line) = miasma_core::logging::legacy::status_line(data_dir) {
         println!("  Old log files:       {line}");
     }
+}
+
+/// One line about the hybrid post-quantum upgrade of private conversations:
+/// the configured mode, whether this build can do it, and (while the
+/// background service runs) what came of it so far.
+fn pqc_line(
+    configured: miasma_core::config::PqcMode,
+    running: Option<&miasma_core::chat::ipc::PqcStatus>,
+) -> String {
+    use miasma_core::config::PqcMode;
+    let mut s = configured.to_string();
+    if configured != PqcMode::Off && !PqcMode::available() {
+        s.push_str(" (this build has no hybrid exchange: private conversations stay classical)");
+        return s;
+    }
+    if let Some(p) = running.filter(|p| p.available && p.mode != "off") {
+        let c = &p.counts;
+        s.push_str(&format!(
+            " (hybrid sessions {}, classical only {}, refused {}, failed {})",
+            c.hybrid_sessions, c.classical_only, c.refused, c.failed
+        ));
+    }
+    s
 }
 
 /// Apply a change of `privacy.diagnostic_logging` to a running daemon; with no
@@ -1359,6 +1389,10 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
                 serde_json::json!(s.proxy_configured),
             );
             report.insert("proxy_type".into(), serde_json::json!(s.proxy_type));
+            report.insert(
+                "pqc".into(),
+                serde_json::to_value(&s.pqc).unwrap_or(serde_json::Value::Null),
+            );
 
             let transports: Vec<serde_json::Value> = s
                 .transport_readiness
@@ -1400,6 +1434,10 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
             } else {
                 "memory only (stealth mode)"
             }
+        );
+        println!(
+            "Hybrid chat:     {}",
+            pqc_line(privacy.pqc_mode, daemon_status.as_ref().map(|s| &s.pqc))
         );
 
         if let Ok((quota_mb, hosted_quota_mb, listen_addr)) = &config_info {
@@ -1873,6 +1911,7 @@ fn cmd_config_loaded(
                     println!("{}", config.privacy.diagnostic_logging)
                 }
                 "privacy.log_buffer_mib" => println!("{}", config.privacy.log_buffer_mib),
+                "privacy.pqc_mode" => println!("{}", config.privacy.pqc_mode),
                 "update.mode" => println!("{}", config.update.mode),
                 "update.channel" => println!("{}", config.update.channel),
                 "update.check_at_start" => println!("{}", config.update.check_at_start),
@@ -1991,6 +2030,22 @@ fn cmd_config_loaded(
                         bail!("expected 1-8 MiB");
                     }
                     config.privacy.log_buffer_mib = mib;
+                }
+                "privacy.pqc_mode" => {
+                    let mode: miasma_core::config::PqcMode =
+                        v.parse().map_err(anyhow::Error::msg)?;
+                    if mode != miasma_core::config::PqcMode::Off
+                        && !miasma_core::config::PqcMode::available()
+                    {
+                        // Saved, but said plainly: this program cannot act on it.
+                        eprintln!(
+                            "note: this build does not include the hybrid exchange, so \
+                             the setting has no effect here and private conversations \
+                             stay classical"
+                        );
+                    }
+                    config.privacy.pqc_mode = mode;
+                    eprintln!("takes effect the next time the background service starts");
                 }
                 "update.mode" => {
                     config.update.mode = v.parse().map_err(anyhow::Error::msg)?;

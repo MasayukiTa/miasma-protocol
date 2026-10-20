@@ -115,6 +115,9 @@ pub struct ChatCore {
     receipt_interval_ms: AtomicU64,
     /// When the last receipt for each contact was queued.
     receipt_clock: Mutex<HashMap<[u8; 32], u64>>,
+    /// Opt-in hybrid upgrade of the sessions (only in builds with `pqc`).
+    #[cfg(feature = "pqc")]
+    pub pq: super::pq::PqState,
 }
 
 impl ChatCore {
@@ -124,6 +127,8 @@ impl ChatCore {
         identity: Identity,
         max_message_bytes: usize,
     ) -> Self {
+        #[cfg(feature = "pqc")]
+        let pq = super::pq::PqState::new(store.dir(), store.keys().clone(), identity.id());
         Self {
             store,
             outbox,
@@ -137,6 +142,8 @@ impl ChatCore {
             receipts_global: AtomicBool::new(true),
             receipt_interval_ms: AtomicU64::new(RECEIPT_MIN_INTERVAL_MS),
             receipt_clock: Mutex::new(HashMap::new()),
+            #[cfg(feature = "pqc")]
+            pq,
         }
     }
 
@@ -330,7 +337,9 @@ impl ChatCore {
                 if st.session.is_none() {
                     st.session = Some(Session::new_initiator(me, &peer)?);
                 }
-                st.session.as_mut().expect("set above").seal(&plain)
+                let s = st.session.as_mut().expect("set above");
+                let layer = self.seal_layer(&peer, s.origin_ek());
+                s.seal_with(&plain, layer.as_deref())
             })
             .map_err(|er| PrepareError::Session(er.to_string()))?;
         // The used key must not be forgotten if we crash after sending.
@@ -355,6 +364,9 @@ impl ChatCore {
         self.store.with_peer(peer, |st| st.session = None);
         let _ = self.store.flush_peer(peer);
         self.void_sealed(peer);
+        // The hybrid key belonged to the session that is gone.
+        #[cfg(feature = "pqc")]
+        self.pq.forget(peer);
     }
 
     fn void_sealed(&self, peer: &[u8; 32]) {
@@ -486,6 +498,8 @@ impl ChatCore {
         let _g = self.gate();
         self.outbox.remove_peer(peer);
         self.store.delete_conversation(peer)?;
+        #[cfg(feature = "pqc")]
+        self.pq.forget(peer);
         self.store.flush_peer(peer)
     }
 
@@ -515,6 +529,9 @@ impl ChatCore {
                 record: Record,
                 replaced: bool,
                 new_ek: Option<[u8; 32]>,
+                /// The plaintext of a hybrid-upgrade record (always `None`
+                /// in builds without the `pqc` feature).
+                pq_plain: Option<Vec<u8>>,
             },
         }
         let me = &self.identity;
@@ -528,7 +545,8 @@ impl ChatCore {
             let result: Option<Result<(Session, zeroize::Zeroizing<Vec<u8>>), CryptoError>>;
             if let Some(existing) = &st.session {
                 let mut s = existing.clone();
-                match s.open(&env) {
+                let layer = self.open_layer(peer, existing.origin_ek());
+                match s.open_with(&env, layer.as_deref()) {
                     Ok(pt) => result = Some(Ok((s, pt))),
                     Err(e) => {
                         // A first-flight message with an unknown key may start
@@ -573,29 +591,52 @@ impl ChatCore {
             }
             match result {
                 Some(Ok((session, pt))) => match Record::decode(&pt) {
-                    Ok(record) => Step::Open {
-                        session,
-                        record,
-                        replaced,
-                        new_ek,
-                    },
+                    Ok(record) => {
+                        #[cfg(feature = "pqc")]
+                        let pq_plain = match &record {
+                            Record::Unknown(k) if super::pq::is_pq_kind(*k) => Some(pt.to_vec()),
+                            _ => None,
+                        };
+                        #[cfg(not(feature = "pqc"))]
+                        let pq_plain: Option<Vec<u8>> = None;
+                        Step::Open {
+                            session,
+                            record,
+                            replaced,
+                            new_ek,
+                            pq_plain,
+                        }
+                    }
                     Err(_) => Step::Done(AckStatus::BadRequest),
                 },
                 _ => Step::Done(AckStatus::BadRequest),
             }
         });
-        let (session, record, replaced, new_ek) = match step {
+        let (session, record, replaced, new_ek, pq_plain) = match step {
             Step::Done(s) => return plain(s),
             Step::Open {
                 session,
                 record,
                 replaced,
                 new_ek,
-            } => (session, record, replaced, new_ek),
+                pq_plain,
+            } => (session, record, replaced, new_ek, pq_plain),
         };
         let message = match record {
             Record::Text(m) => m,
             Record::Unknown(_) => {
+                // A record of the hybrid upgrade is applied before the session
+                // moves on, so a failure to write it down is retried by the
+                // sender.
+                #[cfg(feature = "pqc")]
+                if let Some(pp) = &pq_plain {
+                    let sid = *session.origin_ek();
+                    if self.pq.on_record(peer, &sid, pp, now).is_err() {
+                        return plain(AckStatus::Failed);
+                    }
+                }
+                #[cfg(not(feature = "pqc"))]
+                let _ = &pq_plain;
                 // A record kind from a newer build: the envelope opened, so
                 // the session moves on and it is acknowledged; there is
                 // nothing here to show.
@@ -742,6 +783,89 @@ impl ChatCore {
     }
 }
 
+// ─── Hybrid upgrade (opt-in, `pqc` feature) ──────────────────────────────────
+
+impl ChatCore {
+    /// The hybrid key to seal with in the session `sid`: only after both sides
+    /// finished the exchange.
+    #[cfg(feature = "pqc")]
+    fn seal_layer(&self, peer: &[u8; 32], sid: &[u8; 32]) -> Option<zeroize::Zeroizing<[u8; 32]>> {
+        self.pq.seal_key(peer, sid)
+    }
+
+    #[cfg(not(feature = "pqc"))]
+    fn seal_layer(
+        &self,
+        _peer: &[u8; 32],
+        _sid: &[u8; 32],
+    ) -> Option<zeroize::Zeroizing<[u8; 32]>> {
+        None
+    }
+
+    /// The hybrid key to try when opening in the session `sid`.
+    #[cfg(feature = "pqc")]
+    fn open_layer(&self, peer: &[u8; 32], sid: &[u8; 32]) -> Option<zeroize::Zeroizing<[u8; 32]>> {
+        self.pq.open_key(peer, sid)
+    }
+
+    #[cfg(not(feature = "pqc"))]
+    fn open_layer(
+        &self,
+        _peer: &[u8; 32],
+        _sid: &[u8; 32],
+    ) -> Option<zeroize::Zeroizing<[u8; 32]>> {
+        None
+    }
+}
+
+#[cfg(feature = "pqc")]
+impl ChatCore {
+    /// Set `privacy.pqc_mode` for this core.
+    pub fn set_pqc_mode(&self, mode: crate::config::PqcMode) {
+        self.pq.set_mode(mode);
+    }
+
+    pub fn pqc_mode(&self) -> crate::config::PqcMode {
+        self.pq.mode()
+    }
+
+    fn session_id(&self, peer: &[u8; 32]) -> Option<[u8; 32]> {
+        self.store
+            .peek_peer(peer, |st| st.session.as_ref().map(|s| *s.origin_ek()))
+    }
+
+    /// What the delivery loop does next for `peer` (see [`super::pq::Pass`]).
+    /// `have_text` is true when a message waits.
+    pub fn pq_step(&self, peer: &[u8; 32], have_text: bool, now: u64) -> super::pq::Pass {
+        let _g = self.gate();
+        self.pq.pass(peer, self.session_id(peer), have_text, now)
+    }
+
+    /// Report how the delivery of a hybrid-upgrade record ended.
+    pub fn pq_sent(
+        &self,
+        peer: &[u8; 32],
+        out: &super::pq::Outgoing,
+        outcome: super::pq::SendOutcome,
+        now: u64,
+    ) {
+        let _g = self.gate();
+        if let Some(sid) = self.session_id(peer) {
+            self.pq.sent(peer, &sid, out, outcome, now);
+        }
+    }
+
+    /// True when the delivery loop of `peer` has a hybrid-upgrade step to do.
+    pub fn pq_attention(&self, peer: &[u8; 32], now: u64) -> bool {
+        self.pq.wants_attention(peer, now)
+    }
+
+    /// What to show for the conversation with `peer`.
+    pub fn pq_view(&self, peer: &[u8; 32]) -> super::pq::PqView {
+        self.pq.view(peer)
+    }
+}
+
 // ─── Records that are not private-chat messages (group delivery) ────────────
 
 impl ChatCore {
@@ -762,7 +886,9 @@ impl ChatCore {
                 if st.session.is_none() {
                     st.session = Some(Session::new_initiator(me, peer)?);
                 }
-                st.session.as_mut().expect("set above").seal(plain)
+                let s = st.session.as_mut().expect("set above");
+                let layer = self.seal_layer(peer, s.origin_ek());
+                s.seal_with(plain, layer.as_deref())
             })
             .map_err(|er| PrepareError::Session(er.to_string()))?;
         self.store
@@ -803,7 +929,8 @@ impl ChatCore {
             match &st.session {
                 Some(existing) => {
                     let mut s = existing.clone();
-                    match s.open(&env) {
+                    let layer = self.open_layer(peer, existing.origin_ek());
+                    match s.open_with(&env, layer.as_deref()) {
                         Ok(pt) => Ok((s, pt, false, None)),
                         Err(e) => {
                             let fresh = env.header.init_ek.filter(|ek| {

@@ -1,7 +1,10 @@
 //! Hybrid key exchange: X25519 + ML-KEM-768 (FIPS 203).
 //!
-//! Library level only. Nothing in a live handshake calls this module yet.
-//! It is compiled only with the `pqc` cargo feature.
+//! Compiled only with the `pqc` cargo feature. The one live user is the
+//! opt-in upgrade of private-conversation sessions (`chat::pq`, off unless
+//! `privacy.pqc_mode` is `prefer` or `require`); see
+//! `docs/pqc-session-upgrade.md`. That wiring has not been reviewed by an
+//! outside cryptographer.
 //!
 //! # Shape
 //!
@@ -440,6 +443,17 @@ impl Established {
         match self.role {
             Role::Initiator => self.confirm_initiator,
             Role::Responder => self.confirm_responder,
+        }
+    }
+
+    /// The tag this side expects from the peer. A caller that has to keep the
+    /// exchange across a restart stores it next to the session key and
+    /// compares in constant time later; it is derived from the same transcript
+    /// as the key.
+    pub fn expected_peer_confirmation(&self) -> [u8; 32] {
+        match self.role {
+            Role::Initiator => self.confirm_responder,
+            Role::Responder => self.confirm_initiator,
         }
     }
 

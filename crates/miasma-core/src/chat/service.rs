@@ -37,7 +37,7 @@ use super::{
     sync,
 };
 use crate::{
-    config::NodeConfig,
+    config::{NodeConfig, PqcMode},
     push::{
         contact::fingerprint,
         store::{Contact, ContactStore},
@@ -79,6 +79,8 @@ pub struct ChatSettings {
     pub inbound_per_minute: f64,
     /// Join a group at once when a trusted administrator adds us (`chat.group_auto_join`).
     pub group_auto_join: bool,
+    /// `privacy.pqc_mode`. Only builds with the `pqc` feature act on it.
+    pub pqc_mode: PqcMode,
 }
 
 impl Default for ChatSettings {
@@ -99,6 +101,7 @@ impl Default for ChatSettings {
             inbound_burst: 20.0,
             inbound_per_minute: 30.0,
             group_auto_join: true,
+            pqc_mode: PqcMode::Off,
         }
     }
 }
@@ -207,8 +210,17 @@ pub fn start_for_daemon(
     let settings = ChatSettings {
         max_message_bytes: cfg.chat.max_message_bytes.clamp(1, proto::MAX_TEXT_BYTES),
         group_auto_join: cfg.chat.group_auto_join,
+        pqc_mode: cfg.privacy.pqc_mode,
         ..ChatSettings::default()
     };
+    if cfg.privacy.pqc_mode != PqcMode::Off && !PqcMode::available() {
+        // Said once, plainly: the setting is on but this build cannot do it.
+        warn!(
+            "privacy.pqc_mode is {} but this build has no hybrid exchange; \
+             private conversations stay classical",
+            cfg.privacy.pqc_mode
+        );
+    }
     let svc = ChatService::start(
         &crate::paths::chat_dir(data_dir),
         node,
@@ -291,6 +303,8 @@ impl ChatService {
             identity,
             settings.max_message_bytes,
         ));
+        #[cfg(feature = "pqc")]
+        core.set_pqc_mode(settings.pqc_mode);
         let now = now_ms();
         for e in expired {
             // Recorded as failed so the person sees what did not go out.
@@ -349,6 +363,9 @@ impl ChatService {
             g.shutdown();
         }
         self.core.store.close();
+        // The hybrid session keys leave memory with the service.
+        #[cfg(feature = "pqc")]
+        self.core.pq.clear_memory();
     }
 
     pub fn core(&self) -> &Arc<ChatCore> {
@@ -429,6 +446,25 @@ impl ChatService {
             if *stop.borrow() {
                 self.workers.lock().unwrap().remove(&peer);
                 break;
+            }
+            // The opt-in hybrid upgrade goes first: its records, and under
+            // `require` the decision whether a message may go at all.
+            #[cfg(feature = "pqc")]
+            match self
+                .pq_pass(&peer, &mut conn, &wake, &mut stop, &mut failures)
+                .await
+            {
+                PqLoop::Free => {}
+                PqLoop::Again => continue,
+                PqLoop::Leave => {
+                    // Checked under the registry lock: a message queued
+                    // right now keeps this worker.
+                    let mut w = self.workers.lock().unwrap();
+                    if self.core.outbox.first_for(&peer).is_none() {
+                        w.remove(&peer);
+                        break;
+                    }
+                }
             }
             // Leave when nothing is waiting. Checked under the registry lock
             // so a message queued right now starts a new worker.
@@ -834,6 +870,12 @@ impl ChatService {
                 break;
             }
             let _ = tx.finish();
+            // A record of the hybrid upgrade may owe an answer: wake the
+            // delivery loop for this contact.
+            #[cfg(feature = "pqc")]
+            if status == AckStatus::Stored && self.core.pq_attention(&remote, now_ms()) {
+                self.kick(&remote);
+            }
             match status {
                 AckStatus::Unsupported => {
                     // Let the answer reach the peer, then end politely.
@@ -854,6 +896,155 @@ impl ChatService {
             }
         }
         conn.close(CLOSE_OK.into(), b"done");
+    }
+}
+
+// ─── Hybrid upgrade (opt-in, `pqc` feature) ──────────────────────────────────
+
+/// What the worker does after the hybrid-upgrade step.
+#[cfg(feature = "pqc")]
+enum PqLoop {
+    /// Nothing more to do here: go on with the messages.
+    Free,
+    /// Something happened (a record went out, a message was failed, a wait
+    /// ended): look again from the top.
+    Again,
+    /// Nothing waits and the contact cannot be reached: end this worker.
+    Leave,
+}
+
+/// How often a held message asks again whether the exchange is finished.
+#[cfg(feature = "pqc")]
+const PQ_POLL: Duration = Duration::from_secs(2);
+/// Failures in a row after which a worker that has only hybrid-upgrade
+/// records to send ends (the next message or record from the contact starts it
+/// again).
+#[cfg(feature = "pqc")]
+const PQ_ONLY_RETRIES: u32 = 3;
+
+#[cfg(feature = "pqc")]
+impl ChatService {
+    /// The hybrid-upgrade step of the delivery loop of `peer`.
+    async fn pq_pass(
+        &self,
+        peer: &[u8; 32],
+        conn_slot: &mut Option<Connection>,
+        wake: &Notify,
+        stop: &mut watch::Receiver<bool>,
+        failures: &mut u32,
+    ) -> PqLoop {
+        use super::pq::Pass;
+        if self.settings.pqc_mode == PqcMode::Off {
+            return PqLoop::Free;
+        }
+        // Only contacts we may write to.
+        match self.contacts.by_endpoint(peer) {
+            Some(c) if c.allow_send => {}
+            _ => return PqLoop::Free,
+        }
+        let first = self.core.outbox.first_for(peer);
+        let have_text = first.is_some();
+        match self.core.pq_step(peer, have_text, now_ms()) {
+            Pass::Proceed => PqLoop::Free,
+            Pass::Hold => {
+                tokio::select! {
+                    _ = tokio::time::sleep(PQ_POLL) => {}
+                    _ = wake.notified() => {}
+                    _ = stop.changed() => {}
+                }
+                PqLoop::Again
+            }
+            Pass::Refuse(reason) => {
+                // `require`: nothing goes out in the classical session. The
+                // message stays in the history as failed, with the reason.
+                if let Some(e) = first {
+                    self.core.mark_failed(&e.id, reason, now_ms());
+                }
+                PqLoop::Again
+            }
+            Pass::Send(out) => match self.send_pq(peer, &out, conn_slot).await {
+                Ok(()) => {
+                    *failures = 0;
+                    PqLoop::Again
+                }
+                Err(why) => {
+                    *failures += 1;
+                    debug!(peer = %fingerprint(peer), "hybrid upgrade waits: {why}");
+                    if !have_text && *failures >= PQ_ONLY_RETRIES {
+                        return PqLoop::Leave;
+                    }
+                    if self.wait(wake, stop, *failures).await {
+                        *failures = 0;
+                    }
+                    PqLoop::Again
+                }
+            },
+        }
+    }
+
+    /// Seal one hybrid-upgrade record and deliver it like a message.
+    async fn send_pq(
+        &self,
+        peer: &[u8; 32],
+        out: &super::pq::Outgoing,
+        conn_slot: &mut Option<Connection>,
+    ) -> Result<(), &'static str> {
+        use super::pq::SendOutcome;
+        let (conn, _) = self
+            .ensure_conn(conn_slot, peer)
+            .await
+            .map_err(|e| e.reason_code(fail::PEER_NO_CHAT))?;
+        let (wire, env_id) = self.core.seal_for(peer, &out.plain).map_err(|e| match e {
+            PrepareError::Storage(_) => "storage",
+            _ => "session",
+        })?;
+        let result = tokio::time::timeout(self.settings.ack_timeout, async {
+            let (mut tx, mut rx) = conn.open_bi().await.map_err(|_| "connection_lost")?;
+            proto::write_frame(&mut tx, &Frame::Deliver(wire))
+                .await
+                .map_err(|_| "connection_lost")?;
+            let _ = tx.finish();
+            match proto::read_frame(&mut rx).await {
+                Ok(Frame::Ack(a)) if a.envelope_id == env_id => Ok(a.status),
+                Ok(_) => Err("bad_reply"),
+                Err(_) => Err("connection_lost"),
+            }
+        })
+        .await;
+        let status = match result {
+            Ok(Ok(s)) => s,
+            Ok(Err(why)) => {
+                *conn_slot = None;
+                return Err(why);
+            }
+            Err(_) => {
+                *conn_slot = None;
+                return Err("timed_out");
+            }
+        };
+        match status {
+            AckStatus::Stored | AckStatus::Duplicate => {
+                self.core
+                    .pq_sent(peer, out, SendOutcome::Delivered, now_ms());
+                Ok(())
+            }
+            // The peer opened the envelope and does not know the record: an
+            // older build. Nothing else changed, messages go on as before.
+            AckStatus::BadRequest | AckStatus::Unsupported | AckStatus::TooBig => {
+                self.core
+                    .pq_sent(peer, out, SendOutcome::NotUnderstood, now_ms());
+                Ok(())
+            }
+            AckStatus::NoSession => {
+                self.core.reset_session(peer);
+                Err("no_session")
+            }
+            AckStatus::NotAllowed => Err("not_allowed"),
+            AckStatus::Rate => Err("rate_limited"),
+            AckStatus::Busy => Err("peer_busy"),
+            AckStatus::Failed => Err("peer_failed"),
+            AckStatus::Unknown => Err("peer_status_unknown"),
+        }
     }
 }
 

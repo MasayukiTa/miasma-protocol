@@ -2893,6 +2893,7 @@ chat_strings! {
     state_sending, state_queued, state_delivered, state_failed, retry, queued_note, queued_note_relay,
     fail_not_allowed, fail_too_big, fail_rejected, fail_unsupported, fail_contact_removed,
     fail_send_disabled, fail_expired, fail_session, fail_other,
+    fail_pqc_peer_no_hybrid, fail_pqc_failed, pqc_hybrid, pqc_classical, pqc_pending, pqc_failed,
     delete_history, delete_title, delete_body, delete_confirm, delete_cancel, delete_done,
     memory_only, send_file, send_file_hint, send_off_note, loading_older, jump_latest,
     err_empty, err_too_big, err_outbox_full, err_send_disabled, err_unknown_contact,
@@ -2960,6 +2961,12 @@ static CH_EN: ChatStrings = ChatStrings {
     fail_expired: "It could not be delivered in time.",
     fail_session: "A secure connection could not be set up. Check the contact's verification code with them.",
     fail_other: "It could not be sent.",
+    fail_pqc_peer_no_hybrid: "Not sent. Your setting requires the extra quantum-resistant protection, and the other person's Miasma does not offer it.",
+    fail_pqc_failed: "Not sent. The extra protection could not be set up with this contact. Try again later.",
+    pqc_hybrid: "Extra quantum-resistant protection is on",
+    pqc_classical: "Standard protection only",
+    pqc_pending: "Setting up extra protection...",
+    pqc_failed: "Extra protection could not be set up (standard protection only)",
     delete_history: "Delete this conversation's history",
     delete_title: "Delete the history of this conversation?",
     delete_body: "All messages with {name} will be deleted from this device only. This cannot be undone. The other person keeps their own copy.",
@@ -3051,6 +3058,12 @@ static CH_JA: ChatStrings = ChatStrings {
     fail_expired: "届けられないまま、時間が過ぎました。",
     fail_session: "安全な接続を作れませんでした。相手と確認用コードを見比べてください。",
     fail_other: "送れませんでした。",
+    fail_pqc_peer_no_hybrid: "送りませんでした。設定で追加の保護を必須にしていますが、相手の Miasma が対応していません。",
+    fail_pqc_failed: "送りませんでした。この相手との間で追加の保護を準備できませんでした。しばらくしてからもう一度お試しください。",
+    pqc_hybrid: "量子コンピューター対策の保護：オン",
+    pqc_classical: "標準の保護のみ",
+    pqc_pending: "追加の保護を準備中…",
+    pqc_failed: "追加の保護を準備できませんでした（標準の保護のみ）",
     delete_history: "この会話の履歴を削除",
     delete_title: "この会話の履歴を削除しますか？",
     delete_body: "{name} との会話の履歴を、この端末からすべて削除します。元に戻せません。相手の端末の履歴は消えません。",
@@ -3143,6 +3156,12 @@ static CH_ZH_CN: ChatStrings = ChatStrings {
     fail_expired: "一直未能送达，已超时。",
     fail_session: "无法建立安全连接。请与对方核对验证码。",
     fail_other: "无法发送。",
+    fail_pqc_peer_no_hybrid: "未发送。你的设置要求使用增强保护（抗量子计算），但对方的 Miasma 不提供。",
+    fail_pqc_failed: "未发送。无法与该联系人建立增强保护，请稍后再试。",
+    pqc_hybrid: "已启用抗量子计算的增强保护",
+    pqc_classical: "仅标准保护",
+    pqc_pending: "正在建立增强保护……",
+    pqc_failed: "增强保护建立失败（仅标准保护）",
     delete_history: "删除此会话的记录",
     delete_title: "删除此会话的记录？",
     delete_body: "将从本设备删除与 {name} 的全部消息。无法恢复。对方设备上的记录仍会保留。",
@@ -3209,6 +3228,83 @@ log_strings! {
     daemon_title, desktop_title, empty, unsupported, unavailable,
     legacy_title, legacy_body, legacy_delete, legacy_keep, legacy_deleted, legacy_failed,
 }
+
+// ─── Hybrid post-quantum protection of private conversations (Settings) ─────
+
+macro_rules! pqc_strings {
+    ($($f:ident),* $(,)?) => {
+        /// Strings of the "quantum-resistant chat protection" block in Settings.
+        pub struct PqcStrings { $(pub $f: &'static str),* }
+        impl PqcStrings {
+            /// Every field with its name, for the completeness test.
+            #[cfg(test)]
+            fn all(&self) -> Vec<(&'static str, &'static str)> {
+                vec![$((stringify!($f), self.$f)),*]
+            }
+        }
+    };
+}
+
+pqc_strings! {
+    heading, intro, off, prefer, require, off_help, prefer_help, require_help,
+    restart_note, unavailable, review_note, save_failed, a11y_mode,
+}
+
+pub fn pqc_strings(locale: Locale) -> &'static PqcStrings {
+    match locale {
+        Locale::En => &PQ_EN,
+        Locale::Ja => &PQ_JA,
+        Locale::ZhCn => &PQ_ZH_CN,
+    }
+}
+
+static PQ_EN: PqcStrings = PqcStrings {
+    heading: "Quantum-resistant chat protection",
+    intro: "Private conversations are already encrypted. This adds a second key exchange that is designed to stay safe even against future quantum computers. It is off by default and only takes effect when both people have it turned on.",
+    off: "Off",
+    prefer: "Use when possible",
+    require: "Always required",
+    off_help: "Chat works exactly as before.",
+    prefer_help: "Used when the other person's Miasma supports it. Otherwise chat keeps working as before, and the conversation shows \"Standard protection only\".",
+    require_help: "Messages are sent only after the stronger protection is in place. If the other person cannot use it, the message is not sent and you are told why. Nothing is sent without it.",
+    restart_note: "A change applies the next time Miasma's background service starts.",
+    unavailable: "This version of Miasma does not include this protection, so the setting has no effect.",
+    review_note: "This feature has not yet been reviewed by an outside security expert.",
+    save_failed: "The setting could not be saved. Please try again.",
+    a11y_mode: "Quantum-resistant chat protection",
+};
+
+static PQ_JA: PqcStrings = PqcStrings {
+    heading: "量子コンピューター対策（チャットの暗号）",
+    intro: "個人チャットはすでに暗号化されています。この機能は、将来の量子コンピューターでも破られにくいように、鍵の交換を一段強くするものです。初期設定ではオフで、お互いにオンにしたときだけ働きます。",
+    off: "オフ",
+    prefer: "使えるときは使う",
+    require: "必ず使う",
+    off_help: "チャットはこれまでと同じように動きます。",
+    prefer_help: "相手の Miasma が対応しているときに使います。対応していないときはこれまでどおり送れますが、会話に「標準の保護のみ」と表示されます。",
+    require_help: "強い保護が整ってから送ります。相手が対応していないときは送らず、理由を表示します。この保護なしで送ることはありません。",
+    restart_note: "変更は、次にバックグラウンド機能が起動したときから有効になります。",
+    unavailable: "このバージョンの Miasma にはこの保護が含まれていないため、設定しても効果はありません。",
+    review_note: "この機能は、外部のセキュリティ専門家による確認をまだ受けていません。",
+    save_failed: "設定を保存できませんでした。もう一度お試しください。",
+    a11y_mode: "量子コンピューター対策（チャットの暗号）",
+};
+
+static PQ_ZH_CN: PqcStrings = PqcStrings {
+    heading: "抗量子计算的聊天保护",
+    intro: "私人聊天本来就已加密。此功能再增加一道密钥交换，目的是即使将来出现量子计算机也能保持安全。默认关闭，只有双方都开启时才会生效。",
+    off: "关闭",
+    prefer: "尽量使用",
+    require: "必须使用",
+    off_help: "聊天与以前完全一样。",
+    prefer_help: "对方的 Miasma 支持时就使用。不支持时聊天照常进行，并在会话中标出“仅标准保护”。",
+    require_help: "只有在增强保护建立之后才发送消息。对方不支持时不会发送，并告诉你原因。没有这项保护就不会发出任何内容。",
+    restart_note: "更改将在下次后台服务启动时生效。",
+    unavailable: "此版本的 Miasma 不包含这项保护，设置不会生效。",
+    review_note: "此功能尚未经过外部安全专家审查。",
+    save_failed: "无法保存设置，请重试。",
+    a11y_mode: "抗量子计算的聊天保护",
+};
 
 pub fn log_strings(locale: Locale) -> &'static LogStrings {
     match locale {
@@ -3878,6 +3974,23 @@ mod tests {
             Some("この端末には履歴を残しません")
         );
         assert_eq!(ja.time_yesterday, "昨日");
+    }
+
+    #[test]
+    fn the_quantum_protection_texts_are_filled_in_every_language() {
+        for lang in Locale::ALL {
+            for (name, value) in pqc_strings(lang).all() {
+                assert!(!value.trim().is_empty(), "{lang:?} pqc.{name} is empty");
+            }
+        }
+        // Plain words: no protocol names in the Settings block.
+        for lang in Locale::ALL {
+            for (name, value) in pqc_strings(lang).all() {
+                for bad in ["ML-KEM", "X25519", "KEM", "ratchet", "iroh"] {
+                    assert!(!value.contains(bad), "{lang:?} pqc.{name} says {bad}");
+                }
+            }
+        }
     }
 
     #[test]
