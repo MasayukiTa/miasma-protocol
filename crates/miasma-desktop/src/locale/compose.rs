@@ -15,7 +15,7 @@ macro_rules! compose_strings {
         impl ComposeStrings {
             /// Every field with its name, for the completeness test.
             #[cfg(test)]
-            fn all(&self) -> Vec<(&'static str, &'static str)> {
+            pub(super) fn all(&self) -> Vec<(&'static str, &'static str)> {
                 vec![$((stringify!($f), self.$f)),*]
             }
         }
@@ -177,7 +177,7 @@ static CO_ZH_CN: ComposeStrings = ComposeStrings {
     menu_receipts: "已读回执",
     menu_verify: "验证联系人",
     verify_title: "验证 {name}",
-    verify_body: "请当面或通过电话，让 {name} 读出其自己的验证码。它应与下面的验证码一致：",
+    verify_body: "请当面或通过电话，让 {name} 读出其自己的安全码。它应与下面的安全码一致：",
     verify_close: "关闭",
     header_waiting: "正在等待对方接收你的消息",
     header_relay: "本机未连接到中继服务器",

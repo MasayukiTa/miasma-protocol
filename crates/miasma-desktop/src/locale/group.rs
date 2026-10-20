@@ -12,7 +12,7 @@ macro_rules! group_strings {
         impl GroupStrings {
             /// Every field with its name, for the completeness test.
             #[cfg(test)]
-            fn all(&self) -> Vec<(&'static str, &'static str)> {
+            pub(super) fn all(&self) -> Vec<(&'static str, &'static str)> {
                 vec![$((stringify!($f), self.$f)),*]
             }
         }
@@ -398,7 +398,7 @@ static GR_ZH_CN: GroupStrings = GroupStrings {
     back_to_messages: "返回消息",
     a11y_back_to_messages: "返回此群组的消息",
     unverified_badge: "未验证的成员",
-    unverified_tip: "此人不在你的联系人中。显示的名字是别人给他起的，未经核实。添加之前，请先与本人核对验证码。",
+    unverified_tip: "此人不在你的联系人中。显示的名字是别人给他起的，未经核实。添加之前，请先与本人核对安全码。",
     member_fallback: "成员 {code}",
     add_as_contact: "添加为联系人",
     a11y_add_contact: "将 {name} 添加为联系人",
@@ -428,7 +428,7 @@ static GR_ZH_CN: GroupStrings = GroupStrings {
     you_tag: "你",
     marker_verified: "已验证的联系人",
     marker_unverified: "未验证",
-    code_label: "验证码",
+    code_label: "安全码",
     add_member: "添加成员",
     a11y_add_member: "向此群组添加成员",
     admin_only_hint: "只有创建者和管理员可以添加或移出成员。",
@@ -507,8 +507,8 @@ static GR_ZH_CN: GroupStrings = GroupStrings {
     state_waiting_short: "等待中",
     a11y_member_self: "{name}，{role}",
     member_more: "{name} 的更多操作",
-    member_show_code: "查看验证码",
-    member_hide_code: "隐藏验证码",
+    member_show_code: "查看安全码",
+    member_hide_code: "隐藏安全码",
     ng_search_hint: "搜索联系人",
     a11y_ng_search: "搜索要加入群组的联系人",
     ng_selected_only: "仅显示已选",
@@ -609,6 +609,9 @@ mod tests {
         // The same words as the Contacts tab for the same things.
         let ct = super::super::contact_strings(Locale::Ja);
         assert_eq!(ja.code_label, ct.fingerprint);
+        let zh_ct = super::super::contact_strings(Locale::ZhCn);
+        assert_eq!(zh.code_label, zh_ct.fingerprint);
+        assert!(!zh.unverified_tip.contains("验证码"));
     }
 
     #[test]

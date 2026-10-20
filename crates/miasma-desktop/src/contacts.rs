@@ -219,7 +219,7 @@ pub fn invitation_message(code: &str, fingerprint: &str, locale: Locale) -> Stri
              \n\
              {code}\n\
              \n\
-             验证码 / Verification code: {fingerprint}\n\
+             安全码 / Verification code: {fingerprint}\n\
              \n\
              使用方法：打开 Miasma 的“联系人”，把整条消息原样粘贴到“添加联系人”，然后点击“添加”。\n\
              How to: open Miasma > Contacts, paste this whole message into \"Add a contact\", then press Add.\n\
@@ -3128,7 +3128,7 @@ mod tests {
             assert!(!m.to_lowercase().contains("password:"), "{locale:?}");
             assert!(!m.contains("secret"), "{locale:?}");
             if locale == Locale::ZhCn {
-                assert!(m.contains("联系人") && m.contains("验证码"));
+                assert!(m.contains("联系人") && m.contains("安全码"));
                 assert!(!m.contains("連絡先"));
             } else {
                 assert!(m.contains("連絡先"), "{locale:?}");
