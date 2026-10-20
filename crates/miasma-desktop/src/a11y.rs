@@ -41,8 +41,15 @@ pub fn dialog_enter(ctx: &egui::Context, key: &'static str) -> bool {
     let mut state: DialogFocus = ctx.data_mut(|d| d.get_temp(id)).unwrap_or_default();
     let fresh = state.last_frame == 0 || state.last_frame + 1 < frame;
     if fresh {
+        // A control that named itself as the opener (a row menu's button) wins over whatever has
+        // focus, which may be a menu item that is about to disappear.
+        let named: Option<(egui::Id, u64)> = ctx.data_mut(|d| d.get_temp(opener_id()));
+        let named = named
+            .filter(|(_, at)| frame <= at + OPENER_FRAMES)
+            .map(|(id, _)| id);
+        ctx.data_mut(|d| d.remove::<(egui::Id, u64)>(opener_id()));
         state = DialogFocus {
-            opener: ctx.memory(|m| m.focused()),
+            opener: named.or_else(|| ctx.memory(|m| m.focused())),
             last_frame: frame,
             attempts: FOCUS_ATTEMPTS,
         };
@@ -74,13 +81,45 @@ pub fn dialog_focus_safe_button(ctx: &egui::Context, key: &'static str, safe: &e
 pub fn dialog_leave(ctx: &egui::Context, key: &'static str) {
     let id = state_id(key);
     let state: Option<DialogFocus> = ctx.data_mut(|d| d.get_temp(id));
-    if let Some(opener) = state.and_then(|s| s.opener) {
+    // An opener that is gone is not asked for focus: the accessibility tree would point at it.
+    if let Some(opener) = state.and_then(|s| s.opener).filter(|o| on_screen(ctx, *o)) {
         ctx.memory_mut(|m| m.request_focus(opener));
         // The page behind a dialog is switched off while it is open, and focus on a switched-off
         // widget is dropped at the end of the frame. Ask again in the next frame.
         ctx.data_mut(|d| d.insert_temp(restore_id(), opener));
     }
     ctx.data_mut(|d| d.remove::<DialogFocus>(id));
+}
+
+/// Frames during which a named opener is still taken by the next dialog that opens.
+const OPENER_FRAMES: u64 = 3;
+
+fn opener_id() -> egui::Id {
+    egui::Id::new("a11y_dialog_named_opener")
+}
+
+/// A control that is about to open a dialog says that focus goes back to it when the dialog
+/// closes.
+pub fn set_opener(ctx: &egui::Context, opener: egui::Id) {
+    let frame = ctx.frame_nr();
+    ctx.data_mut(|d| d.insert_temp(opener_id(), (opener, frame)));
+}
+
+/// Whether a widget with this id was on screen this frame or the one before.
+fn on_screen(ctx: &egui::Context, id: egui::Id) -> bool {
+    ctx.read_response(id).is_some()
+}
+
+/// Call at the end of every frame. The accessibility tree names the focused widget; when that
+/// widget is not on screen (a menu item that went with its popup, a field of a closed dialog)
+/// the tree points at nothing and the platform side can bring the whole program down. Focus is
+/// dropped instead.
+pub fn drop_orphan_focus(ctx: &egui::Context) {
+    if let Some(id) = ctx.memory(|m| m.focused()) {
+        if !on_screen(ctx, id) {
+            ctx.memory_mut(|m| m.surrender_focus(id));
+        }
+    }
 }
 
 fn restore_id() -> egui::Id {
@@ -94,7 +133,7 @@ pub fn restore_pending_focus(ctx: &egui::Context) {
     let pending: Option<egui::Id> = ctx.data_mut(|d| d.get_temp(id));
     if let Some(opener) = pending {
         ctx.data_mut(|d| d.remove::<egui::Id>(id));
-        if ctx.memory(|m| m.focused()).is_none() {
+        if ctx.memory(|m| m.focused()).is_none() && on_screen(ctx, opener) {
             ctx.memory_mut(|m| m.request_focus(opener));
         }
     }
@@ -639,6 +678,65 @@ mod tests {
         assert!(closed, "Esc closes the dialog");
         frame(&ctx, screen(), false, false);
         assert_eq!(ctx.memory(|m| m.focused()), Some(opener));
+    }
+
+    /// A page with an "item" button (a menu item that goes away with its popup) and a dialog
+    /// that was opened from it.
+    fn orphan_frame(ctx: &egui::Context, show_item: bool, focus_item: bool, leave: bool) -> bool {
+        let mut on_screen_or_none = true;
+        let _ = ctx.run(screen(), |ctx| {
+            restore_pending_focus(ctx);
+            egui::CentralPanel::default().show(ctx, |ui| {
+                if show_item {
+                    let b = ui.button("item");
+                    if focus_item {
+                        b.request_focus();
+                    }
+                }
+            });
+            if leave {
+                dialog_leave(ctx, "orphan");
+            } else if !focus_item {
+                dialog_enter(ctx, "orphan");
+            }
+            drop_orphan_focus(ctx);
+            on_screen_or_none = ctx.memory(|m| m.focused()).is_none_or_on_screen(ctx);
+        });
+        on_screen_or_none
+    }
+
+    trait FocusCheck {
+        fn is_none_or_on_screen(self, ctx: &egui::Context) -> bool;
+    }
+    impl FocusCheck for Option<egui::Id> {
+        fn is_none_or_on_screen(self, ctx: &egui::Context) -> bool {
+            self.map_or(true, |id| ctx.read_response(id).is_some())
+        }
+    }
+
+    #[test]
+    fn focus_never_stays_on_a_widget_that_left_the_screen() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        // The item has focus, a dialog opens from it, the item goes (its popup closed), the
+        // dialog closes: focus must not be handed back to something that is not there.
+        assert!(orphan_frame(&ctx, true, true, false));
+        assert!(orphan_frame(&ctx, true, false, false));
+        assert!(orphan_frame(&ctx, false, false, false));
+        assert!(orphan_frame(&ctx, false, false, true));
+        for _ in 0..3 {
+            assert!(orphan_frame(&ctx, false, false, false));
+        }
+    }
+
+    #[test]
+    fn a_dialog_is_never_wider_than_a_narrow_window() {
+        for w in [320.0_f32, 360.0, 480.0, 700.0, 1200.0] {
+            let (win, inner) = crate::ui_kit::dialog_widths(w);
+            assert!(win <= (w - 32.0).max(200.0), "{w}: window {win}");
+            assert!(inner < win, "{w}: content {inner} fits in window {win}");
+        }
+        assert_eq!(crate::ui_kit::dialog_widths(1200.0), (460.0, 440.0));
     }
 
     #[test]

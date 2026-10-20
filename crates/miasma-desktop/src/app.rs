@@ -1084,14 +1084,14 @@ impl MiasmaApp {
                             envelope_id: item.envelope_id,
                             sender: item
                                 .sender_peer_id
-                                .unwrap_or_else(|| "<legacy/unbound>".to_string()),
+                                .unwrap_or_else(|| LEGACY_SENDER.to_string()),
                             recipient: item.recipient_pubkey,
                             state: item.state,
                             challenge_code: item
                                 .challenge_code
                                 .map(|code| std::sync::Arc::new(Zeroizing::new(code))),
                             created_at: format_epoch_full(item.created_at, self.locale),
-                            expires_at: format_epoch_full(item.expires_at, self.locale),
+                            expires_at: format_expiry(item.expires_at, self.locale),
                             filename: item.filename,
                             file_size: item.file_size,
                         })
@@ -1109,7 +1109,7 @@ impl MiasmaApp {
                                 .challenge_code
                                 .map(|code| std::sync::Arc::new(Zeroizing::new(code))),
                             created_at: format_epoch_full(item.created_at, self.locale),
-                            expires_at: format_epoch_full(item.expires_at, self.locale),
+                            expires_at: format_expiry(item.expires_at, self.locale),
                             filename: item.filename,
                             file_size: item.file_size,
                         })
@@ -1452,9 +1452,12 @@ impl MiasmaApp {
         let transfer_label = self.tr().tab_easy;
 
         kit::page(ui, s.files_heading_easy, Some(s.files_desc_easy), |ui| {
-            // Sending starts from Home, a contact, a conversation or a dropped file, not from
-            // here: this hub is for what has been sent and received, and for the rest.
+            // Sending is the first thing here, as it is on Home: the one send flow.
             kit::surface(ui, |ui| {
+                if kit::primary(ui, connected, s.home_send_action).clicked() {
+                    self.send_flow.open_empty(self.contacts.contact_list());
+                }
+                ui.add_space(kit::SP_1);
                 for (i, (label, tab)) in [
                     (s.home_receive_action, Tab::Inbox),
                     (s.home_save_action, Tab::Store),
@@ -1468,8 +1471,7 @@ impl MiasmaApp {
                     if i > 0 {
                         ui.add_space(kit::SP_1);
                     }
-                    if ui
-                        .add_enabled(connected, kit::secondary_button(label))
+                    if crate::form_check::add_enabled(ui, connected, kit::secondary_button(label))
                         .clicked()
                     {
                         self.tab = tab;
@@ -1546,7 +1548,8 @@ impl MiasmaApp {
             kit::surface(ui, |ui| {
                 ui.label(s.store_text_label);
                 let au = locale::audit_strings(self.locale);
-                let text_edit = ui.add_enabled(
+                let text_edit = crate::form_check::add_enabled(
+                    ui,
                     connected,
                     kit::input_multiline(&mut self.dissolve_text)
                         .hint_text(s.store_text_hint)
@@ -1576,12 +1579,12 @@ impl MiasmaApp {
                         self.busy = true;
                         self.set_msg(MsgKind::Info, s.store_busy);
                     }
-                    if ui
-                        .add_enabled(
-                            connected && !self.busy,
-                            kit::secondary_button(s.store_choose_file),
-                        )
-                        .clicked()
+                    if crate::form_check::add_enabled(
+                        ui,
+                        connected && !self.busy,
+                        kit::secondary_button(s.store_choose_file),
+                    )
+                    .clicked()
                     {
                         if let Some(path) = rfd::FileDialog::new().pick_file() {
                             let _ = self.worker.tx.try_send(WorkerCmd::DissolveFile(path));
@@ -1668,7 +1671,8 @@ impl MiasmaApp {
                     s.retrieve_mid_label
                 });
                 let au = locale::audit_strings(self.locale);
-                let mid_edit = ui.add_enabled(
+                let mid_edit = crate::form_check::add_enabled(
+                    ui,
                     connected,
                     kit::input_mono(&mut self.mid_input).hint_text("miasma:..."),
                 );
@@ -1951,7 +1955,11 @@ impl MiasmaApp {
                         kit::kv_grid(ui, |g| {
                             if !easy {
                                 g.row(s.inbox_from, |ui| {
-                                    kit::mono_elided(ui, short(&item.sender, 20));
+                                    if item.sender == LEGACY_SENDER {
+                                        ui.label(crate::uitext::unknown_sender(self.locale));
+                                    } else {
+                                        kit::mono_elided(ui, short(&item.sender, 20));
+                                    }
                                 });
                             }
                             if let Some(ref fname) = item.filename {
@@ -2246,7 +2254,7 @@ impl MiasmaApp {
             } else {
                 (
                     Level::Warn,
-                    s.status_state_connected,
+                    locale::audit_strings(self.locale).chip_waiting,
                     s.status_hint_no_peers,
                 )
             }
@@ -2356,7 +2364,14 @@ impl MiasmaApp {
             kit::kv_grid(ui, |g| {
                 g.row(s.status_state, |ui| match self.daemon_state {
                     DaemonState::Connected => {
-                        kit::status_dot(ui, Level::Ok, s.status_state_connected);
+                        // The same words as the chip in the header.
+                        let (level, text) = header_chip(
+                            &self.daemon_state,
+                            self.peer_count,
+                            s,
+                            locale::audit_strings(self.locale),
+                        );
+                        kit::status_dot(ui, level, text);
                     }
                     DaemonState::Starting => {
                         ui.horizontal(|ui| {
@@ -2797,17 +2812,26 @@ impl MiasmaApp {
                 kit::notice(ui, Level::Warn, p.unavailable);
                 ui.add_space(kit::SP_1);
             }
-            for (mode, label, help) in [
-                (PqcMode::Off, p.off, p.off_help),
-                (PqcMode::Prefer, p.prefer, p.prefer_help),
-                (PqcMode::Require, p.require, p.require_help),
-            ] {
-                let r = ui.radio_value(&mut chosen, mode, label);
-                r.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::WidgetType::RadioButton, p.a11y_mode)
-                });
-                kit::hint(ui, help);
-            }
+            // Without the protection in this build the choices are shown switched off: they
+            // would be saved but change nothing.
+            ui.add_enabled_ui(available, |ui| {
+                for (mode, label, help) in [
+                    (PqcMode::Off, p.off, p.off_help),
+                    (PqcMode::Prefer, p.prefer, p.prefer_help),
+                    (PqcMode::Require, p.require, p.require_help),
+                ] {
+                    let r = ui.radio_value(&mut chosen, mode, label);
+                    // Each choice is named by its own label; the heading names the group.
+                    r.widget_info(|| {
+                        egui::WidgetInfo::selected(
+                            egui::WidgetType::RadioButton,
+                            chosen == mode,
+                            label,
+                        )
+                    });
+                    kit::hint(ui, help);
+                }
+            });
             ui.add_space(kit::SP_1);
             kit::hint(ui, p.restart_note);
             kit::hint(ui, p.review_note);
@@ -2956,9 +2980,12 @@ impl MiasmaApp {
                         ))
                         .monospace();
                         let mut on = self.storage.selected.contains(&s.address);
-                        let changed = ui
-                            .add_enabled(!s.in_use, egui::Checkbox::new(&mut on, label))
-                            .changed();
+                        let changed = crate::form_check::add_enabled(
+                            ui,
+                            !s.in_use,
+                            egui::Checkbox::new(&mut on, label),
+                        )
+                        .changed();
                         if changed {
                             if on {
                                 self.storage.selected.insert(s.address.clone());
@@ -2973,7 +3000,11 @@ impl MiasmaApp {
             let mut delete: Option<miasma_core::store::ShareSelection> = None;
             kit::button_row(ui, |ui| {
                 let none = self.storage.selected.is_empty();
-                let btn = ui.add_enabled(!none, kit::danger_button(st.delete_selected_button));
+                let btn = crate::form_check::add_enabled(
+                    ui,
+                    !none,
+                    kit::danger_button(st.delete_selected_button),
+                );
                 if btn.clicked() {
                     let mut ids: Vec<String> = self.storage.selected.iter().cloned().collect();
                     ids.sort();
@@ -3395,6 +3426,27 @@ fn format_epoch_full(epoch_secs: u64, locale: Locale) -> String {
         .unwrap_or_default()
         .as_secs();
     crate::uitext::relative_and_absolute(locale, epoch_secs, now)
+}
+
+/// Stands in for the sender of an old-format envelope that carries none; shown as words.
+const LEGACY_SENDER: &str = "<legacy/unbound>";
+
+/// "Expires" value of an envelope: says whether the time has passed.
+fn format_expiry(epoch_secs: u64, locale: Locale) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let text = crate::uitext::expiry_text(locale, epoch_secs, now);
+    if epoch_secs == 0 {
+        text
+    } else {
+        format!(
+            "{text} ({})",
+            crate::uitext::absolute_time(locale, epoch_secs)
+        )
+    }
 }
 
 /// Map envelope state string to a (level, label) for outbox display.
@@ -4009,6 +4061,8 @@ impl MiasmaApp {
         let dialog_open = self.dialog_is_open();
         self.dialogs(ctx);
         self.modal_open = self.any_modal_open();
+        // Never leave the focus on a widget that is not on screen (see a11y::drop_orphan_focus).
+        crate::a11y::drop_orphan_focus(ctx);
 
         // Esc dismisses the message in the bottom bar when no dialog is open (a dialog takes
         // Esc for itself).

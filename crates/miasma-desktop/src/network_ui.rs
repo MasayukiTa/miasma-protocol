@@ -451,9 +451,12 @@ impl NetworkUi {
             let mut discard = false;
             kit::button_row(ui, |ui| {
                 do_save = kit::primary(ui, dirty && issues.is_empty() && !saving, s.save).clicked();
-                discard = ui
-                    .add_enabled(dirty && !saving, kit::secondary_button(s.discard))
-                    .clicked();
+                discard = crate::form_check::add_enabled(
+                    ui,
+                    dirty && !saving,
+                    kit::secondary_button(s.discard),
+                )
+                .clicked();
             });
             if do_save {
                 self.start_save(ctx);
@@ -491,16 +494,22 @@ impl NetworkUi {
             kit::button_row(ui, |ui| {
                 start = kit::primary(ui, !running, s.check_button).clicked();
                 if let Check::Running { cancelling, .. } = &self.check {
-                    cancel = ui
-                        .add_enabled(!*cancelling, kit::secondary_button(s.check_cancel))
-                        .clicked();
+                    cancel = crate::form_check::add_enabled(
+                        ui,
+                        !*cancelling,
+                        kit::secondary_button(s.check_cancel),
+                    )
+                    .clicked();
                 }
                 // Always in the same row as the test button, so the result below can come and
                 // go without moving any control.
                 if self.view.is_some() {
-                    save_report = ui
-                        .add_enabled(!running, kit::secondary_button(s.save_report))
-                        .clicked();
+                    save_report = crate::form_check::add_enabled(
+                        ui,
+                        !running,
+                        kit::secondary_button(s.save_report),
+                    )
+                    .clicked();
                 }
             });
             if start {
