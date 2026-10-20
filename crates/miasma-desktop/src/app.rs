@@ -4186,6 +4186,116 @@ mod tests {
         used
     }
 
+    /// One frame of the whole window; returns the accessibility tree of that frame.
+    fn window_frame(
+        ctx: &egui::Context,
+        app: &mut MiasmaApp,
+        events: Vec<egui::Event>,
+    ) -> Vec<(String, egui::Rect)> {
+        app.daemon_state = DaemonState::Connected;
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1200.0, 900.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let full = ctx.run(raw, |ctx| app.update_frame(ctx, None));
+        let update = full
+            .platform_output
+            .accesskit_update
+            .expect("accesskit tree");
+        update
+            .nodes
+            .iter()
+            .filter_map(|(_, n)| {
+                let b = n.bounds()?;
+                Some((
+                    n.name()?.to_owned(),
+                    egui::Rect::from_min_max(
+                        egui::pos2(b.x0 as f32, b.y0 as f32),
+                        egui::pos2(b.x1 as f32, b.y1 as f32),
+                    ),
+                ))
+            })
+            .collect()
+    }
+
+    /// A real mouse click on the button with this name: move, then press and release.
+    fn click_button(ctx: &egui::Context, app: &mut MiasmaApp, name: &str) {
+        let nodes = window_frame(ctx, app, vec![]);
+        let rect = nodes
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no button named {name:?} in {:?}",
+                    nodes.iter().map(|(n, _)| n).collect::<Vec<_>>()
+                )
+            })
+            .1;
+        let pos = rect.center();
+        window_frame(ctx, app, vec![egui::Event::PointerMoved(pos)]);
+        let mut events = Vec::new();
+        for pressed in [true, false] {
+            events.push(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+        window_frame(ctx, app, events);
+        window_frame(ctx, app, vec![]);
+    }
+
+    #[test]
+    fn every_button_of_the_easy_files_hub_goes_where_its_label_says() {
+        // None: the send flow opens over the hub.
+        let cases: [(
+            fn(&'static Strings, &'static Strings) -> &'static str,
+            Option<Tab>,
+        ); 6] = [
+            (|s, _| s.home_send_action, None),
+            (|s, _| s.home_receive_action, Some(Tab::Inbox)),
+            (|s, _| s.home_save_action, Some(Tab::Store)),
+            (|s, _| s.tab_retrieve_easy, Some(Tab::Retrieve)),
+            (|_, _| "", Some(Tab::Transfers)),
+            (|s, _| s.tab_outbox_easy, Some(Tab::Outbox)),
+        ];
+        for (i, (label_of, target)) in cases.into_iter().enumerate() {
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            let data = tempfile::tempdir().unwrap();
+            let mut app = MiasmaApp::new_with_ctx(
+                &ctx,
+                None,
+                ProductMode::Easy,
+                Locale::En,
+                ThemeMode::Light,
+                data.path().to_path_buf(),
+                LaunchIntent::Normal,
+            );
+            app.tab = Tab::Files;
+            app.logs.legacy = None;
+            let s = app.s();
+            let label = if i == 4 {
+                app.tr().tab_easy
+            } else {
+                label_of(s, s)
+            };
+            click_button(&ctx, &mut app, label);
+            match target {
+                None => assert!(
+                    app.send_flow.is_open(),
+                    "{label}: the send flow did not open"
+                ),
+                Some(tab) => assert_eq!(app.tab, tab, "{label}"),
+            }
+        }
+    }
+
     #[test]
     fn home_puts_the_actions_first_and_draws_nothing_else_when_not_connected() {
         for width in [700.0_f32, 1200.0] {
