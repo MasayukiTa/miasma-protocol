@@ -1508,7 +1508,12 @@ impl TransfersUi {
         connected: bool,
         cmds: &mut Vec<WorkerCmd>,
     ) {
-        kit::form_row(ui, t.recv_id_label, None, |ui| {
+        let id_label = if easy {
+            t.recv_id_label_easy
+        } else {
+            t.recv_id_label
+        };
+        kit::form_row(ui, id_label, None, |ui| {
             let resp = ui.add(kit::input_mono(&mut self.recv_mid).hint_text("miasma-share:..."));
             // A whole invitation (or a link, or an id with a line break in it) pasted here:
             // keep just the Share ID, and only when it is a valid one.
@@ -1669,7 +1674,12 @@ impl TransfersUi {
         });
         // Generate fills both fields; done after the row so the closure borrows stay simple.
         let mut generate = false;
-        kit::form_row(ui, t.password_label, Some(t.pw_policy_note), |ui| {
+        let note = if easy {
+            t.pw_policy_note_easy
+        } else {
+            t.pw_policy_note
+        };
+        kit::form_row(ui, t.password_label, Some(note), |ui| {
             ui.horizontal(|ui| {
                 ui.add(
                     kit::input(&mut self.send_password)

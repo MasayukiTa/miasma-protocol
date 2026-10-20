@@ -1389,6 +1389,8 @@ pub struct TransferStrings {
     // Share ID: the ID a sender gives a receiver.
     /// Label of the receive form's ID field (accepts a share ID or a MID).
     pub recv_id_label: &'static str,
+    pub recv_id_label_easy: &'static str,
+    pub pw_policy_note_easy: &'static str,
     /// Label of the share ID row in a transfer's details.
     pub share_id_label: &'static str,
     /// Under the share ID on a finished send: what to do with it.
@@ -1712,6 +1714,8 @@ static TR_EN: TransferStrings = TransferStrings {
     err_remove_paused: "This transfer is paused and can be resumed, so it was not removed.",
     recv_folder_note: "That is a folder. The file will be saved inside it, under the name it had when it was sent: {path}",
     recv_id_label: "Share ID (or MID)",
+    recv_id_label_easy: "Invitation code",
+    pw_policy_note_easy: "Optional. If you set one: at least 6 characters with a digit, a letter (a-z, A-Z) and a symbol; a space does not count. Even so, a short password is weak. Press Generate for a strong one.",
     share_id_label: "Share ID",
     share_id_send_note: "Give this Share ID (and the password) to the receiver. It also lets them check who published the file.",
     copy_invitation: "Copy invitation",
@@ -1865,6 +1869,8 @@ static TR_JA: TransferStrings = TransferStrings {
     err_remove_paused: "この転送は一時停止中で再開できるため、外していません。",
     recv_folder_note: "指定先はフォルダです。送信時のファイル名でこのフォルダの中に保存します: {path}",
     recv_id_label: "共有ID (またはMID)",
+    recv_id_label_easy: "招待コード",
+    pw_policy_note_easy: "任意です。設定する場合は 6 文字以上で、数字・英字 (a-z, A-Z)・記号をそれぞれ含めてください（空白は記号に数えません）。ただし短いパスワードは弱くなります。「生成」で強いパスワードを作れます。",
     share_id_label: "共有ID",
     share_id_send_note: "この共有ID(とパスワード)を受信する人に渡してください。誰が公開したファイルかも確認できます。",
     copy_invitation: "招待文をコピー",
@@ -2018,6 +2024,8 @@ static TR_ZH_CN: TransferStrings = TransferStrings {
     err_remove_paused: "此传输已暂停且可以继续，因此未被移除。",
     recv_folder_note: "该路径是文件夹。文件将以发送时的文件名保存在其中：{path}",
     recv_id_label: "共享 ID（或 MID）",
+    recv_id_label_easy: "邀请码",
+    pw_policy_note_easy: "可选。若设置，须至少 6 个字符，并包含数字、字母 (a-z, A-Z) 和符号；空格不算符号。即便如此，短密码仍然很弱。点击“生成”可得到高强度密码。",
     share_id_label: "共享 ID",
     share_id_send_note: "请把此共享 ID（和密码）交给接收方。接收方还能借此核实发布者。",
     copy_invitation: "复制邀请",
