@@ -350,6 +350,8 @@ fn trap_sentinel(ctx: &egui::Context, which: &'static str) {
     let id = trap_id(which);
     egui::Area::new(id.with("area"))
         .fixed_pos(ctx.screen_rect().min)
+        // The area itself is not a stop of the Tab order; only the one widget in it is.
+        .interactable(false)
         .show(ctx, |ui| {
             let rect = egui::Rect::from_min_size(ui.max_rect().min, egui::vec2(1.0, 1.0));
             let sense = egui::Sense {
@@ -365,13 +367,6 @@ fn trap_sentinel(ctx: &egui::Context, which: &'static str) {
 
 /// Frames after a Tab press during which a focus that lands on a window's own stop is moved on.
 const TAB_RECENT: u64 = 3;
-
-fn trace(ctx: &egui::Context, frame: u64, what: String) {
-    let id = egui::Id::new("dbg_trace");
-    let mut v: Vec<(u64, String)> = ctx.data_mut(|d| d.get_temp(id)).unwrap_or_default();
-    v.push((frame, what));
-    ctx.data_mut(|d| d.insert_temp(id, v));
-}
 
 fn tab_dir_id() -> egui::Id {
     egui::Id::new("a11y_dialog_trap_last_tab")
@@ -421,10 +416,8 @@ pub fn trap_input(ctx: &egui::Context, raw: &mut egui::RawInput) {
     }
     let (start, end) = (trap_id("start"), trap_id("end"));
     let Some(focused) = ctx.memory(|m| m.focused()) else {
-        trace(ctx, frame, "none".into());
         return;
     };
-    trace(ctx, frame, format!("{focused:?}"));
     let (to, shift) = if focused == end {
         (start, false)
     } else if focused == start {
@@ -441,7 +434,8 @@ pub fn trap_input(ctx: &egui::Context, raw: &mut egui::RawInput) {
         }
     };
     ctx.memory_mut(|m| m.request_focus(to));
-    ctx.data_mut(|d| d.insert_temp(egui::Id::new("dbg_inject"), (frame, to, shift)));
+    // The move is under way: keep the direction fresh until focus has settled on a control.
+    ctx.data_mut(|d| d.insert_temp(tab_dir_id(), (shift, frame)));
     raw.events.push(tab_event(shift));
 }
 
@@ -1185,22 +1179,7 @@ pub(crate) mod tests {
             }
             seen.push(focused(&ctx));
         }
-        assert_eq!(
-            seen,
-            [Some(ids[1]), Some(ids[2]), Some(ids[0])],
-            "Tab (inj {:?}, start {:?}, end {:?}, skip {:?}, last {:?}, frame {}, ids {:?}, layers {:?})",
-            ctx.data_mut(|d| d.get_temp::<Vec<(u64, String)>>(egui::Id::new("dbg_trace"))),
-            trap_id("start"),
-            trap_id("end"),
-            ctx.data_mut(|d| d.get_temp::<egui::Id>(skip_id())),
-            ctx.data_mut(|d| d.get_temp::<(bool, u64)>(tab_dir_id())),
-            ctx.frame_nr(),
-            ids,
-            ctx.memory(|m| m
-                .layer_ids()
-                .map(|l| (l.id, l.id.with("move")))
-                .collect::<Vec<_>>())
-        );
+        assert_eq!(seen, [Some(ids[1]), Some(ids[2]), Some(ids[0])], "Tab");
         // Backward from the first button: to the last.
         trap_frame(&ctx, tab(true), true);
         for _ in 0..4 {
