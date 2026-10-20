@@ -5,7 +5,6 @@
 [![CI](https://github.com/MasayukiTa/miasma-protocol/actions/workflows/ci.yml/badge.svg)](https://github.com/MasayukiTa/miasma-protocol/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/MasayukiTa/miasma-protocol?include_prereleases&label=release)](https://github.com/MasayukiTa/miasma-protocol/releases)
 [![Status](https://img.shields.io/badge/status-beta-orange)](SECURITY.md)
-[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 Miasma は、信頼できる相手へファイルを送り、自分のファイルを安全に保管するためのアプリです。ファイルを企業のサーバーに預けません。自分の Miasma が相手の Miasma へ直接つながり、すべてを暗号化して運びます。直接つながらないときは中継を使います。Windows と macOS で動き、Android とブラウザ版も開発中です。
 

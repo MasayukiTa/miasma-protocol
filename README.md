@@ -5,7 +5,6 @@
 [![CI](https://github.com/MasayukiTa/miasma-protocol/actions/workflows/ci.yml/badge.svg)](https://github.com/MasayukiTa/miasma-protocol/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/MasayukiTa/miasma-protocol?include_prereleases&label=release)](https://github.com/MasayukiTa/miasma-protocol/releases)
 [![Status](https://img.shields.io/badge/status-beta-orange)](SECURITY.md)
-[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 Miasma lets you send a file to someone you trust, and keep your own files safe, without handing them to a company's server. Your Miasma app talks straight to your contact's Miasma app, encrypts everything on the way, and falls back to a relay when a direct connection is not possible. It runs on Windows and macOS, with Android and a browser client in progress.
 
