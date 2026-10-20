@@ -2704,14 +2704,32 @@ impl MiasmaApp {
     /// Privacy and storage: chat protection, logs and how much this computer keeps for others.
     fn settings_privacy(&mut self, ui: &mut egui::Ui) {
         self.pqc_section(ui);
-        self.logs_section(ui);
         let used = (self.quota_mb > 0).then_some(self.used_mb);
-        self.hosting.section(ui, self.locale, used);
+        if self.mode.is_easy() {
+            // Easy: what keeps this computer's files safe first; logging is under "Advanced".
+            self.hosting.section(ui, self.locale, used);
+            egui::CollapsingHeader::new(kit::section_text(crate::uitext::advanced(self.locale)))
+                .id_source("settings_privacy_advanced")
+                .default_open(false)
+                .show(ui, |ui| self.logs_section(ui));
+        } else {
+            self.logs_section(ui);
+            self.hosting.section(ui, self.locale, used);
+        }
     }
 
     /// Network: the connection settings, then the reachability check.
     fn settings_network(&mut self, ui: &mut egui::Ui) {
-        self.network.section(ui, self.locale);
+        if self.mode.is_easy() {
+            // Relay addresses, certificates, retry time and the check are for Technical use.
+            let title = self.s().settings_network_details_easy;
+            egui::CollapsingHeader::new(kit::section_text(title))
+                .id_source("settings_network_advanced")
+                .default_open(false)
+                .show(ui, |ui| self.network.section(ui, self.locale));
+        } else {
+            self.network.section(ui, self.locale);
+        }
     }
 
     /// About: where things are kept, how the app works and what to send to support.

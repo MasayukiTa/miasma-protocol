@@ -141,6 +141,11 @@ pub fn relative_and_absolute(l: Locale, epoch_secs: u64, now: u64) -> String {
     )
 }
 
+/// Closed header that holds the settings Easy mode leaves alone.
+pub fn advanced(l: Locale) -> &'static str {
+    pick(l, "Advanced", "詳細設定", "高级")
+}
+
 /// Closed header on the verification dialog.
 pub fn technical_details(l: Locale) -> &'static str {
     pick(l, "Technical details", "技術情報", "技术信息")

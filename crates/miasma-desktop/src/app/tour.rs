@@ -1021,6 +1021,30 @@ fn easy_steps() -> Vec<Step> {
             hover: false,
         });
     }
+    // Technical Status and the verification dialog (its details are behind a closed header).
+    for (name, tab, fx) in [
+        ("tech_en_status_wide", Tab::Status, None),
+        (
+            "tech_en_contacts_verify_wide",
+            Tab::Contacts,
+            Some("verify"),
+        ),
+    ] {
+        steps.push(Step {
+            name: name.to_owned(),
+            theme: ThemeMode::Light,
+            locale: Locale::En,
+            tab,
+            daemon: Some(DaemonState::Connected),
+            transfers: None,
+            contacts: fx,
+            chat: None,
+            size: Some((1000.0, 900.0)),
+            mode: Some(ProductMode::Technical),
+            flow: None,
+            hover: false,
+        });
+    }
     // A dialog in the narrowest window: it must stay inside it.
     for fx in ["qr", "perm"] {
         steps.push(Step {
