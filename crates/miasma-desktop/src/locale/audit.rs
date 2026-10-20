@@ -15,7 +15,7 @@ macro_rules! audit_strings {
         impl AuditStrings {
             /// Every field with its name, for the completeness test.
             #[cfg(test)]
-            fn all(&self) -> Vec<(&'static str, &'static str)> {
+            pub(super) fn all(&self) -> Vec<(&'static str, &'static str)> {
                 vec![$((stringify!($f), self.$f)),*]
             }
         }
@@ -144,7 +144,7 @@ static AU_ZH_CN: AuditStrings = AuditStrings {
     need_connection: "尚未连接到后台服务。",
     a11y_store_text: "要存储的文本",
     a11y_store_id: "已存储内容的内容 ID",
-    a11y_get_id: "要取回的内容 ID",
+    a11y_get_id: "要恢复的内容 ID",
     a11y_send_contact: "接收者的联系人代码",
     a11y_password: "密码",
     a11y_password_repeat: "再次输入密码",

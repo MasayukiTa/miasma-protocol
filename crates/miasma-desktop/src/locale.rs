@@ -1243,8 +1243,8 @@ static JA: Strings = Strings {
 static ZH_CN: Strings = Strings {
     tab_store: "存储",
     tab_store_easy: "保存",
-    tab_retrieve: "取回",
-    tab_retrieve_easy: "取回",
+    tab_retrieve: "恢复",
+    tab_retrieve_easy: "恢复",
     tab_status: "状态",
     tab_settings: "设置",
 
@@ -1285,26 +1285,26 @@ static ZH_CN: Strings = Strings {
     store_mid_label_easy: "内容 ID：",
     store_copy: "复制",
     store_copied: "已复制 ID。",
-    store_share_hint: "分享此 ID，其他人就能取回该内容。",
-    store_share_hint_easy: "请保存此 ID，取回内容时需要使用。",
+    store_share_hint: "分享此 ID，其他人就能恢复该内容。",
+    store_share_hint_easy: "请保存此 ID，恢复内容时需要使用。",
     store_busy: "正在存储...",
     store_not_connected_hint: "请先启动应用再保存内容。",
 
-    retrieve_heading: "取回内容",
-    retrieve_heading_easy: "取回内容",
+    retrieve_heading: "恢复内容",
+    retrieve_heading_easy: "恢复内容",
     retrieve_desc: "通过 Miasma 内容 ID 恢复内容。",
-    retrieve_desc_easy: "输入内容 ID 取回你的内容。",
+    retrieve_desc_easy: "输入内容 ID 恢复你的内容。",
     retrieve_mid_label: "内容 ID (MID)：",
     retrieve_mid_label_easy: "内容 ID：",
-    retrieve_button: "取回",
-    retrieve_button_easy: "取回",
-    retrieve_busy: "正在取回...",
-    retrieve_success: "取回成功，可以保存到文件。",
+    retrieve_button: "恢复",
+    retrieve_button_easy: "恢复",
+    retrieve_busy: "正在恢复...",
+    retrieve_success: "恢复成功，可以保存到文件。",
     retrieve_save_button: "保存到文件...",
     retrieve_saved: "已保存到",
     retrieve_save_failed: "保存失败：",
-    retrieve_result_label: "取回结果：",
-    retrieve_not_connected_hint: "请先启动应用再取回内容。",
+    retrieve_result_label: "恢复结果：",
+    retrieve_not_connected_hint: "请先启动应用再恢复内容。",
 
     status_heading: "节点状态",
     status_refresh: "刷新",
@@ -1344,7 +1344,7 @@ static ZH_CN: Strings = Strings {
     status_ready: "就绪",
     status_not_ready: "未就绪",
     status_items_stored: "已存储：",
-    status_hint_ready: "你可以保存和取回内容。",
+    status_hint_ready: "你可以保存和恢复内容。",
     status_hint_not_ready: "应用尚未启动。请前往「保存」标签页开始使用。",
     status_hint_no_peers: "已连接，但尚未找到节点。在找到节点之前内容可能不会复制。",
 
@@ -1392,7 +1392,7 @@ static ZH_CN: Strings = Strings {
     settings_open_folder: "打开数据文件夹",
     settings_language: "语言",
     settings_mode: "界面模式",
-    settings_mode_technical: "专业模式",
+    settings_mode_technical: "高级模式",
     settings_mode_easy: "简易模式",
     settings_mode_desc_technical: "完整诊断信息、传输详情、协议可见",
     settings_mode_desc_easy: "简化界面，隐藏技术细节",
@@ -1455,11 +1455,11 @@ static ZH_CN: Strings = Strings {
     tab_send_easy: "发送",
     tab_inbox: "收件箱",
     tab_inbox_easy: "收到的文件",
-    send_heading: "定向私密共享",
+    send_heading: "私密发送",
     send_heading_easy: "发送文件",
-    send_desc: "使用接收者的共享联系方式加密并发送文件。",
+    send_desc: "使用接收者的文件接收码加密并发送文件。",
     send_desc_easy: "安全地把文件发送给你认识的人。",
-    send_contact_label: "接收者联系方式：",
+    send_contact_label: "接收者的文件接收码：",
     send_contact_hint: "msk:...@PeerId",
     send_password_label: "密码：",
     send_retention_label: "保留期：",
@@ -1469,7 +1469,7 @@ static ZH_CN: Strings = Strings {
     inbox_challenge_easy: "验证码：",
     outbox_confirm_heading_easy: "输入验证码",
     outbox_challenge_failed_easy: "验证码错误",
-    send_contact_hint_easy: "粘贴收到的联系方式代码",
+    send_contact_hint_easy: "粘贴对方发来的文件接收码",
     envelope_waiting: "等待中",
     envelope_needs_action: "需要处理",
     send_choose_file: "选择文件...",
@@ -1477,29 +1477,29 @@ static ZH_CN: Strings = Strings {
     send_busy: "发送中...",
     send_success: "发送成功！请将验证码分享给接收者。",
     send_not_connected: "请先连接再发送。",
-    inbox_heading: "定向收件箱",
+    inbox_heading: "私密收件箱",
     inbox_heading_easy: "收到的文件",
-    inbox_desc: "来自其他用户的定向共享。",
+    inbox_desc: "其他用户私密发送给你的文件。",
     inbox_desc_easy: "别人发给你的文件。",
     inbox_empty: "收件箱为空。",
     inbox_from: "发送者：",
     inbox_state: "状态：",
     inbox_challenge: "验证码：",
-    inbox_retrieve_button: "取回",
+    inbox_retrieve_button: "接收文件",
     inbox_password_label: "密码：",
     inbox_revoke_button: "不接收",
     inbox_refresh: "刷新",
-    sharing_key_label: "你的共享联系方式：",
-    sharing_key_desc: "分享此联系方式，其他人即可向你发送定向文件。",
+    sharing_key_label: "你的文件接收码：",
+    sharing_key_desc: "把此接收码发给其他人，他们就能向你私密发送文件。",
     sharing_key_desc_easy: "把它分享给想给你发送文件的人。",
     sharing_key_copy: "复制",
     sharing_key_copied: "已复制！",
 
     tab_outbox: "发件箱",
     tab_outbox_easy: "已发送",
-    outbox_heading: "定向发件箱",
+    outbox_heading: "私密发件箱",
     outbox_heading_easy: "你发送的文件",
-    outbox_desc: "你发送给其他用户的定向共享。",
+    outbox_desc: "你私密发送给其他用户的文件。",
     outbox_desc_easy: "你发送给特定人的文件。",
     outbox_empty: "发件箱为空。",
     outbox_to: "收件人：",
@@ -1511,19 +1511,19 @@ static ZH_CN: Strings = Strings {
     outbox_confirm_label: "验证码：",
     outbox_confirm_hint: "XXXX-XXXX",
     outbox_confirm_button: "确认",
-    outbox_confirm_success: "确认成功！接收者现在可以取回文件。",
+    outbox_confirm_success: "确认成功！对方现在可以接收文件。",
     outbox_waiting_challenge: "等待接收者验证码...",
     outbox_confirmed: "已确认",
-    outbox_retrieved: "已取回",
+    outbox_retrieved: "对方已接收",
     outbox_expired: "已过期",
     outbox_revoked: "已撤销",
     outbox_challenge_failed: "验证失败",
     outbox_password_failed: "密码验证失败",
     inbox_filename: "文件：",
     inbox_file_size: "大小：",
-    inbox_expired: "此共享已过期。",
-    inbox_revoked: "发送者已撤销此共享。",
-    inbox_retrieved: "已取回。",
+    inbox_expired: "此文件已过期。",
+    inbox_revoked: "发送者已撤销此文件。",
+    inbox_retrieved: "已接收。",
     inbox_wrong_password: "密码错误。",
     inbox_attempts_exhausted: "尝试次数已用尽。",
 
@@ -2283,7 +2283,7 @@ static TR_ZH_CN: TransferStrings = TransferStrings {
     password_note: "会作为加密密钥的一部分使用。密码不会被保存，继续传输时需要，请妥善记下。",
     via_label: "经由 URL（可选）",
     via_hint: "发送方提供的 wss://...",
-    via_note: "不通过网络，而是直接从发送方的隧道 URL 获取，无需节点或 DHT。通常留空。",
+    via_note: "不通过 Miasma 的 P2P/DHT 路径，而是直接从发送方提供的隧道 URL 获取。通常留空。",
     confirm_label: "确认密码",
     mismatch: "两次输入的密码不一致。",
     recv_button: "开始接收",
@@ -2748,8 +2748,8 @@ static CT_ZH_CN: ContactStrings = ContactStrings {
     my_card: "把你的联系人发给对方",
     my_code: "你的联系人代码",
     my_code_hint: "可以放心给别人看，它不是密码。",
-    my_fp: "你的验证码",
-    my_fp_hint: "请通过电话等方式把它读给对方，让对方与自己屏幕上的“验证码”核对。如果不一致，请让对方删除此联系人。",
+    my_fp: "你的安全码",
+    my_fp_hint: "请通过电话等方式把它读给对方，让对方与自己屏幕上的“安全码”核对。如果不一致，请让对方删除此联系人。",
     copy_code: "复制联系人代码",
     copy_invite: "复制邀请消息",
     copied: "已复制",
@@ -2764,7 +2764,7 @@ static CT_ZH_CN: ContactStrings = ContactStrings {
     add_button: "添加",
     add_busy: "正在添加...",
     added_title: "已添加 {label}",
-    added_compare: "请让对方念出“你的验证码”，并与上面的验证码核对。如果不一致，请删除此联系人。",
+    added_compare: "请让对方念出“你的安全码”，并与上面的安全码核对。如果不一致，请删除此联系人。",
     label_required: "请输入名称。",
     err_bad_code: "没有找到 Miasma 联系人代码。请粘贴完整的消息，或以 miasma-contact: 开头的那一行。",
     err_this_is_me: "这是你自己的联系人代码。请粘贴从对方那里收到的代码。",
@@ -2807,7 +2807,7 @@ static CT_ZH_CN: ContactStrings = ContactStrings {
     drop_hint: "把文件拖到这里即可发送",
     drop_folder: "不能发送文件夹。请拖入文件，或先把文件夹压缩。",
     drop_pick_contact: "请把文件拖到某个联系人那一行上，这样 Miasma 才知道发给谁。",
-    fingerprint: "验证码",
+    fingerprint: "安全码",
     send_disabled_note: "已关闭向此人发送。",
     tr_title: "文件传输",
     tr_empty: "还没有传输。",
@@ -2881,11 +2881,11 @@ static CT_ZH_CN: ContactStrings = ContactStrings {
     earlier_hide: "隐藏",
     invite_btn: "我的邀请",
     menu_more: "更多操作",
-    menu_verify: "查看验证码",
+    menu_verify: "查看安全码",
     menu_permissions: "收发权限",
     send_short: "发送",
     row_ready: "可以发送",
-    verify_body: "请让{label}读出对方屏幕上“我的邀请”中的验证码。如果与下面的验证码一致，说明连接的是正确的人；如果不一致，请删除此联系人。",
+    verify_body: "请让{label}读出对方屏幕上“我的邀请”中的安全码。如果与下面的安全码一致，说明连接的是正确的人；如果不一致，请删除此联系人。",
     paste_what: "粘贴对方发给你的内容",
     empty_line: "添加你想发送文件的人。",
     done_btn: "完成",
@@ -3221,7 +3221,7 @@ static CH_ZH_CN: ChatStrings = ChatStrings {
     fail_contact_removed: "联系人已删除，消息未发送。",
     fail_send_disabled: "已关闭向此联系人发送，消息未发送。",
     fail_expired: "一直未能送达，已超时。",
-    fail_session: "无法建立安全连接。请与对方核对验证码。",
+    fail_session: "无法建立安全连接。请与对方核对安全码。",
     fail_other: "无法发送。",
     fail_pqc_peer_no_hybrid: "未发送。你的设置要求使用增强保护（抗量子计算），但对方的 Miasma 不提供。",
     fail_pqc_failed: "未发送。无法与该联系人建立增强保护，请稍后再试。",
@@ -4213,6 +4213,68 @@ mod tests {
             update_strings(zh).all(),
         );
         assert_translation_parity("speed", speed_strings(en).all(), speed_strings(zh).all());
+    }
+
+    #[test]
+    fn zh_cn_uses_the_audited_terms() {
+        let zh = Locale::ZhCn;
+        let ui = strings(zh);
+        assert_eq!(ui.tab_retrieve, "恢复");
+        assert_eq!(ui.tab_retrieve_easy, "恢复");
+        assert_eq!(ui.retrieve_button, "恢复");
+        assert_eq!(ui.settings_mode_technical, "高级模式");
+        assert_eq!(ui.send_heading, "私密发送");
+        assert_eq!(ui.inbox_heading, "私密收件箱");
+        assert_eq!(ui.outbox_heading, "私密发件箱");
+        assert_eq!(ui.sharing_key_label, "你的文件接收码：");
+        assert_eq!(contact_strings(zh).fingerprint, "安全码");
+        assert_eq!(group_strings(zh).code_label, "安全码");
+        assert_eq!(
+            transfer_strings(zh).via_note,
+            "不通过 Miasma 的 P2P/DHT 路径，而是直接从发送方提供的隧道 URL 获取。通常留空。"
+        );
+
+        // Old wording must not come back anywhere in the zh-CN tables.
+        let mut all: Vec<(String, &'static str)> = Vec::new();
+        let mut add = |family: &str, rows: Vec<(&'static str, &'static str)>| {
+            for (name, value) in rows {
+                all.push((format!("{family}.{name}"), value));
+            }
+        };
+        add("strings", ui.all());
+        add("transfers", transfer_strings(zh).all());
+        add("contacts", contact_strings(zh).all());
+        add("chat", chat_strings(zh).all());
+        add("group", group_strings(zh).all());
+        add("compose", compose_strings(zh).all());
+        add("audit", audit_strings(zh).all());
+        add("storage", storage_strings(zh).all());
+        add("updates", update_strings(zh).all());
+        for (name, value) in &all {
+            for old in ["取回", "专业模式", "定向", "联系方式", "不通过网络"] {
+                assert!(!value.contains(old), "zh-CN {name} still says {old}");
+            }
+        }
+        // 验证码 now means only the one-time check code of a private send.
+        let challenge_rows = [
+            "strings.inbox_challenge_easy",
+            "strings.outbox_confirm_heading_easy",
+            "strings.outbox_challenge_failed_easy",
+            "strings.send_success",
+            "strings.inbox_challenge",
+            "strings.outbox_confirm_heading",
+            "strings.outbox_confirm_label",
+            "strings.outbox_waiting_challenge",
+            "audit.a11y_check_code",
+        ];
+        for (name, value) in &all {
+            if value.contains("验证码") {
+                assert!(
+                    challenge_rows.contains(&name.as_str()),
+                    "zh-CN {name} says 验证码 for something that is not a check code"
+                );
+            }
+        }
     }
 
     #[test]

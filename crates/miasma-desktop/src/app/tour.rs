@@ -1070,6 +1070,39 @@ fn easy_steps() -> Vec<Step> {
     steps
 }
 
+/// Technical-mode Simplified Chinese screens (Send, Inbox, Outbox, Retrieve, Settings), wide
+/// and narrow. Only used when `MIASMA_UI_TOUR_TECHZH` is set in the headless tour.
+#[cfg(test)]
+fn technical_zh_steps() -> Vec<Step> {
+    use crate::variant::ProductMode;
+    let mut steps = Vec::new();
+    for (w, h, wname) in [(1200.0, 900.0, "wide"), (700.0, 1200.0, "narrow")] {
+        for (tab, tname) in [
+            (Tab::Send, "send"),
+            (Tab::Inbox, "inbox"),
+            (Tab::Outbox, "outbox"),
+            (Tab::Retrieve, "retrieve"),
+            (Tab::Settings, "settings"),
+        ] {
+            steps.push(Step {
+                name: format!("tech_zh_{tname}_{wname}"),
+                theme: ThemeMode::Light,
+                locale: Locale::ZhCn,
+                tab,
+                daemon: Some(DaemonState::Connected),
+                transfers: None,
+                contacts: None,
+                chat: None,
+                size: Some((w, h)),
+                mode: Some(ProductMode::Technical),
+                flow: None,
+                hover: false,
+            });
+        }
+    }
+    steps
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1136,7 +1169,9 @@ mod tests {
             .unwrap_or_else(|| std::env::temp_dir().join("miasma-ui-tour"));
         let _ = std::fs::remove_dir_all(&out);
         std::fs::create_dir_all(&out).unwrap();
-        let mut steps = if std::env::var_os("MIASMA_UI_TOUR_ALL").is_some() {
+        let mut steps = if std::env::var_os("MIASMA_UI_TOUR_TECHZH").is_some() {
+            technical_zh_steps()
+        } else if std::env::var_os("MIASMA_UI_TOUR_ALL").is_some() {
             all_steps()
         } else {
             easy_steps()
