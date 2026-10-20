@@ -1410,12 +1410,19 @@ impl MiasmaApp {
 
         // The three actions first, big enough to be the point of the screen. Three equal
         // columns; the first (send) is the primary, the other two are outlined.
+        // Three columns when there is room, one column below TASK_COLUMNS_MIN_W (at 320 px the
+        // third column ran off the window).
         let gap = kit::SP_3;
-        let w = ((ui.available_width() - 2.0 * gap) / 3.0)
-            .floor()
-            .max(120.0);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = gap;
+        let narrow = ui.available_width() < TASK_COLUMNS_MIN_W;
+        let w = if narrow {
+            ui.available_width().floor()
+        } else {
+            ((ui.available_width() - 2.0 * gap) / 3.0)
+                .floor()
+                .max(120.0)
+        };
+        let actions = |ui: &mut egui::Ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
             if kit::large_action(ui, true, true, s.home_send_action, w).clicked() {
                 // The one send flow, over this screen.
                 self.send_flow.open_empty(self.contacts.contact_list());
@@ -1426,7 +1433,12 @@ impl MiasmaApp {
             if kit::large_action(ui, false, true, s.home_save_action, w).clicked() {
                 self.tab = Tab::Store;
             }
-        });
+        };
+        if narrow {
+            ui.vertical(actions);
+        } else {
+            ui.horizontal(actions);
+        }
 
         // Status is one muted line; the numbers are behind "Details".
         ui.add_space(kit::SP_3);
@@ -1466,9 +1478,15 @@ impl MiasmaApp {
             // Two main tasks side by side, big; storing and restoring under them, still large;
             // what happened (transfers, sent files) as small links at the bottom.
             let gap = kit::SP_3;
-            let w = ((ui.available_width() - gap) / 2.0).floor().max(120.0);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = gap;
+            // Two columns across the whole width; one column in a narrow window.
+            let narrow = ui.available_width() < TASK_COLUMNS_MIN_W;
+            let w = if narrow {
+                ui.available_width().floor()
+            } else {
+                ((ui.available_width() - gap) / 2.0).floor().max(120.0)
+            };
+            let main_tasks = |ui: &mut egui::Ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
                 if kit::large_action(ui, true, connected, s.home_send_action, w).clicked() {
                     // The one send flow, over this screen.
                     self.send_flow.open_empty(self.contacts.contact_list());
@@ -1476,17 +1494,27 @@ impl MiasmaApp {
                 if kit::large_action(ui, false, connected, s.home_receive_action, w).clicked() {
                     self.tab = Tab::Inbox;
                 }
-            });
+            };
+            if narrow {
+                ui.vertical(main_tasks);
+            } else {
+                ui.horizontal(main_tasks);
+            }
             ui.add_space(kit::SP_3);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = gap;
+            let store_tasks = |ui: &mut egui::Ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
                 if kit::large_action(ui, false, connected, s.home_save_action, w).clicked() {
                     self.tab = Tab::Store;
                 }
                 if kit::large_action(ui, false, connected, s.tab_retrieve_easy, w).clicked() {
                     self.tab = Tab::Retrieve;
                 }
-            });
+            };
+            if narrow {
+                ui.vertical(store_tasks);
+            } else {
+                ui.horizontal(store_tasks);
+            }
             ui.add_space(kit::SP_4);
             kit::divider(ui);
             ui.horizontal(|ui| {
@@ -4146,6 +4174,9 @@ impl MiasmaApp {
         }
     }
 }
+
+/// Width of the page column below which the task buttons stack in one column.
+const TASK_COLUMNS_MIN_W: f32 = 560.0;
 
 /// What the chip in the header says, from what is known: the service is up, and its relay is
 /// reachable or not. Having no peer connected right now is the normal idle state (the direct

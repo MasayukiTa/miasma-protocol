@@ -141,6 +141,20 @@ pub fn relative_and_absolute(l: Locale, epoch_secs: u64, now: u64) -> String {
     )
 }
 
+/// Preset button of the per-contact size limit: leave empty, which means the default limit.
+pub fn size_preset_default(l: Locale) -> &'static str {
+    pick(l, "Default", "既定", "默认")
+}
+
+/// Warning under a very large per-contact size limit.
+pub fn size_very_large(l: Locale, size: &str) -> String {
+    match l {
+        Locale::En => format!("{size} is more than most disks have free. Files up to that size will be accepted from this person."),
+        Locale::Ja => format!("{size} は、ほとんどのディスクの空き容量を超える大きさです。この相手からは、その大きさまでのファイルを受け取ります。"),
+        Locale::ZhCn => format!("{size} 超过大多数磁盘的可用空间。将接受此人发来的不超过该大小的文件。"),
+    }
+}
+
 /// Closed header that holds the settings Easy mode leaves alone.
 pub fn advanced(l: Locale) -> &'static str {
     pick(l, "Advanced", "詳細設定", "高级")
