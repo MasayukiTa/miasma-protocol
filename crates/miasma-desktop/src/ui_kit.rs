@@ -13,9 +13,12 @@
 //!    cannot synthesise a bold weight, so hierarchy is size and colour only.
 //! 4. **Colour.** Neutral surfaces. One accent, for the primary action, the selected tab or
 //!    segment and links. Status colours appear only as text and a small dot ([`status_dot`]).
-//! 5. **Controls.** One primary button per section ([`primary`]); everything else is outlined
-//!    ([`secondary_button`]); destructive is neutral with danger text ([`danger_button`]).
-//!    Buttons and text edits are all [`CONTROL_H`] tall.
+//! 5. **Controls.** A button hierarchy, one pattern each: primary ([`primary`], at most one per
+//!    screen or dialog, never per list row); secondary, outlined ([`secondary_button`], the next
+//!    likely action); quiet, text only ([`quiet_button`]); icon, 28 px with a tooltip and an
+//!    accessible name ([`glyph_button`]); destructive, never on the main surface: it lives in a
+//!    "..." menu ([`row_menu`]) as red text and asks in a dialog, where the confirm button is
+//!    [`danger_button`]. Buttons and text edits are all [`CONTROL_H`] tall.
 //! 6. **Spacing.** 4 / 8 / 12 / 16 / 24 only ([`SP_1`] to [`SP_5`]).
 
 use std::sync::OnceLock;
@@ -35,6 +38,32 @@ pub const SP_2: f32 = 8.0;
 pub const SP_3: f32 = 12.0;
 pub const SP_4: f32 = 16.0;
 pub const SP_5: f32 = 24.0;
+
+/// Gap between a page title and its content.
+pub const GAP_TITLE: f32 = SP_3;
+/// Gap between two groups on a page.
+pub const GAP_GROUP: f32 = SP_4;
+/// Vertical padding inside a list row.
+pub const ROW_PAD_V: f32 = SP_2;
+
+/// Type scale (px). Page titles use [`TITLE_PX`] and only when the page needs a title; a section
+/// title ([`SECTION_PX`]) goes only above a group of two or more rows. The largest text on a
+/// screen is its title.
+pub const TITLE_PX: f32 = 22.0;
+pub const SECTION_PX: f32 = 16.0;
+pub const BODY_PX: f32 = 14.0;
+pub const MONO_PX: f32 = 13.0;
+
+/// Height of a list row with two lines of text (and of a large action button).
+pub const ROW_H: f32 = 56.0;
+/// Height of a list row with one line.
+pub const ROW_H_ONE_LINE: f32 = 40.0;
+/// Side of an icon button.
+pub const GLYPH_BTN: f32 = 28.0;
+/// Diameter of the initial circle in a list row.
+pub const AVATAR_PX: f32 = 36.0;
+/// Height of the big actions on the home screen.
+pub const LARGE_ACTION_H: f32 = 56.0;
 
 /// Widest a page column gets. Wider windows centre it.
 pub const COLUMN_MAX: f32 = 920.0;
@@ -72,12 +101,12 @@ fn section_style() -> TextStyle {
 /// The type scale: nothing is smaller than [`MIN_TEXT_PX`].
 pub fn type_scale() -> [(TextStyle, FontId); 6] {
     [
-        (TextStyle::Heading, FontId::proportional(22.0)),
-        (section_style(), FontId::proportional(16.0)),
-        (TextStyle::Body, FontId::proportional(14.0)),
-        (TextStyle::Button, FontId::proportional(14.0)),
+        (TextStyle::Heading, FontId::proportional(TITLE_PX)),
+        (section_style(), FontId::proportional(SECTION_PX)),
+        (TextStyle::Body, FontId::proportional(BODY_PX)),
+        (TextStyle::Button, FontId::proportional(BODY_PX)),
         (TextStyle::Small, FontId::proportional(MIN_TEXT_PX)),
-        (TextStyle::Monospace, FontId::monospace(13.0)),
+        (TextStyle::Monospace, FontId::monospace(MONO_PX)),
     ]
 }
 
@@ -638,6 +667,400 @@ pub fn compact_button<'a>(text: impl Into<String>) -> egui::Button<'a> {
     egui::Button::new(RichText::new(text).small())
         .small()
         .min_size(vec2(56.0, COMPACT_H))
+}
+
+// ─── Button hierarchy: quiet and icon buttons ───────────────────────────────
+
+/// A borderless text button (Refresh, Clear finished, Back, an inline Retry): accent text, no
+/// frame. For the action that is not the point of the screen.
+pub fn quiet_button<'a>(text: impl Into<String>) -> egui::Button<'a> {
+    egui::Button::new(RichText::new(text).color(pal().accent))
+        .frame(false)
+        .min_size(vec2(0.0, GLYPH_BTN))
+}
+
+/// A "< Back" text link above a title.
+#[allow(dead_code)]
+pub fn back_link(ui: &mut Ui, label: &str) -> bool {
+    ui.add(quiet_button(format!("< {label}"))).clicked()
+}
+
+/// Glyph of the "more actions" icon button.
+pub const MENU_GLYPH: &str = "\u{b7}\u{b7}\u{b7}";
+
+/// An [`GLYPH_BTN`] square button that shows `glyph`. `name` is its tooltip and its accessible
+/// name (a glyph alone says nothing to a screen reader).
+pub fn glyph_button(ui: &mut Ui, glyph: &str, name: &str) -> Response {
+    let resp = ui
+        .scope(|ui| {
+            let w = &mut ui.visuals_mut().widgets;
+            w.inactive.weak_bg_fill = Color32::TRANSPARENT;
+            w.inactive.bg_stroke = Stroke::NONE;
+            ui.add(
+                egui::Button::new(
+                    RichText::new(glyph)
+                        .size(SECTION_PX)
+                        .color(pal().text),
+                )
+                .min_size(vec2(GLYPH_BTN, GLYPH_BTN)),
+            )
+        })
+        .inner;
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, name));
+    resp.on_hover_text(name)
+}
+
+/// A big action (Home): [`LARGE_ACTION_H`] tall, `width` wide, section-size text. `primary_style`
+/// is the accent fill; a disabled primary falls back to outlined like [`primary`].
+pub fn large_action(
+    ui: &mut Ui,
+    primary_style: bool,
+    enabled: bool,
+    text: &str,
+    width: f32,
+) -> Response {
+    let size = vec2(width, LARGE_ACTION_H);
+    let label = RichText::new(text).text_style(section_style());
+    if !primary_style || !enabled {
+        return ui.add_enabled(enabled, egui::Button::new(label).min_size(size));
+    }
+    let p = pal();
+    ui.scope(|ui| {
+        let w = &mut ui.visuals_mut().widgets;
+        for (state, fill) in [
+            (&mut w.inactive, p.accent_fill),
+            (&mut w.hovered, p.accent_hover()),
+            (&mut w.active, p.accent_pressed()),
+        ] {
+            state.weak_bg_fill = fill;
+            state.bg_fill = fill;
+            state.bg_stroke = Stroke::NONE;
+            state.fg_stroke = Stroke::new(1.0, p.on_accent());
+        }
+        ui.add(egui::Button::new(label).min_size(size))
+    })
+    .inner
+}
+
+// ─── Avatar, list rows, "..." menu, dialogs, empty and error states ─────────
+
+/// The letter an initial circle shows for `name`: its first letter or digit, upper-cased, or
+/// `?` when there is none.
+pub fn initial_of(name: &str) -> String {
+    name.chars()
+        .find(|c| c.is_alphanumeric())
+        .map(|c| c.to_uppercase().collect())
+        .unwrap_or_else(|| "?".to_owned())
+}
+
+/// A circle with the initial of `name`. Decoration: the name is always written beside it.
+pub fn avatar(ui: &mut Ui, name: &str, diameter: f32) -> Response {
+    let p = pal();
+    let (rect, resp) = ui.allocate_exact_size(vec2(diameter, diameter), Sense::hover());
+    if ui.is_rect_visible(rect) {
+        ui.painter()
+            .circle_filled(rect.center(), diameter * 0.5, p.selected);
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            initial_of(name),
+            FontId::proportional(SECTION_PX),
+            p.text,
+        );
+    }
+    resp
+}
+
+/// What a [`list_row`] shows on its left.
+pub struct ListRow<'a> {
+    /// Name for the initial circle; `None` for a row without one.
+    pub avatar: Option<&'a str>,
+    pub title: &'a str,
+    /// A muted second line with a status colour (text colour for `Level::Muted`).
+    pub subtitle: Option<(&'a str, Level)>,
+}
+
+/// What [`list_row`] gives back.
+pub struct ListRowOut<R> {
+    /// The row's rectangle (not counting the hairline above it).
+    pub rect: egui::Rect,
+    /// Whatever the trailing closure returned.
+    pub inner: R,
+}
+
+/// A compact list row: hairline above, then [`ROW_H`] (two lines or an initial circle) or
+/// [`ROW_H_ONE_LINE`] of avatar, title, muted subtitle and, on the right, a trailing slot (a quiet
+/// action and a "..." menu). The title and subtitle are cut with an ellipsis, never wrapped, so
+/// every row is the same height. The row is tinted while the pointer is over it.
+pub fn list_row<R>(
+    ui: &mut Ui,
+    row: ListRow<'_>,
+    trailing: impl FnOnce(&mut Ui) -> R,
+) -> ListRowOut<R> {
+    // Rows touch: no gap between the hairline, the row and the next hairline.
+    let saved_gap = ui.spacing().item_spacing.y;
+    ui.spacing_mut().item_spacing.y = 0.0;
+    let out = {
+        divider(ui);
+        let h = if row.avatar.is_some() || row.subtitle.is_some() {
+            ROW_H
+        } else {
+            ROW_H_ONE_LINE
+        };
+        let w = ui.available_width();
+        let tint = ui.painter().add(egui::Shape::Noop);
+        let out = ui.allocate_ui_with_layout(
+            vec2(w, h),
+            Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                ui.set_min_size(vec2(w, h));
+                ui.spacing_mut().item_spacing.x = SP_2;
+                let inner = trailing(ui);
+                ui.with_layout(Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = SP_3;
+                    if let Some(name) = row.avatar {
+                        avatar(ui, name, AVATAR_PX);
+                    }
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        ui.add(
+                            Label::new(RichText::new(row.title).color(pal().text)).truncate(true),
+                        )
+                        .on_hover_text(row.title);
+                        if let Some((sub, level)) = row.subtitle {
+                            let color = if level == Level::Muted {
+                                pal().muted
+                            } else {
+                                level_color(level)
+                            };
+                            ui.add(Label::new(RichText::new(sub).color(color)).truncate(true))
+                                .on_hover_text(sub);
+                        }
+                    });
+                });
+                inner
+            },
+        );
+        let rect = out.response.rect;
+        if ui.rect_contains_pointer(rect) {
+            ui.painter().set(
+                tint,
+                egui::epaint::RectShape::filled(rect, 0.0, pal().text.gamma_multiply(0.04)),
+            );
+        }
+        ListRowOut {
+            rect,
+            inner: out.inner,
+        }
+    };
+    ui.spacing_mut().item_spacing.y = saved_gap;
+    out
+}
+
+/// A confirmation a destructive menu item asks for.
+pub struct Confirm<'a> {
+    pub title: &'a str,
+    pub body: &'a str,
+    /// The red confirm button.
+    pub confirm: &'a str,
+    pub cancel: &'a str,
+}
+
+/// An item of a [`row_menu`].
+pub struct MenuItem<'a> {
+    pub label: &'a str,
+    pub enabled: bool,
+    /// `Some` for a destructive item: drawn as red text, and chosen only after the person
+    /// confirms in a dialog.
+    pub confirm: Option<Confirm<'a>>,
+}
+
+impl<'a> MenuItem<'a> {
+    pub fn new(label: &'a str) -> Self {
+        Self {
+            label,
+            enabled: true,
+            confirm: None,
+        }
+    }
+
+    /// A destructive item: red text, asks first.
+    pub fn destructive(label: &'a str, confirm: Confirm<'a>) -> Self {
+        Self {
+            label,
+            enabled: true,
+            confirm: Some(confirm),
+        }
+    }
+
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+}
+
+/// Narrowest the popup of a [`row_menu`] gets.
+const MENU_MIN_W: f32 = 180.0;
+const MENU_CONFIRM_KEY: &str = "row_menu_confirm";
+
+/// A "..." icon button that opens a popup of `items`. Returns the index of the item the person
+/// chose: at once for a plain item, and for a destructive one only after they press its confirm
+/// button in the dialog. `name` is the button's tooltip and accessible name ("More actions");
+/// `id_source` tells the menus of different rows apart.
+pub fn row_menu(
+    ui: &mut Ui,
+    id_source: impl std::hash::Hash,
+    name: &str,
+    items: &[MenuItem<'_>],
+) -> Option<usize> {
+    let id = ui.make_persistent_id(("row_menu", id_source));
+    let popup_id = id.with("popup");
+    let pending_id = id.with("pending");
+    let button = glyph_button(ui, MENU_GLYPH, name);
+    if button.clicked() {
+        ui.memory_mut(|m| m.toggle_popup(popup_id));
+    }
+    let mut chosen = None;
+    egui::popup::popup_below_widget(ui, popup_id, &button, |ui| {
+        ui.set_min_width(MENU_MIN_W);
+        for (i, item) in items.iter().enumerate() {
+            let mut text = RichText::new(item.label);
+            if item.confirm.is_some() {
+                text = text.color(pal().danger);
+            }
+            let r = ui.add_enabled(
+                item.enabled,
+                egui::Button::new(text)
+                    .frame(false)
+                    .min_size(vec2(ui.available_width(), CONTROL_H)),
+            );
+            if r.clicked() {
+                chosen = Some(i);
+                ui.memory_mut(|m| m.close_popup());
+            }
+        }
+    });
+    let mut result = None;
+    if let Some(i) = chosen {
+        if items.get(i).is_some_and(|it| it.confirm.is_some()) {
+            ui.ctx().data_mut(|d| d.insert_temp(pending_id, i));
+        } else {
+            result = Some(i);
+        }
+    }
+    let pending: Option<usize> = ui.ctx().data(|d| d.get_temp(pending_id));
+    if let Some(i) = pending {
+        match items.get(i).and_then(|it| it.confirm.as_ref()) {
+            Some(conf) => {
+                let mut decided: Option<bool> = None;
+                let shown = dialog(ui.ctx(), MENU_CONFIRM_KEY, conf.title, |ui| {
+                    paragraph(ui, conf.body);
+                    ui.add_space(SP_2);
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.add(danger_button(conf.confirm)).clicked() {
+                            decided = Some(true);
+                        }
+                        let cancel = ui.add(secondary_button(conf.cancel));
+                        crate::a11y::dialog_focus_safe_button(ui.ctx(), MENU_CONFIRM_KEY, &cancel);
+                        if cancel.clicked() {
+                            decided = Some(false);
+                        }
+                    });
+                });
+                match (shown, decided) {
+                    // Esc: the dialog closed itself.
+                    (None, _) => {
+                        ui.ctx().data_mut(|d| d.remove::<usize>(pending_id));
+                    }
+                    (Some(()), Some(yes)) => {
+                        crate::a11y::dialog_leave(ui.ctx(), MENU_CONFIRM_KEY);
+                        ui.ctx().data_mut(|d| d.remove::<usize>(pending_id));
+                        if yes {
+                            result = Some(i);
+                        }
+                    }
+                    (Some(()), None) => {}
+                }
+            }
+            None => ui.ctx().data_mut(|d| d.remove::<usize>(pending_id)),
+        }
+    }
+    result
+}
+
+/// A modal-looking dialog window, centred, with the focus and Esc handling of `a11y`. Returns
+/// `None` when Esc closed it (the caller then drops its "open" state); otherwise the value
+/// `body` returned. A caller that closes it by a button calls
+/// [`crate::a11y::dialog_leave`] with the same `key`.
+pub fn dialog<R>(
+    ctx: &egui::Context,
+    key: &'static str,
+    title: &str,
+    body: impl FnOnce(&mut Ui) -> R,
+) -> Option<R> {
+    crate::a11y::dialog_enter(ctx, key);
+    if crate::a11y::esc_pressed(ctx) {
+        crate::a11y::dialog_leave(ctx, key);
+        return None;
+    }
+    egui::Window::new(title)
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .default_width(420.0)
+        .max_width(460.0)
+        .show(ctx, |ui| {
+            ui.set_max_width(440.0);
+            body(ui)
+        })
+        .and_then(|r| r.inner)
+}
+
+/// An empty list: one sentence and one primary action, centred. Returns true when the action was
+/// pressed.
+pub fn empty_state(ui: &mut Ui, text: &str, primary_label: &str) -> bool {
+    empty_state_with(ui, text, primary_label, |_| {})
+}
+
+/// [`empty_state`] with something quiet under the primary action.
+pub fn empty_state_with(
+    ui: &mut Ui,
+    text: &str,
+    primary_label: &str,
+    below: impl FnOnce(&mut Ui),
+) -> bool {
+    let mut pressed = false;
+    ui.vertical_centered(|ui| {
+        ui.add_space(SP_5 + SP_5);
+        ui.add(Label::new(muted_text(text)).wrap(true));
+        ui.add_space(SP_3);
+        pressed = primary(ui, true, primary_label).clicked();
+        below(ui);
+        ui.add_space(SP_5);
+    });
+    pressed
+}
+
+/// A one-line problem next to its cause, with at most one quiet action under it ("Try again").
+/// Returns true when the action was pressed. Not a card, not a Dismiss button.
+pub fn inline_message(ui: &mut Ui, level: Level, text: &str, action: Option<&str>) -> bool {
+    notice(ui, level, text);
+    match action {
+        Some(label) => ui.add(quiet_button(label)).clicked(),
+        None => false,
+    }
+}
+
+/// A read-only, selectable code (a contact code) in monospace at the standard control height.
+pub fn code_display(ui: &mut Ui, text: &str) -> Response {
+    let mut shown: &str = text;
+    ui.add(
+        egui::TextEdit::singleline(&mut shown)
+            .font(TextStyle::Monospace)
+            .margin(vec2(SP_2, 6.5))
+            .min_size(vec2(0.0, CONTROL_H))
+            .desired_width(f32::INFINITY),
+    )
 }
 
 /// Segmented choice: a row of mutually exclusive options; the selected one gets an accent
@@ -1313,6 +1736,223 @@ mod tests {
         }
         assert!(META_PX >= MIN_TEXT_PX);
         assert!(META_PX < 14.0, "meta text stays below body size");
+    }
+
+    fn run_page(w: f32, h: f32, add: impl FnOnce(&mut Ui)) {
+        run_page_with(egui::RawInput::default(), w, h, add);
+    }
+
+    fn run_page_with(mut input: egui::RawInput, w: f32, h: f32, add: impl FnOnce(&mut Ui)) {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx, false);
+        input.screen_rect = Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(w, h)));
+        let mut add = Some(add);
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::none())
+                .show(ctx, |ui| {
+                    if let Some(f) = add.take() {
+                        f(ui);
+                    }
+                });
+        });
+    }
+
+    #[test]
+    fn the_scales_are_the_agreed_ones() {
+        assert_eq!([TITLE_PX, SECTION_PX, BODY_PX], [22.0, 16.0, 14.0]);
+        assert!(TITLE_PX > SECTION_PX && SECTION_PX > BODY_PX && BODY_PX > MIN_TEXT_PX);
+        assert_eq!([GAP_TITLE, GAP_GROUP, ROW_PAD_V], [SP_3, SP_4, SP_2]);
+        assert_eq!((ROW_H, ROW_H_ONE_LINE, GLYPH_BTN), (56.0, 40.0, 28.0));
+        // A row has room for the circle plus its vertical padding.
+        assert!(ROW_H >= AVATAR_PX + 2.0 * ROW_PAD_V);
+        assert!(GLYPH_BTN >= COMPACT_H);
+        let _guard = theme_guard();
+        let ctx = egui::Context::default();
+        apply_theme(&ctx, false);
+        let style = ctx.style();
+        assert_eq!(style.text_styles[&TextStyle::Heading].size, TITLE_PX);
+        assert_eq!(style.text_styles[&section_style()].size, SECTION_PX);
+        assert_eq!(style.text_styles[&TextStyle::Body].size, BODY_PX);
+    }
+
+    #[test]
+    fn the_initial_is_the_first_letter_upper_cased() {
+        assert_eq!(initial_of("taro"), "T");
+        assert_eq!(initial_of("  Ken"), "K");
+        assert_eq!(initial_of("田中"), "田");
+        assert_eq!(initial_of("(work) anna"), "W");
+        assert_eq!(initial_of("ßeta"), "SS");
+        assert_eq!(initial_of(""), "?");
+        assert_eq!(initial_of("--"), "?");
+    }
+
+    #[test]
+    fn a_list_row_has_a_fixed_height_whatever_the_text() {
+        let _guard = theme_guard();
+        for width in [652.0_f32, 920.0] {
+            let mut heights = Vec::new();
+            run_page(width + 2.0 * PAGE_MARGIN_X, 600.0, |ui| {
+                column(ui, |ui| {
+                    let long = "x".repeat(400);
+                    for (name, sub) in [
+                        ("Taro", Some(("Ready", Level::Muted))),
+                        (long.as_str(), Some((long.as_str(), Level::Warn))),
+                        ("Ken", None),
+                    ] {
+                        let out = list_row(
+                            ui,
+                            ListRow {
+                                avatar: Some(name),
+                                title: name,
+                                subtitle: sub,
+                            },
+                            |ui| {
+                                ui.add(quiet_button("Send"));
+                                ui.label("...");
+                            },
+                        );
+                        heights.push((out.rect.height(), out.rect.width()));
+                    }
+                    // Without a circle and a second line it is the one-line height.
+                    let out = list_row(
+                        ui,
+                        ListRow {
+                            avatar: None,
+                            title: "Only a title",
+                            subtitle: None,
+                        },
+                        |_| {},
+                    );
+                    heights.push((out.rect.height(), out.rect.width()));
+                });
+            });
+            assert_eq!(heights.len(), 4);
+            for (h, w) in &heights[..3] {
+                assert_eq!(*h, ROW_H, "two-line row at {width}");
+                assert!((w - width).abs() < 1.5, "row is {w} wide in a {width} column");
+            }
+            assert_eq!(heights[3].0, ROW_H_ONE_LINE);
+        }
+    }
+
+    #[test]
+    fn rows_stack_without_extra_gaps() {
+        let _guard = theme_guard();
+        let mut tops = Vec::new();
+        run_page(700.0, 600.0, |ui| {
+            for name in ["a", "b", "c"] {
+                let out = list_row(
+                    ui,
+                    ListRow {
+                        avatar: Some(name),
+                        title: name,
+                        subtitle: Some(("x", Level::Muted)),
+                    },
+                    |_| {},
+                );
+                tops.push(out.rect.top());
+            }
+        });
+        // The hairline is 1 px; item spacing inside a row list is zero.
+        assert_eq!(tops[1] - tops[0], ROW_H + 1.0);
+        assert_eq!(tops[2] - tops[1], ROW_H + 1.0);
+    }
+
+    #[test]
+    fn the_menu_button_is_a_28_px_square_with_a_name() {
+        let _guard = theme_guard();
+        let mut size = None;
+        run_page(700.0, 300.0, |ui| {
+            let r = glyph_button(ui, MENU_GLYPH, "More actions");
+            size = Some(r.rect.size());
+        });
+        let size = size.unwrap();
+        assert!(size.x >= GLYPH_BTN && size.y >= GLYPH_BTN, "{size:?}");
+        assert!(size.y <= GLYPH_BTN + 1.0);
+    }
+
+    #[test]
+    fn an_unconfirmed_destructive_choice_is_not_returned_and_esc_cancels_it() {
+        let _guard = theme_guard();
+        let ctx = egui::Context::default();
+        apply_theme(&ctx, false);
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(700.0, 400.0));
+        let mut seen_pending = Vec::new();
+        let mut results = Vec::new();
+        for (frame, esc) in [false, false, true, false].into_iter().enumerate() {
+            let mut input = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            if esc {
+                input.events.push(egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let pending_id = ui.make_persistent_id(("row_menu", "t")).with("pending");
+                    if frame == 0 {
+                        // As if the red item had just been chosen.
+                        ui.ctx().data_mut(|d| d.insert_temp(pending_id, 1usize));
+                    }
+                    let items = [
+                        MenuItem::new("Rename"),
+                        MenuItem::destructive(
+                            "Remove",
+                            Confirm {
+                                title: "Remove this contact?",
+                                body: "It cannot be undone.",
+                                confirm: "Remove",
+                                cancel: "Cancel",
+                            },
+                        ),
+                    ];
+                    results.push(row_menu(ui, "t", "More actions", &items));
+                    seen_pending.push(ui.ctx().data(|d| d.get_temp::<usize>(pending_id)));
+                });
+            });
+        }
+        assert_eq!(results, [None, None, None, None], "nothing is chosen unasked");
+        assert_eq!(seen_pending[0], Some(1), "the dialog is waiting");
+        assert_eq!(seen_pending[1], Some(1));
+        assert_eq!(seen_pending[2], None, "Esc cancelled the question");
+        assert_eq!(seen_pending[3], None);
+    }
+
+    #[test]
+    fn the_empty_state_is_centred_and_asks_for_one_action() {
+        let _guard = theme_guard();
+        let mut out = None;
+        run_page(800.0, 600.0, |ui| {
+            let pressed = empty_state(ui, "No contacts yet.", "Add a contact");
+            out = Some((pressed, ui.min_rect()));
+        });
+        let (pressed, used) = out.unwrap();
+        assert!(!pressed);
+        assert!(used.height() > 60.0);
+        assert!(((used.center().x) - 400.0).abs() < 2.0, "{used:?}");
+    }
+
+    #[test]
+    fn the_code_display_is_as_tall_as_every_other_control() {
+        let _guard = theme_guard();
+        let mut heights = Vec::new();
+        run_page(700.0, 300.0, |ui| {
+            let code = "miasma-contact:3pg8nKBJuripJfrJxMKBKFY6JSBPhTP266EJPq6Q8RDVL2ymxw";
+            heights.push(code_display(ui, code).rect.height());
+            let mut t = String::new();
+            heights.push(ui.add(input(&mut t)).rect.height());
+            heights.push(ui.add(input_mono(&mut t)).rect.height());
+        });
+        for h in &heights {
+            assert!((h - CONTROL_H).abs() < 0.6, "{heights:?}");
+        }
     }
 
     /// Literal font sizes in the chat, contacts and transfers screens: none below the minimum.
