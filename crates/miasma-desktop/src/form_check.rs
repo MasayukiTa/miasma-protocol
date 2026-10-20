@@ -77,6 +77,9 @@ fn pressed_while_disabled(resp: &egui::Response) -> bool {
     resp.contains_pointer() && resp.ctx.input(|i| i.pointer.primary_clicked())
 }
 
+/// Width below which the reason goes to its own row.
+const NARROW_BESIDE: f32 = 260.0;
+
 /// The main button of a form.
 ///
 /// It is enabled when every need is met and `allowed` (not busy, and so on) holds. When something
@@ -98,7 +101,11 @@ pub fn primary_with_reason(
                 ui.ctx().memory_mut(|mem| mem.request_focus(id));
             }
         }
-        // A note for assistive technology and for the eye: next to the button, wrapped.
+        // Next to the button when there is room; on a row of its own when the window is narrow
+        // (a wrapped label beside a button would run into the next row).
+        if ui.available_width() < NARROW_BESIDE {
+            ui.end_row();
+        }
         kit::hint(ui, m.reason);
     }
     resp.clicked()
