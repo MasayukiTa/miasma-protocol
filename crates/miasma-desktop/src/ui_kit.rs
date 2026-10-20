@@ -527,6 +527,9 @@ fn labelled_row<R>(
     .inner
 }
 
+/// Below this width a form row stacks its label above the control.
+const STACK_FORM_BELOW: f32 = 440.0;
+
 /// A form row: label column, control, and an optional hint under the control. The label is
 /// centred on the first control line so it sits next to the control, not above it.
 pub fn form_row<R>(
@@ -536,8 +539,26 @@ pub fn form_row<R>(
     control: impl FnOnce(&mut Ui) -> R,
 ) -> R {
     let total = ui.available_width();
-    let value_w = (total - LABEL_W).max(80.0);
     let spacing = ui.spacing().item_spacing;
+    // A narrow window: no room for a label column beside the control, so the label goes above
+    // it and the control takes the full width (nothing runs past the right edge).
+    if total < STACK_FORM_BELOW {
+        return ui
+            .vertical(|ui| {
+                ui.spacing_mut().item_spacing = spacing;
+                if !label.is_empty() {
+                    ui.add(Label::new(RichText::new(label).color(pal().text)).wrap(true));
+                }
+                ui.set_width(total);
+                let r = control(ui);
+                if let Some(h) = hint_text {
+                    hint(ui, h);
+                }
+                r
+            })
+            .inner;
+    }
+    let value_w = (total - LABEL_W).max(80.0);
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         ui.allocate_ui_with_layout(
@@ -1050,7 +1071,7 @@ pub fn code_display(ui: &mut Ui, text: &str) -> Response {
 pub fn segmented<T: Copy + PartialEq>(ui: &mut Ui, current: &mut T, options: &[(T, &str)]) -> bool {
     let p = pal();
     let mut changed = false;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = SP_1;
         for (value, label) in options {
             let selected = *current == *value;

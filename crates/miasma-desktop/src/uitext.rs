@@ -87,9 +87,98 @@ pub fn relative_time(l: Locale, epoch_secs: u64, now: u64) -> String {
     }
 }
 
+/// Calendar date (year, month 1-12, day 1-31) of a day count since 1970-01-01 (proleptic
+/// Gregorian; the days-from-civil inverse by H. Hinnant). No time-zone database is needed.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    (y, m, d)
+}
+
+/// "Oct 20, 2026 14:05 UTC", "2026年10月20日 14:05 UTC": the date and time in the language's
+/// order, always in UTC (the window has no time-zone database, and a stated zone is better
+/// than a silent guess). `0` means the daemon did not know the time.
+pub fn absolute_time(l: Locale, epoch_secs: u64) -> String {
+    if epoch_secs == 0 {
+        return pick(l, "unknown", "不明", "未知").to_owned();
+    }
+    let (y, m, d) = civil_from_days((epoch_secs / 86_400) as i64);
+    let rem = epoch_secs % 86_400;
+    let (hh, mm) = (rem / 3_600, rem % 3_600 / 60);
+    let zone = crate::locale::settings_strings(l).utc;
+    match l {
+        Locale::En => {
+            const MONTHS: [&str; 12] = [
+                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+            ];
+            format!(
+                "{} {d}, {y} {hh:02}:{mm:02} {zone}",
+                MONTHS[(m - 1) as usize]
+            )
+        }
+        Locale::Ja | Locale::ZhCn => format!("{y}年{m}月{d}日 {hh:02}:{mm:02} {zone}"),
+    }
+}
+
+/// Relative and absolute time together: "3d ago (Oct 17, 2026 14:05 UTC)".
+pub fn relative_and_absolute(l: Locale, epoch_secs: u64, now: u64) -> String {
+    if epoch_secs == 0 {
+        return relative_time(l, epoch_secs, now);
+    }
+    format!(
+        "{} ({})",
+        relative_time(l, epoch_secs, now),
+        absolute_time(l, epoch_secs)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn absolute_times_are_written_in_the_languages_order() {
+        // 2026-10-20 14:05:00 UTC, the epoch, a leap day and a year end.
+        assert_eq!(
+            absolute_time(Locale::En, 1_792_505_100),
+            "Oct 20, 2026 14:05 UTC"
+        );
+        assert_eq!(
+            absolute_time(Locale::Ja, 1_792_505_100),
+            "2026年10月20日 14:05 UTC"
+        );
+        assert_eq!(
+            absolute_time(Locale::ZhCn, 1_792_505_100),
+            "2026年10月20日 14:05 UTC"
+        );
+        assert_eq!(absolute_time(Locale::En, 1), "Jan 1, 1970 00:00 UTC");
+        assert_eq!(
+            absolute_time(Locale::En, 951_782_400 + 3_600),
+            "Feb 29, 2000 01:00 UTC"
+        );
+        assert_eq!(
+            absolute_time(Locale::En, 1_735_689_599),
+            "Dec 31, 2024 23:59 UTC"
+        );
+        assert_eq!(absolute_time(Locale::Ja, 0), "不明");
+    }
+
+    #[test]
+    fn relative_and_absolute_keep_both() {
+        let now = 1_792_505_100 + 3 * 86_400;
+        assert_eq!(
+            relative_and_absolute(Locale::En, 1_792_505_100, now),
+            "3d ago (Oct 20, 2026 14:05 UTC)"
+        );
+        assert_eq!(relative_and_absolute(Locale::En, 0, now), "unknown");
+    }
 
     #[test]
     fn every_label_is_filled_in_every_language() {

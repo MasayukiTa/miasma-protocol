@@ -56,11 +56,48 @@ enum Tab {
     Import,
 }
 
+/// The categories of the Settings page. Each one is a short page of its own; the Danger zone is
+/// last and quiet.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) enum SettingsCat {
+    General,
+    Privacy,
+    Network,
+    Updates,
+    About,
+    Danger,
+}
+
+impl SettingsCat {
+    pub(crate) const ALL: [SettingsCat; 6] = [
+        SettingsCat::General,
+        SettingsCat::Privacy,
+        SettingsCat::Network,
+        SettingsCat::Updates,
+        SettingsCat::About,
+        SettingsCat::Danger,
+    ];
+
+    fn label(self, locale: Locale) -> &'static str {
+        let t = locale::settings_strings(locale);
+        match self {
+            SettingsCat::General => t.cat_general,
+            SettingsCat::Privacy => t.cat_privacy,
+            SettingsCat::Network => t.cat_network,
+            SettingsCat::Updates => t.cat_updates,
+            SettingsCat::About => t.cat_about,
+            SettingsCat::Danger => t.cat_danger,
+        }
+    }
+}
+
 // ─── App struct ─────────────────────────────────────────────────────────────
 
 pub struct MiasmaApp {
     worker: WorkerHandle,
     tab: Tab,
+    /// The category shown on the Settings page.
+    settings_cat: SettingsCat,
 
     // Product mode and locale (persisted to desktop-prefs.toml)
     mode: ProductMode,
@@ -370,19 +407,25 @@ enum RevokeSide {
 
 use crate::ux::MsgLevel as MsgKind;
 
-/// Detailed navigation used by Technical mode. Import stays last because it is only shown
-/// while an import is active.
-const TECH_NAV_TABS: [Tab; 11] = [
+/// The top row of Technical mode: five groups instead of eleven tabs. "Files" opens the second
+/// row ([`TECH_FILE_TABS`]); every screen of the old row is still one click or two away.
+const TECH_NAV_TABS: [Tab; 5] = [
     Tab::Contacts,
     Tab::Chat,
+    Tab::Files,
+    Tab::Status,
+    Tab::Settings,
+];
+
+/// The second row of Technical mode, shown while a file screen is open. Import stays last
+/// because it is only shown while an import is active.
+const TECH_FILE_TABS: [Tab; 7] = [
     Tab::Transfers,
     Tab::Store,
     Tab::Retrieve,
     Tab::Send,
     Tab::Inbox,
     Tab::Outbox,
-    Tab::Status,
-    Tab::Settings,
     Tab::Import,
 ];
 
@@ -477,6 +520,7 @@ impl MiasmaApp {
         Self {
             worker,
             tab: first_tab,
+            settings_cat: SettingsCat::General,
             prev_tab: first_tab,
             mode,
             locale,
@@ -1046,8 +1090,8 @@ impl MiasmaApp {
                             challenge_code: item
                                 .challenge_code
                                 .map(|code| std::sync::Arc::new(Zeroizing::new(code))),
-                            created_at: format_epoch(item.created_at, self.locale),
-                            expires_at: format_epoch(item.expires_at, self.locale),
+                            created_at: format_epoch_full(item.created_at, self.locale),
+                            expires_at: format_epoch_full(item.expires_at, self.locale),
                             filename: item.filename,
                             file_size: item.file_size,
                         })
@@ -1064,8 +1108,8 @@ impl MiasmaApp {
                             challenge_code: item
                                 .challenge_code
                                 .map(|code| std::sync::Arc::new(Zeroizing::new(code))),
-                            created_at: format_epoch(item.created_at, self.locale),
-                            expires_at: format_epoch(item.expires_at, self.locale),
+                            created_at: format_epoch_full(item.created_at, self.locale),
+                            expires_at: format_epoch_full(item.expires_at, self.locale),
                             filename: item.filename,
                             file_size: item.file_size,
                         })
@@ -2139,7 +2183,6 @@ impl MiasmaApp {
     fn status_panel(&mut self, ui: &mut egui::Ui) {
         let s = self.s();
         let easy = self.mode.is_easy();
-        let connected = self.daemon_state == DaemonState::Connected;
 
         kit::page(ui, s.status_heading, None, |ui| {
             kit::button_row(ui, |ui| {
@@ -2159,19 +2202,6 @@ impl MiasmaApp {
             } else {
                 self.status_panel_technical(ui);
             }
-
-            // Emergency wipe: a section of its own at the bottom, never next to a primary.
-            // The button works with the background service stopped too: the wipe then runs
-            // without it, so it is never greyed out when it may be needed most.
-            kit::section(ui, s.wipe_label, |ui| {
-                kit::paragraph_muted(ui, s.wipe_desc);
-                if ui.add(kit::danger_button(s.wipe_button)).clicked() {
-                    self.show_wipe_confirm = true;
-                }
-                if !connected {
-                    kit::hint(ui, s.wipe_offline_note);
-                }
-            });
         });
     }
 
@@ -2488,10 +2518,40 @@ impl MiasmaApp {
 
     fn settings_panel(&mut self, ui: &mut egui::Ui) {
         let s = self.s();
-        let easy = self.mode.is_easy();
-
         kit::page(ui, s.settings_heading, None, |ui| {
-            // Preferences: three aligned rows, no frame.
+            self.settings_category_row(ui);
+            match self.settings_cat {
+                SettingsCat::General => self.settings_general(ui),
+                SettingsCat::Privacy => self.settings_privacy(ui),
+                SettingsCat::Network => self.settings_network(ui),
+                SettingsCat::Updates => {
+                    let technical = !self.mode.is_easy();
+                    self.updates.section(ui, self.locale, technical);
+                }
+                SettingsCat::About => self.settings_about(ui),
+                SettingsCat::Danger => self.settings_danger(ui),
+            }
+        });
+    }
+
+    /// The row of categories under the page title; it wraps on a narrow window.
+    fn settings_category_row(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+            for cat in SettingsCat::ALL {
+                if kit::nav_tab(ui, self.settings_cat == cat, cat.label(self.locale)).clicked() {
+                    self.settings_cat = cat;
+                }
+            }
+        });
+        ui.add_space(kit::SP_3);
+    }
+
+    /// General: language, mode, appearance, group invitations and the speed display.
+    fn settings_general(&mut self, ui: &mut egui::Ui) {
+        let s = self.s();
+        let easy = self.mode.is_easy();
+        {
             kit::form_row(ui, s.settings_language, None, |ui| {
                 let mut lang = self.locale;
                 let options = Locale::ALL.map(|l| (l, l.display_name()));
@@ -2595,8 +2655,27 @@ impl MiasmaApp {
                     }
                 });
             }
-            ui.add_space(kit::SP_4);
+        }
+    }
 
+    /// Privacy and storage: chat protection, logs and how much this computer keeps for others.
+    fn settings_privacy(&mut self, ui: &mut egui::Ui) {
+        self.pqc_section(ui);
+        self.logs_section(ui);
+        let used = (self.quota_mb > 0).then_some(self.used_mb);
+        self.hosting.section(ui, self.locale, used);
+    }
+
+    /// Network: the connection settings, then the reachability check.
+    fn settings_network(&mut self, ui: &mut egui::Ui) {
+        self.network.section(ui, self.locale);
+    }
+
+    /// About: where things are kept, how the app works and what to send to support.
+    fn settings_about(&mut self, ui: &mut egui::Ui) {
+        let s = self.s();
+        let easy = self.mode.is_easy();
+        {
             // ── Paths ────────────────────────────────────────────────
             kit::section(ui, s.settings_paths, |ui| {
                 let sep = std::path::MAIN_SEPARATOR;
@@ -2627,31 +2706,6 @@ impl MiasmaApp {
                     }
                 });
             });
-
-            // ── Logs ─────────────────────────────────────────────────
-            self.updates.section(ui, self.locale, !easy);
-
-            if easy {
-                // Relay and discovery settings are for people who know what they are: on demand.
-                let locale = self.locale;
-                egui::CollapsingHeader::new(kit::section_text(s.settings_network_details_easy))
-                    .id_source("settings-network-details")
-                    .default_open(false)
-                    .show(ui, |ui| self.network.section(ui, locale));
-            } else {
-                self.network.section(ui, self.locale);
-            }
-
-            self.logs_section(ui);
-
-            self.pqc_section(ui);
-
-            // ── Storage ──────────────────────────────────────────────
-            {
-                let used = (self.quota_mb > 0).then_some(self.used_mb);
-                self.hosting.section(ui, self.locale, used);
-            }
-            self.storage_section(ui);
 
             // ── How it works ─────────────────────────────────────────
             kit::section(ui, s.settings_how, |ui| {
@@ -2698,7 +2752,32 @@ impl MiasmaApp {
             });
 
             kit::hint(ui, &crate::buildinfo::window_title(self.locale));
+        }
+    }
+
+    /// The Danger zone: every operation of the page that deletes data, in one place. Each one
+    /// opens its own confirmation, which says what is deleted (see `confirm_dialogs`).
+    fn settings_danger(&mut self, ui: &mut egui::Ui) {
+        let s = self.s();
+        let t = locale::settings_strings(self.locale);
+        let connected = self.daemon_state == DaemonState::Connected;
+        kit::paragraph_muted(ui, t.danger_intro);
+        ui.add_space(kit::SP_2);
+
+        // Emergency wipe. The button works with the background service stopped too: the wipe
+        // then runs without it, so it is never greyed out when it may be needed most.
+        kit::section(ui, s.wipe_label, |ui| {
+            kit::paragraph_muted(ui, s.wipe_desc);
+            if ui.add(kit::danger_button(s.wipe_button)).clicked() {
+                self.show_wipe_confirm = true;
+            }
+            if !connected {
+                kit::hint(ui, s.wipe_offline_note);
+            }
         });
+
+        // The shares this device keeps: delete some, old ones, or all.
+        self.storage_section(ui);
     }
 
     // ── Quantum-resistant chat protection (Settings) ──────────────────────
@@ -3307,6 +3386,17 @@ fn format_epoch(epoch_secs: u64, locale: Locale) -> String {
     crate::uitext::relative_time(locale, epoch_secs, now)
 }
 
+/// Inbox and outbox times: "3d ago (Oct 17, 2026 14:05 UTC)". The relative part is for a quick
+/// look, the date for someone who needs to say when.
+fn format_epoch_full(epoch_secs: u64, locale: Locale) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    crate::uitext::relative_and_absolute(locale, epoch_secs, now)
+}
+
 /// Map envelope state string to a (level, label) for outbox display.
 fn outbox_state_display<'a>(
     s: &'a crate::locale::Strings,
@@ -3702,21 +3792,44 @@ impl MiasmaApp {
                             }
                         }
                     } else {
-                        // Import is the only conditional Technical-mode tab.
-                        let show_import =
-                            self.import_intent.is_some() || self.import_state != ImportState::Idle;
-                        let count = if show_import {
-                            TECH_NAV_TABS.len()
-                        } else {
-                            TECH_NAV_TABS.len() - 1
-                        };
-                        for tab in &TECH_NAV_TABS[..count] {
-                            if kit::nav_tab(ui, self.tab == *tab, label_for(*tab)).clicked() {
-                                self.tab = *tab;
+                        for tab in TECH_NAV_TABS {
+                            if kit::nav_tab(ui, easy_nav_selected(self.tab, tab), label_for(tab))
+                                .clicked()
+                            {
+                                // The group opens on its first screen, unless one of its screens
+                                // is already open.
+                                if tab == Tab::Files && is_file_tab(self.tab) {
+                                    continue;
+                                }
+                                self.tab = if tab == Tab::Files {
+                                    Tab::Transfers
+                                } else {
+                                    tab
+                                };
                             }
                         }
                     }
                 });
+                // Technical mode: the screens of the Files group, one row below.
+                if !easy && is_file_tab(self.tab) {
+                    // Import is the only conditional tab.
+                    let show_import = self.import_intent.is_some()
+                        || self.import_state != ImportState::Idle
+                        || self.tab == Tab::Import;
+                    let count = if show_import {
+                        TECH_FILE_TABS.len()
+                    } else {
+                        TECH_FILE_TABS.len() - 1
+                    };
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                        for tab in &TECH_FILE_TABS[..count] {
+                            if kit::nav_tab(ui, self.tab == *tab, label_for(*tab)).clicked() {
+                                self.tab = *tab;
+                            }
+                        }
+                    });
+                }
                 // Hairline under the whole bar, edge to edge.
                 let y = ui.min_rect().bottom();
                 ui.painter().hline(
@@ -4090,7 +4203,41 @@ mod tests {
                 assert_ne!(a, b);
             }
         }
-        assert_eq!(TECH_NAV_TABS[TECH_NAV_TABS.len() - 1], Tab::Import);
+        for (i, a) in TECH_FILE_TABS.iter().enumerate() {
+            for b in &TECH_FILE_TABS[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+        assert_eq!(TECH_FILE_TABS[TECH_FILE_TABS.len() - 1], Tab::Import);
+    }
+
+    #[test]
+    fn technical_navigation_groups_the_old_row_without_losing_a_screen() {
+        // The old row of eleven tabs.
+        let old = [
+            Tab::Contacts,
+            Tab::Chat,
+            Tab::Transfers,
+            Tab::Store,
+            Tab::Retrieve,
+            Tab::Send,
+            Tab::Inbox,
+            Tab::Outbox,
+            Tab::Status,
+            Tab::Settings,
+            Tab::Import,
+        ];
+        for tab in old {
+            let on_top = TECH_NAV_TABS.contains(&tab);
+            let in_group = TECH_FILE_TABS.contains(&tab);
+            assert!(on_top || in_group, "{tab:?} is no longer reachable");
+        }
+        // The group is the same set the Files tab selects, so the second row is shown exactly
+        // while one of its screens is open.
+        for tab in TECH_FILE_TABS {
+            assert!(easy_nav_selected(tab, Tab::Files));
+        }
+        assert!(TECH_NAV_TABS.len() < old.len());
     }
 
     #[test]
