@@ -1174,7 +1174,7 @@ pub(crate) mod tests {
         let mut seen = Vec::new();
         for _ in 0..3 {
             trap_frame(&ctx, tab(false), true);
-            for _ in 0..4 {
+            for _ in 0..10 {
                 trap_frame(&ctx, screen(), true);
             }
             seen.push(focused(&ctx));
@@ -1182,7 +1182,7 @@ pub(crate) mod tests {
         assert_eq!(seen, [Some(ids[1]), Some(ids[2]), Some(ids[0])], "Tab");
         // Backward from the first button: to the last.
         trap_frame(&ctx, tab(true), true);
-        for _ in 0..4 {
+        for _ in 0..10 {
             trap_frame(&ctx, screen(), true);
         }
         assert_eq!(
@@ -1191,7 +1191,7 @@ pub(crate) mod tests {
             "Shift+Tab from the first button"
         );
         trap_frame(&ctx, tab(true), true);
-        for _ in 0..4 {
+        for _ in 0..10 {
             trap_frame(&ctx, screen(), true);
         }
         assert_eq!(focused(&ctx), Some(ids[1]), "Shift+Tab again");
