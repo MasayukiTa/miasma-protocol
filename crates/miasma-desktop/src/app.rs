@@ -1755,13 +1755,15 @@ impl MiasmaApp {
                 }
                 for item in &items {
                     kit::list_item(ui, |ui| {
-                        let (level, state_label) = inbox_state_display(s, &item.state);
-                        envelope_header(ui, &item.envelope_id, level, state_label);
+                        let (level, state_label) = inbox_state_display(s, &item.state, easy);
+                        envelope_header(ui, &envelope_title(item, easy), level, state_label);
 
                         kit::kv_grid(ui, |g| {
-                            g.row(s.inbox_from, |ui| {
-                                kit::mono_elided(ui, short(&item.sender, 20));
-                            });
+                            if !easy {
+                                g.row(s.inbox_from, |ui| {
+                                    kit::mono_elided(ui, short(&item.sender, 20));
+                                });
+                            }
                             if let Some(ref fname) = item.filename {
                                 g.row(s.inbox_filename, |ui| {
                                     ui.horizontal_wrapped(|ui| {
@@ -1780,7 +1782,12 @@ impl MiasmaApp {
                             g.text(crate::uitext::expires_label(self.locale), &item.expires_at);
                             // Challenge code: the recipient reads this out to the sender.
                             if let Some(ref code) = item.challenge_code {
-                                g.row(s.inbox_challenge, |ui| {
+                                let label = if easy {
+                                    s.inbox_challenge_easy
+                                } else {
+                                    s.inbox_challenge
+                                };
+                                g.row(label, |ui| {
                                     kit::mono_copy(ui, code.as_str(), s.copy);
                                 });
                             }
@@ -1792,9 +1799,15 @@ impl MiasmaApp {
                             "PasswordFailed" => {
                                 kit::notice(ui, Level::Error, s.inbox_attempts_exhausted)
                             }
-                            "ChallengeFailed" => {
-                                kit::notice(ui, Level::Error, s.outbox_challenge_failed)
-                            }
+                            "ChallengeFailed" => kit::notice(
+                                ui,
+                                Level::Error,
+                                if easy {
+                                    s.outbox_challenge_failed_easy
+                                } else {
+                                    s.outbox_challenge_failed
+                                },
+                            ),
                             _ => {}
                         }
 
@@ -1879,13 +1892,15 @@ impl MiasmaApp {
                 }
                 for item in &items {
                     kit::list_item(ui, |ui| {
-                        let (level, state_label) = outbox_state_display(s, &item.state);
-                        envelope_header(ui, &item.envelope_id, level, state_label);
+                        let (level, state_label) = outbox_state_display(s, &item.state, easy);
+                        envelope_header(ui, &envelope_title(item, easy), level, state_label);
 
                         kit::kv_grid(ui, |g| {
-                            g.row(s.outbox_to, |ui| {
-                                kit::mono_elided(ui, short(&item.recipient, 20));
-                            });
+                            if !easy {
+                                g.row(s.outbox_to, |ui| {
+                                    kit::mono_elided(ui, short(&item.recipient, 20));
+                                });
+                            }
                             if let Some(ref fname) = item.filename {
                                 g.text(s.outbox_filename, fname);
                             }
@@ -1895,7 +1910,12 @@ impl MiasmaApp {
 
                         // Sender confirmation: ask for the challenge code.
                         if item.state == "ChallengeIssued" {
-                            kit::notice(ui, Level::Warn, s.outbox_confirm_heading);
+                            let heading = if easy {
+                                s.outbox_confirm_heading_easy
+                            } else {
+                                s.outbox_confirm_heading
+                            };
+                            kit::notice(ui, Level::Warn, heading);
                             kit::form_row(ui, s.outbox_confirm_label, None, |ui| {
                                 ui.horizontal(|ui| {
                                     ui.add(
@@ -2437,7 +2457,16 @@ impl MiasmaApp {
             // ── Logs ─────────────────────────────────────────────────
             self.updates.section(ui, self.locale, !easy);
 
-            self.network.section(ui, self.locale);
+            if easy {
+                // Relay and discovery settings are for people who know what they are: on demand.
+                let locale = self.locale;
+                egui::CollapsingHeader::new(kit::section_text(s.settings_network_details_easy))
+                    .id_source("settings-network-details")
+                    .default_open(false)
+                    .show(ui, |ui| self.network.section(ui, locale));
+            } else {
+                self.network.section(ui, self.locale);
+            }
 
             self.logs_section(ui);
 
@@ -3055,7 +3084,11 @@ fn format_epoch(epoch_secs: u64, locale: Locale) -> String {
 }
 
 /// Map envelope state string to a (level, label) for outbox display.
-fn outbox_state_display<'a>(s: &'a crate::locale::Strings, state: &'a str) -> (Level, &'a str) {
+fn outbox_state_display<'a>(
+    s: &'a crate::locale::Strings,
+    state: &'a str,
+    easy: bool,
+) -> (Level, &'a str) {
     match state {
         // The sentence for these two is shown under the details; the header is one short word.
         "Pending" => (Level::Warn, s.envelope_waiting),
@@ -3065,14 +3098,25 @@ fn outbox_state_display<'a>(s: &'a crate::locale::Strings, state: &'a str) -> (L
         "Expired" => (Level::Error, s.outbox_expired),
         "SenderRevoked" => (Level::Error, s.outbox_revoked),
         "RecipientDeleted" => (Level::Muted, s.outbox_revoked),
-        "ChallengeFailed" => (Level::Error, s.outbox_challenge_failed),
+        "ChallengeFailed" => (
+            Level::Error,
+            if easy {
+                s.outbox_challenge_failed_easy
+            } else {
+                s.outbox_challenge_failed
+            },
+        ),
         "PasswordFailed" => (Level::Error, s.outbox_password_failed),
         _ => (Level::Muted, state),
     }
 }
 
 /// Map envelope state string to a (level, label) for inbox display.
-fn inbox_state_display<'a>(s: &'a crate::locale::Strings, state: &'a str) -> (Level, &'a str) {
+fn inbox_state_display<'a>(
+    s: &'a crate::locale::Strings,
+    state: &'a str,
+    easy: bool,
+) -> (Level, &'a str) {
     match state {
         // Short words only: the sentence that explains a problem is shown under the details,
         // so the header must not say the same thing twice.
@@ -3082,7 +3126,14 @@ fn inbox_state_display<'a>(s: &'a crate::locale::Strings, state: &'a str) -> (Le
         "Expired" => (Level::Error, s.outbox_expired),
         "SenderRevoked" => (Level::Error, s.outbox_revoked),
         "RecipientDeleted" => (Level::Muted, s.outbox_revoked),
-        "ChallengeFailed" => (Level::Error, s.outbox_challenge_failed),
+        "ChallengeFailed" => (
+            Level::Error,
+            if easy {
+                s.outbox_challenge_failed_easy
+            } else {
+                s.outbox_challenge_failed
+            },
+        ),
         "PasswordFailed" => (Level::Error, s.outbox_password_failed),
         _ => (Level::Muted, state),
     }
@@ -3106,6 +3157,14 @@ fn short(s: &str, n: usize) -> &str {
     match s.char_indices().nth(n) {
         Some((i, _)) => &s[..i],
         None => s,
+    }
+}
+
+/// The title of an inbox/outbox item: the file name in Easy mode, the envelope id otherwise.
+fn envelope_title(item: &InboxItem, easy: bool) -> String {
+    match (easy, item.filename.as_deref()) {
+        (true, Some(name)) if !name.is_empty() => name.to_owned(),
+        _ => short(&item.envelope_id, 16).to_owned(),
     }
 }
 

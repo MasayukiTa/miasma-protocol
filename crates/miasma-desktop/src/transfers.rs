@@ -929,176 +929,34 @@ impl TransfersUi {
                     kit::notice(
                         ui,
                         Level::Error,
-                        &format!("{}: {}", t.error_label, localize_job_error(t, err)),
+                        &format!("{}: {}", t.error_label, localize_job_error(t, err, easy)),
                     );
                 }
 
                 if easy {
                     let pct = format_permille(permille(job.bytes_done, job.bytes_total, job.state));
                     kit::paragraph(ui, &easy_sentence(t, &job, &pct));
-                }
-
-                // Where am I: one cell per segment (or per bucket).
-                self.strip_section(ui, t, &job);
-                ui.add_space(kit::SP_2);
-
-                kit::kv_grid(ui, |g| {
-                    // The Share ID is what the receiver needs (it also lets them check who
-                    // published it), so it is shown in Easy mode too, with a Copy button.
+                    // What a sender hands over, without the identifier itself.
                     if let Some(share_id) = job.share_id.as_deref().filter(|s| !s.is_empty()) {
-                        g.row(t.share_id_label, |ui| {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label(RichText::new(share_id).monospace().color(pal().text));
-                                let copied = self
-                                    .copied_at
-                                    .is_some_and(|c| c.elapsed() < Duration::from_secs(2));
-                                let label = if copied { t.copied } else { t.copy };
-                                if ui.add(kit::compact_button(label)).clicked() {
-                                    ui.output_mut(|o| o.copied_text = share_id.to_owned());
-                                    self.copied_at = Some(Instant::now());
-                                }
-                                let invited = self
-                                    .invitation_copied_at
-                                    .is_some_and(|c| c.elapsed() < Duration::from_secs(2));
-                                let label = if invited { t.copied } else { t.copy_invitation };
-                                if ui.add(kit::compact_button(label)).clicked() {
-                                    ui.output_mut(|o| {
-                                        o.copied_text = miasma_core::transfer::invitation_text(
-                                            share_id,
-                                            t.invite_lang,
-                                        )
-                                    });
-                                    self.invitation_copied_at = Some(Instant::now());
-                                }
-                                let qr_label = if self.show_qr { t.hide_qr } else { t.show_qr };
-                                if ui.add(kit::compact_button(qr_label)).clicked() {
-                                    self.show_qr = !self.show_qr;
-                                }
-                            });
-                            if self.show_qr {
-                                ui.add_space(kit::SP_1);
-                                if draw_qr(
-                                    ui,
-                                    &miasma_core::transfer::qr_payload(share_id),
-                                    260.0,
-                                    t.qr_note,
-                                ) {
-                                    kit::hint(ui, t.qr_note);
-                                } else {
-                                    kit::notice(ui, Level::Error, t.qr_failed);
-                                }
-                            }
-                            if job.kind == TransferKind::Send {
-                                kit::hint(ui, t.share_id_send_note);
-                                kit::hint(ui, t.invitation_note);
-                            }
-                        });
-                    }
-
-                    // A receive says whether the publisher was authenticated.
-                    if job.kind == TransferKind::Receive && !job.mid.is_empty() {
-                        g.row(t.publisher_label, |ui| {
-                            if job.publisher_authenticated {
-                                kit::status_dot(ui, Level::Ok, t.publisher_verified);
-                            } else {
-                                kit::status_dot(ui, Level::Warn, t.publisher_unverified);
-                            }
-                        });
-                    }
-
-                    // A receive over iroh says how the data travels: a public relay is
-                    // an order of magnitude slower than a direct path.
-                    if job.kind == TransferKind::Receive {
-                        if let Some(path) = job.path.as_deref() {
-                            g.row(t.path_label, |ui| match path {
-                                "direct" => {
-                                    kit::status_dot(ui, Level::Ok, t.path_direct);
-                                }
-                                _ => {
-                                    kit::status_dot(ui, Level::Warn, t.path_relay);
-                                }
-                            });
+                        if job.kind == TransferKind::Send {
+                            ui.horizontal_wrapped(|ui| self.share_buttons(ui, t, share_id));
+                            self.share_extras(ui, t, share_id, job.kind);
                         }
                     }
-
-                    // The MID: in Technical mode always; in Easy mode only where there is no
-                    // Share ID to give instead (a receive, or a send from an older daemon).
-                    if !easy || job.share_id.as_deref().is_none_or(str::is_empty) {
-                        let mid_label = if easy { t.mid_label_easy } else { t.mid_label };
-                        g.row(mid_label, |ui| {
-                            ui.horizontal_wrapped(|ui| {
-                                if job.mid.is_empty() {
-                                    ui.label(kit::muted_text("-"));
-                                } else {
-                                    ui.label(
-                                        RichText::new(job.mid.as_str())
-                                            .monospace()
-                                            .color(pal().text),
-                                    );
-                                    let copied = self
-                                        .copied_at
-                                        .is_some_and(|c| c.elapsed() < Duration::from_secs(2));
-                                    let label = if copied { t.copied } else { t.copy };
-                                    if ui.add(kit::compact_button(label)).clicked() {
-                                        ui.output_mut(|o| o.copied_text = job.mid.clone());
-                                        self.copied_at = Some(Instant::now());
-                                    }
-                                    // Technical view shows both IDs: say which one the other side needs.
-                                    if !easy
-                                        && job.share_id.as_deref().is_some_and(|s| !s.is_empty())
-                                    {
-                                        ui.label(
-                                            RichText::new(t.mid_internal_note)
-                                                .small()
-                                                .color(pal().muted),
-                                        );
-                                    }
-                                }
-                            });
+                    ui.add_space(kit::SP_1);
+                    // Identifiers, segments, phase and the original error wording: on demand.
+                    egui::CollapsingHeader::new(RichText::new(t.details_label).color(pal().muted))
+                        .id_source(("transfer-details", id.clone()))
+                        .default_open(false)
+                        .show(ui, |ui| {
+                            if let Some(err) = &job.last_error {
+                                kit::hint(ui, err);
+                            }
+                            self.detail_rows(ui, t, true, &job);
                         });
-                    }
-
-                    g.row(t.phase_label, |ui| {
-                        if easy {
-                            ui.label(phase_plain(t, job.phase));
-                        } else {
-                            ui.label(
-                                RichText::new(format!("{:?}", job.phase))
-                                    .monospace()
-                                    .color(pal().text),
-                            );
-                        }
-                    });
-
-                    // A transfer known only from its journal has no elapsed time.
-                    let elapsed = (job.elapsed_secs >= 1.0).then_some(job.elapsed_secs as u64);
-                    g.text(t.elapsed_label, &format_eta(elapsed, t.day));
-
-                    if !easy {
-                        g.text(
-                            t.segments_label,
-                            &format!("{} / {}", job.segments_done, job.segments_total),
-                        );
-                        if job.resumed_from_segment == 0 {
-                            g.text(t.resumed_label, t.resumed_fresh);
-                        } else {
-                            // 1-based, like the caption under the strip.
-                            g.text(t.resumed_label, &(job.resumed_from_segment + 1).to_string());
-                        }
-                        g.text(t.split_label, &split_text(t, &job));
-                        g.text(
-                            t.pieces_label,
-                            &fill(
-                                t.pieces_fmt,
-                                &[
-                                    ("ok", &job.pieces_fetched.to_string()),
-                                    ("bad", &job.pieces_rejected.to_string()),
-                                ],
-                            ),
-                        );
-                        g.text(t.retries_label, &job.segment_retries.to_string());
-                    }
-                });
+                } else {
+                    self.detail_rows(ui, t, false, &job);
+                }
 
                 // A completed transfer has nothing to resume.
                 if job.state != TransferState::Complete {
@@ -1111,6 +969,192 @@ impl TransfersUi {
                 }
             },
         );
+    }
+
+    /// The Share ID buttons: copy the invitation, show or hide the QR code.
+    fn share_buttons(&mut self, ui: &mut egui::Ui, t: &TransferStrings, share_id: &str) {
+        let invited = self
+            .invitation_copied_at
+            .is_some_and(|c| c.elapsed() < Duration::from_secs(2));
+        let label = if invited { t.copied } else { t.copy_invitation };
+        if ui.add(kit::compact_button(label)).clicked() {
+            ui.output_mut(|o| {
+                o.copied_text = miasma_core::transfer::invitation_text(share_id, t.invite_lang)
+            });
+            self.invitation_copied_at = Some(Instant::now());
+        }
+        let qr_label = if self.show_qr { t.hide_qr } else { t.show_qr };
+        if ui.add(kit::compact_button(qr_label)).clicked() {
+            self.show_qr = !self.show_qr;
+        }
+    }
+
+    /// The QR code (when shown) and the notes under the Share ID buttons.
+    fn share_extras(
+        &mut self,
+        ui: &mut egui::Ui,
+        t: &TransferStrings,
+        share_id: &str,
+        kind: TransferKind,
+    ) {
+        if self.show_qr {
+            ui.add_space(kit::SP_1);
+            if draw_qr(
+                ui,
+                &miasma_core::transfer::qr_payload(share_id),
+                260.0,
+                t.qr_note,
+            ) {
+                kit::hint(ui, t.qr_note);
+            } else {
+                kit::notice(ui, Level::Error, t.qr_failed);
+            }
+        }
+        if kind == TransferKind::Send {
+            kit::hint(ui, t.share_id_send_note);
+            kit::hint(ui, t.invitation_note);
+        }
+    }
+
+    /// The segment strip and the table of facts about one transfer. `easy` only changes how a
+    /// few values are worded; Easy mode shows this inside "Details".
+    fn detail_rows(
+        &mut self,
+        ui: &mut egui::Ui,
+        t: &TransferStrings,
+        easy: bool,
+        job: &TransferStatus,
+    ) {
+        // Where am I: one cell per segment (or per bucket).
+        self.strip_section(ui, t, job);
+        ui.add_space(kit::SP_2);
+
+        kit::kv_grid(ui, |g| {
+            // The Share ID is what the receiver needs (it also lets them check who
+            // published it).
+            if let Some(share_id) = job.share_id.as_deref().filter(|s| !s.is_empty()) {
+                g.row(t.share_id_label, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(share_id).monospace().color(pal().text));
+                        let copied = self
+                            .copied_at
+                            .is_some_and(|c| c.elapsed() < Duration::from_secs(2));
+                        let label = if copied { t.copied } else { t.copy };
+                        if ui.add(kit::compact_button(label)).clicked() {
+                            ui.output_mut(|o| o.copied_text = share_id.to_owned());
+                            self.copied_at = Some(Instant::now());
+                        }
+                        if !easy {
+                            self.share_buttons(ui, t, share_id);
+                        }
+                    });
+                    if !easy {
+                        self.share_extras(ui, t, share_id, job.kind);
+                    }
+                });
+            }
+            // A receive says whether the publisher was authenticated.
+            if job.kind == TransferKind::Receive && !job.mid.is_empty() {
+                g.row(t.publisher_label, |ui| {
+                    if job.publisher_authenticated {
+                        kit::status_dot(ui, Level::Ok, t.publisher_verified);
+                    } else {
+                        kit::status_dot(ui, Level::Warn, t.publisher_unverified);
+                    }
+                });
+            }
+
+            // A receive over iroh says how the data travels: a public relay is
+            // an order of magnitude slower than a direct path.
+            if job.kind == TransferKind::Receive {
+                if let Some(path) = job.path.as_deref() {
+                    g.row(t.path_label, |ui| match path {
+                        "direct" => {
+                            kit::status_dot(ui, Level::Ok, t.path_direct);
+                        }
+                        _ => {
+                            kit::status_dot(ui, Level::Warn, t.path_relay);
+                        }
+                    });
+                }
+            }
+
+            // The MID: in Technical mode always; in Easy mode only where there is no
+            // Share ID to give instead (a receive, or a send from an older daemon).
+            if !easy || job.share_id.as_deref().is_none_or(str::is_empty) {
+                let mid_label = if easy { t.mid_label_easy } else { t.mid_label };
+                g.row(mid_label, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        if job.mid.is_empty() {
+                            ui.label(kit::muted_text("-"));
+                        } else {
+                            ui.label(
+                                RichText::new(job.mid.as_str())
+                                    .monospace()
+                                    .color(pal().text),
+                            );
+                            let copied = self
+                                .copied_at
+                                .is_some_and(|c| c.elapsed() < Duration::from_secs(2));
+                            let label = if copied { t.copied } else { t.copy };
+                            if ui.add(kit::compact_button(label)).clicked() {
+                                ui.output_mut(|o| o.copied_text = job.mid.clone());
+                                self.copied_at = Some(Instant::now());
+                            }
+                            // Technical view shows both IDs: say which one the other side needs.
+                            if !easy && job.share_id.as_deref().is_some_and(|s| !s.is_empty()) {
+                                ui.label(
+                                    RichText::new(t.mid_internal_note)
+                                        .small()
+                                        .color(pal().muted),
+                                );
+                            }
+                        }
+                    });
+                });
+            }
+
+            g.row(t.phase_label, |ui| {
+                if easy {
+                    ui.label(phase_plain(t, job.phase));
+                } else {
+                    ui.label(
+                        RichText::new(format!("{:?}", job.phase))
+                            .monospace()
+                            .color(pal().text),
+                    );
+                }
+            });
+
+            // A transfer known only from its journal has no elapsed time.
+            let elapsed = (job.elapsed_secs >= 1.0).then_some(job.elapsed_secs as u64);
+            g.text(t.elapsed_label, &format_eta(elapsed, t.day));
+
+            if !easy {
+                g.text(
+                    t.segments_label,
+                    &format!("{} / {}", job.segments_done, job.segments_total),
+                );
+                if job.resumed_from_segment == 0 {
+                    g.text(t.resumed_label, t.resumed_fresh);
+                } else {
+                    // 1-based, like the caption under the strip.
+                    g.text(t.resumed_label, &(job.resumed_from_segment + 1).to_string());
+                }
+                g.text(t.split_label, &split_text(t, &job));
+                g.text(
+                    t.pieces_label,
+                    &fill(
+                        t.pieces_fmt,
+                        &[
+                            ("ok", &job.pieces_fetched.to_string()),
+                            ("bad", &job.pieces_rejected.to_string()),
+                        ],
+                    ),
+                );
+                g.text(t.retries_label, &job.segment_retries.to_string());
+            }
+        });
     }
 
     fn strip_section(&self, ui: &mut egui::Ui, t: &TransferStrings, job: &TransferStatus) {
@@ -1829,12 +1873,24 @@ fn weak_password_text(t: &TransferStrings, codes: &[&str]) -> String {
     format!("{} {}", t.pw_weak_prefix, reasons.join(t.pw_err_sep))
 }
 
-/// A job's last error for display: the daemon's weak-password refusal (`weak password:
-/// too_short,no_symbol`) is shown in the UI language; any other text is passed through.
-fn localize_job_error(t: &TransferStrings, err: &str) -> String {
-    match password_policy::parse_codes(err) {
-        Some(codes) => weak_password_text(t, &codes),
-        None => err.to_owned(),
+/// A job's last error for display. The daemon's weak-password refusal (`weak password:
+/// too_short,no_symbol`) is shown in the UI language. Easy mode shows the localized text for the
+/// kind of error (the original wording is kept in Details); Technical mode keeps the original
+/// wording, with the localized text above it when the language is not English.
+fn localize_job_error(t: &TransferStrings, err: &str, easy: bool) -> String {
+    if let Some(codes) = password_policy::parse_codes(err) {
+        return weak_password_text(t, &codes);
+    }
+    let plain = crate::errors::classify_message(err).text(t.locale);
+    if easy {
+        plain.to_owned()
+    } else if t.locale == crate::locale::Locale::En {
+        err.to_owned()
+    } else {
+        format!(
+            "{plain}
+{err}"
+        )
     }
 }
 
@@ -2308,12 +2364,18 @@ mod tests {
     fn a_daemon_weak_password_error_is_shown_in_the_ui_language() {
         use crate::locale::{transfer_strings, Locale};
         let ja = transfer_strings(Locale::Ja);
-        let shown = localize_job_error(ja, "weak password: too_short,no_symbol");
+        let shown = localize_job_error(ja, "weak password: too_short,no_symbol", true);
         assert!(shown.starts_with(ja.pw_weak_prefix), "translated prefix");
         assert!(shown.contains(ja.pw_err_no_symbol), "translated no-symbol");
         // Anything else is untouched.
-        assert_eq!(localize_job_error(ja, "disk full"), "disk full");
-        assert_eq!(localize_job_error(ja, "wrong password"), "wrong password");
+        // Anything else gets the localized text of its kind (the original stays in Details).
+        assert_eq!(
+            localize_job_error(ja, "wrong password", true),
+            crate::errors::ErrorKind::WrongPassword.text(Locale::Ja)
+        );
+        assert!(localize_job_error(ja, "disk full", false).ends_with("disk full"));
+        let en = transfer_strings(Locale::En);
+        assert_eq!(localize_job_error(en, "disk full", false), "disk full");
     }
 
     fn status(kind: TransferKind, state: TransferState) -> TransferStatus {
