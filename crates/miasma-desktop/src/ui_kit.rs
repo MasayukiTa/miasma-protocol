@@ -16,7 +16,7 @@
 //! 5. **Controls.** A button hierarchy, one pattern each: primary ([`primary`], at most one per
 //!    screen or dialog, never per list row); secondary, outlined ([`secondary_button`], the next
 //!    likely action); quiet, text only ([`quiet_button`]); icon, 28 px with a tooltip and an
-//!    accessible name ([`glyph_button`]); destructive, never on the main surface: it lives in a
+//!    accessible name ([`icon_button`]); destructive, never on the main surface: it lives in a
 //!    "..." menu ([`row_menu`]) as red text and asks in a dialog, where the confirm button is
 //!    [`danger_button`]. Buttons and text edits are all [`CONTROL_H`] tall.
 //! 6. **Spacing.** 4 / 8 / 12 / 16 / 24 only ([`SP_1`] to [`SP_5`]).
@@ -58,8 +58,7 @@ pub const MONO_PX: f32 = 13.0;
 pub const ROW_H: f32 = 56.0;
 /// Height of a list row with one line.
 pub const ROW_H_ONE_LINE: f32 = 40.0;
-/// Side of an icon button.
-pub const GLYPH_BTN: f32 = 28.0;
+
 /// Diameter of the initial circle in a list row.
 pub const AVATAR_PX: f32 = 36.0;
 /// Height of the big actions on the home screen.
@@ -676,36 +675,13 @@ pub fn compact_button<'a>(text: impl Into<String>) -> egui::Button<'a> {
 pub fn quiet_button<'a>(text: impl Into<String>) -> egui::Button<'a> {
     egui::Button::new(RichText::new(text).color(pal().accent))
         .frame(false)
-        .min_size(vec2(0.0, GLYPH_BTN))
+        .min_size(vec2(0.0, ICON_BTN))
 }
 
 /// A "< Back" text link above a title.
 #[allow(dead_code)]
 pub fn back_link(ui: &mut Ui, label: &str) -> bool {
     ui.add(quiet_button(format!("< {label}"))).clicked()
-}
-
-/// Glyph of the "more actions" icon button.
-pub const MENU_GLYPH: &str = "\u{b7}\u{b7}\u{b7}";
-
-/// An [`GLYPH_BTN`] square button that shows `glyph`. `name` is its tooltip and its accessible
-/// name (a glyph alone says nothing to a screen reader).
-pub fn glyph_button(ui: &mut Ui, glyph: &str, name: &str) -> Response {
-    let resp = ui
-        .scope(|ui| {
-            ui.spacing_mut().button_padding = vec2(SP_2, 2.0);
-            ui.spacing_mut().interact_size = vec2(GLYPH_BTN, GLYPH_BTN);
-            let w = &mut ui.visuals_mut().widgets;
-            w.inactive.weak_bg_fill = Color32::TRANSPARENT;
-            w.inactive.bg_stroke = Stroke::NONE;
-            ui.add(
-                egui::Button::new(RichText::new(glyph).size(SECTION_PX).color(pal().text))
-                    .min_size(vec2(GLYPH_BTN, GLYPH_BTN)),
-            )
-        })
-        .inner;
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, name));
-    resp.on_hover_text(name)
 }
 
 /// A big action (Home): [`LARGE_ACTION_H`] tall, `width` wide, section-size text. `primary_style`
@@ -916,7 +892,7 @@ pub fn row_menu(
     let id = ui.make_persistent_id(("row_menu", id_source));
     let popup_id = id.with("popup");
     let pending_id = id.with("pending");
-    let button = glyph_button(ui, MENU_GLYPH, name);
+    let button = icon_button(ui, Icon::More, name, true).on_hover_text(name);
     if button.clicked() {
         ui.memory_mut(|m| m.toggle_popup(popup_id));
     }
@@ -1763,10 +1739,10 @@ mod tests {
         assert_eq!([TITLE_PX, SECTION_PX, BODY_PX], [22.0, 16.0, 14.0]);
         assert!(TITLE_PX > SECTION_PX && SECTION_PX > BODY_PX && BODY_PX > MIN_TEXT_PX);
         assert_eq!([GAP_TITLE, GAP_GROUP, ROW_PAD_V], [SP_3, SP_4, SP_2]);
-        assert_eq!((ROW_H, ROW_H_ONE_LINE, GLYPH_BTN), (56.0, 40.0, 28.0));
+        assert_eq!((ROW_H, ROW_H_ONE_LINE, ICON_BTN), (56.0, 40.0, 32.0));
         // A row has room for the circle plus its vertical padding.
         assert!(ROW_H >= AVATAR_PX + 2.0 * ROW_PAD_V);
-        assert!(GLYPH_BTN >= COMPACT_H);
+        assert!(ICON_BTN >= COMPACT_H);
         let _guard = theme_guard();
         let ctx = egui::Context::default();
         apply_theme(&ctx, false);
@@ -1863,16 +1839,16 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_button_is_a_28_px_square_with_a_name() {
+    fn the_menu_button_is_the_shared_icon_button() {
         let _guard = theme_guard();
         let mut size = None;
         run_page(700.0, 300.0, |ui| {
-            let r = glyph_button(ui, MENU_GLYPH, "More actions");
+            let r = icon_button(ui, Icon::More, "More actions", true);
             size = Some(r.rect.size());
         });
         let size = size.unwrap();
-        assert!(size.x >= GLYPH_BTN && size.y >= GLYPH_BTN, "{size:?}");
-        assert!(size.y <= GLYPH_BTN + 1.0);
+        assert!(size.x >= ICON_BTN && size.y >= ICON_BTN, "{size:?}");
+        assert!(size.y <= ICON_BTN + 1.0 && size.x <= ICON_BTN + 1.0);
     }
 
     #[test]
