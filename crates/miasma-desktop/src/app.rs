@@ -23,7 +23,7 @@ use miasma_core::push::speed_fmt::{SpeedShown, SpeedUnit};
 
 // Compatibility: `contacts.rs` still imports its drawing helpers from here. They are the kit's
 // own (`ui_kit.rs`); remove this line when contacts.rs imports `ui_kit` directly.
-pub(crate) use crate::ui_kit::{card_frame, danger_button, primary_button, section_heading};
+pub(crate) use crate::ui_kit::{card_frame, danger_button};
 
 #[cfg(feature = "ui-tour")]
 mod tour;
@@ -1320,7 +1320,11 @@ impl MiasmaApp {
 
     fn home_panel(&mut self, ui: &mut egui::Ui) {
         let s = self.s();
-        let connected = self.daemon_state == DaemonState::Connected;
+        // Not connected (first run, stopped, starting): the card above this page is the page.
+        // The actions would only be greyed out, so they are not drawn at all.
+        if self.daemon_state != DaemonState::Connected {
+            return;
+        }
         let peers = self.peer_count;
         let shares = self.share_count;
         let storage = if self.quota_mb > 0 {
@@ -1329,15 +1333,34 @@ impl MiasmaApp {
             s.dashboard_no_data.to_owned()
         };
 
-        kit::page(ui, s.home_heading_easy, Some(s.home_desc_easy), |ui| {
-            kit::section(ui, s.dashboard_quick_status, |ui| {
-                let (level, state) = match self.daemon_state {
-                    DaemonState::Connected => (Level::Ok, s.status_ready),
-                    DaemonState::Starting => (Level::Info, s.starting),
-                    DaemonState::Stopped => (Level::Error, s.offline),
-                    DaemonState::NeedsInit => (Level::Warn, s.setup_needed),
-                };
-                kit::status_dot(ui, level, state);
+        // The three actions first, big enough to be the point of the screen. Three equal
+        // columns; the first (send) is the primary, the other two are outlined.
+        let gap = kit::SP_3;
+        let w = ((ui.available_width() - 2.0 * gap) / 3.0)
+            .floor()
+            .max(120.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            if kit::large_action(ui, true, true, s.home_send_action, w).clicked() {
+                // The one send flow, over this screen.
+                self.send_flow.open_empty(self.contacts.contact_list());
+            }
+            if kit::large_action(ui, false, true, s.home_receive_action, w).clicked() {
+                self.tab = Tab::Inbox;
+            }
+            if kit::large_action(ui, false, true, s.home_save_action, w).clicked() {
+                self.tab = Tab::Store;
+            }
+        });
+
+        // Status is one muted line; the numbers are behind "Details".
+        ui.add_space(kit::SP_3);
+        ui.label(kit::muted_text(s.status_ready));
+        ui.add_space(kit::SP_2);
+        egui::CollapsingHeader::new(kit::muted_text(s.details_easy))
+            .id_source("home_details")
+            .default_open(false)
+            .show(ui, |ui| {
                 kit::stats(
                     ui,
                     &[
@@ -1351,29 +1374,6 @@ impl MiasmaApp {
                     ],
                 );
             });
-
-            ui.add_space(kit::SP_3);
-            kit::surface(ui, |ui| {
-                if kit::primary(ui, connected, s.home_send_action).clicked() {
-                    // The one send flow, over this screen.
-                    self.send_flow.open_empty(self.contacts.contact_list());
-                }
-                ui.add_space(kit::SP_1);
-                if ui
-                    .add_enabled(connected, kit::secondary_button(s.home_receive_action))
-                    .clicked()
-                {
-                    self.tab = Tab::Inbox;
-                }
-                ui.add_space(kit::SP_1);
-                if ui
-                    .add_enabled(connected, kit::secondary_button(s.home_save_action))
-                    .clicked()
-                {
-                    self.tab = Tab::Store;
-                }
-            });
-        });
     }
 
     fn files_panel(&mut self, ui: &mut egui::Ui) {
@@ -3778,6 +3778,65 @@ impl MiasmaApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Draw only the Easy Home page in a column of `width` px and return the rectangle it used.
+    fn home_page_size(state: DaemonState, width: f32) -> egui::Rect {
+        let ctx = egui::Context::default();
+        let data = tempfile::tempdir().unwrap();
+        let mut app = MiasmaApp::new_with_ctx(
+            &ctx,
+            None,
+            ProductMode::Easy,
+            Locale::En,
+            ThemeMode::Light,
+            data.path().to_path_buf(),
+            LaunchIntent::Normal,
+        );
+        app.daemon_state = state;
+        let mut used = egui::Rect::NOTHING;
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(width, 900.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    kit::column(ui, |ui| {
+                        let top = ui.cursor().min;
+                        app.home_panel(ui);
+                        used = egui::Rect::from_min_max(top, ui.min_rect().max);
+                    });
+                });
+            });
+        }
+        used
+    }
+
+    #[test]
+    fn home_puts_the_actions_first_and_draws_nothing_else_when_not_connected() {
+        for width in [700.0_f32, 1200.0] {
+            let connected = home_page_size(DaemonState::Connected, width);
+            // Three 56 px actions, one status line, and a closed "Details" line: no card, no
+            // heading, no numbers above the buttons.
+            assert!(connected.height() >= kit::LARGE_ACTION_H, "{connected:?}");
+            assert!(connected.height() < 140.0, "{connected:?}");
+            assert!(connected.width() <= width, "{connected:?}");
+            for state in [
+                DaemonState::Stopped,
+                DaemonState::Starting,
+                DaemonState::NeedsInit,
+            ] {
+                let r = home_page_size(state.clone(), width);
+                assert!(
+                    r.height() < 1.0,
+                    "{state:?} at {width}: the page below the card is empty, got {r:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn easy_normal_launch_starts_on_home() {

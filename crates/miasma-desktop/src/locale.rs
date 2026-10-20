@@ -2396,6 +2396,8 @@ contact_strings! {
     sugg_title, sugg_body, sugg_item, sugg_attempts, sugg_add, sugg_ignore, sugg_prefill_note,
     sugg_now, sugg_min, sugg_hour,
     open_missing, open_failed, saved_to, earlier_failed, earlier_show, earlier_hide,
+    invite_btn, menu_more, menu_verify, menu_permissions, send_short, row_ready, verify_body,
+    paste_what, empty_line, done_btn, invite_lead,
 }
 
 pub fn contact_strings(locale: Locale) -> &'static ContactStrings {
@@ -2554,6 +2556,17 @@ static CT_EN: ContactStrings = ContactStrings {
     earlier_failed: "{n} earlier failed attempt(s)",
     earlier_show: "Show",
     earlier_hide: "Hide",
+    invite_btn: "My invitation",
+    menu_more: "More actions",
+    menu_verify: "Verify",
+    menu_permissions: "Permissions",
+    send_short: "Send",
+    row_ready: "Ready to send",
+    verify_body: "Ask {label} to read out the verification code under \"My invitation\" on their screen. If it matches the code below, you are connected to the right person. If it differs, remove this contact.",
+    paste_what: "Paste what they sent you",
+    empty_line: "Add the people you want to send files to.",
+    done_btn: "Done",
+    invite_lead: "Send this message to the person you want to add. They paste it under \"Add a contact\".",
 };
 
 static CT_JA: ContactStrings = ContactStrings {
@@ -2704,6 +2717,17 @@ static CT_JA: ContactStrings = ContactStrings {
     earlier_failed: "以前の失敗 {n} 件",
     earlier_show: "表示",
     earlier_hide: "隠す",
+    invite_btn: "あなたの招待",
+    menu_more: "その他の操作",
+    menu_verify: "確認用コードを見る",
+    menu_permissions: "送受信の許可",
+    send_short: "送る",
+    row_ready: "送れます",
+    verify_body: "{label}さんの画面の「あなたの招待」にある確認用コードを、読み上げてもらってください。下のコードと同じなら、正しい相手とつながっています。違っていたら、この連絡先を削除してください。",
+    paste_what: "相手から届いたものを貼り付けてください",
+    empty_line: "ファイルを送りたい相手を追加しましょう。",
+    done_btn: "完了",
+    invite_lead: "このメッセージを、追加したい相手に送ってください。相手は「連絡先を追加」に貼り付けます。",
 };
 
 // zh-CN
@@ -2855,6 +2879,17 @@ static CT_ZH_CN: ContactStrings = ContactStrings {
     earlier_failed: "此前失败 {n} 次",
     earlier_show: "显示",
     earlier_hide: "隐藏",
+    invite_btn: "我的邀请",
+    menu_more: "更多操作",
+    menu_verify: "查看验证码",
+    menu_permissions: "收发权限",
+    send_short: "发送",
+    row_ready: "可以发送",
+    verify_body: "请让{label}读出对方屏幕上“我的邀请”中的验证码。如果与下面的验证码一致，说明连接的是正确的人；如果不一致，请删除此联系人。",
+    paste_what: "粘贴对方发给你的内容",
+    empty_line: "添加你想发送文件的人。",
+    done_btn: "完成",
+    invite_lead: "把这条消息发给你想添加的人，对方将它粘贴到“添加联系人”中。",
 };
 
 // Group conversations of the Chat area (their own file: `locale/group.rs`).
