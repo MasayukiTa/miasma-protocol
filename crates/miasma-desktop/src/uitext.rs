@@ -196,9 +196,9 @@ pub fn updated_ago(l: Locale, secs: u64) -> String {
 pub fn unnamed_file(l: Locale) -> &'static str {
     pick(
         l,
-        "File (name not known yet)",
-        "ファイル（名前はまだ不明）",
-        "文件（尚无名称）",
+        "Unnamed file",
+        "名前のないファイル",
+        "未命名文件",
     )
 }
 
