@@ -4303,6 +4303,7 @@ mod tests {
         };
         window_frame(ctx, app, vec![press(true)]);
         window_frame(ctx, app, vec![press(false)]);
+        eprintln!("DBG {name}: tab after release {:?}", app.tab);
         window_frame(ctx, app, vec![]);
         window_frame(ctx, app, vec![]);
     }
