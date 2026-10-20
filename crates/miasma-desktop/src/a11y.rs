@@ -432,6 +432,7 @@ pub fn trap_input(ctx: &egui::Context, raw: &mut egui::RawInput) {
         }
     };
     ctx.memory_mut(|m| m.request_focus(to));
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new("dbg_inject"), (frame, to, shift)));
     raw.events.push(tab_event(shift));
 }
 
@@ -1178,7 +1179,8 @@ pub(crate) mod tests {
         assert_eq!(
             seen,
             [Some(ids[1]), Some(ids[2]), Some(ids[0])],
-            "Tab (start {:?}, end {:?}, skip {:?}, last {:?}, frame {}, ids {:?}, layers {:?})",
+            "Tab (inj {:?}, start {:?}, end {:?}, skip {:?}, last {:?}, frame {}, ids {:?}, layers {:?})",
+            ctx.data_mut(|d| d.get_temp::<(u64, egui::Id, bool)>(egui::Id::new("dbg_inject"))),
             trap_id("start"),
             trap_id("end"),
             ctx.data_mut(|d| d.get_temp::<egui::Id>(skip_id())),
