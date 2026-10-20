@@ -212,7 +212,6 @@ impl SendFlow {
         self.generated = None;
     }
 
-    #[cfg(test)]
     pub fn is_open(&self) -> bool {
         self.open
     }
