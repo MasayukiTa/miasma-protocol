@@ -37,12 +37,15 @@ fn step(from: &Side, to: &Side, to_is: Peer, now: u64, hook: Option<Hook<'_>>) -
     let peer = to.id();
     let have_text = from.core.outbox.first_for(&peer).is_some();
     match from.core.pq_step(&peer, have_text, now) {
-        Pass::Send(mut out) => {
+        Pass::Send(out) => {
+            // The hook alters what goes on the wire; the sender still reports
+            // the record it meant to send.
+            let mut plain = out.plain.clone();
             if let Some(h) = hook {
-                let kind = out.plain[0];
-                h(kind, &mut out.plain);
+                let kind = plain[0];
+                h(kind, &mut plain);
             }
-            let (wire, _) = from.core.seal_for(&peer, &out.plain).unwrap();
+            let (wire, _) = from.core.seal_for(&peer, &plain).unwrap();
             let outcome = if to_is == Peer::Strict {
                 SendOutcome::NotUnderstood
             } else {
@@ -93,6 +96,11 @@ fn roles<'a>(a: &'a Side, b: &'a Side) -> (&'a Side, &'a Side) {
     }
 }
 
+fn sorted(mut v: Vec<String>) -> Vec<String> {
+    v.sort();
+    v
+}
+
 fn pq_files(s: &Side) -> usize {
     std::fs::read_dir(s.dir.path().join("chat"))
         .map(|rd| {
@@ -117,8 +125,9 @@ fn hybrid_to_hybrid_session_works_and_messages_round_trip() {
     b.core.enqueue(&a.id(), "two", 2).unwrap();
     a.core.enqueue(&b.id(), "three", 3).unwrap();
     pump(&a, &b, 2_000);
-    assert_eq!(b.texts(&a.id()), ["one", "two", "three"]);
-    assert_eq!(a.texts(&b.id()), ["one", "two", "three"]);
+    // Both sides hold all three (the order of the two directions can differ).
+    assert_eq!(sorted(b.texts(&a.id())), ["one", "three", "two"]);
+    assert_eq!(sorted(a.texts(&b.id())), ["one", "three", "two"]);
     assert_eq!(state_of(&a, &b), ("hybrid", None));
     assert_eq!(state_of(&b, &a), ("hybrid", None));
     assert!(counts().hybrid_sessions >= before.hybrid_sessions + 2);
@@ -409,8 +418,8 @@ fn the_hybrid_state_survives_a_restart() {
     a.core.enqueue(&b.id(), "two", 2).unwrap();
     b.core.enqueue(&a.id(), "three", 3).unwrap();
     pump(&a, &b, 2_000);
-    assert_eq!(b.texts(&a.id()), ["one", "two", "three"]);
-    assert_eq!(a.texts(&b.id()), ["one", "two", "three"]);
+    assert_eq!(sorted(b.texts(&a.id())), ["one", "three", "two"]);
+    assert_eq!(sorted(a.texts(&b.id())), ["one", "three", "two"]);
 }
 
 #[test]
