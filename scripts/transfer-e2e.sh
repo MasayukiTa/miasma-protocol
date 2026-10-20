@@ -115,9 +115,9 @@ segments_done() {  # segments_done <dir> <match or ""> -> highest "seg N/M" N, o
 
 wait_segments() {  # wait_segments <dir> <match> <at least> <timeout s>
     local i=0
-    while [ $i -lt $(( $4 * 2 )) ]; do
+    while [ $i -lt $(( $4 * 5 )) ]; do
         if [ "$(segments_done "$1" "$2")" -ge "$3" ]; then return 0; fi
-        sleep 0.5
+        sleep 0.2
         i=$((i + 1))
     done
     return 1
@@ -186,12 +186,41 @@ if [ ! -e "$OUT2" ] && [ ! -e "$OUT2.part" ]; then check 1 "neither attempt left
 # ---- 3. receiver killed mid-transfer ----------------------------------------
 echo
 echo "[3] Receiver: kill B's daemon after the first segment, restart, resume"
-RECV="$TMP/received1.bin"
-"$CLI" --data-dir "$DIR_B" network-get "$MID1" -o "$RECV" --password-file "$PW" --no-wait >/dev/null 2>&1; RC=$?
-[ $RC -eq 0 ] && check 1 "network-get --no-wait started the transfer" || check 0 "network-get --no-wait started the transfer"
-wait_segments "$DIR_B" "$MID1" 1 900 && check 1 "the first segment was received" || check 0 "the first segment was received"
-kill_daemon "$PID_B" "$DIR_B"; PID_B=""
-echo "  B's daemon killed."
+# The kill has to land while the receive is still running. A segment is about 16 MiB, so a
+# 40 MB file is three segments, and on a fast runner loopback can deliver the last two
+# between the poll that sees segment 1 and the kill (seen on a macOS CI runner: the output
+# file was already complete when the daemon was killed, so there was nothing to resume).
+# That is a property of the machine, not a defect, so decide per attempt, from the state on
+# disk after the kill, whether it landed mid-receive; if not, retry with a new file twice
+# as large. The assertions below are made on the attempt that was interrupted.
+SIZE1="$SIZE_MB"
+INTERRUPTED=0
+TRY=1
+while [ "$TRY" -le 4 ] && [ "$INTERRUPTED" = "0" ]; do
+    if [ -z "$PID_B" ]; then
+        PID_B="$(start_daemon "$DIR_B" "$BOOT")" || exit 1
+        wait_peers "$DIR_B" 60 || echo "  warning: node B is not connected to node A"
+    fi
+    if [ "$TRY" -gt 1 ]; then
+        SRC1="$TMP/payload1-$TRY.bin"; new_file "$SRC1" "$SIZE1"; HASH1="$(sha "$SRC1")"
+        MID1="$("$CLI" --data-dir "$DIR_A" network-publish "$SRC1" --data-shards $K --total-shards $N --password-file "$PW" 2>/dev/null | grep '^miasma:' | head -1)"
+        [ -n "$MID1" ] || { echo "could not publish the ${SIZE1} MB retry payload"; exit 1; }
+        echo "  MID (${SIZE1} MB): $MID1"
+    fi
+    RECV="$TMP/received1-$TRY.bin"
+    "$CLI" --data-dir "$DIR_B" network-get "$MID1" -o "$RECV" --password-file "$PW" --no-wait >/dev/null 2>&1; RC=$?
+    [ $RC -eq 0 ] && check 1 "network-get --no-wait started the transfer (${SIZE1} MB)" || check 0 "network-get --no-wait started the transfer (${SIZE1} MB)"
+    wait_segments "$DIR_B" "$MID1" 1 900 && check 1 "the first segment was received" || check 0 "the first segment was received"
+    kill_daemon "$PID_B" "$DIR_B"; PID_B=""
+    echo "  B's daemon killed."
+    if [ ! -e "$RECV" ] && [ -e "$RECV.part" ]; then
+        INTERRUPTED=1
+    elif [ "$TRY" -lt 4 ]; then
+        echo "  the receive finished before the kill landed at ${SIZE1} MB; retrying with $(( SIZE1 * 2 )) MB"
+        SIZE1=$(( SIZE1 * 2 ))
+    fi
+    TRY=$(( TRY + 1 ))
+done
 [ ! -e "$RECV" ] && check 1 "no output file while incomplete" || check 0 "no output file while incomplete"
 [ -e "$RECV.part" ] && check 1 "the partial file is kept" || check 0 "the partial file is kept"
 
