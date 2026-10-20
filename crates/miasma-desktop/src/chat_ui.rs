@@ -1361,7 +1361,10 @@ impl ChatUi {
         if let Some(a) = chosen {
             self.apply_action(a, o, &name, action);
         }
-        self.memory_only_note(ui, c);
+        // Beside the list the note is already shown once above both panes.
+        if !self.wide {
+            self.memory_only_note(ui, c);
+        }
         if back {
             self.close_conversation();
             return;
