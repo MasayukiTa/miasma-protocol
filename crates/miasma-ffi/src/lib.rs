@@ -986,14 +986,18 @@ pub fn start_embedded_daemon(
     let master_key_path = miasma_core::paths::master_key(&path);
     let master_key = read_master_key_zeroizing(&master_key_path)?;
 
-    // Create MiasmaNode with full networking.
-    let node =
+    // Create MiasmaNode with full networking. Building the swarm registers the
+    // QUIC/UDP sockets with the tokio reactor, so this must run inside the shared
+    // runtime's context: the caller is a plain Kotlin/Swift thread with none.
+    let node = {
+        let _runtime_guard = shared_runtime().enter();
         MiasmaNode::new(&master_key, NodeType::Full, &config.network.listen_addr).map_err(|e| {
             tracing::warn!("node create error: {e}");
             MiasmaFfiError::Other {
                 msg: "failed to create network node".into(),
             }
-        })?;
+        })?
+    };
 
     // Move the transport config into the daemon; do not duplicate persisted
     // secret Strings into a second long-lived config object.
