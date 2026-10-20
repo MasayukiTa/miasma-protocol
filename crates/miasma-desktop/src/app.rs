@@ -2838,6 +2838,10 @@ impl MiasmaApp {
                             label,
                         )
                     });
+                    // egui draws a switched-off radio grey but does not publish it as disabled.
+                    if !available {
+                        crate::form_check::mark_disabled(&r);
+                    }
                     kit::hint(ui, help);
                 }
             });
@@ -4344,12 +4348,15 @@ mod tests {
                 .map(|(_, n)| (n.name().unwrap_or("").to_owned(), n.is_disabled()))
                 .collect();
         }
-        assert_eq!(radios.len(), 3, "{radios:?}");
-        for (name, disabled) in &radios {
-            assert!(*disabled, "radio {name:?} is published as enabled");
+        // The three choices, each under its own name, all switched off. (Other radios on the page,
+        // such as the sizes of the hosting setting, are not part of this.)
+        let p = app.pq();
+        for label in [p.off, p.prefer, p.require] {
+            assert!(
+                radios.iter().any(|(n, d)| n == label && *d),
+                "no disabled radio named {label:?}: {radios:?}"
+            );
         }
-        let names: std::collections::HashSet<_> = radios.iter().map(|(n, _)| n.clone()).collect();
-        assert_eq!(names.len(), 3, "each radio has its own name: {radios:?}");
     }
 
     #[test]
