@@ -2648,7 +2648,8 @@ fn inner_frame() -> egui::Frame {
 /// Fixture names for the `ui-tour` screenshots and the layout unit test.
 #[cfg(any(test, feature = "ui-tour"))]
 pub const FIXTURES: &[&str] = &[
-    "empty", "one", "two", "five", "active", "failed", "qr", "verify", "perm", "added", "adderror",
+    "empty", "one", "two", "five", "active", "failed", "invite", "qr", "verify", "perm", "added",
+    "adderror",
 ];
 
 #[cfg(any(test, feature = "ui-tour"))]
@@ -2854,6 +2855,10 @@ impl ContactsUi {
                 );
                 retrying.error = Some("open stream timed out".into());
                 board.push(retrying);
+            }
+            "invite" => {
+                ui.contacts = vec![a.clone()];
+                ui.invite_open = true;
             }
             "qr" => {
                 ui.contacts = vec![a.clone()];
