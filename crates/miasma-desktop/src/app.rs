@@ -4303,7 +4303,6 @@ mod tests {
         };
         window_frame(ctx, app, vec![press(true)]);
         window_frame(ctx, app, vec![press(false)]);
-        eprintln!("DBG {name}: tab after release {:?}", app.tab);
         window_frame(ctx, app, vec![]);
         window_frame(ctx, app, vec![]);
     }
@@ -4344,11 +4343,20 @@ mod tests {
             } else {
                 label_of(s, s)
             };
-            click_button(&ctx, &mut app, label);
-            let ok = match target {
+            // The real background worker may report "no service" in the middle of a frame and
+            // switch the buttons off for that frame; a click is tried again then.
+            let reached = |app: &MiasmaApp| match target {
                 None => app.send_flow.is_open(),
                 Some(tab) => app.tab == tab,
             };
+            let mut ok = false;
+            for _ in 0..4 {
+                click_button(&ctx, &mut app, label);
+                ok = reached(&app);
+                if ok {
+                    break;
+                }
+            }
             if !ok {
                 failed.push(format!(
                     "{label}: now on {:?}, send flow open: {}",
