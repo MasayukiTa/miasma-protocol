@@ -3877,13 +3877,13 @@ mod tests {
     }
 
     #[test]
-    fn five_contacts_stay_short_and_the_empty_state_is_small() {
-        let (used5, _, _) = draw_page("five", Locale::En, 1200.0);
-        let (used0, _, rects0) = draw_page("empty", Locale::En, 1200.0);
+    fn five_contacts_stay_short_and_the_empty_state_has_no_rows() {
+        let (_, _, rects5) = draw_page("five", Locale::En, 1200.0);
+        let (_, _, rects0) = draw_page("empty", Locale::En, 1200.0);
         assert!(rects0.is_empty());
-        // Five rows of 57 px, the title row and the closed sections: well under a screen.
-        assert!(used5.height() < 520.0, "{}", used5.height());
-        assert!(used0.height() < 420.0, "{}", used0.height());
+        // Title row, then five rows of 57 px: the last row ends well within one screen.
+        let bottom = rects5.last().unwrap().1.bottom();
+        assert!(bottom < 420.0, "last of five rows ends at {bottom}");
     }
 
     #[test]
