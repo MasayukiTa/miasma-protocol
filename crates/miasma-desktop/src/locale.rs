@@ -2900,6 +2900,10 @@ pub use group::{group_strings, GroupStrings};
 mod compose;
 pub use compose::{compose_strings, ComposeStrings};
 
+// Strings added for the interface audit (their own file: `locale/audit.rs`).
+mod audit;
+pub use audit::{audit_strings, AuditStrings};
+
 // ─── Chat (one-to-one messages between registered contacts) ─────────────────
 
 /// Declares `ChatStrings` and a field listing for the completeness test from one field list.

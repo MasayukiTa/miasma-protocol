@@ -1342,6 +1342,34 @@ impl GroupUi {
     // ─── Drawing: dialogs ───────────────────────────────────────────────────
 
     /// The dialogs: new group, add members, and the confirmations. Esc closes the open one.
+    /// Keys of the dialogs that are open (for `modal::Order`).
+    pub fn open_modals(&self) -> Vec<&'static str> {
+        let mut open = Vec::new();
+        if self.confirm.is_some() {
+            open.push("group_confirm");
+        }
+        if self.form.is_some() {
+            open.push("group_form");
+        }
+        if self.add.is_some() {
+            open.push("group_add");
+        }
+        open
+    }
+
+    /// Close the dialog with this key (the screen keeps only the newest one open).
+    pub fn close_modal(&mut self, key: &str) {
+        match key {
+            "group_confirm" => self.confirm = None,
+            "group_form" => {
+                self.form = None;
+                self.creating = false;
+            }
+            "group_add" => self.add = None,
+            _ => {}
+        }
+    }
+
     pub fn dialogs(&mut self, ctx: &egui::Context, contacts: &[ContactInfo]) {
         self.confirm_dialog(ctx);
         self.form_dialog(ctx, contacts);
@@ -1401,11 +1429,11 @@ impl GroupUi {
         if self.form.is_none() {
             return;
         }
-        if self.confirm.is_none()
-            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
-        {
+        crate::a11y::dialog_enter(ctx, "group_form");
+        if self.confirm.is_none() && crate::a11y::esc_pressed(ctx) {
             self.form = None;
             self.creating = false;
+            crate::a11y::dialog_leave(ctx, "group_form");
             return;
         }
         let (gs, cs) = (self.gs(), self.cs());
@@ -1507,6 +1535,7 @@ impl GroupUi {
         if cancel {
             self.form = None;
             self.creating = false;
+            crate::a11y::dialog_leave(ctx, "group_form");
         } else if create {
             self.start_create();
         }
@@ -1516,10 +1545,10 @@ impl GroupUi {
         if self.add.is_none() {
             return;
         }
-        if self.confirm.is_none()
-            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
-        {
+        crate::a11y::dialog_enter(ctx, "group_add");
+        if self.confirm.is_none() && crate::a11y::esc_pressed(ctx) {
             self.add = None;
+            crate::a11y::dialog_leave(ctx, "group_add");
             return;
         }
         let Some(d) = self.detail.clone() else {
@@ -1606,6 +1635,7 @@ impl GroupUi {
         }
         if cancel {
             self.add = None;
+            crate::a11y::dialog_leave(ctx, "group_add");
         } else if confirm_add {
             self.start_add();
         }

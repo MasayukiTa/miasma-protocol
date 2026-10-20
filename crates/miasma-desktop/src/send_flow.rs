@@ -759,12 +759,14 @@ impl SendFlow {
         ui.spacing_mut().item_spacing.y = kit::SP_2;
         ui.label(kit::muted_text(t.password_label));
         let mut generate = false;
+        let au = crate::locale::audit_strings(t.locale);
         ui.horizontal(|ui| {
-            ui.add(
+            let r = ui.add(
                 kit::input(&mut self.password)
                     .password(true)
                     .desired_width(kit::input_width_beside_button(ui)),
             );
+            crate::form_check::name(&r, au.a11y_password);
             if ui.add(kit::secondary_button(t.pw_generate)).clicked() {
                 generate = true;
             }
@@ -787,11 +789,12 @@ impl SendFlow {
             kit::hint(ui, t.pw_generated_note);
         }
         ui.label(kit::muted_text(t.confirm_label));
-        ui.add(
+        let r = ui.add(
             kit::input(&mut self.confirm)
                 .password(true)
                 .desired_width(240.0),
         );
+        crate::form_check::name(&r, au.a11y_password_repeat);
         if self.password != self.confirm && !self.confirm.is_empty() {
             kit::notice(ui, Level::Error, t.mismatch);
         }

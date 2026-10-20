@@ -278,11 +278,17 @@ impl NetworkUi {
         self.drain();
         let s = net_strings(locale);
         let ctx = ui.ctx().clone();
-        self.settings_section(ui, s, &ctx);
+        self.settings_section(ui, locale, s, &ctx);
         self.check_section(ui, locale, s, &ctx);
     }
 
-    fn settings_section(&mut self, ui: &mut egui::Ui, s: &'static NetStrings, ctx: &egui::Context) {
+    fn settings_section(
+        &mut self,
+        ui: &mut egui::Ui,
+        locale: Locale,
+        s: &'static NetStrings,
+        ctx: &egui::Context,
+    ) {
         kit::section(ui, s.heading, |ui| {
             kit::paragraph_muted(ui, s.intro);
             if self.load_failed {
@@ -331,6 +337,10 @@ impl NetworkUi {
                         kit::input(&mut self.new_relay)
                             .hint_text(s.relay_placeholder)
                             .desired_width(w),
+                    );
+                    crate::form_check::name(
+                        &r,
+                        crate::locale::audit_strings(locale).a11y_relay_new,
                     );
                     let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     if ui.add(kit::secondary_button(s.relay_add)).clicked() || enter {
@@ -399,10 +409,14 @@ impl NetworkUi {
             let mut hours = self.edit.retry_hours;
             kit::form_row(ui, s.retry_label, Some(s.retry_desc), |ui| {
                 ui.horizontal(|ui| {
-                    ui.add(
+                    let r = ui.add(
                         egui::DragValue::new(&mut hours)
                             .clamp_range(0..=MAX_RETRY_HOURS)
                             .speed(1.0),
+                    );
+                    crate::form_check::name(
+                        &r,
+                        crate::locale::audit_strings(locale).a11y_retry_hours,
                     );
                     ui.label(RichText::new(s.retry_unit).color(kit::pal().text));
                 });
