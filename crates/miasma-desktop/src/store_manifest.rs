@@ -53,9 +53,7 @@ fn the_manifest_declares_every_language_the_app_has() {
 fn the_manifest_template_is_still_well_formed_around_the_resources() {
     assert_eq!(TEMPLATE.matches("<Resources>").count(), 1);
     assert_eq!(TEMPLATE.matches("</Resources>").count(), 1);
-    assert!(TEMPLATE.contains("<Package
-") || TEMPLATE.contains("<Package
-"));
+    assert!(TEMPLATE.contains("<Package\n") || TEMPLATE.contains("<Package\r\n"));
     assert_eq!(TEMPLATE.matches("</Package>").count(), 1);
     // The placeholders the build script fills in are all still there.
     for ph in [
