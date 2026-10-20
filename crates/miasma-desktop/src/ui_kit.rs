@@ -693,6 +693,7 @@ pub const MENU_GLYPH: &str = "\u{b7}\u{b7}\u{b7}";
 pub fn glyph_button(ui: &mut Ui, glyph: &str, name: &str) -> Response {
     let resp = ui
         .scope(|ui| {
+            ui.spacing_mut().button_padding = vec2(SP_2, 2.0);
             let w = &mut ui.visuals_mut().widgets;
             w.inactive.weak_bg_fill = Color32::TRANSPARENT;
             w.inactive.bg_stroke = Stroke::NONE;
