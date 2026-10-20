@@ -90,30 +90,26 @@ They are fine for the README. For the Store, capture at least these five, in Eng
 
 The desktop crate has a developer-only UI tour (`crates/miasma-desktop/src/app/tour.rs`, feature `ui-tour`). It is not part of any release build. It draws the real screens with fixture data, so no real contact code appears.
 
-Headless tour (no window). Its step table has fixed sizes. Only the Chat and Contacts fixtures are at least 1366 pixels wide: Chat is 1400 x 900, Contacts is 1400 x 2100.
+Headless tour (no window). The Store steps render Home, Files, Contacts, Chat and Settings at 1366 x 768 with sample data only, in English (`en`), Japanese (`ja`) and Simplified Chinese (`zh`). Their names are `store_<en|ja|zh>_<home|files|contacts|chat|settings>_1366x768`.
 
 ```powershell
-$env:MIASMA_UI_TOUR_ALL = "1"
-$env:MIASMA_UI_TOUR_FILTER = "chat_thread_light_en_wide,chat_list_light_en_wide,contacts_two_light_en_wide"
+$env:MIASMA_UI_TOUR_FILTER = "store_en_,store_ja_"
 $env:MIASMA_UI_TOUR_OUT = "$env:TEMP\miasma-store-shots"
 cargo test --package miasma-desktop --features ui-tour --bin miasma-desktop headless_tour_renders_every_step -- --nocapture
 ```
 
-Step names are `chat_<fixture>_<light|dark>_<en|ja>_<wide|narrow>` and `contacts_<fixture>_...`. The fixtures are listed in `chat_ui::FIXTURES` and `contacts::FIXTURES`. The Contacts picture is tall, so crop it to a region of at least 1366 x 768. Crop only. Do not scale.
+`MIASMA_UI_TOUR_SIZE=<width>x<height>` renders every selected step at that size instead of its own, for example `1366x768` or `1920x1080` (each side 320 to 8192). Use it to get another size of the same screens:
 
-Home, Files and Settings in the headless Easy tour are 1200 pixels wide, which is too small. There are two ways to get them at a larger size:
+```powershell
+$env:MIASMA_UI_TOUR_FILTER = "store_en_"
+$env:MIASMA_UI_TOUR_SIZE = "1920x1080"
+$env:MIASMA_UI_TOUR_OUT = "$env:TEMP\miasma-store-shots-1080"
+cargo test --package miasma-desktop --features ui-tour --bin miasma-desktop headless_tour_renders_every_step -- --nocapture
+```
 
-1. Window tour on a PC with a display. It uses the window size you give it and writes `.ppm` files that you convert to PNG.
+The same variable sets the window size in the window tour on a PC with a display (`MIASMA_UI_TOUR` set to an output folder, `MIASMA_UI_TOUR_EASY=1`, then `cargo run --release --package miasma-desktop --features ui-tour`), which writes `.ppm` files that you convert to PNG.
 
-   ```powershell
-   $env:MIASMA_UI_TOUR = "$env:TEMP\miasma-store-shots-gl"
-   $env:MIASMA_UI_TOUR_EASY = "1"
-   $env:MIASMA_UI_TOUR_SIZE = "1400x900"
-   $env:MIASMA_UI_TOUR_FILTER = "light_en_home,light_en_files,light_en_settings"
-   cargo run --release --package miasma-desktop --features ui-tour
-   ```
-
-2. A small follow-up change that lets the headless tour read `MIASMA_UI_TOUR_SIZE`. This is not done in this pull request.
+The older Chat and Contacts steps (`chat_<fixture>_<light|dark>_<en|ja>_<wide|narrow>` and `contacts_<fixture>_...`, with `MIASMA_UI_TOUR_ALL=1`) are still there. Their fixtures are listed in `chat_ui::FIXTURES` and `contacts::FIXTURES`. Never scale a screenshot up; only crop.
 
 [Owner] None of these commands was run while writing this kit (no builds were allowed on the machine used). Run them once and open every image before uploading. A screenshot taken from the installed app with a demo profile also works.
 

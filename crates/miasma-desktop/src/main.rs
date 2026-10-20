@@ -27,6 +27,8 @@ mod errors;
 mod fonts;
 mod group;
 mod group_ui;
+mod hosting_strings;
+mod hosting_ui;
 mod link;
 pub mod locale;
 mod network_model;
@@ -36,6 +38,8 @@ mod open_path;
 mod os_locale;
 mod send_flow;
 mod speed;
+#[cfg(test)]
+mod store_manifest;
 mod theme;
 mod transfers;
 mod ui_kit;

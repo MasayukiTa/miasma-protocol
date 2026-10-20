@@ -318,6 +318,22 @@ fn default_hosted_quota_mb() -> u64 {
     DEFAULT_HOSTED_QUOTA_MB
 }
 
+/// The sizes the Settings screen offers for keeping encrypted pieces for others, in MiB
+/// (`0` = off). A value in the file that is none of these is kept as it is and shown as
+/// a custom size.
+pub const HOSTED_QUOTA_CHOICES_MB: [u64; 4] = [0, 256, 1_024, 5_120];
+
+/// The hosted quota a fresh install starts with: a Microsoft Store (MSIX) install keeps
+/// nothing for others until the person turns it on; every other install keeps today's
+/// default.
+pub fn default_hosted_quota_mb_for(packaged: bool) -> u64 {
+    if packaged {
+        0
+    } else {
+        DEFAULT_HOSTED_QUOTA_MB
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageConfig {
     /// Maximum storage for held shares, in MiB.
@@ -642,13 +658,42 @@ impl Default for NetworkConfig {
 }
 
 impl NodeConfig {
-    pub fn load(data_dir: &Path) -> Result<Self, MiasmaError> {
+    /// The settings of a fresh install. A packaged (Microsoft Store) install starts with
+    /// hosting for others and self-update off; any other install is [`NodeConfig::default`].
+    pub fn default_for(packaged: bool) -> Self {
+        let mut c = Self::default();
+        c.storage.hosted_quota_mb = default_hosted_quota_mb_for(packaged);
+        if packaged {
+            c.update.mode = crate::update::UpdateMode::Off;
+        }
+        c
+    }
+
+    /// [`NodeConfig::load`] for a given kind of install. Only a missing `config.toml` is
+    /// answered with [`NodeConfig::default_for`]; a file that exists is read as written, so
+    /// a value the person chose is never replaced.
+    pub fn load_with(data_dir: &Path, packaged: bool) -> Result<Self, MiasmaError> {
         let path = crate::paths::config_file(data_dir);
         if !path.exists() {
-            return Ok(Self::default());
+            return Ok(Self::default_for(packaged));
         }
         let raw = Zeroizing::new(std::fs::read_to_string(&path)?);
         toml::from_str(raw.as_str()).map_err(|e| MiasmaError::Serialization(e.to_string()))
+    }
+
+    /// First start of a packaged install: write the packaged defaults when there is no
+    /// `config.toml` yet. Returns whether it wrote. An existing file is never touched, and
+    /// nothing is written for a normal install.
+    pub fn seed_first_start(data_dir: &Path, packaged: bool) -> Result<bool, MiasmaError> {
+        if !packaged || crate::paths::config_file(data_dir).exists() {
+            return Ok(false);
+        }
+        Self::default_for(true).save(data_dir)?;
+        Ok(true)
+    }
+
+    pub fn load(data_dir: &Path) -> Result<Self, MiasmaError> {
+        Self::load_with(data_dir, crate::update::package::is_packaged())
     }
 
     pub fn save(&self, data_dir: &Path) -> Result<(), MiasmaError> {
@@ -818,5 +863,112 @@ bandwidth_mb_day = 512
         }
         assert!(rendered.contains("proxy_password_configured: true"));
         assert!(rendered.contains("obfuscated_quic_secret_configured: true"));
+    }
+}
+
+#[cfg(test)]
+mod store_install_tests {
+    use super::*;
+    use crate::update::UpdateMode;
+
+    fn read_hosted(dir: &Path) -> u64 {
+        NodeConfig::load_with(dir, false)
+            .unwrap()
+            .storage
+            .hosted_quota_mb
+    }
+
+    #[test]
+    fn a_packaged_fresh_install_keeps_nothing_for_others_and_does_not_self_update() {
+        let c = NodeConfig::default_for(true);
+        assert_eq!(c.storage.hosted_quota_mb, 0);
+        assert_eq!(c.update.mode, UpdateMode::Off);
+    }
+
+    #[test]
+    fn a_normal_fresh_install_keeps_todays_defaults() {
+        let c = NodeConfig::default_for(false);
+        assert_eq!(c.storage.hosted_quota_mb, DEFAULT_HOSTED_QUOTA_MB);
+        assert_eq!(c.update.mode, UpdateMode::Notify);
+        assert_eq!(
+            c.storage.hosted_quota_mb,
+            NodeConfig::default().storage.hosted_quota_mb
+        );
+    }
+
+    #[test]
+    fn the_choices_include_off_and_todays_default() {
+        assert_eq!(HOSTED_QUOTA_CHOICES_MB[0], 0);
+        assert!(HOSTED_QUOTA_CHOICES_MB.contains(&DEFAULT_HOSTED_QUOTA_MB));
+        assert!(HOSTED_QUOTA_CHOICES_MB.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[test]
+    fn first_start_writes_the_packaged_defaults_once() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(NodeConfig::seed_first_start(d.path(), true).unwrap());
+        assert!(crate::paths::config_file(d.path()).exists());
+        // The file is read back as written, also by a loader that says "normal install".
+        assert_eq!(read_hosted(d.path()), 0);
+        let back = NodeConfig::load_with(d.path(), false).unwrap();
+        assert_eq!(back.update.mode, UpdateMode::Off);
+        // A second start writes nothing.
+        assert!(!NodeConfig::seed_first_start(d.path(), true).unwrap());
+    }
+
+    #[test]
+    fn a_normal_install_writes_nothing_at_first_start() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(!NodeConfig::seed_first_start(d.path(), false).unwrap());
+        assert!(!crate::paths::config_file(d.path()).exists());
+    }
+
+    #[test]
+    fn first_start_never_replaces_an_existing_choice() {
+        let d = tempfile::tempdir().unwrap();
+        let mut c = NodeConfig::default();
+        c.storage.hosted_quota_mb = 5_120;
+        c.update.mode = UpdateMode::Auto;
+        c.save(d.path()).unwrap();
+        assert!(!NodeConfig::seed_first_start(d.path(), true).unwrap());
+        // Loading as packaged reads the file as written too.
+        let back = NodeConfig::load_with(d.path(), true).unwrap();
+        assert_eq!(back.storage.hosted_quota_mb, 5_120);
+        assert_eq!(back.update.mode, UpdateMode::Auto);
+    }
+
+    #[test]
+    fn an_explicit_zero_or_default_value_survives_both_kinds_of_loader() {
+        for explicit in [0, DEFAULT_HOSTED_QUOTA_MB] {
+            let d = tempfile::tempdir().unwrap();
+            let mut c = NodeConfig::default();
+            c.storage.hosted_quota_mb = explicit;
+            c.save(d.path()).unwrap();
+            for packaged in [false, true] {
+                let back = NodeConfig::load_with(d.path(), packaged).unwrap();
+                assert_eq!(
+                    back.storage.hosted_quota_mb, explicit,
+                    "packaged={packaged}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_packaged_choice_made_later_persists() {
+        let d = tempfile::tempdir().unwrap();
+        NodeConfig::seed_first_start(d.path(), true).unwrap();
+        let mut c = NodeConfig::load_with(d.path(), true).unwrap();
+        c.storage.hosted_quota_mb = 256;
+        c.save(d.path()).unwrap();
+        assert_eq!(
+            NodeConfig::load_with(d.path(), true)
+                .unwrap()
+                .storage
+                .hosted_quota_mb,
+            256
+        );
+        assert!(!NodeConfig::seed_first_start(d.path(), true).unwrap());
+        assert_eq!(read_hosted(d.path()), 256);
     }
 }

@@ -131,6 +131,10 @@ pub struct UpdatesUi {
     /// The public keys this build verifies releases with. With none, nothing is
     /// installed without the person asking (see `auto_install`).
     signing_keys: Vec<[u8; 32]>,
+    /// Running inside a Microsoft Store (MSIX) package: the Store updates the program, so
+    /// nothing here checks, downloads or installs, and the controls are replaced by a line
+    /// that says so. `cfg.mode` is held at `off` in memory and never written.
+    store_managed: bool,
 }
 
 impl UpdatesUi {
@@ -142,8 +146,17 @@ impl UpdatesUi {
     }
 
     pub fn new(data_dir: PathBuf) -> Self {
-        let node = NodeConfig::load(&data_dir).ok();
-        let cfg = node.as_ref().map(|c| c.update.clone()).unwrap_or_default();
+        Self::with_packaged(data_dir, miasma_core::update::package::is_packaged())
+    }
+
+    /// [`UpdatesUi::new`] with the kind of install given, so tests need no package.
+    pub fn with_packaged(data_dir: PathBuf, packaged: bool) -> Self {
+        let node = NodeConfig::load_with(&data_dir, packaged).ok();
+        let mut cfg = node.as_ref().map(|c| c.update.clone()).unwrap_or_default();
+        if packaged {
+            // Fail closed: whatever the file says, a Store install does not update itself.
+            cfg.mode = UpdateMode::Off;
+        }
         let extra_ca = node.and_then(|c| c.transport.iroh_extra_ca_pem.clone());
         let (tx, rx) = channel();
         Self {
@@ -169,6 +182,7 @@ impl UpdatesUi {
             guard: std::env::var_os(RELAUNCH_GUARD_ENV).is_some(),
             resume_started: false,
             signing_keys: UPDATE_PUBKEYS.to_vec(),
+            store_managed: packaged,
         }
     }
 
@@ -368,7 +382,7 @@ impl UpdatesUi {
             Msg::Checked { outcome, auto } => {
                 self.phase = Phase::Idle;
                 let summary = match &outcome {
-                    CheckOutcome::Disabled => Summary::Disabled,
+                    CheckOutcome::Disabled | CheckOutcome::StoreManaged => Summary::Disabled,
                     CheckOutcome::UpToDate { .. } => Summary::UpToDate,
                     CheckOutcome::Available(o)
                         if o.source == miasma_core::update::Source::Local =>
@@ -547,6 +561,16 @@ impl UpdatesUi {
     /// The Updates section of Settings.
     pub fn section(&mut self, ui: &mut egui::Ui, locale: Locale, technical: bool) {
         let u = locale::update_strings(locale);
+        if self.store_managed {
+            kit::section(ui, u.heading, |ui| {
+                kit::notice(
+                    ui,
+                    Level::Info,
+                    crate::hosting_strings::host_strings(locale).store_updates,
+                );
+            });
+            return;
+        }
         kit::section(ui, u.heading, |ui| {
             let desc = match self.cfg.mode {
                 UpdateMode::Off => u.mode_desc_off,
@@ -680,9 +704,10 @@ pub fn ui_error(e: &UpdateError) -> UiError {
         UpdateError::Verify(_) | UpdateError::Unverifiable | UpdateError::Archive(_) => {
             ErrorKind::UpdateVerifyFailed
         }
-        UpdateError::Network(_) | UpdateError::NoAsset | UpdateError::Disabled => {
-            ErrorKind::UpdateCheckFailed
-        }
+        UpdateError::Network(_)
+        | UpdateError::NoAsset
+        | UpdateError::Disabled
+        | UpdateError::StoreManaged => ErrorKind::UpdateCheckFailed,
         UpdateError::HealthCheck(_)
         | UpdateError::Io(_)
         | UpdateError::Journal(_)
@@ -760,6 +785,58 @@ mod tests {
             assert_eq!(level, Level::Warn);
             assert_ne!(text, s.result_up_to_date);
         }
+    }
+
+    #[test]
+    fn a_store_install_holds_updates_off_even_when_the_file_says_auto() {
+        let d = tempfile::tempdir().unwrap();
+        let mut node = NodeConfig::default();
+        node.update.mode = UpdateMode::Auto;
+        node.save(d.path()).unwrap();
+
+        let mut u = UpdatesUi::with_packaged(d.path().to_path_buf(), true);
+        assert!(u.store_managed);
+        assert_eq!(u.cfg.mode, UpdateMode::Off);
+        assert!(!u.cfg.is_enabled());
+        assert!(!u.auto_install());
+        // No check starts, by hand or by the start timer.
+        u.start_check(false);
+        u.start_check(true);
+        assert_eq!(u.phase, Phase::Idle);
+        // The file is not rewritten: the hold is in memory only.
+        let on_disk = NodeConfig::load_with(d.path(), true).unwrap();
+        assert_eq!(on_disk.update.mode, UpdateMode::Auto);
+
+        // A normal install keeps the file's choice and its controls.
+        let n = UpdatesUi::with_packaged(d.path().to_path_buf(), false);
+        assert!(!n.store_managed);
+        assert_eq!(n.cfg.mode, UpdateMode::Auto);
+    }
+
+    #[test]
+    fn a_fresh_store_install_reads_off_and_a_fresh_normal_install_reads_notify() {
+        let a = tempfile::tempdir().unwrap();
+        let store = UpdatesUi::with_packaged(a.path().to_path_buf(), true);
+        assert_eq!(store.cfg.mode, UpdateMode::Off);
+        let b = tempfile::tempdir().unwrap();
+        let normal = UpdatesUi::with_packaged(b.path().to_path_buf(), false);
+        assert_eq!(normal.cfg.mode, UpdateMode::Notify);
+        assert!(normal.cfg.is_enabled());
+    }
+
+    #[test]
+    fn the_store_answers_map_to_a_quiet_status() {
+        let (_d, mut u) = ui();
+        u.handle(Msg::Checked {
+            outcome: CheckOutcome::StoreManaged,
+            auto: false,
+        });
+        assert_eq!(u.last_check.as_ref().unwrap().1, Summary::Disabled);
+        assert!(u.offer.is_none());
+        assert_eq!(
+            ui_error(&UpdateError::StoreManaged).kind,
+            ErrorKind::UpdateCheckFailed
+        );
     }
 
     #[test]

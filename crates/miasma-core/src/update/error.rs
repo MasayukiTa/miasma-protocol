@@ -8,6 +8,9 @@ use super::verify::VerifyError;
 pub enum UpdateError {
     /// `update.mode = off`.
     Disabled,
+    /// The program runs inside a Microsoft Store (MSIX) package: the Store
+    /// updates it, so this program never downloads or replaces files.
+    StoreManaged,
     /// A transfer, push or chat send is running (or the daemon could not say).
     Busy(String),
     /// The install folder cannot be written to.
@@ -36,6 +39,7 @@ impl UpdateError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Disabled => "disabled",
+            Self::StoreManaged => "store_managed",
             Self::Busy(_) => "busy",
             Self::NotWritable(_) => "not_writable",
             Self::NoTarget(_) => "no_target",
@@ -56,6 +60,7 @@ impl std::fmt::Display for UpdateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Disabled => f.write_str("updates are switched off (update.mode = off)"),
+            Self::StoreManaged => f.write_str("updates are handled by the Microsoft Store"),
             Self::Busy(why) => write!(f, "not now: {why}"),
             Self::NotWritable(m) => write!(f, "the install folder cannot be written to: {m}"),
             Self::NoTarget(m) => write!(f, "this installation cannot be updated in place: {m}"),
