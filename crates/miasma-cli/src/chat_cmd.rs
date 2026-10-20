@@ -112,10 +112,11 @@ impl M<'_> {
             M::HistoryNone(label) => format!("No messages with \"{label}\" yet."),
             M::ConversationsNone => "No conversations yet. Register a contact (`miasma contact add <code>`), then `miasma chat send <contact> <text>`.".into(),
             M::ConversationRow(c) => format!(
-                "{}  {} messages{}  last: {}",
+                "{}  {} messages{}{}  last: {}",
                 c.label.clone().unwrap_or_else(|| format!("(removed contact {})", c.fingerprint)),
                 c.messages,
                 if c.pending > 0 { format!(", {} waiting to be delivered{}", c.pending, pending_note(c, false)) } else { String::new() },
+                pqc_note(c, false),
                 if c.last_ms == 0 { "-".to_owned() } else { stamp(c.last_ms) },
             ),
             M::Line(m) => line(m, false),
@@ -162,10 +163,11 @@ impl M<'_> {
             M::HistoryNone(label) => format!("「{label}」とのメッセージはまだありません。"),
             M::ConversationsNone => "会話はまだありません。連絡先を追加(`miasma contact add <連絡先コード>`)してから、`miasma chat send <連絡先> <メッセージ>` を実行してください。".into(),
             M::ConversationRow(c) => format!(
-                "{}  {}件{}  最後: {}",
+                "{}  {}件{}{}  最後: {}",
                 c.label.clone().unwrap_or_else(|| format!("(削除された連絡先 {})", c.fingerprint)),
                 c.messages,
                 if c.pending > 0 { format!("、未配信 {}件{}", c.pending, pending_note(c, true)) } else { String::new() },
+                pqc_note(c, true),
                 if c.last_ms == 0 { "-".to_owned() } else { stamp(c.last_ms) },
             ),
             M::Line(m) => line(m, true),
@@ -293,9 +295,47 @@ fn reason_words(r: &str, ja: bool) -> String {
             "相手が、このバージョンでは分からない状態を返しました(相手のほうが新しいMiasmaかもしれません)",
         ),
         "storage" => ("this computer could not read its own message store", "このパソコン側で保存領域を読めませんでした"),
+        "pqc_peer_no_hybrid" => (
+            "not sent: privacy.pqc_mode is require and their Miasma does not offer the hybrid key exchange",
+            "送っていません。privacy.pqc_mode が require で、相手のMiasmaがハイブリッド鍵交換に対応していません",
+        ),
+        "pqc_failed" => (
+            "not sent: the hybrid key exchange with them could not be completed",
+            "送っていません。相手とのハイブリッド鍵交換を完了できませんでした",
+        ),
         other => return other.to_owned(),
     };
     (if ja { jp } else { en }).to_owned()
+}
+
+/// `, classical only` and the like for a conversation whose hybrid
+/// post-quantum upgrade was asked for or is in use; nothing otherwise.
+fn pqc_note(c: &ConversationInfo, ja: bool) -> String {
+    let Some(state) = c.pqc.as_deref() else {
+        return String::new();
+    };
+    let (en, jp) = match state {
+        "hybrid" => (
+            "quantum-resistant protection on",
+            "量子コンピューター対策の保護：オン",
+        ),
+        "classical" => ("classical only", "標準の保護のみ"),
+        "pending" => ("extra protection being set up", "追加の保護を準備中"),
+        "failed" => (
+            "extra protection failed, classical only",
+            "追加の保護に失敗、標準の保護のみ",
+        ),
+        _ => return String::new(),
+    };
+    let mut s = format!(
+        "{}{}",
+        if ja { "、" } else { ", " },
+        if ja { jp } else { en }
+    );
+    if let Some(r) = c.pqc_reason.as_deref() {
+        s.push_str(&format!(" ({r})"));
+    }
+    s
 }
 
 /// ` (why the last attempt failed; last tried ...)` for a conversation with
@@ -686,6 +726,8 @@ mod tests {
             read_receipts: true,
             pending_reason: None,
             pending_tried_ms: 0,
+            pqc: None,
+            pqc_reason: None,
         };
         let removed = ConversationInfo {
             label: None,

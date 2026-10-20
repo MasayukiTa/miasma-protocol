@@ -101,6 +101,101 @@ pub struct ConversationInfo {
     /// When that attempt started (ms since the epoch), 0 if none.
     #[serde(default)]
     pub pending_tried_ms: u64,
+    /// Hybrid post-quantum upgrade of this conversation: `pending`, `hybrid`,
+    /// `classical` ("classical only": the contact does not offer it) or
+    /// `failed`. `None` when `privacy.pqc_mode` is off and nothing was
+    /// negotiated, and in builds without the feature. Older daemons omit it.
+    #[serde(default)]
+    pub pqc: Option<String>,
+    /// Why the state is `classical` or `failed` (a stable word such as
+    /// `peer_no_hybrid`, `peer_old_build`, `exchange_failed`).
+    #[serde(default)]
+    pub pqc_reason: Option<String>,
+}
+
+/// What this process did with the hybrid upgrade (numbers only, no peer
+/// identifiers).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PqcCounts {
+    /// Sessions that completed the hybrid exchange.
+    #[serde(default)]
+    pub hybrid_sessions: u64,
+    /// Sessions that stayed classical because the contact did not offer the
+    /// hybrid suite (shown as "classical only").
+    #[serde(default)]
+    pub classical_only: u64,
+    /// Of those, decided under `require`: the messages were refused.
+    #[serde(default)]
+    pub refused: u64,
+    /// Exchanges that failed (altered messages, timeout).
+    #[serde(default)]
+    pub failed: u64,
+    #[serde(default)]
+    pub offers_sent: u64,
+    #[serde(default)]
+    pub offers_received: u64,
+}
+
+/// `privacy.pqc_mode` as the daemon runs it, and what came of it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PqcStatus {
+    /// `off`, `prefer` or `require`: the mode this daemon started with.
+    #[serde(default)]
+    pub mode: String,
+    /// False in a build without the `pqc` cargo feature: the mode has no
+    /// effect there and every session stays classical.
+    #[serde(default)]
+    pub available: bool,
+    #[serde(default)]
+    pub counts: PqcCounts,
+}
+
+/// The hybrid-upgrade status for a daemon that runs in `mode`.
+pub fn pqc_status_for(mode: crate::config::PqcMode) -> PqcStatus {
+    #[cfg(feature = "pqc")]
+    let counts = super::pq::counts();
+    #[cfg(not(feature = "pqc"))]
+    let counts = PqcCounts::default();
+    PqcStatus {
+        mode: mode.as_str().to_owned(),
+        available: crate::config::PqcMode::available(),
+        counts,
+    }
+}
+
+/// The hybrid-upgrade status of the daemon that owns `data_dir`.
+pub fn pqc_status(data_dir: &Path) -> PqcStatus {
+    #[cfg(feature = "iroh")]
+    let mode = super::service::service_for(data_dir)
+        .map(|s| s.settings().pqc_mode)
+        .unwrap_or_default();
+    #[cfg(not(feature = "iroh"))]
+    let mode = {
+        let _ = data_dir;
+        crate::config::PqcMode::Off
+    };
+    pqc_status_for(mode)
+}
+
+/// What to show about one conversation: the state word and its reason.
+#[cfg(all(feature = "iroh", feature = "pqc"))]
+fn pqc_state_of(
+    core: &super::engine::ChatCore,
+    peer: &[u8; 32],
+) -> (Option<String>, Option<String>) {
+    let v = core.pq_view(peer);
+    if v.state == "off" {
+        return (None, None);
+    }
+    (Some(v.state.to_owned()), v.reason.map(str::to_owned))
+}
+
+#[cfg(all(feature = "iroh", not(feature = "pqc")))]
+fn pqc_state_of(
+    _core: &super::engine::ChatCore,
+    _peer: &[u8; 32],
+) -> (Option<String>, Option<String>) {
+    (None, None)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +208,9 @@ pub struct StatusInfo {
     /// The global read-receipt setting (`chat.read_receipts`).
     #[serde(default = "default_true")]
     pub read_receipts: bool,
+    /// The hybrid post-quantum upgrade: mode, availability and counters.
+    #[serde(default)]
+    pub pqc: PqcStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -279,6 +377,7 @@ pub fn handle_with(
                 .map(|c| {
                     let contact = svc.contacts().by_endpoint(&c.peer);
                     let waiting = core.outbox.first_for(&c.peer);
+                    let (pqc, pqc_reason) = pqc_state_of(core, &c.peer);
                     ConversationInfo {
                         pending_reason: waiting.as_ref().and_then(|e| e.last_error.clone()),
                         pending_tried_ms: waiting.as_ref().map_or(0, |e| e.last_try_ms),
@@ -290,6 +389,8 @@ pub fn handle_with(
                         last_ms: c.last_ms,
                         pending: core.outbox.count_for(&c.peer) as u32,
                         read_receipts: core.receipts_enabled(&c.peer),
+                        pqc,
+                        pqc_reason,
                     }
                 })
                 .collect();
@@ -349,6 +450,7 @@ pub fn handle_with(
             outbox_max: core.store.settings().outbox_max as u32,
             max_message_bytes: core.max_text() as u32,
             read_receipts: core.receipts_global(),
+            pqc: pqc_status_for(svc.settings().pqc_mode),
         }),
         ChatRequest::MarkRead { contact, up_to_seq } => {
             let Some(c) = svc.contacts().find(&contact) else {

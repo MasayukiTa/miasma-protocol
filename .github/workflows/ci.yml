@@ -53,6 +53,33 @@ jobs:
       - name: Test miasma-core
         run: cargo test -p miasma-core --tests --locked
 
+  test-core-pqc:
+    name: Core Tests, opt-in hybrid feature (Ubuntu)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # The feature is off by default, so the job above never builds it.
+      - name: Test the hybrid upgrade (chat and protocol modules)
+        run: |
+          cargo test -p miasma-core --features pqc --locked --lib -- chat:: protocol::
+
+      - name: Test old-peer compatibility, frozen wire bytes, local-relay chat
+        run: >
+          cargo test -p miasma-core --features pqc --locked
+          --test pqc_old_peer_compat_test --test chat_pqc_net_test
+          --test wire_compat_test --test wire_compat_net_test --test wire_compat_group_test
+          --test persisted_paths_lint
+
+      - name: Check the mobile bridge with the feature
+        run: cargo check -p miasma-ffi --features pqc --locked
+
   test-desktop-windows:
     name: Desktop and CLI Tests (Windows)
     runs-on: windows-latest

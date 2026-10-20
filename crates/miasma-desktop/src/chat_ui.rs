@@ -1144,6 +1144,25 @@ impl ChatUi {
             HeaderStatus::Waiting => Some(k.header_waiting),
             HeaderStatus::RelayDown => Some(k.header_relay),
         };
+        // The hybrid post-quantum upgrade of this conversation, when it is in use or was asked
+        // for, goes on the same muted line.
+        let pqc_state = self
+            .conversations
+            .iter()
+            .find(|x| x.endpoint_id == o.endpoint_id)
+            .and_then(|x| x.pqc.clone());
+        let pqc_line = crate::chat::pqc_text(c, pqc_state.as_deref());
+        let status_line: Option<String> = match (status, pqc_line) {
+            (Some(s), Some(p)) => Some(format!("{s} · {p}")),
+            (Some(s), None) => Some(s.to_owned()),
+            (None, Some(p)) => Some(p.to_owned()),
+            (None, None) => None,
+        };
+        let status_color = match (status, pqc_state.as_deref()) {
+            (None, Some("hybrid")) => pal().success,
+            (None, Some("failed")) => pal().danger,
+            _ => pal().muted,
+        };
         let mut chosen: Option<ConversationAction> = None;
         let mut menu = |ui: &mut egui::Ui| {
             if receipts_global {
@@ -1169,7 +1188,7 @@ impl ChatUi {
             ui,
             c.a11y_back,
             &elide(&name, NAME_CHARS),
-            status.map(|s| (s, pal().muted)),
+            status_line.as_deref().map(|s| (s, status_color)),
             k.a11y_menu,
             "chat",
             std::mem::take(&mut self.open_menu_once),
@@ -1861,6 +1880,8 @@ impl ChatUi {
                 read_receipts: true,
                 pending_reason: None,
                 pending_tried_ms: 0,
+                pqc: None,
+                pqc_reason: None,
             }
         };
         let msg = |ord: u64, outgoing: bool, state: &str, text: &str, at: u64| MessageInfo {
@@ -2568,6 +2589,8 @@ mod tests {
             read_receipts: true,
             pending_reason: None,
             pending_tried_ms: 0,
+            pqc: None,
+            pqc_reason: None,
         };
         ui.on_reply(
             c(),
@@ -2703,6 +2726,7 @@ mod tests {
                 outbox_max: 10,
                 max_message_bytes: 2000,
                 read_receipts: true,
+                pqc: Default::default(),
             })),
         );
         assert_eq!(ui.availability, Availability::Ok);

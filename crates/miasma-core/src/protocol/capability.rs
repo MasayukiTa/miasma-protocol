@@ -78,7 +78,8 @@ pub const CAPABILITY_VERSION: u16 = 1;
 
 /// Classical X25519-based handshake. Always implied.
 pub const SUITE_CLASSICAL: u32 = 1 << 0;
-/// Hybrid classical + post-quantum handshake (reserved id, not yet usable).
+/// Hybrid classical + post-quantum handshake. Acted on only by builds with the
+/// `pqc` feature (see `chat::pq`); every build may carry the bit.
 pub const SUITE_HYBRID_X25519_MLKEM768: u32 = 1 << 1;
 /// Suite bits this build knows about.
 pub const KNOWN_SUITES: u32 = SUITE_CLASSICAL | SUITE_HYBRID_X25519_MLKEM768;

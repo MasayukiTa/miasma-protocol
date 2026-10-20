@@ -62,6 +62,9 @@ pub mod label {
     pub const ROOT: &[u8] = b"miasma/chat/v1/rk";
     pub const CHAIN: &[u8] = b"miasma/chat/v1/ck";
     pub const MESSAGE: &[u8] = b"miasma/chat/v1/msgkey";
+    /// Optional second layer of a message key (see `chat::pq`); used only
+    /// after a hybrid exchange completed in the session.
+    pub const PQ_LAYER: &[u8] = b"miasma/chat/v1/pqlayer";
     pub const FILE_NAME: &str = "miasma chat v1 file name";
 }
 
@@ -213,6 +216,51 @@ fn kdf_chain(ck: &[u8; 32]) -> Result<Step, CryptoError> {
     let mut nonce: [u8; 24] = rand::random();
     nonce.copy_from_slice(&mat[32..]);
     Ok(Step { next, key, nonce })
+}
+
+/// The key of a message that is protected by the hybrid key `pq` as well as by
+/// the ratchet: both feed one HKDF, bound to the position of the message
+/// (`dh`, `n`), so learning one of the two inputs is not enough. Only a session
+/// that completed the hybrid exchange passes a `pq` key; for everyone else this
+/// function is never reached with `Some`.
+fn layer_key(
+    msg_key: &[u8; 32],
+    pq: &[u8; 32],
+    dh: &[u8; 32],
+    n: u32,
+) -> Result<Zeroizing<[u8; 32]>, CryptoError> {
+    let mut ikm = fresh::<64>();
+    ikm[..32].copy_from_slice(msg_key);
+    ikm[32..].copy_from_slice(pq);
+    let mut info = Vec::with_capacity(36);
+    info.extend_from_slice(dh);
+    info.extend_from_slice(&n.to_be_bytes());
+    let hk = Hkdf::<Sha256>::new(Some(label::PQ_LAYER), ikm.as_ref());
+    let mut out = fresh::<32>();
+    hk.expand(&info, out.as_mut())
+        .map_err(|_| CryptoError::BadState)?;
+    Ok(out)
+}
+
+/// Open one message: with the hybrid layer first when the receiver holds a
+/// hybrid key (the sender may not have switched to it yet, so the plain key is
+/// tried second). The AEAD tag decides; a forged message opens under neither.
+fn open_msg(
+    key: &[u8; 32],
+    nonce: &[u8; 24],
+    aad: &[u8],
+    ct: &[u8],
+    layer: Option<&[u8; 32]>,
+    dh: &[u8; 32],
+    n: u32,
+) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+    if let Some(pq) = layer {
+        let lk = layer_key(key, pq, dh, n)?;
+        if let Ok(pt) = aead_open(&lk, nonce, aad, ct) {
+            return Ok(pt);
+        }
+    }
+    aead_open(key, nonce, aad, ct)
 }
 
 /// The session secret from the first-flight Diffie-Hellman values.
@@ -565,6 +613,17 @@ impl Session {
     /// Encrypt one plaintext into an envelope. The caller persists the session
     /// before the envelope leaves the machine (so a key is never used twice).
     pub fn seal(&mut self, plaintext: &[u8]) -> Result<Envelope, CryptoError> {
+        self.seal_with(plaintext, None)
+    }
+
+    /// As [`seal`](Self::seal); with `layer` the message key is combined with
+    /// the hybrid key of this session (see `chat::pq`). The envelope bytes have
+    /// the same shape either way.
+    pub fn seal_with(
+        &mut self,
+        plaintext: &[u8],
+        layer: Option<&[u8; 32]>,
+    ) -> Result<Envelope, CryptoError> {
         let padded = pad(plaintext)?;
         let cks = self.cks.as_ref().ok_or(CryptoError::NoSendChain)?;
         let step = kdf_chain(cks)?;
@@ -586,7 +645,13 @@ impl Session {
         };
         let a = aad(&env, &self.own_id, &self.peer_id);
         let mut buf = padded;
-        aead_seal(&step.key, &step.nonce, &a, &mut buf)?;
+        match layer {
+            Some(pq) => {
+                let lk = layer_key(&step.key, pq, &self.dhs_pub, self.ns)?;
+                aead_seal(&lk, &step.nonce, &a, &mut buf)?;
+            }
+            None => aead_seal(&step.key, &step.nonce, &a, &mut buf)?,
+        }
         env.ciphertext = std::mem::take(&mut *buf);
         self.cks = Some(step.next);
         self.ns = self.ns.checked_add(1).ok_or(CryptoError::BadState)?;
@@ -597,6 +662,16 @@ impl Session {
     /// message authenticates; a forged, damaged or replayed message leaves it
     /// untouched.
     pub fn open(&mut self, env: &Envelope) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+        self.open_with(env, None)
+    }
+
+    /// As [`open`](Self::open); with `layer` a message that was protected by
+    /// the hybrid key of this session opens too (a plain one still does).
+    pub fn open_with(
+        &mut self,
+        env: &Envelope,
+        layer: Option<&[u8; 32]>,
+    ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
         let a = aad(env, &self.peer_id, &self.own_id);
         // A message whose key was kept for it.
         if let Some(pos) = self
@@ -605,7 +680,7 @@ impl Session {
             .position(|s| s.dh == env.header.dh_pub && s.n == env.header.n)
         {
             let s = &self.skipped[pos];
-            let mut pt = aead_open(&s.key, &s.nonce, &a, &env.ciphertext)?;
+            let mut pt = open_msg(&s.key, &s.nonce, &a, &env.ciphertext, layer, &s.dh, s.n)?;
             unpad(&mut pt)?;
             self.skipped.remove(pos);
             return Ok(pt);
@@ -620,7 +695,15 @@ impl Session {
         next.skip_until(env.header.n)?;
         let ckr = next.ckr.as_ref().ok_or(CryptoError::Authentication)?;
         let step = kdf_chain(ckr)?;
-        let mut pt = aead_open(&step.key, &step.nonce, &a, &env.ciphertext)?;
+        let mut pt = open_msg(
+            &step.key,
+            &step.nonce,
+            &a,
+            &env.ciphertext,
+            layer,
+            &env.header.dh_pub,
+            env.header.n,
+        )?;
         unpad(&mut pt)?;
         next.ckr = Some(step.next);
         next.nr = next.nr.checked_add(1).ok_or(CryptoError::BadState)?;
@@ -1090,6 +1173,50 @@ mod tests {
         ident.fill(0);
         ident[0] = 1;
         assert!(peer_dh_public(&ident).is_err());
+    }
+
+    #[test]
+    fn a_layered_message_needs_the_second_key_and_a_plain_one_still_opens() {
+        let (_a, _b, mut sa, mut sb) = established();
+        let k: [u8; 32] = rand::random();
+        let other: [u8; 32] = rand::random();
+        let m = sa.seal_with(b"layered", Some(&k)).unwrap();
+        // The bytes have the shape of every other envelope.
+        assert_eq!(Envelope::decode(&m.encode()).unwrap(), m);
+        // Without the key, or with another one, it does not open and the
+        // session is unchanged.
+        assert!(sb.open(&m).is_err());
+        assert!(sb.open_with(&m, Some(&other)).is_err());
+        assert_eq!(&**sb.open_with(&m, Some(&k)).unwrap(), b"layered");
+        // A receiver that holds the key still opens a message sent without it
+        // (the sender may not have switched yet), in both orders.
+        let plain = sa.seal(b"plain").unwrap();
+        assert_eq!(&**sb.open_with(&plain, Some(&k)).unwrap(), b"plain");
+        let m2 = sa.seal_with(b"again", Some(&k)).unwrap();
+        let m3 = sa.seal(b"third").unwrap();
+        assert_eq!(&**sb.open_with(&m3, Some(&k)).unwrap(), b"third");
+        assert_eq!(&**sb.open_with(&m2, Some(&k)).unwrap(), b"again");
+    }
+
+    #[test]
+    fn layered_messages_survive_a_reply_and_out_of_order_delivery() {
+        let (_a, _b, mut sa, mut sb) = established();
+        let k: [u8; 32] = rand::random();
+        let old = sa.seal_with(b"old", Some(&k)).unwrap();
+        let r = sb.seal_with(b"reply", Some(&k)).unwrap();
+        assert_eq!(&**sa.open_with(&r, Some(&k)).unwrap(), b"reply");
+        let new = sa.seal_with(b"new", Some(&k)).unwrap();
+        // The new chain arrives first, the old message afterwards.
+        assert_eq!(&**sb.open_with(&new, Some(&k)).unwrap(), b"new");
+        assert_eq!(&**sb.open_with(&old, Some(&k)).unwrap(), b"old");
+        // Tampering is still caught.
+        let m = sa.seal_with(b"x", Some(&k)).unwrap();
+        let mut bad = m.encode();
+        let n = bad.len();
+        bad[n - 1] ^= 1;
+        let e = Envelope::decode(&bad).unwrap();
+        assert!(sb.open_with(&e, Some(&k)).is_err());
+        assert_eq!(&**sb.open_with(&m, Some(&k)).unwrap(), b"x");
     }
 
     #[test]

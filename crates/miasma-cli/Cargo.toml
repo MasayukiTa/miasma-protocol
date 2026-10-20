@@ -6,6 +6,12 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[features]
+# Opt-in hybrid X25519 + ML-KEM-768 upgrade of private conversations (off by
+# default; `privacy.pqc_mode` still has to be turned on). See
+# docs/pqc-session-upgrade.md.
+pqc = ["miasma-core/pqc"]
+
 [[bin]]
 name = "miasma"
 path = "src/main.rs"
