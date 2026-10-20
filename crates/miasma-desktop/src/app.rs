@@ -1425,7 +1425,13 @@ impl MiasmaApp {
 
         // Status is one muted line; the numbers are behind "Details".
         ui.add_space(kit::SP_3);
-        ui.label(kit::muted_text(s.status_ready));
+        let (_, state_text) = header_chip(
+            &self.daemon_state,
+            self.relay_down.is_some(),
+            s,
+            locale::audit_strings(self.locale),
+        );
+        ui.label(kit::muted_text(state_text));
         ui.add_space(kit::SP_2);
         egui::CollapsingHeader::new(kit::muted_text(s.details_easy))
             .id_source("home_details")
@@ -1535,7 +1541,7 @@ impl MiasmaApp {
                         kit::progress(ui, s.status_storage, (pct / 100.0) as f32, pct > 90.0);
                     }
                     if self.peer_count == 0 {
-                        kit::notice(ui, Level::Warn, s.health_no_peers);
+                        kit::hint(ui, s.health_no_peers);
                     }
                 });
             }
@@ -2248,15 +2254,16 @@ impl MiasmaApp {
     fn status_panel_easy(&self, ui: &mut egui::Ui) {
         let s = self.s();
 
+        let relay_text = self.relay_down.as_ref().map(|r| relay_down_text(s, r));
         let (level, status_text, hint) = if self.daemon_state == DaemonState::Connected {
-            if self.peer_count > 0 {
-                (Level::Ok, s.status_ready, s.status_hint_ready)
-            } else {
-                (
+            match &relay_text {
+                // The relay cannot be reached: say so, with the time and the cause.
+                Some(text) => (
                     Level::Warn,
-                    locale::audit_strings(self.locale).chip_waiting,
-                    s.status_hint_no_peers,
-                )
+                    locale::audit_strings(self.locale).chip_relay,
+                    text.as_str(),
+                ),
+                None => (Level::Ok, s.status_ready, s.status_hint_ready),
             }
         } else {
             (Level::Error, s.status_not_ready, s.status_hint_not_ready)
@@ -2306,9 +2313,10 @@ impl MiasmaApp {
                     ),
                 );
             } else {
+                // Nobody connected right now is the normal idle state: a muted detail.
                 kit::status_dot(
                     ui,
-                    Level::Warn,
+                    Level::Muted,
                     &format!("{}  {}", s.health_network, s.health_no_peers),
                 );
             }
@@ -2367,7 +2375,7 @@ impl MiasmaApp {
                         // The same words as the chip in the header.
                         let (level, text) = header_chip(
                             &self.daemon_state,
-                            self.peer_count,
+                            self.relay_down.is_some(),
                             s,
                             locale::audit_strings(self.locale),
                         );
@@ -3783,7 +3791,7 @@ impl MiasmaApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let (level, label) = header_chip(
                             &self.daemon_state,
-                            self.peer_count,
+                            self.relay_down.is_some(),
                             s,
                             locale::audit_strings(self.locale),
                         );
@@ -4072,18 +4080,19 @@ impl MiasmaApp {
     }
 }
 
-/// What the chip in the header says. "Connected" used to cover a running service with nobody to
-/// talk to; now the service being up and the network being reachable are told apart. The
-/// details (peer count, transports) stay on the Status and Settings screens.
+/// What the chip in the header says, from what is known: the service is up, and its relay is
+/// reachable or not. Having no peer connected right now is the normal idle state (the direct
+/// connection to a contact is made when something is sent), so it is not a problem state; the
+/// peer count is a detail on the Status screen.
 fn header_chip(
     state: &DaemonState,
-    peers: usize,
+    relay_down: bool,
     s: &'static Strings,
     au: &'static locale::AuditStrings,
 ) -> (Level, &'static str) {
     match state {
-        DaemonState::Connected if peers > 0 => (Level::Ok, au.chip_ready),
-        DaemonState::Connected => (Level::Info, au.chip_waiting),
+        DaemonState::Connected if !relay_down => (Level::Ok, au.chip_ready),
+        DaemonState::Connected => (Level::Warn, au.chip_relay),
         DaemonState::Starting => (Level::Info, s.starting),
         DaemonState::Stopped => (Level::Error, s.offline),
         DaemonState::NeedsInit => (Level::Warn, s.setup_needed),
@@ -4094,27 +4103,32 @@ fn header_chip(
 mod tests {
     use super::*;
     #[test]
-    fn the_header_chip_does_not_say_connected_with_nobody_to_talk_to() {
+    fn the_header_chip_follows_the_service_and_its_relay_not_the_peer_count() {
         for lang in Locale::ALL {
             let (s, au) = (locale::strings(lang), locale::audit_strings(lang));
-            let (lvl, text) = header_chip(&DaemonState::Connected, 0, s, au);
-            assert_eq!(text, au.chip_waiting, "{lang:?}");
-            assert_ne!(lvl, Level::Ok, "{lang:?}: waiting is not shown green");
-            assert_ne!(text, s.connected, "{lang:?}");
-            let (lvl, text) = header_chip(&DaemonState::Connected, 3, s, au);
+            // Service up, relay reachable: Ready (whatever the number of connected peers).
+            let (lvl, text) = header_chip(&DaemonState::Connected, false, s, au);
             assert_eq!((lvl, text), (Level::Ok, au.chip_ready), "{lang:?}");
-            assert_eq!(header_chip(&DaemonState::Starting, 0, s, au).1, s.starting);
-            assert_eq!(header_chip(&DaemonState::Stopped, 0, s, au).1, s.offline);
+            // Relay unreachable: a warning that names the cause.
+            let (lvl, text) = header_chip(&DaemonState::Connected, true, s, au);
+            assert_eq!((lvl, text), (Level::Warn, au.chip_relay), "{lang:?}");
             assert_eq!(
-                header_chip(&DaemonState::NeedsInit, 0, s, au).1,
+                header_chip(&DaemonState::Starting, false, s, au).1,
+                s.starting
+            );
+            assert_eq!(
+                header_chip(&DaemonState::Stopped, false, s, au).1,
+                s.offline
+            );
+            assert_eq!(
+                header_chip(&DaemonState::NeedsInit, false, s, au).1,
                 s.setup_needed
             );
-            // Four plain states, four different words.
             let words = [
-                header_chip(&DaemonState::Connected, 1, s, au).1,
-                header_chip(&DaemonState::Connected, 0, s, au).1,
-                header_chip(&DaemonState::Starting, 0, s, au).1,
-                header_chip(&DaemonState::NeedsInit, 0, s, au).1,
+                header_chip(&DaemonState::Connected, false, s, au).1,
+                header_chip(&DaemonState::Connected, true, s, au).1,
+                header_chip(&DaemonState::Starting, false, s, au).1,
+                header_chip(&DaemonState::NeedsInit, false, s, au).1,
             ];
             for (i, a) in words.iter().enumerate() {
                 for b in &words[i + 1..] {
