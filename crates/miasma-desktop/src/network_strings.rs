@@ -139,7 +139,7 @@ static NET_EN: NetStrings = NetStrings {
 
 static NET_JA: NetStrings = NetStrings {
     heading: "ネットワーク",
-    intro: "Miasma が他のコンピューターとつながる方法です。変更はこのコンピューターに保存され、Miasma のバックグラウンドサービスを起動し直したあとに反映されます。",
+    intro: "変更は Miasma の再起動後に反映されます。",
     load_failed: "設定ファイルを読み込めませんでした。初期値を表示しています。",
     mode_label: "接続方法:",
     mode_public: "公開の中継サーバー",
@@ -183,7 +183,7 @@ static NET_JA: NetStrings = NetStrings {
     retry_desc: "相手のコンピューターに届かないとき、送信が自動で再試行を続ける期間です。0 にすると諦めずに続けます。",
     retry_unit: "時間",
     restart_tag: "再起動後に反映",
-    saved_notice: "保存しました。反映するには、Miasma を完全に閉じてからもう一度起動してください。",
+    saved_notice: "保存しました。反映するには Miasma を完全に閉じて、もう一度起動してください。",
     save_failed: "保存できませんでした: {err}",
     unsaved: "まだ保存していない変更があります。",
     save: "保存",
@@ -329,7 +329,7 @@ pub fn outcome_text(o: Outcome, locale: Locale) -> &'static str {
         Outcome::Nxdomain => pick(
             locale,
             "The name does not exist according to this computer's name lookup.",
-            "このコンピューターの名前解決では、その名前が存在しないと返されました。",
+            "このコンピューターの名前解決ではその名前が存在しないと返されました。",
             "本机的域名解析返回该名称不存在。",
         ),
         Outcome::Timeout => pick(

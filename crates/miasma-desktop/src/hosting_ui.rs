@@ -16,6 +16,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use miasma_core::config::{NodeConfig, HOSTED_QUOTA_CHOICES_MB};
 use miasma_core::update::package::is_packaged;
 
+use crate::a11y::CollapsingExt as _;
 use crate::hosting_strings::host_strings;
 use crate::locale::Locale;
 use crate::ui_kit::{self as kit, Level};
@@ -142,7 +143,6 @@ impl HostingUi {
         let s = host_strings(locale);
         let ctx = ui.ctx().clone();
         kit::section(ui, s.heading, |ui| {
-            kit::paragraph_muted(ui, s.intro);
             if self.load_failed {
                 kit::notice(ui, Level::Warn, s.load_failed);
             }
@@ -181,6 +181,13 @@ impl HostingUi {
                 SaveState::Saved => kit::notice(ui, Level::Ok, s.saved_notice),
                 SaveState::Failed => kit::notice(ui, Level::Error, s.save_failed),
             }
+            // What this setting does: opened on request.
+            egui::CollapsingHeader::new(kit::muted_text(crate::uitext::details(locale)))
+                .id_source("settings_hosting_details")
+                .default_open(false)
+                .show_a11y(ui, |ui| {
+                    kit::paragraph_muted(ui, s.intro);
+                });
         });
     }
 }
