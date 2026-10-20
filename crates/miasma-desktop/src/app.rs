@@ -4264,7 +4264,7 @@ mod tests {
             (|_, _| "", Some(Tab::Transfers)),
             (|s, _| s.tab_outbox_easy, Some(Tab::Outbox)),
         ];
-        let mut failed = Vec::new();
+        let mut failed: Vec<String> = Vec::new();
         for (i, (label_of, target)) in cases.into_iter().enumerate() {
             let ctx = egui::Context::default();
             ctx.enable_accesskit();
@@ -4287,14 +4287,19 @@ mod tests {
                 label_of(s, s)
             };
             click_button(&ctx, &mut app, label);
-            match target {
-                None => assert!(
-                    app.send_flow.is_open(),
-                    "{label}: the send flow did not open"
-                ),
-                Some(tab) => assert_eq!(app.tab, tab, "{label}"),
+            let ok = match target {
+                None => app.send_flow.is_open(),
+                Some(tab) => app.tab == tab,
+            };
+            if !ok {
+                failed.push(format!(
+                    "{label}: now on {:?}, send flow open: {}",
+                    app.tab,
+                    app.send_flow.is_open()
+                ));
             }
         }
+        assert!(failed.is_empty(), "{failed:#?}");
     }
 
     #[test]
