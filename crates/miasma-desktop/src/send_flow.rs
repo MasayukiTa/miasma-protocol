@@ -26,6 +26,7 @@ use miasma_core::push::ContactInfo;
 use miasma_core::transfer::{password_policy, TransferState, TransferStatus};
 use zeroize::Zeroize;
 
+use crate::a11y::CollapsingExt as _;
 use crate::chat::{elide, NAME_CHARS};
 use crate::contacts::{base_name, ContactsUi, FileStatus, SentFile};
 use crate::locale::{ComposeStrings, ContactStrings, TransferStrings};
@@ -581,6 +582,7 @@ impl SendFlow {
         let mut action = FormAction::None;
         let mut close = false;
         let mut nav = None;
+        crate::a11y::dialog_title(ctx, k.flow_title);
         egui::Window::new(k.flow_title)
             .id(egui::Id::new("send_flow_window"))
             .collapsible(false)
@@ -729,7 +731,7 @@ impl SendFlow {
             egui::CollapsingHeader::new(RichText::new(k.more_options).color(pal().muted))
                 .id_source(("send_flow_more", self.generation))
                 .default_open(self.more_open)
-                .show(ui, |ui| self.more_ui(ui, t));
+                .show_a11y(ui, |ui| self.more_ui(ui, t));
         }
 
         // The one action.

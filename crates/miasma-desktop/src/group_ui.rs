@@ -1504,6 +1504,7 @@ impl GroupUi {
         let mut cancel = false;
         if let Some(form) = self.form.as_mut() {
             form.picks.retain_offered(&offered);
+            crate::a11y::dialog_title(ctx, gs.ng_title);
             egui::Window::new(gs.ng_title)
                 .id(egui::Id::new("group_new"))
                 .collapsible(false)
@@ -1650,6 +1651,7 @@ impl GroupUi {
         let mut cancel = false;
         if let Some(p) = self.add.as_mut() {
             p.retain_offered(&offered);
+            crate::a11y::dialog_title(ctx, gs.add_title);
             egui::Window::new(gs.add_title)
                 .id(egui::Id::new("group_add"))
                 .collapsible(false)

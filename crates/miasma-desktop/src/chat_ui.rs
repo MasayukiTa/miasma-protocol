@@ -1684,6 +1684,7 @@ impl ChatUi {
             .unwrap_or_default();
         let name = elide(&target.label, NAME_CHARS);
         let mut close = false;
+        crate::a11y::dialog_title(ctx, &fill(k.verify_title, &[("name", &name)]));
         egui::Window::new(fill(k.verify_title, &[("name", &name)]))
             .id(egui::Id::new("chat_verify"))
             .collapsible(false)
@@ -1725,6 +1726,7 @@ impl ChatUi {
         }
         let mut chosen: Option<(String, String, String)> = None;
         let mut close = false;
+        crate::a11y::dialog_title(ctx, c.pick_title);
         egui::Window::new(c.pick_title)
             .id(egui::Id::new("chat_picker"))
             .collapsible(false)

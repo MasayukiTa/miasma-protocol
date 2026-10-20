@@ -13,6 +13,7 @@
 //! it opens.
 
 use eframe::egui;
+use egui::accesskit;
 
 /// Frames a dialog keeps asking for focus on its safe button (the window is laid out invisibly on
 /// its first frame, so the first request may not stick).
@@ -57,6 +58,7 @@ pub fn dialog_enter(ctx: &egui::Context, key: &'static str) -> bool {
         state.last_frame = frame;
     }
     ctx.data_mut(|d| d.insert_temp(id, state));
+    segment_begin(ctx);
     fresh
 }
 
@@ -110,11 +112,234 @@ fn on_screen(ctx: &egui::Context, id: egui::Id) -> bool {
     ctx.read_response(id).is_some()
 }
 
+// ── Dialog boundary in the accessibility tree ─────────────────────────────
+
+/// One dialog drawn in this frame: the range of top-level tree nodes it created.
+#[derive(Clone, Debug, Default)]
+struct Segment {
+    start: usize,
+    end: Option<usize>,
+    title: String,
+}
+
+#[derive(Clone, Default)]
+struct FrameSegments {
+    frame: u64,
+    list: Vec<Segment>,
+}
+
+fn segments_id() -> egui::Id {
+    egui::Id::new("a11y_dialog_segments")
+}
+
+/// Number of top-level nodes of the accessibility tree built so far (None when no accessibility
+/// client is attached: nothing is built then, and nothing here costs anything).
+fn top_level_count(ctx: &egui::Context) -> Option<usize> {
+    ctx.accesskit_node_builder(egui::accesskit_root_id(), |b| b.children().len())
+}
+
+fn with_segments(ctx: &egui::Context, f: impl FnOnce(&mut Vec<Segment>)) {
+    let frame = ctx.frame_nr();
+    ctx.data_mut(|d| {
+        let s = d.get_temp_mut_or_default::<FrameSegments>(segments_id());
+        if s.frame != frame {
+            s.frame = frame;
+            s.list.clear();
+        }
+        f(&mut s.list);
+    });
+}
+
+/// Called by `dialog_enter` in every frame a dialog is drawn: the dialog's nodes start here.
+fn segment_begin(ctx: &egui::Context) {
+    let Some(at) = top_level_count(ctx) else {
+        return;
+    };
+    with_segments(ctx, |list| {
+        if let Some(prev) = list.last_mut() {
+            prev.end.get_or_insert(at);
+        }
+        list.push(Segment {
+            start: at,
+            end: None,
+            title: String::new(),
+        });
+    });
+}
+
+/// Name the dialog that is being drawn. Call it right before the dialog's window, with the same
+/// text as the window title: it becomes the accessible name of the dialog.
+pub fn dialog_title(ctx: &egui::Context, title: &str) {
+    with_segments(ctx, |list| {
+        if let Some(last) = list.last_mut() {
+            last.title = title.to_owned();
+        }
+    });
+}
+
+/// Optional: marks the end of the dialog that is being drawn. Without it a dialog ends where the
+/// next one starts, or at the end of the frame.
+pub fn dialog_end(ctx: &egui::Context) {
+    let Some(at) = top_level_count(ctx) else {
+        return;
+    };
+    with_segments(ctx, |list| {
+        if let Some(last) = list.last_mut() {
+            last.end.get_or_insert(at);
+        }
+    });
+}
+
+/// Shape the top level of the accessibility tree around the dialogs drawn in this frame: every
+/// dialog becomes one node with role Dialog, its title as name and the modal flag, holding the
+/// dialog's controls; everything else on screen moves under one node that is hidden from
+/// assistive technology, so nothing behind an open dialog can be reached through the tree. Only
+/// the newest dialog stays visible when several are open. Called from [`drop_orphan_focus`].
+fn seal_dialogs(ctx: &egui::Context) {
+    let frame = ctx.frame_nr();
+    let segments: Vec<Segment> = ctx.data_mut(|d| {
+        d.get_temp::<FrameSegments>(segments_id())
+            .filter(|s| s.frame == frame)
+            .map(|s| s.list)
+            .unwrap_or_default()
+    });
+    if segments.is_empty() {
+        return;
+    }
+    let root = egui::accesskit_root_id();
+    let Some(all) = ctx.accesskit_node_builder(root, |b| b.children().to_vec()) else {
+        return;
+    };
+    // Resolve the ranges against what the root really holds.
+    let mut ranges: Vec<(usize, usize, String)> = Vec::new();
+    for (i, s) in segments.iter().enumerate() {
+        let next = segments.get(i + 1).map_or(all.len(), |n| n.start);
+        let end = s.end.unwrap_or(next).min(all.len());
+        let start = s.start.min(end);
+        if start < end {
+            ranges.push((start, end, s.title.clone()));
+        }
+    }
+    if ranges.is_empty() {
+        return;
+    }
+    let in_dialog = |i: usize| ranges.iter().any(|(a, b, _)| i >= *a && i < *b);
+    let page: Vec<accesskit::NodeId> = all
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !in_dialog(*i))
+        .map(|(_, n)| *n)
+        .collect();
+
+    if !page.is_empty() {
+        let bg = egui::Id::new("a11y_inert_background");
+        let _ = ctx.accesskit_node_builder(bg, |b| {
+            b.set_role(accesskit::Role::GenericContainer);
+            b.set_hidden();
+            b.set_children(page);
+        });
+    }
+    let last = ranges.len() - 1;
+    for (k, (start, end, title)) in ranges.iter().enumerate() {
+        let id = egui::Id::new(("a11y_dialog_node", k));
+        let kids: Vec<accesskit::NodeId> = all[*start..*end].to_vec();
+        let _ = ctx.accesskit_node_builder(id, |b| {
+            b.set_role(accesskit::Role::Dialog);
+            if !title.is_empty() {
+                b.set_name(title.clone());
+            }
+            b.set_modal();
+            if k != last {
+                b.set_hidden();
+            }
+            b.set_children(kids);
+        });
+    }
+    // The new nodes were appended to the root as they were made; the root now lists exactly the
+    // inert background (if any) and the dialogs, in drawing order.
+    let _ = ctx.accesskit_node_builder(root, |b| {
+        let kids: Vec<accesskit::NodeId> = b.children().iter().skip(all.len()).copied().collect();
+        b.set_children(kids);
+    });
+}
+
+// ── Password fields ───────────────────────────────────────────────────────
+
+/// Call with the response of every `TextEdit::password(true)`. egui already marks such a field
+/// with role PasswordInput and masks the text it publishes; this removes the rest: the value
+/// and the per-character text runs (which would let a client read the length and move a caret
+/// through the field), so nothing but the name and the role is left for a client to read.
+pub fn secret_field(resp: &egui::Response) {
+    let ctx = &resp.ctx;
+    let rows = ctx
+        .accesskit_node_builder(resp.id, |b| {
+            b.set_role(accesskit::Role::PasswordInput);
+            b.clear_value();
+            b.clear_text_selection();
+            b.children().len()
+        })
+        .unwrap_or(0);
+    for i in 0..rows {
+        // The text runs are children of the field, numbered by row (see egui's
+        // `update_accesskit_for_text_widget`). They stay in the tree (the tree needs them to be
+        // reachable) but are no longer text.
+        let _ = ctx.accesskit_node_builder(resp.id.with(i), |b| {
+            b.set_role(accesskit::Role::GenericContainer);
+            b.set_hidden();
+            b.clear_value();
+            b.clear_character_lengths();
+            b.clear_character_positions();
+            b.clear_character_widths();
+            b.clear_word_lengths();
+            b.clear_text_direction();
+        });
+    }
+}
+
+// ── Collapsing headers ────────────────────────────────────────────────────
+
+/// `CollapsingHeader::show` that also publishes whether the section is open.
+pub trait CollapsingExt {
+    fn show_a11y<R>(
+        self,
+        ui: &mut egui::Ui,
+        add_body: impl FnOnce(&mut egui::Ui) -> R,
+    ) -> egui::CollapsingResponse<R>;
+}
+
+impl CollapsingExt for egui::CollapsingHeader {
+    fn show_a11y<R>(
+        self,
+        ui: &mut egui::Ui,
+        add_body: impl FnOnce(&mut egui::Ui) -> R,
+    ) -> egui::CollapsingResponse<R> {
+        let r = self.show(ui, add_body);
+        mark_expanded(&r.header_response, !r.fully_closed());
+        r
+    }
+}
+
+/// Publish the open/closed state of a collapsing header. AccessKit has an `expanded` flag; the
+/// Windows adapter in the version egui 0.27 uses does not map it, so the same state is also
+/// published as a toggle (On = open), which that adapter does map (UIA TogglePattern).
+pub fn mark_expanded(header: &egui::Response, open: bool) {
+    let _ = header.ctx.accesskit_node_builder(header.id, |b| {
+        b.set_role(accesskit::Role::DisclosureTriangle);
+        b.set_expanded(open);
+        b.set_checked(if open {
+            accesskit::Checked::True
+        } else {
+            accesskit::Checked::False
+        });
+    });
+}
+
 /// Call at the end of every frame. The accessibility tree names the focused widget; when that
 /// widget is not on screen (a menu item that went with its popup, a field of a closed dialog)
 /// the tree points at nothing and the platform side can bring the whole program down. Focus is
 /// dropped instead.
 pub fn drop_orphan_focus(ctx: &egui::Context) {
+    seal_dialogs(ctx);
     if let Some(id) = ctx.memory(|m| m.focused()) {
         if !on_screen(ctx, id) {
             ctx.memory_mut(|m| m.surrender_focus(id));
@@ -751,5 +976,399 @@ mod tests {
             });
         }
         assert_eq!(results, [true, false, true]);
+    }
+
+    // ── The accessibility tree of dialogs, password fields and collapsing headers ──────────
+
+    use accesskit_consumer::Tree;
+    use std::collections::HashMap;
+
+    type Update = accesskit::TreeUpdate;
+
+    fn node<'a>(u: &'a Update, id: accesskit::NodeId) -> &'a accesskit::Node {
+        &u.nodes.iter().find(|(i, _)| *i == id).expect("node").1
+    }
+
+    fn named<'a>(u: &'a Update, name: &str) -> Vec<(accesskit::NodeId, &'a accesskit::Node)> {
+        u.nodes
+            .iter()
+            .filter(|(_, n)| n.name() == Some(name))
+            .map(|(i, n)| (*i, n))
+            .collect()
+    }
+
+    /// Whether the node or one of its ancestors is hidden from assistive technology.
+    fn is_hidden_in_tree(u: &Update, id: accesskit::NodeId) -> bool {
+        let mut parent: HashMap<accesskit::NodeId, accesskit::NodeId> = HashMap::new();
+        for (pid, n) in &u.nodes {
+            for c in n.children() {
+                parent.insert(*c, *pid);
+            }
+        }
+        let mut cur = Some(id);
+        while let Some(c) = cur {
+            if node(u, c).is_hidden() {
+                return true;
+            }
+            cur = parent.get(&c).copied();
+        }
+        false
+    }
+
+    /// Whether `id` is `ancestor` or below it.
+    fn is_inside(u: &Update, id: accesskit::NodeId, ancestor: accesskit::NodeId) -> bool {
+        let mut parent: HashMap<accesskit::NodeId, accesskit::NodeId> = HashMap::new();
+        for (pid, n) in &u.nodes {
+            for c in n.children() {
+                parent.insert(*c, *pid);
+            }
+        }
+        let mut cur = Some(id);
+        while let Some(c) = cur {
+            if c == ancestor {
+                return true;
+            }
+            cur = parent.get(&c).copied();
+        }
+        false
+    }
+
+    /// The platform side applies the update to its own copy of the tree; building it panics when
+    /// the update is inconsistent (a node nobody lists, a missing child).
+    fn apply_like_the_platform(u: &Update) {
+        let tree = Tree::new(u.clone(), true);
+        let state = tree.state();
+        for (id, _) in &u.nodes {
+            assert!(state.node_by_id(*id).is_some());
+        }
+    }
+
+    fn run_tree(ctx: &egui::Context, ui_fn: impl FnMut(&egui::Context)) -> Update {
+        ctx.run(screen(), ui_fn)
+            .platform_output
+            .accesskit_update
+            .expect("accesskit tree")
+    }
+
+    /// A value that differs on every run, so that no literal secret sits in the tests.
+    fn random_secret() -> String {
+        use std::hash::{BuildHasher, Hasher};
+        let part = || {
+            std::collections::hash_map::RandomState::new()
+                .build_hasher()
+                .finish()
+        };
+        format!("{:016x}{:016x}", part(), part())
+    }
+
+    fn password_frame(ctx: &egui::Context, secret: &mut String, publish: bool) -> Update {
+        run_tree(ctx, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let r = ui.add(crate::ui_kit::input(secret).password(true));
+                if publish {
+                    crate::form_check::name(&r, "Password");
+                }
+                r.request_focus();
+            });
+        })
+    }
+
+    #[test]
+    fn a_password_field_publishes_its_role_and_name_but_no_text() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut secret = random_secret();
+        let typed = secret.clone();
+        // Several frames: the field has focus and a caret, as while typing.
+        let mut u = password_frame(&ctx, &mut secret, true);
+        for _ in 0..3 {
+            u = password_frame(&ctx, &mut secret, true);
+        }
+        let all = format!("{:?}", u.nodes);
+        assert!(!all.contains(&typed), "the typed text is in the tree");
+        let fields = named(&u, "Password");
+        assert_eq!(fields.len(), 1);
+        let (id, field) = fields[0];
+        assert_eq!(field.role(), accesskit::Role::PasswordInput);
+        assert_eq!(field.value(), None, "no value");
+        assert!(field.text_selection().is_none(), "no caret or selection");
+        for (_, n) in &u.nodes {
+            assert_ne!(n.role(), accesskit::Role::InlineTextBox, "no text runs");
+        }
+        // What the Windows side derives from it: no value and no text, so neither ValuePattern
+        // nor TextPattern is offered.
+        apply_like_the_platform(&u);
+        let tree = Tree::new(u.clone(), true);
+        let n = tree.state().node_by_id(id).unwrap();
+        assert!(!n.supports_text_ranges());
+        assert!(!n.has_value());
+    }
+
+    #[test]
+    fn without_the_name_call_egui_still_masks_the_text_it_publishes() {
+        // The baseline this module builds on: egui publishes role PasswordInput and a masked
+        // value; the text runs are what `secret_field` takes away.
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut secret = random_secret();
+        let typed = secret.clone();
+        let _ = password_frame(&ctx, &mut secret, false);
+        let u = password_frame(&ctx, &mut secret, false);
+        assert!(!format!("{:?}", u.nodes).contains(&typed));
+        assert!(
+            u.nodes
+                .iter()
+                .any(|(_, n)| n.role() == accesskit::Role::PasswordInput),
+            "egui publishes the password role"
+        );
+        assert!(
+            u.nodes
+                .iter()
+                .any(|(_, n)| n.role() == accesskit::Role::InlineTextBox),
+            "unprotected, the field still has text runs"
+        );
+    }
+
+    #[test]
+    fn a_dialog_is_a_named_modal_node_and_the_page_behind_it_is_hidden() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let open = std::cell::Cell::new(false);
+        let mut frame = |ctx: &egui::Context| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let _ = ui.button("Behind");
+            });
+            if open.get() {
+                crate::ui_kit::dialog(ctx, "t_modal", "Delete everything?", |ui| {
+                    let _ = ui.button("Keep");
+                });
+            }
+            drop_orphan_focus(ctx);
+        };
+        // Closed: no dialog node, the page is visible.
+        let closed = run_tree(&ctx, &mut frame);
+        assert!(closed
+            .nodes
+            .iter()
+            .all(|(_, n)| n.role() != accesskit::Role::Dialog));
+        let behind = named(&closed, "Behind")[0].0;
+        assert!(!is_hidden_in_tree(&closed, behind));
+        apply_like_the_platform(&closed);
+
+        // Open.
+        open.set(true);
+        let _ = run_tree(&ctx, &mut frame);
+        let u = run_tree(&ctx, &mut frame);
+        let dialogs: Vec<_> = u
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.role() == accesskit::Role::Dialog)
+            .collect();
+        assert_eq!(dialogs.len(), 1);
+        let (did, dlg) = dialogs[0];
+        assert_eq!(dlg.name(), Some("Delete everything?"));
+        assert!(dlg.is_modal());
+        assert!(!is_hidden_in_tree(&u, *did));
+        let keep = named(&u, "Keep")[0].0;
+        assert!(
+            is_inside(&u, keep, *did),
+            "the dialog's button is in the dialog"
+        );
+        assert!(!is_hidden_in_tree(&u, keep));
+        let behind = named(&u, "Behind")[0].0;
+        assert!(!is_inside(&u, behind, *did));
+        assert!(is_hidden_in_tree(&u, behind), "the page behind is inert");
+        apply_like_the_platform(&u);
+
+        // Closed again: the page is back.
+        open.set(false);
+        let u = run_tree(&ctx, &mut frame);
+        let behind = named(&u, "Behind")[0].0;
+        assert!(!is_hidden_in_tree(&u, behind));
+        assert!(u
+            .nodes
+            .iter()
+            .all(|(_, n)| n.role() != accesskit::Role::Dialog));
+    }
+
+    #[test]
+    fn only_the_newest_of_two_open_dialogs_is_visible() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut frame = |ctx: &egui::Context| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let _ = ui.button("Page");
+            });
+            crate::ui_kit::dialog(ctx, "t_first", "First", |ui| {
+                let _ = ui.button("First button");
+            });
+            crate::ui_kit::dialog(ctx, "t_second", "Second", |ui| {
+                let _ = ui.button("Second button");
+            });
+            drop_orphan_focus(ctx);
+        };
+        let _ = run_tree(&ctx, &mut frame);
+        let u = run_tree(&ctx, &mut frame);
+        let first = named(&u, "First")[0].0;
+        let second = named(&u, "Second")[0].0;
+        assert_eq!(node(&u, first).role(), accesskit::Role::Dialog);
+        assert!(is_hidden_in_tree(&u, first));
+        assert!(!is_hidden_in_tree(&u, second));
+        assert!(is_inside(&u, named(&u, "Second button")[0].0, second));
+        assert!(is_inside(&u, named(&u, "First button")[0].0, first));
+        apply_like_the_platform(&u);
+    }
+
+    #[test]
+    fn a_dialog_that_draws_its_own_window_is_named_by_dialog_title() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut frame = |ctx: &egui::Context| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let _ = ui.button("Page");
+            });
+            dialog_enter(ctx, "t_raw");
+            dialog_title(ctx, "Raw window");
+            egui::Window::new("Raw window").show(ctx, |ui| {
+                let _ = ui.button("Inside");
+            });
+            drop_orphan_focus(ctx);
+        };
+        let _ = run_tree(&ctx, &mut frame);
+        let u = run_tree(&ctx, &mut frame);
+        let d = named(&u, "Raw window")
+            .into_iter()
+            .find(|(_, n)| n.role() == accesskit::Role::Dialog)
+            .expect("dialog node");
+        assert!(is_inside(&u, named(&u, "Inside")[0].0, d.0));
+        assert!(is_hidden_in_tree(&u, named(&u, "Page")[0].0));
+        apply_like_the_platform(&u);
+    }
+
+    #[test]
+    fn every_window_in_the_app_is_named_for_assistive_technology() {
+        // A window that does not call `a11y::dialog_title` just before it is drawn is a dialog
+        // without a name in the tree.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rust_files(&root, &mut files);
+        let mut seen = 0usize;
+        let mut missing = Vec::new();
+        for f in &files {
+            let rel = f
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            if rel == "a11y.rs" {
+                continue;
+            }
+            let src = std::fs::read_to_string(f).unwrap();
+            let code_end = src
+                .find("\n#[cfg(test)]\nmod ")
+                .or_else(|| src.find("\r\n#[cfg(test)]\r\nmod "))
+                .unwrap_or(src.len());
+            let lines: Vec<&str> = src[..code_end].lines().collect();
+            for (i, l) in lines.iter().enumerate() {
+                if l.trim_start().starts_with("egui::Window::new(")
+                    || l.contains("= egui::Window::new(")
+                {
+                    seen += 1;
+                    let from = i.saturating_sub(3);
+                    if !lines[from..i].iter().any(|p| p.contains("dialog_title(")) {
+                        missing.push(format!("{rel}:{}", i + 1));
+                    }
+                }
+            }
+        }
+        assert!(seen >= 9, "the scan found only {seen} windows");
+        assert!(
+            missing.is_empty(),
+            "windows without a11y::dialog_title: {missing:?}"
+        );
+    }
+
+    fn header_frame(ctx: &egui::Context, open: bool) -> Update {
+        run_tree(ctx, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                egui::CollapsingHeader::new("Details")
+                    .id_source("t_details")
+                    .default_open(open)
+                    .show_a11y(ui, |ui| {
+                        ui.label("Body text");
+                    });
+            });
+        })
+    }
+
+    #[test]
+    fn a_collapsing_header_publishes_whether_it_is_open() {
+        for open in [false, true] {
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            let _ = header_frame(&ctx, open);
+            let u = header_frame(&ctx, open);
+            let h = named(&u, "Details");
+            assert_eq!(h.len(), 1);
+            let n = h[0].1;
+            assert_eq!(n.is_expanded(), Some(open));
+            assert_eq!(
+                n.checked(),
+                Some(if open {
+                    accesskit::Checked::True
+                } else {
+                    accesskit::Checked::False
+                }),
+                "the state the Windows adapter can express"
+            );
+            assert_eq!(n.role(), accesskit::Role::DisclosureTriangle);
+            assert_eq!(
+                u.nodes
+                    .iter()
+                    .any(|(_, n)| n.name() == Some("Body text") || n.value() == Some("Body text")),
+                open,
+                "the body is in the tree only while open"
+            );
+            apply_like_the_platform(&u);
+        }
+    }
+
+    #[test]
+    fn every_collapsing_header_uses_show_a11y() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rust_files(&root, &mut files);
+        let mut seen = 0usize;
+        let mut plain = Vec::new();
+        for f in &files {
+            let rel = f
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            if rel == "a11y.rs" {
+                continue;
+            }
+            let src = std::fs::read_to_string(f).unwrap();
+            let code_end = src
+                .find("\n#[cfg(test)]\nmod ")
+                .or_else(|| src.find("\r\n#[cfg(test)]\r\nmod "))
+                .unwrap_or(src.len());
+            let lines: Vec<&str> = src[..code_end].lines().collect();
+            for (i, l) in lines.iter().enumerate() {
+                if l.contains("CollapsingHeader::new(") {
+                    seen += 1;
+                    let to = (i + 5).min(lines.len());
+                    if !lines[i..to].iter().any(|n| n.contains(".show_a11y(")) {
+                        plain.push(format!("{rel}:{}", i + 1));
+                    }
+                }
+            }
+        }
+        assert!(seen >= 5, "the scan found only {seen} headers");
+        assert!(
+            plain.is_empty(),
+            "collapsing headers without show_a11y: {plain:?}"
+        );
     }
 }

@@ -15,6 +15,7 @@ use miasma_core::push::{
     ContactInfo, Direction, HistoryEntry, PushRequest, PushResponse, PushState, PushTransferInfo,
 };
 
+use crate::a11y::CollapsingExt as _;
 use crate::app::{card_frame, danger_button};
 use crate::locale::{ContactStrings, Locale};
 use crate::open_path::{self, Action, Resolved};
@@ -1745,11 +1746,11 @@ impl ContactsUi {
             egui::CollapsingHeader::new(kit::section_text(c.tr_title))
                 .id_source("contacts_transfers")
                 .default_open(self.has_active())
-                .show(ui, |ui| self.transfers_ui(ui, c));
+                .show_a11y(ui, |ui| self.transfers_ui(ui, c));
             egui::CollapsingHeader::new(kit::section_text(c.inbox_title))
                 .id_source("contacts_inbox")
                 .default_open(false)
-                .show(ui, |ui| self.inbox_ui(ui, c));
+                .show_a11y(ui, |ui| self.inbox_ui(ui, c));
         }
         self.dialogs(ui.ctx(), c, technical);
         self.clear_dialog(ui.ctx(), c);
@@ -2351,6 +2352,7 @@ impl ContactsUi {
             crate::a11y::dialog_leave(ctx, "clear_finished");
             return;
         }
+        crate::a11y::dialog_title(ctx, c.clear_title);
         egui::Window::new(c.clear_title)
             .collapsible(false)
             .resizable(false)
