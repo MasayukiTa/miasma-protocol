@@ -10,8 +10,9 @@
 //! * `hybrid` (only with the `pqc` cargo feature): X25519 + ML-KEM-768 key
 //!   exchange with transcript binding and downgrade detection.
 //!
-//! All modules are libraries only. Nothing here is wired into a live
-//! handshake yet.
+//! `capability` and `fragment` are libraries; `hybrid` is used by exactly one
+//! live path: the opt-in upgrade of private-conversation sessions
+//! (`chat::pq`, default off, `pqc` feature). Nothing else uses them.
 
 pub mod capability;
 pub mod fragment;

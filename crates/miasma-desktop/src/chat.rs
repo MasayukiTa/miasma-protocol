@@ -707,7 +707,22 @@ pub fn fail_text(c: &ChatStrings, reason: Option<&str>) -> &'static str {
         Some("send_disabled") => c.fail_send_disabled,
         Some("expired") => c.fail_expired,
         Some("session") => c.fail_session,
+        Some("pqc_peer_no_hybrid") => c.fail_pqc_peer_no_hybrid,
+        Some("pqc_failed") => c.fail_pqc_failed,
         _ => c.fail_other,
+    }
+}
+
+/// The line about the hybrid post-quantum upgrade of a conversation, from the
+/// service's state word. `None` when nothing is to be shown (the setting is
+/// off and nothing was negotiated, or the service does not report it).
+pub fn pqc_text(c: &ChatStrings, state: Option<&str>) -> Option<&'static str> {
+    match state {
+        Some("hybrid") => Some(c.pqc_hybrid),
+        Some("classical") => Some(c.pqc_classical),
+        Some("pending") => Some(c.pqc_pending),
+        Some("failed") => Some(c.pqc_failed),
+        _ => None,
     }
 }
 
@@ -876,6 +891,8 @@ mod tests {
             read_receipts: true,
             pending_reason: None,
             pending_tried_ms: 0,
+            pqc: None,
+            pqc_reason: None,
         }
     }
 

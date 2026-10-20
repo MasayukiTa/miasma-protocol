@@ -14,6 +14,8 @@ pub mod group;
 pub mod ipc;
 pub mod mailbox;
 pub mod outbox;
+#[cfg(feature = "pqc")]
+pub mod pq;
 pub mod proto;
 pub mod store;
 pub mod sync;
@@ -27,5 +29,7 @@ pub use ipc::{handle_ipc, ChatRequest, ChatResponse};
 mod engine_tests;
 #[cfg(test)]
 pub(crate) mod offline_tests;
+#[cfg(all(test, feature = "pqc"))]
+mod pq_tests;
 #[cfg(test)]
 mod receipt_tests;

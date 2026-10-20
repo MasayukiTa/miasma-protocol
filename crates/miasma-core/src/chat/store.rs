@@ -539,6 +539,11 @@ impl ChatStore {
         &self.dir
     }
 
+    /// The keys that protect the saved documents (for sibling documents).
+    pub fn keys(&self) -> &Arc<StateKeys> {
+        &self.keys
+    }
+
     fn stem(&self, peer: &[u8; 32]) -> String {
         file_stem(&self.own_id, peer)
     }

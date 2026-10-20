@@ -1135,6 +1135,11 @@ pub struct DaemonStatus {
     /// accepted at a lower level than offered, or refused by local policy.
     #[serde(default)]
     pub capability_downgrades: crate::protocol::capability::DowngradeCounts,
+    /// Hybrid post-quantum upgrade of private conversations: the mode this
+    /// daemon runs with, whether this build can do it at all, and how many
+    /// sessions ended hybrid, "classical only", refused or failed.
+    #[serde(default)]
+    pub pqc: crate::chat::ipc::PqcStatus,
 
     // ── Network environment (Phase 5) ───────────────────────────────────
     /// Detected network environment.
