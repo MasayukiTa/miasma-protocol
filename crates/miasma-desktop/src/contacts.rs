@@ -1932,8 +1932,17 @@ impl ContactsUi {
                     .hint_text(c.add_paste),
             );
             crate::form_check::name(&add_edit, au.a11y_add_code);
+            // The pasted text is read at once: the name is asked for only when it holds a contact
+            // code, and when it does not, the reason is under the field (which keeps its focus).
+            let has_text = !self.add_text.trim().is_empty();
+            let valid =
+                has_text && miasma_core::push::extract_contact_code(&self.add_text).is_some();
+            if has_text && !valid {
+                ui.add_space(kit::SP_1);
+                kit::notice(ui, Level::Error, c.err_bad_code);
+            }
             let mut label_edit: Option<egui::Response> = None;
-            if !self.add_text.trim().is_empty() {
+            if valid {
                 ui.add_space(kit::SP_2);
                 ui.label(label_text(c.add_label));
                 let r = ui.add(kit::input(&mut self.add_label).hint_text(c.add_label_hint));
@@ -1947,7 +1956,7 @@ impl ContactsUi {
             ui.add_space(kit::SP_3);
             let needs = [crate::form_check::Need::new(
                 &add_edit,
-                !self.add_text.trim().is_empty(),
+                valid,
                 au.need_contact,
             )];
             let attempt = label_edit

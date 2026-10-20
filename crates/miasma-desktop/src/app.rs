@@ -1701,12 +1701,21 @@ impl MiasmaApp {
                     } else {
                         s.retrieve_button
                     };
+                    let typed = !self.mid_input.trim().is_empty();
                     let needs = [
                         crate::form_check::Need::general(connected, au.need_connection),
                         crate::form_check::Need::new(
                             &mid_edit,
-                            !self.mid_input.trim().is_empty(),
+                            typed,
                             if easy { au.need_code } else { au.need_mid },
+                        ),
+                        // Read with the parser the daemon uses: a text that cannot be an ID keeps
+                        // the button off, and the reason says what an ID looks like.
+                        crate::form_check::Need::new(
+                            &mid_edit,
+                            miasma_core::crypto::hash::ContentId::from_str(self.mid_input.trim())
+                                .is_ok(),
+                            au.bad_mid,
                         ),
                     ];
                     let attempt = crate::form_check::submitted(&mid_edit);
