@@ -2543,8 +2543,6 @@ impl ContactsUi {
 
 // ─── Look: one set of sizes and frames for every section ───────────────────
 
-/// Space between two sections.
-const GAP: f32 = 10.0;
 /// Size of field labels and hints. Never below the app's small size.
 const LABEL_SIZE: f32 = 13.0;
 

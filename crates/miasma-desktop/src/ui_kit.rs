@@ -781,6 +781,7 @@ pub struct ListRowOut<R> {
     /// The row's rectangle (not counting the hairline above it).
     pub rect: egui::Rect,
     /// Whatever the trailing closure returned.
+    #[allow(dead_code)]
     pub inner: R,
 }
 
@@ -889,6 +890,7 @@ impl<'a> MenuItem<'a> {
         }
     }
 
+    #[allow(dead_code)]
     pub fn enabled(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
         self
