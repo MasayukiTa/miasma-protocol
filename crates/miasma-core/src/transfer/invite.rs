@@ -21,6 +21,8 @@ pub const RELEASES_URL: &str = "https://github.com/MasayukiTa/miasma-protocol/re
 pub enum InviteLang {
     En,
     Ja,
+    /// Simplified Chinese.
+    Zh,
 }
 
 /// The invitation message for `share_id` (a `miasma-share:...` string).
@@ -51,6 +53,17 @@ pub fn invitation_text(share_id: &str, lang: InviteLang) -> String {
              パスワードはこのメッセージには書かれていません。別の方法でお送りします。\n\
              \n\
              Miasma のダウンロード: {RELEASES_URL}\n"
+        ),
+        InviteLang::Zh => format!(
+            "我通过 Miasma 向你分享一个文件。\n\
+             \n\
+             {id}\n\
+             \n\
+             接收方法：打开 Miasma，依次点击“传输”>“新建传输”>“接收”，粘贴上面的共享 ID，并输入密码。\n\
+             命令行方式：miasma network-get <ShareID> -o <file> --password-file <file>\n\
+             密码不在这条消息里，我会另外发给你。\n\
+             \n\
+             下载 Miasma：{RELEASES_URL}\n"
         ),
     }
 }
@@ -177,9 +190,9 @@ mod tests {
     }
 
     #[test]
-    fn invitation_has_id_once_on_its_own_line_in_both_languages() {
+    fn invitation_has_id_once_on_its_own_line_in_every_language() {
         let id = sample_id();
-        for lang in [InviteLang::En, InviteLang::Ja] {
+        for lang in [InviteLang::En, InviteLang::Ja, InviteLang::Zh] {
             let t = invitation_text(&id, lang);
             assert_eq!(t.matches(&id).count(), 1, "{lang:?}");
             assert_eq!(t.lines().filter(|l| *l == id).count(), 1, "{lang:?}");
@@ -189,12 +202,13 @@ mod tests {
         }
         assert!(invitation_text(&id, InviteLang::Ja).contains("別の方法"));
         assert!(invitation_text(&id, InviteLang::En).contains("separately"));
+        assert!(invitation_text(&id, InviteLang::Zh).contains("另外发给你"));
     }
 
     #[test]
     fn invitation_round_trips_through_extract() {
         let id = sample_id();
-        for lang in [InviteLang::En, InviteLang::Ja] {
+        for lang in [InviteLang::En, InviteLang::Ja, InviteLang::Zh] {
             assert_eq!(
                 extract_share_id(&invitation_text(&id, lang)).as_deref(),
                 Some(id.as_str())
@@ -219,6 +233,37 @@ mod tests {
             "田中さん\n\nお世話になっております。資料を共有します。\n\n{id}\n\nパスワードは別途お送りします。\nよろしくお願いします。\n"
         );
         assert_eq!(extract_share_id(&mail).as_deref(), Some(id.as_str()));
+    }
+
+    #[test]
+    fn id_inside_a_chinese_message() {
+        let id = sample_id();
+        let mail =
+            format!("小王：\n\n你好，资料已经准备好了。\n\n{id}\n\n密码稍后单独发给你。\n谢谢！\n");
+        assert_eq!(extract_share_id(&mail).as_deref(), Some(id.as_str()));
+        // Full-width punctuation right after the ID does not belong to it.
+        assert_eq!(
+            extract_share_id(&format!("共享 ID：{id}。")).as_deref(),
+            Some(id.as_str())
+        );
+    }
+
+    #[test]
+    fn invitations_written_by_older_builds_still_parse() {
+        // The texts earlier builds produced (English and Japanese only), written out in full:
+        // a build that knows more languages has to keep reading them.
+        let id = sample_id();
+        let old_en = format!(
+            "I'm sharing a file with you through Miasma.\n\n{id}\n\nTo receive it: open Miasma > Transfers > New transfer > Receive, paste the Share ID above, and enter the password.\nFrom the command line: miasma network-get <ShareID> -o <file> --password-file <file>\nThe password is not in this message; I will send it to you separately.\n\nGet Miasma: {RELEASES_URL}\n"
+        );
+        let old_ja = format!(
+            "Miasma でファイルを共有します。\n\n{id}\n\n受け取り方: Miasma を開き、「転送」>「新しい転送」>「受信」で上の共有 ID を貼り付け、パスワードを入力してください。\nコマンドラインの場合: miasma network-get <ShareID> -o <file> --password-file <file>\nパスワードはこのメッセージには書かれていません。別の方法でお送りします。\n\nMiasma のダウンロード: {RELEASES_URL}\n"
+        );
+        assert_eq!(old_en, invitation_text(&id, InviteLang::En));
+        assert_eq!(old_ja, invitation_text(&id, InviteLang::Ja));
+        for text in [old_en, old_ja] {
+            assert_eq!(extract_share_id(&text).as_deref(), Some(id.as_str()));
+        }
     }
 
     #[test]

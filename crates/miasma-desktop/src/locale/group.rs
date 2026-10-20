@@ -357,7 +357,7 @@ static GR_ZH_CN: GroupStrings = GroupStrings {
     list_empty_groups: "还没有会话。请选择“新建会话”或“新建群组”开始。",
     ng_title: "新建群组",
     ng_name_label: "群组名称",
-    ng_name_hint: "群组的名称",
+    ng_name_hint: "群组名称",
     ng_members_label: "成员（从你的联系人中选择）",
     ng_none: "目前没有可以接收消息的联系人。请先在“联系人”标签页添加联系人。",
     ng_count: "已选 {n} 人，上限 {max} 人（含你自己）",
@@ -493,6 +493,15 @@ mod tests {
                 assert!(!value.trim().is_empty(), "{lang:?} group.{name} is empty");
             }
         }
+    }
+
+    #[test]
+    fn zh_cn_group_texts_match_the_english_ones() {
+        crate::locale::assert_translation_parity(
+            "group",
+            group_strings(Locale::En).all(),
+            group_strings(Locale::ZhCn).all(),
+        );
     }
 
     #[test]

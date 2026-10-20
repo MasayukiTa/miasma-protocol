@@ -13,15 +13,15 @@ fn pick(locale: Locale, en: &'static str, ja: &'static str, zh: &'static str) ->
 }
 
 pub fn created_label(l: Locale) -> &'static str {
-    pick(l, "Created:", "作成:", "创建时间:")
+    pick(l, "Created:", "作成:", "创建时间：")
 }
 
 pub fn expires_label(l: Locale) -> &'static str {
-    pick(l, "Expires:", "期限:", "到期时间:")
+    pick(l, "Expires:", "期限:", "到期时间：")
 }
 
 pub fn envelope_id_label(l: Locale) -> &'static str {
-    pick(l, "Envelope ID:", "送付ID:", "信封 ID:")
+    pick(l, "Envelope ID:", "送付ID:", "信封 ID：")
 }
 
 pub fn text_files_filter(l: Locale) -> &'static str {
@@ -82,8 +82,8 @@ pub fn relative_time(l: Locale, epoch_secs: u64, now: u64) -> String {
         (Locale::En, false) => format!("{n}{} ago", ["m", "h", "d"][unit]),
         (Locale::Ja, true) => format!("{n}{}後", ["分", "時間", "日"][unit]),
         (Locale::Ja, false) => format!("{n}{}前", ["分", "時間", "日"][unit]),
-        (Locale::ZhCn, true) => format!("{n}{}后", ["分钟", "小时", "天"][unit]),
-        (Locale::ZhCn, false) => format!("{n}{}前", ["分钟", "小时", "天"][unit]),
+        (Locale::ZhCn, true) => format!("{n} {}后", ["分钟", "小时", "天"][unit]),
+        (Locale::ZhCn, false) => format!("{n} {}前", ["分钟", "小时", "天"][unit]),
     }
 }
 
@@ -127,8 +127,8 @@ mod tests {
             (Locale::Ja, now - 3 * 3600, "3時間前"),
             (Locale::Ja, now + 2 * 86400, "2日後"),
             (Locale::Ja, 0, "不明"),
-            (Locale::ZhCn, now - 5 * 60, "5分钟前"),
-            (Locale::ZhCn, now + 3600, "1小时后"),
+            (Locale::ZhCn, now - 5 * 60, "5 分钟前"),
+            (Locale::ZhCn, now + 3600, "1 小时后"),
         ];
         for (l, t, want) in cases {
             assert_eq!(relative_time(l, t, now), want, "{l:?} {t}");

@@ -204,21 +204,38 @@ pub fn max_size_hint_text(c: &ContactStrings, default_limit: u64) -> String {
 
 /// The message to paste into chat or e-mail. Bilingual, and it carries only public things: the
 /// contact code is public by design, the verification code is a digest of it. No secret ever
-/// goes here.
-pub fn invitation_message(code: &str, fingerprint: &str) -> String {
-    format!(
-        "Miasma の連絡先を送ります。 / Here is my Miasma contact.\n\
-         \n\
-         {code}\n\
-         \n\
-         確認用コード / Verification code: {fingerprint}\n\
-         \n\
-         使い方: Miasma の「連絡先」を開き、「連絡先を追加」にこのメッセージをそのまま貼り付けて、「追加」を押してください。\n\
-         How to: open Miasma > Contacts, paste this whole message into \"Add a contact\", then press Add.\n\
-         \n\
-         連絡先コードは人に見せても大丈夫です。パスワードではありません。\n\
-         The contact code is safe to share. It is not a password.\n"
-    )
+/// goes here. The English and Japanese windows write Japanese plus English; the Simplified
+/// Chinese window writes Chinese plus English. The code line is the same in all of them, so any
+/// build finds it again.
+pub fn invitation_message(code: &str, fingerprint: &str, locale: Locale) -> String {
+    match locale {
+        Locale::ZhCn => format!(
+            "我把我的 Miasma 联系人发给你。 / Here is my Miasma contact.\n\
+             \n\
+             {code}\n\
+             \n\
+             验证码 / Verification code: {fingerprint}\n\
+             \n\
+             使用方法：打开 Miasma 的“联系人”，把整条消息原样粘贴到“添加联系人”，然后点击“添加”。\n\
+             How to: open Miasma > Contacts, paste this whole message into \"Add a contact\", then press Add.\n\
+             \n\
+             联系人代码可以放心分享，它不是密码。\n\
+             The contact code is safe to share. It is not a password.\n"
+        ),
+        Locale::En | Locale::Ja => format!(
+            "Miasma の連絡先を送ります。 / Here is my Miasma contact.\n\
+             \n\
+             {code}\n\
+             \n\
+             確認用コード / Verification code: {fingerprint}\n\
+             \n\
+             使い方: Miasma の「連絡先」を開き、「連絡先を追加」にこのメッセージをそのまま貼り付けて、「追加」を押してください。\n\
+             How to: open Miasma > Contacts, paste this whole message into \"Add a contact\", then press Add.\n\
+             \n\
+             連絡先コードは人に見せても大丈夫です。パスワードではありません。\n\
+             The contact code is safe to share. It is not a password.\n"
+        ),
+    }
 }
 
 /// Text for the QR code: a plain-text header so a phone camera shows a Text banner instead of
@@ -1722,7 +1739,7 @@ impl ContactsUi {
                     c.copy_invite
                 };
                 if ui.add(primary_button(l)).clicked() {
-                    let msg = invitation_message(&code, &fp);
+                    let msg = invitation_message(&code, &fp, c.locale);
                     ui.output_mut(|o| o.copied_text = msg);
                     self.invite_copied_at = Some(Instant::now());
                 }
@@ -2918,14 +2935,22 @@ mod tests {
     }
 
     #[test]
-    fn invitation_has_code_and_howto_in_both_languages_and_no_secret() {
+    fn invitation_has_code_and_howto_in_every_language_and_no_secret() {
         let code = "miasma-contact:ABCDEFG";
-        let m = invitation_message(code, "AAAAA-BBBBB-CCCCC-DDDDD");
-        assert!(m.contains(code));
-        assert!(m.contains("連絡先") && m.contains("Contacts"));
-        assert!(m.contains("AAAAA-BBBBB-CCCCC-DDDDD"));
-        assert!(!m.to_lowercase().contains("password:"));
-        assert!(!m.contains("secret"));
+        for locale in Locale::ALL {
+            let m = invitation_message(code, "AAAAA-BBBBB-CCCCC-DDDDD", locale);
+            assert!(m.contains(code), "{locale:?}");
+            assert!(m.contains("Contacts"), "{locale:?}");
+            assert!(m.contains("AAAAA-BBBBB-CCCCC-DDDDD"), "{locale:?}");
+            assert!(!m.to_lowercase().contains("password:"), "{locale:?}");
+            assert!(!m.contains("secret"), "{locale:?}");
+            if locale == Locale::ZhCn {
+                assert!(m.contains("联系人") && m.contains("验证码"));
+                assert!(!m.contains("連絡先"));
+            } else {
+                assert!(m.contains("連絡先"), "{locale:?}");
+            }
+        }
     }
 
     #[test]
@@ -2935,9 +2960,26 @@ mod tests {
         id[0] = 0x58;
         let code = miasma_core::push::ContactCode::new(id);
         let text = code.to_string();
-        let m = invitation_message(&text, &code.fingerprint());
+        // Whatever language the sender's window uses, every build finds the same code again.
+        for locale in Locale::ALL {
+            let m = invitation_message(&text, &code.fingerprint(), locale);
+            assert_eq!(
+                miasma_core::push::extract_contact_code(&m).as_deref(),
+                Some(text.as_str()),
+                "{locale:?}"
+            );
+        }
+        // The text an earlier build sent (Japanese plus English) is still read.
+        let old = format!(
+            "Miasma の連絡先を送ります。 / Here is my Miasma contact.\n\n{text}\n\n確認用コード / Verification code: {}\n\n使い方: Miasma の「連絡先」を開き、「連絡先を追加」にこのメッセージをそのまま貼り付けて、「追加」を押してください。\nHow to: open Miasma > Contacts, paste this whole message into \"Add a contact\", then press Add.\n\n連絡先コードは人に見せても大丈夫です。パスワードではありません。\nThe contact code is safe to share. It is not a password.\n",
+            code.fingerprint()
+        );
         assert_eq!(
-            miasma_core::push::extract_contact_code(&m).as_deref(),
+            old,
+            invitation_message(&text, &code.fingerprint(), Locale::Ja)
+        );
+        assert_eq!(
+            miasma_core::push::extract_contact_code(&old).as_deref(),
             Some(text.as_str())
         );
         assert!(qr_payload(&text).starts_with("Miasma Contact\n"));
