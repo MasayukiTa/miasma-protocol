@@ -366,6 +366,13 @@ fn trap_sentinel(ctx: &egui::Context, which: &'static str) {
 /// Frames after a Tab press during which a focus that lands on a window's own stop is moved on.
 const TAB_RECENT: u64 = 3;
 
+fn trace(ctx: &egui::Context, frame: u64, what: String) {
+    let id = egui::Id::new("dbg_trace");
+    let mut v: Vec<(u64, String)> = ctx.data_mut(|d| d.get_temp(id)).unwrap_or_default();
+    v.push((frame, what));
+    ctx.data_mut(|d| d.insert_temp(id, v));
+}
+
 fn tab_dir_id() -> egui::Id {
     egui::Id::new("a11y_dialog_trap_last_tab")
 }
@@ -414,8 +421,10 @@ pub fn trap_input(ctx: &egui::Context, raw: &mut egui::RawInput) {
     }
     let (start, end) = (trap_id("start"), trap_id("end"));
     let Some(focused) = ctx.memory(|m| m.focused()) else {
+        trace(ctx, frame, "none".into());
         return;
     };
+    trace(ctx, frame, format!("{focused:?}"));
     let (to, shift) = if focused == end {
         (start, false)
     } else if focused == start {
@@ -1180,7 +1189,7 @@ pub(crate) mod tests {
             seen,
             [Some(ids[1]), Some(ids[2]), Some(ids[0])],
             "Tab (inj {:?}, start {:?}, end {:?}, skip {:?}, last {:?}, frame {}, ids {:?}, layers {:?})",
-            ctx.data_mut(|d| d.get_temp::<(u64, egui::Id, bool)>(egui::Id::new("dbg_inject"))),
+            ctx.data_mut(|d| d.get_temp::<Vec<(u64, String)>>(egui::Id::new("dbg_trace"))),
             trap_id("start"),
             trap_id("end"),
             ctx.data_mut(|d| d.get_temp::<egui::Id>(skip_id())),
