@@ -151,7 +151,7 @@ pub mod confirm {
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .max_width(440.0)
+            .max_width(424.0)
             .show(ctx, |ui| {
                 body(ui);
                 ui.add_space(kit::SP_1);
