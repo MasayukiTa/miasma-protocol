@@ -174,7 +174,8 @@ fn segment_begin(ctx: &egui::Context, key: &'static str) {
 /// text as the window title: it becomes the accessible name of the dialog.
 pub fn dialog_title(ctx: &egui::Context, title: &str) {
     trap_sentinel(ctx, "start");
-    ctx.data_mut(|d| d.insert_temp(trap_open_id(), ctx.frame_nr()));
+    let frame = ctx.frame_nr();
+    ctx.data_mut(|d| d.insert_temp(trap_open_id(), frame));
     with_segments(ctx, |list| {
         if let Some(last) = list.last_mut() {
             last.title = title.to_owned();
