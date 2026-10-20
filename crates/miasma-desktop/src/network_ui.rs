@@ -21,6 +21,11 @@ use miasma_core::transport::reach::{
 use miasma_core::transport::reach_net::SystemNet;
 use tokio::sync::Notify;
 
+/// Height of the slot under the test button that holds the progress or the outcome of a check.
+const CHECK_STATUS_SLOT_H: f32 = 64.0;
+/// The most height the result of a check takes before it scrolls inside its own box.
+const CHECK_RESULT_MAX_H: f32 = 320.0;
+
 use crate::locale::Locale;
 use crate::network_model::{
     add_relay_url, check_ca_file, file_name_of, load_settings, report_json, save_settings, CaCheck,
@@ -482,11 +487,19 @@ impl NetworkUi {
             let running = matches!(self.check, Check::Running { .. });
             let mut start = false;
             let mut cancel = false;
+            let mut save_report = false;
             kit::button_row(ui, |ui| {
                 start = kit::primary(ui, !running, s.check_button).clicked();
                 if let Check::Running { cancelling, .. } = &self.check {
                     cancel = ui
                         .add_enabled(!*cancelling, kit::secondary_button(s.check_cancel))
+                        .clicked();
+                }
+                // Always in the same row as the test button, so the result below can come and
+                // go without moving any control.
+                if self.view.is_some() {
+                    save_report = ui
+                        .add_enabled(!running, kit::secondary_button(s.save_report))
                         .clicked();
                 }
             });
@@ -496,6 +509,40 @@ impl NetworkUi {
             if cancel {
                 self.cancel_check();
             }
+            if save_report {
+                self.start_save_report(ctx, "network-report.json");
+            }
+            // The progress and the outcome sit directly under the button in a slot of fixed
+            // height, so starting, cancelling or failing a check does not shift the page.
+            if running
+                || self.view.is_some()
+                || !matches!(self.check, Check::Idle)
+                || self.report_note.is_some()
+            {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), CHECK_STATUS_SLOT_H),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_min_height(CHECK_STATUS_SLOT_H);
+                        self.check_status(ui, s, ctx);
+                    },
+                );
+            }
+
+            if let Some(view) = self.view.clone() {
+                // The result is capped in height and scrolls inside its own box.
+                egui::ScrollArea::vertical()
+                    .id_source("network_check_result")
+                    .max_height(CHECK_RESULT_MAX_H)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| result_view(ui, locale, s, &view));
+            }
+        });
+    }
+
+    /// Progress, cancel / failure notice and the report-saved note of the check.
+    fn check_status(&mut self, ui: &mut egui::Ui, s: &'static NetStrings, ctx: &egui::Context) {
+        {
             match &self.check {
                 Check::Running { started, .. } => {
                     let elapsed = started.elapsed();
@@ -515,25 +562,14 @@ impl NetworkUi {
                 }
                 Check::Idle => {}
             }
-
-            if let Some(view) = self.view.clone() {
-                result_view(ui, locale, s, &view);
-                let mut save_report = false;
-                kit::button_row(ui, |ui| {
-                    save_report = ui.add(kit::secondary_button(s.save_report)).clicked();
-                });
-                if save_report {
-                    self.start_save_report(ctx, "network-report.json");
-                }
-                if let Some((level, text)) = &self.report_note {
-                    let shown = match level {
-                        Level::Ok => s.report_saved.replace("{path}", text),
-                        _ => s.report_failed.replace("{err}", text),
-                    };
-                    kit::notice(ui, *level, &shown);
-                }
+            if let Some((level, text)) = &self.report_note {
+                let shown = match level {
+                    Level::Ok => s.report_saved.replace("{path}", text),
+                    _ => s.report_failed.replace("{err}", text),
+                };
+                kit::notice(ui, *level, &shown);
             }
-        });
+        }
     }
 }
 

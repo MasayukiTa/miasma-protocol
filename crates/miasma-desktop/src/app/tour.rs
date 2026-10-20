@@ -235,8 +235,8 @@ fn mock_app(app: &mut MiasmaApp) {
         recipient: "12D3KooWQ9fPzKx2TnYw5Rb7uLhE4sJmAfPdLgN2oKxVe8CiUyH".to_owned(),
         state: state.to_owned(),
         challenge_code: code.then(|| Arc::new(Zeroizing::new("482-913".to_owned()))),
-        created_at: "2026-10-12 09:41".to_owned(),
-        expires_at: "2026-10-19 09:41".to_owned(),
+        created_at: crate::uitext::relative_and_absolute(app.locale, 1_791_798_060, 1_792_505_100),
+        expires_at: crate::uitext::relative_and_absolute(app.locale, 1_792_402_860, 1_792_505_100),
         filename: name.map(str::to_owned),
         file_size: if name.is_some() { 38 * MIB } else { 0 },
     };
@@ -616,6 +616,24 @@ fn all_steps() -> Vec<Step> {
 }
 
 /// Put the app into the state a step shows. Called every frame; `first` on the first one.
+/// The Settings category a step shows: `..._settings_privacy_wide` shows Privacy and storage,
+/// plain `..._settings_wide` shows the first category.
+fn settings_cat_of(step_name: &str) -> super::SettingsCat {
+    use super::SettingsCat as C;
+    for (key, cat) in [
+        ("settings_privacy", C::Privacy),
+        ("settings_network", C::Network),
+        ("settings_updates", C::Updates),
+        ("settings_about", C::About),
+        ("settings_danger", C::Danger),
+    ] {
+        if step_name.contains(key) {
+            return cat;
+        }
+    }
+    C::General
+}
+
 fn arrange(step: &Step, app: &mut MiasmaApp, ctx: &egui::Context, first: bool) {
     if first {
         app.theme_mode = step.theme;
@@ -629,6 +647,7 @@ fn arrange(step: &Step, app: &mut MiasmaApp, ctx: &egui::Context, first: bool) {
         }
         app.locale = step.locale;
         app.tab = step.tab;
+        app.settings_cat = settings_cat_of(&step.name);
         // The send flow is closed at the start of every step, then opened as the step says.
         app.send_flow = crate::send_flow::SendFlow::default();
         if let Some(d) = &step.daemon {
@@ -815,6 +834,14 @@ fn easy_steps() -> Vec<Step> {
                     DaemonState::Connected,
                 ));
             }
+            // The other Settings categories (the first one is "settings" above).
+            for cat in ["privacy", "network", "updates", "about", "danger"] {
+                steps.push(base(
+                    format!("easy_{lname}_settings_{cat}_{wname}"),
+                    Tab::Settings,
+                    DaemonState::Connected,
+                ));
+            }
             for (d, dname) in [
                 (DaemonState::Stopped, "stopped"),
                 (DaemonState::Starting, "starting"),
@@ -912,6 +939,53 @@ fn easy_steps() -> Vec<Step> {
             flow: None,
             hover: false,
         });
+    }
+    // Settings at 600 px and at the 320 px minimum: no horizontal overflow, every category.
+    for (w, wname) in [(600.0, "600"), (320.0, "320")] {
+        for (locale, lname) in [(Locale::En, "en"), (Locale::Ja, "ja")] {
+            for cat in [
+                "general", "privacy", "network", "updates", "about", "danger",
+            ] {
+                steps.push(Step {
+                    name: format!("easy_{lname}_settings_{cat}_{wname}"),
+                    theme: ThemeMode::Light,
+                    locale,
+                    tab: Tab::Settings,
+                    daemon: Some(DaemonState::Connected),
+                    transfers: None,
+                    contacts: None,
+                    chat: None,
+                    size: Some((w, 1800.0)),
+                    mode: Some(ProductMode::Easy),
+                    flow: None,
+                    hover: false,
+                });
+            }
+        }
+    }
+    // Technical mode: the grouped tab row (top row, then the Files group's row) and Settings.
+    for (tab, tname) in [
+        (Tab::Contacts, "contacts"),
+        (Tab::Transfers, "transfers"),
+        (Tab::Inbox, "inbox"),
+        (Tab::Settings, "settings"),
+    ] {
+        for (w, wname) in [(1200.0, "wide"), (600.0, "600")] {
+            steps.push(Step {
+                name: format!("tech_en_{tname}_{wname}"),
+                theme: ThemeMode::Light,
+                locale: Locale::En,
+                tab,
+                daemon: Some(DaemonState::Connected),
+                transfers: None,
+                contacts: None,
+                chat: None,
+                size: Some((w, if tab == Tab::Settings { 1800.0 } else { 900.0 })),
+                mode: Some(ProductMode::Technical),
+                flow: None,
+                hover: false,
+            });
+        }
     }
     steps
 }
