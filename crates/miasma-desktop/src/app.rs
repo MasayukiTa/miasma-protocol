@@ -4680,6 +4680,11 @@ mod tests {
                 .or_default()
                 .native_pixels_per_point = Some(1.0);
             self.clock += 1.0 / 60.0;
+            // The real worker runs in the background and reports that no service is there;
+            // the screens are looked at as with a service up.
+            self.app.daemon_state = DaemonState::Connected;
+            self.app.status_msg = None;
+            self.app.last_error = None;
             let app = &mut self.app;
             let out = self.ctx.run(raw, |ctx| app.update_frame(ctx, None));
             let update = out
