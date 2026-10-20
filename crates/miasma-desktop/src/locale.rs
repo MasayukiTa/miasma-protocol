@@ -867,11 +867,11 @@ static EN: Strings = Strings {
     tab_send_easy: "Send",
     tab_inbox: "Inbox",
     tab_inbox_easy: "Inbox",
-    send_heading: "Directed Private Share",
+    send_heading: "Private Send",
     send_heading_easy: "Send to Someone",
-    send_desc: "Encrypt and send a file to a specific recipient using their sharing contact.",
+    send_desc: "Encrypt and send a file to one recipient, using their file receive code.",
     send_desc_easy: "Send a file privately to someone you know.",
-    send_contact_label: "Recipient contact:",
+    send_contact_label: "Recipient's receive code:",
     send_contact_hint: "msk:...@PeerId",
     send_password_label: "Password:",
     send_retention_label: "Keep for:",
@@ -889,9 +889,9 @@ static EN: Strings = Strings {
     send_busy: "Sending...",
     send_success: "Sent! Share the challenge code with recipient.",
     send_not_connected: "Connect to send files.",
-    inbox_heading: "Directed Inbox",
+    inbox_heading: "Private Inbox",
     inbox_heading_easy: "Received Files",
-    inbox_desc: "Incoming directed shares from other users.",
+    inbox_desc: "Private files other users have sent to you.",
     inbox_desc_easy: "Files people have sent to you.",
     inbox_empty: "Inbox is empty.",
     inbox_from: "From:",
@@ -901,17 +901,17 @@ static EN: Strings = Strings {
     inbox_password_label: "Password:",
     inbox_revoke_button: "Decline",
     inbox_refresh: "Refresh",
-    sharing_key_label: "Your sharing contact:",
-    sharing_key_desc: "Share this contact string so others can send you directed files.",
+    sharing_key_label: "Your file receive code:",
+    sharing_key_desc: "Give this code to people so they can send you private files.",
     sharing_key_desc_easy: "Give this to people who want to send you files.",
-    sharing_key_copy: "Copy Contact",
+    sharing_key_copy: "Copy Code",
     sharing_key_copied: "Copied!",
 
     tab_outbox: "Outbox",
     tab_outbox_easy: "Sent",
-    outbox_heading: "Directed Outbox",
+    outbox_heading: "Private Outbox",
     outbox_heading_easy: "Files You Sent",
-    outbox_desc: "Outgoing directed shares you have sent to others.",
+    outbox_desc: "Private files you have sent to others.",
     outbox_desc_easy: "Files you sent to specific people.",
     outbox_empty: "Outbox is empty.",
     outbox_to: "To:",
@@ -1161,11 +1161,11 @@ static JA: Strings = Strings {
     tab_send_easy: "送る",
     tab_inbox: "受信箱",
     tab_inbox_easy: "届いたファイル",
-    send_heading: "ダイレクト共有",
+    send_heading: "プライベート送信",
     send_heading_easy: "ファイルを送る",
-    send_desc: "受信者の共有コンタクトを使って暗号化し送信します。",
+    send_desc: "受信者のファイル受信コードを使って暗号化し送信します。",
     send_desc_easy: "知り合いにファイルを安全に送ります。",
-    send_contact_label: "送信先コンタクト:",
+    send_contact_label: "送信先の受信コード:",
     send_contact_hint: "msk:...@PeerId",
     send_password_label: "パスワード:",
     send_retention_label: "保持期間:",
@@ -1183,9 +1183,9 @@ static JA: Strings = Strings {
     send_busy: "送信中...",
     send_success: "送信完了！チャレンジコードを受信者に共有してください。",
     send_not_connected: "接続してから送信してください。",
-    inbox_heading: "ダイレクト受信箱",
+    inbox_heading: "プライベート受信箱",
     inbox_heading_easy: "届いたファイル",
-    inbox_desc: "他のユーザーからのダイレクト共有。",
+    inbox_desc: "他のユーザーから届いたプライベートなファイル。",
     inbox_desc_easy: "あなた宛に送られたファイル。",
     inbox_empty: "受信箱は空です。",
     inbox_from: "送信者:",
@@ -1195,17 +1195,17 @@ static JA: Strings = Strings {
     inbox_password_label: "パスワード:",
     inbox_revoke_button: "受け取らない",
     inbox_refresh: "更新",
-    sharing_key_label: "あなたの共有コンタクト:",
-    sharing_key_desc: "このコンタクト文字列を共有すると相手がダイレクト送信できます。",
+    sharing_key_label: "あなたのファイル受信コード:",
+    sharing_key_desc: "このコードを相手に渡すと、プライベートにファイルを送ってもらえます。",
     sharing_key_desc_easy: "ファイルを受け取るにはこれを相手に教えてください。",
     sharing_key_copy: "コピー",
     sharing_key_copied: "コピーしました！",
 
     tab_outbox: "送信済み",
     tab_outbox_easy: "送ったファイル",
-    outbox_heading: "送信済みダイレクト共有",
+    outbox_heading: "送信済みプライベートファイル",
     outbox_heading_easy: "送ったファイル",
-    outbox_desc: "他のユーザーに送ったダイレクト共有。",
+    outbox_desc: "他のユーザーに送ったプライベートなファイル。",
     outbox_desc_easy: "あなたが送ったファイルの一覧。",
     outbox_empty: "送信済みはありません。",
     outbox_to: "宛先:",
@@ -1985,7 +1985,7 @@ static TR_EN: TransferStrings = TransferStrings {
 
     red_label: "Redundancy",
     red_label_easy: "Protection",
-    red_row: "{kn}   {x} storage   tolerates {loss} lost pieces",
+    red_row: "{kn}   {x} storage   tolerates {loss}",
     red_default: "(default)",
     easy_fast: "Fastest",
     easy_fast_desc: "Least disk space and time. There are no spare pieces, so damage cannot be repaired.",
@@ -2903,6 +2903,30 @@ pub use compose::{compose_strings, ComposeStrings};
 // Strings added for the interface audit (their own file: `locale/audit.rs`).
 mod audit;
 pub use audit::{audit_strings, AuditStrings};
+
+/// "1 lost piece", "2 lost pieces" (English); the other languages say the bare number because their
+/// templates carry the unit.
+pub fn lost_pieces(locale: Locale, n: usize) -> String {
+    match (locale, n) {
+        (Locale::En, 1) => "1 lost piece".to_owned(),
+        (Locale::En, n) => format!("{n} lost pieces"),
+        (_, n) => n.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod plural_tests {
+    use super::*;
+
+    #[test]
+    fn one_lost_piece_is_singular() {
+        assert_eq!(lost_pieces(Locale::En, 0), "0 lost pieces");
+        assert_eq!(lost_pieces(Locale::En, 1), "1 lost piece");
+        assert_eq!(lost_pieces(Locale::En, 10), "10 lost pieces");
+        assert_eq!(lost_pieces(Locale::Ja, 1), "1");
+        assert_eq!(lost_pieces(Locale::ZhCn, 10), "10");
+    }
+}
 
 // The Settings category row and the Danger zone (their own file: `locale/settings.rs`).
 mod settings;

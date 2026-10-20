@@ -2765,34 +2765,41 @@ impl MiasmaApp {
         let s = self.s();
         let easy = self.mode.is_easy();
         {
-            // ── Paths ────────────────────────────────────────────────
-            kit::section(ui, s.settings_paths, |ui| {
-                let sep = std::path::MAIN_SEPARATOR;
-                kit::kv_grid(ui, |g| {
-                    g.row(s.settings_data_dir, |ui| {
-                        if kit::mono_copy(ui, &self.data_dir_display, s.copy) {
-                            self.set_msg(MsgKind::Info, s.settings_path_copied);
+            // ── Paths: not in the page body (they carry the user name of this computer) ──
+            egui::CollapsingHeader::new(kit::muted_text(crate::uitext::technical_details(
+                self.locale,
+            )))
+            .id_source("about_technical")
+            .default_open(false)
+            .show(ui, |ui| {
+                kit::section(ui, s.settings_paths, |ui| {
+                    let sep = std::path::MAIN_SEPARATOR;
+                    kit::kv_grid(ui, |g| {
+                        g.row(s.settings_data_dir, |ui| {
+                            if kit::mono_copy(ui, &self.data_dir_display, s.copy) {
+                                self.set_msg(MsgKind::Info, s.settings_path_copied);
+                            }
+                        });
+                        g.mono(
+                            s.settings_config_file,
+                            &format!("{}{sep}config.toml", &self.data_dir_display),
+                        );
+                        let log_where = if self.logs.writes_files {
+                            format!("{}{sep}lg", &self.data_dir_display)
+                        } else {
+                            self.lg().memory_only.to_owned()
+                        };
+                        g.mono(s.settings_log, &log_where);
+                        g.mono(
+                            crate::buildinfo::build_row_label(self.locale),
+                            &crate::buildinfo::build_row_value(),
+                        );
+                        if let Ok(exe) = std::env::current_exe() {
+                            if let Some(dir) = exe.parent() {
+                                g.mono(s.settings_install, &dir.to_string_lossy());
+                            }
                         }
                     });
-                    g.mono(
-                        s.settings_config_file,
-                        &format!("{}{sep}config.toml", &self.data_dir_display),
-                    );
-                    let log_where = if self.logs.writes_files {
-                        format!("{}{sep}lg", &self.data_dir_display)
-                    } else {
-                        self.lg().memory_only.to_owned()
-                    };
-                    g.mono(s.settings_log, &log_where);
-                    g.mono(
-                        crate::buildinfo::build_row_label(self.locale),
-                        &crate::buildinfo::build_row_value(),
-                    );
-                    if let Ok(exe) = std::env::current_exe() {
-                        if let Some(dir) = exe.parent() {
-                            g.mono(s.settings_install, &dir.to_string_lossy());
-                        }
-                    }
                 });
             });
 
@@ -2815,8 +2822,6 @@ impl MiasmaApp {
                     },
                 );
                 ui.add_space(kit::SP_1);
-                kit::paragraph_muted(ui, s.settings_stored_in);
-                kit::mono(ui, &self.data_dir_display);
                 kit::hint(ui, s.settings_preserved);
             });
 

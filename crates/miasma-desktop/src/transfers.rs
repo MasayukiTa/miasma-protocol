@@ -1817,6 +1817,8 @@ impl TransfersUi {
             SendPassword::Unprotected | SendPassword::Good => {}
         }
         ui.add_space(kit::SP_1);
+        // The one thing a sender must know before starting: above the button, not under it.
+        kit::form_row(ui, "", Some(t.send_hint), |_| {});
         // A mismatch or a weak password has its own message above; what is left to say is the file.
         let allowed = send_ready(connected, "x", mismatch, &pw_state);
         let needs = [
@@ -1851,8 +1853,6 @@ impl TransfersUi {
                 restart: false,
             });
         }
-        // The one thing a sender must know before starting.
-        kit::form_row(ui, "", Some(t.send_hint), |_| {});
     }
 
     fn redundancy_picker(&mut self, ui: &mut egui::Ui, t: &TransferStrings, easy: bool) {
@@ -1883,23 +1883,53 @@ impl TransfersUi {
                 });
             }
         } else {
-            for (i, preset) in PRESETS.iter().enumerate() {
+            // The recommended choice is one line; the other four are under "Advanced" (open when
+            // one of them is the choice in force).
+            let row_text = |i: usize, preset: &Preset| {
                 let mut text = fill(
                     t.red_row,
                     &[
                         ("kn", &preset.label()),
                         ("x", &preset.multiplier_text()),
-                        ("loss", &preset.tolerated().to_string()),
+                        (
+                            "loss",
+                            &crate::locale::lost_pieces(t.locale, preset.tolerated() as usize),
+                        ),
                     ],
                 );
                 if i == DEFAULT_PRESET {
                     text.push_str("  ");
                     text.push_str(t.red_default);
                 }
-                if ui.radio(self.send_preset == i, text).clicked() {
-                    self.send_preset = i;
-                }
+                text
+            };
+            if ui
+                .radio(
+                    self.send_preset == DEFAULT_PRESET,
+                    row_text(DEFAULT_PRESET, &PRESETS[DEFAULT_PRESET]),
+                )
+                .clicked()
+            {
+                self.send_preset = DEFAULT_PRESET;
             }
+            egui::CollapsingHeader::new(
+                RichText::new(crate::uitext::advanced(t.locale)).color(pal().muted),
+            )
+            .id_source("send_redundancy_advanced")
+            .default_open(self.send_preset != DEFAULT_PRESET)
+            .show(ui, |ui| {
+                for (i, preset) in PRESETS.iter().enumerate() {
+                    if i == DEFAULT_PRESET {
+                        continue;
+                    }
+                    if ui
+                        .radio(self.send_preset == i, row_text(i, preset))
+                        .clicked()
+                    {
+                        self.send_preset = i;
+                    }
+                }
+            });
         }
     }
 }
