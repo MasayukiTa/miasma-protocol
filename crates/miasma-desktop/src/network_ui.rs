@@ -504,9 +504,12 @@ impl NetworkUi {
                 // Always in the same row as the test button, so the result below can come and
                 // go without moving any control.
                 if self.view.is_some() {
-                    save_report = ui
-                        .add_enabled(!running, kit::secondary_button(s.save_report))
-                        .clicked();
+                    save_report = crate::form_check::add_enabled(
+                        ui,
+                        !running,
+                        kit::secondary_button(s.save_report),
+                    )
+                    .clicked();
                 }
             });
             if start {
