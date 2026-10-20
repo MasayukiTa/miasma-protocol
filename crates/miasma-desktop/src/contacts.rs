@@ -142,6 +142,9 @@ pub fn base_name(path: &str) -> String {
 
 /// Parse the max-size box: GiB as a decimal number, `""` = no limit (`Ok(None)`).
 /// Accepts an optional unit (`MiB`, `GiB`, `MB`, `GB`, `KiB`). Zero means no limit, too.
+/// A per-contact limit above this (100 GiB) gets a warning: it is far more than a disk usually has free.
+const VERY_LARGE_LIMIT: u64 = 100 * (1u64 << 30);
+
 pub fn parse_size_limit(text: &str) -> Result<Option<u64>, ()> {
     let t = text.trim();
     if t.is_empty() {
@@ -2000,19 +2003,19 @@ impl ContactsUi {
                 kit::notice(ui, Level::Warn, c.hint_not_registered);
             }
             if technical {
+                // Identifiers and the folder on this computer are not part of checking the code:
+                // they are behind a closed header, each on its own labelled line.
                 ui.add_space(kit::SP_3);
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(format!(
-                            "{}  {}",
-                            shorten_name(&ct.endpoint_id, 24),
-                            crate::transfers::plain_path(&ct.inbox_dir)
-                        ))
-                        .monospace()
-                        .color(pal().faint),
-                    )
-                    .wrap(true),
-                );
+                let tech_title = kit::muted_text(crate::uitext::technical_details(c.locale));
+                egui::CollapsingHeader::new(tech_title)
+                    .id_source("verify_technical")
+                    .default_open(false)
+                    .show_a11y(ui, |ui| {
+                        ui.label(label_text(crate::uitext::endpoint_label(c.locale)));
+                        kit::mono(ui, &shorten_name(&ct.endpoint_id, 24));
+                        ui.label(label_text(crate::uitext::folder_label(c.locale)));
+                        kit::mono(ui, &crate::transfers::plain_path(&ct.inbox_dir));
+                    });
             }
             ui.add_space(kit::SP_3);
             if kit::primary(ui, true, c.done_btn).clicked() {
@@ -2074,6 +2077,33 @@ impl ContactsUi {
                 );
                 crate::form_check::name(&size_edit, &size_name);
             });
+            // Common sizes in one click, what the number means in words, and a warning when it is
+            // far more than anyone sends.
+            ui.horizontal_wrapped(|ui| {
+                for (label, value) in [
+                    (crate::uitext::size_preset_default(c.locale), ""),
+                    ("1 GiB", "1"),
+                    ("10 GiB", "10"),
+                    ("100 GiB", "100"),
+                ] {
+                    if ui.add(kit::compact_button(label)).clicked() {
+                        *buf = value.to_owned();
+                    }
+                }
+            });
+            match parse_size_limit(buf) {
+                Ok(Some(bytes)) if bytes > 0 => {
+                    hint(ui, &format!("= {}", format_limit(bytes)));
+                    if bytes > VERY_LARGE_LIMIT {
+                        kit::notice(
+                            ui,
+                            Level::Warn,
+                            &crate::uitext::size_very_large(c.locale, &format_limit(bytes)),
+                        );
+                    }
+                }
+                _ => {}
+            }
             let dirty = *buf != init;
             let text = buf.clone();
             // The two check boxes act at once; the size is kept when Done is pressed (one

@@ -142,6 +142,8 @@ pub struct MiasmaApp {
     used_mb: f64,
     quota_mb: u64,
     pending_replication: usize,
+    /// When the last status answer came (the Status screen says how long ago).
+    status_updated_at: Option<std::time::Instant>,
     replicated_count: usize,
     listen_addrs: Vec<String>,
     wss_port: u16,
@@ -558,6 +560,7 @@ impl MiasmaApp {
             used_mb: 0.0,
             quota_mb: 0,
             pending_replication: 0,
+            status_updated_at: None,
             replicated_count: 0,
             listen_addrs: Vec::new(),
             wss_port: 0,
@@ -961,6 +964,7 @@ impl MiasmaApp {
                     self.used_mb = used_mb;
                     self.quota_mb = quota_mb;
                     self.pending_replication = pending_replication;
+                    self.status_updated_at = Some(std::time::Instant::now());
                     self.replicated_count = replicated_count;
                     self.listen_addrs = listen_addrs;
                     self.wss_port = wss_port;
@@ -1406,12 +1410,19 @@ impl MiasmaApp {
 
         // The three actions first, big enough to be the point of the screen. Three equal
         // columns; the first (send) is the primary, the other two are outlined.
+        // Three columns when there is room, one column below TASK_COLUMNS_MIN_W (at 320 px the
+        // third column ran off the window).
         let gap = kit::SP_3;
-        let w = ((ui.available_width() - 2.0 * gap) / 3.0)
-            .floor()
-            .max(120.0);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = gap;
+        let narrow = ui.available_width() < TASK_COLUMNS_MIN_W;
+        let w = if narrow {
+            ui.available_width().floor()
+        } else {
+            ((ui.available_width() - 2.0 * gap) / 3.0)
+                .floor()
+                .max(120.0)
+        };
+        let actions = |ui: &mut egui::Ui| {
+            ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
             if kit::large_action(ui, true, true, s.home_send_action, w).clicked() {
                 // The one send flow, over this screen.
                 self.send_flow.open_empty(self.contacts.contact_list());
@@ -1422,7 +1433,12 @@ impl MiasmaApp {
             if kit::large_action(ui, false, true, s.home_save_action, w).clicked() {
                 self.tab = Tab::Store;
             }
-        });
+        };
+        if narrow {
+            ui.vertical(actions);
+        } else {
+            ui.horizontal(actions);
+        }
 
         // Status is one muted line; the numbers are behind "Details".
         ui.add_space(kit::SP_3);
@@ -1459,30 +1475,62 @@ impl MiasmaApp {
         let transfer_label = self.tr().tab_easy;
 
         kit::page(ui, s.files_heading_easy, Some(s.files_desc_easy), |ui| {
-            // Sending is the first thing here, as it is on Home: the one send flow.
-            kit::surface(ui, |ui| {
-                if kit::primary(ui, connected, s.home_send_action).clicked() {
+            // Two main tasks side by side, big; storing and restoring under them, still large;
+            // what happened (transfers, sent files) as small links at the bottom.
+            let gap = kit::SP_3;
+            // Two columns across the whole width; one column in a narrow window.
+            let narrow = ui.available_width() < TASK_COLUMNS_MIN_W;
+            let w = if narrow {
+                ui.available_width().floor()
+            } else {
+                ((ui.available_width() - gap) / 2.0).floor().max(120.0)
+            };
+            let main_tasks = |ui: &mut egui::Ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
+                if kit::large_action(ui, true, connected, s.home_send_action, w).clicked() {
+                    // The one send flow, over this screen.
                     self.send_flow.open_empty(self.contacts.contact_list());
                 }
-                ui.add_space(kit::SP_1);
-                for (i, (label, tab)) in [
-                    (s.home_receive_action, Tab::Inbox),
-                    (s.home_save_action, Tab::Store),
-                    (s.tab_retrieve_easy, Tab::Retrieve),
-                    (transfer_label, Tab::Transfers),
-                    (s.tab_outbox_easy, Tab::Outbox),
-                ]
-                .into_iter()
-                .enumerate()
+                if kit::large_action(ui, false, connected, s.home_receive_action, w).clicked() {
+                    self.tab = Tab::Inbox;
+                }
+            };
+            if narrow {
+                ui.vertical(main_tasks);
+            } else {
+                ui.horizontal(main_tasks);
+            }
+            ui.add_space(kit::SP_3);
+            let store_tasks = |ui: &mut egui::Ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
+                if kit::large_action(ui, false, connected, s.home_save_action, w).clicked() {
+                    self.tab = Tab::Store;
+                }
+                if kit::large_action(ui, false, connected, s.tab_retrieve_easy, w).clicked() {
+                    self.tab = Tab::Retrieve;
+                }
+            };
+            if narrow {
+                ui.vertical(store_tasks);
+            } else {
+                ui.horizontal(store_tasks);
+            }
+            ui.add_space(kit::SP_4);
+            kit::divider(ui);
+            ui.horizontal(|ui| {
+                if crate::form_check::add_enabled(ui, connected, kit::quiet_button(transfer_label))
+                    .clicked()
                 {
-                    if i > 0 {
-                        ui.add_space(kit::SP_1);
-                    }
-                    if crate::form_check::add_enabled(ui, connected, kit::secondary_button(label))
-                        .clicked()
-                    {
-                        self.tab = tab;
-                    }
+                    self.tab = Tab::Transfers;
+                }
+                if crate::form_check::add_enabled(
+                    ui,
+                    connected,
+                    kit::quiet_button(s.tab_outbox_easy),
+                )
+                .clicked()
+                {
+                    self.tab = Tab::Outbox;
                 }
             });
         });
@@ -1504,49 +1552,6 @@ impl MiasmaApp {
             s.store_desc
         };
         kit::page(ui, title, Some(desc), |ui| {
-            // Easy mode: the three numbers that matter, as plain figures.
-            if easy && connected {
-                kit::section(ui, s.dashboard_quick_status, |ui| {
-                    let pct = if self.quota_mb > 0 {
-                        (self.used_mb / self.quota_mb as f64) * 100.0
-                    } else {
-                        0.0
-                    };
-                    let storage = if self.quota_mb > 0 {
-                        format!("{pct:.0}%")
-                    } else {
-                        s.dashboard_no_data.to_owned()
-                    };
-                    kit::stats(
-                        ui,
-                        &[
-                            (s.dashboard_storage_label, storage, Level::Muted),
-                            (
-                                s.dashboard_peers_label,
-                                self.peer_count.to_string(),
-                                if self.peer_count > 0 {
-                                    Level::Ok
-                                } else {
-                                    Level::Warn
-                                },
-                            ),
-                            (
-                                s.status_items_stored,
-                                self.share_count.to_string(),
-                                Level::Muted,
-                            ),
-                        ],
-                    );
-                    if self.quota_mb > 0 {
-                        ui.add_space(kit::SP_1);
-                        kit::progress(ui, s.status_storage, (pct / 100.0) as f32, pct > 90.0);
-                    }
-                    if self.peer_count == 0 {
-                        kit::hint(ui, s.health_no_peers);
-                    }
-                });
-            }
-
             if easy && !connected {
                 kit::notice(ui, Level::Warn, s.store_not_connected_hint);
             }
@@ -1957,7 +1962,12 @@ impl MiasmaApp {
                 for item in &items {
                     kit::list_item(ui, |ui| {
                         let (level, state_label) = inbox_state_display(s, &item.state, easy);
-                        envelope_header(ui, &envelope_title(item, easy), level, state_label);
+                        envelope_header(
+                            ui,
+                            &envelope_title(item, easy, self.locale),
+                            level,
+                            state_label,
+                        );
 
                         kit::kv_grid(ui, |g| {
                             if !easy {
@@ -1983,8 +1993,18 @@ impl MiasmaApp {
                                     });
                                 });
                             }
-                            g.text(crate::uitext::created_label(self.locale), &item.created_at);
-                            g.text(crate::uitext::expires_label(self.locale), &item.expires_at);
+                            time_row(
+                                g,
+                                crate::uitext::created_label(self.locale),
+                                &item.created_at,
+                                easy,
+                            );
+                            time_row(
+                                g,
+                                crate::uitext::expires_label(self.locale),
+                                &item.expires_at,
+                                easy,
+                            );
                             // Challenge code: the recipient reads this out to the sender.
                             if let Some(ref code) = item.challenge_code {
                                 let label = if easy {
@@ -2112,7 +2132,12 @@ impl MiasmaApp {
                 for item in &items {
                     kit::list_item(ui, |ui| {
                         let (level, state_label) = outbox_state_display(s, &item.state, easy);
-                        envelope_header(ui, &envelope_title(item, easy), level, state_label);
+                        envelope_header(
+                            ui,
+                            &envelope_title(item, easy, self.locale),
+                            level,
+                            state_label,
+                        );
 
                         kit::kv_grid(ui, |g| {
                             if !easy {
@@ -2123,8 +2148,18 @@ impl MiasmaApp {
                             if let Some(ref fname) = item.filename {
                                 g.text(s.outbox_filename, fname);
                             }
-                            g.text(crate::uitext::created_label(self.locale), &item.created_at);
-                            g.text(crate::uitext::expires_label(self.locale), &item.expires_at);
+                            time_row(
+                                g,
+                                crate::uitext::created_label(self.locale),
+                                &item.created_at,
+                                easy,
+                            );
+                            time_row(
+                                g,
+                                crate::uitext::expires_label(self.locale),
+                                &item.expires_at,
+                                easy,
+                            );
                         });
 
                         // Sender confirmation: ask for the challenge code.
@@ -2203,6 +2238,13 @@ impl MiasmaApp {
             kit::button_row(ui, |ui| {
                 if ui.add(kit::secondary_button(s.status_refresh)).clicked() {
                     let _ = self.worker.tx.try_send(WorkerCmd::GetStatus);
+                }
+                // Visible proof that the numbers are current, also when nothing changed.
+                if let Some(at) = self.status_updated_at {
+                    ui.label(kit::muted_text(crate::uitext::updated_ago(
+                        self.locale,
+                        at.elapsed().as_secs(),
+                    )));
                 }
                 if !easy {
                     self.copy_diagnostics_button(ui);
@@ -2434,7 +2476,7 @@ impl MiasmaApp {
                     if self.pending_replication > 0 {
                         ui.label(
                             RichText::new(format!(
-                                "{} replicated, {} pending",
+                                "{} of your items spread to other peers, {} still waiting",
                                 self.replicated_count, self.pending_replication
                             ))
                             .color(kit::level_color(Level::Warn)),
@@ -2462,8 +2504,13 @@ impl MiasmaApp {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = kit::SP_4;
                     if self.wss_port > 0 {
-                        let tls = if self.wss_tls_enabled { "TLS" } else { "plain" };
-                        kit::status_dot(ui, Level::Ok, &format!("WSS :{} ({tls})", self.wss_port));
+                        // "plain" read as unencrypted WSS; what differs is whether TLS wraps it.
+                        let tls = if self.wss_tls_enabled {
+                            "TLS on"
+                        } else {
+                            "TLS off"
+                        };
+                        kit::status_dot(ui, Level::Ok, &format!("WSS :{}, {tls}", self.wss_port));
                     }
                     if self.obfs_quic_port > 0 {
                         kit::status_dot(
@@ -2685,14 +2732,32 @@ impl MiasmaApp {
     /// Privacy and storage: chat protection, logs and how much this computer keeps for others.
     fn settings_privacy(&mut self, ui: &mut egui::Ui) {
         self.pqc_section(ui);
-        self.logs_section(ui);
         let used = (self.quota_mb > 0).then_some(self.used_mb);
-        self.hosting.section(ui, self.locale, used);
+        if self.mode.is_easy() {
+            // Easy: what keeps this computer's files safe first; logging is under "Advanced".
+            self.hosting.section(ui, self.locale, used);
+            egui::CollapsingHeader::new(kit::section_text(crate::uitext::advanced(self.locale)))
+                .id_source("settings_privacy_advanced")
+                .default_open(false)
+                .show_a11y(ui, |ui| self.logs_section(ui));
+        } else {
+            self.logs_section(ui);
+            self.hosting.section(ui, self.locale, used);
+        }
     }
 
     /// Network: the connection settings, then the reachability check.
     fn settings_network(&mut self, ui: &mut egui::Ui) {
-        self.network.section(ui, self.locale);
+        if self.mode.is_easy() {
+            // Relay addresses, certificates, retry time and the check are for Technical use.
+            let title = self.s().settings_network_details_easy;
+            egui::CollapsingHeader::new(kit::section_text(title))
+                .id_source("settings_network_advanced")
+                .default_open(false)
+                .show_a11y(ui, |ui| self.network.section(ui, self.locale));
+        } else {
+            self.network.section(ui, self.locale);
+        }
     }
 
     /// About: where things are kept, how the app works and what to send to support.
@@ -2700,36 +2765,42 @@ impl MiasmaApp {
         let s = self.s();
         let easy = self.mode.is_easy();
         {
-            // ── Paths ────────────────────────────────────────────────
-            kit::section(ui, s.settings_paths, |ui| {
-                let sep = std::path::MAIN_SEPARATOR;
-                kit::kv_grid(ui, |g| {
-                    g.row(s.settings_data_dir, |ui| {
-                        if kit::mono_copy(ui, &self.data_dir_display, s.copy) {
-                            self.set_msg(MsgKind::Info, s.settings_path_copied);
-                        }
+            // ── Paths: not in the page body (they carry the user name of this computer) ──
+            let tech_title = kit::muted_text(crate::uitext::technical_details(self.locale));
+            egui::CollapsingHeader::new(tech_title)
+                .id_source("about_technical")
+                .default_open(false)
+                .show_a11y(ui, |ui| {
+                    kit::section(ui, s.settings_paths, |ui| {
+                        let sep = std::path::MAIN_SEPARATOR;
+                        kit::kv_grid(ui, |g| {
+                            g.row(s.settings_data_dir, |ui| {
+                                if kit::mono_copy(ui, &self.data_dir_display, s.copy) {
+                                    self.set_msg(MsgKind::Info, s.settings_path_copied);
+                                }
+                            });
+                            g.mono(
+                                s.settings_config_file,
+                                &format!("{}{sep}config.toml", &self.data_dir_display),
+                            );
+                            let log_where = if self.logs.writes_files {
+                                format!("{}{sep}lg", &self.data_dir_display)
+                            } else {
+                                self.lg().memory_only.to_owned()
+                            };
+                            g.mono(s.settings_log, &log_where);
+                            g.mono(
+                                crate::buildinfo::build_row_label(self.locale),
+                                &crate::buildinfo::build_row_value(),
+                            );
+                            if let Ok(exe) = std::env::current_exe() {
+                                if let Some(dir) = exe.parent() {
+                                    g.mono(s.settings_install, &dir.to_string_lossy());
+                                }
+                            }
+                        });
                     });
-                    g.mono(
-                        s.settings_config_file,
-                        &format!("{}{sep}config.toml", &self.data_dir_display),
-                    );
-                    let log_where = if self.logs.writes_files {
-                        format!("{}{sep}lg", &self.data_dir_display)
-                    } else {
-                        self.lg().memory_only.to_owned()
-                    };
-                    g.mono(s.settings_log, &log_where);
-                    g.mono(
-                        crate::buildinfo::build_row_label(self.locale),
-                        &crate::buildinfo::build_row_value(),
-                    );
-                    if let Ok(exe) = std::env::current_exe() {
-                        if let Some(dir) = exe.parent() {
-                            g.mono(s.settings_install, &dir.to_string_lossy());
-                        }
-                    }
                 });
-            });
 
             // ── How it works ─────────────────────────────────────────
             kit::section(ui, s.settings_how, |ui| {
@@ -2750,8 +2821,6 @@ impl MiasmaApp {
                     },
                 );
                 ui.add_space(kit::SP_1);
-                kit::paragraph_muted(ui, s.settings_stored_in);
-                kit::mono(ui, &self.data_dir_display);
                 kit::hint(ui, s.settings_preserved);
             });
 
@@ -2838,6 +2907,10 @@ impl MiasmaApp {
                             label,
                         )
                     });
+                    // egui draws a switched-off radio grey but does not publish it as disabled.
+                    if !available {
+                        crate::form_check::mark_disabled(&r);
+                    }
                     kit::hint(ui, help);
                 }
             });
@@ -3537,10 +3610,24 @@ fn short(s: &str, n: usize) -> &str {
 }
 
 /// The title of an inbox/outbox item: the file name in Easy mode, the envelope id otherwise.
-fn envelope_title(item: &InboxItem, easy: bool) -> String {
+fn envelope_title(item: &InboxItem, easy: bool, locale: Locale) -> String {
     match (easy, item.filename.as_deref()) {
         (true, Some(name)) if !name.is_empty() => name.to_owned(),
+        // Easy never leads with an identifier nobody can read.
+        (true, _) => crate::uitext::unnamed_file(locale).to_owned(),
         _ => short(&item.envelope_id, 16).to_owned(),
+    }
+}
+
+/// A date row. Easy shows how long ago (or how long to go); the exact date is in the hover text.
+fn time_row(g: &mut kit::Kv, label: &str, full: &str, easy: bool) {
+    if easy {
+        let short_text = full.split(" (").next().unwrap_or(full).to_owned();
+        g.row(label, |ui| {
+            ui.label(short_text).on_hover_text(full);
+        });
+    } else {
+        g.text(label, full);
     }
 }
 
@@ -4092,6 +4179,9 @@ impl MiasmaApp {
     }
 }
 
+/// Width of the page column below which the task buttons stack in one column.
+const TASK_COLUMNS_MIN_W: f32 = 560.0;
+
 /// What the chip in the header says, from what is known: the service is up, and its relay is
 /// reachable or not. Having no peer connected right now is the normal idle state (the direct
 /// connection to a contact is made when something is sent), so it is not a problem state; the
@@ -4184,6 +4274,184 @@ mod tests {
             });
         }
         used
+    }
+
+    /// One frame of the whole window; returns the accessibility tree of that frame.
+    fn window_frame(
+        ctx: &egui::Context,
+        app: &mut MiasmaApp,
+        events: Vec<egui::Event>,
+    ) -> Vec<(String, egui::Rect)> {
+        app.daemon_state = DaemonState::Connected;
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1200.0, 900.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let full = ctx.run(raw, |ctx| app.update_frame(ctx, None));
+        let update = full
+            .platform_output
+            .accesskit_update
+            .expect("accesskit tree");
+        update
+            .nodes
+            .iter()
+            .filter_map(|(_, n)| {
+                let b = n.bounds()?;
+                Some((
+                    n.name()?.to_owned(),
+                    egui::Rect::from_min_max(
+                        egui::pos2(b.x0 as f32, b.y0 as f32),
+                        egui::pos2(b.x1 as f32, b.y1 as f32),
+                    ),
+                ))
+            })
+            .collect()
+    }
+
+    /// A real mouse click on the button with this name: move, then press and release.
+    fn click_button(ctx: &egui::Context, app: &mut MiasmaApp, name: &str) {
+        for _ in 0..3 {
+            window_frame(ctx, app, vec![]);
+        }
+        let nodes = window_frame(ctx, app, vec![]);
+        let rect = nodes
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no button named {name:?} in {:?}",
+                    nodes.iter().map(|(n, _)| n).collect::<Vec<_>>()
+                )
+            })
+            .1;
+        let pos = rect.center();
+        window_frame(ctx, app, vec![egui::Event::PointerMoved(pos)]);
+        let press = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        window_frame(ctx, app, vec![press(true)]);
+        window_frame(ctx, app, vec![press(false)]);
+        window_frame(ctx, app, vec![]);
+        window_frame(ctx, app, vec![]);
+    }
+
+    #[test]
+    fn every_button_of_the_easy_files_hub_goes_where_its_label_says() {
+        // None: the send flow opens over the hub.
+        let cases: [(
+            fn(&'static Strings, &'static Strings) -> &'static str,
+            Option<Tab>,
+        ); 6] = [
+            (|s, _| s.home_send_action, None),
+            (|s, _| s.home_receive_action, Some(Tab::Inbox)),
+            (|s, _| s.home_save_action, Some(Tab::Store)),
+            (|s, _| s.tab_retrieve_easy, Some(Tab::Retrieve)),
+            (|_, _| "", Some(Tab::Transfers)),
+            (|s, _| s.tab_outbox_easy, Some(Tab::Outbox)),
+        ];
+        let mut failed: Vec<String> = Vec::new();
+        for (i, (label_of, target)) in cases.into_iter().enumerate() {
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            let data = tempfile::tempdir().unwrap();
+            let mut app = MiasmaApp::new_with_ctx(
+                &ctx,
+                None,
+                ProductMode::Easy,
+                Locale::En,
+                ThemeMode::Light,
+                data.path().to_path_buf(),
+                LaunchIntent::Normal,
+            );
+            app.tab = Tab::Files;
+            app.logs.legacy = None;
+            let s = app.s();
+            let label = if i == 4 {
+                app.tr().tab_easy
+            } else {
+                label_of(s, s)
+            };
+            // The real background worker may report "no service" in the middle of a frame and
+            // switch the buttons off for that frame; a click is tried again then.
+            let reached = |app: &MiasmaApp| match target {
+                None => app.send_flow.is_open(),
+                Some(tab) => app.tab == tab,
+            };
+            let mut ok = false;
+            for _ in 0..4 {
+                click_button(&ctx, &mut app, label);
+                ok = reached(&app);
+                if ok {
+                    break;
+                }
+            }
+            if !ok {
+                failed.push(format!(
+                    "{label}: now on {:?}, send flow open: {}",
+                    app.tab,
+                    app.send_flow.is_open()
+                ));
+            }
+        }
+        assert!(failed.is_empty(), "{failed:#?}");
+    }
+
+    #[test]
+    fn the_chat_protection_radios_are_published_as_disabled_when_the_build_lacks_it() {
+        use miasma_core::config::PqcMode;
+        if PqcMode::available() {
+            return; // the radios are live in this build
+        }
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let data = tempfile::tempdir().unwrap();
+        let mut app = MiasmaApp::new_with_ctx(
+            &ctx,
+            None,
+            ProductMode::Easy,
+            Locale::En,
+            ThemeMode::Light,
+            data.path().to_path_buf(),
+            LaunchIntent::Normal,
+        );
+        app.tab = Tab::Settings;
+        app.settings_cat = SettingsCat::Privacy;
+        app.logs.legacy = None;
+        let mut radios: Vec<(String, bool)> = Vec::new();
+        for _ in 0..4 {
+            app.daemon_state = DaemonState::Connected;
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(900.0, 1400.0),
+                )),
+                ..Default::default()
+            };
+            let full = ctx.run(raw, |ctx| app.update_frame(ctx, None));
+            let update = full.platform_output.accesskit_update.unwrap();
+            radios = update
+                .nodes
+                .iter()
+                .filter(|(_, n)| n.role() == egui::accesskit::Role::RadioButton)
+                .map(|(_, n)| (n.name().unwrap_or("").to_owned(), n.is_disabled()))
+                .collect();
+        }
+        // The three choices, each under its own name, all switched off. (Other radios on the page,
+        // such as the sizes of the hosting setting, are not part of this.)
+        let p = app.pq();
+        for label in [p.off, p.prefer, p.require] {
+            assert!(
+                radios.iter().any(|(n, d)| n == label && *d),
+                "no disabled radio named {label:?}: {radios:?}"
+            );
+        }
     }
 
     #[test]

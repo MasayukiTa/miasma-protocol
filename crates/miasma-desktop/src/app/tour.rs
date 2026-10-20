@@ -936,7 +936,12 @@ fn easy_steps() -> Vec<Step> {
     }
     steps.extend(store_steps());
     // The smallest width the window can be given: the reason beside a disabled button must wrap.
-    for (tab, tname) in [(Tab::Store, "store"), (Tab::Retrieve, "retrieve")] {
+    for (tab, tname) in [
+        (Tab::Store, "store"),
+        (Tab::Retrieve, "retrieve"),
+        (Tab::Home, "home"),
+        (Tab::Files, "files"),
+    ] {
         steps.push(Step {
             name: format!("easy_en_{tname}_320"),
             theme: ThemeMode::Light,
@@ -1017,6 +1022,30 @@ fn easy_steps() -> Vec<Step> {
             chat: None,
             size: Some((900.0, 800.0)),
             mode: Some(ProductMode::Easy),
+            flow: None,
+            hover: false,
+        });
+    }
+    // Technical Status and the verification dialog (its details are behind a closed header).
+    for (name, tab, fx) in [
+        ("tech_en_status_wide", Tab::Status, None),
+        (
+            "tech_en_contacts_verify_wide",
+            Tab::Contacts,
+            Some("verify"),
+        ),
+    ] {
+        steps.push(Step {
+            name: name.to_owned(),
+            theme: ThemeMode::Light,
+            locale: Locale::En,
+            tab,
+            daemon: Some(DaemonState::Connected),
+            transfers: None,
+            contacts: fx,
+            chat: None,
+            size: Some((1000.0, 900.0)),
+            mode: Some(ProductMode::Technical),
             flow: None,
             hover: false,
         });
