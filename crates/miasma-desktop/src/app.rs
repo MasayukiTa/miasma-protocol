@@ -427,10 +427,31 @@ impl MiasmaApp {
         data_dir: std::path::PathBuf,
         intent: LaunchIntent,
     ) -> Self {
-        crate::fonts::install(&cc.egui_ctx, locale);
-        let dark = theme::resolve_dark(theme_mode, cc.integration_info.system_theme);
-        kit::apply_theme(&cc.egui_ctx, dark);
-        let worker = WorkerHandle::spawn(data_dir.clone(), cc.egui_ctx.clone());
+        Self::new_with_ctx(
+            &cc.egui_ctx,
+            cc.integration_info.system_theme,
+            mode,
+            locale,
+            theme_mode,
+            data_dir,
+            intent,
+        )
+    }
+
+    /// Same as `new`, from a bare egui context (the window-less UI tour has no eframe frame).
+    pub(crate) fn new_with_ctx(
+        ctx: &egui::Context,
+        system_theme: Option<eframe::Theme>,
+        mode: ProductMode,
+        locale: Locale,
+        theme_mode: ThemeMode,
+        data_dir: std::path::PathBuf,
+        intent: LaunchIntent,
+    ) -> Self {
+        crate::fonts::install(ctx, locale);
+        let dark = theme::resolve_dark(theme_mode, system_theme);
+        kit::apply_theme(ctx, dark);
+        let worker = WorkerHandle::spawn(data_dir.clone(), ctx.clone());
 
         // If launched with a magnet/torrent intent, go to Import tab.
         let first_tab = initial_tab(&intent, mode);
@@ -1617,7 +1638,12 @@ impl MiasmaApp {
                 }
 
                 kit::form_row(ui, s.send_contact_label, None, |ui| {
-                    ui.add(kit::input(&mut self.send_contact).hint_text(s.send_contact_hint));
+                    let hint = if self.mode.is_easy() {
+                        s.send_contact_hint_easy
+                    } else {
+                        s.send_contact_hint
+                    };
+                    ui.add(kit::input(&mut self.send_contact).hint_text(hint));
                 });
                 kit::form_row(ui, s.send_password_label, None, |ui| {
                     ui.add(
@@ -1629,7 +1655,7 @@ impl MiasmaApp {
                 kit::form_row(
                     ui,
                     s.send_retention_label,
-                    Some("(e.g. 24h, 7d, 30d)"),
+                    Some(s.send_retention_hint),
                     |ui| {
                         ui.add(kit::input(&mut self.send_retention).desired_width(120.0));
                     },
@@ -1729,13 +1755,15 @@ impl MiasmaApp {
                 }
                 for item in &items {
                     kit::list_item(ui, |ui| {
-                        let (level, state_label) = inbox_state_display(s, &item.state);
-                        envelope_header(ui, &item.envelope_id, level, state_label);
+                        let (level, state_label) = inbox_state_display(s, &item.state, easy);
+                        envelope_header(ui, &envelope_title(item, easy), level, state_label);
 
                         kit::kv_grid(ui, |g| {
-                            g.row(s.inbox_from, |ui| {
-                                kit::mono_elided(ui, short(&item.sender, 20));
-                            });
+                            if !easy {
+                                g.row(s.inbox_from, |ui| {
+                                    kit::mono_elided(ui, short(&item.sender, 20));
+                                });
+                            }
                             if let Some(ref fname) = item.filename {
                                 g.row(s.inbox_filename, |ui| {
                                     ui.horizontal_wrapped(|ui| {
@@ -1754,7 +1782,12 @@ impl MiasmaApp {
                             g.text(crate::uitext::expires_label(self.locale), &item.expires_at);
                             // Challenge code: the recipient reads this out to the sender.
                             if let Some(ref code) = item.challenge_code {
-                                g.row(s.inbox_challenge, |ui| {
+                                let label = if easy {
+                                    s.inbox_challenge_easy
+                                } else {
+                                    s.inbox_challenge
+                                };
+                                g.row(label, |ui| {
                                     kit::mono_copy(ui, code.as_str(), s.copy);
                                 });
                             }
@@ -1766,9 +1799,15 @@ impl MiasmaApp {
                             "PasswordFailed" => {
                                 kit::notice(ui, Level::Error, s.inbox_attempts_exhausted)
                             }
-                            "ChallengeFailed" => {
-                                kit::notice(ui, Level::Error, s.outbox_challenge_failed)
-                            }
+                            "ChallengeFailed" => kit::notice(
+                                ui,
+                                Level::Error,
+                                if easy {
+                                    s.outbox_challenge_failed_easy
+                                } else {
+                                    s.outbox_challenge_failed
+                                },
+                            ),
                             _ => {}
                         }
 
@@ -1853,13 +1892,15 @@ impl MiasmaApp {
                 }
                 for item in &items {
                     kit::list_item(ui, |ui| {
-                        let (level, state_label) = outbox_state_display(s, &item.state);
-                        envelope_header(ui, &item.envelope_id, level, state_label);
+                        let (level, state_label) = outbox_state_display(s, &item.state, easy);
+                        envelope_header(ui, &envelope_title(item, easy), level, state_label);
 
                         kit::kv_grid(ui, |g| {
-                            g.row(s.outbox_to, |ui| {
-                                kit::mono_elided(ui, short(&item.recipient, 20));
-                            });
+                            if !easy {
+                                g.row(s.outbox_to, |ui| {
+                                    kit::mono_elided(ui, short(&item.recipient, 20));
+                                });
+                            }
                             if let Some(ref fname) = item.filename {
                                 g.text(s.outbox_filename, fname);
                             }
@@ -1869,7 +1910,12 @@ impl MiasmaApp {
 
                         // Sender confirmation: ask for the challenge code.
                         if item.state == "ChallengeIssued" {
-                            kit::notice(ui, Level::Warn, s.outbox_confirm_heading);
+                            let heading = if easy {
+                                s.outbox_confirm_heading_easy
+                            } else {
+                                s.outbox_confirm_heading
+                            };
+                            kit::notice(ui, Level::Warn, heading);
                             kit::form_row(ui, s.outbox_confirm_label, None, |ui| {
                                 ui.horizontal(|ui| {
                                     ui.add(
@@ -2277,6 +2323,8 @@ impl MiasmaApp {
                 let options = Locale::ALL.map(|l| (l, l.display_name()));
                 if kit::segmented(ui, &mut lang, &options) {
                     self.locale = lang;
+                    // A banner already on screen is in the old language; drop it.
+                    self.status_msg = None;
                     // Read the fonts the new language needs (the others stay lazy).
                     crate::fonts::set_locale(ui.ctx(), lang);
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Title(
@@ -2409,7 +2457,16 @@ impl MiasmaApp {
             // ── Logs ─────────────────────────────────────────────────
             self.updates.section(ui, self.locale, !easy);
 
-            self.network.section(ui, self.locale);
+            if easy {
+                // Relay and discovery settings are for people who know what they are: on demand.
+                let locale = self.locale;
+                egui::CollapsingHeader::new(kit::section_text(s.settings_network_details_easy))
+                    .id_source("settings-network-details")
+                    .default_open(false)
+                    .show(ui, |ui| self.network.section(ui, locale));
+            } else {
+                self.network.section(ui, self.locale);
+            }
 
             self.logs_section(ui);
 
@@ -3027,32 +3084,57 @@ fn format_epoch(epoch_secs: u64, locale: Locale) -> String {
 }
 
 /// Map envelope state string to a (level, label) for outbox display.
-fn outbox_state_display<'a>(s: &'a crate::locale::Strings, state: &'a str) -> (Level, &'a str) {
+fn outbox_state_display<'a>(
+    s: &'a crate::locale::Strings,
+    state: &'a str,
+    easy: bool,
+) -> (Level, &'a str) {
     match state {
-        "Pending" => (Level::Warn, s.outbox_waiting_challenge),
-        "ChallengeIssued" => (Level::Warn, s.outbox_confirm_heading),
+        // The sentence for these two is shown under the details; the header is one short word.
+        "Pending" => (Level::Warn, s.envelope_waiting),
+        "ChallengeIssued" => (Level::Warn, s.envelope_needs_action),
         "Confirmed" => (Level::Ok, s.outbox_confirmed),
         "Retrieved" => (Level::Ok, s.outbox_retrieved),
         "Expired" => (Level::Error, s.outbox_expired),
         "SenderRevoked" => (Level::Error, s.outbox_revoked),
         "RecipientDeleted" => (Level::Muted, s.outbox_revoked),
-        "ChallengeFailed" => (Level::Error, s.outbox_challenge_failed),
+        "ChallengeFailed" => (
+            Level::Error,
+            if easy {
+                s.outbox_challenge_failed_easy
+            } else {
+                s.outbox_challenge_failed
+            },
+        ),
         "PasswordFailed" => (Level::Error, s.outbox_password_failed),
         _ => (Level::Muted, state),
     }
 }
 
 /// Map envelope state string to a (level, label) for inbox display.
-fn inbox_state_display<'a>(s: &'a crate::locale::Strings, state: &'a str) -> (Level, &'a str) {
+fn inbox_state_display<'a>(
+    s: &'a crate::locale::Strings,
+    state: &'a str,
+    easy: bool,
+) -> (Level, &'a str) {
     match state {
-        "Pending" | "ChallengeIssued" => (Level::Warn, s.inbox_state),
+        // Short words only: the sentence that explains a problem is shown under the details,
+        // so the header must not say the same thing twice.
+        "Pending" | "ChallengeIssued" => (Level::Warn, s.envelope_waiting),
         "Confirmed" => (Level::Ok, s.outbox_confirmed),
-        "Retrieved" => (Level::Ok, s.inbox_retrieved),
-        "Expired" => (Level::Error, s.inbox_expired),
-        "SenderRevoked" => (Level::Error, s.inbox_revoked),
+        "Retrieved" => (Level::Ok, s.outbox_retrieved),
+        "Expired" => (Level::Error, s.outbox_expired),
+        "SenderRevoked" => (Level::Error, s.outbox_revoked),
         "RecipientDeleted" => (Level::Muted, s.outbox_revoked),
-        "ChallengeFailed" => (Level::Error, s.outbox_challenge_failed),
-        "PasswordFailed" => (Level::Error, s.inbox_attempts_exhausted),
+        "ChallengeFailed" => (
+            Level::Error,
+            if easy {
+                s.outbox_challenge_failed_easy
+            } else {
+                s.outbox_challenge_failed
+            },
+        ),
+        "PasswordFailed" => (Level::Error, s.outbox_password_failed),
         _ => (Level::Muted, state),
     }
 }
@@ -3075,6 +3157,14 @@ fn short(s: &str, n: usize) -> &str {
     match s.char_indices().nth(n) {
         Some((i, _)) => &s[..i],
         None => s,
+    }
+}
+
+/// The title of an inbox/outbox item: the file name in Easy mode, the envelope id otherwise.
+fn envelope_title(item: &InboxItem, easy: bool) -> String {
+    match (easy, item.filename.as_deref()) {
+        (true, Some(name)) if !name.is_empty() => name.to_owned(),
+        _ => short(&item.envelope_id, 16).to_owned(),
     }
 }
 
@@ -3174,6 +3264,17 @@ impl Drop for MiasmaApp {
 
 impl eframe::App for MiasmaApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.update_frame(ctx, frame.info().system_theme);
+    }
+}
+
+impl MiasmaApp {
+    /// One frame of the app. `system_theme` is the OS light/dark choice, when known.
+    pub(crate) fn update_frame(
+        &mut self,
+        ctx: &egui::Context,
+        system_theme: Option<eframe::Theme>,
+    ) {
         #[cfg(feature = "ui-tour")]
         if let Some(mut t) = self.tour.take() {
             if !t.drive(self, ctx) {
@@ -3184,7 +3285,7 @@ impl eframe::App for MiasmaApp {
         // Theme: resolve the choice against the OS theme every frame (cheap), and re-apply when
         // it changed. eframe itself resets the visuals when the OS theme flips, so also
         // re-apply if the panel colour is no longer ours.
-        let dark = theme::resolve_dark(self.theme_mode, frame.info().system_theme);
+        let dark = theme::resolve_dark(self.theme_mode, system_theme);
         if self.applied_dark != Some(dark) || ctx.style().visuals.panel_fill != pal().bg {
             kit::apply_theme(ctx, dark);
             self.applied_dark = Some(dark);

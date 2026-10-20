@@ -121,7 +121,7 @@ Both ZIPs contain the same binaries plus variant-appropriate launcher scripts an
 - [ ] Install via MSI
 - [ ] "Miasma Technical" shortcut launches in Technical mode
 - [ ] Window title shows "Miasma v0.3.1 (Technical Beta)"
-- [ ] Set Up Node creates identity and starts daemon
+- [ ] The setup button creates identity and starts daemon
 - [ ] Status tab shows full Connection/Storage/Transport/Diagnostics
 - [ ] Transport grid displays all transports with success/failure counts
 - [ ] Copy Diagnostics produces complete support report
@@ -142,7 +142,7 @@ Both ZIPs contain the same binaries plus variant-appropriate launcher scripts an
 - [ ] "Miasma" shortcut or "Miasma.cmd" launches in Easy mode
 - [ ] Window title shows "Miasma v0.3.1" (no "Technical Beta")
 - [ ] Welcome screen says "Welcome" not "Welcome to Miasma"
-- [ ] Setup button says "Set Up Node", progress says "Setting up..."
+- [ ] Setup button says "Get Started", progress says "Setting up..."
 - [ ] No mention of "daemon" or "encryption key" in primary flow
 - [ ] Save tab: "Save Content", "Save your content securely."
 - [ ] Get Back tab: "Get Content Back", "Enter your Content ID to get your content back."

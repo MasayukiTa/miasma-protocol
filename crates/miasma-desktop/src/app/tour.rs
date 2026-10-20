@@ -6,6 +6,8 @@
 //! `PrintWindow` from a private desktop; the app renders the frame itself, so what is saved is
 //! exactly what egui drew (fonts, colours, clipping).
 
+mod raster;
+
 use std::path::PathBuf;
 
 use eframe::egui;
@@ -282,6 +284,8 @@ struct Step {
     chat: Option<&'static str>,
     /// Window size to render at.
     size: Option<(f32, f32)>,
+    /// Product mode to show (None: leave as the app has it).
+    mode: Option<crate::variant::ProductMode>,
 }
 
 /// `MIASMA_UI_SNAP=<dir>`: leave the app alone and only save what it draws, every
@@ -374,161 +378,7 @@ impl Tour {
         }
         let out = PathBuf::from(std::env::var_os("MIASMA_UI_TOUR")?);
         let _ = std::fs::create_dir_all(&out);
-        let mut steps = Vec::new();
-        let easy_store_tour = std::env::var_os("MIASMA_UI_TOUR_EASY").is_some();
-        let tabs = [
-            (Tab::Contacts, "contacts"),
-            (Tab::Store, "store"),
-            (Tab::Retrieve, "retrieve"),
-            (Tab::Send, "send"),
-            (Tab::Inbox, "inbox"),
-            (Tab::Outbox, "outbox"),
-            (Tab::Status, "status"),
-            (Tab::Settings, "settings"),
-        ];
-        steps.push(Step {
-            name: "system_en_store".to_owned(),
-            theme: ThemeMode::System,
-            locale: Locale::En,
-            tab: Tab::Store,
-            daemon: None,
-            transfers: None,
-            contacts: None,
-            chat: None,
-            size: None,
-        });
-        for (theme, tname) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
-            for (locale, lname) in [(Locale::En, "en"), (Locale::Ja, "ja")] {
-                if easy_store_tour {
-                    for (tab, name) in [(Tab::Home, "home"), (Tab::Files, "files")] {
-                        steps.push(Step {
-                            name: format!("{tname}_{lname}_{name}"),
-                            theme,
-                            locale,
-                            tab,
-                            daemon: Some(DaemonState::Connected),
-                            transfers: None,
-                            contacts: None,
-                            chat: None,
-                            size: None,
-                        });
-                    }
-                }
-                for (tab, name) in tabs {
-                    steps.push(Step {
-                        name: format!("{tname}_{lname}_{name}"),
-                        theme,
-                        locale,
-                        tab,
-                        daemon: Some(DaemonState::Connected),
-                        transfers: None,
-                        contacts: None,
-                        chat: None,
-                        size: None,
-                    });
-                }
-                // The Transfers tab, one step per situation worth looking at. The daemon is
-                // shown as connected so the forms are enabled.
-                let views = [
-                    ("big", view("backup-100GiB", NewForm::Receive, false, false)),
-                    ("send", view("wedding-4K", NewForm::Send, false, false)),
-                    (
-                        "paused",
-                        view("lecture-archive", NewForm::Receive, true, false),
-                    ),
-                    ("failed", view("contract-scan", NewForm::Send, false, false)),
-                    (
-                        "stopped",
-                        view("photos-2025", NewForm::Receive, false, false),
-                    ),
-                    (
-                        "complete",
-                        view("thesis-final", NewForm::Receive, false, false),
-                    ),
-                    ("empty", view("", NewForm::Receive, false, true)),
-                ];
-                for (vname, v) in views {
-                    steps.push(Step {
-                        name: format!("{tname}_{lname}_transfers_{vname}"),
-                        theme,
-                        locale,
-                        tab: Tab::Transfers,
-                        daemon: Some(DaemonState::Connected),
-                        transfers: Some(v),
-                        contacts: None,
-                        chat: None,
-                        size: None,
-                    });
-                }
-                for (d, dname) in [
-                    (DaemonState::Stopped, "stopped"),
-                    (DaemonState::Starting, "starting"),
-                    (DaemonState::NeedsInit, "needsinit"),
-                ] {
-                    steps.push(Step {
-                        name: format!("{tname}_{lname}_store_{dname}"),
-                        theme,
-                        locale,
-                        tab: Tab::Store,
-                        daemon: Some(d),
-                        transfers: None,
-                        contacts: None,
-                        chat: None,
-                        size: None,
-                    });
-                }
-            }
-        }
-        // The Contacts tab with fake data: every fixture, wide and at the 700 px minimum.
-        // MIASMA_UI_TOUR_FILTER=contacts_ keeps just these.
-        for fx in crate::contacts::FIXTURES {
-            for (w, h, wname) in [(1400.0, 2100.0, "wide"), (700.0, 2700.0, "narrow")] {
-                for (theme, tname, locale, lname) in [
-                    (ThemeMode::Light, "light", Locale::Ja, "ja"),
-                    (ThemeMode::Dark, "dark", Locale::Ja, "ja"),
-                    (ThemeMode::Light, "light", Locale::En, "en"),
-                ] {
-                    steps.push(Step {
-                        name: format!("contacts_{fx}_{tname}_{lname}_{wname}"),
-                        theme,
-                        locale,
-                        tab: Tab::Contacts,
-                        daemon: Some(DaemonState::Connected),
-                        transfers: None,
-                        contacts: Some(fx),
-                        chat: None,
-                        size: Some((w, h)),
-                    });
-                }
-            }
-        }
-        // The Chat tab with fake data: every fixture, wide and at the 700 px minimum.
-        // MIASMA_UI_TOUR_FILTER=chat_ keeps just these.
-        for fx in crate::chat_ui::FIXTURES {
-            for (w, h, wname) in [(1400.0, 900.0, "wide"), (700.0, 900.0, "narrow")] {
-                for (theme, tname, locale, lname) in [
-                    (ThemeMode::Light, "light", Locale::Ja, "ja"),
-                    (ThemeMode::Dark, "dark", Locale::Ja, "ja"),
-                    (ThemeMode::Light, "light", Locale::En, "en"),
-                ] {
-                    steps.push(Step {
-                        name: format!("chat_{fx}_{tname}_{lname}_{wname}"),
-                        theme,
-                        locale,
-                        tab: Tab::Chat,
-                        daemon: Some(DaemonState::Connected),
-                        transfers: None,
-                        contacts: None,
-                        chat: Some(fx),
-                        size: Some((w, h)),
-                    });
-                }
-            }
-        }
-        // MIASMA_UI_TOUR_FILTER=<a>,<b> keeps only the steps whose name contains one of the parts.
-        if let Ok(f) = std::env::var("MIASMA_UI_TOUR_FILTER") {
-            steps.retain(|s| f.split(',').any(|part| s.name.contains(part)));
-        }
+        let steps = all_steps();
         Some(Self {
             out,
             steps,
@@ -550,81 +400,7 @@ impl Tour {
             return true;
         };
         ctx.request_repaint();
-        if self.frames_in_step == 0 {
-            app.theme_mode = step.theme;
-            if std::env::var_os("MIASMA_UI_TOUR_EASY").is_some() {
-                app.mode = crate::variant::ProductMode::Easy;
-            }
-            if let Some((w, h)) = std::env::var("MIASMA_UI_TOUR_SIZE").ok().and_then(|v| {
-                let (w, h) = v.split_once('x')?;
-                Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?))
-            }) {
-                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
-            }
-            app.locale = step.locale;
-            app.tab = step.tab;
-            if let Some(d) = &step.daemon {
-                app.daemon_state = d.clone();
-            }
-            if let Some(fx) = step.contacts {
-                if let Some((w, h)) = step.size {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
-                }
-                if let Some(ui) = crate::contacts::ContactsUi::fixture(
-                    fx,
-                    crate::locale::contact_strings(step.locale),
-                ) {
-                    app.contacts = ui;
-                }
-            }
-            if step.chat.is_some() {
-                // The old-log-files question is not what these screenshots are about.
-                app.logs.legacy = None;
-            }
-            if let Some(fx) = step.chat {
-                if let Some((w, h)) = step.size {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
-                }
-                if let Some(ui) = crate::chat_ui::ChatUi::fixture(fx) {
-                    app.chat = ui;
-                }
-                // The registered contacts the chat fixtures refer to (ids a and b).
-                let contacts = if fx == "nocontacts" { "empty" } else { "two" };
-                if let Some(ui) = crate::contacts::ContactsUi::fixture(
-                    contacts,
-                    crate::locale::contact_strings(step.locale),
-                ) {
-                    app.contacts = ui;
-                }
-            }
-            if let Some(v) = &step.transfers {
-                // Tall enough that the list, the detail pane and the form are all on screen.
-                if std::env::var_os("MIASMA_UI_TOUR_SIZE").is_none() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
-                        1000.0, 1400.0,
-                    )));
-                }
-                app.transfers
-                    .set_mock(if v.empty { Vec::new() } else { mock_jobs() });
-                let id = app
-                    .transfers
-                    .jobs
-                    .iter()
-                    .find(|j| !v.select.is_empty() && j.name.contains(v.select))
-                    .map(transfer_id);
-                app.transfers.select_job(id);
-                app.transfers.set_form(v.form);
-                if v.resume_prompt {
-                    app.transfers.open_resume_prompt();
-                }
-            }
-        } else if let Some(d) = &step.daemon {
-            // The worker may report its own state meanwhile; keep the one being shown.
-            app.daemon_state = d.clone();
-        }
-        if matches!(step.daemon, Some(DaemonState::Connected)) {
-            mock_app(app);
-        }
+        arrange(step, app, ctx, self.frames_in_step == 0);
         self.frames_in_step += 1;
         if !self.requested && self.frames_in_step >= 8 {
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
@@ -651,5 +427,442 @@ impl Tour {
             }
         }
         false
+    }
+}
+
+/// Every step of the GL-window tour (and of its filter).
+fn all_steps() -> Vec<Step> {
+    let mut steps = Vec::new();
+    let easy_store_tour = std::env::var_os("MIASMA_UI_TOUR_EASY").is_some();
+    let tabs = [
+        (Tab::Contacts, "contacts"),
+        (Tab::Store, "store"),
+        (Tab::Retrieve, "retrieve"),
+        (Tab::Send, "send"),
+        (Tab::Inbox, "inbox"),
+        (Tab::Outbox, "outbox"),
+        (Tab::Status, "status"),
+        (Tab::Settings, "settings"),
+    ];
+    steps.push(Step {
+        name: "system_en_store".to_owned(),
+        theme: ThemeMode::System,
+        locale: Locale::En,
+        tab: Tab::Store,
+        daemon: None,
+        transfers: None,
+        contacts: None,
+        chat: None,
+        size: None,
+        mode: None,
+    });
+    for (theme, tname) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
+        for (locale, lname) in [(Locale::En, "en"), (Locale::Ja, "ja")] {
+            if easy_store_tour {
+                for (tab, name) in [(Tab::Home, "home"), (Tab::Files, "files")] {
+                    steps.push(Step {
+                        name: format!("{tname}_{lname}_{name}"),
+                        theme,
+                        locale,
+                        tab,
+                        daemon: Some(DaemonState::Connected),
+                        transfers: None,
+                        contacts: None,
+                        chat: None,
+                        size: None,
+                        mode: None,
+                    });
+                }
+            }
+            for (tab, name) in tabs {
+                steps.push(Step {
+                    name: format!("{tname}_{lname}_{name}"),
+                    theme,
+                    locale,
+                    tab,
+                    daemon: Some(DaemonState::Connected),
+                    transfers: None,
+                    contacts: None,
+                    chat: None,
+                    size: None,
+                    mode: None,
+                });
+            }
+            // The Transfers tab, one step per situation worth looking at. The daemon is
+            // shown as connected so the forms are enabled.
+            let views = [
+                ("big", view("backup-100GiB", NewForm::Receive, false, false)),
+                ("send", view("wedding-4K", NewForm::Send, false, false)),
+                (
+                    "paused",
+                    view("lecture-archive", NewForm::Receive, true, false),
+                ),
+                ("failed", view("contract-scan", NewForm::Send, false, false)),
+                (
+                    "stopped",
+                    view("photos-2025", NewForm::Receive, false, false),
+                ),
+                (
+                    "complete",
+                    view("thesis-final", NewForm::Receive, false, false),
+                ),
+                ("empty", view("", NewForm::Receive, false, true)),
+            ];
+            for (vname, v) in views {
+                steps.push(Step {
+                    name: format!("{tname}_{lname}_transfers_{vname}"),
+                    theme,
+                    locale,
+                    tab: Tab::Transfers,
+                    daemon: Some(DaemonState::Connected),
+                    transfers: Some(v),
+                    contacts: None,
+                    chat: None,
+                    size: None,
+                    mode: None,
+                });
+            }
+            for (d, dname) in [
+                (DaemonState::Stopped, "stopped"),
+                (DaemonState::Starting, "starting"),
+                (DaemonState::NeedsInit, "needsinit"),
+            ] {
+                steps.push(Step {
+                    name: format!("{tname}_{lname}_store_{dname}"),
+                    theme,
+                    locale,
+                    tab: Tab::Store,
+                    daemon: Some(d),
+                    transfers: None,
+                    contacts: None,
+                    chat: None,
+                    size: None,
+                    mode: None,
+                });
+            }
+        }
+    }
+    // The Contacts tab with fake data: every fixture, wide and at the 700 px minimum.
+    // MIASMA_UI_TOUR_FILTER=contacts_ keeps just these.
+    for fx in crate::contacts::FIXTURES {
+        for (w, h, wname) in [(1400.0, 2100.0, "wide"), (700.0, 2700.0, "narrow")] {
+            for (theme, tname, locale, lname) in [
+                (ThemeMode::Light, "light", Locale::Ja, "ja"),
+                (ThemeMode::Dark, "dark", Locale::Ja, "ja"),
+                (ThemeMode::Light, "light", Locale::En, "en"),
+            ] {
+                steps.push(Step {
+                    name: format!("contacts_{fx}_{tname}_{lname}_{wname}"),
+                    theme,
+                    locale,
+                    tab: Tab::Contacts,
+                    daemon: Some(DaemonState::Connected),
+                    transfers: None,
+                    contacts: Some(fx),
+                    chat: None,
+                    size: Some((w, h)),
+                    mode: None,
+                });
+            }
+        }
+    }
+    // The Chat tab with fake data: every fixture, wide and at the 700 px minimum.
+    // MIASMA_UI_TOUR_FILTER=chat_ keeps just these.
+    for fx in crate::chat_ui::FIXTURES {
+        for (w, h, wname) in [(1400.0, 900.0, "wide"), (700.0, 900.0, "narrow")] {
+            for (theme, tname, locale, lname) in [
+                (ThemeMode::Light, "light", Locale::Ja, "ja"),
+                (ThemeMode::Dark, "dark", Locale::Ja, "ja"),
+                (ThemeMode::Light, "light", Locale::En, "en"),
+            ] {
+                steps.push(Step {
+                    name: format!("chat_{fx}_{tname}_{lname}_{wname}"),
+                    theme,
+                    locale,
+                    tab: Tab::Chat,
+                    daemon: Some(DaemonState::Connected),
+                    transfers: None,
+                    contacts: None,
+                    chat: Some(fx),
+                    size: Some((w, h)),
+                    mode: None,
+                });
+            }
+        }
+    }
+    // MIASMA_UI_TOUR_FILTER=<a>,<b> keeps only the steps whose name contains one of the parts.
+    if let Ok(f) = std::env::var("MIASMA_UI_TOUR_FILTER") {
+        steps.retain(|s| f.split(',').any(|part| s.name.contains(part)));
+    }
+    steps
+}
+
+/// Put the app into the state a step shows. Called every frame; `first` on the first one.
+fn arrange(step: &Step, app: &mut MiasmaApp, ctx: &egui::Context, first: bool) {
+    if first {
+        app.theme_mode = step.theme;
+        if let Some(m) = step.mode {
+            app.mode = m;
+        } else if std::env::var_os("MIASMA_UI_TOUR_EASY").is_some() {
+            app.mode = crate::variant::ProductMode::Easy;
+        }
+        if let Some((w, h)) = std::env::var("MIASMA_UI_TOUR_SIZE").ok().and_then(|v| {
+            let (w, h) = v.split_once('x')?;
+            Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?))
+        }) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
+        }
+        app.locale = step.locale;
+        app.tab = step.tab;
+        if let Some(d) = &step.daemon {
+            app.daemon_state = d.clone();
+        }
+        if let Some(fx) = step.contacts {
+            if let Some((w, h)) = step.size {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
+            }
+            if let Some(ui) = crate::contacts::ContactsUi::fixture(
+                fx,
+                crate::locale::contact_strings(step.locale),
+            ) {
+                app.contacts = ui;
+            }
+        }
+        if step.chat.is_some() {
+            // The old-log-files question is not what these screenshots are about.
+            app.logs.legacy = None;
+        }
+        if let Some(fx) = step.chat {
+            if let Some((w, h)) = step.size {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
+            }
+            if let Some(ui) = crate::chat_ui::ChatUi::fixture(fx) {
+                app.chat = ui;
+            }
+            // The registered contacts the chat fixtures refer to (ids a and b).
+            let contacts = if fx == "nocontacts" { "empty" } else { "two" };
+            if let Some(ui) = crate::contacts::ContactsUi::fixture(
+                contacts,
+                crate::locale::contact_strings(step.locale),
+            ) {
+                app.contacts = ui;
+            }
+        }
+        if let Some(v) = &step.transfers {
+            // Tall enough that the list, the detail pane and the form are all on screen.
+            if std::env::var_os("MIASMA_UI_TOUR_SIZE").is_none() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(1000.0, 1400.0)));
+            }
+            app.transfers
+                .set_mock(if v.empty { Vec::new() } else { mock_jobs() });
+            let id = app
+                .transfers
+                .jobs
+                .iter()
+                .find(|j| !v.select.is_empty() && j.name.contains(v.select))
+                .map(transfer_id);
+            app.transfers.select_job(id);
+            app.transfers.set_form(v.form);
+            if v.resume_prompt {
+                app.transfers.open_resume_prompt();
+            }
+        }
+    } else if let Some(d) = &step.daemon {
+        // The worker may report its own state meanwhile; keep the one being shown.
+        app.daemon_state = d.clone();
+    }
+    if matches!(step.daemon, Some(DaemonState::Connected)) {
+        mock_app(app);
+        // The real worker runs in the background of a tour and reports that no service is
+        // there; that banner is not what a connected screen shows.
+        app.status_msg = None;
+        app.last_error = None;
+    }
+}
+
+/// The Easy-mode Store-facing tour: the five top-level screens, the file screens behind
+/// Files, and the error/connection states, in every language, wide and at the 700 px minimum.
+fn easy_steps() -> Vec<Step> {
+    use crate::variant::ProductMode;
+    let mut steps = Vec::new();
+    let sizes = [(1200.0, 900.0, "wide"), (700.0, 1200.0, "narrow")];
+    let locales = [(Locale::En, "en"), (Locale::Ja, "ja"), (Locale::ZhCn, "zh")];
+    let screens: [(Tab, &str); 8] = [
+        (Tab::Home, "home"),
+        (Tab::Files, "files"),
+        (Tab::Settings, "settings"),
+        (Tab::Send, "send"),
+        (Tab::Inbox, "inbox"),
+        (Tab::Store, "store"),
+        (Tab::Retrieve, "retrieve"),
+        (Tab::Outbox, "outbox"),
+    ];
+    for (locale, lname) in locales {
+        for (w, h, wname) in sizes {
+            let base = |name: String, tab: Tab, daemon: DaemonState| Step {
+                name,
+                theme: ThemeMode::Light,
+                locale,
+                tab,
+                daemon: Some(daemon),
+                transfers: None,
+                contacts: None,
+                chat: None,
+                // Long pages get a taller window so what is below the fold is seen too.
+                size: Some((
+                    w,
+                    if matches!(tab, Tab::Settings | Tab::Transfers) {
+                        h * 2.0
+                    } else {
+                        h
+                    },
+                )),
+                mode: Some(ProductMode::Easy),
+            };
+            for (tab, tname) in screens {
+                steps.push(base(
+                    format!("easy_{lname}_{tname}_{wname}"),
+                    tab,
+                    DaemonState::Connected,
+                ));
+            }
+            for (d, dname) in [
+                (DaemonState::Stopped, "stopped"),
+                (DaemonState::Starting, "starting"),
+                (DaemonState::NeedsInit, "needsinit"),
+            ] {
+                steps.push(base(
+                    format!("easy_{lname}_home_{dname}_{wname}"),
+                    Tab::Home,
+                    d.clone(),
+                ));
+                steps.push(base(
+                    format!("easy_{lname}_files_{dname}_{wname}"),
+                    Tab::Store,
+                    d,
+                ));
+            }
+            for (vname, v) in [
+                ("big", view("backup-100GiB", NewForm::Receive, false, false)),
+                ("failed", view("contract-scan", NewForm::Send, false, false)),
+                ("empty", view("", NewForm::Receive, false, true)),
+            ] {
+                let mut s = base(
+                    format!("easy_{lname}_transfers_{vname}_{wname}"),
+                    Tab::Transfers,
+                    DaemonState::Connected,
+                );
+                s.transfers = Some(v);
+                steps.push(s);
+            }
+            for fx in ["empty", "two", "failed", "adderror"] {
+                let mut s = base(
+                    format!("easy_{lname}_contacts_{fx}_{wname}"),
+                    Tab::Contacts,
+                    DaemonState::Connected,
+                );
+                s.contacts = Some(fx);
+                steps.push(s);
+            }
+            for fx in ["nocontacts", "list", "thread", "failed", "notsupported"] {
+                let mut s = base(
+                    format!("easy_{lname}_chat_{fx}_{wname}"),
+                    Tab::Chat,
+                    DaemonState::Connected,
+                );
+                s.chat = Some(fx);
+                steps.push(s);
+            }
+        }
+    }
+    steps
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Window-less tour: renders every step of the Easy tour (or, with `MIASMA_UI_TOUR_ALL`, the
+    /// whole GL tour) on the CPU and writes PNG files. Output folder: `MIASMA_UI_TOUR_OUT`, or
+    /// `<temp dir>/miasma-ui-tour`. `MIASMA_UI_TOUR_FILTER` keeps only matching step names.
+    /// Run with `--features ui-tour`; it also runs as a plain smoke test of every screen.
+    #[test]
+    fn headless_tour_renders_every_step() {
+        let out = std::env::var_os("MIASMA_UI_TOUR_OUT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("miasma-ui-tour"));
+        let _ = std::fs::remove_dir_all(&out);
+        std::fs::create_dir_all(&out).unwrap();
+        let mut steps = if std::env::var_os("MIASMA_UI_TOUR_ALL").is_some() {
+            all_steps()
+        } else {
+            easy_steps()
+        };
+        if let Ok(f) = std::env::var("MIASMA_UI_TOUR_FILTER") {
+            steps.retain(|s| f.split(',').any(|part| s.name.contains(part)));
+        }
+        assert!(!steps.is_empty());
+
+        let data = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = MiasmaApp::new_with_ctx(
+            &ctx,
+            None,
+            crate::variant::ProductMode::Easy,
+            Locale::En,
+            ThemeMode::Light,
+            data.path().to_path_buf(),
+            crate::LaunchIntent::Normal,
+        );
+        let mut raster = raster::Renderer::default();
+        let mut clock = 0.0f64;
+        let mut written = 0usize;
+        for step in &steps {
+            let (w, h) = step.size.unwrap_or(if step.transfers.is_some() {
+                (1000.0, 1400.0)
+            } else {
+                (1000.0, 700.0)
+            });
+            let mut last = None;
+            for frame in 0..8 {
+                arrange(step, &mut app, &ctx, frame == 0);
+                let mut raw = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(w, h),
+                    )),
+                    time: Some(clock),
+                    predicted_dt: 1.0 / 60.0,
+                    ..Default::default()
+                };
+                raw.viewports
+                    .entry(egui::ViewportId::ROOT)
+                    .or_default()
+                    .native_pixels_per_point = Some(1.0);
+                clock += 1.0 / 60.0;
+                let full = ctx.run(raw, |ctx| app.update_frame(ctx, None));
+                raster.apply(&full.textures_delta);
+                last = Some(full.shapes);
+            }
+            let prims = ctx.tessellate(last.unwrap(), 1.0);
+            let bg = ctx.style().visuals.panel_fill;
+            let rgb = raster.paint(&prims, w as usize, h as usize, [bg.r(), bg.g(), bg.b()]);
+            let bmp = raster::bmp(&rgb, w as usize, h as usize);
+            std::fs::write(out.join(format!("{}.bmp", step.name)), bmp).unwrap();
+            written += 1;
+        }
+        // BMP -> PNG with the .NET imaging classes (always present on Windows PowerShell).
+        #[cfg(windows)]
+        {
+            let script = format!(
+                "Add-Type -AssemblyName System.Drawing; Get-ChildItem -LiteralPath '{}' -Filter *.bmp | ForEach-Object {{ $i = [System.Drawing.Image]::FromFile($_.FullName); $i.Save([IO.Path]::ChangeExtension($_.FullName,'png'), [System.Drawing.Imaging.ImageFormat]::Png); $i.Dispose(); Remove-Item -LiteralPath $_.FullName }}",
+                out.display()
+            );
+            let st = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                .status();
+            eprintln!("png conversion: {st:?}");
+        }
+        eprintln!("UI_TOUR_DONE {} images in {}", written, out.display());
     }
 }
