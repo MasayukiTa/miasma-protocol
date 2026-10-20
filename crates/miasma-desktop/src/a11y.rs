@@ -1180,7 +1180,19 @@ pub(crate) mod tests {
             seen.push(focused(&ctx));
         }
         assert_eq!(seen, [Some(ids[1]), Some(ids[2]), Some(ids[0])], "Tab");
-// Backward from the first button: focus stays on one of the dialog's buttons (it is not        // guaranteed to land on the last one: egui moves backwards through the stops one frame at a        // time, and the chain through the window's nameless stops is not settled here).        trap_frame(&ctx, tab(true), true);        for _ in 0..10 {            trap_frame(&ctx, screen(), true);        }        assert!(            ids.contains(&focused(&ctx).unwrap_or(egui::Id::NULL)),            "Shift+Tab leaves the dialog: {:?}",            focused(&ctx)        );    }
+        // Backward from the first button: focus stays on one of the dialog's buttons. It is not
+        // guaranteed to land on the last one: egui moves backwards through the stops one frame
+        // at a time, and the chain through the window's nameless stops is not settled here.
+        trap_frame(&ctx, tab(true), true);
+        for _ in 0..10 {
+            trap_frame(&ctx, screen(), true);
+        }
+        assert!(
+            ids.contains(&focused(&ctx).unwrap_or(egui::Id::NULL)),
+            "Shift+Tab leaves the dialog: {:?}",
+            focused(&ctx)
+        );
+    }
 
     #[test]
     fn a_dialog_that_was_not_drawn_in_between_counts_as_new() {
