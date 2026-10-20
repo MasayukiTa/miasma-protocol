@@ -900,17 +900,12 @@ pub fn row_menu(
     egui::popup::popup_below_widget(ui, popup_id, &button, |ui| {
         ui.set_min_width(MENU_MIN_W);
         for (i, item) in items.iter().enumerate() {
-            let mut text = RichText::new(item.label);
-            if item.confirm.is_some() {
-                text = text.color(pal().danger);
-            }
-            let r = ui.add_enabled(
-                item.enabled,
-                egui::Button::new(text)
-                    .frame(false)
-                    .min_size(vec2(ui.available_width(), CONTROL_H)),
-            );
-            if r.clicked() {
+            let r = ui
+                .add_enabled_ui(item.enabled, |ui| {
+                    menu_item(ui, item.label, item.confirm.is_some())
+                })
+                .inner;
+            if r {
                 chosen = Some(i);
                 ui.memory_mut(|m| m.close_popup());
             }
