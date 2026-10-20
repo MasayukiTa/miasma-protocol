@@ -656,8 +656,11 @@ impl SendFlow {
                         fill(k.to_off, &[("name", &elide(&c.label, NAME_CHARS))])
                     };
                     let selected = matches!(&self.recipient, Recipient::Contact(id) if *id == c.id);
-                    let r =
-                        ui.add_enabled(c.allow_send, egui::SelectableLabel::new(selected, label));
+                    let r = crate::form_check::add_enabled(
+                        ui,
+                        c.allow_send,
+                        egui::SelectableLabel::new(selected, label),
+                    );
                     if r.clicked() {
                         self.recipient = Recipient::Contact(c.id.clone());
                     }

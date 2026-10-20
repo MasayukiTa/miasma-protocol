@@ -857,7 +857,11 @@ impl GroupUi {
                             answer = Some((row.id.clone(), row.name.clone(), true));
                         }
                         let label = fill(gs.a11y_decline_named, &[("name", &name)]);
-                        let r = ui.add_enabled(!busy, kit::secondary_button(gs.decline));
+                        let r = crate::form_check::add_enabled(
+                            ui,
+                            !busy,
+                            kit::secondary_button(gs.decline),
+                        );
                         r.widget_info(|| {
                             egui::WidgetInfo::labeled(egui::WidgetType::Button, label.clone())
                         });
@@ -879,7 +883,7 @@ impl GroupUi {
     pub fn new_group_button(&mut self, ui: &mut egui::Ui, has_contacts: bool) {
         let gs = self.gs();
         let enabled = has_contacts && self.can_create();
-        let resp = ui.add_enabled(enabled, kit::secondary_button(gs.new_group));
+        let resp = crate::form_check::add_enabled(ui, enabled, kit::secondary_button(gs.new_group));
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, gs.a11y_new_group));
         let resp = if !self.can_create() {
             resp.on_disabled_hover_text(gs.unsupported)
@@ -1015,7 +1019,8 @@ impl GroupUi {
                     egui::WidgetInfo::labeled(egui::WidgetType::Button, gs.a11y_accept)
                 });
                 accept = r.clicked();
-                let r = ui.add_enabled(!busy, kit::secondary_button(gs.decline));
+                let r =
+                    crate::form_check::add_enabled(ui, !busy, kit::secondary_button(gs.decline));
                 r.widget_info(|| {
                     egui::WidgetInfo::labeled(egui::WidgetType::Button, gs.a11y_decline)
                 });
@@ -1231,8 +1236,11 @@ impl GroupUi {
                                             }
                                         }
                                         if can_remove(&d, m) {
-                                            let r = ui
-                                                .add_enabled(!busy, kit::danger_button(gs.remove));
+                                            let r = crate::form_check::add_enabled(
+                                                ui,
+                                                !busy,
+                                                kit::danger_button(gs.remove),
+                                            );
                                             let label = fill(gs.a11y_remove, &[("name", &name)]);
                                             r.widget_info(|| {
                                                 egui::WidgetInfo::labeled(
@@ -1256,7 +1264,11 @@ impl GroupUi {
                 let check = add_check(&d);
                 kit::button_row(ui, |ui| {
                     let enabled = matches!(check, AddCheck::Allowed { .. }) && !busy;
-                    let r = ui.add_enabled(enabled, kit::secondary_button(gs.add_member));
+                    let r = crate::form_check::add_enabled(
+                        ui,
+                        enabled,
+                        kit::secondary_button(gs.add_member),
+                    );
                     r.widget_info(|| {
                         egui::WidgetInfo::labeled(egui::WidgetType::Button, gs.a11y_add_member)
                     });
@@ -1295,8 +1307,11 @@ impl GroupUi {
                 kit::divider(ui);
                 ui.add_space(kit::SP_2);
                 kit::button_row(ui, |ui| {
-                    let r =
-                        ui.add_enabled(can_leave(status) && !busy, kit::danger_button(gs.leave));
+                    let r = crate::form_check::add_enabled(
+                        ui,
+                        can_leave(status) && !busy,
+                        kit::danger_button(gs.leave),
+                    );
                     r.widget_info(|| {
                         egui::WidgetInfo::labeled(egui::WidgetType::Button, gs.a11y_leave)
                     });
@@ -1304,7 +1319,11 @@ impl GroupUi {
                         ask_leave = true;
                     }
                     let allowed = can_delete_history(status) && !busy;
-                    let r = ui.add_enabled(allowed, kit::danger_button(gs.delete_history));
+                    let r = crate::form_check::add_enabled(
+                        ui,
+                        allowed,
+                        kit::danger_button(gs.delete_history),
+                    );
                     r.widget_info(|| {
                         egui::WidgetInfo::labeled(egui::WidgetType::Button, gs.a11y_delete_history)
                     });

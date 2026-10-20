@@ -986,6 +986,22 @@ fn easy_steps() -> Vec<Step> {
                 hover: false,
             });
         }
+    // A dialog in the narrowest window: it must stay inside it.
+    for fx in ["qr", "perm"] {
+        steps.push(Step {
+            name: format!("easy_en_contacts_{fx}_320"),
+            theme: ThemeMode::Light,
+            locale: Locale::En,
+            tab: Tab::Contacts,
+            daemon: Some(DaemonState::Connected),
+            transfers: None,
+            contacts: Some(fx),
+            chat: None,
+            size: Some((320.0, 900.0)),
+            mode: Some(ProductMode::Easy),
+            flow: None,
+            hover: false,
+        });
     }
     steps
 }

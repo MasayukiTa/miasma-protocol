@@ -139,6 +139,37 @@ pub fn relative_and_absolute(l: Locale, epoch_secs: u64, now: u64) -> String {
     )
 }
 
+/// The sender shown for an envelope in the old format, which carries none.
+pub fn unknown_sender(l: Locale) -> &'static str {
+    pick(
+        l,
+        "Unknown sender (old format)",
+        "送信者不明（旧形式）",
+        "发送者未知（旧格式）",
+    )
+}
+
+/// When an envelope expires, with the direction in words: "expired 196d ago", "in 3d". The
+/// plain relative form ("196d ago") after the label "Expires:" reads as if the expiry were
+/// still to come.
+pub fn expiry_text(l: Locale, epoch_secs: u64, now: u64) -> String {
+    if epoch_secs == 0 {
+        return relative_time(l, 0, now);
+    }
+    let rel = relative_time(l, epoch_secs, now);
+    if epoch_secs > now {
+        return match l {
+            Locale::Ja => format!("{}に期限", rel.trim_end_matches('後').to_owned() + "後"),
+            _ => rel,
+        };
+    }
+    match l {
+        Locale::En => format!("expired {rel}"),
+        Locale::Ja => format!("{rel}に期限切れ"),
+        Locale::ZhCn => format!("{rel}已过期"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,6 +209,26 @@ mod tests {
             "3d ago (Oct 20, 2026 14:05 UTC)"
         );
         assert_eq!(relative_and_absolute(Locale::En, 0, now), "unknown");
+    }
+
+    #[test]
+    fn an_expiry_in_the_past_says_so() {
+        let now = 1_000_000_000;
+        assert_eq!(
+            expiry_text(Locale::En, now - 196 * 86400, now),
+            "expired 196d ago"
+        );
+        assert_eq!(
+            expiry_text(Locale::Ja, now - 196 * 86400, now),
+            "196日前に期限切れ"
+        );
+        assert!(expiry_text(Locale::ZhCn, now - 196 * 86400, now).contains("已过期"));
+        assert_eq!(expiry_text(Locale::En, now + 3 * 86400, now), "in 3d");
+        assert_eq!(expiry_text(Locale::Ja, now + 3 * 86400, now), "3日後に期限");
+        assert_eq!(expiry_text(Locale::En, 0, now), "unknown");
+        for l in Locale::ALL {
+            assert!(!unknown_sender(l).is_empty());
+        }
     }
 
     #[test]
