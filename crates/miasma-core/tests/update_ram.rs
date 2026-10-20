@@ -276,6 +276,7 @@ fn update_download_streams_to_disk_and_nothing_stays_resident() {
             keys: Vec::new(),
             repo: REPO.to_owned(),
             health_timeout: Duration::from_secs(1),
+            packaged: false,
         };
         let CheckOutcome::Available(offer) = engine.check() else {
             panic!("the fake release is newer");

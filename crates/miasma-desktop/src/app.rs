@@ -184,6 +184,8 @@ pub struct MiasmaApp {
     // Updates (check once after start, Settings section, banner)
     updates: crate::updates::UpdatesUi,
     network: crate::network_ui::NetworkUi,
+    // Storage block of Settings: keep encrypted pieces for others (size chooser)
+    hosting: crate::hosting_ui::HostingUi,
 }
 
 /// Why the stored-share list cannot be shown.
@@ -535,6 +537,7 @@ impl MiasmaApp {
             storage: StorageState::new(),
             updates: crate::updates::UpdatesUi::new(data_dir.clone()),
             network: crate::network_ui::NetworkUi::new(data_dir.clone()),
+            hosting: crate::hosting_ui::HostingUi::new(data_dir.clone()),
 
             transfers: TransfersUi::default(),
             contacts: ContactsUi::default(),
@@ -2516,6 +2519,10 @@ impl MiasmaApp {
             self.logs_section(ui);
 
             // ── Storage ──────────────────────────────────────────────
+            {
+                let used = (self.quota_mb > 0).then_some(self.used_mb);
+                self.hosting.section(ui, self.locale, used);
+            }
             self.storage_section(ui);
 
             // ── How it works ─────────────────────────────────────────

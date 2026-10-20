@@ -31,6 +31,7 @@ pub mod config;
 pub mod engine;
 pub mod error;
 pub mod http;
+pub mod package;
 pub mod release;
 pub mod schedule;
 pub mod state;
