@@ -798,9 +798,13 @@ pub fn list_row<R>(
                     }
                     ui.allocate_ui_with_layout(
                         vec2(ui.available_width(), h),
-                        Layout::top_down(egui::Align::Min).with_main_align(egui::Align::Center),
+                        Layout::top_down(egui::Align::Min),
                         |ui| {
                             ui.spacing_mut().item_spacing.y = 0.0;
+                            // Centre the one or two lines of text in the row.
+                            let lines = if row.subtitle.is_some() { 2.0 } else { 1.0 };
+                            let block = lines * ui.text_style_height(&TextStyle::Body);
+                            ui.add_space(((h - block) * 0.5).max(0.0));
                             ui.add(
                                 Label::new(RichText::new(row.title).color(pal().text))
                                     .truncate(true),
