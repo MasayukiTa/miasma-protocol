@@ -2739,7 +2739,7 @@ impl MiasmaApp {
             egui::CollapsingHeader::new(kit::section_text(crate::uitext::advanced(self.locale)))
                 .id_source("settings_privacy_advanced")
                 .default_open(false)
-                .show(ui, |ui| self.logs_section(ui));
+                .show_a11y(ui, |ui| self.logs_section(ui));
         } else {
             self.logs_section(ui);
             self.hosting.section(ui, self.locale, used);
@@ -2754,7 +2754,7 @@ impl MiasmaApp {
             egui::CollapsingHeader::new(kit::section_text(title))
                 .id_source("settings_network_advanced")
                 .default_open(false)
-                .show(ui, |ui| self.network.section(ui, self.locale));
+                .show_a11y(ui, |ui| self.network.section(ui, self.locale));
         } else {
             self.network.section(ui, self.locale);
         }
@@ -2766,42 +2766,41 @@ impl MiasmaApp {
         let easy = self.mode.is_easy();
         {
             // ── Paths: not in the page body (they carry the user name of this computer) ──
-            egui::CollapsingHeader::new(kit::muted_text(crate::uitext::technical_details(
-                self.locale,
-            )))
-            .id_source("about_technical")
-            .default_open(false)
-            .show(ui, |ui| {
-                kit::section(ui, s.settings_paths, |ui| {
-                    let sep = std::path::MAIN_SEPARATOR;
-                    kit::kv_grid(ui, |g| {
-                        g.row(s.settings_data_dir, |ui| {
-                            if kit::mono_copy(ui, &self.data_dir_display, s.copy) {
-                                self.set_msg(MsgKind::Info, s.settings_path_copied);
+            let tech_title = kit::muted_text(crate::uitext::technical_details(self.locale));
+            egui::CollapsingHeader::new(tech_title)
+                .id_source("about_technical")
+                .default_open(false)
+                .show_a11y(ui, |ui| {
+                    kit::section(ui, s.settings_paths, |ui| {
+                        let sep = std::path::MAIN_SEPARATOR;
+                        kit::kv_grid(ui, |g| {
+                            g.row(s.settings_data_dir, |ui| {
+                                if kit::mono_copy(ui, &self.data_dir_display, s.copy) {
+                                    self.set_msg(MsgKind::Info, s.settings_path_copied);
+                                }
+                            });
+                            g.mono(
+                                s.settings_config_file,
+                                &format!("{}{sep}config.toml", &self.data_dir_display),
+                            );
+                            let log_where = if self.logs.writes_files {
+                                format!("{}{sep}lg", &self.data_dir_display)
+                            } else {
+                                self.lg().memory_only.to_owned()
+                            };
+                            g.mono(s.settings_log, &log_where);
+                            g.mono(
+                                crate::buildinfo::build_row_label(self.locale),
+                                &crate::buildinfo::build_row_value(),
+                            );
+                            if let Ok(exe) = std::env::current_exe() {
+                                if let Some(dir) = exe.parent() {
+                                    g.mono(s.settings_install, &dir.to_string_lossy());
+                                }
                             }
                         });
-                        g.mono(
-                            s.settings_config_file,
-                            &format!("{}{sep}config.toml", &self.data_dir_display),
-                        );
-                        let log_where = if self.logs.writes_files {
-                            format!("{}{sep}lg", &self.data_dir_display)
-                        } else {
-                            self.lg().memory_only.to_owned()
-                        };
-                        g.mono(s.settings_log, &log_where);
-                        g.mono(
-                            crate::buildinfo::build_row_label(self.locale),
-                            &crate::buildinfo::build_row_value(),
-                        );
-                        if let Ok(exe) = std::env::current_exe() {
-                            if let Some(dir) = exe.parent() {
-                                g.mono(s.settings_install, &dir.to_string_lossy());
-                            }
-                        }
                     });
                 });
-            });
 
             // ── How it works ─────────────────────────────────────────
             kit::section(ui, s.settings_how, |ui| {

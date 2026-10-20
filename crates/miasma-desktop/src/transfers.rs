@@ -1912,24 +1912,23 @@ impl TransfersUi {
             {
                 self.send_preset = DEFAULT_PRESET;
             }
-            egui::CollapsingHeader::new(
-                RichText::new(crate::uitext::advanced(t.locale)).color(pal().muted),
-            )
-            .id_source("send_redundancy_advanced")
-            .default_open(self.send_preset != DEFAULT_PRESET)
-            .show(ui, |ui| {
-                for (i, preset) in PRESETS.iter().enumerate() {
-                    if i == DEFAULT_PRESET {
-                        continue;
+            let adv_title = RichText::new(crate::uitext::advanced(t.locale)).color(pal().muted);
+            egui::CollapsingHeader::new(adv_title)
+                .id_source("send_redundancy_advanced")
+                .default_open(self.send_preset != DEFAULT_PRESET)
+                .show_a11y(ui, |ui| {
+                    for (i, preset) in PRESETS.iter().enumerate() {
+                        if i == DEFAULT_PRESET {
+                            continue;
+                        }
+                        if ui
+                            .radio(self.send_preset == i, row_text(i, preset))
+                            .clicked()
+                        {
+                            self.send_preset = i;
+                        }
                     }
-                    if ui
-                        .radio(self.send_preset == i, row_text(i, preset))
-                        .clicked()
-                    {
-                        self.send_preset = i;
-                    }
-                }
-            });
+                });
         }
     }
 }
