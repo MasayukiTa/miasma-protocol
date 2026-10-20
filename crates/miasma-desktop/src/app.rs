@@ -8,6 +8,7 @@
 use eframe::egui::{self, RichText};
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::a11y::CollapsingExt as _;
 use crate::chat_ui::{ChatAction, ChatUi};
 use crate::contacts::ContactsUi;
 use crate::errors::{ErrorKind, UiError};
@@ -1436,7 +1437,7 @@ impl MiasmaApp {
         egui::CollapsingHeader::new(kit::muted_text(s.details_easy))
             .id_source("home_details")
             .default_open(false)
-            .show(ui, |ui| {
+            .show_a11y(ui, |ui| {
                 kit::stats(
                     ui,
                     &[
@@ -3055,6 +3056,7 @@ impl MiasmaApp {
         crate::a11y::dialog_enter(ctx, "legacy_logs");
         // Esc keeps the files (the choice that cannot lose anything).
         let mut keep = crate::a11y::esc_pressed(ctx);
+        crate::a11y::dialog_title(ctx, l.legacy_title);
         egui::Window::new(l.legacy_title)
             .collapsible(false)
             .resizable(false)

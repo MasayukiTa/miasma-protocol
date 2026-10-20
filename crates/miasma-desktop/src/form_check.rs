@@ -54,9 +54,14 @@ pub fn first_missing(needs: &[Need]) -> Option<&Need> {
 /// spin button, ...) and the value that egui already published stay as they are.
 pub fn name(resp: &egui::Response, label: &str) {
     let label = label.to_owned();
-    let _ = resp.ctx.accesskit_node_builder(resp.id, |b| {
+    let secret = resp.ctx.accesskit_node_builder(resp.id, |b| {
         b.set_name(label);
+        b.role() == egui::accesskit::Role::PasswordInput
     });
+    // A password field publishes its name and role only, never its text (see `a11y::secret_field`).
+    if secret == Some(true) {
+        crate::a11y::secret_field(resp);
+    }
 }
 
 /// Tell assistive technology that the control behind `resp` is switched off (egui draws a

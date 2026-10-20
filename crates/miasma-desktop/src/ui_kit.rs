@@ -1047,7 +1047,8 @@ pub fn dialog<R>(
     // Never wider than the window (less a margin on each side): at 320 px the dialog used to
     // keep its 440 px and ran off both edges.
     let (win_w, inner_w) = dialog_widths(ctx.screen_rect().width());
-    egui::Window::new(title)
+    crate::a11y::dialog_title(ctx, title);
+    let shown = egui::Window::new(title)
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
@@ -1057,7 +1058,9 @@ pub fn dialog<R>(
             ui.set_max_width(inner_w);
             body(ui)
         })
-        .and_then(|r| r.inner)
+        .and_then(|r| r.inner);
+    crate::a11y::dialog_end(ctx);
+    shown
 }
 
 /// An empty list: one sentence and one primary action, centred. Returns true when the action was

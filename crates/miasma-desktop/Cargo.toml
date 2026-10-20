@@ -45,3 +45,5 @@ winresource = "0.1"
 [dev-dependencies]
 serde_json.workspace = true
 tempfile.workspace = true
+# The tree consumer used by the Windows adapter: lets tests apply a tree update the way the platform side does.
+accesskit_consumer = "0.16"
