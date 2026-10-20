@@ -4224,6 +4224,9 @@ mod tests {
 
     /// A real mouse click on the button with this name: move, then press and release.
     fn click_button(ctx: &egui::Context, app: &mut MiasmaApp, name: &str) {
+        for _ in 0..3 {
+            window_frame(ctx, app, vec![]);
+        }
         let nodes = window_frame(ctx, app, vec![]);
         let rect = nodes
             .iter()
@@ -4237,16 +4240,15 @@ mod tests {
             .1;
         let pos = rect.center();
         window_frame(ctx, app, vec![egui::Event::PointerMoved(pos)]);
-        let mut events = Vec::new();
-        for pressed in [true, false] {
-            events.push(egui::Event::PointerButton {
-                pos,
-                button: egui::PointerButton::Primary,
-                pressed,
-                modifiers: egui::Modifiers::NONE,
-            });
-        }
-        window_frame(ctx, app, events);
+        let press = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        window_frame(ctx, app, vec![press(true)]);
+        window_frame(ctx, app, vec![press(false)]);
+        window_frame(ctx, app, vec![]);
         window_frame(ctx, app, vec![]);
     }
 
