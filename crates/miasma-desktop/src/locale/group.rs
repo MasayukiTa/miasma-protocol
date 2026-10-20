@@ -61,6 +61,9 @@ group_strings! {
     // Settings
     settings_join_label, settings_join_auto, settings_join_ask, settings_join_auto_desc,
     settings_join_ask_desc,
+    // Two-pane Chat, short delivery state, member rows, contact search in the pickers
+    pane_empty, state_waiting_short, a11y_member_self, member_more, member_show_code,
+    member_hide_code, ng_search_hint, a11y_ng_search, ng_selected_only, ng_no_match,
 }
 
 pub fn group_strings(locale: Locale) -> &'static GroupStrings {
@@ -206,6 +209,16 @@ static GR_EN: GroupStrings = GroupStrings {
     settings_join_ask: "Ask me first",
     settings_join_auto_desc: "You join as soon as a contact you trust, who administers the group, adds you. You can leave with one click.",
     settings_join_ask_desc: "An invitation waits at the top of the Chat tab until you accept or decline it.",
+    pane_empty: "Choose a conversation from the list.",
+    state_waiting_short: "Waiting",
+    a11y_member_self: "{name}, {role}",
+    member_more: "More actions for {name}",
+    member_show_code: "Show verification code",
+    member_hide_code: "Hide verification code",
+    ng_search_hint: "Search contacts",
+    a11y_ng_search: "Search contacts to include in the group",
+    ng_selected_only: "Selected only",
+    ng_no_match: "No contact matches.",
 };
 
 static GR_JA: GroupStrings = GroupStrings {
@@ -343,6 +356,16 @@ static GR_JA: GroupStrings = GroupStrings {
     settings_join_ask: "先に確認する",
     settings_join_auto_desc: "信頼している連絡先がグループの管理者としてあなたを追加すると、すぐに参加します。ワンクリックで抜けられます。",
     settings_join_ask_desc: "「チャット」タブの上に招待が表示され、参加するか断るかを選ぶまで待ちます。",
+    pane_empty: "一覧から会話を選んでください。",
+    state_waiting_short: "待機中",
+    a11y_member_self: "{name}、{role}",
+    member_more: "{name} のその他の操作",
+    member_show_code: "確認コードを表示",
+    member_hide_code: "確認コードを隠す",
+    ng_search_hint: "連絡先を検索",
+    a11y_ng_search: "グループに入れる連絡先を検索",
+    ng_selected_only: "選択済みのみ",
+    ng_no_match: "一致する連絡先がありません。",
 };
 
 static GR_ZH_CN: GroupStrings = GroupStrings {
@@ -480,6 +503,16 @@ static GR_ZH_CN: GroupStrings = GroupStrings {
     settings_join_ask: "先问我",
     settings_join_auto_desc: "你信任的联系人以管理员身份把你加入群组时，你会立即加入。一键即可退出。",
     settings_join_ask_desc: "邀请会显示在“聊天”标签页顶部，等你接受或拒绝。",
+    pane_empty: "请从列表中选择一个会话。",
+    state_waiting_short: "等待中",
+    a11y_member_self: "{name}，{role}",
+    member_more: "{name} 的更多操作",
+    member_show_code: "查看验证码",
+    member_hide_code: "隐藏验证码",
+    ng_search_hint: "搜索联系人",
+    a11y_ng_search: "搜索要加入群组的联系人",
+    ng_selected_only: "仅显示已选",
+    ng_no_match: "没有匹配的联系人。",
 };
 
 #[cfg(test)]
@@ -526,6 +559,12 @@ mod tests {
                 ("members_title", g.members_title, &["{n}"]),
                 ("full_hint", g.full_hint, &["{max}"]),
                 ("a11y_remove", g.a11y_remove, &["{name}"]),
+                (
+                    "a11y_member_self",
+                    g.a11y_member_self,
+                    &["{name}", "{role}"],
+                ),
+                ("member_more", g.member_more, &["{name}"]),
                 (
                     "a11y_member",
                     g.a11y_member,

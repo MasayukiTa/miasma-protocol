@@ -298,32 +298,58 @@ pub fn unverified_count(members: &[MemberInfo]) -> usize {
     members.iter().filter(|m| !m.you && !m.verified).count()
 }
 
-/// The line under a member's name: role and the verified marker, for the screen reader too.
-pub fn member_summary(g: &GroupStrings, m: &MemberInfo) -> String {
+/// What the line under a member's name says, each fact once: the role, then (for others) whether
+/// they are a verified contact and whether they can be reached. For me the name already says
+/// "You", so only the role is left.
+pub fn member_facts(g: &GroupStrings, m: &MemberInfo) -> Vec<String> {
     let role = if m.role == "admin" {
         g.role_admin
     } else {
         g.role_member
     };
-    let state = if m.you {
-        g.you_tag
-    } else if m.verified {
-        g.marker_verified
-    } else {
-        g.marker_unverified
-    };
-    let state = match standing_text(g, &standing_of(m)) {
-        Some(s) => format!("{state}, {s}"),
-        None => state.to_owned(),
-    };
+    let mut facts = vec![role.to_owned()];
+    if m.you {
+        return facts;
+    }
+    facts.push(
+        if m.verified {
+            g.marker_verified
+        } else {
+            g.marker_unverified
+        }
+        .to_owned(),
+    );
+    if let Some(s) = standing_text(g, &standing_of(m)) {
+        facts.push(s);
+    }
+    facts
+}
+
+/// The member's row as one sentence (name, then each fact once), for tests of what a screen
+/// reader is told.
+#[allow(dead_code)]
+pub fn member_summary(g: &GroupStrings, m: &MemberInfo) -> String {
+    let facts = member_facts(g, m);
+    let state = facts[1..].join(", ");
+    if state.is_empty() {
+        return fill(
+            g.a11y_member_self,
+            &[("name", &member_name(g, m)), ("role", &facts[0])],
+        );
+    }
     fill(
         g.a11y_member,
         &[
             ("name", &member_name(g, m)),
-            ("role", role),
+            ("role", &facts[0]),
             ("state", &state),
         ],
     )
+}
+
+/// The muted line under a member's name in the member list (one line, cut with an ellipsis).
+pub fn member_subtitle(g: &GroupStrings, m: &MemberInfo) -> String {
+    member_facts(g, m).join(" - ")
 }
 
 // ─── The setting ────────────────────────────────────────────────────────────
@@ -531,6 +557,35 @@ pub fn delivery_of(m: &GroupMessageInfo) -> GroupDelivery {
     }
 }
 
+/// How long a message may be "waiting" before the line under it says so in full. Until then a
+/// short word is enough: members who are offline are the normal case.
+pub const STUCK_MS: u64 = 10 * 60_000;
+
+/// What is drawn under one of my messages, and the exact words for the hover and the screen
+/// reader when the shown line is the short one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryLine {
+    pub shown: String,
+    pub full: Option<String>,
+}
+
+/// The line under my message `age_ms` after it was sent. A message that is only waiting shows
+/// one short word (the exact count is in `full`) until it has waited [`STUCK_MS`]; every other
+/// state shows its sentence.
+pub fn delivery_line(g: &GroupStrings, d: GroupDelivery, age_ms: u64) -> Option<DeliveryLine> {
+    let text = delivery_text(g, d)?;
+    if matches!(d, GroupDelivery::Waiting { .. }) && age_ms < STUCK_MS {
+        return Some(DeliveryLine {
+            shown: g.state_waiting_short.to_owned(),
+            full: Some(text),
+        });
+    }
+    Some(DeliveryLine {
+        shown: text,
+        full: None,
+    })
+}
+
 /// The sentence for a delivery state (none for a message that is not mine).
 pub fn delivery_text(g: &GroupStrings, d: GroupDelivery) -> Option<String> {
     let n = |v: u32| v.to_string();
@@ -678,11 +733,34 @@ pub enum FormError {
     TooMany,
 }
 
+/// From this many contacts on, the pickers get a search field and a "selected only" switch.
+pub const PICKER_SEARCH_MIN: usize = 8;
+
+/// The contacts a picker shows: those whose name contains `query` (case-insensitive; an empty
+/// query matches all), and with `selected_only` only the ticked ones. The order is kept.
+pub fn filter_picker<'a>(
+    offered: &[&'a ContactInfo],
+    query: &str,
+    selected_only: bool,
+    picks: &Picks,
+) -> Vec<&'a ContactInfo> {
+    let q = query.trim().to_lowercase();
+    offered
+        .iter()
+        .copied()
+        .filter(|c| q.is_empty() || c.label.to_lowercase().contains(&q))
+        .filter(|c| !selected_only || picks.contains(&c.id))
+        .collect()
+}
+
 /// The new-group form.
 #[derive(Debug, Default, Clone)]
 pub struct NewGroupForm {
     pub name: String,
     pub picks: Picks,
+    /// The contact search (only drawn from [`PICKER_SEARCH_MIN`] contacts on).
+    pub search: String,
+    pub selected_only: bool,
     /// Set when ticking was refused; cleared by the next change.
     pub error: Option<FormError>,
 }
@@ -783,7 +861,18 @@ pub fn last_of(g: &GroupStrings, messages: &[GroupMessageInfo]) -> GroupLast {
 /// The second line of a group row.
 pub fn preview_line(g: &GroupStrings, c: &ChatStrings, row: &GroupRow, last: &GroupLast) -> String {
     let members = fill(g.row_members, &[("n", &row.members.to_string())]);
-    let tail = match row.status {
+    let tail = preview_tail(g, c, row, last);
+    if tail.is_empty() {
+        members
+    } else {
+        format!("{members} | {tail}")
+    }
+}
+
+/// What a group row's second line says after the member count: the state, or the last message
+/// with its sender. Empty when there is nothing.
+pub fn preview_tail(g: &GroupStrings, c: &ChatStrings, row: &GroupRow, last: &GroupLast) -> String {
+    match row.status {
         GroupStatus::Invited => g.row_invited.to_owned(),
         GroupStatus::Left => g.row_left.to_owned(),
         GroupStatus::Removed => g.row_removed.to_owned(),
@@ -797,11 +886,6 @@ pub fn preview_line(g: &GroupStrings, c: &ChatStrings, row: &GroupRow, last: &Gr
                 ),
             },
         },
-    };
-    if tail.is_empty() {
-        members
-    } else {
-        format!("{members} | {tail}")
     }
 }
 
@@ -814,6 +898,32 @@ pub fn row_label(g: &GroupStrings, row: &GroupRow) -> String {
             ("n", &row.members.to_string()),
         ],
     )
+}
+
+/// The whole screen-reader name of a group row: the name and member count once, then the unread
+/// count, then what follows the member count on the visible second line (the last message or the
+/// state). `preview_line` starts with the member count for the eye; the name must not repeat it.
+pub fn row_a11y(
+    g: &GroupStrings,
+    c: &ChatStrings,
+    row: &GroupRow,
+    last: &GroupLast,
+    unread: u32,
+) -> String {
+    let mut s = row_label(g, row);
+    if unread > 0 {
+        s.push_str(", ");
+        s.push_str(&fill(
+            c.a11y_unread,
+            &[("n", &crate::chat::badge_text(unread))],
+        ));
+    }
+    let tail = preview_tail(g, c, row, last);
+    if !tail.is_empty() {
+        s.push_str(", ");
+        s.push_str(&tail);
+    }
+    s
 }
 
 #[cfg(test)]
@@ -1280,6 +1390,133 @@ mod tests {
             preview_line(g(), chat_strings(Locale::En), &row, &GroupLast::None),
             "4 members"
         );
+    }
+
+    #[test]
+    fn a_group_row_is_read_with_each_fact_once() {
+        // The visible second line starts with the member count; the screen-reader name already
+        // has it, so it must not be read twice ("Group X, 3 members, 3 members | You: test").
+        let row = GroupRow::from(&info("g1", "joined", 3, 2, 5));
+        let mine = GroupLast::Message {
+            sender: Sender::You,
+            text: "test".into(),
+        };
+        for lang in Locale::ALL {
+            let (gs, cs) = (group_strings(lang), chat_strings(lang));
+            let count = fill(gs.row_members, &[("n", "3")]);
+            for unread in [0, 2] {
+                let name = row_a11y(gs, cs, &row, &mine, unread);
+                assert_eq!(name.matches(&count).count(), 1, "{lang:?}: {name}");
+                assert!(name.contains("test") && name.contains("group g1"), "{name}");
+            }
+            let invited = GroupRow::from(&info("g2", "invited", 3, 0, 5));
+            let name = row_a11y(gs, cs, &invited, &GroupLast::None, 1);
+            assert_eq!(name.matches(&count).count(), 1, "{lang:?}: {name}");
+            assert!(name.contains(gs.row_invited), "{name}");
+        }
+        assert_eq!(
+            row_a11y(g(), chat_strings(Locale::En), &row, &mine, 0),
+            "Group group g1, 3 members, You: test"
+        );
+    }
+
+    #[test]
+    fn a_member_is_read_with_each_fact_once() {
+        let ms = vec![
+            member("me", true, false, true),
+            member("a", false, true, false),
+            member("b", false, false, true),
+        ];
+        for lang in Locale::ALL {
+            let gs = group_strings(lang);
+            // Me: the name already says "You", and the role follows; nothing says "You" again.
+            let me = member_summary(gs, &ms[0]);
+            assert_eq!(me.matches(gs.you_tag).count(), 1, "{lang:?}: {me}");
+            assert_eq!(member_facts(gs, &ms[0]), vec![gs.role_admin.to_owned()]);
+            // Others: role, verified marker (once) and standing.
+            let a = member_summary(gs, &ms[1]);
+            assert_eq!(a.matches(gs.marker_verified).count(), 1, "{lang:?}: {a}");
+            assert_eq!(a.matches(gs.role_member).count(), 1, "{lang:?}: {a}");
+            let b = member_summary(gs, &ms[2]);
+            assert_eq!(b.matches(gs.role_admin).count(), 1, "{lang:?}: {b}");
+        }
+        assert_eq!(member_summary(g(), &ms[0]), "You, Admin");
+        assert_eq!(member_subtitle(g(), &ms[0]), "Admin");
+        assert_eq!(
+            member_subtitle(g(), &ms[1]),
+            "Member - Verified contact - Joined"
+        );
+    }
+
+    #[test]
+    fn waiting_is_one_short_word_until_it_has_waited_long() {
+        for lang in Locale::ALL {
+            let gs = group_strings(lang);
+            let waiting = GroupDelivery::Waiting {
+                delivered: 0,
+                total: 2,
+            };
+            let quick = delivery_line(gs, waiting, 30_000).expect("a line");
+            assert_eq!(quick.shown, gs.state_waiting_short);
+            let full = quick.full.expect("the exact count is kept for the hover");
+            assert!(full.contains('2') && full.contains('0'), "{full}");
+            assert!(full.chars().count() > quick.shown.chars().count());
+            // Stuck: the sentence is shown in full.
+            let stuck = delivery_line(gs, waiting, STUCK_MS).expect("a line");
+            assert_eq!(stuck.shown, full);
+            assert_eq!(stuck.full, None);
+        }
+        // Only "waiting" is shortened.
+        let all = delivery_line(g(), GroupDelivery::All { total: 2 }, 0).unwrap();
+        assert_eq!(all.shown, "Delivered to all 2 members");
+        assert_eq!(all.full, None);
+        assert_eq!(delivery_line(g(), GroupDelivery::None, 0), None);
+    }
+
+    fn named_contact(id: &str, label: &str) -> ContactInfo {
+        ContactInfo {
+            id: id.into(),
+            label: label.into(),
+            endpoint_id: format!("ep-{id}"),
+            fingerprint: String::new(),
+            added_at: 0,
+            allow_send: true,
+            allow_receive: true,
+            max_file_size: None,
+            default_max_file_size: 0,
+            inbox_dir: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_picker_is_filtered_by_name_and_by_what_is_ticked() {
+        let list: Vec<ContactInfo> = ["Alice", "Bob", "alicia", "Carol"]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| named_contact(&format!("c{i}"), n))
+            .collect();
+        let offered: Vec<&ContactInfo> = list.iter().collect();
+        let mut picks = Picks::default();
+        picks.set("c1", true, 31);
+        picks.set("c3", true, 31);
+        let names = |v: Vec<&ContactInfo>| v.iter().map(|c| c.label.clone()).collect::<Vec<_>>();
+        assert_eq!(names(filter_picker(&offered, "", false, &picks)).len(), 4);
+        assert_eq!(
+            names(filter_picker(&offered, "ALI", false, &picks)),
+            ["Alice", "alicia"]
+        );
+        assert_eq!(
+            names(filter_picker(&offered, "  ", true, &picks)),
+            ["Bob", "Carol"]
+        );
+        assert_eq!(
+            names(filter_picker(&offered, "o", true, &picks)),
+            ["Bob", "Carol"]
+        );
+        assert!(filter_picker(&offered, "zzz", false, &picks).is_empty());
+        // Hiding a ticked contact by the filter does not untick it.
+        assert!(picks.contains("c1"));
+        assert_eq!(PICKER_SEARCH_MIN, 8);
     }
 
     #[test]
