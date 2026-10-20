@@ -406,7 +406,7 @@ pub fn trap_input(ctx: &egui::Context, raw: &mut egui::RawInput) {
         (end, true)
     } else {
         // A window's own stop: keep going the way the last Tab press went.
-        let is_window = ctx.memory(|m| m.layer_ids().any(|l| l.id == focused));
+        let is_window = ctx.memory(|m| m.layer_ids().any(|l| l.id.with("move") == focused));
         let last: Option<(bool, u64)> = ctx.data_mut(|d| d.get_temp(tab_dir_id()));
         match last {
             Some((shift, at)) if is_window && at + TAB_RECENT >= frame => (focused, shift),
