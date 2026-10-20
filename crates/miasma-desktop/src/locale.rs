@@ -348,6 +348,300 @@ pub struct Strings {
     pub node_init_msg: &'static str,
 }
 
+impl Strings {
+    /// Every field with its name, for the completeness and parity tests. A field added to the
+    /// struct has to be added here too.
+    #[cfg(test)]
+    fn all(&self) -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("tab_store", self.tab_store),
+            ("tab_store_easy", self.tab_store_easy),
+            ("tab_retrieve", self.tab_retrieve),
+            ("tab_retrieve_easy", self.tab_retrieve_easy),
+            ("tab_status", self.tab_status),
+            ("tab_settings", self.tab_settings),
+            ("connected", self.connected),
+            ("starting", self.starting),
+            ("offline", self.offline),
+            ("setup_needed", self.setup_needed),
+            ("welcome_title", self.welcome_title),
+            ("welcome_title_easy", self.welcome_title_easy),
+            ("welcome_desc", self.welcome_desc),
+            ("welcome_desc_easy", self.welcome_desc_easy),
+            ("welcome_detail", self.welcome_detail),
+            ("welcome_detail_easy", self.welcome_detail_easy),
+            ("welcome_button", self.welcome_button),
+            ("welcome_progress", self.welcome_progress),
+            ("welcome_progress_easy", self.welcome_progress_easy),
+            ("stopped_title", self.stopped_title),
+            ("stopped_title_easy", self.stopped_title_easy),
+            ("stopped_desc", self.stopped_desc),
+            ("stopped_desc_easy", self.stopped_desc_easy),
+            ("stopped_button", self.stopped_button),
+            ("stopped_button_easy", self.stopped_button_easy),
+            ("starting_label", self.starting_label),
+            ("starting_label_easy", self.starting_label_easy),
+            ("store_heading", self.store_heading),
+            ("store_heading_easy", self.store_heading_easy),
+            ("store_desc", self.store_desc),
+            ("store_desc_easy", self.store_desc_easy),
+            ("store_text_label", self.store_text_label),
+            ("store_text_hint", self.store_text_hint),
+            ("store_choose_file", self.store_choose_file),
+            ("store_button", self.store_button),
+            ("store_success", self.store_success),
+            ("store_mid_label", self.store_mid_label),
+            ("store_mid_label_easy", self.store_mid_label_easy),
+            ("store_copy", self.store_copy),
+            ("store_copied", self.store_copied),
+            ("store_share_hint", self.store_share_hint),
+            ("store_share_hint_easy", self.store_share_hint_easy),
+            ("store_busy", self.store_busy),
+            ("store_not_connected_hint", self.store_not_connected_hint),
+            ("retrieve_heading", self.retrieve_heading),
+            ("retrieve_heading_easy", self.retrieve_heading_easy),
+            ("retrieve_desc", self.retrieve_desc),
+            ("retrieve_desc_easy", self.retrieve_desc_easy),
+            ("retrieve_mid_label", self.retrieve_mid_label),
+            ("retrieve_mid_label_easy", self.retrieve_mid_label_easy),
+            ("retrieve_button", self.retrieve_button),
+            ("retrieve_button_easy", self.retrieve_button_easy),
+            ("retrieve_busy", self.retrieve_busy),
+            ("retrieve_success", self.retrieve_success),
+            ("retrieve_save_button", self.retrieve_save_button),
+            ("retrieve_saved", self.retrieve_saved),
+            ("retrieve_save_failed", self.retrieve_save_failed),
+            ("retrieve_result_label", self.retrieve_result_label),
+            (
+                "retrieve_not_connected_hint",
+                self.retrieve_not_connected_hint,
+            ),
+            ("status_heading", self.status_heading),
+            ("status_refresh", self.status_refresh),
+            ("status_copy_diag", self.status_copy_diag),
+            ("status_diag_copied", self.status_diag_copied),
+            ("status_connection", self.status_connection),
+            ("status_state", self.status_state),
+            ("status_state_connected", self.status_state_connected),
+            ("status_state_starting", self.status_state_starting),
+            ("status_state_not_running", self.status_state_not_running),
+            ("status_state_not_init", self.status_state_not_init),
+            ("status_peer_id", self.status_peer_id),
+            ("status_peers", self.status_peers),
+            ("status_relay", self.status_relay),
+            ("relay_down_s", self.relay_down_s),
+            ("relay_down_min", self.relay_down_min),
+            ("relay_down_h", self.relay_down_h),
+            ("relay_cause_dns", self.relay_cause_dns),
+            ("relay_cause_timeout", self.relay_cause_timeout),
+            ("relay_cause_tls", self.relay_cause_tls),
+            ("relay_cause_denied", self.relay_cause_denied),
+            ("relay_cause_other", self.relay_cause_other),
+            ("relay_cert_trusted", self.relay_cert_trusted),
+            ("relay_cert_untrusted", self.relay_cert_untrusted),
+            ("status_listening", self.status_listening),
+            ("status_storage", self.status_storage),
+            ("status_shares", self.status_shares),
+            ("status_used", self.status_used),
+            ("status_replication", self.status_replication),
+            ("status_transport", self.status_transport),
+            ("status_transport_name", self.status_transport_name),
+            ("status_transport_status", self.status_transport_status),
+            ("status_transport_counts", self.status_transport_counts),
+            ("status_transport_details", self.status_transport_details),
+            ("status_all_failing", self.status_all_failing),
+            ("status_ready", self.status_ready),
+            ("status_not_ready", self.status_not_ready),
+            ("status_items_stored", self.status_items_stored),
+            ("status_hint_ready", self.status_hint_ready),
+            ("status_hint_not_ready", self.status_hint_not_ready),
+            ("status_hint_no_peers", self.status_hint_no_peers),
+            ("wipe_label", self.wipe_label),
+            ("wipe_desc", self.wipe_desc),
+            ("wipe_button", self.wipe_button),
+            ("wipe_confirm_title", self.wipe_confirm_title),
+            ("wipe_confirm_line1", self.wipe_confirm_line1),
+            ("wipe_confirm_line2", self.wipe_confirm_line2),
+            ("wipe_confirm_button", self.wipe_confirm_button),
+            ("wipe_cancel", self.wipe_cancel),
+            ("wipe_done", self.wipe_done),
+            ("wipe_confirm_kept", self.wipe_confirm_kept),
+            ("wipe_confirm_offline", self.wipe_confirm_offline),
+            ("wipe_offline_note", self.wipe_offline_note),
+            ("close_title", self.close_title),
+            ("close_body", self.close_body),
+            ("close_confirm", self.close_confirm),
+            ("close_cancel", self.close_cancel),
+            ("dialog_cancel", self.dialog_cancel),
+            ("inbox_revoke_title", self.inbox_revoke_title),
+            ("inbox_revoke_body", self.inbox_revoke_body),
+            ("inbox_revoke_confirm", self.inbox_revoke_confirm),
+            ("inbox_revoke_done", self.inbox_revoke_done),
+            ("outbox_revoke_title", self.outbox_revoke_title),
+            ("outbox_revoke_body", self.outbox_revoke_body),
+            ("outbox_revoke_confirm", self.outbox_revoke_confirm),
+            ("outbox_revoke_done", self.outbox_revoke_done),
+            ("settings_heading", self.settings_heading),
+            ("settings_paths", self.settings_paths),
+            ("settings_data_dir", self.settings_data_dir),
+            ("settings_config_file", self.settings_config_file),
+            ("settings_log", self.settings_log),
+            ("settings_install", self.settings_install),
+            ("settings_path_copied", self.settings_path_copied),
+            ("settings_how", self.settings_how),
+            ("settings_how_line1", self.settings_how_line1),
+            ("settings_how_line1_easy", self.settings_how_line1_easy),
+            ("settings_how_line2", self.settings_how_line2),
+            ("settings_how_line2_easy", self.settings_how_line2_easy),
+            ("settings_stored_in", self.settings_stored_in),
+            ("settings_preserved", self.settings_preserved),
+            ("settings_actions", self.settings_actions),
+            ("settings_open_folder", self.settings_open_folder),
+            ("settings_language", self.settings_language),
+            ("settings_mode", self.settings_mode),
+            ("settings_mode_technical", self.settings_mode_technical),
+            ("settings_mode_easy", self.settings_mode_easy),
+            (
+                "settings_mode_desc_technical",
+                self.settings_mode_desc_technical,
+            ),
+            ("settings_mode_desc_easy", self.settings_mode_desc_easy),
+            ("settings_theme", self.settings_theme),
+            ("settings_theme_system", self.settings_theme_system),
+            ("settings_theme_light", self.settings_theme_light),
+            ("settings_theme_dark", self.settings_theme_dark),
+            ("tab_import", self.tab_import),
+            ("import_heading", self.import_heading),
+            ("import_idle_hint", self.import_idle_hint),
+            ("import_magnet_label", self.import_magnet_label),
+            ("import_torrent_label", self.import_torrent_label),
+            ("import_explain", self.import_explain),
+            ("import_explain_easy", self.import_explain_easy),
+            ("import_button", self.import_button),
+            ("import_cancel", self.import_cancel),
+            ("import_not_connected", self.import_not_connected),
+            ("import_progress", self.import_progress),
+            ("import_complete", self.import_complete),
+            ("import_failed", self.import_failed),
+            ("import_retry", self.import_retry),
+            ("import_done", self.import_done),
+            ("health_app", self.health_app),
+            ("health_backend", self.health_backend),
+            ("health_network", self.health_network),
+            ("health_ok", self.health_ok),
+            ("health_starting", self.health_starting),
+            ("health_offline", self.health_offline),
+            ("health_no_peers", self.health_no_peers),
+            ("status_save_diag", self.status_save_diag),
+            ("status_diag_saved", self.status_diag_saved),
+            ("status_diag_save_failed", self.status_diag_save_failed),
+            ("nav_brand", self.nav_brand),
+            ("nav_brand_easy", self.nav_brand_easy),
+            ("tab_home_easy", self.tab_home_easy),
+            ("tab_files_easy", self.tab_files_easy),
+            ("home_heading_easy", self.home_heading_easy),
+            ("home_desc_easy", self.home_desc_easy),
+            ("home_send_action", self.home_send_action),
+            ("home_receive_action", self.home_receive_action),
+            ("home_save_action", self.home_save_action),
+            ("files_heading_easy", self.files_heading_easy),
+            ("files_desc_easy", self.files_desc_easy),
+            ("dashboard_quick_status", self.dashboard_quick_status),
+            ("dashboard_storage_label", self.dashboard_storage_label),
+            ("dashboard_peers_label", self.dashboard_peers_label),
+            ("dashboard_free", self.dashboard_free),
+            ("dashboard_no_data", self.dashboard_no_data),
+            ("storage_bar_label", self.storage_bar_label),
+            ("tab_send", self.tab_send),
+            ("tab_send_easy", self.tab_send_easy),
+            ("tab_inbox", self.tab_inbox),
+            ("tab_inbox_easy", self.tab_inbox_easy),
+            ("send_heading", self.send_heading),
+            ("send_heading_easy", self.send_heading_easy),
+            ("send_desc", self.send_desc),
+            ("send_desc_easy", self.send_desc_easy),
+            ("send_contact_label", self.send_contact_label),
+            ("send_contact_hint", self.send_contact_hint),
+            ("send_password_label", self.send_password_label),
+            ("send_retention_label", self.send_retention_label),
+            ("send_retention_hint", self.send_retention_hint),
+            ("details_easy", self.details_easy),
+            (
+                "settings_network_details_easy",
+                self.settings_network_details_easy,
+            ),
+            ("inbox_challenge_easy", self.inbox_challenge_easy),
+            (
+                "outbox_confirm_heading_easy",
+                self.outbox_confirm_heading_easy,
+            ),
+            (
+                "outbox_challenge_failed_easy",
+                self.outbox_challenge_failed_easy,
+            ),
+            ("send_contact_hint_easy", self.send_contact_hint_easy),
+            ("envelope_waiting", self.envelope_waiting),
+            ("envelope_needs_action", self.envelope_needs_action),
+            ("send_choose_file", self.send_choose_file),
+            ("send_button", self.send_button),
+            ("send_busy", self.send_busy),
+            ("send_success", self.send_success),
+            ("send_not_connected", self.send_not_connected),
+            ("inbox_heading", self.inbox_heading),
+            ("inbox_heading_easy", self.inbox_heading_easy),
+            ("inbox_desc", self.inbox_desc),
+            ("inbox_desc_easy", self.inbox_desc_easy),
+            ("inbox_empty", self.inbox_empty),
+            ("inbox_from", self.inbox_from),
+            ("inbox_state", self.inbox_state),
+            ("inbox_challenge", self.inbox_challenge),
+            ("inbox_retrieve_button", self.inbox_retrieve_button),
+            ("inbox_password_label", self.inbox_password_label),
+            ("inbox_revoke_button", self.inbox_revoke_button),
+            ("inbox_refresh", self.inbox_refresh),
+            ("sharing_key_label", self.sharing_key_label),
+            ("sharing_key_desc", self.sharing_key_desc),
+            ("sharing_key_desc_easy", self.sharing_key_desc_easy),
+            ("sharing_key_copy", self.sharing_key_copy),
+            ("sharing_key_copied", self.sharing_key_copied),
+            ("tab_outbox", self.tab_outbox),
+            ("tab_outbox_easy", self.tab_outbox_easy),
+            ("outbox_heading", self.outbox_heading),
+            ("outbox_heading_easy", self.outbox_heading_easy),
+            ("outbox_desc", self.outbox_desc),
+            ("outbox_desc_easy", self.outbox_desc_easy),
+            ("outbox_empty", self.outbox_empty),
+            ("outbox_to", self.outbox_to),
+            ("outbox_state", self.outbox_state),
+            ("outbox_filename", self.outbox_filename),
+            ("outbox_refresh", self.outbox_refresh),
+            ("outbox_revoke_button", self.outbox_revoke_button),
+            ("outbox_confirm_heading", self.outbox_confirm_heading),
+            ("outbox_confirm_label", self.outbox_confirm_label),
+            ("outbox_confirm_hint", self.outbox_confirm_hint),
+            ("outbox_confirm_button", self.outbox_confirm_button),
+            ("outbox_confirm_success", self.outbox_confirm_success),
+            ("outbox_waiting_challenge", self.outbox_waiting_challenge),
+            ("outbox_confirmed", self.outbox_confirmed),
+            ("outbox_retrieved", self.outbox_retrieved),
+            ("outbox_expired", self.outbox_expired),
+            ("outbox_revoked", self.outbox_revoked),
+            ("outbox_challenge_failed", self.outbox_challenge_failed),
+            ("outbox_password_failed", self.outbox_password_failed),
+            ("inbox_filename", self.inbox_filename),
+            ("inbox_file_size", self.inbox_file_size),
+            ("inbox_expired", self.inbox_expired),
+            ("inbox_revoked", self.inbox_revoked),
+            ("inbox_retrieved", self.inbox_retrieved),
+            ("inbox_wrong_password", self.inbox_wrong_password),
+            ("inbox_attempts_exhausted", self.inbox_attempts_exhausted),
+            ("dismiss", self.dismiss),
+            ("copy", self.copy),
+            ("node_init_msg", self.node_init_msg),
+        ]
+    }
+}
+
 pub fn strings(locale: Locale) -> &'static Strings {
     match locale {
         Locale::En => &EN,
@@ -949,7 +1243,7 @@ static JA: Strings = Strings {
 static ZH_CN: Strings = Strings {
     tab_store: "存储",
     tab_store_easy: "保存",
-    tab_retrieve: "检索",
+    tab_retrieve: "取回",
     tab_retrieve_easy: "取回",
     tab_status: "状态",
     tab_settings: "设置",
@@ -962,7 +1256,7 @@ static ZH_CN: Strings = Strings {
     welcome_title: "欢迎使用 Miasma",
     welcome_title_easy: "欢迎",
     welcome_desc: "通过点对点网络加密存储和共享内容。",
-    welcome_desc_easy: "安全保存您的文件，随时随地访问。",
+    welcome_desc_easy: "安全保存你的文件，随时随地访问。",
     welcome_detail: "点击下方按钮创建节点身份。将自动生成加密密钥并启动后台守护进程。",
     welcome_detail_easy: "点击下方按钮开始使用，我们会自动完成所有设置。",
     welcome_button: "开始设置",
@@ -981,35 +1275,35 @@ static ZH_CN: Strings = Strings {
     store_heading: "存储内容",
     store_heading_easy: "保存内容",
     store_desc: "将内容加密、分片并存储到 Miasma 网络。",
-    store_desc_easy: "安全保存您的内容。",
+    store_desc_easy: "安全保存你的内容。",
     store_text_label: "文本输入：",
     store_text_hint: "在此输入或粘贴文本...",
     store_choose_file: "选择文件...",
-    store_button: "保存文本",
-    store_success: "保存成功。",
-    store_mid_label: "内容ID (MID)：",
-    store_mid_label_easy: "内容ID：",
+    store_button: "存储文本",
+    store_success: "存储成功。",
+    store_mid_label: "内容 ID (MID)：",
+    store_mid_label_easy: "内容 ID：",
     store_copy: "复制",
-    store_copied: "已复制ID。",
-    store_share_hint: "分享此ID，其他人就能检索该内容。",
-    store_share_hint_easy: "请保存此ID，取回内容时需要使用。",
-    store_busy: "正在保存...",
+    store_copied: "已复制 ID。",
+    store_share_hint: "分享此 ID，其他人就能取回该内容。",
+    store_share_hint_easy: "请保存此 ID，取回内容时需要使用。",
+    store_busy: "正在存储...",
     store_not_connected_hint: "请先启动应用再保存内容。",
 
-    retrieve_heading: "检索内容",
+    retrieve_heading: "取回内容",
     retrieve_heading_easy: "取回内容",
-    retrieve_desc: "通过 Miasma 内容ID恢复内容。",
-    retrieve_desc_easy: "输入内容ID取回您的内容。",
-    retrieve_mid_label: "内容ID (MID)：",
-    retrieve_mid_label_easy: "内容ID：",
-    retrieve_button: "检索",
+    retrieve_desc: "通过 Miasma 内容 ID 恢复内容。",
+    retrieve_desc_easy: "输入内容 ID 取回你的内容。",
+    retrieve_mid_label: "内容 ID (MID)：",
+    retrieve_mid_label_easy: "内容 ID：",
+    retrieve_button: "取回",
     retrieve_button_easy: "取回",
-    retrieve_busy: "正在检索...",
-    retrieve_success: "检索成功，可以保存到文件。",
+    retrieve_busy: "正在取回...",
+    retrieve_success: "取回成功，可以保存到文件。",
     retrieve_save_button: "保存到文件...",
     retrieve_saved: "已保存到",
     retrieve_save_failed: "保存失败：",
-    retrieve_result_label: "检索结果：",
+    retrieve_result_label: "取回结果：",
     retrieve_not_connected_hint: "请先启动应用再取回内容。",
 
     status_heading: "节点状态",
@@ -1022,7 +1316,7 @@ static ZH_CN: Strings = Strings {
     status_state_starting: "启动中...",
     status_state_not_running: "未运行",
     status_state_not_init: "未初始化",
-    status_peer_id: "节点ID：",
+    status_peer_id: "节点 ID：",
     status_peers: "节点数：",
     status_relay: "中继：",
     relay_down_s: "已断开 {n} 秒",
@@ -1040,17 +1334,17 @@ static ZH_CN: Strings = Strings {
     status_shares: "分片数：",
     status_used: "已使用：",
     status_replication: "副本：",
-    status_transport: "传输",
+    status_transport: "传输方式",
     status_transport_name: "传输方式",
     status_transport_status: "状态",
     status_transport_counts: "成功 / 失败",
     status_transport_details: "详情",
-    status_all_failing: "所有传输均失败。请检查代理设置和防火墙规则。",
+    status_all_failing: "所有传输方式均失败。请检查代理设置和防火墙规则，或在 config.toml 中尝试其他传输方式。",
 
     status_ready: "就绪",
     status_not_ready: "未就绪",
-    status_items_stored: "已保存：",
-    status_hint_ready: "您可以保存和取回内容。",
+    status_items_stored: "已存储：",
+    status_hint_ready: "你可以保存和取回内容。",
     status_hint_not_ready: "应用尚未启动。请前往「保存」标签页开始使用。",
     status_hint_no_peers: "已连接，但尚未找到节点。在找到节点之前内容可能不会复制。",
 
@@ -1063,7 +1357,7 @@ static ZH_CN: Strings = Strings {
     wipe_confirm_button: "全部擦除",
     wipe_cancel: "取消",
     wipe_done: "已擦除。如需继续使用，请关闭 Miasma 并重新设置。",
-    wipe_confirm_kept: "不会擦除：已经发送给他人的副本，以及您保存在其他位置的文件（例如接收文件夹）。",
+    wipe_confirm_kept: "不会擦除：已经发送给他人的副本，以及你保存在其他位置的文件（例如接收文件夹）。",
     wipe_confirm_offline: "后台服务已停止，将不经过该服务直接擦除。",
     wipe_offline_note: "即使后台服务已停止，也可以擦除。",
     close_title: "要关闭吗？",
@@ -1089,7 +1383,7 @@ static ZH_CN: Strings = Strings {
     settings_path_copied: "已复制路径。",
     settings_how: "工作原理",
     settings_how_line1: "桌面应用管理一个后台守护进程来处理存储和网络。",
-    settings_how_line1_easy: "此应用通过后台服务管理您的内容。",
+    settings_how_line1_easy: "此应用通过后台服务管理你的内容。",
     settings_how_line2: "守护进程在应用启动时自动运行，关闭应用时停止。",
     settings_how_line2_easy: "打开应用自动启动，关闭应用自动停止。",
     settings_stored_in: "数据保存在：",
@@ -1098,8 +1392,8 @@ static ZH_CN: Strings = Strings {
     settings_open_folder: "打开数据文件夹",
     settings_language: "语言",
     settings_mode: "界面模式",
-    settings_mode_technical: "专业版",
-    settings_mode_easy: "简易版",
+    settings_mode_technical: "专业模式",
+    settings_mode_easy: "简易模式",
     settings_mode_desc_technical: "完整诊断信息、传输详情、协议可见",
     settings_mode_desc_easy: "简化界面，隐藏技术细节",
     settings_theme: "外观",
@@ -1140,7 +1434,7 @@ static ZH_CN: Strings = Strings {
 
     tab_home_easy: "主页",
     tab_files_easy: "文件",
-    home_heading_easy: "您想做什么？",
+    home_heading_easy: "你想做什么？",
     home_desc_easy: "发送、接收或安全保存文件。Miasma 会处理网络细节。",
     home_send_action: "发送文件",
     home_receive_action: "接收文件",
@@ -1164,15 +1458,15 @@ static ZH_CN: Strings = Strings {
     send_heading: "定向私密共享",
     send_heading_easy: "发送文件",
     send_desc: "使用接收者的共享联系方式加密并发送文件。",
-    send_desc_easy: "安全地发送文件给你认识的人。",
-    send_contact_label: "接收者联系方式:",
+    send_desc_easy: "安全地把文件发送给你认识的人。",
+    send_contact_label: "接收者联系方式：",
     send_contact_hint: "msk:...@PeerId",
-    send_password_label: "密码:",
-    send_retention_label: "保留期:",
+    send_password_label: "密码：",
+    send_retention_label: "保留期：",
     send_retention_hint: "（例如：24h、7d、30d）",
     details_easy: "详细信息",
     settings_network_details_easy: "网络详情",
-    inbox_challenge_easy: "验证码:",
+    inbox_challenge_easy: "验证码：",
     outbox_confirm_heading_easy: "输入验证码",
     outbox_challenge_failed_easy: "验证码错误",
     send_contact_hint_easy: "粘贴收到的联系方式代码",
@@ -1188,16 +1482,16 @@ static ZH_CN: Strings = Strings {
     inbox_desc: "来自其他用户的定向共享。",
     inbox_desc_easy: "别人发给你的文件。",
     inbox_empty: "收件箱为空。",
-    inbox_from: "发送者:",
-    inbox_state: "状态:",
-    inbox_challenge: "验证码:",
+    inbox_from: "发送者：",
+    inbox_state: "状态：",
+    inbox_challenge: "验证码：",
     inbox_retrieve_button: "取回",
-    inbox_password_label: "密码:",
+    inbox_password_label: "密码：",
     inbox_revoke_button: "不接收",
     inbox_refresh: "刷新",
-    sharing_key_label: "你的共享联系方式:",
+    sharing_key_label: "你的共享联系方式：",
     sharing_key_desc: "分享此联系方式，其他人即可向你发送定向文件。",
-    sharing_key_desc_easy: "把这个给想发文件给你的人。",
+    sharing_key_desc_easy: "把它分享给想给你发送文件的人。",
     sharing_key_copy: "复制",
     sharing_key_copied: "已复制！",
 
@@ -1208,13 +1502,13 @@ static ZH_CN: Strings = Strings {
     outbox_desc: "你发送给其他用户的定向共享。",
     outbox_desc_easy: "你发送给特定人的文件。",
     outbox_empty: "发件箱为空。",
-    outbox_to: "收件人:",
-    outbox_state: "状态:",
-    outbox_filename: "文件:",
+    outbox_to: "收件人：",
+    outbox_state: "状态：",
+    outbox_filename: "文件：",
     outbox_refresh: "刷新",
     outbox_revoke_button: "撤销",
     outbox_confirm_heading: "输入验证码",
-    outbox_confirm_label: "验证码:",
+    outbox_confirm_label: "验证码：",
     outbox_confirm_hint: "XXXX-XXXX",
     outbox_confirm_button: "确认",
     outbox_confirm_success: "确认成功！接收者现在可以取回文件。",
@@ -1224,9 +1518,9 @@ static ZH_CN: Strings = Strings {
     outbox_expired: "已过期",
     outbox_revoked: "已撤销",
     outbox_challenge_failed: "验证失败",
-    outbox_password_failed: "密码失败",
-    inbox_filename: "文件:",
-    inbox_file_size: "大小:",
+    outbox_password_failed: "密码验证失败",
+    inbox_filename: "文件：",
+    inbox_file_size: "大小：",
     inbox_expired: "此共享已过期。",
     inbox_revoked: "发送者已撤销此共享。",
     inbox_retrieved: "已取回。",
@@ -1397,7 +1691,7 @@ pub struct TransferStrings {
     pub share_id_send_note: &'static str,
     /// Button next to the share ID: copies a ready-to-paste invitation message.
     pub copy_invitation: &'static str,
-    /// Language of the copied invitation message (there is no Chinese text yet: English).
+    /// Language of the copied invitation message.
     pub invite_lang: miasma_core::transfer::InviteLang,
     /// Under the share ID: what the invitation contains and what it does not.
     pub invitation_note: &'static str,
@@ -1617,7 +1911,7 @@ static TR_EN: TransferStrings = TransferStrings {
 
     mid_label: "MID",
     mid_label_easy: "Content ID",
-    mid_internal_note: "仅供内部使用，不能用于接收（请改为提供共享 ID）。",
+    mid_internal_note: "Internal use only; it cannot be used to receive (give the Share ID instead).",
     copy: "Copy",
     copied: "Copied",
     phase_label: "Phase",
@@ -1670,7 +1964,7 @@ static TR_EN: TransferStrings = TransferStrings {
     forms_offline: "Start the background service first (see the top of the window).",
     recv_path_label: "Save to",
     recv_path_hint: "Where to write the finished file",
-    recv_name_lookup: "正在查找文件名...",
+    recv_name_lookup: "Looking up the file name...",
     send_path_label: "File",
     send_path_hint: "The file to send",
     browse: "Browse...",
@@ -1926,8 +2220,8 @@ static TR_ZH_CN: TransferStrings = TransferStrings {
     day: "天",
 
     mid_label: "MID",
-    mid_label_easy: "内容ID",
-    mid_internal_note: "Internal use only; it cannot be used to receive (give the Share ID instead).",
+    mid_label_easy: "内容 ID",
+    mid_internal_note: "仅供内部使用，不能用于接收（请改为提供共享 ID）。",
     copy: "复制",
     copied: "已复制",
     phase_label: "阶段",
@@ -1944,13 +2238,13 @@ static TR_ZH_CN: TransferStrings = TransferStrings {
     strip_done: "已完成",
     strip_inflight: "处理中",
     strip_pending: "等待中",
-    strip_resumed: "从第{n}段继续",
+    strip_resumed: "从第 {n} 段继续",
     strip_per_cell: "每格 {n} 段",
     resumed_label: "继续位置",
     resumed_fresh: "从头开始",
     split_label: "耗时分布",
     split_recv: "获取 {a}%   解码 {b}%   写入 {c}%",
-    split_send: "发送给对端 {a}%   编码 {b}%   本地存储 {c}%",
+    split_send: "发送给节点 {a}%   编码 {b}%   本地存储 {c}%",
     pieces_label: "分片",
     pieces_fmt: "已接收 {ok} 个，校验不符丢弃 {bad} 个",
     retries_label: "分段重试次数",
@@ -1980,7 +2274,7 @@ static TR_ZH_CN: TransferStrings = TransferStrings {
     forms_offline: "请先启动后台服务（见窗口顶部）。",
     recv_path_label: "保存到",
     recv_path_hint: "完成后文件的保存位置",
-    recv_name_lookup: "Looking up the file name...",
+    recv_name_lookup: "正在查找文件名...",
     send_path_label: "文件",
     send_path_hint: "要发送的文件",
     browse: "浏览...",
@@ -1989,7 +2283,7 @@ static TR_ZH_CN: TransferStrings = TransferStrings {
     password_note: "会作为加密密钥的一部分使用。密码不会被保存，继续传输时需要，请妥善记下。",
     via_label: "经由 URL（可选）",
     via_hint: "发送方提供的 wss://...",
-    via_note: "不通过网络，而是直接从发送方的隧道 URL 获取，无需对等节点或 DHT。通常留空。",
+    via_note: "不通过网络，而是直接从发送方的隧道 URL 获取，无需节点或 DHT。通常留空。",
     confirm_label: "确认密码",
     mismatch: "两次输入的密码不一致。",
     recv_button: "开始接收",
@@ -2005,14 +2299,14 @@ static TR_ZH_CN: TransferStrings = TransferStrings {
     red_default: "（默认）",
     easy_fast: "最快",
     easy_fast_desc: "占用磁盘空间和时间最少。没有备用分片，损坏后无法修复。",
-    easy_bal: "均衡",
+    easy_bal: "平衡",
     easy_bal_desc: "有少量备用：每部分最多可修复 2 个损坏的分片。",
     easy_safe: "最安全",
     easy_safe_desc: "占用两倍磁盘空间。每部分最多可修复 10 个损坏的分片。",
 
     btn_remove: "从列表中移除",
     btn_clear_finished: "清除已结束项",
-    clear_finished_hint: "从此列表中移除已完成、失败或已取消的传输。不会改动您接收或发送的文件。仍保留部分数据的已停止传输会被保留。",
+    clear_finished_hint: "从此列表中移除已完成、失败或已取消的传输。不会改动你接收或发送的文件。仍保留部分数据的已停止传输会被保留。",
     remove_note_send: "仅移除此行。该文件仍可供对方接收。",
     remove_note_recv: "仅移除此行。已接收的文件不会被删除。",
     remove_note_plain: "仅移除此行。不会删除磁盘上的任何内容。",
@@ -2029,7 +2323,7 @@ static TR_ZH_CN: TransferStrings = TransferStrings {
     share_id_label: "共享 ID",
     share_id_send_note: "请把此共享 ID（和密码）交给接收方。接收方还能借此核实发布者。",
     copy_invitation: "复制邀请",
-    invite_lang: miasma_core::transfer::InviteLang::En,
+    invite_lang: miasma_core::transfer::InviteLang::Zh,
     invitation_note: "邀请内容只包含共享 ID，不含密码。请通过其他渠道发送密码。",
     show_qr: "显示二维码",
     hide_qr: "隐藏二维码",
@@ -2063,7 +2357,7 @@ macro_rules! contact_strings {
     ($($f:ident),* $(,)?) => {
         /// Strings of the Contacts area (`contacts.rs`). `{name}`-style holes are filled with
         /// `transfers::fill`.
-        pub struct ContactStrings { $(pub $f: &'static str),* }
+        pub struct ContactStrings { $(pub $f: &'static str,)* pub locale: Locale }
         impl ContactStrings {
             /// Every field with its name, for the completeness test.
             #[cfg(test)]
@@ -2113,6 +2407,7 @@ pub fn contact_strings(locale: Locale) -> &'static ContactStrings {
 }
 
 static CT_EN: ContactStrings = ContactStrings {
+    locale: Locale::En,
     tab: "Contacts",
     heading: "Contacts",
     desc: "Add each other once, then send files to that person with one click. No Share ID and no password.",
@@ -2262,6 +2557,7 @@ static CT_EN: ContactStrings = ContactStrings {
 };
 
 static CT_JA: ContactStrings = ContactStrings {
+    locale: Locale::Ja,
     tab: "連絡先",
     heading: "連絡先",
     desc: "お互いに一度登録すれば、ボタン一つでファイルを送れます。共有IDもパスワードも不要です。",
@@ -2412,6 +2708,7 @@ static CT_JA: ContactStrings = ContactStrings {
 
 // zh-CN
 static CT_ZH_CN: ContactStrings = ContactStrings {
+    locale: Locale::ZhCn,
     tab: "联系人",
     heading: "联系人",
     desc: "互相添加一次联系人后，只需点一下就能向对方发送文件。不需要共享 ID，也不需要密码。",
@@ -2420,15 +2717,15 @@ static CT_ZH_CN: ContactStrings = ContactStrings {
     help_2: "2. 把对方发来的消息粘贴到“添加联系人”中，然后点击“添加”。也请对方同样操作。",
     help_3: "3. 双方都添加完成后，点击对方那一行的“发送文件”，选择要发送的文件。",
     loading: "正在加载...",
-    daemon_down: "Miasma 的后台功能没有运行，因此无法使用联系人。请点击窗口上方的按钮启动它。",
+    daemon_down: "Miasma 的后台服务没有运行，因此无法使用联系人。请点击窗口顶部的按钮启动它。",
     push_unavailable: "联系人功能暂时无法使用。请关闭 Miasma 后重新打开。若仍然无法解决，请在设置中保存报告并联系支持。",
-    old_daemon: "后台功能没有响应联系人请求，可能是旧版本。请完全关闭 Miasma 后重新打开。若仍然无法解决，请将应用和后台功能都更新到最新版。",
+    old_daemon: "后台服务没有响应联系人请求，可能是旧版本。请完全退出 Miasma 后重新打开。若仍然无法解决，请将应用和后台服务都更新到最新版。",
     retry_now: "重试",
     my_card: "把你的联系人发给对方",
     my_code: "你的联系人代码",
     my_code_hint: "可以放心给别人看，它不是密码。",
     my_fp: "你的验证码",
-    my_fp_hint: "请通过电话等方式把它念给对方，让对方与自己屏幕上的“验证码”核对。如果不一致，请让对方删除此联系人。",
+    my_fp_hint: "请通过电话等方式把它读给对方，让对方与自己屏幕上的“验证码”核对。如果不一致，请让对方删除此联系人。",
     copy_code: "复制联系人代码",
     copy_invite: "复制邀请消息",
     copied: "已复制",
@@ -2439,7 +2736,7 @@ static CT_ZH_CN: ContactStrings = ContactStrings {
     add_hint: "请把对方发来的消息原样粘贴进来，联系人代码会被自动找到。",
     add_paste: "粘贴的消息或联系人代码",
     add_label: "名称",
-    add_label_hint: "起一个你能认出的名称，例如 小明",
+    add_label_hint: "取一个你能认出的名称，例如 小明",
     add_button: "添加",
     add_busy: "正在添加...",
     added_title: "已添加 {label}",
@@ -2457,11 +2754,11 @@ static CT_ZH_CN: ContactStrings = ContactStrings {
     err_bad_file: "无法发送该文件。文件夹不能发送，请选择文件。",
     err_queue_full: "等待发送的文件太多。请等一部分完成后再试。",
     err_not_found: "该传输已不再进行。",
-    err_internal: "Miasma 内部出现问题。请重试。若仍然如此，请在设置中保存报告并联系支持。",
+    err_internal: "Miasma 内部出现问题。请重试。若仍然如此，请查看日志。",
     err_other: "无法完成该请求",
     list_title: "你的联系人",
     list_empty: "还没有联系人。请使用上方的“添加联系人”添加。",
-    chip_registered: "已登记",
+    chip_registered: "对方已添加你",
     chip_not_registered: "对方还没有添加你",
     hint_not_registered: "你上一个文件被拒绝了。请让对方在 Miasma 的“联系人”中添加你。再次发送邀请消息会有帮助。",
     allow_receive: "接收此人发来的文件",
@@ -2477,7 +2774,7 @@ static CT_ZH_CN: ContactStrings = ContactStrings {
     remove_body: "与“{label}”正在进行的传输将被取消，未完成的文件会被删除。已经收到的文件仍保留在收件箱中。",
     remove_confirm: "删除",
     clear_title: "删除已结束的传输记录？",
-    clear_body: "这会从本设备永久删除已完成、失败和已取消传输的记录（文件名、联系人、时间），并在磁盘上覆盖这些数据，无法撤销。正在进行或等待中的传输不受影响。您接收或发送的文件会保留在原处；没有被任何传输使用的未完成部分文件会被删除。",
+    clear_body: "这会从本设备永久删除已完成、失败和已取消传输的记录（文件名、联系人、时间），并在磁盘上覆盖这些数据，无法撤销。正在进行或等待中的传输不受影响。你接收或发送的文件会保留在原处；没有被任何传输使用的未完成部分文件会被删除。",
     clear_confirm: "删除记录",
     clear_done: "已删除 {n} 条已结束传输的记录。",
     clear_old_daemon: "后台服务版本过旧，无法删除历史记录。请更新 Miasma 并重启服务后重试。",
@@ -2491,7 +2788,7 @@ static CT_ZH_CN: ContactStrings = ContactStrings {
     tr_title: "文件传输",
     tr_empty: "还没有传输。",
     dir_out: "发送给",
-    dir_in: "接收自",
+    dir_in: "来自",
     st_queued: "等待中",
     st_preparing: "准备中",
     st_connecting: "连接中",
@@ -2507,7 +2804,7 @@ static CT_ZH_CN: ContactStrings = ContactStrings {
     btn_retry: "重新发送",
     btn_open_file: "打开文件",
     btn_show_folder: "在文件夹中显示",
-    btn_clear_finished: "清除已完成",
+    btn_clear_finished: "清除已结束项",
     eta: "还剩 {t}",
     rej_too_large: "对方拒绝了：文件超过了对方接受的大小。",
     rej_no_space: "对方拒绝了：对方电脑的可用磁盘空间不足。",
@@ -2543,15 +2840,15 @@ static CT_ZH_CN: ContactStrings = ContactStrings {
     dismiss: "关闭",
     qr_too_long: "内容太长，无法生成二维码。",
     sugg_title: "联系人以外的人尝试联系了你",
-    sugg_body: "没有接受任何内容。如果你认识对方，可以添加。添加前请先与对方核对ID。",
+    sugg_body: "没有接受任何内容。如果你认识对方，可以添加。添加前请先与对方核对 ID。",
     sugg_item: "ID {id}，{when}",
-    sugg_attempts: "{n}次",
+    sugg_attempts: "{n} 次",
     sugg_add: "添加为联系人",
     sugg_ignore: "忽略",
     sugg_prefill_note: "由联系请求添加。在你打开权限之前，此联系人的发送和接收均保持关闭。",
     sugg_now: "刚刚",
-    sugg_min: "{n}分钟前",
-    sugg_hour: "{n}小时前",
+    sugg_min: "{n} 分钟前",
+    sugg_hour: "{n} 小时前",
     open_missing: "找不到该文件，可能已被移动或删除：{path}",
     open_failed: "无法打开：{path}（{why}）",
     saved_to: "保存位置：{path}",
@@ -2811,7 +3108,7 @@ static CH_ZH_CN: ChatStrings = ChatStrings {
     pick_none: "还没有联系人。请先在“联系人”页添加。",
     pick_send_off: "已关闭向此联系人发送。",
     pick_close: "关闭",
-    preview_you: "你: {text}",
+    preview_you: "你：{text}",
     preview_file: "文件：{name}",
     time_today: "今天 {time}",
     time_yesterday: "昨天",
@@ -2833,14 +3130,14 @@ static CH_ZH_CN: ChatStrings = ChatStrings {
     retry: "重新发送",
     queued_note: "对方上线后即可收到。",
     queued_note_relay: "本机未连接到中继服务器，暂时无法发出。请查看“节点状态”。",
-    fail_not_allowed: "对方还没有添加你。请让对方在其 Miasma 中添加你的联系人码。",
+    fail_not_allowed: "对方还没有添加你。请让对方在其 Miasma 中添加你的联系人代码。",
     fail_too_big: "消息太长，对方无法接收。",
     fail_rejected: "对方没有接受这条消息。",
     fail_unsupported: "对方的 Miasma 版本过旧，不支持聊天。请让对方更新。",
     fail_contact_removed: "联系人已删除，消息未发送。",
     fail_send_disabled: "已关闭向此联系人发送，消息未发送。",
     fail_expired: "一直未能送达，已超时。",
-    fail_session: "无法建立安全连接。请与对方核对确认用码。",
+    fail_session: "无法建立安全连接。请与对方核对验证码。",
     fail_other: "无法发送。",
     delete_history: "删除此会话的记录",
     delete_title: "删除此会话的记录？",
@@ -2869,7 +3166,7 @@ static CH_ZH_CN: ChatStrings = ChatStrings {
     a11y_back: "返回会话列表",
     a11y_row: "与 {name} 的会话",
     a11y_unread: "{n} 条未读",
-    nav_new: "新消息",
+    nav_new: "新",
     dismiss: "关闭",
     state_read: "已读",
     receipts_on: "已读回执：开",
@@ -2975,8 +3272,8 @@ static LG_ZH_CN: LogStrings = LogStrings {
     heading: "日志",
     memory_only: "仅在内存中（不会向磁盘写入任何内容）",
     diag_label: "诊断日志",
-    diag_warning: "启用诊断日志后，您的使用记录会保存在文件中。使用时间和对方信息的一部分会留在这台电脑上，因此请仅在排查问题时启用，并在结束后务必关闭（关闭后文件会被删除）。",
-    diag_banner: "诊断日志已启用。您的使用记录正在写入这台电脑上的文件。完成后请在“设置”中关闭。",
+    diag_warning: "启用诊断日志后，你的使用记录会保存在文件中。使用时间和对方信息的一部分会留在这台电脑上，因此请仅在排查问题时启用，并在结束后务必关闭（关闭后文件会被删除）。",
+    diag_banner: "诊断日志已启用。你的使用记录正在写入这台电脑上的文件。完成后请在“设置”中关闭。",
     diag_save_failed: "无法保存该设置。请重试。",
     show_logs: "显示日志",
     hide_logs: "隐藏日志",
@@ -2991,7 +3288,7 @@ static LG_ZH_CN: LogStrings = LogStrings {
     unsupported: "此较旧的后台服务不支持",
     unavailable: "后台服务未运行",
     legacy_title: "发现旧的日志文件",
-    legacy_body: "Miasma 不再将日志写入文件。在这台电脑上发现了旧的日志文件，其中记录了使用 Miasma 的时间。您可以现在安全删除，也可以保留。",
+    legacy_body: "Miasma 不再将日志写入文件。在这台电脑上发现了旧的日志文件，其中记录了使用 Miasma 的时间。你可以现在安全删除，也可以保留。",
     legacy_delete: "立即删除",
     legacy_keep: "保留",
     legacy_deleted: "已删除旧日志文件：{n} 个",
@@ -3087,7 +3384,7 @@ static SG_JA: StorageStrings = StorageStrings {
 
 static SG_ZH_CN: StorageStrings = StorageStrings {
     heading: "存储",
-    desc: "这是本设备保存的共享：您共享的文件片段，以及代他人保管的文件片段。删除共享可以释放这台电脑的空间。正在使用的共享会保留。",
+    desc: "这是本设备保存的共享：你共享的文件片段，以及代他人保管的文件片段。删除共享可以释放这台电脑的空间。正在使用的共享会保留。",
     show: "显示已保存的共享",
     hide: "隐藏",
     refresh: "刷新",
@@ -3108,8 +3405,8 @@ static SG_ZH_CN: StorageStrings = StorageStrings {
     deleted: "已删除 {n} 个共享，释放 {size}。",
     skipped: "已保留（使用中或不安全）：{ids}",
     nothing: "没有删除任何内容。",
-    note_unsupported: "此背景服务版本较旧，不支持存储管理。请完全关闭 Miasma 后重新启动。",
-    note_unavailable: "背景服务未运行，无法列出已保存的共享。请点击窗口上方的按钮启动。",
+    note_unsupported: "此后台服务版本较旧，不支持存储管理。请完全退出 Miasma 后重新启动。",
+    note_unavailable: "后台服务未运行，无法列出已保存的共享。请点击窗口顶部的按钮启动。",
 };
 
 // ─── Updates (Settings section and the update banner) ───────────────────────
@@ -3241,7 +3538,7 @@ static UP_ZH_CN: UpdateStrings = UpdateStrings {
     mode_notify: "通知我",
     mode_auto: "自动",
     mode_desc_off: "Miasma 不会检查更新，也不会连接 GitHub。",
-    mode_desc_notify: "Miasma 启动后只检查一次并通知您。在您同意之前不会安装。",
+    mode_desc_notify: "Miasma 启动后只检查一次并通知你。在你同意之前不会安装。",
     mode_desc_auto: "Miasma 启动后只检查一次，并在没有收发数据时自动安装新版本。",
     version_label: "版本：",
     check_now: "立即检查",
@@ -3251,7 +3548,7 @@ static UP_ZH_CN: UpdateStrings = UpdateStrings {
     ago_seconds: "{n} 秒前",
     ago_minutes: "{n} 分钟前",
     ago_hours: "{n} 小时前",
-    result_up_to_date: "您使用的已是最新版本。",
+    result_up_to_date: "你使用的已是最新版本。",
     result_available: "有新版本 {v} 可用。",
     result_failed: "无法检查。这并不表示已是最新版本。",
     result_disabled: "更新已关闭。",
@@ -3262,16 +3559,16 @@ static UP_ZH_CN: UpdateStrings = UpdateStrings {
     status_applying: "正在安装更新...",
     status_ready: "更新已下载并检查完毕。将在 Miasma 空闲时安装。",
     status_waiting_idle: "正在等待收发数据结束。",
-    status_installed: "已安装版本 {v}。重新启动后即可使用。",
+    status_installed: "已安装版本 {v}。重启后即可使用。",
     status_rolled_back: "新版本未能启动，已恢复为原来的版本。",
-    status_skipped: "您已选择跳过版本 {v}。",
+    status_skipped: "你已选择跳过版本 {v}。",
     wait_before_recheck: "请等待 {n} 秒后再检查。",
     banner_available: "Miasma 有新版本可用：{v}。",
-    banner_installed: "已安装 Miasma {v}。重新启动后即可使用。",
+    banner_installed: "已安装 Miasma {v}。重启后即可使用。",
     update_now: "立即更新",
     later: "稍后",
     skip_version: "跳过此版本",
-    restart_now: "立即重新启动",
+    restart_now: "立即重启",
     backup_note: "更新前的版本已作为备份保留在程序旁边。",
     config_save_failed: "无法保存该设置。请重试。",
 };
@@ -3348,22 +3645,103 @@ static SP_JA: SpeedStrings = SpeedStrings {
 
 static SP_ZH_CN: SpeedStrings = SpeedStrings {
     path_direct: "直连",
-    path_relay: "经中继(较慢)",
+    path_relay: "经中继（较慢）",
     path_mixed: "直连+中继",
-    reason_udp: "你的网络阻止了直接连接(UDP 无法发出)。",
+    reason_udp: "你的网络阻止了直接连接（UDP 无法发出）。",
     reason_nat: "你的路由器按目标改变地址，无法建立直接连接。",
     avg: "平均 {speed}，{secs} 秒",
-    total: "当前: {speed}({n} 个)",
+    total: "当前：{speed}（{n} 个）",
     rtt: "RTT {ms} ms",
     stalled: "停滞 {secs} 秒",
-    settings_unit: "速度优先显示",
-    unit_bits: "比特(Mbps)",
-    unit_bytes: "字节(MB/s、MiB/s)",
+    settings_unit: "优先显示的速度单位",
+    unit_bits: "比特（Mbps）",
+    unit_bytes: "字节（MB/s、MiB/s）",
     settings_shown: "速度单位",
     shown_both: "两者",
     shown_bits: "仅比特",
     shown_bytes: "仅字节",
 };
+
+/// Test helper for every string family: the Chinese text is filled and keeps the `{holes}` of
+/// the English one, Chinese text is followed by full-width punctuation, a Chinese entry without
+/// Chinese characters is a deliberate copy of the English one, and the English column holds no
+/// CJK text (a swapped column would show Chinese in the English window).
+#[cfg(test)]
+pub(crate) fn assert_translation_parity(
+    family: &str,
+    en: Vec<(&'static str, &'static str)>,
+    zh: Vec<(&'static str, &'static str)>,
+) {
+    fn is_han(c: char) -> bool {
+        ('\u{4e00}'..='\u{9fff}').contains(&c)
+    }
+    fn is_kana(c: char) -> bool {
+        ('\u{3040}'..='\u{30ff}').contains(&c)
+    }
+    fn holes(s: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut rest = s;
+        while let Some(i) = rest.find('{') {
+            let Some(j) = rest[i..].find('}') else { break };
+            let name = &rest[i + 1..i + j];
+            if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                out.push(format!("{{{name}}}"));
+            }
+            rest = &rest[i + j + 1..];
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+    assert_eq!(en.len(), zh.len(), "{family}: the tables differ in size");
+    for ((name, en_text), (zh_name, zh_text)) in en.into_iter().zip(zh) {
+        assert_eq!(
+            name, zh_name,
+            "{family}: the tables list their fields differently"
+        );
+        assert!(
+            !zh_text.trim().is_empty(),
+            "{family}.{name}: the zh-CN text is empty"
+        );
+        assert!(
+            !en_text.chars().any(|c| is_han(c) || is_kana(c)),
+            "{family}.{name}: the English text contains CJK characters: {en_text}"
+        );
+        assert_eq!(
+            holes(en_text),
+            holes(zh_text),
+            "{family}.{name}: the zh-CN placeholders differ from the English ones"
+        );
+        if !zh_text.chars().any(is_han) {
+            // Only punctuation and spacing may differ from the English text (`;` and `；`).
+            let plain = |s: &str| -> String {
+                s.chars()
+                    .filter(|c| !c.is_whitespace())
+                    .map(|c| match c {
+                        '；' => ';',
+                        '，' => ',',
+                        '：' => ':',
+                        '（' => '(',
+                        '）' => ')',
+                        c => c,
+                    })
+                    .collect()
+            };
+            assert_eq!(
+                plain(zh_text),
+                plain(en_text),
+                "{family}.{name}: the zh-CN text has no Chinese characters"
+            );
+        }
+        let chars: Vec<char> = zh_text.chars().collect();
+        for w in chars.windows(2) {
+            assert!(
+                !(is_han(w[0]) && matches!(w[1], ':' | ',' | '(' | ')')),
+                "{family}.{name}: half-width punctuation right after Chinese text: {zh_text}"
+            );
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -3622,6 +4000,47 @@ mod tests {
         let t = transfer_strings(Locale::En);
         assert_ne!(t.mid_label, t.mid_label_easy);
         assert_ne!(t.red_label, t.red_label_easy);
+    }
+
+    #[test]
+    fn zh_cn_texts_match_the_english_ones_in_every_family() {
+        let (en, zh) = (Locale::En, Locale::ZhCn);
+        assert_translation_parity("strings", strings(en).all(), strings(zh).all());
+        assert_translation_parity(
+            "transfers",
+            transfer_strings(en).all(),
+            transfer_strings(zh).all(),
+        );
+        assert_translation_parity(
+            "contacts",
+            contact_strings(en).all(),
+            contact_strings(zh).all(),
+        );
+        assert_translation_parity("chat", chat_strings(en).all(), chat_strings(zh).all());
+        assert_translation_parity("logs", log_strings(en).all(), log_strings(zh).all());
+        assert_translation_parity(
+            "storage",
+            storage_strings(en).all(),
+            storage_strings(zh).all(),
+        );
+        assert_translation_parity(
+            "updates",
+            update_strings(en).all(),
+            update_strings(zh).all(),
+        );
+        assert_translation_parity("speed", speed_strings(en).all(), speed_strings(zh).all());
+    }
+
+    #[test]
+    fn invitations_are_written_in_the_language_of_the_window() {
+        use miasma_core::transfer::InviteLang;
+        assert_eq!(transfer_strings(Locale::En).invite_lang, InviteLang::En);
+        assert_eq!(transfer_strings(Locale::Ja).invite_lang, InviteLang::Ja);
+        assert_eq!(transfer_strings(Locale::ZhCn).invite_lang, InviteLang::Zh);
+        for l in Locale::ALL {
+            assert_eq!(transfer_strings(l).locale, l);
+            assert_eq!(contact_strings(l).locale, l);
+        }
     }
 
     #[test]
