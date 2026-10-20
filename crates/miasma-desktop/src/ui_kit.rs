@@ -796,22 +796,27 @@ pub fn list_row<R>(
                     if let Some(name) = row.avatar {
                         avatar(ui, name, AVATAR_PX);
                     }
-                    ui.vertical(|ui| {
-                        ui.spacing_mut().item_spacing.y = 0.0;
-                        ui.add(
-                            Label::new(RichText::new(row.title).color(pal().text)).truncate(true),
-                        )
-                        .on_hover_text(row.title);
-                        if let Some((sub, level)) = row.subtitle {
-                            let color = if level == Level::Muted {
-                                pal().muted
-                            } else {
-                                level_color(level)
-                            };
-                            ui.add(Label::new(RichText::new(sub).color(color)).truncate(true))
-                                .on_hover_text(sub);
-                        }
-                    });
+                    ui.allocate_ui_with_layout(
+                        vec2(ui.available_width(), h),
+                        Layout::top_down(egui::Align::Min).with_main_align(egui::Align::Center),
+                        |ui| {
+                            ui.spacing_mut().item_spacing.y = 0.0;
+                            ui.add(
+                                Label::new(RichText::new(row.title).color(pal().text))
+                                    .truncate(true),
+                            )
+                            .on_hover_text(row.title);
+                            if let Some((sub, level)) = row.subtitle {
+                                let color = if level == Level::Muted {
+                                    pal().muted
+                                } else {
+                                    level_color(level)
+                                };
+                                ui.add(Label::new(RichText::new(sub).color(color)).truncate(true))
+                                    .on_hover_text(sub);
+                            }
+                        },
+                    );
                 });
                 inner
             },
