@@ -3442,7 +3442,10 @@ fn format_expiry(epoch_secs: u64, locale: Locale) -> String {
     if epoch_secs == 0 {
         text
     } else {
-        format!("{text} ({})", crate::uitext::absolute_time(locale, epoch_secs))
+        format!(
+            "{text} ({})",
+            crate::uitext::absolute_time(locale, epoch_secs)
+        )
     }
 }
 

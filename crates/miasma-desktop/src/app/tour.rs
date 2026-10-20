@@ -986,6 +986,7 @@ fn easy_steps() -> Vec<Step> {
                 hover: false,
             });
         }
+    }
     // A dialog in the narrowest window: it must stay inside it.
     for fx in ["qr", "perm"] {
         steps.push(Step {
