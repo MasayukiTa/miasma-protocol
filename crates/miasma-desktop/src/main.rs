@@ -38,7 +38,6 @@ mod network_strings;
 mod network_ui;
 mod open_path;
 mod os_locale;
-mod qr_dialog;
 mod send_flow;
 mod speed;
 #[cfg(test)]

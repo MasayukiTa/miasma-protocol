@@ -2131,7 +2131,9 @@ impl ContactsUi {
                 ui.add_space(kit::SP_3);
                 ui.horizontal(|ui| {
                     if kit::primary(ui, ok, c.save).clicked()
-                        || (ok && crate::form_check::edit_keys(&edit) == crate::form_check::EditKey::Save)
+                        || (ok
+                            && crate::form_check::edit_keys(&edit)
+                                == crate::form_check::EditKey::Save)
                     {
                         commit = true;
                     }

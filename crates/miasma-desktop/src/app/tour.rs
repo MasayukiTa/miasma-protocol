@@ -896,6 +896,23 @@ fn easy_steps() -> Vec<Step> {
         }
     }
     steps.extend(store_steps());
+    // The smallest width the window can be given: the reason beside a disabled button must wrap.
+    for (tab, tname) in [(Tab::Store, "store"), (Tab::Retrieve, "retrieve")] {
+        steps.push(Step {
+            name: format!("easy_en_{tname}_320"),
+            theme: ThemeMode::Light,
+            locale: Locale::En,
+            tab,
+            daemon: Some(DaemonState::Connected),
+            transfers: None,
+            contacts: None,
+            chat: None,
+            size: Some((320.0, 900.0)),
+            mode: Some(ProductMode::Easy),
+            flow: None,
+            hover: false,
+        });
+    }
     steps
 }
 
