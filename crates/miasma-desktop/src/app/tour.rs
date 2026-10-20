@@ -750,6 +750,8 @@ fn store_steps() -> Vec<Step> {
             contacts: None,
             chat: None,
             size: Some(STORE_SIZE),
+            flow: None,
+            hover: false,
             mode: Some(ProductMode::Easy),
         };
         steps.push(base("home", Tab::Home));
