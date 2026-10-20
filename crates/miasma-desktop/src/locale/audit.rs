@@ -35,7 +35,7 @@ audit_strings! {
     // The contact QR dialog.
     qr_title, qr_close, a11y_qr,
     // The state chip in the header.
-    chip_ready, chip_waiting,
+    chip_ready, chip_relay,
     // The first line of the stored-shares confirmation.
     storage_scope_all, storage_scope_ids, storage_scope_days,
 }
@@ -84,7 +84,7 @@ static AU_EN: AuditStrings = AuditStrings {
     qr_close: "Close",
     a11y_qr: "QR code of your contact code",
     chip_ready: "Ready",
-    chip_waiting: "Waiting for the network",
+    chip_relay: "Cannot reach the relay server",
     storage_scope_all: "This deletes all {n} stored shares.",
     storage_scope_ids: "This deletes {n} selected shares.",
     storage_scope_days: "This deletes the shares older than {n} days.",
@@ -126,7 +126,7 @@ static AU_JA: AuditStrings = AuditStrings {
     qr_close: "閉じる",
     a11y_qr: "あなたの連絡先コードのQRコード",
     chip_ready: "準備完了",
-    chip_waiting: "ネットワークを待っています",
+    chip_relay: "中継サーバーに接続できません",
     storage_scope_all: "保存している共有{n}件をすべて削除します。",
     storage_scope_ids: "選んだ共有{n}件を削除します。",
     storage_scope_days: "{n}日より古い共有を削除します。",
@@ -168,7 +168,7 @@ static AU_ZH_CN: AuditStrings = AuditStrings {
     qr_close: "关闭",
     a11y_qr: "你的联系人代码的二维码",
     chip_ready: "已就绪",
-    chip_waiting: "正在等待网络",
+    chip_relay: "无法连接到中继服务器",
     storage_scope_all: "将删除全部 {n} 个已保存的共享。",
     storage_scope_ids: "将删除所选的 {n} 个共享。",
     storage_scope_days: "将删除早于 {n} 天的共享。",

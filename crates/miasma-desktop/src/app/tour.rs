@@ -720,6 +720,17 @@ fn arrange(step: &Step, app: &mut MiasmaApp, ctx: &egui::Context, first: bool) {
     }
     if matches!(step.daemon, Some(DaemonState::Connected)) {
         mock_app(app);
+        // Connected with nobody connected right now, and with the relay unreachable.
+        if step.name.contains("_nopeers_") {
+            app.peer_count = 0;
+        }
+        if step.name.contains("_relaydown_") {
+            app.relay_down = Some(crate::worker::RelayDown {
+                secs: 420,
+                cause: miasma_core::transport::relay_watchdog::RelayCause::Dns,
+                inspected: None,
+            });
+        }
         // The real worker runs in the background of a tour and reports that no service is
         // there; that banner is not what a connected screen shows.
         app.status_msg = None;
@@ -986,6 +997,28 @@ fn easy_steps() -> Vec<Step> {
                 hover: false,
             });
         }
+    }
+    // Header chip and Status: connected with no peers, and with the relay unreachable.
+    for (fx, tab, tname) in [
+        ("nopeers", Tab::Home, "home"),
+        ("relaydown", Tab::Home, "home"),
+        ("nopeers", Tab::Status, "status"),
+        ("relaydown", Tab::Status, "status"),
+    ] {
+        steps.push(Step {
+            name: format!("easy_en_{tname}_{fx}_wide"),
+            theme: ThemeMode::Light,
+            locale: Locale::En,
+            tab,
+            daemon: Some(DaemonState::Connected),
+            transfers: None,
+            contacts: None,
+            chat: None,
+            size: Some((900.0, 800.0)),
+            mode: Some(ProductMode::Easy),
+            flow: None,
+            hover: false,
+        });
     }
     // A dialog in the narrowest window: it must stay inside it.
     for fx in ["qr", "perm"] {
