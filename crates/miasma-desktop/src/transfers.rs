@@ -1353,10 +1353,14 @@ impl TransfersUi {
                 None,
                 |ui| {
                     ui.horizontal(|ui| {
-                        ui.add(
+                        let r = ui.add(
                             kit::input(&mut self.resume_password)
                                 .password(true)
                                 .desired_width(220.0),
+                        );
+                        crate::form_check::name(
+                            &r,
+                            crate::locale::audit_strings(t.locale).a11y_resume_password,
                         );
                         let needs_pw = protected && self.resume_password.is_empty();
                         if kit::primary(ui, connected && !needs_pw, t.resume_go).clicked() {
@@ -1385,10 +1389,14 @@ impl TransfersUi {
             kit::hint(ui, t.resume_pw_optional);
             kit::form_row(ui, t.password_label, None, |ui| {
                 ui.horizontal(|ui| {
-                    ui.add(
+                    let r = ui.add(
                         kit::input(&mut self.resume_password)
                             .password(true)
                             .desired_width(220.0),
+                    );
+                    crate::form_check::name(
+                        &r,
+                        crate::locale::audit_strings(t.locale).a11y_resume_password,
                     );
                     if ui
                         .add_enabled(connected, kit::danger_button(t.restart_yes))
@@ -1530,8 +1538,13 @@ impl TransfersUi {
         } else {
             t.recv_id_label
         };
+        let au = crate::locale::audit_strings(t.locale);
+        let mut mid_field: Option<egui::Response> = None;
+        let mut path_field: Option<egui::Response> = None;
         kit::form_row(ui, id_label, None, |ui| {
             let resp = ui.add(kit::input_mono(&mut self.recv_mid).hint_text("miasma-share:..."));
+            crate::form_check::name(&resp, au.a11y_recv_id);
+            mid_field = Some(resp.clone());
             // A whole invitation (or a link, or an id with a line break in it) pasted here:
             // keep just the Share ID, and only when it is a valid one.
             if resp.changed() {
@@ -1545,11 +1558,13 @@ impl TransfersUi {
         let mut browse = false;
         kit::form_row(ui, t.recv_path_label, None, |ui| {
             ui.horizontal(|ui| {
-                ui.add(
+                let r = ui.add(
                     kit::input(&mut self.recv_path)
                         .hint_text(t.recv_path_hint)
                         .desired_width(kit::input_width_beside_button(ui)),
                 );
+                crate::form_check::name(&r, au.a11y_recv_path);
+                path_field = Some(r);
                 if ui
                     .add_enabled(self.name_peek.is_none(), kit::secondary_button(t.browse))
                     .clicked()
@@ -1617,6 +1632,7 @@ impl TransfersUi {
                     .password(true)
                     .desired_width(240.0),
             );
+            crate::form_check::name(&pw, au.a11y_password);
             if self.focus_recv_password {
                 self.focus_recv_password = false;
                 pw.request_focus();
@@ -1625,13 +1641,30 @@ impl TransfersUi {
         // Technical mode only: Easy mode shows nothing new.
         if !easy {
             kit::form_row(ui, t.via_label, Some(t.via_note), |ui| {
-                ui.add(kit::input_mono(&mut self.recv_via).hint_text(t.via_hint));
+                let r = ui.add(kit::input_mono(&mut self.recv_via).hint_text(t.via_hint));
+                crate::form_check::name(&r, au.a11y_via);
             });
         }
         ui.add_space(kit::SP_1);
-        let ready =
-            connected && !self.recv_mid.trim().is_empty() && !self.recv_path.trim().is_empty();
-        let go = kit::form_actions(ui, |ui| kit::primary(ui, ready, t.recv_button).clicked());
+        let needs = [
+            crate::form_check::Need::general(connected, au.need_connection),
+            crate::form_check::Need {
+                field: mid_field.as_ref().map(|r| r.id),
+                ok: !self.recv_mid.trim().is_empty(),
+                reason: if easy { au.need_code } else { au.need_share_id },
+            },
+            crate::form_check::Need {
+                field: path_field.as_ref().map(|r| r.id),
+                ok: !self.recv_path.trim().is_empty(),
+                reason: au.need_folder,
+            },
+        ];
+        let attempt = [&mid_field, &path_field]
+            .iter()
+            .any(|r| r.as_ref().is_some_and(crate::form_check::submitted));
+        let go = kit::form_actions(ui, |ui| {
+            crate::form_check::primary_with_reason(ui, t.recv_button, &needs, true, attempt)
+        });
         if go {
             let mid = self.recv_mid.trim().to_owned();
             // One parse of what was typed, before anything is sent: a mistyped share ID stops
@@ -1675,13 +1708,17 @@ impl TransfersUi {
         connected: bool,
         cmds: &mut Vec<WorkerCmd>,
     ) {
+        let au = crate::locale::audit_strings(t.locale);
+        let mut path_field: Option<egui::Response> = None;
         kit::form_row(ui, t.send_path_label, None, |ui| {
             ui.horizontal(|ui| {
-                ui.add(
+                let r = ui.add(
                     kit::input(&mut self.send_path)
                         .hint_text(t.send_path_hint)
                         .desired_width(kit::input_width_beside_button(ui)),
                 );
+                crate::form_check::name(&r, au.a11y_send_path);
+                path_field = Some(r);
                 if ui.add(kit::secondary_button(t.browse)).clicked() {
                     if let Some(p) = rfd::FileDialog::new().pick_file() {
                         self.send_path = p.to_string_lossy().into_owned();
@@ -1698,11 +1735,12 @@ impl TransfersUi {
         };
         kit::form_row(ui, t.password_label, Some(note), |ui| {
             ui.horizontal(|ui| {
-                ui.add(
+                let r = ui.add(
                     kit::input(&mut self.send_password)
                         .password(true)
                         .desired_width(240.0),
                 );
+                crate::form_check::name(&r, au.a11y_password);
                 if ui.add(kit::secondary_button(t.pw_generate)).clicked() {
                     generate = true;
                 }
@@ -1734,11 +1772,12 @@ impl TransfersUi {
             });
         }
         kit::form_row(ui, t.confirm_label, None, |ui| {
-            ui.add(
+            let r = ui.add(
                 kit::input(&mut self.send_confirm)
                     .password(true)
                     .desired_width(240.0),
             );
+            crate::form_check::name(&r, au.a11y_password_repeat);
         });
         kit::form_row(
             ui,
@@ -1772,8 +1811,22 @@ impl TransfersUi {
             SendPassword::Unprotected | SendPassword::Good => {}
         }
         ui.add_space(kit::SP_1);
-        let ready = send_ready(connected, &self.send_path, mismatch, &pw_state);
-        let go = kit::form_actions(ui, |ui| kit::primary(ui, ready, t.send_button).clicked());
+        // A mismatch or a weak password has its own message above; what is left to say is the file.
+        let allowed = send_ready(connected, "x", mismatch, &pw_state);
+        let needs = [
+            crate::form_check::Need::general(connected, au.need_connection),
+            crate::form_check::Need {
+                field: path_field.as_ref().map(|r| r.id),
+                ok: !self.send_path.trim().is_empty(),
+                reason: au.need_file,
+            },
+        ];
+        let attempt = path_field
+            .as_ref()
+            .is_some_and(crate::form_check::submitted);
+        let go = kit::form_actions(ui, |ui| {
+            crate::form_check::primary_with_reason(ui, t.send_button, &needs, allowed, attempt)
+        });
         if go {
             let password = (!self.send_password.is_empty()).then(|| self.send_password.clone());
             self.pending_protected = password.is_some();

@@ -1852,7 +1852,8 @@ impl ContactsUi {
             });
             if self.show_qr {
                 ui.add_space(kit::SP_2);
-                if !crate::transfers::draw_qr(ui, &qr_payload(&code), 240.0, c.qr_note) {
+                let qr_name = crate::locale::audit_strings(c.locale).a11y_qr;
+                if !crate::transfers::draw_qr(ui, &qr_payload(&code), 240.0, qr_name) {
                     ui.label(egui::RichText::new(c.qr_too_long).color(pal().danger));
                 }
                 ui.add_space(kit::SP_1);
@@ -1907,29 +1908,41 @@ impl ContactsUi {
                 ui.add_space(kit::SP_2);
             }
             ui.label(label_text(c.paste_what));
-            ui.add(
+            let au = crate::locale::audit_strings(c.locale);
+            let add_edit = ui.add(
                 kit::input_multiline(&mut self.add_text)
                     .desired_rows(3)
                     .hint_text(c.add_paste),
             );
+            crate::form_check::name(&add_edit, au.a11y_add_code);
+            let mut label_edit: Option<egui::Response> = None;
             if !self.add_text.trim().is_empty() {
                 ui.add_space(kit::SP_2);
                 ui.label(label_text(c.add_label));
-                ui.add(kit::input(&mut self.add_label).hint_text(c.add_label_hint));
+                let r = ui.add(kit::input(&mut self.add_label).hint_text(c.add_label_hint));
+                crate::form_check::name(&r, au.a11y_add_label);
+                label_edit = Some(r);
             }
             if let Some(e) = self.add_error.clone() {
                 ui.add_space(kit::SP_2);
                 kit::notice(ui, Level::Error, &e);
             }
             ui.add_space(kit::SP_3);
-            let ready = !self.add_text.trim().is_empty() && !self.add_busy;
+            let needs = [crate::form_check::Need::new(
+                &add_edit,
+                !self.add_text.trim().is_empty(),
+                au.need_contact,
+            )];
+            let attempt = label_edit
+                .as_ref()
+                .is_some_and(crate::form_check::submitted);
             ui.horizontal(|ui| {
                 let l = if self.add_busy {
                     c.add_busy
                 } else {
                     c.add_button
                 };
-                if kit::primary(ui, ready, l).clicked() {
+                if crate::form_check::primary_with_reason(ui, l, &needs, !self.add_busy, attempt) {
                     let label = self.add_label.trim().to_owned();
                     self.add_result = None;
                     if label.is_empty() {
@@ -2045,11 +2058,16 @@ impl ContactsUi {
                 .or_insert_with(|| init.clone());
             ui.horizontal(|ui| {
                 let w = kit::input_width_beside_button(ui);
-                ui.add(
+                let size_edit = ui.add(
                     kit::input(buf)
                         .desired_width(w)
                         .hint_text(max_size_hint_text(c, ct.default_max_file_size)),
                 );
+                let size_name = fill(
+                    crate::locale::audit_strings(c.locale).a11y_max_size,
+                    &[("name", &ct.label)],
+                );
+                crate::form_check::name(&size_edit, &size_name);
             });
             let dirty = *buf != init;
             let text = buf.clone();
@@ -2095,16 +2113,27 @@ impl ContactsUi {
             return;
         }
         let (mut commit, mut close) = (false, false);
+        let old_label = self
+            .renaming
+            .as_ref()
+            .and_then(|(id, _)| self.contacts.iter().find(|x| x.id == *id))
+            .map(|x| x.label.clone())
+            .unwrap_or_default();
         let shown = kit::dialog(ctx, KEY, c.rename, |ui| {
             if let Some((_, text)) = self.renaming.as_mut() {
                 let edit = ui.add(kit::input(text));
+                let field_name = fill(
+                    crate::locale::audit_strings(c.locale).a11y_rename,
+                    &[("name", &old_label)],
+                );
+                crate::form_check::name(&edit, &field_name);
                 let ok = !text.trim().is_empty();
                 ui.add_space(kit::SP_3);
                 ui.horizontal(|ui| {
                     if kit::primary(ui, ok, c.save).clicked()
                         || (ok
-                            && edit.lost_focus()
-                            && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                            && crate::form_check::edit_keys(&edit)
+                                == crate::form_check::EditKey::Save)
                     {
                         commit = true;
                     }
@@ -2125,6 +2154,16 @@ impl ContactsUi {
                 crate::a11y::dialog_leave(ctx, KEY);
             }
         }
+    }
+
+    /// A dialog of this screen is open (the app switches the page behind it off).
+    pub fn modal_open(&self) -> bool {
+        self.invite_open
+            || self.add_open
+            || self.verify_target.is_some()
+            || self.perm_target.is_some()
+            || self.renaming.is_some()
+            || self.clear_confirm
     }
 
     /// Ask the daemon to add the contact of the form: switched off when it came from a suggestion.

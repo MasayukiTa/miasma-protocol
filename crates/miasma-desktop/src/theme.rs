@@ -87,7 +87,7 @@ impl Palette {
             surface_subtle: hex(0xF4F4F2),
             selected: hex(0xE7E5DE),
             border: hex(0xD8D6CF),
-            border_strong: hex(0xB0AEA6),
+            border_strong: hex(0x85827A),
             text: hex(0x18181B),
             muted: hex(0x4F4F57),
             faint: hex(0x56565E),
@@ -107,7 +107,7 @@ impl Palette {
             surface_subtle: hex(0x202020),
             selected: hex(0x2C2C2C),
             border: hex(0x2E2E2E),
-            border_strong: hex(0x4A4A4A),
+            border_strong: hex(0x777777),
             text: hex(0xF4F4F5),
             muted: hex(0xB4B4BC),
             faint: hex(0xA6A6B0),
@@ -284,7 +284,7 @@ mod tests {
             (p.surface_subtle, 0xF4F4F2),
             (p.selected, 0xE7E5DE),
             (p.border, 0xD8D6CF),
-            (p.border_strong, 0xB0AEA6),
+            (p.border_strong, 0x85827A),
             (p.text, 0x18181B),
             (p.muted, 0x4F4F57),
             (p.faint, 0x56565E),
@@ -309,7 +309,7 @@ mod tests {
             (p.surface_subtle, 0x202020),
             (p.selected, 0x2C2C2C),
             (p.border, 0x2E2E2E),
-            (p.border_strong, 0x4A4A4A),
+            (p.border_strong, 0x777777),
             (p.text, 0xF4F4F5),
             (p.muted, 0xB4B4BC),
             (p.faint, 0xA6A6B0),
@@ -391,7 +391,63 @@ mod tests {
         // border_strong on the surface it sits on. The hairline `border` is only a divider.
         for (name, p) in [("light", Palette::light()), ("dark", Palette::dark())] {
             let r = contrast(p.border_strong, p.surface);
-            assert!(r >= 1.9, "{name}: border_strong on surface = {r:.2}");
+            assert!(r >= 3.0, "{name}: border_strong on surface = {r:.2}");
+        }
+    }
+
+    /// Every pair of colours the interface draws one on the other, with the bar it must clear:
+    /// 4.5:1 for text, 3:1 for the outline of a control (a non-text component).
+    #[test]
+    fn every_text_and_outline_pair_clears_its_wcag_bar_in_both_themes() {
+        for (mode, p) in [("light", Palette::light()), ("dark", Palette::dark())] {
+            let surfaces = [
+                ("bg", p.bg),
+                ("surface", p.surface),
+                ("surface_subtle", p.surface_subtle),
+                ("selected", p.selected),
+            ];
+            // Plain, secondary and meta text, links and status text on every surface.
+            for (tok, fg) in [
+                ("text", p.text),
+                ("muted", p.muted),
+                ("faint", p.faint),
+                ("accent", p.accent),
+                ("success", p.success),
+                ("warning", p.warning),
+                ("danger", p.danger),
+                ("info", p.info),
+            ] {
+                for (bn, bg) in surfaces {
+                    let r = contrast(fg, bg);
+                    assert!(r >= 4.5, "{mode}: {tok} text on {bn} = {r:.2}");
+                }
+            }
+            // Primary button: its label on the fill in rest, hover and pressed states.
+            for (state, fill) in [
+                ("rest", p.accent_fill),
+                ("hover", p.accent_hover()),
+                ("pressed", p.accent_pressed()),
+            ] {
+                let r = contrast(p.on_accent(), fill);
+                assert!(r >= 4.5, "{mode}: primary label on {state} fill = {r:.2}");
+            }
+            // Secondary button: label colour on the fills it takes in each state; danger label
+            // on the same fills.
+            for (bn, fill) in [
+                ("surface", p.surface),
+                ("surface_subtle", p.surface_subtle),
+                ("selected", p.selected),
+            ] {
+                let r = contrast(p.text, fill);
+                assert!(r >= 4.5, "{mode}: secondary label on {bn} = {r:.2}");
+                let r = contrast(p.danger, fill);
+                assert!(r >= 4.5, "{mode}: danger label on {bn} = {r:.2}");
+            }
+            // Outline of buttons and fields against everything they can sit on or hold.
+            for (bn, bg) in surfaces {
+                let r = contrast(p.border_strong, bg);
+                assert!(r >= 3.0, "{mode}: control outline on {bn} = {r:.2}");
+            }
         }
     }
 

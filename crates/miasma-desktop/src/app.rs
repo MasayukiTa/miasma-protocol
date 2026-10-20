@@ -97,6 +97,8 @@ pub struct MiasmaApp {
     // Status (from daemon)
     peer_id: String,
     peer_count: usize,
+    /// A dialog was open at the end of the last frame: the page behind it is switched off.
+    modal_open: bool,
     relay_down: Option<crate::worker::RelayDown>,
     share_count: usize,
     used_mb: f64,
@@ -505,6 +507,7 @@ impl MiasmaApp {
             import_mids: Vec::new(),
             peer_id: String::new(),
             peer_count: 0,
+            modal_open: false,
             relay_down: None,
             share_count: 0,
             used_mb: 0.0,
@@ -664,6 +667,15 @@ impl MiasmaApp {
     // ── Dialogs ──────────────────────────────────────────────────────────
 
     /// Whether one of the dialogs drawn by [`Self::dialogs`] is open.
+    /// Any dialog is open, including the ones the screens draw themselves. A dialog belongs to
+    /// the screen that draws it, so it only counts while that screen is showing.
+    fn any_modal_open(&self) -> bool {
+        self.dialog_is_open()
+            || self.send_flow.is_open()
+            || (self.tab == Tab::Chat && self.chat.modal_open())
+            || (self.tab == Tab::Contacts && self.contacts.modal_open())
+    }
+
     fn dialog_is_open(&self) -> bool {
         self.show_close_confirm
             || self.show_wipe_confirm
@@ -806,6 +818,19 @@ impl MiasmaApp {
         // Deleting stored shares: what it frees, and who it affects.
         if let Some(selection) = self.storage.confirm.clone() {
             let st = self.st();
+            let au = locale::audit_strings(self.locale);
+            let scope = match &selection {
+                miasma_core::store::ShareSelection::All => crate::transfers::fill(
+                    au.storage_scope_all,
+                    &[("n", &self.share_count.to_string())],
+                ),
+                miasma_core::store::ShareSelection::Ids(ids) => {
+                    crate::transfers::fill(au.storage_scope_ids, &[("n", &ids.len().to_string())])
+                }
+                miasma_core::store::ShareSelection::OlderThanDays(d) => {
+                    crate::transfers::fill(au.storage_scope_days, &[("n", &d.to_string())])
+                }
+            };
             let answer = ux::confirm::show(
                 ctx,
                 "storage_delete_confirm",
@@ -813,7 +838,8 @@ impl MiasmaApp {
                 st.confirm_button,
                 st.cancel,
                 |ui| {
-                    kit::paragraph(ui, st.confirm_body);
+                    kit::paragraph(ui, &scope);
+                    kit::paragraph_muted(ui, st.confirm_body);
                 },
             );
             match answer {
@@ -1475,15 +1501,30 @@ impl MiasmaApp {
             // The primary task: put text or a file into the network.
             kit::surface(ui, |ui| {
                 ui.label(s.store_text_label);
-                ui.add_enabled(
+                let au = locale::audit_strings(self.locale);
+                let text_edit = ui.add_enabled(
                     connected,
                     kit::input_multiline(&mut self.dissolve_text)
                         .hint_text(s.store_text_hint)
                         .desired_rows(if easy { 6 } else { 5 }),
                 );
+                crate::form_check::name(&text_edit, au.a11y_store_text);
                 kit::button_row(ui, |ui| {
-                    let can_store = connected && !self.dissolve_text.is_empty() && !self.busy;
-                    if kit::primary(ui, can_store, s.store_button).clicked() {
+                    let needs = [
+                        crate::form_check::Need::general(connected, au.need_connection),
+                        crate::form_check::Need::new(
+                            &text_edit,
+                            !self.dissolve_text.is_empty(),
+                            au.need_text,
+                        ),
+                    ];
+                    if crate::form_check::primary_with_reason(
+                        ui,
+                        s.store_button,
+                        &needs,
+                        !self.busy,
+                        false,
+                    ) {
                         let _ = self
                             .worker
                             .tx
@@ -1522,7 +1563,11 @@ impl MiasmaApp {
                     ui.horizontal(|ui| {
                         let mut display = mid.clone();
                         let w = kit::input_width_beside_button(ui);
-                        ui.add(kit::input_mono(&mut display).desired_width(w));
+                        let shown = ui.add(kit::input_mono(&mut display).desired_width(w));
+                        crate::form_check::name(
+                            &shown,
+                            locale::audit_strings(self.locale).a11y_store_id,
+                        );
                         if ui.add(kit::secondary_button(s.store_copy)).clicked() {
                             ui.output_mut(|o| o.copied_text = mid.clone());
                             self.set_msg(MsgKind::Info, s.store_copied);
@@ -1578,18 +1623,30 @@ impl MiasmaApp {
                 } else {
                     s.retrieve_mid_label
                 });
-                ui.add_enabled(
+                let au = locale::audit_strings(self.locale);
+                let mid_edit = ui.add_enabled(
                     connected,
                     kit::input_mono(&mut self.mid_input).hint_text("miasma:..."),
                 );
+                crate::form_check::name(&mid_edit, au.a11y_get_id);
                 kit::button_row(ui, |ui| {
-                    let can_get = connected && !self.mid_input.is_empty() && !self.busy;
                     let label = if easy {
                         s.retrieve_button_easy
                     } else {
                         s.retrieve_button
                     };
-                    if kit::primary(ui, can_get, label).clicked() {
+                    let needs = [
+                        crate::form_check::Need::general(connected, au.need_connection),
+                        crate::form_check::Need::new(
+                            &mid_edit,
+                            !self.mid_input.trim().is_empty(),
+                            if easy { au.need_code } else { au.need_mid },
+                        ),
+                    ];
+                    let attempt = crate::form_check::submitted(&mid_edit);
+                    if crate::form_check::primary_with_reason(
+                        ui, label, &needs, !self.busy, attempt,
+                    ) {
                         let _ = self
                             .worker
                             .tx
@@ -1694,32 +1751,43 @@ impl MiasmaApp {
                     let _ = self.worker.tx.try_send(WorkerCmd::GetSharingKey);
                 }
 
+                let au = locale::audit_strings(self.locale);
+                let mut contact_field: Option<egui::Response> = None;
+                let mut password_field: Option<egui::Response> = None;
+                let mut file_button: Option<egui::Id> = None;
                 kit::form_row(ui, s.send_contact_label, None, |ui| {
                     let hint = if self.mode.is_easy() {
                         s.send_contact_hint_easy
                     } else {
                         s.send_contact_hint
                     };
-                    ui.add(kit::input(&mut self.send_contact).hint_text(hint));
+                    let r = ui.add(kit::input(&mut self.send_contact).hint_text(hint));
+                    crate::form_check::name(&r, au.a11y_send_contact);
+                    contact_field = Some(r);
                 });
                 kit::form_row(ui, s.send_password_label, None, |ui| {
-                    ui.add(
+                    let r = ui.add(
                         kit::input(&mut self.send_password)
                             .password(true)
                             .desired_width(240.0),
                     );
+                    crate::form_check::name(&r, au.a11y_password);
+                    password_field = Some(r);
                 });
                 kit::form_row(
                     ui,
                     s.send_retention_label,
                     Some(s.send_retention_hint),
                     |ui| {
-                        ui.add(kit::input(&mut self.send_retention).desired_width(120.0));
+                        let r = ui.add(kit::input(&mut self.send_retention).desired_width(120.0));
+                        crate::form_check::name(&r, au.a11y_retention);
                     },
                 );
                 kit::form_row(ui, s.inbox_filename, None, |ui| {
                     ui.horizontal(|ui| {
-                        if ui.add(kit::secondary_button(s.send_choose_file)).clicked() {
+                        let choose = ui.add(kit::secondary_button(s.send_choose_file));
+                        file_button = Some(choose.id);
+                        if choose.clicked() {
                             if let Some(path) = rfd::FileDialog::new().pick_file() {
                                 self.send_file_path = Some(path);
                             }
@@ -1730,13 +1798,36 @@ impl MiasmaApp {
                     });
                 });
 
-                let can_send = connected
-                    && !self.busy
-                    && !self.send_contact.is_empty()
-                    && !self.send_password.is_empty()
-                    && self.send_file_path.is_some();
+                let field_id = |r: &Option<egui::Response>| r.as_ref().map(|r| r.id);
+                let needs = [
+                    crate::form_check::Need::general(connected, au.need_connection),
+                    crate::form_check::Need {
+                        field: field_id(&contact_field),
+                        ok: !self.send_contact.is_empty(),
+                        reason: au.need_contact,
+                    },
+                    crate::form_check::Need {
+                        field: field_id(&password_field),
+                        ok: !self.send_password.is_empty(),
+                        reason: au.need_password,
+                    },
+                    crate::form_check::Need {
+                        field: file_button,
+                        ok: self.send_file_path.is_some(),
+                        reason: au.need_file,
+                    },
+                ];
+                let attempt = [&contact_field, &password_field]
+                    .iter()
+                    .any(|r| r.as_ref().is_some_and(crate::form_check::submitted));
                 kit::form_actions(ui, |ui| {
-                    if kit::primary(ui, can_send, s.send_button).clicked() {
+                    if crate::form_check::primary_with_reason(
+                        ui,
+                        s.send_button,
+                        &needs,
+                        !self.busy,
+                        attempt,
+                    ) {
                         if let Some(ref path) = self.send_file_path {
                             self.busy = true;
                             let _ = self.worker.tx.try_send(WorkerCmd::DirectedSend {
@@ -1747,9 +1838,7 @@ impl MiasmaApp {
                             });
                         }
                     }
-                    if !connected {
-                        ui.label(kit::muted_text(s.send_not_connected));
-                    } else if self.busy {
+                    if self.busy {
                         ui.label(kit::muted_text(s.send_busy));
                     }
                 });
@@ -1872,17 +1961,31 @@ impl MiasmaApp {
                         if item.state == "Confirmed" {
                             kit::form_row(ui, s.inbox_password_label, None, |ui| {
                                 ui.horizontal(|ui| {
-                                    ui.add(
+                                    let au = locale::audit_strings(self.locale);
+                                    let pw = ui.add(
                                         kit::input(&mut self.inbox_retrieve_password)
                                             .password(true)
                                             .desired_width(200.0),
                                     );
-                                    let can_retrieve = !self.inbox_retrieve_password.is_empty()
-                                        && connected
-                                        && !self.busy;
-                                    if kit::primary(ui, can_retrieve, s.inbox_retrieve_button)
-                                        .clicked()
-                                    {
+                                    crate::form_check::name(&pw, au.a11y_file_password);
+                                    let needs = [
+                                        crate::form_check::Need::general(
+                                            connected,
+                                            au.need_connection,
+                                        ),
+                                        crate::form_check::Need::new(
+                                            &pw,
+                                            !self.inbox_retrieve_password.is_empty(),
+                                            au.need_password,
+                                        ),
+                                    ];
+                                    if crate::form_check::primary_with_reason(
+                                        ui,
+                                        s.inbox_retrieve_button,
+                                        &needs,
+                                        !self.busy,
+                                        crate::form_check::submitted(&pw),
+                                    ) {
                                         self.busy = true;
                                         let _ =
                                             self.worker.tx.try_send(WorkerCmd::DirectedRetrieve {
@@ -1975,17 +2078,31 @@ impl MiasmaApp {
                             kit::notice(ui, Level::Warn, heading);
                             kit::form_row(ui, s.outbox_confirm_label, None, |ui| {
                                 ui.horizontal(|ui| {
-                                    ui.add(
+                                    let au = locale::audit_strings(self.locale);
+                                    let code = ui.add(
                                         kit::input_mono(&mut self.outbox_confirm_code)
                                             .hint_text(s.outbox_confirm_hint)
                                             .desired_width(140.0),
                                     );
-                                    let can_confirm = !self.outbox_confirm_code.is_empty()
-                                        && connected
-                                        && !self.busy;
-                                    if kit::primary(ui, can_confirm, s.outbox_confirm_button)
-                                        .clicked()
-                                    {
+                                    crate::form_check::name(&code, au.a11y_check_code);
+                                    let needs = [
+                                        crate::form_check::Need::general(
+                                            connected,
+                                            au.need_connection,
+                                        ),
+                                        crate::form_check::Need::new(
+                                            &code,
+                                            !self.outbox_confirm_code.is_empty(),
+                                            au.need_code,
+                                        ),
+                                    ];
+                                    if crate::form_check::primary_with_reason(
+                                        ui,
+                                        s.outbox_confirm_button,
+                                        &needs,
+                                        !self.busy,
+                                        crate::form_check::submitted(&code),
+                                    ) {
                                         self.busy = true;
                                         let _ =
                                             self.worker.tx.try_send(WorkerCmd::DirectedConfirm {
@@ -2789,7 +2906,8 @@ impl MiasmaApp {
             });
             kit::button_row(ui, |ui| {
                 ui.label(st.delete_old);
-                ui.add(kit::input(&mut self.storage.days).desired_width(56.0));
+                let days = ui.add(kit::input(&mut self.storage.days).desired_width(56.0));
+                crate::form_check::name(&days, locale::audit_strings(self.locale).a11y_days);
                 ui.label(st.days_label);
                 if ui.add(kit::danger_button(st.delete_old_button)).clicked() {
                     match self.storage.days.trim().parse::<u64>() {
@@ -3388,6 +3506,10 @@ impl MiasmaApp {
             }
         }
 
+        // A dialog that closed in the last frame hands focus back to the control that opened it.
+        crate::a11y::restore_pending_focus(ctx);
+        let modal = self.modal_open;
+
         // Theme: resolve the choice against the OS theme every frame (cheap), and re-apply when
         // it changed. eframe itself resets the visuals when the OS theme flips, so also
         // re-apply if the panel colour is no longer ours.
@@ -3509,17 +3631,20 @@ impl MiasmaApp {
                     .inner_margin(egui::Margin::symmetric(edge, 0.0)),
             )
             .show(ctx, |ui| {
+                if modal {
+                    ui.set_enabled(false);
+                }
                 ui.add_space(kit::SP_2);
                 ui.horizontal(|ui| {
                     let brand = if easy { s.nav_brand_easy } else { s.nav_brand };
                     ui.label(kit::section_text(brand));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let (level, label) = match self.daemon_state {
-                            DaemonState::Connected => (Level::Ok, s.connected),
-                            DaemonState::Starting => (Level::Info, s.starting),
-                            DaemonState::Stopped => (Level::Error, s.offline),
-                            DaemonState::NeedsInit => (Level::Warn, s.setup_needed),
-                        };
+                        let (level, label) = header_chip(
+                            &self.daemon_state,
+                            self.peer_count,
+                            s,
+                            locale::audit_strings(self.locale),
+                        );
                         kit::status_dot(ui, level, label);
                     });
                 });
@@ -3655,6 +3780,10 @@ impl MiasmaApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(pal().bg))
             .show(ctx, |ui| {
+                // While a dialog is open nothing behind it reacts: the dialog is the only way on.
+                if modal {
+                    ui.set_enabled(false);
+                }
                 // Chat keeps its own scrolling (the message list scrolls, the composer stays in
                 // view), so it is drawn outside the page's scroll area.
                 if self.tab == Tab::Chat {
@@ -3766,6 +3895,7 @@ impl MiasmaApp {
 
         let dialog_open = self.dialog_is_open();
         self.dialogs(ctx);
+        self.modal_open = self.any_modal_open();
 
         // Esc dismisses the message in the bottom bar when no dialog is open (a dialog takes
         // Esc for itself).
@@ -3775,9 +3905,57 @@ impl MiasmaApp {
     }
 }
 
+/// What the chip in the header says. "Connected" used to cover a running service with nobody to
+/// talk to; now the service being up and the network being reachable are told apart. The
+/// details (peer count, transports) stay on the Status and Settings screens.
+fn header_chip(
+    state: &DaemonState,
+    peers: usize,
+    s: &'static Strings,
+    au: &'static locale::AuditStrings,
+) -> (Level, &'static str) {
+    match state {
+        DaemonState::Connected if peers > 0 => (Level::Ok, au.chip_ready),
+        DaemonState::Connected => (Level::Info, au.chip_waiting),
+        DaemonState::Starting => (Level::Info, s.starting),
+        DaemonState::Stopped => (Level::Error, s.offline),
+        DaemonState::NeedsInit => (Level::Warn, s.setup_needed),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn the_header_chip_does_not_say_connected_with_nobody_to_talk_to() {
+        for lang in Locale::ALL {
+            let (s, au) = (locale::strings(lang), locale::audit_strings(lang));
+            let (lvl, text) = header_chip(&DaemonState::Connected, 0, s, au);
+            assert_eq!(text, au.chip_waiting, "{lang:?}");
+            assert_ne!(lvl, Level::Ok, "{lang:?}: waiting is not shown green");
+            assert_ne!(text, s.connected, "{lang:?}");
+            let (lvl, text) = header_chip(&DaemonState::Connected, 3, s, au);
+            assert_eq!((lvl, text), (Level::Ok, au.chip_ready), "{lang:?}");
+            assert_eq!(header_chip(&DaemonState::Starting, 0, s, au).1, s.starting);
+            assert_eq!(header_chip(&DaemonState::Stopped, 0, s, au).1, s.offline);
+            assert_eq!(
+                header_chip(&DaemonState::NeedsInit, 0, s, au).1,
+                s.setup_needed
+            );
+            // Four plain states, four different words.
+            let words = [
+                header_chip(&DaemonState::Connected, 1, s, au).1,
+                header_chip(&DaemonState::Connected, 0, s, au).1,
+                header_chip(&DaemonState::Starting, 0, s, au).1,
+                header_chip(&DaemonState::NeedsInit, 0, s, au).1,
+            ];
+            for (i, a) in words.iter().enumerate() {
+                for b in &words[i + 1..] {
+                    assert_ne!(a, b, "{lang:?}");
+                }
+            }
+        }
+    }
 
     /// Draw only the Easy Home page in a column of `width` px and return the rectangle it used.
     fn home_page_size(state: DaemonState, width: f32) -> egui::Rect {
