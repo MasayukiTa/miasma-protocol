@@ -29,9 +29,11 @@ pub fn text_files_filter(l: Locale) -> &'static str {
 }
 
 pub fn replicated(l: Locale, n: u64) -> String {
+    // The count is of items in the daemon's replication queue (content this computer published)
+    // whose pieces have reached other peers; it is not the number of pieces stored here.
     match l {
-        Locale::En => format!("{n} replicated"),
-        Locale::Ja => format!("{n}件を複製済み"),
+        Locale::En => format!("{n} of your items spread to other peers"),
+        Locale::Ja => format!("{n}件の自分のコンテンツを他の端末へ複製済み"),
         Locale::ZhCn => format!("已复制 {n} 个"),
     }
 }
@@ -136,6 +138,48 @@ pub fn relative_and_absolute(l: Locale, epoch_secs: u64, now: u64) -> String {
         "{} ({})",
         relative_time(l, epoch_secs, now),
         absolute_time(l, epoch_secs)
+    )
+}
+
+/// Closed header on the verification dialog.
+pub fn technical_details(l: Locale) -> &'static str {
+    pick(l, "Technical details", "技術情報", "技术信息")
+}
+
+pub fn endpoint_label(l: Locale) -> &'static str {
+    pick(l, "Endpoint", "エンドポイント", "端点")
+}
+
+pub fn folder_label(l: Locale) -> &'static str {
+    pick(
+        l,
+        "Folder on this computer",
+        "このコンピューター上のフォルダー",
+        "此电脑上的文件夹",
+    )
+}
+
+/// "Updated 5 s ago" under the Status refresh button.
+pub fn updated_ago(l: Locale, secs: u64) -> String {
+    let (n, unit_en, unit_ja, unit_zh) = if secs < 60 {
+        (secs, "s", "秒", "秒")
+    } else {
+        (secs / 60, "min", "分", "分钟")
+    };
+    match l {
+        Locale::En => format!("Updated {n} {unit_en} ago"),
+        Locale::Ja => format!("{n}{unit_ja}前に更新"),
+        Locale::ZhCn => format!("{n} {unit_zh}前已更新"),
+    }
+}
+
+/// Title of a received or sent file whose name is not known yet.
+pub fn unnamed_file(l: Locale) -> &'static str {
+    pick(
+        l,
+        "File (name not known yet)",
+        "ファイル（名前はまだ不明）",
+        "文件（尚无名称）",
     )
 }
 

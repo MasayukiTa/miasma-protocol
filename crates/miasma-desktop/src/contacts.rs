@@ -2000,19 +2000,20 @@ impl ContactsUi {
                 kit::notice(ui, Level::Warn, c.hint_not_registered);
             }
             if technical {
+                // Identifiers and the folder on this computer are not part of checking the code:
+                // they are behind a closed header, each on its own labelled line.
                 ui.add_space(kit::SP_3);
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(format!(
-                            "{}  {}",
-                            shorten_name(&ct.endpoint_id, 24),
-                            crate::transfers::plain_path(&ct.inbox_dir)
-                        ))
-                        .monospace()
-                        .color(pal().faint),
-                    )
-                    .wrap(true),
-                );
+                egui::CollapsingHeader::new(kit::muted_text(crate::uitext::technical_details(
+                    c.locale,
+                )))
+                .id_source("verify_technical")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.label(label_text(crate::uitext::endpoint_label(c.locale)));
+                    kit::mono(ui, &shorten_name(&ct.endpoint_id, 24));
+                    ui.label(label_text(crate::uitext::folder_label(c.locale)));
+                    kit::mono(ui, &crate::transfers::plain_path(&ct.inbox_dir));
+                });
             }
             ui.add_space(kit::SP_3);
             if kit::primary(ui, true, c.done_btn).clicked() {

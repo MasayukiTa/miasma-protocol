@@ -142,6 +142,8 @@ pub struct MiasmaApp {
     used_mb: f64,
     quota_mb: u64,
     pending_replication: usize,
+    /// When the last status answer came (the Status screen says how long ago).
+    status_updated_at: Option<std::time::Instant>,
     replicated_count: usize,
     listen_addrs: Vec<String>,
     wss_port: u16,
@@ -558,6 +560,7 @@ impl MiasmaApp {
             used_mb: 0.0,
             quota_mb: 0,
             pending_replication: 0,
+            status_updated_at: None,
             replicated_count: 0,
             listen_addrs: Vec::new(),
             wss_port: 0,
@@ -961,6 +964,7 @@ impl MiasmaApp {
                     self.used_mb = used_mb;
                     self.quota_mb = quota_mb;
                     self.pending_replication = pending_replication;
+                    self.status_updated_at = Some(std::time::Instant::now());
                     self.replicated_count = replicated_count;
                     self.listen_addrs = listen_addrs;
                     self.wss_port = wss_port;
@@ -1459,30 +1463,46 @@ impl MiasmaApp {
         let transfer_label = self.tr().tab_easy;
 
         kit::page(ui, s.files_heading_easy, Some(s.files_desc_easy), |ui| {
-            // Sending is the first thing here, as it is on Home: the one send flow.
-            kit::surface(ui, |ui| {
-                if kit::primary(ui, connected, s.home_send_action).clicked() {
+            // Two main tasks side by side, big; storing and restoring under them, still large;
+            // what happened (transfers, sent files) as small links at the bottom.
+            let gap = kit::SP_3;
+            let w = ((ui.available_width() - gap) / 2.0).floor().max(120.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                if kit::large_action(ui, true, connected, s.home_send_action, w).clicked() {
+                    // The one send flow, over this screen.
                     self.send_flow.open_empty(self.contacts.contact_list());
                 }
-                ui.add_space(kit::SP_1);
-                for (i, (label, tab)) in [
-                    (s.home_receive_action, Tab::Inbox),
-                    (s.home_save_action, Tab::Store),
-                    (s.tab_retrieve_easy, Tab::Retrieve),
-                    (transfer_label, Tab::Transfers),
-                    (s.tab_outbox_easy, Tab::Outbox),
-                ]
-                .into_iter()
-                .enumerate()
+                if kit::large_action(ui, false, connected, s.home_receive_action, w).clicked() {
+                    self.tab = Tab::Inbox;
+                }
+            });
+            ui.add_space(kit::SP_3);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                if kit::large_action(ui, false, connected, s.home_save_action, w).clicked() {
+                    self.tab = Tab::Store;
+                }
+                if kit::large_action(ui, false, connected, s.tab_retrieve_easy, w).clicked() {
+                    self.tab = Tab::Retrieve;
+                }
+            });
+            ui.add_space(kit::SP_4);
+            kit::divider(ui);
+            ui.horizontal(|ui| {
+                if crate::form_check::add_enabled(ui, connected, kit::quiet_button(transfer_label))
+                    .clicked()
                 {
-                    if i > 0 {
-                        ui.add_space(kit::SP_1);
-                    }
-                    if crate::form_check::add_enabled(ui, connected, kit::secondary_button(label))
-                        .clicked()
-                    {
-                        self.tab = tab;
-                    }
+                    self.tab = Tab::Transfers;
+                }
+                if crate::form_check::add_enabled(
+                    ui,
+                    connected,
+                    kit::quiet_button(s.tab_outbox_easy),
+                )
+                .clicked()
+                {
+                    self.tab = Tab::Outbox;
                 }
             });
         });
@@ -1504,49 +1524,6 @@ impl MiasmaApp {
             s.store_desc
         };
         kit::page(ui, title, Some(desc), |ui| {
-            // Easy mode: the three numbers that matter, as plain figures.
-            if easy && connected {
-                kit::section(ui, s.dashboard_quick_status, |ui| {
-                    let pct = if self.quota_mb > 0 {
-                        (self.used_mb / self.quota_mb as f64) * 100.0
-                    } else {
-                        0.0
-                    };
-                    let storage = if self.quota_mb > 0 {
-                        format!("{pct:.0}%")
-                    } else {
-                        s.dashboard_no_data.to_owned()
-                    };
-                    kit::stats(
-                        ui,
-                        &[
-                            (s.dashboard_storage_label, storage, Level::Muted),
-                            (
-                                s.dashboard_peers_label,
-                                self.peer_count.to_string(),
-                                if self.peer_count > 0 {
-                                    Level::Ok
-                                } else {
-                                    Level::Warn
-                                },
-                            ),
-                            (
-                                s.status_items_stored,
-                                self.share_count.to_string(),
-                                Level::Muted,
-                            ),
-                        ],
-                    );
-                    if self.quota_mb > 0 {
-                        ui.add_space(kit::SP_1);
-                        kit::progress(ui, s.status_storage, (pct / 100.0) as f32, pct > 90.0);
-                    }
-                    if self.peer_count == 0 {
-                        kit::hint(ui, s.health_no_peers);
-                    }
-                });
-            }
-
             if easy && !connected {
                 kit::notice(ui, Level::Warn, s.store_not_connected_hint);
             }
@@ -1957,7 +1934,12 @@ impl MiasmaApp {
                 for item in &items {
                     kit::list_item(ui, |ui| {
                         let (level, state_label) = inbox_state_display(s, &item.state, easy);
-                        envelope_header(ui, &envelope_title(item, easy), level, state_label);
+                        envelope_header(
+                            ui,
+                            &envelope_title(item, easy, self.locale),
+                            level,
+                            state_label,
+                        );
 
                         kit::kv_grid(ui, |g| {
                             if !easy {
@@ -1983,8 +1965,18 @@ impl MiasmaApp {
                                     });
                                 });
                             }
-                            g.text(crate::uitext::created_label(self.locale), &item.created_at);
-                            g.text(crate::uitext::expires_label(self.locale), &item.expires_at);
+                            time_row(
+                                g,
+                                crate::uitext::created_label(self.locale),
+                                &item.created_at,
+                                easy,
+                            );
+                            time_row(
+                                g,
+                                crate::uitext::expires_label(self.locale),
+                                &item.expires_at,
+                                easy,
+                            );
                             // Challenge code: the recipient reads this out to the sender.
                             if let Some(ref code) = item.challenge_code {
                                 let label = if easy {
@@ -2112,7 +2104,12 @@ impl MiasmaApp {
                 for item in &items {
                     kit::list_item(ui, |ui| {
                         let (level, state_label) = outbox_state_display(s, &item.state, easy);
-                        envelope_header(ui, &envelope_title(item, easy), level, state_label);
+                        envelope_header(
+                            ui,
+                            &envelope_title(item, easy, self.locale),
+                            level,
+                            state_label,
+                        );
 
                         kit::kv_grid(ui, |g| {
                             if !easy {
@@ -2123,8 +2120,18 @@ impl MiasmaApp {
                             if let Some(ref fname) = item.filename {
                                 g.text(s.outbox_filename, fname);
                             }
-                            g.text(crate::uitext::created_label(self.locale), &item.created_at);
-                            g.text(crate::uitext::expires_label(self.locale), &item.expires_at);
+                            time_row(
+                                g,
+                                crate::uitext::created_label(self.locale),
+                                &item.created_at,
+                                easy,
+                            );
+                            time_row(
+                                g,
+                                crate::uitext::expires_label(self.locale),
+                                &item.expires_at,
+                                easy,
+                            );
                         });
 
                         // Sender confirmation: ask for the challenge code.
@@ -2203,6 +2210,13 @@ impl MiasmaApp {
             kit::button_row(ui, |ui| {
                 if ui.add(kit::secondary_button(s.status_refresh)).clicked() {
                     let _ = self.worker.tx.try_send(WorkerCmd::GetStatus);
+                }
+                // Visible proof that the numbers are current, also when nothing changed.
+                if let Some(at) = self.status_updated_at {
+                    ui.label(kit::muted_text(crate::uitext::updated_ago(
+                        self.locale,
+                        at.elapsed().as_secs(),
+                    )));
                 }
                 if !easy {
                     self.copy_diagnostics_button(ui);
@@ -2434,7 +2448,7 @@ impl MiasmaApp {
                     if self.pending_replication > 0 {
                         ui.label(
                             RichText::new(format!(
-                                "{} replicated, {} pending",
+                                "{} of your items spread to other peers, {} still waiting",
                                 self.replicated_count, self.pending_replication
                             ))
                             .color(kit::level_color(Level::Warn)),
@@ -2462,8 +2476,13 @@ impl MiasmaApp {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = kit::SP_4;
                     if self.wss_port > 0 {
-                        let tls = if self.wss_tls_enabled { "TLS" } else { "plain" };
-                        kit::status_dot(ui, Level::Ok, &format!("WSS :{} ({tls})", self.wss_port));
+                        // "plain" read as unencrypted WSS; what differs is whether TLS wraps it.
+                        let tls = if self.wss_tls_enabled {
+                            "TLS on"
+                        } else {
+                            "TLS off"
+                        };
+                        kit::status_dot(ui, Level::Ok, &format!("WSS :{}, {tls}", self.wss_port));
                     }
                     if self.obfs_quic_port > 0 {
                         kit::status_dot(
@@ -3541,10 +3560,24 @@ fn short(s: &str, n: usize) -> &str {
 }
 
 /// The title of an inbox/outbox item: the file name in Easy mode, the envelope id otherwise.
-fn envelope_title(item: &InboxItem, easy: bool) -> String {
+fn envelope_title(item: &InboxItem, easy: bool, locale: Locale) -> String {
     match (easy, item.filename.as_deref()) {
         (true, Some(name)) if !name.is_empty() => name.to_owned(),
+        // Easy never leads with an identifier nobody can read.
+        (true, _) => crate::uitext::unnamed_file(locale).to_owned(),
         _ => short(&item.envelope_id, 16).to_owned(),
+    }
+}
+
+/// A date row. Easy shows how long ago (or how long to go); the exact date is in the hover text.
+fn time_row(g: &mut kit::Kv, label: &str, full: &str, easy: bool) {
+    if easy {
+        let short_text = full.split(" (").next().unwrap_or(full).to_owned();
+        g.row(label, |ui| {
+            ui.label(short_text).on_hover_text(full);
+        });
+    } else {
+        g.text(label, full);
     }
 }
 
