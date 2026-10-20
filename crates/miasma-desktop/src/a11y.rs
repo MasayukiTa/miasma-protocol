@@ -347,20 +347,15 @@ fn trap_sentinel(ctx: &egui::Context, which: &'static str) {
         });
 }
 
-/// Call on the raw input before every frame (eframe's `raw_input_hook`): focus that arrived on a
-/// dialog's end stop continues at the first control, focus that arrived on its start stop
-/// (Shift+Tab from the first control) continues at the last one. egui offers no way to set the
-/// direction of the focus move except through a Tab key event, so one is added: focus is put on
-/// the opposite stop and the key moves it on from there.
-pub fn trap_input(ctx: &egui::Context, raw: &mut egui::RawInput) {
-    let (start, end) = (trap_id("start"), trap_id("end"));
-    let (to, shift) = match ctx.memory(|m| m.focused()) {
-        Some(f) if f == end => (start, false),
-        Some(f) if f == start => (end, true),
-        _ => return,
-    };
-    ctx.memory_mut(|m| m.request_focus(to));
-    raw.events.push(egui::Event::Key {
+/// Frames after a Tab press during which a focus that lands on a window's own stop is moved on.
+const TAB_RECENT: u64 = 3;
+
+fn tab_dir_id() -> egui::Id {
+    egui::Id::new("a11y_dialog_trap_last_tab")
+}
+
+fn tab_event(shift: bool) -> egui::Event {
+    egui::Event::Key {
         key: egui::Key::Tab,
         physical_key: None,
         pressed: true,
@@ -370,7 +365,56 @@ pub fn trap_input(ctx: &egui::Context, raw: &mut egui::RawInput) {
         } else {
             egui::Modifiers::NONE
         },
+    }
+}
+
+/// Call on the raw input before every frame (eframe's `raw_input_hook`).
+///
+/// - Focus that arrived on a dialog's end stop continues at the first control; focus that arrived
+///   on its start stop (Shift+Tab from the first control) continues at the last one.
+/// - A window is itself a Tab stop of egui (an unnamed one, right after its last control): focus
+///   that lands there by Tab moves on in the same direction.
+///
+/// egui offers no way to set the direction of a focus move except through a Tab key event, so one
+/// is added: focus is put where the move should start and the key moves it on from there.
+pub fn trap_input(ctx: &egui::Context, raw: &mut egui::RawInput) {
+    let frame = ctx.frame_nr();
+    // Remember the direction of the last Tab press.
+    let pressed = raw.events.iter().find_map(|e| match e {
+        egui::Event::Key {
+            key: egui::Key::Tab,
+            pressed: true,
+            modifiers,
+            ..
+        } => Some(modifiers.shift),
+        _ => None,
     });
+    if let Some(shift) = pressed {
+        ctx.data_mut(|d| d.insert_temp(tab_dir_id(), (shift, frame)));
+    }
+    let open: Option<u64> = ctx.data_mut(|d| d.get_temp(trap_open_id()));
+    if open.map_or(true, |at| at + 2 < frame) {
+        return; // no dialog on screen
+    }
+    let (start, end) = (trap_id("start"), trap_id("end"));
+    let Some(focused) = ctx.memory(|m| m.focused()) else {
+        return;
+    };
+    let (to, shift) = if focused == end {
+        (start, false)
+    } else if focused == start {
+        (end, true)
+    } else {
+        // A window's own stop: keep going the way the last Tab press went.
+        let is_window = ctx.memory(|m| m.layer_ids().any(|l| l.id == focused));
+        let last: Option<(bool, u64)> = ctx.data_mut(|d| d.get_temp(tab_dir_id()));
+        match last {
+            Some((shift, at)) if is_window && at + TAB_RECENT >= frame => (focused, shift),
+            _ => return,
+        }
+    };
+    ctx.memory_mut(|m| m.request_focus(to));
+    raw.events.push(tab_event(shift));
 }
 
 // ── Collapsing headers ────────────────────────────────────────────────────
