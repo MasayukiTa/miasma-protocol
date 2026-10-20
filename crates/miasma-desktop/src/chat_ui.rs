@@ -1615,7 +1615,8 @@ impl ChatUi {
                     .max_height(320.0)
                     .show(ui, |ui| {
                         for ct in picker_order(contacts) {
-                            let r = ui.add_enabled(
+                            let r = crate::form_check::add_enabled(
+                                ui,
                                 ct.allow_send,
                                 kit::secondary_button(elide(&ct.label, NAME_CHARS)),
                             );

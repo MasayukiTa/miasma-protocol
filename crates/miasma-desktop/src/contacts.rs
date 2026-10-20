@@ -1833,7 +1833,11 @@ impl ContactsUi {
             }
             ui.add_space(kit::SP_3);
             ui.label(label_text(c.my_code));
-            kit::code_display(ui, &code);
+            let code_edit = kit::code_display(ui, &code);
+            crate::form_check::name(
+                &code_edit,
+                crate::locale::audit_strings(c.locale).a11y_my_code,
+            );
             hint(ui, c.my_code_hint);
             ui.horizontal(|ui| {
                 let l = if recent(self.copied_at) {
@@ -2071,13 +2075,11 @@ impl ContactsUi {
             });
             let dirty = *buf != init;
             let text = buf.clone();
-            let mut save = false;
-            ui.horizontal(|ui| {
-                save = ui
-                    .add_enabled(dirty, kit::secondary_button(c.save))
-                    .clicked();
-            });
-            if save {
+            // The two check boxes act at once; the size is kept when Done is pressed (one
+            // button, no separate Save), and an invalid size keeps the dialog open.
+            ui.add_space(kit::SP_3);
+            let mut done = kit::primary(ui, true, c.done_btn).clicked();
+            if done && dirty {
                 match parse_size_limit(&text) {
                     Ok(limit) => {
                         self.max_error.remove(&ct.id);
@@ -2088,14 +2090,14 @@ impl ContactsUi {
                     }
                     Err(()) => {
                         self.max_error.insert(ct.id.clone());
+                        done = false;
                     }
                 }
             }
             if self.max_error.contains(&ct.id) {
                 kit::notice(ui, Level::Error, c.max_size_invalid);
             }
-            ui.add_space(kit::SP_3);
-            if kit::primary(ui, true, c.done_btn).clicked() {
+            if done {
                 close = true;
             }
         });
@@ -2289,10 +2291,13 @@ impl ContactsUi {
                         };
                         act = Some((ct.id.clone(), ct.label.clone(), which));
                     }
-                    let send = ui
-                        .add_enabled(ct.allow_send, kit::quiet_button(c.send_short))
-                        .on_hover_text(c.send_files)
-                        .on_disabled_hover_text(c.send_disabled_note);
+                    let send = crate::form_check::add_enabled(
+                        ui,
+                        ct.allow_send,
+                        kit::quiet_button(c.send_short),
+                    )
+                    .on_hover_text(c.send_files)
+                    .on_disabled_hover_text(c.send_disabled_note);
                     // "Send" alone is the same word on every row: name the person for a screen reader.
                     send.widget_info(|| {
                         egui::WidgetInfo::labeled(

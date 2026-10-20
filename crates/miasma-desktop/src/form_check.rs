@@ -67,6 +67,16 @@ pub fn mark_disabled(resp: &egui::Response) {
     });
 }
 
+/// `ui.add_enabled(..)` that also tells assistive technology when the control is switched off
+/// (egui draws it grey but publishes nothing). Use this instead of `ui.add_enabled`.
+pub fn add_enabled(ui: &mut egui::Ui, enabled: bool, widget: impl egui::Widget) -> egui::Response {
+    let resp = ui.add_enabled(enabled, widget);
+    if !enabled {
+        mark_disabled(&resp);
+    }
+    resp
+}
+
 /// True when Enter was pressed in this single-line field (it gave up focus because of it).
 pub fn submitted(resp: &egui::Response) -> bool {
     resp.lost_focus() && resp.ctx.input(|i| i.key_pressed(egui::Key::Enter))
@@ -205,6 +215,29 @@ mod tests {
         let mut input = raw();
         input.events.push(egui::Event::Text("x".into()));
         assert_eq!(rename_frame(&ctx, input, &mut text), EditKey::None);
+    }
+
+    #[test]
+    fn no_screen_switches_a_control_off_without_telling_assistive_technology() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut bad = Vec::new();
+        for e in std::fs::read_dir(&root).unwrap().flatten() {
+            let p = e.path();
+            if p.extension().map_or(true, |x| x != "rs") || p.ends_with("form_check.rs") {
+                continue;
+            }
+            let src = std::fs::read_to_string(&p).unwrap();
+            let code_end = src.find("\n#[cfg(test)]\nmod ").unwrap_or(src.len());
+            for (n, line) in src[..code_end].lines().enumerate() {
+                let t = line.trim_start();
+                if !t.starts_with("//")
+                    && (t.contains("ui.add_enabled(") || t.starts_with(".add_enabled("))
+                {
+                    bad.push(format!("{}:{}", p.display(), n + 1));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "use form_check::add_enabled: {bad:?}");
     }
 
     #[test]

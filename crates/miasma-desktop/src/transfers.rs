@@ -847,10 +847,13 @@ impl TransfersUi {
                 if show_clear_finished(&self.jobs) {
                     kit::button_row(ui, |ui| {
                         // Neutral: the one accent action on this screen is Start receiving / sending.
-                        if ui
-                            .add_enabled(connected, kit::secondary_button(t.btn_clear_finished))
-                            .on_hover_text(t.clear_finished_hint)
-                            .clicked()
+                        if crate::form_check::add_enabled(
+                            ui,
+                            connected,
+                            kit::secondary_button(t.btn_clear_finished),
+                        )
+                        .on_hover_text(t.clear_finished_hint)
+                        .clicked()
                         {
                             cmds.push(WorkerCmd::TransferClearFinished);
                             self.drop_rows(|j| !clearable(j));
@@ -1296,8 +1299,7 @@ impl TransfersUi {
         let protected = self.known_protected.contains(id);
         kit::button_row(ui, |ui| {
             if job.state == TransferState::Running {
-                if ui
-                    .add_enabled(connected, kit::secondary_button(t.btn_stop))
+                if crate::form_check::add_enabled(ui, connected, kit::secondary_button(t.btn_stop))
                     .clicked()
                 {
                     cmds.push(WorkerCmd::TransferCancel { id: id.to_owned() });
@@ -1324,8 +1326,7 @@ impl TransfersUi {
                     self.resume_open = true;
                     self.restart_confirm = false;
                 }
-                if ui
-                    .add_enabled(connected, kit::danger_button(t.btn_restart))
+                if crate::form_check::add_enabled(ui, connected, kit::danger_button(t.btn_restart))
                     .clicked()
                 {
                     self.restart_confirm = true;
@@ -1398,9 +1399,12 @@ impl TransfersUi {
                         &r,
                         crate::locale::audit_strings(t.locale).a11y_resume_password,
                     );
-                    if ui
-                        .add_enabled(connected, kit::danger_button(t.restart_yes))
-                        .clicked()
+                    if crate::form_check::add_enabled(
+                        ui,
+                        connected,
+                        kit::danger_button(t.restart_yes),
+                    )
+                    .clicked()
                     {
                         let via = self.known_via.get(&job.mid).cloned();
                         cmds.push(with_via(
@@ -1436,8 +1440,7 @@ impl TransfersUi {
         if self.discard_confirm {
             kit::notice(ui, Level::Error, t.discard_confirm);
             kit::button_row(ui, |ui| {
-                if ui
-                    .add_enabled(connected, kit::danger_button(t.discard_yes))
+                if crate::form_check::add_enabled(ui, connected, kit::danger_button(t.discard_yes))
                     .clicked()
                 {
                     cmds.push(WorkerCmd::TransferRemove {
@@ -1456,8 +1459,7 @@ impl TransfersUi {
             return;
         }
         kit::button_row(ui, |ui| {
-            if ui
-                .add_enabled(connected, kit::secondary_button(t.btn_remove))
+            if crate::form_check::add_enabled(ui, connected, kit::secondary_button(t.btn_remove))
                 .clicked()
             {
                 if needs_discard {
@@ -1565,9 +1567,12 @@ impl TransfersUi {
                 );
                 crate::form_check::name(&r, au.a11y_recv_path);
                 path_field = Some(r);
-                if ui
-                    .add_enabled(self.name_peek.is_none(), kit::secondary_button(t.browse))
-                    .clicked()
+                if crate::form_check::add_enabled(
+                    ui,
+                    self.name_peek.is_none(),
+                    kit::secondary_button(t.browse),
+                )
+                .clicked()
                 {
                     browse = true;
                 }

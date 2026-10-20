@@ -652,7 +652,7 @@ pub fn primary_button<'a>(text: impl Into<WidgetText>) -> egui::Button<'a> {
 /// instead of a washed-out accent.
 pub fn primary(ui: &mut Ui, enabled: bool, text: &str) -> Response {
     if !enabled {
-        let off = ui.add_enabled(false, secondary_button(text));
+        let off = crate::form_check::add_enabled(ui, false, secondary_button(text));
         crate::form_check::mark_disabled(&off);
         return off;
     }
@@ -719,7 +719,11 @@ pub fn large_action(
     let size = vec2(width, LARGE_ACTION_H);
     let label = RichText::new(text).text_style(section_style());
     if !primary_style || !enabled {
-        return ui.add_enabled(enabled, egui::Button::new(label).min_size(size));
+        return crate::form_check::add_enabled(
+            ui,
+            enabled,
+            egui::Button::new(label).min_size(size),
+        );
     }
     let p = pal();
     ui.scope(|ui| {
@@ -944,6 +948,11 @@ pub fn row_menu(
         }
     });
     let mut result = None;
+    if chosen.is_some() {
+        // Whatever opens next (a confirmation, or a dialog of the caller) hands focus back to
+        // this button, which stays, and not to the menu item, which goes with the popup.
+        crate::a11y::set_opener(ui.ctx(), button.id);
+    }
     if let Some(i) = chosen {
         if items.get(i).is_some_and(|it| it.confirm.is_some()) {
             ui.ctx().data_mut(|d| d.insert_temp(pending_id, i));
@@ -991,6 +1000,19 @@ pub fn row_menu(
     result
 }
 
+/// (window width, content width) of a dialog on a screen `screen_w` wide: the usual 460 / 440,
+/// or less when the screen is narrow (a margin of 16 px on each side, and the window's own
+/// frame inside it).
+pub fn dialog_widths(screen_w: f32) -> (f32, f32) {
+    let win = (screen_w - 32.0).clamp(200.0, 460.0);
+    let inner = if win >= 460.0 {
+        440.0
+    } else {
+        (win - 2.0 * SP_4 - 2.0).clamp(150.0, 440.0)
+    };
+    (win, inner)
+}
+
 /// A modal-looking dialog window, centred, with the focus and Esc handling of `a11y`. Returns
 /// `None` when Esc closed it (the caller then drops its "open" state); otherwise the value
 /// `body` returned. A caller that closes it by a button calls
@@ -1006,14 +1028,17 @@ pub fn dialog<R>(
         crate::a11y::dialog_leave(ctx, key);
         return None;
     }
+    // Never wider than the window (less a margin on each side): at 320 px the dialog used to
+    // keep its 440 px and ran off both edges.
+    let (win_w, inner_w) = dialog_widths(ctx.screen_rect().width());
     egui::Window::new(title)
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-        .default_width(420.0)
-        .max_width(460.0)
+        .default_width(win_w.min(420.0))
+        .max_width(win_w)
         .show(ctx, |ui| {
-            ui.set_max_width(440.0);
+            ui.set_max_width(inner_w);
             body(ui)
         })
         .and_then(|r| r.inner)
@@ -1106,6 +1131,11 @@ pub fn nav_tab(ui: &mut Ui, selected: bool, label: &str) -> Response {
     // Screen readers: a selectable item named by its label (which carries any count of new items).
     resp.widget_info(|| {
         egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, selected, label)
+    });
+    // A tab that says whether it is the selected one.
+    let _ = resp.ctx.accesskit_node_builder(resp.id, |b| {
+        b.set_role(egui::accesskit::Role::Tab);
+        b.set_selected(selected);
     });
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
@@ -1260,6 +1290,8 @@ pub fn menu_item(ui: &mut Ui, label: &str, danger: bool) -> bool {
             .min_size(vec2(w, CONTROL_H)),
     )
     .clicked()
+    .then(|| ui.memory_mut(|m| m.close_popup()))
+    .is_some()
 }
 
 /// A menu row with a check box (a setting that is on or off). Check `changed()` on the result.
