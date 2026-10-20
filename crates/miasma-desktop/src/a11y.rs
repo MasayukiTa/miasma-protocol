@@ -557,6 +557,13 @@ pub(crate) mod inventory {
                 vec![t.send, t.receive]
             },
         },
+        Entry {
+            file: "chat_ui.rs",
+            func: "read_check",
+            // The small check under an older message of mine that was read; the word is its name.
+            role: Role::Named,
+            names: |l| vec![locale::chat_strings(l).state_read],
+        },
     ];
 
     /// Calls that put a hand-painted rectangle in the layout.
