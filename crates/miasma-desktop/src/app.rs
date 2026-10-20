@@ -3829,7 +3829,7 @@ mod tests {
                 DaemonState::Starting,
                 DaemonState::NeedsInit,
             ] {
-                let r = home_page_size(state, width);
+                let r = home_page_size(state.clone(), width);
                 assert!(
                     r.height() < 1.0,
                     "{state:?} at {width}: the page below the card is empty, got {r:?}"
