@@ -179,6 +179,13 @@ pub(crate) mod inventory {
         },
         Entry {
             file: "ui_kit.rs",
+            // The initial circle: the person's name is always written beside it.
+            func: "avatar",
+            role: Role::Decoration,
+            names: none,
+        },
+        Entry {
+            file: "ui_kit.rs",
             func: "nav_tab",
             role: Role::Named,
             // The tab label is passed in by the caller from the tab strings.

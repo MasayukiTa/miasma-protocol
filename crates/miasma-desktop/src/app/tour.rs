@@ -844,7 +844,9 @@ fn easy_steps() -> Vec<Step> {
                 s.transfers = Some(v);
                 steps.push(s);
             }
-            for fx in ["empty", "two", "failed", "adderror"] {
+            for fx in [
+                "empty", "one", "two", "five", "failed", "adderror", "qr", "verify", "perm",
+            ] {
                 let mut s = base(
                     format!("easy_{lname}_contacts_{fx}_{wname}"),
                     Tab::Contacts,
