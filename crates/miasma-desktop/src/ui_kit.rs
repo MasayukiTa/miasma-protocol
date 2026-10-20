@@ -697,12 +697,8 @@ pub fn glyph_button(ui: &mut Ui, glyph: &str, name: &str) -> Response {
             w.inactive.weak_bg_fill = Color32::TRANSPARENT;
             w.inactive.bg_stroke = Stroke::NONE;
             ui.add(
-                egui::Button::new(
-                    RichText::new(glyph)
-                        .size(SECTION_PX)
-                        .color(pal().text),
-                )
-                .min_size(vec2(GLYPH_BTN, GLYPH_BTN)),
+                egui::Button::new(RichText::new(glyph).size(SECTION_PX).color(pal().text))
+                    .min_size(vec2(GLYPH_BTN, GLYPH_BTN)),
             )
         })
         .inner;
@@ -1830,7 +1826,10 @@ mod tests {
             assert_eq!(heights.len(), 4);
             for (h, w) in &heights[..3] {
                 assert_eq!(*h, ROW_H, "two-line row at {width}");
-                assert!((w - width).abs() < 1.5, "row is {w} wide in a {width} column");
+                assert!(
+                    (w - width).abs() < 1.5,
+                    "row is {w} wide in a {width} column"
+                );
             }
             assert_eq!(heights[3].0, ROW_H_ONE_LINE);
         }
@@ -1918,7 +1917,11 @@ mod tests {
                 });
             });
         }
-        assert_eq!(results, [None, None, None, None], "nothing is chosen unasked");
+        assert_eq!(
+            results,
+            [None, None, None, None],
+            "nothing is chosen unasked"
+        );
         assert_eq!(seen_pending[0], Some(1), "the dialog is waiting");
         assert_eq!(seen_pending[1], Some(1));
         assert_eq!(seen_pending[2], None, "Esc cancelled the question");

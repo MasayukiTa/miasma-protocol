@@ -1336,7 +1336,9 @@ impl MiasmaApp {
         // The three actions first, big enough to be the point of the screen. Three equal
         // columns; the first (send) is the primary, the other two are outlined.
         let gap = kit::SP_3;
-        let w = ((ui.available_width() - 2.0 * gap) / 3.0).floor().max(120.0);
+        let w = ((ui.available_width() - 2.0 * gap) / 3.0)
+            .floor()
+            .max(120.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = gap;
             if kit::large_action(ui, true, true, s.home_send_action, w).clicked() {

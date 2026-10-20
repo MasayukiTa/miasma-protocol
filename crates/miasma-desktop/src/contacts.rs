@@ -625,10 +625,7 @@ pub fn row_status(
     if !ct.allow_send {
         return (c.send_disabled_note, Level::Muted);
     }
-    match rows
-        .iter()
-        .find(|r| r.contact_id == ct.id && !r.finished())
-    {
+    match rows.iter().find(|r| r.contact_id == ct.id && !r.finished()) {
         Some(r) if r.state == PushState::Waiting => (state_label(c, r.state), Level::Warn),
         Some(r) => (state_label(c, r.state), Level::Info),
         None => (c.row_ready, Level::Muted),
@@ -2058,7 +2055,9 @@ impl ContactsUi {
             let text = buf.clone();
             let mut save = false;
             ui.horizontal(|ui| {
-                save = ui.add_enabled(dirty, kit::secondary_button(c.save)).clicked();
+                save = ui
+                    .add_enabled(dirty, kit::secondary_button(c.save))
+                    .clicked();
             });
             if save {
                 match parse_size_limit(&text) {
@@ -2103,7 +2102,9 @@ impl ContactsUi {
                 ui.add_space(kit::SP_3);
                 ui.horizontal(|ui| {
                     if kit::primary(ui, ok, c.save).clicked()
-                        || (ok && edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                        || (ok
+                            && edit.lost_focus()
+                            && ui.input(|i| i.key_pressed(egui::Key::Enter)))
                     {
                         commit = true;
                     }
@@ -2280,8 +2281,9 @@ impl ContactsUi {
             Act::Verify => self.verify_target = Some(id),
             Act::Permissions => self.perm_target = Some(id),
             Act::Remove => {
-                self.out
-                    .push_back(PushRequest::ContactRemove { contact: id.clone() });
+                self.out.push_back(PushRequest::ContactRemove {
+                    contact: id.clone(),
+                });
                 self.contacts.retain(|x| x.id != id);
                 self.edits.remove(&id);
             }
@@ -2340,9 +2342,7 @@ impl ContactsUi {
                     ui.label(egui::RichText::new(t).color(pal().muted));
                 }
                 if self.rows.iter().any(|r| r.finished())
-                    && ui
-                        .add(kit::quiet_button(c.btn_clear_finished))
-                        .clicked()
+                    && ui.add(kit::quiet_button(c.btn_clear_finished)).clicked()
                 {
                     self.clear_confirm = true;
                 }
@@ -3008,7 +3008,10 @@ mod tests {
                 .unwrap()
                 .verify_target
                 .is_some());
-            assert!(ContactsUi::fixture("perm", c).unwrap().perm_target.is_some());
+            assert!(ContactsUi::fixture("perm", c)
+                .unwrap()
+                .perm_target
+                .is_some());
             assert!(ContactsUi::fixture("adderror", c).unwrap().add_open);
             let failed = ContactsUi::fixture("failed", c).unwrap();
             for r in failed.rows.iter().filter(|r| r.finished()) {
@@ -3890,7 +3893,10 @@ mod tests {
         let c = contact_strings(Locale::En);
         let mut ct = bob();
         let none: Vec<Row> = Vec::new();
-        assert_eq!(row_status(c, &ct, false, &none), (c.row_ready, Level::Muted));
+        assert_eq!(
+            row_status(c, &ct, false, &none),
+            (c.row_ready, Level::Muted)
+        );
         assert_eq!(
             row_status(c, &ct, true, &none),
             (c.chip_not_registered, Level::Warn)
@@ -3918,10 +3924,16 @@ mod tests {
         );
         // A finished transfer says nothing.
         let done = rows(vec![t("3", Direction::Out, &ct.id, PushState::Done, 7)]);
-        assert_eq!(row_status(c, &ct, false, &done), (c.row_ready, Level::Muted));
+        assert_eq!(
+            row_status(c, &ct, false, &done),
+            (c.row_ready, Level::Muted)
+        );
         // Another contact's transfer does not show here.
         let other = rows(vec![t("4", Direction::Out, "zed", PushState::Sending, 8)]);
-        assert_eq!(row_status(c, &ct, false, &other), (c.row_ready, Level::Muted));
+        assert_eq!(
+            row_status(c, &ct, false, &other),
+            (c.row_ready, Level::Muted)
+        );
     }
 
     #[test]
