@@ -194,12 +194,7 @@ pub fn updated_ago(l: Locale, secs: u64) -> String {
 
 /// Title of a received or sent file whose name is not known yet.
 pub fn unnamed_file(l: Locale) -> &'static str {
-    pick(
-        l,
-        "Unnamed file",
-        "名前のないファイル",
-        "未命名文件",
-    )
+    pick(l, "Unnamed file", "名前のないファイル", "未命名文件")
 }
 
 /// The sender shown for an envelope in the old format, which carries none.
