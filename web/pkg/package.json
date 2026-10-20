@@ -6,7 +6,7 @@
   ],
   "description": "Miasma Protocol WebAssembly build — browser-side dissolve/retrieve",
   "version": "0.3.1",
-  "license": "AGPL-3.0",
+  "license": "MIT",
   "files": [
     "miasma_wasm_bg.wasm",
     "miasma_wasm.js",

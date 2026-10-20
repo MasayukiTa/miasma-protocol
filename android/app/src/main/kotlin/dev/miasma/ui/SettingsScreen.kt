@@ -257,7 +257,7 @@ fun SettingsScreen() {
                 Text(
                     "Miasma v${BuildConfig.VERSION_NAME} Beta\n" +
                     "Plausibly-deniable distributed storage protocol\n" +
-                    "AGPL-3.0 License",
+                    "MIT License",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
                 )
