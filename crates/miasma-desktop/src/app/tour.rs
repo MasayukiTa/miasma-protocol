@@ -286,6 +286,10 @@ struct Step {
     size: Option<(f32, f32)>,
     /// Product mode to show (None: leave as the app has it).
     mode: Option<crate::variant::ProductMode>,
+    /// A `SendFlow::fixture` name: the send flow is open over this screen.
+    flow: Option<&'static str>,
+    /// Files are being dragged over the window (the "Drop files to send" veil).
+    hover: bool,
 }
 
 /// `MIASMA_UI_SNAP=<dir>`: leave the app alone and only save what it draws, every
@@ -455,6 +459,8 @@ fn all_steps() -> Vec<Step> {
         chat: None,
         size: None,
         mode: None,
+        flow: None,
+        hover: false,
     });
     for (theme, tname) in [(ThemeMode::Dark, "dark"), (ThemeMode::Light, "light")] {
         for (locale, lname) in [(Locale::En, "en"), (Locale::Ja, "ja")] {
@@ -471,6 +477,8 @@ fn all_steps() -> Vec<Step> {
                         chat: None,
                         size: None,
                         mode: None,
+                        flow: None,
+                        hover: false,
                     });
                 }
             }
@@ -486,6 +494,8 @@ fn all_steps() -> Vec<Step> {
                     chat: None,
                     size: None,
                     mode: None,
+                    flow: None,
+                    hover: false,
                 });
             }
             // The Transfers tab, one step per situation worth looking at. The daemon is
@@ -520,6 +530,8 @@ fn all_steps() -> Vec<Step> {
                     chat: None,
                     size: None,
                     mode: None,
+                    flow: None,
+                    hover: false,
                 });
             }
             for (d, dname) in [
@@ -538,6 +550,8 @@ fn all_steps() -> Vec<Step> {
                     chat: None,
                     size: None,
                     mode: None,
+                    flow: None,
+                    hover: false,
                 });
             }
         }
@@ -562,6 +576,8 @@ fn all_steps() -> Vec<Step> {
                     chat: None,
                     size: Some((w, h)),
                     mode: None,
+                    flow: None,
+                    hover: false,
                 });
             }
         }
@@ -586,6 +602,8 @@ fn all_steps() -> Vec<Step> {
                     chat: Some(fx),
                     size: Some((w, h)),
                     mode: None,
+                    flow: None,
+                    hover: false,
                 });
             }
         }
@@ -614,6 +632,8 @@ fn arrange(step: &Step, app: &mut MiasmaApp, ctx: &egui::Context, first: bool) {
         }
         app.locale = step.locale;
         app.tab = step.tab;
+        // The send flow is closed at the start of every step, then opened as the step says.
+        app.send_flow = crate::send_flow::SendFlow::default();
         if let Some(d) = &step.daemon {
             app.daemon_state = d.clone();
         }
@@ -647,6 +667,17 @@ fn arrange(step: &Step, app: &mut MiasmaApp, ctx: &egui::Context, first: bool) {
             ) {
                 app.contacts = ui;
             }
+        }
+        if let Some(name) = step.flow {
+            if let Some(ui) = crate::contacts::ContactsUi::fixture(
+                "active",
+                crate::locale::contact_strings(step.locale),
+            ) {
+                app.contacts = ui;
+            }
+            app.transfers.set_mock(mock_jobs());
+            app.send_flow = crate::send_flow::SendFlow::fixture(name, app.contacts.contact_list())
+                .unwrap_or_default();
         }
         if let Some(v) = &step.transfers {
             // Tall enough that the list, the detail pane and the form are all on screen.
@@ -687,11 +718,11 @@ fn easy_steps() -> Vec<Step> {
     let mut steps = Vec::new();
     let sizes = [(1200.0, 900.0, "wide"), (700.0, 1200.0, "narrow")];
     let locales = [(Locale::En, "en"), (Locale::Ja, "ja"), (Locale::ZhCn, "zh")];
-    let screens: [(Tab, &str); 8] = [
+    // Easy mode has no Send screen: sending is the shared flow (see the "flow" steps below).
+    let screens: [(Tab, &str); 7] = [
         (Tab::Home, "home"),
         (Tab::Files, "files"),
         (Tab::Settings, "settings"),
-        (Tab::Send, "send"),
         (Tab::Inbox, "inbox"),
         (Tab::Store, "store"),
         (Tab::Retrieve, "retrieve"),
@@ -718,6 +749,8 @@ fn easy_steps() -> Vec<Step> {
                     },
                 )),
                 mode: Some(ProductMode::Easy),
+                flow: None,
+                hover: false,
             };
             for (tab, tname) in screens {
                 steps.push(base(
@@ -764,7 +797,18 @@ fn easy_steps() -> Vec<Step> {
                 s.contacts = Some(fx);
                 steps.push(s);
             }
-            for fx in ["nocontacts", "list", "thread", "failed", "notsupported"] {
+            for fx in [
+                "nocontacts",
+                "list",
+                "thread",
+                "failed",
+                "notsupported",
+                "menu",
+                "verify",
+                "grouplist",
+                "group",
+                "groupinfo",
+            ] {
                 let mut s = base(
                     format!("easy_{lname}_chat_{fx}_{wname}"),
                     Tab::Chat,
@@ -773,6 +817,24 @@ fn easy_steps() -> Vec<Step> {
                 s.chat = Some(fx);
                 steps.push(s);
             }
+            // The one send flow, over Home, in every state; and the veil shown while files are
+            // dragged over the window.
+            for fx in crate::send_flow::FIXTURES.iter().copied() {
+                let mut s = base(
+                    format!("easy_{lname}_flow_{fx}_{wname}"),
+                    Tab::Home,
+                    DaemonState::Connected,
+                );
+                s.flow = Some(fx);
+                steps.push(s);
+            }
+            let mut s = base(
+                format!("easy_{lname}_drop_{wname}"),
+                Tab::Home,
+                DaemonState::Connected,
+            );
+            s.hover = true;
+            steps.push(s);
         }
     }
     steps
@@ -835,6 +897,9 @@ mod tests {
                     predicted_dt: 1.0 / 60.0,
                     ..Default::default()
                 };
+                if step.hover {
+                    raw.hovered_files.push(egui::HoveredFile::default());
+                }
                 raw.viewports
                     .entry(egui::ViewportId::ROOT)
                     .or_default()
