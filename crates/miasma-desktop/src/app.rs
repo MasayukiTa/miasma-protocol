@@ -4305,6 +4305,54 @@ mod tests {
     }
 
     #[test]
+    fn the_chat_protection_radios_are_published_as_disabled_when_the_build_lacks_it() {
+        use miasma_core::config::PqcMode;
+        if PqcMode::available() {
+            return; // the radios are live in this build
+        }
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let data = tempfile::tempdir().unwrap();
+        let mut app = MiasmaApp::new_with_ctx(
+            &ctx,
+            None,
+            ProductMode::Easy,
+            Locale::En,
+            ThemeMode::Light,
+            data.path().to_path_buf(),
+            LaunchIntent::Normal,
+        );
+        app.tab = Tab::Settings;
+        app.settings_cat = SettingsCat::Privacy;
+        app.logs.legacy = None;
+        let mut radios: Vec<(String, bool)> = Vec::new();
+        for _ in 0..4 {
+            app.daemon_state = DaemonState::Connected;
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(900.0, 1400.0),
+                )),
+                ..Default::default()
+            };
+            let full = ctx.run(raw, |ctx| app.update_frame(ctx, None));
+            let update = full.platform_output.accesskit_update.unwrap();
+            radios = update
+                .nodes
+                .iter()
+                .filter(|(_, n)| n.role() == egui::accesskit::Role::RadioButton)
+                .map(|(_, n)| (n.name().unwrap_or("").to_owned(), n.is_disabled()))
+                .collect();
+        }
+        assert_eq!(radios.len(), 3, "{radios:?}");
+        for (name, disabled) in &radios {
+            assert!(*disabled, "radio {name:?} is published as enabled");
+        }
+        let names: std::collections::HashSet<_> = radios.iter().map(|(n, _)| n.clone()).collect();
+        assert_eq!(names.len(), 3, "each radio has its own name: {radios:?}");
+    }
+
+    #[test]
     fn home_puts_the_actions_first_and_draws_nothing_else_when_not_connected() {
         for width in [700.0_f32, 1200.0] {
             let connected = home_page_size(DaemonState::Connected, width);
