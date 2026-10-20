@@ -336,7 +336,9 @@ impl NetworkUi {
                         kit::mono(ui, url);
                     });
                 }
-                ui.horizontal(|ui| {
+                // Add stays off while the field is empty, with the reason beside it (the shared
+                // form helper); the reason wraps under the button in a narrow window.
+                ui.horizontal_wrapped(|ui| {
                     let w = kit::input_width_beside_button(ui);
                     let r = ui.add(
                         kit::input(&mut self.new_relay)
@@ -347,8 +349,20 @@ impl NetworkUi {
                         &r,
                         crate::locale::audit_strings(locale).a11y_relay_new,
                     );
-                    let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    if ui.add(kit::secondary_button(s.relay_add)).clicked() || enter {
+                    let enter = crate::form_check::submitted(&r);
+                    let needs = [crate::form_check::Need::new(
+                        &r,
+                        !self.new_relay.trim().is_empty(),
+                        s.err_url_empty,
+                    )];
+                    if crate::form_check::secondary_with_reason(
+                        ui,
+                        s.relay_add,
+                        &needs,
+                        true,
+                        enter,
+                    ) || (enter && needs[0].ok)
+                    {
                         add = true;
                     }
                 });
@@ -793,6 +807,59 @@ mod tests {
         ui.drain();
         assert!(!ui.dirty());
         assert!(matches!(ui.save, SaveState::Saved));
+    }
+
+    #[test]
+    fn add_relay_is_off_while_the_field_is_empty_and_says_why() {
+        for l in Locale::ALL {
+            let s = net_strings(l);
+            for (typed, enabled) in [("", false), ("   ", false), ("https://r.example.org", true)] {
+                let mut ui = NetworkUi::new(tempfile::tempdir().unwrap().path().to_path_buf());
+                ui.new_relay = typed.into();
+                let ctx = egui::Context::default();
+                ctx.enable_accesskit();
+                kit::apply_theme(&ctx, false);
+                let mut update = None;
+                let mut shapes = Vec::new();
+                for _ in 0..3 {
+                    let input = egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(700.0, 1400.0),
+                        )),
+                        ..Default::default()
+                    };
+                    let full = ctx.run(input, |ctx| {
+                        egui::CentralPanel::default().show(ctx, |panel| {
+                            ui.settings_section(panel, l, s, ctx);
+                        });
+                    });
+                    update = full.platform_output.accesskit_update;
+                    shapes = full.shapes;
+                }
+                let add: Vec<bool> = update
+                    .expect("tree")
+                    .nodes
+                    .iter()
+                    .filter(|(_, n)| n.name() == Some(s.relay_add))
+                    .map(|(_, n)| !n.is_disabled())
+                    .collect();
+                assert_eq!(add, [enabled], "{l:?} {typed:?}: Add enabled");
+                fn drawn(shape: &egui::Shape, text: &str) -> bool {
+                    match shape {
+                        egui::Shape::Text(t) => t.galley.text() == text,
+                        egui::Shape::Vec(v) => v.iter().any(|x| drawn(x, text)),
+                        _ => false,
+                    }
+                }
+                let reason = shapes.iter().any(|c| drawn(&c.shape, s.err_url_empty));
+                assert_eq!(
+                    reason, !enabled,
+                    "{l:?} {typed:?}: the reason is beside Add"
+                );
+                assert!(ui.relay_error.is_none(), "{l:?}: nothing was submitted");
+            }
+        }
     }
 
     #[test]

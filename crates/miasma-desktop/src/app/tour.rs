@@ -898,6 +898,7 @@ fn easy_steps() -> Vec<Step> {
                 "nocontacts",
                 "list",
                 "thread",
+                "reads",
                 "failed",
                 "notsupported",
                 "menu",

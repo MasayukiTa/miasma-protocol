@@ -64,6 +64,9 @@ group_strings! {
     // Two-pane Chat, short delivery state, member rows, contact search in the pickers
     pane_empty, state_waiting_short, a11y_member_self, member_more, member_show_code,
     member_hide_code, ng_search_hint, a11y_ng_search, ng_selected_only, ng_no_match,
+    // Name limit in characters, files and groups, list joiner
+    ng_name_count, ng_name_over_chars, ng_name_over_bytes, group_file_note, group_file_button,
+    a11y_group_file_button, list_sep,
 }
 
 pub fn group_strings(locale: Locale) -> &'static GroupStrings {
@@ -219,6 +222,13 @@ static GR_EN: GroupStrings = GroupStrings {
     a11y_ng_search: "Search contacts to include in the group",
     ng_selected_only: "Selected only",
     ng_no_match: "No contact matches.",
+    ng_name_count: "{n} / {max} characters",
+    ng_name_over_chars: "About {n} characters too long. A group name can have up to {max} characters.",
+    ng_name_over_bytes: "This name takes too much room. Emoji and some symbols count for more: remove about {n} characters.",
+    group_file_note: "Files cannot be sent to a group yet.",
+    group_file_button: "Send a file to a contact",
+    a11y_group_file_button: "Send a file to one of your contacts",
+    list_sep: ", ",
 };
 
 static GR_JA: GroupStrings = GroupStrings {
@@ -366,6 +376,13 @@ static GR_JA: GroupStrings = GroupStrings {
     a11y_ng_search: "グループに入れる連絡先を検索",
     ng_selected_only: "選択済みのみ",
     ng_no_match: "一致する連絡先がありません。",
+    ng_name_count: "{n} / {max} 文字",
+    ng_name_over_chars: "約 {n} 文字、長すぎます。グループ名は {max} 文字までです。",
+    ng_name_over_bytes: "この名前は長すぎます。絵文字などは多くの場所を使うため、約 {n} 文字減らしてください。",
+    group_file_note: "グループには、まだファイルを送れません。",
+    group_file_button: "連絡先にファイルを送る",
+    a11y_group_file_button: "連絡先の1人にファイルを送る",
+    list_sep: "、",
 };
 
 static GR_ZH_CN: GroupStrings = GroupStrings {
@@ -513,6 +530,13 @@ static GR_ZH_CN: GroupStrings = GroupStrings {
     a11y_ng_search: "搜索要加入群组的联系人",
     ng_selected_only: "仅显示已选",
     ng_no_match: "没有匹配的联系人。",
+    ng_name_count: "{n} / {max} 个字",
+    ng_name_over_chars: "约超出 {n} 个字。群组名称最多 {max} 个字。",
+    ng_name_over_bytes: "名称太长。表情符号等占用的空间更多，请删去约 {n} 个字。",
+    group_file_note: "暂时还不能向群组发送文件。",
+    group_file_button: "向联系人发送文件",
+    a11y_group_file_button: "向一位联系人发送文件",
+    list_sep: ", ",
 };
 
 #[cfg(test)]

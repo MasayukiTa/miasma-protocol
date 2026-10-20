@@ -52,7 +52,7 @@ const STALE: Duration = Duration::from_secs(20);
 /// Height of a row of the conversation list (the same as a one-to-one row).
 const ROW_H: f32 = 62.0;
 /// Room kept under the message list for the composer and its hints.
-const COMPOSER_RESERVE: f32 = 190.0;
+const COMPOSER_RESERVE: f32 = 220.0;
 /// Drafts remembered while another group is open.
 const MAX_DRAFTS: usize = 20;
 
@@ -1159,6 +1159,17 @@ impl GroupUi {
         } else if out.submit && counter(&self.composer, max_bytes).level == CounterLevel::Over {
             self.page_msg = Some(cs.too_long_note.to_owned());
         }
+        // A group has no file button: say so, and point to the one place that sends a file.
+        ui.horizontal_wrapped(|ui| {
+            ui.add(egui::Label::new(kit::meta_text(gs.group_file_note, pal().muted)).wrap(true));
+            let r = ui.add(kit::quiet_button(gs.group_file_button));
+            r.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, gs.a11y_group_file_button)
+            });
+            if r.clicked() {
+                self.action = Some(ChatAction::OpenSendFlow);
+            }
+        });
     }
 
     // ─── Drawing: the information panel ─────────────────────────────────────
@@ -1504,15 +1515,16 @@ impl GroupUi {
         let mut cancel = false;
         if let Some(form) = self.form.as_mut() {
             form.picks.retain_offered(&offered);
+            let (win_w, inner_w) = kit::dialog_widths(ctx.screen_rect().width());
             crate::a11y::dialog_title(ctx, gs.ng_title);
             egui::Window::new(gs.ng_title)
                 .id(egui::Id::new("group_new"))
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .max_width(460.0)
+                .max_width(win_w)
                 .show(ctx, |ui| {
-                    ui.set_max_width(440.0);
+                    ui.set_max_width(inner_w);
                     ui.label(kit::meta_text(gs.ng_name_label, pal().muted));
                     let r = ui.add(kit::input(&mut form.name).hint_text(gs.ng_name_hint));
                     r.widget_info(|| {
@@ -1523,6 +1535,17 @@ impl GroupUi {
                     }
                     if focus {
                         r.request_focus();
+                    }
+                    // The name is never cut while typing: the line under it counts characters while it
+                    // fits and says which limit was hit when it does not (Create stays off).
+                    let fit = crate::group::name_fit(&form.name);
+                    if fit == crate::group::NameFit::Ok {
+                        ui.label(kit::meta_text(
+                            crate::group::name_fit_text(gs, &form.name),
+                            pal().muted,
+                        ));
+                    } else {
+                        kit::notice(ui, Level::Error, &crate::group::name_over_text(gs, fit));
                     }
                     ui.add_space(kit::SP_2);
                     ui.label(kit::meta_text(gs.ng_members_label, pal().muted));
@@ -1537,7 +1560,7 @@ impl GroupUi {
                             let r = ui.add(
                                 kit::input(&mut form.search)
                                     .hint_text(gs.ng_search_hint)
-                                    .desired_width(220.0),
+                                    .desired_width(220.0_f32.min(inner_w)),
                             );
                             r.widget_info(|| {
                                 egui::WidgetInfo::labeled(
@@ -1600,7 +1623,9 @@ impl GroupUi {
                     }
                     ui.add_space(kit::SP_1);
                     kit::button_row(ui, |ui| {
-                        let ready = !form.name.trim().is_empty() && !form.picks.is_empty();
+                        let ready = !form.name.trim().is_empty()
+                            && !form.picks.is_empty()
+                            && crate::group::name_fit(&form.name) == crate::group::NameFit::Ok;
                         let r = kit::primary(ui, ready && !creating, gs.ng_create);
                         r.widget_info(|| {
                             egui::WidgetInfo::labeled(egui::WidgetType::Button, gs.ng_create)
@@ -1651,15 +1676,16 @@ impl GroupUi {
         let mut cancel = false;
         if let Some(p) = self.add.as_mut() {
             p.retain_offered(&offered);
+            let (win_w, inner_w) = kit::dialog_widths(ctx.screen_rect().width());
             crate::a11y::dialog_title(ctx, gs.add_title);
             egui::Window::new(gs.add_title)
                 .id(egui::Id::new("group_add"))
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .max_width(460.0)
+                .max_width(win_w)
                 .show(ctx, |ui| {
-                    ui.set_max_width(440.0);
+                    ui.set_max_width(inner_w);
                     if offered.is_empty() {
                         kit::paragraph(ui, gs.add_none);
                     }
@@ -2945,6 +2971,69 @@ mod tests {
                 let used = ctx.used_rect();
                 assert!(used.right() <= 700.5, "{name} {locale:?}: {used:?}");
                 assert!(requests(&mut ui).is_empty(), "{name}");
+            }
+        }
+    }
+
+    /// The two group dialogs in the narrowest window (320 px, the smallest the window can be
+    /// given): the dialog's own rectangle and everything drawn stay inside the screen, in every
+    /// language, with long names and the search row of a long contact list. Before the dialogs
+    /// used the shared responsive width they kept 440 px and ran off both sides by about 60 px.
+    #[test]
+    fn the_group_dialogs_stay_inside_a_320_px_window() {
+        const W: f32 = 320.0;
+        let many: Vec<ContactInfo> = (0..PICKER_SEARCH_MIN + 4)
+            .map(|i| ContactInfo {
+                id: format!("c{i}"),
+                label: format!("A contact whose name is rather long indeed {i}"),
+                endpoint_id: format!("ep-{i}"),
+                fingerprint: String::new(),
+                added_at: 0,
+                allow_send: true,
+                allow_receive: true,
+                max_file_size: None,
+                default_max_file_size: 0,
+                inbox_dir: String::new(),
+            })
+            .collect();
+        for locale in Locale::ALL {
+            for (dialog, id) in [("form", "group_new"), ("add", "group_add")] {
+                for name_len in [0usize, 300] {
+                    let mut ui = opened(true);
+                    ui.set_locale(locale);
+                    if dialog == "form" {
+                        ui.open_new_group();
+                        let form = ui.form.as_mut().unwrap();
+                        form.name = "あ".repeat(name_len);
+                        form.tick("c2", true);
+                    } else {
+                        ui.add = Some(Picks::default());
+                    }
+                    let ctx = egui::Context::default();
+                    kit::apply_theme(&ctx, false);
+                    for _ in 0..4 {
+                        let input = egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::pos2(0.0, 0.0),
+                                vec2(W, 719.0),
+                            )),
+                            ..Default::default()
+                        };
+                        let _ = ctx.run(input, |ctx| ui.dialogs(ctx, &many));
+                    }
+                    let area = ctx
+                        .memory(|m| m.area_rect(egui::Id::new(id)))
+                        .unwrap_or_else(|| panic!("{dialog} {locale:?}: the dialog is not drawn"));
+                    assert!(
+                        area.left() >= -0.5 && area.right() <= W + 0.5,
+                        "{dialog} {locale:?} name {name_len}: window {area:?} is wider than {W}"
+                    );
+                    let used = ctx.used_rect();
+                    assert!(
+                        used.left() >= -0.5 && used.right() <= W + 0.5,
+                        "{dialog} {locale:?} name {name_len}: drawn {used:?} is wider than {W}"
+                    );
+                }
             }
         }
     }
