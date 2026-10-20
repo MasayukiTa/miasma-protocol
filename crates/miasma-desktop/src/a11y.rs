@@ -1421,7 +1421,9 @@ pub(crate) mod tests {
         for _ in 0..6 {
             let mut o: Vec<usize> = (0..n).collect();
             for i in (1..n).rev() {
-                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                x = x
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 o.swap(i, (x >> 33) as usize % (i + 1));
             }
             orders.push(o);

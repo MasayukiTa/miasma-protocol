@@ -4790,13 +4790,19 @@ mod tests {
 
     /// Open a dialog by pressing a button, as a UI Automation client does.
     fn invoke_opens_a_dialog(rig: &mut A11yRig, button: &str) {
-        assert!(rig.dialogs().is_empty(), "a dialog is open before {button:?}");
+        assert!(
+            rig.dialogs().is_empty(),
+            "a dialog is open before {button:?}"
+        );
         rig.invoke(button);
         rig.frames(4);
         assert!(!rig.dialogs().is_empty(), "{button:?} opened no dialog");
         rig.walk_and_close();
         rig.frames(2);
-        assert!(rig.dialogs().is_empty(), "{button:?}: the dialog is still open");
+        assert!(
+            rig.dialogs().is_empty(),
+            "{button:?}: the dialog is still open"
+        );
     }
 
     #[test]
@@ -4849,8 +4855,7 @@ mod tests {
             let mut rig = A11yRig::new(Tab::Contacts);
             rig.app.contacts = ContactsUi::fixture("active", c).unwrap();
             rig.app.send_flow =
-                crate::send_flow::SendFlow::fixture(name, rig.app.contacts.contact_list())
-                    .unwrap();
+                crate::send_flow::SendFlow::fixture(name, rig.app.contacts.contact_list()).unwrap();
             rig.frames(4);
             assert!(!rig.dialogs().is_empty(), "send flow {name}: no dialog");
             rig.walk_and_close();
