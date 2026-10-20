@@ -1178,11 +1178,12 @@ pub(crate) mod tests {
         assert_eq!(
             seen,
             [Some(ids[1]), Some(ids[2]), Some(ids[0])],
-            "Tab (start {:?}, end {:?}, start area {:?}, end area {:?}, ids {:?}, layers {:?})",
+            "Tab (start {:?}, end {:?}, skip {:?}, last {:?}, frame {}, ids {:?}, layers {:?})",
             trap_id("start"),
             trap_id("end"),
-            trap_id("start").with("area"),
-            trap_id("end").with("area"),
+            ctx.data_mut(|d| d.get_temp::<egui::Id>(skip_id())),
+            ctx.data_mut(|d| d.get_temp::<(bool, u64)>(tab_dir_id())),
+            ctx.frame_nr(),
             ids,
             ctx.memory(|m| m
                 .layer_ids()
