@@ -278,7 +278,10 @@ mod tests {
                 screen.contains_rect(used),
                 "{w}x{h}: dialog {used:?} leaves the window"
             );
-            assert!(used.width() <= 460.0, "{w}: dialog wider than its limit");
+            assert!(
+                used.width() <= 460.0,
+                "{w}: dialog wider than its limit: {used:?}"
+            );
         }
     }
 
