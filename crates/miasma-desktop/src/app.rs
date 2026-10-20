@@ -3756,6 +3756,10 @@ impl Drop for MiasmaApp {
 }
 
 impl eframe::App for MiasmaApp {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        crate::a11y::trap_input(ctx, raw_input);
+    }
+
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.update_frame(ctx, frame.info().system_theme);
     }
@@ -4212,6 +4216,7 @@ impl MiasmaApp {
         self.dialogs(ctx);
         self.modal_open = self.any_modal_open();
         // Never leave the focus on a widget that is not on screen (see a11y::drop_orphan_focus).
+        crate::a11y::trap_finish(ctx);
         crate::a11y::drop_orphan_focus(ctx);
 
         // Esc dismisses the message in the bottom bar when no dialog is open (a dialog takes
