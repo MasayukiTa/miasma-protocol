@@ -67,7 +67,8 @@ jobs:
 
       # The feature is off by default, so the job above never builds it.
       - name: Test the hybrid upgrade (chat and protocol modules)
-        run: cargo test -p miasma-core --features pqc --locked --lib -- chat:: protocol::
+        run: |
+          cargo test -p miasma-core --features pqc --locked --lib -- chat:: protocol::
 
       - name: Test old-peer compatibility, frozen wire bytes, local-relay chat
         run: >
