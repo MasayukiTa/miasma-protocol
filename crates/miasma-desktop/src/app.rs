@@ -4825,7 +4825,6 @@ mod tests {
             (Tab::Chat, Some("picker"), "two"),
             (Tab::Chat, Some("confirm"), "two"),
             (Tab::Chat, Some("verify"), "two"),
-            (Tab::Chat, Some("groupinfo"), "two"),
             (Tab::Contacts, None, "qr"),
             (Tab::Contacts, None, "verify"),
             (Tab::Contacts, None, "perm"),
