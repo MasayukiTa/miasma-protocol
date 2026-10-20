@@ -4264,6 +4264,7 @@ mod tests {
             (|_, _| "", Some(Tab::Transfers)),
             (|s, _| s.tab_outbox_easy, Some(Tab::Outbox)),
         ];
+        let mut failed = Vec::new();
         for (i, (label_of, target)) in cases.into_iter().enumerate() {
             let ctx = egui::Context::default();
             ctx.enable_accesskit();
