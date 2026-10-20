@@ -4613,4 +4613,265 @@ mod tests {
             assert!(easy_nav_selected(file_tab, Tab::Files));
         }
     }
+
+    // ── Every dialog, with an assistive-technology client attached ────────────────────────
+
+    use crate::a11y::tests::{apply_in_every_order, assert_sound};
+    use accesskit_consumer::Tree as PlatformTree;
+    use egui::accesskit;
+
+    /// The app running headless with AccessKit on, and a copy of the tree that the platform
+    /// adapter keeps (every frame's update is applied to it, in several node orders).
+    struct A11yRig {
+        ctx: egui::Context,
+        app: MiasmaApp,
+        tree: Option<PlatformTree>,
+        last: accesskit::TreeUpdate,
+        clock: f64,
+        _data: tempfile::TempDir,
+    }
+
+    impl A11yRig {
+        fn new(tab: Tab) -> Self {
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            let data = tempfile::tempdir().unwrap();
+            let mut app = MiasmaApp::new_with_ctx(
+                &ctx,
+                None,
+                ProductMode::Easy,
+                Locale::En,
+                ThemeMode::Light,
+                data.path().to_path_buf(),
+                LaunchIntent::Normal,
+            );
+            app.tab = tab;
+            app.daemon_state = DaemonState::Connected;
+            app.logs.legacy = None;
+            let mut rig = Self {
+                ctx,
+                app,
+                tree: None,
+                last: accesskit::TreeUpdate {
+                    nodes: Vec::new(),
+                    tree: None,
+                    focus: accesskit::NodeId(0),
+                },
+                clock: 0.0,
+                _data: data,
+            };
+            rig.frames(2);
+            rig
+        }
+
+        fn frame_with(&mut self, events: Vec<egui::Event>) {
+            let mut raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1000.0, 700.0),
+                )),
+                time: Some(self.clock),
+                predicted_dt: 1.0 / 60.0,
+                events,
+                ..Default::default()
+            };
+            raw.viewports
+                .entry(egui::ViewportId::ROOT)
+                .or_default()
+                .native_pixels_per_point = Some(1.0);
+            self.clock += 1.0 / 60.0;
+            // The real worker runs in the background and reports that no service is there;
+            // the screens are looked at as with a service up.
+            self.app.daemon_state = DaemonState::Connected;
+            self.app.status_msg = None;
+            self.app.last_error = None;
+            let app = &mut self.app;
+            let out = self.ctx.run(raw, |ctx| app.update_frame(ctx, None));
+            let update = out
+                .platform_output
+                .accesskit_update
+                .expect("an accessibility update");
+            match &mut self.tree {
+                None => {
+                    let tree = PlatformTree::new(update.clone(), true);
+                    assert_sound(&tree);
+                    self.tree = Some(tree);
+                }
+                Some(tree) => apply_in_every_order(tree, &update),
+            }
+            self.last = update;
+        }
+
+        fn frames(&mut self, n: usize) {
+            for _ in 0..n {
+                self.frame_with(Vec::new());
+            }
+        }
+
+        fn named(&self, name: &str, role: Option<accesskit::Role>) -> Vec<accesskit::NodeId> {
+            self.last
+                .nodes
+                .iter()
+                .filter(|(_, n)| n.name() == Some(name) && role.map_or(true, |r| n.role() == r))
+                .map(|(id, _)| *id)
+                .collect()
+        }
+
+        fn dialogs(&self) -> Vec<String> {
+            self.last
+                .nodes
+                .iter()
+                .filter(|(_, n)| n.role() == accesskit::Role::Dialog)
+                .map(|(_, n)| n.name().unwrap_or_default().to_owned())
+                .collect()
+        }
+
+        fn buttons(&self) -> Vec<String> {
+            self.last
+                .nodes
+                .iter()
+                .filter(|(_, n)| n.role() == accesskit::Role::Button)
+                .filter_map(|(_, n)| n.name().map(str::to_owned))
+                .collect()
+        }
+
+        /// What a UI Automation client does for Invoke: an action request at the button.
+        fn request(&mut self, action: accesskit::Action, target: accesskit::NodeId) {
+            self.frame_with(vec![egui::Event::AccessKitActionRequest(
+                accesskit::ActionRequest {
+                    action,
+                    target,
+                    data: None,
+                },
+            )]);
+        }
+
+        fn invoke(&mut self, name: &str) {
+            let ids = self.named(name, Some(accesskit::Role::Button));
+            assert!(
+                !ids.is_empty(),
+                "no button {name:?}; buttons: {:?}",
+                self.buttons()
+            );
+            self.request(accesskit::Action::Default, ids[0]);
+        }
+
+        fn esc(&mut self) {
+            self.frame_with(vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+
+        /// Ask for focus on every control inside every dialog, one after the other (what a
+        /// screen reader's cursor does), then close the dialogs with Esc.
+        fn walk_and_close(&mut self) {
+            let inside: Vec<accesskit::NodeId> = self
+                .last
+                .nodes
+                .iter()
+                .filter(|(_, n)| n.role() == accesskit::Role::Dialog)
+                .flat_map(|(_, n)| n.children().to_vec())
+                .collect();
+            for id in inside.into_iter().take(12) {
+                if self.last.nodes.iter().any(|(i, _)| *i == id) {
+                    self.request(accesskit::Action::Focus, id);
+                }
+            }
+            for _ in 0..3 {
+                self.esc();
+                self.frames(2);
+            }
+        }
+    }
+
+    /// Open a dialog by pressing a button, as a UI Automation client does.
+    fn invoke_opens_a_dialog(rig: &mut A11yRig, button: &str) {
+        assert!(
+            rig.dialogs().is_empty(),
+            "a dialog is open before {button:?}"
+        );
+        rig.invoke(button);
+        rig.frames(4);
+        assert!(!rig.dialogs().is_empty(), "{button:?} opened no dialog");
+        rig.walk_and_close();
+        rig.frames(2);
+        assert!(
+            rig.dialogs().is_empty(),
+            "{button:?}: the dialog is still open"
+        );
+    }
+
+    #[test]
+    fn dialogs_opened_through_assistive_technology_never_break_the_platform_tree() {
+        let c = locale::contact_strings(Locale::En);
+        // Chat: New conversation, Create a new group.
+        let mut rig = A11yRig::new(Tab::Chat);
+        rig.app.chat = ChatUi::fixture("list").unwrap();
+        rig.app.contacts = ContactsUi::fixture("two", c).unwrap();
+        rig.frames(3);
+        invoke_opens_a_dialog(&mut rig, "New conversation");
+        invoke_opens_a_dialog(&mut rig, "Create a new group");
+        // Contacts: Add a contact, My invitation.
+        let mut rig = A11yRig::new(Tab::Contacts);
+        rig.app.contacts = ContactsUi::fixture("two", c).unwrap();
+        rig.frames(3);
+        invoke_opens_a_dialog(&mut rig, c.add_title);
+        invoke_opens_a_dialog(&mut rig, c.invite_btn);
+    }
+
+    #[test]
+    fn every_dialog_of_the_app_keeps_the_platform_tree_sound_while_it_opens_and_closes() {
+        let c = locale::contact_strings(Locale::En);
+        // Dialogs that the screens open from their own state.
+        for (tab, chat, contacts) in [
+            (Tab::Chat, Some("picker"), "two"),
+            (Tab::Chat, Some("confirm"), "two"),
+            (Tab::Chat, Some("verify"), "two"),
+            (Tab::Contacts, None, "qr"),
+            (Tab::Contacts, None, "verify"),
+            (Tab::Contacts, None, "perm"),
+            (Tab::Contacts, None, "added"),
+            (Tab::Contacts, None, "adderror"),
+        ] {
+            let mut rig = A11yRig::new(tab);
+            if let Some(fx) = chat {
+                rig.app.chat = ChatUi::fixture(fx).unwrap();
+            }
+            rig.app.contacts = ContactsUi::fixture(contacts, c).unwrap();
+            rig.frames(4);
+            assert!(
+                !rig.dialogs().is_empty(),
+                "{tab:?}/{chat:?}/{contacts}: no dialog in the tree"
+            );
+            rig.walk_and_close();
+            rig.frames(2);
+        }
+        // The send flow, in each of its states.
+        for name in ["empty", "contact", "code", "sent", "codesent"] {
+            let mut rig = A11yRig::new(Tab::Contacts);
+            rig.app.contacts = ContactsUi::fixture("active", c).unwrap();
+            rig.app.send_flow =
+                crate::send_flow::SendFlow::fixture(name, rig.app.contacts.contact_list()).unwrap();
+            rig.frames(4);
+            assert!(!rig.dialogs().is_empty(), "send flow {name}: no dialog");
+            rig.walk_and_close();
+            rig.frames(2);
+        }
+        // The confirmations the app itself asks.
+        for which in 0..2 {
+            let mut rig = A11yRig::new(Tab::Home);
+            match which {
+                0 => rig.app.show_wipe_confirm = true,
+                _ => rig.app.show_close_confirm = true,
+            }
+            rig.frames(4);
+            assert!(!rig.dialogs().is_empty(), "confirmation {which}: no dialog");
+            rig.walk_and_close();
+            rig.frames(2);
+        }
+    }
 }
