@@ -916,6 +916,9 @@ enum PqLoop {
 /// How often a held message asks again whether the exchange is finished.
 #[cfg(feature = "pqc")]
 const PQ_POLL: Duration = Duration::from_secs(2);
+/// Longest single wait for a time-driven decision (it asks again afterwards).
+#[cfg(feature = "pqc")]
+const PQ_DEADLINE_CAP_MS: u64 = 20_000;
 /// Failures in a row after which a worker that has only hybrid-upgrade
 /// records to send ends (the next message or record from the contact starts it
 /// again).
@@ -945,7 +948,24 @@ impl ChatService {
         let first = self.core.outbox.first_for(peer);
         let have_text = first.is_some();
         match self.core.pq_step(peer, have_text, now_ms()) {
-            Pass::Proceed => PqLoop::Free,
+            Pass::Proceed => {
+                // Nothing waits, but the wait for the contact's offer is still
+                // running: stay until it is over (or something arrives), so
+                // the conversation is shown as classical only without a
+                // further message.
+                if !have_text {
+                    if let Some(ms) = self.core.pq_deadline(peer, now_ms()) {
+                        let d = Duration::from_millis(ms.min(PQ_DEADLINE_CAP_MS));
+                        tokio::select! {
+                            _ = tokio::time::sleep(d) => {}
+                            _ = wake.notified() => {}
+                            _ = stop.changed() => {}
+                        }
+                        return PqLoop::Again;
+                    }
+                }
+                PqLoop::Free
+            }
             Pass::Hold => {
                 tokio::select! {
                     _ = tokio::time::sleep(PQ_POLL) => {}

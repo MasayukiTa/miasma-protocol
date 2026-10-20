@@ -855,6 +855,12 @@ impl ChatCore {
         }
     }
 
+    /// Milliseconds until a time-driven hybrid-upgrade decision for `peer`
+    /// falls due, if one is pending.
+    pub fn pq_deadline(&self, peer: &[u8; 32], now: u64) -> Option<u64> {
+        self.pq.deadline(peer, now)
+    }
+
     /// True when the delivery loop of `peer` has a hybrid-upgrade step to do.
     pub fn pq_attention(&self, peer: &[u8; 32], now: u64) -> bool {
         self.pq.wants_attention(peer, now)

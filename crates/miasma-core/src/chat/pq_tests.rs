@@ -211,6 +211,29 @@ fn prefer_with_a_classical_peer_downgrades_visibly_and_messages_flow() {
 }
 
 #[test]
+fn the_wait_for_an_offer_has_a_deadline_the_delivery_loop_can_wait_for() {
+    let a = side();
+    let b = side();
+    mode(&a, PqcMode::Prefer);
+    a.core.enqueue(&b.id(), "hello", 1).unwrap();
+    assert_eq!(
+        a.core.pq_deadline(&b.id(), 1_000),
+        None,
+        "nothing offered yet"
+    );
+    pump(&a, &b, 1_000);
+    assert_eq!(a.core.pq_deadline(&b.id(), 1_000), Some(OFFER_WAIT_MS));
+    assert_eq!(
+        a.core.pq_deadline(&b.id(), 1_000 + OFFER_WAIT_MS - 5),
+        Some(5)
+    );
+    // Once the wait is over the decision is taken and nothing is pending.
+    let _ = a.core.pq_step(&b.id(), false, 1_000 + OFFER_WAIT_MS);
+    assert_eq!(a.core.pq_deadline(&b.id(), 1_000 + OFFER_WAIT_MS), None);
+    assert_eq!(state_of(&a, &b).0, "classical");
+}
+
+#[test]
 fn prefer_with_a_build_that_rejects_the_offer_downgrades_at_once() {
     let a = side();
     let b = side();

@@ -911,6 +911,23 @@ impl PqState {
         }
     }
 
+    /// Milliseconds until a decision for `peer` falls due without anything
+    /// arriving: the wait for the peer's offer ends. `None` when no time-driven
+    /// step is pending. The delivery loop waits that long instead of leaving,
+    /// so "classical only" is decided and shown without a further message.
+    pub fn deadline(&self, peer: &[u8; 32], now: u64) -> Option<u64> {
+        if self.mode() == PqcMode::Off {
+            return None;
+        }
+        let g = self.lock();
+        let p = g.peers.get(peer)?;
+        if p.phase == Phase::Offered && p.peer_offer.is_empty() && p.offered_ms > 0 {
+            let due = p.offered_ms.saturating_add(OFFER_WAIT_MS);
+            return Some(due.saturating_sub(now).max(1));
+        }
+        None
+    }
+
     /// Report how the delivery of `out` ended.
     pub fn sent(
         &self,
