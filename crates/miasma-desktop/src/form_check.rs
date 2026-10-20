@@ -151,11 +151,11 @@ mod tests {
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 let r = ui.add(egui::TextEdit::singleline(text));
-                if !r.has_focus() && key == EditKey::None && !ctx.memory(|m| m.focused().is_some())
+                key = edit_keys(&r);
+                if key == EditKey::None && !r.has_focus() && !ctx.memory(|m| m.focused().is_some())
                 {
                     r.request_focus();
                 }
-                key = edit_keys(&r);
             });
         });
         key
