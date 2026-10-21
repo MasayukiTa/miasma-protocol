@@ -1523,19 +1523,20 @@ mod tests {
 
     #[test]
     fn canonical_strings_have_the_documented_shape() {
+        let request_nonce = B64U.encode(OsRng.gen::<[u8; 16]>());
         let s = canonical_request(
             "POST",
             "/api/publish?a=%2F",
             ORIGIN,
             "SID",
             5,
-            "NON",
+            &request_nonce,
             b"abc",
         );
         assert_eq!(
             s,
             format!(
-                "miasma-web-sig-v1\nPOST\n/api/publish?a=%2F\n{ORIGIN}\nSID\n5\nNON\n{}",
+                "miasma-web-sig-v1\nPOST\n/api/publish?a=%2F\n{ORIGIN}\nSID\n5\n{request_nonce}\n{}",
                 "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
             )
         );
