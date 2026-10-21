@@ -514,7 +514,9 @@ pub fn decode_record_value(
     // the input length, and by the largest record a node accepts. These
     // options encode exactly like `bincode::serialize` / `deserialize_from`
     // (fixed-width integers, trailing bytes allowed for the manifest trailer).
-    let limit = value.len().min(crate::network::node::DHT_INNER_RECORD_MAX_BYTES) as u64;
+    let limit = value
+        .len()
+        .min(crate::network::node::DHT_INNER_RECORD_MAX_BYTES) as u64;
     let mut cursor = std::io::Cursor::new(value);
     let record: DhtRecord = bincode::DefaultOptions::new()
         .with_fixint_encoding()
