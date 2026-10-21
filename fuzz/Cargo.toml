@@ -1,0 +1,112 @@
+[package]
+name = "miasma-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "cargo-fuzz targets for the wire and storage decoders (not part of the main workspace)"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+miasma-fuzz-harness = { path = "harness" }
+
+# A workspace of its own: `cargo build` at the repository root never sees this
+# directory, and the nightly-only fuzz build never touches the main lock file.
+[workspace]
+members = ["harness"]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "chat_frame"
+path = "fuzz_targets/chat_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "chat_state"
+path = "fuzz_targets/chat_state.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "group_decoders"
+path = "fuzz_targets/group_decoders.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "capability_fragment"
+path = "fuzz_targets/capability_fragment.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hybrid_kex"
+path = "fuzz_targets/hybrid_kex.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "record_value"
+path = "fuzz_targets/record_value.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "share_bytes"
+path = "fuzz_targets/share_bytes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "directed_wire"
+path = "fuzz_targets/directed_wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ws_wire"
+path = "fuzz_targets/ws_wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "contact_codes"
+path = "fuzz_targets/contact_codes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "state_doc_log"
+path = "fuzz_targets/state_doc_log.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "update_files"
+path = "fuzz_targets/update_files.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "onion_packet"
+path = "fuzz_targets/onion_packet.rs"
+test = false
+doc = false
+bench = false
