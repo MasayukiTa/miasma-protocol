@@ -146,8 +146,32 @@ jobs:
       - name: Build wasm target
         run: cargo build -p miasma-wasm --target wasm32-unknown-unknown --locked
 
+  # Offline release signing tool: its own workspace, never part of the apps.
+  test-release-sign:
+    name: Release signing tool tests (Ubuntu)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/release-sign
+
+      - name: Build and test the signing tool
+        run: cargo test --manifest-path tools/release-sign/Cargo.toml --locked
+
   build-apple-foundation:
     name: Apple Foundation Build (macOS)
+    # id-token and attestations are needed only for the provenance step, which
+    # runs on pushes to main; they are not granted to any other job.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -179,8 +203,20 @@ jobs:
           name: Miasma-macOS
           path: dist/Miasma-macOS.zip
 
+      # Build provenance for the archive (who built it, from which commit).
+      # Pushes to main only: pull requests build exactly as before.
+      - name: Attest build provenance (macOS archive)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/Miasma-macOS.zip
+
   macos-cli-transfer:
     name: CLI + desktop build and transfer e2e (macOS)
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     runs-on: macos-latest
     timeout-minutes: 60
     steps:
@@ -221,6 +257,12 @@ jobs:
           path: dist/miasma-macos.tar.gz
           retention-days: 14
           if-no-files-found: error
+
+      - name: Attest build provenance (macOS binaries)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/miasma-macos.tar.gz
 
   cross-compile-arm64:
     name: Cross-compile ARM64
