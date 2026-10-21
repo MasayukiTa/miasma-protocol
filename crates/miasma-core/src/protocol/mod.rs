@@ -18,6 +18,8 @@ pub mod capability;
 pub mod fragment;
 #[cfg(feature = "pqc")]
 pub mod hybrid;
+#[cfg(all(test, feature = "pqc"))]
+mod hybrid_kat_tests;
 
 #[cfg(test)]
 mod feature_gate_tests {

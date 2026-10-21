@@ -94,7 +94,15 @@ tokio = { version = "1", features = ["full", "test-util"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
 socket2 = "0.6"
+# Independent SHA-3 / SHAKE for the ML-KEM known-answer checks (already in the
+# lock file through ml-kem).
+sha3 = "0.12"
+shake = "0.1"
 
 [[bench]]
 name = "crypto_bench"
 harness = false
+
+# `fuzzing` is set by cargo-fuzz (see the fuzz/ directory).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
