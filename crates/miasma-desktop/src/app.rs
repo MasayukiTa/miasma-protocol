@@ -4815,6 +4815,10 @@ mod tests {
         last: accesskit::TreeUpdate,
         clock: f64,
         _data: tempfile::TempDir,
+        _worker: (
+            std::sync::mpsc::Receiver<WorkerCmd>,
+            std::sync::mpsc::SyncSender<WorkerResult>,
+        ),
     }
 
     impl A11yRig {
@@ -4834,6 +4838,15 @@ mod tests {
             app.tab = tab;
             app.daemon_state = DaemonState::Connected;
             app.logs.legacy = None;
+            // No real worker: it answers on its own schedule (an empty data folder reports
+            // "needs setup"), and `poll_worker` would apply that answer in the middle of a
+            // frame, after the state was pinned. The app talks to channels nobody answers.
+            let (cmd_tx, cmd_rx) = std::sync::mpsc::sync_channel(32);
+            let (res_tx, res_rx) = std::sync::mpsc::sync_channel(64);
+            app.worker = crate::worker::WorkerHandle {
+                tx: cmd_tx,
+                rx: res_rx,
+            };
             let mut rig = Self {
                 ctx,
                 app,
@@ -4845,6 +4858,7 @@ mod tests {
                 },
                 clock: 0.0,
                 _data: data,
+                _worker: (cmd_rx, res_tx),
             };
             rig.frames(2);
             rig
