@@ -175,7 +175,8 @@ fn a_conversation_stopped_by_a_restore_across_ratchet_steps_starts_again_for_the
         assert_eq!(send_one(&a, &b).1, AckStatus::Stored);
     }
     assert!(a.core.outbox.first_for(&peer_b).is_none());
-    assert_eq!(received(&b, &peer_a), ["q1", "q2", "q3"]);
+    // In order, after the text that came before the copy was taken.
+    assert_eq!(received(&b, &peer_a), ["hello", "q1", "q2", "q3"]);
     assert!(nothing_failed(&a, &peer_b));
     // The other direction works on the new session.
     b.core.enqueue(&peer_a, "from the other side", 4).unwrap();
