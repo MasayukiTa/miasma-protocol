@@ -185,7 +185,7 @@ fn read_sealed(data_dir: &Path) -> Result<Option<Vec<u8>>, RootKeyError> {
 fn map_format(e: FormatError) -> RootKeyError {
     match e {
         FormatError::FutureVersion(found) => RootKeyError::FutureVersion {
-            file: "root.sealed",
+            file: "the sealed key file",
             found,
         },
         other => RootKeyError::SealedCorrupt(other.to_string()),
