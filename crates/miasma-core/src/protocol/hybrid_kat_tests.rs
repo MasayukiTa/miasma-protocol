@@ -154,10 +154,9 @@ fn fixed_input_pins() {
     let (ct, k) = dk.encapsulation_key().encapsulate_deterministic(&message(0));
     let ct_hash = hex::encode(Sha3_256::digest(ct.as_slice()));
     let k_hex = hex::encode(k);
-    println!("PIN ct_sha3_256={ct_hash} k={k_hex}");
     assert_eq!(ct_hash, PIN_CT_SHA3_256);
     assert_eq!(k_hex, PIN_K);
 }
 
-const PIN_CT_SHA3_256: &str = "";
-const PIN_K: &str = "";
+const PIN_CT_SHA3_256: &str = "d1a2bb06a654f6a782e869c682616f2d5fb3d9623915c39c619d164322a5cd50";
+const PIN_K: &str = "e8d298689c230e8d1c13b952999c5e717e6b1e9f07a0d01839466215a57d2cd6";
