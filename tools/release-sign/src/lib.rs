@@ -48,7 +48,9 @@ impl std::fmt::Display for Error {
             Self::SumsMalformed(m) => write!(f, "SHA256SUMS.txt is not valid: {m}"),
             Self::SignatureMalformed => f.write_str("the signature file is malformed"),
             Self::SignatureInvalid => f.write_str("the signature is not valid for any given key"),
-            Self::BadPublicKey => f.write_str("the public key is not 64 hex characters of a valid key"),
+            Self::BadPublicKey => {
+                f.write_str("the public key is not 64 hex characters of a valid key")
+            }
             Self::NoKeys => f.write_str("at least one public key is required"),
         }
     }
@@ -96,11 +98,7 @@ impl KdfParams {
     }
 }
 
-fn derive(
-    passphrase: &[u8],
-    salt: &[u8],
-    k: KdfParams,
-) -> Result<Zeroizing<[u8; 32]>, Error> {
+fn derive(passphrase: &[u8], salt: &[u8], k: KdfParams) -> Result<Zeroizing<[u8; 32]>, Error> {
     k.check()?;
     let params = Params::new(k.m_kib, k.t, k.p, Some(32)).map_err(|_| Error::KdfParams)?;
     let mut out = Zeroizing::new([0u8; 32]);
@@ -397,7 +395,10 @@ mod tests {
         let (a, other) = (generate_key(), generate_key());
         let sig = sign_sums(&a, &sums()).unwrap();
         let pk = *other.verifying_key().as_bytes();
-        assert_eq!(verify_sums(&sums(), &sig, &[pk]), Err(Error::SignatureInvalid));
+        assert_eq!(
+            verify_sums(&sums(), &sig, &[pk]),
+            Err(Error::SignatureInvalid)
+        );
         assert_eq!(verify_sums(&sums(), &sig, &[]), Err(Error::NoKeys));
     }
 
@@ -456,13 +457,14 @@ mod tests {
     fn key_file_round_trip() {
         let key = generate_key();
         let file = encrypt_key(&key, b"correct horse battery", FAST).unwrap();
-        assert_eq!(key_file_public(&file).unwrap(), *key.verifying_key().as_bytes());
+        assert_eq!(
+            key_file_public(&file).unwrap(),
+            *key.verifying_key().as_bytes()
+        );
         let back = decrypt_key(&file, b"correct horse battery").unwrap();
         assert_eq!(back.to_bytes(), key.to_bytes());
         // The seed is not present in clear text.
-        assert!(!file
-            .windows(32)
-            .any(|w| w == key.to_bytes().as_slice()));
+        assert!(!file.windows(32).any(|w| w == key.to_bytes().as_slice()));
     }
 
     #[test]
@@ -521,7 +523,10 @@ mod tests {
     fn public_key_parsing() {
         let key = generate_key();
         let hex = hex::encode(key.verifying_key().as_bytes());
-        assert_eq!(parse_public_key(&hex).unwrap(), *key.verifying_key().as_bytes());
+        assert_eq!(
+            parse_public_key(&hex).unwrap(),
+            *key.verifying_key().as_bytes()
+        );
         assert!(parse_public_key("abcd").is_err());
         assert!(parse_public_key(&"zz".repeat(32)).is_err());
     }

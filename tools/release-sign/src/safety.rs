@@ -24,7 +24,12 @@ const SYNC_SUBSTRINGS: &[&str] = &[
 const SYNC_EXACT: &[&str] = &["mega", "box", "box sync", "sync"];
 
 /// Files that a sync client leaves in the root of its folder.
-const SYNC_MARKER_FILES: &[&str] = &[".stfolder", ".dropbox", ".dropbox.cache", ".nextcloudsync.log"];
+const SYNC_MARKER_FILES: &[&str] = &[
+    ".stfolder",
+    ".dropbox",
+    ".dropbox.cache",
+    ".nextcloudsync.log",
+];
 
 /// Environment variables that name a OneDrive root.
 const ONEDRIVE_ENV: &[&str] = &["OneDrive", "OneDriveConsumer", "OneDriveCommercial"];
@@ -130,7 +135,14 @@ mod tests {
     #[test]
     fn sync_folder_names_and_markers_are_refused() {
         let t = tempfile::tempdir().unwrap();
-        for name in ["OneDrive - Company", "Dropbox", "iCloudDrive", "Google Drive", "MEGA", "Box"] {
+        for name in [
+            "OneDrive - Company",
+            "Dropbox",
+            "iCloudDrive",
+            "Google Drive",
+            "MEGA",
+            "Box",
+        ] {
             let d = t.path().join(name).join("keys");
             std::fs::create_dir_all(&d).unwrap();
             assert!(check_output_dir(&d).is_err(), "{name}");

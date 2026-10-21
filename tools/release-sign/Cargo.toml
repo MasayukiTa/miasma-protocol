@@ -28,5 +28,5 @@ clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
 # Interoperability tests call the verifier the update client uses.
-miasma-core = { path = "../../crates/miasma-core", default-features = false }
+miasma-core = { path = "../../crates/miasma-core" }
 tempfile = "3"

@@ -84,11 +84,7 @@ fn run(cli: Cli) -> Result<(), String> {
             force,
             sums,
         } => sign(&key, &sums, out, format, force),
-        Cmd::Verify {
-            pubkeys,
-            sums,
-            sig,
-        } => verify(&pubkeys, &sums, &sig),
+        Cmd::Verify { pubkeys, sums, sig } => verify(&pubkeys, &sums, &sig),
         Cmd::Pubkey { key, check } => pubkey(&key, check),
     }
 }
@@ -128,8 +124,8 @@ fn keygen(out_dir: &Path) -> Result<(), String> {
 
     let key = rs::generate_key();
     let pk = *key.verifying_key().as_bytes();
-    let file = rs::encrypt_key(&key, p1.as_bytes(), rs::KdfParams::STRONG)
-        .map_err(|e| e.to_string())?;
+    let file =
+        rs::encrypt_key(&key, p1.as_bytes(), rs::KdfParams::STRONG).map_err(|e| e.to_string())?;
     let path = out_dir.join(format!("miasma-release-{}.key", &hex_str(&pk)[..8]));
 
     let mut opts = std::fs::OpenOptions::new();
