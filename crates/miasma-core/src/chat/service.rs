@@ -216,8 +216,8 @@ pub fn start_for_daemon(
     if cfg.privacy.pqc_mode != PqcMode::Off && !PqcMode::available() {
         // Said once, plainly: the setting is on but this build cannot do it.
         warn!(
-            "privacy.pqc_mode is {} but this build has no hybrid exchange; \
-             private conversations stay classical",
+            "privacy.pqc_mode is {} but this build has no advanced encryption; \
+             private conversations stay standard",
             cfg.privacy.pqc_mode
         );
     }
