@@ -43,3 +43,4 @@ miasma-core/src/state_crypto/migrate.rs | 4 | one-time conversion of plaintext s
 miasma-core/src/state_crypto/mod.rs | 5 | master key creation on first use, overwrite-and-remove, set-aside of unreadable files
 miasma-core/src/chat/store.rs | 1 | chat folder creation (the files in it are written through state_crypto)
 miasma-core/src/chat/group/store.rs | 1 | chat folder creation (the group files in it are written through state_crypto)
+miasma-core/src/daemon/path_policy.rs | 1 | reserves an empty output file with create-new before a path-taking request writes to it
