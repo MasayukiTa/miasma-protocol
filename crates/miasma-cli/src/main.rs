@@ -1145,11 +1145,32 @@ fn pqc_line(
     configured: miasma_core::config::PqcMode,
     running: Option<&miasma_core::chat::ipc::PqcStatus>,
 ) -> String {
+    pqc_line_for(
+        configured,
+        miasma_core::config::PqcMode::available(),
+        running,
+    )
+}
+
+/// `pqc_line` with the availability of this build given, so both builds can be
+/// tested from one.
+fn pqc_line_for(
+    configured: miasma_core::config::PqcMode,
+    available: bool,
+    running: Option<&miasma_core::chat::ipc::PqcStatus>,
+) -> String {
     use miasma_core::config::PqcMode;
     let mut s = configured.to_string();
-    if configured != PqcMode::Off && !PqcMode::available() {
-        s.push_str(" (this build has no hybrid exchange: private conversations stay classical)");
+    if !available {
+        if configured != PqcMode::Off {
+            s.push_str(
+                " (this build has no hybrid exchange: private conversations stay classical)",
+            );
+        }
         return s;
+    }
+    if configured == PqcMode::Off {
+        s.push_str(" (available in this build; turn it on with `privacy.pqc_mode`)");
     }
     if let Some(p) = running.filter(|p| p.available && p.mode != "off") {
         let c = &p.counts;
@@ -4312,5 +4333,32 @@ mod storage_flag_tests {
     #[test]
     fn storage_delete_rejects_a_non_numeric_age() {
         assert!(parse(&["storage", "delete", "--older-than", "soon"]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod pqc_status_line_tests {
+    use super::pqc_line_for;
+    use miasma_core::config::PqcMode;
+
+    #[test]
+    fn a_build_with_the_feature_says_hybrid_chat_is_available() {
+        let off = pqc_line_for(PqcMode::Off, true, None);
+        assert!(off.starts_with("off"), "{off}");
+        assert!(off.contains("available in this build"), "{off}");
+        // Once on, the line is the mode itself (the counters follow when the
+        // background service runs).
+        assert_eq!(pqc_line_for(PqcMode::Prefer, true, None), "prefer");
+        assert_eq!(pqc_line_for(PqcMode::Require, true, None), "require");
+    }
+
+    #[test]
+    fn a_build_without_the_feature_says_so_only_when_it_matters() {
+        assert_eq!(pqc_line_for(PqcMode::Off, false, None), "off");
+        for mode in [PqcMode::Prefer, PqcMode::Require] {
+            let s = pqc_line_for(mode, false, None);
+            assert!(s.contains("no hybrid exchange"), "{s}");
+            assert!(!s.contains("available"), "{s}");
+        }
     }
 }

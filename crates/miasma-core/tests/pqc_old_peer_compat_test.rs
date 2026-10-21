@@ -274,6 +274,31 @@ fn drive(core: &ChatCore, old: &mut OldPeer, now: u64) {
     panic!("does not settle");
 }
 
+/// The delivery loop under `require`. Offers go to the old peer; messages are
+/// never sent unless the hybrid key is agreed. Returns the reason the waiting
+/// messages are failed with, once the build gives up on the contact.
+fn drive_require(core: &ChatCore, old: &mut OldPeer, now: u64) -> Option<&'static str> {
+    let peer = old.id();
+    for _ in 0..50 {
+        let have_text = core.outbox.first_for(&peer).is_some();
+        match core.pq_step(&peer, have_text, now) {
+            Pass::Send(out) => {
+                let (wire, _) = core.seal_for(&peer, &out.plain).unwrap();
+                let outcome = match old.receive(&core.own_id(), &wire) {
+                    AckStatus::Stored | AckStatus::Duplicate => SendOutcome::Delivered,
+                    AckStatus::BadRequest => SendOutcome::NotUnderstood,
+                    other => panic!("unexpected answer {other:?}"),
+                };
+                core.pq_sent(&peer, &out, outcome, now);
+            }
+            Pass::Hold => return None,
+            Pass::Refuse(reason) => return Some(reason),
+            Pass::Proceed => panic!("`require` must not send a text without the hybrid key"),
+        }
+    }
+    panic!("does not settle");
+}
+
 fn no_hybrid_key(core: &ChatCore, old: &OldPeer) -> bool {
     let sid = core
         .store
@@ -325,6 +350,43 @@ fn an_offering_build_and_a_tolerant_old_peer_keep_talking() {
         .history(&old.id(), None, 10)
         .iter()
         .any(|m| m.text == "back"));
+}
+
+#[test]
+fn require_never_downgrades_towards_a_strict_old_peer() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = core_in(dir.path(), PqcMode::Require);
+    let mut old = OldPeer::new(true);
+    core.enqueue(&old.id(), "secret", 1).unwrap();
+    // The old peer refuses the offer as unknown: the waiting message is failed
+    // with the stable reason that the interface turns into a plain sentence.
+    let reason = drive_require(&core, &mut old, 1_000);
+    assert_eq!(reason, Some(miasma_core::chat::pq::FAIL_NO_HYBRID));
+    // The text never reached the old peer, in any session.
+    assert!(old.texts.is_empty());
+    assert!(no_hybrid_key(&core, &old));
+    // Asking again does not change the answer.
+    assert_eq!(
+        drive_require(&core, &mut old, 2_000),
+        Some(miasma_core::chat::pq::FAIL_NO_HYBRID)
+    );
+    assert!(old.texts.is_empty());
+}
+
+#[test]
+fn require_never_downgrades_towards_a_tolerant_old_peer() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = core_in(dir.path(), PqcMode::Require);
+    let mut old = OldPeer::new(false);
+    core.enqueue(&old.id(), "secret", 1).unwrap();
+    // The offer is acknowledged and set aside; the message waits for an answer.
+    assert_eq!(drive_require(&core, &mut old, 1_000), None);
+    assert!(old.texts.is_empty());
+    // No answer ever comes: after the wait the message is failed, not sent.
+    let reason = drive_require(&core, &mut old, 1_000 + OFFER_WAIT_MS + 1);
+    assert_eq!(reason, Some(miasma_core::chat::pq::FAIL_NO_HYBRID));
+    assert!(old.texts.is_empty());
+    assert!(no_hybrid_key(&core, &old));
 }
 
 #[test]
