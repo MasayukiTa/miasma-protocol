@@ -262,8 +262,9 @@ impl Anchor {
         }
         let (cur, hwm) = {
             let seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
-            seen.get(peer)
-                .map_or((NO_FILE, send_seq), |s| (s.on_disk, s.seq_hwm.max(send_seq)))
+            seen.get(peer).map_or((NO_FILE, send_seq), |s| {
+                (s.on_disk, s.seq_hwm.max(send_seq))
+            })
         };
         if self.dir.is_some()
             && !self.write(
@@ -286,9 +287,7 @@ impl Anchor {
     pub fn after_write(&self, peer: &[u8; 32], next: Fingerprint, send_seq: u64) {
         let hwm = {
             let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
-            let hwm = seen
-                .get(peer)
-                .map_or(send_seq, |s| s.seq_hwm.max(send_seq));
+            let hwm = seen.get(peer).map_or(send_seq, |s| s.seq_hwm.max(send_seq));
             seen.insert(
                 *peer,
                 Seen {

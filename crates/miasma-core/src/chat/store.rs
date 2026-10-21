@@ -676,7 +676,12 @@ impl ChatStore {
         };
         // The record is written before the file is replaced, so a file that
         // can have been used to send is always known to the record.
-        let sealed = doc::seal(&self.keys, Label::ChatSessions, &doc::context_of(&path), &bytes)?;
+        let sealed = doc::seal(
+            &self.keys,
+            Label::ChatSessions,
+            &doc::context_of(&path),
+            &bytes,
+        )?;
         let fp = doc::fingerprint(&sealed);
         anchor.before_write(&st.peer, fp, st.send_seq);
         doc::write_sealed(&path, &sealed, true)?;
