@@ -649,7 +649,7 @@ impl MiasmaApp {
         locale::log_strings(self.locale)
     }
 
-    /// Quantum-resistant chat protection block string table.
+    /// Advanced encryption block string table.
     fn pq(&self) -> &'static locale::PqcStrings {
         locale::pqc_strings(self.locale)
     }
@@ -2890,7 +2890,7 @@ impl MiasmaApp {
         self.storage_section(ui);
     }
 
-    // ── Quantum-resistant chat protection (Settings) ──────────────────────
+    // ── Advanced encryption (Settings) ───────────────────────────────────────────
 
     /// The three choices of `privacy.pqc_mode`, with what each one does. The
     /// choice is written to the configuration at once; the background service
@@ -4556,10 +4556,40 @@ mod tests {
 
     #[test]
     fn the_chat_protection_radios_are_published_as_disabled_when_the_build_lacks_it() {
-        use miasma_core::config::PqcMode;
-        if PqcMode::available() {
+        if miasma_core::config::PqcMode::available() {
             return; // the radios are live in this build
         }
+        let (radios, app) = privacy_radios();
+        // The three choices, each under its own name, all switched off. (Other radios on the page,
+        // such as the sizes of the hosting setting, are not part of this.)
+        let p = app.pq();
+        for label in [p.off, p.prefer, p.require] {
+            assert!(
+                radios.iter().any(|(n, d)| n == label && *d),
+                "no disabled radio named {label:?}: {radios:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_chat_protection_radios_are_enabled_when_the_build_has_it() {
+        if !miasma_core::config::PqcMode::available() {
+            return; // the radios are switched off in this build
+        }
+        let (radios, app) = privacy_radios();
+        let p = app.pq();
+        assert_eq!(p.heading, "Advanced encryption");
+        for label in [p.off, p.prefer, p.require] {
+            assert!(
+                radios.iter().any(|(n, d)| n == label && !*d),
+                "no enabled radio named {label:?}: {radios:?}"
+            );
+        }
+    }
+
+    /// The radios of Settings > Privacy as published to assistive technology
+    /// (name, switched off), and the app that drew them.
+    fn privacy_radios() -> (Vec<(String, bool)>, MiasmaApp) {
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
         let data = tempfile::tempdir().unwrap();
@@ -4595,15 +4625,7 @@ mod tests {
                 .map(|(_, n)| (n.name().unwrap_or("").to_owned(), n.is_disabled()))
                 .collect();
         }
-        // The three choices, each under its own name, all switched off. (Other radios on the page,
-        // such as the sizes of the hosting setting, are not part of this.)
-        let p = app.pq();
-        for label in [p.off, p.prefer, p.require] {
-            assert!(
-                radios.iter().any(|(n, d)| n == label && *d),
-                "no disabled radio named {label:?}: {radios:?}"
-            );
-        }
+        (radios, app)
     }
 
     #[test]

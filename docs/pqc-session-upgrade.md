@@ -36,14 +36,14 @@ what lets every build keep talking to every other build.
   master key makes it unreadable as well.
 * `miasma config --key privacy.pqc_mode --value prefer` (and `--key` alone to
   read it). A change applies the next time the background service starts.
-* Desktop: Settings, "Quantum-resistant chat protection" (English, Japanese,
+* Desktop: Settings, "Advanced encryption" (English, Japanese,
   Simplified Chinese), three choices with a plain explanation of each.
 * `miasma status` shows the mode and the counters; the daemon status carries
   `pqc: { mode, available, counts }`; each conversation reports `pqc`
   (`pending`, `hybrid`, `classical`, `failed`) and `pqc_reason`
   (`peer_no_hybrid`, `peer_old_build`, `exchange_failed`, `exchange_timeout`,
   `confirm_mismatch`). The chat header shows it in words ("Standard protection
-  only", "Extra quantum-resistant protection is on").
+  only", "Advanced encryption is on").
 * Under `require`, a refused message ends as failed with the reason
   `pqc_peer_no_hybrid` or `pqc_failed`, shown in the chat in the three
   languages.
@@ -56,13 +56,17 @@ addition every capability downgrade is counted by the existing
 ## Build default
 
 The cargo feature `pqc` of `miasma-core` (passed through as `pqc` by
-`miasma-cli`, `miasma-desktop` and `miasma-ffi`) is **off by default**.
+`miasma-cli`, `miasma-desktop` and `miasma-ffi`) is **on by default for the
+desktop and command-line programs** and off for `miasma-ffi` (the mobile
+library) and for `miasma-core` on its own. The setting `privacy.pqc_mode` is
+still `off` until a person changes it, so a release build behaves like one
+without the feature until then. A desktop or CLI build can leave it out with
+`--no-default-features`; Settings then shows the choices switched off.
 
-Why it stays off: the dependency adds `ml-kem` and a second `rand_core`
+The dependency adds `ml-kem` and a second `rand_core`
 version to the tree, and binary size and build time could not be measured
-here (local builds are restricted on the development machine). The criterion
-for turning it on by default is "small size impact shown, wasm and android
-builds compile"; only the second half could be checked:
+here (local builds are restricted on the development machine). The wasm and
+android builds were checked:
 
 * `miasma-wasm` does not link `miasma-core` (it is a dev-dependency only), so
   the feature cannot reach it.

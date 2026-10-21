@@ -95,6 +95,13 @@ jobs:
       - name: Test desktop
         run: cargo test -p miasma-desktop --locked
 
+      # The desktop and CLI programs include the hybrid upgrade by default;
+      # this is the build without it (Settings shows the choices switched off).
+      - name: Test desktop and check CLI without the hybrid feature
+        run: |
+          cargo test -p miasma-desktop --no-default-features --locked --lib -- the_chat_protection_radios
+          cargo check -p miasma-cli --no-default-features --locked
+
       # The bridge's tests were only ever built, never run, so its entire
       # suite (including the cross-process BitTorrent round trip) was
       # invisible to CI. `cargo test` builds the binary too.
@@ -175,7 +182,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       # Release build: the same binaries that are handed to a person who has no
-      # Rust toolchain (see the artifact step below).
+      # Rust toolchain (see the artifact step below). Both packages include the
+      # hybrid upgrade by their default features.
       - name: Build CLI and desktop (release)
         run: cargo build --release -p miasma-cli -p miasma-desktop --locked
 

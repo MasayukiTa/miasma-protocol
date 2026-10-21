@@ -3028,9 +3028,9 @@ static CH_EN: ChatStrings = ChatStrings {
     fail_expired: "It could not be delivered in time.",
     fail_session: "A secure connection could not be set up. Check the contact's verification code with them.",
     fail_other: "It could not be sent.",
-    fail_pqc_peer_no_hybrid: "Not sent. Your setting requires the extra quantum-resistant protection, and the other person's Miasma does not offer it.",
+    fail_pqc_peer_no_hybrid: "Not sent. Your setting requires advanced encryption, and the other person's Miasma does not offer it.",
     fail_pqc_failed: "Not sent. The extra protection could not be set up with this contact. Try again later.",
-    pqc_hybrid: "Extra quantum-resistant protection is on",
+    pqc_hybrid: "Advanced encryption is on",
     pqc_classical: "Standard protection only",
     pqc_pending: "Setting up extra protection...",
     pqc_failed: "Extra protection could not be set up (standard protection only)",
@@ -3127,7 +3127,7 @@ static CH_JA: ChatStrings = ChatStrings {
     fail_other: "送れませんでした。",
     fail_pqc_peer_no_hybrid: "送りませんでした。設定で追加の保護を必須にしていますが、相手の Miasma が対応していません。",
     fail_pqc_failed: "送りませんでした。この相手との間で追加の保護を準備できませんでした。しばらくしてからもう一度お試しください。",
-    pqc_hybrid: "量子コンピューター対策の保護：オン",
+    pqc_hybrid: "高度な暗号化：オン",
     pqc_classical: "標準の保護のみ",
     pqc_pending: "追加の保護を準備中…",
     pqc_failed: "追加の保護を準備できませんでした（標準の保護のみ）",
@@ -3300,7 +3300,7 @@ log_strings! {
 
 macro_rules! pqc_strings {
     ($($f:ident),* $(,)?) => {
-        /// Strings of the "quantum-resistant chat protection" block in Settings.
+        /// Strings of the "advanced encryption" block in Settings.
         pub struct PqcStrings { $(pub $f: &'static str),* }
         impl PqcStrings {
             /// Every field with its name, for the completeness test.
@@ -3326,8 +3326,8 @@ pub fn pqc_strings(locale: Locale) -> &'static PqcStrings {
 }
 
 static PQ_EN: PqcStrings = PqcStrings {
-    heading: "Quantum-resistant chat protection",
-    intro: "Private conversations are already encrypted. This adds a second key exchange that is designed to stay safe even against future quantum computers. It is off by default and only takes effect when both people have it turned on.",
+    heading: "Advanced encryption",
+    intro: "Private conversations are already encrypted. This adds a further, stronger layer to the way each conversation is secured. It is off by default and only takes effect when both people have it turned on.",
     off: "Off",
     prefer: "Use when possible",
     require: "Always required",
@@ -3338,12 +3338,12 @@ static PQ_EN: PqcStrings = PqcStrings {
     unavailable: "This version of Miasma does not include this protection, so the setting has no effect.",
     review_note: "This feature has not yet been reviewed by an outside security expert.",
     save_failed: "The setting could not be saved. Please try again.",
-    a11y_mode: "Quantum-resistant chat protection",
+    a11y_mode: "Advanced encryption",
 };
 
 static PQ_JA: PqcStrings = PqcStrings {
-    heading: "量子コンピューター対策（チャットの暗号）",
-    intro: "個人チャットはすでに暗号化されています。この機能は将来の量子コンピューターでも破られにくいよう、鍵の交換を一段強くします。初期設定はオフで、お互いにオンにしたときだけ働きます。",
+    heading: "高度な暗号化",
+    intro: "個人チャットはすでに暗号化されています。この機能は、会話を守る仕組みをさらに一段強くします。初期設定はオフで、お互いにオンにしたときだけ働きます。",
     off: "オフ",
     prefer: "使えるときは使う",
     require: "必ず使う",
@@ -3354,11 +3354,11 @@ static PQ_JA: PqcStrings = PqcStrings {
     unavailable: "このビルドでは利用できません。",
     review_note: "外部のセキュリティ専門家による確認は未実施です。",
     save_failed: "設定を保存できませんでした。もう一度お試しください。",
-    a11y_mode: "量子コンピューター対策（チャットの暗号）",
+    a11y_mode: "高度な暗号化",
 };
 
 static PQ_ZH_CN: PqcStrings = PqcStrings {
-    heading: "抗量子计算的聊天保护",
+    heading: "高级加密",
     intro: "私人聊天本来就已加密。此功能再增加一道密钥交换，目的是即使将来出现量子计算机也能保持安全。默认关闭，只有双方都开启时才会生效。",
     off: "关闭",
     prefer: "尽量使用",
@@ -3370,7 +3370,7 @@ static PQ_ZH_CN: PqcStrings = PqcStrings {
     unavailable: "此版本的 Miasma 不包含这项保护，设置不会生效。",
     review_note: "此功能尚未经过外部安全专家审查。",
     save_failed: "无法保存设置，请重试。",
-    a11y_mode: "抗量子计算的聊天保护",
+    a11y_mode: "高级加密",
 };
 
 pub fn log_strings(locale: Locale) -> &'static LogStrings {
@@ -4044,7 +4044,7 @@ mod tests {
     }
 
     #[test]
-    fn the_quantum_protection_texts_are_filled_in_every_language() {
+    fn the_advanced_encryption_texts_are_filled_in_every_language() {
         for lang in Locale::ALL {
             for (name, value) in pqc_strings(lang).all() {
                 assert!(!value.trim().is_empty(), "{lang:?} pqc.{name} is empty");
