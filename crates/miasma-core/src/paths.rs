@@ -223,6 +223,17 @@ spec!(
     "IV belonging to master.key.enc."
 );
 spec!(
+    ROOT_SEALED,
+    "root.sealed",
+    File,
+    DataDir,
+    Secret,
+    Plain,
+    CryptoEraseOverwriteRemove,
+    "D1",
+    "Reserved for the sealed form of the master key. No build writes it yet; a wipe removes it if present."
+);
+spec!(
     DAEMON_TOKEN,
     "daemon.token",
     File,
@@ -660,6 +671,17 @@ spec!(
     "Advisory lock that serialises the one-time conversion of older plaintext state files; created only when there is something to convert."
 );
 spec!(
+    WIPE_PENDING,
+    "wipe.pending",
+    File,
+    DataDir,
+    Runtime,
+    Plain,
+    Remove,
+    "D24",
+    "Marker written when a wipe starts and removed when the key files are gone; an interrupted wipe is finished from it."
+);
+spec!(
     PREMIGRATE_COPY,
     "*.premigrate",
     Pattern,
@@ -978,6 +1000,7 @@ pub const REGISTRY: &[PathSpec] = &[
     MASTER_KEY,
     MASTER_KEY_WRAPPED,
     MASTER_KEY_WRAP_IV,
+    ROOT_SEALED,
     DAEMON_TOKEN,
     CONFIG,
     VERSION_STAMP,
@@ -1017,6 +1040,7 @@ pub const REGISTRY: &[PathSpec] = &[
     ATOMIC_TMP,
     ATOMIC_SECURE_TMP,
     STATE_MIGRATION_LOCK,
+    WIPE_PENDING,
     PREMIGRATE_COPY,
     STATE_CORRUPT_ASIDE,
     UPDATE_DIR,
@@ -1045,6 +1069,23 @@ pub const REGISTRY: &[PathSpec] = &[
     INSTALLER_PATH_KEY,
     INSTALLER_HANDLERS_KEY,
 ];
+
+/// The key and credential files in the data directory that a wipe overwrites
+/// and removes, taken from [`REGISTRY`] (every `Secret` file stored directly in
+/// the data directory), master key first. A new secret file is wiped as soon as
+/// it is registered; no wipe code spells these names.
+pub fn wipe_key_files(data_dir: &Path) -> Vec<PathBuf> {
+    REGISTRY
+        .iter()
+        .filter(|s| {
+            s.class == Class::Secret
+                && s.kind == Kind::File
+                && s.location == Location::DataDir
+                && s.wipe != WipeMethod::NotRemovable
+        })
+        .map(|s| s.in_dir(data_dir))
+        .collect()
+}
 
 // ── Name fragments shared by several call sites ─────────────────────────────
 
@@ -1516,6 +1557,31 @@ mod tests {
             retrieve_tmp_unique(3, 4).file_name().unwrap(),
             "miasma-retrieve-3-4.tmp"
         );
+    }
+
+    #[test]
+    fn wipe_key_files_list_every_secret_file_master_key_first() {
+        let d = Path::new("D");
+        let files = wipe_key_files(d);
+        assert_eq!(files[0], master_key(d));
+        for spec in [
+            MASTER_KEY,
+            MASTER_KEY_WRAPPED,
+            MASTER_KEY_WRAP_IV,
+            ROOT_SEALED,
+            DAEMON_TOKEN,
+        ] {
+            assert!(files.contains(&spec.in_dir(d)), "{} is not listed", spec.id);
+        }
+        for s in REGISTRY {
+            if s.kind != Kind::File {
+                continue;
+            }
+            let listed = files.contains(&s.in_dir(d));
+            let is_key_file = s.class == Class::Secret && s.location == Location::DataDir;
+            assert_eq!(listed, is_key_file, "{}", s.id);
+        }
+        assert!(!files.contains(&WIPE_PENDING.in_dir(d)));
     }
 
     #[test]

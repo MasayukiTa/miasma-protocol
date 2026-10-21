@@ -361,22 +361,11 @@ impl StateKeys {
         ));
     }
 
-    /// Read `master.key` from `data_dir`. Never creates it.
+    /// Derive the state key from the node's root key in `data_dir`. Never
+    /// creates the root key.
     pub fn load(data_dir: &Path) -> Result<Self, StateError> {
-        let path = crate::paths::master_key(data_dir);
-        let bytes = match std::fs::read(&path) {
-            Ok(b) => Zeroizing::new(b),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(StateError::KeyMissing)
-            }
-            Err(e) => return Err(StateError::Io(e)),
-        };
-        if bytes.len() != 32 {
-            return Err(StateError::KeyInvalid("wrong length".into()));
-        }
-        let mut arr = Zeroizing::new([0u8; 32]);
-        arr.copy_from_slice(&bytes);
-        let keys = Self::from_master_key(&arr)?;
+        let root = crate::root_key::get(data_dir, crate::root_key::CreatePolicy::Never)?;
+        let keys = root.with(Self::from_master_key)??;
         keys.register(data_dir);
         Ok(keys)
     }
@@ -387,26 +376,20 @@ impl StateKeys {
     /// exists the missing key is an error and nothing is created: a node must
     /// not silently start over next to data it can no longer read.
     pub fn open_or_init(data_dir: &Path) -> Result<Self, StateError> {
-        match Self::load(data_dir) {
-            Err(StateError::KeyMissing) => {
-                if has_protected_state(data_dir) {
-                    return Err(StateError::KeyMissing);
-                }
-                create_master_key(data_dir)?;
-                Self::load(data_dir)
-            }
-            other => other,
-        }
+        let root = crate::root_key::get(data_dir, crate::root_key::CreatePolicy::IfFreshDataDir)?;
+        let keys = root.with(Self::from_master_key)??;
+        keys.register(data_dir);
+        Ok(keys)
     }
 
-    /// Find the keys for a state file by looking for `master.key` in the
+    /// Find the keys for a state file by looking for the root key in the
     /// directories above it (a journal lives in `<data>/transfers/`). Never
     /// creates a key.
     pub fn for_state_file(path: &Path) -> Result<Self, StateError> {
         let mut dir = path.parent();
         for _ in 0..3 {
             let Some(d) = dir else { break };
-            if crate::paths::master_key(d).exists() {
+            if crate::root_key::is_initialized(d) {
                 return Self::load(d);
             }
             dir = d.parent();
@@ -480,7 +463,7 @@ mod erase_tests {
 }
 
 /// True when any file of a known protected class already exists in `data_dir`.
-fn has_protected_state(data_dir: &Path) -> bool {
+pub(crate) fn has_protected_state(data_dir: &Path) -> bool {
     use crate::paths::*;
     let singles = [
         CONTACTS.in_dir(data_dir),
@@ -504,25 +487,6 @@ fn has_protected_state(data_dir: &Path) -> bool {
             .map(|rd| rd.flatten().any(|e| sniff(&e.path()).is_protected()))
             .unwrap_or(false)
     })
-}
-
-/// Write a fresh 32-byte master key if none exists yet. Safe against a second
-/// process doing the same: the loser keeps the winner's key.
-fn create_master_key(data_dir: &Path) -> Result<(), StateError> {
-    std::fs::create_dir_all(data_dir)?;
-    let key_path = crate::paths::master_key(data_dir);
-    let mut key = Zeroizing::new([0u8; 32]);
-    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, key.as_mut());
-    let tmp = crate::paths::atomic_secure_tmp(&key_path);
-    crate::secure_file::write_restricted(&tmp, key.as_ref())?;
-    // `hard_link` fails when the target exists, so an existing key is never replaced.
-    let linked = std::fs::hard_link(&tmp, &key_path);
-    let _ = std::fs::remove_file(&tmp);
-    match linked {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-        Err(e) => Err(StateError::Io(e)),
-    }
 }
 
 /// What a file looks like on disk.
@@ -684,8 +648,9 @@ pub fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
 /// format the share store uses). For callers that set up a data directory
 /// before any store has run; it never replaces an existing key.
 pub fn provision_master_key(data_dir: &Path) -> Result<(), StateError> {
-    if crate::paths::master_key(data_dir).exists() {
+    if crate::root_key::is_initialized(data_dir) {
         return Ok(());
     }
-    create_master_key(data_dir)
+    crate::root_key::get(data_dir, crate::root_key::CreatePolicy::FirstUse)?;
+    Ok(())
 }
