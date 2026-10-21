@@ -3,9 +3,12 @@
 //! each other directly, one of them has its whole chat folder replaced by a
 //! copy taken earlier, and the conversation goes on.
 //!
-//! The tests state what this build does today. Where a result is a known
-//! limit that a later change is meant to remove, the expected value hangs on
-//! a named constant, so the test is flipped in one place.
+//! The record kept outside the chat folder (see [`super::anchor`]) lets a
+//! side notice that its session file is older than the last one it wrote. The
+//! tests show what that closes (a partial restore: only the chat folder goes
+//! back) and what it cannot close (a full restore: the chat folder and the
+//! record go back together, or the record is gone). The limits are asserted,
+//! so a change that moves them shows up here.
 
 use std::{fs, path::Path};
 
@@ -23,14 +26,6 @@ use super::{
 /// session (every sender since beta.2 starts a new session on it).
 const UNOPENABLE_ANSWER: AckStatus = AckStatus::NoSession;
 
-/// True once a message sent from a restored copy no longer repeats a number
-/// the receiver already applied (the receiver then keeps the message).
-const SEND_NUMBER_REUSE_CLOSED: bool = false;
-
-/// True once a message sent from a restored copy no longer repeats the
-/// position (ratchet key and index) of an envelope sent before.
-const POSITION_REUSE_CLOSED: bool = false;
-
 fn copy_tree(from: &Path, to: &Path) {
     fs::create_dir_all(to).unwrap();
     for e in fs::read_dir(from).unwrap().flatten() {
@@ -43,24 +38,41 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
-/// A copy of the whole chat folder of one side.
-struct Snapshot(TempDir);
+/// A copy of the whole chat folder of one side, and of its anchor folder.
+struct Snapshot {
+    chat: TempDir,
+    anchor: TempDir,
+}
 
 fn snapshot(s: &mut Side) -> Snapshot {
     // Everything is settled on disk first.
     s.restart();
-    let d = tempfile::tempdir().unwrap();
-    copy_tree(&s.dir.path().join("chat"), d.path());
-    Snapshot(d)
+    let chat = tempfile::tempdir().unwrap();
+    copy_tree(&s.dir.path().join("chat"), chat.path());
+    let anchor = tempfile::tempdir().unwrap();
+    copy_tree(s.anchor.path(), anchor.path());
+    Snapshot { chat, anchor }
+}
+
+/// What a restore of the data does to the record outside it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Record {
+    /// The record stays as it is (only the data folder was put back).
+    Kept,
+    /// The record is put back together with the data folder.
+    PutBack,
+    /// The record is gone.
+    Removed,
 }
 
 /// Put the chat folder back to the copy and open it again.
-fn rollback(s: &mut Side, snap: &Snapshot) {
+fn rollback_with(s: &mut Side, snap: &Snapshot, record: Record) {
     s.core.store.close();
     // Release the files of the running engine before they are replaced.
     let scratch = tempfile::tempdir().unwrap();
     s.core = open_core(
         scratch.path(),
+        None,
         &s.seed,
         &s.master,
         StoreSettings::default(),
@@ -68,8 +80,23 @@ fn rollback(s: &mut Side, snap: &Snapshot) {
     );
     let chat = s.dir.path().join("chat");
     fs::remove_dir_all(&chat).unwrap();
-    copy_tree(snap.0.path(), &chat);
+    copy_tree(snap.chat.path(), &chat);
+    match record {
+        Record::Kept => {}
+        Record::PutBack => {
+            fs::remove_dir_all(s.anchor.path()).unwrap();
+            copy_tree(snap.anchor.path(), s.anchor.path());
+        }
+        Record::Removed => {
+            fs::remove_dir_all(s.anchor.path()).unwrap();
+            fs::create_dir_all(s.anchor.path()).unwrap();
+        }
+    }
     s.restart();
+}
+
+fn rollback(s: &mut Side, snap: &Snapshot) {
+    rollback_with(s, snap, Record::Kept);
 }
 
 /// Send the oldest queued item of `from`; the envelope and the answer.
@@ -115,12 +142,13 @@ fn read_and_tell(victim: &Side, other: &Side, up_to: u64, at: u64) -> Vec<u8> {
 /// The common course: `victim` takes a copy, then the two exchange a receipt,
 /// a text and another receipt (so both ratchets move twice), then the copy is
 /// put back. Returns the envelope of the first receipt, which used the
-/// position that the restored side will use next.
+/// position that the restored side will use next, and the copy.
 fn restore_across_ratchet_steps(
     first: &mut Side,
     second: &mut Side,
     victim_is_first: bool,
-) -> Vec<u8> {
+    record: Record,
+) -> (Vec<u8>, Snapshot) {
     establish(first, second);
     let (victim, other) = if victim_is_first {
         (first, second)
@@ -135,8 +163,8 @@ fn restore_across_ratchet_steps(
         .unwrap();
     assert_eq!(deliver_next(other, victim), Some(AckStatus::Stored));
     read_and_tell(victim, other, 2, 2_000_000);
-    rollback(victim, &snap);
-    used
+    rollback_with(victim, &snap, record);
+    (used, snap)
 }
 
 /// Texts `side` received from `peer`, in the order they were applied.
@@ -156,22 +184,23 @@ fn nothing_failed(side: &Side, peer: &[u8; 32]) -> bool {
         .all(|m| m.state != MsgState::Failed)
 }
 
+// ── What the record closes: only the chat folder goes back ───────────────────
+
 #[test]
-fn a_conversation_stopped_by_a_restore_across_ratchet_steps_starts_again_for_the_initiator() {
+fn a_restore_across_ratchet_steps_starts_a_new_session_before_anything_is_sent() {
     let (mut a, mut b) = (side(), side());
-    let used = restore_across_ratchet_steps(&mut a, &mut b, true);
+    let (used, _) = restore_across_ratchet_steps(&mut a, &mut b, true, Record::Kept);
     let (peer_b, peer_a) = (b.id(), a.id());
-    // The restored side has three messages waiting. The first reuses the
-    // position of the receipt it sent before the restore.
+    // The restored side has three messages waiting. The first would have
+    // reused the position of the receipt it sent before the restore; the
+    // session was dropped when the file was found older, so it does not.
     for t in ["q1", "q2", "q3"] {
         a.core.enqueue(&peer_b, t, 3).unwrap();
     }
     let (wire, st) = send_one(&a, &b);
-    assert_eq!(position(&wire) == position(&used), !POSITION_REUSE_CLOSED);
-    assert_eq!(st, UNOPENABLE_ANSWER);
-    // What the service does on that answer: a new session, the same message.
-    a.core.reset_session(&peer_b);
-    for _ in 0..3 {
+    assert_ne!(position(&wire), position(&used));
+    assert_eq!(st, AckStatus::Stored, "a first message of a new session");
+    for _ in 0..2 {
         assert_eq!(send_one(&a, &b).1, AckStatus::Stored);
     }
     assert!(a.core.outbox.first_for(&peer_b).is_none());
@@ -185,13 +214,14 @@ fn a_conversation_stopped_by_a_restore_across_ratchet_steps_starts_again_for_the
 }
 
 #[test]
-fn a_conversation_stopped_by_a_restore_across_ratchet_steps_starts_again_for_the_responder() {
+fn a_restore_across_ratchet_steps_starts_again_for_the_responder() {
     let (mut a, mut b) = (side(), side());
-    let used = restore_across_ratchet_steps(&mut a, &mut b, false);
+    let (used, _) = restore_across_ratchet_steps(&mut a, &mut b, false, Record::Kept);
     let (peer_b, peer_a) = (b.id(), a.id());
     // `b` is the restored side here and `a` writes first.
     a.core.enqueue(&peer_b, "from the other side", 3).unwrap();
     let (_, st) = send_one(&a, &b);
+    // `b` dropped its session; what `a` sends on the old one does not open.
     assert_eq!(st, UNOPENABLE_ANSWER);
     a.core.reset_session(&peer_b);
     assert_eq!(send_one(&a, &b).1, AckStatus::Stored);
@@ -207,6 +237,153 @@ fn a_conversation_stopped_by_a_restore_across_ratchet_steps_starts_again_for_the
     assert!(received(&a, &peer_b).contains(&"after the restore".to_string()));
     assert!(received(&b, &peer_a).contains(&"from the other side".to_string()));
     assert!(nothing_failed(&a, &peer_b) && nothing_failed(&b, &peer_a));
+}
+
+#[test]
+fn a_restore_on_the_same_chain_does_not_repeat_positions() {
+    let (mut a, b) = (side(), side());
+    establish(&a, &b);
+    let snap = snapshot(&mut a);
+    // Three messages leave and arrive, then the copy is put back.
+    let mut used = Vec::new();
+    for t in ["t1", "t2", "t3"] {
+        a.core.enqueue(&b.id(), t, 2).unwrap();
+        let (wire, st) = send_one(&a, &b);
+        assert_eq!(st, AckStatus::Stored);
+        used.push(position(&wire));
+    }
+    rollback(&mut a, &snap);
+    // Every new message takes a position that was not used, and the receiver
+    // opens it at once.
+    for t in ["q1", "q2", "q3", "q4"] {
+        a.core.enqueue(&b.id(), t, 3).unwrap();
+        let (wire, st) = send_one(&a, &b);
+        assert!(!used.contains(&position(&wire)), "{t}");
+        assert_eq!(st, AckStatus::Stored, "{t}");
+    }
+    assert_eq!(
+        received(&b, &a.id()),
+        ["hello", "t1", "t2", "t3", "q1", "q2", "q3", "q4"]
+    );
+}
+
+#[test]
+fn a_send_number_taken_back_by_a_restore_is_not_used_again() {
+    let (mut a, b) = (side(), side());
+    establish(&a, &b);
+    a.core.enqueue(&b.id(), "one", 2).unwrap();
+    assert_eq!(deliver_next(&a, &b), Some(AckStatus::Stored));
+    let snap = snapshot(&mut a);
+    a.core.enqueue(&b.id(), "two", 3).unwrap();
+    assert_eq!(deliver_next(&a, &b), Some(AckStatus::Stored));
+    rollback(&mut a, &snap);
+    a.core.enqueue(&b.id(), "three", 4).unwrap();
+    let (_, st) = send_one(&a, &b);
+    assert_eq!(st, AckStatus::Stored);
+    assert!(b.texts(&a.id()).contains(&"three".to_string()));
+    let shown_delivered = a
+        .core
+        .history(&b.id(), None, 200)
+        .iter()
+        .any(|m| m.outgoing && m.text == "three" && m.state == MsgState::Delivered);
+    assert!(shown_delivered);
+}
+
+#[test]
+fn only_the_session_file_going_back_is_caught_too() {
+    let (mut a, b) = (side(), side());
+    establish(&a, &b);
+    let snap = snapshot(&mut a);
+    let mut used = Vec::new();
+    for t in ["t1", "t2"] {
+        a.core.enqueue(&b.id(), t, 2).unwrap();
+        let (wire, st) = send_one(&a, &b);
+        assert_eq!(st, AckStatus::Stored);
+        used.push(position(&wire));
+    }
+    a.restart();
+    // Put back the session files only; the outbox and history stay.
+    let chat = a.dir.path().join("chat");
+    for e in fs::read_dir(snap.chat.path()).unwrap().flatten() {
+        if crate::paths::is_chat_session_file(&e.path()) {
+            fs::copy(e.path(), chat.join(e.file_name())).unwrap();
+        }
+    }
+    a.restart();
+    a.core.enqueue(&b.id(), "after", 3).unwrap();
+    let (wire, st) = send_one(&a, &b);
+    assert!(!used.contains(&position(&wire)));
+    assert_eq!(st, AckStatus::Stored);
+}
+
+#[test]
+fn a_record_older_than_the_data_starts_a_new_session() {
+    // The record put back to an earlier state while the data stays current:
+    // the file is "newer than the record", which is also not the file the
+    // record names. The side starts a new session (the safe direction).
+    let (mut a, b) = (side(), side());
+    establish(&a, &b);
+    let snap = snapshot(&mut a);
+    a.core.enqueue(&b.id(), "one", 2).unwrap();
+    assert_eq!(deliver_next(&a, &b), Some(AckStatus::Stored));
+    a.core.store.close();
+    fs::remove_dir_all(a.anchor.path()).unwrap();
+    copy_tree(snap.anchor.path(), a.anchor.path());
+    a.restart();
+    a.core.enqueue(&b.id(), "two", 3).unwrap();
+    let (_, st) = send_one(&a, &b);
+    assert_eq!(st, AckStatus::Stored);
+    assert_eq!(b.texts(&a.id()), ["hello", "hello back", "one", "two"]);
+}
+
+// ── What it cannot close: the record goes back or away with the data ─────────
+
+#[test]
+fn limit_a_full_restore_of_data_and_record_repeats_positions_and_the_receiver_recovers() {
+    let (mut a, mut b) = (side(), side());
+    let (used, _) = restore_across_ratchet_steps(&mut a, &mut b, true, Record::PutBack);
+    let (peer_b, peer_a) = (b.id(), a.id());
+    a.core.enqueue(&peer_b, "q1", 3).unwrap();
+    let (wire, st) = send_one(&a, &b);
+    // Documented limit: the old file looks like the latest one, so the first
+    // message after the restore takes a position that was used before...
+    assert_eq!(position(&wire), position(&used));
+    // ...and is refused. The refusal makes the sender start a new session.
+    assert_eq!(st, UNOPENABLE_ANSWER);
+    a.core.reset_session(&peer_b);
+    assert_eq!(send_one(&a, &b).1, AckStatus::Stored);
+    assert_eq!(received(&b, &peer_a), ["hello", "q1"]);
+}
+
+#[test]
+fn limit_without_a_record_the_data_is_trusted_and_the_record_is_made_again() {
+    let (mut a, mut b) = (side(), side());
+    let (used, _) = restore_across_ratchet_steps(&mut a, &mut b, true, Record::Removed);
+    let (peer_b, _) = (b.id(), a.id());
+    a.core.enqueue(&peer_b, "q1", 3).unwrap();
+    let (wire, st) = send_one(&a, &b);
+    assert_eq!(position(&wire), position(&used));
+    assert_eq!(st, UNOPENABLE_ANSWER);
+    // The record exists again, for the next time.
+    assert!(fs::read_dir(a.anchor.path()).unwrap().count() > 0);
+}
+
+#[test]
+fn a_missing_record_with_current_data_changes_nothing() {
+    let (mut a, b) = (side(), side());
+    establish(&a, &b);
+    a.core.enqueue(&b.id(), "one", 2).unwrap();
+    assert_eq!(deliver_next(&a, &b), Some(AckStatus::Stored));
+    a.core.store.close();
+    fs::remove_dir_all(a.anchor.path()).unwrap();
+    fs::create_dir_all(a.anchor.path()).unwrap();
+    a.restart();
+    a.core.enqueue(&b.id(), "two", 3).unwrap();
+    let (wire, st) = send_one(&a, &b);
+    assert_eq!(st, AckStatus::Stored);
+    // Still the same chain: the session was not dropped.
+    assert!(Envelope::decode(&wire).unwrap().header.init_ek.is_none());
+    assert!(fs::read_dir(a.anchor.path()).unwrap().count() > 0);
 }
 
 #[test]
@@ -259,74 +436,23 @@ fn an_envelope_that_does_not_open_gets_no_session_and_changes_nothing() {
 }
 
 #[test]
-fn a_restore_on_the_same_chain_repeats_positions_one_message_at_a_time() {
-    let (mut a, b) = (side(), side());
-    establish(&a, &b);
-    let snap = snapshot(&mut a);
-    // Three messages leave and arrive, then the copy is put back.
-    let mut used = Vec::new();
-    for t in ["t1", "t2", "t3"] {
-        a.core.enqueue(&b.id(), t, 2).unwrap();
-        let (wire, st) = send_one(&a, &b);
-        assert_eq!(st, AckStatus::Stored);
-        used.push(position(&wire));
-    }
-    rollback(&mut a, &snap);
-    // Every new message takes a position that was used; the receiver cannot
-    // open it. A failed message is given up by the sender, so the next one
-    // takes the next position, until the positions pass the receiver's.
-    let mut answers = Vec::new();
-    for t in ["q1", "q2", "q3", "q4"] {
-        let id = a.core.enqueue(&b.id(), t, 3).unwrap();
-        let (wire, st) = send_one(&a, &b);
-        if answers.len() < 3 {
-            assert_eq!(
-                used.contains(&position(&wire)),
-                !POSITION_REUSE_CLOSED,
-                "{t}"
-            );
-        }
-        if st == UNOPENABLE_ANSWER {
-            a.core.mark_failed(&id, "rejected", 4);
-        }
-        answers.push(st);
-    }
+fn a_first_flight_message_of_a_known_key_gets_no_session_when_there_is_no_session() {
+    let (a, b) = (side(), side());
+    // Two messages before any reply: both carry the first-flight key.
+    a.core.enqueue(&b.id(), "m1", 1).unwrap();
+    a.core.enqueue(&b.id(), "m2", 1).unwrap();
+    let e1 = a.core.outbox.first_for(&b.id()).unwrap();
+    let (w1, _) = a.core.prepare_wire(&e1.id).unwrap();
+    assert_eq!(b.core.accept(&a.id(), &w1, 2).status, AckStatus::Stored);
+    a.core.mark_delivered(&e1.id, 3);
+    let e2 = a.core.outbox.first_for(&b.id()).unwrap();
+    let (w2, _) = a.core.prepare_wire(&e2.id).unwrap();
+    assert!(Envelope::decode(&w2).unwrap().header.init_ek.is_some());
+    // The receiver lost the session but remembers the key.
+    b.core.reset_session(&a.id());
+    assert_eq!(b.core.accept(&a.id(), &w2, 4).status, AckStatus::NoSession);
     assert_eq!(
-        answers,
-        [
-            UNOPENABLE_ANSWER,
-            UNOPENABLE_ANSWER,
-            UNOPENABLE_ANSWER,
-            AckStatus::Stored
-        ]
+        b.core.accept_raw(&a.id(), &w2, |_| AckStatus::Stored),
+        AckStatus::NoSession
     );
-}
-
-#[test]
-fn a_send_number_taken_back_by_a_restore_is_used_again_and_the_receiver_drops_the_message() {
-    let (mut a, b) = (side(), side());
-    establish(&a, &b);
-    a.core.enqueue(&b.id(), "one", 2).unwrap();
-    assert_eq!(deliver_next(&a, &b), Some(AckStatus::Stored));
-    let snap = snapshot(&mut a);
-    a.core.enqueue(&b.id(), "two", 3).unwrap();
-    assert_eq!(deliver_next(&a, &b), Some(AckStatus::Stored));
-    rollback(&mut a, &snap);
-    // A fresh session, so that the envelope opens and only the number is
-    // in question.
-    a.core.reset_session(&b.id());
-    a.core.enqueue(&b.id(), "three", 4).unwrap();
-    let (_, st) = send_one(&a, &b);
-    let kept = b.texts(&a.id()).contains(&"three".to_string());
-    assert_eq!(kept, SEND_NUMBER_REUSE_CLOSED);
-    if !SEND_NUMBER_REUSE_CLOSED {
-        // The receiver drops it and the sender shows it as delivered.
-        assert_eq!(st, AckStatus::Duplicate);
-        let shown_delivered = a
-            .core
-            .history(&b.id(), None, 200)
-            .iter()
-            .any(|m| m.outgoing && m.text == "three" && m.state == MsgState::Delivered);
-        assert!(shown_delivered);
-    }
 }

@@ -47,6 +47,10 @@ pub enum Location {
     BridgeInbox,
     /// The operating system temp directory.
     OsTemp,
+    /// The per-user local state folder of the operating system, a place
+    /// that is not inside the data directory (so that restoring or copying
+    /// the data directory does not carry it along).
+    OutsideDataDir,
     /// A path the user picked (Save As, `-o`, a custom folder, `$MIASMA_UI_SNAP`).
     UserChosen,
     /// `HKEY_CURRENT_USER`.
@@ -520,6 +524,28 @@ spec!(
     "Messages of one chat group (encrypted record log; absent in ephemeral mode)."
 );
 spec!(
+    CHAT_ANCHOR_DIR,
+    "ms",
+    Dir,
+    OutsideDataDir,
+    State,
+    Encrypt,
+    CryptoEraseOverwriteRemove,
+    "D28",
+    "Folder outside the data directory (neutral name) with one sub-folder per data directory."
+);
+spec!(
+    CHAT_ANCHOR,
+    "ms/*/*",
+    Pattern,
+    OutsideDataDir,
+    State,
+    Encrypt,
+    CryptoEraseOverwriteRemove,
+    "D28",
+    "Per-contact record of the last chat session file written: fingerprints and a counter, no keys (names are keyed hashes)."
+);
+spec!(
     CHAT_TMP,
     "chat/*.tmp",
     Pattern,
@@ -979,6 +1005,8 @@ pub const REGISTRY: &[PathSpec] = &[
     CHAT_OUTBOX,
     CHAT_GROUP,
     CHAT_GROUP_HISTORY,
+    CHAT_ANCHOR_DIR,
+    CHAT_ANCHOR,
     CHAT_TMP,
     DAEMON_PORT,
     DAEMON_HTTP,
@@ -1192,6 +1220,44 @@ pub fn contacts_corrupt_aside(contacts_file: &Path, unix_secs: u64) -> PathBuf {
 /// `<data>/chat`
 pub fn chat_dir(data_dir: &Path) -> PathBuf {
     CHAT_DIR.in_dir(data_dir)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test hook: where the anchor folder goes instead of the user's state folder.
+    pub(crate) static ANCHOR_BASE_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The folder that holds the anchor folders: the per-user state folder
+/// (`$XDG_STATE_HOME` or `~/.local/state` on Linux; the local application data
+/// folder on Windows; the caches folder on macOS). `None` when the system
+/// names no such folder (the anchor is then kept in memory only).
+pub fn anchor_base() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(p) = ANCHOR_BASE_OVERRIDE.with(|o| o.borrow().clone()) {
+        return Some(p);
+    }
+    let dirs = directories::BaseDirs::new()?;
+    dirs.state_dir()
+        .unwrap_or_else(|| dirs.cache_dir())
+        .to_path_buf()
+        .into()
+}
+
+/// `<base>/ms/<keyed hash of the data directory>`: the anchor folder of one
+/// data directory below `base`.
+pub fn anchor_dir_in(base: &Path, data_dir: &Path) -> PathBuf {
+    let canon = std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
+    let mut h = blake3::Hasher::new_derive_key("chat anchor folder v1");
+    h.update(canon.to_string_lossy().as_bytes());
+    let name = hex::encode(&h.finalize().as_bytes()[..8]);
+    CHAT_ANCHOR_DIR.in_dir(base).join(name)
+}
+
+/// The anchor folder of `data_dir` in the default place, if there is one.
+pub fn anchor_dir(data_dir: &Path) -> Option<PathBuf> {
+    anchor_base().map(|b| anchor_dir_in(&b, data_dir))
 }
 
 /// `<chat dir>/<stem>.msgs`: the saved messages of one contact.
