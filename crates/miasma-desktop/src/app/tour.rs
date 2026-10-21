@@ -648,6 +648,8 @@ fn arrange(step: &Step, app: &mut MiasmaApp, ctx: &egui::Context, first: bool) {
         app.locale = step.locale;
         app.tab = step.tab;
         app.settings_cat = settings_cat_of(&step.name);
+        // The emergency-wipe confirmation, over the Danger zone page.
+        app.show_wipe_confirm = step.name.contains("_wipe_");
         // The send flow is closed at the start of every step, then opened as the step says.
         app.send_flow = crate::send_flow::SendFlow::default();
         if let Some(d) = &step.daemon {
@@ -884,7 +886,8 @@ fn easy_steps() -> Vec<Step> {
                 steps.push(s);
             }
             for fx in [
-                "empty", "one", "two", "five", "failed", "adderror", "qr", "verify", "perm",
+                "empty", "one", "two", "five", "failed", "adderror", "invite", "qr", "verify",
+                "perm",
             ] {
                 let mut s = base(
                     format!("easy_{lname}_contacts_{fx}_{wname}"),
@@ -981,6 +984,52 @@ fn easy_steps() -> Vec<Step> {
             }
         }
     }
+    // The emergency-wipe confirmation (Japanese), and Technical mode in Japanese: Settings and
+    // the Transfers page with the receive form.
+    steps.push(Step {
+        name: "easy_ja_settings_danger_wipe_wide".to_owned(),
+        theme: ThemeMode::Light,
+        locale: Locale::Ja,
+        tab: Tab::Settings,
+        daemon: Some(DaemonState::Connected),
+        transfers: None,
+        contacts: None,
+        chat: None,
+        size: Some((1200.0, 1200.0)),
+        mode: Some(ProductMode::Easy),
+        flow: None,
+        hover: false,
+    });
+    for cat in ["privacy", "network", "about"] {
+        steps.push(Step {
+            name: format!("tech_ja_settings_{cat}_wide"),
+            theme: ThemeMode::Light,
+            locale: Locale::Ja,
+            tab: Tab::Settings,
+            daemon: Some(DaemonState::Connected),
+            transfers: None,
+            contacts: None,
+            chat: None,
+            size: Some((1200.0, 2400.0)),
+            mode: Some(ProductMode::Technical),
+            flow: None,
+            hover: false,
+        });
+    }
+    steps.push(Step {
+        name: "tech_ja_transfers_wide".to_owned(),
+        theme: ThemeMode::Light,
+        locale: Locale::Ja,
+        tab: Tab::Transfers,
+        daemon: Some(DaemonState::Connected),
+        transfers: Some(view("backup-100GiB", NewForm::Receive, false, false)),
+        contacts: None,
+        chat: None,
+        size: Some((1200.0, 1600.0)),
+        mode: Some(ProductMode::Technical),
+        flow: None,
+        hover: false,
+    });
     // Technical mode: the grouped tab row (top row, then the Files group's row) and Settings.
     for (tab, tname) in [
         (Tab::Contacts, "contacts"),

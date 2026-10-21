@@ -1479,7 +1479,8 @@ impl MiasmaApp {
         let connected = self.daemon_state == DaemonState::Connected;
         let transfer_label = self.tr().tab_easy;
 
-        kit::page(ui, s.files_heading_easy, Some(s.files_desc_easy), |ui| {
+        // The six actions say what this screen is for: no explanation under the heading.
+        kit::page(ui, s.files_heading_easy, None, |ui| {
             // Two main tasks side by side, big; storing and restoring under them, still large;
             // what happened (transfers, sent files) as small links at the bottom.
             let gap = kit::SP_3;
@@ -2770,7 +2771,32 @@ impl MiasmaApp {
         let s = self.s();
         let easy = self.mode.is_easy();
         {
-            // ── Paths: not in the page body (they carry the user name of this computer) ──
+            // ── Version and build: what a person tells support ───────
+            kit::paragraph(ui, &crate::buildinfo::window_title(self.locale));
+            ui.add_space(kit::SP_2);
+
+            // ── Actions ──────────────────────────────────────────────
+            kit::section(ui, s.settings_actions, |ui| {
+                kit::button_row(ui, |ui| {
+                    self.copy_diagnostics_button(ui);
+                    self.save_diagnostics_button(ui);
+                    if ui
+                        .add(kit::secondary_button(s.settings_open_folder))
+                        .clicked()
+                    {
+                        self.open_last =
+                            crate::transfers::plain_path(&self.data_dir_display).to_owned();
+                        crate::open_path::launch(
+                            crate::open_path::Action::Open,
+                            std::path::PathBuf::from(&self.data_dir_display),
+                            self.open_tx.clone(),
+                        );
+                    }
+                });
+            });
+
+            // ── Paths and how it works: closed. The paths carry the user name of this
+            // computer, so they are not in the page body either. ──
             let tech_title = kit::muted_text(crate::uitext::technical_details(self.locale));
             egui::CollapsingHeader::new(tech_title)
                 .id_source("about_technical")
@@ -2805,51 +2831,28 @@ impl MiasmaApp {
                             }
                         });
                     });
-                });
 
-            // ── How it works ─────────────────────────────────────────
-            kit::section(ui, s.settings_how, |ui| {
-                kit::paragraph(
-                    ui,
-                    if easy {
-                        s.settings_how_line1_easy
-                    } else {
-                        s.settings_how_line1
-                    },
-                );
-                kit::paragraph(
-                    ui,
-                    if easy {
-                        s.settings_how_line2_easy
-                    } else {
-                        s.settings_how_line2
-                    },
-                );
-                ui.add_space(kit::SP_1);
-                kit::hint(ui, s.settings_preserved);
-            });
-
-            // ── Actions ──────────────────────────────────────────────
-            kit::section(ui, s.settings_actions, |ui| {
-                kit::button_row(ui, |ui| {
-                    self.copy_diagnostics_button(ui);
-                    self.save_diagnostics_button(ui);
-                    if ui
-                        .add(kit::secondary_button(s.settings_open_folder))
-                        .clicked()
-                    {
-                        self.open_last =
-                            crate::transfers::plain_path(&self.data_dir_display).to_owned();
-                        crate::open_path::launch(
-                            crate::open_path::Action::Open,
-                            std::path::PathBuf::from(&self.data_dir_display),
-                            self.open_tx.clone(),
+                    kit::section(ui, s.settings_how, |ui| {
+                        kit::paragraph(
+                            ui,
+                            if easy {
+                                s.settings_how_line1_easy
+                            } else {
+                                s.settings_how_line1
+                            },
                         );
-                    }
+                        kit::paragraph(
+                            ui,
+                            if easy {
+                                s.settings_how_line2_easy
+                            } else {
+                                s.settings_how_line2
+                            },
+                        );
+                        ui.add_space(kit::SP_1);
+                        kit::hint(ui, s.settings_preserved);
+                    });
                 });
-            });
-
-            kit::hint(ui, &crate::buildinfo::window_title(self.locale));
         }
     }
 
@@ -2888,9 +2891,14 @@ impl MiasmaApp {
         let p = self.pq();
         let available = PqcMode::available();
         let mut chosen = self.pqc_mode;
+        let easy = self.mode.is_easy();
+        let locale = self.locale;
         kit::section(ui, p.heading, |ui| {
-            kit::paragraph_muted(ui, p.intro);
-            ui.add_space(kit::SP_1);
+            if !available && easy {
+                // Nothing can be chosen in this build: one line, no switched-off controls.
+                kit::paragraph_muted(ui, p.unavailable);
+                return;
+            }
             if !available {
                 kit::notice(ui, Level::Warn, p.unavailable);
                 ui.add_space(kit::SP_1);
@@ -2898,10 +2906,10 @@ impl MiasmaApp {
             // Without the protection in this build the choices are shown switched off: they
             // would be saved but change nothing.
             ui.add_enabled_ui(available, |ui| {
-                for (mode, label, help) in [
-                    (PqcMode::Off, p.off, p.off_help),
-                    (PqcMode::Prefer, p.prefer, p.prefer_help),
-                    (PqcMode::Require, p.require, p.require_help),
+                for (mode, label) in [
+                    (PqcMode::Off, p.off),
+                    (PqcMode::Prefer, p.prefer),
+                    (PqcMode::Require, p.require),
                 ] {
                     let r = ui.radio_value(&mut chosen, mode, label);
                     // Each choice is named by its own label; the heading names the group.
@@ -2916,12 +2924,29 @@ impl MiasmaApp {
                     if !available {
                         crate::form_check::mark_disabled(&r);
                     }
-                    kit::hint(ui, help);
                 }
             });
-            ui.add_space(kit::SP_1);
-            kit::hint(ui, p.restart_note);
-            kit::hint(ui, p.review_note);
+            // What the protection is and what each choice does: opened on request.
+            egui::CollapsingHeader::new(kit::muted_text(crate::uitext::details(locale)))
+                .id_source("settings_pqc_details")
+                .default_open(false)
+                .show_a11y(ui, |ui| {
+                    kit::paragraph_muted(ui, p.intro);
+                    for (label, help) in [
+                        (p.off, p.off_help),
+                        (p.prefer, p.prefer_help),
+                        (p.require, p.require_help),
+                    ] {
+                        ui.add_space(kit::SP_1);
+                        ui.label(RichText::new(label).strong());
+                        kit::hint(ui, help);
+                    }
+                });
+            if available {
+                ui.add_space(kit::SP_1);
+                kit::hint(ui, p.restart_note);
+                kit::hint(ui, p.review_note);
+            }
         });
         if chosen != self.pqc_mode {
             let saved =
@@ -4524,10 +4549,11 @@ mod tests {
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
         let data = tempfile::tempdir().unwrap();
+        // Technical mode: Easy mode shows one line instead of the switched-off choices.
         let mut app = MiasmaApp::new_with_ctx(
             &ctx,
             None,
-            ProductMode::Easy,
+            ProductMode::Technical,
             Locale::En,
             ThemeMode::Light,
             data.path().to_path_buf(),

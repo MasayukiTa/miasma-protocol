@@ -295,6 +295,7 @@ impl NetworkUi {
         ctx: &egui::Context,
     ) {
         kit::section(ui, s.heading, |ui| {
+            // Stated once for the whole page; the rows below do not repeat it.
             kit::paragraph_muted(ui, s.intro);
             if self.load_failed {
                 kit::notice(ui, Level::Warn, s.load_failed);
@@ -317,7 +318,6 @@ impl NetworkUi {
                         (IrohMode::Off, s.mode_direct),
                     ],
                 );
-                kit::status_dot(ui, Level::Warn, s.restart_tag);
             });
             self.edit.mode = mode;
 
@@ -369,7 +369,6 @@ impl NetworkUi {
                 if let Some(e) = self.relay_error {
                     kit::notice(ui, Level::Error, url_error_text(s, e));
                 }
-                kit::status_dot(ui, Level::Warn, s.restart_tag);
             });
             if let Some(i) = remove {
                 self.edit.relay_urls.remove(i);
@@ -389,7 +388,6 @@ impl NetworkUi {
             let mut lan = self.edit.lan_discovery;
             kit::form_row(ui, s.lan_label, Some(s.lan_desc), |ui| {
                 kit::segmented(ui, &mut lan, &[(true, s.lan_on), (false, s.lan_off)]);
-                kit::status_dot(ui, Level::Warn, s.restart_tag);
             });
             self.edit.lan_discovery = lan;
 
@@ -408,7 +406,6 @@ impl NetworkUi {
                 } else if let Some((level, text)) = ca_text(s, &self.edit.ca_path, &self.ca_check) {
                     kit::status_dot(ui, level, &text);
                 }
-                kit::status_dot(ui, Level::Warn, s.restart_tag);
             });
             if choose {
                 if let Some(p) = rfd::FileDialog::new()
@@ -439,7 +436,6 @@ impl NetworkUi {
                     );
                     ui.label(RichText::new(s.retry_unit).color(kit::pal().text));
                 });
-                kit::status_dot(ui, Level::Warn, s.restart_tag);
             });
             self.edit.retry_hours = hours;
 
