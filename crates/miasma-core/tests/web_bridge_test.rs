@@ -1,4 +1,4 @@
-//! The HTTP bridge as the browser client uses it: the client's own files are
+﻿//! The HTTP bridge as the browser client uses it: the client's own files are
 //! served without a token, everything under `/api` (except the liveness ping)
 //! needs one. Every test runs a real daemon against a throwaway data directory.
 //! No test writes a literal password: secrets are drawn from the OS RNG at run
@@ -177,7 +177,7 @@ async fn http(port: u16, method: &str, path: &str, bearer: Option<&str>, body: &
     http_with(port, method, path, bearer, None, body).await
 }
 
-// ─── The client itself ───────────────────────────────────────────────────────
+// 笏笏笏 The client itself 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_bridge_serves_the_web_client_without_a_token() {
@@ -319,7 +319,7 @@ async fn the_token_is_never_offered_to_a_caller_that_lacks_it() {
     d.stop().await;
 }
 
-// ─── Transfers over HTTP ─────────────────────────────────────────────────────
+// 笏笏笏 Transfers over HTTP 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
 
 fn body_of(response: &str) -> &str {
     response
@@ -749,7 +749,7 @@ async fn a_weak_private_share_password_is_refused_over_ipc_and_http() {
         .to_string();
         let r = http(d.http_port, "POST", "/api/directed/send", Some(&tok), &send).await;
         assert!(r.starts_with("HTTP/1.1 400"), "{r:.300}");
-        assert!(r.contains(want.as_str()), "{r:.300}");
+        assert!(r.contains(*want), "{r:.300}");
         every_response.push_str(&r);
 
         let send_file = serde_json::json!({
@@ -768,7 +768,7 @@ async fn a_weak_private_share_password_is_refused_over_ipc_and_http() {
         )
         .await;
         assert!(r.starts_with("HTTP/1.1 400"), "{r:.300}");
-        assert!(r.contains(want.as_str()), "{r:.300}");
+        assert!(r.contains(*want), "{r:.300}");
         every_response.push_str(&r);
     }
 
@@ -915,7 +915,7 @@ async fn a_via_receive_is_passed_through_and_a_bad_via_is_refused_clearly() {
     d.stop().await;
 }
 
-// ─── Removing finished transfers over HTTP ───────────────────────────────────
+// 笏笏笏 Removing finished transfers over HTTP 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
 
 /// Put a receive job in `state` into the daemon's registry; returns its id.
 fn inject_job(
