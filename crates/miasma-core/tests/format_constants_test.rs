@@ -176,13 +176,46 @@ fn share_id_version_flags_and_checksum() {
         assert_eq!(back.protected(), protected);
         assert_eq!(back.mid_bytes(), mid.as_bytes());
     }
-    // A flipped version byte or an unknown flag is refused by name.
-    let mut bytes = frozen("share_id_plain");
+    // The checksum context, spelled out: the first four bytes of
+    // BLAKE3_derive_key("miasma-share-id-v2 checksum")(first 66 bytes).
+    let seal = |body: &[u8]| -> Vec<u8> {
+        let mut h = blake3::Hasher::new_derive_key("miasma-share-id-v2 checksum");
+        h.update(body);
+        let mut out = body.to_vec();
+        out.extend_from_slice(&h.finalize().as_bytes()[..4]);
+        out
+    };
+    let plain = frozen("share_id_plain");
+    assert_eq!(seal(&plain[..66]), plain);
+    // A flipped version byte breaks the checksum, which covers it.
+    let mut bytes = plain.clone();
     bytes[0] = 3;
     let text = format!("{SHARE_ID_PREFIX}{}", bs58::encode(&bytes).into_string());
     assert!(matches!(
         ShareId::parse(&text),
+        Err(ShareIdError::BadChecksum)
+    ));
+    // A version or a flag this build does not know, with a valid checksum, is
+    // refused by name ("update Miasma").
+    let mut body = plain[..66].to_vec();
+    body[0] = 3;
+    let text = format!(
+        "{SHARE_ID_PREFIX}{}",
+        bs58::encode(seal(&body)).into_string()
+    );
+    assert!(matches!(
+        ShareId::parse(&text),
         Err(ShareIdError::UnsupportedVersion(3))
+    ));
+    let mut body = plain[..66].to_vec();
+    body[1] = 0b10;
+    let text = format!(
+        "{SHARE_ID_PREFIX}{}",
+        bs58::encode(seal(&body)).into_string()
+    );
+    assert!(matches!(
+        ShareId::parse(&text),
+        Err(ShareIdError::UnknownFlags(0b10))
     ));
 }
 
