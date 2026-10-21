@@ -442,6 +442,8 @@ impl ChatService {
         let mut conn: Option<Connection> = None;
         let mut failures = 0u32;
         let mut resets = 0u32;
+        // The message for which a refusal already led to a new session.
+        let mut restarted_for: Option<[u8; 16]> = None;
         loop {
             if *stop.borrow() {
                 self.workers.lock().unwrap().remove(&peer);
@@ -504,6 +506,19 @@ impl ChatService {
                 Outcome::Permanent(reason) => {
                     failures = 0;
                     self.core.mark_failed(&entry.id, reason, now_ms());
+                }
+                Outcome::Rejected => {
+                    // A build from before `NoSession` was answered for state
+                    // that does not match answers "bad request" instead: start
+                    // a new session once for this message, then take the
+                    // answer as it is.
+                    if restarted_for == Some(entry.id) {
+                        failures = 0;
+                        self.core.mark_failed(&entry.id, fail::REJECTED, now_ms());
+                    } else {
+                        restarted_for = Some(entry.id);
+                        self.core.reset_session(&peer);
+                    }
                 }
                 Outcome::ResetSession => {
                     resets += 1;
@@ -745,7 +760,7 @@ impl ChatService {
             AckStatus::NotAllowed => Outcome::Permanent(fail::NOT_ALLOWED),
             AckStatus::TooBig => Outcome::Permanent(fail::TOO_BIG),
             AckStatus::Unsupported => Outcome::Permanent(fail::UNSUPPORTED),
-            AckStatus::BadRequest => Outcome::Permanent(fail::REJECTED),
+            AckStatus::BadRequest => Outcome::Rejected,
             AckStatus::Rate => Outcome::Retry("rate_limited"),
             AckStatus::Busy => Outcome::Retry("peer_busy"),
             AckStatus::Failed => Outcome::Retry("peer_failed"),
@@ -1085,6 +1100,8 @@ enum Outcome {
     Permanent(&'static str),
     Retry(&'static str),
     ResetSession,
+    /// The contact answered "bad request" to a text.
+    Rejected,
 }
 
 pub(crate) fn closed_with(conn: &Connection, code: u32) -> bool {
