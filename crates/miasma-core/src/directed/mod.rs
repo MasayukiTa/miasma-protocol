@@ -63,6 +63,7 @@ pub use envelope::{
     create_envelope, decrypt_directed_content, decrypt_envelope_payload, derive_content_key,
     finalize_envelope, format_sharing_contact, format_sharing_key, parse_sharing_contact,
     parse_sharing_key, DirectedEnvelope, EnvelopePayload, EnvelopeState, RetentionPeriod,
+    MAX_RETENTION_SECS, MIN_RETENTION_SECS,
 };
 pub use inbox::{DirectedInbox, EnvelopeSummary};
 pub use protocol::{DirectedCodec, DirectedRequest, DirectedResponse};

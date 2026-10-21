@@ -223,3 +223,19 @@ export function errorKey(message) {
   if (m.includes('a password is required') || m.includes('password-protected')) return 'tf_err_password_required';
   return '';
 }
+
+/**
+ * What to show as the sender of a received private share.
+ *
+ * `sender_peer_id` is the PeerId the daemon observed on the connection that delivered the
+ * invite, so it cannot be chosen by the sender. `sender_pubkey` is copied from the envelope and
+ * can be set to anything by whoever built it, so it is only ever shown as unverified.
+ * Returns { kind: 'verified' | 'unverified' | 'unknown', id } where `id` is the text to show.
+ */
+export function senderDisplay(item) {
+  const peer = item && typeof item.sender_peer_id === 'string' ? item.sender_peer_id.trim() : '';
+  if (peer) return { kind: 'verified', id: peer };
+  const claimed = item && typeof item.sender_pubkey === 'string' ? item.sender_pubkey.trim() : '';
+  if (claimed) return { kind: 'unverified', id: claimed };
+  return { kind: 'unknown', id: '' };
+}

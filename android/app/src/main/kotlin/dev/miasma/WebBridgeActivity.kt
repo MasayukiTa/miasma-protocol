@@ -490,6 +490,7 @@ class WebBridgeActivity : ComponentActivity() {
                     arr.put(JSONObject().apply {
                         put("envelope_id", item.envelopeId)
                         put("sender_pubkey", item.senderPubkey)
+                        put("sender_peer_id", item.senderPeerId ?: JSONObject.NULL)
                         put("recipient_pubkey", item.recipientPubkey)
                         put("state", item.state)
                         put("created_at", item.createdAt)

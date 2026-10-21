@@ -64,7 +64,7 @@ struct InboxItemRow: View {
             }
 
             // Sender
-            Text("From: \(String(item.senderKey.prefix(20)))…")
+            Text(item.senderText)
                 .font(.caption)
 
             // Expiry

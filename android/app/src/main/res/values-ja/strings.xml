@@ -64,6 +64,9 @@
     <string name="directed_daemon_unavailable">ノードの準備ができていないため、安全なファイル共有を利用できません。</string>
     <string name="inbox_empty">受信したファイルはまだありません。</string>
     <string name="inbox_from">送信元: %1$s…</string>
+    <string name="inbox_from_verified">送信元(確認済み): %1$s…</string>
+    <string name="inbox_from_unverified">送信元(未確認・送信者の自己申告): %1$s…</string>
+    <string name="inbox_from_unknown">送信元不明(旧形式の記録)</string>
     <string name="file_label">ファイル: %1$s</string>
     <string name="size_label">サイズ: %1$s</string>
     <string name="challenge_share_sender">確認コード — このコードを送信者に伝えてください:</string>

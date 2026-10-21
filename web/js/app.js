@@ -6,6 +6,7 @@ import { MiasmaBridge, getAuthState, onAuthChange, setAfterWipeHandler } from '.
 import { wipeEverything, zeroFill } from './wipe.js';
 import { createTransfers } from './transfers.js';
 import { checkDirectedPassword, parseWeakPasswordCodes } from './password_policy.js';
+import { senderDisplay } from './format.js';
 
 // A password refused for a private share, in the page language ('' when it is acceptable).
 function directedPasswordProblem(codes) {
@@ -791,10 +792,19 @@ async function refreshInbox() {
       card.appendChild(header);
 
       // Sender
-      if (item.sender_pubkey) {
+      // The verified sender is the PeerId seen on the connection; the key inside the share is
+      // only a claim and is labelled as such.
+      {
+        const sender = senderDisplay(item);
         const senderRow = document.createElement('div');
         senderRow.className = 'source-desc small';
-        senderRow.textContent = 'From: ' + (item.sender_pubkey || '').substring(0, 20) + '...';
+        if (sender.kind === 'verified') {
+          senderRow.textContent = t('inbox_sender_verified') + ': ' + sender.id.substring(0, 20) + '...';
+        } else if (sender.kind === 'unverified') {
+          senderRow.textContent = t('inbox_sender_unverified') + ': ' + sender.id.substring(0, 20) + '...';
+        } else {
+          senderRow.textContent = t('inbox_sender_unknown');
+        }
         card.appendChild(senderRow);
       }
 

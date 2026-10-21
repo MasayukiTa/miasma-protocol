@@ -64,6 +64,9 @@ All locally stored shares become permanently unreadable. This cannot be undone.<
     <string name="directed_daemon_unavailable">Node is not ready. Secure file sharing is unavailable.</string>
     <string name="inbox_empty">No received files yet.</string>
     <string name="inbox_from">From: %1$s…</string>
+    <string name="inbox_from_verified">From (verified): %1$s…</string>
+    <string name="inbox_from_unverified">From (unverified, claimed by the sender): %1$s…</string>
+    <string name="inbox_from_unknown">Sender unknown (older record)</string>
     <string name="file_label">File: %1$s</string>
     <string name="size_label">Size: %1$s</string>
     <string name="challenge_share_sender">Challenge code — send this to the sender:</string>

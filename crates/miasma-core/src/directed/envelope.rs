@@ -102,7 +102,35 @@ pub enum RetentionPeriod {
     Custom(u64),
 }
 
+/// Shortest retention a sender may choose: the shortest preset
+/// (`RetentionPeriod::TenMinutes`).
+pub const MIN_RETENTION_SECS: u64 = 600;
+
+/// Longest retention a sender may choose, and the longest time a recipient
+/// keeps a share it received: the longest preset (`RetentionPeriod::ThirtyDays`).
+///
+/// A receiver never trusts the sender's `expires_at` beyond `now + MAX_RETENTION_SECS`,
+/// because `expires_at` is chosen by the sender and `u64::MAX` would otherwise keep a
+/// share on the recipient's disk with no end. A sender-side value outside
+/// `[MIN_RETENTION_SECS, MAX_RETENTION_SECS]` is refused so that `now + retention`
+/// cannot overflow.
+pub const MAX_RETENTION_SECS: u64 = 2_592_000;
+
 impl RetentionPeriod {
+    /// The retention in seconds, or an error when it is outside
+    /// `[MIN_RETENTION_SECS, MAX_RETENTION_SECS]`.
+    pub fn checked_secs(&self) -> Result<u64, MiasmaError> {
+        let secs = self.as_secs();
+        if (MIN_RETENTION_SECS..=MAX_RETENTION_SECS).contains(&secs) {
+            Ok(secs)
+        } else {
+            Err(MiasmaError::Storage(format!(
+                "invalid retention: {secs} seconds is outside the allowed range \
+                 {MIN_RETENTION_SECS} to {MAX_RETENTION_SECS} seconds"
+            )))
+        }
+    }
+
     /// Duration in seconds.
     pub fn as_secs(&self) -> u64 {
         match self {
@@ -231,6 +259,26 @@ impl DirectedEnvelope {
         now_secs >= self.expires_at
     }
 
+    /// Bring the sender-chosen retention fields of a received envelope into
+    /// the range this node is willing to keep.
+    ///
+    /// - A window that ends at or before it starts (`expires_at <= created_at`)
+    ///   is refused: no honest sender produces one.
+    /// - `expires_at` is capped to `now + MAX_RETENTION_SECS` and `retention_secs`
+    ///   to `MAX_RETENTION_SECS`, so a huge value (up to `u64::MAX`) cannot make
+    ///   a share unlimited. An `expires_at` already in the past is kept as is:
+    ///   the share is simply expired.
+    pub fn normalize_received_retention(&mut self, now_secs: u64) -> Result<(), &'static str> {
+        if self.expires_at <= self.created_at {
+            return Err("invalid envelope retention window: it ends before it starts");
+        }
+        self.expires_at = self
+            .expires_at
+            .min(now_secs.saturating_add(MAX_RETENTION_SECS));
+        self.retention_secs = self.retention_secs.min(MAX_RETENTION_SECS);
+        Ok(())
+    }
+
     /// Whether the challenge has expired.
     pub fn is_challenge_expired(&self, now_secs: u64) -> bool {
         self.challenge_expires_at > 0 && now_secs >= self.challenge_expires_at
@@ -317,6 +365,9 @@ fn build_envelope(
 ) -> Result<(DirectedEnvelope, Vec<u8>, Zeroizing<[u8; 32]>), MiasmaError> {
     use rand::RngCore;
 
+    // Refuse a retention that is out of range before doing any work.
+    let retention_secs = retention.checked_secs()?;
+
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -382,14 +433,14 @@ fn build_envelope(
         encrypted_payload,
         payload_nonce,
         password_salt,
-        expires_at: now + retention.as_secs(),
+        expires_at: now.saturating_add(retention_secs),
         created_at: now,
         state: EnvelopeState::Pending,
         challenge_hash: None,
         password_attempts_remaining: 3,
         challenge_attempts_remaining: 3,
         challenge_expires_at: 0,
-        retention_secs: retention.as_secs(),
+        retention_secs,
     };
 
     Ok((envelope, protected_data, envelope_key))
@@ -986,5 +1037,162 @@ mod tests {
         assert_eq!(RetentionPeriod::SevenDays.as_secs(), 604800);
         assert_eq!(RetentionPeriod::ThirtyDays.as_secs(), 2592000);
         assert_eq!(RetentionPeriod::Custom(42).as_secs(), 42);
+    }
+
+    /// A fresh password for each call, so no password is written in this file.
+    fn generated_password() -> String {
+        hex::encode(rand::random::<[u8; 12]>())
+    }
+
+    #[test]
+    fn the_retention_bounds_are_the_shortest_and_longest_preset() {
+        assert_eq!(MIN_RETENTION_SECS, RetentionPeriod::TenMinutes.as_secs());
+        assert_eq!(MAX_RETENTION_SECS, RetentionPeriod::ThirtyDays.as_secs());
+        for preset in [
+            RetentionPeriod::TenMinutes,
+            RetentionPeriod::OneHour,
+            RetentionPeriod::OneDay,
+            RetentionPeriod::SevenDays,
+            RetentionPeriod::ThirtyDays,
+        ] {
+            assert_eq!(preset.checked_secs().unwrap(), preset.as_secs());
+        }
+    }
+
+    #[test]
+    fn create_envelope_refuses_a_retention_that_would_overflow_or_never_end() {
+        let (sender_secret, _, _, recipient_pub) = test_keys();
+        for bad in [
+            0,
+            1,
+            MIN_RETENTION_SECS - 1,
+            MAX_RETENTION_SECS + 1,
+            u64::MAX - 1,
+            u64::MAX,
+        ] {
+            let err = create_envelope(
+                &sender_secret,
+                &recipient_pub,
+                &generated_password(),
+                RetentionPeriod::Custom(bad),
+                b"data",
+                None,
+            )
+            .map(|_| ())
+            .expect_err("an out-of-range retention must be refused");
+            assert!(
+                err.to_string().contains("invalid retention"),
+                "retention {bad}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn create_envelope_accepts_the_ends_of_the_range() {
+        let (sender_secret, _, _, recipient_pub) = test_keys();
+        for ok in [MIN_RETENTION_SECS, 12345, MAX_RETENTION_SECS] {
+            let (env, _, _) = create_envelope(
+                &sender_secret,
+                &recipient_pub,
+                &generated_password(),
+                RetentionPeriod::Custom(ok),
+                b"data",
+                None,
+            )
+            .unwrap();
+            assert_eq!(env.retention_secs, ok);
+            assert_eq!(env.expires_at, env.created_at + ok);
+        }
+    }
+
+    fn envelope_with_window(created_at: u64, expires_at: u64) -> DirectedEnvelope {
+        DirectedEnvelope {
+            envelope_id: [9u8; 32],
+            version: 1,
+            sender_pubkey: [1u8; 32],
+            recipient_pubkey: [2u8; 32],
+            ephemeral_pubkey: [3u8; 32],
+            encrypted_payload: vec![4u8; 16],
+            payload_nonce: [5u8; 24],
+            password_salt: [6u8; 32],
+            expires_at,
+            created_at,
+            state: EnvelopeState::Pending,
+            challenge_hash: None,
+            password_attempts_remaining: 3,
+            challenge_attempts_remaining: 3,
+            challenge_expires_at: 0,
+            retention_secs: expires_at.saturating_sub(created_at),
+        }
+    }
+
+    #[test]
+    fn a_received_unlimited_expiry_is_capped() {
+        let now = 1_800_000_000;
+        for expires_at in [u64::MAX, u64::MAX - 1, now + MAX_RETENTION_SECS + 1] {
+            let mut env = envelope_with_window(now, expires_at);
+            env.normalize_received_retention(now).unwrap();
+            assert_eq!(env.expires_at, now + MAX_RETENTION_SECS);
+            assert_eq!(env.retention_secs, MAX_RETENTION_SECS);
+            assert!(!env.is_expired(now));
+            assert!(env.is_expired(now + MAX_RETENTION_SECS));
+        }
+    }
+
+    #[test]
+    fn a_received_retention_secs_is_capped_on_its_own() {
+        let now = 1_800_000_000;
+        let mut env = envelope_with_window(now, now + 3600);
+        env.retention_secs = u64::MAX;
+        env.normalize_received_retention(now).unwrap();
+        assert_eq!(env.expires_at, now + 3600);
+        assert_eq!(env.retention_secs, MAX_RETENTION_SECS);
+    }
+
+    #[test]
+    fn capping_does_not_overflow_when_the_clock_is_at_the_end_of_time() {
+        let mut env = envelope_with_window(1, u64::MAX);
+        env.normalize_received_retention(u64::MAX).unwrap();
+        assert_eq!(env.expires_at, u64::MAX);
+        let mut env = envelope_with_window(1, u64::MAX);
+        env.normalize_received_retention(u64::MAX - 5).unwrap();
+        assert_eq!(env.expires_at, u64::MAX);
+    }
+
+    #[test]
+    fn a_received_window_that_ends_before_it_starts_is_refused() {
+        let now = 1_800_000_000;
+        for (created_at, expires_at) in [(now, now), (now, now - 1), (now, 0), (u64::MAX, u64::MAX)]
+        {
+            let mut env = envelope_with_window(created_at, expires_at);
+            let err = env.normalize_received_retention(now).unwrap_err();
+            assert!(err.contains("retention window"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_valid_envelope_is_not_changed_by_receiving() {
+        // The values of the frozen v1 fixture: a past, well-formed window is kept
+        // byte for byte, and so is one inside the cap.
+        for now in [1_700_000_000, 1_800_000_000, 2_000_000_000] {
+            let mut env = envelope_with_window(1_700_000_000, 1_700_086_400);
+            env.retention_secs = 86_400;
+            let before = bincode::serialize(&env).unwrap();
+            env.normalize_received_retention(now).unwrap();
+            assert_eq!(bincode::serialize(&env).unwrap(), before, "now = {now}");
+        }
+        let (sender_secret, _, _, recipient_pub) = test_keys();
+        let (mut env, _, _) = create_envelope(
+            &sender_secret,
+            &recipient_pub,
+            &generated_password(),
+            RetentionPeriod::SevenDays,
+            b"data",
+            None,
+        )
+        .unwrap();
+        let before = bincode::serialize(&env).unwrap();
+        env.normalize_received_retention(env.created_at).unwrap();
+        assert_eq!(bincode::serialize(&env).unwrap(), before);
     }
 }

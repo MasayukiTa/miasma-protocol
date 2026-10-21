@@ -4700,7 +4700,7 @@ impl MiasmaNode {
                 // For now, handle Invite by accepting and storing to inbox.
                 // Challenge generation and confirmation happen locally via IPC.
                 match request {
-                    DirectedRequest::Invite { envelope } => {
+                    DirectedRequest::Invite { mut envelope } => {
                         let envelope_id = envelope.envelope_id;
                         let id_hex = hex::encode(envelope_id);
                         let peer_text = peer.to_string();
@@ -4719,6 +4719,16 @@ impl MiasmaNode {
                         {
                             warn!(peer = %peer, envelope_id = %id_hex, "directed.invite_rejected_wrong_recipient_key");
                             DirectedResponse::Error("directed envelope recipient mismatch".into())
+                        } else if let Err(reason) = envelope.normalize_received_retention(
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs(),
+                        ) {
+                            // The retention window comes from the sender: cap it to what
+                            // this node keeps, and refuse one that makes no sense.
+                            warn!(peer = %peer, envelope_id = %id_hex, "directed.invite_rejected_retention");
+                            DirectedResponse::Error(reason.into())
                         } else if let Some(ref data_dir) = self.directed_data_dir {
                             match crate::directed::DirectedInbox::open(data_dir) {
                                 Ok(inbox) => {
