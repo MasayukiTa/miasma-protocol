@@ -2248,7 +2248,14 @@ async fn process_directed_send(
     data_dir: &std::path::Path,
 ) -> Result<String, MiasmaError> {
     // Parse recipient contact.
-    let (recipient_pubkey, _peer_id_str) = directed::parse_sharing_contact(recipient_contact)?;
+    let (recipient_pubkey, peer_id_str) = directed::parse_sharing_contact(recipient_contact)?;
+    // A contact whose PeerId cannot be parsed can never be delivered to: say so now
+    // instead of publishing the content and reporting success.
+    if peer_id_str.parse::<libp2p::PeerId>().is_err() {
+        return Err(MiasmaError::Storage(
+            "invalid recipient contact: the PeerId after '@' is not valid".into(),
+        ));
+    }
 
     // Create envelope and protected data.
     let retention = directed::RetentionPeriod::Custom(retention_secs);
@@ -2647,7 +2654,7 @@ async fn replication_engine(
                                             .duration_since(std::time::UNIX_EPOCH)
                                             .unwrap_or_default()
                                             .as_secs();
-                                        env.challenge_expires_at = now + directed::CHALLENGE_TTL_SECS;
+                                        env.challenge_expires_at = now.saturating_add(directed::CHALLENGE_TTL_SECS);
                                         let _ = inbox.save_incoming(&env);
                                     }
                                 }

@@ -11,12 +11,25 @@ import MiasmaFFI
 struct DirectedInboxItem: Identifiable {
     let envelopeId: String
     let senderKey: String
+    /// PeerId seen on the connection that delivered the invite; nil for older records.
+    let senderPeerId: String?
     let state: String
     let challengeCode: String?
     let createdAt: UInt64
     let expiresAt: UInt64
 
     var id: String { envelopeId }
+
+    /// What to show as the sender. The key inside the envelope is only a claim.
+    var senderText: String {
+        if let peer = senderPeerId, !peer.isEmpty {
+            return "From (verified): \(String(peer.prefix(20)))…"
+        }
+        if !senderKey.isEmpty {
+            return "From (unverified, claimed by the sender): \(String(senderKey.prefix(20)))…"
+        }
+        return "Sender unknown (older record)"
+    }
 }
 
 @MainActor
@@ -234,6 +247,7 @@ class MiasmaViewModel: ObservableObject {
             DirectedInboxItem(
                 envelopeId: obj["envelope_id"] as? String ?? "",
                 senderKey: obj["sender_pubkey"] as? String ?? "",
+                senderPeerId: obj["sender_peer_id"] as? String,
                 state: obj["state"] as? String ?? "Unknown",
                 challengeCode: obj["challenge_code"] as? String,
                 createdAt: (obj["created_at"] as? NSNumber)?.uint64Value ?? 0,

@@ -549,6 +549,55 @@ mod tests {
     }
 
     #[test]
+    fn the_listing_shows_the_authenticated_sender_apart_from_the_claimed_key() {
+        let tmp = TempDir::new().unwrap();
+        let inbox = DirectedInbox::open(tmp.path()).unwrap();
+
+        // The key inside an envelope is whatever its builder wrote; the PeerId is
+        // the one seen on the connection that delivered it.
+        let mut bound = make_test_envelope();
+        bound.envelope_id = [0x11; 32];
+        bound.sender_pubkey = [0xAA; 32];
+        bound.created_at = 200;
+        inbox.save_incoming(&bound).unwrap();
+        inbox
+            .bind_incoming_peer_id(&bound.id_hex(), "12D3KooWAuthenticated")
+            .unwrap();
+
+        let mut unbound = make_test_envelope();
+        unbound.envelope_id = [0x22; 32];
+        unbound.sender_pubkey = [0xBB; 32];
+        unbound.created_at = 100;
+        inbox.save_incoming(&unbound).unwrap();
+
+        let json = serde_json::to_value(inbox.list_incoming()).unwrap();
+        let rows = json.as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+
+        // Newest first: the bound one.
+        assert_eq!(rows[0]["sender_peer_id"], "12D3KooWAuthenticated");
+        assert_eq!(
+            rows[0]["sender_pubkey"],
+            crate::directed::format_sharing_key(&[0xAA; 32])
+        );
+        // No PeerId was seen for the other: clients must treat its key as unverified.
+        assert!(rows[1]["sender_peer_id"].is_null());
+        assert_eq!(
+            rows[1]["sender_pubkey"],
+            crate::directed::format_sharing_key(&[0xBB; 32])
+        );
+
+        // An old client that only reads `sender_pubkey` still finds it.
+        for row in rows {
+            assert!(row["sender_pubkey"].as_str().is_some_and(|s| !s.is_empty()));
+        }
+        // The outgoing list never claims an authenticated sender.
+        inbox.save_outgoing(&bound).unwrap();
+        let out = serde_json::to_value(inbox.list_outgoing()).unwrap();
+        assert!(out[0]["sender_peer_id"].is_null());
+    }
+
+    #[test]
     fn update_state() {
         let tmp = TempDir::new().unwrap();
         let inbox = DirectedInbox::open(tmp.path()).unwrap();
