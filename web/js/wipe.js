@@ -6,6 +6,7 @@
 
 import { clearControlState } from './bridge.js';
 import { lockStorage, deleteDatabase } from './storage.js';
+import { clearSession } from './websession.js';
 
 const CACHE_PREFIX = 'miasma';
 
@@ -52,6 +53,7 @@ function defaultLockScreen(doc, message, buttonLabel) {
  * @param {string} [opts.reloadLabel] label of its reload button
  * @param {object} [opts.env] globals to use (sessionStorage, localStorage, caches, navigator, document)
  * @param {Function} [opts.clearToken] defaults to bridge.js clearControlState
+ * @param {Function} [opts.clearSession] defaults to websession.js clearSession (deletes the stored signing key)
  * @param {Function} [opts.removeDatabase] defaults to storage.js deleteDatabase
  * @param {Function} [opts.lockDb] defaults to storage.js lockStorage
  * @returns {Promise<{ok: boolean, errors: string[]}>}
@@ -67,6 +69,8 @@ export async function wipeEverything(opts = {}) {
   await step('buffers', async () => { for (const drop of opts.dropBuffers || []) await drop(); });
   // 2. Control token (memory + sessionStorage keys).
   await step('token', () => (opts.clearToken || clearControlState)());
+  // 2b. The request-signing key: forget it in memory and delete its database.
+  await step('session', () => (opts.clearSession || clearSession)());
   // 3. Everything else in sessionStorage / localStorage.
   await step('sessionStorage', () => env.sessionStorage && env.sessionStorage.clear());
   await step('localStorage', () => env.localStorage && env.localStorage.clear());

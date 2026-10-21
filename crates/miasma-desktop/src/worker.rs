@@ -1011,7 +1011,7 @@ fn do_init(data_dir: &Path) -> anyhow::Result<()> {
 
 /// Check if node is initialized (master.key + config.toml exist).
 fn is_node_initialized(data_dir: &Path) -> bool {
-    miasma_core::paths::master_key(data_dir).exists()
+    miasma_core::root_key::is_initialized(data_dir)
         && miasma_core::paths::config_file(data_dir).exists()
 }
 
@@ -1394,7 +1394,9 @@ fn wipe_needs_direct_path(msg: &str) -> bool {
 /// Erase the stored data and keys without the background service.
 fn wipe_without_daemon(data_dir: &Path) -> WorkerResult {
     warn!("background service not reachable; erasing through the store directly");
-    match miasma_core::LocalShareStore::open(data_dir, 0).and_then(|store| store.distress_wipe()) {
+    // The key files are erased without opening the key, so this also works
+    // when the key is damaged or cannot be opened.
+    match miasma_core::root_key::wipe_data_dir(data_dir).into_result() {
         Ok(()) => WorkerResult::Wiped,
         Err(e) => WorkerResult::Err(UiError::new(ErrorKind::EraseFailed, e.to_string())),
     }

@@ -292,6 +292,21 @@ jobs:
         with:
           subject-path: dist/miasma-macos.tar.gz
 
+  # The released command-line program must stop, and leave the data directory
+  # alone, when master.key is not a plain 32-byte key (see
+  # crates/miasma-core/tests/root_key_downgrade_compat.rs for the copied readers).
+  older-release-key-file:
+    name: Released CLI against a 64-byte key file (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the released CLI against the data directory
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/check-older-release-key-file.sh v0.3.2-beta.11
+
   cross-compile-arm64:
     name: Cross-compile ARM64
     runs-on: ubuntu-24.04
@@ -315,6 +330,27 @@ jobs:
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: cargo build --target aarch64-unknown-linux-gnu -p miasma-core --locked
+
+      - name: Build the opt-in hybrid feature and its tests for ARM64
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo test --no-run --target aarch64-unknown-linux-gnu -p miasma-core --features pqc --lib --locked
+
+  test-core-pqc-arm64:
+    name: Core Tests, opt-in hybrid feature (native ARM64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test the hybrid key exchange and conversation upgrade
+        run: |
+          cargo test -p miasma-core --features pqc --locked --lib -- protocol:: chat::pq
 
   audit:
     name: Security Audit
