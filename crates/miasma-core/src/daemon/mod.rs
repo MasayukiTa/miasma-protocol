@@ -22,10 +22,12 @@ pub mod control_auth;
 pub mod http_bridge;
 pub mod ipc;
 pub mod maintenance_exec;
+pub mod path_policy;
 pub mod rate_limit;
 pub mod replication;
 pub mod self_heal;
 pub mod web_assets;
+pub mod web_guard;
 
 use std::{
     path::PathBuf,
@@ -1224,6 +1226,21 @@ async fn process_request_inner(
     data_dir: PathBuf,
     bridge_state: BridgeLiveState,
 ) -> ControlResponse {
+    // Whatever the channel, a path request never reaches the daemon's own data
+    // directory (master key, control token, state).
+    let named_path: Option<&str> = match &req {
+        ControlRequest::PublishFile { file_path, .. }
+        | ControlRequest::DirectedSendFile { file_path, .. } => Some(file_path),
+        ControlRequest::GetToFile { output_path, .. }
+        | ControlRequest::DirectedRetrieveToFile { output_path, .. }
+        | ControlRequest::TransferStartReceive { output_path, .. } => Some(output_path),
+        _ => None,
+    };
+    if let Some(p) = named_path {
+        if let Err(e) = path_policy::refuse_data_dir(std::path::Path::new(p), &data_dir) {
+            return ControlResponse::Error(format!("output path rejected: {e}"));
+        }
+    }
     match req {
         ControlRequest::Publish {
             data,

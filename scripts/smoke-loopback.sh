@@ -41,6 +41,9 @@ echo "Using binary: $CLI"
 
 DIR_A=$(mktemp -d /tmp/miasma-loopback-A-XXXXXX)
 DIR_B=$(mktemp -d /tmp/miasma-loopback-B-XXXXXX)
+# Files handed to the daemon live outside both node data dirs: the daemon refuses
+# input and output paths inside its own data directory.
+WORK_DIR=$(mktemp -d /tmp/miasma-loopback-W-XXXXXX)
 PASS=0
 FAIL=0
 
@@ -54,7 +57,7 @@ cleanup() {
             wait "$pid" 2>/dev/null || true
         fi
     done
-    rm -rf "$DIR_A" "$DIR_B"
+    rm -rf "$DIR_A" "$DIR_B" "$WORK_DIR"
     echo "Temp dirs and daemons cleaned up."
     echo ""
     echo "=== Results: $PASS passed, $FAIL failed ==="
@@ -154,11 +157,11 @@ fi
 # ── Step 6: Publish content on Node A ────────────────────────────────────────
 echo ""
 echo "=== Step 6: Publish on Node A ==="
-PAYLOAD_FILE="$DIR_A/payload.txt"
+PAYLOAD_FILE="$WORK_DIR/payload.txt"
 TEST_CONTENT="Miasma P2P loopback test $(date -u +%Y-%m-%dT%H:%M:%SZ) pid=$$"
 echo "$TEST_CONTENT" > "$PAYLOAD_FILE"
 
-PUBLISH_OUT=$("$CLI" --data-dir "$DIR_A" network-publish "$PAYLOAD_FILE" 2>&1)
+PUBLISH_OUT=$("$CLI" --data-dir "$DIR_A" network-publish "$PAYLOAD_FILE" 2>&1) || true
 MID=$(echo "$PUBLISH_OUT" | sed -nE 's/.*(miasma:[^[:space:]]+).*/\1/p' | head -1)
 
 if [ -n "$MID" ]; then
@@ -175,8 +178,8 @@ sleep 3
 # ── Step 7: Retrieve on Node B ───────────────────────────────────────────────
 echo ""
 echo "=== Step 7: Retrieve on Node B ==="
-RETRIEVED_FILE="$DIR_B/retrieved.txt"
-RETRIEVE_OUT=$("$CLI" --data-dir "$DIR_B" network-get "$MID" --output "$RETRIEVED_FILE" 2>&1)
+RETRIEVED_FILE="$WORK_DIR/retrieved.txt"
+RETRIEVE_OUT=$("$CLI" --data-dir "$DIR_B" network-get "$MID" --output "$RETRIEVED_FILE" 2>&1) || true
 
 if [ -f "$RETRIEVED_FILE" ]; then
     pass "Content retrieved to file"

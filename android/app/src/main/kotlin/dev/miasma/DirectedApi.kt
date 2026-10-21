@@ -22,6 +22,24 @@ object DirectedApi {
 
     private const val FILE_OPERATION_TIMEOUT_MS = 30 * 60 * 1000
 
+    /**
+     * The daemon no longer replaces an existing output file, so pick a name that is free:
+     * `name.ext`, then `name (1).ext`, `name (2).ext`, ...
+     */
+    private fun freeOutputPath(path: String): String {
+        val f = File(path)
+        if (!f.exists()) return path
+        val dot = f.name.lastIndexOf('.')
+        val stem = if (dot > 0) f.name.substring(0, dot) else f.name
+        val ext = if (dot > 0) f.name.substring(dot) else ""
+        var n = 1
+        while (true) {
+            val candidate = File(f.parentFile, "$stem ($n)$ext")
+            if (!candidate.exists()) return candidate.path
+            n++
+        }
+    }
+
     private fun bridgeUrl(port: Int, path: String): URL =
         URL("http://127.0.0.1:$port$path")
 
@@ -179,7 +197,7 @@ object DirectedApi {
     ): RetrieveMidToFileResult {
         val body = JSONObject().apply {
             put("mid", mid)
-            put("output_path", outputPath)
+            put("output_path", freeOutputPath(outputPath))
             put("data_shards", k)
             put("total_shards", n)
         }
@@ -296,7 +314,7 @@ object DirectedApi {
         val body = JSONObject().apply {
             put("envelope_id", envelopeId)
             put("password", password)
-            put("output_path", outputPath)
+            put("output_path", freeOutputPath(outputPath))
         }
         val resp = httpPost(dataDir, port, "/api/directed/retrieve-to-file", body, FILE_OPERATION_TIMEOUT_MS)
         if (resp.has("error")) throw RuntimeException(resp.getString("error"))
