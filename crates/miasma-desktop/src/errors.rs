@@ -360,6 +360,18 @@ pub struct UiError {
     pub detail: String,
 }
 
+/// "invalid MID: invalid MID: missing prefix" -> "invalid MID: missing prefix": an error chain
+/// that repeats a segment one after the other keeps it once.
+pub fn dedupe_chain(text: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    for part in text.split(": ") {
+        if out.last().map_or(true, |last| *last != part) {
+            out.push(part);
+        }
+    }
+    out.join(": ")
+}
+
 /// Longest detail kept, in characters.
 const DETAIL_MAX: usize = 240;
 
@@ -389,7 +401,7 @@ impl UiError {
     pub fn new(kind: ErrorKind, detail: impl AsRef<str>) -> Self {
         Self {
             kind,
-            detail: shorten(detail.as_ref()),
+            detail: shorten(&dedupe_chain(detail.as_ref())),
         }
     }
 
@@ -576,6 +588,16 @@ pub fn classify_anyhow(e: &anyhow::Error) -> UiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_repeated_segment_of_an_error_chain_is_kept_once() {
+        assert_eq!(
+            dedupe_chain("invalid MID: invalid MID: missing 'miasma:' prefix in 'x'"),
+            "invalid MID: missing 'miasma:' prefix in 'x'"
+        );
+        assert_eq!(dedupe_chain("a: b: a"), "a: b: a");
+        assert_eq!(dedupe_chain(""), "");
+    }
     use std::collections::HashSet;
 
     #[test]

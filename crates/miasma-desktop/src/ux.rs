@@ -153,9 +153,10 @@ pub mod confirm {
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .max_width(440.0)
             .show(ctx, |ui| {
+                ui.set_max_width(400.0);
                 body(ui);
                 ui.add_space(kit::SP_1);
-                kit::button_row(ui, |ui| {
+                kit::dialog_actions(ui, |ui| {
                     if ui.add(kit::danger_button(confirm_label)).clicked() {
                         answer = Answer::Confirm;
                     }
@@ -277,7 +278,10 @@ mod tests {
                 screen.contains_rect(used),
                 "{w}x{h}: dialog {used:?} leaves the window"
             );
-            assert!(used.width() <= 460.0, "{w}: dialog wider than its limit");
+            assert!(
+                used.width() <= 460.0,
+                "{w}: dialog wider than its limit: {used:?}"
+            );
         }
     }
 

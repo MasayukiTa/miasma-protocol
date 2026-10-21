@@ -1701,12 +1701,21 @@ impl MiasmaApp {
                     } else {
                         s.retrieve_button
                     };
+                    let typed = !self.mid_input.trim().is_empty();
                     let needs = [
                         crate::form_check::Need::general(connected, au.need_connection),
                         crate::form_check::Need::new(
                             &mid_edit,
-                            !self.mid_input.trim().is_empty(),
+                            typed,
                             if easy { au.need_code } else { au.need_mid },
+                        ),
+                        // Read with the parser the daemon uses: a text that cannot be an ID keeps
+                        // the button off, and the reason says what an ID looks like.
+                        crate::form_check::Need::new(
+                            &mid_edit,
+                            miasma_core::crypto::hash::ContentId::from_str(self.mid_input.trim())
+                                .is_ok(),
+                            au.bad_mid,
                         ),
                     ];
                     let attempt = crate::form_check::submitted(&mid_edit);
@@ -3756,6 +3765,10 @@ impl Drop for MiasmaApp {
 }
 
 impl eframe::App for MiasmaApp {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        crate::a11y::trap_input(ctx, raw_input);
+    }
+
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.update_frame(ctx, frame.info().system_theme);
     }
@@ -4212,6 +4225,7 @@ impl MiasmaApp {
         self.dialogs(ctx);
         self.modal_open = self.any_modal_open();
         // Never leave the focus on a widget that is not on screen (see a11y::drop_orphan_focus).
+        crate::a11y::trap_finish(ctx);
         crate::a11y::drop_orphan_focus(ctx);
 
         // Esc dismisses the message in the bottom bar when no dialog is open (a dialog takes

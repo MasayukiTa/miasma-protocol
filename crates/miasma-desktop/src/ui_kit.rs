@@ -465,6 +465,42 @@ pub fn button_row<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
     .inner
 }
 
+/// The buttons of a dialog: one cluster at the bottom right. Add the button that goes furthest right
+/// first (the confirming one), then the others: the cancel button ends up to its left. Forms and
+/// inline actions keep [`button_row`], which stays left aligned.
+pub fn dialog_actions<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.spacing_mut().item_spacing = vec2(SP_2, SP_2);
+        add(ui)
+    })
+    .inner
+}
+
+/// Width of the page column below which a banner's actions go under its text.
+const BANNER_NARROW_W: f32 = 560.0;
+
+/// A banner: the text on the left and its decision on the right (add the main action first: the
+/// others end up to its left, so "Later / Skip / Update" reads secondary to primary). Below
+/// [`BANNER_NARROW_W`] the actions go under the text, still at the right.
+pub fn banner_actions(ui: &mut Ui, level: Level, text: &str, actions: impl FnOnce(&mut Ui)) {
+    let right = Layout::right_to_left(egui::Align::Center);
+    if ui.available_width() < BANNER_NARROW_W {
+        notice(ui, level, text);
+        ui.with_layout(right, |ui| {
+            ui.spacing_mut().item_spacing = vec2(SP_2, SP_2);
+            actions(ui);
+        });
+    } else {
+        ui.with_layout(right, |ui| {
+            ui.spacing_mut().item_spacing = vec2(SP_2, SP_2);
+            actions(ui);
+            ui.with_layout(Layout::left_to_right(egui::Align::Center), |ui| {
+                notice(ui, level, text);
+            });
+        });
+    }
+}
+
 // ─── Key-value grid and forms ───────────────────────────────────────────────
 
 /// Aligned label / value rows with a fixed label column ([`LABEL_W`]). The value column takes
@@ -984,7 +1020,7 @@ pub fn row_menu(
                 let shown = dialog(ui.ctx(), MENU_CONFIRM_KEY, conf.title, |ui| {
                     paragraph(ui, conf.body);
                     ui.add_space(SP_2);
-                    ui.horizontal_wrapped(|ui| {
+                    dialog_actions(ui, |ui| {
                         if ui.add(danger_button(conf.confirm)).clicked() {
                             decided = Some(true);
                         }
@@ -2120,6 +2156,96 @@ mod tests {
                         assert!(px >= MIN_TEXT_PX, "{name}: {pat}{px}");
                     }
                 }
+            }
+        }
+    }
+    /// Right edge of the content column and the rectangles of the buttons that `add` draws, in a
+    /// column `width` px wide (two frames: the first one settles the layout).
+    fn action_rects(
+        width: f32,
+        add: impl Fn(&mut Ui, &mut Vec<(String, egui::Rect)>),
+    ) -> (f32, Vec<(String, egui::Rect)>) {
+        let ctx = egui::Context::default();
+        let mut rects = Vec::new();
+        let mut right = 0.0;
+        for _ in 0..2 {
+            rects.clear();
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width, 600.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(raw, |ctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::none())
+                    .show(ctx, |ui| {
+                        right = ui.max_rect().right();
+                        add(ui, &mut rects);
+                    });
+            });
+        }
+        (right, rects)
+    }
+
+    #[test]
+    fn dialog_buttons_sit_at_the_bottom_right_with_cancel_left_of_confirm() {
+        let (right, rects) = action_rects(440.0, |ui, rects| {
+            dialog_actions(ui, |ui| {
+                let confirm = ui.add(danger_button("Erase"));
+                let cancel = ui.add(secondary_button("Cancel"));
+                rects.push(("confirm".into(), confirm.rect));
+                rects.push(("cancel".into(), cancel.rect));
+            });
+        });
+        let get = |n: &str| rects.iter().find(|(k, _)| k == n).unwrap().1;
+        assert!(
+            (get("confirm").right() - right).abs() <= 1.0,
+            "{rects:?} {right}"
+        );
+        assert!(
+            get("cancel").right() < get("confirm").left(),
+            "cancel is left of confirm"
+        );
+    }
+
+    #[test]
+    fn banner_actions_are_right_aligned_and_stack_under_the_text_when_narrow() {
+        for (width, stacked) in [(900.0_f32, false), (400.0, true)] {
+            let (right, rects) = action_rects(width, |ui, rects| {
+                banner_actions(
+                    ui,
+                    Level::Info,
+                    "A new version is ready to install.",
+                    |ui| {
+                        let update = ui.add(primary_button("Update"));
+                        let skip = ui.add(secondary_button("Skip this version"));
+                        let later = ui.add(secondary_button("Later"));
+                        rects.push(("update".into(), update.rect));
+                        rects.push(("skip".into(), skip.rect));
+                        rects.push(("later".into(), later.rect));
+                    },
+                );
+            });
+            let get = |n: &str| rects.iter().find(|(k, _)| k == n).unwrap().1;
+            assert!(
+                (get("update").right() - right).abs() <= 1.0,
+                "{width}: {rects:?} {right}"
+            );
+            assert!(
+                get("later").right() < get("skip").left(),
+                "{width}: Later, Skip, Update"
+            );
+            assert!(
+                get("skip").right() < get("update").left(),
+                "{width}: Later, Skip, Update"
+            );
+            if stacked {
+                assert!(
+                    get("update").top() > 20.0,
+                    "{width}: the actions are under the text"
+                );
             }
         }
     }

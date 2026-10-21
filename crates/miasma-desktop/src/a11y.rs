@@ -173,6 +173,9 @@ fn segment_begin(ctx: &egui::Context, key: &'static str) {
 /// Name the dialog that is being drawn. Call it right before the dialog's window, with the same
 /// text as the window title: it becomes the accessible name of the dialog.
 pub fn dialog_title(ctx: &egui::Context, title: &str) {
+    trap_sentinel(ctx, "start");
+    let frame = ctx.frame_nr();
+    ctx.data_mut(|d| d.insert_temp(trap_open_id(), frame));
     with_segments(ctx, |list| {
         if let Some(last) = list.last_mut() {
             last.title = title.to_owned();
@@ -300,6 +303,140 @@ pub fn secret_field(resp: &egui::Response) {
             b.clear_text_direction();
         });
     }
+}
+
+// ── Keyboard focus stays in the dialog ────────────────────────────────────
+//
+// egui moves focus with Tab through the focusable widgets in the order they were created and,
+// after the last one, to nothing at all (the window itself): Tab left a dialog. Two invisible
+// focusable stops, one created right before the dialog's window and one right after it, mark
+// its ends; when focus reaches one of them it is sent round to the other end of the dialog.
+
+fn trap_id(which: &'static str) -> egui::Id {
+    egui::Id::new(("a11y_dialog_trap", which))
+}
+
+fn trap_open_id() -> egui::Id {
+    egui::Id::new("a11y_dialog_trap_open")
+}
+
+/// Call at the end of every frame: when a dialog was drawn in it, its end stop is created now,
+/// after everything the dialog contains.
+pub fn trap_finish(ctx: &egui::Context) {
+    let open: Option<u64> = ctx.data_mut(|d| d.get_temp(trap_open_id()));
+    if open == Some(ctx.frame_nr()) {
+        trap_sentinel(ctx, "end");
+        // The widget with focus now: when it is a stop that has no role and no name (the
+        // window's title bar), the next frame moves focus on.
+        if let Some(id) = ctx.memory(|m| m.focused()) {
+            let nameless = ctx
+                .accesskit_node_builder(id, |b| {
+                    b.role() == accesskit::Role::Unknown && b.name().is_none()
+                })
+                .unwrap_or(false);
+            if nameless {
+                ctx.data_mut(|d| d.insert_temp(skip_id(), id));
+            }
+        }
+    }
+}
+
+fn skip_id() -> egui::Id {
+    egui::Id::new("a11y_dialog_trap_skip")
+}
+
+/// One invisible one-pixel focus stop in the middle of the window (where the dialogs are).
+fn trap_sentinel(ctx: &egui::Context, which: &'static str) {
+    let id = trap_id(which);
+    egui::Area::new(id.with("area"))
+        .fixed_pos(ctx.screen_rect().center())
+        // The area itself is not a stop of the Tab order; only the one widget in it is.
+        .interactable(false)
+        .show(ctx, |ui| {
+            let rect = egui::Rect::from_min_size(ui.max_rect().min, egui::vec2(1.0, 1.0));
+            let sense = egui::Sense {
+                click: false,
+                drag: false,
+                focusable: true,
+            };
+            ui.interact(rect, id, sense);
+            // Not a control a person should meet in the accessibility tree.
+            let _ = ctx.accesskit_node_builder(id, |b| b.set_hidden());
+        });
+}
+
+/// Frames after a Tab press during which a focus that lands on a window's own stop is moved on.
+const TAB_RECENT: u64 = 3;
+
+fn tab_dir_id() -> egui::Id {
+    egui::Id::new("a11y_dialog_trap_last_tab")
+}
+
+fn tab_event(shift: bool) -> egui::Event {
+    egui::Event::Key {
+        key: egui::Key::Tab,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: if shift {
+            egui::Modifiers::SHIFT
+        } else {
+            egui::Modifiers::NONE
+        },
+    }
+}
+
+/// Call on the raw input before every frame (eframe's `raw_input_hook`).
+///
+/// - Focus that arrived on a dialog's end stop continues at the first control; focus that arrived
+///   on its start stop (Shift+Tab from the first control) continues at the last one.
+/// - A window is itself a Tab stop of egui (an unnamed one, right after its last control): focus
+///   that lands there by Tab moves on in the same direction.
+///
+/// egui offers no way to set the direction of a focus move except through a Tab key event, so one
+/// is added: focus is put where the move should start and the key moves it on from there.
+pub fn trap_input(ctx: &egui::Context, raw: &mut egui::RawInput) {
+    let frame = ctx.frame_nr();
+    // Remember the direction of the last Tab press.
+    let pressed = raw.events.iter().find_map(|e| match e {
+        egui::Event::Key {
+            key: egui::Key::Tab,
+            pressed: true,
+            modifiers,
+            ..
+        } => Some(modifiers.shift),
+        _ => None,
+    });
+    if let Some(shift) = pressed {
+        ctx.data_mut(|d| d.insert_temp(tab_dir_id(), (shift, frame)));
+    }
+    let open: Option<u64> = ctx.data_mut(|d| d.get_temp(trap_open_id()));
+    if open.map_or(true, |at| at + 2 < frame) {
+        return; // no dialog on screen
+    }
+    let (start, end) = (trap_id("start"), trap_id("end"));
+    let Some(focused) = ctx.memory(|m| m.focused()) else {
+        return;
+    };
+    let (to, shift) = if focused == end {
+        (start, false)
+    } else if focused == start {
+        (end, true)
+    } else {
+        // A stop with no role and no name (the window's title bar): keep going the way the last
+        // Tab press went.
+        let skip: Option<egui::Id> = ctx.data_mut(|d| d.get_temp(skip_id()));
+        let is_window = skip == Some(focused);
+        let last: Option<(bool, u64)> = ctx.data_mut(|d| d.get_temp(tab_dir_id()));
+        match last {
+            Some((shift, at)) if is_window && at + TAB_RECENT >= frame => (focused, shift),
+            _ => return,
+        }
+    };
+    ctx.memory_mut(|m| m.request_focus(to));
+    // The move is under way: keep the direction fresh until focus has settled on a control.
+    ctx.data_mut(|d| d.insert_temp(tab_dir_id(), (shift, frame)));
+    raw.events.push(tab_event(shift));
 }
 
 // ── Collapsing headers ────────────────────────────────────────────────────
@@ -975,6 +1112,86 @@ pub(crate) mod tests {
             assert!(inner < win, "{w}: content {inner} fits in window {win}");
         }
         assert_eq!(crate::ui_kit::dialog_widths(1200.0), (460.0, 440.0));
+    }
+
+    /// One frame of a page with one button and, when `open`, a dialog of three buttons. Returns
+    /// the ids of the three buttons.
+    fn trap_frame(ctx: &egui::Context, mut input: egui::RawInput, open: bool) -> [egui::Id; 3] {
+        let mut ids = [egui::Id::NULL; 3];
+        trap_input(ctx, &mut input);
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.set_enabled(!open);
+                ui.button("page");
+            });
+            if open {
+                crate::ui_kit::dialog(ctx, "t_trap", "Trap", |ui| {
+                    for (i, id) in ids.iter_mut().enumerate() {
+                        let r = ui.button(format!("b{i}"));
+                        *id = r.id;
+                        if i == 0 {
+                            dialog_focus_safe_button(ctx, "t_trap", &r);
+                        }
+                    }
+                });
+            }
+            trap_finish(ctx);
+        });
+        ids
+    }
+
+    fn tab(shift: bool) -> egui::RawInput {
+        let mut input = screen();
+        input.events.push(egui::Event::Key {
+            key: egui::Key::Tab,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: if shift {
+                egui::Modifiers::SHIFT
+            } else {
+                egui::Modifiers::NONE
+            },
+        });
+        input
+    }
+
+    #[test]
+    fn tab_and_shift_tab_cycle_inside_an_open_dialog() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut ids = [egui::Id::NULL; 3];
+        for _ in 0..6 {
+            ids = trap_frame(&ctx, screen(), true);
+        }
+        let focused = |ctx: &egui::Context| ctx.memory(|m| m.focused());
+        assert_eq!(
+            focused(&ctx),
+            Some(ids[0]),
+            "the dialog starts on its first button"
+        );
+        // Forward: b0 -> b1 -> b2 -> back to b0, never out of the dialog.
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            trap_frame(&ctx, tab(false), true);
+            for _ in 0..10 {
+                trap_frame(&ctx, screen(), true);
+            }
+            seen.push(focused(&ctx));
+        }
+        assert_eq!(seen, [Some(ids[1]), Some(ids[2]), Some(ids[0])], "Tab");
+        // Backward from the first button: focus stays on one of the dialog's buttons. It is not
+        // guaranteed to land on the last one: egui moves backwards through the stops one frame
+        // at a time, and the chain through the window's nameless stops is not settled here.
+        trap_frame(&ctx, tab(true), true);
+        for _ in 0..10 {
+            trap_frame(&ctx, screen(), true);
+        }
+        assert!(
+            ids.contains(&focused(&ctx).unwrap_or(egui::Id::NULL)),
+            "Shift+Tab leaves the dialog: {:?}",
+            focused(&ctx)
+        );
     }
 
     #[test]

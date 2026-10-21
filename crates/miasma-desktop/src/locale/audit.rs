@@ -25,7 +25,7 @@ macro_rules! audit_strings {
 audit_strings! {
     // Why the main button is off.
     need_text, need_mid, need_code, need_share_id, need_folder, need_file, need_contact,
-    need_password, need_connection,
+    need_password, need_connection, bad_mid,
     // Accessible names of fields.
     a11y_store_text, a11y_store_id, a11y_get_id, a11y_send_contact, a11y_password,
     a11y_password_repeat, a11y_retention, a11y_file_password, a11y_check_code, a11y_days,
@@ -58,6 +58,7 @@ static AU_EN: AuditStrings = AuditStrings {
     need_contact: "Enter the contact code first.",
     need_password: "Enter a password first.",
     need_connection: "Not connected to the background service yet.",
+    bad_mid: "That is not a content ID. It starts with miasma:",
     a11y_store_text: "Text to store",
     a11y_store_id: "Content ID of the stored content",
     a11y_get_id: "Content ID to get back",
@@ -100,6 +101,7 @@ static AU_JA: AuditStrings = AuditStrings {
     need_contact: "先に連絡先コードを入力してください。",
     need_password: "先にパスワードを入力してください。",
     need_connection: "まだバックグラウンドサービスに接続していません。",
+    bad_mid: "コンテンツIDの形式ではありません。miasma: で始まります。",
     a11y_store_text: "保存するテキスト",
     a11y_store_id: "保存した内容のコンテンツID",
     a11y_get_id: "取得するコンテンツID",
@@ -142,6 +144,7 @@ static AU_ZH_CN: AuditStrings = AuditStrings {
     need_contact: "请先输入联系人代码。",
     need_password: "请先输入密码。",
     need_connection: "尚未连接到后台服务。",
+    bad_mid: "这不是内容 ID。它以 miasma: 开头。",
     a11y_store_text: "要存储的文本",
     a11y_store_id: "已存储内容的内容 ID",
     a11y_get_id: "要恢复的内容 ID",

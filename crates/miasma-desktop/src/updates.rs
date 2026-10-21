@@ -651,8 +651,8 @@ impl UpdatesUi {
         let u = locale::update_strings(locale);
         match self.phase.clone() {
             Phase::Installed(v) if !self.auto_install() => {
-                kit::notice(ui, Level::Ok, &u.banner_installed.replace("{v}", &v));
-                kit::button_row(ui, |ui| {
+                let text = u.banner_installed.replace("{v}", &v);
+                kit::banner_actions(ui, Level::Ok, &text, |ui| {
                     if kit::primary(ui, true, u.restart_now).clicked() {
                         request_relaunch();
                         ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
@@ -674,20 +674,17 @@ impl UpdatesUi {
                 if o.skipped || self.dismissed || self.cfg.mode != UpdateMode::Notify {
                     return;
                 }
-                kit::notice(
-                    ui,
-                    Level::Info,
-                    &u.banner_available.replace("{v}", &o.version),
-                );
-                kit::button_row(ui, |ui| {
+                let text = u.banner_available.replace("{v}", &o.version);
+                // Right to left: Update, then Skip, then Later reads "Later / Skip / Update".
+                kit::banner_actions(ui, Level::Info, &text, |ui| {
                     if kit::primary(ui, true, u.update_now).clicked() {
                         self.update_now();
                     }
-                    if ui.add(kit::secondary_button(u.later)).clicked() {
-                        self.dismissed = true;
-                    }
                     if ui.add(kit::secondary_button(u.skip_version)).clicked() {
                         self.skip_version();
+                    }
+                    if ui.add(kit::secondary_button(u.later)).clicked() {
+                        self.dismissed = true;
                     }
                 });
             }
