@@ -96,7 +96,10 @@ fn aes_gcm_wasm_ciphertext_is_accepted_by_core() {
         assert_eq!(ct.len(), len + 16);
         assert_eq!(core_aead::decrypt(&ct, &key, &nonce).unwrap(), plain);
         // The same key and nonce through core give the same ciphertext.
-        assert_eq!(core_aead::encrypt_with_key(&plain, &key, &nonce).unwrap(), ct);
+        assert_eq!(
+            core_aead::encrypt_with_key(&plain, &key, &nonce).unwrap(),
+            ct
+        );
     }
 }
 
@@ -221,20 +224,32 @@ fn reed_solomon_encoding_is_byte_identical() {
         assert_eq!(w.len(), n);
         assert!(w.iter().all(|s| s.len() % 2 == 0 && s.len() == w[0].len()));
         if (len, k, n) == (17, 10, 20) {
-            assert_frozen("reed-solomon shards 17/10/20", &w.concat(), RS_SHARDS_DIGEST);
+            assert_frozen(
+                "reed-solomon shards 17/10/20",
+                &w.concat(),
+                RS_SHARDS_DIGEST,
+            );
         }
     }
 }
 
 #[test]
 fn reed_solomon_cross_decodes_from_parity_heavy_sets() {
-    for (len, k, n) in [(1usize, 2usize, 3usize), (17, 10, 20), (33, 4, 9), (1000, 3, 5)] {
+    for (len, k, n) in [
+        (1usize, 2usize, 3usize),
+        (17, 10, 20),
+        (33, 4, 9),
+        (1000, 3, 5),
+    ] {
         let data = kat("rs-data", len);
         let shards = core_rs::rs_encode(&data, k, n).unwrap();
         // The last k shards: every parity shard first, as few data shards as possible.
-        let available: Vec<(usize, Vec<u8>)> =
-            (n - k..n).map(|i| (i, shards[i].clone())).collect();
-        assert_eq!(rs_decode(&available, k, n, len).unwrap(), data, "wasm {len}");
+        let available: Vec<(usize, Vec<u8>)> = (n - k..n).map(|i| (i, shards[i].clone())).collect();
+        assert_eq!(
+            rs_decode(&available, k, n, len).unwrap(),
+            data,
+            "wasm {len}"
+        );
         assert_eq!(
             core_rs::rs_decode(&available, k, n, len).unwrap(),
             data,
@@ -574,7 +589,11 @@ fn tampered_shares_and_wrong_inputs_fail_alike() {
 
     // With two good shares and one bad one, there are not enough valid shares.
     let core_set = vec![bad_core.clone(), shares[1].clone(), shares[2].clone()];
-    let wasm_set = vec![bad_wasm.clone(), wasm_shares[1].clone(), wasm_shares[2].clone()];
+    let wasm_set = vec![
+        bad_wasm.clone(),
+        wasm_shares[1].clone(),
+        wasm_shares[2].clone(),
+    ];
     let c = core_pipeline::retrieve(&mid, &core_set, core_params()).unwrap_err();
     let w = retrieve_inner(&wasm_mid, &wasm_set, KAT_PARAMS).unwrap_err();
     assert_eq!(class(&w), "InsufficientShares");
@@ -607,7 +626,10 @@ fn tampered_shares_and_wrong_inputs_fail_alike() {
     assert!(retrieve_inner(&wasm_mid, &wasm_shares, wrong).is_err());
 
     // Garbage MID text.
-    assert_eq!(class(&ContentId::from_mid_str("not a mid").unwrap_err()), "InvalidMid");
+    assert_eq!(
+        class(&ContentId::from_mid_str("not a mid").unwrap_err()),
+        "InvalidMid"
+    );
     assert!(CoreMid::from_str("not a mid").is_err());
 }
 
@@ -669,7 +691,10 @@ fn no_fallback_random_generator_in_shipped_code() {
             "shipped code mentions `{forbidden}`: no generator other than OsRng may be used"
         );
     }
-    assert!(shipped.contains("&mut OsRng"), "key and nonce come from OsRng");
+    assert!(
+        shipped.contains("&mut OsRng"),
+        "key and nonce come from OsRng"
+    );
 
     let manifest = include_str!("../Cargo.toml").replace("\r\n", "\n");
     assert!(
