@@ -345,11 +345,11 @@ fn skip_id() -> egui::Id {
     egui::Id::new("a11y_dialog_trap_skip")
 }
 
-/// One invisible one-pixel focus stop at the corner of the window.
+/// One invisible one-pixel focus stop in the middle of the window (where the dialogs are).
 fn trap_sentinel(ctx: &egui::Context, which: &'static str) {
     let id = trap_id(which);
     egui::Area::new(id.with("area"))
-        .fixed_pos(ctx.screen_rect().min)
+        .fixed_pos(ctx.screen_rect().center())
         // The area itself is not a stop of the Tab order; only the one widget in it is.
         .interactable(false)
         .show(ctx, |ui| {
