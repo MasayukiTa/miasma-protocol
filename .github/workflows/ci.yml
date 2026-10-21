@@ -306,7 +306,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Test the hybrid key exchange and conversation upgrade
-        run: cargo test -p miasma-core --features pqc --locked --lib -- protocol:: chat::pq
+        run: |
+          cargo test -p miasma-core --features pqc --locked --lib -- protocol:: chat::pq
 
   audit:
     name: Security Audit
