@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use super::{
+    anchor::Anchor,
     crypto::Identity,
     engine::{ChatCore, EnqueueError},
     outbox::Outbox,
@@ -18,11 +19,15 @@ pub(super) struct Side {
     pub(super) dir: TempDir,
     pub(super) seed: [u8; 32],
     pub(super) master: [u8; 32],
+    /// Where the record of the last session files written lives: not inside
+    /// `dir`, as in a real installation.
+    pub(super) anchor: TempDir,
     pub(super) core: ChatCore,
 }
 
 pub(super) fn open_core(
     dir: &std::path::Path,
+    anchor: Option<&std::path::Path>,
     seed: &[u8; 32],
     master: &[u8; 32],
     s: StoreSettings,
@@ -31,7 +36,10 @@ pub(super) fn open_core(
     let keys = Arc::new(StateKeys::from_master_key(master).unwrap());
     let id = Identity::from_seed(seed);
     let chat = dir.join("chat");
-    let store = ChatStore::open(&chat, keys.clone(), id.id(), s.clone()).unwrap();
+    let mut store = ChatStore::open(&chat, keys.clone(), id.id(), s.clone()).unwrap();
+    if let Some(a) = anchor {
+        store = store.with_anchor(Anchor::new(Some(a.to_path_buf()), keys.clone(), id.id()));
+    }
     let (outbox, _) = Outbox::open(&crate::paths::chat_outbox_file(&chat), keys, s, 1);
     ChatCore::new(store, outbox, id, max)
 }
@@ -40,11 +48,13 @@ pub(super) fn side_with(s: StoreSettings, max: usize) -> Side {
     let dir = tempfile::tempdir().unwrap();
     let seed: [u8; 32] = rand::random();
     let master: [u8; 32] = rand::random();
-    let core = open_core(dir.path(), &seed, &master, s, max);
+    let anchor = tempfile::tempdir().unwrap();
+    let core = open_core(dir.path(), Some(anchor.path()), &seed, &master, s, max);
     Side {
         dir,
         seed,
         master,
+        anchor,
         core,
     }
 }
@@ -62,6 +72,7 @@ impl Side {
         self.core.store.close();
         self.core = open_core(
             self.dir.path(),
+            Some(self.anchor.path()),
             &self.seed,
             &self.master,
             StoreSettings::default(),
