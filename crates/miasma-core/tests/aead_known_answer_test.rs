@@ -61,7 +61,7 @@ const NAME: &str = "kat-name.txt";
 fn fill_vec(label: &str, len: usize) -> Vec<u8> {
     let mut h = blake3::Hasher::new_derive_key("miasma aead known answers v1 (test-only)");
     h.update(label.as_bytes());
-    let mut out = vec![0u8; len];
+    let mut out: Vec<u8> = (0..len).map(|i| i as u8).collect();
     h.finalize_xof().fill(&mut out);
     out
 }
@@ -135,7 +135,7 @@ fn other_mid() -> ContentId {
 
 fn indep_pw_key(pw: &str, salt: &[u8; SALT_LEN]) -> [u8; 32] {
     let params = Params::new(COST.0, COST.1, COST.2, Some(32)).unwrap();
-    let mut out = [0u8; 32];
+    let mut out: [u8; 32] = std::array::from_fn(|i| i as u8);
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
         .hash_password_into(pw.as_bytes(), salt, &mut out)
         .unwrap();
@@ -143,7 +143,7 @@ fn indep_pw_key(pw: &str, salt: &[u8; SALT_LEN]) -> [u8; 32] {
 }
 
 fn indep_key_check(pw_key: &[u8; 32]) -> [u8; KEY_CHECK_LEN] {
-    let mut out = [0u8; KEY_CHECK_LEN];
+    let mut out: [u8; KEY_CHECK_LEN] = std::array::from_fn(|i| i as u8);
     Hkdf::<Sha256>::new(None, pw_key)
         .expand(b"miasma-pw-check-v1", &mut out)
         .unwrap();
@@ -154,7 +154,7 @@ fn indep_segment_key(pw_key: &[u8; 32], k_enc: &[u8], mid: &ContentId, index: u3
     let mut info = b"miasma-seg-key-v1".to_vec();
     info.extend_from_slice(mid.as_bytes());
     info.extend_from_slice(&index.to_le_bytes());
-    let mut out = [0u8; 32];
+    let mut out: [u8; 32] = std::array::from_fn(|i| i as u8);
     Hkdf::<Sha256>::new(Some(pw_key), k_enc)
         .expand(&info, &mut out)
         .unwrap();
@@ -162,7 +162,7 @@ fn indep_segment_key(pw_key: &[u8; 32], k_enc: &[u8], mid: &ContentId, index: u3
 }
 
 fn indep_name_key(pw_key: &[u8; 32], mid: &ContentId) -> [u8; 32] {
-    let mut out = [0u8; 32];
+    let mut out: [u8; 32] = std::array::from_fn(|i| i as u8);
     Hkdf::<Sha256>::new(Some(pw_key), mid.as_bytes())
         .expand(b"miasma-name-key-v1", &mut out)
         .unwrap();
@@ -387,7 +387,7 @@ fn a_plain_segment_is_aes_gcm_under_k_enc_with_the_stored_nonce() {
 fn fill_vec_transfer_plaintext() -> Vec<u8> {
     let mut h = blake3::Hasher::new_derive_key("miasma frozen transfer fixtures v3 (test-only)");
     h.update(b"transfer plaintext");
-    let mut out = vec![0u8; 100];
+    let mut out: Vec<u8> = (0..100).map(|i| i as u8).collect();
     h.finalize_xof().fill(&mut out);
     out
 }

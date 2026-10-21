@@ -49,7 +49,7 @@ const FIXTURES: &str = include_str!("fixtures/format_constants_v1/frozen.hex");
 fn fill<const N: usize>(label: &str) -> [u8; N] {
     let mut h = blake3::Hasher::new_derive_key("miasma format constants v1 (test-only)");
     h.update(label.as_bytes());
-    let mut out = [0u8; N];
+    let mut out: [u8; N] = std::array::from_fn(|i| i as u8);
     h.finalize_xof().fill(&mut out);
     out
 }

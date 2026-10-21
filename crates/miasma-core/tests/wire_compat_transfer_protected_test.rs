@@ -68,7 +68,7 @@ fn fill<const N: usize>(label: &str) -> [u8; N] {
     let mut h =
         blake3::Hasher::new_derive_key("miasma frozen protected transfer fixtures v1 (test-only)");
     h.update(label.as_bytes());
-    let mut out = [0u8; N];
+    let mut out: [u8; N] = std::array::from_fn(|i| i as u8);
     h.finalize_xof().fill(&mut out);
     out
 }
@@ -331,8 +331,7 @@ fn the_segment_ciphertext_is_aes_gcm_under_the_hkdf_segment_key_without_aad() {
                 == ct
         );
         // ...and K_enc alone does not open it.
-        let mut raw = [0u8; 32];
-        raw.copy_from_slice(&k_enc);
+        let raw: [u8; 32] = k_enc.as_slice().try_into().unwrap();
         assert!(miasma_core::crypto::aead::decrypt(&ct, &raw, &nonce).is_err());
         // Segment keys are bound to the segment index.
         let other = key.segment_key(&k_enc, &mid, s as u32 + 1).unwrap();
