@@ -78,8 +78,8 @@ Please include:
 - whether you believe it is already being exploited, and any disclosure
   deadline you are working to.
 
-What to expect: we aim to acknowledge a report within 7 days and to tell you
-whether it is accepted or declined within 14 days. Accepted issues are fixed in
+What to expect: we will acknowledge and assess each report as soon as we can,
+and tell you whether it is accepted or declined. Accepted issues are fixed in
 the latest beta and, once a fix is released, credited in the release notes if
 you wish. Issues that match a limit listed under "Known security limits (beta)"
 above are already documented, but are still welcome as reports if you can show
