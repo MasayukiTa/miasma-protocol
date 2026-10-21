@@ -309,8 +309,8 @@ fn this_build_reports_a_sealed_key_clearly_and_creates_nothing() {
         CreatePolicy::FirstUse,
     ] {
         match root_key::get(d.path(), policy) {
-            Err(RootKeyError::SealedUnavailable) => {}
-            other => panic!("expected SealedUnavailable, got {other:?}"),
+            Err(RootKeyError::SealedFileMissing) => {}
+            other => panic!("expected SealedFileMissing, got {other:?}"),
         }
     }
     let store_err = miasma_core::LocalShareStore::open(d.path(), 10)
@@ -331,5 +331,100 @@ fn a_plain_key_still_works_and_stays_byte_identical() {
     let root = root_key::get(d.path(), CreatePolicy::Never).unwrap();
     assert_eq!(root.with(|k| *k).unwrap(), key);
     drop(root);
+    assert_eq!(snapshot(d.path()), before);
+}
+
+// ─── A directory this build sealed ───────────────────────────────────────────
+
+/// Every copied reader, in one list.
+fn older_readers(dir: &Path) -> Vec<(&'static str, Result<[u8; 32], String>)> {
+    vec![
+        ("v0.1.0 store", old_v0_1_0::load_or_create_master_key(dir)),
+        ("v0.1.0 cli", old_v0_1_0::cli_daemon_read(dir)),
+        (
+            "v0.3.2-beta.11 store",
+            old_v0_3_2_beta_11::load_or_create_master_key(dir),
+        ),
+        (
+            "v0.3.2-beta.11 cli",
+            old_v0_3_2_beta_11::cli_daemon_read(dir),
+        ),
+        (
+            "v0.3.2-beta.11 daemon",
+            old_v0_3_2_beta_11::daemon_sharing_read(dir),
+        ),
+        (
+            "v0.3.2-beta.11 state",
+            old_v0_3_2_beta_11::state_keys_load(dir),
+        ),
+    ]
+}
+
+fn sealing_provider() -> root_key::SealedProvider {
+    root_key::SealedProvider::new(std::sync::Arc::new(root_key::FileWrap))
+}
+
+#[test]
+fn a_plain_key_sealed_by_this_build_stops_every_older_reader_and_is_still_opened_here() {
+    let key = random_bytes::<32>();
+    let d = data_dir_with(&key);
+    let root = root_key::get_with(d.path(), CreatePolicy::Never, &sealing_provider()).unwrap();
+    assert_eq!(root.with(|k| *k).unwrap(), key);
+    assert_eq!(
+        std::fs::read(d.path().join("master.key")).unwrap().len(),
+        STUB_LEN
+    );
+    assert!(d.path().join("root.sealed").exists());
+    let before = snapshot(d.path());
+
+    for (name, result) in older_readers(d.path()) {
+        let err = result.expect_err(name);
+        assert!(err.contains("wrong length"), "{name}: {err}");
+    }
+    // No older reader started a new key or rewrote anything.
+    assert_eq!(snapshot(d.path()), before);
+
+    // This build opens it with and without a sealing provider.
+    let plain_provider = root_key::get(d.path(), CreatePolicy::Never).unwrap();
+    assert_eq!(plain_provider.with(|k| *k).unwrap(), key);
+    assert_eq!(snapshot(d.path()), before);
+}
+
+#[test]
+fn a_key_created_sealed_by_this_build_stops_every_older_reader() {
+    let d = tempfile::tempdir().unwrap();
+    let root = root_key::get_with(d.path(), CreatePolicy::FirstUse, &sealing_provider()).unwrap();
+    let key = root.with(|k| *k).unwrap();
+    let before = snapshot(d.path());
+    for (name, result) in older_readers(d.path()) {
+        let err = result.expect_err(name);
+        assert!(
+            err.contains("wrong length") || err.contains("wrong"),
+            "{name}: {err}"
+        );
+    }
+    assert_eq!(snapshot(d.path()), before);
+    assert_eq!(
+        root_key::get(d.path(), CreatePolicy::Never)
+            .unwrap()
+            .with(|k| *k)
+            .unwrap(),
+        key
+    );
+}
+
+#[test]
+fn a_sealed_file_of_a_newer_version_is_named_not_misread() {
+    let d = tempfile::tempdir().unwrap();
+    root_key::get_with(d.path(), CreatePolicy::FirstUse, &sealing_provider()).unwrap();
+    let path = d.path().join("root.sealed");
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[4] = 9;
+    std::fs::write(&path, &bytes).unwrap();
+    let before = snapshot(d.path());
+    match root_key::get(d.path(), CreatePolicy::FirstUse) {
+        Err(RootKeyError::FutureVersion { found: 9, .. }) => {}
+        other => panic!("expected FutureVersion, got {other:?}"),
+    }
     assert_eq!(snapshot(d.path()), before);
 }
