@@ -468,7 +468,7 @@ mod tests {
             .unwrap()
             .to_str()
             .unwrap()
-            .contains("unsafe-eval"));
+            .contains("'unsafe-eval'"));
         assert!(h.get("cache-control").is_none());
     }
 }

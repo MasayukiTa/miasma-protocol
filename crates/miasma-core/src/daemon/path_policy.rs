@@ -335,10 +335,18 @@ mod tests {
         );
         // File link as the last component.
         symlink(data.join("secret.bin"), other.join("filelink")).unwrap();
+        // (a link into the data dir is refused as such; a link elsewhere as a link)
         assert_eq!(
             reserve_output(other.join("filelink").to_str().unwrap(), &data, true).unwrap_err(),
+            PathRefusal::DataDir
+        );
+        std::fs::write(other.join("plain.bin"), b"p").unwrap();
+        symlink(other.join("plain.bin"), other.join("plainlink")).unwrap();
+        assert_eq!(
+            reserve_output(other.join("plainlink").to_str().unwrap(), &data, true).unwrap_err(),
             PathRefusal::Link
         );
+        assert_eq!(std::fs::read(other.join("plain.bin")).unwrap(), b"p");
         assert_eq!(
             resolve_input(other.join("filelink").to_str().unwrap(), &data),
             Err(PathRefusal::DataDir)
