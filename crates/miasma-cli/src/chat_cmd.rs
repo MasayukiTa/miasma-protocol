@@ -296,19 +296,19 @@ fn reason_words(r: &str, ja: bool) -> String {
         ),
         "storage" => ("this computer could not read its own message store", "このパソコン側で保存領域を読めませんでした"),
         "pqc_peer_no_hybrid" => (
-            "not sent: privacy.pqc_mode is require and their Miasma does not offer the hybrid key exchange",
-            "送っていません。privacy.pqc_mode が require で、相手のMiasmaがハイブリッド鍵交換に対応していません",
+            "not sent: privacy.pqc_mode is require and their Miasma does not offer advanced encryption",
+            "送っていません。privacy.pqc_mode が require で、相手のMiasmaが高度な暗号化に対応していません",
         ),
         "pqc_failed" => (
-            "not sent: the hybrid key exchange with them could not be completed",
-            "送っていません。相手とのハイブリッド鍵交換を完了できませんでした",
+            "not sent: advanced encryption with them could not be set up",
+            "送っていません。相手との高度な暗号化を準備できませんでした",
         ),
         other => return other.to_owned(),
     };
     (if ja { jp } else { en }).to_owned()
 }
 
-/// `, classical only` and the like for a conversation whose hybrid
+/// `, standard protection only` and the like for a conversation whose
 /// upgrade was asked for or is in use; nothing otherwise.
 fn pqc_note(c: &ConversationInfo, ja: bool) -> String {
     let Some(state) = c.pqc.as_deref() else {
@@ -316,10 +316,10 @@ fn pqc_note(c: &ConversationInfo, ja: bool) -> String {
     };
     let (en, jp) = match state {
         "hybrid" => ("advanced encryption on", "高度な暗号化：オン"),
-        "classical" => ("classical only", "標準の保護のみ"),
+        "classical" => ("standard protection only", "標準の保護のみ"),
         "pending" => ("extra protection being set up", "追加の保護を準備中"),
         "failed" => (
-            "extra protection failed, classical only",
+            "extra protection failed, standard protection only",
             "追加の保護に失敗、標準の保護のみ",
         ),
         _ => return String::new(),
