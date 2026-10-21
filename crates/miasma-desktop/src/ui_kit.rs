@@ -796,20 +796,58 @@ pub fn initial_of(name: &str) -> String {
         .unwrap_or_else(|| "?".to_owned())
 }
 
+/// Which kind of conversation an avatar stands for. The kinds differ in shape (circle or rounded
+/// square) and in tint, and the list that shows them also has a heading per kind, so colour is
+/// never the only carrier of the meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AvatarKind {
+    Person,
+    Group,
+}
+
+/// Fill and letter colour of an avatar. A person is neutral; a group is tinted with the `info`
+/// colour mixed into the surface, with the letter in `info` itself.
+pub fn avatar_colors(p: &Palette, kind: AvatarKind) -> (Color32, Color32) {
+    match kind {
+        AvatarKind::Person => (p.selected, p.text),
+        AvatarKind::Group => {
+            let mix = |a: u8, b: u8| (f32::from(a) * 0.16 + f32::from(b) * 0.84).round() as u8;
+            let fill = Color32::from_rgb(
+                mix(p.info.r(), p.surface.r()),
+                mix(p.info.g(), p.surface.g()),
+                mix(p.info.b(), p.surface.b()),
+            );
+            (fill, p.info)
+        }
+    }
+}
+
+/// Draw an avatar of `kind` with the initial of `name` into `rect` (a square).
+pub fn paint_avatar(painter: &egui::Painter, rect: egui::Rect, name: &str, kind: AvatarKind) {
+    let p = pal();
+    let (fill, letter) = avatar_colors(&p, kind);
+    match kind {
+        AvatarKind::Person => {
+            painter.circle_filled(rect.center(), rect.width() * 0.5, fill);
+        }
+        AvatarKind::Group => {
+            painter.rect_filled(rect, rect.width() * 0.28, fill);
+        }
+    }
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        initial_of(name),
+        FontId::proportional(SECTION_PX),
+        letter,
+    );
+}
+
 /// A circle with the initial of `name`. Decoration: the name is always written beside it.
 pub fn avatar(ui: &mut Ui, name: &str, diameter: f32) -> Response {
-    let p = pal();
     let (rect, resp) = ui.allocate_exact_size(vec2(diameter, diameter), Sense::hover());
     if ui.is_rect_visible(rect) {
-        ui.painter()
-            .circle_filled(rect.center(), diameter * 0.5, p.selected);
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            initial_of(name),
-            FontId::proportional(SECTION_PX),
-            p.text,
-        );
+        paint_avatar(ui.painter(), rect, name, AvatarKind::Person);
     }
     resp
 }
@@ -1886,6 +1924,29 @@ mod tests {
                 assert!(r >= 7.0, "{mode}: text on {bn} = {r:.2}");
             }
             assert!(contrast(p.on_accent(), p.accent_fill) >= 4.5, "{mode}");
+        }
+    }
+
+    #[test]
+    fn the_letter_of_each_avatar_kind_is_readable_and_the_kinds_differ() {
+        use crate::theme::{contrast, Palette};
+        for (mode, p) in [("light", Palette::light()), ("dark", Palette::dark())] {
+            for kind in [AvatarKind::Person, AvatarKind::Group] {
+                let (fill, letter) = avatar_colors(&p, kind);
+                let r = contrast(letter, fill);
+                assert!(r >= 4.5, "{mode}: {kind:?} letter on its fill = {r:.2}");
+            }
+            let person = avatar_colors(&p, AvatarKind::Person);
+            let group = avatar_colors(&p, AvatarKind::Group);
+            assert_ne!(person.0, group.0, "{mode}: the fills differ");
+            // A group's tint still reads as a shape against the page and the selected row.
+            for (bn, b) in [
+                ("bg", p.bg),
+                ("surface", p.surface),
+                ("selected", p.selected),
+            ] {
+                assert_ne!(group.0, b, "{mode}: the group fill is the {bn} colour");
+            }
         }
     }
 
