@@ -187,7 +187,10 @@ fn rebuilt(segs: &[Vec<MiasmaShare>]) -> Vec<(String, Vec<u8>)> {
     }
     vec![
         ("manifest_plain".into(), m.to_bytes().unwrap()),
-        ("manifest_plain_hash".into(), m.manifest_hash().unwrap().to_vec()),
+        (
+            "manifest_plain_hash".into(),
+            m.manifest_hash().unwrap().to_vec(),
+        ),
         ("manifest_trailer".into(), m.encode_trailer().unwrap()),
         (
             "record_bare".into(),
@@ -247,7 +250,10 @@ fn the_wire_layout_of_a_share_and_a_trailer_is_as_documented() {
     );
     assert_eq!(share.original_len as usize, TOTAL_BYTES - SEG_SIZE as usize);
     assert_eq!(share.timestamp, TS);
-    assert_eq!(share.shard_hash, *blake3::hash(&share.shard_data).as_bytes());
+    assert_eq!(
+        share.shard_hash,
+        *blake3::hash(&share.shard_data).as_bytes()
+    );
 
     // Trailer: "MNFT" || version:u8 || len:u32le || manifest.
     let t = frozen("manifest_trailer");
@@ -532,12 +538,22 @@ fn print_fixtures() {
 
     let pw = transfer_password();
     let (pp, key) = PasswordProtection::create_with_cost(&pw, 64, 1, 1).unwrap();
-    let m = manifest_with(&segs, Protection::Password(pp)).with_sealed_name(Some("secret.txt"), &key);
-    println!("FIXTURE manifest_password {}", hex::encode(m.to_bytes().unwrap()));
+    let m =
+        manifest_with(&segs, Protection::Password(pp)).with_sealed_name(Some("secret.txt"), &key);
+    println!(
+        "FIXTURE manifest_password {}",
+        hex::encode(m.to_bytes().unwrap())
+    );
 
     let (lmid, lshares) = dissolve(LEGACY_PLAINTEXT, legacy_params()).unwrap();
-    println!("FIXTURE legacy_mid {}", hex::encode(lmid.to_string().as_bytes()));
+    println!(
+        "FIXTURE legacy_mid {}",
+        hex::encode(lmid.to_string().as_bytes())
+    );
     for (i, s) in lshares.iter().enumerate() {
-        println!("FIXTURE legacy_share{i} {}", hex::encode(s.to_bytes().unwrap()));
+        println!(
+            "FIXTURE legacy_share{i} {}",
+            hex::encode(s.to_bytes().unwrap())
+        );
     }
 }

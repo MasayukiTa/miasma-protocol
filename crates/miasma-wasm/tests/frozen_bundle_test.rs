@@ -102,7 +102,10 @@ fn the_frozen_dissolve_bundle_has_the_documented_layout() {
         assert_eq!(s[0], 1, "share version");
         assert_eq!(&s[1..9], &digest[..8], "MID prefix");
         assert_eq!(u32::from_le_bytes(s[9..13].try_into().unwrap()), 0);
-        assert_eq!(u16::from_le_bytes(s[13..15].try_into().unwrap()) as usize, slot);
+        assert_eq!(
+            u16::from_le_bytes(s[13..15].try_into().unwrap()) as usize,
+            slot
+        );
     }
 }
 
@@ -163,7 +166,9 @@ fn the_web_build_reads_the_shares_made_by_miasma_core() {
     let blobs: Vec<Vec<u8>> = shares.iter().map(|s| s.to_bytes().unwrap()).collect();
     let mid = mid.to_string();
     for s in &blobs {
-        assert!(miasma_wasm::verify_share_bytes(s, &mid).ok().expect("verify"));
+        assert!(miasma_wasm::verify_share_bytes(s, &mid)
+            .ok()
+            .expect("verify"));
     }
     let bundle = pack_share_bundle(&[&blobs[0], &blobs[3], &blobs[4]]);
     assert_eq!(retrieve_bundle(&mid, &bundle, 3, 5), plain);

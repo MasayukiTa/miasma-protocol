@@ -339,7 +339,8 @@ fn the_decoder_reads_the_frozen_envelopes() {
 fn an_envelope_json_without_a_challenge_hash_still_reads() {
     // `challenge_hash` is the one field with `#[serde(default)]`: JSON written
     // before it existed has no such key.
-    let mut v: serde_json::Value = serde_json::from_slice(&frozen("envelope_pending_json")).unwrap();
+    let mut v: serde_json::Value =
+        serde_json::from_slice(&frozen("envelope_pending_json")).unwrap();
     v.as_object_mut().unwrap().remove("challenge_hash");
     let e: DirectedEnvelope = serde_json::from_value(v).unwrap();
     assert!(e.challenge_hash.is_none());
@@ -519,7 +520,11 @@ fn trailing_bytes_after_a_message_are_ignored() {
         bytes.extend_from_slice(&extra);
         let back: DirectedRequest = bincode::deserialize(&bytes)
             .unwrap_or_else(|_| panic!("trailing bytes made `{name}` unreadable"));
-        assert_eq!(bin(&back), want, "`{name}` changed when bytes were appended");
+        assert_eq!(
+            bin(&back),
+            want,
+            "`{name}` changed when bytes were appended"
+        );
     }
     for (_, name) in STATES {
         let mut bytes = frozen(&format!("resp_status_{name}"));
@@ -617,7 +622,10 @@ fn a_real_v1_envelope_still_opens_with_the_same_keys_and_password() {
     // The sender's JSON copy is the same envelope.
     let json: DirectedEnvelope = serde_json::from_slice(&frozen("real_envelope_json")).unwrap();
     check_envelope(&json, &env);
-    assert_eq!(serde_json::to_vec(&env).unwrap(), frozen("real_envelope_json"));
+    assert_eq!(
+        serde_json::to_vec(&env).unwrap(),
+        frozen("real_envelope_json")
+    );
     assert_eq!(bin(&env), frozen("real_envelope"));
 
     // Payload layer: ECDH only, no password.
