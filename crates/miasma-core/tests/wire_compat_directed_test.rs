@@ -694,7 +694,16 @@ async fn a_node_answers_an_unknown_envelope_version_with_the_version_error() {
         let store_b = Arc::new(LocalShareStore::open(dir_b.path(), 100).unwrap());
         let coord_a = MiasmaCoordinator::start(node_a, store_a, addrs_a).await;
         let _coord_b = MiasmaCoordinator::start(node_b, store_b, vec![]).await;
-        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // A directed request goes to a peer that is already connected: dial it
+        // through the bootstrap path and wait for the link.
+        let addr_b: libp2p::Multiaddr = addrs_b[0].parse().unwrap();
+        coord_a.add_bootstrap_peer(peer_b, addr_b).await.unwrap();
+        coord_a.bootstrap_dht().await.unwrap();
+        coord_a
+            .wait_until_peer_connected(peer_b, Duration::from_secs(10))
+            .await
+            .expect("the sender never connected to the receiver");
 
         let mut env: DirectedEnvelope = bincode::deserialize(&frozen("real_envelope")).unwrap();
         for version in [2u8, 0, 255] {
