@@ -1835,14 +1835,7 @@ impl ContactsUi {
                 ui.output_mut(|o| o.copied_text = msg);
                 self.invite_copied_at = Some(Instant::now());
             }
-            ui.add_space(kit::SP_3);
-            ui.label(label_text(c.my_code));
-            let code_edit = kit::code_display(ui, &code);
-            crate::form_check::name(
-                &code_edit,
-                crate::locale::audit_strings(c.locale).a11y_my_code,
-            );
-            hint(ui, c.my_code_hint);
+            ui.add_space(kit::SP_2);
             ui.horizontal(|ui| {
                 let l = if recent(self.copied_at) {
                     c.copied
@@ -1867,10 +1860,26 @@ impl ContactsUi {
                 ui.add_space(kit::SP_1);
                 hint(ui, c.qr_note);
             }
-            ui.add_space(kit::SP_3);
-            ui.label(label_text(c.my_fp));
-            kit::mono(ui, &fp);
-            hint(ui, c.my_fp_hint);
+            // The code text and the code to read out are needed once, not every time: closed.
+            ui.add_space(kit::SP_2);
+            egui::CollapsingHeader::new(kit::muted_text(c.my_code))
+                .id_source("invite_code")
+                .default_open(false)
+                .show_a11y(ui, |ui| {
+                    let code_edit = kit::code_display(ui, &code);
+                    crate::form_check::name(
+                        &code_edit,
+                        crate::locale::audit_strings(c.locale).a11y_my_code,
+                    );
+                    hint(ui, c.my_code_hint);
+                });
+            egui::CollapsingHeader::new(kit::muted_text(c.my_fp))
+                .id_source("invite_fingerprint")
+                .default_open(false)
+                .show_a11y(ui, |ui| {
+                    kit::mono(ui, &fp);
+                    hint(ui, c.my_fp_hint);
+                });
             ui.add_space(kit::SP_3);
             if ui.add(kit::quiet_button(c.done_btn)).clicked() {
                 close = true;
@@ -2648,7 +2657,8 @@ fn inner_frame() -> egui::Frame {
 /// Fixture names for the `ui-tour` screenshots and the layout unit test.
 #[cfg(any(test, feature = "ui-tour"))]
 pub const FIXTURES: &[&str] = &[
-    "empty", "one", "two", "five", "active", "failed", "qr", "verify", "perm", "added", "adderror",
+    "empty", "one", "two", "five", "active", "failed", "invite", "qr", "verify", "perm", "added",
+    "adderror",
 ];
 
 #[cfg(any(test, feature = "ui-tour"))]
@@ -2854,6 +2864,10 @@ impl ContactsUi {
                 );
                 retrying.error = Some("open stream timed out".into());
                 board.push(retrying);
+            }
+            "invite" => {
+                ui.contacts = vec![a.clone()];
+                ui.invite_open = true;
             }
             "qr" => {
                 ui.contacts = vec![a.clone()];

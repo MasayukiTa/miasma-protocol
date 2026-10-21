@@ -330,7 +330,7 @@ impl ErrorKind {
             ],
             Self::UpdateNotWritable => [
                 "This installation cannot be updated from here. Install the new version yourself.",
-                "このインストール先は、ここから更新できません。新しいバージョンを自分でインストールしてください。",
+                "このインストール先はここから更新できません。新しいバージョンを自分でインストールしてください。",
                 "无法从此处更新当前安装。请自行安装新版本。",
             ],
             Self::Other => [
