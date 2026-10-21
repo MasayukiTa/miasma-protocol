@@ -1485,15 +1485,15 @@ mod tests {
 
     #[test]
     fn header_syntax_is_strict() {
-        let sid = B64U.encode([1u8; 16]);
-        let n = B64U.encode([2u8; 16]);
-        let sig = B64U.encode([3u8; 64]);
+        let sid_raw: [u8; 16] = OsRng.gen();
+        let n_raw: [u8; 16] = OsRng.gen();
+        let sig_raw: [u8; 32] = OsRng.gen();
+        let sid = B64U.encode(sid_raw);
+        let n = B64U.encode(n_raw);
+        let sig = B64U.encode([sig_raw, sig_raw].concat());
         let ok = format!("MiasmaSig v=1, sid={sid}, ts=1800000000000, n={n}, sig={sig}");
         let h = SigHeader::parse(&ok).unwrap();
-        assert_eq!(
-            (h.ts, h.sid, h.nonce),
-            (1_800_000_000_000, [1; 16], [2; 16])
-        );
+        assert_eq!((h.ts, h.sid, h.nonce), (1_800_000_000_000, sid_raw, n_raw));
         for bad in [
             format!("Bearer v=1, sid={sid}, ts=1, n={n}, sig={sig}"),
             format!("MiasmaSig v=2, sid={sid}, ts=1, n={n}, sig={sig}"),
