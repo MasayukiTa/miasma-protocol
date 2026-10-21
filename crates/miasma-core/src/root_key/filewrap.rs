@@ -14,7 +14,7 @@
 use std::path::Path;
 
 use chacha20poly1305::{
-    aead::{Aead, KeyInit, Payload},
+    aead::{Aead, AeadCore, KeyInit, OsRng, Payload},
     XChaCha20Poly1305, XNonce,
 };
 use hkdf::Hkdf;
@@ -86,13 +86,12 @@ impl DeviceWrap for FileWrap {
 
     fn wrap(&self, data_dir: &Path, aad: &[u8], root: &[u8; 32]) -> Result<Vec<u8>, WrapError> {
         let secret = load_or_create_secret(data_dir)?;
-        let mut nonce = [0u8; NONCE_LEN];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
+        let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
         let ct = cipher(&secret)
-            .encrypt(XNonce::from_slice(&nonce), Payload { msg: root, aad })
+            .encrypt(&nonce, Payload { msg: root, aad })
             .map_err(|_| WrapError::Corrupt)?;
         let mut out = Vec::with_capacity(NONCE_LEN + ct.len());
-        out.extend_from_slice(&nonce);
+        out.extend_from_slice(nonce.as_slice());
         out.extend_from_slice(&ct);
         Ok(out)
     }
