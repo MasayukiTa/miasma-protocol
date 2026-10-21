@@ -1,4 +1,8 @@
 import { parseDissolveBundle } from './storage.js';
+import {
+  sessionClient, chooseAuthMode, authStateForCode, isSessionGone, noSessionResponse,
+} from './websession.js';
+import { isBootToken } from './websig.js';
 // Miasma Web — Bridge Abstraction Layer
 //
 // Detects the runtime environment and routes API calls accordingly:
@@ -55,10 +59,20 @@ export class MiasmaBridge {
     // 2. Check for desktop HTTP bridge
     const found = await findBridge();
     if (found) {
-      bridgeBase = found;
+      bridgeBase = found.base;
       this._mode = MODE_HTTP;
-      // Reachable is not the same as allowed in: /api/ping needs no token, the
-      // rest does. status() records whether the token was accepted.
+      // The daemon says how it wants requests authenticated. Signed sessions
+      // when it advertises them; the old Bearer token only for a daemon that
+      // predates the field.
+      authMode = chooseAuthMode(found.ping);
+      if (authMode === 'sig-v1') {
+        const state = await sessionClient.establish(found.base);
+        if (state !== 'ready') setAuthState(state);
+      } else if (authMode === 'unsupported') {
+        setAuthState('unsupported');
+      }
+      // Reachable is not the same as allowed in: /api/ping needs no credential,
+      // the rest does. status() records whether it was accepted.
       this._connected = false;
       await this.status();
       this._startPolling();
@@ -661,18 +675,18 @@ export class MiasmaBridge {
 
 // ── Utility ──────────────────────────────────────────────────────────────────
 
-// The daemon's HTTP bridge requires its control token (contents of
-// <data_dir>/daemon.token) as a Bearer credential on everything except
-// /api/ping. A page cannot read that file, so `miasma web` prints a launch
-// link with the token in its URL fragment:
+// The daemon's HTTP bridge wants every request except /api/ping to be signed
+// by a session this page registered (websession.js). `miasma web` prints a
+// launch link with a one-time value in its URL fragment:
 //
-//   http://127.0.0.1:<port>/#token=<hex>[&bridge=http://127.0.0.1:<port>]
+//   http://127.0.0.1:<port>/#boot=<base64url>[&bridge=http://127.0.0.1:<port>]
 //
 // A fragment is never sent to any server. The page reads it once at load, keeps
-// it in sessionStorage (gone when the tab closes; unlike localStorage it is not
-// shared with other tabs or kept on disk) and removes it from the address bar.
-// `bridge=` is honoured only for a loopback address: the token must never be
-// sent to a remote host because a link said so.
+// it in memory only and removes it from the address bar.
+//
+// A daemon that predates sessions (its /api/ping has no `web_auth`) still gets
+// the old `#token=<hex>` link and a Bearer header; that token is also kept in
+// memory only. `bridge=` is honoured only for a loopback address.
 const TOKEN_KEY = 'miasma_control_token';
 const BRIDGE_KEY = 'miasma_bridge_url';
 const TOKEN_SHAPE = /^[0-9a-fA-F]{16,128}$/;
@@ -772,11 +786,13 @@ export function isLoopbackUrl(value) {
  * Returns what was found; the caller stores it and clears the address bar.
  */
 export function parseLaunchFragment(hash) {
-  const out = { token: '', bridge: '' };
+  const out = { token: '', boot: '', bridge: '' };
   if (!hash || hash.length < 2) return out;
   const params = new URLSearchParams(hash.replace(/^#/, ''));
   const token = (params.get('token') || '').trim();
   if (TOKEN_SHAPE.test(token)) out.token = token;
+  const boot = (params.get('boot') || '').trim();
+  if (isBootToken(boot)) out.boot = boot;
   const bridge = (params.get('bridge') || '').trim();
   if (bridge && isLoopbackUrl(bridge)) out.bridge = bridge.replace(/\/+$/, '');
   return out;
@@ -789,10 +805,13 @@ function consumeLaunchFragment() {
 
   let hash = '';
   try { hash = window.location.hash; } catch (_) { return; }
+  // An earlier build kept the token in sessionStorage; do not leave it there.
+  sessionSet(TOKEN_KEY, '');
   const found = parseLaunchFragment(hash);
-  if (found.token) { memoryToken = found.token; sessionSet(TOKEN_KEY, found.token); }
+  if (found.token) memoryToken = found.token;
+  if (found.boot) sessionClient.setBoot(found.boot);
   if (found.bridge) sessionSet(BRIDGE_KEY, found.bridge);
-  if (found.token || found.bridge || /token=/.test(hash)) {
+  if (found.token || found.boot || found.bridge || /(token|boot)=/.test(hash)) {
     try {
       window.history.replaceState(window.history.state, '', window.location.pathname + window.location.search);
     } catch (_) { /* ignore */ }
@@ -801,16 +820,15 @@ function consumeLaunchFragment() {
 
 consumeLaunchFragment();
 
-/** Set the token by hand (for example from a console); kept for this tab only. */
+/** Set the legacy token by hand (for example from a console); kept in memory only. */
 export function setControlToken(token) {
-  const t = token ? String(token).trim() : '';
-  memoryToken = t;
-  sessionSet(TOKEN_KEY, t);
+  memoryToken = token ? String(token).trim() : '';
 }
 
-/** Forget the control token and bridge address everywhere this page keeps them. */
+/** Forget the control token, the session key and the bridge address held by this page. */
 export function clearControlState() {
   memoryToken = '';
+  sessionClient.dropMemory();
   bridgeBase = DEFAULT_BRIDGE_URL;
   try { sessionStorage.removeItem(TOKEN_KEY); } catch (_) { /* ignore */ }
   try { sessionStorage.removeItem(BRIDGE_KEY); } catch (_) { /* ignore */ }
@@ -825,15 +843,23 @@ export function setAfterWipeHandler(fn) {
 }
 
 function controlToken() {
-  return memoryToken || sessionGet(TOKEN_KEY);
+  return memoryToken;
 }
 
+// How requests are authenticated, decided from the daemon's /api/ping answer:
+// 'sig-v1' (signed session), 'legacy-bearer' (daemon without sessions) or 'unsupported'.
+let authMode = 'legacy-bearer';
+
+export function getAuthMode() { return authMode; }
+
 // ── Auth state ───────────────────────────────────────────────────────────────
-// 'unknown' until a request needing the token has been answered.
-//   ok        the daemon accepted the token
-//   missing   no token in this tab (the page was not opened from a launch link)
-//   rejected  a token is present but the daemon refused it (it changes at every
-//             daemon start, so a link from an earlier run stops working)
+// 'unknown' until a request needing a credential has been answered.
+//   ok           the daemon accepted it
+//   missing      nothing to authenticate with (the page was not opened from a launch link)
+//   rejected     a credential is present but the daemon refused it
+//   expired      the session ended or the launch link was already used (the daemon
+//                restarted, the time ran out): open a fresh link
+//   unsupported  this browser cannot sign requests (no WebCrypto: not a secure context)
 let authState = 'unknown';
 const authListeners = new Set();
 
@@ -876,24 +902,51 @@ async function findBridge() {
       const resp = await fetchWithTimeout(`${base}/api/ping`, { method: 'GET' }, PING_TIMEOUT_MS);
       if (resp.ok) {
         const data = await resp.json();
-        if (data && data.ok === true) return base;
+        if (data && data.ok === true) return { base, ping: data };
       }
     } catch (_) { /* try the next one */ }
   }
-  return '';
+  return null;
 }
 
 async function bridgeFetch(url, options) {
-  const opts = Object.assign({}, options);
   const isPing = url.endsWith('/api/ping');
+  if (isPing) return fetch(url, Object.assign({}, options));
+
+  if (authMode === 'sig-v1') return signedBridgeFetch(url, options);
+  if (authMode === 'unsupported') {
+    setAuthState('unsupported');
+    return noSessionResponse('unsupported');
+  }
+
+  // Daemon without sessions: the old Bearer token, only from this page's memory.
+  const opts = Object.assign({}, options);
   const token = controlToken();
-  if (token && !isPing) {
+  if (token) {
     opts.headers = Object.assign({}, opts.headers, { Authorization: `Bearer ${token}` });
   }
   const resp = await fetch(url, opts);
-  if (!isPing) {
-    if (resp.status === 401) setAuthState(token ? 'rejected' : 'missing');
-    else if (resp.ok) setAuthState('ok');
+  if (resp.status === 401) setAuthState(token ? 'rejected' : 'missing');
+  else if (resp.ok) setAuthState('ok');
+  return resp;
+}
+
+/** The daemon advertised sessions: sign, or send nothing. Never a Bearer token. */
+async function signedBridgeFetch(url, options) {
+  if (!sessionClient.hasSession()) {
+    const state = sessionClient.noSessionState();
+    setAuthState(state);
+    return noSessionResponse(state);
+  }
+  const resp = await sessionClient.signedFetch(url, options);
+  if (resp.status === 401) {
+    let code = '';
+    try { code = (await resp.clone().json()).code || ''; } catch (_) { /* not JSON */ }
+    const state = authStateForCode(code);
+    if (isSessionGone(code)) await sessionClient.invalidate(state);
+    setAuthState(state);
+  } else if (resp.ok) {
+    setAuthState('ok');
   }
   return resp;
 }

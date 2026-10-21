@@ -48,11 +48,12 @@ test('wipeEverything runs every step and locks the page', async () => {
     env,
     dropBuffers: [() => { zeroFill(secret); calls.push('buffers'); }],
     clearToken: () => calls.push('token'),
+    clearSession: () => calls.push('session'),
     lockDb: () => calls.push('lock'),
     removeDatabase: async () => calls.push('deleteDatabase'),
   });
   assert.deepEqual(result, { ok: true, errors: [] });
-  assert.deepEqual(calls, ['buffers', 'token', 'lock', 'deleteDatabase']);
+  assert.deepEqual(calls, ['buffers', 'token', 'session', 'lock', 'deleteDatabase']);
   assert.deepEqual([...secret], [0, 0, 0]);
   assert.equal(env.sessionStorage.m.size, 0);
   assert.equal(env.localStorage.m.size, 0);
@@ -67,6 +68,7 @@ test('a failing step does not stop the others and is reported', async () => {
   const result = await wipeEverything({
     env,
     clearToken: () => {},
+    clearSession: () => {},
     lockDb: () => {},
     removeDatabase: async () => { throw new Error('blocked'); },
     dropBuffers: [() => { throw new Error('boom'); }],
@@ -133,4 +135,14 @@ test('bridge.wipe runs the after-wipe handler only when the remote wipe succeede
   assert.equal(await b.wipe(), true);
   assert.equal(ran, 1);
   setAfterWipeHandler(null);
+});
+
+test('wipeEverything deletes the stored signing key by default', async () => {
+  const idb = installFakeIndexedDb();
+  const { env } = fakeEnv();
+  const result = await wipeEverything({
+    env, clearToken: () => {}, lockDb: () => {}, removeDatabase: async () => {},
+  });
+  assert.equal(result.ok, true);
+  assert.ok(idb.log.includes('miasma-session'));
 });

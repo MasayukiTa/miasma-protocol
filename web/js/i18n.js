@@ -254,6 +254,8 @@ const translations = {
     conn_chip_local: "Local only",
     auth_missing: "The daemon is running, but this page was not opened with its link, so the daemon refuses its requests. Run `miasma web` and open the link it prints.",
     auth_rejected: "The daemon no longer accepts this page's token (it changes every time the daemon starts). Run `miasma web` again and open the link it prints.",
+    auth_expired: "This page's session with the daemon has ended, or its link was already used (a session is short-lived and ends when the daemon restarts). Run `miasma web` again and open the link it prints.",
+    auth_unsupported: "This browser cannot create the signing key the daemon requires, which needs a secure context. Open the link `miasma web` prints (it uses 127.0.0.1 or localhost) in an up-to-date browser.",
   },
   ja: {
     loading: "Miasma Protocol を読み込み中...",
@@ -508,6 +510,8 @@ const translations = {
     conn_chip_local: "ローカルのみ",
     auth_missing: "デーモンは動作していますが、このページは専用リンクから開かれていないため、リクエストが拒否されます。`miasma web` を実行し、表示されたリンクを開いてください。",
     auth_rejected: "デーモンがこのページのトークンを受け付けなくなりました（トークンはデーモンの起動のたびに変わります）。もう一度 `miasma web` を実行し、表示されたリンクを開いてください。",
+    auth_expired: "デーモンとのセッションが終了したか、このリンクはすでに使われています（セッションは短い時間で切れ、デーモンの再起動でも終わります）。もう一度 `miasma web` を実行し、表示されたリンクを開いてください。",
+    auth_unsupported: "このブラウザでは、デーモンが求める署名用の鍵を作れません（安全なコンテキストが必要です）。`miasma web` が表示するリンク（127.0.0.1 または localhost）を、新しいブラウザで開いてください。",
   },
   zh: {
     loading: "正在加载 Miasma Protocol...",
@@ -762,6 +766,8 @@ const translations = {
     conn_chip_local: "仅本地",
     auth_missing: "守护进程正在运行，但此页面不是通过它的专用链接打开的，因此请求被拒绝。请运行 `miasma web` 并打开它输出的链接。",
     auth_rejected: "守护进程不再接受此页面的令牌（令牌在每次守护进程启动时都会改变）。请再次运行 `miasma web` 并打开它输出的链接。",
+    auth_expired: "此页面与守护进程的会话已结束，或其链接已被使用（会话有效期很短，守护进程重启后也会结束）。请再次运行 `miasma web` 并打开它输出的链接。",
+    auth_unsupported: "此浏览器无法创建守护进程所需的签名密钥（需要安全上下文）。请在较新的浏览器中打开 `miasma web` 输出的链接（使用 127.0.0.1 或 localhost）。",
   }
 };
 
