@@ -1310,8 +1310,7 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
         info
     });
     let has_config = config_info.is_ok();
-    let key_path = miasma_core::paths::master_key(data_dir);
-    let key_exists = key_path.exists();
+    let key_exists = miasma_core::root_key::is_initialized(data_dir);
 
     // Store info.
     let (share_count, storage_used, owned_storage_used, hosted_storage_used) =
@@ -1865,11 +1864,13 @@ async fn cmd_wipe(data_dir: &std::path::Path, confirm: bool) -> Result<()> {
             bail!("wipe response received but daemon runtime did not stop within 5s");
         }
     } else {
+        // No daemon to ask: erase the key files directly. This does not open
+        // the key, so it works when the key is damaged or cannot be opened.
         let mut config = NodeConfig::load(data_dir).unwrap_or_default();
-        let quota_mb = config.storage.quota_mb;
         config.transport.zeroize_secret_copies();
-        let store = LocalShareStore::open(data_dir, quota_mb).context("cannot open share store")?;
-        store.distress_wipe().context("wipe failed")?;
+        miasma_core::root_key::wipe_data_dir(data_dir)
+            .into_result()
+            .context("wipe failed")?;
     }
 
     eprintln!(
@@ -2234,20 +2235,11 @@ async fn cmd_daemon(
         ),
     }
 
-    let master_key_path = miasma_core::paths::master_key(data_dir);
-    if !master_key_path.exists() {
+    if !miasma_core::root_key::is_initialized(data_dir) {
         bail!("Node not initialised. Run `miasma init` first.");
     }
-    let master_bytes =
-        Zeroizing::new(std::fs::read(&master_key_path).context("cannot read master.key")?);
-    if master_bytes.len() != 32 {
-        bail!("master.key has wrong length");
-    }
-    let mut master_key = Zeroizing::new([0u8; 32]);
-    master_key.copy_from_slice(&master_bytes);
-    if master_key.iter().all(|byte| *byte == 0) {
-        bail!("master.key is erased/all-zero");
-    }
+    let root_key = miasma_core::root_key::get(data_dir, miasma_core::root_key::CreatePolicy::Never)
+        .context("cannot read the master key")?;
 
     // `storage.hosted_quota_mb` bounds the shares this node holds for other
     // publishers (0 = refuse every pushed share).
@@ -2256,7 +2248,9 @@ async fn cmd_daemon(
             .context("cannot open share store")?,
     );
 
-    let node = MiasmaNode::new(&master_key, NodeType::Full, &config.network.listen_addr)
+    let node = root_key
+        .with(|key| MiasmaNode::new(key, NodeType::Full, &config.network.listen_addr))
+        .context("cannot read the master key")?
         .context("cannot create node")?;
 
     let transport_config = std::mem::take(&mut config.transport);

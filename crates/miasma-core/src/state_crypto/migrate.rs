@@ -114,7 +114,7 @@ fn state_dir_of(path: &Path) -> PathBuf {
     let mut dir = path.parent();
     for _ in 0..3 {
         let Some(d) = dir else { break };
-        if crate::paths::master_key(d).exists() {
+        if crate::root_key::is_initialized(d) {
             return d.to_path_buf();
         }
         dir = d.parent();

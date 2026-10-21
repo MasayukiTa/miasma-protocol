@@ -28,6 +28,7 @@ pub mod protocol;
 pub mod push;
 pub mod repair;
 pub mod retrieval;
+pub mod root_key;
 pub mod secure_file;
 pub mod secure_memory;
 pub mod share;

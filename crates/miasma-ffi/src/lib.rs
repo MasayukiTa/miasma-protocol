@@ -31,8 +31,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use zeroize::Zeroizing;
-
 use miasma_core::{
     config::{NetworkConfig, NodeConfig, StorageConfig},
     daemon::{
@@ -262,8 +260,7 @@ fn open_store_inner(
     keep_transport_secrets: bool,
 ) -> Result<(NodeConfig, Arc<LocalShareStore>), MiasmaFfiError> {
     let path = validate_data_dir(data_dir)?;
-    let master_key_path = miasma_core::paths::master_key(&path);
-    if !master_key_path.exists() {
+    if !miasma_core::root_key::is_initialized(&path) {
         return Err(MiasmaFfiError::NotInitialized {
             data_dir: data_dir.to_owned(),
         });
@@ -707,80 +704,20 @@ pub fn distress_wipe(data_dir: String) -> Result<(), MiasmaFfiError> {
         }
     }
 
-    // No daemon performed the store wipe: erase via a fresh store instance. An
-    // unreachable external daemon remains an error even if disk cleanup succeeds,
-    // because its in-memory master-derived keys cannot be proven destroyed here.
-    if !daemon_wipe_started {
-        match open_store(&data_dir) {
-            Ok((_config, store)) => {
-                if let Err(e) = store.distress_wipe() {
-                    tracing::warn!("fallback store distress wipe incomplete: {e}");
-                    errors.push("local store wipe incomplete".into());
-                }
-            }
-            Err(e) => tracing::debug!("fallback store open skipped during wipe: {e}"),
-        }
-    }
-
-    // Scrub persisted transport secrets even when master.key was already absent
-    // and LocalShareStore could not be opened.
-    let config_path = miasma_core::paths::config_file(&path);
-    if config_path.exists() {
-        match NodeConfig::load(&path) {
-            Ok(mut config) => {
-                if config.has_persisted_secrets() {
-                    if let Err(e) = config.scrub_credentials(&path) {
-                        tracing::warn!("wipe transport-secret scrub failed: {e}");
-                        errors.push("transport-secret cleanup failed".into());
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!("wipe could not parse config for secret scrub: {e}");
-                errors.push("transport config could not be scrubbed".into());
-            }
-        }
-    }
-
-    // Platform wrappers can leave encrypted key blobs alongside master.key.
-    // Erase-and-remove each one and treat any failure as incomplete wipe.
-    for fname in [
-        miasma_core::paths::MASTER_KEY.name,
-        miasma_core::paths::MASTER_KEY_WRAPPED.name,
-        miasma_core::paths::MASTER_KEY_WRAP_IV.name,
-    ] {
-        let fpath = path.join(fname);
-        if !fpath.exists() {
-            continue;
-        }
-        match std::fs::metadata(&fpath) {
-            Ok(metadata) => {
-                let zeros = vec![0u8; metadata.len() as usize];
-                if let Err(e) = std::fs::write(&fpath, &zeros) {
-                    tracing::warn!(
-                        "wipe overwrite failed for {}: {e}",
-                        miasma_core::logging::redact::name(fname)
-                    );
-                    errors.push(format!("could not overwrite {fname}"));
-                    continue;
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "wipe metadata failed for {}: {e}",
-                    miasma_core::logging::redact::name(fname)
-                );
-                errors.push(format!("could not inspect {fname}"));
-                continue;
-            }
-        }
-        if let Err(e) = std::fs::remove_file(&fpath) {
-            tracing::warn!(
-                "wipe removal failed for {}: {e}",
-                miasma_core::logging::redact::name(fname)
-            );
-            errors.push(format!("could not remove {fname}"));
-        }
+    // Erase the key files the persisted-paths registry names (the master key,
+    // platform-wrapped copies and any sealed form) and scrub the persisted
+    // transport secrets in config.toml. This runs whether or not a daemon did
+    // its part, never opens the key, and works when the store cannot be
+    // opened. An unreachable external daemon remains an error even if disk
+    // cleanup succeeds, because its in-memory master-derived keys cannot be
+    // proven destroyed here.
+    let report = miasma_core::root_key::wipe_data_dir(&path);
+    if !report.is_complete() {
+        tracing::warn!(
+            "wipe cleanup incomplete: {} step(s) failed",
+            report.errors.len()
+        );
+        errors.push("local key wipe incomplete".into());
     }
 
     // Daemon Wipe returns its response before the outer run loop necessarily
@@ -835,28 +772,38 @@ fn summary_to_ffi(s: directed::EnvelopeSummary) -> EnvelopeSummaryFfi {
     }
 }
 
-fn read_master_key_zeroizing(
-    master_key_path: &std::path::Path,
-) -> Result<Zeroizing<[u8; 32]>, MiasmaFfiError> {
-    let bytes = Zeroizing::new(std::fs::read(master_key_path).map_err(|e| {
-        tracing::warn!("read master.key: {e}");
-        MiasmaFfiError::Other {
-            msg: "failed to read master key".into(),
-        }
-    })?);
-    if bytes.len() != 32 {
-        return Err(MiasmaFfiError::Other {
-            msg: "invalid master key length".into(),
-        });
-    }
-    let mut key = Zeroizing::new([0u8; 32]);
-    key.copy_from_slice(&bytes);
-    if key.iter().all(|byte| *byte == 0) {
-        return Err(MiasmaFfiError::Other {
-            msg: "master key is erased/all-zero".into(),
-        });
-    }
-    Ok(key)
+/// The node's root key, through the single root-key entry point. Never
+/// creates one.
+fn read_root_key(path: &std::path::Path) -> Result<miasma_core::root_key::RootKey, MiasmaFfiError> {
+    use miasma_core::root_key::RootKeyError;
+    miasma_core::root_key::get(path, miasma_core::root_key::CreatePolicy::Never).map_err(
+        |e| match e {
+            RootKeyError::Io(io) => {
+                tracing::warn!("read master key: {io}");
+                MiasmaFfiError::Other {
+                    msg: "failed to read master key".into(),
+                }
+            }
+            RootKeyError::WrongLength => MiasmaFfiError::Other {
+                msg: "invalid master key length".into(),
+            },
+            RootKeyError::Erased => MiasmaFfiError::Other {
+                msg: "master key is erased/all-zero".into(),
+            },
+            other => MiasmaFfiError::Other {
+                msg: other.to_string(),
+            },
+        },
+    )
+}
+
+/// Run `f` on the root key bytes.
+fn with_root_key<R>(
+    key: &miasma_core::root_key::RootKey,
+    f: impl FnOnce(&[u8; 32]) -> R,
+) -> Result<R, MiasmaFfiError> {
+    key.with(f)
+        .map_err(|e| MiasmaFfiError::Other { msg: e.to_string() })
 }
 
 /// Get this node's sharing key (formatted as `msk:<base58>`).
@@ -866,19 +813,18 @@ fn read_master_key_zeroizing(
 #[uniffi::export]
 pub fn get_sharing_key(data_dir: String) -> Result<String, MiasmaFfiError> {
     let path = validate_data_dir(&data_dir)?;
-    let master_key_path = miasma_core::paths::master_key(&path);
-    if !master_key_path.exists() {
+    if !miasma_core::root_key::is_initialized(&path) {
         return Err(MiasmaFfiError::NotInitialized {
             data_dir: data_dir.to_owned(),
         });
     }
-    let master_key = read_master_key_zeroizing(&master_key_path)?;
-    let secret =
-        miasma_core::crypto::keyderive::derive_sharing_key(master_key.as_ref()).map_err(|e| {
-            MiasmaFfiError::Other {
-                msg: format!("{e}"),
-            }
-        })?;
+    let root = read_root_key(&path)?;
+    let secret = with_root_key(&root, |key| {
+        miasma_core::crypto::keyderive::derive_sharing_key(key)
+    })?
+    .map_err(|e| MiasmaFfiError::Other {
+        msg: format!("{e}"),
+    })?;
     let static_secret = x25519_dalek::StaticSecret::from(*secret);
     let pubkey = x25519_dalek::PublicKey::from(&static_secret);
     Ok(directed::format_sharing_key(pubkey.as_bytes()))
@@ -991,8 +937,7 @@ pub fn start_embedded_daemon(
     let (mut config, store) = open_store_for_daemon(&data_dir)?;
 
     // Read master key for node identity.
-    let master_key_path = miasma_core::paths::master_key(&path);
-    let master_key = read_master_key_zeroizing(&master_key_path)?;
+    let root_key = read_root_key(&path)?;
 
     // Move the transport config into the daemon; do not duplicate persisted
     // secret Strings into a second long-lived config object.
@@ -1009,13 +954,15 @@ pub fn start_embedded_daemon(
         // Create MiasmaNode with full networking. Building the swarm registers
         // UDP sockets with the tokio reactor, so it must run inside the runtime:
         // this function is called from a plain Kotlin/Swift thread that has none.
-        let node = MiasmaNode::new(&master_key, NodeType::Full, &config.network.listen_addr)
-            .map_err(|e| {
-                tracing::warn!("node create error: {e}");
-                MiasmaFfiError::Other {
-                    msg: "failed to create network node".into(),
-                }
-            })?;
+        let node = with_root_key(&root_key, |key| {
+            MiasmaNode::new(key, NodeType::Full, &config.network.listen_addr)
+        })?
+        .map_err(|e| {
+            tracing::warn!("node create error: {e}");
+            MiasmaFfiError::Other {
+                msg: "failed to create network node".into(),
+            }
+        })?;
 
         let server =
             DaemonServer::start_with_transport(node, store, path.clone(), transport_config)
@@ -1033,10 +980,12 @@ pub fn start_embedded_daemon(
 
         // Derive sharing contact for this daemon.
         let sharing_contact = {
-            let secret = miasma_core::crypto::keyderive::derive_sharing_key(master_key.as_ref())
-                .map_err(|e| MiasmaFfiError::Other {
-                    msg: format!("{e}"),
-                })?;
+            let secret = with_root_key(&root_key, |key| {
+                miasma_core::crypto::keyderive::derive_sharing_key(key)
+            })?
+            .map_err(|e| MiasmaFfiError::Other {
+                msg: format!("{e}"),
+            })?;
             let static_secret = x25519_dalek::StaticSecret::from(*secret);
             let pubkey = x25519_dalek::PublicKey::from(&static_secret);
             directed::format_sharing_contact(pubkey.as_bytes(), &peer_id)

@@ -248,20 +248,13 @@ impl DaemonServer {
         };
 
         let (sharing_secret, sharing_pubkey) = {
-            let master_key_path = crate::paths::master_key(&data_dir);
-            let master_bytes = zeroize::Zeroizing::new(
-                std::fs::read(&master_key_path)
-                    .with_context(|| format!("cannot read {}", master_key_path.display()))?,
-            );
-            if master_bytes.len() != 32 {
-                anyhow::bail!("{} has wrong length", master_key_path.display());
-            }
-            // Derive straight from the one zeroizing read buffer; no second
-            // copy of the root key is made here.
-            if master_bytes.iter().all(|byte| *byte == 0) {
-                anyhow::bail!("{} is erased/all-zero", master_key_path.display());
-            }
-            let secret = crate::crypto::keyderive::derive_sharing_key(master_bytes.as_slice())
+            let root = crate::root_key::get(&data_dir, crate::root_key::CreatePolicy::Never)
+                .context("cannot read the master key")?;
+            // Derive straight from the protected key; no copy of the root key
+            // is made here.
+            let secret = root
+                .with(|key| crate::crypto::keyderive::derive_sharing_key(key))
+                .context("cannot read the master key")?
                 .context("cannot derive directed-sharing key")?;
             let static_secret = x25519_dalek::StaticSecret::from(*secret);
             let pubkey = x25519_dalek::PublicKey::from(&static_secret);

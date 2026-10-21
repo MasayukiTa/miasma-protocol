@@ -264,6 +264,21 @@ jobs:
         with:
           subject-path: dist/miasma-macos.tar.gz
 
+  # The released command-line program must stop, and leave the data directory
+  # alone, when master.key is not a plain 32-byte key (see
+  # crates/miasma-core/tests/root_key_downgrade_compat.rs for the copied readers).
+  older-release-key-file:
+    name: Released CLI against a 64-byte key file (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the released CLI against the data directory
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/check-older-release-key-file.sh v0.3.2-beta.11
+
   cross-compile-arm64:
     name: Cross-compile ARM64
     runs-on: ubuntu-24.04
