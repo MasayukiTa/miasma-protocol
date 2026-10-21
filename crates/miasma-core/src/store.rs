@@ -40,6 +40,7 @@ use crate::{
 };
 
 const NONCE_LEN: usize = 24; // XChaCha20 nonce
+#[cfg(test)]
 const MASTER_KEY_FILE: &str = crate::paths::MASTER_KEY.name;
 const SHARES_DIR: &str = crate::paths::SHARES_DIR.name;
 const INDEX_FILE: &str = crate::paths::STORE_INDEX.name;
@@ -325,7 +326,7 @@ fn save_index(data_dir: &Path, index: &StoreIndex) -> Result<(), MiasmaError> {
 }
 
 /// Write to a temp file then rename — atomic on POSIX, best-effort on Windows.
-fn atomic_write(path: &Path, data: &[u8]) -> Result<(), MiasmaError> {
+pub(crate) fn atomic_write(path: &Path, data: &[u8]) -> Result<(), MiasmaError> {
     let tmp = crate::paths::atomic_tmp(path);
     {
         let mut f = std::fs::File::create(&tmp)?;
@@ -338,44 +339,14 @@ fn atomic_write(path: &Path, data: &[u8]) -> Result<(), MiasmaError> {
 
 // ─── Master key management ────────────────────────────────────────────────────
 
-/// Load or create the master key at `{data_dir}/master.key`.
+/// Load or create the master key of `data_dir` (through the single root-key
+/// entry point).
 ///
 /// The master key is used to derive per-file XChaCha20-Poly1305 keys via HKDF.
-/// Deleting this file instantly renders all stored shares unreadable (distress wipe).
+/// Erasing it instantly renders all stored shares unreadable (distress wipe).
 fn load_or_create_master_key(data_dir: &Path) -> Result<SecureKeyVault, MiasmaError> {
-    let key_path = data_dir.join(MASTER_KEY_FILE);
-    if key_path.exists() {
-        let bytes = Zeroizing::new(std::fs::read(&key_path)?);
-        if bytes.len() != 32 {
-            return Err(MiasmaError::KeyDerivation(
-                "master.key has wrong length".into(),
-            ));
-        }
-        let mut arr = Zeroizing::new([0u8; 32]);
-        arr.copy_from_slice(&bytes);
-        if arr.iter().all(|byte| *byte == 0) {
-            return Err(MiasmaError::KeyDerivation(
-                "master.key is erased/all-zero; refusing known key material".into(),
-            ));
-        }
-        Ok(SecureKeyVault::from_slice(&arr))
-    } else {
-        let mut arr = Zeroizing::new([0u8; 32]);
-        rand::RngCore::fill_bytes(&mut OsRng, arr.as_mut());
-        std::fs::create_dir_all(data_dir)?;
-
-        // Write the key via atomic_write_restricted: the file is created
-        // with a restrictive DACL/mode from the start (Win32 CreateFileW
-        // with SECURITY_ATTRIBUTES on Windows, open() with 0o600 on Unix).
-        // At no point does the key exist on disk with permissive permissions.
-        crate::secure_file::atomic_write_restricted(&key_path, arr.as_ref()).map_err(|e| {
-            MiasmaError::KeyDerivation(format!(
-                "failed to write master.key with restricted permissions: {e}"
-            ))
-        })?;
-
-        Ok(SecureKeyVault::from_slice(&arr))
-    }
+    let root = crate::root_key::get(data_dir, crate::root_key::CreatePolicy::FirstUse)?;
+    Ok(root.with(SecureKeyVault::from_slice)?)
 }
 
 /// Derive a per-file XChaCha20-Poly1305 key from the master key and the share address.
@@ -1243,54 +1214,13 @@ impl LocalShareStore {
         // already emptied the pool; this catches anything handed back since).
         self.wipe_gate.wipe_plaintext_pool();
 
-        // 3. Crypto-erase: the on-disk key is overwritten and removed. This is
-        //    a logical erase; it does not promise that earlier storage blocks
-        //    (for example on an SSD) are physically overwritten.
-
-        let mut cleanup_errors = Vec::new();
-        let key_path = self.data_dir.join(MASTER_KEY_FILE);
-        if key_path.exists() {
-            // Both steps are always attempted: a failed overwrite (a locked or
-            // read-only file) must not leave the real key on disk when it can
-            // still be removed.
-            let zeros = vec![0u8; 32];
-            if let Err(e) = atomic_write(&key_path, &zeros) {
-                cleanup_errors.push(format!("erase master.key: {e}"));
-            }
-            if let Err(e) = std::fs::remove_file(&key_path) {
-                cleanup_errors.push(format!("remove erased master.key: {e}"));
-            }
-        }
-
-        // The chat records kept outside the data directory go with the key.
-        crate::chat::anchor::wipe_for(&self.data_dir);
-
-        // Scrub persisted transport secrets from config.toml so they do not
-        // survive a wipe. A parse/save failure is wipe failure, never advisory.
-        let config_path = crate::paths::config_file(&self.data_dir);
-        if config_path.exists() {
-            match crate::config::NodeConfig::load(&self.data_dir) {
-                Ok(mut config) => {
-                    if config.has_persisted_secrets() {
-                        if let Err(e) = config.scrub_credentials(&self.data_dir) {
-                            cleanup_errors.push(format!("scrub transport secrets: {e}"));
-                        }
-                    }
-                }
-                Err(e) => {
-                    cleanup_errors.push(format!("load config for proxy credential scrub: {e}"))
-                }
-            }
-        }
-
-        if cleanup_errors.is_empty() {
-            Ok(())
-        } else {
-            Err(MiasmaError::Storage(format!(
-                "distress wipe incomplete: {}",
-                cleanup_errors.join("; ")
-            )))
-        }
+        // 3. Crypto-erase: the key files named by the persisted-paths registry
+        //    are overwritten and removed, and the persisted transport secrets
+        //    in config.toml are scrubbed. This is a logical erase; it does not
+        //    promise that earlier storage blocks (for example on an SSD) are
+        //    physically overwritten. It never reads the key
+        //    (see `root_key::wipe_data_dir`).
+        crate::root_key::wipe_data_dir(&self.data_dir).into_result()
     }
 
     /// Return addresses of all shares whose `mid_prefix` matches `prefix`.
