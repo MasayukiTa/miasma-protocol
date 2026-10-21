@@ -1,0 +1,64 @@
+# cargo-deny policy, run in CI by the "Dependency Policy" job:
+#   cargo deny --locked check advisories sources licenses bans
+#
+# Every advisory exception below needs a written reason, a review date and a
+# reachability note. Review all of them by 2026-12-31 at the latest.
+
+[advisories]
+# Unmaintained crates are reported by `cargo audit` as warnings; this policy
+# only gates on vulnerabilities and yanked releases.
+unmaintained = "none"
+yanked = "deny"
+ignore = [
+    { id = "RUSTSEC-2026-0257", reason = """
+webbrowser 0.8.15 (BROWSER environment variable handling, fixed in >= 1.2.2).
+Path: eframe 0.27.2 -> egui-winit 0.27.2 -> webbrowser, used by miasma-desktop.
+Not reachable: the vulnerable code is the Unix (Linux/BSD) backend only, and
+the shipped and tested desktop targets are Windows and macOS, which use other
+backends that do not read BROWSER. webbrowser::open is only called when egui
+requests opening a URL, and no miasma crate emits one (no hyperlink or
+open_url use). eframe 0.27 enables egui-winit's links feature unconditionally,
+so the dependency cannot be dropped by features; fixing it means moving eframe
+0.27 -> 0.37 (a large migration). Review by 2026-12-31, and re-check before any
+Linux desktop build is shipped.""" },
+    { id = "RUSTSEC-2026-0293", reason = """
+ringbuf 0.4.8 (Consumer::skip/clear drop panic, fixed in >= 0.5.2).
+Path: librqbit 9.0.1 -> librqbit-utp 0.7.0 -> ringbuf 0.4.8, used by
+miasma-bridge. Not reachable: the issue needs an element type whose Drop
+implementation panics; librqbit-utp's buffer is SharedRb<Heap<u8>> and u8 has
+no Drop. No newer librqbit or librqbit-utp release exists that moves to
+ringbuf >= 0.5.2. Review by 2026-12-31; remove this entry when upstream
+updates.""" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+
+[licenses]
+confidence-threshold = 0.8
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+    # Default fonts bundled by egui (miasma-desktop only).
+    "OFL-1.1",
+    "LicenseRef-UFL-1.0",
+]

@@ -294,20 +294,21 @@ jobs:
         #   Drop implementation; the exploit precondition is unreachable in
         #   this dependency path. Upstream librqbit-utp main still pins 0.4.7
         #   as of 2026-09-29. Remove this ignore when upstream moves to >=0.5.2.
-        #
-        # NOT ignored, and deliberately not tracked here: yamux 0.12.1
-        # (GHSA-vxx9-2994-q338 / CVE-2026-32314, remote panic) is present in
-        # the lockfile via libp2p-yamux's own unconditional dependency on
-        # BOTH yamux 0.12 and 0.13 (verified in libp2p-yamux 0.47.0's
-        # Cargo.toml -- there is no feature flag to drop either side), but
-        # this project only ever constructs `yamux::Config::default()`
-        # (crates/miasma-core/src/network/node.rs), which resolves to
-        # `Either::Right(Config013)` -- the fixed yamux013 path. The
-        # vulnerable yamux012 code is compiled in but never instantiated at
-        # runtime. cargo-audit's local RustSec DB does not flag this ID at
-        # all yet, so it never reached this ignore list. The corresponding
-        # Dependabot alert was dismissed with a tolerable_risk rationale
-        # rather than fixed.
+
+  deny:
+    name: Dependency Policy (cargo-deny)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2
+
+      # Policy and the dated advisory exceptions live in deny.toml.
+      - name: Run cargo deny
+        run: cargo deny --locked check advisories sources licenses bans
 
   coverage:
     name: Core Coverage

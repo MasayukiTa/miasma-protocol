@@ -507,8 +507,22 @@ pub fn encode_record_value(
 pub fn decode_record_value(
     value: &[u8],
 ) -> Result<(DhtRecord, Option<TransferManifest>), MiasmaError> {
+    use bincode::Options;
+
+    // Reading from a reader makes bincode allocate a string or byte buffer of
+    // the *declared* length before reading it, so the read is bounded here: by
+    // the input length, and by the largest record a node accepts. These
+    // options encode exactly like `bincode::serialize` / `deserialize_from`
+    // (fixed-width integers, trailing bytes allowed for the manifest trailer).
+    let limit = value
+        .len()
+        .min(crate::network::node::DHT_INNER_RECORD_MAX_BYTES) as u64;
     let mut cursor = std::io::Cursor::new(value);
-    let record: DhtRecord = bincode::deserialize_from(&mut cursor)
+    let record: DhtRecord = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .allow_trailing_bytes()
+        .with_limit(limit)
+        .deserialize_from(&mut cursor)
         .map_err(|e| MiasmaError::Serialization(format!("record: {e}")))?;
     let rest = &value[cursor.position() as usize..];
     if rest.is_empty() {
@@ -795,6 +809,34 @@ mod tests {
         let (r, m) = decode_record_value(&value).unwrap();
         assert_eq!(r.mid_digest, rec.mid_digest);
         assert!(m.is_none());
+    }
+
+    #[test]
+    fn bounded_decode_reads_what_the_unbounded_encoder_wrote() {
+        use crate::network::types::ShardLocation;
+
+        let locations = |n: usize, addrs: usize, alen: usize| -> Vec<ShardLocation> {
+            (0..n)
+                .map(|i| ShardLocation {
+                    peer_id_bytes: vec![i as u8; 38],
+                    shard_index: (i % 6) as u16,
+                    segment_index: i as u32,
+                    addrs: (0..addrs).map(|a| "a".repeat(alen + a)).collect(),
+                })
+                .collect()
+        };
+        for (n, addrs, alen) in [(0, 0, 0), (1, 0, 0), (1, 1, 14), (5, 3, 40), (200, 4, 60)] {
+            let mut rec = record([9u8; 32]);
+            rec.locations = locations(n, addrs, alen);
+            rec.published_at = u64::MAX - n as u64;
+            // Bytes written by the plain encoder, as every shipped node does.
+            let value = bincode::serialize(&rec).unwrap();
+            let (back, none) = decode_record_value(&value).unwrap();
+            assert!(none.is_none());
+            // The decoded record re-encodes to the identical bytes.
+            assert_eq!(bincode::serialize(&back).unwrap(), value);
+            assert_eq!(back.locations, rec.locations);
+        }
     }
 
     #[test]
