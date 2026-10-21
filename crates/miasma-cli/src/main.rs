@@ -760,7 +760,7 @@ async fn main() -> Result<()> {
         }
 
         Commands::Transfers { clear_finished } => cmd_transfers(&data_dir, clear_finished).await,
-        Commands::Web { open, web_url } => cmd_web(&data_dir, open, web_url.as_deref()),
+        Commands::Web { open, web_url } => cmd_web(&data_dir, open, web_url.as_deref()).await,
         Commands::TransferCancel { mid } => cmd_transfer_cancel(&data_dir, &mid).await,
         Commands::TransferRemove {
             id,
@@ -3364,7 +3364,9 @@ fn cmd_redundancy_bench(
 }
 
 /// `miasma web`: print (and optionally open) the browser client's launch link.
-fn cmd_web(data_dir: &std::path::Path, open: bool, web_url: Option<&str>) -> Result<()> {
+async fn cmd_web(data_dir: &std::path::Path, open: bool, web_url: Option<&str>) -> Result<()> {
+    use miasma_core::{daemon_request, ControlRequest, ControlResponse};
+
     let port = web_link::read_bridge_port(data_dir).map_err(|e| {
         anyhow::anyhow!(
             "{}",
@@ -3374,16 +3376,48 @@ fn cmd_web(data_dir: &std::path::Path, open: bool, web_url: Option<&str>) -> Res
             .t()
         )
     })?;
-    let token = miasma_core::daemon::control_auth::read_token_file(data_dir)?;
     let page = match web_url {
         Some(u) => web_link::Page::Static(u),
         None => web_link::Page::Bridge,
     };
-    let url = web_link::launch_url(port, token.as_str(), &page)?;
+
+    // A daemon that supports browser sessions gets a one-time value in the
+    // link; an older one (or one that does not answer) gets the token link.
+    let advertised = web_link::ping_web_auth(port);
+    let sessions = advertised
+        .as_ref()
+        .is_some_and(|a| a.iter().any(|m| m == "sig-v1"));
+    let (url, note) = if sessions {
+        let origin = web_link::page_origin(port, &page)?;
+        let boot = match daemon_request(
+            data_dir,
+            ControlRequest::WebBootstrap {
+                origin,
+                scopes: Vec::new(),
+            },
+        )
+        .await?
+        {
+            ControlResponse::WebBootstrapIssued { boot, .. } => zeroize::Zeroizing::new(boot),
+            ControlResponse::Error(e) => return Err(daemon_error(e)),
+            other => return Err(unexpected_response(&other)),
+        };
+        (
+            web_link::launch_boot_url(port, &boot, &page)?,
+            Msg::WebSessionLinkNote,
+        )
+    } else {
+        let token = miasma_core::daemon::control_auth::read_token_file(data_dir)?;
+        let url = web_link::launch_url(port, token.as_str(), &page)?;
+        if advertised.is_some() {
+            eprintln!("{}", Msg::WebOldDaemon.t());
+        }
+        (url, Msg::WebLinkNote)
+    };
 
     // The link alone on stdout, so `miasma web | clip` or `$(miasma web)` works.
     println!("{url}");
-    eprintln!("{}", Msg::WebLinkNote.t());
+    eprintln!("{}", note.t());
     if open {
         eprintln!("{}", Msg::WebOpening.t());
         if let Err(e) = web_link::open_in_default_browser(&url) {

@@ -315,6 +315,17 @@ pub enum ControlRequest {
     LogsSetDiagnostic { enabled: bool },
     /// Empty the daemon's in-memory log buffer (zeroing it).
     LogsClear,
+
+    // ── Browser sessions (added after the variants above) ───────────────────
+    /// Issue a one-time bootstrap value for a page at `origin` (an `http(s)`
+    /// loopback origin). `scopes` empty means the browser default; the
+    /// `destructive` scope is refused. Answered with `WebBootstrapIssued`.
+    WebBootstrap { origin: String, scopes: Vec<String> },
+    /// List the live browser sessions (no key material). Answered with `WebSessions`.
+    WebSessionList,
+    /// End browser sessions whose id starts with `sid_prefix` (four or more
+    /// characters), or all of them when `None`. Answered with `WebSessionsRevoked`.
+    WebSessionRevoke { sid_prefix: Option<String> },
 }
 
 /// Upper bound on the line text in one `Logs` reply.
@@ -455,6 +466,16 @@ impl fmt::Debug for ControlRequest {
                 .field("enabled", enabled)
                 .finish(),
             Self::LogsClear => f.write_str("LogsClear"),
+            Self::WebBootstrap { origin, scopes } => f
+                .debug_struct("WebBootstrap")
+                .field("origin", origin)
+                .field("scopes", scopes)
+                .finish(),
+            Self::WebSessionList => f.write_str("WebSessionList"),
+            Self::WebSessionRevoke { sid_prefix } => f
+                .debug_struct("WebSessionRevoke")
+                .field("sid_prefix", sid_prefix)
+                .finish(),
             Self::Wipe => f.write_str("Wipe"),
             Self::WipeConfirm { .. } => f
                 .debug_struct("WipeConfirm")
@@ -673,6 +694,24 @@ pub enum ControlResponse {
         #[serde(default)]
         capacity: u64,
     },
+
+    // ── Browser sessions ────────────────────────────────────────────────────
+    /// Answer to `WebBootstrap`: the one-time value for the launch link's
+    /// fragment, valid for `expires_in_s` seconds.
+    WebBootstrapIssued {
+        boot: String,
+        expires_in_s: u32,
+    },
+    /// Answer to `WebSessionList`, with the number of browser requests that
+    /// used the control token as a Bearer since the daemon started.
+    WebSessions {
+        sessions: Vec<super::web_session::WebSessionInfo>,
+        browser_bearer_requests: u64,
+    },
+    /// Answer to `WebSessionRevoke`.
+    WebSessionsRevoked {
+        count: u32,
+    },
 }
 
 impl fmt::Debug for ControlResponse {
@@ -786,6 +825,23 @@ impl fmt::Debug for ControlResponse {
                 .field("next_seq", next_seq)
                 .field("diagnostic", diagnostic)
                 .finish(),
+            Self::WebBootstrapIssued { expires_in_s, .. } => f
+                .debug_struct("WebBootstrapIssued")
+                .field("boot", &"<redacted>")
+                .field("expires_in_s", expires_in_s)
+                .finish(),
+            Self::WebSessions {
+                sessions,
+                browser_bearer_requests,
+            } => f
+                .debug_struct("WebSessions")
+                .field("sessions", &sessions.len())
+                .field("browser_bearer_requests", browser_bearer_requests)
+                .finish(),
+            Self::WebSessionsRevoked { count } => f
+                .debug_struct("WebSessionsRevoked")
+                .field("count", count)
+                .finish(),
         }
     }
 }
@@ -794,6 +850,7 @@ impl ControlResponse {
     /// Erase plaintext response bodies after they have been serialized to IPC.
     pub(super) fn zeroize_sensitive_material(&mut self) {
         match self {
+            Self::WebBootstrapIssued { boot, .. } => boot.zeroize(),
             Self::Retrieved { data } | Self::DirectedRetrieved { data, .. } => data.zeroize(),
             Self::DirectedInboxList(items) | Self::DirectedOutboxList(items) => {
                 for item in items {

@@ -9,7 +9,10 @@
 //! | Method | Path            | Description                              |
 //! |--------|-----------------|------------------------------------------|
 //! | GET    | `/`, `/js/...`  | The web client itself (public, no token) |
-//! | GET    | `/api/ping`     | Connection liveness check                |
+//! | GET    | `/api/ping`     | Connection liveness check; lists `web_auth` |
+//! | POST   | `/api/session/register` | A page trades its one-time value and a proof of key possession for a session |
+//! | GET    | `/api/session`  | The calling session's scopes and remaining time |
+//! | POST   | `/api/session/end` | End the calling session                |
 //! | GET    | `/api/status`   | Full `DaemonStatus` snapshot             |
 //! | POST   | `/api/publish`  | Dissolve + publish (base64 data)         |
 //! | POST   | `/api/publish-file` | Stream a daemon-local file into the network |
@@ -35,6 +38,13 @@
 //! non-browser clients authenticate like everyone else, and browser origins
 //! that are not localhost are still refused.  `POST /api/wipe` is two-step:
 //! without a body it returns a challenge, `{"confirm": "<challenge>"}` wipes.
+//!
+//! A page may instead present `Authorization: MiasmaSig ...`, a request
+//! signature checked against the key it registered (see `web_session`); such a
+//! session is limited to its scopes and never reaches the raw host-path
+//! endpoints.  A page that still sends the control token as a Bearer is served,
+//! counted and answered with `Deprecation: true`; native clients (no `Origin`)
+//! keep using the token.
 //!
 //! The web client (`web/`) is compiled in (`web_assets`) and served from the
 //! bridge's own origin.  Those files are public code and need no token; `miasma
@@ -66,7 +76,7 @@ use super::{
     path_policy, process_request,
     rate_limit::{classify_endpoint, validate_field_length, MAX_MID_LEN, MAX_PASSWORD_LEN},
     replication::ReplicationQueue,
-    web_guard, BridgeLiveState,
+    web_guard, web_session, BridgeLiveState,
 };
 
 /// Maximum HTTP request body size (16 MiB, matching IPC FRAME_MAX).
@@ -309,6 +319,73 @@ async fn handle(
     Ok(web_guard::decorate(resp, kind, origin.as_deref()))
 }
 
+/// What `GET /api/ping` answers: liveness, and the ways a page may
+/// authenticate (`bearer`, `sig-v1`).
+#[derive(Serialize)]
+struct PingResponse {
+    ok: bool,
+    web_auth: [&'static str; 2],
+}
+
+/// The reply for a refused session request.
+fn refusal_response(r: web_session::Refusal) -> Response<Full<Bytes>> {
+    let mut v = serde_json::json!({ "error": r.message, "code": r.code });
+    if let Some((k, val)) = r.extra {
+        v[k] = val;
+    }
+    Response::builder()
+        .status(StatusCode::from_u16(r.status).unwrap_or(StatusCode::FORBIDDEN))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Full::new(Bytes::from(
+            serde_json::to_vec(&v).unwrap_or_default(),
+        )))
+        .unwrap()
+}
+
+#[derive(Serialize)]
+struct RegisterResponse {
+    sid: String,
+    v: u8,
+    alg: &'static str,
+    scopes: Vec<&'static str>,
+    idle_timeout_s: u64,
+    expires_in_s: u64,
+    server_time_ms: i64,
+}
+
+/// `POST /api/session/register`: a page trades its one-time value and a proof
+/// of possession of a new key for a session.
+async fn handle_register(
+    incoming: Incoming,
+    state: &BridgeState,
+    admission: &web_guard::Admission,
+) -> Response<Full<Bytes>> {
+    let body = match read_body_max(incoming, web_session::MAX_REGISTER_BODY).await {
+        Ok(b) => b,
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.to_string()),
+    };
+    match state
+        .bridge_live
+        .web_sessions
+        .register(admission.origin.as_deref(), &body)
+    {
+        Ok(r) => json_ok(&RegisterResponse {
+            sid: r.sid,
+            v: 1,
+            alg: "ES256",
+            scopes: r.scopes.names(),
+            idle_timeout_s: r.idle_timeout_s,
+            expires_in_s: r.expires_in_s,
+            server_time_ms: r.server_time_ms,
+        }),
+        Err(r) => refusal_response(r),
+    }
+}
+
+/// How often a browser's use of the control token as a Bearer is logged at
+/// warning level (every n-th request; the first is always logged).
+const BROWSER_BEARER_WARN_EVERY: u64 = 100;
+
 async fn serve(
     req: Request<Incoming>,
     state: BridgeState,
@@ -339,26 +416,115 @@ async fn serve(
         );
     }
 
-    // Authentication — everything but the liveness probe needs the token.
-    if !(req.method() == Method::GET && req.uri().path() == "/api/ping") {
-        let presented = req
-            .headers()
+    let method = req.method().clone();
+    let path_str = req.uri().path().to_string();
+    let (parts, incoming) = req.into_parts();
+
+    // Registration answers before authentication: its proof is in the body.
+    if method == Method::POST && path_str == "/api/session/register" {
+        return handle_register(incoming, &state, &admission).await;
+    }
+
+    // Authentication — everything but the liveness probe needs either the
+    // control token (as before) or a signed session request.
+    let mut session: Option<[u8; 16]> = None;
+    let mut pre_body: Option<Bytes> = None;
+    let mut incoming = Some(incoming);
+    let mut deprecated_bearer = false;
+    if !(method == Method::GET && path_str == "/api/ping") {
+        let auth = parts
+            .headers
             .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .unwrap_or("");
-        if let Err(delay) = state.bridge_live.control_auth.check(presented) {
-            tokio::time::sleep(delay).await;
-            return json_error(
-                StatusCode::UNAUTHORIZED,
-                "unauthorized: missing or invalid control token",
-            );
+            .and_then(|v| v.to_str().ok());
+        if let Some(value) = auth.filter(|v| v.starts_with(web_session::AUTH_SCHEME)) {
+            let sessions = &state.bridge_live.web_sessions;
+            let hdr = match web_session::SigHeader::parse(value) {
+                Ok(h) => h,
+                Err(r) => return refusal_response(r),
+            };
+            let Some(needed) = web_session::required_scope(method.as_str(), &path_str) else {
+                return if is_host_path_endpoint(&path_str) {
+                    json_error_coded(
+                        StatusCode::FORBIDDEN,
+                        "this endpoint is not available to browser pages",
+                        "host_path_not_allowed_from_browser",
+                    )
+                } else {
+                    json_error_coded(
+                        StatusCode::FORBIDDEN,
+                        "this session may not call that endpoint",
+                        "scope_required",
+                    )
+                };
+            };
+            if let Err(r) = sessions.precheck(&hdr, admission.origin.as_deref(), needed) {
+                return refusal_response(r);
+            }
+            let body = match read_body(incoming.take().expect("body not yet taken")).await {
+                Ok(b) => b,
+                Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.to_string()),
+            };
+            let path_and_query = parts
+                .uri
+                .path_and_query()
+                .map(|p| p.as_str())
+                .unwrap_or(path_str.as_str());
+            if let Err(r) = sessions.verify(&hdr, method.as_str(), path_and_query, &body) {
+                scrub(body);
+                return refusal_response(r);
+            }
+            // A session never changes which CA a receive trusts.
+            if path_str == "/api/transfers/receive" {
+                #[derive(Deserialize)]
+                struct Probe {
+                    #[serde(default)]
+                    via_ca_pem: Option<serde::de::IgnoredAny>,
+                }
+                if matches!(
+                    serde_json::from_slice::<Probe>(&body),
+                    Ok(Probe {
+                        via_ca_pem: Some(_)
+                    })
+                ) {
+                    scrub(body);
+                    return json_error_coded(
+                        StatusCode::BAD_REQUEST,
+                        "via_ca_pem is not available to browser sessions",
+                        "field_not_allowed_for_session",
+                    );
+                }
+            }
+            session = Some(hdr.sid);
+            pre_body = Some(body);
+        } else {
+            let presented = auth.and_then(|v| v.strip_prefix("Bearer ")).unwrap_or("");
+            if let Err(delay) = state.bridge_live.control_auth.check(presented) {
+                tokio::time::sleep(delay).await;
+                let msg = "unauthorized: missing or invalid control token";
+                return if auth.is_none() {
+                    json_error_coded(StatusCode::UNAUTHORIZED, msg, "session_required")
+                } else {
+                    json_error(StatusCode::UNAUTHORIZED, msg)
+                };
+            }
+            // Version N still accepts the token from a page; it is counted so
+            // the later refusal can be scheduled from real numbers.
+            if admission.browser {
+                let n = state.bridge_live.web_sessions.note_browser_bearer();
+                if n == 1 || n % BROWSER_BEARER_WARN_EVERY == 0 {
+                    warn!(
+                        count = n,
+                        "HTTP bridge: a browser page presented the control token; \
+                         pages should use a session (run `miasma web` again)"
+                    );
+                }
+                deprecated_bearer = true;
+            }
         }
     }
 
     // Rate limiting — check before routing
-    let method_str = req.method().as_str().to_string();
-    let path_str = req.uri().path().to_string();
+    let method_str = method.as_str().to_string();
     let rate_class = classify_endpoint(&method_str, &path_str);
     {
         let mut rl = state.bridge_live.rate_limiter.lock().unwrap();
@@ -372,74 +538,101 @@ async fn serve(
         }
     }
 
+    // The body, read once: a signed request already had to read it to be verified.
+    let body = match pre_body {
+        Some(b) => b,
+        None if method == Method::POST => {
+            match read_body(incoming.take().expect("body not yet taken")).await {
+                Ok(b) => b,
+                Err(e) => return json_error(StatusCode::BAD_REQUEST, &e.to_string()),
+            }
+        }
+        None => Bytes::new(),
+    };
+
+    let mut resp = route(method, path_str, body, session, state).await;
+    if deprecated_bearer {
+        resp.headers_mut().insert(
+            header::HeaderName::from_static("deprecation"),
+            header::HeaderValue::from_static("true"),
+        );
+    }
+    resp
+}
+
+async fn route(
+    method: Method,
+    path: String,
+    body: Bytes,
+    session: Option<[u8; 16]>,
+    state: BridgeState,
+) -> Response<Full<Bytes>> {
     // Transfers (list, status, start a receive, cancel): the same handlers the CLI and
     // the desktop app use, reached through the same request type.
-    if let Some(rest) = path_str.strip_prefix("/api/transfers") {
-        return route_transfers(req, rest.to_owned(), state).await;
+    if let Some(rest) = path.strip_prefix("/api/transfers") {
+        return route_transfers(method, rest.to_owned(), body, state).await;
     }
 
-    match (req.method().clone(), req.uri().path()) {
-        (Method::GET, "/api/ping") => json_ok(&OkResponse { ok: true }),
+    match (method, path.as_str()) {
+        (Method::GET, "/api/ping") => json_ok(&PingResponse {
+            ok: true,
+            web_auth: web_session::ADVERTISED_AUTH,
+        }),
+
+        (Method::GET, "/api/session") => {
+            match session.and_then(|sid| state.bridge_live.web_sessions.info(&sid)) {
+                Some(info) => json_ok(&serde_json::json!({
+                    "scopes": info.scopes,
+                    "idle_expires_in_s": info.idle_expires_in_s,
+                    "expires_in_s": info.expires_in_s,
+                })),
+                None => json_error_coded(
+                    StatusCode::BAD_REQUEST,
+                    "this request is not using a session",
+                    "session_required",
+                ),
+            }
+        }
+
+        (Method::POST, "/api/session/end") => match session {
+            Some(sid) => json_ok(&OkResponse {
+                ok: state.bridge_live.web_sessions.end(&sid),
+            }),
+            None => json_error_coded(
+                StatusCode::BAD_REQUEST,
+                "this request is not using a session",
+                "session_required",
+            ),
+        },
 
         (Method::GET, "/api/status") => handle_status(state).await,
 
-        (Method::POST, "/api/publish") => match read_body(req).await {
-            Ok(body) => handle_publish(body, state).await,
-            Err(e) => json_error(StatusCode::BAD_REQUEST, &e.to_string()),
-        },
+        (Method::POST, "/api/publish") => handle_publish(body, state).await,
 
-        (Method::POST, "/api/publish-file") => match read_body(req).await {
-            Ok(body) => handle_publish_file(body, state).await,
-            Err(e) => json_error(StatusCode::BAD_REQUEST, &e.to_string()),
-        },
+        (Method::POST, "/api/publish-file") => handle_publish_file(body, state).await,
 
-        (Method::POST, "/api/retrieve") => match read_body(req).await {
-            Ok(body) => handle_retrieve(body, state).await,
-            Err(e) => json_error(StatusCode::BAD_REQUEST, &e.to_string()),
-        },
+        (Method::POST, "/api/retrieve") => handle_retrieve(body, state).await,
 
-        (Method::POST, "/api/retrieve-to-file") => match read_body(req).await {
-            Ok(body) => handle_retrieve_to_file(body, state).await,
-            Err(e) => json_error(StatusCode::BAD_REQUEST, &e.to_string()),
-        },
+        (Method::POST, "/api/retrieve-to-file") => handle_retrieve_to_file(body, state).await,
 
-        (Method::POST, "/api/wipe") => match read_body(req).await {
-            Ok(body) => handle_wipe(body, state).await,
-            Err(e) => json_error(StatusCode::BAD_REQUEST, &e.to_string()),
-        },
+        (Method::POST, "/api/wipe") => handle_wipe(body, state).await,
 
         // ── Directed sharing endpoints ──────────────────────────────────
         (Method::GET, "/api/sharing-key") => handle_sharing_key(state).await,
 
-        (Method::POST, "/api/directed/send") => match read_body(req).await {
-            Ok(body) => handle_directed_send(body, state).await,
-            Err(e) => json_error(StatusCode::BAD_REQUEST, &e.to_string()),
-        },
+        (Method::POST, "/api/directed/send") => handle_directed_send(body, state).await,
 
-        (Method::POST, "/api/directed/send-file") => match read_body(req).await {
-            Ok(body) => handle_directed_send_file(body, state).await,
-            Err(e) => json_error(StatusCode::BAD_REQUEST, &e.to_string()),
-        },
+        (Method::POST, "/api/directed/send-file") => handle_directed_send_file(body, state).await,
 
-        (Method::POST, "/api/directed/confirm") => match read_body(req).await {
-            Ok(body) => handle_directed_confirm(body, state).await,
-            Err(e) => json_error(StatusCode::BAD_REQUEST, &e.to_string()),
-        },
+        (Method::POST, "/api/directed/confirm") => handle_directed_confirm(body, state).await,
 
-        (Method::POST, "/api/directed/retrieve") => match read_body(req).await {
-            Ok(body) => handle_directed_retrieve(body, state).await,
-            Err(e) => json_error(StatusCode::BAD_REQUEST, &e.to_string()),
-        },
+        (Method::POST, "/api/directed/retrieve") => handle_directed_retrieve(body, state).await,
 
-        (Method::POST, "/api/directed/retrieve-to-file") => match read_body(req).await {
-            Ok(body) => handle_directed_retrieve_to_file(body, state).await,
-            Err(e) => json_error(StatusCode::BAD_REQUEST, &e.to_string()),
-        },
+        (Method::POST, "/api/directed/retrieve-to-file") => {
+            handle_directed_retrieve_to_file(body, state).await
+        }
 
-        (Method::POST, "/api/directed/revoke") => match read_body(req).await {
-            Ok(body) => handle_directed_revoke(body, state).await,
-            Err(e) => json_error(StatusCode::BAD_REQUEST, &e.to_string()),
-        },
+        (Method::POST, "/api/directed/revoke") => handle_directed_revoke(body, state).await,
 
         (Method::GET, "/api/directed/inbox") => handle_directed_inbox(state).await,
 
@@ -1056,11 +1249,11 @@ fn transfer_error_status(e: &str) -> StatusCode {
 }
 
 async fn route_transfers(
-    req: Request<Incoming>,
+    method: Method,
     rest: String,
+    body: Bytes,
     state: BridgeState,
 ) -> Response<Full<Bytes>> {
-    let method = req.method().clone();
     let segments: Vec<&str> = match rest.strip_prefix('/') {
         None if rest.is_empty() => Vec::new(),
         None => return json_error(StatusCode::NOT_FOUND, "not found"),
@@ -1068,10 +1261,7 @@ async fn route_transfers(
     };
     match (&method, segments.as_slice()) {
         (&Method::GET, []) => handle_transfer_list(state).await,
-        (&Method::POST, ["receive"]) => match read_body(req).await {
-            Ok(body) => handle_transfer_receive(body, state).await,
-            Err(e) => json_error(StatusCode::BAD_REQUEST, &e.to_string()),
-        },
+        (&Method::POST, ["receive"]) => handle_transfer_receive(body, state).await,
         (&Method::GET, [id]) if !id.is_empty() => match percent_decode(id) {
             Some(id) => handle_transfer_status(id, state).await,
             None => json_error(StatusCode::BAD_REQUEST, "bad transfer id"),
@@ -1082,10 +1272,7 @@ async fn route_transfers(
         },
         (&Method::POST, ["clear-finished"]) => handle_transfer_clear_finished(state).await,
         (&Method::POST, [id, "remove"]) if !id.is_empty() => match percent_decode(id) {
-            Some(id) => match read_body(req).await {
-                Ok(body) => handle_transfer_remove(id, body, state).await,
-                Err(e) => json_error(StatusCode::BAD_REQUEST, &e.to_string()),
-            },
+            Some(id) => handle_transfer_remove(id, body, state).await,
             None => json_error(StatusCode::BAD_REQUEST, "bad transfer id"),
         },
         _ => json_error(StatusCode::NOT_FOUND, "not found"),
@@ -1282,21 +1469,22 @@ fn scrub(body: Bytes) {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-async fn read_body(req: Request<Incoming>) -> Result<Bytes> {
-    let upper = req.body().size_hint().upper().unwrap_or(u64::MAX) as usize;
-    if upper > MAX_BODY {
-        anyhow::bail!("request body too large ({upper} bytes, max {MAX_BODY})");
+async fn read_body(body: Incoming) -> Result<Bytes> {
+    read_body_max(body, MAX_BODY).await
+}
+
+async fn read_body_max(incoming: Incoming, max: usize) -> Result<Bytes> {
+    let upper = incoming.size_hint().upper().unwrap_or(u64::MAX) as usize;
+    if upper > max {
+        anyhow::bail!("request body too large ({upper} bytes, max {max})");
     }
-    let body = req
+    let body = incoming
         .collect()
         .await
         .context("reading request body")?
         .to_bytes();
-    if body.len() > MAX_BODY {
-        anyhow::bail!(
-            "request body too large ({} bytes, max {MAX_BODY})",
-            body.len()
-        );
+    if body.len() > max {
+        anyhow::bail!("request body too large ({} bytes, max {max})", body.len());
     }
     Ok(body)
 }

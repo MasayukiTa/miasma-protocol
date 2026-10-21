@@ -5362,6 +5362,7 @@ dependencies = [
  "rand_core 0.10.1",
  "rcgen 0.13.2",
  "reed-solomon-simd",
+ "ring",
  "rustls",
  "rustls-pemfile",
  "rustls-platform-verifier",

@@ -28,6 +28,7 @@ pub mod replication;
 pub mod self_heal;
 pub mod web_assets;
 pub mod web_guard;
+pub mod web_session;
 
 use std::{
     path::PathBuf,
@@ -147,6 +148,8 @@ pub struct DaemonServer {
     cover_traffic_metrics: Arc<crate::cover_traffic::CoverTrafficMetrics>,
     /// Control-channel token and wipe-challenge state.
     control_auth: Arc<control_auth::ControlAuth>,
+    /// Browser sessions of the HTTP bridge (memory only).
+    web_sessions: Arc<web_session::WebSessions>,
     // Single-consumer resources moved into run():
     listener: Option<TcpListener>,
     rep_success_rx: Option<mpsc::Receiver<[u8; 32]>>,
@@ -375,6 +378,7 @@ impl DaemonServer {
             control_auth::ControlToken::generate(),
         ));
         control_auth::write_token_file(&data_dir, control_auth.token())?;
+        let web_sessions = Arc::new(web_session::WebSessions::new());
         if let Err(e) = write_port_file(&data_dir, control_port) {
             control_auth::remove_token_file(&data_dir);
             return Err(e);
@@ -573,6 +577,7 @@ impl DaemonServer {
                 cover_traffic_metrics: cover_traffic_metrics.clone(),
                 daemon_shutdown_tx: shutdown_tx.clone(),
                 control_auth: control_auth.clone(),
+                web_sessions: web_sessions.clone(),
             },
         )
         .await
@@ -630,6 +635,7 @@ impl DaemonServer {
             rep_success_rx: Some(rep_rx),
             topology_rx: Some(topo_rx),
             control_auth,
+            web_sessions,
             shutdown_tx,
             shutdown_rx: Some(shutdown_rx),
         })
@@ -783,6 +789,7 @@ impl DaemonServer {
             cover_traffic_metrics: self.cover_traffic_metrics.clone(),
             daemon_shutdown_tx: self.shutdown_tx.clone(),
             control_auth: self.control_auth.clone(),
+            web_sessions: self.web_sessions.clone(),
         };
         let ipc_handle: JoinHandle<()> = tokio::spawn(async move {
             ipc_server_loop(
@@ -1119,6 +1126,8 @@ pub struct BridgeLiveState {
     /// Control token (checked on every IPC connection and HTTP bridge request)
     /// and the outstanding `Wipe` confirmation challenge.
     pub control_auth: Arc<control_auth::ControlAuth>,
+    /// Browser sessions of the HTTP bridge; ended by a confirmed wipe.
+    pub web_sessions: Arc<web_session::WebSessions>,
 }
 
 /// Mark the shares that are pending replication or part of an active send as
@@ -1931,6 +1940,8 @@ async fn process_request_inner(
                     "wipe not confirmed: missing, expired or wrong confirmation nonce".into(),
                 );
             }
+            // No page keeps a session across a wipe.
+            bridge_state.web_sessions.revoke_all();
             // Order: quiesce (refuse new work, cancel in-flight publish, file
             // receive and RAM-only receive streams (all registered with the
             // gate) and the piece maintenance executor, then wait for the gated
@@ -1977,6 +1988,24 @@ async fn process_request_inner(
                 }
             }
         }
+
+        // ── Browser sessions ────────────────────────────────────────────
+        ControlRequest::WebBootstrap { origin, scopes } => {
+            match bridge_state.web_sessions.issue_boot(&origin, &scopes) {
+                Ok((boot, expires_in_s)) => ControlResponse::WebBootstrapIssued {
+                    boot: boot.to_string(),
+                    expires_in_s,
+                },
+                Err(e) => ControlResponse::Error(e),
+            }
+        }
+        ControlRequest::WebSessionList => ControlResponse::WebSessions {
+            sessions: bridge_state.web_sessions.list(),
+            browser_bearer_requests: bridge_state.web_sessions.browser_bearer_count(),
+        },
+        ControlRequest::WebSessionRevoke { sid_prefix } => ControlResponse::WebSessionsRevoked {
+            count: bridge_state.web_sessions.revoke(sid_prefix.as_deref()) as u32,
+        },
 
         // ── Logs ────────────────────────────────────────────────────────
         ControlRequest::LogsTail {

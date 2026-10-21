@@ -45,6 +45,9 @@ rcgen = "0.13"
 # Reads the issuer of the relay certificate for the status (relay_tls).
 x509-parser = "0.18"
 subtle = "2"
+# ECDSA P-256 verification of browser session requests (web_session). Already
+# in the dependency tree through rustls; this adds no new crate.
+ring = "0.17"
 argon2.workspace = true
 hyper.workspace = true
 http-body-util.workspace = true
