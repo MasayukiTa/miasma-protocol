@@ -692,7 +692,9 @@ async fn a_weak_private_share_password_is_refused_over_ipc_and_http() {
         ControlResponse::SharingKey { contact, .. } => contact,
         other => panic!("unexpected: {other:?}"),
     };
-    let file = d.dir.path().join("payload.bin");
+    // The daemon refuses source files inside its own data directory.
+    let src_dir = tempfile::tempdir().unwrap();
+    let file = src_dir.path().join("payload.bin");
     std::fs::write(&file, b"payload").unwrap();
     let file_path = file.to_string_lossy().into_owned();
 
