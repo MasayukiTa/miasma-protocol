@@ -104,7 +104,7 @@ fn parse_port(p: &str) -> Option<u16> {
 
 /// Normalise an origin to `scheme://host[:port]` when it is a loopback origin
 /// with nothing else in it.
-fn loopback_origin(origin: &str, schemes: &[&str]) -> Option<String> {
+pub(crate) fn loopback_origin(origin: &str, schemes: &[&str]) -> Option<String> {
     let lower = origin.trim().to_ascii_lowercase();
     let (scheme, rest) = lower.split_once("://")?;
     if !schemes.contains(&scheme) {

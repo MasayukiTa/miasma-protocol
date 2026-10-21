@@ -186,6 +186,7 @@ pub fn classify_endpoint(method: &str, path: &str) -> RateLimitClass {
     match (method, path) {
         // Read-only
         ("GET", "/api/ping")
+        | ("GET", "/api/session")
         | ("GET", "/api/status")
         | ("GET", "/api/sharing-key")
         | ("GET", "/api/directed/inbox")

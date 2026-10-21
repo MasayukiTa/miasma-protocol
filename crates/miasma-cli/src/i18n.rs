@@ -445,6 +445,8 @@ pub enum Msg {
         detail: String,
     },
     WebLinkNote,
+    WebSessionLinkNote,
+    WebOldDaemon,
     WebOpening,
     WebOpenFailed {
         e: String,
@@ -697,6 +699,8 @@ impl Msg {
             ),
             WebLinkNote => "Open the link above in a browser on this computer. The token is in the part after '#', which the browser never sends to the server and keeps for this tab only.
 Anyone who has this link can control this node until the daemon restarts: do not share it or paste it into chat.".into(),
+            WebSessionLinkNote => "Open the link above in a browser on this computer within a minute. It works once: the page uses it to start its own session, and the link is no use after that.".into(),
+            WebOldDaemon => "this daemon does not support browser sessions, so the link above carries the control token. Update and restart the daemon, then run this again.".into(),
             WebOpening => "Opening it in the default browser...".into(),
             WebOpenFailed { e } => format!("could not open the browser ({e}); open the link by hand"),
 
@@ -928,6 +932,8 @@ Anyone who has this link can control this node until the daemon restarts: do not
             ),
             WebLinkNote => "上のリンクを、このコンピュータのブラウザで開いてください。トークンは「#」より後ろにあり、ブラウザはそれをサーバへ送らず、このタブの間だけ保持します。
 このリンクを持つ人は、デーモンが再起動されるまでこのノードを操作できます。共有したりチャットに貼り付けたりしないでください。".into(),
+            WebSessionLinkNote => "上のリンクを、1分以内にこのコンピュータのブラウザで開いてください。リンクは1回しか使えません。ページがこのリンクで自分用のセッションを始めると、リンクは使えなくなります。".into(),
+            WebOldDaemon => "このデーモンはブラウザのセッションに対応していないため、上のリンクには制御トークンが入っています。デーモンを更新して再起動してから、もう一度実行してください。".into(),
             WebOpening => "既定のブラウザで開いています...".into(),
             WebOpenFailed { e } => format!("ブラウザを開けませんでした（{e}）。リンクを手で開いてください"),
 
@@ -1582,6 +1588,8 @@ mod tests {
             PresetOutOfRange { .. } => "PresetOutOfRange",
             WebNoBridge { .. } => "WebNoBridge",
             WebLinkNote => "WebLinkNote",
+            WebSessionLinkNote => "WebSessionLinkNote",
+            WebOldDaemon => "WebOldDaemon",
             WebOpening => "WebOpening",
             WebOpenFailed { .. } => "WebOpenFailed",
             ViaNeedsOutput => "ViaNeedsOutput",
@@ -1841,6 +1849,14 @@ mod tests {
                 WebLinkNote,
                 "Open the link above in a browser on this computer. The token is in the part after '#', which the browser never sends to the server and keeps for this tab only.
 Anyone who has this link can control this node until the daemon restarts: do not share it or paste it into chat.",
+            ),
+            (
+                WebSessionLinkNote,
+                "Open the link above in a browser on this computer within a minute. It works once: the page uses it to start its own session, and the link is no use after that.",
+            ),
+            (
+                WebOldDaemon,
+                "this daemon does not support browser sessions, so the link above carries the control token. Update and restart the daemon, then run this again.",
             ),
             (WebOpening, "Opening it in the default browser..."),
             (
