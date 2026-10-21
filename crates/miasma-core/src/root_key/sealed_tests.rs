@@ -528,7 +528,7 @@ fn start_up_rules_table() {
                 matches!(
                     e,
                     RootKeyError::FutureVersion {
-                        file: "root.sealed",
+                        file: "the sealed key file",
                         found: 2
                     }
                 ) && e.to_string().contains("update the program")
