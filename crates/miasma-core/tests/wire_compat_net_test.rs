@@ -165,11 +165,25 @@ struct Hand {
     core: Arc<ChatCore>,
     delivers: AtomicUsize,
     bad_after: usize,
+    /// The first this many deliveries are answered "bad request" without
+    /// looking (a build from before `NoSession` answers state that does not
+    /// match that way).
+    bad_first: usize,
     raw_status: Option<u8>,
 }
 
 impl Hand {
     fn new(seed: &[u8; 32], peer: &Side, bad_after: usize, raw_status: Option<u8>) -> Arc<Self> {
+        Self::refusing_first(seed, peer, bad_after, raw_status, 0)
+    }
+
+    fn refusing_first(
+        seed: &[u8; 32],
+        peer: &Side,
+        bad_after: usize,
+        raw_status: Option<u8>,
+        bad_first: usize,
+    ) -> Arc<Self> {
         let dir = tempfile::tempdir().unwrap();
         let keys = Arc::new(StateKeys::open_or_init(dir.path()).unwrap());
         let id = Identity::from_seed(seed);
@@ -188,6 +202,7 @@ impl Hand {
             core: Arc::new(ChatCore::new(store, outbox, id, 4096)),
             delivers: AtomicUsize::new(0),
             bad_after,
+            bad_first,
             raw_status,
         })
     }
@@ -213,7 +228,7 @@ impl ChatConnectionHandler for Hand {
                 f.extend_from_slice(&payload);
                 let _ = tokio::io::AsyncWriteExt::write_all(&mut tx, &f).await;
             } else {
-                let status = if n >= self.bad_after {
+                let status = if n >= self.bad_after || n < self.bad_first {
                     proto::AckStatus::BadRequest
                 } else {
                     self.core.accept(&remote, &wire, 1).status
@@ -412,6 +427,63 @@ async fn read_receipts_stop_after_a_peer_that_predates_them_refuses_one() {
         .history(&peer, None, 20)
         .iter()
         .all(|m| m.state != MsgState::Failed));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_text_refused_once_by_an_older_build_is_sent_again_on_a_new_session() {
+    let r = relay().await;
+    let a = current(&r, None).await;
+    let b_seed: [u8; 32] = rand::random();
+    let b_node = start_node(&r, &b_seed, Some(vec![IROH_ALPN, PUSH_ALPN, CHAT_ALPN])).await;
+    // Answers "bad request" to the first delivery without looking, then reads.
+    let hand = Hand::refusing_first(&b_seed, &a, usize::MAX, None, 1);
+    b_node.set_chat_handler(hand.clone());
+    a.contacts
+        .add(&ContactCode::new(b_node.endpoint_id()), Some("bob"), None)
+        .unwrap();
+    let peer = b_node.endpoint_id();
+    send(&a.svc, "bob", "hello again");
+    until(40, "the text to arrive", || a.svc.core().outbox.is_empty()).await;
+    assert_eq!(hand.delivers.load(Ordering::SeqCst), 2);
+    let m = waiting_row(&a, &peer).expect("the message is in the history");
+    assert_eq!(m.state, MsgState::Delivered);
+    assert_eq!(m.text, "hello again");
+    assert!(hand
+        .core
+        .history(&a.id, None, 20)
+        .iter()
+        .any(|x| !x.outgoing && x.text == "hello again"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_text_refused_twice_by_an_older_build_ends_as_rejected_after_one_new_session() {
+    let r = relay().await;
+    let a = current(&r, None).await;
+    let b_seed: [u8; 32] = rand::random();
+    let b_node = start_node(&r, &b_seed, Some(vec![IROH_ALPN, PUSH_ALPN, CHAT_ALPN])).await;
+    let hand = Hand::refusing_first(&b_seed, &a, usize::MAX, None, usize::MAX);
+    b_node.set_chat_handler(hand.clone());
+    a.contacts
+        .add(&ContactCode::new(b_node.endpoint_id()), Some("bob"), None)
+        .unwrap();
+    let peer = b_node.endpoint_id();
+    send(&a.svc, "bob", "never read");
+    until(
+        40,
+        "the message to end as failed",
+        || matches!(waiting_row(&a, &peer), Some(m) if m.state == MsgState::Failed),
+    )
+    .await;
+    assert_eq!(
+        waiting_row(&a, &peer).unwrap().reason.as_deref(),
+        Some("rejected")
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        hand.delivers.load(Ordering::SeqCst),
+        2,
+        "one more try on a new session, then the answer stands"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

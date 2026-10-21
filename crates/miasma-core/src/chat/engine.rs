@@ -574,7 +574,11 @@ impl ChatCore {
                                 if e == CryptoError::Replay && st.recent_env.contains(&env.id) {
                                     return Step::Done(AckStatus::Duplicate);
                                 }
-                                return Step::Done(AckStatus::BadRequest);
+                                // The envelope does not open and does not start
+                                // a session: the two sides no longer share the
+                                // state it needs. Every sender since beta.2
+                                // answers this by starting a session again.
+                                return Step::Done(AckStatus::NoSession);
                             }
                         }
                     }
@@ -956,8 +960,9 @@ impl ChatCore {
                                     }
                                 }
                                 None => {
+                                    // As in `accept`: the sender starts again.
                                     let _ = e;
-                                    Err(AckStatus::BadRequest)
+                                    Err(AckStatus::NoSession)
                                 }
                             }
                         }

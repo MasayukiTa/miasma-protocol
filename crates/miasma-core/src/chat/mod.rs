@@ -33,3 +33,5 @@ pub(crate) mod offline_tests;
 mod pq_tests;
 #[cfg(test)]
 mod receipt_tests;
+#[cfg(test)]
+mod restore_tests;

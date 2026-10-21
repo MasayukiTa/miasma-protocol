@@ -1227,4 +1227,70 @@ mod tests {
         assert_eq!(file_stem(&a, &b), file_stem(&a, &b));
         assert!(!file_stem(&a, &b).contains("0101"));
     }
+
+    /// What a session restored from an older copy does for a position that
+    /// was already used. These tests record the behaviour of this build: the
+    /// message key and nonce follow from the stored chain key alone, so the
+    /// same position gives the same pair. Set this to `true` when a later
+    /// change makes the pair depend on more than the stored state (and the
+    /// tests below then assert the opposite).
+    const RESTORED_POSITION_GETS_A_FRESH_PAIR: bool = false;
+
+    fn next_pair(s: &Session) -> ([u8; 32], [u8; 24]) {
+        let st = kdf_chain(s.cks.as_ref().expect("a sending chain")).unwrap();
+        (*st.key, st.nonce)
+    }
+
+    #[test]
+    fn a_restored_session_derives_the_same_key_and_nonce_for_a_used_position() {
+        let (_a, _b, mut sa, _sb) = established();
+        let saved = sa.to_bytes();
+        // Control: inside one run every position has its own pair.
+        let p0 = next_pair(&sa);
+        let first = sa.seal(b"sent after the copy was made").unwrap();
+        let p1 = next_pair(&sa);
+        assert_ne!(p0, p1);
+        sa.seal(b"second").unwrap();
+        sa.seal(b"third").unwrap();
+        // The copy is restored and used for another text.
+        let mut restored = Session::from_bytes(&saved).unwrap();
+        let again = next_pair(&restored);
+        let second = restored.seal(b"a different text, same position").unwrap();
+        assert_eq!(first.header.dh_pub, second.header.dh_pub);
+        assert_eq!(first.header.n, second.header.n);
+        assert_ne!(first.ciphertext, second.ciphertext);
+        assert_eq!(
+            p0 == again,
+            !RESTORED_POSITION_GETS_A_FRESH_PAIR,
+            "the pair for a used position"
+        );
+    }
+
+    #[test]
+    fn a_restore_across_a_ratchet_step_cannot_be_opened_by_the_peer_that_moved_on() {
+        let (_a, _b, mut sa, mut sb) = established();
+        let saved = sa.to_bytes();
+        // The peer answers and this side moves to a new sending key.
+        let r = sb.seal(b"answer").unwrap();
+        sa.open(&r).unwrap();
+        let m = sa.seal(b"after the step").unwrap();
+        sb.open(&m).unwrap();
+        let r2 = sb.seal(b"answer two").unwrap();
+        sa.open(&r2).unwrap();
+        // The copy from before the step is used again.
+        let mut restored = Session::from_bytes(&saved).unwrap();
+        let stale = restored.seal(b"from the restored copy").unwrap();
+        let before = sb.to_bytes();
+        assert!(sb.open(&stale).is_err());
+        assert_eq!(
+            sb.to_bytes().as_slice(),
+            before.as_slice(),
+            "no state change"
+        );
+        // And the restored side cannot open what the peer sends now.
+        let n = sb.seal(b"to the restored side").unwrap();
+        let copy_before = restored.to_bytes();
+        assert!(restored.open(&n).is_err());
+        assert_eq!(restored.to_bytes().as_slice(), copy_before.as_slice());
+    }
 }
