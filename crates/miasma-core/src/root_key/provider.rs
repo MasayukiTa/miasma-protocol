@@ -29,6 +29,22 @@ pub enum ProviderId {
     Passphrase = 7,
 }
 
+impl ProviderId {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        Some(match v {
+            0 => Self::File,
+            1 => Self::Dpapi,
+            2 => Self::CngTpm,
+            3 => Self::CngSoftware,
+            4 => Self::Keystore,
+            5 => Self::Keychain,
+            6 => Self::SecretService,
+            7 => Self::Passphrase,
+            _ => return None,
+        })
+    }
+}
+
 /// How strongly the key is protected, for display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtectionLevel {
@@ -68,6 +84,42 @@ pub trait RootKeyProvider: Send + Sync {
     fn destroy(&self, data_dir: &Path) -> Result<DestroyOutcome, RootKeyError>;
 }
 
+/// Why a wrap could not be made or opened.
+#[derive(Debug, thiserror::Error)]
+pub enum WrapError {
+    /// The place that holds the wrapping secret cannot be reached right now.
+    #[error("{0}")]
+    Unavailable(String),
+    /// The wrapping secret is gone for good.
+    #[error("the wrapping secret is gone")]
+    KeyGone,
+    /// The wrapped bytes do not authenticate (damaged, or made for another
+    /// header).
+    #[error("the wrapped key does not authenticate")]
+    Corrupt,
+    #[error("i/o error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// What protects the root key on this device. It turns the 32 key bytes into an
+/// opaque blob and back; `aad` (the header and the record head of
+/// `root.sealed`) must be authenticated by the wrap, so a blob cannot be moved
+/// to another file or install.
+pub trait DeviceWrap: Send + Sync {
+    /// Written into the record, so the right wrap is used to open it.
+    fn id(&self) -> ProviderId;
+    fn available(&self) -> Availability;
+    fn wrap(&self, data_dir: &Path, aad: &[u8], root: &[u8; 32]) -> Result<Vec<u8>, WrapError>;
+    fn unwrap(
+        &self,
+        data_dir: &Path,
+        aad: &[u8],
+        wrapped: &[u8],
+    ) -> Result<SecureBytes<32>, WrapError>;
+    /// Destroy whatever the wrap keeps outside the data directory.
+    fn destroy(&self, data_dir: &Path) -> Result<DestroyOutcome, WrapError>;
+}
+
 /// The plain-file provider.
 pub struct FileProvider;
 
@@ -84,6 +136,12 @@ pub(super) fn classify(bytes: &[u8]) -> Result<SecureBytes<32>, RootKeyError> {
         }
         super::stub::STUB_LEN => match Stub::parse(bytes) {
             Ok(_) => Err(RootKeyError::SealedUnavailable),
+            Err(super::stub::StubError::UnsupportedVersion(v)) => {
+                Err(RootKeyError::FutureVersion {
+                    file: "master.key marker",
+                    found: v,
+                })
+            }
             Err(_) => Err(RootKeyError::DamagedMarker),
         },
         _ => Err(RootKeyError::WrongLength),
@@ -103,14 +161,11 @@ impl RootKeyProvider for FileProvider {
         Availability::Ready
     }
 
+    /// Plain key as before. A key sealed with the file wrap is opened too; one
+    /// sealed any other way fails closed ([`RootKeyError::SealedUnavailable`]).
+    /// No sealing or migration happens without an installed wrap.
     fn open(&self, data_dir: &Path) -> Result<Option<SecureBytes<32>>, RootKeyError> {
-        let path = crate::paths::master_key(data_dir);
-        let bytes = match std::fs::read(&path) {
-            Ok(b) => Zeroizing::new(b),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(RootKeyError::Io(e)),
-        };
-        classify(&bytes).map(Some)
+        super::sealed::open(data_dir, None)
     }
 
     /// Write a fresh 32-byte key if none exists yet. Safe against a second

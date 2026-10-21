@@ -231,7 +231,18 @@ spec!(
     Plain,
     CryptoEraseOverwriteRemove,
     "D1",
-    "Reserved for the sealed form of the master key. No build writes it yet; a wipe removes it if present."
+    "The master key in sealed form: a versioned header and the key wrapped by the device wrap. Written when a sealing provider is installed; master.key then holds a 64-byte marker."
+);
+spec!(
+    WRAP_SECRET,
+    "root-wrap.secret",
+    File,
+    DataDir,
+    Secret,
+    Plain,
+    OverwriteRemove,
+    "D1",
+    "Wrapping secret of the file wrap: the secret that wraps the master key in root.sealed when no operating-system key store does."
 );
 spec!(
     DAEMON_TOKEN,
@@ -668,7 +679,7 @@ spec!(
     Plain,
     Remove,
     "D22",
-    "Advisory lock that serialises the one-time conversion of older plaintext state files; created only when there is something to convert."
+    "Advisory lock that serialises the one-time conversion of older plaintext state files and the move of a plain master key into root.sealed; created only when there is something to convert."
 );
 spec!(
     WIPE_PENDING,
@@ -1001,6 +1012,7 @@ pub const REGISTRY: &[PathSpec] = &[
     MASTER_KEY_WRAPPED,
     MASTER_KEY_WRAP_IV,
     ROOT_SEALED,
+    WRAP_SECRET,
     DAEMON_TOKEN,
     CONFIG,
     VERSION_STAMP,
@@ -1569,6 +1581,7 @@ mod tests {
             MASTER_KEY_WRAPPED,
             MASTER_KEY_WRAP_IV,
             ROOT_SEALED,
+            WRAP_SECRET,
             DAEMON_TOKEN,
         ] {
             assert!(files.contains(&spec.in_dir(d)), "{} is not listed", spec.id);
