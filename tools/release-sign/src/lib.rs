@@ -14,7 +14,7 @@ use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
-use rand::RngCore;
+use rand::{Rng, RngCore};
 use zeroize::Zeroizing;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,10 +118,8 @@ pub fn generate_key() -> SigningKey {
 /// Encrypt the secret seed under `passphrase`. The public key is stored in the
 /// (authenticated) header so it can be shown without the passphrase.
 pub fn encrypt_key(key: &SigningKey, passphrase: &[u8], k: KdfParams) -> Result<Vec<u8>, Error> {
-    let mut salt = [0u8; SALT_LEN];
-    let mut nonce = [0u8; NONCE_LEN];
-    OsRng.fill_bytes(&mut salt);
-    OsRng.fill_bytes(&mut nonce);
+    let salt: [u8; SALT_LEN] = OsRng.gen();
+    let nonce: [u8; NONCE_LEN] = OsRng.gen();
     let dk = derive(passphrase, &salt, k)?;
 
     let mut header = Vec::with_capacity(HEADER_LEN);
