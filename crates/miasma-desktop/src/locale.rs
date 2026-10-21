@@ -3223,9 +3223,9 @@ static CH_ZH_CN: ChatStrings = ChatStrings {
     fail_expired: "一直未能送达，已超时。",
     fail_session: "无法建立安全连接。请与对方核对安全码。",
     fail_other: "无法发送。",
-    fail_pqc_peer_no_hybrid: "未发送。你的设置要求使用增强保护（抗量子计算），但对方的 Miasma 不提供。",
+    fail_pqc_peer_no_hybrid: "未发送。你的设置要求使用高级加密，但对方的 Miasma 不提供。",
     fail_pqc_failed: "未发送。无法与该联系人建立增强保护，请稍后再试。",
-    pqc_hybrid: "已启用抗量子计算的增强保护",
+    pqc_hybrid: "高级加密已开启",
     pqc_classical: "仅标准保护",
     pqc_pending: "正在建立增强保护……",
     pqc_failed: "增强保护建立失败（仅标准保护）",
@@ -3359,7 +3359,7 @@ static PQ_JA: PqcStrings = PqcStrings {
 
 static PQ_ZH_CN: PqcStrings = PqcStrings {
     heading: "高级加密",
-    intro: "私人聊天本来就已加密。此功能再增加一道密钥交换，目的是即使将来出现量子计算机也能保持安全。默认关闭，只有双方都开启时才会生效。",
+    intro: "私人聊天本来就已加密。此功能会进一步加强对每个会话的保护。默认关闭，只有双方都开启时才会生效。",
     off: "关闭",
     prefer: "尽量使用",
     require: "必须使用",
@@ -4053,8 +4053,27 @@ mod tests {
         // Plain words: no protocol names in the Settings block.
         for lang in Locale::ALL {
             for (name, value) in pqc_strings(lang).all() {
-                for bad in ["ML-KEM", "X25519", "KEM", "ratchet", "iroh"] {
+                for bad in [
+                    "ML-KEM", "X25519", "KEM", "ratchet", "iroh", "quantum", "量子",
+                ] {
                     assert!(!value.contains(bad), "{lang:?} pqc.{name} says {bad}");
+                }
+            }
+            // The chat lines about it say the same plain things.
+            let c = chat_strings(lang);
+            for value in [
+                c.fail_pqc_peer_no_hybrid,
+                c.fail_pqc_failed,
+                c.pqc_hybrid,
+                c.pqc_classical,
+                c.pqc_pending,
+                c.pqc_failed,
+            ] {
+                for bad in ["quantum", "Quantum", "量子", "ML-KEM"] {
+                    assert!(
+                        !value.contains(bad),
+                        "{lang:?} chat line says {bad}: {value}"
+                    );
                 }
             }
         }

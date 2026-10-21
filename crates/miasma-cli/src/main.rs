@@ -992,7 +992,7 @@ async fn cmd_status(data_dir: &std::path::Path) -> Result<()> {
             println!("  Replicated items:    {}", s.replicated_count);
             print_logging_status(data_dir);
             println!(
-                "  Hybrid chat:         {}",
+                "  Advanced encryption: {}",
                 pqc_line(
                     miasma_core::logging::load_privacy(data_dir).pqc_mode,
                     Some(&s.pqc)
@@ -1164,7 +1164,7 @@ fn pqc_line_for(
     if !available {
         if configured != PqcMode::Off {
             s.push_str(
-                " (this build has no hybrid exchange: private conversations stay classical)",
+                " (this build has no advanced encryption: private conversations stay standard)",
             );
         }
         return s;
@@ -1175,7 +1175,7 @@ fn pqc_line_for(
     if let Some(p) = running.filter(|p| p.available && p.mode != "off") {
         let c = &p.counts;
         s.push_str(&format!(
-            " (hybrid sessions {}, classical only {}, refused {}, failed {})",
+            " (advanced sessions {}, standard only {}, refused {}, failed {})",
             c.hybrid_sessions, c.classical_only, c.refused, c.failed
         ));
     }
@@ -1457,7 +1457,7 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
             }
         );
         println!(
-            "Hybrid chat:     {}",
+            "Advanced encryption: {}",
             pqc_line(privacy.pqc_mode, daemon_status.as_ref().map(|s| &s.pqc))
         );
 
@@ -2060,9 +2060,9 @@ fn cmd_config_loaded(
                     {
                         // Saved, but said plainly: this program cannot act on it.
                         eprintln!(
-                            "note: this build does not include the hybrid exchange, so \
+                            "note: this build does not include advanced encryption, so \
                              the setting has no effect here and private conversations \
-                             stay classical"
+                             stay standard"
                         );
                     }
                     config.privacy.pqc_mode = mode;
@@ -4342,7 +4342,7 @@ mod pqc_status_line_tests {
     use miasma_core::config::PqcMode;
 
     #[test]
-    fn a_build_with_the_feature_says_hybrid_chat_is_available() {
+    fn a_build_with_the_feature_says_advanced_encryption_is_available() {
         let off = pqc_line_for(PqcMode::Off, true, None);
         assert!(off.starts_with("off"), "{off}");
         assert!(off.contains("available in this build"), "{off}");
@@ -4357,7 +4357,7 @@ mod pqc_status_line_tests {
         assert_eq!(pqc_line_for(PqcMode::Off, false, None), "off");
         for mode in [PqcMode::Prefer, PqcMode::Require] {
             let s = pqc_line_for(mode, false, None);
-            assert!(s.contains("no hybrid exchange"), "{s}");
+            assert!(s.contains("no advanced encryption"), "{s}");
             assert!(!s.contains("available"), "{s}");
         }
     }
