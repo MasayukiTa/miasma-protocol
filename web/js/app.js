@@ -1237,7 +1237,8 @@ function onLanguageChanged() {
 
 /** Why the daemon refuses this page, and what to do about it. */
 function authMessage() {
-  return t(getAuthState() === 'rejected' ? 'auth_rejected' : 'auth_missing');
+  const key = { rejected: 'auth_rejected', expired: 'auth_expired', unsupported: 'auth_unsupported' }[getAuthState()];
+  return t(key || 'auth_missing');
 }
 
 /**
@@ -1248,7 +1249,7 @@ function updateAuthBanner() {
   const banner = document.getElementById('auth-banner');
   if (!banner) return;
   const state = getAuthState();
-  const refused = bridge && bridge.mode === 'http' && (state === 'missing' || state === 'rejected');
+  const refused = bridge && bridge.mode === 'http' && ['missing', 'rejected', 'expired', 'unsupported'].includes(state);
   banner.classList.toggle('hidden', !refused);
   if (refused) document.getElementById('auth-banner-text').textContent = authMessage();
 }
