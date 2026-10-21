@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "version": "f5950766f48e6733",
+  "version": "ac03ba23c780f65c",
   "files": {
     "css/style.css": "ed0c1639306506a22271d6ba16a1aa1df42f397677b07c6ce1f82724ecbcc89e",
     "icons/apple-touch-icon.png": "2388819c43f164216556fdeebac510c2d1dba7a73ebb4a66a2053a2eee2e6b2a",
@@ -9,7 +9,7 @@
     "icons/icon-maskable-512.png": "100989ec4d3334e02302e9f753244bf927472e0cd4070cee46569f737f1a0078",
     "index.html": "2292329ef15b6937f3273037962282b7dc820125bfbe20188e98ee9f28ac4615",
     "js/app.js": "1ab03677d1ebb67db3f1312f82045414c5dc3a40a0888f0d26acaa5d6c44a93c",
-    "js/bridge.js": "98d922762b5d6a2d98a9d1aed0c8e454053fe22cb22c477451f43f5c0a838cfb",
+    "js/bridge.js": "053bb022ce77639f6078c561bcbad34c463b35281d5f8757a8dc81e5997d5618",
     "js/format.js": "e6f123446aa2ceca1de752321fee5fc5aa5e464f7169bf6c215a164bd19a9cba",
     "js/i18n.js": "8f88bad848f310bee72828286898c05f33a66594be05a7c7d4a625c28d4e987c",
     "js/password_policy.js": "d406157619603be6572c89f00a4b210f191ba3a0088460747d1fc7f5427a37c6",

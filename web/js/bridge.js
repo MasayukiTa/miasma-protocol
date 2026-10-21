@@ -2,7 +2,7 @@ import { parseDissolveBundle } from './storage.js';
 // Miasma Web — Bridge Abstraction Layer
 //
 // Detects the runtime environment and routes API calls accordingly:
-//   1. WebView bridge (Android/iOS) — window.miasma injected by native host
+//   1. WebView bridge (Android/iOS) — window.miasma from the native host (Android: postMessage channel)
 //   2. HTTP bridge (Desktop) — the daemon's HTTP API on 127.0.0.1. Found, in
 //      this order, at: the address a launch link named, the page's own origin
 //      (the daemon serves this client itself), the default port 17842.
@@ -34,9 +34,9 @@ export class MiasmaBridge {
     this._wasm = wasmModule;
 
     // 1. Check for native WebView bridge
-    if (typeof window.miasma !== 'undefined' && typeof window.miasma.ping === 'function') {
+    if (hasNativeHost()) {
       try {
-        const result = await Promise.resolve(window.miasma.ping());
+        const result = await Promise.resolve(nativeCall('ping'));
         const parsed = typeof result === 'string' ? JSON.parse(result) : result;
         if (parsed && parsed.ok) {
           this._mode = MODE_WEBVIEW;
@@ -46,7 +46,10 @@ export class MiasmaBridge {
           this._startPolling();
           return;
         }
-      } catch (_) { /* fall through */ }
+      } catch (e) {
+        // A native host is present but did not answer: say so instead of looking offline.
+        this._hostError = (e && e.message) || 'The native bridge did not answer.';
+      }
     }
 
     // 2. Check for desktop HTTP bridge
@@ -67,6 +70,9 @@ export class MiasmaBridge {
     this._connected = false;
   }
 
+  /** Why a present native host could not be used (null if none, or it works). */
+  get hostError() { return this._hostError || null; }
+
   /** Current connection mode. */
   get mode() { return this._mode; }
 
@@ -83,7 +89,7 @@ export class MiasmaBridge {
   async status() {
     if (this._mode === MODE_WEBVIEW) {
       try {
-        const result = await Promise.resolve(window.miasma.status());
+        const result = await Promise.resolve(nativeCall('status'));
         this._lastStatus = typeof result === 'string' ? JSON.parse(result) : result;
         this._setConnected(this._lastStatus?.network_ready === true);
         return this._lastStatus;
@@ -136,7 +142,7 @@ export class MiasmaBridge {
     if (this._mode === MODE_WEBVIEW) {
       try {
         const result = await Promise.resolve(
-          window.miasma.dissolve(b64, k, n)
+          nativeCall('dissolve', b64, k, n)
         );
         const parsed = typeof result === 'string' ? JSON.parse(result) : result;
         if (parsed.error) throw new Error(parsed.error);
@@ -187,7 +193,7 @@ export class MiasmaBridge {
     if (this._mode === MODE_WEBVIEW) {
       try {
         const result = await Promise.resolve(
-          window.miasma.retrieve(mid, k, n)
+          nativeCall('retrieve', mid, k, n)
         );
         const parsed = typeof result === 'string' ? JSON.parse(result) : result;
         if (parsed.error) throw new Error(parsed.error);
@@ -230,7 +236,7 @@ export class MiasmaBridge {
   async _wipeRemote() {
     if (this._mode === MODE_WEBVIEW) {
       try {
-        const result = await Promise.resolve(window.miasma.wipe());
+        const result = await Promise.resolve(nativeCall('wipe'));
         const parsed = typeof result === 'string' ? JSON.parse(result) : result;
         return parsed.ok === true;
       } catch (_) { return false; }
@@ -263,7 +269,7 @@ export class MiasmaBridge {
 
     if (this._mode === MODE_WEBVIEW) {
       try {
-        const result = await Promise.resolve(window.miasma.sharingKey());
+        const result = await Promise.resolve(nativeCall('sharingKey'));
         const parsed = typeof result === 'string' ? JSON.parse(result) : result;
         if (parsed.error) return null;
         return { key: parsed.key, contact: parsed.contact };
@@ -303,7 +309,7 @@ export class MiasmaBridge {
     if (this._mode === MODE_WEBVIEW) {
       try {
         const result = await Promise.resolve(
-          window.miasma.directedSend(recipientContact, b64, password, retentionSecs, filename)
+          nativeCall('directedSend', recipientContact, b64, password, retentionSecs, filename)
         );
         const parsed = typeof result === 'string' ? JSON.parse(result) : result;
         if (parsed.error) throw new Error(parsed.error);
@@ -347,7 +353,7 @@ export class MiasmaBridge {
     if (this._mode === MODE_WEBVIEW) {
       try {
         const result = await Promise.resolve(
-          window.miasma.directedConfirm(envelopeId, challengeCode)
+          nativeCall('directedConfirm', envelopeId, challengeCode)
         );
         const parsed = typeof result === 'string' ? JSON.parse(result) : result;
         return parsed.ok === true;
@@ -383,7 +389,7 @@ export class MiasmaBridge {
     if (this._mode === MODE_WEBVIEW) {
       try {
         const result = await Promise.resolve(
-          window.miasma.directedRetrieve(envelopeId, password)
+          nativeCall('directedRetrieve', envelopeId, password)
         );
         const parsed = typeof result === 'string' ? JSON.parse(result) : result;
         if (parsed.error) throw new Error(parsed.error);
@@ -419,7 +425,7 @@ export class MiasmaBridge {
 
     if (this._mode === MODE_WEBVIEW) {
       try {
-        const result = await Promise.resolve(window.miasma.directedRevoke(envelopeId));
+        const result = await Promise.resolve(nativeCall('directedRevoke', envelopeId));
         const parsed = typeof result === 'string' ? JSON.parse(result) : result;
         return parsed.ok === true;
       } catch (_) { return false; }
@@ -446,7 +452,7 @@ export class MiasmaBridge {
 
     if (this._mode === MODE_WEBVIEW) {
       try {
-        const result = await Promise.resolve(window.miasma.directedInbox());
+        const result = await Promise.resolve(nativeCall('directedInbox'));
         const parsed = typeof result === 'string' ? JSON.parse(result) : result;
         if (parsed?.error) throw new Error(parsed.error);
         if (!Array.isArray(parsed)) throw new Error('Malformed inbox response');
@@ -473,7 +479,7 @@ export class MiasmaBridge {
 
     if (this._mode === MODE_WEBVIEW) {
       try {
-        const result = await Promise.resolve(window.miasma.directedOutbox());
+        const result = await Promise.resolve(nativeCall('directedOutbox'));
         const parsed = typeof result === 'string' ? JSON.parse(result) : result;
         if (parsed?.error) throw new Error(parsed.error);
         if (!Array.isArray(parsed)) throw new Error('Malformed outbox response');
@@ -672,6 +678,71 @@ const BRIDGE_KEY = 'miasma_bridge_url';
 const TOKEN_SHAPE = /^[0-9a-fA-F]{16,128}$/;
 
 let bridgeBase = DEFAULT_BRIDGE_URL;
+
+// ── Native host channel (WebView) ───────────────────────────────────────
+//
+// Android: the host injects window.miasma with postMessage()/onmessage only
+// (WebViewCompat.addWebMessageListener, restricted to this app's own origin).
+// Requests are {id, method, args}; answers are {id, result} or {id, error}.
+// Android never injects callable methods, so there is no open interface to fall
+// back to. iOS still injects an object with callable methods; that form is used
+// as is when present.
+const CHANNEL_TIMEOUT_MS = 30 * 60 * 1000; // same as the native file-operation timeout
+const channelPending = new Map();
+let channelNextId = 1;
+let channelWired = null;
+
+function isChannelHost(m) {
+  return !!m && typeof m.postMessage === 'function' && typeof m.ping !== 'function';
+}
+
+function wireChannel(m) {
+  if (channelWired === m) return;
+  m.onmessage = (ev) => {
+    let d = ev && ev.data;
+    if (typeof d === 'string') {
+      try { d = JSON.parse(d); } catch (_) { return; }
+    }
+    if (!d || typeof d.id !== 'number') return;
+    const p = channelPending.get(d.id);
+    if (!p) return;
+    channelPending.delete(d.id);
+    clearTimeout(p.timer);
+    if (Object.prototype.hasOwnProperty.call(d, 'result')) p.resolve(d.result);
+    else p.resolve({ error: String(d.error || 'bridge error') });
+  };
+  channelWired = m;
+}
+
+/** True when a native host object is present (either form). */
+function hasNativeHost() {
+  const m = typeof window !== 'undefined' ? window.miasma : undefined;
+  return !!m && (isChannelHost(m) || typeof m.ping === 'function');
+}
+
+/** Calls a native method; resolves with the host's answer (a JSON string or an object). */
+function nativeCall(method, ...args) {
+  const m = window.miasma;
+  if (!m) return Promise.reject(new Error('The native bridge is not available.'));
+  if (!isChannelHost(m)) return Promise.resolve(m[method](...args));
+  wireChannel(m);
+  const id = channelNextId++;
+  const timeoutMs = method === 'ping' ? PING_TIMEOUT_MS : CHANNEL_TIMEOUT_MS;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      channelPending.delete(id);
+      reject(new Error('The native bridge did not answer.'));
+    }, timeoutMs);
+    channelPending.set(id, { resolve, timer });
+    try {
+      m.postMessage(JSON.stringify({ id, method, args }));
+    } catch (e) {
+      channelPending.delete(id);
+      clearTimeout(timer);
+      reject(e);
+    }
+  });
+}
 
 function sessionGet(key) {
   try { return sessionStorage.getItem(key) || ''; } catch (_) { return ''; }

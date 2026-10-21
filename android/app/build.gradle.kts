@@ -129,6 +129,10 @@ dependencies {
 
     // QR code
     implementation(libs.zxing.embedded)
+
+    // JVM unit tests (message protocol); org.json is a stub in the Android jar, so pull the real one
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }
 
 // Android assets must exist before resource merging for every build variant.
