@@ -1,0 +1,32 @@
+[package]
+name = "miasma-release-sign"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Offline tool to create, sign with and verify Ed25519 release keys"
+
+# A separate workspace: this tool is never built into the shipped apps and the
+# main workspace (and its CI jobs) do not know about it.
+[workspace]
+
+[[bin]]
+name = "release-sign"
+path = "src/main.rs"
+
+[dependencies]
+# Same major/feature set as miasma-core, so the signature code is identical.
+ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+zeroize = "1"
+rand = "0.8"
+hex = "0.4"
+base64 = "0.22"
+rpassword = "7"
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+# Interoperability tests call the verifier the update client uses.
+miasma-core = { path = "../../crates/miasma-core" }
+tempfile = "3"
