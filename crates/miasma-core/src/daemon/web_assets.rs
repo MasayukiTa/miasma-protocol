@@ -49,6 +49,8 @@ pub static ASSETS: &[Asset] = &[
     asset!("js/storage.js", JS),
     asset!("js/theme.js", JS),
     asset!("js/transfers.js", JS),
+    asset!("js/websession.js", JS),
+    asset!("js/websig.js", JS),
     asset!("manifest.json", "application/manifest+json"),
     asset!("pkg/miasma_wasm.js", JS),
     asset!("pkg/miasma_wasm_bg.wasm", "application/wasm"),
