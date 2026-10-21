@@ -132,6 +132,10 @@ jobs:
       - name: Web client JS tests (node, no dependencies)
         run: node --test web/tests/*.test.mjs
 
+      # Fails when a shipped web file differs from web/asset-manifest.json.
+      - name: Web asset manifest is up to date
+        run: node scripts/web-asset-manifest.mjs --check
+
       - name: Build wasm target
         run: cargo build -p miasma-wasm --target wasm32-unknown-unknown --locked
 

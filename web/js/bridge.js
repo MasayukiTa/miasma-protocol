@@ -215,8 +215,19 @@ export class MiasmaBridge {
     }
   }
 
-  /** Distress wipe. Returns true on success. */
+  /**
+   * Distress wipe. Returns true on success. After the daemon or native app
+   * confirms, this page's own state is erased too (see wipe.js).
+   */
   async wipe() {
+    const ok = await this._wipeRemote();
+    if (ok && afterWipeHandler) {
+      try { await afterWipeHandler(); } catch (_) { /* best effort: the remote wipe already happened */ }
+    }
+    return ok;
+  }
+
+  async _wipeRemote() {
     if (this._mode === MODE_WEBVIEW) {
       try {
         const result = await Promise.resolve(window.miasma.wipe());
@@ -724,6 +735,22 @@ export function setControlToken(token) {
   const t = token ? String(token).trim() : '';
   memoryToken = t;
   sessionSet(TOKEN_KEY, t);
+}
+
+/** Forget the control token and bridge address everywhere this page keeps them. */
+export function clearControlState() {
+  memoryToken = '';
+  bridgeBase = DEFAULT_BRIDGE_URL;
+  try { sessionStorage.removeItem(TOKEN_KEY); } catch (_) { /* ignore */ }
+  try { sessionStorage.removeItem(BRIDGE_KEY); } catch (_) { /* ignore */ }
+  try { localStorage.removeItem(TOKEN_KEY); } catch (_) { /* ignore */ }
+  authState = 'unknown';
+}
+
+let afterWipeHandler = null;
+/** Register what runs after the daemon (or native app) confirmed a wipe. */
+export function setAfterWipeHandler(fn) {
+  afterWipeHandler = typeof fn === 'function' ? fn : null;
 }
 
 function controlToken() {

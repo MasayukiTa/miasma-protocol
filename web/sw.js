@@ -1,54 +1,101 @@
 // Miasma Web — Service Worker
-// Provides offline support via Cache API
+//
+// One cache holds exactly one build of the app shell and the crypto assets.
+// The build is named by ASSET_VERSION, which scripts/web-asset-manifest.mjs
+// derives from the hashes in asset-manifest.json and writes into this file (so
+// every shipped change also changes this file and the browser installs it).
+//
+//  - install: fetch every file listed in the manifest, check its SHA-256 against
+//    the manifest, store all of them in the cache for this version, and only
+//    then finish. Any failure discards the partial cache and the install fails,
+//    leaving the previous worker and cache in place.
+//  - activate: delete every other Miasma cache, take over open pages.
+//  - fetch: network first for everything same-origin (never serve an older copy
+//    while online); the cache of this exact version is the offline fallback.
+//  - /api/* is never touched or cached.
 
-const CACHE_NAME = 'miasma-web-v10';
-const PRECACHE_ASSETS = [
-  'index.html',
-  'css/style.css',
-  'js/app.js',
-  'js/bridge.js',
-  'js/i18n.js',
-  'js/password_policy.js',
-  'js/storage.js',
-  'js/theme.js',
-  'js/format.js',
-  'js/transfers.js',
-  'manifest.json',
-  'icons/icon-192.png',
-  'icons/icon-512.png',
-  'icons/icon-maskable-512.png',
-  'icons/apple-touch-icon.png',
-];
+const ASSET_VERSION = '86b82493d20738b1';
+const CACHE_PREFIX = 'miasma-web-';
+const CACHE_NAME = CACHE_PREFIX + ASSET_VERSION;
+const MANIFEST_PATH = 'asset-manifest.json';
+const COMPLETE_MARKER = '__complete';
+// Listed in the manifest (it is part of the version) but not stored in the cache.
+const NOT_CACHED = new Set(['sw.js']);
+const TEXT_EXT = /\.(js|html|css|json)$/;
 
-// WASM assets use stale-while-revalidate so offline startup stays fast while online visits refresh them
-const REVALIDATE_ASSETS = [
-  'pkg/miasma_wasm.js',
-  'pkg/miasma_wasm_bg.wasm',
-];
+function scopeUrl(rel) {
+  return new URL(rel, self.registration.scope).href;
+}
 
-// Install: precache all assets
+async function sha256Hex(buffer) {
+  const digest = await crypto.subtle.digest('SHA-256', buffer);
+  return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Same normalisation as the manifest script: line endings do not change a hash.
+function normalise(rel, buffer) {
+  const bytes = new Uint8Array(buffer);
+  if (!TEXT_EXT.test(rel)) return bytes;
+  return bytes.filter((b) => b !== 0x0d);
+}
+
+async function fetchChecked(rel, expectedHash) {
+  const response = await fetch(new Request(scopeUrl(rel), { cache: 'reload' }));
+  if (!response.ok) throw new Error(`${rel}: HTTP ${response.status}`);
+  const actual = await sha256Hex(normalise(rel, await response.clone().arrayBuffer()));
+  if (actual !== expectedHash) throw new Error(`${rel}: content does not match the manifest`);
+  return response;
+}
+
+async function installVersion() {
+  const res = await fetch(new Request(scopeUrl(MANIFEST_PATH), { cache: 'no-store' }));
+  if (!res.ok) throw new Error(`${MANIFEST_PATH}: HTTP ${res.status}`);
+  const manifestText = await res.text();
+  const manifest = JSON.parse(manifestText);
+  if (manifest.version !== ASSET_VERSION) {
+    throw new Error('asset manifest and service worker are from different builds');
+  }
+  await caches.delete(CACHE_NAME); // a partial cache from an earlier attempt
+  const cache = await caches.open(CACHE_NAME);
+  try {
+    const entries = Object.entries(manifest.files).filter(([rel]) => !NOT_CACHED.has(rel));
+    const responses = await Promise.all(entries.map(([rel, hash]) => fetchChecked(rel, hash)));
+    for (let i = 0; i < entries.length; i++) await cache.put(scopeUrl(entries[i][0]), responses[i]);
+    await cache.put(scopeUrl(MANIFEST_PATH), new Response(manifestText, {
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    // Written last: a cache without it is never used.
+    await cache.put(scopeUrl(COMPLETE_MARKER), new Response(ASSET_VERSION));
+  } catch (err) {
+    await caches.delete(CACHE_NAME);
+    throw err;
+  }
+}
+
+async function activateVersion() {
+  const cache = await caches.open(CACHE_NAME);
+  if (!(await cache.match(scopeUrl(COMPLETE_MARKER)))) return; // nothing usable: keep what exists
+  const keys = await caches.keys();
+  await Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k)));
+}
+
+async function cachedResponse(request) {
+  const cache = await caches.open(CACHE_NAME);
+  if (!(await cache.match(scopeUrl(COMPLETE_MARKER)))) return undefined;
+  if (request.mode === 'navigate') {
+    return (await cache.match(request)) || cache.match(scopeUrl('index.html'));
+  }
+  return cache.match(request);
+}
+
 self.addEventListener('install', (event) => {
-  event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => {
-      return cache.addAll([...PRECACHE_ASSETS, ...REVALIDATE_ASSETS]);
-    })
-  );
-  self.skipWaiting();
+  event.waitUntil(installVersion().then(() => self.skipWaiting()));
 });
 
-// Activate: clean old caches
 self.addEventListener('activate', (event) => {
-  event.waitUntil(
-    caches.keys().then((keys) => {
-      return Promise.all(
-        keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k))
-      );
-    })
-  );
-  self.clients.claim();
+  event.waitUntil(activateVersion().then(() => self.clients.claim()));
 });
 
-// Fetch handler
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
 
@@ -64,52 +111,14 @@ self.addEventListener('fetch', (event) => {
     url.pathname.startsWith(scopedApiPath)
   ) return;
 
-  // App-shell navigation: the installed PWA may launch at the scope root.
-  // When offline, serve the cached entry point instead of letting a directory
-  // navigation fail because only index.html was precached.
-  if (event.request.mode === 'navigate') {
-    event.respondWith(
-      fetch(event.request).catch(async () => {
-        const cache = await caches.open(CACHE_NAME);
-        return cache.match(new URL('./index.html', self.registration.scope).href);
-      })
-    );
-    return;
-  }
-
-  // WASM/JS assets: stale-while-revalidate (serve cached, update in background)
-  if (REVALIDATE_ASSETS.some(a => url.pathname.endsWith('/' + a) || url.pathname.endsWith(a))) {
-    event.respondWith(
-      caches.open(CACHE_NAME).then((cache) => {
-        return cache.match(event.request).then((cached) => {
-          const fetchPromise = fetch(event.request).then((response) => {
-            if (response.ok) {
-              cache.put(event.request, response.clone());
-            }
-            return response;
-          }).catch(() => cached); // Network failure: fall back to cache
-
-          return cached || fetchPromise;
-        });
-      })
-    );
-    return;
-  }
-
-  // Other assets: cache-first with network fallback
+  // Network first: while online the page always gets the server's current build.
+  // Offline (the fetch itself fails) it gets the cache of this worker's build.
+  const request = event.request;
   event.respondWith(
-    caches.match(event.request).then((cached) => {
+    (request.mode === 'navigate' ? fetch(request) : fetch(request, { cache: 'no-cache' })).catch(async () => {
+      const cached = await cachedResponse(request);
       if (cached) return cached;
-      return fetch(event.request).then((response) => {
-        // Only cache same-origin successful responses from the precache list
-        if (response.ok && PRECACHE_ASSETS.some(a => url.pathname.endsWith('/' + a) || url.pathname.endsWith(a))) {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => {
-            cache.put(event.request, clone);
-          });
-        }
-        return response;
-      });
+      return Response.error();
     })
   );
 });

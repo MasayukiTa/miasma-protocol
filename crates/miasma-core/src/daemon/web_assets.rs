@@ -33,8 +33,10 @@ const CSS: &str = "text/css; charset=utf-8";
 const PNG: &str = "image/png";
 
 pub static ASSETS: &[Asset] = &[
+    asset!("asset-manifest.json", "application/json"),
     asset!("index.html", HTML),
     asset!("css/style.css", CSS),
+    asset!("js/wipe.js", JS),
     asset!("icons/apple-touch-icon.png", PNG),
     asset!("icons/icon-192.png", PNG),
     asset!("icons/icon-512.png", PNG),
@@ -112,23 +114,24 @@ mod tests {
     }
 
     #[test]
-    fn the_service_worker_precache_list_is_all_embedded() {
-        let sw = ASSETS.iter().find(|a| a.path == "sw.js").unwrap();
-        let sw = std::str::from_utf8(sw.body).unwrap();
-        let list = sw
-            .split("PRECACHE_ASSETS = [")
-            .nth(1)
-            .and_then(|s| s.split(']').next())
-            .expect("PRECACHE_ASSETS in sw.js");
-        for item in list.split(',') {
-            let item = item.trim().trim_matches('\'');
-            if item.is_empty() {
-                continue;
+    fn the_asset_manifest_lists_only_embedded_files() {
+        // The service worker installs exactly the files this manifest lists.
+        let m = ASSETS.iter().find(|a| a.path == "asset-manifest.json").unwrap();
+        let m = std::str::from_utf8(m.body).unwrap();
+        let files = m.split("\"files\"").nth(1).expect("files in asset manifest");
+        let mut count = 0;
+        for line in files.lines() {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix('"') {
+                if let Some((path, _)) = rest.split_once("\": \"") {
+                    count += 1;
+                    assert!(
+                        ASSETS.iter().any(|a| a.path == path),
+                        "asset-manifest.json lists {path}, which the bridge does not serve"
+                    );
+                }
             }
-            assert!(
-                ASSETS.iter().any(|a| a.path == item),
-                "sw.js precaches {item}, which the bridge does not serve"
-            );
         }
+        assert!(count > 10, "asset manifest looks empty");
     }
 }

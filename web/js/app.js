@@ -1,8 +1,9 @@
 // Miasma Web — Main Application
 
 import { t, getLang, setLang, applyTranslations } from './i18n.js';
-import { initDB, saveShares, getSharesByMidPrefix, getShareCount, getMidCount, getStorageEstimate, clearAll, shareBinaryBytes, shareToPortableJson, shareSerializedSize, packShareBundle } from './storage.js';
-import { MiasmaBridge, getAuthState, onAuthChange } from './bridge.js';
+import { initDB, saveShares, getSharesByMidPrefix, getShareCount, getMidCount, getStorageEstimate, clearAll, setConnectedProbe, shareBinaryBytes, shareToPortableJson, shareSerializedSize, packShareBundle } from './storage.js';
+import { MiasmaBridge, getAuthState, onAuthChange, setAfterWipeHandler } from './bridge.js';
+import { wipeEverything, zeroFill } from './wipe.js';
 import { createTransfers } from './transfers.js';
 
 let wasm = null;
@@ -12,6 +13,7 @@ let currentView = 'loading';
 let dissolveResult = null;
 let retrieveShares = [];
 let selectedFile = null;
+let retrievedBytes = null;
 
 // ── Feature Detection ─────────────────────────────────────────────
 
@@ -51,6 +53,8 @@ async function init() {
 
     // Initialize bridge (detects WebView / HTTP / local-only)
     bridge = new MiasmaBridge();
+    setConnectedProbe(() => bridge && bridge.connected);
+    setAfterWipeHandler(eraseBrowserData);
     await bridge.init(wasm);
     bridge.onStateChange = onBridgeStateChange;
     onAuthChange(updateAuthBanner);
@@ -215,6 +219,7 @@ function setupEventListeners() {
 
   // Settings
   document.getElementById('btn-clear-all').addEventListener('click', handleClearAll);
+  document.getElementById('btn-erase-browser').addEventListener('click', handleEraseBrowser);
 
   // Install banner dismiss
   const installBanner = document.getElementById('install-banner');
@@ -609,6 +614,7 @@ async function handleRetrieve() {
 
     resultSection.classList.remove('hidden');
 
+    retrievedBytes = bytes;
     if (isLikelyText(bytes)) {
       const text = new TextDecoder().decode(bytes);
       document.getElementById('retrieve-text-content').textContent = text;
@@ -620,7 +626,7 @@ async function handleRetrieve() {
       binaryResult.classList.remove('hidden');
 
       document.getElementById('btn-download').onclick = () => {
-        const blob = new Blob([bytes]);
+        const blob = new Blob([retrievedBytes || bytes]);
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -1079,6 +1085,37 @@ async function handleClearAll() {
   updateSettingsView();
 }
 
+// Zero and release the plaintext and shares this page holds (best effort).
+function dropAppBuffers() {
+  zeroFill(dissolveResult);
+  zeroFill(retrieveShares);
+  zeroFill(retrievedBytes);
+  dissolveResult = null;
+  retrieveShares = [];
+  retrievedBytes = null;
+  selectedFile = null;
+  for (const id of ['retrieve-text-content', 'result-mid']) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = '';
+  }
+  for (const el of document.querySelectorAll('textarea, input[type="text"], input[type="password"]')) {
+    el.value = '';
+  }
+}
+
+async function eraseBrowserData() {
+  return wipeEverything({
+    dropBuffers: [dropAppBuffers],
+    message: t('erased_locked'),
+    reloadLabel: t('erased_reload'),
+  });
+}
+
+async function handleEraseBrowser() {
+  if (!confirm(t('confirm_erase_browser'))) return;
+  await eraseBrowserData();
+}
+
 // ── Stats ─────────────────────────────────────────────────────────
 
 async function updateStats() {
@@ -1270,6 +1307,16 @@ function onBridgeStateChange(mode, connected, status) {
 
 if ('serviceWorker' in navigator) {
   // Use relative path so the SW works when hosted at a subpath
+  const hadController = !!navigator.serviceWorker.controller;
+  let reloadNoticeShown = false;
+  // A new build took over: the open page is from the old one. Reload when nothing
+  // is held in memory; otherwise ask, so unsaved shares are not lost.
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController || reloadNoticeShown) return;
+    reloadNoticeShown = true;
+    if (!dissolveResult && retrieveShares.length === 0) window.location.reload();
+    else showToast(t('update_ready'), 'success');
+  });
   navigator.serviceWorker.register('./sw.js').catch(() => {
     // SW registration failure is non-fatal (e.g. localhost without HTTPS)
   });
