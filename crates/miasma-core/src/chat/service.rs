@@ -81,6 +81,9 @@ pub struct ChatSettings {
     pub group_auto_join: bool,
     /// `privacy.pqc_mode`. Only builds with the `pqc` feature act on it.
     pub pqc_mode: PqcMode,
+    /// Where the record of the last session files written is kept, outside
+    /// the data folder. `None` keeps only marks in memory.
+    pub anchor_dir: Option<PathBuf>,
 }
 
 impl Default for ChatSettings {
@@ -102,6 +105,7 @@ impl Default for ChatSettings {
             inbound_per_minute: 30.0,
             group_auto_join: true,
             pqc_mode: PqcMode::Off,
+            anchor_dir: None,
         }
     }
 }
@@ -211,6 +215,7 @@ pub fn start_for_daemon(
         max_message_bytes: cfg.chat.max_message_bytes.clamp(1, proto::MAX_TEXT_BYTES),
         group_auto_join: cfg.chat.group_auto_join,
         pqc_mode: cfg.privacy.pqc_mode,
+        anchor_dir: crate::paths::anchor_dir(data_dir),
         ..ChatSettings::default()
     };
     if cfg.privacy.pqc_mode != PqcMode::Off && !PqcMode::available() {
@@ -285,7 +290,11 @@ impl ChatService {
             identity.id(),
             store_settings.clone(),
         ) {
-            Ok(s) => s,
+            Ok(s) => s.with_anchor(super::anchor::Anchor::new(
+                settings.anchor_dir.clone(),
+                keys.clone(),
+                identity.id(),
+            )),
             Err(e) => {
                 warn!("chat stays off: {e}");
                 return None;

@@ -1262,6 +1262,9 @@ impl LocalShareStore {
             }
         }
 
+        // The chat records kept outside the data directory go with the key.
+        crate::chat::anchor::wipe_for(&self.data_dir);
+
         // Scrub persisted transport secrets from config.toml so they do not
         // survive a wipe. A parse/save failure is wipe failure, never advisory.
         let config_path = crate::paths::config_file(&self.data_dir);

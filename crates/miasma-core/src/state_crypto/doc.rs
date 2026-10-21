@@ -159,12 +159,8 @@ pub fn write_document(
     path: &Path,
     plaintext: &[u8],
 ) -> Result<(), StateError> {
-    let tmp = stage_document(keys, label, path, plaintext)?;
-    std::fs::rename(&tmp, path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
-    })?;
-    sync_parent_dir(path);
-    Ok(())
+    let sealed = seal(keys, label, &context_of(path), plaintext)?;
+    write_sealed(path, &sealed, true)
 }
 
 /// Write a document only if `path` does not exist yet. `Ok(true)` when this
@@ -200,16 +196,68 @@ pub(crate) fn stage_document(
     path: &Path,
     plaintext: &[u8],
 ) -> Result<std::path::PathBuf, StateError> {
+    let sealed = seal(keys, label, &context_of(path), plaintext)?;
+    stage_sealed(path, &sealed, true)
+}
+
+/// Write already sealed document bytes next to `path` and return the temp
+/// path. With `durable` the data is flushed to disk before returning.
+fn stage_sealed(
+    path: &Path,
+    sealed: &[u8],
+    durable: bool,
+) -> Result<std::path::PathBuf, StateError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let sealed = seal(keys, label, &context_of(path), plaintext)?;
     let tmp = crate::paths::staged_tmp(path);
-    crate::secure_file::write_restricted(&tmp, &sealed).inspect_err(|_| {
+    crate::secure_file::write_restricted(&tmp, sealed).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })?;
-    fsync_path(&tmp)?;
+    if durable {
+        fsync_path(&tmp)?;
+    }
     Ok(tmp)
+}
+
+/// Put already sealed document bytes (from [`seal`] for this `path`) in place:
+/// temp file, flush when `durable`, rename.
+pub(crate) fn write_sealed(path: &Path, sealed: &[u8], durable: bool) -> Result<(), StateError> {
+    let tmp = stage_sealed(path, sealed, durable)?;
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })?;
+    if durable {
+        sync_parent_dir(path);
+    }
+    Ok(())
+}
+
+/// A short, stable name of one written document, taken from its sealed bytes
+/// (the nonce differs at every write, so two writes never share one). It
+/// reveals nothing about the content.
+pub(crate) fn fingerprint(sealed: &[u8]) -> [u8; 16] {
+    let mut h = blake3::Hasher::new_derive_key("state document fingerprint v1");
+    h.update(sealed);
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&h.finalize().as_bytes()[..16]);
+    out
+}
+
+/// As [`read_document`], and the fingerprint of the bytes that were read.
+pub(crate) fn read_document_fingerprinted(
+    keys: &StateKeys,
+    label: Label,
+    path: &Path,
+) -> Result<(Zeroizing<Vec<u8>>, [u8; 16]), StateError> {
+    let size = std::fs::metadata(path)?.len();
+    let limit = (label.max_document_bytes() + DOC_HEADER_LEN + TAG_LEN) as u64;
+    if size > limit {
+        return Err(StateError::TooLarge { size, limit });
+    }
+    let bytes = std::fs::read(path)?;
+    let fp = fingerprint(&bytes);
+    Ok((open(keys, label, &context_of(path), bytes)?, fp))
 }
 
 #[cfg(test)]

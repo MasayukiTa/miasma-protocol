@@ -91,10 +91,12 @@ pub enum Label {
     ChatGroupHistory,
     /// Files waiting to be pushed to a trusted contact (path, size, hash, progress).
     PushOutbox,
+    /// The record kept outside the data folder that tells whether a chat session file is the latest one written.
+    ChatAnchor,
 }
 
 impl Label {
-    pub const ALL: [Label; 13] = [
+    pub const ALL: [Label; 14] = [
         Label::Contacts,
         Label::PushHistory,
         Label::ReplicationWal,
@@ -108,6 +110,7 @@ impl Label {
         Label::ChatGroups,
         Label::ChatGroupHistory,
         Label::PushOutbox,
+        Label::ChatAnchor,
     ];
 
     /// The id stored in file headers.
@@ -126,6 +129,7 @@ impl Label {
             Label::ChatGroups => 11,
             Label::ChatGroupHistory => 12,
             Label::PushOutbox => 13,
+            Label::ChatAnchor => 14,
         }
     }
 
@@ -149,6 +153,7 @@ impl Label {
             Label::ChatGroups => "chat-groups",
             Label::ChatGroupHistory => "chat-group-history",
             Label::PushOutbox => "push-outbox",
+            Label::ChatAnchor => "chat-anchor",
         }
     }
 
