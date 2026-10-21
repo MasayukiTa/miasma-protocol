@@ -668,6 +668,8 @@ async fn a_node_answers_an_unknown_envelope_version_with_the_version_error() {
         .unwrap();
         node_b.set_directed_data_dir(data_b.path().to_path_buf());
         node_b.set_directed_recipient_pubkey(k.recipient_pub);
+        let (topology_tx, mut topology_rx) = tokio::sync::mpsc::channel(8);
+        node_b.set_topology_notifier(topology_tx);
         let peer_b = node_b.local_peer_id;
         let addrs_b: Vec<String> = node_b
             .collect_listen_addrs(400)
@@ -743,6 +745,19 @@ async fn a_node_answers_an_unknown_envelope_version_with_the_version_error() {
             matches!(resp, DirectedResponse::InviteAccepted { envelope_id: id } if id == id_of(&env)),
             "a version 1 invite for the right recipient must be accepted, got {resp:?}"
         );
+        // The accepted envelope is handed on to the daemon; the refused ones were not.
+        let mut handed_on = 0;
+        while let Ok(ev) = topology_rx.try_recv() {
+            if let miasma_core::network::types::TopologyEvent::DirectedEnvelopeReceived {
+                envelope,
+                ..
+            } = ev
+            {
+                assert_eq!(envelope.version, 1);
+                handed_on += 1;
+            }
+        }
+        assert_eq!(handed_on, 1, "only the version 1 invite is handed on");
     })
     .await;
     outcome.expect("the node test timed out");
