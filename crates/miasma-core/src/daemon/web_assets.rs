@@ -116,9 +116,15 @@ mod tests {
     #[test]
     fn the_asset_manifest_lists_only_embedded_files() {
         // The service worker installs exactly the files this manifest lists.
-        let m = ASSETS.iter().find(|a| a.path == "asset-manifest.json").unwrap();
+        let m = ASSETS
+            .iter()
+            .find(|a| a.path == "asset-manifest.json")
+            .unwrap();
         let m = std::str::from_utf8(m.body).unwrap();
-        let files = m.split("\"files\"").nth(1).expect("files in asset manifest");
+        let files = m
+            .split("\"files\"")
+            .nth(1)
+            .expect("files in asset manifest");
         let mut count = 0;
         for line in files.lines() {
             let line = line.trim();
