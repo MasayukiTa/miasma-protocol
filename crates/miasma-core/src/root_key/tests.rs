@@ -146,7 +146,7 @@ fn a_64_byte_marker_says_the_key_is_sealed_and_fails_closed() {
         CreatePolicy::FirstUse,
     ] {
         let err = get(d.path(), policy).unwrap_err();
-        assert!(matches!(err, RootKeyError::SealedUnavailable), "{err}");
+        assert!(matches!(err, RootKeyError::SealedFileMissing), "{err}");
         assert!(err.to_string().contains("sealed key unavailable"), "{err}");
     }
     // Every consumer reports the same clear error and creates nothing.

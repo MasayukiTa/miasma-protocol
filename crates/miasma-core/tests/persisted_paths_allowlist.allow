@@ -45,3 +45,6 @@ miasma-core/src/chat/group/store.rs | 1 | chat folder creation (the group files 
 miasma-core/src/daemon/path_policy.rs | 1 | reserves an empty output file with create-new before a path-taking request writes to it
 miasma-core/src/root_key/provider.rs | 2 | master key creation on first use (restricted temp file, then a no-overwrite link)
 miasma-core/src/root_key/wipe.rs | 3 | wipe marker, and the zero-overwrite of the registered key files before they are removed
+miasma-core/src/root_key/durable.rs | 3 | crash-safe writes of the key files: restricted staging file, move into place, copy fallback for the plain key's second name
+miasma-core/src/root_key/filewrap.rs | 1 | data dir creation before the file wrap's secret is written
+miasma-core/src/root_key/sealed.rs | 3 | data dir creation for a new sealed key, the migration lock file, setting a damaged sealed file aside

@@ -87,6 +87,15 @@ impl WipeReport {
     }
 }
 
+/// Every file that holds or once held key material: the registered key files,
+/// then what the sealed form can leave beside them (the second name of a plain
+/// key during a move, staging files, a damaged `root.sealed` set aside).
+fn wipe_targets(data_dir: &Path) -> Vec<PathBuf> {
+    let mut v = crate::paths::wipe_key_files(data_dir);
+    v.extend(super::sealed::sidecar_files(data_dir));
+    v
+}
+
 fn present(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok()
 }
@@ -124,7 +133,7 @@ pub fn wipe_data_dir(data_dir: &Path) -> WipeReport {
     //    removal are always attempted: a failed overwrite (a locked or
     //    read-only file) must not leave the key on disk when it can still be
     //    removed.
-    for path in crate::paths::wipe_key_files(data_dir) {
+    for path in wipe_targets(data_dir) {
         if !present(&path) {
             continue;
         }
@@ -169,10 +178,7 @@ pub fn wipe_data_dir(data_dir: &Path) -> WipeReport {
     }
 
     // 6. The marker goes last, and only when no key file is left.
-    let left = crate::paths::wipe_key_files(data_dir)
-        .iter()
-        .filter(|p| present(p))
-        .count();
+    let left = wipe_targets(data_dir).iter().filter(|p| present(p)).count();
     if left == 0 {
         if let Err(e) = std::fs::remove_file(&marker) {
             if e.kind() != std::io::ErrorKind::NotFound {
