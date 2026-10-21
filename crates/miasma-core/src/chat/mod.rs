@@ -8,6 +8,7 @@
 //! connection when both sides are online; otherwise they wait in the outbox
 //! and are retried ([`service`]).
 
+pub mod anchor;
 pub mod crypto;
 pub mod engine;
 pub mod group;
@@ -25,6 +26,8 @@ pub mod service;
 
 pub use ipc::{handle_ipc, ChatRequest, ChatResponse};
 
+#[cfg(test)]
+mod anchor_tests;
 #[cfg(test)]
 mod engine_tests;
 #[cfg(test)]

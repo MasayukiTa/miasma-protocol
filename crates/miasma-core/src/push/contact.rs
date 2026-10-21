@@ -104,12 +104,11 @@ impl ContactCode {
     /// Parse the text form. Surrounding whitespace is ignored.
     pub fn parse(text: &str) -> Result<Self, ContactCodeError> {
         let t = text.trim();
-        let rest = if t.len() >= CONTACT_PREFIX.len()
-            && t[..CONTACT_PREFIX.len()].eq_ignore_ascii_case(CONTACT_PREFIX)
-        {
-            &t[CONTACT_PREFIX.len()..]
-        } else {
-            return Err(ContactCodeError::BadPrefix);
+        // `get` and not an index: the text is untrusted, and the prefix length
+        // can fall inside a multi-byte character.
+        let rest = match t.get(..CONTACT_PREFIX.len()) {
+            Some(head) if head.eq_ignore_ascii_case(CONTACT_PREFIX) => &t[CONTACT_PREFIX.len()..],
+            _ => return Err(ContactCodeError::BadPrefix),
         };
         let bytes = bs58::decode(rest)
             .into_vec()
@@ -270,6 +269,22 @@ mod tests {
         SigningKey::from_bytes(&[seed; 32])
             .verifying_key()
             .to_bytes()
+    }
+
+    /// The prefix is 15 bytes; a two-byte character that starts at byte 14
+    /// puts the prefix length inside it. Must be an error, not a panic.
+    #[test]
+    fn a_multibyte_character_across_the_prefix_length_is_a_bad_prefix() {
+        let cut = CONTACT_PREFIX.len() - 1;
+        let text = format!("{}\u{e9}abc", &CONTACT_PREFIX[..cut]);
+        assert!(!text.is_char_boundary(CONTACT_PREFIX.len()));
+        assert_eq!(
+            ContactCode::parse(&text).unwrap_err(),
+            ContactCodeError::BadPrefix
+        );
+        // Wider characters, and strings shorter than the prefix.
+        assert!(ContactCode::parse("\u{20ac}\u{20ac}\u{20ac}\u{20ac}\u{20ac}\u{20ac}").is_err());
+        assert!(ContactCode::parse("\u{1f600}").is_err());
     }
 
     #[test]

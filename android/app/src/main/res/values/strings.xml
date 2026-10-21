@@ -45,6 +45,8 @@ All locally stored shares become permanently unreadable. This cannot be undone.<
     <string name="send_selected_file">Selected: %1$s (%2$s)</string>
     <string name="send_use_text">Use text instead</string>
     <string name="send_password">Password (shared with recipient)</string>
+    <string name="send_password_rule">At least %1$d characters, with a letter, a digit and a symbol.</string>
+    <string name="send_password_refused">The password was not accepted. Use at least %1$d characters, with a letter, a digit and a symbol.</string>
     <string name="send_retention_hours">Retention (hours)</string>
     <string name="send_retention_default">Invalid hours — using 24 hours.</string>
     <string name="send_securely">Send securely</string>

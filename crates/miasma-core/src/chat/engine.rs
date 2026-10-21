@@ -306,6 +306,10 @@ impl ChatCore {
     pub fn prepare_wire(&self, id: &[u8; 16]) -> Result<(Vec<u8>, [u8; 16]), PrepareError> {
         let _g = self.gate();
         let e = self.outbox.get(id).ok_or(PrepareError::Gone)?;
+        // Before anything cached for this contact leaves: was its session
+        // file found older than the one written last?
+        self.settle_rollback(&e.peer);
+        let e = self.outbox.get(id).ok_or(PrepareError::Gone)?;
         if let Some(s) = &e.sealed {
             if let Ok(env) = Envelope::decode(s) {
                 return Ok((s.clone(), env.id));
@@ -367,6 +371,18 @@ impl ChatCore {
         // The hybrid key belonged to the session that is gone.
         #[cfg(feature = "pqc")]
         self.pq.forget(peer);
+    }
+
+    /// If the session file of `peer` was found older than the one written
+    /// last, the session was dropped when it was loaded: what was sealed on
+    /// it is void and so is the hybrid key. Called with the gate held, before
+    /// anything is sent or opened for the contact.
+    fn settle_rollback(&self, peer: &[u8; 32]) {
+        if self.store.take_rollback(peer) {
+            self.void_sealed(peer);
+            #[cfg(feature = "pqc")]
+            self.pq.forget(peer);
+        }
     }
 
     fn void_sealed(&self, peer: &[u8; 32]) {
@@ -520,6 +536,7 @@ impl ChatCore {
             Err(_) => return plain(AckStatus::BadRequest),
         };
         let _g = self.gate();
+        self.settle_rollback(peer);
 
         // Step 1: decide on copies; nothing is changed yet.
         enum Step {
@@ -589,7 +606,7 @@ impl ChatCore {
                         new_ek = Some(ek);
                         result = Some(Session::accept(me, peer, &env));
                     }
-                    Some(_) => return Step::Done(AckStatus::BadRequest),
+                    Some(_) => return Step::Done(AckStatus::NoSession),
                     None => return Step::Done(AckStatus::NoSession),
                 }
             }
@@ -889,6 +906,7 @@ impl ChatCore {
         plain: &[u8],
     ) -> Result<(Vec<u8>, [u8; 16]), PrepareError> {
         let _g = self.gate();
+        self.settle_rollback(peer);
         let me = &self.identity;
         let env = self
             .store
@@ -930,6 +948,7 @@ impl ChatCore {
             Err(_) => return AckStatus::BadRequest,
         };
         let _g = self.gate();
+        self.settle_rollback(peer);
         let me = &self.identity;
         type Opened = (Session, zeroize::Zeroizing<Vec<u8>>, bool, Option<[u8; 32]>);
         let opened: Result<Opened, AckStatus> = self.store.peek_peer(peer, |st| {
@@ -974,7 +993,7 @@ impl ChatCore {
                         Ok((s, pt)) => Ok((s, pt, false, Some(ek))),
                         Err(_) => Err(AckStatus::BadRequest),
                     },
-                    Some(_) => Err(AckStatus::BadRequest),
+                    Some(_) => Err(AckStatus::NoSession),
                     None => Err(AckStatus::NoSession),
                 },
             }

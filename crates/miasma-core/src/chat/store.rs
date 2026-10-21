@@ -20,7 +20,7 @@
 //! does not lose the ability to decrypt or to deliver.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -28,6 +28,7 @@ use std::{
 use tracing::warn;
 
 use super::{
+    anchor::{Anchor, Check, NO_FILE},
     crypto::{file_stem, Rd, Session},
     proto::MAX_TEXT_BYTES,
 };
@@ -493,6 +494,9 @@ struct Inner {
     ring_bytes: usize,
     ring_next: HashMap<[u8; 32], u64>,
     tick: u64,
+    /// Contacts whose session file was found to be older than the one written
+    /// last; the engine settles each once ([`ChatStore::take_rollback`]).
+    rolled_back: HashSet<[u8; 32]>,
 }
 
 pub struct ChatStore {
@@ -501,6 +505,8 @@ pub struct ChatStore {
     own_id: [u8; 32],
     settings: StoreSettings,
     inner: Mutex<Inner>,
+    /// The record kept outside the data folder (see [`super::anchor`]).
+    anchor: Option<Anchor>,
 }
 
 impl ChatStore {
@@ -523,8 +529,38 @@ impl ChatStore {
                 ring_bytes: 0,
                 ring_next: HashMap::new(),
                 tick: 0,
+                rolled_back: HashSet::new(),
             }),
+            anchor: None,
         })
+    }
+
+    /// Keep a record outside the data folder of which session file was
+    /// written last, and drop a session whose file turns out to be older.
+    pub fn with_anchor(mut self, anchor: Anchor) -> Self {
+        self.anchor = Some(anchor);
+        self
+    }
+
+    /// Test hook: write `peer` if changed and forget it, so the next use
+    /// reads the file again.
+    #[cfg(test)]
+    pub(crate) fn evict_for_test(&self, peer: &[u8; 32]) {
+        let mut g = self.inner.lock().unwrap();
+        if let Some(s) = g.peers.remove(peer) {
+            if s.dirty {
+                let _ = self.write_peer(&s.state);
+            }
+        }
+    }
+
+    /// True once if the session file of `peer` was found older than the last
+    /// one written (the session was dropped and the send counter raised).
+    /// The caller then voids what was sealed on the dropped session.
+    pub fn take_rollback(&self, peer: &[u8; 32]) -> bool {
+        let mut g = self.inner.lock().unwrap();
+        self.slot(&mut g, peer);
+        g.rolled_back.remove(peer)
     }
 
     pub fn settings(&self) -> &StoreSettings {
@@ -558,19 +594,39 @@ impl ChatStore {
 
     // ── Per-contact state ────────────────────────────────────────────────────
 
-    fn load_peer(&self, peer: &[u8; 32]) -> PeerState {
+    /// The state of `peer` from disk, and whether it is older than the last
+    /// one written (then the session is dropped and the send counter raised).
+    fn load_peer(&self, peer: &[u8; 32]) -> (PeerState, bool) {
         let path = self.session_path(peer);
+        let mut found = None;
+        let mut disk = NO_FILE;
         if path.exists() {
-            match doc::read_document(&self.keys, Label::ChatSessions, &path) {
-                Ok(bytes) => match PeerState::from_bytes(&bytes) {
-                    Some(s) if &s.peer == peer => return s,
+            match doc::read_document_fingerprinted(&self.keys, Label::ChatSessions, &path) {
+                Ok((bytes, fp)) => match PeerState::from_bytes(&bytes) {
+                    Some(s) if &s.peer == peer => {
+                        found = Some(s);
+                        disk = fp;
+                    }
                     _ => warn!("a chat session file is damaged; it was set aside"),
                 },
                 Err(e) => warn!("a chat session file cannot be read ({e}); it was set aside"),
             }
-            let _ = state_crypto::set_aside(&path);
+            if found.is_none() {
+                let _ = state_crypto::set_aside(&path);
+            }
         }
-        PeerState::new(*peer)
+        let mut state = found.unwrap_or_else(|| PeerState::new(*peer));
+        let mut behind = false;
+        if let Some(a) = &self.anchor {
+            if let Check::Behind { send_seq_floor } = a.check(peer, disk, state.send_seq) {
+                // Older than what was written last: its keys may have been
+                // used. A new session starts, and no number is used twice.
+                state.session = None;
+                state.send_seq = state.send_seq.max(send_seq_floor);
+                behind = true;
+            }
+        }
+        (state, behind)
     }
 
     fn slot<'a>(&self, g: &'a mut Inner, peer: &[u8; 32]) -> &'a mut PeerSlot {
@@ -592,12 +648,15 @@ impl ChatStore {
                 }
                 g.writers.remove(&victim);
             }
-            let state = self.load_peer(peer);
+            let (state, behind) = self.load_peer(peer);
+            if behind {
+                g.rolled_back.insert(*peer);
+            }
             g.peers.insert(
                 *peer,
                 PeerSlot {
                     state,
-                    dirty: false,
+                    dirty: behind,
                     used: tick,
                     next_ord: None,
                 },
@@ -610,12 +669,23 @@ impl ChatStore {
 
     fn write_peer(&self, st: &PeerState) -> Result<(), StoreError> {
         let bytes = st.to_bytes();
-        doc::write_document(
+        let path = self.session_path(&st.peer);
+        let Some(anchor) = &self.anchor else {
+            doc::write_document(&self.keys, Label::ChatSessions, &path, &bytes)?;
+            return Ok(());
+        };
+        // The record is written before the file is replaced, so a file that
+        // can have been used to send is always known to the record.
+        let sealed = doc::seal(
             &self.keys,
             Label::ChatSessions,
-            &self.session_path(&st.peer),
+            &doc::context_of(&path),
             &bytes,
         )?;
+        let fp = doc::fingerprint(&sealed);
+        anchor.before_write(&st.peer, fp, st.send_seq);
+        doc::write_sealed(&path, &sealed, true)?;
+        anchor.after_write(&st.peer, fp, st.send_seq);
         Ok(())
     }
 

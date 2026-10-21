@@ -25,7 +25,7 @@ macro_rules! audit_strings {
 audit_strings! {
     // Why the main button is off.
     need_text, need_mid, need_code, need_share_id, need_folder, need_file, need_contact,
-    need_password, need_connection, bad_mid,
+    need_password, need_private_password, need_connection, bad_mid,
     // Accessible names of fields.
     a11y_store_text, a11y_store_id, a11y_get_id, a11y_send_contact, a11y_password,
     a11y_password_repeat, a11y_retention, a11y_file_password, a11y_check_code, a11y_days,
@@ -57,6 +57,7 @@ static AU_EN: AuditStrings = AuditStrings {
     need_file: "Choose a file first.",
     need_contact: "Enter the contact code first.",
     need_password: "Enter a password first.",
+    need_private_password: "Use 12+ characters: letter, digit and symbol.",
     need_connection: "Not connected to the background service yet.",
     bad_mid: "That is not a content ID. It starts with miasma:",
     a11y_store_text: "Text to store",
@@ -100,6 +101,7 @@ static AU_JA: AuditStrings = AuditStrings {
     need_file: "先にファイルを選んでください。",
     need_contact: "先に連絡先コードを入力してください。",
     need_password: "先にパスワードを入力してください。",
+    need_private_password: "12 文字以上で、英字・数字・記号を含めてください。",
     need_connection: "まだバックグラウンドサービスに接続していません。",
     bad_mid: "コンテンツIDの形式ではありません。miasma: で始まります。",
     a11y_store_text: "保存するテキスト",
@@ -143,6 +145,7 @@ static AU_ZH_CN: AuditStrings = AuditStrings {
     need_file: "请先选择文件。",
     need_contact: "请先输入联系人代码。",
     need_password: "请先输入密码。",
+    need_private_password: "请使用 12 个以上字符，含字母、数字和符号。",
     need_connection: "尚未连接到后台服务。",
     bad_mid: "这不是内容 ID。它以 miasma: 开头。",
     a11y_store_text: "要存储的文本",
@@ -226,6 +229,18 @@ mod tests {
     }
 
     #[test]
+    fn the_private_password_reason_names_the_core_minimum() {
+        let n = miasma_core::transfer::password_policy::DIRECTED_MIN_LEN.to_string();
+        for lang in Locale::ALL {
+            let a = audit_strings(lang);
+            assert!(
+                a.need_private_password.contains(&n),
+                "{lang:?}: need_private_password does not name {n}"
+            );
+        }
+    }
+
+    #[test]
     fn reasons_are_short_plain_sentences() {
         for lang in Locale::ALL {
             let a = audit_strings(lang);
@@ -238,6 +253,7 @@ mod tests {
                 a.need_file,
                 a.need_contact,
                 a.need_password,
+                a.need_private_password,
                 a.need_connection,
             ];
             for (i, value) in reasons.iter().enumerate() {
