@@ -1829,6 +1829,16 @@ fn group_row(
         Stroke::new(1.0, p.border),
     );
     let inner = rect.shrink2(vec2(kit::SP_3, kit::SP_2));
+    // A group is a tinted rounded square; a person (see `conversation_row`) is a plain circle.
+    let avatar = egui::Rect::from_center_size(
+        egui::pos2(inner.left() + kit::AVATAR_PX * 0.5, rect.center().y),
+        vec2(kit::AVATAR_PX, kit::AVATAR_PX),
+    );
+    kit::paint_avatar(ui.painter(), avatar, &row.name, kit::AvatarKind::Group);
+    let inner = egui::Rect::from_min_max(
+        egui::pos2(inner.left() + kit::AVATAR_PX + kit::SP_3, inner.top()),
+        inner.max,
+    );
     let when_galley = single_line(ui, when, kit::META_PX, p.muted, inner.width() * 0.4);
     let name_galley = single_line(
         ui,

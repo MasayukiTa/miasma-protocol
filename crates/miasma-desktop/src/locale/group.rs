@@ -67,6 +67,8 @@ group_strings! {
     // Name limit in characters, files and groups, list joiner
     ng_name_count, ng_name_over_chars, ng_name_over_bytes, group_file_note, group_file_button,
     a11y_group_file_button, list_sep,
+    // Headings of the two kinds of conversation in the list
+    section_groups, section_people,
 }
 
 pub fn group_strings(locale: Locale) -> &'static GroupStrings {
@@ -229,6 +231,8 @@ static GR_EN: GroupStrings = GroupStrings {
     group_file_button: "Send a file to a contact",
     a11y_group_file_button: "Send a file to one of your contacts",
     list_sep: ", ",
+    section_groups: "Groups",
+    section_people: "People",
 };
 
 static GR_JA: GroupStrings = GroupStrings {
@@ -383,6 +387,8 @@ static GR_JA: GroupStrings = GroupStrings {
     group_file_button: "連絡先にファイルを送る",
     a11y_group_file_button: "連絡先の1人にファイルを送る",
     list_sep: "、",
+    section_groups: "グループ",
+    section_people: "個人",
 };
 
 static GR_ZH_CN: GroupStrings = GroupStrings {
@@ -537,6 +543,8 @@ static GR_ZH_CN: GroupStrings = GroupStrings {
     group_file_button: "向联系人发送文件",
     a11y_group_file_button: "向一位联系人发送文件",
     list_sep: ", ",
+    section_groups: "群组",
+    section_people: "个人",
 };
 
 #[cfg(test)]
