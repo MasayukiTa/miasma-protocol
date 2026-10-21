@@ -2,15 +2,9 @@
 
 ## Supported Versions
 
-Use this section to tell people about which versions of your project are
-currently being supported with security updates.
-
-| Version | Supported          |
-| ------- | ------------------ |
-| 5.1.x   | :white_check_mark: |
-| 5.0.x   | :x:                |
-| 4.0.x   | :white_check_mark: |
-| < 4.0   | :x:                |
+Miasma is in beta. Only the latest beta release (the current version line is
+v0.3.2-beta.x) receives security fixes. Older betas are not patched; update to
+the latest release.
 
 ## Known security limits (beta)
 
@@ -69,8 +63,24 @@ before relying on it:
 
 ## Reporting a Vulnerability
 
-Use this section to tell people how to report a vulnerability.
+Please report vulnerabilities privately. Do not open a public issue or pull
+request for a security problem.
 
-Tell them where to go, how often they can expect to get an update on a
-reported vulnerability, what to expect if the vulnerability is accepted or
-declined, etc.
+Use GitHub's private vulnerability reporting:
+<https://github.com/MasayukiTa/miasma-protocol/security/advisories/new>
+
+Please include:
+
+- the affected version (for example the output of `miasma --version`) and
+  platform;
+- a description of the problem and its impact;
+- steps or a minimal input that reproduces it;
+- whether you believe it is already being exploited, and any disclosure
+  deadline you are working to.
+
+What to expect: we aim to acknowledge a report within 7 days and to tell you
+whether it is accepted or declined within 14 days. Accepted issues are fixed in
+the latest beta and, once a fix is released, credited in the release notes if
+you wish. Issues that match a limit listed under "Known security limits (beta)"
+above are already documented, but are still welcome as reports if you can show
+a worse impact than described.
