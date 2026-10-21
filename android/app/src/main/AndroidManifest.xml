@@ -27,6 +27,11 @@
         android:theme="@style/Theme.Miasma"
         android:supportsRtl="true">
 
+        <!-- Safe Browsing stays on for the WebView -->
+        <meta-data
+            android:name="android.webkit.WebView.EnableSafeBrowsing"
+            android:value="true" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

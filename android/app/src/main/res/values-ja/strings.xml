@@ -32,6 +32,9 @@
 端末内に保存されたシェアは永久に読み取れなくなります。この操作は取り消せません。</string>
     <string name="wipe_now">今すぐ消去</string>
     <string name="cancel">キャンセル</string>
+    <string name="screen_privacy_title">画面のプライバシー</string>
+    <string name="screen_privacy_description">スクリーンショット、画面録画、最近使ったアプリの一覧でのプレビューを禁止します。</string>
+    <string name="webview_unsupported">この端末の WebView が古いため、ウェブ表示画面を開けません。Android System WebView（または Google Chrome）を更新してから、もう一度お試しください。</string>
 
     <string name="refresh">更新</string>
     <string name="send_title">送信</string>

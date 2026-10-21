@@ -26,7 +26,7 @@ The handler reuses `process_request()`, the same function the IPC handler calls,
 
 ### Android: WebView with JavaScript Bridge
 
-The Android app hosts the web UI in a `WebView` loaded from app assets (`file:///android_asset/web/`).  A `@JavascriptInterface` object is injected as `window.miasma`, with methods that call through to UniFFI-generated Kotlin bindings.
+The Android app hosts the web UI in a `WebView` loaded through `WebViewAssetLoader` from `https://appassets.androidplatform.net/assets/web/`.  Native operations are reached with `WebViewCompat.addWebMessageListener` restricted to that origin: the page posts `{id, method, args}` to `window.miasma.postMessage` and receives `{id, result}` or `{id, error}` on `window.miasma.onmessage`.  Requests are length- and type-checked per method before any decode, and `wipe` requires a native confirmation dialog.  A WebView without `WEB_MESSAGE_LISTENER` support does not load the page.
 
 ### iOS: WKWebView with Message Handler
 
@@ -36,7 +36,7 @@ The iOS app hosts the web UI in a `WKWebView` loaded from app bundle resources. 
 
 The web app's `bridge.js` detects its environment at init:
 
-1. `window.miasma` exists and `ping()` succeeds → **WebView** mode
+1. `window.miasma` exists and `ping()` succeeds (Android: over the message channel; iOS: as a callable method) → **WebView** mode
 2. `fetch('http://127.0.0.1:17842/api/ping')` succeeds → **HTTP** mode
 3. Fallback → **Local-only** mode (WASM, no network)
 

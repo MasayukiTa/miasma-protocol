@@ -43,6 +43,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ScreenPrivacy.apply(this)
 
         // Start the background daemon with persisted settings.
         MiasmaService.startNode(

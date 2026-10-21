@@ -15,6 +15,8 @@ object Prefs {
     private const val KEY_BANDWIDTH_MB_DAY = "bandwidth_mb_day"
     private const val KEY_BOOTSTRAP_PEERS = "bootstrap_peers"
 
+    private const val KEY_SCREEN_PRIVACY = "screen_privacy"
+
     // ──── Defaults ───────────────────────────────────────────────────────────
 
     const val DEFAULT_STORAGE_MB      = 512L
@@ -32,6 +34,13 @@ object Prefs {
     fun bootstrapPeers(ctx: Context): List<String> =
         ctx.prefs().getString(KEY_BOOTSTRAP_PEERS, "")
             ?.lines()?.filter { it.isNotBlank() } ?: emptyList()
+
+    /** Block screenshots, screen recording and the recents thumbnail (FLAG_SECURE). Off by default. */
+    fun screenPrivacy(ctx: Context): Boolean =
+        ctx.prefs().getBoolean(KEY_SCREEN_PRIVACY, false)
+
+    fun setScreenPrivacy(ctx: Context, value: Boolean) =
+        ctx.prefs().edit { putBoolean(KEY_SCREEN_PRIVACY, value) }
 
     fun setStorageMb(ctx: Context, value: Long) =
         ctx.prefs().edit { putLong(KEY_STORAGE_MB, value) }

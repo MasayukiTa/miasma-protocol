@@ -26,6 +26,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
+import androidx.compose.ui.res.stringResource
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -46,6 +48,8 @@ import android.content.Intent
 import dev.miasma.MiasmaService
 import dev.miasma.BuildConfig
 import dev.miasma.Prefs
+import dev.miasma.R
+import dev.miasma.ScreenPrivacy
 import dev.miasma.WebBridgeActivity
 import kotlinx.coroutines.launch
 import kotlin.math.roundToLong
@@ -224,6 +228,43 @@ fun SettingsScreen() {
             Icon(Icons.Outlined.Hub, contentDescription = null, modifier = Modifier.size(18.dp))
             Spacer(Modifier.width(8.dp))
             Text("Open Web View")
+        }
+
+        Spacer(Modifier.height(16.dp))
+
+        // ── Screen privacy (FLAG_SECURE), off by default ──
+        var screenPrivacy by remember { mutableStateOf(Prefs.screenPrivacy(context)) }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    stringResource(R.string.screen_privacy_title),
+                    style = MaterialTheme.typography.bodyLarge,
+                )
+                Text(
+                    stringResource(R.string.screen_privacy_description),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(
+                checked = screenPrivacy,
+                onCheckedChange = { on ->
+                    screenPrivacy = on
+                    Prefs.setScreenPrivacy(context, on)
+                    // Take effect on this window now; other windows read it when they open.
+                    var c: android.content.Context? = context
+                    while (c is android.content.ContextWrapper) {
+                        if (c is android.app.Activity) {
+                            ScreenPrivacy.apply(c)
+                            break
+                        }
+                        c = c.baseContext
+                    }
+                },
+            )
         }
 
         Spacer(Modifier.height(8.dp))
