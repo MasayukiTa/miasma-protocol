@@ -11,7 +11,6 @@ import dev.miasma.uniffi.getNodeStatus
 import dev.miasma.uniffi.publishFile as ffiPublishFile
 import dev.miasma.uniffi.retrieveBytes
 import dev.miasma.uniffi.retrieveToFile as ffiRetrieveToFile
-import dev.miasma.uniffi.distressWipe as ffiDistressWipe
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -183,31 +182,17 @@ class MiasmaViewModel(app: Application) : AndroidViewModel(app) {
             _ui.value = _ui.value.copy(isLoading = true, error = null)
             val ctx: Context = getApplication()
             try {
-                withContext(Dispatchers.IO) {
-                    var cleanupFailed = false
-                    try {
-                        ffiDistressWipe(dataDir)
-                    } finally {
-                        // Always run, even if the Rust wipe throws: the
-                        // Keystore key and the wrapped key blobs must not
-                        // survive. A failure here must not hide the original
-                        // error, so each step is isolated.
-                        if (runCatching { KeystoreHelper.deleteKey() }.isFailure) {
-                            cleanupFailed = true
-                        }
-                        val dataFile = java.io.File(dataDir)
-                        for (name in listOf("master.key.enc", "master.key.iv")) {
-                            val removed = runCatching {
-                                val f = dataFile.resolve(name)
-                                !f.exists() || f.delete()
-                            }.getOrDefault(false)
-                            if (!removed) cleanupFailed = true
-                        }
-                    }
-                    // Reached only if the Rust wipe succeeded: report an
-                    // incomplete cleanup through the same warning path.
-                    if (cleanupFailed) throw IllegalStateException("wipe cleanup incomplete")
+                // Key wipe always runs the Keystore and blob cleanup; a failure
+                // anywhere is reported through the same warning path.
+                var webCleared = true
+                try {
+                    withContext(Dispatchers.IO) { NativeWipe.wipeKeys(dataDir) }
+                } finally {
+                    // WebView site data (storage, cookies, service workers) goes too,
+                    // whether or not the key wipe reported a problem.
+                    webCleared = NativeWipe.clearWebData(null)
                 }
+                if (!webCleared) throw IllegalStateException("wipe cleanup incomplete")
                 MiasmaService.stopNode(ctx)
                 // Clear all sensitive state including any retrieved bytes.
                 val prev = _ui.value.retrievedBytes
