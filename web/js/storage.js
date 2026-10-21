@@ -4,8 +4,29 @@ const DB_NAME = 'miasma-web';
 const DB_VERSION = 2;
 
 let db = null;
+let locked = false;
+let connectedProbe = null;
+
+/** Tell the storage layer how to ask "is the page in daemon (connected) mode?". */
+export function setConnectedProbe(fn) {
+  connectedProbe = typeof fn === 'function' ? fn : null;
+}
+
+/** After an erase the database must not be re-created by a stray call. */
+export function lockStorage() {
+  locked = true;
+  closeDB();
+}
+
+export function closeDB() {
+  if (db) {
+    try { db.close(); } catch (_) { /* already closed */ }
+    db = null;
+  }
+}
 
 export async function initDB() {
+  if (locked) throw new Error('storage is locked after erase');
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = (e) => {
@@ -49,6 +70,8 @@ export async function initDB() {
     };
     req.onsuccess = (e) => {
       db = e.target.result;
+      // Another tab asking to delete or upgrade the database must not be blocked by us.
+      db.onversionchange = () => closeDB();
       resolve(db);
     };
     req.onerror = (e) => reject(e.target.error);
@@ -56,6 +79,10 @@ export async function initDB() {
 }
 
 export async function saveShares(mid, shares, params) {
+  // Shares published through the daemon are not kept in this browser.
+  if (connectedProbe && connectedProbe()) {
+    throw new Error('saving shares in the browser is not available while connected to the daemon');
+  }
   if (!db) await initDB();
   const tx = db.transaction(['shares', 'metadata'], 'readwrite');
   const shareStore = tx.objectStore('shares');
@@ -121,15 +148,23 @@ export async function getStorageEstimate() {
   return 0;
 }
 
-export async function clearAll() {
-  if (!db) await initDB();
-  const tx = db.transaction(['shares', 'metadata'], 'readwrite');
-  tx.objectStore('shares').clear();
-  tx.objectStore('metadata').clear();
+/** Close this tab's handle and delete the whole database (not just its rows). */
+export function deleteDatabase(timeoutMs = 5000) {
+  closeDB();
   return new Promise((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = (e) => reject(e.target.error);
+    let timer = null;
+    const req = indexedDB.deleteDatabase(DB_NAME);
+    req.onsuccess = () => { clearTimeout(timer); resolve(); };
+    req.onerror = (e) => { clearTimeout(timer); reject(e.target.error || new Error('deleteDatabase failed')); };
+    // Another tab still holds the database; the delete completes once it closes.
+    req.onblocked = () => {
+      timer = setTimeout(() => reject(new Error('database delete is blocked by another tab')), timeoutMs);
+    };
   });
+}
+
+export async function clearAll() {
+  await deleteDatabase();
 }
 
 // IDB helpers
