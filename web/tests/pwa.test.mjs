@@ -46,12 +46,14 @@ test('HTML exposes manifest and iOS touch icon', () => {
   assert.deepEqual(pngSize(path.join(webRoot, 'icons/apple-touch-icon.png')), [180, 180]);
 });
 
-test('service worker precaches install assets and has offline navigation fallback', () => {
+test('asset manifest covers install assets and the service worker has an offline navigation fallback', () => {
   const sw = fs.readFileSync(path.join(webRoot, 'sw.js'), 'utf8');
-  for (const icon of [...manifest.icons.map(i => i.src), 'icons/apple-touch-icon.png', 'manifest.json']) {
-    assert.ok(sw.includes(`'${icon}'`), `service worker does not precache ${icon}`);
+  const build = JSON.parse(fs.readFileSync(path.join(webRoot, 'asset-manifest.json'), 'utf8'));
+  for (const icon of [...manifest.icons.map(i => i.src), 'icons/apple-touch-icon.png', 'manifest.json', 'index.html', 'js/bridge.js', 'pkg/miasma_wasm_bg.wasm']) {
+    assert.ok(build.files[icon], `asset manifest does not list ${icon}`);
   }
-  assert.match(sw, /event\.request\.mode === 'navigate'/);
-  assert.match(sw, /cache\.match\(new URL\('\.\/index\.html', self\.registration\.scope\)\.href\)/);
+  assert.match(sw, /request\.mode === 'navigate'/);
+  assert.match(sw, /scopeUrl\('index\.html'\)/);
   assert.match(sw, /url\.pathname\.startsWith\('\/api\/'\)/);
+  assert.doesNotMatch(sw, /stale-while-revalidate|REVALIDATE_ASSETS/);
 });
