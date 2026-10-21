@@ -108,6 +108,13 @@ jobs:
       - name: Test bridge
         run: cargo test -p miasma-bridge --locked
 
+      # The daemon control token is created owner-only and verified; these
+      # run the Windows access-list code for real.
+      - name: Test control token file protection
+        run: |
+          cargo test -p miasma-core --lib --locked -- secure_file:: control_auth::
+          cargo test -p miasma-core --locked --test adversarial_ipc_test -- token_file daemon_does_not_start
+
       - name: Build CLI
         run: cargo build -p miasma-cli --locked
 

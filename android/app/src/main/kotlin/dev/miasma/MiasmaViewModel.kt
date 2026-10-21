@@ -184,12 +184,29 @@ class MiasmaViewModel(app: Application) : AndroidViewModel(app) {
             val ctx: Context = getApplication()
             try {
                 withContext(Dispatchers.IO) {
-                    ffiDistressWipe(dataDir)
-                    KeystoreHelper.deleteKey()
-                    // Delete wrapped key blobs on the Kotlin side too.
-                    val dataFile = java.io.File(dataDir)
-                    dataFile.resolve("master.key.enc").delete()
-                    dataFile.resolve("master.key.iv").delete()
+                    var cleanupFailed = false
+                    try {
+                        ffiDistressWipe(dataDir)
+                    } finally {
+                        // Always run, even if the Rust wipe throws: the
+                        // Keystore key and the wrapped key blobs must not
+                        // survive. A failure here must not hide the original
+                        // error, so each step is isolated.
+                        if (runCatching { KeystoreHelper.deleteKey() }.isFailure) {
+                            cleanupFailed = true
+                        }
+                        val dataFile = java.io.File(dataDir)
+                        for (name in listOf("master.key.enc", "master.key.iv")) {
+                            val removed = runCatching {
+                                val f = dataFile.resolve(name)
+                                !f.exists() || f.delete()
+                            }.getOrDefault(false)
+                            if (!removed) cleanupFailed = true
+                        }
+                    }
+                    // Reached only if the Rust wipe succeeded: report an
+                    // incomplete cleanup through the same warning path.
+                    if (cleanupFailed) throw IllegalStateException("wipe cleanup incomplete")
                 }
                 MiasmaService.stopNode(ctx)
                 // Clear all sensitive state including any retrieved bytes.

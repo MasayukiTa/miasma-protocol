@@ -59,8 +59,9 @@ before relying on it:
   applies on top of them.
 - Local control: the daemon's IPC and HTTP bridge require a random per-start
   token stored in `daemon.token` in the data directory. It is created owner-only
-  on Unix (mode 0600). On Windows the daemon asks `icacls` to restrict the file
-  to the current user and logs a warning, then continues, if that fails. Any
+  from the first byte (Unix: mode 0600; Windows: a security descriptor with a
+  single entry for the current user) and then verified; if that fails the daemon
+  does not start. Any
   process running as the same user can read the token and control the daemon;
   the token protects against other users and against unauthenticated loopback
   clients, not against malware in your own account. The bridge's `/api/ping`
