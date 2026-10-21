@@ -160,10 +160,10 @@ const ALLOWED_ORIGINS: &[&str] = &[
     "https://localhost",
     "https://127.0.0.1",
     "https://[::1]",
-    "null", // file:// and some WebView origins
 ];
 
-/// Validate that an Origin header is from localhost.
+/// Validate that an Origin header is from localhost.  (The bridge itself gates
+/// requests with `web_guard`; this looser check remains for other callers.)
 ///
 /// Returns true if:
 /// - No Origin header present (non-browser client, always OK)
@@ -323,7 +323,7 @@ mod tests {
         assert!(validate_origin(Some("http://127.0.0.1:17842")));
         assert!(validate_origin(Some("https://localhost")));
         assert!(validate_origin(Some("http://[::1]")));
-        assert!(validate_origin(Some("null"))); // file:// origins
+        assert!(!validate_origin(Some("null"))); // opaque origins are not trusted
     }
 
     #[test]
