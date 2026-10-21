@@ -3,7 +3,7 @@
 //! On Windows the key is wrapped by DPAPI for the signed-in user. If DPAPI does
 //! not work for this user, the file wrap is used so the program still starts
 //! with a sealed key (a sealed key is never opened by older programs, which stop
-//! instead of starting a new key). A service in session 0 keeps the plain key:
+//! instead of starting a new key). A service account (LocalSystem and the like) keeps the plain key:
 //! sealing there would make the key unreadable to the user's own programs. Other
 //! systems keep the plain key until they have a provider of their own.
 
@@ -25,7 +25,7 @@ pub(super) enum Pick {
     FileWrap,
 }
 
-/// `user_session`: the process runs in a user's session. `dpapi_works`: the
+/// `user_session`: the process runs as a user, not a service account. `dpapi_works`: the
 /// DPAPI self-test passed (only asked when `user_session` is true).
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(super) fn pick(user_session: bool, dpapi_works: impl FnOnce() -> bool) -> Pick {
@@ -59,7 +59,7 @@ pub fn install_default_platform_provider() -> Option<ProviderId> {
     {
         let wrap: Arc<dyn DeviceWrap> = match windows_pick() {
             Pick::Plain => {
-                tracing::info!("not in a user session; the key stays a plain file");
+                tracing::info!("running as a service account; the key stays a plain file");
                 return None;
             }
             Pick::Dpapi => Arc::new(super::dpapi::DpapiWrap),
@@ -93,7 +93,7 @@ mod tests {
     fn a_service_session_keeps_the_plain_key_without_asking_dpapi() {
         assert_eq!(
             pick(false, || panic!(
-                "DPAPI must not be asked outside a user session"
+                "DPAPI must not be asked as a service account"
             )),
             Pick::Plain
         );

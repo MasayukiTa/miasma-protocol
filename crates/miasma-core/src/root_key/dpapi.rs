@@ -17,12 +17,17 @@ use std::path::Path;
 use chacha20poly1305::aead::{AeadCore, KeyInit, OsRng};
 use chacha20poly1305::XChaCha20Poly1305;
 use sha2::{Digest, Sha256};
-use windows_sys::Win32::Foundation::{GetLastError, LocalFree, ERROR_INVALID_DATA};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GetLastError, LocalFree, ERROR_INVALID_DATA, HANDLE,
+};
 use windows_sys::Win32::Security::Cryptography::{
     CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
 };
-use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
-use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+use windows_sys::Win32::Security::{
+    GetTokenInformation, IsWellKnownSid, TokenUser, WinLocalServiceSid, WinLocalSystemSid,
+    WinNetworkServiceSid, TOKEN_QUERY, TOKEN_USER,
+};
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use zeroize::Zeroizing;
 
 use super::provider::{Availability, DestroyOutcome, DeviceWrap, ProviderId, WrapError};
@@ -39,14 +44,37 @@ impl std::fmt::Debug for DpapiWrap {
     }
 }
 
-/// `false` only when the process is known to run in session 0, where the
-/// services live. A key sealed there would be unreadable to the user's own
-/// programs.
+/// `false` only when the process runs as LocalSystem, LocalService or
+/// NetworkService. A key sealed by such a service would be unreadable to the
+/// user's own programs. Any query that fails counts as a user.
 pub fn in_user_session() -> bool {
-    let mut session = 0u32;
-    // SAFETY: `session` outlives the call; the id is this process's own.
-    let ok = unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut session) };
-    ok == 0 || session != 0
+    let mut token: HANDLE = std::ptr::null_mut();
+    // SAFETY: the pseudo handle of this process is always valid; `token` is
+    // closed below.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return true;
+    }
+    let mut len = 0u32;
+    // SAFETY: a size query with no buffer.
+    unsafe { GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut len) };
+    let mut service = false;
+    if len > 0 {
+        // Eight-byte units keep the buffer aligned for `TOKEN_USER`.
+        let mut buf: Vec<u64> = vec![0; (len as usize).div_ceil(8)];
+        // SAFETY: the buffer holds at least `len` bytes; on success it starts
+        // with a `TOKEN_USER` whose SID lives inside the same buffer.
+        unsafe {
+            if GetTokenInformation(token, TokenUser, buf.as_mut_ptr().cast(), len, &mut len) != 0 {
+                let sid = (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid;
+                service = [WinLocalSystemSid, WinLocalServiceSid, WinNetworkServiceSid]
+                    .iter()
+                    .any(|kind| IsWellKnownSid(sid, *kind) != 0);
+            }
+        }
+    }
+    // SAFETY: `token` was opened above.
+    unsafe { CloseHandle(token) };
+    !service
 }
 
 fn entropy_of(aad: &[u8]) -> [u8; 32] {
@@ -166,7 +194,7 @@ impl DeviceWrap for DpapiWrap {
         if in_user_session() {
             Availability::Ready
         } else {
-            Availability::Unavailable("no_user_session")
+            Availability::Unavailable("service_account")
         }
     }
 
@@ -254,6 +282,12 @@ mod tests {
     #[test]
     fn debug_output_names_no_key() {
         assert_eq!(format!("{DpapiWrap:?}"), "DpapiWrap");
+    }
+
+    #[test]
+    fn an_ordinary_user_is_not_taken_for_a_service() {
+        assert!(in_user_session());
+        assert!(matches!(DpapiWrap.available(), Availability::Ready));
     }
 
     #[test]
