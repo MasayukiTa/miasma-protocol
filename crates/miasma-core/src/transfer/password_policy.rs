@@ -37,6 +37,11 @@ pub const MIN_LEN: usize = 6;
 pub const MAX_LEN: usize = 1024;
 /// Below this a compliant password still gets a soft warning.
 pub const RECOMMENDED_LEN: usize = 12;
+/// Shortest password accepted when a private (directed) share is created.
+/// Front ends that check before sending use this value. The web and Android
+/// clients keep a copy; `tests/directed_min_len_sync.rs` fails if they differ.
+/// Receiving never checks it: older, shorter passwords still open.
+pub const DIRECTED_MIN_LEN: usize = 12;
 
 /// Generator bounds and default.
 pub const GENERATE_MIN_LEN: usize = 12;
@@ -54,8 +59,19 @@ const GEN_ALPHABET: &[u8] =
 /// One way a password fails the policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PolicyViolation {
-    TooShort { min: usize, len: usize },
-    TooLong { max: usize, len: usize },
+    TooShort {
+        min: usize,
+        len: usize,
+    },
+    /// Under [`DIRECTED_MIN_LEN`] for a private share.
+    TooShortPrivate {
+        min: usize,
+        len: usize,
+    },
+    TooLong {
+        max: usize,
+        len: usize,
+    },
     NoDigit,
     NoLetter,
     NoSymbol,
@@ -66,6 +82,7 @@ impl PolicyViolation {
     pub fn code(&self) -> &'static str {
         match self {
             Self::TooShort { .. } => "too_short",
+            Self::TooShortPrivate { .. } => "too_short_private",
             Self::TooLong { .. } => "too_long",
             Self::NoDigit => "no_digit",
             Self::NoLetter => "no_letter",
@@ -98,6 +115,7 @@ pub fn parse_codes(error_text: &str) -> Option<Vec<&'static str>> {
         .unwrap_or("");
     let known = [
         "too_short",
+        "too_short_private",
         "too_long",
         "no_digit",
         "no_letter",
@@ -117,10 +135,28 @@ pub fn parse_codes(error_text: &str) -> Option<Vec<&'static str>> {
 /// Check `password` against the policy. `Ok(())` when it complies, otherwise
 /// every violation, in a stable order (length, digit, letter, symbol).
 pub fn check(password: &str) -> Result<(), Vec<PolicyViolation>> {
+    check_with_min(password, MIN_LEN, false)
+}
+
+/// The policy for a password chosen when a private (directed) share is
+/// created: the same character rules with a floor of [`DIRECTED_MIN_LEN`].
+pub fn check_directed(password: &str) -> Result<(), Vec<PolicyViolation>> {
+    check_with_min(password, DIRECTED_MIN_LEN, true)
+}
+
+fn check_with_min(
+    password: &str,
+    min_len: usize,
+    private: bool,
+) -> Result<(), Vec<PolicyViolation>> {
     let mut v = Vec::new();
     let len = password.chars().count();
-    if len < MIN_LEN {
-        v.push(PolicyViolation::TooShort { min: MIN_LEN, len });
+    if len < min_len {
+        v.push(if private {
+            PolicyViolation::TooShortPrivate { min: min_len, len }
+        } else {
+            PolicyViolation::TooShort { min: min_len, len }
+        });
     }
     if len > MAX_LEN {
         v.push(PolicyViolation::TooLong { max: MAX_LEN, len });
@@ -375,6 +411,25 @@ mod tests {
         assert_eq!(ok.chars().count(), MAX_LEN);
         assert!(check(&ok).is_ok());
         assert_composition(MAX_LEN - 1, 1, 1, &[]);
+    }
+
+    #[test]
+    fn private_share_floor_is_twelve_characters() {
+        assert_eq!(DIRECTED_MIN_LEN, 12);
+        // Eleven characters pass for a transfer but not for a private share.
+        let eleven = compose(8, 2, 1, &[]);
+        assert!(check(&eleven).is_ok());
+        assert_eq!(
+            check_directed(&eleven).unwrap_err(),
+            vec![PolicyViolation::TooShortPrivate { min: 12, len: 11 }]
+        );
+        assert!(check_directed(&compose(9, 2, 1, &[])).is_ok());
+        // Characters, not bytes.
+        let wide = compose(4, 1, 1, &[Other::NonAscii; 5]);
+        assert!(wide.len() > DIRECTED_MIN_LEN && check_directed(&wide).is_err());
+        // Same character rules as a transfer.
+        assert!(check_directed(&" ".repeat(20)).is_err());
+        assert!(check_directed(&compose(12, 0, 0, &[])).is_err());
     }
 
     #[test]

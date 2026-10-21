@@ -40,6 +40,12 @@ object DirectedApi {
         }
     }
 
+    /**
+     * Shortest password for a private share. Copy of DIRECTED_MIN_LEN in
+     * crates/miasma-core/src/transfer/password_policy.rs; a core test fails if they differ.
+     */
+    const val DIRECTED_MIN_PASSWORD_LEN = 12
+
     private fun bridgeUrl(port: Int, path: String): URL =
         URL("http://127.0.0.1:$port$path")
 

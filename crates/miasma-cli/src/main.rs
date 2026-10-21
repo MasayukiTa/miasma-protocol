@@ -2421,6 +2421,8 @@ async fn cmd_send(
 ) -> Result<()> {
     use miasma_core::{daemon_request, ControlRequest, ControlResponse};
 
+    check_private_share_password(password)?;
+
     // Validate the file exists and get its size for display, but don't read it —
     // the daemon reads it directly via DirectedSendFile, avoiding IPC bloat.
     let meta = std::fs::metadata(path)
@@ -2454,7 +2456,19 @@ async fn cmd_send(
             eprintln!("  Waiting for recipient to generate a challenge code.");
             eprintln!("  Then confirm with: miasma confirm {envelope_id} --code XXXX-XXXX");
         }
-        ControlResponse::Error(e) => bail!("daemon error: {e}"),
+        ControlResponse::Error(e) => {
+            // The daemon applies the same password rule; show it in the person's language.
+            if let Some(codes) = miasma_core::transfer::password_policy::parse_codes(&e) {
+                bail!(
+                    "{}",
+                    Msg::WeakPassword {
+                        codes: codes.into_iter().map(str::to_owned).collect(),
+                    }
+                    .t()
+                );
+            }
+            bail!("daemon error: {e}")
+        }
         other => bail!("unexpected response: {other:?}"),
     }
     Ok(())
@@ -2747,6 +2761,23 @@ fn check_publish_password(pw: &str) -> Result<()> {
     }
     if strength_hint(pw) == Strength::Short {
         eprintln!("{}", Msg::PasswordShortWarning.t());
+    }
+    Ok(())
+}
+
+/// The password rule for a *new* private share, checked here so the person
+/// gets the message before anything is sent to the daemon (which enforces the
+/// same rule). Never used when receiving.
+fn check_private_share_password(pw: &str) -> Result<()> {
+    use miasma_core::transfer::password_policy::{check_directed, codes};
+    if let Err(v) = check_directed(pw) {
+        bail!(
+            "{}",
+            Msg::WeakPassword {
+                codes: codes(&v).split(',').map(str::to_owned).collect(),
+            }
+            .t()
+        );
     }
     Ok(())
 }
