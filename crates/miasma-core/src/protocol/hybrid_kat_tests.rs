@@ -98,7 +98,9 @@ fn a_changed_ciphertext_gives_the_implicit_rejection_key() {
     let seed = seed_bytes();
     let z = &seed[32..];
     let dk = dk_from_seed();
-    let (ct, k) = dk.encapsulation_key().encapsulate_deterministic(&message(3));
+    let (ct, k) = dk
+        .encapsulation_key()
+        .encapsulate_deterministic(&message(3));
     for pos in [0usize, 1, 10, 500, 1087] {
         let mut bad = ct.clone();
         bad[pos] ^= 0x01;
@@ -128,7 +130,9 @@ fn another_key_does_not_recover_the_secret() {
     let dk = dk_from_seed();
     let other_seed: Vec<u8> = (64u8..128).collect();
     let other = DecapsulationKey768::from_seed(Seed::try_from(&other_seed[..]).unwrap());
-    let (ct, k) = dk.encapsulation_key().encapsulate_deterministic(&message(4));
+    let (ct, k) = dk
+        .encapsulation_key()
+        .encapsulate_deterministic(&message(4));
     let got = other.decapsulate(&ct);
     assert_ne!(got, k);
     assert_eq!(got.as_slice(), &j(&other_seed[32..], ct.as_ref())[..]);
@@ -151,7 +155,9 @@ fn an_encapsulation_key_with_an_out_of_range_coefficient_is_refused() {
 #[test]
 fn fixed_input_pins() {
     let dk = dk_from_seed();
-    let (ct, k) = dk.encapsulation_key().encapsulate_deterministic(&message(0));
+    let (ct, k) = dk
+        .encapsulation_key()
+        .encapsulate_deterministic(&message(0));
     let ct_hash = hex::encode(Sha3_256::digest(ct.as_slice()));
     let k_hex = hex::encode(k);
     assert_eq!(ct_hash, PIN_CT_SHA3_256);

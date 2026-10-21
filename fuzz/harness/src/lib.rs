@@ -70,7 +70,7 @@ pub fn group_decoders(data: &[u8]) {
 /// Capability messages, handshake fragments and the reassembler.
 pub fn capability_fragment(data: &[u8]) {
     use miasma_core::protocol::capability::Capabilities;
-    use miasma_core::protocol::fragment::{HandshakeFragment, ReassemblyLimits, Reassembler};
+    use miasma_core::protocol::fragment::{HandshakeFragment, Reassembler, ReassemblyLimits};
     let _ = Capabilities::decode(data);
     let _ = HandshakeFragment::decode(data);
     let mut re = Reassembler::new(ReassemblyLimits::default());
