@@ -164,8 +164,17 @@ private fun InboxCard(item: DirectedApi.EnvelopeItem, vm: MiasmaViewModel) {
             Spacer(Modifier.height(6.dp))
 
             // Sender
+            // The PeerId seen on the connection is verified; the key inside the
+            // envelope is only a claim by the sender.
+            val peerId = item.senderPeerId
             Text(
-                stringResource(R.string.inbox_from, item.senderPubkey.take(20)),
+                when {
+                    !peerId.isNullOrBlank() ->
+                        stringResource(R.string.inbox_from_verified, peerId.take(20))
+                    item.senderPubkey.isNotBlank() ->
+                        stringResource(R.string.inbox_from_unverified, item.senderPubkey.take(20))
+                    else -> stringResource(R.string.inbox_from_unknown)
+                },
                 style = MaterialTheme.typography.bodySmall,
             )
 

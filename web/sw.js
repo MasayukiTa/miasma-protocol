@@ -14,7 +14,7 @@
 //    while online); the cache of this exact version is the offline fallback.
 //  - /api/* is never touched or cached.
 
-const ASSET_VERSION = 'c56b7ab5c8bcbf8e';
+const ASSET_VERSION = '9856e0cc26a91648';
 const CACHE_PREFIX = 'miasma-web-';
 const CACHE_NAME = CACHE_PREFIX + ASSET_VERSION;
 const MANIFEST_PATH = 'asset-manifest.json';

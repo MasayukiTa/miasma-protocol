@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "version": "c56b7ab5c8bcbf8e",
+  "version": "9856e0cc26a91648",
   "files": {
     "css/style.css": "ed0c1639306506a22271d6ba16a1aa1df42f397677b07c6ce1f82724ecbcc89e",
     "icons/apple-touch-icon.png": "2388819c43f164216556fdeebac510c2d1dba7a73ebb4a66a2053a2eee2e6b2a",
@@ -8,10 +8,10 @@
     "icons/icon-512.png": "100989ec4d3334e02302e9f753244bf927472e0cd4070cee46569f737f1a0078",
     "icons/icon-maskable-512.png": "100989ec4d3334e02302e9f753244bf927472e0cd4070cee46569f737f1a0078",
     "index.html": "2292329ef15b6937f3273037962282b7dc820125bfbe20188e98ee9f28ac4615",
-    "js/app.js": "a35ec0d78981abc0db2790cb24a85d633c2dfde91eddaa3714748f7ada62e6a6",
+    "js/app.js": "ad1207956f02f5ec9b788e1eed3fedd913a1c16776b369eac4623676ba32200b",
     "js/bridge.js": "561710a2f70dfe4c32698332fc7bf1ae47af646001f7ff48bf4411c6af9bc594",
-    "js/format.js": "e6f123446aa2ceca1de752321fee5fc5aa5e464f7169bf6c215a164bd19a9cba",
-    "js/i18n.js": "db569fe42fcd029a00d844c1e0056c6dbb847f0a55d6ca8aba0aa81add1e7879",
+    "js/format.js": "b01029cfdfc7e791ed956df37a2b93926c2f227e8b870ffa9ef1c42275bdf998",
+    "js/i18n.js": "27f04a8ab297b98657d559b90c83b652e06c3f119d910461ecbf6dba88080eff",
     "js/password_policy.js": "d406157619603be6572c89f00a4b210f191ba3a0088460747d1fc7f5427a37c6",
     "js/storage.js": "50816d3c2600857f7567d833d1a9ea8f9faf95c0039935d40b5dfd1a8cf57af9",
     "js/theme.js": "53702b13bee8ccc2c9bc77102006e070afda4b212e17bde6bca282e77537d3dd",

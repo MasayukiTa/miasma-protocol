@@ -349,6 +349,8 @@ object DirectedApi {
     data class EnvelopeItem(
         val envelopeId: String,
         val senderPubkey: String,
+        // PeerId seen on the connection that delivered the invite; null for older records.
+        val senderPeerId: String?,
         val recipientPubkey: String,
         val state: String,
         val createdAt: Long,
@@ -367,6 +369,7 @@ object DirectedApi {
                 EnvelopeItem(
                     envelopeId = obj.optString("envelope_id", ""),
                     senderPubkey = obj.optString("sender_pubkey", ""),
+                    senderPeerId = if (obj.isNull("sender_peer_id")) null else obj.optString("sender_peer_id", "").ifEmpty { null },
                     recipientPubkey = obj.optString("recipient_pubkey", ""),
                     state = obj.optString("state", "Unknown"),
                     createdAt = obj.optLong("created_at", 0),
