@@ -563,6 +563,82 @@ fn chat_frames_from_a_newer_build_are_read_and_set_aside() {
     assert!(Message::decode(&unhex(CHAT_TEXT_HEX)[..20]).is_err());
 }
 
+fn chat_core(dir: &std::path::Path) -> miasma_core::chat::engine::ChatCore {
+    use miasma_core::chat::{
+        crypto::Identity,
+        engine::ChatCore,
+        outbox::Outbox,
+        store::{ChatStore, StoreSettings},
+    };
+    use miasma_core::state_crypto::StateKeys;
+    let keys = std::sync::Arc::new(StateKeys::open_or_init(dir).unwrap());
+    let id = Identity::from_seed(&rand::random());
+    let chat = dir.join("chat");
+    let s = StoreSettings::default();
+    let store = ChatStore::open(&chat, keys.clone(), id.id(), s.clone()).unwrap();
+    let (outbox, _) = Outbox::open(&miasma_core::paths::chat_outbox_file(&chat), keys, s, 1);
+    ChatCore::new(store, outbox, id, 4096)
+}
+
+/// The next queued item of `from` as envelope bytes.
+fn next_wire(from: &miasma_core::chat::engine::ChatCore, to: &[u8; 32]) -> Vec<u8> {
+    let e = from.outbox.first_for(to).expect("something queued");
+    from.prepare_wire(&e.id).unwrap().0
+}
+
+#[test]
+fn a_chat_peer_of_beta_2_reads_the_answer_to_a_message_that_does_not_open() {
+    // The frozen bytes of the answer, in both decoders.
+    let frozen = unhex(&chat_ack_hex(2));
+    match old_chat::decode_frame(&frozen).unwrap() {
+        old_chat::Frame::Ack { status, id } => {
+            assert_eq!(status, 2);
+            assert_eq!(id, <[u8; 16]>::try_from(unhex(ID16)).unwrap());
+        }
+        _ => panic!("not an ack"),
+    }
+    assert_eq!(
+        decode_frame(&frozen).unwrap().0,
+        Frame::Ack(Ack {
+            status: AckStatus::NoSession,
+            envelope_id: unhex(ID16).try_into().unwrap(),
+        })
+    );
+    // What this build answers when a message that is not a first message
+    // does not open (the state of the two sides has drifted apart).
+    let (da, db) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (a, b) = (chat_core(da.path()), chat_core(db.path()));
+    let (ida, idb) = (a.own_id(), b.own_id());
+    a.enqueue(&idb, "hello", 1).unwrap();
+    assert_eq!(
+        b.accept(&ida, &next_wire(&a, &idb), 2).status,
+        AckStatus::Stored
+    );
+    a.mark_delivered(&a.outbox.first_for(&idb).unwrap().id, 3);
+    b.enqueue(&ida, "hi", 4).unwrap();
+    assert_eq!(
+        a.accept(&idb, &next_wire(&b, &ida), 5).status,
+        AckStatus::Stored
+    );
+    a.enqueue(&idb, "again", 6).unwrap();
+    let mut wire = next_wire(&a, &idb);
+    let last = wire.len() - 1;
+    wire[last] ^= 1;
+    let status = b.accept(&ida, &wire, 7).status;
+    assert_eq!(status, AckStatus::NoSession);
+    // The sender of beta.2 reads the frame as the answer that makes it start a
+    // new session.
+    let env_id: [u8; 16] = wire[3..19].try_into().unwrap();
+    let frame = encode_frame(&Frame::Ack(Ack {
+        status,
+        envelope_id: env_id,
+    }));
+    match old_chat::decode_frame(&frame).unwrap() {
+        old_chat::Frame::Ack { status: s, id } => assert_eq!((s, id), (2, env_id)),
+        _ => panic!("not an ack"),
+    }
+}
+
 #[test]
 fn the_chat_constants_older_peers_rely_on_have_not_moved() {
     assert_eq!(chat::FRAME_DELIVER, 1);

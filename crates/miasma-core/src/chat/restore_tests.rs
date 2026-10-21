@@ -20,8 +20,8 @@ use super::{
 };
 
 /// The answer to an envelope that cannot be opened and does not start a
-/// session.
-const UNOPENABLE_ANSWER: AckStatus = AckStatus::BadRequest;
+/// session (every sender since beta.2 starts a new session on it).
+const UNOPENABLE_ANSWER: AckStatus = AckStatus::NoSession;
 
 /// True once a message sent from a restored copy no longer repeats a number
 /// the receiver already applied (the receiver then keeps the message).
@@ -139,38 +139,122 @@ fn restore_across_ratchet_steps(
     used
 }
 
-#[test]
-fn a_restore_across_ratchet_steps_stops_the_conversation_for_the_initiator() {
-    let (mut a, mut b) = (side(), side());
-    let used = restore_across_ratchet_steps(&mut a, &mut b, true);
-    let (peer_b, peer_a) = (b.id(), a.id());
-    // The restored side writes: its message reuses the position of the
-    // receipt it sent before the restore.
-    let q = a.core.enqueue(&peer_b, "after the restore", 3).unwrap();
-    let (wire, st) = send_one(&a, &b);
-    assert_eq!(position(&wire) == position(&used), !POSITION_REUSE_CLOSED);
-    assert_eq!(st, UNOPENABLE_ANSWER);
-    // The same bytes again, and the other side's messages: nothing opens.
-    assert_eq!(send_one(&a, &b).1, UNOPENABLE_ANSWER);
-    b.core.enqueue(&peer_a, "from the other side", 3).unwrap();
-    assert_eq!(send_one(&b, &a).1, UNOPENABLE_ANSWER);
-    assert_eq!(send_one(&b, &a).1, UNOPENABLE_ANSWER);
-    assert!(a.core.outbox.get(&q).is_some(), "still waiting, not lost");
+/// Texts `side` received from `peer`, in the order they were applied.
+fn received(side: &Side, peer: &[u8; 32]) -> Vec<String> {
+    side.core
+        .history(peer, None, 200)
+        .into_iter()
+        .filter(|m| !m.outgoing)
+        .map(|m| m.text)
+        .collect()
+}
+
+fn nothing_failed(side: &Side, peer: &[u8; 32]) -> bool {
+    side.core
+        .history(peer, None, 200)
+        .iter()
+        .all(|m| m.state != MsgState::Failed)
 }
 
 #[test]
-fn a_restore_across_ratchet_steps_stops_the_conversation_for_the_responder() {
+fn a_conversation_stopped_by_a_restore_across_ratchet_steps_starts_again_for_the_initiator() {
+    let (mut a, mut b) = (side(), side());
+    let used = restore_across_ratchet_steps(&mut a, &mut b, true);
+    let (peer_b, peer_a) = (b.id(), a.id());
+    // The restored side has three messages waiting. The first reuses the
+    // position of the receipt it sent before the restore.
+    for t in ["q1", "q2", "q3"] {
+        a.core.enqueue(&peer_b, t, 3).unwrap();
+    }
+    let (wire, st) = send_one(&a, &b);
+    assert_eq!(position(&wire) == position(&used), !POSITION_REUSE_CLOSED);
+    assert_eq!(st, UNOPENABLE_ANSWER);
+    // What the service does on that answer: a new session, the same message.
+    a.core.reset_session(&peer_b);
+    for _ in 0..3 {
+        assert_eq!(send_one(&a, &b).1, AckStatus::Stored);
+    }
+    assert!(a.core.outbox.first_for(&peer_b).is_none());
+    assert_eq!(received(&b, &peer_a), ["q1", "q2", "q3"]);
+    assert!(nothing_failed(&a, &peer_b));
+    // The other direction works on the new session.
+    b.core.enqueue(&peer_a, "from the other side", 4).unwrap();
+    assert_eq!(send_one(&b, &a).1, AckStatus::Stored);
+    assert!(received(&a, &peer_b).contains(&"from the other side".to_string()));
+}
+
+#[test]
+fn a_conversation_stopped_by_a_restore_across_ratchet_steps_starts_again_for_the_responder() {
     let (mut a, mut b) = (side(), side());
     let used = restore_across_ratchet_steps(&mut a, &mut b, false);
     let (peer_b, peer_a) = (b.id(), a.id());
-    // `b` is the restored side here.
-    b.core.enqueue(&peer_a, "after the restore", 3).unwrap();
-    let (wire, st) = send_one(&b, &a);
-    assert_eq!(position(&wire) == position(&used), !POSITION_REUSE_CLOSED);
-    assert_eq!(st, UNOPENABLE_ANSWER);
+    // `b` is the restored side here and `a` writes first.
     a.core.enqueue(&peer_b, "from the other side", 3).unwrap();
-    assert_eq!(send_one(&a, &b).1, UNOPENABLE_ANSWER);
-    assert_eq!(send_one(&a, &b).1, UNOPENABLE_ANSWER);
+    let (_, st) = send_one(&a, &b);
+    assert_eq!(st, UNOPENABLE_ANSWER);
+    a.core.reset_session(&peer_b);
+    assert_eq!(send_one(&a, &b).1, AckStatus::Stored);
+    // The restored side replaces its session and writes on the new one.
+    b.core.enqueue(&peer_a, "after the restore", 4).unwrap();
+    let (wire, st) = send_one(&b, &a);
+    assert_ne!(
+        position(&wire),
+        position(&used),
+        "a new session, a new position"
+    );
+    assert_eq!(st, AckStatus::Stored);
+    assert!(received(&a, &peer_b).contains(&"after the restore".to_string()));
+    assert!(received(&b, &peer_a).contains(&"from the other side".to_string()));
+    assert!(nothing_failed(&a, &peer_b) && nothing_failed(&b, &peer_a));
+}
+
+#[test]
+fn an_envelope_that_does_not_open_gets_no_session_and_changes_nothing() {
+    let (a, b) = (side(), side());
+    establish(&a, &b);
+    a.core.enqueue(&b.id(), "second", 2).unwrap();
+    let e = a.core.outbox.first_for(&b.id()).unwrap();
+    let (wire, _) = a.core.prepare_wire(&e.id).unwrap();
+    let mut damaged = wire.clone();
+    let last = damaged.len() - 1;
+    damaged[last] ^= 0x01;
+    let state = |s: &Side| {
+        s.core.store.peek_peer(&a.id(), |st| {
+            st.session.as_ref().map(|x| x.to_bytes().to_vec())
+        })
+    };
+    let before = state(&b);
+    assert_eq!(
+        b.core.accept(&a.id(), &damaged, 3).status,
+        AckStatus::NoSession
+    );
+    let mut handled = false;
+    let st = b.core.accept_raw(&a.id(), &damaged, |_| {
+        handled = true;
+        AckStatus::Stored
+    });
+    assert_eq!(st, AckStatus::NoSession);
+    assert!(
+        !handled,
+        "nothing is handed over for a message that did not open"
+    );
+    assert_eq!(state(&b), before);
+    // The genuine envelope still opens.
+    assert_eq!(b.core.accept(&a.id(), &wire, 4).status, AckStatus::Stored);
+    // A first message that does not open is still a bad request: nothing is
+    // known about the sender yet, so there is nothing to start again.
+    let c = side();
+    c.core.enqueue(&b.id(), "hello", 1).unwrap();
+    let e = c.core.outbox.first_for(&b.id()).unwrap();
+    let (first, _) = c.core.prepare_wire(&e.id).unwrap();
+    let mut bad_first = first.clone();
+    let last = bad_first.len() - 1;
+    bad_first[last] ^= 0x01;
+    assert_eq!(
+        b.core.accept(&c.id(), &bad_first, 5).status,
+        AckStatus::BadRequest
+    );
+    assert_eq!(b.core.accept(&c.id(), &first, 6).status, AckStatus::Stored);
 }
 
 #[test]
