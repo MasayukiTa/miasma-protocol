@@ -22,15 +22,19 @@
 //!
 //! # File permissions
 //!
+//! The file is created through [`crate::secure_file`] and checked before the
+//! secret is written; any failure aborts the daemon start (fail closed).
+//!
 //! * Unix: the file is created with mode `0600` at creation time (never
 //!   widened and narrowed afterwards); an existing file is unlinked first so a
-//!   stale file with looser permissions is never reused.
-//! * Windows: `std` has no ACL API and the crate has no direct dependency that
-//!   does.  The file is created empty, then the system `icacls` tool is asked
-//!   to drop inheritance and grant access to the current user only, and only
-//!   then is the secret written.  If `icacls` cannot be run or fails, the
-//!   daemon logs a warning and keeps running with the ACL the per-user data
-//!   directory already provides; that fallback is not verified by the daemon.
+//!   stale file with looser permissions is never reused.  Afterwards the file
+//!   (regular file, mode `0600`, owned by the daemon's user) and its directory
+//!   (owned by the daemon's user, not writable by others) are verified.
+//! * Windows: the file is created with a security descriptor passed to
+//!   `CreateFileW` (one entry for the current user, no inheritance, owner set
+//!   to the current user), so it is restricted from the first byte.  Its access
+//!   list and owner are then verified.
+//! * Other platforms: not supported; creating the file fails.
 
 use std::{
     io::Write,
@@ -172,7 +176,30 @@ impl ControlAuth {
 // ─── Token file ──────────────────────────────────────────────────────────────
 
 /// Write the token to `<data_dir>/daemon.token`, replacing any stale file.
+///
+/// Fails closed: if the data directory is not private, the file cannot be
+/// created owner-only, or the created file does not verify as owner-only,
+/// nothing secret is written, the file is removed and an error is returned.
+/// The daemon treats that error as a failed start, so neither the HTTP bridge
+/// nor the control IPC is brought up.
 pub fn write_token_file(data_dir: &Path, token: &ControlToken) -> Result<()> {
+    write_token_file_with(data_dir, token, crate::secure_file::verify_owner_only)
+}
+
+/// [`write_token_file`] with the post-creation check injected (tests make it
+/// fail to prove the start is refused).
+fn write_token_file_with(
+    data_dir: &Path,
+    token: &ControlToken,
+    verify: impl Fn(&Path) -> std::result::Result<(), crate::MiasmaError>,
+) -> Result<()> {
+    crate::secure_file::verify_private_dir(data_dir).with_context(|| {
+        format!(
+            "the data directory {} is not private to the current user; \
+             refusing to start the control interface",
+            data_dir.display()
+        )
+    })?;
     let path = data_dir.join(TOKEN_FILE);
     // Never reuse a stale file: it may carry looser permissions.
     match std::fs::remove_file(&path) {
@@ -180,74 +207,25 @@ pub fn write_token_file(data_dir: &Path, token: &ControlToken) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e).context("remove stale daemon.token"),
     }
-    let mut file = create_private_file(&path).context("create daemon.token")?;
-    file.write_all(token.as_str().as_bytes())
-        .context("write daemon.token")?;
-    file.flush().ok();
-    Ok(())
-}
-
-#[cfg(unix)]
-fn create_private_file(path: &Path) -> Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    Ok(std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)?)
-}
-
-#[cfg(windows)]
-fn create_private_file(path: &Path) -> Result<std::fs::File> {
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
-    // The file is still empty here, so nothing secret is exposed while the
-    // ACL is being tightened.
-    if let Err(e) = restrict_to_current_user(path) {
-        tracing::warn!(
-            "could not restrict daemon.token to the current user ({e}); \
-             relying on the ACL of the per-user data directory"
+    let mut file = crate::secure_file::create_new_restricted(&path)
+        .context("could not create daemon.token as an owner-only file; refusing to start the control interface")?;
+    // Verify while the file is still empty, so the secret is never written to
+    // a file whose protection is unconfirmed.
+    if let Err(e) = verify(&path) {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        return Err(anyhow::Error::new(e)).context(
+            "daemon.token is not restricted to the current user; \
+             refusing to start the control interface",
         );
     }
-    Ok(file)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn create_private_file(path: &Path) -> Result<std::fs::File> {
-    Ok(std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?)
-}
-
-/// Drop inherited ACEs on `path` and grant full control to the current user
-/// only, through the system `icacls` tool.
-#[cfg(windows)]
-pub fn restrict_to_current_user(path: &Path) -> Result<()> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-    let user = std::env::var("USERNAME").context("USERNAME is not set")?;
-    let principal = match std::env::var("USERDOMAIN") {
-        Ok(d) if !d.is_empty() => format!("{d}\\{user}"),
-        _ => user,
-    };
-    let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
-    let icacls = PathBuf::from(system_root)
-        .join("System32")
-        .join("icacls.exe");
-    let out = std::process::Command::new(icacls)
-        .arg(path)
-        .arg("/inheritance:r")
-        .arg("/grant:r")
-        .arg(format!("{principal}:(F)"))
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .context("run icacls")?;
-    if !out.status.success() {
-        bail!("icacls exited with {}", out.status);
+    let written = file
+        .write_all(token.as_str().as_bytes())
+        .and_then(|()| file.flush());
+    drop(file);
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&path);
+        return Err(e).context("write daemon.token");
     }
     Ok(())
 }
@@ -360,6 +338,94 @@ mod tests {
         assert!(!auth.consume_wipe_challenge("wrong"));
         assert!(auth.consume_wipe_challenge(&n));
         assert!(!auth.consume_wipe_challenge(&n));
+    }
+
+    #[test]
+    fn token_file_round_trips_and_verifies() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = ControlToken::generate();
+        write_token_file(dir.path(), &token).unwrap();
+        crate::secure_file::verify_owner_only(&dir.path().join(TOKEN_FILE)).unwrap();
+        let read = read_token_file(dir.path()).unwrap();
+        assert!(read.matches(token.as_str()));
+    }
+
+    #[test]
+    fn stale_token_file_is_replaced_by_an_owner_only_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(TOKEN_FILE), "stale").unwrap();
+        let token = ControlToken::generate();
+        write_token_file(dir.path(), &token).unwrap();
+        crate::secure_file::verify_owner_only(&dir.path().join(TOKEN_FILE)).unwrap();
+        assert!(read_token_file(dir.path()).unwrap().matches(token.as_str()));
+    }
+
+    /// A failed check must refuse the start and leave no secret on disk.
+    #[test]
+    fn failed_verification_refuses_and_leaves_no_token_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = ControlToken::generate();
+        let err = write_token_file_with(dir.path(), &token, |_| {
+            Err(crate::MiasmaError::Io(std::io::Error::other(
+                "injected verification failure",
+            )))
+        })
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("refusing to start"),
+            "unexpected error: {err:#}"
+        );
+        assert!(!dir.path().join(TOKEN_FILE).exists());
+    }
+
+    /// The real check refuses a file with default (non owner-only) access.
+    #[test]
+    fn real_verification_rejects_a_loosely_protected_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let loose = dir.path().join("loose.tmp");
+        std::fs::write(&loose, "x").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        assert!(crate::secure_file::verify_owner_only(&loose).is_err());
+    }
+
+    /// A token path that cannot be replaced fails the write.
+    #[test]
+    fn unreplaceable_token_path_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join(TOKEN_FILE);
+        std::fs::create_dir(&blocker).unwrap();
+        std::fs::write(blocker.join("inner"), "x").unwrap();
+        assert!(write_token_file(dir.path(), &ControlToken::generate()).is_err());
+    }
+
+    /// Unix: a data directory other users can write to is refused.
+    #[cfg(unix)]
+    #[test]
+    fn world_writable_data_dir_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        let err = write_token_file(dir.path(), &ControlToken::generate()).unwrap_err();
+        assert!(format!("{err:#}").contains("not private"), "{err:#}");
+        assert!(!dir.path().join(TOKEN_FILE).exists());
+    }
+
+    /// Unix: the created file is 0600 and owned by the current user.
+    #[cfg(unix)]
+    #[test]
+    fn unix_token_file_mode_is_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        write_token_file(dir.path(), &ControlToken::generate()).unwrap();
+        let mode = std::fs::metadata(dir.path().join(TOKEN_FILE))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     #[test]
