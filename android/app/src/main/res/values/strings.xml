@@ -32,6 +32,9 @@
 All locally stored shares become permanently unreadable. This cannot be undone.</string>
     <string name="wipe_now">WIPE NOW</string>
     <string name="cancel">Cancel</string>
+    <string name="screen_privacy_title">Screen privacy</string>
+    <string name="screen_privacy_description">Block screenshots, screen recording and the app preview in the recent apps list.</string>
+    <string name="webview_unsupported">This device\'s WebView is too old for the web view screen. Update Android System WebView (or Google Chrome) and try again.</string>
 
     <string name="refresh">Refresh</string>
     <string name="send_title">Send</string>
