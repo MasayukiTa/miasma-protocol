@@ -719,7 +719,8 @@ mod tests {
             )
         };
         // Empty.
-        match try_pw("") {
+        let empty = String::new();
+        match try_pw(&empty) {
             Err(MiasmaError::WeakPassword(v)) => {
                 assert!(v.contains(&PolicyViolation::TooShortPrivate {
                     min: DIRECTED_MIN_LEN,
@@ -751,7 +752,7 @@ mod tests {
         ));
         // Whitespace only.
         assert!(matches!(
-            try_pw(&" ".repeat(20)),
+            try_pw(&compose(0, 0, 0, &[Other::Space; 20])),
             Err(MiasmaError::WeakPassword(_))
         ));
         // Exactly at the floor.
@@ -818,7 +819,8 @@ mod tests {
         let out = decrypt_directed_content(&key, &payload.content_nonce, &protected).unwrap();
         assert_eq!(out, plaintext);
         // The empty password also derives a key without being refused.
-        assert!(derive_content_key(&recipient_secret, &envelope, "").is_ok());
+        let empty = String::new();
+        assert!(derive_content_key(&recipient_secret, &envelope, &empty).is_ok());
     }
 
     #[test]
