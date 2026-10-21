@@ -41,6 +41,10 @@ else
   exit 2
 fi
 
+# Keep the machine's own paths (home directory, user name) out of the .wasm:
+# panic locations in a release build would otherwise embed them.
+export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$root=/miasma --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo --remap-path-prefix=${RUSTUP_HOME:-$HOME/.rustup}=/rustup"
+
 cargo build --package miasma-wasm --lib --release --target wasm32-unknown-unknown --locked
 target_dir="${CARGO_TARGET_DIR:-$root/target}"
 mkdir -p "$out"

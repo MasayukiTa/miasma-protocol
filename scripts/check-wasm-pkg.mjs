@@ -200,8 +200,16 @@ if (mode === '--write') {
     const first = a.findIndex((l, i) => l !== b[i]);
     problems.push(`rebuilt wasm interface differs from web/pkg (first difference near line ${first}: '${a[first]}' vs '${b[first]}')`);
   }
+  // The build script remaps the machine's own paths; a home directory in the
+  // rebuilt module means that stopped working.
+  const HOME_PATH = /(?:[A-Za-z]:\\Users\\|\/home\/|\/Users\/|\/runner\/)[A-Za-z0-9_.-]+/g;
+  const homePaths = (file) => new Set(fs.readFileSync(file).toString('latin1').match(HOME_PATH) ?? []).size;
+  const rebuiltHomes = homePaths(path.join(dir, WASM_FILE));
+  if (rebuiltHomes) problems.push(`the rebuilt wasm embeds ${rebuiltHomes} home-directory path(s); the build script's path remapping did not apply`);
+  const committedHomes = homePaths(path.join(PKG, WASM_FILE));
+  if (committedHomes) console.log(`note: web/pkg/${WASM_FILE} embeds ${committedHomes} distinct home-directory path(s) from the machine that built it`);
   if (problems.length) fail(problems);
-  const same = committed.files[WASM_FILE] === rebuilt.files[WASM_FILE];
+  const same =committed.files[WASM_FILE] === rebuilt.files[WASM_FILE];
   console.log(
     `rebuilt package agrees with web/pkg: glue, type files and wasm interface identical; wasm bytes ${
       same ? 'identical' : 'differ (expected: the code embeds absolute build paths)'

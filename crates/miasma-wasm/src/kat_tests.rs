@@ -684,7 +684,7 @@ fn no_fallback_random_generator_in_shipped_code() {
 
 // ── Frozen digests (BLAKE3 of the deterministic outputs above) ────────
 
-const AES_CT_DIGEST: &str = "";
-const RS_SHARDS_DIGEST: &str = "";
-const SHARES_DIGEST: &str = "";
-const BUNDLE_DIGEST: &str = "";
+const AES_CT_DIGEST: &str = "694659efdeabc55113bc154dc0ca0775b51667488d1e008c0cfd07e8f016793e";
+const RS_SHARDS_DIGEST: &str = "692fb1ad378bcc709e6543f95809e20b73a7a698ce6e2d27a156ce8688b4c020";
+const SHARES_DIGEST: &str = "8132ea001f64e18995a504bf4272d5065881659cccb0250d864b295e2257314a";
+const BUNDLE_DIGEST: &str = "9e676be210c3e8af54205de849d3aecd9d151fb805a0f3e279d0c16c2a16eb6e";

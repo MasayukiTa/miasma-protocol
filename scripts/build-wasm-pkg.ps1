@@ -30,6 +30,12 @@ if ($Update) { $out = Join-Path $root 'web\pkg' }
 elseif ($OutDir) { $out = $OutDir }
 else { throw 'pass -OutDir <dir> or -Update' }
 
+# Keep the machine's own paths (home directory, user name) out of the .wasm:
+# panic locations in a release build would otherwise embed them.
+$cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $HOME '.cargo' }
+$rustupHome = if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME } else { Join-Path $HOME '.rustup' }
+$env:RUSTFLAGS = "$($env:RUSTFLAGS) --remap-path-prefix=$root=/miasma --remap-path-prefix=$cargoHome=/cargo --remap-path-prefix=$rustupHome=/rustup"
+
 cargo build --package miasma-wasm --lib --release --target wasm32-unknown-unknown --locked
 if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
 $targetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $root 'target' }
