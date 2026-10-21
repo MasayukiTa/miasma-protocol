@@ -1,0 +1,26 @@
+name: tmp-wasm-build
+on:
+  push:
+    branches: [tmp/wasm-build-linux]
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Read the wasm-bindgen version from Cargo.lock
+        id: wbg
+        run: echo "version=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/[^0-9.]/, ""); print; exit }' Cargo.lock)" >> "$GITHUB_OUTPUT"
+      - run: cargo install wasm-bindgen-cli --version "${{ steps.wbg.outputs.version }}" --locked --root ~/.cargo-wbg
+      - run: |
+          export PATH="$HOME/.cargo-wbg/bin:$PATH"
+          bash scripts/build-wasm-pkg.sh --update
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg
+          path: |
+            web/pkg
+            web/asset-manifest.json
+            crates/miasma-wasm/pkg-build.json
