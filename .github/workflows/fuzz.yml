@@ -1,0 +1,118 @@
+name: Fuzz
+
+# Short smoke run on every pull request; longer scheduled run every night.
+# The fuzz targets live in fuzz/ (a separate Cargo workspace, nightly only).
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/miasma-core/**"
+      - "fuzz/**"
+      - ".github/workflows/fuzz.yml"
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Seconds per target"
+        required: false
+        default: "600"
+
+concurrency:
+  group: fuzz-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pinned: the nightly toolchain by date, cargo-fuzz by version.
+  FUZZ_NIGHTLY: nightly-2026-09-01
+  CARGO_FUZZ_VERSION: 0.13.1
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Fuzz ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - chat_frame
+          - chat_state
+          - group_decoders
+          - capability_fragment
+          - hybrid_kex
+          - record_value
+          - share_bytes
+          - directed_wire
+          - ws_wire
+          - contact_codes
+          - state_doc_log
+          - update_files
+          - onion_packet
+    env:
+      # Seconds of fuzzing per target: 20 on a pull request, 600 on the
+      # nightly schedule, or the value given for a manual run.
+      FUZZ_SECONDS: ${{ github.event_name == 'schedule' && '600' || github.event_name == 'workflow_dispatch' && inputs.seconds || '20' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned nightly toolchain
+        run: |
+          rustup toolchain install "$FUZZ_NIGHTLY" --profile minimal
+          rustup default "$FUZZ_NIGHTLY"
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version "$CARGO_FUZZ_VERSION" --locked
+
+      - name: Fuzz
+        working-directory: fuzz
+        run: |
+          mkdir -p "artifacts/${{ matrix.target }}"
+          cargo fuzz run "${{ matrix.target }}" --sanitizer address -- \
+            -max_total_time="$FUZZ_SECONDS" -timeout=10 -rss_limit_mb=2048 -max_len=65536
+
+      - name: Upload crash inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Upload the grown corpus
+        if: github.event_name == 'schedule' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus-${{ matrix.target }}
+          path: fuzz/corpus/${{ matrix.target }}
+          retention-days: 30
+          if-no-files-found: ignore
+
+  seeds:
+    name: Seed corpus replay (stable)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+
+      - name: Replay the seeds through every target
+        working-directory: fuzz
+        run: cargo test --package miasma-fuzz-harness --locked

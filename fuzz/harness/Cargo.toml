@@ -1,0 +1,16 @@
+[package]
+name = "miasma-fuzz-harness"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Decoder entry points shared by the fuzz targets and the corpus replay test"
+
+[dependencies]
+# Default features stay on: miasma-core does not build without the iroh feature.
+miasma-core = { path = "../../crates/miasma-core", features = ["pqc"] }
+bincode = "1"
+rand = "0.8"
+blake3 = "1"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
