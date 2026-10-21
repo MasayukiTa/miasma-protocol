@@ -6,13 +6,20 @@
 //! that is not a plain key is recognised, and which files a wipe removes are
 //! decided here and in [`paths`](crate::paths).
 //!
-//! Today the key is a plain 32-byte `master.key` ([`FileProvider`]). A
-//! `master.key` of exactly [`stub::STUB_LEN`] (64) bytes is the marker for a key
-//! kept elsewhere; this build cannot open such a key and says so
-//! ([`RootKeyError::SealedUnavailable`]) instead of failing with a length error
-//! or creating a new key.
+//! By default the key is a plain 32-byte `master.key` ([`FileProvider`]). A
+//! program that installs a [`SealedProvider`] keeps it instead in `root.sealed`
+//! ([`format`]), wrapped by a [`DeviceWrap`], with a 64-byte marker in
+//! `master.key` ([`stub`]) so that older programs stop instead of starting a new
+//! key; an existing plain key is moved over automatically at start-up
+//! ([`sealed`]). A key this build cannot open is reported
+//! ([`RootKeyError::SealedUnavailable`] and its neighbours) and nothing is
+//! created or changed.
 
+mod durable;
+mod filewrap;
+pub mod format;
 mod provider;
+pub mod sealed;
 pub mod stub;
 pub mod wipe;
 
@@ -20,9 +27,12 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
+pub use filewrap::FileWrap;
 pub use provider::{
-    Availability, DestroyOutcome, FileProvider, ProtectionLevel, ProviderId, RootKeyProvider,
+    Availability, DestroyOutcome, DeviceWrap, FileProvider, ProtectionLevel, ProviderId,
+    RootKeyProvider, WrapError,
 };
+pub use sealed::SealedProvider;
 pub use wipe::{wipe_data_dir, WipeReport};
 
 use crate::secure_memory::SecureBytes;
@@ -44,6 +54,27 @@ pub enum RootKeyError {
     /// Nothing was created or changed.
     #[error("sealed key unavailable: the master key is stored in a form this program cannot open")]
     SealedUnavailable,
+    /// The marker is there but `root.sealed` is not.
+    #[error("sealed key unavailable: root.sealed is missing")]
+    SealedFileMissing,
+    /// `root.sealed` does not authenticate or does not parse.
+    #[error("sealed key unavailable: root.sealed is damaged ({0})")]
+    SealedCorrupt(String),
+    /// The marker and `root.sealed` belong to different keys.
+    #[error("sealed key unavailable: master.key and root.sealed do not belong together")]
+    SealedMismatch,
+    /// What wrapped the key is gone (the wrapping secret was deleted).
+    #[error("sealed key unavailable: the secret that wraps the key is gone")]
+    SealedKeyGone,
+    /// The key store that wraps the key cannot be reached right now.
+    #[error("sealed key unavailable: the key store cannot be used ({0})")]
+    KeyStoreUnavailable(String),
+    /// A file was written by a newer program.
+    #[error(
+        "sealed key unavailable: {file} has format version {found}, newer than this program \
+         understands; update the program"
+    )]
+    FutureVersion { file: &'static str, found: u8 },
     /// A wipe is running or could not be finished.
     #[error("a wipe is pending; the master key cannot be used")]
     WipePending,
@@ -200,8 +231,16 @@ pub fn erase_cached(data_dir: &Path) -> usize {
 /// A `wipe.pending` marker left by an interrupted wipe is finished first (the
 /// wipe never opens the key).
 pub fn get(data_dir: &Path, create: CreatePolicy) -> Result<RootKey, RootKeyError> {
+    get_with(data_dir, create, &*current_provider())
+}
+
+/// [`get`] with an explicit provider instead of the installed one.
+pub fn get_with(
+    data_dir: &Path,
+    create: CreatePolicy,
+    provider: &dyn RootKeyProvider,
+) -> Result<RootKey, RootKeyError> {
     wipe::finish_pending(data_dir)?;
-    let provider = current_provider();
     let key = match provider.open(data_dir)? {
         Some(k) => k,
         None => {
@@ -225,10 +264,29 @@ pub fn get(data_dir: &Path, create: CreatePolicy) -> Result<RootKey, RootKeyErro
     Ok(root)
 }
 
+/// Seal the plain key of `data_dir` with `wrap` now. `Ok(true)` when this call
+/// sealed it; `Ok(false)` when there is nothing to do (no plain key, already
+/// sealed, or another process holds the migration lock). The same move runs
+/// automatically from [`get`] when a [`SealedProvider`] is installed.
+pub fn seal_with(data_dir: &Path, wrap: &dyn DeviceWrap) -> Result<bool, RootKeyError> {
+    wipe::finish_pending(data_dir)?;
+    let plain = match std::fs::read(crate::paths::master_key(data_dir)) {
+        Ok(b) => zeroize::Zeroizing::new(b),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(RootKeyError::Io(e)),
+    };
+    if plain.len() != 32 {
+        return Ok(false);
+    }
+    let key = provider::classify(&plain)?;
+    Ok(sealed::migrate(data_dir, wrap, &key)? == sealed::Moved::Sealed)
+}
+
 /// `true` when the data directory has a key in any form (plain, or the marker
 /// of a key kept elsewhere). Does not read or open the key.
 pub fn is_initialized(data_dir: &Path) -> bool {
     crate::paths::master_key(data_dir).exists()
+        || crate::paths::ROOT_SEALED.in_dir(data_dir).exists()
 }
 
 /// What is on disk, without opening the key.
@@ -255,7 +313,14 @@ pub fn status(data_dir: &Path) -> RootKeyState {
     let path = crate::paths::master_key(data_dir);
     let len = match std::fs::metadata(&path) {
         Ok(m) => m.len(),
-        Err(_) => return RootKeyState::Absent,
+        Err(_) => {
+            // The marker is lost but the sealed file is there.
+            return if crate::paths::ROOT_SEALED.in_dir(data_dir).exists() {
+                RootKeyState::Sealed
+            } else {
+                RootKeyState::Absent
+            };
+        }
     };
     if len == 32 {
         return RootKeyState::File;
@@ -290,5 +355,7 @@ impl From<RootKeyError> for crate::state_crypto::StateError {
     }
 }
 
+#[cfg(test)]
+mod sealed_tests;
 #[cfg(test)]
 mod tests;
