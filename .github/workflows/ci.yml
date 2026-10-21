@@ -99,7 +99,7 @@ jobs:
       # this is the build without it (Settings shows the choices switched off).
       - name: Test desktop and check CLI without the hybrid feature
         run: |
-          cargo test -p miasma-desktop --no-default-features --locked --lib -- the_chat_protection_radios
+          cargo test -p miasma-desktop --no-default-features --locked --bin miasma-desktop -- the_chat_protection_radios
           cargo check -p miasma-cli --no-default-features --locked
 
       # The bridge's tests were only ever built, never run, so its entire
