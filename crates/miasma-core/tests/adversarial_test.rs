@@ -4037,6 +4037,11 @@ async fn dht_fire_and_forget_backpressure() {
 // ─── Directed Sharing — Helpers ─────────────────────────────────────────────
 
 /// Generate deterministic sender/recipient key pairs for directed sharing tests.
+/// A private-share password that meets the creation policy, generated at run time.
+fn directed_pw() -> String {
+    miasma_core::transfer::password_policy::generate(16).to_string()
+}
+
 fn directed_test_keys() -> ([u8; 32], [u8; 32], [u8; 32], [u8; 32]) {
     let sender_secret_raw =
         miasma_core::crypto::keyderive::derive_sharing_key(b"sender-master-key-32bytes-pad!!!")
@@ -4089,10 +4094,11 @@ fn directed_envelope_crypto_roundtrip() {
     let (sender_secret, _sender_pub, recipient_secret, recipient_pub) = directed_test_keys();
     let plaintext = b"Confidential document contents - roundtrip test";
 
+    let pw = directed_pw();
     let (envelope, protected, _envelope_key) = create_envelope(
         &sender_secret,
         &recipient_pub,
-        "strong-password-42",
+        &pw,
         RetentionPeriod::OneDay,
         plaintext,
         Some("secret.pdf".to_string()),
@@ -4109,8 +4115,7 @@ fn directed_envelope_crypto_roundtrip() {
     assert_eq!(payload.total_shards, 20);
 
     // Recipient derives content key with password and decrypts content.
-    let content_key =
-        derive_content_key(&recipient_secret, &envelope, "strong-password-42").unwrap();
+    let content_key = derive_content_key(&recipient_secret, &envelope, &pw).unwrap();
     let decrypted =
         decrypt_directed_content(&content_key, &payload.content_nonce, &protected).unwrap();
     assert_eq!(decrypted, plaintext);
@@ -4126,7 +4131,7 @@ fn directed_finalize_envelope_roundtrip() {
     let (mut envelope, protected, envelope_key) = create_envelope(
         &sender_secret,
         &recipient_pub,
-        "password",
+        &directed_pw(),
         RetentionPeriod::OneDay,
         b"data",
         None,
@@ -4149,10 +4154,12 @@ fn directed_wrong_password_rejection() {
     let (sender_secret, _, recipient_secret, recipient_pub) = directed_test_keys();
     let plaintext = b"Secret!";
 
+    let pw = directed_pw();
+    let other_pw = directed_pw();
     let (envelope, protected, _envelope_key) = create_envelope(
         &sender_secret,
         &recipient_pub,
-        "correct-password",
+        &pw,
         RetentionPeriod::OneHour,
         plaintext,
         None,
@@ -4162,7 +4169,7 @@ fn directed_wrong_password_rejection() {
     let payload = decrypt_envelope_payload(&recipient_secret, &envelope).unwrap();
 
     // Derive key with wrong password.
-    let wrong_key = derive_content_key(&recipient_secret, &envelope, "wrong-password").unwrap();
+    let wrong_key = derive_content_key(&recipient_secret, &envelope, &other_pw).unwrap();
     let result = decrypt_directed_content(&wrong_key, &payload.content_nonce, &protected);
     assert!(result.is_err(), "decryption with wrong password must fail");
 }
@@ -4175,7 +4182,7 @@ fn directed_wrong_recipient_rejection() {
     let (envelope, _protected, _envelope_key) = create_envelope(
         &sender_secret,
         &recipient_pub,
-        "password",
+        &directed_pw(),
         RetentionPeriod::OneHour,
         b"data",
         None,
@@ -4540,7 +4547,7 @@ fn directed_envelope_tampering_detection() {
     let (mut envelope, _protected, _envelope_key) = create_envelope(
         &sender_secret,
         &recipient_pub,
-        "password",
+        &directed_pw(),
         RetentionPeriod::OneHour,
         b"tamper-test-data",
         None,
@@ -4560,10 +4567,11 @@ fn directed_envelope_tampering_detection() {
     );
 
     // Restore payload, tamper with protected content instead.
+    let pw2 = directed_pw();
     let (envelope2, mut protected2, _envelope_key2) = create_envelope(
         &sender_secret,
         &recipient_pub,
-        "password2",
+        &pw2,
         RetentionPeriod::OneHour,
         b"tamper-test-content",
         None,
@@ -4571,7 +4579,7 @@ fn directed_envelope_tampering_detection() {
     .unwrap();
 
     let payload2 = decrypt_envelope_payload(&recipient_secret, &envelope2).unwrap();
-    let content_key = derive_content_key(&recipient_secret, &envelope2, "password2").unwrap();
+    let content_key = derive_content_key(&recipient_secret, &envelope2, &pw2).unwrap();
 
     // Flip a byte in protected content.
     let mid_idx = protected2.len() / 2;
@@ -4589,10 +4597,11 @@ fn directed_envelope_tampering_detection() {
 fn directed_password_salt_uniqueness() {
     let (sender_secret, _, _, recipient_pub) = directed_test_keys();
 
+    let same_pw = directed_pw();
     let (env1, _, _key1) = create_envelope(
         &sender_secret,
         &recipient_pub,
-        "same-password",
+        &same_pw,
         RetentionPeriod::OneHour,
         b"data1",
         None,
@@ -4602,7 +4611,7 @@ fn directed_password_salt_uniqueness() {
     let (env2, _, _key2) = create_envelope(
         &sender_secret,
         &recipient_pub,
-        "same-password",
+        &same_pw,
         RetentionPeriod::OneHour,
         b"data2",
         None,
@@ -6108,7 +6117,7 @@ fn directed_relay_request_variants_serde() {
     let (test_envelope, _protected, _key) = create_envelope(
         &sender_secret,
         recipient_pubkey.as_bytes(),
-        "test-password",
+        &directed_pw(),
         RetentionPeriod::OneDay,
         b"test content",
         Some("test.txt".to_string()),

@@ -45,6 +45,8 @@
     <string name="send_selected_file">選択中: %1$s（%2$s）</string>
     <string name="send_use_text">テキスト入力に戻す</string>
     <string name="send_password">パスワード（受信者と共有）</string>
+    <string name="send_password_rule">%1$d 文字以上で、英字・数字・記号を含めてください。</string>
+    <string name="send_password_refused">このパスワードは使えません。%1$d 文字以上で、英字・数字・記号を含めてください。</string>
     <string name="send_retention_hours">保持期間（時間）</string>
     <string name="send_retention_default">時間の指定が無効なため24時間を使用します。</string>
     <string name="send_securely">安全に送信</string>

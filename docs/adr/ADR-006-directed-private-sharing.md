@@ -17,8 +17,9 @@ Recipient-targeted sharing requires:
    compromising the recipient's long-term key alone is not sufficient.
 3. **Anti-misdirection** — a mechanism for the sender to confirm they are
    targeting the correct recipient before the content becomes retrievable.
-4. **Forward secrecy** — compromise of long-term keys does not expose past
-   directed shares.
+4. **Ephemeral sender key** — compromise of the sender's long-term key alone
+   does not expose past directed shares. This is not forward secrecy against
+   the recipient (see the security properties).
 5. **Honest deletion** — sender revocation and expiry render content
    cryptographically unrecoverable, even though encrypted shards may persist
    on the network.
@@ -62,9 +63,11 @@ Salt is 32 bytes of random, stored in the envelope.
 
 **Ephemeral keys**: Each envelope generates a fresh X25519 keypair. The
 ephemeral public key is included in the envelope; the ephemeral secret is
-not persisted after envelope creation. This provides forward secrecy —
-compromise of the sender's long-term sharing key does not expose past
-envelopes.
+not persisted after envelope creation. The sender's long-term sharing key is
+not used in key derivation, so its compromise alone does not expose past
+envelopes. If the recipient's long-term key is compromised, the shared secret
+of recorded envelopes can be recomputed from the ephemeral public key; the
+password remains the second factor.
 
 ### 2. Envelope structure
 
@@ -279,9 +282,11 @@ Deletion in a distributed system is honest but not absolute:
 - **Anti-misdirection**: the confirmation challenge prevents sending to the
   wrong recipient. The sender must verify (out-of-band) that the person
   displaying the challenge code is the intended recipient.
-- **Forward secrecy**: each envelope uses a fresh ephemeral X25519 keypair.
-  Compromise of a peer's long-term sharing key does not retroactively expose
-  previously sent envelopes, because the ephemeral secret is not persisted.
+- **Ephemeral sender key**: each envelope uses a fresh ephemeral X25519
+  keypair that is not persisted. Compromise of the sender's long-term sharing
+  key alone does not expose previously sent envelopes. Compromise of the
+  recipient's long-term key allows the shared secret of recorded envelopes to
+  be recomputed, so this is not forward secrecy against the recipient.
 - **Sender revocability**: senders can invalidate envelopes before retrieval.
   Combined with retention-based expiry, this provides lifecycle control.
 

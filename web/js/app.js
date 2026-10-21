@@ -5,6 +5,14 @@ import { initDB, saveShares, getSharesByMidPrefix, getShareCount, getMidCount, g
 import { MiasmaBridge, getAuthState, onAuthChange, setAfterWipeHandler } from './bridge.js';
 import { wipeEverything, zeroFill } from './wipe.js';
 import { createTransfers } from './transfers.js';
+import { checkDirectedPassword, parseWeakPasswordCodes } from './password_policy.js';
+
+// A password refused for a private share, in the page language ('' when it is acceptable).
+function directedPasswordProblem(codes) {
+  if (!codes || codes.length === 0) return '';
+  const reasons = codes.map((c) => t('tf_pw_' + c)).join(t('tf_pw_sep'));
+  return `${t('send_pw_weak_prefix')} ${reasons}`;
+}
 
 let wasm = null;
 let bridge = null;
@@ -695,6 +703,13 @@ async function handleDirectedSend() {
     return;
   }
 
+  // The daemon enforces the same rule; this only saves the upload and shows the reason.
+  const weak = directedPasswordProblem(checkDirectedPassword(password));
+  if (weak) {
+    showToast(weak, 'error');
+    return;
+  }
+
   const btn = document.getElementById('btn-directed-send');
   btn.disabled = true;
   btn.textContent = t('processing');
@@ -709,7 +724,7 @@ async function handleDirectedSend() {
     showToast(t('send_success'), 'success');
   } catch (e) {
     console.error('Directed send failed:', e);
-    showToast(e.message, 'error');
+    showToast(directedPasswordProblem(parseWeakPasswordCodes(e && e.message)) || e.message, 'error');
   } finally {
     btn.disabled = false;
     btn.textContent = t('send_btn');
