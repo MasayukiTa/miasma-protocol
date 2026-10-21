@@ -1039,11 +1039,6 @@ mod tests {
         assert_eq!(RetentionPeriod::Custom(42).as_secs(), 42);
     }
 
-    /// A fresh password for each call, so no password is written in this file.
-    fn generated_password() -> String {
-        hex::encode(rand::random::<[u8; 12]>())
-    }
-
     #[test]
     fn the_retention_bounds_are_the_shortest_and_longest_preset() {
         assert_eq!(MIN_RETENTION_SECS, RetentionPeriod::TenMinutes.as_secs());
@@ -1073,7 +1068,7 @@ mod tests {
             let err = create_envelope(
                 &sender_secret,
                 &recipient_pub,
-                &generated_password(),
+                &strong_pw(),
                 RetentionPeriod::Custom(bad),
                 b"data",
                 None,
@@ -1094,7 +1089,7 @@ mod tests {
             let (env, _, _) = create_envelope(
                 &sender_secret,
                 &recipient_pub,
-                &generated_password(),
+                &strong_pw(),
                 RetentionPeriod::Custom(ok),
                 b"data",
                 None,
@@ -1185,7 +1180,7 @@ mod tests {
         let (mut env, _, _) = create_envelope(
             &sender_secret,
             &recipient_pub,
-            &generated_password(),
+            &strong_pw(),
             RetentionPeriod::SevenDays,
             b"data",
             None,
