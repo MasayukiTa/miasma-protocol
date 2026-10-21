@@ -1500,3 +1500,6 @@ mod tests {
         assert!(full_verify(b"wrong", params, &mid).is_err());
     }
 }
+
+#[cfg(test)]
+mod kat_tests;
