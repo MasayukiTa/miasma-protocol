@@ -21,7 +21,12 @@
 //!   can compute the ECDH shared secret needed to derive the content key.
 //! - **Password second factor**: Even with the recipient's private key,
 //!   the password is required to derive the content decryption key.
-//! - **Forward secrecy**: Ephemeral X25519 keys are used per envelope.
+//! - **Ephemeral sender key**: a fresh X25519 key is used per envelope and is
+//!   not stored. This is not forward secrecy against the recipient: the
+//!   ephemeral public key is recorded in the envelope, so if the
+//!   recipient's long-term key is later compromised, the shared secret of
+//!   past envelopes can be recomputed. Compromise of the sender's long-term
+//!   key alone does not expose past shares.
 //! - **Anti-misdirection**: One-time confirmation code prevents sending to
 //!   the wrong recipient.
 
@@ -256,7 +261,53 @@ impl DirectedEnvelope {
 /// should be dissolved and published to the network. The MID of
 /// protected_data goes into the envelope payload. The envelope_key is
 /// needed by `finalize_envelope` to update the payload after dissolution.
+///
+/// The password must meet the private-share policy
+/// ([`password_policy::check_directed`](crate::transfer::password_policy::check_directed));
+/// otherwise [`MiasmaError::WeakPassword`] is returned before any key work.
+/// Opening an envelope never applies this policy.
 pub fn create_envelope(
+    sender_secret: &[u8; 32],
+    recipient_pubkey: &[u8; 32],
+    password: &str,
+    retention: RetentionPeriod,
+    plaintext: &[u8],
+    filename: Option<String>,
+) -> Result<(DirectedEnvelope, Vec<u8>, Zeroizing<[u8; 32]>), MiasmaError> {
+    crate::transfer::password_policy::check_directed(password)
+        .map_err(MiasmaError::WeakPassword)?;
+    build_envelope(
+        sender_secret,
+        recipient_pubkey,
+        password,
+        retention,
+        plaintext,
+        filename,
+    )
+}
+
+/// [`create_envelope`] without the password policy. Test builds only: it
+/// stands in for envelopes written before the policy existed.
+#[cfg(test)]
+pub(crate) fn create_envelope_unchecked(
+    sender_secret: &[u8; 32],
+    recipient_pubkey: &[u8; 32],
+    password: &str,
+    retention: RetentionPeriod,
+    plaintext: &[u8],
+    filename: Option<String>,
+) -> Result<(DirectedEnvelope, Vec<u8>, Zeroizing<[u8; 32]>), MiasmaError> {
+    build_envelope(
+        sender_secret,
+        recipient_pubkey,
+        password,
+        retention,
+        plaintext,
+        filename,
+    )
+}
+
+fn build_envelope(
     sender_secret: &[u8; 32],
     recipient_pubkey: &[u8; 32],
     password: &str,
@@ -645,15 +696,141 @@ mod tests {
         )
     }
 
+    /// A policy-compliant password generated at run time.
+    fn strong_pw() -> String {
+        crate::transfer::password_policy::generate(16).to_string()
+    }
+
+    #[test]
+    fn create_envelope_enforces_the_private_share_policy() {
+        use crate::transfer::password_policy::{
+            test_support::{compose, Other},
+            PolicyViolation, DIRECTED_MIN_LEN,
+        };
+        let (sender_secret, _, _, recipient_pub) = test_keys();
+        let try_pw = |pw: &str| {
+            create_envelope(
+                &sender_secret,
+                &recipient_pub,
+                pw,
+                RetentionPeriod::OneHour,
+                b"data",
+                None,
+            )
+        };
+        // Empty.
+        match try_pw("") {
+            Err(MiasmaError::WeakPassword(v)) => {
+                assert!(v.contains(&PolicyViolation::TooShortPrivate {
+                    min: DIRECTED_MIN_LEN,
+                    len: 0
+                }));
+            }
+            _ => panic!("empty password accepted"),
+        }
+        // One below the floor, otherwise compliant.
+        let eleven = compose(8, 2, 1, &[]);
+        assert_eq!(eleven.chars().count(), DIRECTED_MIN_LEN - 1);
+        match try_pw(&eleven) {
+            Err(MiasmaError::WeakPassword(v)) => assert_eq!(
+                v,
+                vec![PolicyViolation::TooShortPrivate {
+                    min: DIRECTED_MIN_LEN,
+                    len: 11
+                }]
+            ),
+            _ => panic!("11-character password accepted"),
+        }
+        // Characters, not bytes: 11 characters that take more than 12 bytes.
+        let multibyte = compose(4, 1, 1, &[Other::NonAscii; 5]);
+        assert_eq!(multibyte.chars().count(), 11);
+        assert!(multibyte.len() > DIRECTED_MIN_LEN);
+        assert!(matches!(
+            try_pw(&multibyte),
+            Err(MiasmaError::WeakPassword(_))
+        ));
+        // Whitespace only.
+        assert!(matches!(
+            try_pw(&" ".repeat(20)),
+            Err(MiasmaError::WeakPassword(_))
+        ));
+        // Exactly at the floor.
+        let twelve = compose(9, 2, 1, &[]);
+        assert_eq!(twelve.chars().count(), DIRECTED_MIN_LEN);
+        assert!(try_pw(&twelve).is_ok());
+        assert!(try_pw(&crate::transfer::password_policy::generate(12)).is_ok());
+    }
+
+    #[test]
+    fn weak_password_error_text_carries_codes_only() {
+        use crate::transfer::password_policy::{parse_codes, test_support::compose};
+        let (sender_secret, _, _, recipient_pub) = test_keys();
+        let weak = compose(7, 0, 0, &[]);
+        let err = create_envelope(
+            &sender_secret,
+            &recipient_pub,
+            &weak,
+            RetentionPeriod::OneHour,
+            b"data",
+            None,
+        )
+        .unwrap_err();
+        let shown = format!("{err} | {err:?}");
+        assert!(!shown.contains(&weak));
+        assert_eq!(
+            err.to_string(),
+            "weak password: too_short_private,no_digit,no_symbol"
+        );
+        assert_eq!(
+            parse_codes(&err.to_string()).unwrap(),
+            vec!["too_short_private", "no_digit", "no_symbol"]
+        );
+    }
+
+    #[test]
+    fn envelope_made_with_a_short_password_still_opens() {
+        use crate::transfer::password_policy::test_support::compose;
+        let (sender_secret, _, recipient_secret, recipient_pub) = test_keys();
+        let short = compose(2, 1, 1, &[]);
+        let plaintext = b"older share";
+        // Not creatable now ...
+        assert!(create_envelope(
+            &sender_secret,
+            &recipient_pub,
+            &short,
+            RetentionPeriod::OneHour,
+            plaintext,
+            None
+        )
+        .is_err());
+        // ... but one made before the policy opens with its own password.
+        let (envelope, protected, _k) = create_envelope_unchecked(
+            &sender_secret,
+            &recipient_pub,
+            &short,
+            RetentionPeriod::OneHour,
+            plaintext,
+            None,
+        )
+        .unwrap();
+        let payload = decrypt_envelope_payload(&recipient_secret, &envelope).unwrap();
+        let key = derive_content_key(&recipient_secret, &envelope, &short).unwrap();
+        let out = decrypt_directed_content(&key, &payload.content_nonce, &protected).unwrap();
+        assert_eq!(out, plaintext);
+        // The empty password also derives a key without being refused.
+        assert!(derive_content_key(&recipient_secret, &envelope, "").is_ok());
+    }
+
     #[test]
     fn envelope_roundtrip() {
         let (sender_secret, _sender_pub, recipient_secret, recipient_pub) = test_keys();
         let plaintext = b"Hello, this is a secret message for you!";
+        let pw = strong_pw();
 
         let (mut envelope, protected, envelope_key) = create_envelope(
             &sender_secret,
             &recipient_pub,
-            "test-password-123",
+            &pw,
             RetentionPeriod::OneDay,
             plaintext,
             Some("message.txt".to_string()),
@@ -671,8 +848,7 @@ mod tests {
         assert_eq!(payload.file_size, plaintext.len() as u64);
 
         // Recipient derives content key and decrypts.
-        let content_key =
-            derive_content_key(&recipient_secret, &envelope, "test-password-123").unwrap();
+        let content_key = derive_content_key(&recipient_secret, &envelope, &pw).unwrap();
         let decrypted =
             decrypt_directed_content(&content_key, &payload.content_nonce, &protected).unwrap();
         assert_eq!(decrypted, plaintext);
@@ -682,11 +858,13 @@ mod tests {
     fn wrong_password_fails_decryption() {
         let (sender_secret, _sender_pub, recipient_secret, recipient_pub) = test_keys();
         let plaintext = b"Secret!";
+        let pw = strong_pw();
+        let other = strong_pw();
 
         let (envelope, protected, _envelope_key) = create_envelope(
             &sender_secret,
             &recipient_pub,
-            "correct-password",
+            &pw,
             RetentionPeriod::OneHour,
             plaintext,
             None,
@@ -696,7 +874,7 @@ mod tests {
         let payload = decrypt_envelope_payload(&recipient_secret, &envelope).unwrap();
 
         // Wrong password → different key → AEAD fails.
-        let wrong_key = derive_content_key(&recipient_secret, &envelope, "wrong-password").unwrap();
+        let wrong_key = derive_content_key(&recipient_secret, &envelope, &other).unwrap();
         let result = decrypt_directed_content(&wrong_key, &payload.content_nonce, &protected);
         assert!(result.is_err());
     }
@@ -708,7 +886,7 @@ mod tests {
         let (envelope, _protected, _envelope_key) = create_envelope(
             &sender_secret,
             &recipient_pub,
-            "password",
+            &strong_pw(),
             RetentionPeriod::OneHour,
             b"data",
             None,
@@ -726,7 +904,7 @@ mod tests {
     #[test]
     fn create_envelope_rejects_non_contributory_recipient_key() {
         let (sender_secret, _, _, _) = test_keys();
-        let password = format!("test-{}", rand::random::<u64>());
+        let password = strong_pw();
         let err = create_envelope(
             &sender_secret,
             &[0u8; 32],
@@ -742,7 +920,7 @@ mod tests {
     #[test]
     fn recipient_rejects_non_contributory_ephemeral_key() {
         let (sender_secret, _, recipient_secret, recipient_pub) = test_keys();
-        let password = format!("test-{}", rand::random::<u64>());
+        let password = strong_pw();
         let (mut envelope, _, _) = create_envelope(
             &sender_secret,
             &recipient_pub,
@@ -783,7 +961,7 @@ mod tests {
         let (mut envelope, _, _envelope_key) = create_envelope(
             &sender_secret,
             &recipient_pub,
-            "pwd",
+            &strong_pw(),
             RetentionPeriod::TenMinutes,
             b"data",
             None,

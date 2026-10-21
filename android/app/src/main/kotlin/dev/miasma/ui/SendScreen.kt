@@ -12,6 +12,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import dev.miasma.DirectedApi
 import dev.miasma.MiasmaViewModel
 import dev.miasma.R
 import java.io.File
@@ -43,6 +44,10 @@ fun SendScreen(vm: MiasmaViewModel) {
     var sendError by remember { mutableStateOf<String?>(null) }
     var recipientFormatError by remember { mutableStateOf<String?>(null) }
     var retentionFallbackUsed by remember { mutableStateOf(false) }
+    val passwordLongEnough =
+        password.codePointCount(0, password.length) >= DirectedApi.DIRECTED_MIN_PASSWORD_LEN
+    val passwordRuleText = stringResource(R.string.send_password_rule, DirectedApi.DIRECTED_MIN_PASSWORD_LEN)
+    val passwordRefusedText = stringResource(R.string.send_password_refused, DirectedApi.DIRECTED_MIN_PASSWORD_LEN)
 
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) { cleanupOldStagingFiles(context.cacheDir, "miasma-send") }
@@ -174,6 +179,8 @@ fun SendScreen(vm: MiasmaViewModel) {
             value = password,
             onValueChange = { password = it },
             label = { Text(stringResource(R.string.send_password)) },
+            supportingText = { Text(passwordRuleText) },
+            isError = password.isNotEmpty() && !passwordLongEnough,
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
@@ -239,7 +246,7 @@ fun SendScreen(vm: MiasmaViewModel) {
                 }
             },
             enabled = recipientContact.isNotBlank() && recipientFormatError == null &&
-                (message.isNotBlank() || selectedFile != null) && password.isNotBlank() && !isSending && !isStagingFile,
+                (message.isNotBlank() || selectedFile != null) && passwordLongEnough && !isSending && !isStagingFile,
             modifier = Modifier.fillMaxWidth(),
         ) {
             if (isSending) {
@@ -271,7 +278,9 @@ fun SendScreen(vm: MiasmaViewModel) {
         }
         if (sendError != null) {
             Spacer(Modifier.height(8.dp))
-            Text(sendError!!, color = MaterialTheme.colorScheme.error)
+            // The daemon's refusal reads "weak password: <codes>"; show the rule instead.
+            val shown = if (sendError!!.contains("weak password:")) passwordRefusedText else sendError!!
+            Text(shown, color = MaterialTheme.colorScheme.error)
         }
     }
 }

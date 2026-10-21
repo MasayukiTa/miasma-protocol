@@ -8,8 +8,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { webcrypto } from 'node:crypto';
 import {
-  checkPassword, strengthHint, parseWeakPasswordCodes, generatePassword,
-  GENERATE_MIN_LEN, GENERATE_MAX_LEN, MAX_LEN,
+  checkPassword, checkDirectedPassword, DIRECTED_MIN_LEN, strengthHint, parseWeakPasswordCodes,
+  generatePassword, GENERATE_MIN_LEN, GENERATE_MAX_LEN, MAX_LEN,
 } from '../js/password_policy.js';
 
 const vectors = JSON.parse(
@@ -63,6 +63,17 @@ test('the daemon error text is parsed into codes', () => {
   assert.deepEqual(parseWeakPasswordCodes('daemon error: weak password: no_digit'), ['no_digit']);
   assert.equal(parseWeakPasswordCodes('wrong password'), null);
   assert.equal(parseWeakPasswordCodes('weak password: bogus'), null);
+});
+
+test('a private share needs DIRECTED_MIN_LEN characters', () => {
+  assert.equal(DIRECTED_MIN_LEN, 12);
+  const pw = (n) => generatePassword(GENERATE_MIN_LEN, webcrypto).slice(0, n);
+  assert.deepEqual(checkDirectedPassword(''), ['too_short_private', 'no_digit', 'no_letter', 'no_symbol']);
+  assert.deepEqual(checkDirectedPassword('a1!bcdefghi'), ['too_short_private']); // 11
+  assert.deepEqual(checkDirectedPassword('a1!bcdefghij'), []); // 12
+  assert.equal(checkDirectedPassword(pw(11)).includes('too_short_private'), true);
+  assert.deepEqual(checkDirectedPassword(generatePassword(12, webcrypto)), []);
+  assert.deepEqual(parseWeakPasswordCodes('weak password: too_short_private'), ['too_short_private']);
 });
 
 test('generated passwords are always compliant, of the asked length, and differ', () => {

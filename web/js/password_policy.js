@@ -24,8 +24,12 @@ export const RECOMMENDED_LEN = 12;
 export const GENERATE_MIN_LEN = 12;
 export const GENERATE_MAX_LEN = 64;
 export const GENERATE_DEFAULT_LEN = 16;
+// Shortest password for a private (directed) share. Copy of DIRECTED_MIN_LEN in
+// crates/miasma-core/src/transfer/password_policy.rs; crates/miasma-core/tests/directed_min_len_sync.rs
+// fails if the two differ.
+export const DIRECTED_MIN_LEN = 12;
 
-export const CODES = ['too_short', 'too_long', 'no_digit', 'no_letter', 'no_symbol'];
+export const CODES = ['too_short', 'too_short_private', 'too_long', 'no_digit', 'no_letter', 'no_symbol'];
 
 // ASCII punctuation: ! " # $ % & ' ( ) * + , - . / : ; < = > ? @ [ \ ] ^ _ ` { | } ~
 const isDigit = (c) => c >= '0' && c <= '9';
@@ -44,6 +48,16 @@ export function checkPassword(password) {
   if (!chars.some(isDigit)) v.push('no_digit');
   if (!chars.some(isLetter)) v.push('no_letter');
   if (!chars.some(isSymbol)) v.push('no_symbol');
+  return v;
+}
+
+/** Violation codes for a password chosen for a private share (same rules, floor DIRECTED_MIN_LEN). */
+export function checkDirectedPassword(password) {
+  const v = checkPassword(password);
+  const i = v.indexOf('too_short');
+  const short = Array.from(String(password ?? '')).length < DIRECTED_MIN_LEN;
+  if (i >= 0) v.splice(i, 1);
+  if (short) v.unshift('too_short_private');
   return v;
 }
 

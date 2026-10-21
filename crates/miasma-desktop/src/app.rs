@@ -1883,8 +1883,16 @@ impl MiasmaApp {
                     },
                     crate::form_check::Need {
                         field: field_id(&password_field),
-                        ok: !self.send_password.is_empty(),
-                        reason: au.need_password,
+                        // Same rule the daemon applies to a new private share.
+                        ok: miasma_core::transfer::password_policy::check_directed(
+                            &self.send_password,
+                        )
+                        .is_ok(),
+                        reason: if self.send_password.is_empty() {
+                            au.need_password
+                        } else {
+                            au.need_private_password
+                        },
                     },
                     crate::form_check::Need {
                         field: file_button,

@@ -678,6 +678,112 @@ async fn a_protected_transfer_is_received_over_http_and_the_password_never_leaks
     .expect("timed out");
 }
 
+/// A private share is refused for an empty or too-short password with the
+/// same machine-readable text on every entry point, and the password is in no
+/// response and no log line.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_weak_private_share_password_is_refused_over_ipc_and_http() {
+    let d = start_daemon().await;
+    let tok = d.token();
+    let contact = match daemon_request(d.dir.path(), ControlRequest::SharingKey)
+        .await
+        .unwrap()
+    {
+        ControlResponse::SharingKey { contact, .. } => contact,
+        other => panic!("unexpected: {other:?}"),
+    };
+    let file = d.dir.path().join("payload.bin");
+    std::fs::write(&file, b"payload").unwrap();
+    let file_path = file.to_string_lossy().into_owned();
+
+    // 11 characters: otherwise compliant, one under the floor.
+    let eleven: String = random_policy_password().chars().take(11).collect();
+    let cases = [
+        (
+            String::new(),
+            "weak password: too_short_private,no_digit,no_letter,no_symbol",
+        ),
+        (eleven, "weak password: too_short_private"),
+    ];
+    let mut every_response = String::new();
+    for (pw, want) in &cases {
+        match daemon_request(
+            d.dir.path(),
+            ControlRequest::DirectedSend {
+                recipient_contact: contact.clone(),
+                data: b"payload".to_vec(),
+                password: pw.clone(),
+                retention_secs: 3600,
+                filename: None,
+            },
+        )
+        .await
+        .unwrap()
+        {
+            ControlResponse::Error(e) => assert_eq!(&e, want),
+            other => panic!("unexpected: {other:?}"),
+        }
+        match daemon_request(
+            d.dir.path(),
+            ControlRequest::DirectedSendFile {
+                recipient_contact: contact.clone(),
+                file_path: file_path.clone(),
+                password: pw.clone(),
+                retention_secs: 3600,
+                filename: None,
+            },
+        )
+        .await
+        .unwrap()
+        {
+            ControlResponse::Error(e) => assert_eq!(&e, want),
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        let send = serde_json::json!({
+            "recipient_contact": contact,
+            "data": "cGF5bG9hZA==",
+            "password": pw,
+            "retention_secs": 3600,
+        })
+        .to_string();
+        let r = http(d.http_port, "POST", "/api/directed/send", Some(&tok), &send).await;
+        assert!(r.starts_with("HTTP/1.1 400"), "{r:.300}");
+        assert!(r.contains(want.as_str()), "{r:.300}");
+        every_response.push_str(&r);
+
+        let send_file = serde_json::json!({
+            "recipient_contact": contact,
+            "file_path": file_path,
+            "password": pw,
+            "retention_secs": 3600,
+        })
+        .to_string();
+        let r = http(
+            d.http_port,
+            "POST",
+            "/api/directed/send-file",
+            Some(&tok),
+            &send_file,
+        )
+        .await;
+        assert!(r.starts_with("HTTP/1.1 400"), "{r:.300}");
+        assert!(r.contains(want.as_str()), "{r:.300}");
+        every_response.push_str(&r);
+    }
+
+    let (secret, _) = &cases[1];
+    assert!(
+        !every_response.contains(secret.as_str()),
+        "a response contains the password"
+    );
+    assert!(
+        !captured_logs().contains(secret.as_str()),
+        "a log line contains the password"
+    );
+    d.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_running_receive_can_be_stopped_over_http() {
     tokio::time::timeout(Duration::from_secs(120), async {

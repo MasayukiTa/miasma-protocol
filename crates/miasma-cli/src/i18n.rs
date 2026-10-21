@@ -125,10 +125,32 @@ pub fn display_width(s: &str) -> usize {
 const CORE_WRONG_PASSWORD: &str = "wrong password";
 const CORE_PASSWORD_REQUIRED: &str = "a password is required";
 
+/// Whether the violation codes come from the private-share policy.
+fn weak_is_private(codes: &[String]) -> bool {
+    codes.iter().any(|c| c == "too_short_private")
+}
+
+/// The minimum length the refused policy asked for.
+fn weak_min_len(codes: &[String]) -> usize {
+    if weak_is_private(codes) {
+        miasma_core::transfer::password_policy::DIRECTED_MIN_LEN
+    } else {
+        miasma_core::transfer::password_policy::MIN_LEN
+    }
+}
+
 /// One password-policy violation code (from miasma-core) as a clause.
 pub fn policy_problem(code: &str, lang: Lang) -> String {
     match (code, lang) {
         ("too_short", Lang::En) => "it is shorter than 6 characters".into(),
+        ("too_short_private", Lang::En) => format!(
+            "it is shorter than {} characters",
+            miasma_core::transfer::password_policy::DIRECTED_MIN_LEN
+        ),
+        ("too_short_private", Lang::Ja) => format!(
+            "{} 文字未満です",
+            miasma_core::transfer::password_policy::DIRECTED_MIN_LEN
+        ),
         ("too_long", Lang::En) => "it is longer than 1024 characters".into(),
         ("no_digit", Lang::En) => "it has no digit (0-9)".into(),
         ("no_letter", Lang::En) => "it has no letter (a-z, A-Z)".into(),
@@ -634,12 +656,14 @@ impl Msg {
             CannotReadPasswordStdin => "cannot read the password from standard input".into(),
             PasswordEmpty => "the password is empty; refusing to publish with no protection".into(),
             WeakPassword { codes } => format!(
-                "this password is not accepted for a new protected transfer: {}. A password needs at least 6 characters with a digit (0-9), a letter (a-z, A-Z) and a symbol such as ! # $ % (a space does not count). Run `miasma password-generate` for a strong one.",
+                "this password is not accepted for a new {}: {}. A password needs at least {} characters with a digit (0-9), a letter (a-z, A-Z) and a symbol such as ! # $ % (a space does not count). Run `miasma password-generate` for a strong one.",
+                if weak_is_private(codes) { "private share" } else { "protected transfer" },
                 codes
                     .iter()
                     .map(|c| policy_problem(c, Lang::En))
                     .collect::<Vec<_>>()
-                    .join("; ")
+                    .join("; "),
+                weak_min_len(codes)
             ),
             PasswordShortWarning => "warning: short password. A password that meets the rules is still easy to guess at 6 to 11 characters, and anyone holding the manifest can try guesses offline. Use 12+ characters or run `miasma password-generate`.".into(),
             PasswordGeneratedNote => "Store this password somewhere safe: it is not saved anywhere and cannot be recovered. The receiver needs it in addition to the MID; share it over a different channel than the MID.".into(),
@@ -863,12 +887,14 @@ Anyone who has this link can control this node until the daemon restarts: do not
             CannotReadPasswordStdin => "標準入力からパスワードを読み込めません".into(),
             PasswordEmpty => "パスワードが空です。保護なしでは公開しません".into(),
             WeakPassword { codes } => format!(
-                "このパスワードは新しい保護付き転送には使えません: {}。パスワードは 6 文字以上で、数字 (0-9)、英字 (a-z, A-Z)、記号 (! # $ % など) をそれぞれ 1 つ以上含めてください（空白は記号に数えません）。`miasma password-generate` で強いパスワードを作れます。",
+                "このパスワードは新しい{}には使えません: {}。パスワードは {} 文字以上で、数字 (0-9)、英字 (a-z, A-Z)、記号 (! # $ % など) をそれぞれ 1 つ以上含めてください（空白は記号に数えません）。`miasma password-generate` で強いパスワードを作れます。",
+                if weak_is_private(codes) { "プライベート共有" } else { "保護付き転送" },
                 codes
                     .iter()
                     .map(|c| policy_problem(c, Lang::Ja))
                     .collect::<Vec<_>>()
-                    .join("、")
+                    .join("、"),
+                weak_min_len(codes)
             ),
             PasswordShortWarning => "注意: 短いパスワードです。規則を満たしていても 6〜11 文字では推測されやすく、マニフェストを持つ人はオフラインで何度でも試せます。12 文字以上にするか、`miasma password-generate` を使ってください。".into(),
             PasswordGeneratedNote => "このパスワードは安全な場所に保管してください。どこにも保存されず、失くすと復元できません。受信する人には MID とは別の経路で伝えてください。".into(),
@@ -2061,6 +2087,26 @@ Anyone who has this link can control this node until the daemon restarts: do not
             !ja.contains("英字 (a-z, A-Z) がありません"),
             "japanese: a letter is present"
         );
+    }
+
+    #[test]
+    fn the_private_share_refusal_names_the_private_minimum() {
+        use miasma_core::transfer::password_policy::{check_directed, codes, DIRECTED_MIN_LEN};
+        // Eleven letters: long enough for a transfer, one short for a private share.
+        let v = check_directed(&compose_pw(11, 0, 0)).unwrap_err();
+        let codes: Vec<String> = codes(&v).split(',').map(str::to_owned).collect();
+        assert!(codes.iter().any(|c| c == "too_short_private"));
+        let min = DIRECTED_MIN_LEN.to_string();
+        let en = Msg::WeakPassword {
+            codes: codes.clone(),
+        }
+        .text(Lang::En);
+        assert!(en.contains(&format!("shorter than {min} characters")));
+        assert!(en.contains("private share"));
+        assert!(en.contains(&format!("at least {min} characters")));
+        let ja = Msg::WeakPassword { codes }.text(Lang::Ja);
+        assert!(ja.contains(&format!("{min} 文字未満")));
+        assert!(ja.contains("プライベート共有"));
     }
 
     #[test]
