@@ -410,13 +410,17 @@ enum RevokeSide {
 
 use crate::ux::MsgLevel as MsgKind;
 
+/// The first place of the top row is Home in Easy mode and Status in Technical mode; Contacts,
+/// Chat, Files and Settings follow in the same order in both, so switching mode moves nothing
+/// the person already knows.
+///
 /// The top row of Technical mode: five groups instead of eleven tabs. "Files" opens the second
 /// row ([`TECH_FILE_TABS`]); every screen of the old row is still one click or two away.
 const TECH_NAV_TABS: [Tab; 5] = [
+    Tab::Status,
     Tab::Contacts,
     Tab::Chat,
     Tab::Files,
-    Tab::Status,
     Tab::Settings,
 ];
 
@@ -436,9 +440,9 @@ const TECH_FILE_TABS: [Tab; 7] = [
 /// grouped under Files so a new user does not need to learn protocol structure first.
 const EASY_NAV_TABS: [Tab; 5] = [
     Tab::Home,
+    Tab::Contacts,
     Tab::Chat,
     Tab::Files,
-    Tab::Contacts,
     Tab::Settings,
 ];
 
@@ -463,7 +467,8 @@ fn easy_nav_selected(current: Tab, item: Tab) -> bool {
     }
 }
 
-/// Easy mode starts on a task-oriented Home screen; Technical mode keeps Contacts first.
+/// Easy mode starts on a task-oriented Home screen; Technical mode keeps Contacts as the place
+/// it opens on.
 /// External magnet/torrent launches still open Import directly in either mode.
 fn initial_tab(intent: &LaunchIntent, mode: ProductMode) -> Tab {
     match intent {
@@ -3875,8 +3880,18 @@ impl MiasmaApp {
                 }
                 ui.add_space(kit::SP_2);
                 ui.horizontal(|ui| {
-                    let brand = if easy { s.nav_brand_easy } else { s.nav_brand };
-                    ui.label(kit::section_text(brand));
+                    // The product name does not change with the mode; Technical mode adds a small
+                    // badge after it.
+                    ui.label(kit::section_text(s.nav_brand_easy));
+                    if !easy {
+                        egui::Frame::none()
+                            .stroke(egui::Stroke::new(1.0, pal().border_strong))
+                            .rounding(8.0)
+                            .inner_margin(egui::Margin::symmetric(kit::SP_2, 1.0))
+                            .show(ui, |ui| {
+                                ui.label(kit::meta_text(s.settings_mode_technical, pal().muted));
+                            });
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let (level, label) = header_chip(
                             &self.daemon_state,
@@ -4081,6 +4096,9 @@ impl MiasmaApp {
                         Some(ChatAction::SendFiles(id)) => {
                             // The paperclip opens the one send flow with this contact chosen.
                             self.send_flow.open_for_contact(&id);
+                        }
+                        Some(ChatAction::OpenSendFlow) => {
+                            self.send_flow.open_empty(self.contacts.contact_list());
                         }
                         Some(ChatAction::RetryFile { contact_id, path }) => {
                             self.contacts.resend_file(&contact_id, &path);
@@ -4403,6 +4421,100 @@ mod tests {
         assert!(failed.is_empty(), "{failed:#?}");
     }
 
+    /// Every text the first frames of the app draw, in drawing order.
+    fn drawn_texts(mode: ProductMode, locale_: Locale) -> Vec<String> {
+        fn collect(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(t) => out.push(t.galley.text().to_owned()),
+                egui::Shape::Vec(v) => v.iter().for_each(|s| collect(s, out)),
+                _ => {}
+            }
+        }
+        let ctx = egui::Context::default();
+        let data = tempfile::tempdir().unwrap();
+        let mut app = MiasmaApp::new_with_ctx(
+            &ctx,
+            None,
+            mode,
+            locale_,
+            ThemeMode::Light,
+            data.path().to_path_buf(),
+            LaunchIntent::Normal,
+        );
+        app.logs.legacy = None;
+        let mut texts = Vec::new();
+        for _ in 0..3 {
+            texts.clear();
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(1100.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            let full = ctx.run(raw, |ctx| app.update_frame(ctx, None));
+            for c in &full.shapes {
+                collect(&c.shape, &mut texts);
+            }
+        }
+        texts
+    }
+
+    #[test]
+    fn the_brand_is_miasma_in_both_modes_and_technical_adds_a_badge() {
+        for l in Locale::ALL {
+            let s = locale::strings(l);
+            for mode in [ProductMode::Easy, ProductMode::Technical] {
+                let texts = drawn_texts(mode, l);
+                assert!(
+                    texts.iter().any(|t| t == "Miasma"),
+                    "{l:?} {mode:?}: no brand in {texts:?}"
+                );
+                assert!(
+                    !texts.iter().any(|t| t.contains("Protocol")),
+                    "{l:?} {mode:?}: {texts:?}"
+                );
+                let badge = texts.iter().any(|t| t == s.settings_mode_technical);
+                assert_eq!(badge, !mode.is_easy(), "{l:?} {mode:?}: badge");
+            }
+        }
+    }
+
+    #[test]
+    fn the_navigation_draws_the_common_destinations_in_the_same_order_in_both_modes() {
+        let l = Locale::En;
+        let s = locale::strings(l);
+        let order_of = |mode| {
+            let texts = drawn_texts(mode, l);
+            let names = [
+                s.tab_home_easy,
+                s.tab_status,
+                locale::contact_strings(l).tab,
+                locale::chat_strings(l).tab,
+                s.tab_files_easy,
+                s.tab_settings,
+            ];
+            let mut found: Vec<(usize, &str)> = Vec::new();
+            for n in names {
+                if let Some(i) = texts.iter().position(|t| t.starts_with(n)) {
+                    found.push((i, n));
+                }
+            }
+            found.sort();
+            found.into_iter().map(|(_, n)| n).collect::<Vec<_>>()
+        };
+        let easy = order_of(ProductMode::Easy);
+        let tech = order_of(ProductMode::Technical);
+        let common = |v: &[&str]| -> Vec<String> {
+            v.iter()
+                .filter(|n| **n != s.tab_home_easy && **n != s.tab_status)
+                .map(|n| (*n).to_owned())
+                .collect()
+        };
+        assert_eq!(common(&easy), common(&tech), "{easy:?} vs {tech:?}");
+        assert_eq!(common(&easy).len(), 4, "{easy:?}");
+    }
+
     #[test]
     fn the_chat_protection_radios_are_published_as_disabled_when_the_build_lacks_it() {
         use miasma_core::config::PqcMode;
@@ -4589,14 +4701,26 @@ mod tests {
     }
 
     #[test]
+    fn the_common_destinations_keep_their_place_in_both_modes() {
+        // Slot 0 is Home (Easy) or Status (Technical); the rest are the same, in the same order.
+        assert_eq!(EASY_NAV_TABS[0], Tab::Home);
+        assert_eq!(TECH_NAV_TABS[0], Tab::Status);
+        assert_eq!(EASY_NAV_TABS[1..], TECH_NAV_TABS[1..]);
+        assert_eq!(
+            TECH_NAV_TABS[1..],
+            [Tab::Contacts, Tab::Chat, Tab::Files, Tab::Settings]
+        );
+    }
+
+    #[test]
     fn easy_navigation_has_five_task_oriented_items() {
         assert_eq!(
             EASY_NAV_TABS,
             [
                 Tab::Home,
+                Tab::Contacts,
                 Tab::Chat,
                 Tab::Files,
-                Tab::Contacts,
                 Tab::Settings
             ]
         );

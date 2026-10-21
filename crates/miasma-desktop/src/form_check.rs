@@ -108,8 +108,35 @@ pub fn primary_with_reason(
     allowed: bool,
     attempt: bool,
 ) -> bool {
+    button_with_reason(ui, label, needs, allowed, attempt, true)
+}
+
+/// [`primary_with_reason`] for a button of the second rank (the Add beside a single field).
+pub fn secondary_with_reason(
+    ui: &mut egui::Ui,
+    label: &str,
+    needs: &[Need],
+    allowed: bool,
+    attempt: bool,
+) -> bool {
+    button_with_reason(ui, label, needs, allowed, attempt, false)
+}
+
+fn button_with_reason(
+    ui: &mut egui::Ui,
+    label: &str,
+    needs: &[Need],
+    allowed: bool,
+    attempt: bool,
+    primary: bool,
+) -> bool {
     let missing = first_missing(needs).copied();
-    let resp = kit::primary(ui, missing.is_none() && allowed, label);
+    let on = missing.is_none() && allowed;
+    let resp = if primary {
+        kit::primary(ui, on, label)
+    } else {
+        add_enabled(ui, on, kit::secondary_button(label))
+    };
     if let Some(m) = missing {
         if attempt || pressed_while_disabled(&resp) {
             if let Some(id) = m.field {
