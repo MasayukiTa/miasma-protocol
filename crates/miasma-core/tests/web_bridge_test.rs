@@ -954,3 +954,398 @@ async fn clear_finished_over_http_removes_finished_rows_only() {
     assert!(!ids.contains(&a) && !ids.contains(&b));
     d.stop().await;
 }
+
+// ─── The request gate and the host-path endpoints ────────────────────────────
+
+/// One raw exchange with full control of the headers (`Host` included).
+async fn http_hdr(
+    port: u16,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> String {
+    let mut s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let extra: String = headers
+        .iter()
+        .map(|(k, v)| format!("{k}: {v}\r\n"))
+        .collect();
+    let req = format!(
+        "{method} {path} HTTP/1.1\r\n{extra}Content-Type: application/json\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    s.write_all(req.as_bytes()).await.unwrap();
+    let mut out = Vec::new();
+    let _ = s.read_to_end(&mut out).await;
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn header_of(response: &str, name: &str) -> Option<String> {
+    let head = response.split("\r\n\r\n").next().unwrap_or("");
+    head.lines().skip(1).find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.trim()
+            .eq_ignore_ascii_case(name)
+            .then(|| v.trim().to_owned())
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_web_client_on_the_bridges_own_origin_works_and_gets_the_header_set() {
+    let d = start_daemon().await;
+    let tok = d.token();
+    let host = format!("127.0.0.1:{}", d.http_port);
+    let origin = format!("http://127.0.0.1:{}", d.http_port);
+    let bearer = format!("Bearer {tok}");
+
+    let r = http_hdr(
+        d.http_port,
+        "GET",
+        "/index.html",
+        &[
+            ("Host", &host),
+            ("Sec-Fetch-Site", "none"),
+            ("Sec-Fetch-Mode", "navigate"),
+        ],
+        "",
+    )
+    .await;
+    assert!(r.starts_with("HTTP/1.1 200"), "{r:.200}");
+    let csp = header_of(&r, "content-security-policy").expect("page CSP");
+    assert!(csp.contains("default-src 'none'") && !csp.contains("unsafe-eval"));
+    assert!(header_of(&r, "permissions-policy").is_some());
+    assert_eq!(
+        header_of(&r, "x-content-type-options").as_deref(),
+        Some("nosniff")
+    );
+
+    let r = http_hdr(
+        d.http_port,
+        "GET",
+        "/api/status",
+        &[
+            ("Host", &host),
+            ("Origin", &origin),
+            ("Sec-Fetch-Site", "same-origin"),
+            ("Authorization", &bearer),
+        ],
+        "",
+    )
+    .await;
+    assert!(r.starts_with("HTTP/1.1 200"), "{r:.200}");
+    assert_eq!(
+        header_of(&r, "access-control-allow-origin"),
+        Some(origin.clone())
+    );
+    assert_eq!(header_of(&r, "vary").as_deref(), Some("Origin"));
+    assert_eq!(header_of(&r, "cache-control").as_deref(), Some("no-store"));
+    assert!(header_of(&r, "content-security-policy").is_some());
+
+    // The token is still required, with or without an Origin.
+    let r = http_hdr(
+        d.http_port,
+        "GET",
+        "/api/status",
+        &[("Host", &host), ("Origin", &origin)],
+        "",
+    )
+    .await;
+    assert!(r.starts_with("HTTP/1.1 401"), "{r:.200}");
+    assert_eq!(header_of(&r, "cache-control").as_deref(), Some("no-store"));
+    d.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn null_and_foreign_origins_and_wrong_hosts_are_refused_without_a_cors_grant() {
+    let d = start_daemon().await;
+    let tok = d.token();
+    let bearer = format!("Bearer {tok}");
+    let host = format!("127.0.0.1:{}", d.http_port);
+
+    for origin in ["null", "https://evil.example", "http://evil.example:80"] {
+        for (method, path) in [
+            ("GET", "/api/status"),
+            ("GET", "/index.html"),
+            ("OPTIONS", "/api/status"),
+        ] {
+            let r = http_hdr(
+                d.http_port,
+                method,
+                path,
+                &[
+                    ("Host", &host),
+                    ("Origin", origin),
+                    ("Authorization", &bearer),
+                ],
+                "",
+            )
+            .await;
+            assert!(
+                r.starts_with("HTTP/1.1 403"),
+                "{origin} {method} {path}: {r:.200}"
+            );
+            assert!(
+                header_of(&r, "access-control-allow-origin").is_none(),
+                "{r:.300}"
+            );
+        }
+    }
+
+    // DNS rebinding: a name that is not this computer, or another port.
+    for bad_host in [
+        "evil.example".to_owned(),
+        format!("evil.example:{}", d.http_port),
+        "127.0.0.1:1".to_owned(),
+        format!("localhost.evil.example:{}", d.http_port),
+    ] {
+        for path in ["/api/status", "/index.html"] {
+            let r = http_hdr(
+                d.http_port,
+                "GET",
+                path,
+                &[("Host", &bad_host), ("Authorization", &bearer)],
+                "",
+            )
+            .await;
+            assert!(r.starts_with("HTTP/1.1 403"), "{bad_host} {path}: {r:.200}");
+        }
+    }
+
+    // A cross-site fetch without an allowed Origin is refused too.
+    let r = http_hdr(
+        d.http_port,
+        "GET",
+        "/index.html",
+        &[("Host", &host), ("Sec-Fetch-Site", "cross-site")],
+        "",
+    )
+    .await;
+    assert!(r.starts_with("HTTP/1.1 403"), "{r:.200}");
+
+    // A preflight from a page on another localhost port is granted to that origin only.
+    let r = http_hdr(
+        d.http_port,
+        "OPTIONS",
+        "/api/status",
+        &[("Host", &host), ("Origin", "http://localhost:8080")],
+        "",
+    )
+    .await;
+    assert!(r.starts_with("HTTP/1.1 204"), "{r:.200}");
+    assert_eq!(
+        header_of(&r, "access-control-allow-origin").as_deref(),
+        Some("http://localhost:8080")
+    );
+    d.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn host_path_endpoints_are_closed_to_browsers_and_open_to_native_clients() {
+    let d = start_daemon().await;
+    let tok = d.token();
+    let bearer = format!("Bearer {tok}");
+    let host = format!("127.0.0.1:{}", d.http_port);
+    let origin = format!("http://127.0.0.1:{}", d.http_port);
+    let scratch = tempfile::tempdir().unwrap();
+    let input = scratch.path().join("in.bin");
+    std::fs::write(&input, b"payload").unwrap();
+    let input_s = input.to_string_lossy().into_owned();
+    let out_s = scratch
+        .path()
+        .join("out.bin")
+        .to_string_lossy()
+        .into_owned();
+
+    let bodies = [
+        (
+            "/api/publish-file",
+            serde_json::json!({ "file_path": input_s }),
+        ),
+        (
+            "/api/retrieve-to-file",
+            serde_json::json!({ "mid": "miasma:abc", "output_path": out_s }),
+        ),
+        (
+            "/api/directed/send-file",
+            serde_json::json!({ "recipient_contact": "x", "file_path": input_s,
+                                 "password": "p", "retention_secs": 60 }),
+        ),
+        (
+            "/api/directed/retrieve-to-file",
+            serde_json::json!({ "envelope_id": "e", "password": "p", "output_path": out_s }),
+        ),
+    ];
+    for (path, body) in &bodies {
+        let body = body.to_string();
+        // Browser (Origin, or only fetch metadata): refused, even with the token.
+        for extra in [
+            ("Origin", origin.as_str()),
+            ("Sec-Fetch-Site", "same-origin"),
+        ] {
+            let r = http_hdr(
+                d.http_port,
+                "POST",
+                path,
+                &[("Host", &host), ("Authorization", &bearer), extra],
+                &body,
+            )
+            .await;
+            assert!(r.starts_with("HTTP/1.1 403"), "{path}: {r:.200}");
+            assert_eq!(
+                json_of(&r)["code"],
+                "host_path_not_allowed_from_browser",
+                "{path}"
+            );
+        }
+        // Native client, no token: the token requirement is unchanged.
+        let r = http_hdr(d.http_port, "POST", path, &[("Host", &host)], &body).await;
+        assert!(r.starts_with("HTTP/1.1 401"), "{path}: {r:.200}");
+        // Native client with the token is not turned away by the gate.
+        let r = http_hdr(
+            d.http_port,
+            "POST",
+            path,
+            &[("Host", &host), ("Authorization", &bearer)],
+            &body,
+        )
+        .await;
+        assert!(
+            !r.starts_with("HTTP/1.1 403") && !r.starts_with("HTTP/1.1 401"),
+            "{path}: {r:.200}"
+        );
+    }
+    // Nothing was left behind by the refused or failed requests.
+    assert!(!scratch.path().join("out.bin").exists());
+    d.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn host_path_endpoints_refuse_the_data_dir_and_never_overwrite_by_default() {
+    let d = start_daemon().await;
+    let tok = d.token();
+    let bearer = format!("Bearer {tok}");
+    let host = format!("127.0.0.1:{}", d.http_port);
+    let port = d.http_port;
+    let call = |path: &'static str, body: serde_json::Value| {
+        let (host, bearer) = (host.clone(), bearer.clone());
+        async move {
+            http_hdr(
+                port,
+                "POST",
+                path,
+                &[("Host", &host), ("Authorization", &bearer)],
+                &body.to_string(),
+            )
+            .await
+        }
+    };
+    let data = d.dir.path();
+    let key = data.join("master.key").to_string_lossy().into_owned();
+    let token_file = data.join("daemon.token").to_string_lossy().into_owned();
+    let key_before = std::fs::read(data.join("master.key")).unwrap();
+
+    // Reading the data directory: refused for both read endpoints.
+    for f in [&key, &token_file] {
+        let r = call("/api/publish-file", serde_json::json!({ "file_path": f })).await;
+        assert!(r.starts_with("HTTP/1.1 400"), "{r:.200}");
+        assert_eq!(json_of(&r)["code"], "path_not_allowed");
+        let r = call(
+            "/api/directed/send-file",
+            serde_json::json!({ "recipient_contact": "x", "file_path": f,
+                                 "password": "p", "retention_secs": 60 }),
+        )
+        .await;
+        assert!(r.starts_with("HTTP/1.1 400"), "{r:.200}");
+        assert_eq!(json_of(&r)["code"], "path_not_allowed");
+    }
+    // Writing into it, with and without the overwrite flag.
+    for overwrite in [false, true] {
+        let r = call(
+            "/api/retrieve-to-file",
+            serde_json::json!({ "mid": "miasma:abc", "output_path": key, "overwrite": overwrite }),
+        )
+        .await;
+        assert_eq!(json_of(&r)["code"], "path_not_allowed", "{r:.300}");
+        let r = call(
+            "/api/directed/retrieve-to-file",
+            serde_json::json!({ "envelope_id": "e", "password": "p",
+                                 "output_path": key, "overwrite": overwrite }),
+        )
+        .await;
+        assert_eq!(json_of(&r)["code"], "path_not_allowed", "{r:.300}");
+    }
+    let newfile = data.join("planted.bin").to_string_lossy().into_owned();
+    let r = call(
+        "/api/retrieve-to-file",
+        serde_json::json!({ "mid": "miasma:abc", "output_path": newfile }),
+    )
+    .await;
+    assert_eq!(json_of(&r)["code"], "path_not_allowed", "{r:.300}");
+    assert!(!data.join("planted.bin").exists());
+    assert_eq!(std::fs::read(data.join("master.key")).unwrap(), key_before);
+
+    // Relative and `..` paths are refused for the read endpoint too.
+    for bad in [
+        "relative.bin".to_owned(),
+        format!("{}/../x", data.display()),
+    ] {
+        let r = call(
+            "/api/directed/send-file",
+            serde_json::json!({ "recipient_contact": "x", "file_path": bad,
+                                 "password": "p", "retention_secs": 60 }),
+        )
+        .await;
+        assert!(r.starts_with("HTTP/1.1 400"), "{bad}: {r:.200}");
+    }
+
+    // An existing output file is not replaced unless asked.
+    let scratch = tempfile::tempdir().unwrap();
+    let out = scratch.path().join("keep.bin");
+    std::fs::write(&out, b"original").unwrap();
+    let out_s = out.to_string_lossy().into_owned();
+    let r = call(
+        "/api/retrieve-to-file",
+        serde_json::json!({ "mid": "miasma:abc", "output_path": out_s }),
+    )
+    .await;
+    assert!(r.starts_with("HTTP/1.1 400"), "{r:.200}");
+    assert_eq!(json_of(&r)["code"], "path_not_allowed");
+    assert_eq!(std::fs::read(&out).unwrap(), b"original");
+    let r = call(
+        "/api/directed/retrieve-to-file",
+        serde_json::json!({ "envelope_id": "e", "password": "p", "output_path": out_s }),
+    )
+    .await;
+    assert_eq!(json_of(&r)["code"], "path_not_allowed");
+    assert_eq!(std::fs::read(&out).unwrap(), b"original");
+    // With the flag the request goes on to the daemon (which rejects the bad MID
+    // before touching the file).
+    let r = call(
+        "/api/retrieve-to-file",
+        serde_json::json!({ "mid": "miasma:abc", "output_path": out_s, "overwrite": true }),
+    )
+    .await;
+    assert!(json_of(&r).get("code").is_none(), "{r:.300}");
+    assert_eq!(std::fs::read(&out).unwrap(), b"original");
+
+    // A failed request leaves no placeholder behind.
+    let fresh = scratch.path().join("fresh.bin");
+    let r = call(
+        "/api/retrieve-to-file",
+        serde_json::json!({ "mid": "miasma:abc", "output_path": fresh.to_string_lossy() }),
+    )
+    .await;
+    assert!(r.starts_with("HTTP/1.1 400"), "{r:.200}");
+    assert!(!fresh.exists());
+
+    // transfers/receive may not target the data directory either.
+    let r = call(
+        "/api/transfers/receive",
+        serde_json::json!({ "mid": "miasma:abc", "output_path": key }),
+    )
+    .await;
+    assert!(r.starts_with("HTTP/1.1 400"), "{r:.200}");
+    assert_eq!(std::fs::read(data.join("master.key")).unwrap(), key_before);
+    d.stop().await;
+}

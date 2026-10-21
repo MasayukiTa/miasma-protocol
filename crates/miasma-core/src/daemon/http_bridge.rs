@@ -63,12 +63,10 @@ use crate::{network::coordinator::MiasmaCoordinator, store::LocalShareStore};
 use super::{
     control_auth,
     ipc::{ControlRequest, ControlResponse},
-    process_request,
-    rate_limit::{
-        classify_endpoint, validate_field_length, validate_origin, MAX_MID_LEN, MAX_PASSWORD_LEN,
-    },
+    path_policy, process_request,
+    rate_limit::{classify_endpoint, validate_field_length, MAX_MID_LEN, MAX_PASSWORD_LEN},
     replication::ReplicationQueue,
-    BridgeLiveState,
+    web_guard, BridgeLiveState,
 };
 
 /// Maximum HTTP request body size (16 MiB, matching IPC FRAME_MAX).
@@ -125,6 +123,9 @@ struct RetrieveResponse {
 struct RetrieveToFileRequest {
     mid: String,
     output_path: String,
+    /// Replace an existing file (default: refuse).
+    #[serde(default)]
+    overwrite: bool,
     #[serde(default = "default_k")]
     data_shards: u8,
     #[serde(default = "default_n")]
@@ -140,6 +141,8 @@ struct RetrieveToFileResponse {
 #[derive(Serialize)]
 struct ErrorResponse {
     error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -165,6 +168,8 @@ struct BridgeState {
     data_dir: std::path::PathBuf,
     /// Bridge superhardening live state (rate limiter, health monitor, env snapshot).
     bridge_live: BridgeLiveState,
+    /// Host / Origin / fetch-metadata gate for every request.
+    guard: Arc<web_guard::GuardConfig>,
 }
 
 // ─── HttpBridge ──────────────────────────────────────────────────────────────
@@ -207,7 +212,9 @@ impl HttpBridge {
             }
         };
 
+        let bound_port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
         let state = BridgeState {
+            guard: Arc::new(web_guard::GuardConfig::from_env(bound_port)),
             coord,
             queue,
             store,
@@ -263,38 +270,73 @@ impl HttpBridge {
 
 // ─── Request handler ─────────────────────────────────────────────────────────
 
+/// The endpoints that take a path on the daemon's computer.  Only the native
+/// Android client uses them; a request that comes from a browser is refused.
+fn is_host_path_endpoint(path: &str) -> bool {
+    matches!(
+        path,
+        "/api/publish-file"
+            | "/api/retrieve-to-file"
+            | "/api/directed/send-file"
+            | "/api/directed/retrieve-to-file"
+    )
+}
+
 async fn handle(
     req: Request<Incoming>,
     state: BridgeState,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
-    // Handle CORS preflight
+    // One gate for every request, preflight included: Host, Origin, fetch metadata.
+    let admission = match state.guard.admit(req.headers()) {
+        Ok(a) => a,
+        Err(refusal) => {
+            warn!("HTTP bridge: refused request ({refusal:?})");
+            return Ok(web_guard::decorate(
+                json_error(StatusCode::FORBIDDEN, refusal.message()),
+                web_guard::Kind::Api,
+                None,
+            ));
+        }
+    };
+    let kind =
+        if req.method() == Method::GET && super::web_assets::lookup(req.uri().path()).is_some() {
+            web_guard::Kind::Page
+        } else {
+            web_guard::Kind::Api
+        };
+    let origin = admission.origin.clone();
+    let resp = serve(req, state, admission).await;
+    Ok(web_guard::decorate(resp, kind, origin.as_deref()))
+}
+
+async fn serve(
+    req: Request<Incoming>,
+    state: BridgeState,
+    admission: web_guard::Admission,
+) -> Response<Full<Bytes>> {
+    // CORS preflight: answered after the gate; the grant is added only for a
+    // validated Origin.
     if req.method() == Method::OPTIONS {
-        return Ok(cors(
-            Response::builder()
-                .status(StatusCode::NO_CONTENT)
-                .body(Full::new(Bytes::new()))
-                .unwrap(),
-        ));
+        return Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .body(Full::new(Bytes::new()))
+            .unwrap();
     }
 
-    // Origin validation — reject non-localhost origins
-    let origin = req
-        .headers()
-        .get(header::ORIGIN)
-        .and_then(|v| v.to_str().ok());
-    if !validate_origin(origin) {
-        warn!("HTTP bridge: rejected non-localhost origin: {:?}", origin);
-        return Ok(cors(json_error(
-            StatusCode::FORBIDDEN,
-            "origin not allowed",
-        )));
-    }
-
-    // The web client's own files: public code, no token, but the same Origin gate.
+    // The web client's own files: public code, no token, but the same gate.
     if req.method() == Method::GET {
         if let Some(asset) = super::web_assets::lookup(req.uri().path()) {
-            return Ok(static_response(asset));
+            return static_response(asset);
         }
+    }
+
+    // Raw host paths are for native clients only.
+    if admission.browser && is_host_path_endpoint(req.uri().path()) {
+        return json_error_coded(
+            StatusCode::FORBIDDEN,
+            "this endpoint is not available to browser pages",
+            "host_path_not_allowed_from_browser",
+        );
     }
 
     // Authentication — everything but the liveness probe needs the token.
@@ -307,10 +349,10 @@ async fn handle(
             .unwrap_or("");
         if let Err(delay) = state.bridge_live.control_auth.check(presented) {
             tokio::time::sleep(delay).await;
-            return Ok(cors(json_error(
+            return json_error(
                 StatusCode::UNAUTHORIZED,
                 "unauthorized: missing or invalid control token",
-            )));
+            );
         }
     }
 
@@ -322,24 +364,21 @@ async fn handle(
         let mut rl = state.bridge_live.rate_limiter.lock().unwrap();
         if !rl.check(rate_class) {
             debug!("HTTP bridge: rate limited {} {}", method_str, path_str);
-            return Ok(cors(
-                Response::builder()
-                    .status(StatusCode::TOO_MANY_REQUESTS)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Full::new(Bytes::from(r#"{"error":"rate limited"}"#)))
-                    .unwrap(),
-            ));
+            return Response::builder()
+                .status(StatusCode::TOO_MANY_REQUESTS)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Full::new(Bytes::from(r#"{"error":"rate limited"}"#)))
+                .unwrap();
         }
     }
 
     // Transfers (list, status, start a receive, cancel): the same handlers the CLI and
     // the desktop app use, reached through the same request type.
     if let Some(rest) = path_str.strip_prefix("/api/transfers") {
-        let resp = route_transfers(req, rest.to_owned(), state).await;
-        return Ok(cors(resp));
+        return route_transfers(req, rest.to_owned(), state).await;
     }
 
-    let resp = match (req.method().clone(), req.uri().path()) {
+    match (req.method().clone(), req.uri().path()) {
         (Method::GET, "/api/ping") => json_ok(&OkResponse { ok: true }),
 
         (Method::GET, "/api/status") => handle_status(state).await,
@@ -407,9 +446,7 @@ async fn handle(
         (Method::GET, "/api/directed/outbox") => handle_directed_outbox(state).await,
 
         _ => json_error(StatusCode::NOT_FOUND, "not found"),
-    };
-
-    Ok(cors(resp))
+    }
 }
 
 /// Send a ControlRequest through process_request with all bridge state params.
@@ -485,10 +522,14 @@ async fn handle_publish_file(body: Bytes, state: BridgeState) -> Response<Full<B
             "file_path must be absolute and contain no '..'",
         );
     }
+    let file_path = match path_policy::resolve_input(&req.file_path, &state.data_dir) {
+        Ok(p) => p,
+        Err(r) => return path_refusal(&r),
+    };
     let resp = bridge_request(
         state,
         ControlRequest::PublishFile {
-            file_path: req.file_path,
+            file_path,
             data_shards: req.data_shards,
             total_shards: req.total_shards,
         },
@@ -544,16 +585,24 @@ async fn handle_retrieve_to_file(body: Bytes, state: BridgeState) -> Response<Fu
             "output_path must be absolute and contain no '..'",
         );
     }
+    let target = match path_policy::reserve_output(&req.output_path, &state.data_dir, req.overwrite)
+    {
+        Ok(t) => t,
+        Err(r) => return path_refusal(&r),
+    };
     let resp = bridge_request(
         state,
         ControlRequest::GetToFile {
             mid: req.mid,
             data_shards: req.data_shards,
             total_shards: req.total_shards,
-            output_path: req.output_path,
+            output_path: target.path.clone(),
         },
     )
     .await;
+    if matches!(resp, ControlResponse::Error(_)) {
+        target.release_if_unused();
+    }
     match resp {
         ControlResponse::RetrievedToFile {
             output_path,
@@ -647,6 +696,9 @@ struct DirectedRetrieveToFileRequest {
     envelope_id: String,
     password: String,
     output_path: String,
+    /// Replace an existing file (default: refuse).
+    #[serde(default)]
+    overwrite: bool,
 }
 
 #[derive(Serialize)]
@@ -725,11 +777,25 @@ async fn handle_directed_send_file(body: Bytes, state: BridgeState) -> Response<
     if req.file_path.is_empty() {
         return json_error(StatusCode::BAD_REQUEST, "file_path is required");
     }
+    if let Err(e) = validate_field_length("file_path", &req.file_path, MAX_OUTPUT_PATH_LEN) {
+        return json_error(StatusCode::BAD_REQUEST, &e);
+    }
+    // The same path policy as `publish-file`.
+    if control_auth::validate_output_path(&req.file_path).is_err() {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "file_path must be absolute and contain no '..'",
+        );
+    }
+    let file_path = match path_policy::resolve_input(&req.file_path, &state.data_dir) {
+        Ok(p) => p,
+        Err(r) => return path_refusal(&r),
+    };
     let resp = bridge_request(
         state,
         ControlRequest::DirectedSendFile {
             recipient_contact: req.recipient_contact,
-            file_path: req.file_path,
+            file_path,
             password: req.password,
             retention_secs: req.retention_secs,
             filename: req.filename,
@@ -811,15 +877,23 @@ async fn handle_directed_retrieve_to_file(
             "output_path must be absolute and contain no '..'",
         );
     }
+    let target = match path_policy::reserve_output(&req.output_path, &state.data_dir, req.overwrite)
+    {
+        Ok(t) => t,
+        Err(r) => return path_refusal(&r),
+    };
     let resp = bridge_request(
         state,
         ControlRequest::DirectedRetrieveToFile {
             envelope_id: req.envelope_id,
             password: req.password,
-            output_path: req.output_path,
+            output_path: target.path.clone(),
         },
     )
     .await;
+    if matches!(resp, ControlResponse::Error(_)) {
+        target.release_if_unused();
+    }
     match resp {
         ControlResponse::DirectedRetrievedToFile {
             output_path,
@@ -1171,6 +1245,14 @@ async fn handle_transfer_receive(body: Bytes, state: BridgeState) -> Response<Fu
         }
     }
 
+    // Never into the daemon's own data directory (the receive itself refuses an
+    // existing file and writes a `.part` first).
+    if let Err(r) =
+        path_policy::refuse_data_dir(std::path::Path::new(&req.output_path), &state.data_dir)
+    {
+        return path_refusal(&r);
+    }
+
     // An empty password field means "no password".
     let password = req.password.take().filter(|p| !p.is_empty());
     let request = ControlRequest::TransferStartReceive {
@@ -1231,6 +1313,7 @@ fn json_ok<T: Serialize>(value: &T) -> Response<Full<Bytes>> {
 fn json_error(status: StatusCode, msg: &str) -> Response<Full<Bytes>> {
     let body = serde_json::to_vec(&ErrorResponse {
         error: msg.to_string(),
+        code: None,
     })
     .unwrap_or_default();
     Response::builder()
@@ -1242,30 +1325,30 @@ fn json_error(status: StatusCode, msg: &str) -> Response<Full<Bytes>> {
 
 fn static_response(asset: &'static super::web_assets::Asset) -> Response<Full<Bytes>> {
     // `no-cache` so a new daemon build is picked up on the next load; the client's
-    // service worker keeps its own versioned cache for offline use.
+    // service worker keeps its own versioned cache for offline use.  The security
+    // headers are added for every response by `web_guard::decorate`.
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, asset.content_type)
         .header(header::CACHE_CONTROL, "no-cache")
-        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
-        .header(header::REFERRER_POLICY, "no-referrer")
-        .header(header::X_FRAME_OPTIONS, "DENY")
         .body(Full::new(Bytes::from_static(asset.body)))
         .unwrap()
 }
 
-/// Add CORS headers to a response.  Localhost-only binding makes wildcard
-/// origin safe — any local process can already reach the daemon via IPC.
-fn cors(mut resp: Response<Full<Bytes>>) -> Response<Full<Bytes>> {
-    let headers = resp.headers_mut();
-    headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".parse().unwrap());
-    headers.insert(
-        header::ACCESS_CONTROL_ALLOW_METHODS,
-        "GET, POST, OPTIONS".parse().unwrap(),
-    );
-    headers.insert(
-        header::ACCESS_CONTROL_ALLOW_HEADERS,
-        "Content-Type, Authorization".parse().unwrap(),
-    );
-    resp
+fn json_error_coded(status: StatusCode, msg: &str, code: &'static str) -> Response<Full<Bytes>> {
+    let body = serde_json::to_vec(&ErrorResponse {
+        error: msg.to_string(),
+        code: Some(code),
+    })
+    .unwrap_or_default();
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Full::new(Bytes::from(body)))
+        .unwrap()
+}
+
+/// Turn a refused path into the reply for the caller.
+fn path_refusal(r: &path_policy::PathRefusal) -> Response<Full<Bytes>> {
+    json_error_coded(StatusCode::BAD_REQUEST, &r.to_string(), "path_not_allowed")
 }
