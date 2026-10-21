@@ -15,9 +15,12 @@
 //! ([`RootKeyError::SealedUnavailable`] and its neighbours) and nothing is
 //! created or changed.
 
+#[cfg(windows)]
+mod dpapi;
 mod durable;
 mod filewrap;
 pub mod format;
+mod platform;
 mod provider;
 pub mod sealed;
 pub mod stub;
@@ -27,7 +30,10 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
+#[cfg(windows)]
+pub use dpapi::DpapiWrap;
 pub use filewrap::FileWrap;
+pub use platform::install_default_platform_provider;
 pub use provider::{
     Availability, DestroyOutcome, DeviceWrap, FileProvider, ProtectionLevel, ProviderId,
     RootKeyProvider, WrapError,
