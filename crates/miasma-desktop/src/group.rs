@@ -330,7 +330,7 @@ pub fn member_facts(g: &GroupStrings, m: &MemberInfo) -> Vec<String> {
 #[allow(dead_code)]
 pub fn member_summary(g: &GroupStrings, m: &MemberInfo) -> String {
     let facts = member_facts(g, m);
-    let state = facts[1..].join(", ");
+    let state = facts[1..].join(g.list_sep);
     if state.is_empty() {
         return fill(
             g.a11y_member_self,
@@ -449,14 +449,14 @@ pub fn waiting_of(g: &GroupStrings, d: &GroupDetailInfo) -> Waiting {
     w
 }
 
-fn names_list(names: &[String]) -> String {
+fn names_list(g: &GroupStrings, names: &[String]) -> String {
     const SHOWN: usize = 3;
     let mut s = names
         .iter()
         .take(SHOWN)
         .cloned()
         .collect::<Vec<_>>()
-        .join(", ");
+        .join(g.list_sep);
     if names.len() > SHOWN {
         s.push_str(&format!(" +{}", names.len() - SHOWN));
     }
@@ -471,7 +471,7 @@ pub fn waiting_notices(g: &GroupStrings, w: &Waiting) -> Vec<(bool, String)> {
     if !w.no_group.is_empty() {
         out.push((
             true,
-            fill(g.banner_no_group, &[("names", &names_list(&w.no_group))]),
+            fill(g.banner_no_group, &[("names", &names_list(g, &w.no_group))]),
         ));
     }
     if !w.unreachable.is_empty() {
@@ -479,14 +479,14 @@ pub fn waiting_notices(g: &GroupStrings, w: &Waiting) -> Vec<(bool, String)> {
             true,
             fill(
                 g.banner_unreachable,
-                &[("names", &names_list(&w.unreachable))],
+                &[("names", &names_list(g, &w.unreachable))],
             ),
         ));
     }
     if !w.invited.is_empty() {
         out.push((
             false,
-            fill(g.banner_invited, &[("names", &names_list(&w.invited))]),
+            fill(g.banner_invited, &[("names", &names_list(g, &w.invited))]),
         ));
     }
     out
@@ -729,8 +729,72 @@ impl Picks {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormError {
     Name,
+    /// The name is over the product limit (see [`name_fit`]).
+    NameTooLong(NameFit),
     NoMembers,
     TooMany,
+}
+
+/// Longest group name the form accepts, in characters, in every language. The wire limit
+/// (`MAX_NAME_BYTES`, 192 bytes) is not changed: a name must also fit it, which 64 characters
+/// of any script do unless they are mostly 4-byte characters such as emoji.
+pub const NAME_MAX_CHARS: usize = 64;
+
+/// How much of the name box is kept in memory when text is pasted (far above any limit, so a
+/// paste is never silently cut to the limit; the form says it is too long instead).
+pub const NAME_KEEP_BYTES: usize = MAX_NAME_BYTES * 4;
+
+/// Whether a typed group name fits, and which limit it hits first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NameFit {
+    Ok,
+    /// More than [`NAME_MAX_CHARS`] characters; the number is how many too many.
+    OverChars(usize),
+    /// Within the character limit but over `MAX_NAME_BYTES` (emoji and some symbols take 4
+    /// bytes); the number is the approximate count of characters to remove.
+    OverBytes(usize),
+}
+
+/// The rule: at most [`NAME_MAX_CHARS`] characters AND at most `MAX_NAME_BYTES` bytes, measured
+/// on the trimmed name (the one that is sent).
+pub fn name_fit(name: &str) -> NameFit {
+    let t = name.trim();
+    let chars = t.chars().count();
+    if chars > NAME_MAX_CHARS {
+        return NameFit::OverChars(chars - NAME_MAX_CHARS);
+    }
+    if t.len() > MAX_NAME_BYTES {
+        let avg = t.len() as f64 / chars.max(1) as f64;
+        let over = ((t.len() - MAX_NAME_BYTES) as f64 / avg).ceil() as usize;
+        return NameFit::OverBytes(over.max(1));
+    }
+    NameFit::Ok
+}
+
+/// The line under the name box: the count while it fits, which limit was hit when it does not.
+pub fn name_fit_text(g: &GroupStrings, name: &str) -> String {
+    match name_fit(name) {
+        NameFit::Ok => fill(
+            g.ng_name_count,
+            &[
+                ("n", &name.trim().chars().count().to_string()),
+                ("max", &NAME_MAX_CHARS.to_string()),
+            ],
+        ),
+        over => name_over_text(g, over),
+    }
+}
+
+/// Which limit was hit, in words (empty when the name fits).
+pub fn name_over_text(g: &GroupStrings, fit: NameFit) -> String {
+    match fit {
+        NameFit::Ok => String::new(),
+        NameFit::OverChars(n) => fill(
+            g.ng_name_over_chars,
+            &[("n", &n.to_string()), ("max", &NAME_MAX_CHARS.to_string())],
+        ),
+        NameFit::OverBytes(n) => fill(g.ng_name_over_bytes, &[("n", &n.to_string())]),
+    }
 }
 
 /// From this many contacts on, the pickers get a search field and a "selected only" switch.
@@ -783,8 +847,11 @@ impl NewGroupForm {
     }
 
     pub fn edit_name(&mut self) {
-        cap_text(&mut self.name, MAX_NAME_BYTES);
-        if self.error == Some(FormError::Name) {
+        cap_text(&mut self.name, NAME_KEEP_BYTES);
+        if matches!(
+            self.error,
+            Some(FormError::Name | FormError::NameTooLong(_))
+        ) {
             self.error = None;
         }
     }
@@ -801,15 +868,18 @@ impl NewGroupForm {
         if self.total() > MAX_MEMBERS {
             return Err(FormError::TooMany);
         }
-        let mut name = name.to_owned();
-        cap_text(&mut name, MAX_NAME_BYTES);
-        Ok((name, self.picks.ids().to_vec()))
+        let fit = name_fit(name);
+        if fit != NameFit::Ok {
+            return Err(FormError::NameTooLong(fit));
+        }
+        Ok((name.to_owned(), self.picks.ids().to_vec()))
     }
 }
 
 pub fn form_error_text(g: &GroupStrings, e: FormError) -> String {
     match e {
         FormError::Name => g.ng_err_name.to_owned(),
+        FormError::NameTooLong(fit) => name_over_text(g, fit),
         FormError::NoMembers => g.ng_err_members.to_owned(),
         FormError::TooMany => fill(g.ng_err_limit, &[("max", &MAX_MEMBERS.to_string())]),
     }
@@ -912,7 +982,7 @@ pub fn row_a11y(
 ) -> String {
     let mut s = row_label(g, row);
     if unread > 0 {
-        s.push_str(", ");
+        s.push_str(g.list_sep);
         s.push_str(&fill(
             c.a11y_unread,
             &[("n", &crate::chat::badge_text(unread))],
@@ -920,7 +990,7 @@ pub fn row_a11y(
     }
     let tail = preview_tail(g, c, row, last);
     if !tail.is_empty() {
-        s.push_str(", ");
+        s.push_str(g.list_sep);
         s.push_str(&tail);
     }
     s
@@ -1279,11 +1349,67 @@ mod tests {
         // Unticking one makes room again and clears the message.
         f.tick("c0", false);
         assert_eq!(f.error, None);
-        // A very long name is cut on a character boundary.
+        // A very long name is kept as typed (not cut); the form refuses it and says why.
         f.name = "あ".repeat(200);
         f.edit_name();
-        assert!(f.name.len() <= MAX_NAME_BYTES);
+        assert_eq!(f.name.chars().count(), 200);
+        assert_eq!(
+            f.check().unwrap_err(),
+            FormError::NameTooLong(NameFit::OverChars(200 - NAME_MAX_CHARS))
+        );
+    }
+
+    #[test]
+    fn a_group_name_has_the_same_limit_in_characters_in_every_script() {
+        // 64 characters of one, two or three bytes each fit the wire limit; the 65th does not.
+        for ch in ["a", "é", "あ", "中"] {
+            assert_eq!(name_fit(&ch.repeat(NAME_MAX_CHARS)), NameFit::Ok, "{ch}");
+            assert_eq!(
+                name_fit(&ch.repeat(NAME_MAX_CHARS + 1)),
+                NameFit::OverChars(1),
+                "{ch}"
+            );
+        }
+        // Surrounding blanks do not count, they are not sent.
+        assert_eq!(name_fit(&format!("  {}  ", "a".repeat(64))), NameFit::Ok);
+        // 4-byte characters hit the byte limit first: 48 fit (192 bytes), 49 do not.
+        assert_eq!(name_fit(&"😀".repeat(48)), NameFit::Ok);
+        assert_eq!(name_fit(&"😀".repeat(49)), NameFit::OverBytes(1));
+        assert_eq!(name_fit(&"😀".repeat(64)), NameFit::OverBytes(16));
+        // Whatever fits is accepted by the wire rule.
+        let mut f = NewGroupForm::default();
+        f.tick("c1", true);
+        f.name = "😀".repeat(48);
         assert!(f.check().is_ok());
+        assert!(f.name.len() <= MAX_NAME_BYTES);
+    }
+
+    #[test]
+    fn a_long_paste_is_kept_and_the_line_under_the_name_says_which_limit_was_hit() {
+        use crate::locale::{group_strings, Locale};
+        for locale in Locale::ALL {
+            let g = group_strings(locale);
+            let mut f = NewGroupForm::default();
+            f.name = "a".repeat(300);
+            f.edit_name();
+            assert_eq!(f.name.len(), 300, "{locale:?}: a paste is not cut");
+            let over = name_fit_text(g, &f.name);
+            assert!(over.contains("236"), "{locale:?}: {over}");
+            assert!(over.contains("64"), "{locale:?}: {over}");
+            // The count while it fits.
+            let ok = name_fit_text(g, "abc");
+            assert!(ok.contains('3') && ok.contains("64"), "{locale:?}: {ok}");
+            // Only the emoji case mentions room, not a character count of the limit.
+            let emoji = name_fit_text(g, &"😀".repeat(60));
+            assert!(emoji.contains("12"), "{locale:?}: {emoji}");
+            // The error kept on the form, once the name changes, goes away.
+            f.tick("c1", true);
+            f.error = f.check().err();
+            assert!(matches!(f.error, Some(FormError::NameTooLong(_))));
+            f.name = "ok".into();
+            f.edit_name();
+            assert_eq!(f.error, None);
+        }
     }
 
     #[test]

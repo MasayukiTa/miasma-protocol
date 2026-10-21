@@ -950,7 +950,7 @@ static JA: Strings = Strings {
     tab_store: "保存",
     tab_store_easy: "保存",
     tab_retrieve: "取得",
-    tab_retrieve_easy: "取り出す",
+    tab_retrieve_easy: "復元",
     tab_status: "ステータス",
     tab_settings: "設定",
 
@@ -997,13 +997,13 @@ static JA: Strings = Strings {
     store_not_connected_hint: "保存するにはアプリを起動してください。",
 
     retrieve_heading: "コンテンツ取得",
-    retrieve_heading_easy: "取り出す",
+    retrieve_heading_easy: "復元",
     retrieve_desc: "MiasmaコンテンツIDからコンテンツを復元します。",
     retrieve_desc_easy: "コンテンツIDを入力して取り出します。",
     retrieve_mid_label: "コンテンツID (MID):",
     retrieve_mid_label_easy: "コンテンツID:",
     retrieve_button: "取得",
-    retrieve_button_easy: "取り出す",
+    retrieve_button_easy: "復元",
     retrieve_busy: "取得中...",
     retrieve_success: "取得しました。ファイルに保存できます。",
     retrieve_save_button: "ファイルに保存...",
@@ -4213,6 +4213,21 @@ mod tests {
             update_strings(zh).all(),
         );
         assert_translation_parity("speed", speed_strings(en).all(), speed_strings(zh).all());
+    }
+
+    #[test]
+    fn the_easy_files_hub_names_its_four_tasks_with_one_word_for_restoring() {
+        // Restore is the same word on the hub button, the screen's heading and its button.
+        for (l, word) in [
+            (Locale::En, "Restore"),
+            (Locale::Ja, "復元"),
+            (Locale::ZhCn, "恢复"),
+        ] {
+            let s = strings(l);
+            assert_eq!(s.tab_retrieve_easy, word, "{l:?}");
+            assert_eq!(s.retrieve_button_easy, word, "{l:?}");
+            assert!(s.retrieve_heading_easy.starts_with(word), "{l:?}");
+        }
     }
 
     #[test]

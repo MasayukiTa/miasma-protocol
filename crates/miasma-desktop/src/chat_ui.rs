@@ -59,6 +59,9 @@ pub enum ChatAction {
     OpenContacts,
     /// Pick files and send them to this contact (the Contacts tab's own flow).
     SendFiles(String),
+    /// Open the one send flow with nobody chosen yet (a group has no file button: its note
+    /// points here).
+    OpenSendFlow,
     /// Send this file to this contact again (a file line that did not go through).
     RetryFile { contact_id: String, path: String },
     /// Open the add-contact form with this contact code filled in (a group member who is not a
@@ -1488,6 +1491,8 @@ impl ChatUi {
             .unwrap_or(&[]);
         let relay_down = self.relay_down;
         let msgs = self.window.items();
+        // Only the newest message of mine says "Read" in words; older ones a small check.
+        let latest_own = msgs.iter().rposition(|m| m.outgoing);
         let timeline = &self.timeline;
         let heights = &mut self.heights;
         let older_loading = self.older_inflight.is_some();
@@ -1536,7 +1541,15 @@ impl ChatUi {
                         }
                     }
                     let r = ui.vertical(|ui| match *e {
-                        Entry::Msg(i) => message_row(ui, c, &msgs[i], clock, bubble_w, relay_down),
+                        Entry::Msg(i) => message_row(
+                            ui,
+                            c,
+                            &msgs[i],
+                            clock,
+                            bubble_w,
+                            relay_down,
+                            latest_own == Some(i),
+                        ),
                         Entry::File(i) => {
                             let st = file_states
                                 .get(&notes[i].id)
@@ -1891,6 +1904,25 @@ fn conversation_row(
     resp
 }
 
+/// Whether a message of mine that was read shows a small check instead of the word: every one
+/// but the newest (the word repeated under each bubble drowned the messages).
+pub(crate) fn read_as_check(delivery: Delivery, latest_own: bool) -> bool {
+    delivery == Delivery::Read && !latest_own
+}
+
+/// A small check mark (drawn, so no font needs it); the word is its hover text and its name for
+/// assistive technology.
+fn read_check(ui: &mut egui::Ui, word: &str, color: egui::Color32) {
+    let (rect, resp) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+    let a = rect.min;
+    ui.painter().add(egui::Shape::line(
+        vec![a + vec2(2.0, 7.5), a + vec2(5.5, 11.0), a + vec2(12.0, 3.5)],
+        Stroke::new(1.6, color),
+    ));
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, word));
+    resp.on_hover_text(word);
+}
+
 /// One message as an aligned bubble with its time and state. Returns `Some(())` when "send
 /// again" was pressed.
 fn message_row(
@@ -1900,6 +1932,7 @@ fn message_row(
     clock: Clock,
     bubble_w: f32,
     relay_down: bool,
+    latest_own: bool,
 ) -> Option<()> {
     let p = pal();
     let own = m.outgoing;
@@ -1935,7 +1968,11 @@ fn message_row(
     let mut retry = None;
     ui.with_layout(layout, |ui| {
         if let Some(s) = state {
-            ui.label(kit::meta_text(s, state_color));
+            if read_as_check(delivery, latest_own) {
+                read_check(ui, s, state_color);
+            } else {
+                ui.label(kit::meta_text(s, state_color));
+            }
         }
         if !when.is_empty() {
             ui.label(kit::meta_text(when, p.muted));
@@ -2018,6 +2055,7 @@ pub const FIXTURES: &[&str] = &[
     "empty",
     "list",
     "thread",
+    "reads",
     "long",
     "failed",
     "memory",
@@ -2086,8 +2124,8 @@ impl ChatUi {
         let mut open = false;
         match name {
             "nocontacts" | "empty" | "notsupported" => {}
-            "memory" | "list" | "picker" | "confirm" | "thread" | "long" | "failed" | "menu"
-            | "verify" | "grouplist" | "group" | "groupinfo" => {
+            "memory" | "list" | "picker" | "confirm" | "thread" | "reads" | "long" | "failed"
+            | "menu" | "verify" | "grouplist" | "group" | "groupinfo" => {
                 convs = vec![
                     conv(a_ep, "a", "田中", NOW - 2 * MIN, 12, 0),
                     conv("bb", "b", LONG, NOW - DAY, 40, 1),
@@ -2139,6 +2177,22 @@ impl ChatUi {
                     msg(4, true, "read", "ありがとうございます。確認します。", NOW - 2 * MIN),
                     msg(0, true, "sending", "確認しました。", NOW - 30_000),
                     msg(0, true, "queued", "あとで電話します。", NOW - 10_000),
+                ];
+            }
+            "reads" => {
+                // Four messages of mine that were all read: only the newest says so in words.
+                open = true;
+                thread = vec![
+                    msg(1, true, "read", "お疲れさまです。", NOW - 4 * MIN),
+                    msg(
+                        2,
+                        true,
+                        "read",
+                        "資料を共有フォルダに置きました。",
+                        NOW - 3 * MIN,
+                    ),
+                    msg(3, true, "read", "明日は10時からです。", NOW - 2 * MIN),
+                    msg(4, true, "read", "よろしくお願いします。", NOW - MIN),
                 ];
             }
             "long" => {
@@ -2291,6 +2345,61 @@ mod tests {
         ChatRequest::MarkRead {
             contact: contact.into(),
             up_to_seq,
+        }
+    }
+
+    #[test]
+    fn only_the_newest_message_of_mine_says_read_in_words() {
+        assert!(!read_as_check(Delivery::Read, true));
+        assert!(read_as_check(Delivery::Read, false));
+        // Other states keep their words on every message.
+        for d in [
+            Delivery::Sending,
+            Delivery::Queued,
+            Delivery::Delivered,
+            Delivery::Failed,
+        ] {
+            assert!(!read_as_check(d, false), "{d:?}");
+        }
+        // The fixture with four read messages: the word "Read" is drawn once (the newest), the
+        // other three carry the check.
+        for locale in Locale::ALL {
+            let mut chat = ChatUi::fixture("reads").expect("fixture");
+            chat.set_locale(locale);
+            let word = chat_strings(locale).state_read;
+            let contacts =
+                crate::contacts::ContactsUi::fixture("two", crate::locale::contact_strings(locale))
+                    .unwrap();
+            let list = contacts.contact_list().to_vec();
+            let ctx = egui::Context::default();
+            kit::apply_theme(&ctx, false);
+            let mut shapes = Vec::new();
+            for _ in 0..3 {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::pos2(0.0, 0.0),
+                        vec2(700.0, 900.0),
+                    )),
+                    ..Default::default()
+                };
+                let out = ctx.run(input, |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        kit::column_max(ui, TWO_PANE_MAX, |ui| {
+                            let _ = chat.show(ui, chat_strings(locale), true, &list);
+                        });
+                    });
+                });
+                shapes = out.shapes;
+            }
+            fn count(shape: &egui::Shape, word: &str) -> usize {
+                match shape {
+                    egui::Shape::Text(t) => usize::from(t.galley.text() == word),
+                    egui::Shape::Vec(v) => v.iter().map(|s| count(s, word)).sum(),
+                    _ => 0,
+                }
+            }
+            let n: usize = shapes.iter().map(|c| count(&c.shape, word)).sum();
+            assert_eq!(n, 1, "{locale:?}: the word {word:?} is drawn {n} times");
         }
     }
 
