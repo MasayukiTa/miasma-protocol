@@ -41,7 +41,8 @@ if ($Target -eq "release") {
 # are included), not the compiled binary itself.
 # Build once; variant distinction comes from launcher scripts and persisted prefs.
 
-# Build all workspace binaries.
+# Build all workspace binaries. The desktop and CLI packages include the hybrid
+# chat upgrade through their default features (the setting itself stays off).
 & cargo @cargoArgs --workspace
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Cargo build failed."

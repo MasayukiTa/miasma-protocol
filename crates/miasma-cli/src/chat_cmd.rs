@@ -309,16 +309,13 @@ fn reason_words(r: &str, ja: bool) -> String {
 }
 
 /// `, classical only` and the like for a conversation whose hybrid
-/// post-quantum upgrade was asked for or is in use; nothing otherwise.
+/// upgrade was asked for or is in use; nothing otherwise.
 fn pqc_note(c: &ConversationInfo, ja: bool) -> String {
     let Some(state) = c.pqc.as_deref() else {
         return String::new();
     };
     let (en, jp) = match state {
-        "hybrid" => (
-            "quantum-resistant protection on",
-            "量子コンピューター対策の保護：オン",
-        ),
+        "hybrid" => ("advanced encryption on", "高度な暗号化：オン"),
         "classical" => ("classical only", "標準の保護のみ"),
         "pending" => ("extra protection being set up", "追加の保護を準備中"),
         "failed" => (

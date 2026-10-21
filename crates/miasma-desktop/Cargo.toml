@@ -9,9 +9,13 @@ license.workspace = true
 [features]
 # Developer-only: walk theme x language x tab and save screenshots (see src/app/tour.rs).
 ui-tour = []
-# Opt-in hybrid upgrade of private conversations (off by default). See
+# Hybrid upgrade of private conversations, included in release builds (the
+# setting itself is off by default). See
 # docs/pqc-session-upgrade.md.
 pqc = ["miasma-core/pqc"]
+# Release builds include the hybrid upgrade; `privacy.pqc_mode` is still off
+# until a person turns it on.
+default = ["pqc"]
 
 [[bin]]
 name = "miasma-desktop"
