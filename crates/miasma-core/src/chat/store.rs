@@ -1112,6 +1112,13 @@ impl ChatStore {
     }
 }
 
+/// Entry point for the fuzz targets only (`--cfg fuzzing`, set by cargo-fuzz):
+/// parses a per-peer state document. Not compiled in any other build.
+#[cfg(fuzzing)]
+pub fn fuzz_peer_state(b: &[u8]) -> bool {
+    PeerState::from_bytes(b).is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
