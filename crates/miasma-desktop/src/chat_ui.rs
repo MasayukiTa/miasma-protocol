@@ -16,7 +16,7 @@ use miasma_core::push::ContactInfo;
 
 use crate::chat::*;
 use crate::contacts::{ContactsUi, FileStatus, SentFile};
-use crate::group::{merge_list, ListEntry};
+use crate::group::split_by_kind;
 use crate::group_ui::GroupUi;
 use crate::locale::{group_strings, ChatStrings, ContactStrings, Locale};
 use crate::theme::{self, Palette};
@@ -868,6 +868,10 @@ impl ChatUi {
     // ─── Actions ────────────────────────────────────────────────────────────
 
     fn open_conversation(&mut self, contact_id: &str, endpoint_id: &str, label: &str) {
+        // One conversation at a time: a group that is open is closed first. The screen draws an
+        // open group before it looks at the one-to-one view, so a group left open hid every
+        // person that was opened after it.
+        self.group.show_list();
         self.stash_draft();
         self.view = View::Conversation(Open {
             contact_id: contact_id.to_owned(),
@@ -888,6 +892,15 @@ impl ChatUi {
         self.focus_composer = true;
         self.page_msg = None;
         self.unread.open(endpoint_id);
+    }
+
+    /// Open a group from its list row. The one-to-one conversation that was open is left, so
+    /// only the group is selected and "back" returns to the list.
+    fn open_group(&mut self, index: usize) {
+        if matches!(self.view, View::Conversation(_)) {
+            self.close_conversation();
+        }
+        self.group.open_index(index);
     }
 
     fn close_conversation(&mut self) {
@@ -1224,23 +1237,28 @@ impl ChatUi {
             }
             return;
         }
+        let (group_ix, direct_ix) = split_by_kind(&self.rows, self.group.rows());
+        let gs = group_strings(self.locale);
         kit::section(ui, c.list_title, |_| {});
         egui::ScrollArea::vertical()
             .id_source("chat_list")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                // Groups sit among the conversations, newest first.
-                for entry in merge_list(&self.rows, self.group.rows()) {
-                    let i = match entry {
-                        ListEntry::Direct(i) => i,
-                        ListEntry::Group(j) => {
-                            if self.group.row(ui, j, clock) {
-                                open_group = Some(j);
-                            }
-                            continue;
+                // Two headings, groups then people, each newest first. The heading and the
+                // shape of the avatar say which kind a row is, not only its colour.
+                if !group_ix.is_empty() {
+                    section_heading(ui, gs.section_groups);
+                    for &j in &group_ix {
+                        if self.group.row(ui, j, clock) {
+                            open_group = Some(j);
                         }
-                    };
+                    }
+                }
+                if !direct_ix.is_empty() {
+                    section_heading(ui, gs.section_people);
+                }
+                for &i in &direct_ix {
                     let row = &self.rows[i];
                     let note = self.notes.get(&row.contact_id).and_then(|n| n.last());
                     let stored = self
@@ -1270,7 +1288,7 @@ impl ChatUi {
             self.open_conversation(&r.contact_id, &r.endpoint_id, &r.label);
         }
         if let Some(j) = open_group {
-            self.group.open_index(j);
+            self.open_group(j);
         }
     }
 
@@ -1811,6 +1829,13 @@ fn single_line(
     ui.fonts(|f| f.layout_job(job))
 }
 
+/// The small heading over one kind of conversation in the list ("Groups", "People").
+fn section_heading(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(kit::SP_3);
+    ui.add(egui::Label::new(kit::meta_text(text, pal().muted).strong()));
+    ui.add_space(kit::SP_1);
+}
+
 /// One row of the conversation list: name and time, then the last message and the unread badge.
 fn conversation_row(
     ui: &mut egui::Ui,
@@ -1857,6 +1882,16 @@ fn conversation_row(
         Stroke::new(1.0, p.border),
     );
     let inner = rect.shrink2(vec2(kit::SP_3, kit::SP_2));
+    // A person is a circle; a group (see `group_row`) is a rounded square.
+    let avatar = egui::Rect::from_center_size(
+        egui::pos2(inner.left() + kit::AVATAR_PX * 0.5, rect.center().y),
+        vec2(kit::AVATAR_PX, kit::AVATAR_PX),
+    );
+    kit::paint_avatar(ui.painter(), avatar, &row.label, kit::AvatarKind::Person);
+    let inner = egui::Rect::from_min_max(
+        egui::pos2(inner.left() + kit::AVATAR_PX + kit::SP_3, inner.top()),
+        inner.max,
+    );
     let when_galley = single_line(ui, when, kit::META_PX, p.muted, inner.width() * 0.4);
     let name_galley = single_line(
         ui,
@@ -3304,5 +3339,251 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ── Opening conversations of both kinds, by pointer and by assistive technology ───────────
+
+    use egui::accesskit;
+
+    /// The Chat area drawn headless with AccessKit on: the list rows are found in the tree by
+    /// their names, then pressed with the pointer or invoked as a UI Automation client does.
+    struct ChatRig {
+        ctx: egui::Context,
+        chat: ChatUi,
+        contacts: Vec<ContactInfo>,
+        width: f32,
+        clock: f64,
+        last: Vec<(accesskit::NodeId, accesskit::Node)>,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Press {
+        Pointer,
+        Invoke,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Want {
+        Person(&'static str, &'static str),
+        Group(&'static str),
+    }
+
+    impl ChatRig {
+        fn new(fixture: &str, width: f32) -> Self {
+            let contacts = crate::contacts::ContactsUi::fixture(
+                "two",
+                crate::locale::contact_strings(Locale::En),
+            )
+            .unwrap();
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            kit::apply_theme(&ctx, false);
+            let mut chat = ChatUi::fixture(fixture).expect(fixture);
+            chat.set_locale(Locale::En);
+            let mut rig = Self {
+                ctx,
+                chat,
+                contacts: contacts.contact_list().to_vec(),
+                width,
+                clock: 0.0,
+                last: Vec::new(),
+            };
+            rig.frames(3);
+            rig
+        }
+
+        fn frame_with(&mut self, events: Vec<egui::Event>) {
+            let mut raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    vec2(self.width, 900.0),
+                )),
+                time: Some(self.clock),
+                predicted_dt: 1.0 / 60.0,
+                events,
+                ..Default::default()
+            };
+            raw.viewports
+                .entry(egui::ViewportId::ROOT)
+                .or_default()
+                .native_pixels_per_point = Some(1.0);
+            self.clock += 1.0 / 60.0;
+            let (chat, list) = (&mut self.chat, &self.contacts);
+            let out = self.ctx.run(raw, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    kit::column_max(ui, TWO_PANE_MAX, |ui| {
+                        let _ = chat.show(ui, chat_strings(Locale::En), true, list);
+                    });
+                });
+            });
+            self.last = out
+                .platform_output
+                .accesskit_update
+                .expect("an accessibility update")
+                .nodes;
+        }
+
+        fn frames(&mut self, n: usize) {
+            for _ in 0..n {
+                self.frame_with(Vec::new());
+            }
+        }
+
+        fn button(&self, prefix: &str) -> (accesskit::NodeId, accesskit::Rect) {
+            let found = self.last.iter().find(|(_, n)| {
+                n.role() == accesskit::Role::Button
+                    && n.name().is_some_and(|name| name.starts_with(prefix))
+            });
+            let names: Vec<_> = self
+                .last
+                .iter()
+                .filter(|(_, n)| n.role() == accesskit::Role::Button)
+                .filter_map(|(_, n)| n.name())
+                .collect();
+            let (id, node) = found.unwrap_or_else(|| panic!("no button {prefix:?} in {names:?}"));
+            (*id, node.bounds().expect("a row has bounds"))
+        }
+
+        fn has_text(&self, text: &str) -> bool {
+            self.last.iter().any(|(_, n)| n.name() == Some(text))
+        }
+
+        fn press(&mut self, prefix: &str, how: Press) {
+            let (id, r) = self.button(prefix);
+            match how {
+                Press::Invoke => self.frame_with(vec![egui::Event::AccessKitActionRequest(
+                    accesskit::ActionRequest {
+                        action: accesskit::Action::Default,
+                        target: id,
+                        data: None,
+                    },
+                )]),
+                Press::Pointer => {
+                    let pos =
+                        egui::pos2(((r.x0 + r.x1) / 2.0) as f32, ((r.y0 + r.y1) / 2.0) as f32);
+                    let button = |pressed| egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    };
+                    self.frame_with(vec![egui::Event::PointerMoved(pos)]);
+                    self.frame_with(vec![button(true)]);
+                    self.frame_with(vec![button(false)]);
+                }
+            }
+            self.frames(3);
+        }
+
+        /// In a narrow window the list is hidden behind the open conversation: go back first.
+        fn back_if_narrow(&mut self, how: Press) {
+            if self.width < TWO_PANE_MIN {
+                self.press(chat_strings(Locale::En).a11y_back, how);
+            }
+        }
+
+        fn open(&mut self, prefix: &str, how: Press, want: Want) {
+            self.press(prefix, how);
+            let ctx = format!("after {prefix:?} ({how:?}, {} px)", self.width);
+            match want {
+                Want::Person(id, fallback) => {
+                    // The header shows the contact's own label when the contact is known.
+                    let header = self
+                        .contacts
+                        .iter()
+                        .find(|x| x.id == id)
+                        .map_or(fallback, |x| x.label.as_str())
+                        .to_owned();
+                    let header = header.as_str();
+                    assert_eq!(self.chat.open_contact_id(), Some(id), "{ctx}");
+                    assert!(!self.chat.group.is_open(), "{ctx}: a group is still open");
+                    assert!(
+                        self.has_text(header),
+                        "{ctx}: the header {header:?} is not drawn"
+                    );
+                    assert!(
+                        !self.has_text(group_strings(Locale::En).a11y_composer),
+                        "{ctx}: the group composer is drawn"
+                    );
+                }
+                Want::Group(name) => {
+                    assert!(self.chat.group.is_open(), "{ctx}: no group is open");
+                    assert!(
+                        self.chat.open_contact_id().is_none(),
+                        "{ctx}: a person is still open"
+                    );
+                    assert!(
+                        self.has_text(name),
+                        "{ctx}: the header {name:?} is not drawn"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A group, then a person (the reported case), then a group again, then person to person and
+    /// back to the group, then the same group twice.
+    fn people_and_groups_in_turn(width: f32, how: Press) {
+        const TANAKA: &str = "Conversation with 田中";
+        const ALICE: &str = "Conversation with Alice";
+        const WEEKLY: &str = "Group 週次ミーティング";
+        let mut rig = ChatRig::new("grouplist", width);
+        rig.open(WEEKLY, how, Want::Group("週次ミーティング"));
+        rig.back_if_narrow(how);
+        rig.open(TANAKA, how, Want::Person("a", "田中"));
+        rig.back_if_narrow(how);
+        rig.open(WEEKLY, how, Want::Group("週次ミーティング"));
+        rig.back_if_narrow(how);
+        rig.open(ALICE, how, Want::Person("c", "Alice"));
+        rig.back_if_narrow(how);
+        rig.open(TANAKA, how, Want::Person("a", "田中"));
+        rig.back_if_narrow(how);
+        rig.open(WEEKLY, how, Want::Group("週次ミーティング"));
+        rig.back_if_narrow(how);
+        rig.open(WEEKLY, how, Want::Group("週次ミーティング"));
+    }
+
+    #[test]
+    fn groups_and_people_are_listed_under_their_own_headings() {
+        let gs = group_strings(Locale::En);
+        for width in [700.0, 1400.0] {
+            let rig = ChatRig::new("grouplist", width);
+            let top_of = |name: &str| -> f64 {
+                let found = rig.last.iter().find(|(_, n)| n.name() == Some(name));
+                let (_, node) = found.unwrap_or_else(|| panic!("no {name:?} at {width} px"));
+                node.bounds().expect("bounds").y0
+            };
+            let (groups, people) = (top_of(gs.section_groups), top_of(gs.section_people));
+            let group_row = rig.button("Group ").1.y0;
+            let person_row = rig.button("Conversation with ").1.y0;
+            // Groups first, each row under its own heading, nothing of the other kind between.
+            assert!(groups < group_row && group_row < people, "{width} px");
+            assert!(people < person_row, "{width} px");
+            // The kind is said once in a row's name: groups say "Group", people do not.
+            assert!(
+                rig.button("Group 週次ミーティング, 3 members").0
+                    != rig.button("Conversation with").0
+            );
+        }
+    }
+
+    #[test]
+    fn people_and_groups_open_in_turn_narrow_by_pointer() {
+        people_and_groups_in_turn(700.0, Press::Pointer);
+    }
+
+    #[test]
+    fn people_and_groups_open_in_turn_narrow_by_automation() {
+        people_and_groups_in_turn(700.0, Press::Invoke);
+    }
+
+    #[test]
+    fn people_and_groups_open_in_turn_wide_by_pointer() {
+        people_and_groups_in_turn(1400.0, Press::Pointer);
+    }
+
+    #[test]
+    fn people_and_groups_open_in_turn_wide_by_automation() {
+        people_and_groups_in_turn(1400.0, Press::Invoke);
     }
 }

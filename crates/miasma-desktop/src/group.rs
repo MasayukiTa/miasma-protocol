@@ -129,6 +129,19 @@ pub fn merge_list(direct: &[ListRow], groups: &[GroupRow]) -> Vec<ListEntry> {
     all.into_iter().map(|x| x.3).collect()
 }
 
+/// The same list split by kind for the two headings of the conversation list: the indexes of
+/// the groups, then the indexes of the one-to-one conversations, each newest first.
+pub fn split_by_kind(direct: &[ListRow], groups: &[GroupRow]) -> (Vec<usize>, Vec<usize>) {
+    let (mut g, mut d) = (Vec::new(), Vec::new());
+    for entry in merge_list(direct, groups) {
+        match entry {
+            ListEntry::Group(j) => g.push(j),
+            ListEntry::Direct(i) => d.push(i),
+        }
+    }
+    (g, d)
+}
+
 // ─── Unread ─────────────────────────────────────────────────────────────────
 
 /// Unread messages per group, and the arrivals the navigation item still announces. The service
@@ -1115,6 +1128,9 @@ mod tests {
             ]
         );
         assert!(merge_list(&[], &[]).is_empty());
+        // Split under two headings, each part keeping the newest-first order.
+        assert_eq!(split_by_kind(&direct, &groups), (vec![1, 0], vec![0, 1]));
+        assert_eq!(split_by_kind(&[], &[]), (vec![], vec![]));
     }
 
     #[test]
