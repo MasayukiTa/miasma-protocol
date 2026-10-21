@@ -96,3 +96,106 @@ fn web_without_a_running_daemon_says_how_to_start_one() {
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(stderr.contains("miasma daemon"), "{stderr}");
 }
+
+/// A bridge that answers one `GET /api/ping` with `reply`; returns its port.
+fn fake_bridge(reply: &'static str) -> u16 {
+    use std::io::{Read, Write};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        if let Ok((mut s, _)) = l.accept() {
+            let mut buf = [0u8; 512];
+            let _ = s.read(&mut buf);
+            let _ = s.write_all(reply.as_bytes());
+        }
+    });
+    port
+}
+
+/// An IPC endpoint that reads the auth frame and one request frame, hands the
+/// request text back through the channel and answers with `response` (JSON).
+fn fake_ipc(response: String) -> (u16, std::sync::mpsc::Receiver<String>) {
+    use std::io::{Read, Write};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let Ok((mut s, _)) = l.accept() else { return };
+        let frame = |s: &mut std::net::TcpStream| -> String {
+            let mut len = [0u8; 4];
+            s.read_exact(&mut len).unwrap();
+            let mut body = vec![0u8; u32::from_le_bytes(len) as usize];
+            s.read_exact(&mut body).unwrap();
+            String::from_utf8(body).unwrap()
+        };
+        let _auth = frame(&mut s);
+        let _ = tx.send(frame(&mut s));
+        let body = response.into_bytes();
+        let _ = s.write_all(&(body.len() as u32).to_le_bytes());
+        let _ = s.write_all(&body);
+    });
+    (port, rx)
+}
+
+#[test]
+fn web_against_a_session_capable_daemon_prints_a_one_time_link_without_the_token() {
+    let bridge = fake_bridge(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"ok\":true,\"web_auth\":[\"bearer\",\"sig-v1\"]}",
+    );
+    let (dir, token) = fake_daemon_dir(bridge);
+    // Any base64url text stands in for what the daemon issues; made at run time.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let boot = format!("b{nanos:x}");
+    let boot = boot.as_str();
+    let (ipc, rx) = fake_ipc(format!(
+        "{{\"WebBootstrapIssued\":{{\"boot\":\"{boot}\",\"expires_in_s\":60}}}}"
+    ));
+    std::fs::write(
+        dir.path().join(miasma_core::daemon::ipc::PORT_FILE),
+        ipc.to_string(),
+    )
+    .unwrap();
+
+    let out = run(dir.path(), &["--lang", "en", "web"]);
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(
+        stdout.trim_end(),
+        format!("http://127.0.0.1:{bridge}/#boot={boot}")
+    );
+    assert!(!stdout.contains(&token));
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(!stderr.contains(&token), "{stderr}");
+    assert!(stderr.contains("works once"), "{stderr}");
+
+    // The request named the page's own origin and asked for the default scopes.
+    let sent = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+    assert!(sent.contains("WebBootstrap"), "{sent}");
+    assert!(
+        sent.contains(&format!("http://127.0.0.1:{bridge}")),
+        "{sent}"
+    );
+}
+
+#[test]
+fn web_against_a_daemon_without_sessions_falls_back_to_the_token_link_and_says_so() {
+    let bridge = fake_bridge(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"ok\":true}",
+    );
+    let (dir, token) = fake_daemon_dir(bridge);
+    let out = run(dir.path(), &["--lang", "en", "web"]);
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(
+        stdout.trim_end(),
+        format!("http://127.0.0.1:{bridge}/#token={token}")
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(
+        stderr.contains("does not support browser sessions"),
+        "{stderr}"
+    );
+}
