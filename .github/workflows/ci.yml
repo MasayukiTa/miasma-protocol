@@ -146,6 +146,34 @@ jobs:
       - name: Build wasm target
         run: cargo build -p miasma-wasm --target wasm32-unknown-unknown --locked
 
+      # web/pkg is a committed build product. Fail when the source or the
+      # locked dependencies moved without a rebuilt package, then rebuild it
+      # here and compare what does not depend on the build machine (the .wasm
+      # bytes embed absolute build paths; see scripts/check-wasm-pkg.mjs).
+      - name: Package record matches the source
+        run: node scripts/check-wasm-pkg.mjs --check
+
+      - name: Read the wasm-bindgen version from Cargo.lock
+        id: wbg
+        run: echo "version=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/[^0-9.]/, ""); print; exit }' Cargo.lock)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache wasm-bindgen-cli
+        id: wbg-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo-wbg
+          key: wasm-bindgen-cli-${{ steps.wbg.outputs.version }}-ubuntu-24.04
+
+      - name: Install wasm-bindgen-cli (the version in Cargo.lock)
+        if: steps.wbg-cache.outputs.cache-hit != 'true'
+        run: cargo install wasm-bindgen-cli --version "${{ steps.wbg.outputs.version }}" --locked --root ~/.cargo-wbg
+
+      - name: Rebuild the package from source and compare with web/pkg
+        run: |
+          export PATH="$HOME/.cargo-wbg/bin:$PATH"
+          bash scripts/build-wasm-pkg.sh "$RUNNER_TEMP/pkg-rebuilt"
+          node scripts/check-wasm-pkg.mjs --compare "$RUNNER_TEMP/pkg-rebuilt"
+
   # Offline release signing tool: its own workspace, never part of the apps.
   test-release-sign:
     name: Release signing tool tests (Ubuntu)
