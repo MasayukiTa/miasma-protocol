@@ -259,6 +259,13 @@ impl DirectedEnvelope {
         now_secs >= self.expires_at
     }
 
+    /// Record a (validated) retention on a new envelope: it ends `secs` after
+    /// it was created, without overflowing.
+    fn set_retention(&mut self, secs: u64) {
+        self.expires_at = self.created_at.saturating_add(secs);
+        self.retention_secs = secs;
+    }
+
     /// Bring the sender-chosen retention fields of a received envelope into
     /// the range this node is willing to keep.
     ///
@@ -324,7 +331,7 @@ pub fn create_envelope(
 ) -> Result<(DirectedEnvelope, Vec<u8>, Zeroizing<[u8; 32]>), MiasmaError> {
     crate::transfer::password_policy::check_directed(password)
         .map_err(MiasmaError::WeakPassword)?;
-    build_envelope(
+    build_with_retention(
         sender_secret,
         recipient_pubkey,
         password,
@@ -345,7 +352,7 @@ pub(crate) fn create_envelope_unchecked(
     plaintext: &[u8],
     filename: Option<String>,
 ) -> Result<(DirectedEnvelope, Vec<u8>, Zeroizing<[u8; 32]>), MiasmaError> {
-    build_envelope(
+    build_with_retention(
         sender_secret,
         recipient_pubkey,
         password,
@@ -355,7 +362,12 @@ pub(crate) fn create_envelope_unchecked(
     )
 }
 
-fn build_envelope(
+/// Validate the retention, build the envelope, then record the retention on it.
+///
+/// The retention is applied after the keys and ciphertext exist, and never
+/// passed into [`build_envelope`], so the retention seconds are not an input
+/// of the key, nonce or salt handling.
+fn build_with_retention(
     sender_secret: &[u8; 32],
     recipient_pubkey: &[u8; 32],
     password: &str,
@@ -363,10 +375,27 @@ fn build_envelope(
     plaintext: &[u8],
     filename: Option<String>,
 ) -> Result<(DirectedEnvelope, Vec<u8>, Zeroizing<[u8; 32]>), MiasmaError> {
-    use rand::RngCore;
-
     // Refuse a retention that is out of range before doing any work.
     let retention_secs = retention.checked_secs()?;
+    let (mut envelope, protected_data, envelope_key) = build_envelope(
+        sender_secret,
+        recipient_pubkey,
+        password,
+        plaintext,
+        filename,
+    )?;
+    envelope.set_retention(retention_secs);
+    Ok((envelope, protected_data, envelope_key))
+}
+
+fn build_envelope(
+    sender_secret: &[u8; 32],
+    recipient_pubkey: &[u8; 32],
+    password: &str,
+    plaintext: &[u8],
+    filename: Option<String>,
+) -> Result<(DirectedEnvelope, Vec<u8>, Zeroizing<[u8; 32]>), MiasmaError> {
+    use rand::RngCore;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -433,14 +462,15 @@ fn build_envelope(
         encrypted_payload,
         payload_nonce,
         password_salt,
-        expires_at: now.saturating_add(retention_secs),
+        // Set by `set_retention` once the retention is known.
+        expires_at: now,
         created_at: now,
         state: EnvelopeState::Pending,
         challenge_hash: None,
         password_attempts_remaining: 3,
         challenge_attempts_remaining: 3,
         challenge_expires_at: 0,
-        retention_secs,
+        retention_secs: 0,
     };
 
     Ok((envelope, protected_data, envelope_key))
