@@ -49,6 +49,29 @@ pub fn verify_restricted(path: &Path) -> Result<bool, MiasmaError> {
     platform::verify_restricted_impl(path)
 }
 
+/// Create a new, empty file that only the current user can access from its
+/// first byte (Windows: security descriptor passed to `CreateFileW`, owner set
+/// to the current user; Unix: mode `0600`).  Fails if `path` already exists.
+/// On an unsupported platform this always fails.
+pub fn create_new_restricted(path: &Path) -> Result<std::fs::File, MiasmaError> {
+    platform::create_new_restricted_impl(path)
+}
+
+/// Strict check: `Ok(())` only if `path` is a file only the current user can
+/// access (Windows: a single allow ACE for the user and the user as owner;
+/// Unix: regular file, mode `0600`, owned by the effective user).  Any other
+/// outcome, including an unsupported platform, is an `Err` that says why.
+pub fn verify_owner_only(path: &Path) -> Result<(), MiasmaError> {
+    platform::verify_owner_only_impl(path)
+}
+
+/// Check that nobody but the current user can add or replace entries in `dir`
+/// (Unix: owned by the effective user, not writable by other users; Windows: not
+/// checked here, the file's own access list is verified instead).
+pub fn verify_private_dir(dir: &Path) -> Result<(), MiasmaError> {
+    platform::verify_private_dir_impl(dir)
+}
+
 // ─── Platform implementation ─────────────────────────────────────────────────
 
 #[cfg(windows)]
@@ -63,6 +86,7 @@ mod platform {
     // Win32 constants — avoids pulling in the large windows-sys crate.
     const GENERIC_READ: u32 = 0x80000000;
     const GENERIC_WRITE: u32 = 0x40000000;
+    const CREATE_NEW: u32 = 1;
     const CREATE_ALWAYS: u32 = 2;
     const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
     const INVALID_HANDLE_VALUE: isize = -1;
@@ -72,6 +96,7 @@ mod platform {
     // ACL / SECURITY_DESCRIPTOR constants
     const ACL_REVISION: u32 = 2;
     const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
+    const OWNER_SECURITY_INFORMATION: u32 = 1;
     const DACL_SECURITY_INFORMATION: u32 = 4;
     const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
 
@@ -159,6 +184,16 @@ mod platform {
             bDaclPresent: i32,
             pDacl: *mut Acl,
             bDaclDefaulted: i32,
+        ) -> i32;
+        fn SetSecurityDescriptorOwner(
+            pSecurityDescriptor: *mut SecurityDescriptor,
+            pOwner: *mut u8,
+            bOwnerDefaulted: i32,
+        ) -> i32;
+        fn GetSecurityDescriptorOwner(
+            pSecurityDescriptor: *const u8,
+            pOwner: *mut *mut u8,
+            lpbOwnerDefaulted: *mut i32,
         ) -> i32;
         fn InitializeAcl(pAcl: *mut Acl, nAclLength: u32, dwAclRevision: u32) -> i32;
         fn AddAccessAllowedAce(
@@ -253,6 +288,31 @@ mod platform {
             let _ = std::fs::remove_file(path);
         }
 
+        let mut file = open_restricted(path, CREATE_ALWAYS, false)?;
+        if let Err(e) = file.write_all(data) {
+            // File is closed by drop.
+            drop(file);
+            let _ = std::fs::remove_file(path);
+            return Err(MiasmaError::Io(e));
+        }
+        if let Err(e) = file.flush() {
+            drop(file);
+            let _ = std::fs::remove_file(path);
+            return Err(MiasmaError::Io(e));
+        }
+        Ok(())
+    }
+
+    /// Create a file whose security descriptor (one ACE for the current
+    /// user, no inheritance) is applied by `CreateFileW` itself.  With
+    /// `CREATE_NEW` the call fails if the path already exists.  With
+    /// `set_owner` the owner is set to the current user explicitly (the
+    /// default owner of an elevated process is the Administrators group).
+    fn open_restricted(
+        path: &Path,
+        disposition: u32,
+        set_owner: bool,
+    ) -> Result<std::fs::File, MiasmaError> {
         let sid = current_user_sid()?;
         let sid_len = sid.len();
 
@@ -289,6 +349,12 @@ mod platform {
                 ));
             }
 
+            if set_owner && SetSecurityDescriptorOwner(&mut sd, sid_ptr, 0) == 0 {
+                return Err(MiasmaError::KeyDerivation(
+                    "SetSecurityDescriptorOwner failed".into(),
+                ));
+            }
+
             let mut sa = SecurityAttributes {
                 n_length: std::mem::size_of::<SecurityAttributes>() as u32,
                 lp_security_descriptor: &mut sd,
@@ -301,7 +367,7 @@ mod platform {
                 GENERIC_READ | GENERIC_WRITE,
                 0, // no sharing
                 &mut sa,
-                CREATE_ALWAYS,
+                disposition,
                 FILE_ATTRIBUTE_NORMAL,
                 0,
             );
@@ -314,18 +380,72 @@ mod platform {
             }
 
             // Wrap in a std::fs::File so we get RAII close + Write trait.
-            let mut file = std::fs::File::from_raw_handle(handle as *mut std::ffi::c_void);
-            if let Err(e) = file.write_all(data) {
-                // File is closed by drop.
-                let _ = std::fs::remove_file(path);
-                return Err(MiasmaError::Io(e));
-            }
-            if let Err(e) = file.flush() {
-                let _ = std::fs::remove_file(path);
-                return Err(MiasmaError::Io(e));
-            }
-            // file dropped here → handle closed
+            Ok(std::fs::File::from_raw_handle(
+                handle as *mut std::ffi::c_void,
+            ))
         }
+    }
+
+    pub(super) fn create_new_restricted_impl(path: &Path) -> Result<std::fs::File, MiasmaError> {
+        open_restricted(path, CREATE_NEW, true)
+    }
+
+    /// Fetch the self-relative security descriptor of `path` for `info`.
+    fn file_security(path: &Path, info: u32) -> Result<Vec<u8>, MiasmaError> {
+        let wide = to_wide(path);
+        let mut needed: u32 = 0;
+        unsafe {
+            GetFileSecurityW(wide.as_ptr(), info, ptr::null_mut(), 0, &mut needed);
+            if needed == 0 {
+                return Err(MiasmaError::KeyDerivation(format!(
+                    "GetFileSecurityW size query failed for {}",
+                    path.display()
+                )));
+            }
+            let mut buf = vec![0u8; needed as usize];
+            if GetFileSecurityW(wide.as_ptr(), info, buf.as_mut_ptr(), needed, &mut needed) == 0 {
+                return Err(MiasmaError::KeyDerivation(format!(
+                    "GetFileSecurityW failed for {}",
+                    path.display()
+                )));
+            }
+            Ok(buf)
+        }
+    }
+
+    /// Fail unless the DACL holds exactly one allow ACE for the current user
+    /// and the owner is the current user.
+    pub(super) fn verify_owner_only_impl(path: &Path) -> Result<(), MiasmaError> {
+        if !verify_restricted_impl(path)? {
+            return Err(MiasmaError::Io(std::io::Error::other(format!(
+                "{} is not restricted to the current user (unexpected access list)",
+                path.display()
+            ))));
+        }
+        let sid = current_user_sid()?;
+        let sd = file_security(path, OWNER_SECURITY_INFORMATION)?;
+        unsafe {
+            let mut owner: *mut u8 = ptr::null_mut();
+            let mut defaulted: i32 = 0;
+            if GetSecurityDescriptorOwner(sd.as_ptr(), &mut owner, &mut defaulted) == 0 {
+                return Err(MiasmaError::KeyDerivation(
+                    "GetSecurityDescriptorOwner failed".into(),
+                ));
+            }
+            if owner.is_null() || EqualSid(owner, sid.as_ptr() as *mut u8) == 0 {
+                return Err(MiasmaError::Io(std::io::Error::other(format!(
+                    "{} is not owned by the current user",
+                    path.display()
+                ))));
+            }
+        }
+        Ok(())
+    }
+
+    /// The directory is not checked on Windows: the default data directory
+    /// lives under the per-user profile, and the file's own access list is
+    /// verified instead.
+    pub(super) fn verify_private_dir_impl(_dir: &Path) -> Result<(), MiasmaError> {
         Ok(())
     }
 
@@ -452,6 +572,83 @@ mod platform {
         let mode = meta.permissions().mode() & 0o777;
         Ok(mode == 0o600)
     }
+
+    pub(super) fn create_new_restricted_impl(path: &Path) -> Result<std::fs::File, MiasmaError> {
+        // O_EXCL: fails on an existing path and never follows a symlink.
+        Ok(std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?)
+    }
+
+    /// A file is owner-only when no group/other bit is set and the owner can
+    /// read and write it.
+    pub(super) fn file_mode_is_owner_only(mode: u32) -> bool {
+        mode & 0o777 == 0o600
+    }
+
+    /// A directory is private enough to hold a secret file when it is not
+    /// writable by other users.  The group bit is tolerated: many Linux
+    /// setups create directories as 0775 with a per-user group.
+    pub(super) fn dir_mode_is_private(mode: u32) -> bool {
+        mode & 0o002 == 0
+    }
+
+    fn other(msg: String) -> MiasmaError {
+        MiasmaError::Io(std::io::Error::other(msg))
+    }
+
+    pub(super) fn verify_owner_only_impl(path: &Path) -> Result<(), MiasmaError> {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        // symlink_metadata: a link in place of the file is a failure.
+        let meta = std::fs::symlink_metadata(path)?;
+        if !meta.file_type().is_file() {
+            return Err(other(format!("{} is not a regular file", path.display())));
+        }
+        let mode = meta.permissions().mode();
+        if !file_mode_is_owner_only(mode) {
+            return Err(other(format!(
+                "{} has mode {:o}, expected 600",
+                path.display(),
+                mode & 0o777
+            )));
+        }
+        // SAFETY: geteuid has no preconditions.
+        let euid = unsafe { libc::geteuid() };
+        if meta.uid() != euid {
+            return Err(other(format!(
+                "{} is not owned by the current user",
+                path.display()
+            )));
+        }
+        Ok(())
+    }
+
+    pub(super) fn verify_private_dir_impl(dir: &Path) -> Result<(), MiasmaError> {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let meta = std::fs::metadata(dir)?;
+        if !meta.is_dir() {
+            return Err(other(format!("{} is not a directory", dir.display())));
+        }
+        let mode = meta.permissions().mode();
+        if !dir_mode_is_private(mode) {
+            return Err(other(format!(
+                "{} has mode {:o}; other users may modify it",
+                dir.display(),
+                mode & 0o777
+            )));
+        }
+        // SAFETY: geteuid has no preconditions.
+        let euid = unsafe { libc::geteuid() };
+        if meta.uid() != euid {
+            return Err(other(format!(
+                "{} is not owned by the current user",
+                dir.display()
+            )));
+        }
+        Ok(())
+    }
 }
 
 // Fallback for non-Windows, non-Unix (e.g. WASM).
@@ -466,6 +663,25 @@ mod platform {
 
     pub(super) fn verify_restricted_impl(_path: &Path) -> Result<bool, MiasmaError> {
         Ok(false)
+    }
+
+    fn unsupported() -> MiasmaError {
+        MiasmaError::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "unsupported platform: owner-only files cannot be created or verified here",
+        ))
+    }
+
+    pub(super) fn create_new_restricted_impl(_path: &Path) -> Result<std::fs::File, MiasmaError> {
+        Err(unsupported())
+    }
+
+    pub(super) fn verify_owner_only_impl(_path: &Path) -> Result<(), MiasmaError> {
+        Err(unsupported())
+    }
+
+    pub(super) fn verify_private_dir_impl(_dir: &Path) -> Result<(), MiasmaError> {
+        Err(unsupported())
     }
 }
 
@@ -516,6 +732,105 @@ mod tests {
         // The current user must be able to read their own restricted file.
         let contents = std::fs::read(&path).unwrap();
         assert_eq!(contents, b"hello");
+    }
+
+    #[test]
+    fn create_new_restricted_is_owner_only_from_creation() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fresh.tok");
+
+        let mut f = create_new_restricted(&path).unwrap();
+        // Verified while still empty: the secret is never written first.
+        verify_owner_only(&path).unwrap();
+        f.write_all(b"payload").unwrap();
+        drop(f);
+        verify_owner_only(&path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"payload");
+    }
+
+    #[test]
+    fn create_new_restricted_refuses_an_existing_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exists.tok");
+        std::fs::write(&path, b"old").unwrap();
+        assert!(create_new_restricted(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"old");
+    }
+
+    #[test]
+    fn verify_owner_only_rejects_a_file_with_default_access() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("loose.tok");
+        std::fs::write(&path, b"x").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        // Windows: the file inherits the directory's list (several ACEs).
+        assert!(verify_owner_only(&path).is_err());
+    }
+
+    #[test]
+    fn verify_owner_only_rejects_a_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(verify_owner_only(&dir.path().join("absent.tok")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_mode_checks() {
+        use super::platform::{dir_mode_is_private, file_mode_is_owner_only};
+        assert!(file_mode_is_owner_only(0o100600));
+        assert!(!file_mode_is_owner_only(0o100640));
+        assert!(!file_mode_is_owner_only(0o100604));
+        assert!(!file_mode_is_owner_only(0o100400));
+        assert!(!file_mode_is_owner_only(0o100700));
+        assert!(dir_mode_is_private(0o40700));
+        assert!(dir_mode_is_private(0o40775));
+        assert!(!dir_mode_is_private(0o40777));
+        assert!(!dir_mode_is_private(0o40757));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_private_dir_check_rejects_world_writable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        verify_private_dir(dir.path()).unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(verify_private_dir(dir.path()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_verify_rejects_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.tok");
+        let link = dir.path().join("link.tok");
+        create_new_restricted(&target).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(verify_owner_only(&link).is_err());
+    }
+
+    /// Windows: the owner of a freshly created file is the current user, and
+    /// the list has exactly one entry; a copy that inherits the directory's
+    /// list is refused.
+    #[cfg(windows)]
+    #[test]
+    fn windows_dacl_and_owner_verification() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("win.tok");
+        drop(create_new_restricted(&path).unwrap());
+        verify_owner_only(&path).unwrap();
+        assert!(verify_restricted(&path).unwrap());
+
+        let inherited = dir.path().join("inherited.tok");
+        std::fs::write(&inherited, b"x").unwrap();
+        let err = verify_owner_only(&inherited).unwrap_err();
+        assert!(err.to_string().contains("restricted"), "{err}");
     }
 
     #[test]

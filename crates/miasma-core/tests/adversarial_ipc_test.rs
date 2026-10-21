@@ -332,6 +332,30 @@ async fn token_file_acl_excludes_broad_groups_on_windows() {
     d.stop().await;
 }
 
+/// If the token file cannot be created as a protected file, the daemon does
+/// not start: no port file is published and no control interface is served.
+#[tokio::test(flavor = "multi_thread")]
+async fn daemon_does_not_start_when_the_token_file_cannot_be_protected() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(LocalShareStore::open(dir.path(), 100).unwrap());
+    let master: [u8; 32] = std::fs::read(dir.path().join("master.key"))
+        .unwrap()
+        .try_into()
+        .unwrap();
+    // A non-empty directory in the token's place cannot be replaced.
+    let blocker = dir.path().join(TOKEN_FILE);
+    std::fs::create_dir(&blocker).unwrap();
+    std::fs::write(blocker.join("inner"), b"x").unwrap();
+
+    let node = MiasmaNode::new(&master, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+    let started = DaemonServer::start(node, store, dir.path().to_owned()).await;
+    assert!(started.is_err(), "daemon started without a protected token");
+    assert!(
+        !dir.path().join(PORT_FILE).exists(),
+        "a failed start must not publish the control port"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn stale_token_from_a_crashed_daemon_is_replaced_and_removed_on_shutdown() {
     let dir = tempfile::tempdir().unwrap();
