@@ -964,6 +964,16 @@ pub struct ContactsUi {
 
     /// Speed units, the sparklines' data, and the UI language for their words.
     speed: crate::speed::SpeedUi,
+    /// Whether some transfer (sending or receiving) was running at the last list update.
+    prev_active: bool,
+    /// A transfer has just started: open the Transfers section once, so a file that arrives
+    /// while the section is closed is not hidden behind it.
+    open_transfers: bool,
+}
+
+/// The Transfers section opens by itself when the first running transfer appears.
+pub fn should_open_transfers(was_active: bool, is_active: bool) -> bool {
+    is_active && !was_active
 }
 
 impl Default for ContactsUi {
@@ -1032,6 +1042,8 @@ impl Default for ContactsUi {
             err_locale: Locale::En,
             err_technical: false,
             speed: Default::default(),
+            prev_active: false,
+            open_transfers: false,
         }
     }
 }
@@ -1424,6 +1436,13 @@ impl ContactsUi {
         self.speed
             .sparks
             .observe(miasma_core::push::state::now_ms(), &self.rows);
+        let active = self.has_active();
+        if should_open_transfers(self.prev_active, active) {
+            self.open_transfers = true;
+        } else if !active {
+            self.open_transfers = false;
+        }
+        self.prev_active = active;
     }
 
     /// Speed units and language, set by the app from its settings.
@@ -1807,9 +1826,11 @@ impl ContactsUi {
         // Transfers and the inbox folder are not the point of this page: closed until opened.
         if !self.contacts.is_empty() || !self.rows.is_empty() {
             ui.add_space(kit::GAP_GROUP);
+            let force_open = std::mem::take(&mut self.open_transfers);
             egui::CollapsingHeader::new(kit::section_text(c.tr_title))
                 .id_source("contacts_transfers")
                 .default_open(self.has_active())
+                .open(force_open.then_some(true))
                 .show_a11y(ui, |ui| self.transfers_ui(ui, c));
             egui::CollapsingHeader::new(kit::section_text(c.inbox_title))
                 .id_source("contacts_inbox")
@@ -2926,6 +2947,17 @@ impl ContactsUi {
                         8,
                     ),
                 ];
+                // Sending and receiving rows carry the same live numbers: speed, path, RTT.
+                for (id, rate_bits, rtt) in [("1", 35_200_000u64, 27u32), ("2", 248_000_000, 9)] {
+                    if let Some(x) = board.iter_mut().find(|x| x.id == id) {
+                        x.stats = Some(miasma_core::push::stats::TransferStats {
+                            rate_bits,
+                            path: miasma_core::push::stats::PathKind::Direct,
+                            rtt_ms: Some(rtt),
+                            ..Default::default()
+                        });
+                    }
+                }
             }
             "failed" => {
                 let mut a2 = a.clone();
@@ -3025,6 +3057,7 @@ impl ContactsUi {
 mod tests {
     use super::*;
     use crate::locale::{contact_strings, Locale};
+    use miasma_core::push::stats::{PathKind, TransferStats};
 
     fn t(id: &str, dir: Direction, contact: &str, state: PushState, at: u64) -> PushTransferInfo {
         PushTransferInfo {
@@ -4584,6 +4617,121 @@ mod tests {
             let (avail, used) = inner.unwrap();
             assert!(used.height() > 40.0, "{l:?}: the card was not drawn");
             assert!(used.right() <= avail.right() + 1.0, "{l:?}: overflow");
+        }
+    }
+
+    // ── The receiving card is the sending card ─────────────────────────────────
+
+    fn live(id: &str, dir: Direction, rate_bps: u64, stats: Option<TransferStats>) -> Row {
+        let mut i = t(id, dir, "peer", PushState::Sending, 1);
+        i.size = 1000 << 20;
+        i.bytes = 237 << 20;
+        i.rate_bps = rate_bps;
+        i.stats = stats;
+        Row::from(&i)
+    }
+
+    fn direct(rate_bits: u64, rtt: u32) -> TransferStats {
+        TransferStats {
+            rate_bits,
+            path: PathKind::Direct,
+            rtt_ms: Some(rtt),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_receiving_row_gets_the_same_speed_eta_path_and_rtt_text_as_a_sending_row() {
+        for l in Locale::ALL {
+            let c = contact_strings(l);
+            let sp = crate::speed::SpeedUi {
+                locale: l,
+                ..Default::default()
+            };
+            let out = live("o", Direction::Out, 4_400_000, Some(direct(35_200_000, 27)));
+            let inn = live("i", Direction::In, 4_400_000, Some(direct(35_200_000, 27)));
+            assert!(out.outbound && !inn.outbound);
+            let want = sp.rate_text(&out, 800.0).unwrap();
+            assert!(want.contains("Mbps"), "{want}");
+            assert_eq!(sp.rate_text(&inn, 800.0), Some(want));
+            assert_eq!(
+                eta_secs(inn.size, inn.bytes, inn.rate_bps),
+                eta_secs(out.size, out.bytes, out.rate_bps)
+            );
+            assert!(eta_secs(inn.size, inn.bytes, inn.rate_bps).is_some());
+            let s = crate::speed::speed_strings(l);
+            let st = inn.stats.as_ref().unwrap();
+            assert!(crate::speed::path_badge(s, st.path).is_some());
+            assert_eq!(
+                crate::speed::detail_text(s, st),
+                crate::speed::detail_text(s, out.stats.as_ref().unwrap())
+            );
+            assert!(crate::speed::detail_text(s, st).unwrap().contains("27"));
+            // Both ends are "Stop"-able while they run: the same cancel request applies.
+            assert!(!inn.finished() && !c.btn_cancel.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_receiving_row_from_a_daemon_without_stats_keeps_the_byte_rate_and_shows_no_extras() {
+        let old = r#"{"id":"ab","direction":"in","contact_id":"c","contact_label":"L",
+            "name":"f.bin","size":1048576000,"bytes":248512512,"rate_bps":4400000,
+            "state":"sending","created_at_ms":1,"updated_at_ms":2}"#;
+        let info: PushTransferInfo = serde_json::from_str(old).unwrap();
+        let r = Row::from(&info);
+        assert!(!r.outbound);
+        assert_eq!(r.stats, None);
+        let sp = crate::speed::SpeedUi::default();
+        // 4.4 MB/s from the plain byte rate: 35.2 Mbps.
+        assert_eq!(crate::speed::row_rate_bits(&r), 35_200_000);
+        assert!(sp.rate_text(&r, 800.0).unwrap().contains("Mbps"));
+        assert!(eta_secs(r.size, r.bytes, r.rate_bps).is_some());
+        // Nothing but the bar: the extras line needs the daemon's stats.
+        assert!(r.stats.is_none());
+    }
+
+    #[test]
+    fn the_transfers_section_opens_once_when_the_first_transfer_starts() {
+        assert!(should_open_transfers(false, true));
+        assert!(!should_open_transfers(true, true));
+        assert!(!should_open_transfers(true, false));
+        assert!(!should_open_transfers(false, false));
+
+        let mut ui = ContactsUi {
+            board: vec![t("a", Direction::In, "bob", PushState::Preparing, 1)],
+            ..Default::default()
+        };
+        ui.rebuild_rows();
+        assert!(ui.open_transfers, "an arriving file opens the section");
+        ui.open_transfers = false; // the page drew it open
+        ui.board = vec![t("a", Direction::In, "bob", PushState::Sending, 1)];
+        ui.rebuild_rows();
+        assert!(!ui.open_transfers, "a running transfer does not reopen it");
+        ui.board = vec![t("a", Direction::In, "bob", PushState::Done, 1)];
+        ui.rebuild_rows();
+        ui.board = vec![t("b", Direction::In, "bob", PushState::Preparing, 2)];
+        ui.rebuild_rows();
+        assert!(ui.open_transfers, "the next arrival opens it again");
+    }
+
+    #[test]
+    fn the_active_fixture_draws_a_receiving_card_with_its_numbers_in_every_language() {
+        for l in Locale::ALL {
+            let c = contact_strings(l);
+            let ui = ContactsUi::fixture("active", c).unwrap();
+            let rx = ui
+                .rows
+                .iter()
+                .find(|r| !r.outbound && !r.finished())
+                .unwrap();
+            assert_eq!(rx.stats.as_ref().and_then(|s| s.rtt_ms), Some(9));
+            for width in [420.0_f32, 700.0, 1200.0] {
+                let (used, avail, _) = draw_page("active", l, width);
+                assert!(
+                    used.right() <= avail.right() + 1.0,
+                    "{l:?} {width}: overflow"
+                );
+            }
         }
     }
 
