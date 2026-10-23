@@ -3327,12 +3327,12 @@ pub fn pqc_strings(locale: Locale) -> &'static PqcStrings {
 
 static PQ_EN: PqcStrings = PqcStrings {
     heading: "Advanced encryption",
-    intro: "Private conversations are already encrypted. This adds a further, stronger layer to the way each conversation is secured. It is off by default and only takes effect when both people have it turned on.",
+    intro: "Private conversations are already encrypted. This adds a further, stronger layer to the way each conversation is secured. It is on by default, and takes effect when the other person's Miasma supports it too.",
     off: "Off",
     prefer: "Use when possible",
     require: "Always required",
     off_help: "Chat works exactly as before.",
-    prefer_help: "Used when the other person's Miasma supports it. Otherwise chat keeps working as before, and the conversation shows \"Standard protection only\".",
+    prefer_help: "Default. Used when the other person's Miasma supports it. Otherwise chat keeps working as before, and the conversation shows \"Standard protection only\".",
     require_help: "Messages are sent only after the stronger protection is in place. If the other person cannot use it, the message is not sent and you are told why. Nothing is sent without it.",
     restart_note: "A change applies the next time Miasma's background service starts.",
     unavailable: "This version of Miasma does not include this protection, so the setting has no effect.",
@@ -3343,12 +3343,12 @@ static PQ_EN: PqcStrings = PqcStrings {
 
 static PQ_JA: PqcStrings = PqcStrings {
     heading: "高度な暗号化",
-    intro: "個人チャットはすでに暗号化されています。この機能は、会話を守る仕組みをさらに一段強くします。初期設定はオフで、お互いにオンにしたときだけ働きます。",
+    intro: "個人チャットはすでに暗号化されています。この機能は、会話を守る仕組みをさらに一段強くします。初期設定ではオンで、相手の Miasma も対応しているときに働きます。",
     off: "オフ",
     prefer: "使えるときは使う",
     require: "必ず使う",
     off_help: "チャットはこれまでと同じように動きます。",
-    prefer_help: "相手の Miasma が対応しているときに使います。対応していないときはこれまでどおり送れますが、会話に「標準の保護のみ」と表示されます。",
+    prefer_help: "初期設定です。相手の Miasma が対応しているときに使います。対応していないときはこれまでどおり送れますが、会話に「標準の保護のみ」と表示されます。",
     require_help: "強い保護が整ってから送ります。相手が対応していないときは送らず、理由を表示します。この保護なしで送ることはありません。",
     restart_note: "変更は次回起動時に反映されます。",
     unavailable: "このビルドでは利用できません。",
@@ -3359,12 +3359,12 @@ static PQ_JA: PqcStrings = PqcStrings {
 
 static PQ_ZH_CN: PqcStrings = PqcStrings {
     heading: "高级加密",
-    intro: "私人聊天本来就已加密。此功能会进一步加强对每个会话的保护。默认关闭，只有双方都开启时才会生效。",
+    intro: "私人聊天本来就已加密。此功能会进一步加强对每个会话的保护。默认开启，对方的 Miasma 也支持时才会生效。",
     off: "关闭",
     prefer: "尽量使用",
     require: "必须使用",
     off_help: "聊天与以前完全一样。",
-    prefer_help: "对方的 Miasma 支持时就使用。不支持时聊天照常进行，并在会话中标出“仅标准保护”。",
+    prefer_help: "默认选项。对方的 Miasma 支持时就使用。不支持时聊天照常进行，并在会话中标出“仅标准保护”。",
     require_help: "只有在增强保护建立之后才发送消息。对方不支持时不会发送，并告诉你原因。没有这项保护就不会发出任何内容。",
     restart_note: "更改将在下次后台服务启动时生效。",
     unavailable: "此版本的 Miasma 不包含这项保护，设置不会生效。",
