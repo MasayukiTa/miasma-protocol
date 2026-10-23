@@ -102,9 +102,20 @@ pub enum RetentionPeriod {
     Custom(u64),
 }
 
+/// Length in seconds of each retention preset, as enum discriminants.
+#[derive(Clone, Copy)]
+#[repr(u64)]
+enum PresetSecs {
+    TenMinutes = 600,
+    OneHour = 3600,
+    OneDay = 86400,
+    SevenDays = 604800,
+    ThirtyDays = 2592000,
+}
+
 /// Shortest retention a sender may choose: the shortest preset
 /// (`RetentionPeriod::TenMinutes`).
-pub const MIN_RETENTION_SECS: u64 = 600;
+pub const MIN_RETENTION_SECS: u64 = PresetSecs::TenMinutes as u64;
 
 /// Longest retention a sender may choose, and the longest time a recipient
 /// keeps a share it received: the longest preset (`RetentionPeriod::ThirtyDays`).
@@ -114,7 +125,7 @@ pub const MIN_RETENTION_SECS: u64 = 600;
 /// share on the recipient's disk with no end. A sender-side value outside
 /// `[MIN_RETENTION_SECS, MAX_RETENTION_SECS]` is refused so that `now + retention`
 /// cannot overflow.
-pub const MAX_RETENTION_SECS: u64 = 2_592_000;
+pub const MAX_RETENTION_SECS: u64 = PresetSecs::ThirtyDays as u64;
 
 impl RetentionPeriod {
     /// The retention in seconds, or an error when it is outside
@@ -134,11 +145,11 @@ impl RetentionPeriod {
     /// Duration in seconds.
     pub fn as_secs(&self) -> u64 {
         match self {
-            Self::TenMinutes => 600,
-            Self::OneHour => 3600,
-            Self::OneDay => 86400,
-            Self::SevenDays => 604800,
-            Self::ThirtyDays => 2592000,
+            Self::TenMinutes => PresetSecs::TenMinutes as u64,
+            Self::OneHour => PresetSecs::OneHour as u64,
+            Self::OneDay => PresetSecs::OneDay as u64,
+            Self::SevenDays => PresetSecs::SevenDays as u64,
+            Self::ThirtyDays => PresetSecs::ThirtyDays as u64,
             Self::Custom(s) => *s,
         }
     }
