@@ -741,6 +741,20 @@ impl MiasmaApp {
     /// already chosen.
     fn handle_drops(&mut self, ctx: &egui::Context) {
         let d = crate::send_flow::read_drops(ctx);
+        // With "Add a contact" open, a dropped picture is read as a QR code for that form (it is
+        // not offered for sending).
+        if self.tab == Tab::Contacts && self.contacts.add_dialog_open() && !self.dialog_is_open() {
+            if d.hovering {
+                crate::send_flow::paint_drop_overlay(
+                    ctx,
+                    locale::contact_strings(self.locale).qr_img_overlay,
+                );
+            }
+            if let Some(path) = d.paths.into_iter().next() {
+                self.contacts.load_qr_image(ctx, path);
+            }
+            return;
+        }
         if d.hovering && !self.dialog_is_open() {
             crate::send_flow::paint_drop_overlay(
                 ctx,

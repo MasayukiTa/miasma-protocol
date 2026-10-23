@@ -2398,6 +2398,8 @@ contact_strings! {
     open_missing, open_failed, saved_to, earlier_failed, earlier_show, earlier_hide,
     invite_btn, menu_more, menu_verify, menu_permissions, send_short, row_ready, verify_body,
     paste_what, empty_line, done_btn, invite_lead,
+    qr_img_btn, qr_img_title, qr_img_busy, qr_img_drop, qr_img_overlay,
+    err_img_unreadable, err_img_not_image, err_img_too_large, err_img_no_qr, err_img_not_miasma,
 }
 
 pub fn contact_strings(locale: Locale) -> &'static ContactStrings {
@@ -2567,6 +2569,16 @@ static CT_EN: ContactStrings = ContactStrings {
     empty_line: "Add the people you want to send files to.",
     done_btn: "Done",
     invite_lead: "Send this message to the person you want to add. They paste it under \"Add a contact\".",
+    qr_img_btn: "Choose QR image",
+    qr_img_title: "Choose a picture of the QR code",
+    qr_img_busy: "Reading the image...",
+    qr_img_drop: "You can also drop a PNG or JPEG picture of the QR code here.",
+    qr_img_overlay: "Drop the QR image to read it",
+    err_img_unreadable: "That file could not be opened.",
+    err_img_not_image: "That is not a PNG or JPEG image, or the file is damaged.",
+    err_img_too_large: "That image is too large. Crop it to the QR code or save a smaller copy.",
+    err_img_no_qr: "No QR code was found in the image. Choose a sharp picture that shows the whole code.",
+    err_img_not_miasma: "This QR code is not a Miasma contact code.",
 };
 
 static CT_JA: ContactStrings = ContactStrings {
@@ -2728,6 +2740,16 @@ static CT_JA: ContactStrings = ContactStrings {
     empty_line: "ファイルを送りたい相手を追加しましょう。",
     done_btn: "完了",
     invite_lead: "この招待を相手に送ってください。",
+    qr_img_btn: "画像から読み取る",
+    qr_img_title: "QRコードの画像を選んでください",
+    qr_img_busy: "画像を読み取っています...",
+    qr_img_drop: "QRコードのPNGまたはJPEG画像を、ここにドロップして読み取ることもできます。",
+    qr_img_overlay: "QRコードの画像をドロップすると読み取ります",
+    err_img_unreadable: "そのファイルを開けませんでした。",
+    err_img_not_image: "PNGまたはJPEGの画像ではないか、ファイルが壊れています。",
+    err_img_too_large: "画像が大きすぎます。QRコードの部分だけ切り取るか、小さく保存し直してください。",
+    err_img_no_qr: "画像からQRコードが見つかりませんでした。コード全体が写った、鮮明な画像を選んでください。",
+    err_img_not_miasma: "このQRコードはMiasmaの連絡先コードではありません。",
 };
 
 // zh-CN
@@ -2890,6 +2912,16 @@ static CT_ZH_CN: ContactStrings = ContactStrings {
     empty_line: "添加你想发送文件的人。",
     done_btn: "完成",
     invite_lead: "把这条消息发给你想添加的人，对方将它粘贴到“添加联系人”中。",
+    qr_img_btn: "选择二维码图片",
+    qr_img_title: "选择二维码图片",
+    qr_img_busy: "正在读取图片...",
+    qr_img_drop: "也可以把二维码的 PNG 或 JPEG 图片拖到这里。",
+    qr_img_overlay: "松开即可读取二维码图片",
+    err_img_unreadable: "无法打开该文件。",
+    err_img_not_image: "这不是 PNG 或 JPEG 图片，或文件已损坏。",
+    err_img_too_large: "图片太大。请裁剪出二维码部分，或另存为较小的图片。",
+    err_img_no_qr: "图片中没有找到二维码。请换一张清晰且完整显示二维码的图片。",
+    err_img_not_miasma: "这个二维码不是 Miasma 联系人代码。",
 };
 
 // Group conversations of the Chat area (their own file: `locale/group.rs`).

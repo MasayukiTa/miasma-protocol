@@ -19,6 +19,7 @@ use crate::a11y::CollapsingExt as _;
 use crate::app::{card_frame, danger_button};
 use crate::locale::{ContactStrings, Locale};
 use crate::open_path::{self, Action, Resolved};
+use crate::qr_image::{self, QrImageError};
 use crate::theme::{self, Palette};
 use crate::transfers::{fill, format_bytes, format_eta};
 use crate::ui_kit::{self as kit, Confirm, Level, ListRow, MenuItem};
@@ -928,6 +929,13 @@ pub struct ContactsUi {
     /// Failures of "Open file" / "Show in folder" reported by the helper thread.
     open_tx: std::sync::mpsc::Sender<String>,
     open_rx: std::sync::mpsc::Receiver<String>,
+    /// A picture of a QR code is being read on a helper thread; its answer comes back here with
+    /// the number of the request (a picture read for a dialog that was closed since is dropped).
+    qr_img_tx: std::sync::mpsc::Sender<QrImageAnswer>,
+    qr_img_rx: std::sync::mpsc::Receiver<QrImageAnswer>,
+    qr_img_seq: u64,
+    qr_img_busy: bool,
+    qr_img_error: Option<QrImageError>,
     /// The path the last open was aimed at (named in the notice if it fails).
     last_open: String,
     /// The notice was just set: bring it into view once.
@@ -962,9 +970,15 @@ impl Default for ContactsUi {
     fn default() -> Self {
         let now = Instant::now();
         let (open_tx, open_rx) = std::sync::mpsc::channel();
+        let (qr_img_tx, qr_img_rx) = std::sync::mpsc::channel();
         Self {
             open_tx,
             open_rx,
+            qr_img_tx,
+            qr_img_rx,
+            qr_img_seq: 0,
+            qr_img_busy: false,
+            qr_img_error: None,
             last_open: String::new(),
             scroll_to_msg: false,
             show_earlier: HashSet::new(),
@@ -1238,6 +1252,53 @@ impl ContactsUi {
         self.add_error = None;
         self.add_result = None;
         self.add_open = true;
+    }
+
+    /// The "Add a contact" form is open and can take a picture (dropped on the window, or chosen
+    /// with the button).
+    pub fn add_dialog_open(&self) -> bool {
+        self.add_open && self.add_result.is_none()
+    }
+
+    /// Read a picture of a QR code for the add form. The file is read and decoded on a helper
+    /// thread; the answer is taken up by [`Self::collect_qr_image`]. What it finds is put in the
+    /// form as if the person had pasted it, and the form's own check and button do the rest.
+    pub fn load_qr_image(&mut self, ctx: &egui::Context, path: PathBuf) {
+        if !self.add_dialog_open() || self.qr_img_busy {
+            return;
+        }
+        self.qr_img_busy = true;
+        self.qr_img_error = None;
+        let (seq, tx, ctx) = (self.qr_img_seq, self.qr_img_tx.clone(), ctx.clone());
+        let started = std::thread::Builder::new()
+            .name("qr-image".into())
+            .spawn(move || {
+                let _ = tx.send((seq, qr_image::contact_code_from_file(&path)));
+                ctx.request_repaint();
+            });
+        if started.is_err() {
+            self.qr_img_busy = false;
+            self.qr_img_error = Some(QrImageError::Unreadable);
+        }
+    }
+
+    /// Take up the answers of the picture reader.
+    fn collect_qr_image(&mut self) {
+        while let Ok((seq, answer)) = self.qr_img_rx.try_recv() {
+            if seq != self.qr_img_seq {
+                continue;
+            }
+            self.qr_img_busy = false;
+            match answer {
+                Ok(code) => {
+                    self.add_text = code;
+                    self.add_from_suggestion = None;
+                    self.add_error = None;
+                    self.qr_img_error = None;
+                }
+                Err(e) => self.qr_img_error = Some(e),
+            }
+        }
     }
 
     /// "Add as contact" from outside this tab (a group member): fill the add form with the
@@ -1898,6 +1959,7 @@ impl ContactsUi {
     /// to add. After the add, the verification code to compare.
     fn add_dialog(&mut self, ctx: &egui::Context, c: &ContactStrings) {
         const KEY: &str = "contact_add";
+        self.collect_qr_image();
         if !self.add_open {
             return;
         }
@@ -1932,6 +1994,35 @@ impl ContactsUi {
                     .hint_text(c.add_paste),
             );
             crate::form_check::name(&add_edit, au.a11y_add_code);
+            // The same code from a picture of its QR code: the text lands in the field above and
+            // is checked there exactly as if it had been pasted.
+            ui.add_space(kit::SP_1);
+            ui.horizontal(|ui| {
+                let busy = self.qr_img_busy;
+                let label = if busy { c.qr_img_busy } else { c.qr_img_btn };
+                let pick = crate::form_check::add_enabled(
+                    ui,
+                    !busy && !self.add_busy,
+                    kit::secondary_button(label),
+                );
+                if pick.clicked() {
+                    if let Some(p) = rfd::FileDialog::new()
+                        .set_title(c.qr_img_title)
+                        .add_filter("PNG, JPEG", &["png", "jpg", "jpeg"])
+                        .pick_file()
+                    {
+                        self.load_qr_image(ctx, p);
+                    }
+                }
+                if busy {
+                    ui.spinner();
+                }
+            });
+            hint(ui, c.qr_img_drop);
+            if let Some(e) = self.qr_img_error {
+                ui.add_space(kit::SP_1);
+                kit::notice(ui, Level::Error, qr_image_error_text(c, e));
+            }
             // The pasted text is read at once: the name is asked for only when it holds a contact
             // code, and when it does not, the reason is under the field (which keeps its focus).
             let has_text = !self.add_text.trim().is_empty();
@@ -1991,6 +2082,10 @@ impl ContactsUi {
             self.add_text.clear();
             self.add_label.clear();
             self.add_from_suggestion = None;
+            // A picture still being read belongs to the form that was closed.
+            self.qr_img_seq += 1;
+            self.qr_img_busy = false;
+            self.qr_img_error = None;
             if shown.is_some() {
                 crate::a11y::dialog_leave(ctx, KEY);
             }
@@ -2648,6 +2743,20 @@ fn label_text(text: &str) -> egui::RichText {
 }
 
 /// A line of explanation under a field.
+/// What the picture reader sends back: the request number and the contact code or the reason.
+type QrImageAnswer = (u64, Result<String, QrImageError>);
+
+/// The sentence for a picture that gave no contact code.
+fn qr_image_error_text(c: &ContactStrings, e: QrImageError) -> &'static str {
+    match e {
+        QrImageError::Unreadable => c.err_img_unreadable,
+        QrImageError::NotImage => c.err_img_not_image,
+        QrImageError::TooLarge => c.err_img_too_large,
+        QrImageError::NoQr => c.err_img_no_qr,
+        QrImageError::NotMiasma => c.err_img_not_miasma,
+    }
+}
+
 fn hint(ui: &mut egui::Ui, text: &str) {
     ui.add(egui::Label::new(label_text(text)).wrap(true));
 }
@@ -4475,6 +4584,112 @@ mod tests {
             let (avail, used) = inner.unwrap();
             assert!(used.height() > 40.0, "{l:?}: the card was not drawn");
             assert!(used.right() <= avail.right() + 1.0, "{l:?}: overflow");
+        }
+    }
+
+    // ─── A picture of a QR code fills the add form ──────────────────────────
+
+    /// Load `bytes` as a picture through the window's own path and wait for the answer.
+    fn load_picture(ui: &mut ContactsUi, bytes: &[u8]) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("picture.png");
+        std::fs::write(&path, bytes).unwrap();
+        ui.load_qr_image(&egui::Context::default(), path);
+        assert!(ui.qr_img_busy, "the picture is read in the background");
+        for _ in 0..500 {
+            ui.collect_qr_image();
+            if !ui.qr_img_busy {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("the picture was not read in 10 s");
+    }
+
+    #[test]
+    fn a_picture_of_a_code_fills_the_form_like_a_paste_and_adds_normally() {
+        let code = crate::qr_image::tests::fresh_code();
+        let mut ui = ContactsUi::default();
+        ui.open_add_dialog();
+        ui.add_text = "old text".into();
+        load_picture(
+            &mut ui,
+            &crate::qr_image::tests::png_of(&qr_payload(&code), 4),
+        );
+        assert_eq!(ui.add_text, code);
+        assert!(ui.qr_img_error.is_none() && !ui.add_is_from_suggestion());
+        assert!(miasma_core::push::extract_contact_code(&ui.add_text).is_some());
+        // Adding goes the same way as for a pasted code: permissions are not switched off.
+        ui.queue_add("Ken".into());
+        assert!(matches!(
+            ui.out.back(),
+            Some(PushRequest::ContactAdd { code: c, .. }) if *c == code
+        ));
+    }
+
+    #[test]
+    fn a_picture_that_is_no_code_leaves_the_form_alone_and_says_why() {
+        let mut ui = ContactsUi::default();
+        ui.open_add_dialog();
+        ui.add_text = "typed by hand".into();
+        load_picture(
+            &mut ui,
+            &crate::qr_image::tests::png_of("https://example.org/", 4),
+        );
+        assert_eq!(ui.add_text, "typed by hand");
+        assert_eq!(ui.qr_img_error, Some(QrImageError::NotMiasma));
+        load_picture(&mut ui, b"not an image at all");
+        assert_eq!(ui.qr_img_error, Some(QrImageError::NotImage));
+        assert!(!ui.qr_img_busy);
+        // Every reason has its sentence in every language.
+        for lang in Locale::ALL {
+            let c = contact_strings(lang);
+            for e in [
+                QrImageError::Unreadable,
+                QrImageError::NotImage,
+                QrImageError::TooLarge,
+                QrImageError::NoQr,
+                QrImageError::NotMiasma,
+            ] {
+                assert!(!qr_image_error_text(c, e).trim().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn a_picture_read_for_a_closed_form_is_dropped_and_a_closed_form_reads_nothing() {
+        let ctx = egui::Context::default();
+        let mut ui = ContactsUi::default();
+        // No form open: nothing is started.
+        ui.load_qr_image(&ctx, PathBuf::from("picture.png"));
+        assert!(!ui.qr_img_busy);
+        // An answer that belongs to an earlier form is not used.
+        ui.open_add_dialog();
+        let code = crate::qr_image::tests::fresh_code();
+        ui.qr_img_busy = true;
+        ui.qr_img_tx.send((ui.qr_img_seq + 1, Ok(code))).unwrap();
+        ui.collect_qr_image();
+        assert!(ui.add_text.is_empty() && ui.qr_img_busy);
+    }
+
+    #[test]
+    fn the_add_form_with_the_picture_button_draws_in_every_language() {
+        let ctx = egui::Context::default();
+        crate::ui_kit::apply_theme(&ctx, false);
+        for l in Locale::ALL {
+            let c = contact_strings(l);
+            let mut ui_state = ContactsUi::default();
+            ui_state.open_add_dialog();
+            ui_state.qr_img_error = Some(QrImageError::NoQr);
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(700.0, 900.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| ui_state.add_dialog(ctx, c));
+            assert!(ui_state.add_open, "{l:?}: the form closed itself");
         }
     }
 }
