@@ -110,8 +110,7 @@ pub fn decode_qr_texts(bytes: &[u8]) -> Result<Vec<String>, QrImageError> {
     let raw = grey.as_raw();
     // The scanner is third-party code run on untrusted pixels: a panic inside it is "no code".
     let found = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut prepared =
-            rqrr::PreparedImage::prepare_from_greyscale(w, h, |x, y| raw[y * w + x]);
+        let mut prepared = rqrr::PreparedImage::prepare_from_greyscale(w, h, |x, y| raw[y * w + x]);
         prepared
             .detect_grids()
             .into_iter()
@@ -236,7 +235,10 @@ pub(crate) mod tests {
         ihdr.extend_from_slice(&[8, 0, 0, 0, 0]);
         let mut out = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
         out.extend(chunk(b"IHDR", &ihdr));
-        out.extend(chunk(b"IDAT", &[0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]));
+        out.extend(chunk(
+            b"IDAT",
+            &[0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01],
+        ));
         out.extend(chunk(b"IEND", &[]));
         out
     }
