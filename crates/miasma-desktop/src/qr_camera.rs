@@ -45,8 +45,9 @@ pub struct Frame {
     pub luma: Vec<u8>,
 }
 
-/// An open camera. Dropping it lets the camera go.
-pub trait CameraSource: Send {
+/// An open camera. Dropping it lets the camera go. It is opened and used on the scan thread only
+/// (the system camera objects cannot be moved between threads), so it need not be `Send`.
+pub trait CameraSource {
     /// The next picture; waits until there is one.
     fn next_frame(&mut self) -> Result<Frame, CameraError>;
 }
