@@ -68,9 +68,16 @@ pub fn read_limited(path: &Path) -> Result<Vec<u8>, QrImageError> {
 /// The texts of the QR codes found in a PNG or JPEG picture (at most [`MAX_GRIDS`]).
 ///
 /// Pure and total: any bytes give `Ok` or an error, never a panic.
+pub fn decode_qr_texts(bytes: &[u8]) -> Result<Vec<String>, QrImageError> {
+    let (w, h, raw) = luma_from_picture(bytes)?;
+    decode_luma_texts(w, h, &raw)
+}
+
+/// A PNG or JPEG picture as grey pixels (width, height, one byte per pixel), within the limits
+/// above. Also used for the JPEG frames some cameras deliver.
 // `Limits` cannot be built with a struct literal outside its crate (it is non-exhaustive).
 #[allow(clippy::field_reassign_with_default)]
-pub fn decode_qr_texts(bytes: &[u8]) -> Result<Vec<String>, QrImageError> {
+pub fn luma_from_picture(bytes: &[u8]) -> Result<(usize, usize, Vec<u8>), QrImageError> {
     if bytes.len() as u64 > MAX_FILE_BYTES {
         return Err(QrImageError::TooLarge);
     }
@@ -106,8 +113,20 @@ pub fn decode_qr_texts(bytes: &[u8]) -> Result<Vec<String>, QrImageError> {
         .decode()
         .map_err(|_| QrImageError::NotImage)?
         .to_luma8();
-    let (w, h) = (grey.width() as usize, grey.height() as usize);
-    let raw = grey.as_raw();
+    Ok((
+        grey.width() as usize,
+        grey.height() as usize,
+        grey.into_raw(),
+    ))
+}
+
+/// The texts of the QR codes in a grey picture of `w` x `h` pixels (at most [`MAX_GRIDS`]).
+/// `raw` must hold `w * h` bytes; anything else is "no code". Used for pictures and for camera
+/// frames, so both are read by the same scanner.
+pub fn decode_luma_texts(w: usize, h: usize, raw: &[u8]) -> Result<Vec<String>, QrImageError> {
+    if w.checked_mul(h) != Some(raw.len()) || w < MIN_SIDE as usize || h < MIN_SIDE as usize {
+        return Err(QrImageError::NoQr);
+    }
     // The scanner is third-party code run on untrusted pixels: a panic inside it is "no code".
     let found = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut prepared = rqrr::PreparedImage::prepare_from_greyscale(w, h, |x, y| raw[y * w + x]);
@@ -126,13 +145,44 @@ pub fn decode_qr_texts(bytes: &[u8]) -> Result<Vec<String>, QrImageError> {
     }
 }
 
+/// The first text that holds a contact code. This is the one check every way of entering a code
+/// goes through (pasted text, a picture, the camera): `extract_contact_code`.
+pub fn first_contact_code(texts: &[String]) -> Option<String> {
+    texts
+        .iter()
+        .find_map(|t| miasma_core::push::extract_contact_code(t))
+}
+
+/// Shrink a grey picture so that its long side is at most `max_side`, by averaging whole blocks
+/// of pixels (a whole factor keeps the edges of the QR modules clean). Returns the input
+/// unchanged when it is small enough. `raw` must hold `w * h` bytes, otherwise the result is empty.
+pub fn downscale_luma(w: usize, h: usize, raw: &[u8], max_side: usize) -> (usize, usize, Vec<u8>) {
+    if w.checked_mul(h) != Some(raw.len()) || w == 0 || h == 0 || max_side == 0 {
+        return (0, 0, Vec::new());
+    }
+    let k = w.max(h).div_ceil(max_side);
+    if k <= 1 {
+        return (w, h, raw.to_vec());
+    }
+    let (nw, nh) = (w / k, h / k);
+    let mut out = Vec::with_capacity(nw * nh);
+    for y in 0..nh {
+        for x in 0..nw {
+            let mut sum = 0u32;
+            for dy in 0..k {
+                let row = (y * k + dy) * w + x * k;
+                sum += raw[row..row + k].iter().map(|&p| u32::from(p)).sum::<u32>();
+            }
+            out.push((sum / (k * k) as u32) as u8);
+        }
+    }
+    (nw, nh, out)
+}
+
 /// The contact code in a picture. The text of a QR code goes through the same check as a pasted
 /// text (`extract_contact_code`); the first code that holds a contact code wins.
 pub fn contact_code_from_image(bytes: &[u8]) -> Result<String, QrImageError> {
-    decode_qr_texts(bytes)?
-        .iter()
-        .find_map(|t| miasma_core::push::extract_contact_code(t))
-        .ok_or(QrImageError::NotMiasma)
+    first_contact_code(&decode_qr_texts(bytes)?).ok_or(QrImageError::NotMiasma)
 }
 
 /// Read the file and find the contact code in it. Runs on a helper thread.

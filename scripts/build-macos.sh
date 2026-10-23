@@ -39,6 +39,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
     <key>CFBundleVersion</key><string>$VERSION</string>
     <key>MiasmaVersion</key><string>$FULL_VERSION</string>
     <key>NSHighResolutionCapable</key><true/>
+    <key>NSCameraUsageDescription</key><string>Miasma uses the camera only to read a contact QR code.</string>
     <key>NSLocalNetworkUsageDescription</key><string>Miasma discovers and connects to nearby peers to store and retrieve content.</string>
 </dict></plist>
 EOF

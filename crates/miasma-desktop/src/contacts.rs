@@ -7,6 +7,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -19,6 +20,7 @@ use crate::a11y::CollapsingExt as _;
 use crate::app::{card_frame, danger_button};
 use crate::locale::{ContactStrings, Locale};
 use crate::open_path::{self, Action, Resolved};
+use crate::qr_camera::{self, CameraBackend, ScanConfig, ScanState, Scanner};
 use crate::qr_image::{self, QrImageError};
 use crate::theme::{self, Palette};
 use crate::transfers::{fill, format_bytes, format_eta};
@@ -936,6 +938,15 @@ pub struct ContactsUi {
     qr_img_seq: u64,
     qr_img_busy: bool,
     qr_img_error: Option<QrImageError>,
+    /// The camera of this computer (`None` where there is no camera support), the scan in
+    /// progress, whether a camera was found, and the preview picture of the scan.
+    camera: Option<Arc<dyn CameraBackend>>,
+    scanner: Scanner,
+    cam_avail: CamAvail,
+    cam_avail_rx: Option<std::sync::mpsc::Receiver<bool>>,
+    cam_texture: Option<egui::TextureHandle>,
+    /// The scan was stopped because the window was left.
+    cam_left: bool,
     /// The path the last open was aimed at (named in the notice if it fails).
     last_open: String,
     /// The notice was just set: bring it into view once.
@@ -989,6 +1000,12 @@ impl Default for ContactsUi {
             qr_img_seq: 0,
             qr_img_busy: false,
             qr_img_error: None,
+            camera: qr_camera::system_backend(),
+            scanner: Scanner::default(),
+            cam_avail: CamAvail::Unknown,
+            cam_avail_rx: None,
+            cam_texture: None,
+            cam_left: false,
             last_open: String::new(),
             scroll_to_msg: false,
             show_earlier: HashSet::new(),
@@ -1279,6 +1296,8 @@ impl ContactsUi {
         if !self.add_dialog_open() || self.qr_img_busy {
             return;
         }
+        // A picture replaces a scan that is still going.
+        self.scanner.reset();
         self.qr_img_busy = true;
         self.qr_img_error = None;
         let (seq, tx, ctx) = (self.qr_img_seq, self.qr_img_tx.clone(), ctx.clone());
@@ -1302,14 +1321,111 @@ impl ContactsUi {
             }
             self.qr_img_busy = false;
             match answer {
-                Ok(code) => {
-                    self.add_text = code;
-                    self.add_from_suggestion = None;
-                    self.add_error = None;
-                    self.qr_img_error = None;
-                }
+                Ok(code) => self.apply_scanned_code(code),
                 Err(e) => self.qr_img_error = Some(e),
             }
+        }
+    }
+
+    /// A contact code read from a picture or by the camera goes into the form as if it had been
+    /// pasted; the form's own check and button do the rest.
+    fn apply_scanned_code(&mut self, code: String) {
+        self.add_text = code;
+        self.add_from_suggestion = None;
+        self.add_error = None;
+        self.qr_img_error = None;
+    }
+
+    /// Once per frame of the open form: the camera check, the scan's answers, the preview picture,
+    /// and the rule that the camera is off whenever the window is not in front.
+    fn camera_tick(&mut self, ctx: &egui::Context) {
+        if self.camera.is_none() {
+            return;
+        }
+        if self.cam_avail == CamAvail::Unknown {
+            self.cam_avail = CamAvail::Checking;
+            if let Some(backend) = self.camera.clone() {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let ctx = ctx.clone();
+                let started = std::thread::Builder::new()
+                    .name("qr-camera-check".into())
+                    .spawn(move || {
+                        let _ = tx.send(matches!(backend.camera_count(), Ok(n) if n > 0));
+                        ctx.request_repaint();
+                    });
+                if started.is_ok() {
+                    self.cam_avail_rx = Some(rx);
+                } else {
+                    self.cam_avail = CamAvail::Present;
+                }
+            }
+        }
+        if let Some(rx) = &self.cam_avail_rx {
+            if let Ok(present) = rx.try_recv() {
+                self.cam_avail = if present {
+                    CamAvail::Present
+                } else {
+                    CamAvail::Missing
+                };
+                self.cam_avail_rx = None;
+            }
+        }
+        // The system's permission question takes the focus on macOS, so a scan that is still
+        // starting is not stopped for that.
+        let in_front = ctx.input(|i| i.raw.focused);
+        if self.scanner.state() == ScanState::Scanning && !in_front {
+            self.scanner.stop();
+            self.cam_left = true;
+        }
+        if let Some(code) = self.scanner.pump() {
+            self.apply_scanned_code(code);
+        }
+        if let Some(f) = self.scanner.take_preview() {
+            let image = egui::ColorImage::from_gray([f.width, f.height], &f.luma);
+            match &mut self.cam_texture {
+                Some(t) => t.set(image, egui::TextureOptions::LINEAR),
+                None => {
+                    self.cam_texture = Some(ctx.load_texture(
+                        "qr_camera_preview",
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    ))
+                }
+            }
+        }
+        if !self.scanner.running() {
+            self.cam_texture = None;
+        }
+    }
+
+    /// Turn the camera on for the form.
+    fn start_camera(&mut self, ctx: &egui::Context) {
+        let Some(backend) = self.camera.clone() else {
+            return;
+        };
+        self.cam_left = false;
+        self.qr_img_error = None;
+        let ctx = ctx.clone();
+        self.scanner.reset();
+        self.scanner.start(
+            backend,
+            ScanConfig::default(),
+            Arc::new(move || ctx.request_repaint()),
+        );
+    }
+
+    /// The sentence for how the last scan ended, if it ended badly.
+    fn camera_note(&self, c: &ContactStrings) -> Option<&'static str> {
+        if self.cam_left {
+            return Some(c.cam_left);
+        }
+        match self.scanner.state() {
+            ScanState::Denied => Some(c.cam_denied),
+            ScanState::NoCamera => Some(c.cam_none),
+            ScanState::Busy => Some(c.cam_busy),
+            ScanState::Failed => Some(c.cam_failed),
+            ScanState::TimedOut => Some(c.cam_timeout),
+            _ => None,
         }
     }
 
@@ -1982,8 +2098,14 @@ impl ContactsUi {
         const KEY: &str = "contact_add";
         self.collect_qr_image();
         if !self.add_open {
+            // The form is gone (closed, or switched off from outside): so is the camera.
+            if self.scanner.running() {
+                self.scanner.reset();
+                self.cam_texture = None;
+            }
             return;
         }
+        self.camera_tick(ctx);
         let mut close = false;
         let shown = kit::dialog(ctx, KEY, c.add_title, |ui| {
             if let Some((label, fp)) = self.add_result.clone() {
@@ -2038,8 +2160,51 @@ impl ContactsUi {
                 if busy {
                     ui.spinner();
                 }
+                // The camera: shown only where this computer has camera support, and switched
+                // off with the reason below when no camera is connected.
+                if self.camera.is_some() {
+                    if self.scanner.running() {
+                        if ui.add(kit::secondary_button(c.cam_stop)).clicked() {
+                            self.scanner.stop();
+                        }
+                    } else {
+                        let ready = self.cam_avail != CamAvail::Missing && !busy && !self.add_busy;
+                        let cam = crate::form_check::add_enabled(
+                            ui,
+                            ready,
+                            kit::secondary_button(c.cam_btn),
+                        );
+                        if cam.clicked() {
+                            self.start_camera(ctx);
+                        }
+                    }
+                }
             });
             hint(ui, c.qr_img_drop);
+            if self.camera.is_some() && self.cam_avail == CamAvail::Missing {
+                hint(ui, c.cam_none);
+            }
+            if self.scanner.running() {
+                ui.add_space(kit::SP_1);
+                let status = if self.scanner.state() == ScanState::Scanning {
+                    c.cam_scanning
+                } else {
+                    c.cam_starting
+                };
+                ui.label(label_text(status));
+                if let Some(t) = &self.cam_texture {
+                    let size = t.size_vec2();
+                    let shown = size * (240.0 / size.x.max(size.y).max(1.0)).min(1.0);
+                    let pic = ui.image(egui::load::SizedTexture::new(t.id(), shown));
+                    crate::form_check::name(&pic, c.cam_preview);
+                }
+                if self.scanner.not_miasma {
+                    kit::notice(ui, Level::Warn, c.err_img_not_miasma);
+                }
+            } else if let Some(note) = self.camera_note(c) {
+                ui.add_space(kit::SP_1);
+                kit::notice(ui, Level::Error, note);
+            }
             if let Some(e) = self.qr_img_error {
                 ui.add_space(kit::SP_1);
                 kit::notice(ui, Level::Error, qr_image_error_text(c, e));
@@ -2107,6 +2272,10 @@ impl ContactsUi {
             self.qr_img_seq += 1;
             self.qr_img_busy = false;
             self.qr_img_error = None;
+            // The camera goes off with the form.
+            self.scanner.reset();
+            self.cam_texture = None;
+            self.cam_left = false;
             if shown.is_some() {
                 crate::a11y::dialog_leave(ctx, KEY);
             }
@@ -2764,6 +2933,15 @@ fn label_text(text: &str) -> egui::RichText {
 }
 
 /// A line of explanation under a field.
+/// Whether a camera is connected, found once when the form is first shown.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CamAvail {
+    Unknown,
+    Checking,
+    Present,
+    Missing,
+}
+
 /// What the picture reader sends back: the request number and the contact code or the reason.
 type QrImageAnswer = (u64, Result<String, QrImageError>);
 
@@ -4838,6 +5016,163 @@ mod tests {
             };
             let _ = ctx.run(input, |ctx| ui_state.add_dialog(ctx, c));
             assert!(ui_state.add_open, "{l:?}: the form closed itself");
+        }
+    }
+
+    // ─── The camera in the add form ─────────────────────────────────────────
+
+    fn run_frame(ui: &mut ContactsUi, ctx: &egui::Context, focused: bool) {
+        let c = contact_strings(Locale::En);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(700.0, 900.0),
+            )),
+            focused,
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| ui.add_dialog(ctx, c));
+    }
+
+    fn wait_released(flag: &std::sync::atomic::AtomicBool) -> bool {
+        for _ in 0..500 {
+            if flag.load(std::sync::atomic::Ordering::SeqCst) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    fn form_with_camera(cam: crate::qr_camera::tests::FakeCamera) -> (ContactsUi, egui::Context) {
+        let ctx = egui::Context::default();
+        crate::ui_kit::apply_theme(&ctx, false);
+        let mut ui = ContactsUi::default();
+        ui.camera = Some(Arc::new(cam));
+        ui.open_add_dialog();
+        (ui, ctx)
+    }
+
+    #[test]
+    fn a_code_shown_to_the_camera_fills_the_form_and_the_camera_is_let_go() {
+        use crate::qr_camera::tests::{frame_of, FakeCamera};
+        let code = crate::qr_image::tests::fresh_code();
+        let cam = FakeCamera::new(vec![frame_of(&qr_payload(&code), 4)]);
+        let released = cam.released.clone();
+        let (mut ui, ctx) = form_with_camera(cam);
+        run_frame(&mut ui, &ctx, true);
+        ui.start_camera(&ctx);
+        for _ in 0..500 {
+            run_frame(&mut ui, &ctx, true);
+            if ui.add_text == code {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(ui.add_text, code);
+        assert!(!ui.add_is_from_suggestion());
+        assert!(!ui.scanner.running());
+        assert!(wait_released(&released), "the camera was not let go");
+        // Adding goes the same way as for a pasted code.
+        ui.queue_add("Ken".into());
+        assert!(matches!(
+            ui.out.back(),
+            Some(PushRequest::ContactAdd { code: c, .. }) if *c == code
+        ));
+    }
+
+    #[test]
+    fn leaving_the_window_or_closing_the_form_turns_the_camera_off() {
+        use crate::qr_camera::tests::FakeCamera;
+        let blank = crate::qr_camera::Frame {
+            width: 160,
+            height: 120,
+            luma: vec![200; 160 * 120],
+        };
+        // The window loses the focus while scanning.
+        let cam = FakeCamera::new(vec![blank.clone()]);
+        let released = cam.released.clone();
+        let (mut ui, ctx) = form_with_camera(cam);
+        ui.start_camera(&ctx);
+        for _ in 0..500 {
+            run_frame(&mut ui, &ctx, true);
+            if ui.scanner.state() == ScanState::Scanning {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(ui.scanner.state(), ScanState::Scanning);
+        run_frame(&mut ui, &ctx, false);
+        assert!(ui.cam_left && !ui.scanner.running());
+        assert!(wait_released(&released));
+        // The form is closed while scanning.
+        let cam = FakeCamera::new(vec![blank]);
+        let released = cam.released.clone();
+        let (mut ui, ctx) = form_with_camera(cam);
+        ui.start_camera(&ctx);
+        for _ in 0..500 {
+            run_frame(&mut ui, &ctx, true);
+            if ui.scanner.state() == ScanState::Scanning {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        ui.add_open = false;
+        run_frame(&mut ui, &ctx, true);
+        assert!(!ui.scanner.running() && ui.cam_texture.is_none());
+        assert!(wait_released(&released));
+    }
+
+    #[test]
+    fn no_camera_switches_the_button_off_and_no_support_hides_it() {
+        use crate::qr_camera::tests::FakeCamera;
+        let mut cam = FakeCamera::new(Vec::new());
+        cam.open_error = Some(crate::qr_camera::CameraError::NoCamera);
+        let (mut ui, ctx) = form_with_camera(cam);
+        for _ in 0..500 {
+            run_frame(&mut ui, &ctx, true);
+            if ui.cam_avail == CamAvail::Missing {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(ui.cam_avail, CamAvail::Missing);
+        // Where there is no camera support the form still draws, without the button.
+        ui.camera = None;
+        run_frame(&mut ui, &ctx, true);
+        assert!(ui.add_open);
+    }
+
+    #[test]
+    fn camera_failures_are_told_in_every_language() {
+        for lang in Locale::ALL {
+            let c = contact_strings(lang);
+            for text in [
+                c.cam_btn,
+                c.cam_stop,
+                c.cam_starting,
+                c.cam_scanning,
+                c.cam_preview,
+                c.cam_none,
+                c.cam_denied,
+                c.cam_busy,
+                c.cam_failed,
+                c.cam_timeout,
+                c.cam_left,
+            ] {
+                assert!(!text.trim().is_empty(), "{lang:?}");
+            }
+            let mut ui = ContactsUi::default();
+            for (state, want) in [
+                (ScanState::Denied, c.cam_denied),
+                (ScanState::NoCamera, c.cam_none),
+                (ScanState::Busy, c.cam_busy),
+                (ScanState::Failed, c.cam_failed),
+                (ScanState::TimedOut, c.cam_timeout),
+            ] {
+                ui.scanner.set_state_for_test(state);
+                assert_eq!(ui.camera_note(c), Some(want), "{lang:?} {state:?}");
+            }
         }
     }
 }
