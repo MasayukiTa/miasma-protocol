@@ -3,8 +3,16 @@ name: CI
 on:
   push:
     branches: [main, develop]
+    # A pre-release tag such as v0.3.2-beta.12 builds with that label.
+    tags: ['v*-*']
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      prerelease:
+        description: 'Pre-release label for the macOS builds, e.g. beta.12 (empty: none)'
+        type: string
+        default: ''
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -210,6 +218,17 @@ jobs:
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Set pre-release label
+        env:
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          label="$INPUT_PRERELEASE"
+          if [ -z "$label" ] && [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            case "$tag" in *-*) label="${tag#*-}" ;; esac
+          fi
+          if [ -n "$label" ]; then echo "MIASMA_PRERELEASE=$label" >> "$GITHUB_ENV"; fi
+
       - name: Build Apple-relevant crates
         run: cargo build -p miasma-core -p miasma-ffi -p miasma-wasm --locked
 
@@ -255,6 +274,17 @@ jobs:
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
+
+      - name: Set pre-release label
+        env:
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          label="$INPUT_PRERELEASE"
+          if [ -z "$label" ] && [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            case "$tag" in *-*) label="${tag#*-}" ;; esac
+          fi
+          if [ -n "$label" ]; then echo "MIASMA_PRERELEASE=$label" >> "$GITHUB_ENV"; fi
 
       # Release build: the same binaries that are handed to a person who has no
       # Rust toolchain (see the artifact step below). Both packages include the

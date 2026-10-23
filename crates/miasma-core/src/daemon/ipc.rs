@@ -897,6 +897,10 @@ pub struct IrohStatus {
 /// Snapshot of daemon state — returned for `miasma status` and IPC calls.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonStatus {
+    /// The daemon is holding the OS request that keeps the computer awake
+    /// (a transfer or message delivery is in flight).
+    #[serde(default)]
+    pub keeping_awake: bool,
     /// The iroh direct transport; `None` when it is off or not compiled in.
     #[serde(default)]
     pub iroh: Option<IrohStatus>,

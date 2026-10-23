@@ -2874,6 +2874,8 @@ dependencies = [
  "iroh-mdns-address-lookup",
  "libc",
  "libp2p",
+ "objc2",
+ "objc2-foundation",
  "quinn",
  "rand 0.8.8",
  "rcgen",
