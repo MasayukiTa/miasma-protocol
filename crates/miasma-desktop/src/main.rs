@@ -123,6 +123,10 @@ fn main() -> eframe::Result<()> {
         process_hardening: true,
     });
 
+    // Wrap the root key with the system's key protection (Windows: the signed-in
+    // user's); an existing plain key is moved over without any prompt.
+    miasma_core::root_key::install_default_platform_provider();
+
     // A `miasma-share:` link (the OS passes it as an argument). If a Miasma window of this data
     // dir is already open, hand the link to it and exit instead of starting a second copy.
     let share_link = link::share_id_from_args(std::env::args().skip(1));
