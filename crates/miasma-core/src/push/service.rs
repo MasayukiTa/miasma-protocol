@@ -1112,6 +1112,7 @@ impl PushService {
         stop: &mut watch::Receiver<bool>,
         stats: &mut AttemptStats,
     ) -> Result<Option<String>, AttemptError> {
+        let _awake = crate::power::ActivityGuard::acquire("Sending a file");
         let stall = self.settings.stall_timeout;
         let broken = |conn: &dyn Link, what: &str, e: String| {
             if Self::closed_as_not_allowed(conn) {
@@ -1278,6 +1279,7 @@ impl PushService {
         mut tx: BoxTx,
         mut rx: BoxRx,
     ) -> bool {
+        let _awake = crate::power::ActivityGuard::acquire("Receiving a file");
         let header: Header =
             match tokio::time::timeout(Duration::from_secs(30), proto::read_frame(&mut rx)).await {
                 Ok(Ok(h)) => h,

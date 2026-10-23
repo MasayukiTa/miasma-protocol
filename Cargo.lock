@@ -5357,6 +5357,8 @@ dependencies = [
  "libc",
  "libp2p",
  "ml-kem",
+ "objc2 0.6.4",
+ "objc2-foundation",
  "quinn",
  "rand 0.8.8",
  "rand_core 0.10.1",

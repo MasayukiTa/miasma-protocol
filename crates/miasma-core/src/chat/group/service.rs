@@ -283,6 +283,7 @@ impl GroupService {
         plain: &[u8],
         conn_slot: &mut Option<Connection>,
     ) -> Outcome {
+        let _awake = crate::power::ActivityGuard::acquire("Delivering a message");
         // A contact whose sending is switched off gets nothing; the items wait.
         if let Some(c) = self.contacts.by_endpoint(peer) {
             if !c.allow_send {

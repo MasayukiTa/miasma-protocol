@@ -1728,6 +1728,8 @@ pub struct TransferStrings {
     pub pw_short_warning: &'static str,
     pub pw_generate: &'static str,
     pub pw_generated_note: &'static str,
+    /// Shown while the daemon keeps the computer from sleeping during work.
+    pub awake_note: &'static str,
 }
 
 impl TransferStrings {
@@ -1873,6 +1875,7 @@ impl TransferStrings {
             ("pw_short_warning", self.pw_short_warning),
             ("pw_generate", self.pw_generate),
             ("pw_generated_note", self.pw_generated_note),
+            ("awake_note", self.awake_note),
         ]
     }
 }
@@ -2038,6 +2041,7 @@ static TR_EN: TransferStrings = TransferStrings {
     pw_short_warning: "short: use 12+ characters or press Generate",
     pw_generate: "Generate",
     pw_generated_note: "Generated password, shown once. Store it now: it is not saved anywhere and cannot be recovered. The receiver needs it in addition to the MID.",
+    awake_note: "Keeping this computer awake while transferring",
 };
 
 static TR_JA: TransferStrings = TransferStrings {
@@ -2193,6 +2197,7 @@ static TR_JA: TransferStrings = TransferStrings {
     pw_short_warning: "短めです: 12 文字以上にするか「生成」を押してください",
     pw_generate: "生成",
     pw_generated_note: "生成したパスワードです（この1回だけ表示）。今すぐ保管してください。どこにも保存されず、失くすと復元できません。受信する人には MID に加えてこのパスワードが必要です。",
+    awake_note: "転送が終わるまで、このパソコンをスリープさせません",
 };
 
 static TR_ZH_CN: TransferStrings = TransferStrings {
@@ -2348,6 +2353,7 @@ static TR_ZH_CN: TransferStrings = TransferStrings {
     pw_short_warning: "偏短：请使用 12 个以上字符，或点击“生成”",
     pw_generate: "生成",
     pw_generated_note: "已生成的密码（仅显示这一次）。请立即保存：它不会保存在任何地方，丢失后无法找回。接收方除 MID 外还需要此密码。",
+    awake_note: "传输期间让此电脑保持唤醒",
 };
 
 // ─── Contacts (trusted-contact push) ────────────────────────────────────────
