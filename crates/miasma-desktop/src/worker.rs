@@ -291,6 +291,8 @@ pub enum WorkerResult {
         transport_statuses: Vec<TransportStatusInfo>,
         /// `Some` while the iroh home relay is not connected.
         relay_down: Option<RelayDown>,
+        /// The daemon is holding the keep-awake request (a transfer or delivery is in flight).
+        keeping_awake: bool,
     },
     /// Distress wipe complete.
     Wiped,
@@ -423,11 +425,13 @@ impl fmt::Debug for WorkerResult {
                 obfs_quic_port,
                 transport_statuses,
                 relay_down,
+                keeping_awake,
             } => f
                 .debug_struct("Status")
                 .field("peer_id", peer_id)
                 .field("peer_count", peer_count)
                 .field("relay_down", relay_down)
+                .field("keeping_awake", keeping_awake)
                 .field("share_count", share_count)
                 .field("used_mb", used_mb)
                 .field("quota_mb", quota_mb)
@@ -1321,6 +1325,7 @@ async fn get_status(data_dir: &Path) -> WorkerResult {
                 .unwrap_or(0);
 
             WorkerResult::Status {
+                keeping_awake: s.keeping_awake,
                 peer_id: s.peer_id,
                 peer_count: s.peer_count,
                 share_count: s.share_count,

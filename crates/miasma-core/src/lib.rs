@@ -24,6 +24,7 @@ pub mod network;
 pub mod onion;
 pub mod paths;
 pub mod pipeline;
+pub mod power;
 pub mod protocol;
 pub mod push;
 pub mod repair;

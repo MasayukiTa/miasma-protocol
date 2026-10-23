@@ -509,6 +509,8 @@ pub struct TransfersUi {
     /// Browse was clicked and the sender's file name is being looked up before the Save-As
     /// dialog opens.
     name_peek: Option<NamePeek>,
+    /// The daemon reports that it is keeping the computer awake (from the status poll).
+    pub keeping_awake: bool,
 }
 
 /// How long the form waits for the name lookup before it opens the dialog with the placeholder
@@ -571,6 +573,7 @@ impl Default for TransfersUi {
             show_qr: false,
             focus_recv_password: false,
             name_peek: None,
+            keeping_awake: false,
         }
     }
 }
@@ -837,6 +840,9 @@ impl TransfersUi {
             if easy { t.heading_easy } else { t.heading },
             Some(desc),
             |ui| {
+                if self.keeping_awake {
+                    kit::hint(ui, t.awake_note);
+                }
                 if let Some((msg, down)) = &self.poll_error {
                     let shown = if *down { t.offline_note } else { msg.as_str() };
                     kit::notice(ui, Level::Warn, shown);
