@@ -2825,7 +2825,8 @@ impl ContactsUi {
                         PushState::Sending,
                         6,
                     ),
-                    xfer("3", true, &a, "memo.txt", 1000, 0, 0, PushState::Queued, 7),                    xfer(
+                    xfer("3", true, &a, "memo.txt", 1000, 0, 0, PushState::Queued, 7),
+                    xfer(
                         "4",
                         true,
                         &a,
@@ -4609,11 +4610,18 @@ mod tests {
         for l in Locale::ALL {
             let c = contact_strings(l);
             let ui = ContactsUi::fixture("active", c).unwrap();
-            let rx = ui.rows.iter().find(|r| !r.outbound && !r.finished()).unwrap();
+            let rx = ui
+                .rows
+                .iter()
+                .find(|r| !r.outbound && !r.finished())
+                .unwrap();
             assert_eq!(rx.stats.as_ref().and_then(|s| s.rtt_ms), Some(9));
             for width in [420.0_f32, 700.0, 1200.0] {
                 let (used, avail, _) = draw_page("active", l, width);
-                assert!(used.right() <= avail.right() + 1.0, "{l:?} {width}: overflow");
+                assert!(
+                    used.right() <= avail.right() + 1.0,
+                    "{l:?} {width}: overflow"
+                );
             }
         }
     }
