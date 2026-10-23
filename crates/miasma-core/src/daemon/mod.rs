@@ -1228,6 +1228,21 @@ async fn process_request_inner(
     data_dir: PathBuf,
     bridge_state: BridgeLiveState,
 ) -> ControlResponse {
+    // Held for as long as a request that moves data over the network is handled.
+    let _awake = match &req {
+        ControlRequest::Publish { .. }
+        | ControlRequest::PublishFile { .. }
+        | ControlRequest::PublishFileProtected { .. }
+        | ControlRequest::Get { .. }
+        | ControlRequest::GetToFile { .. }
+        | ControlRequest::DirectedSend { .. }
+        | ControlRequest::DirectedSendFile { .. }
+        | ControlRequest::DirectedRetrieve { .. }
+        | ControlRequest::DirectedRetrieveToFile { .. } => {
+            Some(crate::power::ActivityGuard::acquire("Transferring data"))
+        }
+        _ => None,
+    };
     // Whatever the channel, a path request never reaches the daemon's own data
     // directory (master key, control token, state).
     let named_path: Option<&str> = match &req {
@@ -1750,6 +1765,7 @@ async fn process_request_inner(
             let cover_metrics = bridge_state.cover_traffic_metrics.snapshot();
 
             ControlResponse::Status(DaemonStatus {
+                keeping_awake: crate::power::is_held(),
                 iroh: iroh_status_for(&data_dir),
                 peer_id: coord.peer_id().to_string(),
                 listen_addrs,

@@ -676,6 +676,8 @@ impl ChatService {
         id: &[u8; 16],
         conn_slot: &mut Option<Connection>,
     ) -> Outcome {
+        // Held while one delivery attempt (dial, send, wait for the ack) runs.
+        let _awake = crate::power::ActivityGuard::acquire("Delivering a message");
         // Permission is read again for every attempt.
         match self.contacts.by_endpoint(peer) {
             None => return Outcome::Permanent(fail::CONTACT_REMOVED),

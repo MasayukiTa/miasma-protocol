@@ -959,10 +959,12 @@ impl MiasmaApp {
                     obfs_quic_port,
                     transport_statuses,
                     relay_down,
+                    keeping_awake,
                 } => {
                     self.busy = false;
                     self.chat.relay_down = relay_down.is_some();
                     self.relay_down = relay_down;
+                    self.transfers.keeping_awake = keeping_awake;
                     self.peer_id = peer_id;
                     self.peer_count = peer_count;
                     self.share_count = share_count;
