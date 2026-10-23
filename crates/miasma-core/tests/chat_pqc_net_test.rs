@@ -267,7 +267,9 @@ async fn require_sends_once_the_peer_has_agreed() {
 /// the new-default side reports "classical only" for the older one.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_new_default_build_and_an_old_default_build_keep_talking() {
-    let new_default = miasma_core::config::NodeConfig::default().privacy.pqc_mode();
+    let new_default = miasma_core::config::NodeConfig::default()
+        .privacy
+        .pqc_mode();
     assert_eq!(new_default, PqcMode::Prefer);
     let old_default: PqcMode = "off".parse().unwrap();
     let r = relay().await;

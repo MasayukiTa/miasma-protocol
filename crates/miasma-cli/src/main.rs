@@ -993,10 +993,7 @@ async fn cmd_status(data_dir: &std::path::Path) -> Result<()> {
             print_logging_status(data_dir);
             println!(
                 "  Advanced encryption: {}",
-                pqc_line(
-                    &miasma_core::logging::load_privacy(data_dir),
-                    Some(&s.pqc)
-                )
+                pqc_line(&miasma_core::logging::load_privacy(data_dir), Some(&s.pqc))
             );
             if s.wss_port > 0 {
                 let tls_tag = if s.wss_tls_enabled {
@@ -4421,7 +4418,10 @@ mod pqc_status_line_tests {
         // The default says what it does and that it is the default (the
         // counters follow when the background service runs).
         let dflt = pqc_line_for(PqcMode::Prefer, true, true, None);
-        assert!(dflt.starts_with("prefer (on when the contact supports it"), "{dflt}");
+        assert!(
+            dflt.starts_with("prefer (on when the contact supports it"),
+            "{dflt}"
+        );
         assert!(dflt.contains("default"), "{dflt}");
         let chosen = pqc_line_for(PqcMode::Prefer, false, true, None);
         assert_eq!(chosen, "prefer (on when the contact supports it)");
