@@ -3867,7 +3867,10 @@ mod retention_entry_tests {
                 refused.is_err(),
                 "--retention {arg} ({secs}s) should be refused"
             );
-            assert!(refused.unwrap_err().to_string().contains("invalid retention"));
+            assert!(refused
+                .unwrap_err()
+                .to_string()
+                .contains("invalid retention"));
         }
         // 30 days + 1 expressed in the CLI's own unit suffixes is the same reject.
         let over_max_hours = format!("{}h", RetentionPeriod::ThirtyDays.as_secs() / 3600 + 1);

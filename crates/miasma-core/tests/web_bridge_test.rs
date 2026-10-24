@@ -1,4 +1,4 @@
-﻿//! The HTTP bridge as the browser client uses it: the client's own files are
+//! The HTTP bridge as the browser client uses it: the client's own files are
 //! served without a token, everything under `/api` (except the liveness ping)
 //! needs one. Every test runs a real daemon against a throwaway data directory.
 //! No test writes a literal password: secrets are drawn from the OS RNG at run
@@ -856,7 +856,10 @@ async fn an_out_of_range_retention_is_refused_over_ipc_and_http() {
         .unwrap()
         {
             ControlResponse::Error(e) => {
-                assert!(e.contains("invalid retention"), "DirectedSendFile {bad}: {e}")
+                assert!(
+                    e.contains("invalid retention"),
+                    "DirectedSendFile {bad}: {e}"
+                )
             }
             other => panic!("DirectedSendFile {bad}: expected an error, got {other:?}"),
         }
