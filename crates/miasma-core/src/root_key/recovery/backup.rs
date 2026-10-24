@@ -125,8 +125,9 @@ fn parse_header(bytes: &[u8]) -> Result<(BackupParams, [u8; SALT_LEN]), BackupEr
     let m_kib = u32::from_le_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]);
     let t_cost = u32::from_le_bytes([bytes[10], bytes[11], bytes[12], bytes[13]]);
     let p_cost = u32::from_le_bytes([bytes[14], bytes[15], bytes[16], bytes[17]]);
-    let mut salt = [0u8; SALT_LEN];
-    salt.copy_from_slice(&bytes[18..34]);
+    let salt: [u8; SALT_LEN] = bytes[18..34]
+        .try_into()
+        .map_err(|_| BackupError::Truncated)?;
     let params = BackupParams {
         m_kib,
         t_cost,
@@ -164,8 +165,7 @@ pub fn create(
     params: BackupParams,
 ) -> Result<Vec<u8>, BackupError> {
     params.validate()?;
-    let mut salt = [0u8; SALT_LEN];
-    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut salt);
+    let salt: [u8; SALT_LEN] = rand::random();
     let header = header_bytes(&params, &salt);
     let kek = argon2id_kek(passphrase, &salt, &params)?;
     let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
@@ -375,5 +375,29 @@ mod tests {
         // Overwrite the m_kib field (offset 6..10) with a value above the ceiling.
         bytes[6..10].copy_from_slice(&(MAX_M_KIB + 1).to_le_bytes());
         assert!(matches!(open(&bytes, &pp), Err(BackupError::BadCost(_))));
+    }
+
+    #[test]
+    fn two_backups_use_a_fresh_salt_each_time() {
+        // Each created file draws its own random salt, so the salt field
+        // (header offset 18..34) differs between two files for the same key
+        // and passphrase. This guards the create side against a fixed salt.
+        let root = random::<32>();
+        let pp = random_passphrase();
+        let a = create(&root, &pp, test_params()).unwrap();
+        let b = create(&root, &pp, test_params()).unwrap();
+        assert_ne!(a[18..34], b[18..34], "two files must not share a salt");
+    }
+
+    #[test]
+    fn the_salt_survives_a_header_round_trip() {
+        // A random salt written by header_bytes is read back unchanged by
+        // parse_header, so the read side reconstructs the exact salt field.
+        let salt: [u8; SALT_LEN] = rand::random();
+        let params = test_params();
+        let header = header_bytes(&params, &salt);
+        let (read_params, read_salt) = parse_header(&header).unwrap();
+        assert_eq!(read_salt, salt);
+        assert_eq!(read_params, params);
     }
 }
