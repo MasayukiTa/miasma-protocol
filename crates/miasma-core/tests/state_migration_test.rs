@@ -132,6 +132,7 @@ fn publish_header() -> PublishHeader {
         mid: "miasma:abc".into(),
         protection: Protection::None,
         started_at: 1,
+        suite: 1,
     }
 }
 
