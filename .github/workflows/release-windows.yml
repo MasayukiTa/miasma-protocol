@@ -246,10 +246,32 @@ jobs:
           }
           Get-ChildItem out, out-extra | Select-Object Directory, Name, Length | Format-Table -AutoSize
 
+      # The desktop window needs OpenGL 2.0+, and a hosted runner has no graphics
+      # driver (OpenGL 1.1 only). For the launch test only, a software OpenGL
+      # (Mesa llvmpipe, pinned release, SHA-256 checked) is copied next to the
+      # installed program and removed again before the uninstall. It is never
+      # part of the installer.
+      - name: Fetch software OpenGL for the launch test
+        shell: pwsh
+        env:
+          MESA_VERSION: '26.1.8'
+          MESA_SHA256: '4c6d32e653e0ff9ad07796e40c0bcfabf2764d849e3ce4f3b1590112c87e42f9'
+        run: |
+          $d = Join-Path $env:RUNNER_TEMP 'mesa'
+          New-Item -ItemType Directory -Force -Path $d | Out-Null
+          $f = Join-Path $d 'mesa.7z'
+          Invoke-WebRequest "https://github.com/pal1000/mesa-dist-win/releases/download/$env:MESA_VERSION/mesa3d-$env:MESA_VERSION-release-msvc.7z" -OutFile $f
+          $got = (Get-FileHash $f -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($got -ne $env:MESA_SHA256) { Write-Host "::error::Mesa archive hash mismatch: $got"; exit 1 }
+          7z x $f "-o$d\x" x64 -y | Select-Object -Last 3
+          Get-ChildItem "$d\x\x64" | Select-Object Name, Length | Format-Table -AutoSize
+          "MESA_DIR=$d\x\x64" >> $env:GITHUB_ENV
+
       - name: Smoke test the installer
         shell: pwsh
         run: |
           $installerArgs = @{
+            SoftwareGlDir   = $env:MESA_DIR
             SetupExe        = "out/Miasma-Setup-$env:VERSION-x64.exe"
             OldSetupExe     = 'out-extra/Miasma-Setup-0.0.1-beta.1-x64.exe'
             ExpectedVersion = $env:VERSION

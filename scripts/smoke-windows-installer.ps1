@@ -38,6 +38,14 @@
 .PARAMETER LogDir
     Where installer logs are written. Default: .\smoke-logs
 
+.PARAMETER SoftwareGlDir
+    TEST ONLY. The desktop window needs OpenGL 2.0 or later. A CI runner has no
+    graphics driver, so it only has OpenGL 1.1 and the window cannot open. Give a
+    folder with a software OpenGL (Mesa llvmpipe: opengl32.dll, libgallium_wgl.dll,
+    libglapi.dll). Those files are copied next to miasma-desktop.exe for the launch
+    test and removed again before the uninstall. Not needed on a computer with a
+    normal graphics driver.
+
 .PARAMETER ExpectedVersion
     Release version the programs were built with (for example 0.3.2-beta.12).
     When given, `miasma.exe --version` must contain it.
@@ -52,7 +60,8 @@ param(
     [string]$NextSetupExe = "",
     [int]$AliveSeconds = 15,
     [string]$LogDir = ".\smoke-logs",
-    [string]$ExpectedVersion = ""
+    [string]$ExpectedVersion = "",
+    [string]$SoftwareGlDir = ""
 )
 
 $ErrorActionPreference = "Continue"
@@ -60,6 +69,7 @@ $script:passed = 0
 $script:failed = 0
 $script:dataDir = $null
 $script:desktopProc = $null
+$script:glFiles = @()
 
 $InstallDir = Join-Path $env:ProgramFiles "Miasma Protocol"
 $MsiUpgradeCode = "{E8A3F0C1-7B2D-4E56-9A1F-3C8D5E7F0B12}"
@@ -238,6 +248,13 @@ try {
     Check "miasma.exe init (throwaway data dir)" ((Test-Path (Join-Path $script:dataDir "master.key")) -and ($LASTEXITCODE -eq 0)) "exit code $LASTEXITCODE"
 
     Step "Phase 1: desktop app starts the background service"
+    if ($SoftwareGlDir) {
+        foreach ($n in @("opengl32.dll", "libgallium_wgl.dll", "libglapi.dll")) {
+            $src = Join-Path $SoftwareGlDir $n
+            if (Test-Path $src) { Copy-Item $src (Join-Path $InstallDir $n) -Force; $script:glFiles += $n }
+        }
+        Write-Host "  software OpenGL copied next to the desktop app (test only): $($script:glFiles -join ', ')"
+    }
     New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
     $deskOut = Join-Path (Resolve-Path $LogDir) "desktop-stdout.txt"
     $deskErr = Join-Path (Resolve-Path $LogDir) "desktop-stderr.txt"
@@ -271,6 +288,8 @@ try {
 
     Step "Phase 1: stop the app and the service"
     Stop-MiasmaForDataDir
+    foreach ($n in $script:glFiles) { Remove-Item (Join-Path $InstallDir $n) -Force -ErrorAction SilentlyContinue }
+    $script:glFiles = @()
     $left = @(Get-CimInstance Win32_Process -Filter "Name='miasma.exe' OR Name='miasma-desktop.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($script:dataDir) })
     Check "no Miasma process left for the test data dir" ($left.Count -eq 0) "$($left.Count) left"
     Set-Content -Path (Join-Path $script:dataDir "keep-me.txt") -Value "user file" -Encoding ASCII
@@ -337,6 +356,7 @@ try {
 }
 finally {
     Stop-MiasmaForDataDir
+    foreach ($n in $script:glFiles) { Remove-Item (Join-Path $InstallDir $n) -Force -ErrorAction SilentlyContinue }
     # Leave the machine clean even if a step failed half way.
     if ((Test-Path (Join-Path $InstallDir "miasma.exe")) -and ($script:failed -gt 0)) {
         Write-Host "Cleaning up after a failure..."
