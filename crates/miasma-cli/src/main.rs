@@ -1997,6 +1997,9 @@ fn cmd_config_loaded(
                         .as_deref()
                         .unwrap_or("")
                 ),
+                "push.max_send_kib_per_sec" => {
+                    println!("{}", config.push.max_send_kib_per_sec)
+                }
                 _ => bail!("unknown config key: {k}"),
             }
         }
@@ -2179,6 +2182,11 @@ fn cmd_config_loaded(
                 "transport.obfuscated_quic_secret" => {
                     config.transport.obfuscated_quic_secret =
                         if v.is_empty() { None } else { Some(v.into()) };
+                }
+                "push.max_send_kib_per_sec" => {
+                    config.push.max_send_kib_per_sec = v
+                        .parse()
+                        .context("expected a number of KiB per second (0 = no cap)")?;
                 }
                 _ => bail!("unknown config key: {k}"),
             }
