@@ -46,11 +46,22 @@ Miasma は、送る側と受け取る側の両方に必要です。お使いの�
 
 ### Windows
 
-1. Windows 用のファイルを含むリリースから、インストーラー(`MiasmaSetup-<バージョン>-x64.exe`)か zip をダウンロードします。
-2. 実行します。コード署名はしていないので、Windows SmartScreen の警告が出ることがあります。「詳細情報」を押し、「実行」を選んでください。
-3. スタートメニューから Miasma を起動します。初回は「Set Up Node」(ノードを設定)を押します。少し待つと、自分用の暗号鍵が作られます。
+Rust や Visual Studio などの開発ツールは要りません。
 
-どのリリースにも Windows 用のファイルが無いときは、自分でビルドします(「ソースからビルドする」を参照)。よくある問題の対処は [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) にあります。
+1. [Releases ページ](https://github.com/MasayukiTa/miasma-protocol/releases)で、使いたいリリースから `Miasma-Setup-<バージョン>-x64.exe`(例: `Miasma-Setup-0.3.2-beta.12-x64.exe`)をダウンロードします。64 ビット Windows 用のインストーラーです。
+2. 実行して、画面の案内に従います。Miasma デスクトップ、バックグラウンドサービス、コマンドラインツールが、まとめて `C:\Program Files\Miasma Protocol` に入ります。Microsoft Visual C++ ランタイムが無いパソコンでは、それも入ります。管理者の承認を一度求められます。
+3. インストーラーにはまだコード署名が付いていないので、Windows SmartScreen の警告(「Windows によって PC が保護されました」)が出ることがあります。「詳細情報」を押し、「実行」を選んでください。ダウンロードしたファイルが公開したものと同じか確かめるには、同じリリースの `SHA256SUMS-windows.txt` と SHA-256 を見比べます。
+
+   ```powershell
+   Get-FileHash .\Miasma-Setup-0.3.2-beta.12-x64.exe -Algorithm SHA256
+   ```
+
+   表示されたハッシュが、同じファイル名の横に書かれたものと一致している必要があります。
+4. スタートメニューから Miasma を起動します。初回は「Set Up Node」(ノードを設定)を押します。少し待つと、自分用の暗号鍵が作られます。
+
+古い版の上から新しいインストーラーを実行すると、データを残したまま更新されます。削除は Windows の設定の「アプリ」から行います。データ(`%LOCALAPPDATA%\miasma` の下)は消えません。サイレントインストールは `Miasma-Setup-<バージョン>-x64.exe /quiet` です。詳しくは [installer/RELEASE_NOTES_WINDOWS.md](installer/RELEASE_NOTES_WINDOWS.md)(英語)を参照してください。よくある問題の対処は [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) にあります。
+
+**開発者・上級者向け:** リリースに Windows 用のインストーラーが無いとき、または自分でビルドしたいときは、「ソースからビルドする」を参照してください。
 
 ### macOS
 

@@ -46,11 +46,22 @@ Both people need Miasma. Download the build for your computer from the [Releases
 
 ### Windows
 
-1. Download the installer (`MiasmaSetup-<version>-x64.exe`) or the zip from a release that includes Windows files.
-2. Run it. The builds are not code-signed, so Windows SmartScreen may warn you. Choose **More info**, then **Run anyway**.
-3. Start **Miasma** from the Start menu. On first run, click **Set Up Node**. Setup takes a moment and creates your own encryption key.
+You do not need Rust, Visual Studio or any other tool.
 
-If no release has a Windows file, build it yourself (see [Build from source](#build-from-source)). Help with common problems is in [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+1. On the [Releases page](https://github.com/MasayukiTa/miasma-protocol/releases), download `Miasma-Setup-<version>-x64.exe` (for example `Miasma-Setup-0.3.2-beta.12-x64.exe`) from the release you want. It is a 64-bit Windows installer.
+2. Run it and follow the prompts. It installs Miasma Desktop, the background service and the command-line tool together under `C:\Program Files\Miasma Protocol`, and installs the Microsoft Visual C++ runtime if your computer lacks it. Administrator approval is asked once.
+3. The installer is not code-signed yet, so Windows SmartScreen may warn you ("Windows protected your PC"). Choose **More info**, then **Run anyway**. To check that your download is the file we published, compare its SHA-256 with `SHA256SUMS-windows.txt` from the same release:
+
+   ```powershell
+   Get-FileHash .\Miasma-Setup-0.3.2-beta.12-x64.exe -Algorithm SHA256
+   ```
+
+   The hash shown must be the one listed next to the same file name.
+4. Start **Miasma** from the Start menu. On first run, click **Set Up Node**. Setup takes a moment and creates your own encryption key.
+
+Installing a newer installer over an older one upgrades Miasma and keeps your data. Uninstall from Windows Settings, Apps. Your data (under `%LOCALAPPDATA%\miasma`) is not deleted. For silent installs, `Miasma-Setup-<version>-x64.exe /quiet` works. Details: [installer/RELEASE_NOTES_WINDOWS.md](installer/RELEASE_NOTES_WINDOWS.md). Help with common problems is in [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+
+**Developers and advanced users:** if a release has no Windows installer, or you want to build your own, see [Build from source](#build-from-source).
 
 ### macOS
 
@@ -111,7 +122,7 @@ cargo build --release --package miasma-cli --package miasma-desktop
 ```
 
 - **macOS app bundle:** run `bash scripts/build-macos.sh`, then `open dist/Miasma.app`. It builds for the current Mac and signs locally, without notarization.
-- **Windows packages:** `scripts/build-release.ps1`, `scripts/package-release.ps1` and `scripts/build-installer.ps1`.
+- **Windows packages:** `scripts/build-release.ps1`, `scripts/package-release.ps1` and `scripts/build-installer.ps1 -Version <version>` (needs WiX v6; the release workflow `.github/workflows/release-windows.yml` runs the same scripts). `scripts/smoke-windows-installer.ps1` installs, starts, upgrades and removes a built installer; run it from an elevated prompt on a computer that has no Miasma installed.
 - **Android:** `./scripts/build-android.sh` (`--setup` prepares the tools). It targets API 36 and needs the Android SDK and NDK.
 - **Tests:** `cargo test --workspace`.
 

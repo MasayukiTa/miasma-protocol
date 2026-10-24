@@ -150,6 +150,11 @@ jobs:
           ref: ${{ needs.prepare.outputs.checkout_ref }}
           persist-credentials: false
 
+      # TEMP while this workflow is developed: remove before merge.
+      - uses: Swatinem/rust-cache@v2.8.0
+        with:
+          cache-on-failure: true
+
       - name: Install Rust toolchain
         shell: pwsh
         run: |
@@ -220,8 +225,8 @@ jobs:
       - name: Build installer
         shell: pwsh
         run: |
-          $installerArgs = @('-InputDir', 'dist', '-OutputDir', 'out', '-Version', $env:VERSION)
-          if ($env:SIGN_CERT_THUMBPRINT) { $installerArgs += @('-CertThumbprint', $env:SIGN_CERT_THUMBPRINT) }
+          $installerArgs = @{ InputDir = 'dist'; OutputDir = 'out'; Version = $env:VERSION }
+          if ($env:SIGN_CERT_THUMBPRINT) { $installerArgs['CertThumbprint'] = $env:SIGN_CERT_THUMBPRINT }
           else { Write-Host 'Code signing is not configured: the installer is unsigned.' }
           ./scripts/build-installer.ps1 @installerArgs
           if ($LASTEXITCODE -ne 0) { exit 1 }
@@ -244,15 +249,15 @@ jobs:
       - name: Smoke test the installer
         shell: pwsh
         run: |
-          $installerArgs = @(
-            '-SetupExe', "out/Miasma-Setup-$env:VERSION-x64.exe",
-            '-OldSetupExe', 'out-extra/Miasma-Setup-0.0.1-beta.1-x64.exe',
-            '-ExpectedVersion', $env:VERSION,
-            '-LogDir', 'smoke-logs'
-          )
+          $installerArgs = @{
+            SetupExe        = "out/Miasma-Setup-$env:VERSION-x64.exe"
+            OldSetupExe     = 'out-extra/Miasma-Setup-0.0.1-beta.1-x64.exe'
+            ExpectedVersion = $env:VERSION
+            LogDir          = 'smoke-logs'
+          }
           if ($env:LABEL) {
             $core = ($env:VERSION -split '-', 2)[0]
-            $installerArgs += @('-NextSetupExe', "out-extra/Miasma-Setup-$core-x64.exe")
+            $installerArgs['NextSetupExe'] = "out-extra/Miasma-Setup-$core-x64.exe"
           }
           ./scripts/smoke-windows-installer.ps1 @installerArgs
           if ($LASTEXITCODE -ne 0) { exit 1 }
