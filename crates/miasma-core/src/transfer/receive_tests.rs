@@ -325,6 +325,52 @@ async fn an_old_transfer_with_a_weak_password_is_still_receivable() {
 }
 
 #[tokio::test]
+async fn a_transfer_below_the_create_floor_is_received_and_flagged_weak() {
+    // `world` builds its protection at 64 KiB / 1 / 1, below the current create
+    // floor, so the receiver must flag its key derivation as weak while still
+    // completing the transfer.
+    let pw = "pw-1";
+    let w = world(5_000, 4, 6, Some(pw));
+    assert!(
+        match &w.manifest.as_ref().unwrap().protection {
+            Protection::Password(p) => p.is_weak_kdf(),
+            _ => false,
+        },
+        "fixture must be below the floor for this test to mean anything"
+    );
+    let src = MockSource::new(&w);
+    let run = Run::new();
+    let p = progress(&w);
+    let outcome = run_receive(&src, run.spec(&w, Some(pw), false), p.clone())
+        .await
+        .unwrap();
+    assert!(matches!(outcome, ReceiveOutcome::Complete { .. }));
+    assert_eq!(std::fs::read(run.out()).unwrap(), w.data);
+    assert!(
+        p.is_weak_key_derivation(),
+        "a below-floor transfer must be reported as weak"
+    );
+}
+
+#[tokio::test]
+async fn an_unprotected_transfer_is_not_flagged_weak() {
+    // No password means no password KDF, so nothing is weak. Cheap: it derives
+    // no key at all.
+    let w = world(5_000, 4, 6, None);
+    let src = MockSource::new(&w);
+    let run = Run::new();
+    let p = progress(&w);
+    let outcome = run_receive(&src, run.spec(&w, None, false), p.clone())
+        .await
+        .unwrap();
+    assert!(matches!(outcome, ReceiveOutcome::Complete { .. }));
+    assert!(
+        !p.is_weak_key_derivation(),
+        "an unprotected transfer is not weak"
+    );
+}
+
+#[tokio::test]
 async fn a_wrong_password_is_refused_before_a_single_piece_is_fetched() {
     let w = world(5_000, 4, 6, Some("right"));
     let src = MockSource::new(&w);
