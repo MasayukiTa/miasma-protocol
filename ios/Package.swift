@@ -26,6 +26,7 @@ let package = Package(
     platforms: [.iOS(.v16)],
     products: [
         .library(name: "MiasmaFFI", targets: ["MiasmaFFI"]),
+        .library(name: "MiasmaBackup", targets: ["MiasmaBackup"]),
         .executable(name: "MiasmaApp", targets: ["MiasmaApp"]),
     ],
     dependencies: [],
@@ -38,10 +39,21 @@ let package = Package(
             // Phase 2: link the XCFramework
             // linkerSettings: [.linkedFramework("MiasmaFFI")]
         ),
+        // Backup-exclusion helper, kept FFI-free so it can be unit tested
+        // without the Rust toolchain.
+        .target(
+            name: "MiasmaBackup",
+            path: "MiasmaApp/Sources/MiasmaBackup"
+        ),
         .executableTarget(
             name: "MiasmaApp",
-            dependencies: ["MiasmaFFI"],
+            dependencies: ["MiasmaFFI", "MiasmaBackup"],
             path: "MiasmaApp/App",
+        ),
+        .testTarget(
+            name: "MiasmaBackupTests",
+            dependencies: ["MiasmaBackup"],
+            path: "MiasmaApp/Tests/MiasmaBackupTests"
         ),
     ]
 )
