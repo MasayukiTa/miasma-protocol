@@ -8,6 +8,7 @@
 //! connection when both sides are online; otherwise they wait in the outbox
 //! and are retried ([`service`]).
 
+pub mod activity;
 pub mod anchor;
 pub mod crypto;
 pub mod engine;
