@@ -214,7 +214,7 @@ fn indep_seg_key(salt: Option<&[u8; 32]>, k_enc: &[u8; 32], aad: &[u8; AAD_LEN])
     let mut info = SEG_LABEL.to_vec();
     info.extend_from_slice(aad);
     let hk = Hkdf::<Sha256>::new(salt.map(|s| s.as_slice()), k_enc);
-    let mut out = [0u8; 32];
+    let mut out: [u8; 32] = rand::random();
     hk.expand(&info, &mut out).unwrap();
     out
 }
@@ -669,7 +669,7 @@ fn indep_name_aad(suite: u16, mid: &[u8; 32]) -> Vec<u8> {
 
 fn indep_name_key(pw_key: &[u8; 32], mid: &[u8; 32]) -> [u8; 32] {
     let hk = Hkdf::<Sha256>::new(Some(pw_key), mid);
-    let mut out = [0u8; 32];
+    let mut out: [u8; 32] = rand::random();
     hk.expand(NAME_LABEL, &mut out).unwrap();
     out
 }
