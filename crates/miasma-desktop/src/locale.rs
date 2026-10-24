@@ -2049,7 +2049,7 @@ static TR_JA: TransferStrings = TransferStrings {
     tab_easy: "ファイル転送",
     heading: "転送",
     heading_easy: "ファイル転送",
-    desc: "大きなファイルをバックグラウンドで送受信します。途中で止めても再開できます。",
+    desc: "大きなファイルは、バックグラウンドで送受信します。途中で止めても再開できます。この一覧で、各ファイルがどこまで進んだかを正確に確認できます。",
     desc_easy: "大きなファイルをここで送ったり受け取ったりできます。途中で止めても、あとで続きから再開できます。",
 
     send: "送信",
@@ -2618,7 +2618,7 @@ static CT_JA: ContactStrings = ContactStrings {
     my_code: "あなたの連絡先コード",
     my_code_hint: "人に見せても大丈夫です。パスワードではありません。",
     my_fp: "あなたの確認用コード",
-    my_fp_hint: "電話などで相手に読み上げ、相手の画面のコードと見比べてもらいます。",
+    my_fp_hint: "電話などで相手に読み上げ、相手の画面の「確認用コード」と見比べてもらいます。違っていたら、この連絡先を削除してもらってください。",
     copy_code: "連絡先コードをコピー",
     copy_invite: "招待メッセージをコピー",
     copied: "コピーしました",
@@ -2738,7 +2738,7 @@ static CT_JA: ContactStrings = ContactStrings {
     sugg_attempts: "{n}回",
     sugg_add: "連絡先に追加",
     sugg_ignore: "無視",
-    sugg_prefill_note: "接続の履歴から追加します。あなたが許可を入れるまで、この連絡先は送信も受信もオフです。",
+    sugg_prefill_note: "連絡の申請から追加しました。あなたが許可を入れるまで、この連絡先は送信も受信もオフです。",
     sugg_now: "たった今",
     sugg_min: "{n}分前",
     sugg_hour: "{n}時間前",
@@ -2754,11 +2754,11 @@ static CT_JA: ContactStrings = ContactStrings {
     menu_permissions: "送受信の許可",
     send_short: "送る",
     row_ready: "送れます",
-    verify_body: "{label}さんの「あなたの招待」にある確認用コードと、下のコードを見比べてください。違うときはこの連絡先を削除してください。",
+    verify_body: "{label}さんの画面の「あなたの招待」にある確認用コードを読み上げてもらい、下のコードと見比べてください。一致すれば、正しい相手とつながっています。違うときは、この連絡先を削除してください。",
     paste_what: "相手から届いたものを貼り付けてください",
     empty_line: "ファイルを送りたい相手を追加しましょう。",
     done_btn: "完了",
-    invite_lead: "この招待を相手に送ってください。",
+    invite_lead: "この招待を、追加したい相手に送ってください。相手はそれを「連絡先を追加」に貼り付けます。",
     qr_img_btn: "画像から読み取る",
     qr_img_title: "QRコードの画像を選んでください",
     qr_img_busy: "画像を読み取っています...",
@@ -3597,7 +3597,7 @@ static SG_EN: StorageStrings = StorageStrings {
 
 static SG_JA: StorageStrings = StorageStrings {
     heading: "ストレージ",
-    desc: "この端末が保管している共有です。削除すると空き容量が増えます。使用中の共有は削除されません。",
+    desc: "この端末が保管している共有です。自分が共有したファイルの断片と、ほかの人のファイルを預かっている断片があります。削除すると、このパソコンの空き容量が増えます。使用中の共有は削除されません。",
     show: "保存している共有を表示",
     hide: "隠す",
     refresh: "更新",
@@ -3767,7 +3767,7 @@ static UP_JA: UpdateStrings = UpdateStrings {
     later: "あとで",
     skip_version: "このバージョンをスキップ",
     restart_now: "今すぐ再起動",
-    backup_note: "更新前のバージョンはバックアップとして残ります。",
+    backup_note: "更新前のバージョンは、プログラムと同じフォルダーにバックアップとして残ります。",
     config_save_failed: "設定を保存できませんでした。もう一度お試しください。",
 };
 
