@@ -1,5 +1,6 @@
 pub mod aead;
 pub mod hash;
+pub mod kdf_bounds;
 pub mod keyderive;
 pub mod rs;
 pub mod sss;
