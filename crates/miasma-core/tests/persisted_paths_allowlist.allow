@@ -18,7 +18,7 @@ miasma-core/src/config.rs | 4 | config.toml and version stamp writers
 miasma-core/src/daemon/ipc.rs | 2 | daemon.port and daemon.http discovery files
 miasma-core/src/daemon/mod.rs | 2 | streaming decrypted retrieval to a caller-chosen output path
 miasma-core/src/logging/diag.rs | 4 | opt-in diagnostic log files: lg folder, rotation, zero-overwrite of removed files
-miasma-core/src/directed/inbox.rs | 2 | directed/ folders (the envelope and sidecar files themselves are written through state_crypto)
+miasma-core/src/directed/inbox.rs | 4 | directed/ folders including the v2 incoming and outgoing dirs (the envelope and sidecar files themselves are written through state_crypto)
 miasma-core/src/push/service.rs | 4 | push inbox: .part files and final placement
 miasma-core/src/push/store.rs | 2 | setting an unreadable contacts file aside (contents are written through state_crypto)
 miasma-core/src/secure_file.rs | 7 | restricted-permission write primitives used by the stores
