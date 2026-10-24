@@ -90,9 +90,7 @@ impl SendPacer {
         // anyway. A measured rate of zero yields a ceiling of zero, which this
         // module treats as "no fixed ceiling yet" so the first window is not
         // stalled to a standstill before any rate is known.
-        self.measured_bps
-            .saturating_mul(YIELD_PERCENT)
-            / 100
+        self.measured_bps.saturating_mul(YIELD_PERCENT) / 100
     }
 
     /// How long to wait before sending `want` bytes, given whether a chat send
@@ -134,7 +132,9 @@ impl SendPacer {
             }
             return;
         }
-        let dt = now.saturating_duration_since(self.last_refill).as_secs_f64();
+        let dt = now
+            .saturating_duration_since(self.last_refill)
+            .as_secs_f64();
         self.last_refill = now;
         self.tokens += dt * ceiling as f64;
         let cap = ceiling as f64 * BUCKET_SECONDS;
@@ -215,8 +215,8 @@ mod tests {
         let limit_kib = 1024u32;
         let mut p = SendPacer::new(limit_kib, t0);
         let ceiling = u64::from(limit_kib) * KIB; // bytes/s
-        // Send 4 MiB worth of 256 KiB chunks, obeying each requested wait, and
-        // check the elapsed virtual time is at least what the ceiling implies.
+                                                  // Send 4 MiB worth of 256 KiB chunks, obeying each requested wait, and
+                                                  // check the elapsed virtual time is at least what the ceiling implies.
         let total_bytes: u64 = 4 * 1024 * 1024;
         let chunks = total_bytes / CHUNK as u64;
         let mut now = t0;
@@ -316,8 +316,8 @@ mod tests {
     fn huge_chunk_does_not_overflow() {
         let t0 = Instant::now();
         let mut p = SendPacer::new(1, t0); // 1 KiB/s, tiny ceiling
-        // A very large request against a tiny ceiling: the wait is capped, not
-        // overflowed or infinite.
+                                           // A very large request against a tiny ceiling: the wait is capped, not
+                                           // overflowed or infinite.
         let wait = p.delay_before_send(t0, usize::MAX, true);
         assert!(wait <= Duration::from_secs(60));
         // Recording a huge count must not overflow the window counter.

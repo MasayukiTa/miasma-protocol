@@ -2184,8 +2184,9 @@ fn cmd_config_loaded(
                         if v.is_empty() { None } else { Some(v.into()) };
                 }
                 "push.max_send_kib_per_sec" => {
-                    config.push.max_send_kib_per_sec =
-                        v.parse().context("expected a number of KiB per second (0 = no cap)")?;
+                    config.push.max_send_kib_per_sec = v
+                        .parse()
+                        .context("expected a number of KiB per second (0 = no cap)")?;
                 }
                 _ => bail!("unknown config key: {k}"),
             }

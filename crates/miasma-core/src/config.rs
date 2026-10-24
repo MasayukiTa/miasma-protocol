@@ -1247,7 +1247,10 @@ mod push_send_rate_config_tests {
             cfg.push.max_send_kib_per_sec = cap;
             cfg.save(dir.path()).unwrap();
             assert_eq!(
-                NodeConfig::load(dir.path()).unwrap().push.max_send_kib_per_sec,
+                NodeConfig::load(dir.path())
+                    .unwrap()
+                    .push
+                    .max_send_kib_per_sec,
                 cap
             );
         }
