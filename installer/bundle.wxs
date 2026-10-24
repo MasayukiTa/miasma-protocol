@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   WiX Bundle (bootstrapper) for Miasma Protocol.
-  Produces a single MiasmaSetup.exe that:
+  Produces a single Miasma-Setup-<version>-x64.exe that:
     1. Detects and installs the VC++ 2015-2022 Redistributable (x64) if needed
     2. Installs the Miasma MSI
 
@@ -25,7 +25,8 @@
       Key="SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64"
       Value="Installed"
       Variable="VCRedistInstalled"
-      Result="value" />
+      Result="value"
+      Bitness="always64" />
 
     <!-- Standard bootstrapper UI. -->
     <BootstrapperApplication>
@@ -59,7 +60,11 @@
       <MsiPackage
         Id="MiasmaMsi"
         SourceFile="$(var.MsiPath)"
-        Vital="yes" />
+        Vital="yes">
+        <!-- Hide the MSI's own entry in Programs and Features: the bundle has one,
+             so a Setup.exe install shows a single "Miasma Protocol" entry. -->
+        <MsiProperty Name="ARPSYSTEMCOMPONENT" Value="1" />
+      </MsiPackage>
     </Chain>
 
   </Bundle>

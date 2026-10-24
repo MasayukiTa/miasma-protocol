@@ -6,6 +6,7 @@
 *.pdb
 /task.md
 *.txt
+!installer/README-installed.txt
 
 # Local planning / internal working docs
 /miasma-prd.md

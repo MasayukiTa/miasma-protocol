@@ -6,8 +6,13 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
 
-  <!-- Version is injected at build time via -d Version=x.y.z -->
-  <?define ProductVersion = "!(bind.property.Version)" ?>
+  <!--
+    Version is injected at build time via -d Version=a.b.c. It is the MSI form of
+    the release version (third field = patch*1000 + pre-release rank), so that
+    Windows Installer, which ignores a fourth field when it compares versions,
+    still orders every beta and the final release correctly.
+    See scripts/windows-version.ps1 for the mapping. UpgradeCode must never change.
+  -->
 
   <Package
     Name="Miasma Protocol"
@@ -30,7 +35,7 @@
     <Launch Condition="Installed OR VCRUNTIME140"
             Message="Miasma requires the Microsoft Visual C++ 2015-2022 Redistributable (x64). Download it from: https://aka.ms/vs/17/release/vc_redist.x64.exe" />
     <Property Id="VCRUNTIME140">
-      <DirectorySearch Id="VCRuntimeSearch" Path="[SystemFolder]">
+      <DirectorySearch Id="VCRuntimeSearch" Path="[System64Folder]">
         <FileSearch Name="vcruntime140.dll" />
       </DirectorySearch>
     </Property>

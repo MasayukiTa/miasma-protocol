@@ -1,0 +1,347 @@
+name: Release (Windows installer)
+
+# Builds the Windows x64 installer (Miasma-Setup-<version>-x64.exe) on a Windows
+# runner, smoke-tests it (install, launch, upgrade, uninstall) and attaches it,
+# with SHA256SUMS-windows.txt, to the GitHub Release of the tag.
+#
+# Triggers
+#   release: published   PRIMARY. The Release exists, so the files can be attached.
+#   push of a v* tag     Builds and smoke-tests only; never uploads. It gives an
+#                        early result before the Release is published, and it can
+#                        not create a duplicate upload.
+#   workflow_dispatch    Inputs: tag, dry_run (default true). A dry run builds and
+#                        tests and keeps the files as a workflow artifact only;
+#                        it never reads or changes any Release.
+#
+# This workflow never creates, edits or deletes a Release. It only attaches files
+# to a Release that already exists (`gh release upload --clobber`, so a re-run
+# replaces the files instead of failing or duplicating them).
+#
+# Code signing is optional and off until the repository has the secrets
+# WINDOWS_SIGN_CERT_PFX_BASE64 and WINDOWS_SIGN_CERT_PASSWORD (see
+# installer/RELEASE_NOTES_WINDOWS.md). Without them the installer is unsigned.
+
+on:
+  release:
+    types: [published]
+  push:
+    tags: ['v*']
+  # Installer-related changes are built and tested as a dry run (never uploaded),
+  # so a break shows up in the pull request and not on release day.
+  pull_request:
+    branches: [main]
+    paths:
+      - 'installer/**'
+      - 'RELEASE-NOTES.md'
+      - 'scripts/build-installer.ps1'
+      - 'scripts/build-release.ps1'
+      - 'scripts/windows-version.ps1'
+      - 'scripts/test-windows-version.ps1'
+      - 'scripts/check-exe-deps.ps1'
+      - 'scripts/smoke-windows-installer.ps1'
+      - '.github/workflows/release-windows.yml'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag, for example v0.3.2-beta.12'
+        type: string
+        required: true
+      dry_run:
+        description: 'Build and test only; keep the files as a workflow artifact and do not touch any Release'
+        type: boolean
+        default: true
+
+concurrency:
+  group: release-windows-${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  WIX_VERSION: '6.0.2'
+
+jobs:
+  prepare:
+    name: Resolve tag and version
+    if: github.repository == 'MasayukiTa/miasma-protocol'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      label: ${{ steps.resolve.outputs.label }}
+      upload: ${{ steps.resolve.outputs.upload }}
+      checkout_ref: ${{ steps.resolve.outputs.checkout_ref }}
+    steps:
+      - name: Read the crate version (pull requests only)
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4.2.2
+        with:
+          sparse-checkout: Cargo.toml
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Resolve
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          PUSH_TAG: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -eu
+          checkout_ref=""
+          case "$EVENT_NAME" in
+            release)
+              tag="$RELEASE_TAG"; upload=true ;;
+            push)
+              tag="$PUSH_TAG"; upload=false ;;
+            pull_request)
+              # A made-up pre-release of the current series; never uploaded.
+              base="$(sed -n '/^\[workspace\.package\]/,/^\[/{s/^version *= *"\([^"]*\)".*/\1/p}' Cargo.toml | head -n 1)"
+              tag="v${base}-beta.99"; upload=false ;;
+            workflow_dispatch)
+              tag="$INPUT_TAG"
+              if [ "$INPUT_DRY_RUN" = "true" ]; then
+                # A dry run may name a tag that does not exist: build the branch it was started from.
+                upload=false
+              else
+                upload=true
+                checkout_ref="refs/tags/$tag"
+              fi ;;
+            *)
+              echo "unexpected event $EVENT_NAME" >&2; exit 1 ;;
+          esac
+          if ! printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "tag is not of the form vMAJOR.MINOR.PATCH[-label]" >&2
+            exit 1
+          fi
+          version="${tag#v}"
+          label=""
+          case "$version" in *-*) label="${version#*-}" ;; esac
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "label=$label"
+            echo "upload=$upload"
+            echo "checkout_ref=$checkout_ref"
+          } >> "$GITHUB_OUTPUT"
+          echo "tag=$tag version=$version label=$label upload=$upload"
+
+  build:
+    name: Build, test and package (Windows)
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      LABEL: ${{ needs.prepare.outputs.label }}
+      # 'true' only when both signing secrets are set in the repository.
+      WINDOWS_SIGN_CERT_PRESENT: ${{ secrets.WINDOWS_SIGN_CERT_PFX_BASE64 != '' && secrets.WINDOWS_SIGN_CERT_PASSWORD != '' }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4.2.2
+        with:
+          ref: ${{ needs.prepare.outputs.checkout_ref }}
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: Tag matches the crate version
+        shell: pwsh
+        run: |
+          $crate = (cargo metadata --format-version 1 --no-deps | ConvertFrom-Json).packages |
+            Where-Object { $_.name -eq 'miasma-cli' } | Select-Object -ExpandProperty version
+          $core = ($env:VERSION -split '-', 2)[0]
+          Write-Host "crate version: $crate; tag version: $env:VERSION"
+          if ($crate -ne $core) {
+            Write-Host "::error::Tag version $core does not match the crate version $crate."
+            exit 1
+          }
+
+      - name: Check the version mapping
+        shell: pwsh
+        run: |
+          ./scripts/test-windows-version.ps1
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Build release programs
+        shell: pwsh
+        run: |
+          if ($env:LABEL) { $env:MIASMA_PRERELEASE = $env:LABEL }
+          ./scripts/build-release.ps1 -Target release -OutputDir dist
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Get-ChildItem dist | Select-Object Name, Length | Format-Table -AutoSize
+
+      - name: Check what the programs depend on
+        shell: pwsh
+        run: |
+          ./scripts/check-exe-deps.ps1 -Dir dist -Require
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Install WiX
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version $env:WIX_VERSION
+          foreach ($e in 'UI', 'Bal', 'Util') {
+            wix extension add -g "WixToolset.$e.wixext/$env:WIX_VERSION"
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+          wix --version
+          wix extension list -g
+
+      # ---- Optional code signing: skipped unless the signing secrets exist ----
+      - name: Import code-signing certificate (optional)
+        if: env.WINDOWS_SIGN_CERT_PRESENT == 'true'
+        shell: pwsh
+        env:
+          SIGN_PFX_BASE64: ${{ secrets.WINDOWS_SIGN_CERT_PFX_BASE64 }}
+          SIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGN_CERT_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'sign.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGN_PFX_BASE64))
+          $secure = ConvertTo-SecureString $env:SIGN_PFX_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $secure
+          Remove-Item $pfx -Force
+          "SIGN_CERT_THUMBPRINT=$($cert.Thumbprint)" >> $env:GITHUB_ENV
+          Write-Host 'Code-signing certificate imported.'
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $installerArgs = @('-InputDir', 'dist', '-OutputDir', 'out', '-Version', $env:VERSION)
+          if ($env:SIGN_CERT_THUMBPRINT) { $installerArgs += @('-CertThumbprint', $env:SIGN_CERT_THUMBPRINT) }
+          else { Write-Host 'Code signing is not configured: the installer is unsigned.' }
+          ./scripts/build-installer.ps1 @installerArgs
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      # Test-only installers built from the same programs. The older one has a
+      # lower version, the next one is the final release of the same series (only
+      # when the tag is a pre-release), so the upgrade order is tested for real.
+      - name: Build upgrade-test installers
+        shell: pwsh
+        run: |
+          ./scripts/build-installer.ps1 -InputDir dist -OutputDir out-extra -Version 0.0.1-beta.1
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if ($env:LABEL) {
+            $core = ($env:VERSION -split '-', 2)[0]
+            ./scripts/build-installer.ps1 -InputDir dist -OutputDir out-extra -Version $core
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+          Get-ChildItem out, out-extra | Select-Object Directory, Name, Length | Format-Table -AutoSize
+
+      - name: Smoke test the installer
+        shell: pwsh
+        run: |
+          $installerArgs = @(
+            '-SetupExe', "out/Miasma-Setup-$env:VERSION-x64.exe",
+            '-OldSetupExe', 'out-extra/Miasma-Setup-0.0.1-beta.1-x64.exe',
+            '-ExpectedVersion', $env:VERSION,
+            '-LogDir', 'smoke-logs'
+          )
+          if ($env:LABEL) {
+            $core = ($env:VERSION -split '-', 2)[0]
+            $installerArgs += @('-NextSetupExe', "out-extra/Miasma-Setup-$core-x64.exe")
+          }
+          ./scripts/smoke-windows-installer.ps1 @installerArgs
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Collect release files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release-assets | Out-Null
+          $exe = "Miasma-Setup-$env:VERSION-x64.exe"
+          Copy-Item "out/$exe" "release-assets/$exe"
+          # Checksum file for the release: only the file that is attached.
+          $line = (Get-Content out/SHA256SUMS-windows.txt) | Where-Object { $_ -match [regex]::Escape($exe) }
+          if (-not $line) { Write-Host '::error::checksum line not found'; exit 1 }
+          [IO.File]::WriteAllText((Join-Path (Get-Location) 'release-assets/SHA256SUMS-windows.txt'), ($line + "`n"), (New-Object Text.UTF8Encoding($false)))
+          # Check the checksum file against the file that will be uploaded.
+          $want = ($line -split '\s+')[0]
+          $got = (Get-FileHash "release-assets/$exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($want -ne $got) { Write-Host "::error::checksum mismatch"; exit 1 }
+          Get-Content release-assets/SHA256SUMS-windows.txt
+          Get-ChildItem release-assets | Select-Object Name, Length | Format-Table -AutoSize
+          if ($env:SIGN_CERT_THUMBPRINT) {
+            Get-AuthenticodeSignature "release-assets/$exe" | Format-List Status, SignerCertificate
+          } else {
+            Write-Host 'This installer is not code-signed (no signing certificate configured).'
+          }
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: miasma-windows-installer-${{ needs.prepare.outputs.version }}
+          path: |
+            release-assets/Miasma-Setup-*-x64.exe
+            release-assets/SHA256SUMS-windows.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload MSI artifact
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: miasma-windows-msi-${{ needs.prepare.outputs.version }}
+          path: out/miasma-*-windows-x64.msi
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload smoke-test logs
+        if: always()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: miasma-windows-smoke-logs-${{ needs.prepare.outputs.version }}
+          path: smoke-logs/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  upload:
+    name: Attach to the GitHub Release
+    needs: [prepare, build]
+    if: needs.prepare.outputs.upload == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Download installer artifact
+        uses: actions/download-artifact@v4.3.0
+        with:
+          name: miasma-windows-installer-${{ needs.prepare.outputs.version }}
+          path: release-assets
+
+      - name: Verify checksum before upload
+        run: |
+          cd release-assets
+          ls -l
+          sha256sum -c SHA256SUMS-windows.txt
+
+      # The Release must already exist (this workflow does not create one).
+      - name: Check the Release exists
+        run: gh release view "$TAG" --json tagName,isDraft,isPrerelease,assets
+
+      - name: Attach files (replaces files with the same name)
+        run: |
+          gh release upload "$TAG" \
+            "release-assets/Miasma-Setup-${VERSION}-x64.exe" \
+            "release-assets/SHA256SUMS-windows.txt" \
+            --clobber
+
+      - name: Show the Release assets
+        run: gh release view "$TAG" --json assets --jq '.assets[] | [.name, .size, .digest] | @tsv'

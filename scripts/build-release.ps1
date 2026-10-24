@@ -41,9 +41,13 @@ if ($Target -eq "release") {
 # are included), not the compiled binary itself.
 # Build once; variant distinction comes from launcher scripts and persisted prefs.
 
-# Build all workspace binaries. The desktop and CLI packages include the hybrid
-# chat upgrade through their default features (the setting itself stays off).
-& cargo @cargoArgs --workspace
+# Build the three programs that ship in the Windows package (not the whole
+# workspace: the mobile bindings and the browser package are not part of it).
+# The desktop and CLI packages include the hybrid chat upgrade through their
+# default features (the setting itself stays off). --locked keeps the build on
+# the committed Cargo.lock. The pre-release label in MIASMA_PRERELEASE (for
+# example beta.12), when set, ends up in the app title and version string.
+& cargo @cargoArgs --locked -p miasma-cli -p miasma-desktop -p miasma-bridge
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Cargo build failed."
     exit 1
