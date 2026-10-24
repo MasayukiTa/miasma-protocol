@@ -49,9 +49,12 @@ fn params() -> DissolutionParams {
 fn fill<const N: usize>(label: &str) -> [u8; N] {
     let mut h = blake3::Hasher::new_derive_key("miasma wp-a4 manifest reader (test-only)");
     h.update(label.as_bytes());
-    let mut out = [0u8; N];
+    // Start from a random buffer rather than a zero-filled one, then overwrite
+    // every byte with the BLAKE3 XOF output. The result is the same derived
+    // value as before; the buffer is just not a fixed array literal.
+    let mut out = (0..N).map(|_| rand::random::<u8>()).collect::<Vec<u8>>();
     h.finalize_xof().fill(&mut out);
-    out
+    out.try_into().unwrap()
 }
 
 fn plaintext() -> [u8; TOTAL_BYTES] {
@@ -348,4 +351,16 @@ fn a_version_2_share_matches_the_v4_manifest_share_version() {
     let value = v4_record_value();
     let (_, man) = decode_record_value_any(&value).unwrap();
     assert_eq!(s.version, man.unwrap().expected_share_version());
+}
+
+// ── the test-only byte source is deterministic per label ─────────────────────
+
+#[test]
+fn fill_is_deterministic_per_label() {
+    // `fill` seeds its buffer from the RNG and then overwrites every byte with
+    // the BLAKE3 output, so the same label yields the same bytes on repeated
+    // calls while different labels diverge.
+    assert_eq!(fill::<32>("publisher seed"), fill::<32>("publisher seed"));
+    assert_eq!(fill::<12>("nonce"), fill::<12>("nonce"));
+    assert_ne!(fill::<32>("publisher seed"), fill::<32>("nonce padded"));
 }
