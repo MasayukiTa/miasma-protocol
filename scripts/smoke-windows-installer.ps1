@@ -38,6 +38,11 @@
 .PARAMETER LogDir
     Where installer logs are written. Default: .\smoke-logs
 
+.PARAMETER ChainSetupExes
+    Setup EXEs in increasing version order (for example beta.11, beta.12, beta.13,
+    final). Each is installed over the one before; every step must leave exactly
+    one entry at the new version.
+
 .PARAMETER SoftwareGlDir
     TEST ONLY. The desktop window needs OpenGL 2.0 or later. A CI runner has no
     graphics driver, so it only has OpenGL 1.1 and the window cannot open. Give a
@@ -61,7 +66,8 @@ param(
     [int]$AliveSeconds = 15,
     [string]$LogDir = ".\smoke-logs",
     [string]$ExpectedVersion = "",
-    [string]$SoftwareGlDir = ""
+    [string]$SoftwareGlDir = "",
+    [string[]]$ChainSetupExes = @()
 )
 
 $ErrorActionPreference = "Continue"
@@ -357,6 +363,29 @@ try {
         Show-State "after uninstall"
         Check "nothing left after uninstall" ((@(Get-ArpEntries).Count -eq 0) -and (-not (Test-Path $InstallDir))) "leftovers"
     }
+
+    # ===== Phase 3: release-order chain =======================================
+    if ($ChainSetupExes.Count -gt 0) {
+        Step "Phase 3: each release replaces the one before it"
+        $prevMsi = $null
+        $lastExe = $null
+        foreach ($exe in $ChainSetupExes) {
+            $exe = (Resolve-Path $exe).Path
+            $v = Get-SetupVersion $exe
+            $rc = Invoke-Setup $exe @("/install") ("chain-" + (Split-Path -Leaf $exe))
+            Check "install $(Split-Path -Leaf $exe) (exit code $rc)" (($rc -eq 0) -or ($rc -eq 3010)) "exit code $rc"
+            Assert-SingleEntry "chain $v" $v
+            $m = @(Get-MsiProducts)
+            if ($m.Count -eq 1) {
+                Write-Host "  now installed: bundle $v, MSI $($m[0].Version)"
+                if ($prevMsi) { Check "MSI version rose ($prevMsi -> $($m[0].Version))" ([version]$m[0].Version -gt [version]$prevMsi) "did not rise" }
+                $prevMsi = $m[0].Version
+            }
+            $lastExe = $exe
+        }
+        Uninstall-Current $lastExe "chain-uninstall"
+        Check "nothing left after the chain" ((@(Get-ArpEntries).Count -eq 0) -and (-not (Test-Path $InstallDir))) "leftovers"
+    }
 }
 finally {
     Stop-MiasmaForDataDir
@@ -365,7 +394,7 @@ finally {
     if ((Test-Path (Join-Path $InstallDir "miasma.exe")) -and ($script:failed -gt 0)) {
         Write-Host "Cleaning up after a failure..."
         $e = @(Get-ArpEntries | Where-Object { -not $_.Hidden })
-        foreach ($exe in @($NextSetupExe, $SetupExe, $OldSetupExe)) {
+        foreach ($exe in (@($NextSetupExe, $SetupExe, $OldSetupExe) + @($ChainSetupExes))) {
             if ($exe -and (Test-Path $InstallDir)) { Invoke-Setup $exe @("/uninstall") "cleanup" | Out-Null }
         }
     }

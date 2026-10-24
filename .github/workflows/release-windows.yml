@@ -9,6 +9,8 @@ name: Release (Windows installer)
 #   push of a v* tag     Builds and smoke-tests only; never uploads. It gives an
 #                        early result before the Release is published, and it can
 #                        not create a duplicate upload.
+#   pull_request         Only when installer files change: a dry run (tag
+#                        vX.Y.Z-beta.99 is made up), nothing is uploaded.
 #   workflow_dispatch    Inputs: tag, dry_run (default true). A dry run builds and
 #                        tests and keeps the files as a workflow artifact only;
 #                        it never reads or changes any Release.
@@ -150,8 +152,11 @@ jobs:
           ref: ${{ needs.prepare.outputs.checkout_ref }}
           persist-credentials: false
 
-      # TEMP while this workflow is developed: remove before merge.
-      - uses: Swatinem/rust-cache@v2.8.0
+      # Pull-request runs only: a cache makes the check quicker. Release builds
+      # (tag, release, manual) never read or write a cache.
+      - name: Cache Rust build (pull requests only)
+        if: github.event_name == 'pull_request'
+        uses: Swatinem/rust-cache@v2.8.0
         with:
           cache-on-failure: true
 
@@ -244,7 +249,21 @@ jobs:
             ./scripts/build-installer.ps1 -InputDir dist -OutputDir out-extra -Version $core
             if ($LASTEXITCODE -ne 0) { exit 1 }
           }
-          Get-ChildItem out, out-extra | Select-Object Directory, Name, Length | Format-Table -AutoSize
+          # The release order of one series, installed one over the other in the smoke test.
+          $core = ($env:VERSION -split '-', 2)[0]
+          foreach ($v in @("$core-beta.11", "$core-beta.12", "$core-beta.13", $core)) {
+            ./scripts/build-installer.ps1 -InputDir dist -OutputDir out-chain -Version $v
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+          Get-ChildItem out, out-extra, out-chain -Filter *.exe | Select-Object Directory, Name, Length | Format-Table -AutoSize
+
+      # Evidence for the version scheme (not run for a real release).
+      - name: Check that Windows Installer ignores the 4th version field
+        if: needs.prepare.outputs.upload != 'true'
+        shell: pwsh
+        run: |
+          ./scripts/prove-msi-version-compare.ps1 -InputDir dist -WorkDir out-proof
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
       # The desktop window needs OpenGL 2.0+, and a hosted runner has no graphics
       # driver (OpenGL 1.1 only). For the launch test only, a software OpenGL
@@ -280,6 +299,10 @@ jobs:
             OldSetupExe     = 'out-extra/Miasma-Setup-0.0.1-beta.1-x64.exe'
             ExpectedVersion = $env:VERSION
             LogDir          = 'smoke-logs'
+          }
+          $core = ($env:VERSION -split '-', 2)[0]
+          $installerArgs['ChainSetupExes'] = @("beta.11", "beta.12", "beta.13", $null) | ForEach-Object {
+            if ($_) { "out-chain/Miasma-Setup-$core-$_-x64.exe" } else { "out-chain/Miasma-Setup-$core-x64.exe" }
           }
           if ($env:LABEL) {
             $core = ($env:VERSION -split '-', 2)[0]
