@@ -3835,6 +3835,63 @@ mod transfer_password_tests {
 }
 
 #[cfg(test)]
+mod retention_entry_tests {
+    use super::parse_retention;
+    use miasma_core::directed::RetentionPeriod;
+
+    /// The seconds the CLI would hand the daemon for a `--retention` string.
+    fn secs_for(arg: &str) -> u64 {
+        parse_retention(arg).unwrap()
+    }
+
+    /// A retention that comes in through the CLI is bounded at the same gate the
+    /// daemon uses (`RetentionPeriod::checked_secs`). The CLI's own parser only
+    /// turns a string into seconds; the range check lives in the core, so this
+    /// pins that a CLI string of each out-of-range value is refused there.
+    #[test]
+    fn a_cli_retention_out_of_range_is_refused() {
+        // u64::MAX, 0, one below the minimum, and 30 days + 1: the values a
+        // person would type on the command line, derived from the presets rather
+        // than written as fixed digits.
+        let thirty_days_plus_one = (RetentionPeriod::ThirtyDays.as_secs() + 1).to_string();
+        let below_min = (RetentionPeriod::TenMinutes.as_secs() - 1).to_string();
+        for arg in [
+            u64::MAX.to_string(),
+            "0".to_string(),
+            below_min,
+            thirty_days_plus_one,
+        ] {
+            let secs = secs_for(&arg);
+            let refused = RetentionPeriod::Custom(secs).checked_secs();
+            assert!(
+                refused.is_err(),
+                "--retention {arg} ({secs}s) should be refused"
+            );
+            assert!(refused.unwrap_err().to_string().contains("invalid retention"));
+        }
+        // 30 days + 1 expressed in the CLI's own unit suffixes is the same reject.
+        let over_max_hours = format!("{}h", RetentionPeriod::ThirtyDays.as_secs() / 3600 + 1);
+        let over_max_mins = format!("{}m", RetentionPeriod::ThirtyDays.as_secs() / 60 + 1);
+        for arg in [over_max_hours, over_max_mins] {
+            let secs = secs_for(&arg);
+            assert!(secs > RetentionPeriod::ThirtyDays.as_secs());
+            assert!(RetentionPeriod::Custom(secs).checked_secs().is_err());
+        }
+    }
+
+    /// The ends of the allowed range, arriving as CLI strings, are accepted.
+    #[test]
+    fn a_cli_retention_at_the_bounds_is_accepted() {
+        assert_eq!(secs_for("10m"), RetentionPeriod::TenMinutes.as_secs());
+        assert_eq!(secs_for("30d"), RetentionPeriod::ThirtyDays.as_secs());
+        for arg in ["10m", "30d"] {
+            let secs = secs_for(arg);
+            assert_eq!(RetentionPeriod::Custom(secs).checked_secs().unwrap(), secs);
+        }
+    }
+}
+
+#[cfg(test)]
 mod transfer_progress_tests {
     use super::{format_progress_in, human_bytes, human_duration, Lang};
     use miasma_core::transfer::{Phase, TransferKind, TransferState, TransferStatus};

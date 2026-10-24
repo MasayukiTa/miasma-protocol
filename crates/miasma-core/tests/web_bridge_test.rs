@@ -786,6 +786,116 @@ async fn a_weak_private_share_password_is_refused_over_ipc_and_http() {
     d.stop().await;
 }
 
+/// A private share whose retention is out of range is refused on every send
+/// entry point - both IPC variants and both HTTP variants - with the
+/// range error, and nothing is published. The bad values are the overflow end
+/// (`u64::MAX`), zero, one second under the shortest preset (59), and one
+/// second over the longest preset (30 days + 1).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_out_of_range_retention_is_refused_over_ipc_and_http() {
+    use miasma_core::directed::{MAX_RETENTION_SECS, MIN_RETENTION_SECS};
+
+    let d = start_daemon().await;
+    let tok = d.token();
+    let pw = random_policy_password();
+    let contact = match daemon_request(d.dir.path(), ControlRequest::SharingKey)
+        .await
+        .unwrap()
+    {
+        ControlResponse::SharingKey { contact, .. } => contact,
+        other => panic!("unexpected: {other:?}"),
+    };
+    let src_dir = tempfile::tempdir().unwrap();
+    let file = src_dir.path().join("payload.bin");
+    std::fs::write(&file, b"payload").unwrap();
+    let file_path = file.to_string_lossy().into_owned();
+
+    // The design names u64::MAX, 0, 59 and 30 days + 1 explicitly; the preset
+    // bounds (MIN - 1, MAX + 1) are the same two edges expressed as constants.
+    let bad_values = [
+        0u64,
+        59,
+        MIN_RETENTION_SECS - 1,
+        MAX_RETENTION_SECS + 1,
+        u64::MAX,
+    ];
+
+    for bad in bad_values {
+        // Entry 1: IPC DirectedSend.
+        match daemon_request(
+            d.dir.path(),
+            ControlRequest::DirectedSend {
+                recipient_contact: contact.clone(),
+                data: b"payload".to_vec(),
+                password: pw.clone(),
+                retention_secs: bad,
+                filename: None,
+            },
+        )
+        .await
+        .unwrap()
+        {
+            ControlResponse::Error(e) => {
+                assert!(e.contains("invalid retention"), "DirectedSend {bad}: {e}")
+            }
+            other => panic!("DirectedSend {bad}: expected an error, got {other:?}"),
+        }
+
+        // Entry 2: IPC DirectedSendFile.
+        match daemon_request(
+            d.dir.path(),
+            ControlRequest::DirectedSendFile {
+                recipient_contact: contact.clone(),
+                file_path: file_path.clone(),
+                password: pw.clone(),
+                retention_secs: bad,
+                filename: None,
+            },
+        )
+        .await
+        .unwrap()
+        {
+            ControlResponse::Error(e) => {
+                assert!(e.contains("invalid retention"), "DirectedSendFile {bad}: {e}")
+            }
+            other => panic!("DirectedSendFile {bad}: expected an error, got {other:?}"),
+        }
+
+        // Entry 3: HTTP /api/directed/send.
+        let send = serde_json::json!({
+            "recipient_contact": contact,
+            "data": "cGF5bG9hZA==",
+            "password": pw,
+            "retention_secs": bad,
+        })
+        .to_string();
+        let r = http(d.http_port, "POST", "/api/directed/send", Some(&tok), &send).await;
+        assert!(r.starts_with("HTTP/1.1 400"), "send {bad}: {r:.300}");
+        assert!(r.contains("invalid retention"), "send {bad}: {r:.300}");
+
+        // Entry 4: HTTP /api/directed/send-file.
+        let send_file = serde_json::json!({
+            "recipient_contact": contact,
+            "file_path": file_path,
+            "password": pw,
+            "retention_secs": bad,
+        })
+        .to_string();
+        let r = http(
+            d.http_port,
+            "POST",
+            "/api/directed/send-file",
+            Some(&tok),
+            &send_file,
+        )
+        .await;
+        assert!(r.starts_with("HTTP/1.1 400"), "send-file {bad}: {r:.300}");
+        assert!(r.contains("invalid retention"), "send-file {bad}: {r:.300}");
+    }
+
+    d.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_running_receive_can_be_stopped_over_http() {
     tokio::time::timeout(Duration::from_secs(120), async {
