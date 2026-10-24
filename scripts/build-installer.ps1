@@ -8,7 +8,7 @@
 
     Requires:
       - WiX Toolset v6 (install: dotnet tool install --global wix --version 6.0.2)
-      - WiX extensions: WixToolset.UI.wixext, WixToolset.Bal.wixext, WixToolset.Util.wixext
+      - WiX extensions: WixToolset.UI.wixext, WixToolset.BootstrapperApplications.wixext, WixToolset.Util.wixext
         (install: wix extension add -g WixToolset.UI.wixext/6.0.2 ...)
 
     Pipeline:
@@ -99,7 +99,7 @@ if (-not $wix) {
     Write-Host ""
     Write-Host "Then install the required extensions:"
     Write-Host "  wix extension add -g WixToolset.UI.wixext/6.0.2"
-    Write-Host "  wix extension add -g WixToolset.Bal.wixext/6.0.2"
+    Write-Host "  wix extension add -g WixToolset.BootstrapperApplications.wixext/6.0.2"
     Write-Host "  wix extension add -g WixToolset.Util.wixext/6.0.2"
     Write-Host ""
     Write-Host "See: https://wixtoolset.org/docs/intro/"
@@ -231,7 +231,7 @@ if (-not $SkipBundle) {
         -d "Version=$($ver.BundleVersion)" `
         -d "MsiPath=$msiPath" `
         -d "VCRedistPath=$VCRedistPath" `
-        -ext WixToolset.Bal.wixext `
+        -ext WixToolset.BootstrapperApplications.wixext `
         -ext WixToolset.Util.wixext `
         -arch x64
 
