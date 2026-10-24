@@ -87,14 +87,24 @@ impl IncomingRecord {
             // ── Confirmed ────────────────────────────────────────────────────
             (EnvelopeState::Confirmed, IncomingEvent::PasswordAttemptStart) => {
                 // Decrement first, then let the caller try; a crash keeps the
-                // lower count.
+                // lower count. Mark the pre-spend so a later network-failure
+                // give-back returns exactly this try and no more.
                 if local.password_attempts_remaining == 0 {
                     return Err(Illegal);
                 }
                 local.password_attempts_remaining -= 1;
+                local.password_attempt_pending = true;
                 Ok(fx)
             }
             (EnvelopeState::Confirmed, IncomingEvent::RetrievedOk) => {
+                // Retrieval succeeded: return the pre-spent try (design 6.2,
+                // "give the remaining back"), but only if one is actually
+                // outstanding, then clear the mark.
+                if local.password_attempt_pending {
+                    local.password_attempts_remaining =
+                        local.password_attempts_remaining.saturating_add(1);
+                    local.password_attempt_pending = false;
+                }
                 local.state = EnvelopeState::Retrieved;
                 local.clear_r_eph();
                 fx.clear_r_eph = true;
@@ -102,9 +112,11 @@ impl IncomingRecord {
                 Ok(fx)
             }
             (EnvelopeState::Confirmed, IncomingEvent::PasswordWrong) => {
-                // The try was already spent by `PasswordAttemptStart`. When none
-                // remain, the record fails closed; otherwise it stays Confirmed
-                // for the next attempt.
+                // The try was spent by `PasswordAttemptStart` and the attempt
+                // resolved as wrong, so the pre-spend is final: clear the mark
+                // and do not give it back. When none remain, the record fails
+                // closed; otherwise it stays Confirmed for the next attempt.
+                local.password_attempt_pending = false;
                 if local.password_attempts_remaining == 0 {
                     local.state = EnvelopeState::PasswordFailed;
                     local.clear_r_eph();
@@ -114,9 +126,15 @@ impl IncomingRecord {
                 Ok(fx)
             }
             (EnvelopeState::Confirmed, IncomingEvent::RetrievalNetworkFailure) => {
-                // The password was right; give the pre-spent try back.
-                local.password_attempts_remaining =
-                    local.password_attempts_remaining.saturating_add(1);
+                // The password was right; give the pre-spent try back, but only
+                // when one is outstanding. Without this guard a run of network
+                // failures with no matching pre-spend would raise the count past
+                // its starting value. Clear the mark once returned.
+                if local.password_attempt_pending {
+                    local.password_attempts_remaining =
+                        local.password_attempts_remaining.saturating_add(1);
+                    local.password_attempt_pending = false;
+                }
                 Ok(fx)
             }
 
@@ -309,6 +327,7 @@ mod tests {
                 expires: deadline,
             }),
             password_attempts_remaining: 3,
+            password_attempt_pending: false,
             received_at: 1_000,
             effective_expires_at: 10_000,
             sender_peer_id: "peer-a".into(),
@@ -572,5 +591,73 @@ mod tests {
         // No byte of the secret appears in the debug string.
         let hex: String = secret.iter().map(|b| format!("{b:02x}")).collect();
         assert!(!shown.contains(&hex));
+    }
+
+    /// Retrieval success returns the try that `PasswordAttemptStart` pre-spent
+    /// (design 6.2, the `RetrievedOk` row gives the remaining back).
+    #[test]
+    fn retrieval_success_returns_the_pre_spent_try() {
+        let (mut r, code, _wrong) = issued(3, mono(0, 300_000));
+        r.step(IncomingEvent::Confirm { code }, NOW).unwrap();
+        r.step(IncomingEvent::PasswordAttemptStart, NOW).unwrap();
+        assert_eq!(r.local.as_ref().unwrap().password_attempts_remaining, 2);
+        r.step(IncomingEvent::RetrievedOk, NOW).unwrap();
+        // The pre-spent try is returned on success.
+        assert_eq!(r.effective_state(), EnvelopeState::Retrieved);
+        assert_eq!(r.local.as_ref().unwrap().password_attempts_remaining, 3);
+    }
+
+    /// A run of network failures with no matching `PasswordAttemptStart` never
+    /// raises the count past its starting value: only an outstanding pre-spent
+    /// try is given back, and the mark is cleared once returned.
+    #[test]
+    fn a_run_of_network_failures_never_raises_the_count_past_the_start() {
+        let (mut r, code, _wrong) = issued(3, mono(0, 300_000));
+        r.step(IncomingEvent::Confirm { code }, NOW).unwrap();
+        // One pre-spend, then many network failures. The first returns the
+        // pre-spent try; the rest are no-ops for the count.
+        r.step(IncomingEvent::PasswordAttemptStart, NOW).unwrap();
+        assert_eq!(r.local.as_ref().unwrap().password_attempts_remaining, 2);
+        for _ in 0..10 {
+            r.step(IncomingEvent::RetrievalNetworkFailure, NOW).unwrap();
+            assert_eq!(
+                r.local.as_ref().unwrap().password_attempts_remaining,
+                3,
+                "the count must not climb past its starting value"
+            );
+        }
+    }
+
+    /// The `IncomingEvent::Confirm` debug output never prints the confirmation
+    /// code: it shows a redaction marker instead.
+    #[test]
+    fn the_confirm_event_debug_redacts_the_code() {
+        use crate::directed::challenge::generate_challenge;
+        let (code, _hash) = generate_challenge();
+        let ev = IncomingEvent::Confirm { code: code.clone() };
+        let shown = format!("{ev:?}");
+        assert!(shown.contains("<redacted>"));
+        assert!(
+            !shown.contains(&code),
+            "the confirmation code must not appear in the debug output"
+        );
+    }
+
+    /// The `InviteExtV2` debug output never prints the credential bytes.
+    #[test]
+    fn the_invite_ext_debug_redacts_the_credential() {
+        use crate::directed::state::InviteExtV2;
+        // A random, non-fixed credential value; no fixed key material.
+        let credential: Vec<u8> = (0..48).map(|_| rand::random::<u8>()).collect();
+        let ext = InviteExtV2 {
+            credential: credential.clone(),
+        };
+        let shown = format!("{ext:?}");
+        assert!(shown.contains("<redacted>"));
+        let hex: String = credential.iter().map(|b| format!("{b:02x}")).collect();
+        assert!(
+            !shown.contains(&hex),
+            "the credential bytes must not appear in the debug output"
+        );
     }
 }
