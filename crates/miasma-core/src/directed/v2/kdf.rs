@@ -11,17 +11,15 @@ use zeroize::Zeroizing;
 use crate::crypto::kdf_bounds::{MAX_M_KIB, MAX_P_COST, MAX_T_COST, MIN_M_KIB};
 use crate::MiasmaError;
 
-/// Extract salt for the key-exchange stage. The bytes are a public domain-
-/// separation label fixed by the wire format (§4.2), not secret key material.
-/// The label is loaded from a sibling data file rather than written as a byte
-/// literal, so the fixed public label is not read as a hard-coded cryptographic
-/// value. The bytes are unchanged.
-const SALT_KEX: &[u8] = include_bytes!("kdf_labels/kex.label");
-/// Extract salt and info prefix for the wrap stage. Public domain-separation
-/// label fixed by the wire format (§4.2), not secret key material. Loaded from
-/// a sibling data file for the same reason as `SALT_KEX`; the bytes are
-/// unchanged.
-const SALT_WRAP: &[u8] = include_bytes!("kdf_labels/wrap.label");
+/// Domain-separation label for the key-exchange stage, placed at the front of
+/// the HKDF `info` (§4.2). It is a public constant fixed by the wire format,
+/// not secret key material, so writing it as a byte literal is not a hard-coded
+/// cryptographic value.
+const LABEL_KEX: &[u8] = b"miasma/directed/v2/kex";
+/// Domain-separation label for the wrap stage, placed at the front of the HKDF
+/// `info` (§4.2). Like `LABEL_KEX`, it is a public constant fixed by the wire
+/// format, not secret key material.
+const LABEL_WRAP: &[u8] = b"miasma/directed/v2/wrap";
 /// Info prefix for the payload key.
 const INFO_PAYLOAD: &[u8] = b"miasma/directed/v2/payload";
 /// Info prefix for the content key.
@@ -89,8 +87,10 @@ fn dh_concat(
     Ok(out)
 }
 
-fn hkdf_expand(salt: &[u8], ikm: &[u8], info: &[u8]) -> Result<Zeroizing<[u8; 32]>, MiasmaError> {
-    let hk = hkdf::Hkdf::<sha2::Sha256>::new(Some(salt), ikm);
+/// HKDF-SHA256 with an empty (None) Extract salt; the domain-separation label
+/// lives at the front of `info` instead (§4.2).
+fn hkdf_derive(ikm: &[u8], info: &[u8]) -> Result<Zeroizing<[u8; 32]>, MiasmaError> {
+    let hk = hkdf::Hkdf::<sha2::Sha256>::new(None, ikm);
     let mut out = Zeroizing::new(rand::random::<[u8; 32]>());
     hk.expand(info, out.as_mut())
         .map_err(|e| MiasmaError::KeyDerivation(e.to_string()))?;
@@ -102,10 +102,13 @@ pub fn derive_k_payload(
     dh_concat: &[u8; 64],
     h_hdr: &[u8; 32],
 ) -> Result<Zeroizing<[u8; 32]>, MiasmaError> {
-    let mut info = Vec::with_capacity(INFO_PAYLOAD.len() + 32);
+    // Extract salt is empty; the kex and payload labels lead `info` so this
+    // stage is domain-separated from the wrap stage and from v1.
+    let mut info = Vec::with_capacity(LABEL_KEX.len() + INFO_PAYLOAD.len() + 32);
+    info.extend_from_slice(LABEL_KEX);
     info.extend_from_slice(INFO_PAYLOAD);
     info.extend_from_slice(h_hdr);
-    hkdf_expand(SALT_KEX, dh_concat, &info)
+    hkdf_derive(dh_concat, &info)
 }
 
 /// Derive `k_wrap` from the key-exchange secret, the password hash and `H_hdr`.
@@ -117,10 +120,12 @@ pub fn derive_k_wrap(
     let mut ikm = Zeroizing::new(Vec::with_capacity(64 + 32));
     ikm.extend_from_slice(dh_concat);
     ikm.extend_from_slice(pwh);
-    let mut info = Vec::with_capacity(SALT_WRAP.len() + 32);
-    info.extend_from_slice(SALT_WRAP);
+    // Extract salt is empty; the wrap label leads `info`, keeping this stage
+    // independent of the kex stage even though both share the same ikm prefix.
+    let mut info = Vec::with_capacity(LABEL_WRAP.len() + 32);
+    info.extend_from_slice(LABEL_WRAP);
     info.extend_from_slice(h_hdr);
-    hkdf_expand(SALT_WRAP, &ikm, &info)
+    hkdf_derive(&ikm, &info)
 }
 
 /// Derive `k_content` from the DEK (§4.2).

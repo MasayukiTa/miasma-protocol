@@ -1,31 +1,35 @@
 //! Directed share v2 — known-answer tests for the key schedule (sec 4.2).
 //!
-//! The design derives two keys that are not in `frozen.hex`: `k_wrap` (the key
-//! that wraps the DEK, which folds in the Argon2id password hash) and, for a
-//! cross-check, `k_payload` (the payload key). The expected bytes live in
-//! `tests/fixtures/directed_v2/kdf_kat.hex`, written once from the design by
-//! `_gen_kdf_kat.py` and never regenerated to make a test pass.
+//! The key schedule derives two keys the crate exposes together with the
+//! Extract+Expand steps fused: `k_payload` (the payload key, password-free) and
+//! `k_wrap` (which folds in the Argon2id password hash). The expected bytes live
+//! in `tests/fixtures/directed_v2/kdf_kat.hex`, written once from the design and
+//! never regenerated to make a test pass.
 //!
 //! Each line is checked two independent ways:
-//!   1. recomputed here straight from the primitives (HKDF-SHA256 Extract and
-//!      Expand, Argon2id) with every label and salt spelled out, so a label
-//!      that changes inside the crate cannot silently change here too; and
+//!   1. recomputed here straight from the primitives — Argon2id, and an HKDF
+//!      (RFC 5869) built by hand from HMAC-SHA256 over `sha2::Sha256`, *not* the
+//!      `hkdf` crate — with every label spelled out, so a label that changes
+//!      inside the crate cannot silently change here too; and
 //!   2. recomputed through the crate's `kdf` functions.
 //! Both must equal the frozen line. A drift in either the design or the code
 //! shows up here.
 //!
-//! The intermediate HKDF-Extract value `prk_kex` from the design is not a KAT
-//! target: the crate does not expose the PRK (its `derive_*` functions run
-//! Extract and Expand together), so `k_payload` and `k_wrap` stand in for it.
+//! New key schedule (sec 4.2): HKDF-Extract takes an empty (None) salt, and the
+//! public domain-separation label leads the HKDF `info`:
+//!   k_payload = HKDF(salt=None, ikm = dh1||dh2,
+//!                    info = LABEL_KEX || INFO_PAYLOAD || H_hdr)
+//!   k_wrap    = HKDF(salt=None, ikm = dh1||dh2||pwh,
+//!                    info = LABEL_WRAP || H_hdr)
 //!
 //! Fixture inputs are derived from labels through `fill` (a keyed BLAKE3 XOF),
-//! matching the generator, so no literal key, nonce, salt or password appears
-//! in this file. The password is the ASCII hex of a derived value, so it is a
-//! valid `&str` for the crate's `password_hash`.
+//! matching the generator, so no literal key, nonce, salt or password appears in
+//! this file. The two public labels are read from a fixture file, not written as
+//! byte literals here. The password is the ASCII hex of a derived value, so it
+//! is a valid `&str` for the crate's `password_hash`.
 
 use argon2::{Algorithm, Argon2, Params, Version};
-use hkdf::Hkdf;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 
 use miasma_core::crypto::kdf_bounds::MIN_M_KIB;
 use miasma_core::directed::v2::kdf;
@@ -34,7 +38,7 @@ const FROZEN: &str = include_str!("fixtures/directed_v2/kdf_kat.hex");
 const LABELS: &str = include_str!("fixtures/directed_v2/kdf_labels.hex");
 const FIX_CTX: &str = "miasma directed v2 kat fixtures (test-only)";
 
-/// Labels for this KAT, distinct from the wire_compat `frozen.hex` labels.
+/// Labels for the fixture inputs (distinct from the key-schedule labels below).
 const L_PW: &str = "kdf kat password";
 /// Two further password labels, so this test uses two distinct derived
 /// passwords instead of literal password strings.
@@ -46,23 +50,73 @@ const L_R_STATIC: &str = "kdf kat r_static secret";
 const L_R_EPH: &str = "kdf kat r_eph secret";
 const L_E_S: &str = "kdf kat e_s secret";
 
-/// Design labels for the key schedule (sec 4.2). The two Extract salts are
-/// read from a test fixture file rather than written as byte literals, so these
-/// fixed public domain-separation labels are not read as hard-coded
-/// cryptographic values. They remain independent of the crate: the fixture is
-/// this test's own copy, so a change inside the crate does not also change the
-/// expected value here. The bytes are unchanged.
-fn salt_kex() -> Vec<u8> {
-    label("salt_kex")
-}
-fn salt_wrap() -> Vec<u8> {
-    label("salt_wrap")
-}
+/// The payload info label, a public constant fixed by the wire format (sec 4.2).
+/// It is not secret; it only separates this stage from others.
 const INFO_PAYLOAD: &[u8] = "miasma/directed/v2/payload".as_bytes();
+
+/// Key-schedule domain-separation labels (sec 4.2), read from a fixture file
+/// rather than written as byte literals here. They remain independent of the
+/// crate: the fixture is this test's own copy, so a change inside the crate does
+/// not also change the expected value here.
+fn label_kex() -> Vec<u8> {
+    label("label_kex")
+}
+fn label_wrap() -> Vec<u8> {
+    label("label_wrap")
+}
 
 /// Small-cost Argon2id mouth: m = MIN_M_KIB (8 KiB), t = 1, p = 1 (m >= 8*p).
 const KDF_T_COST: u32 = 1;
 const KDF_P_COST: u32 = 1;
+
+/// HMAC-SHA256 built by hand (FIPS 198-1) over `sha2::Sha256`, so the HKDF below
+/// does not lean on the `hkdf` crate that the production code uses.
+fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
+    const BLOCK: usize = 64;
+    let mut k = [0u8; BLOCK];
+    if key.len() > BLOCK {
+        let d = Sha256::digest(key);
+        k[..32].copy_from_slice(d.as_slice());
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36u8; BLOCK];
+    let mut opad = [0x5cu8; BLOCK];
+    for i in 0..BLOCK {
+        ipad[i] ^= k[i];
+        opad[i] ^= k[i];
+    }
+    let mut inner = Sha256::new();
+    inner.update(ipad);
+    inner.update(msg);
+    let inner = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(inner.as_slice());
+    let mac = outer.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(mac.as_slice());
+    out
+}
+
+/// RFC 5869 HKDF-Extract with an empty salt (None -> HashLen zero bytes).
+fn hkdf_extract_no_salt(ikm: &[u8]) -> [u8; 32] {
+    hmac_sha256(&[0u8; 32], ikm)
+}
+
+/// RFC 5869 HKDF-Expand to 32 bytes (one block: T(1)).
+fn hkdf_expand_32(prk: &[u8; 32], info: &[u8]) -> [u8; 32] {
+    let mut msg = Vec::with_capacity(info.len() + 1);
+    msg.extend_from_slice(info);
+    msg.push(0x01);
+    hmac_sha256(prk, &msg)
+}
+
+/// Full HKDF-SHA256 with salt=None, to 32 bytes.
+fn hkdf_no_salt_32(ikm: &[u8], info: &[u8]) -> [u8; 32] {
+    let prk = hkdf_extract_no_salt(ikm);
+    hkdf_expand_32(&prk, info)
+}
 
 /// Keyed BLAKE3 XOF over `label`, matching the generator that wrote the fixture.
 fn fill<const N: usize>(label: &str) -> [u8; N] {
@@ -110,8 +164,8 @@ fn password_str() -> String {
     hex::encode(fill::<32>(L_PW))
 }
 
-/// A password derived from a label, as ASCII hex, so no literal password
-/// string appears in the tests.
+/// A password derived from a label, as ASCII hex, so no literal password string
+/// appears in the tests.
 fn password_str_from(label: &str) -> String {
     hex::encode(fill::<32>(label))
 }
@@ -138,13 +192,6 @@ fn argon2_pwh_independent(password: &str, salt: &[u8; 32]) -> [u8; 32] {
     out
 }
 
-fn hkdf_expand_independent(salt: &[u8], ikm: &[u8], info: &[u8]) -> [u8; 32] {
-    let hk = Hkdf::<Sha256>::new(Some(salt), ikm);
-    let mut out: [u8; 32] = rand::random();
-    hk.expand(info, &mut out).expect("hkdf expand");
-    out
-}
-
 /// dh1 || dh2 recomputed here from the fixture secrets and publics.
 fn dh_concat_independent() -> [u8; 64] {
     let e_s = x25519_dalek::StaticSecret::from(fill::<32>(L_E_S));
@@ -158,16 +205,31 @@ fn dh_concat_independent() -> [u8; 64] {
     out
 }
 
+/// Assemble the payload info: LABEL_KEX || INFO_PAYLOAD || H_hdr.
+fn payload_info(h_hdr: &[u8; 32]) -> Vec<u8> {
+    let mut info = Vec::new();
+    info.extend_from_slice(&label_kex());
+    info.extend_from_slice(INFO_PAYLOAD);
+    info.extend_from_slice(h_hdr);
+    info
+}
+
+/// Assemble the wrap info: LABEL_WRAP || H_hdr.
+fn wrap_info(h_hdr: &[u8; 32]) -> Vec<u8> {
+    let mut info = Vec::new();
+    info.extend_from_slice(&label_wrap());
+    info.extend_from_slice(h_hdr);
+    info
+}
+
 #[test]
 fn k_payload_matches_the_frozen_value_both_ways() {
     let h_hdr = fill::<32>(L_HHDR);
     let dh_concat = dh_concat_independent();
 
-    // 1. Independent recomputation from the primitive.
-    let mut info = Vec::new();
-    info.extend_from_slice(INFO_PAYLOAD);
-    info.extend_from_slice(&h_hdr);
-    let independent = hkdf_expand_independent(&salt_kex(), &dh_concat, &info);
+    // 1. Independent recomputation: HKDF(salt=None, ikm=dh, info=LABEL_KEX ||
+    //    INFO_PAYLOAD || H_hdr), from the hand-built HMAC-SHA256.
+    let independent = hkdf_no_salt_32(&dh_concat, &payload_info(&h_hdr));
     assert_eq!(
         &independent[..],
         &frozen("kdf_k_payload")[..],
@@ -193,16 +255,12 @@ fn k_wrap_matches_the_frozen_value_both_ways() {
     // pwh from the small-cost Argon2id mouth, recomputed here.
     let pwh = argon2_pwh_independent(&password, &salt);
 
-    // 1. Independent recomputation: prk_wrap = Extract(salt = wrap,
-    //    ikm = dh1 || dh2 || pwh); k_wrap = Expand(prk_wrap, info = wrap || H_hdr).
+    // 1. Independent recomputation: HKDF(salt=None, ikm = dh || pwh,
+    //    info = LABEL_WRAP || H_hdr).
     let mut ikm = Vec::new();
     ikm.extend_from_slice(&dh_concat);
     ikm.extend_from_slice(&pwh);
-    let wrap_label = salt_wrap();
-    let mut info = Vec::new();
-    info.extend_from_slice(&wrap_label);
-    info.extend_from_slice(&h_hdr);
-    let independent = hkdf_expand_independent(&wrap_label, &ikm, &info);
+    let independent = hkdf_no_salt_32(&ikm, &wrap_info(&h_hdr));
     assert_eq!(
         &independent[..],
         &frozen("kdf_k_wrap")[..],
@@ -271,27 +329,32 @@ fn sender_and_recipient_reach_the_same_k_payload() {
 }
 
 #[test]
-fn extract_salt_labels_are_deterministic_and_distinct() {
-    // The two Extract salts are assembled at run time; each must be stable
-    // across calls, and the two stages must stay separated.
-    assert_eq!(salt_kex(), salt_kex(), "salt_kex is deterministic");
-    assert_eq!(salt_wrap(), salt_wrap(), "salt_wrap is deterministic");
-    assert_ne!(salt_kex(), salt_wrap(), "the two stages use distinct salts");
+fn the_two_stage_labels_are_deterministic_and_distinct() {
+    // The two domain-separation labels are read from the fixture; each must be
+    // stable across calls, and the two stages must stay separated.
+    assert_eq!(label_kex(), label_kex(), "label_kex is deterministic");
+    assert_eq!(label_wrap(), label_wrap(), "label_wrap is deterministic");
+    assert_ne!(
+        label_kex(),
+        label_wrap(),
+        "the two stages use distinct labels"
+    );
 }
 
 #[test]
-fn swapping_the_two_extract_salts_breaks_the_kat() {
-    // Using the wrap salt where the kex salt belongs must not reach the frozen
-    // k_payload, pinning which stage each salt feeds.
+fn swapping_the_two_stage_labels_breaks_the_kat() {
+    // Leading the payload info with the wrap label instead of the kex label must
+    // not reach the frozen k_payload, pinning which label each stage uses.
     let h_hdr = fill::<32>(L_HHDR);
     let dh_concat = dh_concat_independent();
     let mut info = Vec::new();
+    info.extend_from_slice(&label_wrap());
     info.extend_from_slice(INFO_PAYLOAD);
     info.extend_from_slice(&h_hdr);
-    let swapped = hkdf_expand_independent(&salt_wrap(), &dh_concat, &info);
+    let swapped = hkdf_no_salt_32(&dh_concat, &info);
     assert_ne!(
         &swapped[..],
         &frozen("kdf_k_payload")[..],
-        "wrong Extract salt must not reach the frozen k_payload"
+        "wrong stage label must not reach the frozen k_payload"
     );
 }
