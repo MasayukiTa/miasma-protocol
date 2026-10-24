@@ -1237,7 +1237,7 @@ impl PushService {
         // unchanged.
         let mut pacer = super::pacer::SendPacer::new(
             self.settings.max_send_kib_per_sec,
-            Instant::now(),
+            std::time::Instant::now(),
         );
         let chat_activity = self.chat_activity();
         while sent < size {
@@ -1254,7 +1254,7 @@ impl PushService {
             // Wait, if the pacer asks, before the write. Cancellation and
             // shutdown still win over the wait so a paced send stops promptly.
             let chat_busy = chat_activity.as_ref().is_some_and(|a| a.is_active());
-            let delay = pacer.delay_before_send(Instant::now(), n, chat_busy);
+            let delay = pacer.delay_before_send(std::time::Instant::now(), n, chat_busy);
             if !delay.is_zero() {
                 let waited = tokio::select! {
                     _ = wait_cancel(cancel) => return Err(AttemptError::Cancelled),
@@ -1278,7 +1278,7 @@ impl PushService {
                     )),
                 }
             }
-            pacer.record_sent(Instant::now(), n);
+            pacer.record_sent(std::time::Instant::now(), n);
             sent += n as u64;
             progress.store(sent, std::sync::atomic::Ordering::Relaxed);
             let rate = meter.sample(sent);
