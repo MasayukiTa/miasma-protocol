@@ -1939,6 +1939,21 @@ async fn process_request_inner(
                     .key_memory_status()
                     .map(|(_, dump)| dump)
                     .unwrap_or(false),
+                // Push send-loop pacing: time spent yielding the uplink to
+                // chat. Read from the running push service if this build has
+                // one; zero otherwise.
+                push_yielded_ms: {
+                    #[cfg(feature = "iroh")]
+                    {
+                        crate::push::service::service_for(&data_dir)
+                            .map(|p| p.yielded_ms())
+                            .unwrap_or(0)
+                    }
+                    #[cfg(not(feature = "iroh"))]
+                    {
+                        0
+                    }
+                },
             })
         }
 

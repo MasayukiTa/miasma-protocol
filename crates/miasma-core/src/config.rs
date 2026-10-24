@@ -372,6 +372,12 @@ pub struct PushConfig {
     /// connection and resumed on a new one (default 30).
     #[serde(default = "default_push_stall_secs")]
     pub stall_timeout_secs: u64,
+    /// Cap on the outbound rate of the file-push send loop, in KiB per second
+    /// (default 0 = no cap, the previous behaviour). When non-zero, the send
+    /// loop keeps its rate at or below this value; it also yields to chat by
+    /// slowing down while chat traffic is in flight.
+    #[serde(default)]
+    pub max_send_kib_per_sec: u32,
 }
 
 pub const DEFAULT_PUSH_PART_RETENTION_DAYS: u64 = 7;
@@ -409,6 +415,7 @@ impl Default for PushConfig {
             part_retention_days: DEFAULT_PUSH_PART_RETENTION_DAYS,
             retry_window_hours: DEFAULT_PUSH_RETRY_WINDOW_HOURS,
             stall_timeout_secs: DEFAULT_PUSH_STALL_SECS,
+            max_send_kib_per_sec: 0,
         }
     }
 }
@@ -1202,5 +1209,47 @@ mod pqc_default_tests {
         assert_eq!(back.privacy.pqc_mode, None);
         assert_eq!(back.privacy.pqc_default_version, PQC_DEFAULT_VERSION);
         assert_eq!(back.privacy.pqc_mode(), PqcMode::Prefer);
+    }
+}
+
+#[cfg(test)]
+mod push_send_rate_config_tests {
+    use super::*;
+
+    #[test]
+    fn the_send_rate_cap_defaults_to_zero() {
+        assert_eq!(PushConfig::default().max_send_kib_per_sec, 0);
+        assert_eq!(NodeConfig::default().push.max_send_kib_per_sec, 0);
+    }
+
+    #[test]
+    fn an_old_push_section_without_the_key_reads_as_zero() {
+        // A file written before the key existed keeps the no-cap default.
+        let c: NodeConfig = toml::from_str("[push]\nstall_timeout_secs = 45\n").unwrap();
+        assert_eq!(c.push.stall_timeout_secs, 45);
+        assert_eq!(c.push.max_send_kib_per_sec, 0);
+        // An empty file reads the same way.
+        let none: NodeConfig = toml::from_str("").unwrap();
+        assert_eq!(none.push.max_send_kib_per_sec, 0);
+    }
+
+    #[test]
+    fn the_send_rate_cap_reads_from_toml() {
+        let c: NodeConfig = toml::from_str("[push]\nmax_send_kib_per_sec = 512\n").unwrap();
+        assert_eq!(c.push.max_send_kib_per_sec, 512);
+    }
+
+    #[test]
+    fn the_send_rate_cap_round_trips_through_save_and_load() {
+        for cap in [0u32, 256, 8_192] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut cfg = NodeConfig::default();
+            cfg.push.max_send_kib_per_sec = cap;
+            cfg.save(dir.path()).unwrap();
+            assert_eq!(
+                NodeConfig::load(dir.path()).unwrap().push.max_send_kib_per_sec,
+                cap
+            );
+        }
     }
 }

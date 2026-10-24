@@ -26,6 +26,7 @@ use tokio::sync::{watch, Notify, Semaphore};
 use tracing::{debug, info, warn};
 
 use super::{
+    activity::ChatActivity,
     crypto::Identity,
     engine::{now_ms, ChatCore, EnqueueError, MarkOutcome, PrepareError},
     outbox::{OutKind, Outbox},
@@ -268,6 +269,9 @@ pub struct ChatService {
     slots: Arc<Semaphore>,
     workers: Mutex<HashMap<[u8; 32], Worker>>,
     shutdown: watch::Sender<bool>,
+    /// Node-wide count of chat sends in flight, shared with group chat and the
+    /// push send loop so the latter can pace itself while chat is sending.
+    activity: ChatActivity,
     groups: OnceLock<Arc<super::group::service::GroupService>>,
 }
 
@@ -339,6 +343,7 @@ impl ChatService {
             slots: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
             workers: Mutex::new(HashMap::new()),
             shutdown,
+            activity: ChatActivity::new(),
             groups: OnceLock::new(),
         });
         node.set_chat_handler(Arc::new(Handler(svc.clone())));
@@ -399,6 +404,12 @@ impl ChatService {
 
     pub fn settings(&self) -> &ChatSettings {
         &self.settings
+    }
+
+    /// The node-wide count of chat sends in flight. Shared with group chat and
+    /// read by the push send loop so it can pace itself while chat is sending.
+    pub fn chat_activity(&self) -> &ChatActivity {
+        &self.activity
     }
 
     pub fn own_endpoint_id(&self) -> [u8; 32] {
@@ -723,6 +734,10 @@ impl ChatService {
             Err(PrepareError::Storage(_)) => return Outcome::Retry("storage"),
         };
         self.core.outbox.update(id, |e| e.sending = true);
+        // Raised while this send holds the uplink, so the push loop paces
+        // itself; lowered as soon as the acknowledgement is in. Dropped on
+        // every path out of this scope, including the early returns below.
+        let send_guard = self.activity.enter();
         let result = tokio::time::timeout(self.settings.ack_timeout, async {
             let (mut tx, mut rx) = conn.open_bi().await.map_err(|_| "connection_lost")?;
             proto::write_frame(&mut tx, &Frame::Deliver(wire))
@@ -736,6 +751,8 @@ impl ChatService {
             }
         })
         .await;
+        // The uplink is free once the send and its acknowledgement are done.
+        drop(send_guard);
         let status = match result {
             Ok(Ok(s)) => s,
             Ok(Err(why)) => {
