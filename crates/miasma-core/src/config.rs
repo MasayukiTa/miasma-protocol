@@ -75,6 +75,11 @@ pub struct PrivacyConfig {
 }
 
 /// Value of [`PrivacyConfig::pqc_default_version`] written by this build.
+///
+/// Note for a future bump to 2 or more: [`PrivacyConfig::migrate_pqc_default`]
+/// only rewrites an `off` that an earlier default wrote. Before raising this,
+/// make the migration apply per version (version 0 only) so a later explicit
+/// `off` is not read as never chosen.
 pub const PQC_DEFAULT_VERSION: u32 = 1;
 
 /// `privacy.pqc_mode`: whether private-conversation sessions are upgraded with
@@ -136,11 +141,11 @@ impl fmt::Display for PqcMode {
 }
 
 /// Persist `privacy.pqc_mode` in `config.toml` (a running daemon reads it at
-/// its next start). Creates nothing when there is no configuration file yet.
+/// its next start). With no configuration file yet, start from the defaults,
+/// apply the choice and write it; a file that exists but cannot be read is an
+/// error and is left untouched, so a damaged file is never overwritten with
+/// defaults.
 pub fn set_pqc_mode_persistent(data_dir: &Path, mode: PqcMode) -> std::io::Result<()> {
-    if !crate::paths::config_file(data_dir).exists() {
-        return Ok(());
-    }
     let mut c = NodeConfig::load(data_dir)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
     if c.privacy.pqc_mode != Some(mode) {
@@ -1209,6 +1214,40 @@ mod pqc_default_tests {
         assert_eq!(back.privacy.pqc_mode, None);
         assert_eq!(back.privacy.pqc_default_version, PQC_DEFAULT_VERSION);
         assert_eq!(back.privacy.pqc_mode(), PqcMode::Prefer);
+    }
+
+    #[test]
+    fn a_choice_with_no_file_yet_creates_one_and_is_kept() {
+        // A fresh install with no config.toml: the choice from the screen must
+        // persist rather than fail silently.
+        for mode in [PqcMode::Off, PqcMode::Require] {
+            let dir = tempfile::tempdir().unwrap();
+            assert!(
+                !crate::paths::config_file(dir.path()).exists(),
+                "no file to start with"
+            );
+            set_pqc_mode_persistent(dir.path(), mode).unwrap();
+            assert!(
+                crate::paths::config_file(dir.path()).exists(),
+                "the setter created the file"
+            );
+            let back = NodeConfig::load(dir.path()).unwrap();
+            assert_eq!(back.privacy.pqc_mode, Some(mode));
+            assert_eq!(back.privacy.pqc_mode(), mode);
+            assert_eq!(back.privacy.pqc_default_version, PQC_DEFAULT_VERSION);
+        }
+    }
+
+    #[test]
+    fn a_damaged_file_is_an_error_and_is_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = crate::paths::config_file(dir.path());
+        let damaged = "[privacy\nstealth_mode = ";
+        std::fs::write(&path, damaged).unwrap();
+        let err = set_pqc_mode_persistent(dir.path(), PqcMode::Off).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        // The damaged file is left exactly as it was: not replaced by defaults.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), damaged);
     }
 }
 
