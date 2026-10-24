@@ -68,19 +68,11 @@ pub fn cost_below_create_floor(m_kib: u32, t_cost: u32, p_cost: u32) -> bool {
     m_kib < CREATE_FLOOR_M_KIB || t_cost < CREATE_FLOOR_T_COST || p_cost < CREATE_FLOOR_P_COST
 }
 
-/// Upper bounds accepted from an *untrusted* manifest. Without them a hostile
-/// sender could make a receiver allocate gigabytes just to check a password.
-///
-/// `create` uses 64 MiB / 3 passes / 1 lane (the defaults above) and nothing in
-/// the CLI or desktop picks another cost, so the ceiling is twice the memory,
-/// twice the passes and twice the lanes of what is actually produced: room to
-/// raise the default later, far below what a hostile manifest could ask for.
-/// A manifest above it is refused before any KDF work runs.
-pub const MAX_M_KIB: u32 = 128 * 1024;
-pub const MAX_T_COST: u32 = 6;
-pub const MAX_P_COST: u32 = 2;
-/// Argon2 itself requires `m >= 8 * p` KiB.
-pub const MIN_M_KIB: u32 = 8;
+/// Argon2id cost bounds accepted from an untrusted manifest. Defined once in
+/// [`crate::crypto::kdf_bounds`] and re-exported here so existing paths keep
+/// their `transfer::protection::MAX_*` names. A cost outside these bounds is
+/// refused before any KDF work runs.
+pub use crate::crypto::kdf_bounds::{MAX_M_KIB, MAX_P_COST, MAX_T_COST, MIN_M_KIB};
 
 /// How a transfer's segments are keyed on top of the per-segment random key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,9 +127,7 @@ impl PasswordProtection {
     /// the measurement is not dominated by one 64 MiB derivation per preset.
     /// Crate-internal: there is no public entry point that creates a protection
     /// below the floor, so a shipped build cannot quietly make a weak one.
-    pub(crate) fn create_for_bench(
-        password: &str,
-    ) -> Result<(Self, UnlockedKey), MiasmaError> {
+    pub(crate) fn create_for_bench(password: &str) -> Result<(Self, UnlockedKey), MiasmaError> {
         Self::create_unchecked_with_cost(password, BENCH_M_KIB, BENCH_T_COST, BENCH_P_COST)
     }
 
