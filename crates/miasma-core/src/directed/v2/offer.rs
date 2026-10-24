@@ -201,7 +201,7 @@ mod tests {
             sk,
             offer_id: rand::random(),
             request_id: rand::random(),
-            requester: rand::random::<[u8; 38]>().to_vec(),
+            requester: (0..38).map(|_| rand::random::<u8>()).collect::<Vec<u8>>(),
             recipient_identity,
             recipient_sharing,
             recipient_binding,

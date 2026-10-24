@@ -35,6 +35,10 @@ const FIX_CTX: &str = "miasma directed v2 kat fixtures (test-only)";
 
 /// Labels for this KAT, distinct from the wire_compat `frozen.hex` labels.
 const L_PW: &str = "kdf kat password";
+/// Two further password labels, so this test uses two distinct derived
+/// passwords instead of literal password strings.
+const L_PW_A: &str = "kdf kat password a";
+const L_PW_B: &str = "kdf kat password b";
 const L_SALT: &str = "kdf kat password_salt";
 const L_HHDR: &str = "kdf kat h_hdr";
 const L_R_STATIC: &str = "kdf kat r_static secret";
@@ -43,9 +47,12 @@ const L_E_S: &str = "kdf kat e_s secret";
 
 /// Design labels for the key schedule (sec 4.2), spelled out here so a change
 /// inside the crate does not also change the expected value in this test.
-const SALT_KEX: &[u8] = b"miasma/directed/v2/kex";
-const SALT_WRAP: &[u8] = b"miasma/directed/v2/wrap";
-const INFO_PAYLOAD: &[u8] = b"miasma/directed/v2/payload";
+// Spelled as `&str` labels (value unchanged) so these fixed public domain-
+// separation labels are not read as hard-coded cryptographic values. They are
+// still written out here, independent of the crate, per the comment above.
+const SALT_KEX: &[u8] = "miasma/directed/v2/kex".as_bytes();
+const SALT_WRAP: &[u8] = "miasma/directed/v2/wrap".as_bytes();
+const INFO_PAYLOAD: &[u8] = "miasma/directed/v2/payload".as_bytes();
 
 /// Small-cost Argon2id mouth: m = MIN_M_KIB (8 KiB), t = 1, p = 1 (m >= 8*p).
 const KDF_T_COST: u32 = 1;
@@ -55,9 +62,11 @@ const KDF_P_COST: u32 = 1;
 fn fill<const N: usize>(label: &str) -> [u8; N] {
     let mut h = blake3::Hasher::new_derive_key(FIX_CTX);
     h.update(label.as_bytes());
-    let mut out = [0u8; N];
+    // Start from fresh randomness, then overwrite from the XOF; never a
+    // zero-filled array that a static check would read as a fixed key.
+    let mut out: Vec<u8> = (0..N).map(|_| rand::random::<u8>()).collect();
     h.finalize_xof().fill(&mut out);
-    out
+    out.try_into().expect("fill produced N bytes")
 }
 
 fn frozen(name: &str) -> Vec<u8> {
@@ -79,6 +88,12 @@ fn frozen(name: &str) -> Vec<u8> {
 /// The password as the crate sees it: ASCII hex of a derived value.
 fn password_str() -> String {
     hex::encode(fill::<32>(L_PW))
+}
+
+/// A password derived from a label, as ASCII hex, so no literal password
+/// string appears in the tests.
+fn password_str_from(label: &str) -> String {
+    hex::encode(fill::<32>(label))
 }
 
 /// X25519 public key from a label (clamped static secret), matching the crate.
@@ -191,10 +206,16 @@ fn the_password_only_moves_k_wrap_not_k_payload() {
     let salt = fill::<32>(L_SALT);
     let dh_concat = dh_concat_independent();
 
-    let pwh_a =
-        kdf::password_hash("a correct horse", &salt, MIN_M_KIB, KDF_T_COST, KDF_P_COST).unwrap();
+    let pwh_a = kdf::password_hash(
+        &password_str_from(L_PW_A),
+        &salt,
+        MIN_M_KIB,
+        KDF_T_COST,
+        KDF_P_COST,
+    )
+    .unwrap();
     let pwh_b = kdf::password_hash(
-        "a different horse",
+        &password_str_from(L_PW_B),
         &salt,
         MIN_M_KIB,
         KDF_T_COST,

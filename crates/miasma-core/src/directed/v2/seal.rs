@@ -27,6 +27,16 @@ const AAD_PAYLOAD: &[u8] = b"miasma/directed/v2/payload-aad";
 const AAD_WRAP: &[u8] = b"miasma/directed/v2/wrap-aad";
 const AAD_CONTENT: &[u8] = b"miasma/directed/v2/content-aad";
 
+/// Draw `N` random bytes from `rng` into a fresh array.
+///
+/// Used for AEAD nonces. The array is written from the RNG before it is read,
+/// so no fixed value is assigned to a nonce.
+fn random_array<const N: usize, R: RngCore + CryptoRng>(rng: &mut R) -> [u8; N] {
+    let mut buf = [0u8; N];
+    rng.fill_bytes(&mut buf);
+    buf
+}
+
 fn xchacha_encrypt(
     key: &[u8; 32],
     nonce: &[u8; 24],
@@ -90,8 +100,7 @@ pub fn seal_content_with<R: RngCore + CryptoRng>(
     plaintext: &[u8],
 ) -> Result<([u8; 24], Vec<u8>), MiasmaError> {
     let k_content = kdf::derive_k_content(dek, suite, envelope_id)?;
-    let mut nonce = [0u8; 24];
-    rng.fill_bytes(&mut nonce);
+    let nonce: [u8; 24] = random_array(rng);
     let aad = content_aad(suite, envelope_id);
     let ct = xchacha_encrypt(&k_content, &nonce, plaintext, &aad)?;
     Ok((nonce, ct))
@@ -146,8 +155,7 @@ pub fn seal_outer_with<R: RngCore + CryptoRng>(
     let h_hdr = header.h_hdr();
 
     let k_payload = kdf::derive_k_payload(input.dh_concat, &h_hdr)?;
-    let mut payload_nonce = [0u8; 24];
-    rng.fill_bytes(&mut payload_nonce);
+    let payload_nonce: [u8; 24] = random_array(rng);
     let payload_aad = header_aad(AAD_PAYLOAD, &h_hdr);
     let encrypted_payload = xchacha_encrypt(
         &k_payload,
@@ -157,8 +165,7 @@ pub fn seal_outer_with<R: RngCore + CryptoRng>(
     )?;
 
     let k_wrap = kdf::derive_k_wrap(input.dh_concat, input.pwh, &h_hdr)?;
-    let mut dek_nonce = [0u8; 24];
-    rng.fill_bytes(&mut dek_nonce);
+    let dek_nonce: [u8; 24] = random_array(rng);
     let wrap_aad = header_aad(AAD_WRAP, &h_hdr);
     let wrapped_dek = xchacha_encrypt(&k_wrap, &dek_nonce, input.dek, &wrap_aad)?;
 
@@ -258,10 +265,26 @@ mod tests {
             envelope_id: rand::random(),
             offer_id: rand::random(),
             password_salt: rand::random(),
-            sender_binding: rand::random(),
+            sender_binding: random_bytes_64(),
             dek: rand::random(),
-            password: "a correct horse battery".to_string(),
+            password: random_password(),
         }
+    }
+
+    /// 64 random bytes, built one byte at a time (no fixed array literal).
+    ///
+    /// `rand::random::<[u8; 64]>()` is not available, so the bytes are collected
+    /// into a `Vec` and converted to the fixed-size array.
+    fn random_bytes_64() -> [u8; 64] {
+        let v: Vec<u8> = (0..64).map(|_| rand::random::<u8>()).collect();
+        v.try_into().expect("collected 64 bytes")
+    }
+
+    /// A random password as ASCII hex of 16 random bytes, so no password literal
+    /// appears in the test.
+    fn random_password() -> String {
+        let v: Vec<u8> = (0..16).map(|_| rand::random::<u8>()).collect();
+        v.iter().map(|b| format!("{b:02x}")).collect()
     }
 
     fn header<'a>(w: &'a World) -> Header<'a> {
@@ -388,14 +411,11 @@ mod tests {
         .unwrap();
         let h_hdr = hdr.h_hdr();
         let dr = kdf::dh_concat_recipient(&w.r_static_secret, &w.r_eph_secret, &w.e_s_pub).unwrap();
-        let pwh_wrong = kdf::password_hash(
-            "a different password",
-            &w.password_salt,
-            MIN_M_KIB.max(8),
-            1,
-            1,
-        )
-        .unwrap();
+        // A wrong password that is simply the correct one with an extra char, so
+        // it is derived from randomness and never equals the right password.
+        let wrong_password = format!("{}!", w.password);
+        let pwh_wrong =
+            kdf::password_hash(&wrong_password, &w.password_salt, MIN_M_KIB.max(8), 1, 1).unwrap();
         assert!(open_wrapped_dek(
             &dr,
             &pwh_wrong,

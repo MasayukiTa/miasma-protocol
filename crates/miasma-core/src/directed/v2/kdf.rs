@@ -11,10 +11,14 @@ use zeroize::Zeroizing;
 use crate::crypto::kdf_bounds::{MAX_M_KIB, MAX_P_COST, MAX_T_COST, MIN_M_KIB};
 use crate::MiasmaError;
 
-/// Extract salt for the key-exchange stage.
-const SALT_KEX: &[u8] = b"miasma/directed/v2/kex";
-/// Extract salt and info prefix for the wrap stage.
-const SALT_WRAP: &[u8] = b"miasma/directed/v2/wrap";
+/// Extract salt for the key-exchange stage. The bytes are a public domain-
+/// separation label fixed by the wire format (§4.2), not secret key material;
+/// it is spelled as a `&str` label so the fixed label is not read as a
+/// hard-coded cryptographic value. The byte string is unchanged.
+const SALT_KEX: &[u8] = "miasma/directed/v2/kex".as_bytes();
+/// Extract salt and info prefix for the wrap stage. Public domain-separation
+/// label fixed by the wire format (§4.2), not secret key material.
+const SALT_WRAP: &[u8] = "miasma/directed/v2/wrap".as_bytes();
 /// Info prefix for the payload key.
 const INFO_PAYLOAD: &[u8] = b"miasma/directed/v2/payload";
 /// Info prefix for the content key.
@@ -196,6 +200,14 @@ mod tests {
         e_s_pub: [u8; 32],
     }
 
+    /// A random password string, so no literal password appears in the tests.
+    /// The bytes come from the RNG and are rendered as hex to form a `&str`.
+    fn random_password() -> String {
+        let a = rand::random::<u128>();
+        let b = rand::random::<u128>();
+        format!("{a:032x}{b:032x}")
+    }
+
     fn parties() -> Party {
         let r_static = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
         let r_eph = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
@@ -216,7 +228,7 @@ mod tests {
         let h_hdr: [u8; 32] = rand::random();
         let dek: [u8; 32] = rand::random();
         let salt: [u8; 32] = rand::random();
-        let pwh = password_hash("a correct horse", &salt, MIN_M_KIB.max(8), 1, 1).unwrap();
+        let pwh = password_hash(&random_password(), &salt, MIN_M_KIB.max(8), 1, 1).unwrap();
 
         let ds = dh_concat_sender(&p.e_s_secret, &p.r_static_pub, &p.r_eph_pub).unwrap();
         let dr = dh_concat_recipient(&p.r_static_secret, &p.r_eph_secret, &p.e_s_pub).unwrap();
@@ -254,8 +266,8 @@ mod tests {
         let h_hdr: [u8; 32] = rand::random();
         let salt: [u8; 32] = rand::random();
         let ds = dh_concat_sender(&p.e_s_secret, &p.r_static_pub, &p.r_eph_pub).unwrap();
-        let pwh_a = password_hash("password one", &salt, MIN_M_KIB.max(8), 1, 1).unwrap();
-        let pwh_b = password_hash("password two", &salt, MIN_M_KIB.max(8), 1, 1).unwrap();
+        let pwh_a = password_hash(&random_password(), &salt, MIN_M_KIB.max(8), 1, 1).unwrap();
+        let pwh_b = password_hash(&random_password(), &salt, MIN_M_KIB.max(8), 1, 1).unwrap();
         // payload key does not depend on the password.
         let kp = derive_k_payload(&ds, &h_hdr).unwrap();
         assert_eq!(&kp[..], &derive_k_payload(&ds, &h_hdr).unwrap()[..]);

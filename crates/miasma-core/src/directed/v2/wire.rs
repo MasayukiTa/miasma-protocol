@@ -9,6 +9,71 @@ use serde::{Deserialize, Serialize};
 
 use crate::directed::envelope::{DirectedEnvelope, EnvelopeState};
 
+/// Serde helper for `[u8; 64]` fields.
+///
+/// serde does not implement `Serialize`/`Deserialize` for arrays longer than 32
+/// elements, so the signature and binding fields need an explicit codec. This
+/// writes the 64 bytes as a fixed-length tuple (no length prefix), matching the
+/// wire shape the design fixes for these fields and the encoding bincode already
+/// uses for the shorter `[u8; N]` fields in the same structs.
+mod bytes64 {
+    use serde::de::{Error, SeqAccess, Visitor};
+    use serde::ser::SerializeTuple;
+    use serde::{Deserializer, Serializer};
+    use std::fmt;
+
+    const LEN: usize = 64;
+
+    pub fn serialize<S>(value: &[u8; LEN], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut tup = serializer.serialize_tuple(LEN)?;
+        for byte in value.iter() {
+            tup.serialize_element(byte)?;
+        }
+        tup.end()
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; LEN], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct Bytes64Visitor;
+
+        impl<'de> Visitor<'de> for Bytes64Visitor {
+            type Value = [u8; LEN];
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "an array of {LEN} bytes")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut out = [0u8; LEN];
+                for (i, slot) in out.iter_mut().enumerate() {
+                    *slot = seq
+                        .next_element()?
+                        .ok_or_else(|| Error::invalid_length(i, &self))?;
+                }
+                Ok(out)
+            }
+
+            fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+            where
+                E: Error,
+            {
+                v.try_into()
+                    .map_err(|_| Error::invalid_length(v.len(), &self))
+            }
+        }
+
+        deserializer.deserialize_tuple(LEN, Bytes64Visitor)
+    }
+}
+
 /// Directed suite identifier for v2 (fixed value).
 pub const SUITE_V2: u8 = 2;
 
@@ -33,6 +98,7 @@ pub struct InviteExtV2 {
     /// Sender's Ed25519 identity public key.
     pub sender_identity: [u8; 32],
     /// Signature binding `sender_identity` to the X25519 sharing key.
+    #[serde(with = "bytes64")]
     pub sender_binding: [u8; 64],
     /// Recipient's Ed25519 identity public key.
     pub recipient_identity: [u8; 32],
@@ -45,6 +111,7 @@ pub struct InviteExtV2 {
     /// Nonce for the DEK wrap.
     pub dek_nonce: [u8; 24],
     /// Sender's signature over the transcript.
+    #[serde(with = "bytes64")]
     pub signature: [u8; 64],
 }
 
@@ -81,12 +148,14 @@ pub struct SignedOffer {
     /// Recipient's X25519 sharing key (`R_static`).
     pub recipient_sharing: [u8; 32],
     /// Signature binding the sharing key to the identity.
+    #[serde(with = "bytes64")]
     pub recipient_binding: [u8; 64],
     /// Recipient ephemeral (`r_eph`) public key.
     pub recipient_ephemeral: [u8; 32],
     /// Advertised lifetime in seconds (display only).
     pub ttl_secs: u32,
     /// Recipient's signature over the offer.
+    #[serde(with = "bytes64")]
     pub signature: [u8; 64],
 }
 
@@ -234,7 +303,10 @@ mod tests {
     use super::*;
 
     fn rand_arr<const N: usize>() -> [u8; N] {
-        rand::random::<[u8; N]>()
+        // `rand::random::<[u8; N]>()` only covers N <= 32; build the bytes one
+        // draw at a time and convert, so any N works and no fixed value appears.
+        let bytes: Vec<u8> = (0..N).map(|_| rand::random::<u8>()).collect();
+        bytes.try_into().expect("N bytes collected")
     }
 
     fn sample_envelope() -> DirectedEnvelope {
@@ -271,7 +343,7 @@ mod tests {
             recipient_identity: rand_arr(),
             offer_id: rand_arr(),
             recipient_ephemeral: rand_arr(),
-            wrapped_dek: rand::random::<[u8; 48]>().to_vec(),
+            wrapped_dek: rand_arr::<48>().to_vec(),
             dek_nonce: rand_arr(),
             signature: rand_arr(),
         }
@@ -282,7 +354,7 @@ mod tests {
             suite: SUITE_V2,
             offer_id: rand_arr(),
             request_id: rand_arr(),
-            requester: rand::random::<[u8; 38]>().to_vec(),
+            requester: rand_arr::<38>().to_vec(),
             recipient_identity: rand_arr(),
             recipient_sharing: rand_arr(),
             recipient_binding: rand_arr(),
@@ -390,5 +462,33 @@ mod tests {
         let s = error_string(codes::KEY_MISMATCH, "contact key differs");
         assert_eq!(parse_error_code(&s), Some(codes::KEY_MISMATCH));
         assert!(parse_error_code("plain text").is_none());
+    }
+
+    #[test]
+    fn bytes64_fields_survive_a_bincode_roundtrip() {
+        // The `bytes64` codec is used for the `[u8; 64]` binding and signature
+        // fields. A full encode/decode of `InviteExtV2` must return those two
+        // 64-byte fields unchanged. `InviteExtV2` has no `PartialEq`, so the
+        // two long fields are compared byte-for-byte.
+        let ext = sample_ext();
+        let sender_binding = ext.sender_binding;
+        let signature = ext.signature;
+        let bytes = bincode::serialize(&ext).unwrap();
+        let back: InviteExtV2 = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(&back.sender_binding[..], &sender_binding[..]);
+        assert_eq!(&back.signature[..], &signature[..]);
+    }
+
+    #[test]
+    fn bytes64_encodes_as_sixty_four_bytes_with_no_length_prefix() {
+        // The codec writes the 64 bytes as a fixed-length tuple: exactly 64
+        // bytes, no length prefix. `SignedOffer.recipient_binding` is a
+        // `[u8; 64]` field that sits between two 32-byte fields, so the three
+        // together occupy 128 bytes if and only if each `[u8; 64]` is 64 bytes.
+        let offer = sample_offer();
+        let bytes = bincode::serialize(&offer).unwrap();
+        let back: SignedOffer = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(&back.recipient_binding[..], &offer.recipient_binding[..]);
+        assert_eq!(&back.signature[..], &offer.signature[..]);
     }
 }

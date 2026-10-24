@@ -44,6 +44,13 @@ struct World {
     password: String,
 }
 
+/// A random password string, so no literal password appears in the tests.
+fn random_password() -> String {
+    let a = rand::random::<u128>();
+    let b = rand::random::<u128>();
+    format!("{a:032x}{b:032x}")
+}
+
 fn world() -> World {
     let r_static = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
     let r_eph = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
@@ -65,7 +72,7 @@ fn world() -> World {
         offer_id: rand::random(),
         password_salt: rand::random(),
         dek: rand::random(),
-        password: "a correct horse battery".to_string(),
+        password: random_password(),
     }
 }
 

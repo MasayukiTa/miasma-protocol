@@ -228,10 +228,14 @@ mod tests {
     fn outer_vals() -> ([u8; 24], Vec<u8>, [u8; 24], Vec<u8>, [u8; 64]) {
         (
             rand::random(),
-            rand::random::<[u8; 40]>().to_vec(),
+            (0..40).map(|_| rand::random::<u8>()).collect::<Vec<u8>>(),
             rand::random(),
-            rand::random::<[u8; 48]>().to_vec(),
-            rand::random(),
+            (0..48).map(|_| rand::random::<u8>()).collect::<Vec<u8>>(),
+            (0..64)
+                .map(|_| rand::random::<u8>())
+                .collect::<Vec<u8>>()
+                .try_into()
+                .unwrap(),
         )
     }
 
