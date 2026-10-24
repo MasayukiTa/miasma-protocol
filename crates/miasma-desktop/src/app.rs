@@ -593,7 +593,7 @@ impl MiasmaApp {
             last_status_poll: now,
             launch_attempts: 0,
             logs: LogsState::new(&data_dir),
-            pqc_mode: miasma_core::logging::load_privacy(&data_dir).pqc_mode,
+            pqc_mode: miasma_core::logging::load_privacy(&data_dir).pqc_mode(),
             storage: StorageState::new(),
             updates: crate::updates::UpdatesUi::new(data_dir.clone()),
             network: crate::network_ui::NetworkUi::new(data_dir.clone()),
@@ -2985,7 +2985,7 @@ impl MiasmaApp {
             let saved =
                 miasma_core::config::set_pqc_mode_persistent(&self.data_dir, chosen).is_ok();
             // The configuration is the source of truth for the choice shown.
-            self.pqc_mode = miasma_core::logging::load_privacy(&self.data_dir).pqc_mode;
+            self.pqc_mode = miasma_core::logging::load_privacy(&self.data_dir).pqc_mode();
             if !saved || self.pqc_mode != chosen {
                 self.set_msg(MsgKind::Error, self.pq().save_failed);
             }

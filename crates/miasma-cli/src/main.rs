@@ -993,10 +993,7 @@ async fn cmd_status(data_dir: &std::path::Path) -> Result<()> {
             print_logging_status(data_dir);
             println!(
                 "  Advanced encryption: {}",
-                pqc_line(
-                    miasma_core::logging::load_privacy(data_dir).pqc_mode,
-                    Some(&s.pqc)
-                )
+                pqc_line(&miasma_core::logging::load_privacy(data_dir), Some(&s.pqc))
             );
             if s.wss_port > 0 {
                 let tls_tag = if s.wss_tls_enabled {
@@ -1142,26 +1139,32 @@ fn print_logging_status(data_dir: &std::path::Path) {
 /// the configured mode, whether this build can do it, and (while the
 /// background service runs) what came of it so far.
 fn pqc_line(
-    configured: miasma_core::config::PqcMode,
+    privacy: &miasma_core::config::PrivacyConfig,
     running: Option<&miasma_core::chat::ipc::PqcStatus>,
 ) -> String {
     pqc_line_for(
-        configured,
+        privacy.pqc_mode(),
+        privacy.pqc_mode.is_none(),
         miasma_core::config::PqcMode::available(),
         running,
     )
 }
 
 /// `pqc_line` with the availability of this build given, so both builds can be
-/// tested from one.
+/// tested from one. `by_default` is true when nobody set `privacy.pqc_mode`.
 fn pqc_line_for(
     configured: miasma_core::config::PqcMode,
+    by_default: bool,
     available: bool,
     running: Option<&miasma_core::chat::ipc::PqcStatus>,
 ) -> String {
     use miasma_core::config::PqcMode;
     let mut s = configured.to_string();
     if !available {
+        if by_default {
+            // Nobody asked for it; do not make it sound like a request.
+            return "off (not in this build: private conversations stay standard)".to_owned();
+        }
         if configured != PqcMode::Off {
             s.push_str(
                 " (this build has no advanced encryption: private conversations stay standard)",
@@ -1169,8 +1172,15 @@ fn pqc_line_for(
         }
         return s;
     }
-    if configured == PqcMode::Off {
-        s.push_str(" (available in this build; turn it on with `privacy.pqc_mode`)");
+    match configured {
+        PqcMode::Off => {
+            s.push_str(" (available in this build; turn it on with `privacy.pqc_mode`)");
+        }
+        PqcMode::Prefer if by_default => {
+            s.push_str(" (on when the contact supports it; this is the default)");
+        }
+        PqcMode::Prefer => s.push_str(" (on when the contact supports it)"),
+        PqcMode::Require => {}
     }
     if let Some(p) = running.filter(|p| p.available && p.mode != "off") {
         let c = &p.counts;
@@ -1457,7 +1467,7 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
         );
         println!(
             "Advanced encryption: {}",
-            pqc_line(privacy.pqc_mode, daemon_status.as_ref().map(|s| &s.pqc))
+            pqc_line(&privacy, daemon_status.as_ref().map(|s| &s.pqc))
         );
 
         if let Ok((quota_mb, hosted_quota_mb, listen_addr)) = &config_info {
@@ -1933,7 +1943,7 @@ fn cmd_config_loaded(
                     println!("{}", config.privacy.diagnostic_logging)
                 }
                 "privacy.log_buffer_mib" => println!("{}", config.privacy.log_buffer_mib),
-                "privacy.pqc_mode" => println!("{}", config.privacy.pqc_mode),
+                "privacy.pqc_mode" => println!("{}", config.privacy.pqc_mode()),
                 "update.mode" => println!("{}", config.update.mode),
                 "update.channel" => println!("{}", config.update.channel),
                 "update.check_at_start" => println!("{}", config.update.check_at_start),
@@ -2066,7 +2076,7 @@ fn cmd_config_loaded(
                              stay standard"
                         );
                     }
-                    config.privacy.pqc_mode = mode;
+                    config.privacy.pqc_mode = Some(mode);
                     eprintln!("takes effect the next time the background service starts");
                 }
                 "update.mode" => {
@@ -4402,22 +4412,32 @@ mod pqc_status_line_tests {
 
     #[test]
     fn a_build_with_the_feature_says_advanced_encryption_is_available() {
-        let off = pqc_line_for(PqcMode::Off, true, None);
+        let off = pqc_line_for(PqcMode::Off, false, true, None);
         assert!(off.starts_with("off"), "{off}");
         assert!(off.contains("available in this build"), "{off}");
-        // Once on, the line is the mode itself (the counters follow when the
-        // background service runs).
-        assert_eq!(pqc_line_for(PqcMode::Prefer, true, None), "prefer");
-        assert_eq!(pqc_line_for(PqcMode::Require, true, None), "require");
+        // The default says what it does and that it is the default (the
+        // counters follow when the background service runs).
+        let dflt = pqc_line_for(PqcMode::Prefer, true, true, None);
+        assert!(
+            dflt.starts_with("prefer (on when the contact supports it"),
+            "{dflt}"
+        );
+        assert!(dflt.contains("default"), "{dflt}");
+        let chosen = pqc_line_for(PqcMode::Prefer, false, true, None);
+        assert_eq!(chosen, "prefer (on when the contact supports it)");
+        assert_eq!(pqc_line_for(PqcMode::Require, false, true, None), "require");
     }
 
     #[test]
     fn a_build_without_the_feature_says_so_only_when_it_matters() {
-        assert_eq!(pqc_line_for(PqcMode::Off, false, None), "off");
+        assert_eq!(pqc_line_for(PqcMode::Off, false, false, None), "off");
         for mode in [PqcMode::Prefer, PqcMode::Require] {
-            let s = pqc_line_for(mode, false, None);
+            let s = pqc_line_for(mode, false, false, None);
             assert!(s.contains("no advanced encryption"), "{s}");
             assert!(!s.contains("available"), "{s}");
         }
+        // The untouched default is not reported as a setting this build ignores.
+        let d = pqc_line_for(PqcMode::Prefer, true, false, None);
+        assert!(d.starts_with("off (not in this build"), "{d}");
     }
 }

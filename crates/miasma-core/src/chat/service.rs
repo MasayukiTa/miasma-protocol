@@ -104,6 +104,8 @@ impl Default for ChatSettings {
             inbound_burst: 20.0,
             inbound_per_minute: 30.0,
             group_auto_join: true,
+            // Baseline for tests and embedders; the daemon takes the mode from
+            // `privacy.pqc_mode` (default `prefer`) when it starts.
             pqc_mode: PqcMode::Off,
             anchor_dir: None,
         }
@@ -214,16 +216,17 @@ pub fn start_for_daemon(
     let settings = ChatSettings {
         max_message_bytes: cfg.chat.max_message_bytes.clamp(1, proto::MAX_TEXT_BYTES),
         group_auto_join: cfg.chat.group_auto_join,
-        pqc_mode: cfg.privacy.pqc_mode,
+        pqc_mode: cfg.privacy.pqc_mode(),
         anchor_dir: crate::paths::anchor_dir(data_dir),
         ..ChatSettings::default()
     };
-    if cfg.privacy.pqc_mode != PqcMode::Off && !PqcMode::available() {
+    // Only a value somebody set is worth a warning; the default is not a request.
+    if cfg.privacy.pqc_mode.is_some_and(|m| m != PqcMode::Off) && !PqcMode::available() {
         // Said once, plainly: the setting is on but this build cannot do it.
         warn!(
             "privacy.pqc_mode is {} but this build has no advanced encryption; \
              private conversations stay standard",
-            cfg.privacy.pqc_mode
+            cfg.privacy.pqc_mode()
         );
     }
     let svc = ChatService::start(

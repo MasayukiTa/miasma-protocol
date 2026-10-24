@@ -1,7 +1,7 @@
-# Hybrid key exchange for private conversations (opt-in)
+# Hybrid key exchange for private conversations
 
-**Status: beta, opt-in, off by default. This wiring has not been reviewed by an
-outside cryptographer.** The primitives come from a maintained library (see
+**Status: beta, on by default (`prefer`: used when the contact supports it).
+This wiring has not been reviewed by an outside cryptographer.** The primitives come from a maintained library (see
 `dependency-review-mlkem.md`); the way they are combined with the existing
 conversation sessions is new code written for this project and is subject to
 external cryptographic review before anyone relies on it.
@@ -24,10 +24,14 @@ what lets every build keep talking to every other build.
 
 | value     | behaviour |
 |-----------|-----------|
-| `off`     | Default. The build offers nothing and answers nothing. Bytes on the wire are those of a build without the feature. |
-| `prefer`  | Offer the upgrade. Use it when the contact agrees; otherwise keep the classical session and show "classical only". Messages are never held back. |
+| `off`     | The build offers nothing and answers nothing. Bytes on the wire are those of a build without the feature. |
+| `prefer`  | Default. Offer the upgrade. Use it when the contact agrees; otherwise keep the classical session and show "classical only". Messages are never held back. |
 | `require` | Send messages to a contact only after the upgrade with that contact finished. If the contact cannot do it (or the exchange fails), the messages fail on this device with a stated reason. Nothing is sent in the classical session. The contact's own settings are not affected. |
 
+* The default is `prefer`. The key is written to `config.toml` only after a
+  person has chosen a value; a file without it means "never chosen". Settings
+  and `miasma status` then say "on when the contact supports it" and that this
+  is the default.
 * Turning the setting off stops new upgrades and the answers to offers. A
   session that was already upgraded keeps using its key (dropping it would only
   weaken the messages, and the contact still sends layered ones); the key goes
@@ -58,10 +62,12 @@ addition every capability downgrade is counted by the existing
 The cargo feature `pqc` of `miasma-core` (passed through as `pqc` by
 `miasma-cli`, `miasma-desktop` and `miasma-ffi`) is **on by default for the
 desktop and command-line programs** and off for `miasma-ffi` (the mobile
-library) and for `miasma-core` on its own. The setting `privacy.pqc_mode` is
-still `off` until a person changes it, so a release build behaves like one
-without the feature until then. A desktop or CLI build can leave it out with
-`--no-default-features`; Settings then shows the choices switched off.
+library) and for `miasma-core` on its own. The setting `privacy.pqc_mode`
+defaults to `prefer`, so a release build offers the upgrade to every contact
+until a person changes it. A desktop or CLI build can leave it out with
+`--no-default-features`; Settings then shows the choices switched off. The
+mobile library does not run the chat service and does not enable the feature
+(see "Mobile" below).
 
 The dependency adds `ml-kem` and a second `rand_core`
 version to the tree, and binary size and build time could not be measured
@@ -77,8 +83,42 @@ With the feature off the negotiation and exchange code is not compiled and the
 daemon behaves exactly as before. One small, always compiled piece is shared:
 the message-key layering helper in `chat/crypto.rs`, which is never given a
 key in such a build. A build without the feature that finds
-`privacy.pqc_mode = prefer|require` says so (log line, `miasma config`,
-`miasma status`, desktop Settings) and stays classical; it does not pretend.
+`privacy.pqc_mode = prefer|require` set by a person says so (log line,
+`miasma config`, `miasma status`, desktop Settings) and stays classical; it does
+not pretend. The untouched default is not reported as a setting it ignores:
+`miasma status` says "off (not in this build ...)".
+
+## Existing configuration files
+
+Before the default changed, every save of `config.toml` wrote
+`pqc_mode = "off"`, chosen or not, so a plain change of the default would never
+have reached existing installs. The file now carries
+`privacy.pqc_default_version` (written by every save; a file without it counts
+as 0) and `pqc_mode` is written only when set:
+
+* version 0 with `pqc_mode = "off"` (or without the key): read as never chosen,
+  that is `prefer`;
+* version 0 with `prefer` or `require`: kept;
+* version 1 or later: whatever is written is a choice, including `off`, and is
+  kept.
+
+No step is needed. The migration happens on load; the file is rewritten by the
+next save. Known limit: a version-0 file cannot show whether `off` was chosen or
+only saved as the old default (for example someone who tried `prefer` and went
+back), so those people get `prefer` and can set `off` again in Settings or with
+`miasma config --key privacy.pqc_mode --value off`. A choice of `off` made after
+the change is kept. If an older build rewrites the file, it drops the version
+key and writes `off` again, and the next start of this build reads it as never
+chosen.
+
+## Mobile
+
+`miasma-ffi` keeps the feature off. It does not start the chat service (the
+only reference to chat there is a default `ChatConfig`), so the setting would
+change nothing, and CI only runs `cargo check -p miasma-ffi --features pqc` on
+the host: there is no Android or iOS target build in CI that includes `ml-kem`.
+Enabling it needs, first, a chat service in the mobile library, and an
+Android and iOS target build with the feature checked in CI.
 
 ## Design
 
@@ -144,6 +184,8 @@ out-of-order delivery work as before.
 The owner's rule: builds of any version keep talking; nothing fails merely
 because the peer is older or newer; a downgrade is visible, never silent.
 
+* The default does not change the bytes sent to a contact with the setting off
+  or an older build beyond the one record described next.
 * Old builds: the envelope, frame and acknowledgement bytes are those they
   always read. The only new thing a `prefer`/`require` build sends to a contact
   that does not know the upgrade is one sealed record of kind `0x20`. A build

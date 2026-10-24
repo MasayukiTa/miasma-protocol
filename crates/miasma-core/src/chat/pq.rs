@@ -1,7 +1,7 @@
-//! Opt-in hybrid (X25519 + ML-KEM-768) upgrade of a private-conversation
-//! session. Compiled only with the `pqc` cargo feature; off by default, and
-//! even in a build that has it, nothing below acts unless
-//! `privacy.pqc_mode` is `prefer` or `require`.
+//! Hybrid (X25519 + ML-KEM-768) upgrade of a private-conversation
+//! session. Compiled only with the `pqc` cargo feature; in a build that has it,
+//! nothing below acts unless `privacy.pqc_mode` is `prefer` (the default) or
+//! `require`.
 //!
 //! This wiring has not been reviewed by an outside cryptographer. See
 //! `docs/pqc-session-upgrade.md` for the design, the limits and what is not
