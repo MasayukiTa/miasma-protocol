@@ -267,6 +267,10 @@ try {
         Write-Host "  desktop stdout:"; Get-Content $deskOut -ErrorAction SilentlyContinue | Select-Object -First 20 | ForEach-Object { Write-Host "    $_" }
         Write-Host "  session: $([Diagnostics.Process]::GetCurrentProcess().SessionId); display adapters:"
         Get-CimInstance Win32_VideoController | ForEach-Object { Write-Host "    $($_.Name) driver $($_.DriverVersion)" }
+        Write-Host "  recent application errors mentioning miasma:"
+        Get-WinEvent -FilterHashtable @{ LogName = "Application"; StartTime = (Get-Date).AddMinutes(-10) } -ErrorAction SilentlyContinue |
+            Where-Object { $_.Message -match "miasma" } | Select-Object -First 3 |
+            ForEach-Object { Write-Host ("    " + (($_.Message -split "`n" | Select-Object -First 8) -join " | ")) }
     }
     Check "daemon.port written by the service the desktop started" (Test-Path $portFile) "no daemon.port within 60s"
     $svc = @(Get-CimInstance Win32_Process -Filter "Name='miasma.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($script:dataDir) -and $_.CommandLine -match "daemon" })

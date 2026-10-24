@@ -269,6 +269,10 @@ jobs:
 
       - name: Smoke test the installer
         shell: pwsh
+        env:
+          # Make Mesa use its CPU renderer (its default driver on Windows is Direct3D 12).
+          GALLIUM_DRIVER: llvmpipe
+          RUST_BACKTRACE: '1'
         run: |
           $installerArgs = @{
             SoftwareGlDir   = $env:MESA_DIR
