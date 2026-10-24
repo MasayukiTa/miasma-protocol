@@ -623,6 +623,20 @@ fn retrieve_inner(
 ) -> Result<Vec<u8>, MiasmaError> {
     validate_params(params.data_shards, params.total_shards)?;
 
+    // The web build reads only the version-1 (Suite1) object format. A newer
+    // share (version 2 and up) is refused here with a clear message rather than
+    // failing deep inside RS/AEAD, and without duplicating the Suite2 reader in
+    // WASM. One guard covers every retrieve entry point, since all of them land
+    // here.
+    if let Some(s) = shares.iter().find(|s| s.version != 1) {
+        return Err(MiasmaError::Serialization(format!(
+            "この形式は Web 版では読めません (share version {}). \
+             デスクトップ版をご利用ください。 / this format cannot be read in the web \
+             version (share version {}); use the desktop app",
+            s.version, s.version
+        )));
+    }
+
     if shares.len() > MAX_SHARE_COUNT {
         return Err(MiasmaError::Sss(format!(
             "too many shares: {} (max {})",

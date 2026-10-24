@@ -107,6 +107,40 @@ impl MiasmaShare {
         }
     }
 
+    /// Create a `MiasmaShare` whose `version` is 2 (Suite2).
+    ///
+    /// Identical to [`new`](Self::new) in every field except the version byte,
+    /// which decides the suite a reader uses (see
+    /// [`crate::format::ObjectSuite::from_share_version`]). The writer still
+    /// produces version 1; this is used to build the Suite2 fixtures and the
+    /// reader tests, so the version-matching and the version-split reader paths
+    /// can be exercised against real shares.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_v2(
+        mid: &ContentId,
+        segment_index: u32,
+        slot_index: u16,
+        shard_data: Vec<u8>,
+        key_share: Vec<u8>,
+        nonce: [u8; 12],
+        original_len: u32,
+        timestamp: u64,
+    ) -> Self {
+        let shard_hash = *blake3::hash(&shard_data).as_bytes();
+        Self {
+            version: 2,
+            mid_prefix: mid.prefix(),
+            segment_index,
+            slot_index,
+            shard_data,
+            key_share,
+            shard_hash,
+            nonce,
+            original_len,
+            timestamp,
+        }
+    }
+
     /// The piece commitment: a domain-separated BLAKE3 over *everything in the
     /// share that decides whether it can be used*, not just the ciphertext.
     ///
