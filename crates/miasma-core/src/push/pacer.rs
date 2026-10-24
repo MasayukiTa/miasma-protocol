@@ -151,6 +151,12 @@ impl SendPacer {
         // Spend tokens only while a finite ceiling is in force; under an
         // unlimited ceiling the bucket is idle and its count is not read.
         if self.bucket_rate_bps != 0 {
+            // Refill for the time waited before this write, then spend. Without
+            // the refill here the tokens earned during the wait this method's
+            // caller just honoured would instead be banked for the next refill,
+            // letting the following chunk go free and the loop run at twice the
+            // ceiling.
+            self.refill(now, self.bucket_rate_bps);
             self.tokens -= n as f64;
             if self.tokens < 0.0 {
                 self.tokens = 0.0;
@@ -159,12 +165,18 @@ impl SendPacer {
         self.window_bytes = self.window_bytes.saturating_add(n);
         let elapsed = now.saturating_duration_since(self.window_start);
         if elapsed >= RATE_WINDOW {
-            let secs = elapsed.as_secs_f64();
-            self.measured_bps = if secs > 0.0 {
-                (self.window_bytes as f64 / secs) as u64
-            } else {
-                0
-            };
+            // Publish the rate only for a window that actually carried bytes. An
+            // empty window would compute to zero and erase the last real rate,
+            // which the chat yield relies on; keep the last rate and just slide
+            // the window forward.
+            if self.window_bytes > 0 {
+                let secs = elapsed.as_secs_f64();
+                self.measured_bps = if secs > 0.0 {
+                    (self.window_bytes as f64 / secs) as u64
+                } else {
+                    0
+                };
+            }
             self.window_bytes = 0;
             self.window_start = now;
         }
@@ -334,5 +346,58 @@ mod tests {
         assert_eq!(duration_from_secs_f64(0.0), Duration::ZERO);
         assert_eq!(duration_from_secs_f64(120.0), Duration::from_secs(60));
         assert_eq!(duration_from_secs_f64(0.5), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn record_sent_refill_keeps_send_at_ceiling() {
+        let t0 = Instant::now();
+        // 1024 KiB/s = 1 MiB/s ceiling.
+        let limit_kib = 1024u32;
+        let mut p = SendPacer::new(limit_kib, t0);
+        let ceiling = u64::from(limit_kib) * KIB;
+        // Send two chunks, honouring each requested wait. record_sent must
+        // refill for the waited time and spend, so the second chunk cannot go
+        // free: two 256 KiB chunks at 1 MiB/s take half a second, not a
+        // quarter.
+        let mut now = t0;
+        for _ in 0..2 {
+            let wait = p.delay_before_send(now, CHUNK, false);
+            now += wait;
+            p.record_sent(now, CHUNK);
+        }
+        let elapsed = now.saturating_duration_since(t0).as_secs_f64();
+        let ideal = (2 * CHUNK as u64) as f64 / ceiling as f64;
+        // Must not be faster than the ceiling allows. Before the refill fix the
+        // elapsed time was half this and the send ran at twice the ceiling.
+        assert!(
+            elapsed >= ideal - 1e-6,
+            "elapsed {elapsed} s is faster than the ceiling floor {ideal} s"
+        );
+    }
+
+    #[test]
+    fn empty_window_keeps_last_measured_rate() {
+        let t0 = Instant::now();
+        let mut p = SendPacer::new(0, t0);
+        // Warm the measured rate: 4 MiB over one second with no chat.
+        let four_mib: u64 = 4 * 1024 * 1024;
+        let chunks = four_mib / CHUNK as u64;
+        let step = Duration::from_secs(1).as_nanos() as u64 / chunks;
+        let mut now = t0;
+        for _ in 0..chunks {
+            let _ = p.delay_before_send(now, CHUNK, false);
+            now += Duration::from_nanos(step);
+            p.record_sent(now, CHUNK);
+        }
+        let warmed = p.measured_bps();
+        assert!(warmed > 0, "the first full window should publish a rate");
+        // Cross an empty window boundary: no bytes were sent, so the last real
+        // rate must survive rather than being overwritten with zero.
+        p.record_sent(now + RATE_WINDOW, 0);
+        assert_eq!(
+            p.measured_bps(),
+            warmed,
+            "an empty window must not erase the last measured rate"
+        );
     }
 }
