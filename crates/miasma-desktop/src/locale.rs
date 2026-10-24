@@ -2406,6 +2406,8 @@ contact_strings! {
     paste_what, empty_line, done_btn, invite_lead,
     qr_img_btn, qr_img_title, qr_img_busy, qr_img_drop, qr_img_overlay,
     err_img_unreadable, err_img_not_image, err_img_too_large, err_img_no_qr, err_img_not_miasma,
+    cam_btn, cam_stop, cam_starting, cam_scanning, cam_preview,
+    cam_none, cam_denied, cam_busy, cam_failed, cam_timeout, cam_left,
 }
 
 pub fn contact_strings(locale: Locale) -> &'static ContactStrings {
@@ -2585,6 +2587,17 @@ static CT_EN: ContactStrings = ContactStrings {
     err_img_too_large: "That image is too large. Crop it to the QR code or save a smaller copy.",
     err_img_no_qr: "No QR code was found in the image. Choose a sharp picture that shows the whole code.",
     err_img_not_miasma: "This QR code is not a Miasma contact code.",
+    cam_btn: "Scan with camera",
+    cam_stop: "Stop camera",
+    cam_starting: "Starting the camera...",
+    cam_scanning: "Hold the QR code in front of the camera.",
+    cam_preview: "Camera preview",
+    cam_none: "No camera was found.",
+    cam_denied: "Miasma is not allowed to use the camera. Allow it in your system settings, then try again.",
+    cam_busy: "Another app is using the camera. Close it and try again.",
+    cam_failed: "The camera could not be started.",
+    cam_timeout: "No QR code was seen for 60 seconds, so the camera was turned off.",
+    cam_left: "The camera was turned off because the window was left.",
 };
 
 static CT_JA: ContactStrings = ContactStrings {
@@ -2756,6 +2769,17 @@ static CT_JA: ContactStrings = ContactStrings {
     err_img_too_large: "画像が大きすぎます。QRコードの部分だけ切り取るか、小さく保存し直してください。",
     err_img_no_qr: "画像からQRコードが見つかりませんでした。コード全体が写った、鮮明な画像を選んでください。",
     err_img_not_miasma: "このQRコードはMiasmaの連絡先コードではありません。",
+    cam_btn: "カメラで読み取る",
+    cam_stop: "カメラを止める",
+    cam_starting: "カメラを起動しています...",
+    cam_scanning: "QRコードをカメラに向けてください。",
+    cam_preview: "カメラの映像",
+    cam_none: "カメラが見つかりません。",
+    cam_denied: "Miasmaにカメラの使用が許可されていません。システムの設定で許可してから、もう一度お試しください。",
+    cam_busy: "ほかのアプリがカメラを使っています。そのアプリを閉じてから、もう一度お試しください。",
+    cam_failed: "カメラを起動できませんでした。",
+    cam_timeout: "60秒たってもQRコードが見つからなかったので、カメラを止めました。",
+    cam_left: "ウィンドウから離れたので、カメラを止めました。",
 };
 
 // zh-CN
@@ -2928,6 +2952,17 @@ static CT_ZH_CN: ContactStrings = ContactStrings {
     err_img_too_large: "图片太大。请裁剪出二维码部分，或另存为较小的图片。",
     err_img_no_qr: "图片中没有找到二维码。请换一张清晰且完整显示二维码的图片。",
     err_img_not_miasma: "这个二维码不是 Miasma 联系人代码。",
+    cam_btn: "用摄像头扫描",
+    cam_stop: "关闭摄像头",
+    cam_starting: "正在启动摄像头...",
+    cam_scanning: "请把二维码对准摄像头。",
+    cam_preview: "摄像头画面",
+    cam_none: "没有找到摄像头。",
+    cam_denied: "Miasma 没有使用摄像头的权限。请在系统设置中允许后再试。",
+    cam_busy: "摄像头正被其他应用使用。请关闭该应用后再试。",
+    cam_failed: "无法启动摄像头。",
+    cam_timeout: "60 秒内没有看到二维码，摄像头已关闭。",
+    cam_left: "因为离开了窗口，摄像头已关闭。",
 };
 
 // Group conversations of the Chat area (their own file: `locale/group.rs`).
