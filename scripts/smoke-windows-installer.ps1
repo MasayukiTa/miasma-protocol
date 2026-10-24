@@ -108,6 +108,14 @@ function Get-MsiProducts {
     }
 }
 
+# The installer appends the folder with a trailing backslash; ignore that.
+function Test-InMachinePath {
+    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    $want = $InstallDir.TrimEnd('\')
+    foreach ($p in ($machinePath -split ';')) { if ($p.TrimEnd('\') -eq $want) { return $true } }
+    return $false
+}
+
 function Show-State($label) {
     Write-Host "  [$label] Programs and Features entries:"
     $e = @(Get-ArpEntries)
@@ -164,8 +172,7 @@ function Assert-InstallLayout([string]$Tag) {
     $dd = (Get-Item (Join-Path $InstallDir "miasma-desktop.exe") -ErrorAction SilentlyContinue).DirectoryName
     $dm = (Get-Item (Join-Path $InstallDir "miasma.exe") -ErrorAction SilentlyContinue).DirectoryName
     Check "$Tag miasma.exe sits next to miasma-desktop.exe" ($dd -and ($dd -eq $dm)) "desktop='$dd' daemon='$dm'"
-    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
-    Check "$Tag install dir is on the machine PATH" ($machinePath -split ';' -contains $InstallDir) "not found in machine PATH"
+    Check "$Tag install dir is on the machine PATH" (Test-InMachinePath) "not found in machine PATH"
     $lnk = Join-Path ([Environment]::GetFolderPath("CommonPrograms")) "Miasma Protocol\Miasma.lnk"
     Check "$Tag Start menu shortcut" (Test-Path $lnk) "missing $lnk"
 }
@@ -231,11 +238,18 @@ try {
     Check "miasma.exe init (throwaway data dir)" ((Test-Path (Join-Path $script:dataDir "master.key")) -and ($LASTEXITCODE -eq 0)) "exit code $LASTEXITCODE"
 
     Step "Phase 1: desktop app starts the background service"
-    $script:desktopProc = Start-Process -FilePath $desktop -ArgumentList @("--mode", "easy", "--data-dir", "`"$($script:dataDir)`"") -PassThru
+    New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+    $deskOut = Join-Path (Resolve-Path $LogDir) "desktop-stdout.txt"
+    $deskErr = Join-Path (Resolve-Path $LogDir) "desktop-stderr.txt"
+    $script:desktopProc = Start-Process -FilePath $desktop -ArgumentList @("--mode", "easy", "--data-dir", "`"$($script:dataDir)`"") -PassThru -RedirectStandardOutput $deskOut -RedirectStandardError $deskErr
     $portFile = Join-Path $script:dataDir "daemon.port"
     $up = Wait-Until { (Test-Path $portFile) -or $script:desktopProc.HasExited } 60
     if ($script:desktopProc.HasExited) {
         Fail "desktop stays running" "miasma-desktop.exe exited early with code $($script:desktopProc.ExitCode)"
+        Write-Host "  desktop stderr:"; Get-Content $deskErr -ErrorAction SilentlyContinue | Select-Object -First 20 | ForEach-Object { Write-Host "    $_" }
+        Write-Host "  desktop stdout:"; Get-Content $deskOut -ErrorAction SilentlyContinue | Select-Object -First 20 | ForEach-Object { Write-Host "    $_" }
+        Write-Host "  session: $([Diagnostics.Process]::GetCurrentProcess().SessionId); display adapters:"
+        Get-CimInstance Win32_VideoController | ForEach-Object { Write-Host "    $($_.Name) driver $($_.DriverVersion)" }
     }
     Check "daemon.port written by the service the desktop started" (Test-Path $portFile) "no daemon.port within 60s"
     $svc = @(Get-CimInstance Win32_Process -Filter "Name='miasma.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($script:dataDir) -and $_.CommandLine -match "daemon" })
@@ -269,8 +283,7 @@ try {
     Check "install folder removed" (-not (Test-Path $InstallDir)) "folder still exists"
     Check "Programs and Features entry removed" (@(Get-ArpEntries).Count -eq 0) "entries remain"
     Check "no MSI product left" (@(Get-MsiProducts).Count -eq 0) "product remains"
-    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
-    Check "install dir removed from the machine PATH" (-not ($machinePath -split ';' -contains $InstallDir)) "still in PATH"
+    Check "install dir removed from the machine PATH" (-not (Test-InMachinePath)) "still in PATH"
     Check "data directory untouched (user file)" (Test-Path (Join-Path $script:dataDir "keep-me.txt")) "user file gone"
     Check "data directory untouched (master.key identical)" ((Test-Path (Join-Path $script:dataDir "master.key")) -and ((Get-FileHash (Join-Path $script:dataDir "master.key") -Algorithm SHA256).Hash -eq $keyBefore)) "key changed or gone"
 
