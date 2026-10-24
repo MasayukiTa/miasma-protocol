@@ -35,7 +35,10 @@ impl std::fmt::Display for FormatError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             FormatError::Newer(v) => {
-                write!(f, "object format {v} is newer than this build supports; update Miasma")
+                write!(
+                    f,
+                    "object format {v} is newer than this build supports; update Miasma"
+                )
             }
             FormatError::Unrepresentable(what) => {
                 write!(f, "value does not fit the segment AAD: {what}")

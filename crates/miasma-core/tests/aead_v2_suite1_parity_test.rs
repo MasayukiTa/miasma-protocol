@@ -46,10 +46,17 @@ fn suite1_decryption_matches_the_shipped_aead() {
         let pt = fill_vec(&format!("suite1 plaintext {len}"), len);
 
         let ct = encrypt_with_key(&pt, &key, &nonce).expect("v1 seal");
-        assert_eq!(ct.len(), len + 16, "len {len}: ciphertext carries the 16-byte tag");
+        assert_eq!(
+            ct.len(),
+            len + 16,
+            "len {len}: ciphertext carries the 16-byte tag"
+        );
 
         let opened = decrypt(&ct, &key, &nonce).expect("the shipped decryptor opens it");
-        assert_eq!(opened, pt, "len {len}: Suite1 round trip through the live code");
+        assert_eq!(
+            opened, pt,
+            "len {len}: Suite1 round trip through the live code"
+        );
     }
 }
 
@@ -64,10 +71,16 @@ fn suite1_decryption_refuses_a_tampered_input() {
 
     let mut other_nonce = nonce;
     other_nonce[0] ^= 1;
-    assert!(decrypt(&ct, &key, &other_nonce).is_err(), "a changed nonce is refused");
+    assert!(
+        decrypt(&ct, &key, &other_nonce).is_err(),
+        "a changed nonce is refused"
+    );
 
     ct[0] ^= 1;
-    assert!(decrypt(&ct, &key, &nonce).is_err(), "a flipped ciphertext byte is refused");
+    assert!(
+        decrypt(&ct, &key, &nonce).is_err(),
+        "a flipped ciphertext byte is refused"
+    );
 }
 
 /// A ciphertext written by the Suite2 sealer does not open through the shipped
@@ -104,8 +117,14 @@ fn the_descriptor_separates_suite1_from_suite2() {
     let s1 = ObjectSuite::Suite1.spec();
     let s2 = ObjectSuite::Suite2.spec();
 
-    assert!(matches!(s1.aad, AadLayout::None), "Suite1 binds no associated data");
-    assert!(matches!(s2.aad, AadLayout::Msa2), "Suite2 binds the 49-byte AAD");
+    assert!(
+        matches!(s1.aad, AadLayout::None),
+        "Suite1 binds no associated data"
+    );
+    assert!(
+        matches!(s2.aad, AadLayout::Msa2),
+        "Suite2 binds the 49-byte AAD"
+    );
     assert_eq!(s1.segment_key_label, b"miasma-seg-key-v1");
     assert_eq!(s1.name_key_label, b"miasma-name-key-v1");
     assert_eq!(s2.segment_key_label, b"miasma-seg-key-v2");

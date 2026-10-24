@@ -249,7 +249,12 @@ fn the_fixture_is_what_the_primitives_compute() {
 
     for c in &CASES {
         let aad = indep_case_aad(c);
-        assert_eq!(aad.to_vec(), frozen(&format!("aad_{}", c.label)), "{} aad", c.label);
+        assert_eq!(
+            aad.to_vec(),
+            frozen(&format!("aad_{}", c.label)),
+            "{} aad",
+            c.label
+        );
         let kaes = indep_seg_key(c.salt().as_ref(), &k_enc(), &aad);
         assert_eq!(
             kaes.to_vec(),
@@ -258,7 +263,12 @@ fn the_fixture_is_what_the_primitives_compute() {
             c.label
         );
         let ct = indep_seal(&kaes, &nonce(), &c.plaintext(), &aad);
-        assert_eq!(ct, frozen(&format!("ct_{}", c.label)), "{} ciphertext", c.label);
+        assert_eq!(
+            ct,
+            frozen(&format!("ct_{}", c.label)),
+            "{} ciphertext",
+            c.label
+        );
         assert_eq!(ct.len(), c.plaintext_len + TAG_LEN);
     }
 }
@@ -291,10 +301,18 @@ fn the_library_decodes_the_frozen_associated_data() {
         assert_eq!(parsed.suite, ObjectSuite::Suite2, "{}: suite", c.label);
         assert_eq!(parsed.context, c.context, "{}: context", c.label);
         assert_eq!(parsed.mid, mid_bytes(), "{}: mid", c.label);
-        assert_eq!(parsed.segment_index, c.segment_index, "{}: segment_index", c.label);
+        assert_eq!(
+            parsed.segment_index, c.segment_index,
+            "{}: segment_index",
+            c.label
+        );
         assert_eq!(parsed.data_shards, c.k as u8, "{}: k", c.label);
         assert_eq!(parsed.total_shards, c.n as u8, "{}: n", c.label);
-        assert_eq!(parsed.plaintext_len, c.plaintext_len as u32, "{}: plaintext_len", c.label);
+        assert_eq!(
+            parsed.plaintext_len, c.plaintext_len as u32,
+            "{}: plaintext_len",
+            c.label
+        );
         assert_eq!(parsed.encode(), bytes, "{}: re-encode round trip", c.label);
     }
 }
@@ -307,7 +325,12 @@ fn the_library_seals_and_opens_the_frozen_bytes() {
         let pt = c.plaintext();
         let salt = c.salt();
         let sealed = seal_segment(Zeroizing::new(k_enc()), &nonce(), &pt, &aad, salt.as_ref());
-        assert_eq!(sealed, frozen(&format!("ct_{}", c.label)), "{}: library seal vs frozen", c.label);
+        assert_eq!(
+            sealed,
+            frozen(&format!("ct_{}", c.label)),
+            "{}: library seal vs frozen",
+            c.label
+        );
         let opened = open_segment(&k_enc(), &nonce(), &sealed, &aad, salt.as_ref())
             .expect("opens with the right key, nonce and aad");
         assert_eq!(opened, pt, "{}: round trip", c.label);
@@ -329,27 +352,123 @@ fn changing_one_bound_field_refuses_the_open() {
     // whole associated data, so any change must refuse.
     let mut variants: Vec<[u8; AAD_LEN]> = Vec::new();
     // suite (two neighbouring values)
-    variants.push(indep_aad(1, c.context.as_u8(), &mid_bytes(), c.segment_index, c.k as u8, c.n as u8, c.plaintext_len as u32));
-    variants.push(indep_aad(3, c.context.as_u8(), &mid_bytes(), c.segment_index, c.k as u8, c.n as u8, c.plaintext_len as u32));
+    variants.push(indep_aad(
+        1,
+        c.context.as_u8(),
+        &mid_bytes(),
+        c.segment_index,
+        c.k as u8,
+        c.n as u8,
+        c.plaintext_len as u32,
+    ));
+    variants.push(indep_aad(
+        3,
+        c.context.as_u8(),
+        &mid_bytes(),
+        c.segment_index,
+        c.k as u8,
+        c.n as u8,
+        c.plaintext_len as u32,
+    ));
     // context
-    variants.push(indep_aad(SUITE2, 2, &mid_bytes(), c.segment_index, c.k as u8, c.n as u8, c.plaintext_len as u32));
-    variants.push(indep_aad(SUITE2, 3, &mid_bytes(), c.segment_index, c.k as u8, c.n as u8, c.plaintext_len as u32));
+    variants.push(indep_aad(
+        SUITE2,
+        2,
+        &mid_bytes(),
+        c.segment_index,
+        c.k as u8,
+        c.n as u8,
+        c.plaintext_len as u32,
+    ));
+    variants.push(indep_aad(
+        SUITE2,
+        3,
+        &mid_bytes(),
+        c.segment_index,
+        c.k as u8,
+        c.n as u8,
+        c.plaintext_len as u32,
+    ));
     // every byte of the mid (32 cases)
     for i in 0..32 {
         let mut m = mid_bytes();
         m[i] ^= 1;
-        variants.push(indep_aad(SUITE2, c.context.as_u8(), &m, c.segment_index, c.k as u8, c.n as u8, c.plaintext_len as u32));
+        variants.push(indep_aad(
+            SUITE2,
+            c.context.as_u8(),
+            &m,
+            c.segment_index,
+            c.k as u8,
+            c.n as u8,
+            c.plaintext_len as u32,
+        ));
     }
     // segment_index: +1, -1, u32::MAX
-    variants.push(indep_aad(SUITE2, c.context.as_u8(), &mid_bytes(), c.segment_index + 1, c.k as u8, c.n as u8, c.plaintext_len as u32));
-    variants.push(indep_aad(SUITE2, c.context.as_u8(), &mid_bytes(), c.segment_index - 1, c.k as u8, c.n as u8, c.plaintext_len as u32));
-    variants.push(indep_aad(SUITE2, c.context.as_u8(), &mid_bytes(), u32::MAX, c.k as u8, c.n as u8, c.plaintext_len as u32));
+    variants.push(indep_aad(
+        SUITE2,
+        c.context.as_u8(),
+        &mid_bytes(),
+        c.segment_index + 1,
+        c.k as u8,
+        c.n as u8,
+        c.plaintext_len as u32,
+    ));
+    variants.push(indep_aad(
+        SUITE2,
+        c.context.as_u8(),
+        &mid_bytes(),
+        c.segment_index - 1,
+        c.k as u8,
+        c.n as u8,
+        c.plaintext_len as u32,
+    ));
+    variants.push(indep_aad(
+        SUITE2,
+        c.context.as_u8(),
+        &mid_bytes(),
+        u32::MAX,
+        c.k as u8,
+        c.n as u8,
+        c.plaintext_len as u32,
+    ));
     // k, n
-    variants.push(indep_aad(SUITE2, c.context.as_u8(), &mid_bytes(), c.segment_index, c.k as u8 + 1, c.n as u8, c.plaintext_len as u32));
-    variants.push(indep_aad(SUITE2, c.context.as_u8(), &mid_bytes(), c.segment_index, c.k as u8, c.n as u8 + 1, c.plaintext_len as u32));
+    variants.push(indep_aad(
+        SUITE2,
+        c.context.as_u8(),
+        &mid_bytes(),
+        c.segment_index,
+        c.k as u8 + 1,
+        c.n as u8,
+        c.plaintext_len as u32,
+    ));
+    variants.push(indep_aad(
+        SUITE2,
+        c.context.as_u8(),
+        &mid_bytes(),
+        c.segment_index,
+        c.k as u8,
+        c.n as u8 + 1,
+        c.plaintext_len as u32,
+    ));
     // plaintext_len: +1, -1
-    variants.push(indep_aad(SUITE2, c.context.as_u8(), &mid_bytes(), c.segment_index, c.k as u8, c.n as u8, c.plaintext_len as u32 + 1));
-    variants.push(indep_aad(SUITE2, c.context.as_u8(), &mid_bytes(), c.segment_index, c.k as u8, c.n as u8, c.plaintext_len as u32 - 1));
+    variants.push(indep_aad(
+        SUITE2,
+        c.context.as_u8(),
+        &mid_bytes(),
+        c.segment_index,
+        c.k as u8,
+        c.n as u8,
+        c.plaintext_len as u32 + 1,
+    ));
+    variants.push(indep_aad(
+        SUITE2,
+        c.context.as_u8(),
+        &mid_bytes(),
+        c.segment_index,
+        c.k as u8,
+        c.n as u8,
+        c.plaintext_len as u32 - 1,
+    ));
 
     for (i, v) in variants.iter().enumerate() {
         assert_ne!(*v, base, "variant {i} is not actually a change");
@@ -400,7 +519,10 @@ fn a_v2_ciphertext_does_not_open_as_v1_and_the_reverse() {
     // data (see aead_known_answer_test.rs). A v1 decryptor is AES-GCM under
     // K_enc with an empty aad -- it must not open the v2 ciphertext.
     let v1_opens_v2 = indep_open(&k_enc(), &nonce(), &v2_ct, b"");
-    assert!(v1_opens_v2.is_none(), "a v1 decryptor must not open a v2 ciphertext");
+    assert!(
+        v1_opens_v2.is_none(),
+        "a v1 decryptor must not open a v2 ciphertext"
+    );
 
     // And a v1 ciphertext (K_enc, empty aad) must not open as v2 (needs the aad
     // and the HKDF-derived key).
@@ -426,7 +548,10 @@ fn agreed_len_and_version(shares: &[miasma_core::MiasmaShare]) -> Option<(u32, u
     let first = shares.first()?;
     let len = first.original_len;
     let ver = first.version;
-    if shares.iter().any(|s| s.original_len != len || s.version != ver) {
+    if shares
+        .iter()
+        .any(|s| s.original_len != len || s.version != ver)
+    {
         return None;
     }
     Some((len, ver))
@@ -457,11 +582,19 @@ fn disagreeing_shares_are_refused_before_the_open() {
 
     // One share reports a different plaintext length: refuse before the open.
     let bad_len = vec![mk(64, 2), mk(65, 2), mk(64, 2)];
-    assert_eq!(agreed_len_and_version(&bad_len), None, "a length mismatch must be refused");
+    assert_eq!(
+        agreed_len_and_version(&bad_len),
+        None,
+        "a length mismatch must be refused"
+    );
 
     // One share claims a different version: refuse before the open.
     let bad_ver = vec![mk(64, 2), mk(64, 1), mk(64, 2)];
-    assert_eq!(agreed_len_and_version(&bad_ver), None, "a version mismatch must be refused");
+    assert_eq!(
+        agreed_len_and_version(&bad_ver),
+        None,
+        "a version mismatch must be refused"
+    );
 }
 
 // --- Section 5.3 item 5: round trip over the length boundaries ---------------
@@ -570,12 +703,30 @@ fn the_sealed_name_v2_is_bound_to_the_suite_and_the_mid() {
 
 #[test]
 fn the_object_suite_maps_versions_both_ways() {
-    assert_eq!(ObjectSuite::from_share_version(1).unwrap(), ObjectSuite::Suite1);
-    assert_eq!(ObjectSuite::from_share_version(2).unwrap(), ObjectSuite::Suite2);
-    assert_eq!(ObjectSuite::from_manifest_version(3).unwrap(), ObjectSuite::Suite1);
-    assert_eq!(ObjectSuite::from_manifest_version(4).unwrap(), ObjectSuite::Suite2);
-    assert_eq!(ObjectSuite::from_envelope_version(1).unwrap(), ObjectSuite::Suite1);
-    assert_eq!(ObjectSuite::from_envelope_version(2).unwrap(), ObjectSuite::Suite2);
+    assert_eq!(
+        ObjectSuite::from_share_version(1).unwrap(),
+        ObjectSuite::Suite1
+    );
+    assert_eq!(
+        ObjectSuite::from_share_version(2).unwrap(),
+        ObjectSuite::Suite2
+    );
+    assert_eq!(
+        ObjectSuite::from_manifest_version(3).unwrap(),
+        ObjectSuite::Suite1
+    );
+    assert_eq!(
+        ObjectSuite::from_manifest_version(4).unwrap(),
+        ObjectSuite::Suite2
+    );
+    assert_eq!(
+        ObjectSuite::from_envelope_version(1).unwrap(),
+        ObjectSuite::Suite1
+    );
+    assert_eq!(
+        ObjectSuite::from_envelope_version(2).unwrap(),
+        ObjectSuite::Suite2
+    );
 
     // An unknown version does not silently fall back to an older suite.
     assert!(ObjectSuite::from_share_version(3).is_err());
