@@ -478,6 +478,28 @@ spec!(
     "D18",
     "Outgoing envelopes (<id>.json) and their .peer sidecars."
 );
+spec!(
+    DIRECTED_V2_INCOMING,
+    "directed/v2/incoming",
+    Dir,
+    DataDir,
+    State,
+    Encrypt,
+    CryptoEraseOverwriteRemove,
+    "D18",
+    "v2 incoming records (<id>.json): one file per envelope, challenge and sender PeerId and ephemeral secret inline."
+);
+spec!(
+    DIRECTED_V2_OUTGOING,
+    "directed/v2/outgoing",
+    Dir,
+    DataDir,
+    State,
+    Encrypt,
+    CryptoEraseOverwriteRemove,
+    "D18",
+    "v2 outgoing records (<id>.json): one file per envelope, sender secrets inline until delivery is acknowledged."
+);
 
 spec!(
     CHAT_DIR,
@@ -1034,6 +1056,8 @@ pub const REGISTRY: &[PathSpec] = &[
     DIRECTED_DIR,
     DIRECTED_INCOMING,
     DIRECTED_OUTGOING,
+    DIRECTED_V2_INCOMING,
+    DIRECTED_V2_OUTGOING,
     CHAT_DIR,
     CHAT_SESSION,
     CHAT_HISTORY,
@@ -1190,6 +1214,14 @@ pub fn directed_incoming_dir(data_dir: &Path) -> PathBuf {
 /// `<data>/directed/outgoing`
 pub fn directed_outgoing_dir(data_dir: &Path) -> PathBuf {
     DIRECTED_OUTGOING.in_dir(data_dir)
+}
+/// `<data>/directed/v2/incoming`
+pub fn directed_v2_incoming_dir(data_dir: &Path) -> PathBuf {
+    DIRECTED_V2_INCOMING.in_dir(data_dir)
+}
+/// `<data>/directed/v2/outgoing`
+pub fn directed_v2_outgoing_dir(data_dir: &Path) -> PathBuf {
+    DIRECTED_V2_OUTGOING.in_dir(data_dir)
 }
 /// Default push inbox: `<data>/inbox`.
 pub fn default_push_inbox(data_dir: &Path) -> PathBuf {
