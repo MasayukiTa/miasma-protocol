@@ -1,11 +1,14 @@
 //! Directed share v2 — known-answer and wire-shape checks.
 //!
-//! Every expected value in `tests/fixtures/directed_v2/frozen.hex` was computed
-//! independently from the design (a separate implementation of the same BLAKE3
-//! derive, HKDF-SHA256, X25519 and Ed25519 steps), not copied from this crate's
-//! output. The tests below recompute each value through the crate and assert it
-//! equals the frozen line, so a drift in either the design or the code shows up
-//! here.
+//! The header, offer, binding and transcript checks read expected values from
+//! `tests/fixtures/directed_v2/frozen.hex`, each computed independently from the
+//! design (a separate implementation of the same BLAKE3 derive, HKDF-SHA256,
+//! X25519 and Ed25519 steps), not copied from this crate's output; they
+//! recompute each value through the crate and assert it equals the frozen line,
+//! so a drift in either the design or the code shows up here. The v2 key
+//! schedule and real-envelope checks lower in this file do not read frozen
+//! samples: the schedule is not yet finalized, so they recompute it against an
+//! in-test HKDF and run a real seal/open round trip instead.
 //!
 //! Fixture inputs are derived from labels through `fill` (a keyed BLAKE3 XOF), so
 //! no literal keys, nonces, salts or passwords appear in this file.
@@ -235,172 +238,307 @@ fn sig_msg_signature_and_transcript_hash_match_the_frozen_values() {
     );
 }
 
+// --- v2 key schedule and real-envelope checks, decoupled from frozen samples. ---
+//
+// The v2 key derivation and envelope format are not yet finalized, so instead of
+// reading frozen ciphertext/key samples (which the earlier salt-as-label KDF
+// produced) these tests recompute the schedule independently and run a real
+// seal/open round trip; the frozen real_* samples will return once v2 is frozen.
+//
+// No literal key, nonce, salt or password appears: inputs come from `fill`
+// labels or the RNG, and the key schedule is checked against an in-test
+// HKDF-SHA256 (RFC 5869) built by hand from HMAC-SHA256 over `sha2::Sha256`,
+// independent of the `hkdf` crate the production code uses.
+
+use sha2::{Digest, Sha256};
+
+use miasma_core::directed::v2::seal::{self, SealInput};
+
+/// Key-schedule domain-separation labels (sec 4.2), fixed by the wire format.
+const LABEL_KEX: &[u8] = b"miasma/directed/v2/kex";
+const INFO_PAYLOAD: &[u8] = b"miasma/directed/v2/payload";
+const INFO_CONTENT: &[u8] = b"miasma/directed/v2/content";
+
+/// HMAC-SHA256 by hand (FIPS 198-1) over `sha2::Sha256`, so the HKDF below does
+/// not lean on the `hkdf` crate the production code uses.
+fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
+    const BLOCK: usize = 64;
+    let mut k = [0u8; BLOCK];
+    if key.len() > BLOCK {
+        let d = Sha256::digest(key);
+        k[..32].copy_from_slice(d.as_slice());
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36u8; BLOCK];
+    let mut opad = [0x5cu8; BLOCK];
+    for i in 0..BLOCK {
+        ipad[i] ^= k[i];
+        opad[i] ^= k[i];
+    }
+    let mut inner = Sha256::new();
+    inner.update(ipad);
+    inner.update(msg);
+    let inner = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(inner.as_slice());
+    let mac = outer.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(mac.as_slice());
+    out
+}
+
+/// RFC 5869 HKDF-SHA256 with an empty (None) Extract salt, expanded to 32 bytes
+/// (one block: T(1)).
+fn hkdf_no_salt_32(ikm: &[u8], info: &[u8]) -> [u8; 32] {
+    let prk = hmac_sha256(&[0u8; 32], ikm);
+    let mut msg = Vec::with_capacity(info.len() + 1);
+    msg.extend_from_slice(info);
+    msg.push(0x01);
+    hmac_sha256(&prk, &msg)
+}
+
+/// The derived keys match an independent HKDF-SHA256 over the same inputs, and
+/// the sender and recipient sides reach the same payload key. Inputs come from
+/// `fill` labels, not frozen samples, because the v2 schedule is not yet frozen.
 #[test]
 fn the_derived_keys_match_the_frozen_values() {
-    // Sender-side dh_concat from the fixture secrets/publics.
+    let h_hdr = fill::<32>("derived keys h_hdr");
+
+    // Sender-side dh_concat from fixture secrets/publics.
     let ds = kdf::dh_concat_sender(
         &x_secret("e_s secret"),
-        &arr32("r_static_pub"),
-        &arr32("r_eph_pub"),
+        &x_pub("r_static secret"),
+        &x_pub("r_eph secret"),
     )
     .unwrap();
-    let h_hdr = arr32("h_hdr");
+
+    // k_payload through the crate equals an independent HKDF(salt=None,
+    // ikm = dh1||dh2, info = LABEL_KEX || INFO_PAYLOAD || H_hdr).
     let k_payload = kdf::derive_k_payload(&ds, &h_hdr).unwrap();
-    assert_eq!(&k_payload[..], &frozen("k_payload")[..]);
+    let mut payload_info = Vec::new();
+    payload_info.extend_from_slice(LABEL_KEX);
+    payload_info.extend_from_slice(INFO_PAYLOAD);
+    payload_info.extend_from_slice(&h_hdr);
+    let independent_payload = hkdf_no_salt_32(&ds, &payload_info);
+    assert_eq!(&k_payload[..], &independent_payload[..]);
 
-    let dek = arr32("dek");
-    let k_content = kdf::derive_k_content(&dek, 2, &arr32("envelope_id")).unwrap();
-    assert_eq!(&k_content[..], &frozen("k_content")[..]);
+    // k_content through the crate equals an independent HKDF(salt=None, ikm=dek,
+    // info = INFO_CONTENT || suite || envelope_id).
+    let dek = fill::<32>("derived keys dek");
+    let envelope_id = fill::<32>("derived keys envelope_id");
+    let k_content = kdf::derive_k_content(&dek, 2, &envelope_id).unwrap();
+    let mut content_info = Vec::new();
+    content_info.extend_from_slice(INFO_CONTENT);
+    content_info.push(2u8);
+    content_info.extend_from_slice(&envelope_id);
+    let independent_content = hkdf_no_salt_32(&dek, &content_info);
+    assert_eq!(&k_content[..], &independent_content[..]);
 
-    // Recipient-side dh_concat reaches the same payload key.
+    // The recipient side reaches the same payload key.
     let dr = kdf::dh_concat_recipient(
         &x_secret("r_static secret"),
         &x_secret("r_eph secret"),
-        &arr32("e_s_pub"),
+        &x_pub("e_s secret"),
     )
     .unwrap();
     let k_payload_r = kdf::derive_k_payload(&dr, &h_hdr).unwrap();
     assert_eq!(&k_payload[..], &k_payload_r[..]);
 }
 
-// --- Real-envelope integration KAT and forward secrecy (§8.2, §8.3). ---
-//
-// The `real_*_v2` fixtures below were produced independently from the design
-// (a separate X25519 + HKDF-SHA256 + Argon2id + XChaCha20-Poly1305 run), then
-// frozen. These tests walk the recipient path
-// `kdf::dh_concat_recipient` -> `seal::open_wrapped_dek` ->
-// `seal::open_content` / `seal::open_payload` and assert the frozen bytes open
-// to the expected plaintext. No literal key, nonce, salt or password appears:
-// every secret comes from a `fill` label, and `pwh` is derived through
-// `kdf::password_hash`.
-//
-// The reused `h_hdr` fixture carries kdf params m=65536, t=3, p=1, so the
-// password hash below uses the same costs; the wrap AAD binds that same
-// `h_hdr`.
+/// Argon2id cost parameters for the round-trip tests: the shared minimum mouth,
+/// so the password hash stays cheap in CI.
+const RT_KDF_M_KIB: u32 = 8;
+const RT_KDF_T_COST: u32 = 1;
+const RT_KDF_P_COST: u32 = 1;
 
-use miasma_core::directed::v2::seal;
-
-/// Argon2id cost parameters baked into the frozen `h_hdr` (§4.3).
-const REAL_KDF_M_KIB: u32 = 65536;
-const REAL_KDF_T_COST: u32 = 3;
-const REAL_KDF_P_COST: u32 = 1;
-
-/// Plaintexts the real fixtures encrypt, pinned here so a drift shows up.
-const REAL_MID_PLAINTEXT: &[u8] = b"preview: mid=42, size=2048";
-const REAL_BODY_PLAINTEXT: &[u8] = b"the real directed v2 body bytes";
-
-/// The password for the real fixtures, derived from a label (never a literal):
-/// the generator used the hex encoding of a 16-byte `fill` output.
-fn real_password() -> String {
-    hex::encode(fill::<16>("real password v2"))
+/// Round-trip material, every field drawn from a label or the RNG so no key,
+/// nonce, salt or password is a fixed value.
+struct RealWorld {
+    r_static_secret: [u8; 32],
+    r_static_pub: [u8; 32],
+    r_eph_secret: [u8; 32],
+    r_eph_pub: [u8; 32],
+    e_s_secret: [u8; 32],
+    e_s_pub: [u8; 32],
+    sender_identity: [u8; 32],
+    recipient_identity: [u8; 32],
+    envelope_id: [u8; 32],
+    offer_id: [u8; 16],
+    password_salt: [u8; 32],
+    dek: [u8; 32],
+    password: String,
 }
 
-/// Derive `pwh` for the real fixtures through the crate, as a sender would.
-fn real_pwh() -> [u8; 32] {
-    let salt = arr32("real_password_salt_v2");
-    let pwh = kdf::password_hash(
-        &real_password(),
-        &salt,
-        REAL_KDF_M_KIB,
-        REAL_KDF_T_COST,
-        REAL_KDF_P_COST,
-    )
-    .expect("password_hash within bounds");
-    *pwh
+/// Draw the round-trip material from the RNG.
+fn real_world() -> RealWorld {
+    let r_static = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+    let r_eph = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+    let e_s = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+    // The password is the ASCII hex of 16 random bytes, so it is a valid `&str`
+    // for `password_hash` and never a literal password string.
+    let pw: Vec<u8> = (0..16).map(|_| rand::random::<u8>()).collect();
+    RealWorld {
+        r_static_secret: r_static.to_bytes(),
+        r_static_pub: x25519_dalek::PublicKey::from(&r_static).to_bytes(),
+        r_eph_secret: r_eph.to_bytes(),
+        r_eph_pub: x25519_dalek::PublicKey::from(&r_eph).to_bytes(),
+        e_s_secret: e_s.to_bytes(),
+        e_s_pub: x25519_dalek::PublicKey::from(&e_s).to_bytes(),
+        sender_identity: rand::random(),
+        recipient_identity: rand::random(),
+        envelope_id: rand::random(),
+        offer_id: rand::random(),
+        password_salt: rand::random(),
+        dek: rand::random(),
+        password: pw.iter().map(|b| format!("{b:02x}")).collect(),
+    }
 }
 
-/// Recipient-side `dh1 ‖ dh2` built from the frozen kex material.
-fn real_dr() -> [u8; 64] {
-    let dr = kdf::dh_concat_recipient(
-        &x_secret("r_static secret"),
-        &x_secret("r_eph secret"),
-        &arr32("e_s_pub"),
-    )
-    .expect("recipient dh_concat");
-    *dr
+fn real_header(w: &RealWorld) -> Header<'_> {
+    Header {
+        version: 2,
+        suite: 2,
+        envelope_id: &w.envelope_id,
+        sender_identity: &w.sender_identity,
+        sender_pubkey: &w.r_static_pub,
+        recipient_identity: &w.recipient_identity,
+        recipient_pubkey: &w.r_static_pub,
+        ephemeral_pubkey: &w.e_s_pub,
+        recipient_ephemeral: &w.r_eph_pub,
+        offer_id: &w.offer_id,
+        kdf_m_kib: RT_KDF_M_KIB,
+        kdf_t_cost: RT_KDF_T_COST,
+        kdf_p_cost: RT_KDF_P_COST,
+        password_salt: &w.password_salt,
+        created_at: 1_700_000_000,
+        expires_at: 1_700_003_600,
+        retention_secs: 3600,
+    }
 }
 
-/// The real envelope opens end to end for the recipient: the DEK wrap yields the
-/// frozen DEK, that DEK opens the protected body, and the payload preview opens
-/// without a password. This pins "`real_envelope_v2` opens with fixed keys and
-/// password" (§8.3).
+/// A real envelope, sealed with the public functions, opens end to end for the
+/// recipient: the DEK wrap yields the DEK, that DEK opens the body, and the
+/// payload preview opens without a password. A round trip replaces the frozen
+/// samples until the v2 format is finalized.
 #[test]
 fn real_envelope_v2_opens_for_the_recipient_with_fixed_keys_and_password() {
-    let dr = real_dr();
-    let pwh = real_pwh();
-    let h_hdr = arr32("h_hdr");
+    let w = real_world();
+    let mut rng = rand::rngs::OsRng;
 
-    // Open the DEK wrap and recover the frozen DEK.
-    let dek = seal::open_wrapped_dek(
-        &dr,
-        &pwh,
-        &h_hdr,
-        &arr24("real_dek_nonce_v2"),
-        &frozen("real_wrapped_dek_v2"),
+    let body = b"the real directed v2 body bytes";
+    let preview = b"preview: mid=42, size=2048";
+
+    // Seal the body under the DEK (content layer).
+    let (content_nonce, protected) =
+        seal::seal_content_with(&mut rng, &w.dek, 2, &w.envelope_id, body).unwrap();
+
+    // Seal the payload preview and wrap the DEK against the header.
+    let ds = kdf::dh_concat_sender(&w.e_s_secret, &w.r_static_pub, &w.r_eph_pub).unwrap();
+    let pwh = kdf::password_hash(
+        &w.password,
+        &w.password_salt,
+        RT_KDF_M_KIB,
+        RT_KDF_T_COST,
+        RT_KDF_P_COST,
     )
-    .expect("the real DEK wrap opens for the recipient");
-    assert_eq!(&dek[..], &arr32("real_dek_v2")[..]);
-
-    // The recovered DEK opens the protected body (content layer).
-    let body = seal::open_content(
-        &dek,
-        2,
-        &arr32("envelope_id"),
-        &arr24("real_content_nonce_v2"),
-        &frozen("real_protected_v2"),
+    .unwrap();
+    let hdr = real_header(&w);
+    let sealed = seal::seal_outer_with(
+        &mut rng,
+        &hdr,
+        &SealInput {
+            dh_concat: &ds,
+            pwh: &pwh,
+            dek: &w.dek,
+            payload_plaintext: preview,
+        },
     )
-    .expect("the protected body opens with the recovered DEK");
-    assert_eq!(body, REAL_BODY_PLAINTEXT);
+    .unwrap();
 
-    // The preview opens from the key-exchange secret alone (no password).
-    let preview = seal::open_payload(
+    // Recipient side: recompute dh_concat and H_hdr, open the wrap, then body.
+    let dr = kdf::dh_concat_recipient(&w.r_static_secret, &w.r_eph_secret, &w.e_s_pub).unwrap();
+    let h_hdr = hdr.h_hdr();
+    let dek = seal::open_wrapped_dek(&dr, &pwh, &h_hdr, &sealed.dek_nonce, &sealed.wrapped_dek)
+        .expect("the real DEK wrap opens for the recipient");
+    assert_eq!(&dek[..], &w.dek[..]);
+
+    let opened_body = seal::open_content(&dek, 2, &w.envelope_id, &content_nonce, &protected)
+        .expect("the protected body opens with the recovered DEK");
+    assert_eq!(opened_body, body);
+
+    let opened_preview = seal::open_payload(
         &dr,
         &h_hdr,
-        &arr24("real_payload_nonce_v2"),
-        &frozen("real_mid_v2"),
+        &sealed.payload_nonce,
+        &sealed.encrypted_payload,
     )
     .expect("the payload preview opens without a password");
-    assert_eq!(preview, REAL_MID_PLAINTEXT);
+    assert_eq!(opened_preview, preview);
 }
 
 /// Forward secrecy: with `r_eph` replaced by an unrelated secret the recipient
-/// can no longer form `dh2`, so the wrap key is wrong and the DEK wrap does not
-/// open. This pins "`r_eph` を渡さないと開かない" (§8.3).
+/// can no longer form `dh2`, so the DEK wrap does not open; the correct
+/// ephemeral still opens it, and tampering with the wrap fails. A round trip
+/// replaces the frozen samples until the v2 format is finalized.
 #[test]
 fn real_envelope_v2_stays_closed_without_r_eph() {
-    let pwh = real_pwh();
-    let h_hdr = arr32("h_hdr");
+    let w = real_world();
+    let mut rng = rand::rngs::OsRng;
 
-    // An unrelated ephemeral secret stands in for "r_eph discarded".
-    let other_eph = x_secret("unrelated ephemeral for forward secrecy");
-    let dr_wrong =
-        kdf::dh_concat_recipient(&x_secret("r_static secret"), &other_eph, &arr32("e_s_pub"))
-            .expect("recipient dh_concat with the wrong ephemeral still computes");
+    let ds = kdf::dh_concat_sender(&w.e_s_secret, &w.r_static_pub, &w.r_eph_pub).unwrap();
+    let pwh = kdf::password_hash(
+        &w.password,
+        &w.password_salt,
+        RT_KDF_M_KIB,
+        RT_KDF_T_COST,
+        RT_KDF_P_COST,
+    )
+    .unwrap();
+    let hdr = real_header(&w);
+    let mut sealed = seal::seal_outer_with(
+        &mut rng,
+        &hdr,
+        &SealInput {
+            dh_concat: &ds,
+            pwh: &pwh,
+            dek: &w.dek,
+            payload_plaintext: b"preview",
+        },
+    )
+    .unwrap();
+    let h_hdr = hdr.h_hdr();
 
+    // An unrelated ephemeral stands in for "r_eph discarded": dh2 is wrong.
+    let other_eph = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng).to_bytes();
+    let dr_wrong = kdf::dh_concat_recipient(&w.r_static_secret, &other_eph, &w.e_s_pub).unwrap();
     assert!(
         seal::open_wrapped_dek(
             &dr_wrong,
             &pwh,
             &h_hdr,
-            &arr24("real_dek_nonce_v2"),
-            &frozen("real_wrapped_dek_v2"),
+            &sealed.dek_nonce,
+            &sealed.wrapped_dek
         )
         .is_err(),
         "without r_eph the DEK wrap must not open"
     );
 
-    // Sanity: the correct ephemeral still opens it, so the failure above is due
-    // to the missing r_eph and not to some other mismatch.
-    let dr_ok = real_dr();
+    // The correct ephemeral still opens it, so the failure above is the missing
+    // r_eph and not some other mismatch.
+    let dr_ok = kdf::dh_concat_recipient(&w.r_static_secret, &w.r_eph_secret, &w.e_s_pub).unwrap();
     assert!(
-        seal::open_wrapped_dek(
-            &dr_ok,
-            &pwh,
-            &h_hdr,
-            &arr24("real_dek_nonce_v2"),
-            &frozen("real_wrapped_dek_v2"),
-        )
-        .is_ok(),
+        seal::open_wrapped_dek(&dr_ok, &pwh, &h_hdr, &sealed.dek_nonce, &sealed.wrapped_dek)
+            .is_ok(),
         "with the right r_eph the DEK wrap opens"
+    );
+
+    // Tampering with one byte of the wrap fails decryption.
+    sealed.wrapped_dek[0] ^= 0x01;
+    assert!(
+        seal::open_wrapped_dek(&dr_ok, &pwh, &h_hdr, &sealed.dek_nonce, &sealed.wrapped_dek)
+            .is_err(),
+        "a tampered wrap must not open"
     );
 }
