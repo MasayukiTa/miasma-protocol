@@ -42,6 +42,11 @@ pub struct PublishHeader {
     /// Public parameters only (Argon2 cost, salt, wrong-password check).
     pub protection: Protection,
     pub started_at: u64,
+    /// The object suite this publish writes. 0 (the serde default) means a
+    /// journal written before this field existed, which is always Suite1. A
+    /// resumed publish keeps the suite it started with.
+    #[serde(default)]
+    pub suite: u16,
 }
 
 /// One line per completed segment.
@@ -163,6 +168,7 @@ mod tests {
             mid: "miasma:abc".into(),
             protection: Protection::None,
             started_at: 1,
+            suite: 1,
         }
     }
 

@@ -154,4 +154,21 @@ impl ObjectSuite {
             other => Err(FormatError::Newer(other)),
         }
     }
+
+    /// Whether this is the older object format. Suite1 is what shipped builds
+    /// write today; a reader shows such an object as the legacy ("old format")
+    /// form in its status. Suite2 is the newer form.
+    pub fn is_legacy(self) -> bool {
+        matches!(self, Self::Suite1)
+    }
+
+    /// A short, neutral label for the object format, for status display.
+    /// Returns "legacy" for Suite1 and "current" for Suite2.
+    pub fn status_label(self) -> &'static str {
+        if self.is_legacy() {
+            "legacy"
+        } else {
+            "current"
+        }
+    }
 }

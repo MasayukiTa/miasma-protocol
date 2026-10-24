@@ -36,8 +36,9 @@ pub use invite::{extract_share_id, invitation_text, qr_payload, share_id_from_li
 pub use share_id::{parse_transfer_id, ShareId, ShareIdError, ShareMismatch, TransferId};
 
 pub use manifest::{
-    decode_record_value, encode_record_value, open_signed_record, sanitize_file_name,
-    FetchedRecord, PieceId, SegmentEntry, SignedRecordError, TransferManifest,
+    decode_record_value, decode_record_value_any, encode_record_value, open_signed_record,
+    sanitize_file_name, DecodedManifest, FetchedRecord, ManifestV4, PieceId, SegmentEntry,
+    SignedRecordError, TransferManifest, MANIFEST_VERSION_V4,
 };
 pub use plaintext_pool::{PlaintextPool, PoolSnapshot};
 pub use progress::{Phase, TransferKind, TransferProgress, TransferState, TransferStatus};

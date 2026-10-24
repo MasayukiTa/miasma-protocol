@@ -249,6 +249,8 @@ impl MiasmaCoordinator {
                     mid: mid.to_string(),
                     protection: protection.clone(),
                     started_at: super::journal::now_secs(),
+                    // The writer is unchanged in R1: a publish is always Suite1.
+                    suite: crate::format::ObjectSuite::Suite1.id(),
                 };
                 if let Some(jp) = &journal_path {
                     PublishJournal::create(jp, &header)?;

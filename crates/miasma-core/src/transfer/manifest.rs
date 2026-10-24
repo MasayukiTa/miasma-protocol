@@ -383,6 +383,273 @@ impl TransferManifest {
     }
 }
 
+/// Manifest format version 4: the Suite2 index.
+///
+/// A v4 manifest has every field of [`TransferManifest`] (v3) in the same order
+/// and then two more: the [`ObjectSuite`] id and a bounded extension area for a
+/// later version to grow into. It rides a trailer whose version byte is 4; a v3
+/// trailer and a v3 manifest are untouched by this type, so the bytes a shipped
+/// build reads and writes do not change.
+pub const MANIFEST_VERSION_V4: u8 = 4;
+
+/// Largest `ext` area a v4 manifest may carry. A reader does not interpret the
+/// contents; the cap only bounds what an untrusted record makes a node hold.
+pub const MANIFEST_V4_MAX_EXT_BYTES: usize = 256;
+
+/// The v4 (Suite2) transfer manifest.
+///
+/// The leading fields are exactly those of [`TransferManifest`], in the same
+/// order, so the shared structure encodes and validates the same way. The two
+/// trailing fields are new: `suite` names the [`ObjectSuite`] of every share and
+/// segment the manifest indexes (always [`ObjectSuite::Suite2`] for a v4
+/// manifest), and `ext` is reserved for a later version and ignored here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestV4 {
+    pub version: u8,
+    pub mid: [u8; 32],
+    pub publisher: [u8; 32],
+    pub name: Option<String>,
+    pub data_shards: u8,
+    pub total_shards: u8,
+    pub segment_size: u32,
+    pub total_bytes: u64,
+    pub protection: Protection,
+    pub segments: Vec<SegmentEntry>,
+    /// The object suite of this manifest's shares and segments.
+    pub suite: u16,
+    /// Reserved for a later version; not interpreted by a v4 reader.
+    pub ext: Vec<u8>,
+}
+
+impl ManifestV4 {
+    /// The suite this manifest names, mapped from its version. A v4 manifest is
+    /// Suite2; an unknown `suite` id is [`FormatError::Newer`].
+    pub fn object_suite(&self) -> Result<crate::format::ObjectSuite, crate::format::FormatError> {
+        crate::format::ObjectSuite::from_id(self.suite)
+    }
+
+    pub fn params(&self) -> DissolutionParams {
+        DissolutionParams {
+            data_shards: self.data_shards as usize,
+            total_shards: self.total_shards as usize,
+        }
+    }
+
+    /// Internal consistency of the shared structure, plus the v4-only rules: the
+    /// version byte is 4, the suite is the one a v4 manifest must name, and the
+    /// extension area is within bounds. The structural checks reuse the v3 rules
+    /// by validating an equivalent [`TransferManifest`] view.
+    pub fn validate(&self) -> Result<(), MiasmaError> {
+        if self.version != MANIFEST_VERSION_V4 {
+            return Err(MiasmaError::InvalidManifest(
+                unsupported_version_message_v4(self.version),
+            ));
+        }
+        if self.ext.len() > MANIFEST_V4_MAX_EXT_BYTES {
+            return Err(MiasmaError::InvalidManifest(format!(
+                "manifest ext is {} bytes, limit {MANIFEST_V4_MAX_EXT_BYTES}",
+                self.ext.len()
+            )));
+        }
+        // The suite must be known and must be the one a v4 manifest names.
+        let suite = self
+            .object_suite()
+            .map_err(|e| MiasmaError::InvalidManifest(e.to_string()))?;
+        if suite.spec().manifest_version != MANIFEST_VERSION_V4 {
+            return Err(MiasmaError::InvalidManifest(format!(
+                "manifest suite {} does not name a version 4 manifest",
+                self.suite
+            )));
+        }
+        // Reuse the v3 structural rules on a value whose version byte is 3.
+        self.as_v3_view().validate()
+    }
+
+    /// A [`TransferManifest`] (v3) value with the same structural fields, used to
+    /// reuse the v3 structural validation. Its `version` is set to 3 so the
+    /// shared [`TransferManifest::validate`] accepts it; the v4-only fields are
+    /// not part of that structural check.
+    fn as_v3_view(&self) -> TransferManifest {
+        TransferManifest {
+            version: MANIFEST_VERSION,
+            mid: self.mid,
+            publisher: self.publisher,
+            name: self.name.clone(),
+            data_shards: self.data_shards,
+            total_shards: self.total_shards,
+            segment_size: self.segment_size,
+            total_bytes: self.total_bytes,
+            protection: self.protection.clone(),
+            segments: self.segments.clone(),
+        }
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, MiasmaError> {
+        let bytes =
+            bincode::serialize(self).map_err(|e| MiasmaError::Serialization(e.to_string()))?;
+        if bytes.len() > MANIFEST_MAX_BYTES {
+            return Err(MiasmaError::InvalidManifest(format!(
+                "manifest is {} bytes, limit {MANIFEST_MAX_BYTES}",
+                bytes.len()
+            )));
+        }
+        Ok(bytes)
+    }
+
+    /// Decode *and validate* a v4 manifest. Untrusted input.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, MiasmaError> {
+        if bytes.len() > MANIFEST_MAX_BYTES {
+            return Err(MiasmaError::InvalidManifest(format!(
+                "manifest is {} bytes, limit {MANIFEST_MAX_BYTES}",
+                bytes.len()
+            )));
+        }
+        let manifest: Self = bincode::deserialize(bytes)
+            .map_err(|e| MiasmaError::InvalidManifest(format!("decode: {e}")))?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    pub fn manifest_hash(&self) -> Result<[u8; 32], MiasmaError> {
+        Ok(*blake3::hash(&self.to_bytes()?).as_bytes())
+    }
+
+    /// The framed trailer to append to a serialized `DhtRecord`, with a version
+    /// byte of 4.
+    pub fn encode_trailer(&self) -> Result<Vec<u8>, MiasmaError> {
+        let payload = self.to_bytes()?;
+        let mut out = Vec::with_capacity(TRAILER_HEADER_LEN + payload.len());
+        out.extend_from_slice(TRAILER_MAGIC);
+        out.push(MANIFEST_VERSION_V4);
+        out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        out.extend_from_slice(&payload);
+        Ok(out)
+    }
+}
+
+/// A manifest decoded from a trailer, tagged by the version that was read.
+///
+/// A v3 trailer yields [`DecodedManifest::V3`] (a [`TransferManifest`] whose
+/// bytes and behaviour are unchanged); a v4 trailer yields
+/// [`DecodedManifest::V4`]. This lets a reader accept both versions without
+/// changing the v3-only [`decode_record_value`], which shipped builds and the
+/// frozen tests rely on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecodedManifest {
+    V3(TransferManifest),
+    V4(ManifestV4),
+}
+
+impl DecodedManifest {
+    /// The object suite this manifest names: Suite1 for v3, the manifest's own
+    /// suite for v4.
+    pub fn object_suite(&self) -> Result<crate::format::ObjectSuite, crate::format::FormatError> {
+        match self {
+            DecodedManifest::V3(_) => Ok(crate::format::ObjectSuite::Suite1),
+            DecodedManifest::V4(m) => m.object_suite(),
+        }
+    }
+
+    /// The MID digest the manifest carries.
+    pub fn mid(&self) -> [u8; 32] {
+        match self {
+            DecodedManifest::V3(m) => m.mid,
+            DecodedManifest::V4(m) => m.mid,
+        }
+    }
+
+    /// The publisher key the manifest names.
+    pub fn publisher(&self) -> [u8; 32] {
+        match self {
+            DecodedManifest::V3(m) => m.publisher,
+            DecodedManifest::V4(m) => m.publisher,
+        }
+    }
+
+    /// The share version every piece of this transfer must carry: 1 for a v3
+    /// manifest, the suite's share version for v4.
+    pub fn expected_share_version(&self) -> u8 {
+        match self {
+            DecodedManifest::V3(_) => crate::format::ObjectSuite::Suite1.spec().share_version,
+            DecodedManifest::V4(m) => match m.object_suite() {
+                Ok(s) => s.spec().share_version,
+                Err(_) => 0,
+            },
+        }
+    }
+}
+
+/// The "this build is too old" message for an unexpected v4-area version.
+fn unsupported_version_message_v4(found: u8) -> String {
+    format!(
+        "manifest version {found} is newer than this build supports ({MANIFEST_VERSION_V4}); \
+         update Miasma"
+    )
+}
+
+/// Decode a record value, accepting both a version 3 and a version 4 manifest
+/// trailer.
+///
+/// This is the reader side of R1: a v3 trailer decodes exactly as
+/// [`decode_record_value`] does (returned as [`DecodedManifest::V3`]); a v4
+/// trailer is accepted and returned as [`DecodedManifest::V4`]. A value with no
+/// trailer is a legacy record. A trailer that is present but malformed, or whose
+/// version is neither 3 nor 4, is an error -- never a silent downgrade.
+///
+/// [`decode_record_value`] is left as the v3-only reader so that a build or a
+/// copied decoder that predates v4 still refuses a v4 record with "update
+/// Miasma"; this function is the one that opts in to reading v4.
+pub fn decode_record_value_any(
+    value: &[u8],
+) -> Result<(DhtRecord, Option<DecodedManifest>), MiasmaError> {
+    use bincode::Options;
+
+    let limit = value
+        .len()
+        .min(crate::network::node::DHT_INNER_RECORD_MAX_BYTES) as u64;
+    let mut cursor = std::io::Cursor::new(value);
+    let record: DhtRecord = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .allow_trailing_bytes()
+        .with_limit(limit)
+        .deserialize_from(&mut cursor)
+        .map_err(|e| MiasmaError::Serialization(format!("record: {e}")))?;
+    let rest = &value[cursor.position() as usize..];
+    if rest.is_empty() {
+        return Ok((record, None));
+    }
+
+    if rest.len() < TRAILER_HEADER_LEN || &rest[..4] != TRAILER_MAGIC {
+        return Err(MiasmaError::InvalidManifest(
+            "unrecognized data after the record".into(),
+        ));
+    }
+    let trailer_version = rest[4];
+    let len = u32::from_le_bytes(rest[5..9].try_into().expect("4 bytes")) as usize;
+    let payload = &rest[TRAILER_HEADER_LEN..];
+    if payload.len() != len {
+        return Err(MiasmaError::InvalidManifest(format!(
+            "trailer declares {len} bytes but {} follow",
+            payload.len()
+        )));
+    }
+    let manifest = match trailer_version {
+        MANIFEST_VERSION => DecodedManifest::V3(TransferManifest::from_bytes(payload)?),
+        MANIFEST_VERSION_V4 => DecodedManifest::V4(ManifestV4::from_bytes(payload)?),
+        other => {
+            return Err(MiasmaError::InvalidManifest(unsupported_version_message(
+                other,
+            )));
+        }
+    };
+    if manifest.mid() != record.mid_digest {
+        return Err(MiasmaError::InvalidManifest(
+            "manifest MID does not match its record".into(),
+        ));
+    }
+    Ok((record, Some(manifest)))
+}
+
 fn unsupported_version_message(found: u8) -> String {
     if found < MANIFEST_VERSION {
         format!(

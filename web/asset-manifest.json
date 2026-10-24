@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "version": "9856e0cc26a91648",
+  "version": "d0a5f9e16a24da45",
   "files": {
     "css/style.css": "ed0c1639306506a22271d6ba16a1aa1df42f397677b07c6ce1f82724ecbcc89e",
     "icons/apple-touch-icon.png": "2388819c43f164216556fdeebac510c2d1dba7a73ebb4a66a2053a2eee2e6b2a",
@@ -21,7 +21,7 @@
     "js/wipe.js": "85c99e96f83bd94984ed02056e68f6897d9302634301cd16a67b6a5098dc0270",
     "manifest.json": "405e2128e4081e8133afe28832473050858fa3f5bf803b56ce938c4bcc8020a8",
     "pkg/miasma_wasm.js": "5452265110258aa822bf08aba6304f03289d8e9abea9290cfccd642a767a2e41",
-    "pkg/miasma_wasm_bg.wasm": "56b32ff2e415c8e4b95b6079ab232f598be272dfff5e7f95d653705570184b53",
+    "pkg/miasma_wasm_bg.wasm": "a6fb08006bcbcfed9e31ef64c8d1511a9e1b04ce57c47e6e2dd8a07ae198d587",
     "sw.js": "079fa94303d1130bf76b17180f1a4dc42814d2e778a0aef0ff1d96907b5e6314"
   }
 }

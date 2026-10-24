@@ -19,6 +19,7 @@ mod durable;
 mod filewrap;
 pub mod format;
 mod provider;
+pub mod recovery;
 pub mod sealed;
 pub mod stub;
 pub mod wipe;
