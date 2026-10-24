@@ -11,8 +11,8 @@
 //!   exchange with transcript binding and downgrade detection.
 //!
 //! `capability` and `fragment` are libraries; `hybrid` is used by exactly one
-//! live path: the opt-in upgrade of private-conversation sessions
-//! (`chat::pq`, default off, `pqc` feature). Nothing else uses them.
+//! live path: the upgrade of private-conversation sessions
+//! (`chat::pq`, default `prefer`, `pqc` feature). Nothing else uses them.
 
 pub mod capability;
 pub mod fragment;

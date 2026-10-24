@@ -58,19 +58,31 @@ pub struct PrivacyConfig {
     /// again.
     #[serde(default)]
     pub old_logs_keep: bool,
-    /// Hybrid post-quantum upgrade of private-conversation sessions (default
-    /// **off**). See [`PqcMode`]. Only builds with the `pqc` cargo feature act
-    /// on it; other builds ignore it and report that they cannot.
+    /// Hybrid post-quantum upgrade of private-conversation sessions. Not set
+    /// (the default) means [`PqcMode::DEFAULT`] (`prefer`); the key is written
+    /// only once a person has chosen a value. Use [`PrivacyConfig::pqc_mode`] for
+    /// the value in force. Only builds with the `pqc` cargo feature act on it;
+    /// other builds ignore it and report that they cannot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pqc_mode: Option<PqcMode>,
+    /// Which default of `pqc_mode` this file was written under. Files written
+    /// before the default became `prefer` have no such key (read as 0) and
+    /// carry `pqc_mode = "off"` merely because that was then the default; they
+    /// are read as "never chosen". Every save writes the current value, so a
+    /// choice made afterwards (including `off`) is kept as it is.
     #[serde(default)]
-    pub pqc_mode: PqcMode,
+    pub pqc_default_version: u32,
 }
+
+/// Value of [`PrivacyConfig::pqc_default_version`] written by this build.
+pub const PQC_DEFAULT_VERSION: u32 = 1;
 
 /// `privacy.pqc_mode`: whether private-conversation sessions are upgraded with
 /// a hybrid X25519 + ML-KEM-768 key exchange.
 ///
-/// * `off` (default): nothing changes. This build offers nothing and answers
+/// * `off`: nothing changes. This build offers nothing and answers
 ///   nothing, so every peer sees exactly what it saw before.
-/// * `prefer`: offer the hybrid exchange. Use it when the peer agrees; when the
+/// * `prefer` (default): offer the hybrid exchange. Use it when the peer agrees; when the
 ///   peer does not, keep the classical session and show "classical only".
 /// * `require`: messages to a contact are sent only once the hybrid exchange
 ///   with that contact has completed. If the contact does not offer it, the
@@ -79,13 +91,16 @@ pub struct PrivacyConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PqcMode {
-    #[default]
     Off,
+    #[default]
     Prefer,
     Require,
 }
 
 impl PqcMode {
+    /// What applies when a person never chose a value.
+    pub const DEFAULT: Self = Self::Prefer;
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Off => "off",
@@ -128,8 +143,8 @@ pub fn set_pqc_mode_persistent(data_dir: &Path, mode: PqcMode) -> std::io::Resul
     }
     let mut c = NodeConfig::load(data_dir)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-    if c.privacy.pqc_mode != mode {
-        c.privacy.pqc_mode = mode;
+    if c.privacy.pqc_mode != Some(mode) {
+        c.privacy.pqc_mode = Some(mode);
         c.save(data_dir)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
     }
@@ -153,12 +168,30 @@ impl Default for PrivacyConfig {
             log_buffer_mib: DEFAULT_LOG_BUFFER_MIB,
             old_logs_notice_shown: false,
             old_logs_keep: false,
-            pqc_mode: PqcMode::Off,
+            pqc_mode: None,
+            pqc_default_version: PQC_DEFAULT_VERSION,
         }
     }
 }
 
 impl PrivacyConfig {
+    /// The mode in force: the person's choice, else [`PqcMode::DEFAULT`].
+    pub fn pqc_mode(&self) -> PqcMode {
+        self.pqc_mode.unwrap_or(PqcMode::DEFAULT)
+    }
+
+    /// Read a file written under an older default: `pqc_mode = "off"` without
+    /// the version key was written by a save, not chosen, so it counts as not
+    /// set. `prefer` and `require` were always a choice and stay.
+    fn migrate_pqc_default(&mut self) {
+        if self.pqc_default_version < PQC_DEFAULT_VERSION {
+            if self.pqc_mode == Some(PqcMode::Off) {
+                self.pqc_mode = None;
+            }
+            self.pqc_default_version = PQC_DEFAULT_VERSION;
+        }
+    }
+
     /// The ring buffer size in bytes, clamped to the allowed range.
     pub fn log_buffer_bytes(&self) -> usize {
         self.log_buffer_mib
@@ -749,14 +782,19 @@ impl NodeConfig {
 
     /// [`NodeConfig::load`] for a given kind of install. Only a missing `config.toml` is
     /// answered with [`NodeConfig::default_for`]; a file that exists is read as written, so
-    /// a value the person chose is never replaced.
+    /// a value the person chose is never replaced (the one reading rule is
+    /// [`PrivacyConfig::pqc_mode`]: an `off` that only the old default wrote
+    /// counts as not chosen).
     pub fn load_with(data_dir: &Path, packaged: bool) -> Result<Self, MiasmaError> {
         let path = crate::paths::config_file(data_dir);
         if !path.exists() {
             return Ok(Self::default_for(packaged));
         }
         let raw = Zeroizing::new(std::fs::read_to_string(&path)?);
-        toml::from_str(raw.as_str()).map_err(|e| MiasmaError::Serialization(e.to_string()))
+        let mut c: Self =
+            toml::from_str(raw.as_str()).map_err(|e| MiasmaError::Serialization(e.to_string()))?;
+        c.privacy.migrate_pqc_default();
+        Ok(c)
     }
 
     /// First start of a packaged install: write the packaged defaults when there is no
@@ -1048,5 +1086,121 @@ mod store_install_tests {
         );
         assert!(!NodeConfig::seed_first_start(d.path(), true).unwrap());
         assert_eq!(read_hosted(d.path()), 256);
+    }
+}
+
+#[cfg(test)]
+mod pqc_default_tests {
+    use super::*;
+
+    /// The shape of `[privacy]` as the previous release wrote it: the mode is a
+    /// plain value, so every save carried it, chosen or not.
+    #[derive(Serialize)]
+    struct LegacyPrivacy {
+        stealth_mode: bool,
+        diagnostic_logging: bool,
+        log_buffer_mib: u32,
+        old_logs_notice_shown: bool,
+        old_logs_keep: bool,
+        pqc_mode: PqcMode,
+    }
+
+    #[derive(Serialize)]
+    struct LegacyNode {
+        privacy: LegacyPrivacy,
+    }
+
+    fn legacy_file(dir: &Path, mode: PqcMode) {
+        let old = LegacyNode {
+            privacy: LegacyPrivacy {
+                stealth_mode: true,
+                diagnostic_logging: false,
+                log_buffer_mib: 2,
+                old_logs_notice_shown: false,
+                old_logs_keep: false,
+                pqc_mode: mode,
+            },
+        };
+        let text = toml::to_string_pretty(&old).unwrap();
+        assert!(text.contains(&format!("pqc_mode = \"{mode}\"")), "{text}");
+        assert!(!text.contains("pqc_default_version"), "{text}");
+        std::fs::write(crate::paths::config_file(dir), text).unwrap();
+    }
+
+    #[test]
+    fn the_default_is_prefer_and_is_not_written_to_the_file() {
+        assert_eq!(PqcMode::default(), PqcMode::Prefer);
+        let c = NodeConfig::default();
+        assert_eq!(c.privacy.pqc_mode, None);
+        assert_eq!(c.privacy.pqc_mode(), PqcMode::Prefer);
+        let dir = tempfile::tempdir().unwrap();
+        c.save(dir.path()).unwrap();
+        let text = std::fs::read_to_string(crate::paths::config_file(dir.path())).unwrap();
+        assert!(!text.contains("pqc_mode"), "{text}");
+        assert!(text.contains("pqc_default_version = 1"), "{text}");
+        let back = NodeConfig::load(dir.path()).unwrap();
+        assert_eq!(back.privacy.pqc_mode(), PqcMode::Prefer);
+    }
+
+    #[test]
+    fn an_old_file_with_the_old_default_reads_as_never_chosen() {
+        let dir = tempfile::tempdir().unwrap();
+        legacy_file(dir.path(), PqcMode::Off);
+        let c = NodeConfig::load(dir.path()).unwrap();
+        assert_eq!(c.privacy.pqc_mode, None);
+        assert_eq!(c.privacy.pqc_mode(), PqcMode::Prefer);
+        // A file from before the key existed reads the same way.
+        std::fs::write(
+            crate::paths::config_file(dir.path()),
+            "[privacy]\nstealth_mode = true\n",
+        )
+        .unwrap();
+        assert_eq!(
+            NodeConfig::load(dir.path()).unwrap().privacy.pqc_mode(),
+            PqcMode::Prefer
+        );
+    }
+
+    #[test]
+    fn an_old_file_with_prefer_or_require_keeps_it() {
+        for mode in [PqcMode::Prefer, PqcMode::Require] {
+            let dir = tempfile::tempdir().unwrap();
+            legacy_file(dir.path(), mode);
+            let c = NodeConfig::load(dir.path()).unwrap();
+            assert_eq!(c.privacy.pqc_mode, Some(mode));
+            assert_eq!(c.privacy.pqc_mode(), mode);
+        }
+    }
+
+    #[test]
+    fn a_choice_of_off_made_after_the_change_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        legacy_file(dir.path(), PqcMode::Off);
+        // The migration is only in memory until something saves; the choice
+        // goes through the same persistent setter the programs use.
+        set_pqc_mode_persistent(dir.path(), PqcMode::Off).unwrap();
+        let text = std::fs::read_to_string(crate::paths::config_file(dir.path())).unwrap();
+        assert!(text.contains("pqc_mode = \"off\""), "{text}");
+        assert!(text.contains("pqc_default_version = 1"), "{text}");
+        for _ in 0..2 {
+            let c = NodeConfig::load(dir.path()).unwrap();
+            assert_eq!(c.privacy.pqc_mode, Some(PqcMode::Off));
+            assert_eq!(c.privacy.pqc_mode(), PqcMode::Off);
+            c.save(dir.path()).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_later_save_by_another_setting_writes_the_marker_without_choosing() {
+        let dir = tempfile::tempdir().unwrap();
+        legacy_file(dir.path(), PqcMode::Off);
+        let mut c = NodeConfig::load(dir.path()).unwrap();
+        c.privacy.diagnostic_logging = true;
+        c.save(dir.path()).unwrap();
+        let back = NodeConfig::load(dir.path()).unwrap();
+        assert!(back.privacy.diagnostic_logging);
+        assert_eq!(back.privacy.pqc_mode, None);
+        assert_eq!(back.privacy.pqc_default_version, PQC_DEFAULT_VERSION);
+        assert_eq!(back.privacy.pqc_mode(), PqcMode::Prefer);
     }
 }

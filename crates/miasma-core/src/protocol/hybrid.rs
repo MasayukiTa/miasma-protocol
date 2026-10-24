@@ -1,8 +1,8 @@
 //! Hybrid key exchange: X25519 + ML-KEM-768 (FIPS 203).
 //!
 //! Compiled only with the `pqc` cargo feature. The one live user is the
-//! opt-in upgrade of private-conversation sessions (`chat::pq`, off unless
-//! `privacy.pqc_mode` is `prefer` or `require`); see
+//! upgrade of private-conversation sessions (`chat::pq`, acts unless
+//! `privacy.pqc_mode` is `off`); see
 //! `docs/pqc-session-upgrade.md`. That wiring has not been reviewed by an
 //! outside cryptographer.
 //!

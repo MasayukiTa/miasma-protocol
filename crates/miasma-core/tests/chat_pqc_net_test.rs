@@ -261,3 +261,36 @@ async fn require_sends_once_the_peer_has_agreed() {
     until(60, "the message", || texts(&b, &a.id()).len() == 1).await;
     assert_eq!(pqc_of(&a, &b.id()).0.as_deref(), Some("hybrid"));
 }
+
+/// The mode a fresh configuration now gives (`prefer`) against the mode the
+/// previous release gave (`off`): nothing is held back in either direction, and
+/// the new-default side reports "classical only" for the older one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_default_build_and_an_old_default_build_keep_talking() {
+    let new_default = miasma_core::config::NodeConfig::default()
+        .privacy
+        .pqc_mode();
+    assert_eq!(new_default, PqcMode::Prefer);
+    let old_default: PqcMode = "off".parse().unwrap();
+    let r = relay().await;
+    let (a, b) = (peer(&r, new_default).await, peer(&r, old_default).await);
+    register(&a, b.id(), "bob");
+    register(&b, a.id(), "alice");
+    for i in 0..3 {
+        send(&a, "bob", &format!("to old {i}"));
+        send(&b, "alice", &format!("to new {i}"));
+    }
+    until(90, "all six messages", || {
+        texts(&a, &b.id()).len() == 6 && texts(&b, &a.id()).len() == 6
+    })
+    .await;
+    until(60, "classical only", || {
+        pqc_of(&a, &b.id()) == (Some("classical".into()), Some("peer_no_hybrid".into()))
+    })
+    .await;
+    assert_eq!(pqc_of(&b, &a.id()), (None, None));
+    until(30, "acknowledgements", || {
+        a.svc.core().outbox.is_empty() && b.svc.core().outbox.is_empty()
+    })
+    .await;
+}
