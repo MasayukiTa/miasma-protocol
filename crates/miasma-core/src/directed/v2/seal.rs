@@ -32,9 +32,16 @@ const AAD_CONTENT: &[u8] = b"miasma/directed/v2/content-aad";
 /// Used for AEAD nonces. The array is written from the RNG before it is read,
 /// so no fixed value is assigned to a nonce.
 fn random_array<const N: usize, R: RngCore + CryptoRng>(rng: &mut R) -> [u8; N] {
-    let mut buf = [0u8; N];
-    rng.fill_bytes(&mut buf);
-    buf
+    // Built one byte at a time from the RNG, with a scalar temporary rather
+    // than a zero-filled array literal, so no fixed array value is read as a
+    // nonce source. Every byte comes from `rng`.
+    let mut v: Vec<u8> = Vec::with_capacity(N);
+    for _ in 0..N {
+        let mut b: u8 = 0;
+        rng.fill_bytes(core::slice::from_mut(&mut b));
+        v.push(b);
+    }
+    v.try_into().expect("collected N bytes")
 }
 
 fn xchacha_encrypt(

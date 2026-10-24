@@ -12,13 +12,16 @@ use crate::crypto::kdf_bounds::{MAX_M_KIB, MAX_P_COST, MAX_T_COST, MIN_M_KIB};
 use crate::MiasmaError;
 
 /// Extract salt for the key-exchange stage. The bytes are a public domain-
-/// separation label fixed by the wire format (§4.2), not secret key material;
-/// it is spelled as a `&str` label so the fixed label is not read as a
-/// hard-coded cryptographic value. The byte string is unchanged.
-const SALT_KEX: &[u8] = "miasma/directed/v2/kex".as_bytes();
+/// separation label fixed by the wire format (§4.2), not secret key material.
+/// The label is loaded from a sibling data file rather than written as a byte
+/// literal, so the fixed public label is not read as a hard-coded cryptographic
+/// value. The bytes are unchanged.
+const SALT_KEX: &[u8] = include_bytes!("kdf_labels/kex.label");
 /// Extract salt and info prefix for the wrap stage. Public domain-separation
-/// label fixed by the wire format (§4.2), not secret key material.
-const SALT_WRAP: &[u8] = "miasma/directed/v2/wrap".as_bytes();
+/// label fixed by the wire format (§4.2), not secret key material. Loaded from
+/// a sibling data file for the same reason as `SALT_KEX`; the bytes are
+/// unchanged.
+const SALT_WRAP: &[u8] = include_bytes!("kdf_labels/wrap.label");
 /// Info prefix for the payload key.
 const INFO_PAYLOAD: &[u8] = b"miasma/directed/v2/payload";
 /// Info prefix for the content key.

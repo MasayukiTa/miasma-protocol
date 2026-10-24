@@ -41,7 +41,7 @@ fn sample_envelope() -> DirectedEnvelope {
         sender_pubkey: fill("sender sharing pub"),
         recipient_pubkey: fill("recipient sharing pub"),
         ephemeral_pubkey: fill("ephemeral pub"),
-        encrypted_payload: rand::random::<[u8; 48]>().to_vec(),
+        encrypted_payload: (0..48).map(|_| rand::random::<u8>()).collect::<Vec<u8>>(),
         payload_nonce: rand::random(),
         password_salt: rand::random(),
         expires_at: 1_700_003_600,
@@ -70,7 +70,7 @@ fn sample_ext() -> InviteExtV2 {
         recipient_identity: fill("recipient identity pub"),
         offer_id: rand::random(),
         recipient_ephemeral: fill("r_eph pub"),
-        wrapped_dek: rand::random::<[u8; 48]>().to_vec(),
+        wrapped_dek: (0..48).map(|_| rand::random::<u8>()).collect::<Vec<u8>>(),
         dek_nonce: rand::random(),
         signature: fill("transcript signature"),
     }

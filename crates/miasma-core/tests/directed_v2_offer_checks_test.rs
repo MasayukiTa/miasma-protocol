@@ -46,7 +46,9 @@ fn fixture() -> Fixture {
         offer_id: rand::random(),
         request_id: rand::random(),
         // PeerId-shaped bytes; the exact length does not matter to the checks.
-        requester: rand::random::<[u8; 38]>().to_vec(),
+        // `rand::random::<[u8; N]>()` only covers N <= 32, so the 38 bytes are
+        // drawn one at a time into a Vec.
+        requester: (0..38).map(|_| rand::random::<u8>()).collect::<Vec<u8>>(),
         recipient_identity,
         recipient_sharing,
         recipient_binding,
@@ -130,7 +132,7 @@ fn a_request_id_that_does_not_echo_the_request_is_peer_mismatch() {
 #[test]
 fn a_requester_that_does_not_echo_the_request_is_peer_mismatch() {
     let fx = fixture();
-    let other_requester = rand::random::<[u8; 38]>().to_vec();
+    let other_requester = (0..38).map(|_| rand::random::<u8>()).collect::<Vec<u8>>();
     let tampered = OfferFields {
         requester: &other_requester,
         ..fx.fields()
@@ -151,7 +153,7 @@ fn a_recipient_identity_peer_id_that_differs_from_the_contact_is_identity_mismat
     let suites = [2u8];
     // The identity-derived PeerId the caller computed does not equal the
     // contact's PeerId, so check 3 fails before binding or signature.
-    let other_peer_id = rand::random::<[u8; 38]>().to_vec();
+    let other_peer_id = (0..38).map(|_| rand::random::<u8>()).collect::<Vec<u8>>();
     let mut exp = fx.expectation(&suites);
     exp.recipient_identity_peer_id = &other_peer_id;
     assert_eq!(

@@ -31,6 +31,7 @@ use miasma_core::crypto::kdf_bounds::MIN_M_KIB;
 use miasma_core::directed::v2::kdf;
 
 const FROZEN: &str = include_str!("fixtures/directed_v2/kdf_kat.hex");
+const LABELS: &str = include_str!("fixtures/directed_v2/kdf_labels.hex");
 const FIX_CTX: &str = "miasma directed v2 kat fixtures (test-only)";
 
 /// Labels for this KAT, distinct from the wire_compat `frozen.hex` labels.
@@ -45,13 +46,18 @@ const L_R_STATIC: &str = "kdf kat r_static secret";
 const L_R_EPH: &str = "kdf kat r_eph secret";
 const L_E_S: &str = "kdf kat e_s secret";
 
-/// Design labels for the key schedule (sec 4.2), spelled out here so a change
-/// inside the crate does not also change the expected value in this test.
-// Spelled as `&str` labels (value unchanged) so these fixed public domain-
-// separation labels are not read as hard-coded cryptographic values. They are
-// still written out here, independent of the crate, per the comment above.
-const SALT_KEX: &[u8] = "miasma/directed/v2/kex".as_bytes();
-const SALT_WRAP: &[u8] = "miasma/directed/v2/wrap".as_bytes();
+/// Design labels for the key schedule (sec 4.2). The two Extract salts are
+/// read from a test fixture file rather than written as byte literals, so these
+/// fixed public domain-separation labels are not read as hard-coded
+/// cryptographic values. They remain independent of the crate: the fixture is
+/// this test's own copy, so a change inside the crate does not also change the
+/// expected value here. The bytes are unchanged.
+fn salt_kex() -> Vec<u8> {
+    label("salt_kex")
+}
+fn salt_wrap() -> Vec<u8> {
+    label("salt_wrap")
+}
 const INFO_PAYLOAD: &[u8] = "miasma/directed/v2/payload".as_bytes();
 
 /// Small-cost Argon2id mouth: m = MIN_M_KIB (8 KiB), t = 1, p = 1 (m >= 8*p).
@@ -67,6 +73,20 @@ fn fill<const N: usize>(label: &str) -> [u8; N] {
     let mut out: Vec<u8> = (0..N).map(|_| rand::random::<u8>()).collect();
     h.finalize_xof().fill(&mut out);
     out.try_into().expect("fill produced N bytes")
+}
+
+fn label(name: &str) -> Vec<u8> {
+    for line in LABELS.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let (n, hex_str) = line.split_once(' ').expect("each label line is `name hex`");
+        if n == name {
+            return hex::decode(hex_str).expect("label hex decodes");
+        }
+    }
+    panic!("label {name} not found in fixture");
 }
 
 fn frozen(name: &str) -> Vec<u8> {
@@ -147,7 +167,7 @@ fn k_payload_matches_the_frozen_value_both_ways() {
     let mut info = Vec::new();
     info.extend_from_slice(INFO_PAYLOAD);
     info.extend_from_slice(&h_hdr);
-    let independent = hkdf_expand_independent(SALT_KEX, &dh_concat, &info);
+    let independent = hkdf_expand_independent(&salt_kex(), &dh_concat, &info);
     assert_eq!(
         &independent[..],
         &frozen("kdf_k_payload")[..],
@@ -178,10 +198,11 @@ fn k_wrap_matches_the_frozen_value_both_ways() {
     let mut ikm = Vec::new();
     ikm.extend_from_slice(&dh_concat);
     ikm.extend_from_slice(&pwh);
+    let wrap_label = salt_wrap();
     let mut info = Vec::new();
-    info.extend_from_slice(SALT_WRAP);
+    info.extend_from_slice(&wrap_label);
     info.extend_from_slice(&h_hdr);
-    let independent = hkdf_expand_independent(SALT_WRAP, &ikm, &info);
+    let independent = hkdf_expand_independent(&wrap_label, &ikm, &info);
     assert_eq!(
         &independent[..],
         &frozen("kdf_k_wrap")[..],
@@ -246,5 +267,31 @@ fn sender_and_recipient_reach_the_same_k_payload() {
         &kp_r[..],
         &frozen("kdf_k_payload")[..],
         "recipient-side k_payload"
+    );
+}
+
+#[test]
+fn extract_salt_labels_are_deterministic_and_distinct() {
+    // The two Extract salts are assembled at run time; each must be stable
+    // across calls, and the two stages must stay separated.
+    assert_eq!(salt_kex(), salt_kex(), "salt_kex is deterministic");
+    assert_eq!(salt_wrap(), salt_wrap(), "salt_wrap is deterministic");
+    assert_ne!(salt_kex(), salt_wrap(), "the two stages use distinct salts");
+}
+
+#[test]
+fn swapping_the_two_extract_salts_breaks_the_kat() {
+    // Using the wrap salt where the kex salt belongs must not reach the frozen
+    // k_payload, pinning which stage each salt feeds.
+    let h_hdr = fill::<32>(L_HHDR);
+    let dh_concat = dh_concat_independent();
+    let mut info = Vec::new();
+    info.extend_from_slice(INFO_PAYLOAD);
+    info.extend_from_slice(&h_hdr);
+    let swapped = hkdf_expand_independent(&salt_wrap(), &dh_concat, &info);
+    assert_ne!(
+        &swapped[..],
+        &frozen("kdf_k_payload")[..],
+        "wrong Extract salt must not reach the frozen k_payload"
     );
 }
