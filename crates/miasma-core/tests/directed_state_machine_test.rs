@@ -246,7 +246,13 @@ fn predict(
                 illegal
             }
         }
-        // Everything else (including every terminal state and Pending) is illegal.
+        // SenderRevoked is terminal, but a revoke replay on an already-revoked
+        // record is a legal no-write that leaves the state unchanged
+        // (design 6.2: "SenderRevoked + sender revoke (replay) -> SenderRevoked,
+        // no write"). The grid test checks next state only; the no-write effect
+        // is covered by check_write_count and the terminal-states test.
+        (S::SenderRevoked, Ev::SenderRevoke) => to(S::SenderRevoked),
+        // Everything else (including every other terminal state and Pending) is illegal.
         _ => illegal,
     }
 }
@@ -319,8 +325,7 @@ fn the_full_state_event_grid_matches_the_model() {
                             check_write_count(&fx);
                             assert!(
                                 predicted.legal,
-                                "{state:?} + {ev_label} (c={challenge_tries}, p={password_tries}) \
-                                 was accepted but the model forbids it"
+                                "{state:?} + {ev_label} was accepted but the model forbids it"
                             );
                             assert_eq!(
                                 r.effective_state(),
@@ -331,8 +336,7 @@ fn the_full_state_event_grid_matches_the_model() {
                         Err(Illegal) => {
                             assert!(
                                 !predicted.legal,
-                                "{state:?} + {ev_label} (c={challenge_tries}, p={password_tries}) \
-                                 was refused but the model allows it"
+                                "{state:?} + {ev_label} was refused but the model allows it"
                             );
                             assert_eq!(
                                 r.effective_state(),
@@ -607,4 +611,76 @@ fn the_sender_phase_delivers_confirms_and_fails_closed() {
         .unwrap();
     assert_eq!(o2.phase, OutgoingPhase::ChallengeFailed);
     assert!(fx.reached_terminal);
+}
+
+/// A revoke replay on an already-revoked record is a legal no-write that leaves
+/// the state at `SenderRevoked` (design 6.2: the `SenderRevoked + sender revoke
+/// (replay)` row). This pins the behaviour that the grid and random-stream
+/// tests rely on: the implementation accepts the replay without a write, and the
+/// reference model agrees it is legal with an unchanged next state.
+#[test]
+fn revoke_replay_on_sender_revoked_is_a_legal_no_write() {
+    let (mut r, _code) = record(EnvelopeState::SenderRevoked, 0, 0, mono(0, 300_000), 10_000);
+    // The model predicts a legal, state-preserving step.
+    let predicted = predict(
+        EnvelopeState::SenderRevoked,
+        Ev::SenderRevoke,
+        0,
+        0,
+        false,
+        false,
+    );
+    assert!(predicted.legal);
+    assert_eq!(predicted.next, EnvelopeState::SenderRevoked);
+    // The implementation accepts it as a no-write and does not move.
+    let fx = r.step(IncomingEvent::SenderRevoke, NOW).unwrap();
+    assert!(fx.no_write);
+    assert!(!fx.reached_terminal);
+    assert!(!fx.delete_file);
+    assert_eq!(r.effective_state(), EnvelopeState::SenderRevoked);
+}
+
+/// Across every terminal state and every event, the only legal step is the
+/// revoke replay on `SenderRevoked`; every other terminal (state, event) pair is
+/// `Illegal` and leaves the state unchanged. The reference model and the
+/// implementation must agree on this for all pairs, so no other terminal
+/// combination can quietly become acceptable.
+#[test]
+fn only_sender_revoked_accepts_a_terminal_replay() {
+    let terminals = [
+        EnvelopeState::Retrieved,
+        EnvelopeState::SenderRevoked,
+        EnvelopeState::RecipientDeleted,
+        EnvelopeState::Expired,
+        EnvelopeState::ChallengeFailed,
+        EnvelopeState::PasswordFailed,
+    ];
+    for &state in &terminals {
+        for &ev in &EVENTS {
+            let (mut r, code) = record(state, 3, 3, mono(0, 300_000), 10_000);
+            let predicted = predict(state, ev, 3, 3, false, false);
+            let is_revoke_replay = state == EnvelopeState::SenderRevoked && ev == Ev::SenderRevoke;
+            // The model marks exactly the revoke replay legal among terminals.
+            assert_eq!(
+                predicted.legal, is_revoke_replay,
+                "model legality disagrees for a terminal pair"
+            );
+            let event = make_event(ev, &code);
+            match r.step(event, NOW) {
+                Ok(fx) => {
+                    assert!(is_revoke_replay, "an unexpected terminal pair was accepted");
+                    assert!(fx.no_write, "the revoke replay must not write");
+                    assert_eq!(r.effective_state(), EnvelopeState::SenderRevoked);
+                }
+                Err(Illegal) => {
+                    assert!(!is_revoke_replay, "the revoke replay was refused");
+                    assert_eq!(
+                        r.effective_state(),
+                        state,
+                        "an illegal step changed the state"
+                    );
+                }
+            }
+        }
+    }
 }
