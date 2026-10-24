@@ -313,7 +313,8 @@ mod tests {
             effective_expires_at: 10_000,
             sender_peer_id: "peer-a".into(),
             protection: Protection::V2,
-            r_eph_secret: Some([0x09u8; 32]),
+            // A random non-terminal ephemeral secret; no fixed key material.
+            r_eph_secret: Some(rand::random::<[u8; 32]>()),
         };
         let record = IncomingRecord {
             wire: wire(EnvelopeState::ChallengeIssued),
@@ -491,5 +492,85 @@ mod tests {
             .unwrap();
         assert_eq!(o.phase, OutgoingPhase::ChallengeFailed);
         assert!(fx.reached_terminal);
+    }
+
+    /// `new_incoming` takes a zeroizing ephemeral secret and stores it in the
+    /// bare-array field; `r_eph()` hands back the same bytes, and a `None`
+    /// argument stays `None`.
+    #[test]
+    fn new_incoming_stores_the_zeroizing_secret() {
+        use crate::directed::challenge::generate_challenge;
+        use zeroize::Zeroizing;
+
+        let (_code, hash) = generate_challenge();
+        let challenge = ChallengeLocal {
+            hash,
+            attempts_remaining: 3,
+            expires: mono(0, 300_000),
+        };
+        let secret = rand::random::<[u8; 32]>();
+        let rec = IncomingRecord::new_incoming(
+            wire(EnvelopeState::ChallengeIssued),
+            None,
+            "peer-a".into(),
+            Protection::V2,
+            challenge,
+            3,
+            Some(Zeroizing::new(secret)),
+            NOW,
+        );
+        let local = rec.local.as_ref().unwrap();
+        // The stored bytes round-trip through the zeroizing accessor.
+        assert_eq!(local.r_eph().map(|z| *z), Some(secret));
+
+        // A `None` secret is kept as `None`.
+        let (_code2, hash2) = generate_challenge();
+        let challenge2 = ChallengeLocal {
+            hash: hash2,
+            attempts_remaining: 3,
+            expires: mono(0, 300_000),
+        };
+        let rec_none = IncomingRecord::new_incoming(
+            wire(EnvelopeState::ChallengeIssued),
+            None,
+            "peer-a".into(),
+            Protection::V2,
+            challenge2,
+            3,
+            None,
+            NOW,
+        );
+        assert!(rec_none.local.as_ref().unwrap().r_eph().is_none());
+    }
+
+    /// The `IncomingLocal` debug output never prints the ephemeral secret bytes:
+    /// it shows a redaction marker instead.
+    #[test]
+    fn incoming_local_debug_redacts_the_ephemeral_secret() {
+        use crate::directed::challenge::generate_challenge;
+        use zeroize::Zeroizing;
+
+        let (_code, hash) = generate_challenge();
+        let challenge = ChallengeLocal {
+            hash,
+            attempts_remaining: 3,
+            expires: mono(0, 300_000),
+        };
+        let secret = rand::random::<[u8; 32]>();
+        let rec = IncomingRecord::new_incoming(
+            wire(EnvelopeState::ChallengeIssued),
+            None,
+            "peer-a".into(),
+            Protection::V2,
+            challenge,
+            3,
+            Some(Zeroizing::new(secret)),
+            NOW,
+        );
+        let shown = format!("{:?}", rec.local.as_ref().unwrap());
+        assert!(shown.contains("<redacted>"));
+        // No byte of the secret appears in the debug string.
+        let hex: String = secret.iter().map(|b| format!("{b:02x}")).collect();
+        assert!(!shown.contains(&hex));
     }
 }

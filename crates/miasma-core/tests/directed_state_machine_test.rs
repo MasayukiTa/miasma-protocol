@@ -79,7 +79,8 @@ fn record(
     let r_eph = if state.is_terminal() {
         None
     } else {
-        Some([0x09u8; 32])
+        // A random non-terminal ephemeral secret; no fixed key material.
+        Some(rand::random::<[u8; 32]>())
     };
     let local = IncomingLocal {
         state,
@@ -135,6 +136,26 @@ enum Ev {
     RecipientDelete,
     ExpiryTick,
     ChallengeTimeout,
+}
+
+impl Ev {
+    /// A fixed label naming the event kind. Used in assert messages so the
+    /// formatted output is a constant string, never a value that could carry a
+    /// confirmation code.
+    fn label(self) -> &'static str {
+        match self {
+            Ev::ConfirmRight => "ConfirmRight",
+            Ev::ConfirmWrong => "ConfirmWrong",
+            Ev::PasswordAttemptStart => "PasswordAttemptStart",
+            Ev::RetrievedOk => "RetrievedOk",
+            Ev::PasswordWrong => "PasswordWrong",
+            Ev::RetrievalNetworkFailure => "RetrievalNetworkFailure",
+            Ev::SenderRevoke => "SenderRevoke",
+            Ev::RecipientDelete => "RecipientDelete",
+            Ev::ExpiryTick => "ExpiryTick",
+            Ev::ChallengeTimeout => "ChallengeTimeout",
+        }
+    }
 }
 
 const EVENTS: [Ev; 10] = [
@@ -289,6 +310,7 @@ fn the_full_state_event_grid_matches_the_model() {
                         10_000,
                     );
                     let before = r.effective_state();
+                    let ev_label = ev.label();
                     let predicted =
                         predict(state, ev, challenge_tries, password_tries, false, false);
                     let event = make_event(ev, &code);
@@ -297,19 +319,19 @@ fn the_full_state_event_grid_matches_the_model() {
                             check_write_count(&fx);
                             assert!(
                                 predicted.legal,
-                                "{state:?} + {ev:?} (c={challenge_tries}, p={password_tries}) \
+                                "{state:?} + {ev_label} (c={challenge_tries}, p={password_tries}) \
                                  was accepted but the model forbids it"
                             );
                             assert_eq!(
                                 r.effective_state(),
                                 predicted.next,
-                                "{state:?} + {ev:?} went to the wrong next state"
+                                "{state:?} + {ev_label} went to the wrong next state"
                             );
                         }
                         Err(Illegal) => {
                             assert!(
                                 !predicted.legal,
-                                "{state:?} + {ev:?} (c={challenge_tries}, p={password_tries}) \
+                                "{state:?} + {ev_label} (c={challenge_tries}, p={password_tries}) \
                                  was refused but the model allows it"
                             );
                             assert_eq!(

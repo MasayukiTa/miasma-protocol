@@ -339,7 +339,11 @@ impl IncomingRecord {
             effective_expires_at,
             sender_peer_id,
             protection,
-            r_eph_secret,
+            // The field is a bare array (serde-enabled); the argument carries a
+            // zeroizing wrapper. Unwrap it into the stored array. The wrapper is
+            // dropped (and zeroized) at the end of this call; the stored copy is
+            // cleared by `clear_r_eph` on every terminal step.
+            r_eph_secret: r_eph_secret.map(|z| *z),
         };
         Self {
             wire,
