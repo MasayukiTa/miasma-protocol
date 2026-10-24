@@ -1231,4 +1231,27 @@ mod tests {
         env.normalize_received_retention(env.created_at).unwrap();
         assert_eq!(bincode::serialize(&env).unwrap(), before);
     }
+
+    #[test]
+    fn winding_the_clock_back_does_not_extend_the_effective_expiry() {
+        // An envelope whose stored end is far beyond the cap, so every call is
+        // decided by `now + MAX_RETENTION_SECS` rather than the stored value.
+        let created_at = 1_000_000;
+        let first_now = 1_800_000_000;
+        let mut env = envelope_with_window(created_at, u64::MAX);
+        env.normalize_received_retention(first_now).unwrap();
+        let after_first = env.expires_at;
+
+        // Re-normalize the same envelope with the clock wound back. The cap only
+        // ever lowers `expires_at` (`min`), so an earlier `now` can never push
+        // the effective end later than what an earlier, larger `now` produced.
+        for earlier in [first_now - 1, first_now - 10_000, created_at + 1, 0] {
+            env.normalize_received_retention(earlier).unwrap();
+            assert!(
+                env.expires_at <= after_first,
+                "clock wound back to {earlier}: expiry {} rose above {after_first}",
+                env.expires_at
+            );
+        }
+    }
 }
