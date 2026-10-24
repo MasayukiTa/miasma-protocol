@@ -14,7 +14,13 @@
 //!   * no chat in flight: the configured limit (`0` = unlimited, no wait);
 //!   * chat in flight, configured limit non-zero: the configured limit;
 //!   * chat in flight, configured limit zero (unlimited): 25% of the send rate
-//!     measured over the last second, so an unmetered send still yields.
+//!     measured over the last second, but never below [`YIELD_FLOOR_BPS`], so
+//!     an unmetered send yields to chat yet still makes progress instead of
+//!     being throttled toward a standstill.
+//!
+//! While a chat yield is in force the window it governs is marked throttled and
+//! its byte count is not used to refresh the measured rate, so the yield ceiling
+//! does not chase the send's own slowed pace downward window after window.
 //!
 //! When the ceiling is unlimited the pacer never waits and keeps no bucket, so
 //! the default build (`max_send_kib_per_sec = 0`, no chat) behaves exactly as
@@ -29,6 +35,13 @@ const RATE_WINDOW: Duration = Duration::from_secs(1);
 /// The fraction of the measured rate a send is held to while chat is in flight
 /// and no fixed limit is configured, as a numerator over 100.
 const YIELD_PERCENT: u64 = 25;
+/// The lowest ceiling a chat yield may impose, in bytes per second. Without a
+/// floor the yield ceiling is a fraction of the rate the send itself just
+/// achieved; once the send is throttled that measured rate falls, which would
+/// lower the next window's ceiling again, and so on until the send is starved.
+/// This floor keeps a throttled send moving at a small but non-zero rate so a
+/// file transfer still makes progress for the whole time chat is in flight.
+const YIELD_FLOOR_BPS: u64 = 64 * KIB;
 /// The largest bucket fill, in seconds of the ceiling, so a long idle stretch
 /// cannot bank an unbounded burst.
 const BUCKET_SECONDS: f64 = 1.0;
@@ -52,6 +65,13 @@ pub struct SendPacer {
     window_start: Instant,
     /// The send rate measured over the last full window, in bytes per second.
     measured_bps: u64,
+    /// Whether a chat yield has driven the ceiling from the measured rate at any
+    /// point inside the current window. While this is set the window is being
+    /// throttled by the send's own slowed rate, so its byte count is not a
+    /// faithful sample of the uplink; `record_sent` holds `measured_bps` at its
+    /// last unthrottled value rather than letting the throttled window lower it
+    /// and feed the ceiling further down. Reset when the window slides.
+    window_throttled: bool,
 }
 
 impl SendPacer {
@@ -66,6 +86,7 @@ impl SendPacer {
             window_bytes: 0,
             window_start: now,
             measured_bps: 0,
+            window_throttled: false,
         }
     }
 
@@ -76,8 +97,10 @@ impl SendPacer {
     }
 
     /// The ceiling in force right now given whether chat is in flight, in bytes
-    /// per second; `0` means unlimited (no pacing).
-    fn ceiling_bps(&self, chat_active: bool) -> u64 {
+    /// per second; `0` means unlimited (no pacing). Takes `&mut self` because a
+    /// ceiling derived from the measured rate marks the current window as
+    /// throttled (see `window_throttled`).
+    fn ceiling_bps(&mut self, chat_active: bool) -> u64 {
         if !chat_active {
             return self.limit_bps;
         }
@@ -85,12 +108,21 @@ impl SendPacer {
             return self.limit_bps;
         }
         // Unlimited configured, but chat is sending: hold to a fraction of the
-        // rate measured over the last second. Saturating throughout; the
-        // multiply cannot overflow a u64 for any realistic rate but is guarded
-        // anyway. A measured rate of zero yields a ceiling of zero, which this
-        // module treats as "no fixed ceiling yet" so the first window is not
-        // stalled to a standstill before any rate is known.
-        self.measured_bps.saturating_mul(YIELD_PERCENT) / 100
+        // rate measured over the last second, but never below YIELD_FLOOR_BPS so
+        // the send keeps moving instead of being throttled toward a standstill.
+        // Saturating throughout; the multiply cannot overflow a u64 for any
+        // realistic rate but is guarded anyway. A measured rate of zero yields a
+        // ceiling of zero, which this module treats as "no fixed ceiling yet" so
+        // the first window is not stalled before any rate is known; the floor is
+        // not applied in that case for the same reason.
+        if self.measured_bps == 0 {
+            return 0;
+        }
+        // This ceiling comes from the measured rate, so the window it governs is
+        // throttled: record_sent must not let that window lower measured_bps.
+        self.window_throttled = true;
+        let fraction = self.measured_bps.saturating_mul(YIELD_PERCENT) / 100;
+        fraction.max(YIELD_FLOOR_BPS)
     }
 
     /// How long to wait before sending `want` bytes, given whether a chat send
@@ -165,11 +197,15 @@ impl SendPacer {
         self.window_bytes = self.window_bytes.saturating_add(n);
         let elapsed = now.saturating_duration_since(self.window_start);
         if elapsed >= RATE_WINDOW {
-            // Publish the rate only for a window that actually carried bytes. An
-            // empty window would compute to zero and erase the last real rate,
-            // which the chat yield relies on; keep the last rate and just slide
-            // the window forward.
-            if self.window_bytes > 0 {
+            // Publish the rate only for a window that actually carried bytes and
+            // was not throttled by a chat yield. An empty window would compute to
+            // zero and erase the last real rate, which the chat yield relies on.
+            // A throttled window carried only what the yield ceiling allowed, so
+            // its rate reflects the send's own slowed pace rather than the
+            // uplink; publishing it would feed the ceiling lower each window and
+            // starve the send. In both cases keep the last rate and just slide
+            // the window forward; the next unthrottled window refreshes it.
+            if self.window_bytes > 0 && !self.window_throttled {
                 let secs = elapsed.as_secs_f64();
                 self.measured_bps = if secs > 0.0 {
                     (self.window_bytes as f64 / secs) as u64
@@ -179,6 +215,7 @@ impl SendPacer {
             }
             self.window_bytes = 0;
             self.window_start = now;
+            self.window_throttled = false;
         }
     }
 }
@@ -398,6 +435,145 @@ mod tests {
             p.measured_bps(),
             warmed,
             "an empty window must not erase the last measured rate"
+        );
+    }
+
+    /// Warm the measured rate to roughly `target_bps` by sending `target_bps`
+    /// bytes over one second with no chat, then publishing the window. Returns
+    /// the pacer and the virtual clock positioned just past the publish tick.
+    fn warmed_pacer(target_bps: u64) -> (SendPacer, Instant, Instant) {
+        let t0 = Instant::now();
+        let mut p = SendPacer::new(0, t0);
+        let chunk = 64 * 1024usize; // small chunk so low targets still carry bytes
+        let chunks = (target_bps / chunk as u64).max(1);
+        let step = Duration::from_secs(1).as_nanos() as u64 / chunks;
+        let mut now = t0;
+        for _ in 0..chunks {
+            let _ = p.delay_before_send(now, chunk, false);
+            now += Duration::from_nanos(step);
+            p.record_sent(now, chunk);
+        }
+        // One tick past the window boundary to publish the measured rate.
+        now += RATE_WINDOW;
+        p.record_sent(now, 0);
+        (p, t0, now)
+    }
+
+    #[test]
+    fn chat_yield_holds_a_floor_and_keeps_sending_for_many_windows() {
+        // Warm to a rate whose 25% yield fraction sits *below* the floor, so the
+        // floor is what keeps the send alive: 128 KiB/s measured -> 32 KiB/s
+        // fraction < 64 KiB/s floor.
+        let (mut p, _t0, start) = warmed_pacer(128 * 1024);
+        let warmed = p.measured_bps();
+        assert!(warmed > 0, "a rate should have been measured");
+
+        // Chat stays in flight for 20 one-second windows. Each window must carry
+        // bytes (the send keeps progressing) and the ceiling must never fall
+        // below the floor, which it would without the floor-and-no-decay fix.
+        // A 16 KiB chunk against the 64 KiB/s floor needs a quarter second, so
+        // several chunks land inside each one-second window; a chunk equal to
+        // the floor would need the whole window and straddle its boundary.
+        let mut now = start;
+        let chunk = 16 * 1024usize;
+        for w in 0..20u32 {
+            let mut window_sent: u64 = 0;
+            let window_end = now + RATE_WINDOW;
+            // Send chunks honouring each requested wait until the window closes.
+            while now < window_end {
+                let wait = p.delay_before_send(now, chunk, true);
+                assert!(
+                    wait <= Duration::from_secs(60),
+                    "window {w}: the wait must stay bounded"
+                );
+                let next = now + wait;
+                if next >= window_end {
+                    break;
+                }
+                now = next;
+                p.record_sent(now, chunk);
+                window_sent += chunk as u64;
+            }
+            // Close the window with a tick at its end.
+            p.record_sent(window_end, 0);
+            now = window_end;
+            assert!(
+                window_sent > 0,
+                "window {w}: the send made no progress while chat was in flight"
+            );
+            // The measured rate must not have decayed: the throttled windows do
+            // not refresh it, so it stays at the warmed value.
+            assert_eq!(
+                p.measured_bps(),
+                warmed,
+                "window {w}: a throttled window must not lower the measured rate"
+            );
+            // The ceiling in force must sit at or above the floor.
+            assert!(
+                p.ceiling_bps(true) >= YIELD_FLOOR_BPS,
+                "window {w}: the yield ceiling fell below the floor"
+            );
+        }
+    }
+
+    #[test]
+    fn ceiling_uses_fraction_when_it_exceeds_the_floor() {
+        // Warm to 4 MiB/s: 25% is 1 MiB/s, well above the 64 KiB/s floor, so the
+        // fraction wins and the floor does not clamp a fast link down.
+        let (mut p, _t0, _now) = warmed_pacer(4 * 1024 * 1024);
+        let warmed = p.measured_bps();
+        let expected = (warmed.saturating_mul(YIELD_PERCENT) / 100).max(YIELD_FLOOR_BPS);
+        assert_eq!(p.ceiling_bps(true), expected);
+        assert!(
+            p.ceiling_bps(true) > YIELD_FLOOR_BPS,
+            "a fast link's yield ceiling should exceed the floor"
+        );
+    }
+
+    #[test]
+    fn measured_rate_recovers_after_chat_stops() {
+        // Warm, then throttle under chat for several windows (the measured rate
+        // is held), then let chat stop and a fast unthrottled window refresh it.
+        let (mut p, _t0, start) = warmed_pacer(128 * 1024);
+        let warmed = p.measured_bps();
+        let chunk = 16 * 1024usize;
+        let mut now = start;
+        for _ in 0..5u32 {
+            let window_end = now + RATE_WINDOW;
+            while now < window_end {
+                let wait = p.delay_before_send(now, chunk, true);
+                let next = now + wait;
+                if next >= window_end {
+                    break;
+                }
+                now = next;
+                p.record_sent(now, chunk);
+            }
+            p.record_sent(window_end, 0);
+            now = window_end;
+        }
+        assert_eq!(
+            p.measured_bps(),
+            warmed,
+            "the measured rate must be held while chat throttles the send"
+        );
+
+        // Chat stops. Send a full fast window with no chat: 4 MiB over one
+        // second. The unthrottled window must refresh the measured rate upward.
+        let four_mib: u64 = 4 * 1024 * 1024;
+        let chunks = four_mib / CHUNK as u64;
+        let step = Duration::from_secs(1).as_nanos() as u64 / chunks;
+        for _ in 0..chunks {
+            let _ = p.delay_before_send(now, CHUNK, false);
+            now += Duration::from_nanos(step);
+            p.record_sent(now, CHUNK);
+        }
+        p.record_sent(now + RATE_WINDOW, 0);
+        let recovered = p.measured_bps();
+        assert!(
+            recovered > warmed,
+            "after chat stopped an unthrottled window should refresh the rate upward: \
+             recovered {recovered} vs held {warmed}"
         );
     }
 }
