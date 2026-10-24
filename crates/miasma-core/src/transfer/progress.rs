@@ -109,6 +109,7 @@ struct Inner {
     share_id_checked: bool,
     publisher_authenticated: bool,
     path: Option<String>,
+    weak_key_derivation: bool,
     phase: Phase,
     state: TransferState,
     last_error: Option<String>,
@@ -162,6 +163,7 @@ impl TransferProgress {
                 share_id_checked: false,
                 publisher_authenticated: false,
                 path: None,
+                weak_key_derivation: false,
                 phase: Phase::Preparing,
                 state: TransferState::Running,
                 last_error: None,
@@ -206,6 +208,17 @@ impl TransferProgress {
     /// The fetched record was verified against the share ID's publisher.
     pub fn set_publisher_authenticated(&self, authenticated: bool) {
         self.inner.lock().unwrap().publisher_authenticated = authenticated;
+    }
+
+    /// Record that the transfer was made with an Argon2id cost below the create
+    /// floor, so the receiver can show it. Does not stop the receive.
+    pub fn note_weak_key_derivation(&self) {
+        self.inner.lock().unwrap().weak_key_derivation = true;
+    }
+
+    /// Whether the transfer being received was made below the create floor.
+    pub fn is_weak_key_derivation(&self) -> bool {
+        self.inner.lock().unwrap().weak_key_derivation
     }
 
     /// The path an iroh transfer is using (`direct` / `relay`); `None` clears it.

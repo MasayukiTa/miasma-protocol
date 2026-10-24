@@ -46,19 +46,33 @@ pub const DEFAULT_M_KIB: u32 = 64 * 1024;
 pub const DEFAULT_T_COST: u32 = 3;
 pub const DEFAULT_P_COST: u32 = 1;
 
-/// Upper bounds accepted from an *untrusted* manifest. Without them a hostile
-/// sender could make a receiver allocate gigabytes just to check a password.
-///
-/// `create` uses 64 MiB / 3 passes / 1 lane (the defaults above) and nothing in
-/// the CLI or desktop picks another cost, so the ceiling is twice the memory,
-/// twice the passes and twice the lanes of what is actually produced: room to
-/// raise the default later, far below what a hostile manifest could ask for.
-/// A manifest above it is refused before any KDF work runs.
-pub const MAX_M_KIB: u32 = 128 * 1024;
-pub const MAX_T_COST: u32 = 6;
-pub const MAX_P_COST: u32 = 2;
-/// Argon2 itself requires `m >= 8 * p` KiB.
-pub const MIN_M_KIB: u32 = 8;
+/// Lowest Argon2id cost a publicly created protection may use. Equal to the
+/// default, so every protection made through [`PasswordProtection::create`]
+/// meets it and no existing transfer is below it. A received manifest whose
+/// cost is below this floor is still accepted; it is only reported as weak
+/// (see [`PasswordProtection::is_weak_kdf`]).
+pub const CREATE_FLOOR_M_KIB: u32 = 64 * 1024;
+pub const CREATE_FLOOR_T_COST: u32 = 3;
+pub const CREATE_FLOOR_P_COST: u32 = 1;
+
+/// Cost the redundancy bench creates with: small on purpose, below the floor,
+/// so the measurement is not dominated by one 64 MiB derivation per preset.
+const BENCH_M_KIB: u32 = 64;
+const BENCH_T_COST: u32 = 1;
+const BENCH_P_COST: u32 = 1;
+
+/// Whether a cost is below the create floor, on any one of memory, passes, or
+/// lanes. Used to pin the public creator to the floor and to flag a received
+/// transfer whose cost is below it.
+pub fn cost_below_create_floor(m_kib: u32, t_cost: u32, p_cost: u32) -> bool {
+    m_kib < CREATE_FLOOR_M_KIB || t_cost < CREATE_FLOOR_T_COST || p_cost < CREATE_FLOOR_P_COST
+}
+
+/// Argon2id cost bounds accepted from an untrusted manifest. Defined once in
+/// [`crate::crypto::kdf_bounds`] and re-exported here so existing paths keep
+/// their `transfer::protection::MAX_*` names. A cost outside these bounds is
+/// refused before any KDF work runs.
+pub use crate::crypto::kdf_bounds::{MAX_M_KIB, MAX_P_COST, MAX_T_COST, MIN_M_KIB};
 
 /// How a transfer's segments are keyed on top of the per-segment random key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,13 +110,33 @@ impl std::fmt::Debug for UnlockedKey {
 }
 
 impl PasswordProtection {
-    /// Start a protected transfer with a fresh random salt and default cost.
+    /// Start a protected transfer with a fresh random salt. This is the public
+    /// way to create a protection: it always uses the default cost, which is
+    /// the create floor, so the result never derives a key below the floor.
     pub fn create(password: &str) -> Result<(Self, UnlockedKey), MiasmaError> {
+        // The default cost is the floor; a build that lowered the default
+        // below the floor would let `create` produce weak material.
+        debug_assert!(
+            !cost_below_create_floor(DEFAULT_M_KIB, DEFAULT_T_COST, DEFAULT_P_COST),
+            "default cost must not be below the create floor"
+        );
         Self::create_with_cost(password, DEFAULT_M_KIB, DEFAULT_T_COST, DEFAULT_P_COST)
     }
 
-    /// As [`create`](Self::create) with an explicit Argon2id cost (used by tests
-    /// to avoid a 64 MiB derivation per case in a debug build).
+    /// Create a protection with the smallest cost the redundancy bench uses, so
+    /// the measurement is not dominated by one 64 MiB derivation per preset.
+    /// Crate-internal: there is no public entry point that creates a protection
+    /// below the floor, so a shipped build cannot quietly make a weak one.
+    pub(crate) fn create_for_bench(password: &str) -> Result<(Self, UnlockedKey), MiasmaError> {
+        Self::create_unchecked_with_cost(password, BENCH_M_KIB, BENCH_T_COST, BENCH_P_COST)
+    }
+
+    /// As [`create`](Self::create) with an explicit Argon2id cost. Policy-gated:
+    /// the password policy runs before any key work. It does not pin the cost to
+    /// the create floor, so the floor is guaranteed instead by [`create`](Self::create),
+    /// the only entry point a publish path uses, which always derives at the
+    /// default cost (equal to the floor). Tests pass an explicit small cost to
+    /// avoid a 64 MiB derivation per case in a debug build.
     pub fn create_with_cost(
         password: &str,
         m_kib: u32,
@@ -170,6 +204,13 @@ impl PasswordProtection {
     /// Structural validity, for a manifest that has not been unlocked yet.
     pub fn validate(&self) -> Result<(), MiasmaError> {
         validate_cost(self.m_kib, self.t_cost, self.p_cost)
+    }
+
+    /// Whether this protection's cost is below the create floor. Such a transfer
+    /// is still accepted on receive; the receiver reports it as weak. New
+    /// transfers made through [`create`](Self::create) are never weak.
+    pub fn is_weak_kdf(&self) -> bool {
+        cost_below_create_floor(self.m_kib, self.t_cost, self.p_cost)
     }
 }
 
@@ -481,6 +522,106 @@ mod tests {
             DEFAULT_M_KIB,
             DEFAULT_T_COST,
             DEFAULT_P_COST,
+            t1.elapsed()
+        );
+    }
+
+    #[test]
+    fn the_create_floor_equals_the_default_cost() {
+        // Every protection made through the public creator meets the floor, so
+        // no transfer produced by this build is ever below it.
+        assert_eq!(CREATE_FLOOR_M_KIB, DEFAULT_M_KIB);
+        assert_eq!(CREATE_FLOOR_T_COST, DEFAULT_T_COST);
+        assert_eq!(CREATE_FLOOR_P_COST, DEFAULT_P_COST);
+        assert!(!cost_below_create_floor(
+            DEFAULT_M_KIB,
+            DEFAULT_T_COST,
+            DEFAULT_P_COST
+        ));
+    }
+
+    #[test]
+    fn a_cost_below_the_floor_on_any_one_dimension_is_flagged() {
+        // At the floor: not below.
+        assert!(!cost_below_create_floor(
+            CREATE_FLOOR_M_KIB,
+            CREATE_FLOOR_T_COST,
+            CREATE_FLOOR_P_COST
+        ));
+        // One step under on memory or passes is below.
+        assert!(cost_below_create_floor(
+            CREATE_FLOOR_M_KIB - 1,
+            CREATE_FLOOR_T_COST,
+            CREATE_FLOOR_P_COST
+        ));
+        assert!(cost_below_create_floor(
+            CREATE_FLOOR_M_KIB,
+            CREATE_FLOOR_T_COST - 1,
+            CREATE_FLOOR_P_COST
+        ));
+        // A cost above the floor on memory and passes is never flagged.
+        assert!(!cost_below_create_floor(
+            CREATE_FLOOR_M_KIB + 1,
+            CREATE_FLOOR_T_COST + 1,
+            CREATE_FLOOR_P_COST
+        ));
+    }
+
+    #[test]
+    fn the_public_creator_never_produces_a_weak_protection() {
+        // `create` is pinned to the default cost, which equals the floor, so a
+        // protection carrying that cost is never reported as weak. Checked on
+        // the cost directly to avoid a 64 MiB derivation in a debug build.
+        let at_default = PasswordProtection {
+            m_kib: DEFAULT_M_KIB,
+            t_cost: DEFAULT_T_COST,
+            p_cost: DEFAULT_P_COST,
+            salt: [0u8; SALT_LEN],
+            key_check: [0u8; KEY_CHECK_LEN],
+        };
+        assert!(!at_default.is_weak_kdf());
+    }
+
+    #[test]
+    fn the_bench_entry_point_builds_a_below_floor_protection_that_unlocks() {
+        // The crate-internal bench entry point makes a deliberately small cost
+        // so the redundancy measurement is not dominated by one 64 MiB
+        // derivation per preset. It must still round-trip a key.
+        let pw = random_test_password();
+        let (prot, created) = PasswordProtection::create_for_bench(&pw).unwrap();
+        // Below the floor, hence reported as weak.
+        assert!(prot.is_weak_kdf());
+        // The derived key is usable: unlock yields the same segment key.
+        let unlocked = prot.unlock(&pw).unwrap();
+        let k_enc = [5u8; 32];
+        let a = created.segment_key(&k_enc, &mid(1), 0).unwrap();
+        let b = unlocked.segment_key(&k_enc, &mid(1), 0).unwrap();
+        assert_eq!(a.as_ref(), b.as_ref());
+    }
+
+    /// Prints how long the floor cost (64 MiB / 3 / 1) takes on this machine.
+    /// Ignored: a measurement, not a correctness test, and slow in a debug
+    /// build. Run with `cargo test -- --ignored measure_create_floor`.
+    #[test]
+    #[ignore]
+    fn measure_create_floor_argon2id_cost() {
+        let pw = random_test_password();
+        let t0 = std::time::Instant::now();
+        let (prot, _) = PasswordProtection::create_with_cost(
+            &pw,
+            CREATE_FLOOR_M_KIB,
+            CREATE_FLOOR_T_COST,
+            CREATE_FLOOR_P_COST,
+        )
+        .unwrap();
+        let create = t0.elapsed();
+        let t1 = std::time::Instant::now();
+        prot.unlock(&pw).unwrap();
+        println!(
+            "argon2id floor (m={} KiB, t={}, p={}): create {create:?}, unlock {:?}",
+            CREATE_FLOOR_M_KIB,
+            CREATE_FLOOR_T_COST,
+            CREATE_FLOOR_P_COST,
             t1.elapsed()
         );
     }
