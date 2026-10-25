@@ -56,7 +56,8 @@ use crate::directed::v2::behaviour::{
 };
 use crate::directed::v2::credential::sign_binding;
 use crate::directed::v2::invite_intake::{
-    intake_invite, InviteIntakeError, InviteRecipientContext,
+    intake_invite, intake_resend_if_stored, InviteIntakeError, InviteRecipientContext,
+    ResendContext,
 };
 use crate::directed::v2::offer::{sign_offer, OfferFields};
 use crate::directed::v2::offer_table::OfferTable;
@@ -5049,7 +5050,10 @@ impl MiasmaNode {
         let id_hex = hex::encode(envelope.envelope_id);
         info!(peer = %peer, envelope_id = %id_hex, "directed_v2.invite_received");
 
-        let Some(ref data_dir) = self.directed_data_dir else {
+        // Own the data dir and recipient keys up front so the `&self` borrow is
+        // released before the offer table is taken (a `&mut self` borrow).
+        // `PathBuf` is cloned; the two 32-byte keys are `Copy`.
+        let Some(data_dir) = self.directed_data_dir.clone() else {
             return DirectedResponseV2::Error(directed_v2_error(
                 directed_v2_codes::OFFER_UNKNOWN,
                 "directed invite persistence unavailable",
@@ -5063,21 +5067,9 @@ impl MiasmaNode {
         };
         let own_identity = self.dht_signing_key.verifying_key().to_bytes();
 
-        // Take the offer out first (design 3.4 item 4, one-shot): any later
-        // failure must not put it back, so a second invite with the same
-        // offer id cannot be tried.
-        let now_secs = self.directed_v2_offer_secs();
-        let Some(offer) = self.directed_v2_offers.take(&peer, &ext.offer_id, now_secs) else {
-            // Absent or expired. Distinguish only by what the table can tell us:
-            // a missing entry reads as unknown.
-            return DirectedResponseV2::Error(directed_v2_error(
-                directed_v2_codes::OFFER_UNKNOWN,
-                "no live offer for this id",
-            ));
-        };
-
         // Derive the sender identity's PeerId from the key the invite carries,
-        // so the pure intake can compare it to the transport PeerId.
+        // so the pure intake can compare it to the transport PeerId. This does
+        // not read the offer, so it is done before the offer is consulted.
         let sender_identity_peer_id = match ed25519_pubkey_to_peer_id(&ext.sender_identity) {
             Some(p) => p.to_bytes(),
             None => {
@@ -5090,7 +5082,7 @@ impl MiasmaNode {
         let transport_peer_id = peer.to_bytes();
         let sender_peer_id_display = peer.to_string();
 
-        let inbox = match crate::directed::DirectedInbox::open(data_dir) {
+        let inbox = match crate::directed::DirectedInbox::open(&data_dir) {
             Ok(inbox) => inbox,
             Err(e) => {
                 debug!("directed_v2.open_inbox_failed: {e}");
@@ -5099,6 +5091,52 @@ impl MiasmaNode {
                     "open inbox failed",
                 ));
             }
+        };
+
+        // Check the stored record before the offer table (design 2.5, 3.4-11).
+        // The one-shot offer is spent by the first Invite, so a genuine resend
+        // (a lost `InviteStored`, a duplicate delivery) arrives with no offer
+        // left. Judging it against the already-stored record first makes the
+        // resend idempotent instead of failing with `offer_unknown`. The resend
+        // signature is still verified inside this call, so a forged Invite under
+        // a stored id is refused, not echoed back.
+        let resend_ctx = ResendContext {
+            own_identity: &own_identity,
+            own_sharing: &own_sharing,
+            sender_identity_peer_id: &sender_identity_peer_id,
+            transport_peer_id: &transport_peer_id,
+            sender_peer_id_display: &sender_peer_id_display,
+        };
+        match intake_resend_if_stored(&inbox, &envelope, &ext, &resend_ctx) {
+            // An identical Invite was already stored: answer idempotently with
+            // the stored transcript hash. Nothing is written and no offer is
+            // consumed.
+            Ok(Some(outcome)) => {
+                info!(peer = %peer, envelope_id = %id_hex, "directed_v2.invite_idempotent_resend");
+                return DirectedResponseV2::InviteStored {
+                    envelope_id: envelope.envelope_id,
+                    transcript_hash: outcome.transcript_hash,
+                };
+            }
+            // No record under this id yet: fall through to the offer path.
+            Ok(None) => {}
+            // The id is present but the content differs (conflict), or the
+            // resend's signature did not verify. Return the coded error without
+            // touching the offer.
+            Err(e) => return directed_v2_intake_error_response(e),
+        }
+
+        // No stored record matched, so this is a first delivery. Take the offer
+        // out (design 3.4 item 4, one-shot): any later failure must not put it
+        // back, so a second invite with the same offer id cannot be tried.
+        let now_secs = self.directed_v2_offer_secs();
+        let Some(offer) = self.directed_v2_offers.take(&peer, &ext.offer_id, now_secs) else {
+            // Absent or expired. Distinguish only by what the table can tell us:
+            // a missing entry reads as unknown.
+            return DirectedResponseV2::Error(directed_v2_error(
+                directed_v2_codes::OFFER_UNKNOWN,
+                "no live offer for this id",
+            ));
         };
 
         let ctx = InviteRecipientContext {
@@ -7244,6 +7282,75 @@ mod directed_v2_receive_tests {
             other => panic!("expected InviteStored on resend, got {other:?}"),
         };
         assert_eq!(hash1, hash2, "a resend yields the same transcript hash");
+    }
+
+    #[tokio::test]
+    async fn resent_invite_does_not_consume_a_second_unspent_offer() {
+        // The idempotent resend path must be judged against the stored record
+        // before the offer table is consulted (design 2.5, 3.4-11): a resend
+        // arrives after its one-shot offer is already spent, so if the handler
+        // reached for the offer table it would either fail with `offer_unknown`
+        // or wrongly spend a different, still-unspent offer. This drives the
+        // handler end to end and proves it does neither: a second offer held by
+        // the same peer survives the resend and completes its own round trip.
+        let (mut node, dir, sharing) = recipient_node();
+        let recipient_identity = node.dht_signing_key.verifying_key().to_bytes();
+        let sender_sk = signing_key();
+        let requester = peer_id_of(&sender_sk.verifying_key().to_bytes());
+
+        // The same requester holds two distinct, unspent offers.
+        let offer_a = request_offer(&mut node, requester);
+        let offer_b = request_offer(&mut node, requester);
+        assert_ne!(offer_a.offer_id, offer_b.offer_id);
+
+        // First delivery of the invite answering offer A: stored once.
+        let (invite_a, peer_a) = build_invite(
+            &sender_sk,
+            recipient_identity,
+            sharing,
+            &offer_a,
+            now_wall_secs(),
+        );
+        let hash1 = match node.handle_directed_v2_request(peer_a, invite_a.clone()) {
+            DirectedResponseV2::InviteStored {
+                transcript_hash, ..
+            } => transcript_hash,
+            other => panic!("expected InviteStored for the first delivery, got {other:?}"),
+        };
+
+        // The exact same invite is delivered again. It is idempotent on the
+        // stored record, so it returns the same transcript hash without taking
+        // any offer out of the table.
+        let hash2 = match node.handle_directed_v2_request(peer_a, invite_a) {
+            DirectedResponseV2::InviteStored {
+                transcript_hash, ..
+            } => transcript_hash,
+            other => panic!("expected InviteStored on resend, got {other:?}"),
+        };
+        assert_eq!(hash1, hash2, "the resend yields the same transcript hash");
+
+        // Offer B was never touched by the resend: an invite answering it still
+        // completes, proving the resend did not spend it.
+        let (invite_b, peer_b) = build_invite(
+            &sender_sk,
+            recipient_identity,
+            sharing,
+            &offer_b,
+            now_wall_secs(),
+        );
+        match node.handle_directed_v2_request(peer_b, invite_b) {
+            DirectedResponseV2::InviteStored { .. } => {}
+            other => panic!("expected InviteStored for offer B, got {other:?}"),
+        }
+
+        // Exactly two records exist: offer A's (written once, not twice by the
+        // resend) and offer B's.
+        let inbox = crate::directed::DirectedInbox::open(dir.path()).unwrap();
+        assert_eq!(
+            inbox.list_incoming_v2().len(),
+            2,
+            "the resend must not write a second record for the same id",
+        );
     }
 
     #[tokio::test]

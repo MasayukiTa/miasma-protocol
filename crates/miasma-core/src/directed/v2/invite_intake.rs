@@ -143,6 +143,163 @@ fn invite_transcript_hash(envelope: &DirectedEnvelope, ext: &InviteExtV2) -> [u8
     transcript::transcript_hash(&sig_msg, &ext.signature)
 }
 
+/// What the recipient knows about itself and the Invite transport, without the
+/// offer. This is the subset of [`InviteRecipientContext`] that an idempotent
+/// resend check needs: a resend is judged after the offer has already been
+/// consumed, so none of the offer fields are available or required (design 2.5,
+/// 3.4-11).
+pub struct ResendContext<'a> {
+    /// This recipient's Ed25519 identity public key.
+    pub own_identity: &'a [u8; 32],
+    /// This recipient's X25519 sharing public key (`R_static`).
+    pub own_sharing: &'a [u8; 32],
+    /// PeerId bytes derived by the caller from `ext.sender_identity`.
+    pub sender_identity_peer_id: &'a [u8],
+    /// PeerId bytes of the connection that carried the Invite.
+    pub transport_peer_id: &'a [u8],
+    /// The sender PeerId string recorded on the stored record.
+    pub sender_peer_id_display: &'a str,
+}
+
+/// Run the offer-independent §3.4 recipient checks and verify the transcript.
+///
+/// This is the subset of [`verify_invite`] that does not read the prekey offer:
+/// version/suite (item 1), lifecycle fixed values (item 2), KDF bounds (item 3),
+/// the invite naming this recipient (item 7), the sender PeerId matching the
+/// transport (item 8), the sender binding (item 9) and the transcript signature
+/// (item 10). The offer checks (items 4, 5, 6) are skipped because an idempotent
+/// resend arrives after the one-shot offer was already spent; its authenticity
+/// still rests on the signature, which is verified here. The expiry check is
+/// also skipped: a window that has since closed does not change whether an
+/// already-stored record is the same Invite, and a resend never creates a new
+/// record. Returns the recomputed transcript hash on success.
+fn verify_invite_no_offer(
+    envelope: &DirectedEnvelope,
+    ext: &InviteExtV2,
+    own_identity: &[u8; 32],
+    own_sharing: &[u8; 32],
+    sender_identity_peer_id: &[u8],
+    transport_peer_id: &[u8],
+) -> Result<[u8; 32], InviteIntakeError> {
+    // 1. version / suite are the v2 values.
+    if envelope.version != SUITE_V2 || ext.suite != SUITE_V2 {
+        return Err(InviteIntakeError::UnsupportedSuite);
+    }
+    // 2. the five lifecycle fields carry their fixed values (§2.2).
+    let lifecycle_ok = envelope.state == EnvelopeState::Pending
+        && envelope.challenge_hash.is_none()
+        && envelope.password_attempts_remaining == 0
+        && envelope.challenge_attempts_remaining == 0
+        && envelope.challenge_expires_at == 0;
+    if !lifecycle_ok {
+        return Err(InviteIntakeError::BadLifecycle);
+    }
+    // 3. KDF cost is within the shared bounds, checked before any key work.
+    if check_kdf_bounds(ext.kdf.m_kib, ext.kdf.t_cost, ext.kdf.p_cost).is_err() {
+        return Err(InviteIntakeError::KdfOutOfRange);
+    }
+    // 7. the invite names this recipient (identity and sharing key).
+    if &ext.recipient_identity != own_identity || &envelope.recipient_pubkey != own_sharing {
+        return Err(InviteIntakeError::NotForThisRecipient);
+    }
+    // 8. the sender identity's PeerId matches the Invite transport PeerId.
+    if sender_identity_peer_id != transport_peer_id {
+        return Err(InviteIntakeError::PeerMismatch);
+    }
+    // 9. the sender sharing-key binding is correct for
+    //    (sender_identity, envelope.sender_pubkey).
+    if !verify_binding(
+        &ext.sender_identity,
+        &envelope.sender_pubkey,
+        &ext.sender_binding,
+    ) {
+        return Err(InviteIntakeError::BadBinding);
+    }
+    // 10. the transcript signature verifies (verify_strict, inside
+    //     verify_transcript), over the header and outer values recomputed from
+    //     the wire.
+    let transcript_hash = invite_transcript_hash(envelope, ext);
+    let header = Header {
+        version: envelope.version,
+        suite: ext.suite,
+        envelope_id: &envelope.envelope_id,
+        sender_identity: &ext.sender_identity,
+        sender_pubkey: &envelope.sender_pubkey,
+        recipient_identity: &ext.recipient_identity,
+        recipient_pubkey: &envelope.recipient_pubkey,
+        ephemeral_pubkey: &envelope.ephemeral_pubkey,
+        recipient_ephemeral: &ext.recipient_ephemeral,
+        offer_id: &ext.offer_id,
+        kdf_m_kib: ext.kdf.m_kib,
+        kdf_t_cost: ext.kdf.t_cost,
+        kdf_p_cost: ext.kdf.p_cost,
+        password_salt: &envelope.password_salt,
+        created_at: envelope.created_at,
+        expires_at: envelope.expires_at,
+        retention_secs: envelope.retention_secs,
+    };
+    let h_hdr = header.h_hdr();
+    let outer = OuterRefs {
+        payload_nonce: &envelope.payload_nonce,
+        encrypted_payload: &envelope.encrypted_payload,
+        dek_nonce: &ext.dek_nonce,
+        wrapped_dek: &ext.wrapped_dek,
+        sender_binding: &ext.sender_binding,
+    };
+    let sig_msg = transcript::sig_msg(&h_hdr, &outer);
+    if !transcript::verify_transcript(&ext.sender_identity, &sig_msg, &ext.signature) {
+        return Err(InviteIntakeError::BadSignature);
+    }
+    Ok(transcript_hash)
+}
+
+/// If a record already exists under this Invite's envelope id, judge the resend
+/// without touching the prekey offer (design 2.5, 3.4-11).
+///
+/// The one-shot offer is consumed by the first Invite, so a genuine resend (a
+/// lost `InviteStored`, a duplicate delivery) arrives with no offer left to
+/// take. The design orders the stored-match check before the offer table for
+/// exactly this case: when the id is already present, the sender PeerId and a
+/// freshly verified transcript hash are compared against the stored record. A
+/// match returns the idempotent `InviteStored` outcome with `created = false`;
+/// the same id carrying a different transcript (or bound to a different PeerId)
+/// is an [`InviteIntakeError::IdConflict`]. When no record exists, `Ok(None)` is
+/// returned and the caller proceeds to the offer-table path.
+///
+/// Authenticity is not weakened: the resend's signature is verified here before
+/// any match, so a forged Invite under a stored id is refused rather than echoed
+/// back. The offer is never consulted, so this path neither spends nor returns
+/// an offer.
+pub fn intake_resend_if_stored(
+    inbox: &DirectedInbox,
+    envelope: &DirectedEnvelope,
+    ext: &InviteExtV2,
+    ctx: &ResendContext<'_>,
+) -> Result<Option<IntakeOutcome>, InviteIntakeError> {
+    let id_hex = envelope.id_hex();
+    let Ok(existing) = inbox.load_incoming_v2(&id_hex) else {
+        return Ok(None);
+    };
+    // A record is present: verify the resend's signature (offer-independent) and
+    // compare it to the stored record.
+    let transcript_hash = verify_invite_no_offer(
+        envelope,
+        ext,
+        ctx.own_identity,
+        ctx.own_sharing,
+        ctx.sender_identity_peer_id,
+        ctx.transport_peer_id,
+    )?;
+    if existing_matches(&existing, &transcript_hash, ctx.sender_peer_id_display) {
+        Ok(Some(IntakeOutcome {
+            transcript_hash,
+            created: false,
+        }))
+    } else {
+        Err(InviteIntakeError::IdConflict)
+    }
+}
+
 /// Run the §3.4 recipient checks on `(envelope, ext)` and verify the transcript.
 ///
 /// On success returns `(h_hdr, sig_msg)` is not needed by the caller, so only
