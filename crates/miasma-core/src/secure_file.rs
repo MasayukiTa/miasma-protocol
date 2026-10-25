@@ -880,7 +880,9 @@ mod tests {
         let path = dir.path().join("exists.dat");
         let existing: [u8; 16] = rand::random();
         std::fs::write(&path, existing).unwrap();
-        let other: [u8; 48] = rand::random();
+        // `rand::random::<[u8; N]>()` only implements N <= 32; build the 48
+        // bytes one at a time so no zero-filled array stands in for the bytes.
+        let other: Vec<u8> = (0..48).map(|_| rand::random::<u8>()).collect();
         assert!(!atomic_write_new(&path, &other).unwrap());
         assert_eq!(std::fs::read(&path).unwrap(), existing);
     }
