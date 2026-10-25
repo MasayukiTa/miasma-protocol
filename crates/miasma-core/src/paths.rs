@@ -1297,6 +1297,30 @@ pub fn atomic_tmp(path: &Path) -> PathBuf {
 pub fn atomic_secure_tmp(path: &Path) -> PathBuf {
     path.with_extension(ATOMIC_SECURE_TMP_EXT)
 }
+/// Per-write temp name that includes the process id and a caller-supplied
+/// nonce, so two writers staging the same final path never pick the same temp:
+/// `<name>.<pid>.<nonce-hex>.tmp`. The nonce is passed in (generated with a
+/// random source by the caller) to keep this function pure and testable.
+pub fn atomic_tmp_unique(path: &Path, pid: u32, nonce: u64) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    let mut unique = name;
+    unique.push(format!(".{pid}.{nonce:016x}.{ATOMIC_TMP_EXT}"));
+    path.with_file_name(unique)
+}
+/// Restricted counterpart of `atomic_tmp_unique`:
+/// `<name>.<pid>.<nonce-hex>.sec.tmp`.
+pub fn atomic_secure_tmp_unique(path: &Path, pid: u32, nonce: u64) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    let mut unique = name;
+    unique.push(format!(".{pid}.{nonce:016x}.{ATOMIC_SECURE_TMP_EXT}"));
+    path.with_file_name(unique)
+}
 /// Where the contacts loader sets an unreadable file aside.
 pub fn contacts_corrupt_aside(contacts_file: &Path, unix_secs: u64) -> PathBuf {
     contacts_file.with_extension(format!("json.corrupt-{unix_secs}"))
@@ -1601,6 +1625,36 @@ mod tests {
             retrieve_tmp_unique(3, 4).file_name().unwrap(),
             "miasma-retrieve-3-4.tmp"
         );
+    }
+
+    #[test]
+    fn unique_atomic_tmp_names_stay_in_the_same_dir_and_differ_by_nonce() {
+        let target = Path::new("d/config.toml");
+
+        let a = atomic_tmp_unique(target, 7, 0x1122_3344_5566_7788);
+        // Same directory as the final file, so the rename is same-volume.
+        assert_eq!(a.parent(), target.parent());
+        let a_name = a.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(a_name.starts_with("config.toml."), "keeps the base name");
+        assert!(a_name.ends_with(".tmp"), "ends with the tmp extension");
+        assert!(a_name.contains(".7."), "carries the process id");
+        assert!(
+            a_name.contains("1122334455667788"),
+            "carries the nonce in hex"
+        );
+        // It is not the old fixed `config.tmp` another path could also pick.
+        assert_ne!(a, atomic_tmp(target));
+
+        // A different nonce yields a different temp name (no collision).
+        let b = atomic_tmp_unique(target, 7, 0x8877_6655_4433_2211);
+        assert_ne!(a, b);
+
+        // The restricted variant keeps the secure extension, same rules.
+        let s = atomic_secure_tmp_unique(Path::new("d/master.key"), 7, 1);
+        assert_eq!(s.parent(), Path::new("d/master.key").parent());
+        let s_name = s.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(s_name.starts_with("master.key."));
+        assert!(s_name.ends_with(".sec.tmp"));
     }
 
     #[test]
