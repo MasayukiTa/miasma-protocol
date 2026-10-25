@@ -1300,7 +1300,7 @@ pub fn atomic_secure_tmp(path: &Path) -> PathBuf {
 /// Per-write temp name that includes the process id and a caller-supplied
 /// random suffix, so two writers staging the same final path never pick the
 /// same temp: `<name>.<pid>.<suffix-hex>.tmp`. The suffix is passed in
-/// (generated with a random source by the caller) to keep this function pure
+/// (drawn from a random source by the caller) to keep this function pure
 /// and testable.
 pub fn atomic_tmp_unique(path: &Path, pid: u32, suffix: u64) -> PathBuf {
     let name = path
