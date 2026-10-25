@@ -27,7 +27,9 @@ use crate::directed::challenge::{
 };
 use crate::directed::envelope::{DirectedEnvelope, EnvelopeState};
 use crate::directed::inbox::DirectedInbox;
-use crate::directed::state::{ChallengeLocal, IncomingRecord, MonoDeadline, Now, Protection};
+use crate::directed::state::{
+    ChallengeLocal, IncomingLocal, IncomingRecord, MonoDeadline, Now, Protection,
+};
 
 use super::credential::verify_binding;
 use super::kdf::check_kdf_bounds;
@@ -901,5 +903,23 @@ mod tests {
             !existing_matches(&record, &stored, "a-different-peer"),
             "a different bound PeerId is not an idempotent resend"
         );
+    }
+
+    /// Guards that `IncomingLocal` is in scope in this module's tests: the type
+    /// lives in `crate::directed::state`, and a missing import of it is exactly
+    /// what stopped this test module from compiling. Building one through
+    /// `local_with` (which returns `IncomingLocal`) and reading its fields back
+    /// fails to compile if the import is dropped again. No fixed key material is
+    /// used: the bound PeerId and the pinned transcript hash are both random.
+    #[test]
+    fn incoming_local_is_constructible_in_scope() {
+        let peer_id = hex::encode(rand_vec(16));
+        let pinned: [u8; 32] = rand::random();
+        let local: IncomingLocal = local_with(&peer_id, Some(pinned));
+        assert_eq!(local.sender_peer_id, peer_id);
+        assert_eq!(local.transcript_hash, Some(pinned));
+        assert_eq!(local.protection, Protection::V2);
+        // The ephemeral secret is absent in this terminal-shaped record.
+        assert!(local.r_eph_secret.is_none());
     }
 }
