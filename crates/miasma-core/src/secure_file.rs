@@ -64,24 +64,30 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), MiasmaError> {
     })
 }
 
-/// Atomic plain write that never replaces an existing file. The bytes go to a
-/// uniquely named temp file in the same directory, and are then linked into
-/// place only if nothing already holds the final name; the temp file is always
-/// removed. Returns `Ok(true)` when this call created `path`,
-/// `Ok(false)` when a file was already there (left untouched). A reader sees
-/// either no file or the whole file, never a partial one.
+/// Atomic restricted write that never replaces an existing file. The bytes go
+/// to a uniquely named, owner-only temp file in the same directory (Unix mode
+/// `0600`, Windows DACL granting only the current user), and are then linked
+/// into place only if nothing already holds the final name; the temp file is
+/// always removed, including on failure. The final name shares the temp file's
+/// restricted permissions through the hard link. Returns `Ok(true)` when this
+/// call created `path`, `Ok(false)` when a file was already there (left
+/// untouched). A reader sees either no file or the whole file, never a partial
+/// one.
 ///
-/// Use this instead of a bare `File::create` + `hard_link` so the no-clobber
-/// temp+link guarantee lives in one audited place. The temp name includes the
-/// process id and a fresh random suffix to avoid colliding with another writer
-/// in the same directory.
+/// Use this for secrets that must not be replaced: it keeps the no-clobber
+/// temp+link guarantee and the restricted permissions in one audited place.
+/// The temp name includes the process id and a fresh random suffix to avoid
+/// colliding with another writer in the same directory.
 pub fn atomic_write_new(path: &Path, data: &[u8]) -> Result<bool, MiasmaError> {
-    let tmp = crate::paths::atomic_tmp_unique(path, std::process::id(), rand::random());
-    std::fs::write(&tmp, data).inspect_err(|_e| {
+    let tmp = crate::paths::atomic_secure_tmp_unique(path, std::process::id(), rand::random());
+    // The temp file is born restricted to the current user, so the bytes are
+    // never readable by other users, even briefly at the temp path.
+    write_restricted(&tmp, data).inspect_err(|_e| {
         let _ = std::fs::remove_file(&tmp);
     })?;
     // A hard link fails with AlreadyExists rather than overwriting, so an
-    // existing file at the final path is never lost.
+    // existing file at the final path is never lost. The link shares the temp
+    // file's inode and so its restricted permissions.
     let linked = std::fs::hard_link(&tmp, path);
     let _ = std::fs::remove_file(&tmp);
     match linked {
@@ -1028,5 +1034,23 @@ mod tests {
         write_restricted(&path, b"v2").unwrap();
         assert!(verify_restricted(&path).unwrap());
         assert_eq!(std::fs::read(&path).unwrap(), b"v2");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_new_creates_an_owner_only_file() {
+        // The file a fresh create leaves behind is restricted to its owner from
+        // the start: mode 0o600, readable and writable by nobody else. The
+        // bytes are drawn at run time, never a fixed literal.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owner-only.dat");
+        let payload: [u8; 32] = rand::random();
+        assert!(atomic_write_new(&path, &payload).unwrap());
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "backup must be owner-only, got {mode:o}");
+        // The stricter owner-only check (regular file, 0o600, owned by us) also
+        // holds for the placed file.
+        verify_owner_only(&path).unwrap();
     }
 }
