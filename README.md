@@ -98,6 +98,7 @@ A browser client lives in `web/`. With the desktop app or the CLI running, `mias
 - **Built for poor networks.** Transfers retry, can be stopped, and resume from where they stopped.
 - **Storage you can inspect and delete.** Settings shows where your data is kept. Clearing finished transfers or a conversation's history deletes it from the app's storage.
 - **Works across versions.** Older and newer builds tolerate each other, and the app says why when something is waiting for the other side. Byte-level tests pin the formats of earlier releases.
+- **Post-quantum key exchange by default.** Private-conversation key exchange requires a post-quantum hybrid (X25519 + ML-KEM-768) by default. If a contact's build cannot do it, messages are not sent down to classical silently: the app shows that compatibility is missing and refuses to send, and you ask the contact to update to a recent build. See [docs/pqc-session-upgrade.md](docs/pqc-session-upgrade.md).
 
 For the protocol itself (erasure-coded, content-addressed storage, a Kademlia DHT, relay and onion routing options), see the [architecture decision records](docs/adr/) and [docs/variant-guide.md](docs/variant-guide.md).
 
