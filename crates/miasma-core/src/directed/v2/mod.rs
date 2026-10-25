@@ -17,6 +17,7 @@
 
 pub mod behaviour;
 pub mod credential;
+pub mod invite_intake;
 pub mod kdf;
 pub mod offer;
 pub mod offer_table;
