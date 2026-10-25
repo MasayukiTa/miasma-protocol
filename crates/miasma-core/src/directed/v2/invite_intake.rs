@@ -816,4 +816,90 @@ mod tests {
         );
         assert!(rendered.contains("<redacted>"));
     }
+
+    /// Build a recipient-local part with the given bound PeerId and stored
+    /// transcript hash, with no fixed key material. The ephemeral secret is
+    /// absent (a terminal-shaped record); only the PeerId and the stored hash
+    /// matter to `existing_matches`.
+    fn local_with(sender_peer_id: &str, transcript_hash: Option<[u8; 32]>) -> IncomingLocal {
+        IncomingLocal {
+            state: EnvelopeState::ChallengeIssued,
+            challenge: None,
+            password_attempts_remaining: 3,
+            password_attempt_pending: false,
+            received_at: 1_000,
+            effective_expires_at: 10_000,
+            sender_peer_id: sender_peer_id.to_string(),
+            protection: Protection::V2,
+            transcript_hash,
+            r_eph_secret: None,
+        }
+    }
+
+    /// A record whose local part pins no transcript hash stands in for a record
+    /// written before the field existed (an older on-disk record or a v1
+    /// migration). A resend under the same bound PeerId cannot compare hashes,
+    /// so it falls back to the PeerId alone and is treated as an idempotent
+    /// match, preserving the earlier behaviour and on-disk compatibility.
+    #[test]
+    fn a_record_without_a_stored_transcript_hash_matches_on_the_peer_id_alone() {
+        let b = build_valid(1_700_000_000);
+        // The hash the caller recomputed for the resend; its value is irrelevant
+        // because the stored record pins no hash to compare it against.
+        let resend_hash: [u8; 32] = rand::random();
+
+        let mut record = IncomingRecord {
+            wire: b.envelope.clone(),
+            ext: None,
+            local: Some(local_with(&b.peer_id_display, None)),
+        };
+        assert!(
+            existing_matches(&record, &resend_hash, &b.peer_id_display),
+            "a hashless record matches a resend from the same bound PeerId"
+        );
+
+        // A different bound PeerId never matches, even with no stored hash.
+        record.local = Some(local_with("a-different-peer", None));
+        assert!(
+            !existing_matches(&record, &resend_hash, &b.peer_id_display),
+            "a different bound PeerId is not an idempotent resend"
+        );
+    }
+
+    /// A record that pins a transcript hash is idempotent only when both the
+    /// bound PeerId and the stored hash match; the same id carrying a different
+    /// transcript is a conflict.
+    #[test]
+    fn a_record_with_a_stored_transcript_hash_matches_only_on_both_peer_id_and_hash() {
+        let b = build_valid(1_700_000_000);
+        let stored: [u8; 32] = rand::random();
+        // A second draw that differs from the first stands in for a different
+        // transcript; no fixed hash value is written.
+        let mut different: [u8; 32] = rand::random();
+        while different == stored {
+            different = rand::random();
+        }
+
+        let record = IncomingRecord {
+            wire: b.envelope.clone(),
+            ext: None,
+            local: Some(local_with(&b.peer_id_display, Some(stored))),
+        };
+
+        // Same PeerId and same stored hash: idempotent.
+        assert!(
+            existing_matches(&record, &stored, &b.peer_id_display),
+            "the same bound PeerId and the same stored hash is a resend"
+        );
+        // Same PeerId but a different hash: a content conflict.
+        assert!(
+            !existing_matches(&record, &different, &b.peer_id_display),
+            "a different transcript hash under the same id is a conflict"
+        );
+        // A different PeerId never matches, even with the same stored hash.
+        assert!(
+            !existing_matches(&record, &stored, "a-different-peer"),
+            "a different bound PeerId is not an idempotent resend"
+        );
+    }
 }
