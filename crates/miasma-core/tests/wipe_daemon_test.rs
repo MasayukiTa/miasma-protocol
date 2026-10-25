@@ -158,6 +158,7 @@ async fn wipe_through_the_control_interface_stops_work_and_leaves_no_output() {
                     file_path: source.to_string_lossy().into_owned(),
                     data_shards: 2,
                     total_shards: 3,
+                    object_format: None,
                 },
             )
             .await

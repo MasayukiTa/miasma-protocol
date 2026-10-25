@@ -112,6 +112,9 @@ struct PublishFileRequest {
     data_shards: u8,
     #[serde(default = "default_n")]
     total_shards: u8,
+    /// Optional object format. Absent: the daemon uses the configured value.
+    #[serde(default)]
+    object_format: Option<crate::config::ObjectFormat>,
 }
 
 #[derive(Deserialize)]
@@ -725,6 +728,7 @@ async fn handle_publish_file(body: Bytes, state: BridgeState) -> Response<Full<B
             file_path,
             data_shards: req.data_shards,
             total_shards: req.total_shards,
+            object_format: req.object_format,
         },
     )
     .await;

@@ -11,7 +11,7 @@ use miasma_core::{
     config::{default_data_dir, NodeConfig},
     dissolve, retrieve,
     store::LocalShareStore,
-    DissolutionParams, MiasmaNode, NodeType,
+    DissolutionParams, MiasmaNode, NodeType, ObjectFormat,
 };
 use tracing::info;
 use zeroize::{Zeroize, Zeroizing};
@@ -223,6 +223,10 @@ enum Commands {
         /// part of it. Default output is unchanged without this flag.
         #[arg(long)]
         invite: bool,
+        /// Object format to write: `compat` (the default receivers read) or
+        /// `latest`. Omitted: the configured `transfer.object_format` is used.
+        #[arg(long, value_name = "FORMAT")]
+        format: Option<ObjectFormat>,
     },
 
     /// Generate a strong random password for `network-publish --password-file`.
@@ -696,6 +700,7 @@ async fn main() -> Result<()> {
             restart,
             no_wait,
             invite,
+            format,
         } => {
             let password = read_transfer_password(password_file.as_deref(), password_stdin)?;
             if let Some(pw) = &password {
@@ -711,6 +716,7 @@ async fn main() -> Result<()> {
                 restart,
                 no_wait,
                 invite,
+                format,
             )
             .await
         }
@@ -2805,8 +2811,20 @@ async fn cmd_network_publish(
     restart: bool,
     no_wait: bool,
     invite: bool,
+    format: Option<ObjectFormat>,
 ) -> Result<()> {
     use miasma_core::{daemon_request, ControlRequest, ControlResponse};
+
+    // When the flag is given it wins; otherwise the configured value is loaded
+    // here and carried on the request, so the daemon writes the chosen format.
+    let object_format = match format {
+        Some(f) => Some(f),
+        None => Some(
+            NodeConfig::load(data_dir)
+                .map(|c| c.transfer.object_format)
+                .unwrap_or_default(),
+        ),
+    };
 
     // The daemon reads the file itself and publishes it segment by segment, so
     // files of any size work without full-file RAM buffering or IPC size limits.
@@ -2828,6 +2846,7 @@ async fn cmd_network_publish(
             total_shards: total_shards as u8,
             password: password.map(str::to_owned),
             restart,
+            object_format,
         },
     )
     .await?

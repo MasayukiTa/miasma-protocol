@@ -1211,6 +1211,20 @@ pub(crate) fn process_request(
     ))
 }
 
+/// Resolve the object format for a publish: the value the request carried, or
+/// the configured `transfer.object_format` when the request omitted it (an
+/// older client). A config that cannot be read falls back to the default.
+fn resolve_object_format(
+    requested: Option<crate::config::ObjectFormat>,
+    data_dir: &std::path::Path,
+) -> crate::config::ObjectFormat {
+    requested.unwrap_or_else(|| {
+        crate::config::NodeConfig::load(data_dir)
+            .map(|c| c.transfer.object_format)
+            .unwrap_or_default()
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn process_request_inner(
     req: ControlRequest,
@@ -1290,18 +1304,28 @@ async fn process_request_inner(
             file_path,
             data_shards,
             total_shards,
+            object_format,
         } => {
             let params = DissolutionParams {
                 data_shards: data_shards as usize,
                 total_shards: total_shards as usize,
             };
+            let object_format = resolve_object_format(object_format, &data_dir);
             let path = std::path::Path::new(&file_path);
             let gate = store.wipe_gate();
             match gate
                 .run_result(async {
                     // Test hold point; returns at once outside tests.
                     gate.stall_point().await;
-                    coord.dissolve_and_publish_file(path, params).await
+                    coord
+                        .dissolve_and_publish_file_with_format(
+                            path,
+                            params,
+                            crate::network::PublishOptions::default(),
+                            object_format,
+                        )
+                        .await
+                        .map(|report| report.mid)
                 })
                 .await
             {
@@ -1317,6 +1341,7 @@ async fn process_request_inner(
             data_shards,
             total_shards,
             password,
+            object_format,
         } => {
             // Wiped from memory when this arm ends.
             let password = Zeroizing::new(password);
@@ -1324,13 +1349,15 @@ async fn process_request_inner(
                 data_shards: data_shards as usize,
                 total_shards: total_shards as usize,
             };
+            let object_format = resolve_object_format(object_format, &data_dir);
             let path = std::path::Path::new(&file_path);
             match coord
-                .dissolve_and_publish_file_protected(
+                .dissolve_and_publish_file_protected_with_format(
                     path,
                     params,
                     crate::network::PublishOptions::default(),
                     password.as_str(),
+                    object_format,
                 )
                 .await
             {
@@ -1426,23 +1453,25 @@ async fn process_request_inner(
             total_shards,
             password,
             restart,
+            object_format,
         } => {
             let password = password.map(Zeroizing::new);
             let params = DissolutionParams {
                 data_shards: data_shards as usize,
                 total_shards: total_shards as usize,
             };
+            // The request carries the format for a new publish; when it is
+            // absent (an older client) the configured value is used. A resume
+            // still honours whatever suite its journal recorded.
+            let object_format = resolve_object_format(object_format, &data_dir);
             let registry = crate::transfer::jobs::registry_for(&data_dir);
-            // IPC does not yet carry the format choice, so the daemon keeps the
-            // compat default here (see the follow-up list). A resume still
-            // honours whatever suite its journal recorded.
             let id = registry.start_publish(
                 coord.clone(),
                 PathBuf::from(file_path),
                 params,
                 password,
                 restart,
-                crate::config::ObjectFormat::default(),
+                object_format,
             );
             ControlResponse::TransferStarted { id }
         }

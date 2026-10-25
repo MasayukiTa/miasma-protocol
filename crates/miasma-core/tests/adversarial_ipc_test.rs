@@ -435,6 +435,7 @@ fn password_bearing_requests_zeroize_their_secrets() {
         data_shards: 2,
         total_shards: 3,
         password: random_secret(),
+        object_format: None,
     };
     protected.zeroize();
     match protected {
@@ -464,6 +465,7 @@ fn password_bearing_requests_zeroize_their_secrets() {
         total_shards: 3,
         password: Some(random_secret()),
         restart: false,
+        object_format: None,
     };
     publish.zeroize();
     match publish {

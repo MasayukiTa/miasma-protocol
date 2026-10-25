@@ -556,6 +556,8 @@ pub fn publish_file(data_dir: String, file_path: String) -> Result<String, Miasm
             file_path: file_path.to_string_lossy().into_owned(),
             data_shards: DEFAULT_DATA_SHARDS,
             total_shards: DEFAULT_TOTAL_SHARDS,
+            // Absent: the daemon falls back to the configured object format.
+            object_format: None,
         },
     )?;
     match response {

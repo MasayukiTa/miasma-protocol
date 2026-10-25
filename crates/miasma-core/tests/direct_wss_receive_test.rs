@@ -236,6 +236,7 @@ async fn a_protected_multi_segment_transfer_is_received_through_a_daemon_with_on
                 data_shards: 2,
                 total_shards: 3,
                 password: password.clone(),
+                object_format: None,
             },
         )
         .await

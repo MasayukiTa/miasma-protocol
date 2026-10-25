@@ -5857,6 +5857,7 @@ fn ipc_publish_file_serde_roundtrip() {
         file_path: "/tmp/test-file.bin".to_string(),
         data_shards: 3,
         total_shards: 5,
+        object_format: None,
     };
     let json = serde_json::to_string(&req).unwrap();
     let deser: ControlRequest = serde_json::from_str(&json).unwrap();
@@ -5865,10 +5866,12 @@ fn ipc_publish_file_serde_roundtrip() {
             file_path,
             data_shards,
             total_shards,
+            object_format,
         } => {
             assert_eq!(file_path, "/tmp/test-file.bin");
             assert_eq!(data_shards, 3);
             assert_eq!(total_shards, 5);
+            assert_eq!(object_format, None);
         }
         _ => panic!("deserialized to wrong variant"),
     }

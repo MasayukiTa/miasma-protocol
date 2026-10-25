@@ -518,6 +518,7 @@ async fn a_protected_transfer_is_received_over_http_and_the_password_never_leaks
                 data_shards: 2,
                 total_shards: 3,
                 password: password.clone(),
+                object_format: None,
             },
         )
         .await
@@ -913,6 +914,7 @@ async fn a_running_receive_can_be_stopped_over_http() {
                 file_path: src.to_string_lossy().into_owned(),
                 data_shards: 2,
                 total_shards: 3,
+                object_format: None,
             },
         )
         .await
