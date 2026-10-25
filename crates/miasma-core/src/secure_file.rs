@@ -28,7 +28,10 @@ pub fn write_restricted(path: &Path, data: &[u8]) -> Result<(), MiasmaError> {
 /// This is the preferred pattern for secrets that must never be readable by
 /// other users even momentarily at the final path.
 pub fn atomic_write_restricted(path: &Path, data: &[u8]) -> Result<(), MiasmaError> {
-    let tmp = crate::paths::atomic_secure_tmp(path);
+    // The temp file carries the process id and a fresh random suffix in its
+    // name, so two writers staging the same final path, or an unrelated `.tmp`
+    // user in the same directory, never collide on the temp name.
+    let tmp = crate::paths::atomic_secure_tmp_unique(path, std::process::id(), rand::random());
     write_restricted(&tmp, data).inspect_err(|_e| {
         let _ = std::fs::remove_file(&tmp);
     })?;
@@ -36,6 +39,27 @@ pub fn atomic_write_restricted(path: &Path, data: &[u8]) -> Result<(), MiasmaErr
         let _ = std::fs::remove_file(&tmp);
         MiasmaError::Io(std::io::Error::other(format!(
             "failed to rename restricted file into place: {e}"
+        )))
+    })
+}
+
+/// Atomic plain write: write to a temp file in the same directory, then rename
+/// it over the final path. The rename is atomic on the same volume, so a crash
+/// or a concurrent writer never leaves a truncated file at the final path.
+///
+/// Use this instead of `std::fs::write` for persisted paths that do not need
+/// restricted permissions, so the temp+rename guarantee lives in one audited
+/// place. The temp name includes the process id and a fresh random suffix to
+/// avoid colliding with another writer in the same directory.
+pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), MiasmaError> {
+    let tmp = crate::paths::atomic_tmp_unique(path, std::process::id(), rand::random());
+    std::fs::write(&tmp, data).inspect_err(|_e| {
+        let _ = std::fs::remove_file(&tmp);
+    })?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        MiasmaError::Io(std::io::Error::other(format!(
+            "failed to rename file into place: {e}"
         )))
     })
 }
@@ -721,6 +745,91 @@ mod tests {
 
         // Temp file must not linger.
         assert!(!path.with_extension("sec.tmp").exists());
+    }
+
+    #[test]
+    fn atomic_write_writes_replaces_and_leaves_no_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plain.dat");
+
+        // First write creates the file.
+        atomic_write(&path, b"first").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"first");
+
+        // Second write replaces the contents in place.
+        atomic_write(&path, b"second").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
+
+        // No temp file is left behind, under the old fixed name or any other:
+        // after a successful rename the directory holds only the final file.
+        assert!(!crate::paths::atomic_tmp(&path).exists());
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|n| n != "plain.dat")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no temp file left behind: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn atomic_write_fails_and_cleans_up_when_the_final_path_is_a_directory() {
+        // Force the rename step itself to fail: a directory already sits at the
+        // final path, so renaming the temp file over it cannot succeed on
+        // either Windows or Unix. The temp file must be cleaned up and the
+        // existing entry at the final path left exactly as it was.
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("occupied");
+
+        // A directory stands where the file would land, holding one marker file
+        // whose contents must survive the failed save untouched.
+        std::fs::create_dir(&target).unwrap();
+        let sentinel = target.join("keep.txt");
+        std::fs::write(&sentinel, b"original").unwrap();
+
+        let result = atomic_write(&target, b"should not land");
+        assert!(result.is_err(), "the rename over a directory must fail");
+
+        // The directory and its contents are unchanged.
+        assert!(target.is_dir(), "the existing directory is still there");
+        assert_eq!(
+            std::fs::read(&sentinel).unwrap(),
+            b"original",
+            "the existing contents were left untouched"
+        );
+
+        // No temp file is left behind in the parent directory: after the failed
+        // rename only the `occupied` directory remains.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|n| n != "occupied")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no temp file left behind after the failed rename: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn atomic_write_fails_without_corrupting_when_parent_is_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // A good file written first.
+        let good = dir.path().join("good.dat");
+        atomic_write(&good, b"keep").unwrap();
+
+        // A regular file that cannot act as a parent directory.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"x").unwrap();
+
+        // Writing under it fails; the good file is untouched.
+        let doomed = blocker.join("child.dat");
+        assert!(atomic_write(&doomed, b"nope").is_err());
+        assert_eq!(std::fs::read(&good).unwrap(), b"keep");
+        assert!(!doomed.exists());
     }
 
     #[test]
