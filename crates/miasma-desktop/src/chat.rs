@@ -1266,6 +1266,43 @@ mod tests {
     }
 
     #[test]
+    fn pqc_fail_reasons_have_their_own_sentence_in_every_language() {
+        // The two `require` refusals the service gives map to their own
+        // sentences (not the catch-all), in every language.
+        for lang in Locale::ALL {
+            let c = chat_strings(lang);
+            for reason in ["pqc_peer_no_hybrid", "pqc_failed"] {
+                assert_ne!(
+                    fail_text(c, Some(reason)),
+                    c.fail_other,
+                    "{lang:?} {reason}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_unsupported_peer_message_asks_for_an_update() {
+        // When the contact's app does not offer the advanced encryption the
+        // setting requires, the message tells the person to ask for an update.
+        let update_word = |lang: Locale| -> &'static str {
+            match lang {
+                Locale::En => "update",
+                Locale::Ja => "\u{6700}\u{65b0}\u{7248}",
+                Locale::ZhCn => "\u{66f4}\u{65b0}",
+            }
+        };
+        for lang in Locale::ALL {
+            let c = chat_strings(lang);
+            let s = fail_text(c, Some("pqc_peer_no_hybrid"));
+            assert!(
+                s.contains(update_word(lang)),
+                "{lang:?} does not ask for an update: {s}"
+            );
+        }
+    }
+
+    #[test]
     fn the_counter_follows_the_limit_in_bytes() {
         assert_eq!(counter("", 4096).level, CounterLevel::Empty);
         assert_eq!(counter("  \n", 4096).level, CounterLevel::Empty);

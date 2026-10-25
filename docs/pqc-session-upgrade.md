@@ -1,7 +1,8 @@
 # Hybrid key exchange for private conversations
 
-**Status: beta, on by default (`prefer`: used when the contact supports it).
-This wiring has not been reviewed by an outside cryptographer.** The primitives come from a maintained library (see
+**Status: beta, on by default (`require`: a message is sent only after the
+hybrid exchange with that contact has completed; there is no classical
+fallback). This wiring has not been reviewed by an outside cryptographer.** The primitives come from a maintained library (see
 `dependency-review-mlkem.md`); the way they are combined with the existing
 conversation sessions is new code written for this project and is subject to
 external cryptographic review before anyone relies on it.
@@ -24,24 +25,39 @@ what lets every build keep talking to every other build.
 
 | value     | behaviour |
 |-----------|-----------|
-| `off`     | The build offers nothing and answers nothing. Bytes on the wire are those of a build without the feature. |
-| `prefer`  | Default. Offer the upgrade. Use it when the contact agrees; otherwise keep the classical session and show "classical only". Messages are never held back. |
-| `require` | Send messages to a contact only after the upgrade with that contact finished. If the contact cannot do it (or the exchange fails), the messages fail on this device with a stated reason. Nothing is sent in the classical session. The contact's own settings are not affected. |
+| `require` | Default. Send messages to a contact only after the upgrade with that contact finished. If the contact cannot do it (or the exchange fails), the messages fail on this device with a stated reason. Nothing is sent in the classical session. The contact's own settings are not affected. |
+| `prefer`  | Advanced only (see below). Offer the upgrade. Use it when the contact agrees; otherwise keep the classical session and show "classical only". Messages are never held back. Allowing this classical fallback lowers the guarantee to the contact's level, so `miasma status` warns while it is in force. |
+| `off`     | Advanced only (see below). The build offers nothing and answers nothing. Bytes on the wire are those of a build without the feature. Like `prefer`, it allows a classical fallback and `miasma status` warns while it is in force. |
 
-* The default is `prefer`. The key is written to `config.toml` only after a
+* The default is `require`. The key is written to `config.toml` only after a
   person has chosen a value; a file without it means "never chosen". Settings
-  and `miasma status` then say "on when the contact supports it" and that this
-  is the default.
+  and `miasma status` then say the upgrade is required and that this is the
+  default.
+* `off` and `prefer` lower the guarantee below `require` by allowing a
+  classical fallback. They are **not offered in the normal settings**: they are
+  honoured only when written into `config.toml` by hand or passed to an advanced
+  command-line option, and `miasma status` and desktop Settings warn while one
+  is in force. See [`PqcMode::allows_classical_fallback`] in the code.
+* A contact whose build does not offer the hybrid suite cannot be sent to under
+  the `require` default: the messages fail on this device with the reason
+  `pqc_peer_no_hybrid`, shown in the chat in the three languages, and the person
+  is told to ask the contact to update to the latest version. Nothing is sent in
+  the classical session.
 * Turning the setting off stops new upgrades and the answers to offers. A
   session that was already upgraded keeps using its key (dropping it would only
   weaken the messages, and the contact still sends layered ones); the key goes
   when the session is reset or the conversation is deleted. The document is
   sealed with the same state keys as the session, so the existing erase of the
   master key makes it unreadable as well.
-* `miasma config --key privacy.pqc_mode --value prefer` (and `--key` alone to
-  read it). A change applies the next time the background service starts.
+* `miasma config --key privacy.pqc_mode --value require` (and `--key` alone to
+  read it). A change applies the next time the background service starts. The
+  `require` default needs no setting; lowering it to `off` or `prefer` is an
+  advanced step (set the key here or pass the advanced command-line option) and
+  the status then warns that a classical fallback is allowed.
 * Desktop: Settings, "Advanced encryption" (English, Japanese,
-  Simplified Chinese), three choices with a plain explanation of each.
+  Simplified Chinese). The required upgrade is the standard, shown as the
+  default; `off` and `prefer` are moved out of the ordinary choices into an
+  advanced area, and a warning is shown while a classical fallback is allowed.
 * `miasma status` shows the mode and the counters; the daemon status carries
   `pqc: { mode, available, counts }`; each conversation reports `pqc`
   (`pending`, `hybrid`, `classical`, `failed`) and `pqc_reason`
@@ -63,9 +79,10 @@ The cargo feature `pqc` of `miasma-core` (passed through as `pqc` by
 `miasma-cli`, `miasma-desktop` and `miasma-ffi`) is **on by default for the
 desktop and command-line programs** and off for `miasma-ffi` (the mobile
 library) and for `miasma-core` on its own. The setting `privacy.pqc_mode`
-defaults to `prefer`, so a release build offers the upgrade to every contact
-until a person changes it. A desktop or CLI build can leave it out with
-`--no-default-features`; Settings then shows the choices switched off. The
+defaults to `require`, so a release build requires the upgrade for every
+contact until a person sets `off` or `prefer`. A desktop or CLI build can leave
+it out with `--no-default-features`; Settings then shows the choices switched
+off. The
 mobile library does not run the chat service and does not enable the feature
 (see "Mobile" below).
 
@@ -83,33 +100,42 @@ With the feature off the negotiation and exchange code is not compiled and the
 daemon behaves exactly as before. One small, always compiled piece is shared:
 the message-key layering helper in `chat/crypto.rs`, which is never given a
 key in such a build. A build without the feature that finds
-`privacy.pqc_mode = prefer|require` set by a person says so (log line,
+`privacy.pqc_mode = off|prefer|require` set by a person says so (log line,
 `miasma config`, `miasma status`, desktop Settings) and stays classical; it does
 not pretend. The untouched default is not reported as a setting it ignores:
 `miasma status` says "off (not in this build ...)".
 
 ## Existing configuration files
 
-Before the default changed, every save of `config.toml` wrote
+Before the default first changed, every save of `config.toml` wrote
 `pqc_mode = "off"`, chosen or not, so a plain change of the default would never
-have reached existing installs. The file now carries
+have reached existing installs. The file carries
 `privacy.pqc_default_version` (written by every save; a file without it counts
-as 0) and `pqc_mode` is written only when set:
+as 0), and `pqc_mode` is written only when set. The default has moved twice:
+version 1 made it `prefer`, and **this release (beta.12) raises it to
+`require`** as version 2. Each step is applied once, when the file is first read
+under an older version, and the file is then rewritten by the next save:
 
-* version 0 with `pqc_mode = "off"` (or without the key): read as never chosen,
-  that is `prefer`;
-* version 0 with `prefer` or `require`: kept;
-* version 1 or later: whatever is written is a choice, including `off`, and is
-  kept.
+* version 0 with `pqc_mode = "off"` (or without the key): the version-0 default
+  wrote that `off`, so it was never chosen. It is cleared, and the current
+  default (`require`) applies;
+* the `prefer` default that version 1 left in force was never written to the
+  file (it was the unset default), so a version-1 file with no `pqc_mode` moves
+  to the `require` default as well;
+* any `off`, `prefer` or `require` a person wrote at version 1 or later is a
+  choice and is kept as it is.
 
-No step is needed. The migration happens on load; the file is rewritten by the
-next save. Known limit: a version-0 file cannot show whether `off` was chosen or
-only saved as the old default (for example someone who tried `prefer` and went
-back), so those people get `prefer` and can set `off` again in Settings or with
-`miasma config --key privacy.pqc_mode --value off`. A choice of `off` made after
-the change is kept. If an older build rewrites the file, it drops the version
+So the migration to `require` happens **once, on the first start under beta.12**:
+an install that never chose a value moves from the old default to `require`,
+and an install that did choose keeps its choice (including `off` or `prefer`,
+which then warn about the classical fallback). No manual step is needed. Known
+limit: a version-0 file cannot show whether `off` was chosen or only saved as
+the old default (for example someone who tried a value and went back), so those
+people get `require` and can set `off` or `prefer` again by hand or with
+`miasma config --key privacy.pqc_mode --value off`. A choice made after the
+migration is kept. If an older build rewrites the file, it drops the version
 key and writes `off` again, and the next start of this build reads it as never
-chosen.
+chosen (so `require` applies).
 
 ## Mobile
 
@@ -181,19 +207,26 @@ out-of-order delivery work as before.
 
 ## Compatibility
 
-The owner's rule: builds of any version keep talking; nothing fails merely
-because the peer is older or newer; a downgrade is visible, never silent.
+The owner's rule: the wire stays compatible with builds of any version, and a
+downgrade is visible, never silent. Under the `require` default the *content*
+to a contact that cannot do the upgrade is held back by design (the message
+fails on this device rather than drop to the classical session); the bytes that
+do go on the wire are still the ones an old build reads. Lowering the setting to
+`prefer` or `off` restores classical delivery to such a contact.
 
-* The default does not change the bytes sent to a contact with the setting off
-  or an older build beyond the one record described next.
+* The bytes sent to a contact with the setting off or an older build do not
+  change beyond the one record described next, whatever this side's mode.
 * Old builds: the envelope, frame and acknowledgement bytes are those they
-  always read. The only new thing a `prefer`/`require` build sends to a contact
-  that does not know the upgrade is one sealed record of kind `0x20`. A build
-  that sets unknown records aside acknowledges it; the oldest chat release
-  answers "bad request" for it and keeps its session unchanged. Either way the
-  next envelope is an ordinary message. The contact is then shown as
-  "classical only" (`peer_no_hybrid` after a short wait, or `peer_old_build`
-  at once).
+  always read. The only new thing a build with the upgrade enabled
+  (`require`, `prefer`) sends to a contact that does not know the upgrade is one
+  sealed record of kind `0x20`. A build that sets unknown records aside
+  acknowledges it; the oldest chat release answers "bad request" for it and
+  keeps its session unchanged. Either way the next envelope is an ordinary
+  message. Under `prefer` the contact is then shown as "classical only"
+  (`peer_no_hybrid` after a short wait, or `peer_old_build` at once); under the
+  `require` default the messages to that contact fail on this device with the
+  reason `pqc_peer_no_hybrid`, and the person is asked to have the contact
+  update to the latest version.
 * `tests/pqc_old_peer_compat_test.rs` runs this build against **frozen copies
   of the old decoders** (strict envelope, frame and message readers, taken from
   the release sources, as `wire_compat_test.rs` does), for both kinds of old
@@ -213,7 +246,7 @@ because the peer is older or newer; a downgrade is visible, never silent.
 
 | situation | result |
 |-----------|--------|
-| contact has the setting off, or an older build | `prefer`: classical only, shown. `require`: messages fail locally with the reason |
+| contact has the setting off, or an older build | `require` (default): messages fail locally with the reason `pqc_peer_no_hybrid`, and the person is asked to have the contact update; nothing is sent in the classical session. `prefer`/`off` (advanced): classical only, shown |
 | offer altered or stripped on the way | cannot happen inside the authenticated session except by the peer itself; the transcript binding makes an altered offer fail the confirmation (`failed`); a missing offer counts as `offer_missing` and ends classical |
 | exchange message altered | decapsulation yields an unrelated key (implicit rejection); the tags differ; both sides end `failed`; no layered message is ever sent |
 | restart in the middle | the exchange starts again; a finished one is read from the document |

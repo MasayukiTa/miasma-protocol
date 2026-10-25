@@ -2916,9 +2916,13 @@ impl MiasmaApp {
 
     // ── Advanced encryption (Settings) ───────────────────────────────────────────
 
-    /// The three choices of `privacy.pqc_mode`, with what each one does. The
-    /// choice is written to the configuration at once; the background service
-    /// reads it when it starts.
+    /// `privacy.pqc_mode` in Settings. The normal (easy) view offers only the
+    /// required default; `off` and `prefer`, which allow a classical fallback,
+    /// appear under an advanced heading in the technical view (they can also be
+    /// set in the configuration file or by the advanced command-line option). A
+    /// warning is shown whenever a value that allows a classical fallback is in
+    /// force. The choice is written to the configuration at once; the background
+    /// service reads it when it starts.
     fn pqc_section(&mut self, ui: &mut egui::Ui) {
         use miasma_core::config::PqcMode;
         let p = self.pq();
@@ -2936,20 +2940,24 @@ impl MiasmaApp {
                 kit::notice(ui, Level::Warn, p.unavailable);
                 ui.add_space(kit::SP_1);
             }
+            // `require` is the default. `off` and `prefer` lower the protection
+            // below it and are set apart under an advanced heading further down;
+            // while one of them is in force a warning says a classical fallback
+            // is allowed.
+            if chosen.allows_classical_fallback() {
+                kit::notice(ui, Level::Warn, p.fallback_warning);
+                ui.add_space(kit::SP_1);
+            }
             // Without the protection in this build the choices are shown switched off: they
             // would be saved but change nothing.
             ui.add_enabled_ui(available, |ui| {
-                for (mode, label) in [
-                    (PqcMode::Off, p.off),
-                    (PqcMode::Prefer, p.prefer),
-                    (PqcMode::Require, p.require),
-                ] {
-                    let r = ui.radio_value(&mut chosen, mode, label);
+                let radio = |ui: &mut egui::Ui, chosen: &mut PqcMode, mode, label| {
+                    let r = ui.radio_value(chosen, mode, label);
                     // Each choice is named by its own label; the heading names the group.
                     r.widget_info(|| {
                         egui::WidgetInfo::selected(
                             egui::WidgetType::RadioButton,
-                            chosen == mode,
+                            *chosen == mode,
                             label,
                         )
                     });
@@ -2957,6 +2965,23 @@ impl MiasmaApp {
                     if !available {
                         crate::form_check::mark_disabled(&r);
                     }
+                };
+                // `require` is the standard and the only everyday choice; it is
+                // always shown first and is selectable.
+                radio(ui, &mut chosen, PqcMode::Require, p.require);
+                kit::hint(ui, p.required_note);
+                // `off` and `prefer` lower the protection below the default. They
+                // are not everyday choices: the normal (easy) settings do not
+                // offer them, so a classical fallback can only be chosen from the
+                // configuration file, the advanced command-line option, or this
+                // technical view. When one is already in force the warning above
+                // is shown whichever view this is.
+                if !easy {
+                    ui.add_space(kit::SP_1);
+                    ui.label(kit::muted_text(p.advanced_label));
+                    kit::hint(ui, p.advanced_hint);
+                    radio(ui, &mut chosen, PqcMode::Prefer, p.prefer);
+                    radio(ui, &mut chosen, PqcMode::Off, p.off);
                 }
             });
             // What the protection is and what each choice does: opened on request.
