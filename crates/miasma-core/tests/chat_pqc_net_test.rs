@@ -137,6 +137,19 @@ fn texts(p: &Peer, other: &[u8; 32]) -> Vec<String> {
         .collect()
 }
 
+/// The bodies this side received from `other` (incoming only). `texts` mixes in
+/// this side's own outgoing bodies, which share the same conversation key, so a
+/// check for "did the peer's body arrive" must exclude what we sent ourselves.
+fn received(p: &Peer, other: &[u8; 32]) -> Vec<String> {
+    p.svc
+        .core()
+        .history(other, None, 200)
+        .into_iter()
+        .filter(|m| !m.outgoing)
+        .map(|m| m.text)
+        .collect()
+}
+
 fn conversation(p: &Peer, other: &[u8; 32]) -> Option<ConversationInfo> {
     match handle_with(&p.svc, ChatRequest::Conversations {}) {
         ChatResponse::Conversations(list) => list
@@ -238,8 +251,8 @@ async fn require_fails_locally_when_the_peer_does_not_offer_it() {
     .await;
     let hist = a.svc.core().history(&b.id(), None, 10);
     assert_eq!(hist[0].reason.as_deref(), Some("pqc_peer_no_hybrid"));
-    // Nothing was sent in the classical session.
-    assert!(texts(&b, &a.id()).is_empty());
+    // Nothing was sent in the classical session (b received no body from a).
+    assert!(received(&b, &a.id()).is_empty());
     // The other side is unaffected and can still write.
     send(&b, "alice", "still here");
     until(60, "the message from the other side", || {
@@ -296,11 +309,86 @@ async fn a_new_default_build_refuses_an_old_default_build_and_does_not_fall_back
     })
     .await;
     assert!(
-        texts(&b, &a.id()).is_empty(),
+        received(&b, &a.id()).is_empty(),
         "no classical fallback under require"
     );
     assert_eq!(
         a.svc.core().history(&b.id(), None, 20)[0].reason.as_deref(),
         Some("pqc_peer_no_hybrid")
+    );
+}
+
+/// Guards the test helper itself: a conversation key is shared by both
+/// directions, so `texts` returns this side's own sent bodies as well as what
+/// arrived, while `received` returns only the incoming ones. A check for "did
+/// the peer's body arrive" must use `received`, or a side that has only sent
+/// would look as if it had received.
+#[tokio::test(flavor = "multi_thread")]
+async fn received_excludes_this_sides_own_outgoing_bodies() {
+    let r = relay().await;
+    let (a, b) = (
+        peer(&r, PqcMode::Prefer).await,
+        peer(&r, PqcMode::Prefer).await,
+    );
+    register(&a, b.id(), "bob");
+    register(&b, a.id(), "alice");
+    send(&a, "bob", "only from a");
+    until(60, "a's body to arrive at b", || {
+        received(&b, &a.id()).iter().any(|t| t == "only from a")
+    })
+    .await;
+    // a has sent one and received nothing: `texts` shows its own body, but
+    // `received` is empty for a.
+    until(30, "a's own send to settle", || {
+        texts(&a, &b.id()).iter().any(|t| t == "only from a")
+    })
+    .await;
+    assert!(
+        texts(&a, &b.id()).iter().any(|t| t == "only from a"),
+        "texts includes this side's own outgoing body"
+    );
+    assert!(
+        received(&a, &b.id()).is_empty(),
+        "received excludes this side's own outgoing body"
+    );
+}
+
+/// The require side must not put a body in the clear even when the old-default
+/// peer transmits first: `b` sends three before `a` is asked to, yet none of
+/// `a`'s own bodies reach `b`. This pins the ordering where the peer's traffic
+/// arrives before the local refusal is decided.
+#[tokio::test(flavor = "multi_thread")]
+async fn require_does_not_leak_bodies_even_when_the_peer_sends_first() {
+    let r = relay().await;
+    let (a, b) = (
+        peer(&r, PqcMode::Require).await,
+        peer(&r, PqcMode::Off).await,
+    );
+    register(&a, b.id(), "bob");
+    register(&b, a.id(), "alice");
+    // The old-default side transmits first and repeatedly.
+    for i in 0..3 {
+        send(&b, "alice", &format!("old first {i}"));
+    }
+    until(90, "all three from the old build to arrive at a", || {
+        received(&a, &b.id()).len() == 3
+    })
+    .await;
+    // Only now does the require side try to send.
+    for i in 0..3 {
+        send(&a, "bob", &format!("from require {i}"));
+    }
+    until(90, "a's messages all failing on the require side", || {
+        let h = a.svc.core().history(&b.id(), None, 20);
+        h.iter().filter(|m| m.outgoing).count() == 3
+            && h.iter()
+                .filter(|m| m.outgoing)
+                .all(|m| m.state == MsgState::Failed)
+    })
+    .await;
+    // None of a's bodies were put in the clear: b received nothing from a.
+    assert!(
+        received(&b, &a.id()).is_empty(),
+        "no classical fallback under require even when the peer sends first"
     );
 }
