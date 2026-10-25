@@ -998,6 +998,7 @@ fn do_init(data_dir: &Path) -> anyhow::Result<()> {
         chat: Default::default(),
         privacy: Default::default(),
         update: Default::default(),
+        transfer: Default::default(),
     };
     config.save(data_dir)?;
 

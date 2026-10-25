@@ -1456,4 +1456,24 @@ mod transfer_object_format_tests {
         }
         assert!("gibberish".parse::<ObjectFormat>().is_err());
     }
+
+    // The `transfer` field carries a default, so a NodeConfig built field by
+    // field (as the init paths in the CLI, the mobile bridge and the desktop
+    // worker do) equals the all-defaults config, and the key is optional for a
+    // config file written before it existed.
+    #[test]
+    fn the_default_node_config_has_the_compat_transfer_section() {
+        let c = NodeConfig::default();
+        assert_eq!(c.transfer, TransferConfig::default());
+        assert_eq!(c.transfer.object_format, ObjectFormat::Compat);
+    }
+
+    #[test]
+    fn a_node_config_file_without_a_transfer_section_reads_as_compat() {
+        // A whole config.toml from before the [transfer] section existed still
+        // parses, and the missing section reads as the compat default.
+        let c: NodeConfig = toml::from_str("[chat]\nenabled = true\n").unwrap();
+        assert_eq!(c.transfer, TransferConfig::default());
+        assert_eq!(c.transfer.object_format, ObjectFormat::Compat);
+    }
 }

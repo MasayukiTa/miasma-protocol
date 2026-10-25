@@ -836,6 +836,7 @@ fn cmd_init(
         chat: Default::default(),
         privacy: Default::default(),
         update: Default::default(),
+        transfer: Default::default(),
     };
     config.save(data_dir).context("cannot save config")?;
 
