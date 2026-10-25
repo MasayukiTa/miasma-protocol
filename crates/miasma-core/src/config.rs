@@ -1205,6 +1205,16 @@ mod pqc_default_tests {
     }
 
     #[test]
+    fn only_off_and_prefer_allow_a_classical_fallback() {
+        // `require` holds the message back for a contact that cannot do the
+        // hybrid exchange; `off` and `prefer` let it fall back to a classical
+        // session. The status surfaces warn on exactly the latter two.
+        assert!(!PqcMode::Require.allows_classical_fallback());
+        assert!(PqcMode::Off.allows_classical_fallback());
+        assert!(PqcMode::Prefer.allows_classical_fallback());
+    }
+
+    #[test]
     fn an_old_file_with_the_old_default_reads_as_never_chosen() {
         let dir = tempfile::tempdir().unwrap();
         legacy_file(dir.path(), PqcMode::Off);
