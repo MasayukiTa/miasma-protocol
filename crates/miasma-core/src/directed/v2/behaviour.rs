@@ -13,6 +13,7 @@
 
 use super::wire::{DirectedRequestV2, DirectedResponseV2};
 use crate::directed::protocol::DIRECTED_MSG_MAX;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Protocol id for the v2 directed request-response behaviour.
 pub const DIRECTED_PROTOCOL_V2: &str = "/miasma/directed/2.0.0";
@@ -49,7 +50,7 @@ impl libp2p::request_response::Codec for DirectedCodecV2 {
                 "directed v2 msg too large",
             ));
         }
-        let mut buf = vec![0u8; len];
+        let mut buf = Zeroizing::new(vec![0u8; len]);
         io.read_exact(buf.as_mut_slice()).await?;
         bincode::deserialize(buf.as_slice())
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
@@ -73,7 +74,7 @@ impl libp2p::request_response::Codec for DirectedCodecV2 {
                 "directed v2 response too large",
             ));
         }
-        let mut buf = vec![0u8; len];
+        let mut buf = Zeroizing::new(vec![0u8; len]);
         io.read_exact(buf.as_mut_slice()).await?;
         bincode::deserialize(buf.as_slice())
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
@@ -83,14 +84,17 @@ impl libp2p::request_response::Codec for DirectedCodecV2 {
         &mut self,
         _: &libp2p::StreamProtocol,
         io: &mut T,
-        req: Self::Request,
+        mut req: Self::Request,
     ) -> std::io::Result<()>
     where
         T: futures::AsyncWrite + Unpin + Send,
     {
         use futures::AsyncWriteExt;
-        let buf = bincode::serialize(&req)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let serialized = bincode::serialize(&req);
+        req.zeroize();
+        let buf = Zeroizing::new(
+            serialized.map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
+        );
         io.write_all(&(buf.len() as u32).to_le_bytes()).await?;
         io.write_all(buf.as_slice()).await
     }
@@ -105,8 +109,10 @@ impl libp2p::request_response::Codec for DirectedCodecV2 {
         T: futures::AsyncWrite + Unpin + Send,
     {
         use futures::AsyncWriteExt;
-        let buf = bincode::serialize(&res)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let buf = Zeroizing::new(
+            bincode::serialize(&res)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
+        );
         io.write_all(&(buf.len() as u32).to_le_bytes()).await?;
         io.write_all(buf.as_slice()).await
     }
@@ -301,5 +307,55 @@ mod tests {
         // Construction must not panic and the protocol id constant is the v2 one.
         let _b = new_directed_v2_behaviour();
         assert_eq!(DIRECTED_PROTOCOL_V2, "/miasma/directed/2.0.0");
+    }
+
+    #[test]
+    fn a_confirm_request_v2_zeroizes_its_challenge_code() {
+        // The v2 request clears the only secret-bearing field on `zeroize`, the
+        // same field the v1 `DirectedRequest` clears. The code is built from a
+        // random draw so no fixed secret appears in the test.
+        let code: String = (0..12)
+            .map(|_| (b'A' + rand::random::<u8>() % 26) as char)
+            .collect();
+        let mut req = DirectedRequestV2::Confirm {
+            envelope_id: rand_arr(),
+            challenge_code: code,
+        };
+        req.zeroize();
+        match req {
+            DirectedRequestV2::Confirm { challenge_code, .. } => {
+                assert!(challenge_code.is_empty());
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn write_request_frames_the_same_bytes_despite_zeroizing() {
+        // Clearing the source after serialising must not change the bytes on the
+        // wire: the frame is still the 4-byte LE length then the body produced by
+        // an independent serialize of an equal request.
+        let mut c = DirectedCodecV2;
+        let p = proto();
+        let envelope_id: [u8; 32] = rand_arr();
+        let code: String = (0..12)
+            .map(|_| (b'A' + rand::random::<u8>() % 26) as char)
+            .collect();
+        let reference = DirectedRequestV2::Confirm {
+            envelope_id,
+            challenge_code: code.clone(),
+        };
+        let want = bincode::serialize(&reference).unwrap();
+        let sent = DirectedRequestV2::Confirm {
+            envelope_id,
+            challenge_code: code,
+        };
+        let mut out: Vec<u8> = Vec::new();
+        block_on(c.write_request(&p, &mut out, sent)).unwrap();
+        assert_eq!(&out[..4], &(want.len() as u32).to_le_bytes());
+        assert_eq!(&out[4..], want.as_slice());
+        let mut rd = futures::io::Cursor::new(out);
+        let back = block_on(c.read_request(&p, &mut rd)).unwrap();
+        assert_eq!(bincode::serialize(&back).unwrap(), want);
     }
 }
