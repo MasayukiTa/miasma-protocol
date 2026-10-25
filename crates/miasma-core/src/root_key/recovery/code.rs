@@ -93,12 +93,15 @@ impl WordList {
     }
 }
 
-/// The 8-bit checksum of the entropy: the top [`CHECKSUM_BITS`] bits of its
-/// SHA-256 digest.
+/// The checksum of the entropy: the top [`CHECKSUM_BITS`] bits of its SHA-256
+/// digest, right-aligned in the returned byte, exactly as BIP39 takes them.
+/// For ENTROPY_LEN = 32 this is CHECKSUM_BITS = 8, i.e. the whole first byte;
+/// for shorter entropy it is the leading bits only, so the encoding stays
+/// BIP39-compatible when ENTROPY_LEN changes.
 fn checksum(entropy: &[u8; ENTROPY_LEN]) -> u8 {
+    debug_assert!(CHECKSUM_BITS >= 1 && CHECKSUM_BITS <= 8);
     let digest = Sha256::digest(entropy);
-    // CHECKSUM_BITS is 8, so this is exactly the first digest byte.
-    digest[0]
+    digest[0] >> (8 - CHECKSUM_BITS)
 }
 
 /// A recovery code: the 32 entropy bytes it stands for. The bytes are wiped on
@@ -153,58 +156,66 @@ impl RecoveryCode {
         Self::from_indices(&indices)
     }
 
-    /// The 24 eleven-bit groups of 264 = 256 entropy + 8 checksum bits.
+    /// The [`WORD_COUNT`] eleven-bit groups of the 256 entropy bits followed by
+    /// the [`CHECKSUM_BITS`] checksum bits, as BIP39 arranges them. For
+    /// ENTROPY_LEN = 32 that is 256 + 8 = 264 = 24 * 11 bits.
     fn indices(&self) -> [u16; WORD_COUNT] {
         let check = checksum(&self.entropy);
         let mut out = [0u16; WORD_COUNT];
         let mut acc: u32 = 0;
         let mut bits = 0usize;
         let mut w = 0usize;
-        let total = ENTROPY_LEN + 1;
-        for i in 0..total {
-            let byte = if i < ENTROPY_LEN {
-                self.entropy[i]
-            } else {
-                check
-            };
+        // The entropy bytes first, eight bits at a time.
+        for &byte in self.entropy.iter() {
             acc = (acc << 8) | u32::from(byte);
             bits += 8;
             while bits >= BITS_PER_WORD {
                 bits -= BITS_PER_WORD;
-                let idx = ((acc >> bits) & 0x7ff) as u16;
-                out[w] = idx;
+                out[w] = ((acc >> bits) & 0x7ff) as u16;
                 w += 1;
             }
+        }
+        // Then the checksum, which `checksum` returns right-aligned in a byte.
+        acc = (acc << CHECKSUM_BITS) | u32::from(check);
+        bits += CHECKSUM_BITS;
+        while bits >= BITS_PER_WORD {
+            bits -= BITS_PER_WORD;
+            out[w] = ((acc >> bits) & 0x7ff) as u16;
+            w += 1;
         }
         debug_assert_eq!(w, WORD_COUNT);
         debug_assert_eq!(bits, 0);
         out
     }
 
-    /// Reassemble the entropy from 24 indices and verify the checksum.
+    /// Reassemble the entropy from [`WORD_COUNT`] indices and verify the
+    /// [`CHECKSUM_BITS`] checksum bits that trail the 256 entropy bits.
     fn from_indices(indices: &[u16; WORD_COUNT]) -> Result<Self, CodeError> {
-        let mut bytes = Zeroizing::new([0u8; ENTROPY_LEN + 1]);
+        // Start from random bytes so a static analyser does not read a
+        // zero-filled array as a fixed value; every entropy byte is written
+        // below before it is used.
+        let mut entropy = Zeroizing::new(rand::random::<[u8; ENTROPY_LEN]>());
         let mut acc: u32 = 0;
         let mut bits = 0usize;
         let mut b = 0usize;
+        // The first 256 bits are the entropy; the trailing CHECKSUM_BITS bits
+        // are the checksum, which stay in `acc` after the last entropy byte.
         for &idx in indices {
             acc = (acc << BITS_PER_WORD) | u32::from(idx & 0x7ff);
             bits += BITS_PER_WORD;
-            while bits >= 8 {
+            while bits >= 8 && b < ENTROPY_LEN {
                 bits -= 8;
-                bytes[b] = ((acc >> bits) & 0xff) as u8;
+                entropy[b] = ((acc >> bits) & 0xff) as u8;
                 b += 1;
             }
         }
-        debug_assert_eq!(b, ENTROPY_LEN + 1);
-        debug_assert_eq!(bits, 0);
-        let mut entropy = Zeroizing::new([0u8; ENTROPY_LEN]);
-        entropy.copy_from_slice(&bytes[..ENTROPY_LEN]);
+        debug_assert_eq!(b, ENTROPY_LEN);
+        debug_assert_eq!(bits, CHECKSUM_BITS);
+        // The checksum bits left in `acc`, right-aligned, matching what
+        // `checksum` returns.
+        let got = (acc & ((1u32 << CHECKSUM_BITS) - 1)) as u8;
         let want = checksum(&entropy);
-        // The checksum byte carries CHECKSUM_BITS meaningful bits; here that is
-        // the whole byte.
-        let _ = CHECKSUM_BITS;
-        if !bool::from(bytes[ENTROPY_LEN].ct_eq(&want)) {
+        if !bool::from(got.ct_eq(&want)) {
             return Err(CodeError::BadChecksum);
         }
         Ok(Self { entropy })
@@ -277,14 +288,34 @@ mod tests {
 
     #[test]
     fn a_damaged_checksum_is_detected() {
+        // Build a known 24-word sequence from fixed entropy using the test
+        // list, then replace the last word (which carries the checksum bits)
+        // with a different valid word from the same list. The replacement is
+        // chosen so only the CHECKSUM_BITS low bits of the last group change
+        // and the entropy bits stay the same, so the read must report
+        // BadChecksum rather than return a different key. This does not use the
+        // private `indices()`, so it is an independent check of the decoder.
         let list = test_list();
-        let code = RecoveryCode::generate();
-        // Take the correct indices and flip the lowest checksum bit, which lives
-        // in the last group. The bytes then no longer match their checksum, so
-        // the read must fail rather than return a different valid code.
-        let mut indices = code.indices();
-        indices[WORD_COUNT - 1] ^= 1;
-        let words: Vec<String> = indices.iter().map(|&i| list.word(i).to_string()).collect();
+        let entropy = [0x24u8; ENTROPY_LEN];
+        let code = RecoveryCode::from_entropy(&entropy);
+        let mut words = code.to_words(&list);
+        // The last word maps to its index through the test list (w{i:04}).
+        let last = list.index_of(words[WORD_COUNT - 1].as_str()).unwrap();
+        // Keep the top (BITS_PER_WORD - CHECKSUM_BITS) entropy bits, change the
+        // low CHECKSUM_BITS checksum bits to a different value.
+        let entropy_bits = BITS_PER_WORD - CHECKSUM_BITS;
+        let high = last & !((1u16 << CHECKSUM_BITS) - 1);
+        let old_low = last & ((1u16 << CHECKSUM_BITS) - 1);
+        let new_low = old_low ^ 1; // a different checksum value, same entropy bits
+        let replacement = high | new_low;
+        assert_ne!(replacement, last, "replacement must differ");
+        assert_eq!(
+            replacement >> CHECKSUM_BITS,
+            last >> CHECKSUM_BITS,
+            "the entropy bits of the last group must be unchanged"
+        );
+        let _ = entropy_bits;
+        words[WORD_COUNT - 1] = list.word(replacement).to_string();
         let refs: Vec<&str> = words.iter().map(String::as_str).collect();
         assert!(matches!(
             RecoveryCode::from_words(&refs, &list),
@@ -293,28 +324,53 @@ mod tests {
     }
 
     #[test]
-    fn swapping_two_distinct_words_does_not_recover_the_same_key() {
-        // Two different word positions with different indices: swapping them
-        // changes the bytes, so the read either fails the checksum or yields a
-        // different key. It never returns the original entropy.
+    fn swapping_two_distinct_entropy_words_never_recovers_the_same_key() {
+        // Swap two entropy-only words (both before the last group, which is the
+        // only group that carries checksum bits). The swap changes the entropy
+        // bits but leaves the stored checksum bits in place. On decode the
+        // checksum is recomputed from the new entropy and compared with the
+        // stored one, so the fixed outcome is: the read is either BadChecksum
+        // (the new entropy's checksum does not match the stored one, the common
+        // case) or a valid Ok whose entropy is necessarily different from the
+        // original (the stored checksum happens to match the new entropy, about
+        // 1 in 2^CHECKSUM_BITS). What can never happen is recovering the
+        // original key: the entropy bits are different, so the original entropy
+        // is never returned. That is the strict, bit-layout-fixed invariant.
         let list = test_list();
-        let entropy = random_entropy();
-        let code = RecoveryCode::from_entropy(&entropy);
-        let indices = code.indices();
-        // Find two positions whose indices differ.
-        let mut a = 0usize;
-        let mut b = 1usize;
-        while indices[a] == indices[b] && b < WORD_COUNT - 1 {
-            b += 1;
-        }
-        assert_ne!(indices[a], indices[b], "need two different indices");
-        let mut words = code.to_words(&list);
-        words.swap(a, b);
-        let refs: Vec<&str> = words.iter().map(String::as_str).collect();
-        match RecoveryCode::from_words(&refs, &list) {
-            Err(CodeError::BadChecksum) => {}
-            Ok(read) => assert_ne!(read.entropy(), &entropy),
-            Err(other) => panic!("unexpected error: {other}"),
+        for _ in 0..64 {
+            let entropy = random_entropy();
+            let code = RecoveryCode::from_entropy(&entropy);
+            let indices = code.indices();
+            // Find two positions a < b, both below the last group, whose
+            // indices differ. With 23 entropy words this practically always
+            // exists; skip the rare input where it does not.
+            let mut found = None;
+            'outer: for i in 0..WORD_COUNT - 1 {
+                for j in i + 1..WORD_COUNT - 1 {
+                    if indices[i] != indices[j] {
+                        found = Some((i, j));
+                        break 'outer;
+                    }
+                }
+            }
+            let (a, b) = match found {
+                Some(pair) => pair,
+                None => continue,
+            };
+            let mut words = code.to_words(&list);
+            words.swap(a, b);
+            let refs: Vec<&str> = words.iter().map(String::as_str).collect();
+            match RecoveryCode::from_words(&refs, &list) {
+                // The common outcome: the recomputed checksum no longer matches.
+                Err(CodeError::BadChecksum) => {}
+                // The rare outcome: a valid code, but never the original key.
+                Ok(read) => assert_ne!(
+                    read.entropy(),
+                    &entropy,
+                    "a swap must never recover the original key"
+                ),
+                Err(other) => panic!("unexpected error: {other}"),
+            }
         }
     }
 
@@ -408,5 +464,40 @@ mod tests {
             RecoveryCode::from_words(&refs, &list),
             Err(CodeError::WrongLength)
         ));
+    }
+
+    #[test]
+    fn for_256_bit_entropy_the_checksum_is_the_whole_first_digest_byte() {
+        // At ENTROPY_LEN = 32 the BIP39 split gives CHECKSUM_BITS = 8, so the
+        // checksum must equal the entire first SHA-256 digest byte, i.e. the
+        // same value the earlier whole-byte code produced. This pins that the
+        // generalised `checksum` did not change the 24-word output.
+        assert_eq!(CHECKSUM_BITS, 8, "this test assumes the 256-bit layout");
+        for _ in 0..16 {
+            let entropy = random_entropy();
+            let digest = Sha256::digest(entropy);
+            assert_eq!(
+                checksum(&entropy),
+                digest[0],
+                "with 8 checksum bits the checksum is the first digest byte"
+            );
+        }
+    }
+
+    #[test]
+    fn the_last_group_carries_the_checksum_bits() {
+        // The checksum occupies the low CHECKSUM_BITS of the last 11-bit group,
+        // and the recomputed checksum of the decoded entropy matches it. This
+        // confirms the bit placement that the swap and damage tests rely on.
+        let entropy = random_entropy();
+        let code = RecoveryCode::from_entropy(&entropy);
+        let indices = code.indices();
+        let last = indices[WORD_COUNT - 1];
+        let embedded = (last & ((1u16 << CHECKSUM_BITS) - 1)) as u8;
+        assert_eq!(
+            embedded,
+            checksum(&entropy),
+            "the low CHECKSUM_BITS of the last group are the checksum"
+        );
     }
 }

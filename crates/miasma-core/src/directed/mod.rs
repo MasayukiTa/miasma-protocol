@@ -57,6 +57,7 @@ pub mod inbox;
 pub mod protocol;
 pub mod state;
 mod state_step;
+pub mod v2;
 
 pub use challenge::{
     generate_challenge, verify_challenge, CHALLENGE_MAX_ATTEMPTS, CHALLENGE_TTL_SECS,

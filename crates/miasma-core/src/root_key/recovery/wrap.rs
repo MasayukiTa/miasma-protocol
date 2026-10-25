@@ -48,6 +48,11 @@ pub enum RecoveryError {
     /// The opened key does not match the file's key check.
     #[error("the recovered key failed its check")]
     KeyCheckFailed,
+    /// The key-encryption key could not be derived. A 32-byte HKDF output is
+    /// always a valid length, so this cannot happen in practice; it is kept so
+    /// the derivation never has to return a value it did not compute.
+    #[error("the recovery key could not be derived")]
+    KeyDerivation,
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -57,14 +62,19 @@ fn map_format(e: FormatError) -> RecoveryError {
 }
 
 /// Derive the key-encryption key for a recovery code and install.
-fn recovery_kek(code: &RecoveryCode, install_id: &[u8; 16]) -> Zeroizing<[u8; 32]> {
+fn recovery_kek(
+    code: &RecoveryCode,
+    install_id: &[u8; 16],
+) -> Result<Zeroizing<[u8; 32]>, RecoveryError> {
     let hk = Hkdf::<Sha256>::new(Some(install_id), code.entropy());
     // Start from random bytes so a static analyser does not read a zero-filled
-    // array as a fixed key; HKDF-Expand overwrites every byte below.
+    // array as a fixed key; HKDF-Expand overwrites every byte below. If the
+    // expand ever fails (it cannot for a 32-byte output), return an error
+    // rather than let the random bytes stand in as a key.
     let mut kek = Zeroizing::new(rand::random::<[u8; 32]>());
     hk.expand(HKDF_INFO, kek.as_mut())
-        .expect("32 bytes is a valid HKDF output length");
-    kek
+        .map_err(|_| RecoveryError::KeyDerivation)?;
+    Ok(kek)
 }
 
 fn cipher(kek: &[u8; 32]) -> XChaCha20Poly1305 {
@@ -81,7 +91,7 @@ fn seal_record(code: &RecoveryCode, blob: &Blob, root: &[u8; 32]) -> Result<Reco
         wrapped: Vec::new(),
     };
     let aad = record.aad(&blob.header);
-    let kek = recovery_kek(code, &blob.header.install_id);
+    let kek = recovery_kek(code, &blob.header.install_id)?;
     let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
     let ct = cipher(&kek)
         .encrypt(
@@ -109,7 +119,7 @@ fn open_record(
         return Err(RecoveryError::WrongCodeOrTampered);
     }
     let aad = record.aad(&blob.header);
-    let kek = recovery_kek(code, &blob.header.install_id);
+    let kek = recovery_kek(code, &blob.header.install_id)?;
     let (nonce, ct) = record.wrapped.split_at(NONCE_LEN);
     let plain = Zeroizing::new(
         cipher(&kek)
@@ -146,8 +156,12 @@ pub fn has_recovery_wrap(data_dir: &Path) -> Result<bool, RecoveryError> {
 
 /// Add a recovery record for `root` under `code`, rewriting `root.sealed`.
 /// `root` must be the key the file already holds; it is confirmed against the
-/// header's key check before anything is written. Returns the previous file
-/// bytes so the caller can undo the change (see [`remove_recovery_wrap`]).
+/// header's key check before anything is written. If the word confirmation is
+/// not completed, the caller undoes the wrap with [`remove_recovery_wrap`],
+/// which takes the recovery record back out so the file again holds only the
+/// device wrap, as the design requires for a cancelled add. The write itself
+/// is atomic (see [`write_blob`]), so a crash leaves either the old file or the
+/// new one, never a half-written file.
 pub fn add_recovery_wrap(
     data_dir: &Path,
     code: &RecoveryCode,
@@ -168,7 +182,10 @@ pub fn add_recovery_wrap(
 }
 
 /// Remove the recovery record from `root.sealed`, rewriting it. The device
-/// record is kept, so the device can still open the key.
+/// record is kept, so the device can still open the key, and install_id and
+/// key_id are left unchanged. This is how an added wrap is taken back out when
+/// a recovery add is cancelled: the file returns to holding only the device
+/// wrap, which is the "before the wrap" state the design calls for.
 pub fn remove_recovery_wrap(data_dir: &Path) -> Result<(), RecoveryError> {
     let mut blob = read_blob(data_dir)?;
     match recovery_index(&blob) {
@@ -342,5 +359,41 @@ mod tests {
         assert!(blob.records.iter().any(|r| r.rtype == RECORD_RECOVERY));
         // The device record is unchanged: the device still opens the key.
         assert_eq!(*blob.device_record(), before);
+    }
+
+    #[test]
+    fn wrapping_the_same_code_twice_uses_a_fresh_nonce() {
+        // Wrapping the same root under the same code must draw a fresh nonce
+        // each time, so the wrapped bytes differ. The nonce is the first
+        // NONCE_LEN bytes of the record's wrapped field. This is a regression
+        // guard against a fixed or reused nonce. Add, remove, then add again,
+        // and compare the two recovery records' nonces.
+        let dir = tempfile::tempdir().unwrap();
+        let root = random::<32>();
+        seed_sealed(dir.path(), &root);
+        let code = RecoveryCode::generate();
+
+        add_recovery_wrap(dir.path(), &code, &root).unwrap();
+        let first = read_blob(dir.path()).unwrap();
+        let first_rec = &first.records[recovery_index(&first).unwrap()];
+        let first_nonce = first_rec.wrapped[..NONCE_LEN].to_vec();
+
+        remove_recovery_wrap(dir.path()).unwrap();
+        add_recovery_wrap(dir.path(), &code, &root).unwrap();
+        let second = read_blob(dir.path()).unwrap();
+        let second_rec = &second.records[recovery_index(&second).unwrap()];
+        let second_nonce = second_rec.wrapped[..NONCE_LEN].to_vec();
+
+        assert_eq!(first_nonce.len(), NONCE_LEN);
+        assert_eq!(second_nonce.len(), NONCE_LEN);
+        assert_ne!(
+            first_nonce, second_nonce,
+            "a fresh nonce must be drawn for each wrap"
+        );
+        // The whole wrapped bytes therefore differ as well.
+        assert_ne!(first_rec.wrapped, second_rec.wrapped);
+        // Both wraps still open to the same key.
+        let opened = open_with_code(dir.path(), &code).unwrap();
+        assert!(bool::from(opened.as_array().ct_eq(&root)));
     }
 }

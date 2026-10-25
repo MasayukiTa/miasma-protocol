@@ -359,7 +359,12 @@ impl TransferManifest {
                 bytes.len()
             )));
         }
-        let manifest: Self = bincode::deserialize(bytes)
+        use bincode::Options;
+        let manifest: Self = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .allow_trailing_bytes()
+            .with_limit(MANIFEST_MAX_BYTES as u64)
+            .deserialize(bytes)
             .map_err(|e| MiasmaError::InvalidManifest(format!("decode: {e}")))?;
         manifest.validate()?;
         Ok(manifest)
@@ -504,7 +509,12 @@ impl ManifestV4 {
                 bytes.len()
             )));
         }
-        let manifest: Self = bincode::deserialize(bytes)
+        use bincode::Options;
+        let manifest: Self = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .allow_trailing_bytes()
+            .with_limit(MANIFEST_MAX_BYTES as u64)
+            .deserialize(bytes)
             .map_err(|e| MiasmaError::InvalidManifest(format!("decode: {e}")))?;
         manifest.validate()?;
         Ok(manifest)
@@ -1526,5 +1536,42 @@ mod tests {
         assert_eq!(hostile.original_name(None).as_deref(), Some("run.bat"));
         hostile.name = Some(format!("{SEALED_NAME_PREFIX}!!not base64!!"));
         assert_eq!(hostile.original_name(None), None);
+    }
+
+    /// Bytes that declare a huge inner length (here the `name` string) must be
+    /// refused by the length-limited decoder *before* an allocation of that
+    /// size is made, not accepted and not turned into a large reservation. The
+    /// input itself is tiny and well under `MANIFEST_MAX_BYTES`, so it is the
+    /// decode limit -- not the up-front input-length check -- that rejects it.
+    fn bytes_declaring_a_huge_name_length() -> Vec<u8> {
+        // v3/v4 share this leading layout under bincode's fixed-int encoding:
+        //   version:u8 | mid:[u8;32] | publisher:[u8;32] | name:Option<String>
+        // For `Some`, the string is a u64 length (little-endian) then its bytes.
+        // A length of u64::MAX would need an enormous buffer; the limit stops it.
+        let mut bytes = Vec::new();
+        bytes.push(MANIFEST_VERSION); // version = 3 (value is never reached)
+        bytes.extend_from_slice(&[0u8; 32]); // mid
+        bytes.extend_from_slice(&[0u8; 32]); // publisher
+        bytes.push(1u8); // name: Option tag = Some
+        bytes.extend_from_slice(&u64::MAX.to_le_bytes()); // declared string length
+        bytes
+    }
+
+    #[test]
+    fn a_huge_declared_length_is_refused_without_allocating_it() {
+        let bytes = bytes_declaring_a_huge_name_length();
+        // The crafted input is tiny, so the up-front `bytes.len() >
+        // MANIFEST_MAX_BYTES` guard does not fire; only the decode limit can.
+        assert!(bytes.len() < MANIFEST_MAX_BYTES);
+
+        // Both readers must error instead of trying to reserve u64::MAX bytes.
+        assert!(
+            TransferManifest::from_bytes(&bytes).is_err(),
+            "v3 reader must refuse a huge declared length"
+        );
+        assert!(
+            ManifestV4::from_bytes(&bytes).is_err(),
+            "v4 reader must refuse a huge declared length"
+        );
     }
 }
