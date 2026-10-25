@@ -239,3 +239,20 @@ export function senderDisplay(item) {
   if (claimed) return { kind: 'unverified', id: claimed };
   return { kind: 'unknown', id: '' };
 }
+
+/**
+ * The web build reads only version-1 shares; the WASM reader refuses a newer
+ * share with an explicit, already-localised message that names the version.
+ * That message carries the one thing the generic "retrieval failed" toast
+ * cannot: that the share is simply not readable here and the desktop app is
+ * needed. Detect it so the caller can surface the WASM text verbatim instead of
+ * flattening it. The English clause "share version" is part of the message for
+ * every locale, so matching on it is locale-independent. Returns the trimmed
+ * message to show, or '' when it is not the web-unsupported-share error.
+ */
+export function webUnsupportedShareMessage(error) {
+  const m = typeof error === 'string'
+    ? error
+    : (error && typeof error.message === 'string' ? error.message : '');
+  return m.includes('share version') ? m.trim() : '';
+}
