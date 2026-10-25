@@ -6,7 +6,7 @@ import { MiasmaBridge, getAuthState, onAuthChange, setAfterWipeHandler } from '.
 import { wipeEverything, zeroFill } from './wipe.js';
 import { createTransfers } from './transfers.js';
 import { checkDirectedPassword, parseWeakPasswordCodes } from './password_policy.js';
-import { senderDisplay } from './format.js';
+import { senderDisplay, webUnsupportedShareMessage } from './format.js';
 
 // A password refused for a private share, in the page language ('' when it is acceptable).
 function directedPasswordProblem(codes) {
@@ -649,7 +649,11 @@ async function handleRetrieve() {
     resultSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   } catch (e) {
     console.error('Retrieve failed:', e);
-    showToast(e && e.code === 'auth' ? authMessage() : t('error_retrieve'), 'error');
+    const unsupported = webUnsupportedShareMessage(e);
+    showToast(
+      e && e.code === 'auth' ? authMessage() : (unsupported || t('error_retrieve')),
+      'error',
+    );
   } finally {
     btn.disabled = !isConnected && retrieveShares.length < k;
     applyTranslations();
