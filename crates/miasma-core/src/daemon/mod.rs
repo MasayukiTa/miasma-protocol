@@ -1433,12 +1433,16 @@ async fn process_request_inner(
                 total_shards: total_shards as usize,
             };
             let registry = crate::transfer::jobs::registry_for(&data_dir);
+            // IPC does not yet carry the format choice, so the daemon keeps the
+            // compat default here (see the follow-up list). A resume still
+            // honours whatever suite its journal recorded.
             let id = registry.start_publish(
                 coord.clone(),
                 PathBuf::from(file_path),
                 params,
                 password,
                 restart,
+                crate::config::ObjectFormat::default(),
             );
             ControlResponse::TransferStarted { id }
         }

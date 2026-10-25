@@ -13,6 +13,7 @@ use crate::{
         rs::{rs_decode, rs_encode},
         sss::{sss_combine, sss_split},
     },
+    format::{open_segment, seal_segment, AadContext, ObjectSuite, SegmentAad},
     pipeline::DissolutionParams,
     share::{MiasmaShare, ShareVerification},
     transfer::protection::UnlockedKey,
@@ -170,6 +171,183 @@ pub fn dissolve_segment_with_at(
     };
 
     Ok((meta, shares))
+}
+
+/// Dissolve one segment into Suite2 (version-2) shares.
+///
+/// The version-2 publish path. Unlike [`dissolve_segment_with`] (Suite1), the
+/// AES-256-GCM key is not `K_enc` itself: it is the v2 key schedule
+/// `HKDF(salt = pw_key or empty, ikm = K_enc, info = label || AAD)`, and the
+/// 49-byte segment AAD is bound into the AEAD (see [`crate::format`]). The
+/// random `K_enc` is still Shamir-split across the shares exactly as in Suite1,
+/// so any `k` shares recover `K_enc`; a reader then rebuilds the same AAD and
+/// key schedule to open the segment.
+///
+/// Produces [`MiasmaShare`]s of version 2. `password_key` mixes the password
+/// into the key schedule when present. The caller supplies the timestamp, as in
+/// the Suite1 deterministic-clock variant.
+pub fn dissolve_segment_v2_at(
+    segment_data: &[u8],
+    mid: &ContentId,
+    segment_index: u32,
+    offset_bytes: u64,
+    params: DissolutionParams,
+    password_key: Option<&UnlockedKey>,
+    timestamp: u64,
+) -> Result<(SegmentMeta, Vec<MiasmaShare>), MiasmaError> {
+    use rand::RngCore as _;
+
+    // 1. A fresh random K_enc, kept for the Shamir split, and a fresh nonce.
+    // The HKDF/AES output arrays are seeded with random bytes before being
+    // overwritten, never a fixed zero array.
+    let mut k_enc = Zeroizing::new(rand::random::<[u8; KEY_LEN]>());
+    rand::rngs::OsRng.fill_bytes(k_enc.as_mut());
+    let nonce = rand::random::<[u8; NONCE_LEN]>();
+
+    // 2. The canonical 49-byte AAD for a transfer segment.
+    let aad = SegmentAad::new(
+        ObjectSuite::Suite2,
+        AadContext::TransferSegment,
+        mid,
+        segment_index,
+        params.data_shards,
+        params.total_shards,
+        segment_data.len(),
+    )
+    .map_err(|e| MiasmaError::Encryption(e.to_string()))?
+    .encode();
+
+    // 3. Shamir-split K_enc before it is consumed by the seal. Any k shares
+    // recover it; the reader derives the same AES key from it and the AAD.
+    let key_shares = sss_split(
+        k_enc.as_ref(),
+        params.data_shards as u8,
+        params.total_shards as u8,
+    )?;
+    debug_assert_eq!(key_shares.len(), params.total_shards);
+
+    // 4. Seal: AES-256-GCM under the v2 key schedule, AAD bound. `seal_segment`
+    // consumes and wipes K_enc, so a copy of the value is handed to it. The copy
+    // is a sized `[u8; KEY_LEN]` (not a slice), which is what the seal takes.
+    let mut k_enc_copy = [0u8; KEY_LEN];
+    k_enc_copy.copy_from_slice(k_enc.as_ref());
+    let k_enc_for_seal = Zeroizing::new(k_enc_copy);
+    let ciphertext = match password_key {
+        None => seal_segment(k_enc_for_seal, &nonce, segment_data, &aad, None),
+        Some(unlocked) => unlocked.seal_segment_v2(k_enc_for_seal, &nonce, segment_data, &aad),
+    };
+    drop(k_enc); // the split is done and the seal has its own copy
+
+    // 5. RS encode the ciphertext into n shards.
+    let shards = rs_encode(&ciphertext, params.data_shards, params.total_shards)?;
+    debug_assert_eq!(shards.len(), params.total_shards);
+
+    // 6. Assemble one version-2 MiasmaShare per shard.
+    let shares: Vec<MiasmaShare> = shards
+        .into_iter()
+        .zip(key_shares)
+        .enumerate()
+        .map(|(i, (shard_data, key_share))| {
+            MiasmaShare::new_v2(
+                mid,
+                segment_index,
+                i as u16,
+                shard_data,
+                key_share,
+                nonce,
+                segment_data.len() as u32,
+                timestamp,
+            )
+        })
+        .collect();
+
+    let meta = SegmentMeta {
+        index: segment_index,
+        offset_bytes,
+        plaintext_len: segment_data.len() as u32,
+        share_count: params.total_shards as u16,
+    };
+
+    Ok((meta, shares))
+}
+
+/// Reconstruct one Suite2 (version-2) segment from ≥k version-2 shares.
+///
+/// The reverse of [`dissolve_segment_v2_at`]: recover `K_enc` from any `k` key
+/// shares, rebuild the 49-byte AAD from the segment's known parameters, and open
+/// the AEAD under the v2 key schedule. A wrong key, a tampered shard or any AAD
+/// mismatch returns [`MiasmaError::Decryption`].
+pub fn retrieve_segment_v2(
+    mid: &ContentId,
+    shares: &[MiasmaShare],
+    meta: &SegmentMeta,
+    params: DissolutionParams,
+    password_key: Option<&UnlockedKey>,
+) -> Result<Vec<u8>, MiasmaError> {
+    // 1. Coarse-verify and filter to shares for this segment.
+    let valid: Vec<&MiasmaShare> = shares
+        .iter()
+        .filter(|s| s.segment_index == meta.index && ShareVerification::coarse_verify(s, mid))
+        .collect();
+    if valid.len() < params.data_shards {
+        return Err(MiasmaError::InsufficientShares {
+            need: params.data_shards,
+            got: valid.len(),
+        });
+    }
+    let selected = &valid[..params.data_shards];
+    let nonce: [u8; NONCE_LEN] = selected[0].nonce;
+    // The sealed segment is plaintext_len + 16 (the AES-GCM tag).
+    let ciphertext_len = meta.plaintext_len as usize + 16;
+
+    // 2. RS decode the encrypted shards back into the ciphertext.
+    let rs_shards: Vec<(usize, Vec<u8>)> = selected
+        .iter()
+        .map(|s| (s.slot_index as usize, s.shard_data.clone()))
+        .collect();
+    let ciphertext = rs_decode(
+        &rs_shards,
+        params.data_shards,
+        params.total_shards,
+        ciphertext_len,
+    )?;
+
+    // 3. SSS combine the key shares into K_enc.
+    let key_shares = Zeroizing::new(
+        selected
+            .iter()
+            .map(|s| s.key_share.clone())
+            .collect::<Vec<Vec<u8>>>(),
+    );
+    let k_enc = sss_combine(key_shares.as_slice(), params.data_shards as u8)?;
+    if k_enc.len() != KEY_LEN {
+        return Err(MiasmaError::Sss("recovered K_enc has wrong length".into()));
+    }
+    let mut key = Zeroizing::new([0u8; KEY_LEN]);
+    key.copy_from_slice(k_enc.as_slice());
+
+    // 4. Rebuild the same AAD the sealer bound.
+    let aad = SegmentAad::new(
+        ObjectSuite::Suite2,
+        AadContext::TransferSegment,
+        mid,
+        meta.index,
+        params.data_shards,
+        params.total_shards,
+        meta.plaintext_len as usize,
+    )
+    .map_err(|e| MiasmaError::Decryption(e.to_string()))?
+    .encode();
+
+    // 5. Open the AEAD under the v2 key schedule. `&*key` is the sized
+    // `&[u8; KEY_LEN]` the opener takes (via `Zeroizing`'s `Deref`), not the
+    // `&[u8]` slice that `as_ref()` would give.
+    let key_ref: &[u8; KEY_LEN] = &key;
+    let opened = match password_key {
+        None => open_segment(key_ref, &nonce, &ciphertext, &aad, None),
+        Some(unlocked) => unlocked.open_segment_v2(key_ref, &nonce, &ciphertext, &aad),
+    };
+    opened.ok_or_else(|| MiasmaError::Decryption("version-2 segment did not open".into()))
 }
 
 /// Reconstruct one segment from ≥k shares.
@@ -338,5 +516,62 @@ mod tests {
             result,
             Err(MiasmaError::InsufficientShares { .. })
         ));
+    }
+
+    // ── Suite2 (version-2) segment path ─────────────────────────────────────
+
+    #[test]
+    fn v2_dissolve_retrieve_roundtrip() {
+        let params = DissolutionParams::default();
+        let m = mid();
+        let (meta, shares) =
+            dissolve_segment_v2_at(DATA, &m, 0, 0, params, None, 1_800_000_000).unwrap();
+
+        assert_eq!(meta.index, 0);
+        assert_eq!(meta.plaintext_len, DATA.len() as u32);
+        assert_eq!(shares.len(), params.total_shards);
+        // Version-2 shares carry the chosen timestamp.
+        assert!(shares.iter().all(|s| s.timestamp == 1_800_000_000));
+
+        let recovered = retrieve_segment_v2(&m, &shares, &meta, params, None).unwrap();
+        assert_eq!(recovered, DATA);
+    }
+
+    #[test]
+    fn v2_retrieve_with_minimum_k_shares() {
+        let params = DissolutionParams::default();
+        let m = mid();
+        let (meta, shares) = dissolve_segment_v2_at(DATA, &m, 0, 0, params, None, 1).unwrap();
+
+        let subset = &shares[..params.data_shards];
+        let recovered = retrieve_segment_v2(&m, subset, &meta, params, None).unwrap();
+        assert_eq!(recovered, DATA);
+    }
+
+    #[test]
+    fn v2_insufficient_valid_shares_fails() {
+        let params = DissolutionParams::default();
+        let m = mid();
+        let (meta, shares) = dissolve_segment_v2_at(DATA, &m, 0, 0, params, None, 1).unwrap();
+
+        let result = retrieve_segment_v2(&m, &shares[..5], &meta, params, None);
+        assert!(matches!(
+            result,
+            Err(MiasmaError::InsufficientShares { .. })
+        ));
+    }
+
+    #[test]
+    fn v2_wrong_mid_is_rejected() {
+        // The AAD binds the MID: retrieving with a different MID rebuilds a
+        // different AAD, so coarse verification drops every share and the
+        // retrieve fails rather than opening wrong data.
+        let params = DissolutionParams::default();
+        let m = mid();
+        let (meta, shares) = dissolve_segment_v2_at(DATA, &m, 0, 0, params, None, 1).unwrap();
+
+        let other = ContentId::compute(DATA, b"k=10,n=20,v=2-different");
+        let result = retrieve_segment_v2(&other, &shares, &meta, params, None);
+        assert!(result.is_err());
     }
 }

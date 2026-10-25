@@ -268,6 +268,34 @@ impl UnlockedKey {
             .map_err(|e| MiasmaError::KeyDerivation(e.to_string()))?;
         Ok(out)
     }
+
+    /// Seal one Suite2 segment under this transfer's password key.
+    ///
+    /// A wrapper around [`crate::format::seal_segment`] that passes the
+    /// password-derived key as the HKDF salt without exposing it. `k_enc` is
+    /// consumed and wiped by the inner call. Used by the version-2 publish path
+    /// for a password-protected transfer.
+    pub fn seal_segment_v2(
+        &self,
+        k_enc: Zeroizing<[u8; 32]>,
+        nonce: &[u8; crate::crypto::aead::NONCE_LEN],
+        plaintext: &[u8],
+        aad: &[u8; crate::format::AAD_LEN],
+    ) -> Vec<u8> {
+        crate::format::seal_segment(k_enc, nonce, plaintext, aad, Some(&self.pw_key))
+    }
+
+    /// Open one Suite2 segment sealed by [`seal_segment_v2`](Self::seal_segment_v2).
+    /// `None` on any mismatch, as for [`crate::format::open_segment`].
+    pub fn open_segment_v2(
+        &self,
+        k_enc: &[u8; 32],
+        nonce: &[u8; crate::crypto::aead::NONCE_LEN],
+        ciphertext: &[u8],
+        aad: &[u8; crate::format::AAD_LEN],
+    ) -> Option<Vec<u8>> {
+        crate::format::open_segment(k_enc, nonce, ciphertext, aad, Some(&self.pw_key))
+    }
 }
 
 fn validate_cost(m_kib: u32, t_cost: u32, p_cost: u32) -> Result<(), MiasmaError> {

@@ -1141,6 +1141,45 @@ impl DhtHandle {
         self.recv_reply(rx, "put").await?
     }
 
+    /// Publish a `DhtRecord` carrying a version-4 (Suite2) transfer manifest as a
+    /// framed trailer. The version-2 publish path's counterpart to
+    /// [`put_with_manifest`]: identical envelope signing and size budget, only
+    /// the trailer is a v4 manifest. A receiver reads it through the
+    /// version-accepting decoder; a pre-v4 build refuses it with "update Miasma".
+    pub async fn put_with_manifest_v4(
+        &self,
+        record: DhtRecord,
+        manifest: &crate::transfer::ManifestV4,
+    ) -> Result<(), MiasmaError> {
+        // A manifest must name the key that is about to sign it, as in the v3 path.
+        if let Some(own) = self.publisher {
+            if manifest.publisher != own {
+                return Err(MiasmaError::InvalidManifest(
+                    "the manifest's publisher is not this node's record-signing key".into(),
+                ));
+            }
+        }
+        let key = record.mid_digest.to_vec();
+        let value = crate::transfer::encode_record_value_v4(&record, manifest)?;
+        if value.len() >= DHT_INNER_RECORD_MAX_BYTES {
+            return Err(MiasmaError::Dht(format!(
+                "DHT record metadata too large: {} bytes (limit < {} bytes)",
+                value.len(),
+                DHT_INNER_RECORD_MAX_BYTES
+            )));
+        }
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(DhtCommand::Put {
+                key,
+                value,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
+        self.recv_reply(rx, "put").await?
+    }
+
     /// Register a bootstrap peer inside the running event loop.
     ///
     /// Sends `AddBootstrapPeer` to the event loop so the dial happens from

@@ -29,6 +29,9 @@ pub struct NodeConfig {
     /// Looking for, and installing, newer builds.
     #[serde(default)]
     pub update: crate::update::UpdateConfig,
+    /// How published transfers are written on the wire.
+    #[serde(default)]
+    pub transfer: TransferConfig,
 }
 
 /// `[privacy]` in `config.toml`: what the programs may leave behind.
@@ -282,6 +285,74 @@ impl ChatConfig {
     /// is set explicitly.
     pub fn history_saved(&self) -> bool {
         self.history_save.unwrap_or(true)
+    }
+}
+
+/// `[transfer]` in `config.toml`: how a published transfer is written.
+///
+/// Every key has a default, so a `config.toml` written by an older version
+/// (without the section) reads with the compatible object format.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct TransferConfig {
+    /// Which object format a new publish writes. Defaults to
+    /// [`ObjectFormat::Compat`]: the output is byte-for-byte what shipped
+    /// builds write, which every current receiver reads. [`ObjectFormat::Latest`]
+    /// writes a transfer with a version-4 manifest and version-2 shares; a
+    /// receiver that predates that format refuses it with a clear message.
+    /// A publish with no manifest (a single share) is unaffected and stays on
+    /// the compatible format regardless of this setting.
+    #[serde(default)]
+    pub object_format: ObjectFormat,
+}
+
+/// `transfer.object_format`: the object format a new publish writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ObjectFormat {
+    /// The format shipped builds write today: a version-3 manifest and
+    /// version-1 shares (`ObjectSuite::Suite1`). The default.
+    #[default]
+    Compat,
+    /// The newer format: a version-4 manifest and version-2 shares
+    /// (`ObjectSuite::Suite2`, AAD-bound AES-256-GCM).
+    Latest,
+}
+
+impl ObjectFormat {
+    /// The object suite this format writes.
+    pub fn object_suite(self) -> crate::format::ObjectSuite {
+        match self {
+            Self::Compat => crate::format::ObjectSuite::Suite1,
+            Self::Latest => crate::format::ObjectSuite::Suite2,
+        }
+    }
+
+    /// The wire word for this format, as used by the CLI and the IPC/HTTP
+    /// request field.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Compat => "compat",
+            Self::Latest => "latest",
+        }
+    }
+}
+
+impl std::str::FromStr for ObjectFormat {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "compat" => Ok(Self::Compat),
+            "latest" => Ok(Self::Latest),
+            other => Err(format!(
+                "unknown object format '{other}': expected compat or latest"
+            )),
+        }
+    }
+}
+
+impl fmt::Display for ObjectFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -1295,5 +1366,94 @@ mod push_send_rate_config_tests {
                 cap
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod transfer_object_format_tests {
+    use super::*;
+
+    // transfer.object_format: the writer picks the object format; compat
+    // (default) stays byte-compatible on Suite1, latest selects Suite2.
+    #[test]
+    fn the_object_format_defaults_to_compat() {
+        // A fresh config, and a file with no [transfer] section, both read as
+        // compat — the byte-for-byte format shipped builds write.
+        assert_eq!(
+            TransferConfig::default().object_format,
+            ObjectFormat::Compat
+        );
+        assert_eq!(
+            NodeConfig::default().transfer.object_format,
+            ObjectFormat::Compat
+        );
+        let none: NodeConfig = toml::from_str("").unwrap();
+        assert_eq!(none.transfer.object_format, ObjectFormat::Compat);
+    }
+
+    #[test]
+    fn the_object_format_reads_from_toml() {
+        let c: NodeConfig = toml::from_str("[transfer]\nobject_format = \"latest\"\n").unwrap();
+        assert_eq!(c.transfer.object_format, ObjectFormat::Latest);
+        let c: NodeConfig = toml::from_str("[transfer]\nobject_format = \"compat\"\n").unwrap();
+        assert_eq!(c.transfer.object_format, ObjectFormat::Compat);
+    }
+
+    #[test]
+    fn an_old_transfer_section_without_the_key_reads_as_compat() {
+        // A [transfer] table written before the key existed keeps the compat
+        // default rather than failing to parse.
+        let c: NodeConfig = toml::from_str("[transfer]\n").unwrap();
+        assert_eq!(c.transfer.object_format, ObjectFormat::Compat);
+    }
+
+    #[test]
+    fn the_object_format_round_trips_through_toml() {
+        for fmt in [ObjectFormat::Compat, ObjectFormat::Latest] {
+            let cfg = TransferConfig { object_format: fmt };
+            let text = toml::to_string_pretty(&cfg).unwrap();
+            assert!(
+                text.contains(&format!("object_format = \"{}\"", fmt.as_str())),
+                "{text}"
+            );
+            let back: TransferConfig = toml::from_str(&text).unwrap();
+            assert_eq!(back.object_format, fmt);
+        }
+    }
+
+    #[test]
+    fn the_object_format_round_trips_through_save_and_load() {
+        for fmt in [ObjectFormat::Compat, ObjectFormat::Latest] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut cfg = NodeConfig::default();
+            cfg.transfer.object_format = fmt;
+            cfg.save(dir.path()).unwrap();
+            assert_eq!(
+                NodeConfig::load(dir.path()).unwrap().transfer.object_format,
+                fmt
+            );
+        }
+    }
+
+    #[test]
+    fn each_object_format_selects_its_object_suite() {
+        // compat stays on Suite1 (the shipped, byte-compatible wire format);
+        // latest selects Suite2. This is what the publish path branches on.
+        assert_eq!(
+            ObjectFormat::Compat.object_suite(),
+            crate::format::ObjectSuite::Suite1
+        );
+        assert_eq!(
+            ObjectFormat::Latest.object_suite(),
+            crate::format::ObjectSuite::Suite2
+        );
+    }
+
+    #[test]
+    fn the_object_format_wire_word_round_trips() {
+        for fmt in [ObjectFormat::Compat, ObjectFormat::Latest] {
+            assert_eq!(fmt.as_str().parse::<ObjectFormat>().unwrap(), fmt);
+        }
+        assert!("gibberish".parse::<ObjectFormat>().is_err());
     }
 }

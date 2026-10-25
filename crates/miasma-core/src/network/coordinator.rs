@@ -898,7 +898,29 @@ impl MiasmaCoordinator {
         params: DissolutionParams,
         options: PublishOptions,
     ) -> Result<PublishReport, MiasmaError> {
-        self.publish_file_inner(file_path, params, options, None)
+        self.publish_file_inner(
+            file_path,
+            params,
+            options,
+            None,
+            crate::config::ObjectFormat::default(),
+        )
+        .await
+    }
+
+    /// Like [`dissolve_and_publish_file_with_options`], choosing the object
+    /// format the publish writes. [`ObjectFormat::Compat`](crate::config::ObjectFormat::Compat)
+    /// (the default) writes byte-for-byte what shipped builds write; [`ObjectFormat::Latest`](crate::config::ObjectFormat::Latest)
+    /// writes a version-4 manifest and version-2 shares. The caller resolves the
+    /// format from configuration before calling.
+    pub async fn dissolve_and_publish_file_with_format(
+        &self,
+        file_path: &std::path::Path,
+        params: DissolutionParams,
+        options: PublishOptions,
+        object_format: crate::config::ObjectFormat,
+    ) -> Result<PublishReport, MiasmaError> {
+        self.publish_file_inner(file_path, params, options, None, object_format)
             .await
     }
 
@@ -917,7 +939,27 @@ impl MiasmaCoordinator {
         options: PublishOptions,
         password: &str,
     ) -> Result<PublishReport, MiasmaError> {
-        self.publish_file_inner(file_path, params, options, Some(password))
+        self.publish_file_inner(
+            file_path,
+            params,
+            options,
+            Some(password),
+            crate::config::ObjectFormat::default(),
+        )
+        .await
+    }
+
+    /// Like [`dissolve_and_publish_file_protected`], choosing the object format
+    /// the publish writes. See [`dissolve_and_publish_file_with_format`](Self::dissolve_and_publish_file_with_format).
+    pub async fn dissolve_and_publish_file_protected_with_format(
+        &self,
+        file_path: &std::path::Path,
+        params: DissolutionParams,
+        options: PublishOptions,
+        password: &str,
+        object_format: crate::config::ObjectFormat,
+    ) -> Result<PublishReport, MiasmaError> {
+        self.publish_file_inner(file_path, params, options, Some(password), object_format)
             .await
     }
 
@@ -932,6 +974,7 @@ impl MiasmaCoordinator {
         params: DissolutionParams,
         options: PublishOptions,
         password: Option<&str>,
+        object_format: crate::config::ObjectFormat,
     ) -> Result<PublishReport, MiasmaError> {
         use crate::transfer::publish::{PublishOutcome, PublishSpec};
 
@@ -942,6 +985,7 @@ impl MiasmaCoordinator {
             password: password.map(|p| zeroize::Zeroizing::new(p.to_owned())),
             journal_dir: None,
             restart: false,
+            object_format,
         };
         match self.publish_file_job(spec, None).await? {
             PublishOutcome::Complete(report) => Ok(report),

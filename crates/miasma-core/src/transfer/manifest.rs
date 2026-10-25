@@ -765,6 +765,27 @@ pub fn encode_record_value(
     Ok(value)
 }
 
+/// Serialize `record` followed by a version-4 manifest's trailer, as the signed
+/// value. The version-2 publish path's counterpart to [`encode_record_value`];
+/// the record bytes are identical, only the trailer version byte (4) and the
+/// manifest payload differ. A reader on [`decode_record_value_any`] accepts it;
+/// a pre-v4 reader on [`decode_record_value`] refuses it with "update Miasma".
+pub fn encode_record_value_v4(
+    record: &DhtRecord,
+    manifest: &ManifestV4,
+) -> Result<Vec<u8>, MiasmaError> {
+    record.validate()?;
+    if manifest.mid != record.mid_digest {
+        return Err(MiasmaError::InvalidManifest(
+            "manifest MID does not match the record it rides on".into(),
+        ));
+    }
+    let mut value =
+        bincode::serialize(record).map_err(|e| MiasmaError::Serialization(e.to_string()))?;
+    value.extend_from_slice(&manifest.encode_trailer()?);
+    Ok(value)
+}
+
 /// Decode a record value into `(record, optional manifest)`.
 ///
 /// A value with no trailer is a legacy record and yields `(record, None)`.

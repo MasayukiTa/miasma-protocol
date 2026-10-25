@@ -491,6 +491,7 @@ fn send_spec(
         password: password.map(|p| zeroize::Zeroizing::new(p.to_owned())),
         journal_dir: Some(journal_dir.to_path_buf()),
         restart: false,
+        object_format: miasma_core::config::ObjectFormat::Compat,
     }
 }
 
