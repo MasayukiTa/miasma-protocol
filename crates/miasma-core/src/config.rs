@@ -83,11 +83,12 @@ pub struct PrivacyConfig {
 ///   `off` value written under version `0` was a save, not a choice.
 /// * `1`: the default became `prefer`. An `off` left by version `0` was read
 ///   as never chosen and cleared, so the `prefer` default applied.
-/// * `2`: the default becomes `require`. A value that only an earlier default
-///   wrote (an `off` from version `0`, or the unset `prefer` default that
-///   version `1` left in force) is read as never chosen and cleared, so the
-///   `require` default applies. A value a person set after this migration
-///   (the file is then at version `2`) is kept as it is.
+/// * `2`: the default becomes `require`. Only a value an earlier default wrote
+///   is read as never chosen and cleared: an `off` from version `0` (the sole
+///   version whose default was `off`), and the unset `prefer` default of
+///   version `1` (already absent). An `off` recorded at version `1` or later
+///   was an explicit choice and is kept, as is any value set after this
+///   migration (the file is then at version `2`).
 pub const PQC_DEFAULT_VERSION: u32 = 2;
 
 /// `privacy.pqc_mode`: whether private-conversation sessions are upgraded with
@@ -212,22 +213,21 @@ impl PrivacyConfig {
     /// person set after a migration (the file is then at the current version)
     /// is never read as an older default and is kept.
     ///
-    /// * version `0` -> `1`: an `off` the version `0` default wrote (no version
-    ///   key) was a save, not a choice, so it is cleared to "never chosen".
-    /// * version `1` -> `2`: the value only an earlier default left in force
-    ///   is cleared so the `require` default applies. That is an `off` still
-    ///   present from version `0`, and the unset `prefer` default of version
-    ///   `1` (already `None`). A `prefer` or `require` written at version `1`
-    ///   or later was a choice and stays.
+    /// Only an `off` the version `0` default wrote is cleared, because version
+    /// `0` was the only default of `off`. Versions `1` (default `prefer`) and
+    /// `2` (default `require`) never wrote `off`, so an `off` recorded at
+    /// version `1` or later was a choice and is kept. The unset `prefer`
+    /// default of version `1` is already absent (it was never written), so no
+    /// step is needed for it.
+    ///
+    /// * version `0` -> later: an `off` the version `0` default wrote (no
+    ///   version key) was a save, not a choice, so it is cleared to "never
+    ///   chosen" and the current default applies.
     fn migrate_pqc_default(&mut self) {
         if self.pqc_default_version < 1 && self.pqc_mode == Some(PqcMode::Off) {
             // The version `0` default wrote this `off`; it was never chosen.
-            self.pqc_mode = None;
-        }
-        if self.pqc_default_version < 2 && self.pqc_mode == Some(PqcMode::Off) {
-            // An `off` still carried from version `0` is the old default, not a
-            // choice: clear it so the `require` default applies. (A later
-            // explicit `off` sits at version `2` and never reaches here.)
+            // Versions `1` and `2` never defaulted to `off`, so an `off` from
+            // those versions is an explicit choice and is left untouched.
             self.pqc_mode = None;
         }
         if self.pqc_default_version < PQC_DEFAULT_VERSION {
@@ -1250,6 +1250,32 @@ mod pqc_default_tests {
             assert_eq!(c.privacy.pqc_mode(), PqcMode::Off);
             c.save(dir.path()).unwrap();
         }
+    }
+
+    /// A file written by a version-`1` build (default `prefer`) with an
+    /// explicit `off` must keep that `off` when a version-`2` build reads it:
+    /// `off` was never a version-`1` default, so it was a choice, not a
+    /// carried-over default. The kept value still allows a classical fallback,
+    /// so the status is expected to warn about it (see
+    /// `PqcMode::allows_classical_fallback`).
+    #[test]
+    fn an_explicit_off_written_at_version_1_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        // A version-`1` file: the version key is present and set to 1, with an
+        // explicit `off`. Written directly because no current build emits
+        // version 1 any more.
+        std::fs::write(
+            crate::paths::config_file(dir.path()),
+            "[privacy]\nstealth_mode = true\npqc_mode = \"off\"\npqc_default_version = 1\n",
+        )
+        .unwrap();
+        let c = NodeConfig::load(dir.path()).unwrap();
+        assert_eq!(c.privacy.pqc_mode, Some(PqcMode::Off));
+        assert_eq!(c.privacy.pqc_mode(), PqcMode::Off);
+        // The kept value is one the status warns about (classical fallback).
+        assert!(c.privacy.pqc_mode().allows_classical_fallback());
+        // The file is moved up to the current version but the choice stays.
+        assert_eq!(c.privacy.pqc_default_version, PQC_DEFAULT_VERSION);
     }
 
     #[test]
