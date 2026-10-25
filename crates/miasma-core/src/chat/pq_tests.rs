@@ -56,9 +56,9 @@ fn step(from: &Side, to: &Side, to_is: Peer, now: u64, hook: Option<Hook<'_>>) -
             from.core.pq_sent(&peer, &out, outcome, now);
             true
         }
-        Pass::Refuse(reason) => {
+        Pass::Refuse(refusal) => {
             if let Some(e) = from.core.outbox.first_for(&peer) {
-                from.core.mark_failed(&e.id, reason, now);
+                from.core.mark_failed(&e.id, refusal.reason_str(), now);
             }
             true
         }
@@ -288,6 +288,92 @@ fn require_with_a_build_that_rejects_the_offer_fails_at_once() {
     assert!(b.texts(&a.id()).is_empty());
     let hist = a.core.history(&b.id(), None, 10);
     assert_eq!(hist[0].reason.as_deref(), Some(FAIL_NO_HYBRID));
+}
+
+#[test]
+fn require_with_a_tampered_mlkem_part_fails_and_never_falls_to_classical() {
+    // `require` side talks to a peer that offers the suite, but the ML-KEM
+    // response is corrupted on the wire. The exchange must fail (no key
+    // confirmation) and nothing may be sent in a classical session.
+    let a = side();
+    let b = side();
+    mode(&a, PqcMode::Require);
+    mode(&b, PqcMode::Prefer);
+    let (init, resp) = roles(&a, &b);
+    // Flip the last byte of the responder's ML-KEM fragment (the ciphertext).
+    let hook = |kind: u8, plain: &mut Vec<u8>| {
+        if kind == KIND_RESP {
+            let n = plain.len();
+            plain[n - 1] ^= 0x01;
+        }
+    };
+    // The `require` side is the one that must not fall back. Queue its message.
+    let (req_side, other) = if init.core.pqc_mode() == PqcMode::Require {
+        (init, resp)
+    } else {
+        (resp, init)
+    };
+    req_side.core.enqueue(&other.id(), "secret", 1).unwrap();
+    pump_with(init, resp, Peer::Current, 1_000, Some(&hook));
+    // Failed on the require side, and nothing reached the peer in the clear.
+    assert_eq!(state_of(req_side, other).0, "failed");
+    assert!(
+        other.texts(&req_side.id()).is_empty(),
+        "no classical fallback under require"
+    );
+    let hist = req_side.core.history(&other.id(), None, 10);
+    assert_eq!(hist[0].state, MsgState::Failed);
+    // No hybrid key was installed either.
+    let sid = req_side
+        .core
+        .store
+        .peek_peer(&other.id(), |st| *st.session.as_ref().unwrap().origin_ek());
+    assert!(req_side.core.pq.seal_key(&other.id(), &sid).is_none());
+    assert!(req_side.core.pq.open_key(&other.id(), &sid).is_none());
+}
+
+#[test]
+fn require_with_a_forged_offer_fails_and_never_falls_to_classical() {
+    // The responder's offer reaches the `require` initiator altered (a capability
+    // declaration that does not match what is actually sent). The transcript
+    // binding catches it; under `require` the message is not sent classically.
+    let a = side();
+    let b = side();
+    mode(&a, PqcMode::Require);
+    mode(&b, PqcMode::Prefer);
+    let (init, resp) = roles(&a, &b);
+    let altered = Capabilities::current()
+        .with_unknown(vec![1, 2, 3])
+        .unwrap()
+        .encode();
+    let alter = std::cell::Cell::new(false);
+    let hook = |kind: u8, plain: &mut Vec<u8>| {
+        if kind == KIND_OFFER && alter.get() {
+            plain.truncate(1);
+            plain.extend_from_slice(&altered);
+            alter.set(false);
+        }
+    };
+    init.core.enqueue(&resp.id(), "secret", 1).unwrap();
+    assert!(step(init, resp, Peer::Current, 1_000, Some(&hook)));
+    alter.set(true);
+    assert!(step(resp, init, Peer::Current, 1_000, Some(&hook)));
+    pump_with(init, resp, Peer::Current, 1_000, Some(&hook));
+    let (req_side, other) = if init.core.pqc_mode() == PqcMode::Require {
+        (init, resp)
+    } else {
+        (resp, init)
+    };
+    assert_eq!(state_of(req_side, other).0, "failed");
+    assert!(
+        other.texts(&req_side.id()).is_empty(),
+        "no classical fallback under require"
+    );
+    let sid = req_side
+        .core
+        .store
+        .peek_peer(&other.id(), |st| *st.session.as_ref().unwrap().origin_ek());
+    assert!(req_side.core.pq.seal_key(&other.id(), &sid).is_none());
 }
 
 #[test]

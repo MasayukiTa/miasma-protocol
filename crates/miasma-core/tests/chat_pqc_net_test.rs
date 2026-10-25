@@ -262,15 +262,16 @@ async fn require_sends_once_the_peer_has_agreed() {
     assert_eq!(pqc_of(&a, &b.id()).0.as_deref(), Some("hybrid"));
 }
 
-/// The mode a fresh configuration now gives (`prefer`) against the mode the
-/// previous release gave (`off`): nothing is held back in either direction, and
-/// the new-default side reports "classical only" for the older one.
+/// The mode a fresh configuration now gives (`require`) against the mode the
+/// previous release gave (`off`): the new-default side refuses rather than fall
+/// back to a classical session, so its own messages fail and nothing is sent in
+/// the clear; the old-default side is unaffected and its messages still arrive.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_new_default_build_and_an_old_default_build_keep_talking() {
+async fn a_new_default_build_refuses_an_old_default_build_and_does_not_fall_back() {
     let new_default = miasma_core::config::NodeConfig::default()
         .privacy
         .pqc_mode();
-    assert_eq!(new_default, PqcMode::Prefer);
+    assert_eq!(new_default, PqcMode::Require);
     let old_default: PqcMode = "off".parse().unwrap();
     let r = relay().await;
     let (a, b) = (peer(&r, new_default).await, peer(&r, old_default).await);
@@ -280,17 +281,26 @@ async fn a_new_default_build_and_an_old_default_build_keep_talking() {
         send(&a, "bob", &format!("to old {i}"));
         send(&b, "alice", &format!("to new {i}"));
     }
-    until(90, "all six messages", || {
-        texts(&a, &b.id()).len() == 6 && texts(&b, &a.id()).len() == 6
+    // The old-default side can still send in the classical session: `a` receives.
+    until(90, "the three messages from the old build", || {
+        texts(&a, &b.id()).len() == 3
     })
     .await;
-    until(60, "classical only", || {
-        pqc_of(&a, &b.id()) == (Some("classical".into()), Some("peer_no_hybrid".into()))
+    // The require side never sends in the clear: `b` receives none of a's three.
+    until(90, "a's messages all failing on the require side", || {
+        let h = a.svc.core().history(&b.id(), None, 20);
+        h.iter().filter(|m| m.outgoing).count() == 3
+            && h.iter()
+                .filter(|m| m.outgoing)
+                .all(|m| m.state == MsgState::Failed)
     })
     .await;
-    assert_eq!(pqc_of(&b, &a.id()), (None, None));
-    until(30, "acknowledgements", || {
-        a.svc.core().outbox.is_empty() && b.svc.core().outbox.is_empty()
-    })
-    .await;
+    assert!(
+        texts(&b, &a.id()).is_empty(),
+        "no classical fallback under require"
+    );
+    assert_eq!(
+        a.svc.core().history(&b.id(), None, 20)[0].reason.as_deref(),
+        Some("pqc_peer_no_hybrid")
+    );
 }
