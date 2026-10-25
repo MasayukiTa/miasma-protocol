@@ -332,6 +332,9 @@ mod tests {
             effective_expires_at: 10_000,
             sender_peer_id: "peer-a".into(),
             protection: Protection::V2,
+            // A v2 record with no recorded transcript hash; same meaning as an
+            // older record that predates the field.
+            transcript_hash: None,
             // A random non-terminal ephemeral secret; no fixed key material.
             r_eph_secret: Some(rand::random::<[u8; 32]>()),
         };
