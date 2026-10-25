@@ -27,9 +27,7 @@ use crate::directed::challenge::{
 };
 use crate::directed::envelope::{DirectedEnvelope, EnvelopeState};
 use crate::directed::inbox::DirectedInbox;
-use crate::directed::state::{
-    ChallengeLocal, IncomingLocal, IncomingRecord, MonoDeadline, Now, Protection,
-};
+use crate::directed::state::{ChallengeLocal, IncomingRecord, MonoDeadline, Now, Protection};
 
 use super::credential::verify_binding;
 use super::kdf::check_kdf_bounds;
@@ -379,6 +377,7 @@ fn fresh_challenge(now: Now) -> ChallengeLocal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::directed::state::IncomingLocal;
     use crate::directed::v2::credential::sign_binding;
     use crate::directed::v2::transcript::{self as tx};
     use crate::directed::v2::wire::KdfParams;

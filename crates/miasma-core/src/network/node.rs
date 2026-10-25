@@ -49,7 +49,21 @@ use super::peer_state::{AdmissionStats, PeerRegistry, RejectionReason};
 use super::routing::{self, RoutingStats, RoutingTable};
 use super::sybil::{self, NodeIdPoW, SignedDhtRecord};
 use super::types::{DhtRecord, NodeType};
+use crate::directed::envelope::DirectedEnvelope;
 use crate::directed::protocol::{DirectedCodec, DirectedRequest, DirectedResponse};
+use crate::directed::v2::behaviour::{
+    new_directed_v2_behaviour, DirectedBehaviourV2, DIRECTED_PROTOCOL_V2,
+};
+use crate::directed::v2::credential::sign_binding;
+use crate::directed::v2::invite_intake::{
+    intake_invite, InviteIntakeError, InviteRecipientContext,
+};
+use crate::directed::v2::offer::{sign_offer, OfferFields};
+use crate::directed::v2::offer_table::OfferTable;
+use crate::directed::v2::wire::{
+    codes as directed_v2_codes, error_string as directed_v2_error, DirectedRequestV2,
+    DirectedResponseV2, InviteExtV2, SignedOffer, SUITE_V2,
+};
 
 // ─── Share-exchange wire types ────────────────────────────────────────────────
 
@@ -1855,6 +1869,10 @@ pub struct MiasmaBehaviour {
     pub(crate) relay_probe: request_response::Behaviour<super::relay_probe::RelayProbeCodec>,
     /// Directed sharing: `/miasma/directed/1.0.0` request-response.
     pub(crate) directed_sharing: request_response::Behaviour<DirectedCodec>,
+    /// Directed sharing v2: `/miasma/directed/2.0.0` request-response. Runs
+    /// beside the v1 behaviour so the v1 endpoint keeps its exact wire shape
+    /// and behaviour (WP-D6b).
+    pub(crate) directed_sharing_v2: DirectedBehaviourV2,
     /// mDNS for local network peer discovery.
     pub(crate) mdns: mdns::tokio::Behaviour,
 }
@@ -1875,6 +1893,72 @@ fn onion_layer_fingerprint(layer: &crate::onion::packet::OnionLayer) -> [u8; 32]
     hasher.update(&layer.nonce);
     hasher.update(&layer.ciphertext);
     *hasher.finalize().as_bytes()
+}
+
+/// An unspent v2 prekey offer this node handed out, held in memory until it is
+/// taken by a matching Invite or ages out (design 2.3). It carries the `r_eph`
+/// secret that opening a later DEK wrap needs; the secret is zeroized when the
+/// entry is dropped.
+struct PendingDirectedOffer {
+    /// The request id the offer answered (echoed back for the sender to match).
+    #[allow(dead_code)]
+    request_id: [u8; 16],
+    /// The `r_eph` public key advertised in the offer; the Invite must name it.
+    r_eph_pub: [u8; 32],
+    /// The `r_eph` secret, stored with the record on intake so the recipient
+    /// can later open the wrap. Zeroized on drop.
+    r_eph_secret: zeroize::Zeroizing<[u8; 32]>,
+}
+
+/// Derive a libp2p `PeerId` from a raw Ed25519 public key, or `None` if the key
+/// is not a well-formed Ed25519 point. Used to turn an Invite's claimed sender
+/// identity key into the PeerId the pure intake compares to the transport one.
+fn ed25519_pubkey_to_peer_id(pubkey: &[u8; 32]) -> Option<PeerId> {
+    let ed = libp2p::identity::ed25519::PublicKey::try_from_bytes(pubkey).ok()?;
+    Some(PeerId::from(libp2p::identity::PublicKey::from(ed)))
+}
+
+/// Map a typed intake failure to a coded v2 error response (design 3.4, the
+/// error codes in `wire::codes`). The message carries only the reason name; no
+/// secret or path reaches it.
+fn directed_v2_intake_error_response(err: InviteIntakeError) -> DirectedResponseV2 {
+    let (code, detail): (&str, &str) = match err {
+        InviteIntakeError::UnsupportedSuite => {
+            (directed_v2_codes::UNSUPPORTED_SUITE, "unsupported suite")
+        }
+        InviteIntakeError::BadLifecycle => {
+            (directed_v2_codes::UNSUPPORTED_SUITE, "bad lifecycle fields")
+        }
+        InviteIntakeError::KdfOutOfRange => {
+            (directed_v2_codes::KDF_OUT_OF_RANGE, "kdf cost out of range")
+        }
+        InviteIntakeError::Expired => (directed_v2_codes::OFFER_EXPIRED, "window closed"),
+        InviteIntakeError::OfferMismatch => (
+            directed_v2_codes::OFFER_UNKNOWN,
+            "offer id or r_eph mismatch",
+        ),
+        InviteIntakeError::NotForThisRecipient => (
+            directed_v2_codes::KEY_MISMATCH,
+            "not addressed to this recipient",
+        ),
+        InviteIntakeError::PeerMismatch => {
+            (directed_v2_codes::PEER_MISMATCH, "sender peer id mismatch")
+        }
+        InviteIntakeError::BadBinding => (
+            directed_v2_codes::BAD_SIGNATURE,
+            "sender binding did not verify",
+        ),
+        InviteIntakeError::BadSignature => (
+            directed_v2_codes::BAD_SIGNATURE,
+            "transcript signature did not verify",
+        ),
+        InviteIntakeError::IdConflict => (
+            directed_v2_codes::ID_CONFLICT,
+            "envelope id reused with different content",
+        ),
+        InviteIntakeError::Storage => (directed_v2_codes::OFFER_UNKNOWN, "persist failed"),
+    };
+    DirectedResponseV2::Error(directed_v2_error(code, detail))
 }
 
 fn take_peer_correlated<T>(
@@ -2093,6 +2177,30 @@ pub struct MiasmaNode {
     /// Local X25519 public key for directed sharing. Incoming Invite envelopes
     /// must be addressed to this exact key before they are persisted.
     directed_recipient_pubkey: Option<[u8; 32]>,
+    /// Pending directed v2 reply channels (sender side; populated when this node
+    /// sends a v2 request). Kept for symmetry with `pending_directed_replies`;
+    /// the sender-side assembly that fills it is a later work package.
+    pending_directed_v2_replies: HashMap<
+        request_response::OutboundRequestId,
+        (
+            PeerId,
+            oneshot::Sender<Result<DirectedResponseV2, MiasmaError>>,
+        ),
+    >,
+    /// Unspent v2 prekey offers this node handed out, keyed by requester PeerId
+    /// and offer id. Memory only, bounded per peer, expiring after a fixed age
+    /// (design 2.3). The stored value carries the `r_eph` secret that opening a
+    /// later DEK wrap needs.
+    directed_v2_offers: OfferTable<PendingDirectedOffer>,
+    /// PeerIds observed (through Identify) to speak `/miasma/directed/2.0.0`.
+    /// The sender side consults this to decide whether a peer can take a v2
+    /// invite or must fall back to v1 (the fallback itself is a later package).
+    directed_v2_peers: std::collections::HashSet<PeerId>,
+    /// Monotonic base taken at node construction. `mono_ms` and the offer
+    /// table's age are both measured as the elapsed time since this instant, so
+    /// a wall-clock step backwards cannot lengthen an offer's life or a
+    /// challenge's window.
+    directed_v2_mono_base: std::time::Instant,
 
     // ── Bridge superhardening: connection health + flap detection ──────
     /// Connection health monitor — peer scoring, dial backoff, stale pruning.
@@ -2254,6 +2362,10 @@ impl MiasmaNode {
             pending_directed_replies: HashMap::new(),
             directed_data_dir: None,
             directed_recipient_pubkey: None,
+            pending_directed_v2_replies: HashMap::new(),
+            directed_v2_offers: OfferTable::new(),
+            directed_v2_peers: std::collections::HashSet::new(),
+            directed_v2_mono_base: std::time::Instant::now(),
             health_monitor: super::connection_health::ConnectionHealthMonitor::default(),
             flap_detector: crate::daemon::self_heal::NetworkFlapDetector::default(),
             partial_failure: crate::daemon::self_heal::PartialFailureDetector::default(),
@@ -3367,6 +3479,11 @@ impl MiasmaNode {
                         .retain(|_, (pending_peer, _)| *pending_peer != peer_id);
                     self.pending_directed_replies
                         .retain(|_, (pending_peer, _)| *pending_peer != peer_id);
+                    self.pending_directed_v2_replies
+                        .retain(|_, (pending_peer, _)| *pending_peer != peer_id);
+                    // A v2 peer that fully disconnected no longer advertises the
+                    // protocol; drop it so a stale entry does not outlive the link.
+                    self.directed_v2_peers.remove(&peer_id);
                     // Track disconnection in health monitor and flap detector.
                     self.health_monitor
                         .record_peer_failure(&peer_id.to_string());
@@ -3425,6 +3542,9 @@ impl MiasmaNode {
             }
             SwarmEvent::Behaviour(MiasmaBehaviourEvent::DirectedSharing(ev)) => {
                 self.handle_directed_sharing_event(ev);
+            }
+            SwarmEvent::Behaviour(MiasmaBehaviourEvent::DirectedSharingV2(ev)) => {
+                self.handle_directed_sharing_v2_event(ev);
             }
             SwarmEvent::Behaviour(MiasmaBehaviourEvent::Mdns(ev)) => {
                 self.handle_mdns_event(ev);
@@ -3585,6 +3705,20 @@ impl MiasmaNode {
         // Promote to Observed and retain the authenticated identity key.
         self.peer_registry
             .on_identify_identity(peer_id, identity_pubkey);
+
+        // Record whether this peer speaks the v2 directed protocol. The sender
+        // side consults this before offering a v2 invite; a peer that never
+        // advertises it is handled over v1 (the fallback is a later package).
+        // Identify may refresh, so update the set in both directions.
+        let speaks_v2 = info
+            .protocols
+            .iter()
+            .any(|p| p.as_ref() == DIRECTED_PROTOCOL_V2);
+        if speaks_v2 {
+            self.directed_v2_peers.insert(peer_id);
+        } else {
+            self.directed_v2_peers.remove(&peer_id);
+        }
 
         if self.allow_local_addresses {
             // Local mode: skip PoW admission, add directly to Kademlia and
@@ -4683,6 +4817,308 @@ impl MiasmaNode {
         }
     }
 
+    /// A monotonic `Now` for the directed-v2 state machine: wall-clock seconds
+    /// for display and effective-expiry clamping, and milliseconds since the
+    /// node's monotonic base for the challenge deadline. A wall-clock step back
+    /// cannot shorten or lengthen a monotonic window.
+    fn directed_v2_now(&self) -> crate::directed::state::Now {
+        crate::directed::state::Now {
+            wall_secs: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            mono_ms: self.directed_v2_mono_base.elapsed().as_millis() as u64,
+        }
+    }
+
+    /// Elapsed whole seconds since the monotonic base, the unit the offer table
+    /// ages its entries in (design 2.3). Taken from the same base as
+    /// [`Self::directed_v2_now`] so the two clocks agree.
+    fn directed_v2_offer_secs(&self) -> u64 {
+        self.directed_v2_mono_base.elapsed().as_secs()
+    }
+
+    /// Handle one event from the `/miasma/directed/2.0.0` behaviour.
+    ///
+    /// This is the v2 receive side (WP-D6b): it answers a `PrekeyRequest` with a
+    /// signed offer, verifies and stores an `Invite` exactly once, and routes a
+    /// response back to a pending sender-side request. It never touches the v1
+    /// behaviour, so the two endpoints run side by side without interference.
+    fn handle_directed_sharing_v2_event(
+        &mut self,
+        ev: request_response::Event<DirectedRequestV2, DirectedResponseV2>,
+    ) {
+        match ev {
+            request_response::Event::Message {
+                peer,
+                message:
+                    request_response::Message::Request {
+                        request, channel, ..
+                    },
+                ..
+            } => {
+                let response = self.handle_directed_v2_request(peer, request);
+                let _ = self
+                    .swarm
+                    .behaviour_mut()
+                    .directed_sharing_v2
+                    .send_response(channel, response);
+            }
+            request_response::Event::Message {
+                peer,
+                message:
+                    request_response::Message::Response {
+                        request_id,
+                        response,
+                    },
+                ..
+            } => {
+                if let Some(reply) = take_peer_correlated(
+                    &mut self.pending_directed_v2_replies,
+                    &request_id,
+                    peer,
+                    "directed_v2.response",
+                ) {
+                    let _ = reply.send(Ok(response));
+                }
+            }
+            request_response::Event::OutboundFailure {
+                request_id,
+                peer,
+                error,
+                ..
+            } => {
+                if let Some(reply) = take_peer_correlated(
+                    &mut self.pending_directed_v2_replies,
+                    &request_id,
+                    peer,
+                    "directed_v2.failure",
+                ) {
+                    let _ = reply.send(Err(MiasmaError::Network(format!(
+                        "directed v2 outbound failure: {error}"
+                    ))));
+                }
+                debug!("directed_sharing_v2 outbound failure: {error}");
+            }
+            request_response::Event::InboundFailure { error, .. } => {
+                debug!("directed_sharing_v2 inbound failure: {error}");
+            }
+            _ => {}
+        }
+    }
+
+    /// Produce the response to one inbound v2 request. Split out so the event
+    /// handler stays small and the request arms can each `return` a response.
+    fn handle_directed_v2_request(
+        &mut self,
+        peer: PeerId,
+        request: DirectedRequestV2,
+    ) -> DirectedResponseV2 {
+        match request {
+            DirectedRequestV2::PrekeyRequest { request_id, suites } => {
+                self.handle_directed_v2_prekey_request(peer, request_id, &suites)
+            }
+            DirectedRequestV2::Invite { envelope, ext } => {
+                self.handle_directed_v2_invite(peer, envelope, ext)
+            }
+            // The remaining variants (Confirm, SenderRevoke, StatusQuery) are
+            // the state-machine and status work of later packages. Answer with a
+            // coded error so a caller gets a clear, localisable reason rather
+            // than a dropped stream.
+            DirectedRequestV2::Confirm { .. }
+            | DirectedRequestV2::SenderRevoke { .. }
+            | DirectedRequestV2::StatusQuery { .. } => DirectedResponseV2::Error(
+                directed_v2_error(directed_v2_codes::UNSUPPORTED_SUITE, "not yet handled"),
+            ),
+        }
+    }
+
+    /// Answer a `PrekeyRequest` with a freshly generated, signed offer and keep
+    /// the matching `r_eph` secret in the offer table (design 2.1 step 9-10,
+    /// 2.3). The offer is bound to the requester PeerId and expires after a
+    /// fixed age; a full per-peer table rejects the request without signing.
+    fn handle_directed_v2_prekey_request(
+        &mut self,
+        peer: PeerId,
+        request_id: [u8; 16],
+        suites: &[u8],
+    ) -> DirectedResponseV2 {
+        // Only the v2 suite is offered. If the requester does not accept it,
+        // there is nothing to negotiate.
+        if !suites.contains(&SUITE_V2) {
+            return DirectedResponseV2::Error(directed_v2_error(
+                directed_v2_codes::UNSUPPORTED_SUITE,
+                "only suite 2 is offered",
+            ));
+        }
+        // The recipient must have its sharing key set to answer at all.
+        let Some(recipient_sharing) = self.directed_recipient_pubkey else {
+            return DirectedResponseV2::Error(directed_v2_error(
+                directed_v2_codes::OFFER_UNKNOWN,
+                "recipient sharing key unavailable",
+            ));
+        };
+
+        // Fresh ephemeral X25519 key, held only in memory for the offer's life.
+        let r_eph_secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let r_eph_pub = *x25519_dalek::PublicKey::from(&r_eph_secret).as_bytes();
+        let r_eph_secret_bytes = r_eph_secret.to_bytes();
+
+        let offer_id: [u8; 16] = rand::random();
+        let recipient_identity = self.dht_signing_key.verifying_key().to_bytes();
+        let recipient_binding = sign_binding(&self.dht_signing_key, &recipient_sharing);
+        let requester_bytes = peer.to_bytes();
+        let ttl_secs = crate::directed::v2::offer_table::OFFER_TTL as u32;
+
+        let fields = OfferFields {
+            suite: SUITE_V2,
+            offer_id: &offer_id,
+            request_id: &request_id,
+            requester: &requester_bytes,
+            recipient_identity: &recipient_identity,
+            recipient_sharing: &recipient_sharing,
+            recipient_binding: &recipient_binding,
+            recipient_ephemeral: &r_eph_pub,
+            ttl_secs,
+        };
+        let signature = sign_offer(&self.dht_signing_key, &fields);
+
+        let now = self.directed_v2_offer_secs();
+        let pending = PendingDirectedOffer {
+            request_id,
+            r_eph_pub,
+            r_eph_secret: zeroize::Zeroizing::new(r_eph_secret_bytes),
+        };
+        if self
+            .directed_v2_offers
+            .insert(peer, offer_id, pending, now)
+            .is_err()
+        {
+            // The per-peer table is full of unspent offers (design 2.3). Do not
+            // sign or hand out another; the requester can retry once some age
+            // out.
+            return DirectedResponseV2::Error(directed_v2_error(
+                directed_v2_codes::OFFER_UNKNOWN,
+                "too many unspent offers for this peer",
+            ));
+        }
+
+        DirectedResponseV2::PrekeyOffer {
+            offer: SignedOffer {
+                suite: SUITE_V2,
+                offer_id,
+                request_id,
+                requester: requester_bytes,
+                recipient_identity,
+                recipient_sharing,
+                recipient_binding,
+                recipient_ephemeral: r_eph_pub,
+                ttl_secs,
+                signature,
+            },
+        }
+    }
+
+    /// Verify and store a received v2 `Invite` exactly once (design 3.4, 6.4).
+    ///
+    /// The offer is taken out of the table first, so the same offer cannot be
+    /// used twice and any later failure does not return it. The caller-derived
+    /// PeerId bytes (sender identity's PeerId and the transport PeerId) let the
+    /// pure intake compare identities without the networking types.
+    fn handle_directed_v2_invite(
+        &mut self,
+        peer: PeerId,
+        envelope: DirectedEnvelope,
+        ext: InviteExtV2,
+    ) -> DirectedResponseV2 {
+        let id_hex = hex::encode(envelope.envelope_id);
+        info!(peer = %peer, envelope_id = %id_hex, "directed_v2.invite_received");
+
+        let Some(ref data_dir) = self.directed_data_dir else {
+            return DirectedResponseV2::Error(directed_v2_error(
+                directed_v2_codes::OFFER_UNKNOWN,
+                "directed invite persistence unavailable",
+            ));
+        };
+        let Some(own_sharing) = self.directed_recipient_pubkey else {
+            return DirectedResponseV2::Error(directed_v2_error(
+                directed_v2_codes::OFFER_UNKNOWN,
+                "recipient sharing key unavailable",
+            ));
+        };
+        let own_identity = self.dht_signing_key.verifying_key().to_bytes();
+
+        // Take the offer out first (design 3.4 item 4, one-shot): any later
+        // failure must not put it back, so a second invite with the same
+        // offer id cannot be tried.
+        let now_secs = self.directed_v2_offer_secs();
+        let Some(offer) = self.directed_v2_offers.take(&peer, &ext.offer_id, now_secs) else {
+            // Absent or expired. Distinguish only by what the table can tell us:
+            // a missing entry reads as unknown.
+            return DirectedResponseV2::Error(directed_v2_error(
+                directed_v2_codes::OFFER_UNKNOWN,
+                "no live offer for this id",
+            ));
+        };
+
+        // Derive the sender identity's PeerId from the key the invite carries,
+        // so the pure intake can compare it to the transport PeerId.
+        let sender_identity_peer_id = match ed25519_pubkey_to_peer_id(&ext.sender_identity) {
+            Some(p) => p.to_bytes(),
+            None => {
+                return DirectedResponseV2::Error(directed_v2_error(
+                    directed_v2_codes::PEER_MISMATCH,
+                    "sender identity is not a valid ed25519 key",
+                ));
+            }
+        };
+        let transport_peer_id = peer.to_bytes();
+        let sender_peer_id_display = peer.to_string();
+
+        let inbox = match crate::directed::DirectedInbox::open(data_dir) {
+            Ok(inbox) => inbox,
+            Err(e) => {
+                debug!("directed_v2.open_inbox_failed: {e}");
+                return DirectedResponseV2::Error(directed_v2_error(
+                    directed_v2_codes::OFFER_UNKNOWN,
+                    "open inbox failed",
+                ));
+            }
+        };
+
+        let ctx = InviteRecipientContext {
+            own_identity: &own_identity,
+            own_sharing: &own_sharing,
+            expected_offer_id: &ext.offer_id,
+            offer_r_eph_pub: &offer.r_eph_pub,
+            offer_r_eph_secret: &offer.r_eph_secret,
+            sender_identity_peer_id: &sender_identity_peer_id,
+            transport_peer_id: &transport_peer_id,
+            sender_peer_id_display: &sender_peer_id_display,
+        };
+
+        let now = self.directed_v2_now();
+        match intake_invite(&inbox, &envelope, &ext, &ctx, now) {
+            Ok(outcome) => {
+                if outcome.created {
+                    if let Some(ref tx) = self.topology_tx {
+                        let _ =
+                            tx.try_send(super::types::TopologyEvent::DirectedEnvelopeReceived {
+                                peer_id: peer,
+                                envelope: Box::new(envelope.clone()),
+                            });
+                    }
+                    info!(peer = %peer, envelope_id = %id_hex, "directed_v2.invite_stored");
+                }
+                DirectedResponseV2::InviteStored {
+                    envelope_id: envelope.envelope_id,
+                    transcript_hash: outcome.transcript_hash,
+                }
+            }
+            Err(e) => directed_v2_intake_error_response(e),
+        }
+    }
+
     fn handle_directed_sharing_event(
         &mut self,
         ev: request_response::Event<DirectedRequest, DirectedResponse>,
@@ -5656,6 +6092,10 @@ fn build_swarm(
                 request_response::Config::default(),
             );
 
+            // The v2 behaviour uses the v2 codec and protocol id, built the same
+            // way as the v1 one above (WP-D6b).
+            let directed_sharing_v2 = new_directed_v2_behaviour();
+
             let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?;
 
             Ok(MiasmaBehaviour {
@@ -5673,6 +6113,7 @@ fn build_swarm(
                 onion_relay,
                 relay_probe,
                 directed_sharing,
+                directed_sharing_v2,
                 mdns,
             })
         })
@@ -6525,5 +6966,305 @@ mod large_file_dht_budget_tests {
             DHT_RECORD_MAX_VALUE_BYTES
         );
         assert!(envelope.len() < DHT_MAX_PACKET_SIZE);
+    }
+}
+
+#[cfg(test)]
+mod directed_v2_receive_tests {
+    //! Process-local, Behaviour-unit tests for the v2 directed receive side
+    //! (WP-D6b step 1). They drive `handle_directed_v2_request` directly rather
+    //! than standing up a full swarm, so they stay inside the disk/time budget
+    //! while still exercising the real offer table, the real signed-offer path,
+    //! and the real `intake_invite` persistence. They cover: v1/v2 endpoints not
+    //! interfering, the PrekeyRequest -> Invite round trip, an idempotent resend,
+    //! out-of-order consumption of two offers, and the 20-second offer expiry.
+
+    use super::*;
+    use crate::directed::envelope::{DirectedEnvelope, EnvelopeState};
+    use crate::directed::v2::credential::sign_binding;
+    use crate::directed::v2::transcript::{self as tx, Header, OuterRefs};
+    use crate::directed::v2::wire::{
+        DirectedRequestV2, DirectedResponseV2, InviteExtV2, KdfParams, SignedOffer, SUITE_V2,
+    };
+    use ed25519_dalek::SigningKey;
+    use tempfile::TempDir;
+    use x25519_dalek::{PublicKey as XPublicKey, StaticSecret};
+
+    fn signing_key() -> SigningKey {
+        SigningKey::from_bytes(&rand::random())
+    }
+
+    fn x25519_pair() -> ([u8; 32], [u8; 32]) {
+        let sk = StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let pk = XPublicKey::from(&sk);
+        (sk.to_bytes(), pk.to_bytes())
+    }
+
+    fn rand_vec(n: usize) -> Vec<u8> {
+        (0..n).map(|_| rand::random::<u8>()).collect()
+    }
+
+    /// A node wired for v2 receive: a fresh sharing key placed in
+    /// `directed_recipient_pubkey` and a temp inbox directory. The recipient
+    /// identity is the node's own `dht_signing_key`. Returns the node, the temp
+    /// dir (kept alive for the test), and the recipient sharing public key.
+    fn recipient_node() -> (MiasmaNode, TempDir, [u8; 32]) {
+        let key = rand::random::<[u8; 32]>();
+        let mut node = MiasmaNode::new(&key, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+        let (_sk, sharing_pub) = x25519_pair();
+        node.directed_recipient_pubkey = Some(sharing_pub);
+        let dir = TempDir::new().unwrap();
+        node.directed_data_dir = Some(dir.path().to_path_buf());
+        (node, dir, sharing_pub)
+    }
+
+    /// Derive the libp2p PeerId for an Ed25519 identity public key, as the
+    /// handler does when it compares the invite's claimed sender identity to the
+    /// transport PeerId.
+    fn peer_id_of(identity_pub: &[u8; 32]) -> PeerId {
+        let ed = libp2p::identity::ed25519::PublicKey::try_from_bytes(identity_pub).unwrap();
+        PeerId::from(libp2p::identity::PublicKey::from(ed))
+    }
+
+    /// Ask the node for a signed prekey offer and return it.
+    fn request_offer(node: &mut MiasmaNode, requester: PeerId) -> SignedOffer {
+        let request_id: [u8; 16] = rand::random();
+        let resp = node.handle_directed_v2_request(
+            requester,
+            DirectedRequestV2::PrekeyRequest {
+                request_id,
+                suites: vec![SUITE_V2],
+            },
+        );
+        match resp {
+            DirectedResponseV2::PrekeyOffer { offer } => {
+                assert_eq!(offer.suite, SUITE_V2);
+                assert_eq!(offer.request_id, request_id);
+                offer
+            }
+            other => panic!("expected PrekeyOffer, got {other:?}"),
+        }
+    }
+
+    /// Build a correct, self-consistent v2 Invite addressed to `recipient_*`,
+    /// answering `offer` (its offer_id and r_eph public key), signed by a fresh
+    /// sender identity. Returns the request and the sender's PeerId (the
+    /// transport PeerId the handler must be given for the identity check to
+    /// pass).
+    fn build_invite(
+        recipient_identity: [u8; 32],
+        recipient_sharing: [u8; 32],
+        offer: &SignedOffer,
+        now_wall: u64,
+    ) -> (DirectedRequestV2, PeerId) {
+        let sender_sk = signing_key();
+        let sender_identity = sender_sk.verifying_key().to_bytes();
+        let (_sender_sharing_sk, sender_sharing_pub) = x25519_pair();
+        let (_e_s_sk, e_s_pub) = x25519_pair();
+
+        let envelope_id: [u8; 32] = rand::random();
+        let password_salt: [u8; 32] = rand::random();
+        let payload_nonce: [u8; 24] = rand::random();
+        let dek_nonce: [u8; 24] = rand::random();
+        let encrypted_payload = rand_vec(40);
+        let wrapped_dek = rand_vec(48);
+        let kdf = KdfParams {
+            m_kib: 65536,
+            t_cost: 3,
+            p_cost: 1,
+        };
+        let created_at = now_wall;
+        let expires_at = now_wall.saturating_add(3600);
+        let retention_secs = 3600u64;
+
+        let sender_binding = sign_binding(&sender_sk, &sender_sharing_pub);
+
+        let envelope = DirectedEnvelope {
+            envelope_id,
+            version: SUITE_V2,
+            sender_pubkey: sender_sharing_pub,
+            recipient_pubkey: recipient_sharing,
+            ephemeral_pubkey: e_s_pub,
+            encrypted_payload,
+            payload_nonce,
+            password_salt,
+            expires_at,
+            created_at,
+            state: EnvelopeState::Pending,
+            challenge_hash: None,
+            password_attempts_remaining: 0,
+            challenge_attempts_remaining: 0,
+            challenge_expires_at: 0,
+            retention_secs,
+        };
+
+        let header = Header {
+            version: envelope.version,
+            suite: SUITE_V2,
+            envelope_id: &envelope.envelope_id,
+            sender_identity: &sender_identity,
+            sender_pubkey: &envelope.sender_pubkey,
+            recipient_identity: &recipient_identity,
+            recipient_pubkey: &envelope.recipient_pubkey,
+            ephemeral_pubkey: &envelope.ephemeral_pubkey,
+            recipient_ephemeral: &offer.recipient_ephemeral,
+            offer_id: &offer.offer_id,
+            kdf_m_kib: kdf.m_kib,
+            kdf_t_cost: kdf.t_cost,
+            kdf_p_cost: kdf.p_cost,
+            password_salt: &envelope.password_salt,
+            created_at: envelope.created_at,
+            expires_at: envelope.expires_at,
+            retention_secs: envelope.retention_secs,
+        };
+        let h_hdr = header.h_hdr();
+        let outer = OuterRefs {
+            payload_nonce: &envelope.payload_nonce,
+            encrypted_payload: &envelope.encrypted_payload,
+            dek_nonce: &dek_nonce,
+            wrapped_dek: &wrapped_dek,
+            sender_binding: &sender_binding,
+        };
+        let sig_msg = tx::sig_msg(&h_hdr, &outer);
+        let signature = tx::sign_transcript(&sender_sk, &sig_msg);
+
+        let ext = InviteExtV2 {
+            suite: SUITE_V2,
+            kdf,
+            sender_identity,
+            sender_binding,
+            recipient_identity,
+            offer_id: offer.offer_id,
+            recipient_ephemeral: offer.recipient_ephemeral,
+            wrapped_dek,
+            dek_nonce,
+            signature,
+        };
+
+        let sender_peer = peer_id_of(&sender_identity);
+        (DirectedRequestV2::Invite { envelope, ext }, sender_peer)
+    }
+
+    #[test]
+    fn prekey_request_then_invite_round_trips_and_stores() {
+        let (mut node, _dir, sharing) = recipient_node();
+        let recipient_identity = node.dht_signing_key.verifying_key().to_bytes();
+        let requester = PeerId::random();
+
+        let offer = request_offer(&mut node, requester);
+        // The offer names this recipient and echoes the live sharing key.
+        assert_eq!(offer.recipient_identity, recipient_identity);
+        assert_eq!(offer.recipient_sharing, sharing);
+
+        // The invite comes from the same transport PeerId whose identity signs it.
+        let (invite, sender_peer) = build_invite(recipient_identity, sharing, &offer, 1000);
+        let resp = node.handle_directed_v2_request(sender_peer, invite);
+        match resp {
+            DirectedResponseV2::InviteStored { .. } => {}
+            other => panic!("expected InviteStored, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resent_invite_is_idempotent_same_transcript() {
+        let (mut node, _dir, sharing) = recipient_node();
+        let recipient_identity = node.dht_signing_key.verifying_key().to_bytes();
+        let requester = PeerId::random();
+
+        let offer = request_offer(&mut node, requester);
+        let (invite, sender_peer) = build_invite(recipient_identity, sharing, &offer, 1000);
+
+        let first = node.handle_directed_v2_request(sender_peer, invite.clone());
+        let hash1 = match first {
+            DirectedResponseV2::InviteStored {
+                transcript_hash, ..
+            } => transcript_hash,
+            other => panic!("expected InviteStored, got {other:?}"),
+        };
+        // The exact same invite arrives again (a resend / duplicate delivery).
+        let second = node.handle_directed_v2_request(sender_peer, invite);
+        let hash2 = match second {
+            DirectedResponseV2::InviteStored {
+                transcript_hash, ..
+            } => transcript_hash,
+            other => panic!("expected InviteStored on resend, got {other:?}"),
+        };
+        assert_eq!(hash1, hash2, "a resend yields the same transcript hash");
+    }
+
+    #[test]
+    fn two_offers_consumed_out_of_order() {
+        let (mut node, _dir, sharing) = recipient_node();
+        let recipient_identity = node.dht_signing_key.verifying_key().to_bytes();
+        let requester = PeerId::random();
+
+        // Hand out two distinct offers to the same requester.
+        let offer_a = request_offer(&mut node, requester);
+        let offer_b = request_offer(&mut node, requester);
+        assert_ne!(offer_a.offer_id, offer_b.offer_id);
+
+        // Build invites for both, then consume B before A (reordered).
+        let (invite_a, peer_a) = build_invite(recipient_identity, sharing, &offer_a, 1000);
+        let (invite_b, peer_b) = build_invite(recipient_identity, sharing, &offer_b, 1000);
+
+        match node.handle_directed_v2_request(peer_b, invite_b) {
+            DirectedResponseV2::InviteStored { .. } => {}
+            other => panic!("expected InviteStored for B, got {other:?}"),
+        }
+        match node.handle_directed_v2_request(peer_a, invite_a) {
+            DirectedResponseV2::InviteStored { .. } => {}
+            other => panic!("expected InviteStored for A, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn offer_past_twenty_seconds_is_unknown() {
+        let (mut node, _dir, sharing) = recipient_node();
+        let recipient_identity = node.dht_signing_key.verifying_key().to_bytes();
+        let requester = PeerId::random();
+
+        let offer = request_offer(&mut node, requester);
+        let (invite, sender_peer) = build_invite(recipient_identity, sharing, &offer, 1000);
+
+        // Advance the node's monotonic base so the offer is strictly older than
+        // the 20-second TTL by the time the invite is taken.
+        node.directed_v2_mono_base = std::time::Instant::now()
+            - std::time::Duration::from_secs(crate::directed::v2::offer_table::OFFER_TTL + 1);
+
+        match node.handle_directed_v2_request(sender_peer, invite) {
+            DirectedResponseV2::Error(msg) => {
+                assert!(
+                    msg.contains(crate::directed::v2::wire::codes::OFFER_UNKNOWN),
+                    "expected offer_unknown, got {msg}"
+                );
+            }
+            other => panic!("expected Error(offer_unknown), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn v1_and_v2_endpoints_do_not_interfere() {
+        // A node answers a v2 PrekeyRequest on the v2 handler while its v1
+        // directed state is untouched: the v2 receive path does not read or
+        // write any v1 field, and the v1 handler is a separate method. This test
+        // drives the v2 handler to completion (offer + stored invite) and
+        // asserts the v1 pending-reply map the v1 handler uses is still empty.
+        let (mut node, _dir, sharing) = recipient_node();
+        let recipient_identity = node.dht_signing_key.verifying_key().to_bytes();
+        let requester = PeerId::random();
+        assert!(node.pending_directed_replies.is_empty());
+
+        let offer = request_offer(&mut node, requester);
+        let (invite, sender_peer) = build_invite(recipient_identity, sharing, &offer, 1000);
+        match node.handle_directed_v2_request(sender_peer, invite) {
+            DirectedResponseV2::InviteStored { .. } => {}
+            other => panic!("expected InviteStored, got {other:?}"),
+        }
+
+        // The v1 request/response bookkeeping was never touched by the v2 path.
+        assert!(
+            node.pending_directed_replies.is_empty(),
+            "v2 receive must not populate the v1 pending-reply map"
+        );
     }
 }
