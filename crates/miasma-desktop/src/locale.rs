@@ -3101,7 +3101,7 @@ static CH_EN: ChatStrings = ChatStrings {
     fail_expired: "It could not be delivered in time.",
     fail_session: "A secure connection could not be set up. Check the contact's verification code with them.",
     fail_other: "It could not be sent.",
-    fail_pqc_peer_no_hybrid: "Not sent. Your setting requires advanced encryption, and the other person's Miasma does not offer it.",
+    fail_pqc_peer_no_hybrid: "Not sent. The other person's app does not support the advanced encryption your setting requires. Ask them to update to the latest version.",
     fail_pqc_failed: "Not sent. The extra protection could not be set up with this contact. Try again later.",
     pqc_hybrid: "Advanced encryption is on",
     pqc_classical: "Standard protection only",
@@ -3198,7 +3198,7 @@ static CH_JA: ChatStrings = ChatStrings {
     fail_expired: "届けられないまま、時間が過ぎました。",
     fail_session: "安全な接続を作れませんでした。相手と確認用コードを見比べてください。",
     fail_other: "送れませんでした。",
-    fail_pqc_peer_no_hybrid: "送りませんでした。設定で追加の保護を必須にしていますが、相手の Miasma が対応していません。",
+    fail_pqc_peer_no_hybrid: "相手のアプリが追加の保護に対応していないため、送れません。相手に最新版への更新を依頼してください。",
     fail_pqc_failed: "送りませんでした。この相手との間で追加の保護を準備できませんでした。しばらくしてからもう一度お試しください。",
     pqc_hybrid: "高度な暗号化：オン",
     pqc_classical: "標準の保護のみ",
@@ -3296,7 +3296,7 @@ static CH_ZH_CN: ChatStrings = ChatStrings {
     fail_expired: "一直未能送达，已超时。",
     fail_session: "无法建立安全连接。请与对方核对安全码。",
     fail_other: "无法发送。",
-    fail_pqc_peer_no_hybrid: "未发送。你的设置要求使用高级加密，但对方的 Miasma 不提供。",
+    fail_pqc_peer_no_hybrid: "未发送。对方的应用不支持你的设置所要求的高级加密。请对方更新到最新版本。",
     fail_pqc_failed: "未发送。无法与该联系人建立增强保护，请稍后再试。",
     pqc_hybrid: "高级加密已开启",
     pqc_classical: "仅标准保护",
@@ -3388,6 +3388,7 @@ macro_rules! pqc_strings {
 pqc_strings! {
     heading, intro, off, prefer, require, off_help, prefer_help, require_help,
     restart_note, unavailable, review_note, save_failed, a11y_mode,
+    advanced_label, advanced_hint, fallback_warning, required_note,
 }
 
 pub fn pqc_strings(locale: Locale) -> &'static PqcStrings {
@@ -3400,50 +3401,62 @@ pub fn pqc_strings(locale: Locale) -> &'static PqcStrings {
 
 static PQ_EN: PqcStrings = PqcStrings {
     heading: "Advanced encryption",
-    intro: "Private conversations are already encrypted. This adds a further, stronger layer to the way each conversation is secured. It is on by default, and takes effect when the other person's Miasma supports it too.",
+    intro: "Private conversations are already encrypted. This adds a further, stronger layer to the way each conversation is secured. It is required by default: a message is sent only once that stronger protection is in place.",
     off: "Off",
     prefer: "Use when possible",
     require: "Always required",
-    off_help: "Chat works exactly as before.",
-    prefer_help: "Default. Used when the other person's Miasma supports it. Otherwise chat keeps working as before, and the conversation shows \"Standard protection only\".",
-    require_help: "Messages are sent only after the stronger protection is in place. If the other person cannot use it, the message is not sent and you are told why. Nothing is sent without it.",
+    off_help: "Chat works exactly as before, without the stronger protection.",
+    prefer_help: "Used when the other person's Miasma supports it. Otherwise chat keeps working as before, and the conversation shows \"Standard protection only\".",
+    require_help: "Default. Messages are sent only after the stronger protection is in place. If the other person cannot use it, the message is not sent and you are told why. Nothing is sent without it.",
     restart_note: "A change applies the next time Miasma's background service starts.",
     unavailable: "This version of Miasma does not include this protection, so the setting has no effect.",
     review_note: "This feature has not yet been reviewed by an outside security expert.",
     save_failed: "The setting could not be saved. Please try again.",
     a11y_mode: "Advanced encryption",
+    advanced_label: "Advanced: let messages fall back to standard protection",
+    advanced_hint: "These choices lower the protection below the default. Most people should leave this alone. They are meant for testing and special setups.",
+    fallback_warning: "Your setting lets messages fall back to standard protection when the other person cannot use the stronger one. The default is to require it.",
+    required_note: "This is standard and required. If the other person's app cannot use the stronger protection, the message is not sent and you are told why.",
 };
 
 static PQ_JA: PqcStrings = PqcStrings {
     heading: "高度な暗号化",
-    intro: "個人チャットはすでに暗号化されています。この機能は、会話を守る仕組みをさらに一段強くします。初期設定ではオンで、相手の Miasma も対応しているときに働きます。",
+    intro: "個人チャットはすでに暗号化されています。この機能は、会話を守る仕組みをさらに一段強くします。初期設定では必須で、強い保護が整ってからメッセージを送ります。",
     off: "オフ",
     prefer: "使えるときは使う",
     require: "必ず使う",
-    off_help: "チャットはこれまでと同じように動きます。",
-    prefer_help: "初期設定です。相手の Miasma が対応しているときに使います。対応していないときはこれまでどおり送れますが、会話に「標準の保護のみ」と表示されます。",
-    require_help: "強い保護が整ってから送ります。相手が対応していないときは送らず、理由を表示します。この保護なしで送ることはありません。",
+    off_help: "強い保護を使わず、チャットはこれまでと同じように動きます。",
+    prefer_help: "相手の Miasma が対応しているときに使います。対応していないときはこれまでどおり送れますが、会話に「標準の保護のみ」と表示されます。",
+    require_help: "初期設定です。強い保護が整ってから送ります。相手が対応していないときは送らず、理由を表示します。この保護なしで送ることはありません。",
     restart_note: "変更は次回起動時に反映されます。",
     unavailable: "このビルドでは利用できません。",
     review_note: "外部のセキュリティ専門家による確認は未実施です。",
     save_failed: "設定を保存できませんでした。もう一度お試しください。",
     a11y_mode: "高度な暗号化",
+    advanced_label: "詳細：相手が使えないときは標準の保護で送る",
+    advanced_hint: "これらを選ぶと、保護が初期設定より弱くなります。ふだんは変更しないでください。試験や特別な用途のための項目です。",
+    fallback_warning: "いまの設定では、相手が強い保護を使えないとき、標準の保護に切り替えて送ります。初期設定は「必ず使う」です。",
+    required_note: "これが標準で、必須です。相手のアプリが強い保護を使えないときは送らず、理由を表示します。",
 };
 
 static PQ_ZH_CN: PqcStrings = PqcStrings {
     heading: "高级加密",
-    intro: "私人聊天本来就已加密。此功能会进一步加强对每个会话的保护。默认开启，对方的 Miasma 也支持时才会生效。",
+    intro: "私人聊天本来就已加密。此功能会进一步加强对每个会话的保护。默认必须使用：只有在增强保护建立之后才会发送消息。",
     off: "关闭",
     prefer: "尽量使用",
     require: "必须使用",
-    off_help: "聊天与以前完全一样。",
-    prefer_help: "默认选项。对方的 Miasma 支持时就使用。不支持时聊天照常进行，并在会话中标出“仅标准保护”。",
-    require_help: "只有在增强保护建立之后才发送消息。对方不支持时不会发送，并告诉你原因。没有这项保护就不会发出任何内容。",
+    off_help: "不使用增强保护，聊天与以前完全一样。",
+    prefer_help: "对方的 Miasma 支持时就使用。不支持时聊天照常进行，并在会话中标出“仅标准保护”。",
+    require_help: "默认选项。只有在增强保护建立之后才发送消息。对方不支持时不会发送，并告诉你原因。没有这项保护就不会发出任何内容。",
     restart_note: "更改将在下次后台服务启动时生效。",
     unavailable: "此版本的 Miasma 不包含这项保护，设置不会生效。",
     review_note: "此功能尚未经过外部安全专家审查。",
     save_failed: "无法保存设置，请重试。",
     a11y_mode: "高级加密",
+    advanced_label: "高级：对方无法使用时，改用标准保护发送",
+    advanced_hint: "这些选项会把保护降到默认以下。大多数人无需改动。它们供测试和特殊配置使用。",
+    fallback_warning: "当前设置会在对方无法使用增强保护时，改用标准保护发送。默认设置为“必须使用”。",
+    required_note: "这是标准，且为必须。如果对方的应用无法使用增强保护，消息将不会发送，并会告诉你原因。",
 };
 
 pub fn log_strings(locale: Locale) -> &'static LogStrings {
@@ -4149,6 +4162,63 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn the_advanced_group_names_require_as_the_default() {
+        // The weaker choices live under an advanced group; its label, hint and
+        // the fallback warning are filled in every language, and the warning
+        // names the required default so the weaker state is visible.
+        for lang in Locale::ALL {
+            let p = pqc_strings(lang);
+            for (name, value) in [
+                ("advanced_label", p.advanced_label),
+                ("advanced_hint", p.advanced_hint),
+                ("fallback_warning", p.fallback_warning),
+            ] {
+                assert!(!value.trim().is_empty(), "{lang:?} pqc.{name} is empty");
+            }
+        }
+        // Each language's required-default word appears in the help for the
+        // required choice, and not in the help for the weaker `prefer` choice.
+        for (lang, default_word) in [
+            (Locale::En, "Default"),
+            (Locale::Ja, "初期設定"),
+            (Locale::ZhCn, "默认"),
+        ] {
+            let p = pqc_strings(lang);
+            assert!(
+                p.require_help.contains(default_word),
+                "{lang:?} require_help should name the default"
+            );
+            assert!(
+                !p.prefer_help.contains(default_word),
+                "{lang:?} prefer_help should no longer be the default"
+            );
+        }
+    }
+
+    #[test]
+    fn the_required_note_states_the_standard_in_every_language() {
+        // The normal (easy) view offers only the required choice and shows this
+        // note: it says the required mode is the standard and that a message to
+        // a contact that cannot use the stronger protection is not sent. The
+        // note is filled in every language and names the required standard.
+        for (lang, required_word) in [
+            (Locale::En, "required"),
+            (Locale::Ja, "必須"),
+            (Locale::ZhCn, "必须"),
+        ] {
+            let p = pqc_strings(lang);
+            assert!(
+                !p.required_note.trim().is_empty(),
+                "{lang:?} required_note is empty"
+            );
+            assert!(
+                p.required_note.contains(required_word),
+                "{lang:?} required_note should name the required standard"
+            );
         }
     }
 

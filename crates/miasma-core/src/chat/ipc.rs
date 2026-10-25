@@ -139,9 +139,22 @@ pub struct PqcCounts {
 /// `privacy.pqc_mode` as the daemon runs it, and what came of it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PqcStatus {
-    /// `off`, `prefer` or `require`: the mode this daemon started with.
+    /// `off`, `prefer` or `require`: the mode this daemon started with (the
+    /// value in force, i.e. the person's choice or the default).
     #[serde(default)]
     pub mode: String,
+    /// `off`, `prefer` or `require`: the mode that applies when nobody set
+    /// `privacy.pqc_mode`. `require` in this build. Lets a reader see whether
+    /// `mode` is the default or a chosen value.
+    #[serde(default)]
+    pub default_mode: String,
+    /// True when `mode` lowers the guarantee below `require`, so a classical
+    /// session is allowed for a contact that does not offer the hybrid
+    /// exchange. A reader can warn on this; it is false for the `require`
+    /// default. Always false in a build without the `pqc` feature (the mode
+    /// has no effect and nothing is offered).
+    #[serde(default)]
+    pub allows_classical_fallback: bool,
     /// False in a build without the `pqc` cargo feature: the mode has no
     /// effect there and every session stays classical.
     #[serde(default)]
@@ -156,9 +169,14 @@ pub fn pqc_status_for(mode: crate::config::PqcMode) -> PqcStatus {
     let counts = super::pq::counts();
     #[cfg(not(feature = "pqc"))]
     let counts = PqcCounts::default();
+    let available = crate::config::PqcMode::available();
     PqcStatus {
         mode: mode.as_str().to_owned(),
-        available: crate::config::PqcMode::available(),
+        default_mode: crate::config::PqcMode::DEFAULT.as_str().to_owned(),
+        // Without the feature the mode has no effect and no classical fallback
+        // is offered, so this is reported as false regardless of the value.
+        allows_classical_fallback: available && mode.allows_classical_fallback(),
+        available,
         counts,
     }
 }
@@ -542,5 +560,72 @@ mod tests {
         };
         let s = serde_json::to_string(&resp).unwrap();
         assert!(serde_json::from_str::<ChatResponse>(&s).is_ok());
+    }
+
+    #[test]
+    fn pqc_status_reports_the_default_and_current_mode() {
+        use crate::config::PqcMode;
+        // `default_mode` is the mode in force when nobody set a value, and
+        // equals `PqcMode::DEFAULT` whatever the current mode is.
+        for mode in [PqcMode::Off, PqcMode::Prefer, PqcMode::Require] {
+            let st = pqc_status_for(mode);
+            assert_eq!(st.mode, mode.as_str());
+            assert_eq!(st.default_mode, PqcMode::DEFAULT.as_str());
+        }
+    }
+
+    #[cfg(feature = "pqc")]
+    #[test]
+    fn pqc_status_flags_a_classical_fallback_only_below_require() {
+        use crate::config::PqcMode;
+        // With the feature present the mode has effect: `off` and `prefer`
+        // lower the guarantee and allow a classical session, `require` does
+        // not. This mirrors `PqcMode::allows_classical_fallback`.
+        let require = pqc_status_for(PqcMode::Require);
+        assert!(require.available);
+        assert!(!require.allows_classical_fallback);
+        for mode in [PqcMode::Off, PqcMode::Prefer] {
+            let st = pqc_status_for(mode);
+            assert!(st.available);
+            assert!(
+                st.allows_classical_fallback,
+                "{} should allow a classical fallback",
+                mode.as_str()
+            );
+        }
+    }
+
+    #[cfg(not(feature = "pqc"))]
+    #[test]
+    fn pqc_status_never_flags_a_fallback_without_the_feature() {
+        use crate::config::PqcMode;
+        // Without the feature the mode has no effect: nothing is offered and no
+        // classical fallback is reported, whatever the value says.
+        for mode in [PqcMode::Off, PqcMode::Prefer, PqcMode::Require] {
+            let st = pqc_status_for(mode);
+            assert!(!st.available);
+            assert!(!st.allows_classical_fallback);
+        }
+    }
+
+    #[test]
+    fn pqc_status_round_trips_the_new_fields_as_json() {
+        use crate::config::PqcMode;
+        let st = pqc_status_for(PqcMode::Require);
+        let s = serde_json::to_string(&st).unwrap();
+        assert!(s.contains("default_mode"), "{s}");
+        assert!(s.contains("allows_classical_fallback"), "{s}");
+        let back: PqcStatus = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, st);
+        // A JSON object from an older daemon, without the new keys, still reads
+        // (the fields default to empty/false).
+        let old = serde_json::json!({
+            "mode": "require",
+            "available": true,
+            "counts": {}
+        });
+        let parsed: PqcStatus = serde_json::from_value(old).unwrap();
+        assert_eq!(parsed.default_mode, "");
+        assert!(!parsed.allows_classical_fallback);
     }
 }

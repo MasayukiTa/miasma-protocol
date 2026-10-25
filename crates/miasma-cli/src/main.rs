@@ -1174,12 +1174,22 @@ fn pqc_line_for(
     }
     match configured {
         PqcMode::Off => {
-            s.push_str(" (available in this build; turn it on with `privacy.pqc_mode`)");
+            // `off` and `prefer` both lower the guarantee below the `require`
+            // default: a classical session is then allowed. Say so plainly.
+            s.push_str(
+                " (warning: classical fallback allowed; the default is `require`, \
+                 which sends only over the advanced exchange)",
+            );
         }
-        PqcMode::Prefer => s.push_str(" (on when the contact supports it)"),
+        PqcMode::Prefer => {
+            s.push_str(
+                " (on when the contact supports it; warning: classical fallback \
+                 allowed when it does not. The default is `require`)",
+            );
+        }
         PqcMode::Require if by_default => {
-            // `require` is the default: no classical fallback. Say so, since the
-            // person did not set it.
+            // `require` is the default: no classical fallback. Say it is the
+            // default, since the person did not set it.
             s.push_str(" (required; this is the default)");
         }
         PqcMode::Require => {}
@@ -2079,6 +2089,17 @@ fn cmd_config_loaded(
                             "note: this build does not include advanced encryption, so \
                              the setting has no effect here and private conversations \
                              stay standard"
+                        );
+                    }
+                    if mode.allows_classical_fallback() {
+                        // The default is `require` (no classical fallback). `off`
+                        // and `prefer` lower that: a classical session is then
+                        // allowed. This is an advanced choice; warn so the weaker
+                        // guarantee is visible.
+                        eprintln!(
+                            "warning: privacy.pqc_mode = {mode} allows a classical fallback \
+                             for private conversations. The default is `require`, which \
+                             sends only once the advanced exchange has succeeded."
                         );
                     }
                     config.privacy.pqc_mode = Some(mode);
@@ -4482,17 +4503,29 @@ mod pqc_status_line_tests {
 
     #[test]
     fn a_build_with_the_feature_says_advanced_encryption_is_available() {
-        let off = pqc_line_for(PqcMode::Off, false, true, None);
-        assert!(off.starts_with("off"), "{off}");
-        assert!(off.contains("available in this build"), "{off}");
         // The default is now `require` (no classical fallback): it says it is
-        // the default. `prefer`, when chosen, still describes itself.
+        // the default and warns nothing, because nothing is lowered.
         let dflt = pqc_line_for(PqcMode::Require, true, true, None);
         assert!(dflt.starts_with("require"), "{dflt}");
         assert!(dflt.contains("default"), "{dflt}");
-        let chosen = pqc_line_for(PqcMode::Prefer, false, true, None);
-        assert_eq!(chosen, "prefer (on when the contact supports it)");
+        assert!(!dflt.contains("warning"), "{dflt}");
+        // A chosen `require` describes nothing further.
         assert_eq!(pqc_line_for(PqcMode::Require, false, true, None), "require");
+        // `off` and `prefer` lower the guarantee below the default: both warn
+        // that a classical fallback is allowed and point back to `require`.
+        let off = pqc_line_for(PqcMode::Off, false, true, None);
+        assert!(off.starts_with("off"), "{off}");
+        assert!(off.contains("warning"), "{off}");
+        assert!(off.contains("classical fallback allowed"), "{off}");
+        assert!(off.contains("require"), "{off}");
+        let prefer = pqc_line_for(PqcMode::Prefer, false, true, None);
+        assert!(
+            prefer.starts_with("prefer (on when the contact supports it"),
+            "{prefer}"
+        );
+        assert!(prefer.contains("warning"), "{prefer}");
+        assert!(prefer.contains("classical fallback"), "{prefer}");
+        assert!(prefer.contains("require"), "{prefer}");
     }
 
     #[test]
@@ -4504,6 +4537,8 @@ mod pqc_status_line_tests {
             assert!(!s.contains("available"), "{s}");
         }
         // The untouched default is not reported as a setting this build ignores.
+        // Under the `require` default the configured value at by_default is
+        // `require`, and a build without the feature says it plainly.
         let d = pqc_line_for(PqcMode::Require, true, false, None);
         assert!(d.starts_with("off (not in this build"), "{d}");
     }
