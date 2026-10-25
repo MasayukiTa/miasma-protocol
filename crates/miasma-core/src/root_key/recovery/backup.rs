@@ -1,11 +1,18 @@
 //! The exported backup file: the root key under a passphrase in its own file.
 //!
-//! The file is a small versioned container with magic `MSKX`, separate from
-//! `root.sealed` (`MSKR`). It holds one passphrase record: the key-encryption
-//! key is Argon2id over the passphrase and a random salt, and the root key is
-//! sealed under it with XChaCha20-Poly1305, authenticated by the whole header.
-//! The cost sits between the shared KDF floor and ceiling so a received file is
-//! bounds-checked before any Argon2 work runs.
+//! The file is a small self-describing container with magic `MSKX`, separate
+//! from `root.sealed` (`MSKR`). It reuses the record frame of
+//! [`crate::root_key::format`]: a short header followed by one record that
+//! names its `provider`, `kdf_id`, and `kdf_params`, so a reader checks those
+//! fields before it runs any Argon2id work. The single record is the passphrase
+//! wrap (`provider = PROVIDER_PASSPHRASE`, `kdf_id = KDF_ARGON2ID`): its
+//! `kdf_params` hold the Argon2id cost and salt, and its `wrapped` holds the
+//! XChaCha20-Poly1305 nonce and ciphertext. The key-encryption key is Argon2id
+//! over the passphrase and the salt; the whole header and the record head are
+//! the AEAD aad.
+//!
+//! This format is pre-release: there is no compatibility with the earlier
+//! simplified MSKX layout, and none is needed.
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::{
@@ -16,7 +23,7 @@ use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 use crate::crypto::kdf_bounds::{MAX_M_KIB, MAX_P_COST, MAX_T_COST, MIN_M_KIB};
-use crate::root_key::format;
+use crate::root_key::format::{self, Record, KDF_ARGON2ID, RECORD_RECOVERY};
 use crate::secure_memory::SecureBytes;
 use crate::transfer::protection::{CREATE_FLOOR_P_COST, CREATE_FLOOR_T_COST};
 
@@ -27,11 +34,14 @@ pub const VERSION: u8 = 1;
 /// Provider byte of the passphrase record. Stable: written into the file.
 pub const PROVIDER_PASSPHRASE: u8 = 7;
 
+/// Header: magic 4 | version 1 | flags 1.
+const HEADER_LEN: usize = 4 + 1 + 1;
+/// kdf_params of the passphrase record: m_kib 4 | t_cost 4 | p_cost 4 | salt 16.
 const SALT_LEN: usize = 16;
+const KDF_PARAMS_LEN: usize = 4 + 4 + 4 + SALT_LEN;
 const NONCE_LEN: usize = 24;
 const TAG_LEN: usize = 16;
-/// magic 4 | version 1 | reserved 1 | m_kib 4 | t_cost 4 | p_cost 4 | salt 16.
-const HEADER_LEN: usize = 4 + 1 + 1 + 4 + 4 + 4 + SALT_LEN;
+/// A whole MSKX file is far smaller than this; it bounds a received file.
 const MAX_FILE_LEN: usize = 4096;
 
 /// The default Argon2id cost for a new backup file. Memory is the shared
@@ -74,6 +84,36 @@ impl BackupParams {
         }
         Ok(())
     }
+
+    /// Encode the cost and `salt` as the record's `kdf_params`.
+    fn to_kdf_params(self, salt: &[u8; SALT_LEN]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(KDF_PARAMS_LEN);
+        out.extend_from_slice(&self.m_kib.to_le_bytes());
+        out.extend_from_slice(&self.t_cost.to_le_bytes());
+        out.extend_from_slice(&self.p_cost.to_le_bytes());
+        out.extend_from_slice(salt);
+        out
+    }
+
+    /// Read the cost and salt from a record's `kdf_params`, checking the cost
+    /// against the shared bounds before any Argon2id work is done.
+    fn from_kdf_params(params: &[u8]) -> Result<(Self, [u8; SALT_LEN]), BackupError> {
+        if params.len() != KDF_PARAMS_LEN {
+            return Err(BackupError::Corrupt("kdf_params length"));
+        }
+        let m_kib = u32::from_le_bytes([params[0], params[1], params[2], params[3]]);
+        let t_cost = u32::from_le_bytes([params[4], params[5], params[6], params[7]]);
+        let p_cost = u32::from_le_bytes([params[8], params[9], params[10], params[11]]);
+        let mut salt = [0u8; SALT_LEN];
+        salt.copy_from_slice(&params[12..12 + SALT_LEN]);
+        let params = BackupParams {
+            m_kib,
+            t_cost,
+            p_cost,
+        };
+        params.validate()?;
+        Ok((params, salt))
+    }
 }
 
 /// Why a backup file could not be created or read.
@@ -95,19 +135,24 @@ pub enum BackupError {
     Kdf(String),
 }
 
-fn header_bytes(params: &BackupParams, salt: &[u8; SALT_LEN]) -> [u8; HEADER_LEN] {
+/// The 6-byte header bytes for a backup file.
+fn header_bytes() -> [u8; HEADER_LEN] {
     let mut out = [0u8; HEADER_LEN];
     out[..4].copy_from_slice(MAGIC);
     out[4] = VERSION;
-    out[5] = 0; // reserved
-    out[6..10].copy_from_slice(&params.m_kib.to_le_bytes());
-    out[10..14].copy_from_slice(&params.t_cost.to_le_bytes());
-    out[14..18].copy_from_slice(&params.p_cost.to_le_bytes());
-    out[18..34].copy_from_slice(salt);
+    out[5] = 0; // flags: reserved
     out
 }
 
-fn parse_header(bytes: &[u8]) -> Result<(BackupParams, [u8; SALT_LEN]), BackupError> {
+/// The aad for the passphrase wrap: the whole header and the record head.
+fn backup_aad(record: &Record) -> Vec<u8> {
+    let mut aad = header_bytes().to_vec();
+    aad.extend_from_slice(&record.head());
+    aad
+}
+
+/// Parse and check the header, returning the offset of the first record.
+fn parse_header(bytes: &[u8]) -> Result<usize, BackupError> {
     if bytes.len() < 5 {
         return Err(BackupError::Truncated);
     }
@@ -122,19 +167,65 @@ fn parse_header(bytes: &[u8]) -> Result<(BackupParams, [u8; SALT_LEN]), BackupEr
     if bytes.len() < HEADER_LEN {
         return Err(BackupError::Truncated);
     }
-    let m_kib = u32::from_le_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]);
-    let t_cost = u32::from_le_bytes([bytes[10], bytes[11], bytes[12], bytes[13]]);
-    let p_cost = u32::from_le_bytes([bytes[14], bytes[15], bytes[16], bytes[17]]);
-    let salt: [u8; SALT_LEN] = bytes[18..34]
-        .try_into()
-        .map_err(|_| BackupError::Truncated)?;
-    let params = BackupParams {
-        m_kib,
-        t_cost,
-        p_cost,
+    Ok(HEADER_LEN)
+}
+
+/// Parse the one passphrase record that follows the header. Checks the record
+/// frame, the provider, and the kdf before returning: a received file that is
+/// not a passphrase wrap is refused here, before any Argon2id work.
+fn parse_record(
+    bytes: &[u8],
+    pos: usize,
+) -> Result<(Record, BackupParams, [u8; SALT_LEN]), BackupError> {
+    // Fixed part: rtype 1 | provider 1 | kdf_id 1 | params_len 2.
+    let fixed = bytes.get(pos..pos + 5).ok_or(BackupError::Truncated)?;
+    let rtype = fixed[0];
+    let provider = fixed[1];
+    let kdf_id = fixed[2];
+    let params_len = u16::from_le_bytes([fixed[3], fixed[4]]) as usize;
+    if rtype != RECORD_RECOVERY {
+        return Err(BackupError::Corrupt("unexpected record type"));
+    }
+    if provider != PROVIDER_PASSPHRASE {
+        return Err(BackupError::Corrupt("unexpected provider"));
+    }
+    if kdf_id != KDF_ARGON2ID {
+        return Err(BackupError::Corrupt("unexpected kdf"));
+    }
+    if params_len != KDF_PARAMS_LEN {
+        return Err(BackupError::Corrupt("kdf_params length"));
+    }
+    let mut pos = pos + 5;
+    let kdf_params = bytes
+        .get(pos..pos + params_len)
+        .ok_or(BackupError::Truncated)?
+        .to_vec();
+    pos += params_len;
+    // Check the cost against the shared bounds before any Argon2id work.
+    let (params, salt) = BackupParams::from_kdf_params(&kdf_params)?;
+    let len_bytes = bytes.get(pos..pos + 4).ok_or(BackupError::Truncated)?;
+    let wrapped_len =
+        u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]) as usize;
+    pos += 4;
+    if wrapped_len != NONCE_LEN + 32 + TAG_LEN {
+        return Err(BackupError::Corrupt("wrong body length"));
+    }
+    let wrapped = bytes
+        .get(pos..pos + wrapped_len)
+        .ok_or(BackupError::Truncated)?
+        .to_vec();
+    pos += wrapped_len;
+    if pos != bytes.len() {
+        return Err(BackupError::Corrupt("trailing bytes"));
+    }
+    let record = Record {
+        rtype,
+        provider,
+        kdf_id,
+        kdf_params,
+        wrapped,
     };
-    params.validate()?;
-    Ok((params, salt))
+    Ok((record, params, salt))
 }
 
 fn argon2id_kek(
@@ -159,6 +250,11 @@ fn cipher(kek: &[u8; 32]) -> XChaCha20Poly1305 {
 }
 
 /// Build the bytes of a backup file that holds `root` under `passphrase`.
+///
+/// The caller must normalise `passphrase` to Unicode NFKC before calling, so a
+/// passphrase typed with differently composed but visually identical characters
+/// still opens the file. This crate does not depend on a normalisation crate,
+/// so normalisation is the caller's responsibility (see the module note).
 pub fn create(
     root: &[u8; 32],
     passphrase: &str,
@@ -166,7 +262,14 @@ pub fn create(
 ) -> Result<Vec<u8>, BackupError> {
     params.validate()?;
     let salt: [u8; SALT_LEN] = rand::random();
-    let header = header_bytes(&params, &salt);
+    let mut record = Record {
+        rtype: RECORD_RECOVERY,
+        provider: PROVIDER_PASSPHRASE,
+        kdf_id: KDF_ARGON2ID,
+        kdf_params: params.to_kdf_params(&salt),
+        wrapped: Vec::new(),
+    };
+    let aad = backup_aad(&record);
     let kek = argon2id_kek(passphrase, &salt, &params)?;
     let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
     let ct = cipher(&kek)
@@ -174,14 +277,20 @@ pub fn create(
             &nonce,
             Payload {
                 msg: root,
-                aad: &header,
+                aad: &aad,
             },
         )
         .map_err(|_| BackupError::WrongPassphraseOrTampered)?;
-    let mut out = Vec::with_capacity(HEADER_LEN + NONCE_LEN + ct.len());
-    out.extend_from_slice(&header);
-    out.extend_from_slice(nonce.as_slice());
-    out.extend_from_slice(&ct);
+    let mut wrapped = Vec::with_capacity(NONCE_LEN + ct.len());
+    wrapped.extend_from_slice(nonce.as_slice());
+    wrapped.extend_from_slice(&ct);
+    record.wrapped = wrapped;
+
+    let mut out = Vec::with_capacity(HEADER_LEN + 5 + KDF_PARAMS_LEN + 4 + record.wrapped.len());
+    out.extend_from_slice(&header_bytes());
+    out.extend_from_slice(&record.head());
+    out.extend_from_slice(&(record.wrapped.len() as u32).to_le_bytes());
+    out.extend_from_slice(&record.wrapped);
     Ok(out)
 }
 
@@ -191,30 +300,28 @@ pub fn create_default(root: &[u8; 32], passphrase: &str) -> Result<Vec<u8>, Back
 }
 
 /// Open a backup file with `passphrase`, returning the root key.
+///
+/// The caller must normalise `passphrase` to Unicode NFKC before calling, the
+/// same form used when the file was created. This crate does not depend on a
+/// normalisation crate, so normalisation is the caller's responsibility (see
+/// the module note).
 pub fn open(bytes: &[u8], passphrase: &str) -> Result<SecureBytes<32>, BackupError> {
     if bytes.len() > MAX_FILE_LEN {
         return Err(BackupError::Corrupt("too long"));
     }
-    let (params, salt) = parse_header(bytes)?;
-    let header = &bytes[..HEADER_LEN];
-    let body = &bytes[HEADER_LEN..];
-    if body.len() != NONCE_LEN + 32 + TAG_LEN {
-        return Err(BackupError::Corrupt("wrong body length"));
-    }
+    let pos = parse_header(bytes)?;
+    let (record, params, salt) = parse_record(bytes, pos)?;
+    let aad = backup_aad(&record);
+    // The record frame guarantees this length; split the stored nonce from the
+    // ciphertext-and-tag.
     let kek = argon2id_kek(passphrase, &salt, &params)?;
-    let (nonce, ct) = body.split_at(NONCE_LEN);
+    let (nonce, ct) = record.wrapped.split_at(NONCE_LEN);
     let plain = Zeroizing::new(
         cipher(&kek)
-            .decrypt(
-                XNonce::from_slice(nonce),
-                Payload {
-                    msg: ct,
-                    aad: header,
-                },
-            )
+            .decrypt(XNonce::from_slice(nonce), Payload { msg: ct, aad: &aad })
             .map_err(|_| BackupError::WrongPassphraseOrTampered)?,
     );
-    let mut key = Zeroizing::new([0u8; 32]);
+    let mut key = Zeroizing::new(rand::random::<[u8; 32]>());
     key.copy_from_slice(&plain);
     Ok(SecureBytes::from_slice(&key))
 }
@@ -250,6 +357,11 @@ mod tests {
         format!("pp-{:032x}", rand::random::<u128>())
     }
 
+    /// The byte offset of the record's fixed part (rtype) in a file.
+    const RECORD_START: usize = HEADER_LEN;
+    /// The byte offset of the kdf_params within a file.
+    const KDF_PARAMS_START: usize = HEADER_LEN + 5;
+
     #[test]
     fn a_backup_round_trips() {
         let root = random::<32>();
@@ -257,6 +369,23 @@ mod tests {
         let bytes = create(&root, &pp, test_params()).unwrap();
         let opened = open(&bytes, &pp).unwrap();
         assert!(bool::from(opened.as_array().ct_eq(&root)));
+    }
+
+    #[test]
+    fn the_file_is_self_describing_with_the_passphrase_record() {
+        // The record frame names the passphrase provider and the Argon2id kdf,
+        // so a reader can check them before doing any Argon2 work.
+        let root = random::<32>();
+        let pp = random_passphrase();
+        let bytes = create(&root, &pp, test_params()).unwrap();
+        assert_eq!(&bytes[..4], MAGIC);
+        assert_eq!(bytes[4], VERSION);
+        assert_eq!(bytes[RECORD_START], RECORD_RECOVERY);
+        assert_eq!(bytes[RECORD_START + 1], PROVIDER_PASSPHRASE);
+        assert_eq!(bytes[RECORD_START + 2], KDF_ARGON2ID);
+        let params_len =
+            u16::from_le_bytes([bytes[RECORD_START + 3], bytes[RECORD_START + 4]]) as usize;
+        assert_eq!(params_len, KDF_PARAMS_LEN);
     }
 
     #[test]
@@ -282,12 +411,14 @@ mod tests {
     }
 
     #[test]
-    fn changing_the_header_is_refused() {
-        // The header is the AEAD aad, so editing the salt breaks authentication.
+    fn changing_the_kdf_params_is_refused() {
+        // The record head (which includes kdf_params) is the AEAD aad, so
+        // editing a salt byte breaks authentication.
         let root = random::<32>();
         let pp = random_passphrase();
         let mut bytes = create(&root, &pp, test_params()).unwrap();
-        bytes[20] ^= 0x01; // a salt byte
+        // A salt byte sits after m_kib|t_cost|p_cost (12 bytes) in kdf_params.
+        bytes[KDF_PARAMS_START + 12] ^= 0x01;
         assert!(open(&bytes, &pp).is_err());
     }
 
@@ -310,6 +441,27 @@ mod tests {
         let mut bytes = create(&root, &pp, test_params()).unwrap();
         bytes[0] ^= 0x01;
         assert!(matches!(open(&bytes, &pp), Err(BackupError::BadMagic)));
+    }
+
+    #[test]
+    fn a_wrong_provider_is_refused() {
+        // A record that is not the passphrase provider is refused while
+        // parsing, before any Argon2 work. provider sits at RECORD_START + 1.
+        let root = random::<32>();
+        let pp = random_passphrase();
+        let mut bytes = create(&root, &pp, test_params()).unwrap();
+        bytes[RECORD_START + 1] = PROVIDER_PASSPHRASE ^ 0x01;
+        assert!(matches!(open(&bytes, &pp), Err(BackupError::Corrupt(_))));
+    }
+
+    #[test]
+    fn a_wrong_kdf_is_refused() {
+        // A record that does not name Argon2id is refused while parsing.
+        let root = random::<32>();
+        let pp = random_passphrase();
+        let mut bytes = create(&root, &pp, test_params()).unwrap();
+        bytes[RECORD_START + 2] = KDF_ARGON2ID ^ 0x01;
+        assert!(matches!(open(&bytes, &pp), Err(BackupError::Corrupt(_))));
     }
 
     #[test]
@@ -368,36 +520,26 @@ mod tests {
     #[test]
     fn an_out_of_range_cost_in_a_file_is_refused_before_any_argon2_work() {
         // A received file that claims a cost outside the shared bounds is
-        // rejected while parsing the header, before Argon2 is run.
+        // rejected while parsing the record, before Argon2 is run. The m_kib
+        // field is the first 4 bytes of kdf_params.
         let root = random::<32>();
         let pp = random_passphrase();
         let mut bytes = create(&root, &pp, test_params()).unwrap();
-        // Overwrite the m_kib field (offset 6..10) with a value above the ceiling.
-        bytes[6..10].copy_from_slice(&(MAX_M_KIB + 1).to_le_bytes());
+        bytes[KDF_PARAMS_START..KDF_PARAMS_START + 4]
+            .copy_from_slice(&(MAX_M_KIB + 1).to_le_bytes());
         assert!(matches!(open(&bytes, &pp), Err(BackupError::BadCost(_))));
     }
 
     #[test]
     fn two_backups_use_a_fresh_salt_each_time() {
-        // Each created file draws its own random salt, so the salt field
-        // (header offset 18..34) differs between two files for the same key
-        // and passphrase. This guards the create side against a fixed salt.
+        // Each created file draws its own random salt, so the salt bytes within
+        // kdf_params differ between two files for the same key and passphrase.
         let root = random::<32>();
         let pp = random_passphrase();
         let a = create(&root, &pp, test_params()).unwrap();
         let b = create(&root, &pp, test_params()).unwrap();
-        assert_ne!(a[18..34], b[18..34], "two files must not share a salt");
-    }
-
-    #[test]
-    fn the_salt_survives_a_header_round_trip() {
-        // A random salt written by header_bytes is read back unchanged by
-        // parse_header, so the read side reconstructs the exact salt field.
-        let salt: [u8; SALT_LEN] = rand::random();
-        let params = test_params();
-        let header = header_bytes(&params, &salt);
-        let (read_params, read_salt) = parse_header(&header).unwrap();
-        assert_eq!(read_salt, salt);
-        assert_eq!(read_params, params);
+        let salt_a = &a[KDF_PARAMS_START + 12..KDF_PARAMS_START + 12 + SALT_LEN];
+        let salt_b = &b[KDF_PARAMS_START + 12..KDF_PARAMS_START + 12 + SALT_LEN];
+        assert_ne!(salt_a, salt_b, "two files must not share a salt");
     }
 }
