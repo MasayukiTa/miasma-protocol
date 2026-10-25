@@ -292,7 +292,7 @@ fn drive_require(core: &ChatCore, old: &mut OldPeer, now: u64) -> Option<&'stati
                 core.pq_sent(&peer, &out, outcome, now);
             }
             Pass::Hold => return None,
-            Pass::Refuse(reason) => return Some(reason),
+            Pass::Refuse(refusal) => return Some(refusal.reason_str()),
             Pass::Proceed => panic!("`require` must not send a text without the hybrid key"),
         }
     }
@@ -478,4 +478,45 @@ fn layered_envelopes_have_the_common_shape_and_never_reach_a_peer_without_the_ke
         .store
         .peek_peer(&a.own_id(), |st| st.session.clone().unwrap());
     assert!(s.open(&env).is_err());
+}
+
+/// Under `require`, a strict old peer (one that does not offer the hybrid
+/// suite at all) is refused with the *no-hybrid* reason, never the *exchange*
+/// reason. The peer lacks the suite; the exchange did not break. This pins the
+/// typed refusal (`PeerLacksPqc` -> `FAIL_NO_HYBRID`) from the compatibility
+/// side, so the two reasons cannot be confused here.
+#[test]
+fn require_refuses_a_strict_old_peer_with_the_no_hybrid_reason_not_the_exchange_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = core_in(dir.path(), PqcMode::Require);
+    let mut old = OldPeer::new(true);
+    core.enqueue(&old.id(), "secret", 1).unwrap();
+    let reason = drive_require(&core, &mut old, 1_000);
+    assert_eq!(reason, Some(miasma_core::chat::pq::FAIL_NO_HYBRID));
+    assert_ne!(reason, Some(miasma_core::chat::pq::FAIL_EXCHANGE));
+    assert!(old.texts.is_empty());
+    assert!(no_hybrid_key(&core, &old));
+}
+
+/// Under `require`, a tolerant old peer (one that acknowledges the offer and
+/// sets it aside, never answering) is likewise refused with the *no-hybrid*
+/// reason once the wait elapses, never the *exchange* reason: no hybrid key
+/// was ever agreed, so the peer is treated as lacking the suite. This pins the
+/// typed refusal from the compatibility side for the tolerant peer too.
+#[test]
+fn require_refuses_a_tolerant_old_peer_with_the_no_hybrid_reason_not_the_exchange_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = core_in(dir.path(), PqcMode::Require);
+    let mut old = OldPeer::new(false);
+    core.enqueue(&old.id(), "secret", 1).unwrap();
+    // The offer is acknowledged and set aside; the message waits for an answer.
+    assert_eq!(drive_require(&core, &mut old, 1_000), None);
+    assert!(old.texts.is_empty());
+    // No answer ever comes: after the wait the message is failed with the
+    // no-hybrid reason, not the exchange reason.
+    let reason = drive_require(&core, &mut old, 1_000 + OFFER_WAIT_MS + 1);
+    assert_eq!(reason, Some(miasma_core::chat::pq::FAIL_NO_HYBRID));
+    assert_ne!(reason, Some(miasma_core::chat::pq::FAIL_EXCHANGE));
+    assert!(old.texts.is_empty());
+    assert!(no_hybrid_key(&core, &old));
 }

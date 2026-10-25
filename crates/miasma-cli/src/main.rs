@@ -1176,10 +1176,12 @@ fn pqc_line_for(
         PqcMode::Off => {
             s.push_str(" (available in this build; turn it on with `privacy.pqc_mode`)");
         }
-        PqcMode::Prefer if by_default => {
-            s.push_str(" (on when the contact supports it; this is the default)");
-        }
         PqcMode::Prefer => s.push_str(" (on when the contact supports it)"),
+        PqcMode::Require if by_default => {
+            // `require` is the default: no classical fallback. Say so, since the
+            // person did not set it.
+            s.push_str(" (required; this is the default)");
+        }
         PqcMode::Require => {}
     }
     if let Some(p) = running.filter(|p| p.available && p.mode != "off") {
@@ -4483,13 +4485,10 @@ mod pqc_status_line_tests {
         let off = pqc_line_for(PqcMode::Off, false, true, None);
         assert!(off.starts_with("off"), "{off}");
         assert!(off.contains("available in this build"), "{off}");
-        // The default says what it does and that it is the default (the
-        // counters follow when the background service runs).
-        let dflt = pqc_line_for(PqcMode::Prefer, true, true, None);
-        assert!(
-            dflt.starts_with("prefer (on when the contact supports it"),
-            "{dflt}"
-        );
+        // The default is now `require` (no classical fallback): it says it is
+        // the default. `prefer`, when chosen, still describes itself.
+        let dflt = pqc_line_for(PqcMode::Require, true, true, None);
+        assert!(dflt.starts_with("require"), "{dflt}");
         assert!(dflt.contains("default"), "{dflt}");
         let chosen = pqc_line_for(PqcMode::Prefer, false, true, None);
         assert_eq!(chosen, "prefer (on when the contact supports it)");
@@ -4505,7 +4504,7 @@ mod pqc_status_line_tests {
             assert!(!s.contains("available"), "{s}");
         }
         // The untouched default is not reported as a setting this build ignores.
-        let d = pqc_line_for(PqcMode::Prefer, true, false, None);
+        let d = pqc_line_for(PqcMode::Require, true, false, None);
         assert!(d.starts_with("off (not in this build"), "{d}");
     }
 }
