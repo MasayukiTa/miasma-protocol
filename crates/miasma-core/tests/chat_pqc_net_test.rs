@@ -314,9 +314,16 @@ async fn a_new_default_build_refuses_an_old_default_build_and_does_not_fall_back
         received(&b, &a.id()).is_empty(),
         "no classical fallback under require"
     );
-    assert_eq!(
-        a.svc.core().history(&b.id(), None, 20)[0].reason.as_deref(),
-        Some("pqc_peer_no_hybrid")
+    // Every outgoing message failed for the no-hybrid reason. The history also
+    // holds the three incoming bodies from the off side, so the first entry is
+    // not necessarily one of ours: check each outgoing entry, not entry zero.
+    let h = a.svc.core().history(&b.id(), None, 20);
+    let ours: Vec<_> = h.iter().filter(|m| m.outgoing).collect();
+    assert_eq!(ours.len(), 3);
+    assert!(
+        ours.iter()
+            .all(|m| m.reason.as_deref() == Some("pqc_peer_no_hybrid")),
+        "every refused send carries the no-hybrid reason"
     );
 }
 
