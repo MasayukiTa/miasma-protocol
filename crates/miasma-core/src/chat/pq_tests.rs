@@ -354,16 +354,19 @@ fn require_with_a_forged_offer_fails_and_never_falls_to_classical() {
             alter.set(false);
         }
     };
-    init.core.enqueue(&resp.id(), "secret", 1).unwrap();
-    assert!(step(init, resp, Peer::Current, 1_000, Some(&hook)));
-    alter.set(true);
-    assert!(step(resp, init, Peer::Current, 1_000, Some(&hook)));
-    pump_with(init, resp, Peer::Current, 1_000, Some(&hook));
+    // The `require` side is the one that must not fall back; queue its message
+    // (whichever role it took), so a classical fallback would surface as the
+    // peer receiving this text.
     let (req_side, other) = if init.core.pqc_mode() == PqcMode::Require {
         (init, resp)
     } else {
         (resp, init)
     };
+    req_side.core.enqueue(&other.id(), "secret", 1).unwrap();
+    assert!(step(init, resp, Peer::Current, 1_000, Some(&hook)));
+    alter.set(true);
+    assert!(step(resp, init, Peer::Current, 1_000, Some(&hook)));
+    pump_with(init, resp, Peer::Current, 1_000, Some(&hook));
     assert_eq!(state_of(req_side, other).0, "failed");
     assert!(
         other.texts(&req_side.id()).is_empty(),
@@ -741,16 +744,18 @@ fn require_with_a_forged_offer_fails_with_the_exchange_reason() {
             alter.set(false);
         }
     };
-    init.core.enqueue(&resp.id(), "secret", 1).unwrap();
-    assert!(step(init, resp, Peer::Current, 1_000, Some(&hook)));
-    alter.set(true);
-    assert!(step(resp, init, Peer::Current, 1_000, Some(&hook)));
-    pump_with(init, resp, Peer::Current, 1_000, Some(&hook));
+    // Queue the message on the `require` side (whichever role it took), so a
+    // classical fallback would show up as the peer receiving this text.
     let (req_side, other) = if init.core.pqc_mode() == PqcMode::Require {
         (init, resp)
     } else {
         (resp, init)
     };
+    req_side.core.enqueue(&other.id(), "secret", 1).unwrap();
+    assert!(step(init, resp, Peer::Current, 1_000, Some(&hook)));
+    alter.set(true);
+    assert!(step(resp, init, Peer::Current, 1_000, Some(&hook)));
+    pump_with(init, resp, Peer::Current, 1_000, Some(&hook));
     assert!(
         other.texts(&req_side.id()).is_empty(),
         "no classical fallback under require"
@@ -758,4 +763,56 @@ fn require_with_a_forged_offer_fails_with_the_exchange_reason() {
     let hist = req_side.core.history(&other.id(), None, 10);
     assert_eq!(hist[0].state, MsgState::Failed);
     assert_eq!(hist[0].reason.as_deref(), Some(FAIL_EXCHANGE));
+}
+
+/// Same forged-offer scenario, but with the roles pinned: the `require` side is
+/// the initiator and the forged capability bytes are random (not a literal).
+/// The transcript binding must still catch the altered offer and the message
+/// must fail with the *exchange* reason, never falling to a classical session.
+/// Pinning the roles makes the outcome deterministic regardless of which
+/// endpoint ID sorts first.
+#[test]
+fn require_initiator_with_a_forged_offer_fails_with_the_exchange_reason_deterministically() {
+    let a = side();
+    let b = side();
+    let (init, resp) = roles(&a, &b);
+    // Pin the require role to the initiator so the result does not depend on the
+    // random endpoint-ID ordering.
+    mode(init, PqcMode::Require);
+    mode(resp, PqcMode::Prefer);
+    // Random extension bytes: a declared capability set that differs from what
+    // is actually sent, with no fixed value written down.
+    let ext: [u8; 4] = rand::random();
+    let altered = Capabilities::current()
+        .with_unknown(ext.to_vec())
+        .unwrap()
+        .encode();
+    let alter = std::cell::Cell::new(false);
+    let hook = |kind: u8, plain: &mut Vec<u8>| {
+        if kind == KIND_OFFER && alter.get() {
+            plain.truncate(1);
+            plain.extend_from_slice(&altered);
+            alter.set(false);
+        }
+    };
+    init.core.enqueue(&resp.id(), "secret", 1).unwrap();
+    assert!(step(init, resp, Peer::Current, 1_000, Some(&hook)));
+    alter.set(true);
+    assert!(step(resp, init, Peer::Current, 1_000, Some(&hook)));
+    pump_with(init, resp, Peer::Current, 1_000, Some(&hook));
+    assert_eq!(state_of(init, resp).0, "failed");
+    assert!(
+        resp.texts(&init.id()).is_empty(),
+        "no classical fallback under require"
+    );
+    let hist = init.core.history(&resp.id(), None, 10);
+    assert_eq!(hist[0].state, MsgState::Failed);
+    assert_eq!(hist[0].reason.as_deref(), Some(FAIL_EXCHANGE));
+    // No hybrid key was installed on the require side either.
+    let sid = init
+        .core
+        .store
+        .peek_peer(&resp.id(), |st| *st.session.as_ref().unwrap().origin_ek());
+    assert!(init.core.pq.seal_key(&resp.id(), &sid).is_none());
+    assert!(init.core.pq.open_key(&resp.id(), &sid).is_none());
 }
