@@ -848,9 +848,24 @@ impl NodeConfig {
         };
 
         if has_secrets || was_restricted {
-            crate::secure_file::write_restricted(&path, raw.as_bytes())?;
+            // Atomic restricted write: a temp file (born with the restricted
+            // DACL / 0o600) is written, then renamed over the final path so a
+            // crash or a concurrent save never leaves a truncated or
+            // permission-relaxed config.toml behind.
+            crate::secure_file::atomic_write_restricted(&path, raw.as_bytes())?;
         } else {
-            std::fs::write(&path, raw)?;
+            // Atomic plain write: write to a temp file in the same directory,
+            // then rename it into place. The rename is atomic on the same
+            // volume, so a crash or a concurrent save cannot leave a partially
+            // written config.toml at the final path.
+            let tmp = crate::paths::atomic_tmp(&path);
+            std::fs::write(&tmp, raw).inspect_err(|_e| {
+                let _ = std::fs::remove_file(&tmp);
+            })?;
+            std::fs::rename(&tmp, &path).map_err(|e| {
+                let _ = std::fs::remove_file(&tmp);
+                e
+            })?;
         }
         Ok(())
     }
@@ -1250,6 +1265,98 @@ mod pqc_default_tests {
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         // The damaged file is left exactly as it was: not replaced by defaults.
         assert_eq!(std::fs::read_to_string(&path).unwrap(), damaged);
+    }
+
+    /// A freshly generated, non-fixed secret value for tests. Generated at
+    /// runtime so no fixed credential is written into the source.
+    fn random_secret() -> String {
+        hex::encode(rand::random::<[u8; 16]>())
+    }
+
+    #[test]
+    fn a_plain_save_leaves_no_temp_file_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = NodeConfig::default();
+        cfg.save(dir.path()).unwrap();
+        let path = crate::paths::config_file(dir.path());
+        assert!(path.exists(), "the config file was written");
+        assert!(
+            !crate::paths::atomic_tmp(&path).exists(),
+            "the plain temp file was renamed away, not left behind"
+        );
+        assert!(
+            !crate::paths::atomic_secure_tmp(&path).exists(),
+            "no restricted temp file for a secret-free config"
+        );
+    }
+
+    #[test]
+    fn a_secret_save_leaves_no_temp_file_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = NodeConfig::default();
+        cfg.transport.proxy_password = Some(random_secret());
+        cfg.save(dir.path()).unwrap();
+        let path = crate::paths::config_file(dir.path());
+        assert!(path.exists(), "the config file was written");
+        assert!(
+            !crate::paths::atomic_secure_tmp(&path).exists(),
+            "the restricted temp file was renamed away, not left behind"
+        );
+        assert!(
+            !crate::paths::atomic_tmp(&path).exists(),
+            "no plain temp file on the restricted path"
+        );
+    }
+
+    #[test]
+    fn a_config_with_a_secret_round_trips_through_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = random_secret();
+        let mut cfg = NodeConfig::default();
+        cfg.transport.proxy_password = Some(secret.clone());
+        cfg.save(dir.path()).unwrap();
+        let back = NodeConfig::load(dir.path()).unwrap();
+        assert_eq!(
+            back.transport.proxy_password.as_deref(),
+            Some(secret.as_str())
+        );
+    }
+
+    /// A save that cannot complete must not damage the config that is already
+    /// on disk: the temp-file + rename approach means the final path keeps its
+    /// previous, valid contents. Unix-only because it forces the failure by
+    /// dropping write permission on the directory, which is a no-op on Windows.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_save_does_not_corrupt_the_existing_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = NodeConfig::default();
+        cfg.push.max_send_kib_per_sec = 111;
+        cfg.save(dir.path()).unwrap();
+        let path = crate::paths::config_file(dir.path());
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        // Drop write permission on the directory so creating the temp file
+        // fails. The pre-existing config.toml stays intact.
+        let ro = std::fs::Permissions::from_mode(0o500);
+        std::fs::set_permissions(dir.path(), ro).unwrap();
+
+        let mut cfg2 = cfg.clone();
+        cfg2.push.max_send_kib_per_sec = 222;
+        let result = cfg2.save(dir.path());
+
+        // Restore permission before any assertion so the tempdir can clean up.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(result.is_err(), "the save could not complete");
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(after, before, "the existing config was left untouched");
+        assert!(
+            !crate::paths::atomic_tmp(&path).exists(),
+            "no temp file left behind after the failure"
+        );
     }
 }
 
