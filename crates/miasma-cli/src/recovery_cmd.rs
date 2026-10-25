@@ -182,60 +182,24 @@ fn prompt_secret(msg: &M) -> Result<String> {
 }
 
 /// Write `bytes` to `out` without overwriting an existing file, and without
-/// leaving a half-written file if the write fails partway. The bytes go to a
-/// freshly named temporary file in the same directory, are flushed, and are
-/// then linked into place only if nothing already holds that name; the
-/// temporary file is always removed. A reader sees either no file or the whole
-/// file, never a partial one, and an existing backup is never lost.
+/// leaving a half-written file if the write fails partway. The actual write is
+/// delegated to `secure_file::atomic_write_new`, the audited temp+link
+/// primitive: the bytes go to a uniquely named temporary file in the same
+/// directory and are then linked into place only if nothing already holds that
+/// name; the temporary file is always removed. A reader sees either no file or
+/// the whole file, never a partial one, and an existing backup is never lost.
 fn write_new_backup(out: &Path, bytes: &[u8]) -> Result<()> {
     if out.exists() {
         bail!("{}", M::BackupExists.t());
     }
-    let dir = out.parent().filter(|p| !p.as_os_str().is_empty());
-    // A unique suffix for the temporary name. This is a staging name, not key
-    // material, so std's hasher seed is enough; this crate has no random-number
-    // dependency. The hard link below is what actually guards against clobbering
-    // an existing file, so a name clash at worst retries, never overwrites.
-    let seed = {
-        use std::hash::{BuildHasher as _, Hasher as _};
-        std::collections::hash_map::RandomState::new()
-            .build_hasher()
-            .finish()
-    };
-    let hex = format!("{seed:016x}");
-    let file_name = out
-        .file_name()
-        .map(|n| n.to_os_string())
-        .unwrap_or_default();
-    let mut tmp_name = file_name;
-    tmp_name.push(format!(".{hex}.tmp"));
-    let tmp = match dir {
-        Some(d) => d.join(&tmp_name),
-        None => PathBuf::from(&tmp_name),
-    };
-
-    let write_and_flush = || -> std::io::Result<()> {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-        Ok(())
-    };
-    if let Err(e) = write_and_flush() {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(anyhow::Error::new(e).context("cannot write the backup file"));
+    // `atomic_write_new` returns `false` when the final name was taken between
+    // the check above and the link, so a backup is never silently replaced.
+    let created = miasma_core::secure_file::atomic_write_new(out, bytes)
+        .context("cannot write the backup file")?;
+    if !created {
+        bail!("{}", M::BackupExists.t());
     }
-
-    // Link into place only if nothing already has the name, then drop the
-    // temporary. hard_link fails with AlreadyExists rather than overwriting.
-    let linked = std::fs::hard_link(&tmp, out);
-    let _ = std::fs::remove_file(&tmp);
-    match linked {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            bail!("{}", M::BackupExists.t())
-        }
-        Err(e) => Err(anyhow::Error::new(e).context("cannot place the backup file")),
-    }
+    Ok(())
 }
 
 // ─── Commands ────────────────────────────────
