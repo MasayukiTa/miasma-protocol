@@ -133,6 +133,18 @@ impl<V> OfferTable<V> {
             .map(|slot| slot.values().filter(|e| e.is_live(now)).count())
             .unwrap_or(0)
     }
+
+    /// Whether a fresh offer (one with an id not already held) could be inserted
+    /// for `peer` at `now` without exceeding [`MAX_OFFERS_PER_PEER`].
+    ///
+    /// This counts only live entries, matching [`Self::insert`], which drops
+    /// expired entries before it checks the limit. A caller can use this to
+    /// decline a request before doing expensive per-offer work, so a peer that
+    /// is already at the limit is turned away without that work. It is a
+    /// read-only check and leaves the table unchanged.
+    pub fn has_capacity_for_new(&self, peer: &PeerId, now: u64) -> bool {
+        self.len_for_peer(peer, now) < MAX_OFFERS_PER_PEER
+    }
 }
 
 #[cfg(test)]

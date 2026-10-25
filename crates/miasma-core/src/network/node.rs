@@ -4959,6 +4959,20 @@ impl MiasmaNode {
             ));
         };
 
+        // Decline a peer that is already at its per-peer offer limit before doing
+        // any asymmetric key work. A PrekeyRequest is unauthenticated, so the
+        // limit check is moved ahead of the X25519 key generation and the
+        // Ed25519 offer signature below: a full peer is turned away without
+        // either. The insert further down still enforces the same bound, so the
+        // behaviour within the limit is unchanged.
+        let now = self.directed_v2_offer_secs();
+        if !self.directed_v2_offers.has_capacity_for_new(&peer, now) {
+            return DirectedResponseV2::Error(directed_v2_error(
+                directed_v2_codes::OFFER_UNKNOWN,
+                "too many unspent offers for this peer",
+            ));
+        }
+
         // Fresh ephemeral X25519 key, held only in memory for the offer's life.
         let r_eph_secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
         let r_eph_pub = *x25519_dalek::PublicKey::from(&r_eph_secret).as_bytes();
@@ -4983,7 +4997,8 @@ impl MiasmaNode {
         };
         let signature = sign_offer(&self.dht_signing_key, &fields);
 
-        let now = self.directed_v2_offer_secs();
+        // Reuse the `now` taken for the capacity check above so the limit test
+        // and the insert agree on one instant.
         let pending = PendingDirectedOffer {
             request_id,
             r_eph_pub,
@@ -7047,17 +7062,22 @@ mod directed_v2_receive_tests {
     }
 
     /// Build a correct, self-consistent v2 Invite addressed to `recipient_*`,
-    /// answering `offer` (its offer_id and r_eph public key), signed by a fresh
-    /// sender identity. Returns the request and the sender's PeerId (the
-    /// transport PeerId the handler must be given for the identity check to
-    /// pass).
+    /// answering `offer` (its offer_id and r_eph public key), signed by
+    /// `sender_sk`. Returns the request and the sender's PeerId (the transport
+    /// PeerId the handler must be given for the identity check to pass).
+    ///
+    /// The caller passes the sender identity so the offer can be requested from
+    /// the same PeerId that later sends the invite: an offer is bound in the
+    /// offer table to the requesting PeerId (see `OfferTable`), and the receive
+    /// handler takes it back out keyed by the invite's transport PeerId, so a
+    /// round trip only completes when the two are the same peer.
     fn build_invite(
+        sender_sk: &SigningKey,
         recipient_identity: [u8; 32],
         recipient_sharing: [u8; 32],
         offer: &SignedOffer,
         now_wall: u64,
     ) -> (DirectedRequestV2, PeerId) {
-        let sender_sk = signing_key();
         let sender_identity = sender_sk.verifying_key().to_bytes();
         let (_sender_sharing_sk, sender_sharing_pub) = x25519_pair();
         let (_e_s_sk, e_s_pub) = x25519_pair();
@@ -7077,7 +7097,7 @@ mod directed_v2_receive_tests {
         let expires_at = now_wall.saturating_add(3600);
         let retention_secs = 3600u64;
 
-        let sender_binding = sign_binding(&sender_sk, &sender_sharing_pub);
+        let sender_binding = sign_binding(sender_sk, &sender_sharing_pub);
 
         let envelope = DirectedEnvelope {
             envelope_id,
@@ -7126,7 +7146,7 @@ mod directed_v2_receive_tests {
             sender_binding: &sender_binding,
         };
         let sig_msg = tx::sig_msg(&h_hdr, &outer);
-        let signature = tx::sign_transcript(&sender_sk, &sig_msg);
+        let signature = tx::sign_transcript(sender_sk, &sig_msg);
 
         let ext = InviteExtV2 {
             suite: SUITE_V2,
@@ -7145,11 +7165,15 @@ mod directed_v2_receive_tests {
         (DirectedRequestV2::Invite { envelope, ext }, sender_peer)
     }
 
-    #[test]
-    fn prekey_request_then_invite_round_trips_and_stores() {
+    #[tokio::test]
+    async fn prekey_request_then_invite_round_trips_and_stores() {
         let (mut node, _dir, sharing) = recipient_node();
         let recipient_identity = node.dht_signing_key.verifying_key().to_bytes();
-        let requester = PeerId::random();
+        // The same peer requests the offer and later sends the invite: the offer
+        // is bound in the table to the requesting PeerId and taken back out by
+        // the invite's transport PeerId, so these must be one and the same peer.
+        let sender_sk = signing_key();
+        let requester = peer_id_of(&sender_sk.verifying_key().to_bytes());
 
         let offer = request_offer(&mut node, requester);
         // The offer names this recipient and echoes the live sharing key.
@@ -7157,7 +7181,12 @@ mod directed_v2_receive_tests {
         assert_eq!(offer.recipient_sharing, sharing);
 
         // The invite comes from the same transport PeerId whose identity signs it.
-        let (invite, sender_peer) = build_invite(recipient_identity, sharing, &offer, 1000);
+        let (invite, sender_peer) =
+            build_invite(&sender_sk, recipient_identity, sharing, &offer, 1000);
+        assert_eq!(
+            sender_peer, requester,
+            "invite sender is the offer requester"
+        );
         let resp = node.handle_directed_v2_request(sender_peer, invite);
         match resp {
             DirectedResponseV2::InviteStored { .. } => {}
@@ -7165,14 +7194,16 @@ mod directed_v2_receive_tests {
         }
     }
 
-    #[test]
-    fn resent_invite_is_idempotent_same_transcript() {
+    #[tokio::test]
+    async fn resent_invite_is_idempotent_same_transcript() {
         let (mut node, _dir, sharing) = recipient_node();
         let recipient_identity = node.dht_signing_key.verifying_key().to_bytes();
-        let requester = PeerId::random();
+        let sender_sk = signing_key();
+        let requester = peer_id_of(&sender_sk.verifying_key().to_bytes());
 
         let offer = request_offer(&mut node, requester);
-        let (invite, sender_peer) = build_invite(recipient_identity, sharing, &offer, 1000);
+        let (invite, sender_peer) =
+            build_invite(&sender_sk, recipient_identity, sharing, &offer, 1000);
 
         let first = node.handle_directed_v2_request(sender_peer, invite.clone());
         let hash1 = match first {
@@ -7192,11 +7223,15 @@ mod directed_v2_receive_tests {
         assert_eq!(hash1, hash2, "a resend yields the same transcript hash");
     }
 
-    #[test]
-    fn two_offers_consumed_out_of_order() {
+    #[tokio::test]
+    async fn two_offers_consumed_out_of_order() {
         let (mut node, _dir, sharing) = recipient_node();
         let recipient_identity = node.dht_signing_key.verifying_key().to_bytes();
-        let requester = PeerId::random();
+        // One peer requests two offers and later sends two invites; the offer
+        // table binds both offers to this requesting PeerId, so both invites
+        // must come from the same peer for the table to find them.
+        let sender_sk = signing_key();
+        let requester = peer_id_of(&sender_sk.verifying_key().to_bytes());
 
         // Hand out two distinct offers to the same requester.
         let offer_a = request_offer(&mut node, requester);
@@ -7204,8 +7239,10 @@ mod directed_v2_receive_tests {
         assert_ne!(offer_a.offer_id, offer_b.offer_id);
 
         // Build invites for both, then consume B before A (reordered).
-        let (invite_a, peer_a) = build_invite(recipient_identity, sharing, &offer_a, 1000);
-        let (invite_b, peer_b) = build_invite(recipient_identity, sharing, &offer_b, 1000);
+        let (invite_a, peer_a) =
+            build_invite(&sender_sk, recipient_identity, sharing, &offer_a, 1000);
+        let (invite_b, peer_b) =
+            build_invite(&sender_sk, recipient_identity, sharing, &offer_b, 1000);
 
         match node.handle_directed_v2_request(peer_b, invite_b) {
             DirectedResponseV2::InviteStored { .. } => {}
@@ -7217,14 +7254,16 @@ mod directed_v2_receive_tests {
         }
     }
 
-    #[test]
-    fn offer_past_twenty_seconds_is_unknown() {
+    #[tokio::test]
+    async fn offer_past_twenty_seconds_is_unknown() {
         let (mut node, _dir, sharing) = recipient_node();
         let recipient_identity = node.dht_signing_key.verifying_key().to_bytes();
-        let requester = PeerId::random();
+        let sender_sk = signing_key();
+        let requester = peer_id_of(&sender_sk.verifying_key().to_bytes());
 
         let offer = request_offer(&mut node, requester);
-        let (invite, sender_peer) = build_invite(recipient_identity, sharing, &offer, 1000);
+        let (invite, sender_peer) =
+            build_invite(&sender_sk, recipient_identity, sharing, &offer, 1000);
 
         // Advance the node's monotonic base so the offer is strictly older than
         // the 20-second TTL by the time the invite is taken.
@@ -7242,8 +7281,8 @@ mod directed_v2_receive_tests {
         }
     }
 
-    #[test]
-    fn v1_and_v2_endpoints_do_not_interfere() {
+    #[tokio::test]
+    async fn v1_and_v2_endpoints_do_not_interfere() {
         // A node answers a v2 PrekeyRequest on the v2 handler while its v1
         // directed state is untouched: the v2 receive path does not read or
         // write any v1 field, and the v1 handler is a separate method. This test
@@ -7251,11 +7290,13 @@ mod directed_v2_receive_tests {
         // asserts the v1 pending-reply map the v1 handler uses is still empty.
         let (mut node, _dir, sharing) = recipient_node();
         let recipient_identity = node.dht_signing_key.verifying_key().to_bytes();
-        let requester = PeerId::random();
+        let sender_sk = signing_key();
+        let requester = peer_id_of(&sender_sk.verifying_key().to_bytes());
         assert!(node.pending_directed_replies.is_empty());
 
         let offer = request_offer(&mut node, requester);
-        let (invite, sender_peer) = build_invite(recipient_identity, sharing, &offer, 1000);
+        let (invite, sender_peer) =
+            build_invite(&sender_sk, recipient_identity, sharing, &offer, 1000);
         match node.handle_directed_v2_request(sender_peer, invite) {
             DirectedResponseV2::InviteStored { .. } => {}
             other => panic!("expected InviteStored, got {other:?}"),
@@ -7265,6 +7306,254 @@ mod directed_v2_receive_tests {
         assert!(
             node.pending_directed_replies.is_empty(),
             "v2 receive must not populate the v1 pending-reply map"
+        );
+    }
+
+    // Regression guard for the receive-side swarm wiring: building a recipient
+    // node runs `MiasmaNode::new`, which stands up the swarm (including the
+    // tokio-backed mDNS behaviour). That construction needs a running reactor,
+    // so these Behaviour-unit tests must be `#[tokio::test]`. A plain `#[test]`
+    // here panics inside the netlink socket setup before any assertion runs.
+    #[tokio::test]
+    async fn recipient_node_constructs_under_tokio_runtime() {
+        let (node, _dir, sharing) = recipient_node();
+        // The sharing key handed back is the one placed on the node.
+        assert_eq!(node.directed_recipient_pubkey, Some(sharing));
+        // A fresh node has taken no v2 offers yet and holds no v2 reply state.
+        assert!(node.pending_directed_v2_replies.is_empty());
+        // The inbox directory is wired for the receive path to persist into.
+        assert!(node.directed_data_dir.is_some());
+    }
+
+    #[tokio::test]
+    async fn invite_for_unknown_offer_is_rejected() {
+        // An invite whose offer id was never issued (so it is absent from the
+        // per-peer offer table) must be refused with `offer_unknown`, the same
+        // one-shot gate that stops a consumed or expired offer from being
+        // reused. Here the offer is valid but the id is swapped for one the
+        // table has never seen.
+        let (mut node, _dir, sharing) = recipient_node();
+        let recipient_identity = node.dht_signing_key.verifying_key().to_bytes();
+        let sender_sk = signing_key();
+        let requester = peer_id_of(&sender_sk.verifying_key().to_bytes());
+
+        let offer = request_offer(&mut node, requester);
+        let (invite, sender_peer) =
+            build_invite(&sender_sk, recipient_identity, sharing, &offer, 1000);
+
+        // Replace the invite's offer id with one that was never handed out.
+        let unknown = {
+            let mut candidate: [u8; 16] = rand::random();
+            while candidate == offer.offer_id {
+                candidate = rand::random();
+            }
+            candidate
+        };
+        let tampered = match invite {
+            DirectedRequestV2::Invite { envelope, mut ext } => {
+                ext.offer_id = unknown;
+                DirectedRequestV2::Invite { envelope, ext }
+            }
+            other => panic!("expected Invite, got {other:?}"),
+        };
+
+        match node.handle_directed_v2_request(sender_peer, tampered) {
+            DirectedResponseV2::Error(msg) => {
+                assert!(
+                    msg.contains(crate::directed::v2::wire::codes::OFFER_UNKNOWN),
+                    "expected offer_unknown, got {msg}"
+                );
+            }
+            other => panic!("expected Error(offer_unknown), got {other:?}"),
+        }
+
+        // The genuinely-issued offer is still in the table: the rejected invite
+        // must not have consumed it, so the real invite still stores exactly once.
+        let (invite, sender_peer) =
+            build_invite(&sender_sk, recipient_identity, sharing, &offer, 1000);
+        match node.handle_directed_v2_request(sender_peer, invite) {
+            DirectedResponseV2::InviteStored { .. } => {}
+            other => panic!("expected InviteStored for the genuine offer, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn invite_for_expired_envelope_is_rejected() {
+        // The offer is still live in the table, but the envelope's own window has
+        // already closed: `expires_at` is set to a small wall-clock second while
+        // the handler reads the real wall clock, which is far larger. The intake
+        // expiry check (envelope.is_expired) fires before any key work and the
+        // request is refused with `offer_expired`.
+        let (mut node, _dir, sharing) = recipient_node();
+        let recipient_identity = node.dht_signing_key.verifying_key().to_bytes();
+        let sender_sk = signing_key();
+        let requester = peer_id_of(&sender_sk.verifying_key().to_bytes());
+
+        let offer = request_offer(&mut node, requester);
+        // now_wall = 1000 => envelope.expires_at = 4600, long past against the
+        // real wall clock the handler reads, so the envelope is expired while the
+        // offer itself is still within its monotonic 20-second table lifetime.
+        let (invite, sender_peer) =
+            build_invite(&sender_sk, recipient_identity, sharing, &offer, 1000);
+
+        match node.handle_directed_v2_request(sender_peer, invite) {
+            DirectedResponseV2::Error(msg) => {
+                assert!(
+                    msg.contains(crate::directed::v2::wire::codes::OFFER_EXPIRED),
+                    "expected offer_expired, got {msg}"
+                );
+            }
+            other => panic!("expected Error(offer_expired), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn invite_using_another_peers_offer_is_rejected() {
+        // An offer is bound in the table to the PeerId that requested it. A
+        // second, different peer that presents an invite carrying that same
+        // offer id is turned away: the table is keyed by the connection PeerId,
+        // so the attacker's peer has no such offer and the take returns nothing
+        // (`offer_unknown`). The offer stays bound to its real owner.
+        let (mut node, _dir, sharing) = recipient_node();
+        let recipient_identity = node.dht_signing_key.verifying_key().to_bytes();
+
+        // The legitimate requester obtains an offer.
+        let owner_sk = signing_key();
+        let owner_peer = peer_id_of(&owner_sk.verifying_key().to_bytes());
+        let offer = request_offer(&mut node, owner_peer);
+
+        // A different peer builds a well-formed invite for that offer and sends
+        // it from its own transport PeerId.
+        let attacker_sk = signing_key();
+        let (invite, attacker_peer) =
+            build_invite(&attacker_sk, recipient_identity, sharing, &offer, 1000);
+        assert_ne!(attacker_peer, owner_peer, "attacker is a distinct peer");
+
+        match node.handle_directed_v2_request(attacker_peer, invite) {
+            DirectedResponseV2::Error(msg) => {
+                assert!(
+                    msg.contains(crate::directed::v2::wire::codes::OFFER_UNKNOWN),
+                    "expected offer_unknown, got {msg}"
+                );
+            }
+            other => panic!("expected Error(offer_unknown), got {other:?}"),
+        }
+
+        // The offer was never bound to the attacker, so it is still available to
+        // the real owner, who can complete the round trip exactly once.
+        let (invite, owner_send_peer) =
+            build_invite(&owner_sk, recipient_identity, sharing, &offer, 1000);
+        assert_eq!(owner_send_peer, owner_peer);
+        match node.handle_directed_v2_request(owner_send_peer, invite) {
+            DirectedResponseV2::InviteStored { .. } => {}
+            other => panic!("expected InviteStored for the owner, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn invite_with_corrupt_signature_stores_nothing() {
+        // A single flipped byte in the transcript signature must fail the
+        // signature check (`bad_signature`) and write no record: the intake
+        // verifies before it persists, so a tampered invite leaves the inbox
+        // empty for that envelope id.
+        let (mut node, dir, sharing) = recipient_node();
+        let recipient_identity = node.dht_signing_key.verifying_key().to_bytes();
+        let sender_sk = signing_key();
+        let requester = peer_id_of(&sender_sk.verifying_key().to_bytes());
+
+        let offer = request_offer(&mut node, requester);
+        let (invite, sender_peer) =
+            build_invite(&sender_sk, recipient_identity, sharing, &offer, 1000);
+
+        // Corrupt one signature byte by adding a non-zero delta, so the result is
+        // guaranteed to differ from the genuine signature without writing a fixed
+        // value. Keep the envelope id so we can assert nothing was stored under it.
+        let (envelope_id, tampered) = match invite {
+            DirectedRequestV2::Invite { envelope, mut ext } => {
+                let id = envelope.envelope_id;
+                let idx = (rand::random::<u8>() as usize) % ext.signature.len();
+                let delta = 1u8 + (rand::random::<u8>() % 255); // 1..=255, never zero
+                ext.signature[idx] = ext.signature[idx].wrapping_add(delta);
+                (id, DirectedRequestV2::Invite { envelope, ext })
+            }
+            other => panic!("expected Invite, got {other:?}"),
+        };
+
+        match node.handle_directed_v2_request(sender_peer, tampered) {
+            DirectedResponseV2::Error(msg) => {
+                assert!(
+                    msg.contains(crate::directed::v2::wire::codes::BAD_SIGNATURE),
+                    "expected bad_signature, got {msg}"
+                );
+            }
+            other => panic!("expected Error(bad_signature), got {other:?}"),
+        }
+
+        // Nothing was persisted for this envelope id: loading it fails.
+        let inbox = crate::directed::DirectedInbox::open(dir.path()).unwrap();
+        assert!(
+            inbox.load_incoming_v2(&hex::encode(envelope_id)).is_err(),
+            "a rejected invite must leave no stored record"
+        );
+    }
+
+    #[tokio::test]
+    async fn offers_past_the_per_peer_limit_are_refused_without_signing() {
+        // A single peer that keeps asking is capped at the per-peer offer limit.
+        // The first MAX_OFFERS_PER_PEER requests each yield a signed offer; the
+        // next one is refused with `offer_unknown` before any key or signature
+        // work, and the table does not grow past the bound.
+        use crate::directed::v2::offer_table::MAX_OFFERS_PER_PEER;
+
+        let (mut node, _dir, _sharing) = recipient_node();
+        let sender_sk = signing_key();
+        let requester = peer_id_of(&sender_sk.verifying_key().to_bytes());
+
+        // Fill the peer's table to the limit; every request is answered.
+        for _ in 0..MAX_OFFERS_PER_PEER {
+            let request_id: [u8; 16] = rand::random();
+            match node.handle_directed_v2_request(
+                requester,
+                DirectedRequestV2::PrekeyRequest {
+                    request_id,
+                    suites: vec![SUITE_V2],
+                },
+            ) {
+                DirectedResponseV2::PrekeyOffer { .. } => {}
+                other => panic!("expected PrekeyOffer within the limit, got {other:?}"),
+            }
+        }
+        let now = node.directed_v2_offer_secs();
+        assert_eq!(
+            node.directed_v2_offers.len_for_peer(&requester, now),
+            MAX_OFFERS_PER_PEER,
+            "the table holds exactly the limit"
+        );
+
+        // The next request is refused and the table stays at the limit, so the
+        // refusal happened without inserting (and, by construction, before the
+        // key generation and signature that follow the limit check).
+        let request_id: [u8; 16] = rand::random();
+        match node.handle_directed_v2_request(
+            requester,
+            DirectedRequestV2::PrekeyRequest {
+                request_id,
+                suites: vec![SUITE_V2],
+            },
+        ) {
+            DirectedResponseV2::Error(msg) => {
+                assert!(
+                    msg.contains(crate::directed::v2::wire::codes::OFFER_UNKNOWN),
+                    "expected offer_unknown at the limit, got {msg}"
+                );
+            }
+            other => panic!("expected Error(offer_unknown) at the limit, got {other:?}"),
+        }
+        let now = node.directed_v2_offer_secs();
+        assert_eq!(
+            node.directed_v2_offers.len_for_peer(&requester, now),
+            MAX_OFFERS_PER_PEER,
+            "a refused request does not grow the table past the limit"
         );
     }
 }
