@@ -86,6 +86,7 @@ fn record(
         state,
         challenge,
         password_attempts_remaining: password_tries,
+        password_attempt_pending: false,
         received_at: 1_000,
         effective_expires_at,
         sender_peer_id: "peer-a".into(),
@@ -404,6 +405,9 @@ fn a_random_event_stream_agrees_with_the_model() {
         let mut model_state = EnvelopeState::ChallengeIssued;
         let mut challenge_tries = 3u8;
         let mut password_tries = 3u8;
+        // Mirrors the record's `password_attempt_pending`: a give-back only
+        // returns a try that `PasswordAttemptStart` actually pre-spent.
+        let mut password_pending = false;
         for _ in 0..12 {
             let ev = EVENTS[rng.gen_range(0..EVENTS.len())];
             let predicted = predict(
@@ -419,7 +423,9 @@ fn a_random_event_stream_agrees_with_the_model() {
             match (result, predicted.legal) {
                 (Ok(fx), true) => {
                     check_write_count(&fx);
-                    // Advance the model's counts the same way the design does.
+                    // Advance the model's counts the same way the design does
+                    // (6.2: pre-spend on attempt start, give back only a try
+                    // that is outstanding).
                     match (model_state, ev) {
                         (EnvelopeState::ChallengeIssued, Ev::ConfirmWrong)
                             if challenge_tries > 1 =>
@@ -428,9 +434,22 @@ fn a_random_event_stream_agrees_with_the_model() {
                         }
                         (EnvelopeState::Confirmed, Ev::PasswordAttemptStart) => {
                             password_tries = password_tries.saturating_sub(1);
+                            password_pending = true;
+                        }
+                        (EnvelopeState::Confirmed, Ev::RetrievedOk) => {
+                            if password_pending {
+                                password_tries = password_tries.saturating_add(1);
+                                password_pending = false;
+                            }
+                        }
+                        (EnvelopeState::Confirmed, Ev::PasswordWrong) => {
+                            password_pending = false;
                         }
                         (EnvelopeState::Confirmed, Ev::RetrievalNetworkFailure) => {
-                            password_tries = password_tries.saturating_add(1);
+                            if password_pending {
+                                password_tries = password_tries.saturating_add(1);
+                                password_pending = false;
+                            }
                         }
                         _ => {}
                     }
@@ -455,8 +474,10 @@ fn a_random_event_stream_agrees_with_the_model() {
     }
 }
 
-/// Invariant: challenge and password tries never rise except for the explicit
-/// network-failure give-back, and a terminal record carries no secret.
+/// Invariant: challenge and password tries never rise except for a give-back of
+/// a pre-spent try (on retrieval success or a network failure, design 6.2 rows
+/// for `RetrievedOk` and `RetrievalNetworkFailure`), the count never climbs past
+/// its starting value, and a terminal record carries no secret.
 #[test]
 fn counts_do_not_rise_and_terminal_records_hold_no_secret() {
     let mut rng = StdRng::seed_from_u64(0x5EED_D3);
@@ -478,13 +499,18 @@ fn counts_do_not_rise_and_terminal_records_hold_no_secret() {
             }
             let local = r.local.as_ref().unwrap();
             let pw = local.password_attempts_remaining;
-            // The only legal rise is the network-failure give-back from Confirmed.
+            // The only legal rise is giving back a pre-spent try, on retrieval
+            // success or a network failure, and only from Confirmed.
             if pw > last_pw {
                 assert!(
-                    was_confirmed && ev == Ev::RetrievalNetworkFailure,
-                    "password tries rose without a network-failure give-back"
+                    was_confirmed && (ev == Ev::RetrievalNetworkFailure || ev == Ev::RetrievedOk),
+                    "password tries rose without a give-back of a pre-spent try"
                 );
             }
+            // A give-back never raises the count past its starting value, so a
+            // run of network failures with no matching pre-spend cannot inflate
+            // the count.
+            assert!(pw <= 3, "password tries climbed past the starting value");
             last_pw = pw;
             if local.state.is_terminal() {
                 assert!(local.r_eph_secret.is_none(), "terminal record kept r_eph");

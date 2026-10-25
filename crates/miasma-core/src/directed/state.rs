@@ -37,11 +37,20 @@ pub enum Protection {
 /// Sender-supplied extension carried by a v2 Invite. The wire codec is out of
 /// scope for this work package (WP-D5); the field exists so a record can hold
 /// it once that lands. Unknown to v1.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct InviteExtV2 {
     /// Opaque sender credential bytes, verified elsewhere.
     #[serde(default)]
     pub credential: Vec<u8>,
+}
+
+impl std::fmt::Debug for InviteExtV2 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The credential is key-bearing material; show only its length.
+        f.debug_struct("InviteExtV2")
+            .field("credential", &"<redacted>")
+            .finish()
+    }
 }
 
 /// The recipient's local, non-wire fields for one envelope.
@@ -55,6 +64,13 @@ pub struct IncomingLocal {
     pub challenge: Option<ChallengeLocal>,
     /// Remaining password tries.
     pub password_attempts_remaining: u8,
+    /// True while a `PasswordAttemptStart` has pre-spent one try that has not
+    /// yet been resolved. A network-failure give-back returns the try only when
+    /// this is set, so a give-back without a matching pre-spend cannot raise the
+    /// count past its starting value. A new optional field with a serde default
+    /// so the on-disk shape stays compatible with an older build.
+    #[serde(default)]
+    pub password_attempt_pending: bool,
     /// When this record was first written, in wall-clock Unix seconds (display).
     pub received_at: u64,
     /// Expiry this node enforces: never past `received_at + MAX_RETENTION_SECS`,
@@ -98,6 +114,7 @@ impl std::fmt::Debug for IncomingLocal {
                 "password_attempts_remaining",
                 &self.password_attempts_remaining,
             )
+            .field("password_attempt_pending", &self.password_attempt_pending)
             .field("received_at", &self.received_at)
             .field("effective_expires_at", &self.effective_expires_at)
             .field("sender_peer_id", &self.sender_peer_id)
@@ -170,7 +187,7 @@ pub struct Now {
 }
 
 /// Events the recipient record reacts to (design 6.2).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum IncomingEvent {
     /// A Confirm arrived with this code.
     Confirm { code: String },
@@ -191,6 +208,26 @@ pub enum IncomingEvent {
     ExpiryTick,
     /// A periodic check found the challenge TTL passed.
     ChallengeTimeout,
+}
+
+impl std::fmt::Debug for IncomingEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The confirmation code is a secret; never print it.
+        match self {
+            IncomingEvent::Confirm { .. } => f
+                .debug_struct("Confirm")
+                .field("code", &"<redacted>")
+                .finish(),
+            IncomingEvent::PasswordAttemptStart => f.write_str("PasswordAttemptStart"),
+            IncomingEvent::RetrievedOk => f.write_str("RetrievedOk"),
+            IncomingEvent::PasswordWrong => f.write_str("PasswordWrong"),
+            IncomingEvent::RetrievalNetworkFailure => f.write_str("RetrievalNetworkFailure"),
+            IncomingEvent::SenderRevoke => f.write_str("SenderRevoke"),
+            IncomingEvent::RecipientDelete => f.write_str("RecipientDelete"),
+            IncomingEvent::ExpiryTick => f.write_str("ExpiryTick"),
+            IncomingEvent::ChallengeTimeout => f.write_str("ChallengeTimeout"),
+        }
+    }
 }
 
 /// What the caller must do in the same write after a legal step.
@@ -335,6 +372,7 @@ impl IncomingRecord {
             state: EnvelopeState::ChallengeIssued,
             challenge: Some(challenge),
             password_attempts_remaining,
+            password_attempt_pending: false,
             received_at: now.wall_secs,
             effective_expires_at,
             sender_peer_id,
@@ -382,6 +420,7 @@ impl IncomingRecord {
             state,
             challenge,
             password_attempts_remaining: self.wire.password_attempts_remaining,
+            password_attempt_pending: false,
             received_at: now.wall_secs,
             effective_expires_at,
             sender_peer_id: sender_peer_id.unwrap_or_else(|| LEGACY_SENDER.to_string()),
