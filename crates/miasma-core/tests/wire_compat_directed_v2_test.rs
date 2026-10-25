@@ -321,7 +321,7 @@ fn the_derived_keys_match_the_frozen_values() {
     payload_info.extend_from_slice(LABEL_KEX);
     payload_info.extend_from_slice(INFO_PAYLOAD);
     payload_info.extend_from_slice(&h_hdr);
-    let independent_payload = hkdf_no_salt_32(&ds, &payload_info);
+    let independent_payload = hkdf_no_salt_32(&ds[..], &payload_info);
     assert_eq!(&k_payload[..], &independent_payload[..]);
 
     // k_content through the crate equals an independent HKDF(salt=None, ikm=dek,
