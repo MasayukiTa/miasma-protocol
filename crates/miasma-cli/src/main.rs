@@ -20,6 +20,7 @@ mod chat_cmd;
 mod chat_group_cmd;
 mod i18n;
 mod push_cmd;
+mod recovery_cmd;
 mod storage_cmd;
 mod tunnel;
 mod update_cmd;
@@ -531,6 +532,17 @@ enum Commands {
         action: storage_cmd::StorageCmd,
     },
 
+    /// Manage the recovery code and the exported backup file (technician route).
+    ///
+    ///   miasma recovery show-code --wordlist WORDS    make and show a 24-word code
+    ///   miasma recovery export FILE                   write a .miasma-key backup
+    ///   miasma recovery verify-code --wordlist WORDS   check a code opens the wrap
+    ///   miasma recovery status                        whether a recovery wrap exists
+    Recovery {
+        #[command(subcommand)]
+        action: recovery_cmd::RecoveryCmd,
+    },
+
     /// Look for, fetch and install newer builds (see `update.*` in the config).
     ///
     ///   miasma update check    available / none / failed (distinct exit codes)
@@ -797,6 +809,7 @@ async fn main() -> Result<()> {
         Commands::PushInbox => push_cmd::run_push_inbox(&data_dir).await,
         Commands::Chat { action } => chat_cmd::run_chat(&data_dir, action).await,
         Commands::Storage { action } => storage_cmd::run_storage(&data_dir, action).await,
+        Commands::Recovery { action } => recovery_cmd::run_recovery(&data_dir, action).await,
 
         Commands::WssProbe {
             url,
@@ -4470,6 +4483,77 @@ mod storage_flag_tests {
     #[test]
     fn storage_delete_rejects_a_non_numeric_age() {
         assert!(parse(&["storage", "delete", "--older-than", "soon"]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod recovery_flag_tests {
+    use super::{Cli, Commands};
+    use clap::Parser;
+
+    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+        let mut v = vec!["miasma"];
+        v.extend_from_slice(args);
+        Cli::try_parse_from(v)
+    }
+
+    #[test]
+    fn show_code_takes_a_wordlist_path() {
+        match parse(&["recovery", "show-code", "--wordlist", "words.txt"])
+            .unwrap()
+            .command
+        {
+            Commands::Recovery {
+                action: crate::recovery_cmd::RecoveryCmd::ShowCode { wordlist },
+            } => assert_eq!(wordlist, std::path::Path::new("words.txt")),
+            _ => panic!("wrong command"),
+        }
+        // The wordlist path is required.
+        assert!(parse(&["recovery", "show-code"]).is_err());
+    }
+
+    #[test]
+    fn verify_code_takes_a_wordlist_path() {
+        match parse(&["recovery", "verify-code", "--wordlist", "words.txt"])
+            .unwrap()
+            .command
+        {
+            Commands::Recovery {
+                action: crate::recovery_cmd::RecoveryCmd::VerifyCode { wordlist },
+            } => assert_eq!(wordlist, std::path::Path::new("words.txt")),
+            _ => panic!("wrong command"),
+        }
+        assert!(parse(&["recovery", "verify-code"]).is_err());
+    }
+
+    #[test]
+    fn export_takes_an_output_path() {
+        match parse(&["recovery", "export", "backup.miasma-key"])
+            .unwrap()
+            .command
+        {
+            Commands::Recovery {
+                action: crate::recovery_cmd::RecoveryCmd::Export { out },
+            } => assert_eq!(out, std::path::Path::new("backup.miasma-key")),
+            _ => panic!("wrong command"),
+        }
+        // The output path is required.
+        assert!(parse(&["recovery", "export"]).is_err());
+    }
+
+    #[test]
+    fn status_takes_no_arguments() {
+        match parse(&["recovery", "status"]).unwrap().command {
+            Commands::Recovery {
+                action: crate::recovery_cmd::RecoveryCmd::Status,
+            } => {}
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn an_unknown_recovery_subcommand_is_refused() {
+        assert!(parse(&["recovery", "rotate"]).is_err());
     }
 }
 
