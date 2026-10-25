@@ -7033,6 +7033,17 @@ mod directed_v2_receive_tests {
         (node, dir, sharing_pub)
     }
 
+    /// Current wall-clock seconds, the base the receive handler reads when it
+    /// checks the envelope's own expiry window. An invite that must be accepted
+    /// has to carry a `created_at`/`expires_at` anchored to this same clock;
+    /// a fixed past second would read as already expired against it.
+    fn now_wall_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
     /// Derive the libp2p PeerId for an Ed25519 identity public key, as the
     /// handler does when it compares the invite's claimed sender identity to the
     /// transport PeerId.
@@ -7181,8 +7192,15 @@ mod directed_v2_receive_tests {
         assert_eq!(offer.recipient_sharing, sharing);
 
         // The invite comes from the same transport PeerId whose identity signs it.
-        let (invite, sender_peer) =
-            build_invite(&sender_sk, recipient_identity, sharing, &offer, 1000);
+        // Anchor its expiry to the wall clock the handler reads so the envelope
+        // is live when the invite is taken.
+        let (invite, sender_peer) = build_invite(
+            &sender_sk,
+            recipient_identity,
+            sharing,
+            &offer,
+            now_wall_secs(),
+        );
         assert_eq!(
             sender_peer, requester,
             "invite sender is the offer requester"
@@ -7202,8 +7220,13 @@ mod directed_v2_receive_tests {
         let requester = peer_id_of(&sender_sk.verifying_key().to_bytes());
 
         let offer = request_offer(&mut node, requester);
-        let (invite, sender_peer) =
-            build_invite(&sender_sk, recipient_identity, sharing, &offer, 1000);
+        let (invite, sender_peer) = build_invite(
+            &sender_sk,
+            recipient_identity,
+            sharing,
+            &offer,
+            now_wall_secs(),
+        );
 
         let first = node.handle_directed_v2_request(sender_peer, invite.clone());
         let hash1 = match first {
@@ -7239,10 +7262,20 @@ mod directed_v2_receive_tests {
         assert_ne!(offer_a.offer_id, offer_b.offer_id);
 
         // Build invites for both, then consume B before A (reordered).
-        let (invite_a, peer_a) =
-            build_invite(&sender_sk, recipient_identity, sharing, &offer_a, 1000);
-        let (invite_b, peer_b) =
-            build_invite(&sender_sk, recipient_identity, sharing, &offer_b, 1000);
+        let (invite_a, peer_a) = build_invite(
+            &sender_sk,
+            recipient_identity,
+            sharing,
+            &offer_a,
+            now_wall_secs(),
+        );
+        let (invite_b, peer_b) = build_invite(
+            &sender_sk,
+            recipient_identity,
+            sharing,
+            &offer_b,
+            now_wall_secs(),
+        );
 
         match node.handle_directed_v2_request(peer_b, invite_b) {
             DirectedResponseV2::InviteStored { .. } => {}
@@ -7262,8 +7295,13 @@ mod directed_v2_receive_tests {
         let requester = peer_id_of(&sender_sk.verifying_key().to_bytes());
 
         let offer = request_offer(&mut node, requester);
-        let (invite, sender_peer) =
-            build_invite(&sender_sk, recipient_identity, sharing, &offer, 1000);
+        let (invite, sender_peer) = build_invite(
+            &sender_sk,
+            recipient_identity,
+            sharing,
+            &offer,
+            now_wall_secs(),
+        );
 
         // Advance the node's monotonic base so the offer is strictly older than
         // the 20-second TTL by the time the invite is taken.
@@ -7295,8 +7333,13 @@ mod directed_v2_receive_tests {
         assert!(node.pending_directed_replies.is_empty());
 
         let offer = request_offer(&mut node, requester);
-        let (invite, sender_peer) =
-            build_invite(&sender_sk, recipient_identity, sharing, &offer, 1000);
+        let (invite, sender_peer) = build_invite(
+            &sender_sk,
+            recipient_identity,
+            sharing,
+            &offer,
+            now_wall_secs(),
+        );
         match node.handle_directed_v2_request(sender_peer, invite) {
             DirectedResponseV2::InviteStored { .. } => {}
             other => panic!("expected InviteStored, got {other:?}"),
@@ -7338,8 +7381,13 @@ mod directed_v2_receive_tests {
         let requester = peer_id_of(&sender_sk.verifying_key().to_bytes());
 
         let offer = request_offer(&mut node, requester);
-        let (invite, sender_peer) =
-            build_invite(&sender_sk, recipient_identity, sharing, &offer, 1000);
+        let (invite, sender_peer) = build_invite(
+            &sender_sk,
+            recipient_identity,
+            sharing,
+            &offer,
+            now_wall_secs(),
+        );
 
         // Replace the invite's offer id with one that was never handed out.
         let unknown = {
@@ -7369,8 +7417,13 @@ mod directed_v2_receive_tests {
 
         // The genuinely-issued offer is still in the table: the rejected invite
         // must not have consumed it, so the real invite still stores exactly once.
-        let (invite, sender_peer) =
-            build_invite(&sender_sk, recipient_identity, sharing, &offer, 1000);
+        let (invite, sender_peer) = build_invite(
+            &sender_sk,
+            recipient_identity,
+            sharing,
+            &offer,
+            now_wall_secs(),
+        );
         match node.handle_directed_v2_request(sender_peer, invite) {
             DirectedResponseV2::InviteStored { .. } => {}
             other => panic!("expected InviteStored for the genuine offer, got {other:?}"),
@@ -7425,8 +7478,13 @@ mod directed_v2_receive_tests {
         // A different peer builds a well-formed invite for that offer and sends
         // it from its own transport PeerId.
         let attacker_sk = signing_key();
-        let (invite, attacker_peer) =
-            build_invite(&attacker_sk, recipient_identity, sharing, &offer, 1000);
+        let (invite, attacker_peer) = build_invite(
+            &attacker_sk,
+            recipient_identity,
+            sharing,
+            &offer,
+            now_wall_secs(),
+        );
         assert_ne!(attacker_peer, owner_peer, "attacker is a distinct peer");
 
         match node.handle_directed_v2_request(attacker_peer, invite) {
@@ -7441,8 +7499,13 @@ mod directed_v2_receive_tests {
 
         // The offer was never bound to the attacker, so it is still available to
         // the real owner, who can complete the round trip exactly once.
-        let (invite, owner_send_peer) =
-            build_invite(&owner_sk, recipient_identity, sharing, &offer, 1000);
+        let (invite, owner_send_peer) = build_invite(
+            &owner_sk,
+            recipient_identity,
+            sharing,
+            &offer,
+            now_wall_secs(),
+        );
         assert_eq!(owner_send_peer, owner_peer);
         match node.handle_directed_v2_request(owner_send_peer, invite) {
             DirectedResponseV2::InviteStored { .. } => {}
@@ -7462,8 +7525,13 @@ mod directed_v2_receive_tests {
         let requester = peer_id_of(&sender_sk.verifying_key().to_bytes());
 
         let offer = request_offer(&mut node, requester);
-        let (invite, sender_peer) =
-            build_invite(&sender_sk, recipient_identity, sharing, &offer, 1000);
+        let (invite, sender_peer) = build_invite(
+            &sender_sk,
+            recipient_identity,
+            sharing,
+            &offer,
+            now_wall_secs(),
+        );
 
         // Corrupt one signature byte by adding a non-zero delta, so the result is
         // guaranteed to differ from the genuine signature without writing a fixed
@@ -7555,5 +7623,33 @@ mod directed_v2_receive_tests {
             MAX_OFFERS_PER_PEER,
             "a refused request does not grow the table past the limit"
         );
+    }
+
+    #[tokio::test]
+    async fn invite_anchored_to_current_wall_clock_is_accepted() {
+        // Counterpart to `invite_for_expired_envelope_is_rejected`: the receive
+        // handler reads the real wall clock for the envelope expiry check, so an
+        // invite whose window is anchored to that same clock is still live and
+        // is stored. A fixed past second would read as expired against it; this
+        // guards the intake from being judged on a clock the sender never used.
+        let (mut node, _dir, sharing) = recipient_node();
+        let recipient_identity = node.dht_signing_key.verifying_key().to_bytes();
+        let sender_sk = signing_key();
+        let requester = peer_id_of(&sender_sk.verifying_key().to_bytes());
+
+        let offer = request_offer(&mut node, requester);
+        let (invite, sender_peer) = build_invite(
+            &sender_sk,
+            recipient_identity,
+            sharing,
+            &offer,
+            now_wall_secs(),
+        );
+        // The envelope's window is open against the handler's wall clock, so the
+        // live offer round-trips and the invite is stored exactly once.
+        match node.handle_directed_v2_request(sender_peer, invite) {
+            DirectedResponseV2::InviteStored { .. } => {}
+            other => panic!("expected InviteStored for a live-window invite, got {other:?}"),
+        }
     }
 }
