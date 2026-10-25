@@ -104,8 +104,9 @@ impl BackupParams {
         let m_kib = u32::from_le_bytes([params[0], params[1], params[2], params[3]]);
         let t_cost = u32::from_le_bytes([params[4], params[5], params[6], params[7]]);
         let p_cost = u32::from_le_bytes([params[8], params[9], params[10], params[11]]);
-        let mut salt = [0u8; SALT_LEN];
-        salt.copy_from_slice(&params[12..12 + SALT_LEN]);
+        let salt: [u8; SALT_LEN] = params[12..12 + SALT_LEN]
+            .try_into()
+            .map_err(|_| BackupError::Corrupt("kdf_params salt"))?;
         let params = BackupParams {
             m_kib,
             t_cost,
