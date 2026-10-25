@@ -375,7 +375,9 @@ pub struct PushConfig {
     /// Cap on the outbound rate of the file-push send loop, in KiB per second
     /// (default 0 = no cap, the previous behaviour). When non-zero, the send
     /// loop keeps its rate at or below this value; it also yields to chat by
-    /// slowing down while chat traffic is in flight.
+    /// slowing down while chat traffic is in flight. This cap applies per
+    /// transfer, not to the node's uplink as a whole: several transfers running
+    /// at once each pace to this value independently.
     #[serde(default)]
     pub max_send_kib_per_sec: u32,
 }
