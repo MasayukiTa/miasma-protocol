@@ -11,6 +11,7 @@
 //! clock.
 
 pub mod credential;
+pub mod invite_intake;
 pub mod kdf;
 pub mod offer;
 pub mod seal;
