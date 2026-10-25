@@ -280,7 +280,7 @@ pub fn intake_invite(
     // secret is wrapped in `Zeroizing` on the way in; `new_incoming` unwraps it
     // into the stored field and the wrapper is zeroized at the end of the call.
     let challenge = fresh_challenge(now);
-    let record = IncomingRecord::new_incoming(
+    let mut record = IncomingRecord::new_incoming(
         envelope.clone(),
         // The record's local extension is a different, opaque-credential type
         // (`state::InviteExtV2`); the wire extension does not fit it and is kept
@@ -293,6 +293,12 @@ pub fn intake_invite(
         Some(zeroize::Zeroizing::new(*ctx.offer_r_eph_secret)),
         now,
     );
+    // Pin the transcript hash on the record so a later resend under the same id
+    // can be judged identical (same hash) or a conflict (different hash). The
+    // local part was just built by `new_incoming`, so it is present.
+    if let Some(local) = record.local.as_mut() {
+        local.transcript_hash = Some(transcript_hash);
+    }
 
     match inbox.store_incoming_v2_new(&record) {
         Ok(true) => Ok(IntakeOutcome {
@@ -317,42 +323,37 @@ pub fn intake_invite(
     }
 }
 
-/// Whether a stored record is the same Invite as the one just verified: same
-/// transcript hash (recomputed from its wire part and its wire extension) and
-/// the same bound sender PeerId.
+/// Whether a stored record is the same Invite as the one just verified: the same
+/// bound sender PeerId and the same transcript hash.
 ///
-/// A record stored by this module keeps the wire extension off the record
-/// (`ext = None`), so the transcript cannot be recomputed from the record
-/// alone. The bound PeerId is always available, so the comparison falls back to
-/// it: a record under this id whose bound PeerId matches is treated as the same
-/// Invite (the create-only store already guarantees the id was written by a
-/// prior successful intake, which verified the transcript). When the record
-/// does carry a wire extension, the transcript hash is compared as well.
+/// A v2 intake pins the transcript hash on the record's local part when it
+/// writes it, so a resend is judged on both the bound PeerId and that stored
+/// hash: a match on both is idempotent, and the same id carrying a different
+/// transcript (or bound to a different PeerId) is a conflict (design 3.4-11,
+/// 2.5).
+///
+/// A record without a stored transcript hash predates this field (an older
+/// on-disk record, or a v1 migration, which has none). For those the hash
+/// cannot be compared, so the decision falls back to the bound PeerId alone,
+/// preserving the earlier behaviour and the on-disk compatibility.
 fn existing_matches(
     existing: &IncomingRecord,
     transcript_hash: &[u8; 32],
     sender_peer_id_display: &str,
 ) -> bool {
-    let peer_ok = existing
-        .local
-        .as_ref()
-        .map(|l| l.sender_peer_id == sender_peer_id_display)
-        .unwrap_or(false);
-    if !peer_ok {
+    let Some(local) = existing.local.as_ref() else {
+        // No local part at all (a bare wire record): nothing to match against.
+        return false;
+    };
+    if local.sender_peer_id != sender_peer_id_display {
         return false;
     }
-    // If a wire extension is present on the record, pin the transcript too.
-    // Records this module writes carry `None`, so the PeerId match above is the
-    // decisive check for them.
-    match existing.ext.as_ref() {
-        Some(_) => {
-            // The record's `ext` is the opaque-credential local type, not the
-            // wire extension, so the transcript hash cannot be recomputed from
-            // it. The PeerId match stands as the identity check; the presence of
-            // a credential does not weaken it.
-            let _ = transcript_hash;
-            true
-        }
+    match local.transcript_hash.as_ref() {
+        // A v2 record pins the transcript: both the PeerId and the hash must
+        // match for the resend to be idempotent; a different hash is a conflict.
+        Some(stored) => stored == transcript_hash,
+        // An older record or a v1 migration has no stored hash; fall back to the
+        // PeerId match (already confirmed above) to keep the prior behaviour.
         None => true,
     }
 }
@@ -412,6 +413,9 @@ mod tests {
         r_eph_secret: [u8; 32],
         peer_id: Vec<u8>,
         peer_id_display: String,
+        /// The sender identity key, kept so a test can forge a second, different
+        /// Invite under the same id, offer and PeerId (same signer).
+        sender_sk: SigningKey,
     }
 
     /// Build a correct, self-consistent v2 Invite: a sender identity and sharing
@@ -531,6 +535,7 @@ mod tests {
             r_eph_secret,
             peer_id,
             peer_id_display,
+            sender_sk,
         }
     }
 
@@ -546,6 +551,73 @@ mod tests {
                 transport_peer_id: &self.peer_id,
                 sender_peer_id_display: &self.peer_id_display,
             }
+        }
+
+        /// A second, self-consistent Invite from the same sender, under the same
+        /// envelope id, offer, recipient and PeerId, but with a different
+        /// published ciphertext and fresh outer nonces. The sender re-signs the
+        /// transcript, so the second Invite has a different transcript hash and
+        /// is a genuine content conflict rather than an identical resend.
+        fn resigned_with_different_content(&self) -> (DirectedEnvelope, InviteExtV2) {
+            let sender_identity = self.sender_sk.verifying_key().to_bytes();
+            // Keep every header field the same except the outer ciphertext and
+            // its nonces, so only the content differs. Reuse the first
+            // envelope's keys, salt, timestamps and id.
+            let mut envelope = self.envelope.clone();
+            let mut new_payload = self.envelope.encrypted_payload.clone();
+            // Flip one byte so the published ciphertext (and thus its hash)
+            // differs; the length is unchanged.
+            new_payload[0] ^= 0x01;
+            envelope.encrypted_payload = new_payload;
+            envelope.payload_nonce = rand::random();
+            let dek_nonce: [u8; 24] = rand::random();
+            let wrapped_dek = rand_vec(48);
+
+            // Re-fold the header exactly as the intake will, over the shared
+            // header values, then re-sign the new outer values.
+            let header = Header {
+                version: envelope.version,
+                suite: self.ext.suite,
+                envelope_id: &envelope.envelope_id,
+                sender_identity: &sender_identity,
+                sender_pubkey: &envelope.sender_pubkey,
+                recipient_identity: &self.ext.recipient_identity,
+                recipient_pubkey: &envelope.recipient_pubkey,
+                ephemeral_pubkey: &envelope.ephemeral_pubkey,
+                recipient_ephemeral: &self.ext.recipient_ephemeral,
+                offer_id: &self.ext.offer_id,
+                kdf_m_kib: self.ext.kdf.m_kib,
+                kdf_t_cost: self.ext.kdf.t_cost,
+                kdf_p_cost: self.ext.kdf.p_cost,
+                password_salt: &envelope.password_salt,
+                created_at: envelope.created_at,
+                expires_at: envelope.expires_at,
+                retention_secs: envelope.retention_secs,
+            };
+            let h_hdr = header.h_hdr();
+            let outer = OuterRefs {
+                payload_nonce: &envelope.payload_nonce,
+                encrypted_payload: &envelope.encrypted_payload,
+                dek_nonce: &dek_nonce,
+                wrapped_dek: &wrapped_dek,
+                sender_binding: &self.ext.sender_binding,
+            };
+            let sig_msg = tx::sig_msg(&h_hdr, &outer);
+            let signature = tx::sign_transcript(&self.sender_sk, &sig_msg);
+
+            let ext = InviteExtV2 {
+                suite: self.ext.suite,
+                kdf: self.ext.kdf,
+                sender_identity,
+                sender_binding: self.ext.sender_binding,
+                recipient_identity: self.ext.recipient_identity,
+                offer_id: self.ext.offer_id,
+                recipient_ephemeral: self.ext.recipient_ephemeral,
+                wrapped_dek,
+                dek_nonce,
+                signature,
+            };
+            (envelope, ext)
         }
     }
 
@@ -627,6 +699,51 @@ mod tests {
         );
         assert_eq!(first.transcript_hash, second.transcript_hash);
         // Exactly one record exists for the id.
+        let count = inbox
+            .list_incoming_v2()
+            .into_iter()
+            .filter(|r| r.wire.envelope_id == b.envelope.envelope_id)
+            .count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn a_second_invite_with_different_content_under_the_same_id_is_a_conflict() {
+        let (_tmp, inbox) = inbox();
+        let b = build_valid(1_700_000_000);
+        let now = now_at(1_700_000_000);
+        // The first Invite is accepted and stored, pinning its transcript hash.
+        let first =
+            intake_invite(&inbox, &b.envelope, &b.ext, &b.ctx(), now).expect("first intake");
+        assert!(first.created);
+
+        // A second, validly signed Invite from the same sender, under the same
+        // envelope id, offer and PeerId, but carrying different content: its
+        // transcript hash differs, so it must be refused as a conflict rather
+        // than treated as an idempotent resend.
+        let (env2, ext2) = b.resigned_with_different_content();
+        // The id is unchanged, the content (and thus the transcript) is not.
+        assert_eq!(env2.envelope_id, b.envelope.envelope_id);
+        assert_ne!(
+            invite_transcript_hash(&env2, &ext2),
+            first.transcript_hash,
+            "the forged second Invite must have a different transcript hash",
+        );
+
+        let err = intake_invite(&inbox, &env2, &ext2, &b.ctx(), now)
+            .expect_err("a different transcript under the same id is a conflict");
+        assert_eq!(err, InviteIntakeError::IdConflict);
+
+        // The original record is untouched: still exactly one, still the first
+        // transcript hash.
+        let rec = inbox
+            .load_incoming_v2(&b.envelope.id_hex())
+            .expect("the first record is still present");
+        assert_eq!(
+            rec.local.as_ref().expect("local part").transcript_hash,
+            Some(first.transcript_hash),
+            "the stored transcript hash is the first Invite's, not the second's",
+        );
         let count = inbox
             .list_incoming_v2()
             .into_iter()
