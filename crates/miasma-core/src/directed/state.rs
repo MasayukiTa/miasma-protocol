@@ -80,6 +80,15 @@ pub struct IncomingLocal {
     pub sender_peer_id: String,
     /// Which protection scheme guards the content key.
     pub protection: Protection,
+    /// Transcript hash of the v2 Invite that created this record, if it was a
+    /// v2 intake. A resent Invite under the same envelope id is idempotent only
+    /// when its recomputed transcript hash matches this value (and the bound
+    /// PeerId matches); a different transcript under the same id is a conflict.
+    /// A new optional field with a serde default so an older record (and a v1
+    /// migration, which has none) still reads and the on-disk shape stays
+    /// compatible. Not a secret: it is a public digest over wire values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_hash: Option<[u8; 32]>,
     /// Ephemeral retrieval secret (v2 only). Dropped on every terminal step.
     ///
     /// Stored as a bare array because `zeroize::Zeroizing` is not serde-enabled
@@ -119,6 +128,7 @@ impl std::fmt::Debug for IncomingLocal {
             .field("effective_expires_at", &self.effective_expires_at)
             .field("sender_peer_id", &self.sender_peer_id)
             .field("protection", &self.protection)
+            .field("transcript_hash", &self.transcript_hash.is_some())
             .field(
                 "r_eph_secret",
                 &self.r_eph_secret.as_ref().map(|_| "<redacted>"),
@@ -377,6 +387,9 @@ impl IncomingRecord {
             effective_expires_at,
             sender_peer_id,
             protection,
+            // Set by the v2 intake after construction, once the transcript hash
+            // is known; a v1 migration leaves it `None`.
+            transcript_hash: None,
             // The field is a bare array (serde-enabled); the argument carries a
             // zeroizing wrapper. Unwrap it into the stored array. The wrapper is
             // dropped (and zeroized) at the end of this call; the stored copy is
@@ -425,6 +438,7 @@ impl IncomingRecord {
             effective_expires_at,
             sender_peer_id: sender_peer_id.unwrap_or_else(|| LEGACY_SENDER.to_string()),
             protection: Protection::LegacyV1,
+            transcript_hash: None,
             r_eph_secret: None,
         });
     }

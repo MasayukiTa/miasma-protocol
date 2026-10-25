@@ -91,6 +91,9 @@ fn record(
         effective_expires_at,
         sender_peer_id: "peer-a".into(),
         protection: Protection::V2,
+        // A v2 record with no recorded transcript hash; same meaning as an
+        // older record that predates the field.
+        transcript_hash: None,
         r_eph_secret: r_eph,
     };
     (
