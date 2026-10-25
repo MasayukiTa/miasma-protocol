@@ -6,6 +6,7 @@
 //! None of these types are wired into a `Behaviour` yet.
 
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
 
 use crate::directed::envelope::{DirectedEnvelope, EnvelopeState};
 
@@ -210,6 +211,17 @@ pub enum DirectedRequestV2 {
         /// Suites the requester accepts.
         suites: Vec<u8>,
     },
+}
+
+impl Zeroize for DirectedRequestV2 {
+    /// Clear the secret-bearing field of a request after it is serialized,
+    /// matching the v1 `DirectedRequest` zeroize: only `Confirm` carries a
+    /// secret (the challenge code) that needs clearing here.
+    fn zeroize(&mut self) {
+        if let Self::Confirm { challenge_code, .. } = self {
+            challenge_code.zeroize();
+        }
+    }
 }
 
 /// The v2 response. Indices 0..=5 match v1; 6 and 7 are new.
