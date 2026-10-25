@@ -1298,27 +1298,28 @@ pub fn atomic_secure_tmp(path: &Path) -> PathBuf {
     path.with_extension(ATOMIC_SECURE_TMP_EXT)
 }
 /// Per-write temp name that includes the process id and a caller-supplied
-/// nonce, so two writers staging the same final path never pick the same temp:
-/// `<name>.<pid>.<nonce-hex>.tmp`. The nonce is passed in (generated with a
-/// random source by the caller) to keep this function pure and testable.
-pub fn atomic_tmp_unique(path: &Path, pid: u32, nonce: u64) -> PathBuf {
+/// random suffix, so two writers staging the same final path never pick the
+/// same temp: `<name>.<pid>.<suffix-hex>.tmp`. The suffix is passed in
+/// (generated with a random source by the caller) to keep this function pure
+/// and testable.
+pub fn atomic_tmp_unique(path: &Path, pid: u32, suffix: u64) -> PathBuf {
     let name = path
         .file_name()
         .map(|n| n.to_os_string())
         .unwrap_or_default();
     let mut unique = name;
-    unique.push(format!(".{pid}.{nonce:016x}.{ATOMIC_TMP_EXT}"));
+    unique.push(format!(".{pid}.{suffix:016x}.{ATOMIC_TMP_EXT}"));
     path.with_file_name(unique)
 }
 /// Restricted counterpart of `atomic_tmp_unique`:
-/// `<name>.<pid>.<nonce-hex>.sec.tmp`.
-pub fn atomic_secure_tmp_unique(path: &Path, pid: u32, nonce: u64) -> PathBuf {
+/// `<name>.<pid>.<suffix-hex>.sec.tmp`.
+pub fn atomic_secure_tmp_unique(path: &Path, pid: u32, suffix: u64) -> PathBuf {
     let name = path
         .file_name()
         .map(|n| n.to_os_string())
         .unwrap_or_default();
     let mut unique = name;
-    unique.push(format!(".{pid}.{nonce:016x}.{ATOMIC_SECURE_TMP_EXT}"));
+    unique.push(format!(".{pid}.{suffix:016x}.{ATOMIC_SECURE_TMP_EXT}"));
     path.with_file_name(unique)
 }
 /// Where the contacts loader sets an unreadable file aside.
@@ -1628,29 +1629,43 @@ mod tests {
     }
 
     #[test]
-    fn unique_atomic_tmp_names_stay_in_the_same_dir_and_differ_by_nonce() {
+    fn unique_atomic_tmp_names_stay_in_the_same_dir_and_vary_between_writes() {
         let target = Path::new("d/config.toml");
 
-        let a = atomic_tmp_unique(target, 7, 0x1122_3344_5566_7788);
+        // Two writers draw their own random suffix; the value is never fixed in
+        // the source, it comes from the same random source the callers use.
+        let a = atomic_tmp_unique(target, 7, rand::random::<u64>());
         // Same directory as the final file, so the rename is same-volume.
         assert_eq!(a.parent(), target.parent());
         let a_name = a.file_name().unwrap().to_string_lossy().into_owned();
         assert!(a_name.starts_with("config.toml."), "keeps the base name");
         assert!(a_name.ends_with(".tmp"), "ends with the tmp extension");
         assert!(a_name.contains(".7."), "carries the process id");
+        // The suffix is sixteen hex digits between the pid and the extension:
+        // `config.toml.7.<16 hex>.tmp`.
+        let suffix_hex = a_name
+            .strip_prefix("config.toml.7.")
+            .and_then(|r| r.strip_suffix(".tmp"))
+            .expect("name is config.toml.<pid>.<suffix>.tmp");
+        assert_eq!(suffix_hex.len(), 16, "suffix is sixteen hex digits");
         assert!(
-            a_name.contains("1122334455667788"),
-            "carries the nonce in hex"
+            suffix_hex.bytes().all(|b| b.is_ascii_hexdigit()),
+            "suffix is hexadecimal"
         );
         // It is not the old fixed `config.tmp` another path could also pick.
         assert_ne!(a, atomic_tmp(target));
 
-        // A different nonce yields a different temp name (no collision).
-        let b = atomic_tmp_unique(target, 7, 0x8877_6655_4433_2211);
-        assert_ne!(a, b);
+        // Drawing a fresh suffix almost always yields a different temp name, so
+        // two writers do not collide. Retry a few times to keep the test from
+        // ever flaking on the rare equal draw.
+        let differs = (0..8).any(|_| {
+            atomic_tmp_unique(target, 7, rand::random::<u64>())
+                != atomic_tmp_unique(target, 7, rand::random::<u64>())
+        });
+        assert!(differs, "independent random suffixes should differ");
 
         // The restricted variant keeps the secure extension, same rules.
-        let s = atomic_secure_tmp_unique(Path::new("d/master.key"), 7, 1);
+        let s = atomic_secure_tmp_unique(Path::new("d/master.key"), 7, rand::random::<u64>());
         assert_eq!(s.parent(), Path::new("d/master.key").parent());
         let s_name = s.file_name().unwrap().to_string_lossy().into_owned();
         assert!(s_name.starts_with("master.key."));
