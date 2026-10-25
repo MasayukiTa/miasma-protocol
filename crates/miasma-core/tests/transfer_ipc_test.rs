@@ -113,6 +113,7 @@ async fn a_weak_publish_password_is_refused_with_machine_readable_codes() {
                 total_shards: 3,
                 password: Some(weak.into()),
                 restart: false,
+                object_format: None,
             },
         )
         .await

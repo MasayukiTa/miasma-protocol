@@ -173,6 +173,7 @@ async fn wipe_through_the_control_interface_stops_work_and_leaves_no_output() {
             total_shards: 3,
             password: None,
             restart: false,
+            object_format: None,
         },
     )
     .await

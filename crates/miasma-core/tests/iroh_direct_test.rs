@@ -817,6 +817,7 @@ async fn the_daemons_endpoint_id_is_the_publisher_key_of_its_share_ids() {
                 total_shards: 3,
                 password: None,
                 restart: false,
+                object_format: None,
             },
         )
         .await

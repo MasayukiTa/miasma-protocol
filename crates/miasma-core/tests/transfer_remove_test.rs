@@ -343,6 +343,7 @@ async fn a_finished_send_is_removed_but_its_source_and_shares_stay() {
                 total_shards: 3,
                 password: None,
                 restart: false,
+                object_format: None,
             })
             .await
         {
