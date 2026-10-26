@@ -848,7 +848,7 @@ impl TransfersUi {
         let connected = connected && !self.poll_error.as_ref().is_some_and(|(_, down)| *down);
 
         let desc = if easy { t.desc_easy } else { t.desc };
-        let body = |ui: &mut egui::Ui| {
+        let mut body = |ui: &mut egui::Ui| {
             if self.keeping_awake {
                 kit::hint(ui, t.awake_note);
             }
