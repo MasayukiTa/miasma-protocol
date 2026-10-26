@@ -52,10 +52,7 @@ mod tests {
 
     #[test]
     fn title_shows_version_and_channel_without_the_build_id() {
-        assert_eq!(
-            title_for("0.3.2", Locale::En),
-            "Miasma v0.3.2 (Beta)"
-        );
+        assert_eq!(title_for("0.3.2", Locale::En), "Miasma v0.3.2 (Beta)");
         // The build id is deliberately kept out of the title.
         assert!(!title_for("0.3.2", Locale::En).contains("1a2b3c4d5"));
         let ja = title_for("0.3.2", Locale::Ja);
@@ -92,10 +89,9 @@ mod tests {
     #[test]
     fn the_build_row_value_is_shown_on_the_about_and_update_screens() {
         let dir = env!("CARGO_MANIFEST_DIR");
-        let about = std::fs::read_to_string(format!("{dir}/src/app.rs"))
-            .expect("read app.rs");
-        let updates = std::fs::read_to_string(format!("{dir}/src/updates.rs"))
-            .expect("read updates.rs");
+        let about = std::fs::read_to_string(format!("{dir}/src/app.rs")).expect("read app.rs");
+        let updates =
+            std::fs::read_to_string(format!("{dir}/src/updates.rs")).expect("read updates.rs");
         assert!(
             about.contains("build_row_value()"),
             "the About screen (app.rs) no longer shows build_row_value, so the \
