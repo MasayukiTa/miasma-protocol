@@ -395,6 +395,13 @@ impl ChatUi {
         self.open().is_some_and(|o| o.endpoint_id == endpoint)
     }
 
+    /// The conversation still open is the one this contact id belongs to. A send's answer carries
+    /// the contact id (`ChatRequest::Send`), so this says whether its text belongs in the
+    /// composer now on screen or in that conversation's kept draft.
+    fn is_open_contact(&self, contact_id: &str) -> bool {
+        self.open().is_some_and(|o| o.contact_id == contact_id)
+    }
+
     // ─── Asking ─────────────────────────────────────────────────────────────
 
     /// Ask for more data when it is due. Cheap: with the area closed this is one small request
@@ -604,21 +611,43 @@ impl ChatUi {
                     ChatFail::NotSupported => Availability::OldDaemon,
                     ChatFail::Other => self.availability,
                 };
-                if let ChatRequest::Send { text, .. } = &req {
-                    self.send_failed(text, c.err_other);
+                if let ChatRequest::Send { contact, text } = &req {
+                    self.send_failed(contact, text, c.err_other);
                 }
             }
         }
     }
 
-    /// A send got no answer or an error: nothing is lost, the text goes back into the composer.
-    fn send_failed(&mut self, text: &str, why: &str) {
+    /// A send got no answer or an error: nothing is lost, the text goes back. It returns to the
+    /// composer only while that same conversation is still open; if the person has moved on, it is
+    /// kept as that conversation's draft instead, so one conversation's failure never writes into
+    /// another's composer.
+    fn send_failed(&mut self, contact_id: &str, text: &str, why: &str) {
         self.sends_in_flight = self.sends_in_flight.saturating_sub(1);
         self.send_kinds.pop_front();
-        if self.composer.trim().is_empty() {
-            self.composer = text.to_owned();
+        if self.is_open_contact(contact_id) {
+            if self.composer.trim().is_empty() {
+                self.composer = text.to_owned();
+            }
+            self.page_msg = Some(why.to_owned());
+        } else if !text.trim().is_empty() {
+            self.keep_draft(contact_id, text);
         }
-        self.page_msg = Some(why.to_owned());
+    }
+
+    /// Keep `text` as `contact_id`'s draft (memory only, a few of them), without disturbing the
+    /// open conversation's composer. An existing draft for that contact is not overwritten: what
+    /// the person has since typed there wins.
+    fn keep_draft(&mut self, contact_id: &str, text: &str) {
+        if self.drafts.contains_key(contact_id) {
+            return;
+        }
+        if self.drafts.len() >= MAX_DRAFTS {
+            self.drafts.clear();
+        }
+        let mut kept = text.to_owned();
+        cap_text(&mut kept, composer_cap(self.max_bytes));
+        self.drafts.insert(contact_id.to_owned(), kept);
     }
 
     fn on_answer(&mut self, c: &ChatStrings, req: &ChatRequest, resp: ChatResponse) {
@@ -628,8 +657,8 @@ impl ChatUi {
                     self.availability = Availability::NoChat;
                 }
                 match req {
-                    ChatRequest::Send { text, .. } => {
-                        self.send_failed(text, error_text(c, &kind));
+                    ChatRequest::Send { contact, text } => {
+                        self.send_failed(contact, text, error_text(c, &kind));
                     }
                     ChatRequest::Events { .. }
                     | ChatRequest::Conversations {}
@@ -1181,7 +1210,13 @@ impl ChatUi {
                     View::Conversation(o) => self.conversation_view(ui, c, contacts, &o, action),
                     View::List => {
                         ui.add_space(kit::SP_5);
-                        kit::paragraph_muted(ui, group_strings(self.locale).pane_empty);
+                        // When the list holds nothing, "pick a conversation" would contradict the
+                        // empty list on the left; say there are none instead. Once at least one
+                        // conversation or group exists, go back to the "pick one" hint.
+                        let gs = group_strings(self.locale);
+                        let none = self.rows.is_empty() && self.group.rows().is_empty();
+                        let hint = if none { gs.pane_none } else { gs.pane_empty };
+                        kit::paragraph_muted(ui, hint);
                     }
                 }
             }
@@ -1198,14 +1233,21 @@ impl ChatUi {
             c.heading,
             Some(c.desc),
             |ui| {
-                let resp = kit::primary(ui, !contacts.is_empty(), c.new_chat);
-                resp.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::WidgetType::Button, c.new_chat)
+                // The page's action area is laid right to left, which would make the buttons be
+                // read (and focused) right to left too — the reverse of what is seen. Nest a
+                // left-to-right group so the cluster still sits on the right, while the two
+                // buttons are both drawn and announced left to right: "New group" then the
+                // primary "New conversation".
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    self.group.new_group_button(ui, !contacts.is_empty());
+                    let resp = kit::primary(ui, !contacts.is_empty(), c.new_chat);
+                    resp.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, c.new_chat)
+                    });
+                    if resp.clicked() {
+                        new_chat = true;
+                    }
                 });
-                if resp.clicked() {
-                    new_chat = true;
-                }
-                self.group.new_group_button(ui, !contacts.is_empty());
             },
             |_| {},
         );
@@ -2946,6 +2988,45 @@ mod tests {
             ui.close_conversation();
         }
         assert!(ui.drafts.len() <= MAX_DRAFTS);
+    }
+
+    #[test]
+    fn a_send_that_fails_after_switching_does_not_write_into_the_other_composer() {
+        let mut ui = ready();
+        ui.open_conversation("a", "ep-a", "A");
+        ui.composer = "Aのメッセージ".into();
+        ui.submit(c());
+        let sent = requests(&mut ui).remove(0);
+        assert!(matches!(&sent, ChatRequest::Send { contact, .. } if contact == "a"));
+        // The person moves to B before A's send is answered.
+        ui.open_conversation("b", "ep-b", "B");
+        ui.composer = "Bで入力中".into();
+        ui.on_reply(
+            c(),
+            sent,
+            Ok(ChatResponse::Error {
+                kind: "outbox_full".into(),
+                message: "x".into(),
+            }),
+        );
+        // B's composer is untouched and keeps what is being typed there.
+        assert_eq!(ui.composer, "Bで入力中");
+        // A's failed text is kept as A's draft, so going back shows it again.
+        ui.open_conversation("a", "ep-a", "A");
+        assert_eq!(ui.composer, "Aのメッセージ");
+    }
+
+    #[test]
+    fn a_send_that_fails_while_still_open_returns_to_the_composer() {
+        let mut ui = ready();
+        ui.open_conversation("a", "ep-a", "A");
+        ui.composer = "そのまま".into();
+        ui.submit(c());
+        let sent = requests(&mut ui).remove(0);
+        ui.on_reply(c(), sent, Err(ChatFail::Other));
+        // Same conversation is still open: the text comes back to the composer.
+        assert_eq!(ui.composer, "そのまま");
+        assert!(ui.drafts.is_empty());
     }
 
     #[test]

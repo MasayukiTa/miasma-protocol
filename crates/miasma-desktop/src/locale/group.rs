@@ -62,7 +62,7 @@ group_strings! {
     settings_join_label, settings_join_auto, settings_join_ask, settings_join_auto_desc,
     settings_join_ask_desc,
     // Two-pane Chat, short delivery state, member rows, contact search in the pickers
-    pane_empty, state_waiting_short, a11y_member_self, member_more, member_show_code,
+    pane_empty, pane_none, state_waiting_short, a11y_member_self, member_more, member_show_code,
     member_hide_code, ng_search_hint, a11y_ng_search, ng_selected_only, ng_no_match,
     // Name limit in characters, files and groups, list joiner
     ng_name_count, ng_name_over_chars, ng_name_over_bytes, group_file_note, group_file_button,
@@ -215,6 +215,7 @@ static GR_EN: GroupStrings = GroupStrings {
     settings_join_auto_desc: "You join as soon as a contact you trust, who administers the group, adds you. You can leave with one click.",
     settings_join_ask_desc: "An invitation waits at the top of the Chat tab until you accept or decline it.",
     pane_empty: "Choose a conversation from the list.",
+    pane_none: "No conversations yet.",
     state_waiting_short: "Waiting",
     a11y_member_self: "{name}, {role}",
     member_more: "More actions for {name}",
@@ -371,6 +372,7 @@ static GR_JA: GroupStrings = GroupStrings {
     settings_join_auto_desc: "信頼している連絡先がグループの管理者としてあなたを追加すると、すぐに参加します。ワンクリックで抜けられます。",
     settings_join_ask_desc: "「チャット」タブの上に招待が表示され、参加するか断るかを選ぶまで待ちます。",
     pane_empty: "一覧から会話を選んでください。",
+    pane_none: "会話はまだありません。",
     state_waiting_short: "待機中",
     a11y_member_self: "{name}、{role}",
     member_more: "{name} のその他の操作",
@@ -527,6 +529,7 @@ static GR_ZH_CN: GroupStrings = GroupStrings {
     settings_join_auto_desc: "你信任的联系人以管理员身份把你加入群组时，你会立即加入。一键即可退出。",
     settings_join_ask_desc: "邀请会显示在“聊天”标签页顶部，等你接受或拒绝。",
     pane_empty: "请从列表中选择一个会话。",
+    pane_none: "还没有会话。",
     state_waiting_short: "等待中",
     a11y_member_self: "{name}，{role}",
     member_more: "{name} 的更多操作",
