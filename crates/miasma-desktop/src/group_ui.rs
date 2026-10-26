@@ -384,6 +384,19 @@ impl GroupUi {
         self.composer.clear();
     }
 
+    /// Keep `text` as `id`'s draft (memory only, a few of them) without touching the open group's
+    /// composer, for a send that failed after the person moved to another group. An existing draft
+    /// is kept: what was typed there since wins.
+    fn keep_draft(&mut self, id: &str, text: &str) {
+        if self.drafts.contains_key(id) {
+            return;
+        }
+        if self.drafts.len() >= MAX_DRAFTS {
+            self.drafts.clear();
+        }
+        self.drafts.insert(id.to_owned(), text.to_owned());
+    }
+
     fn open_row(&self) -> Option<&GroupRow> {
         let o = self.open.as_ref()?;
         self.rows.iter().find(|r| r.id == o.id)
@@ -534,12 +547,16 @@ impl GroupUi {
     /// says what went wrong and gives back what it took (a message's text).
     fn fail(&mut self, req: &GroupRequest, why: String) {
         match req {
-            GroupRequest::Send { text, .. } => {
+            GroupRequest::Send { group, text } => {
                 self.sends_in_flight = self.sends_in_flight.saturating_sub(1);
-                if self.composer.trim().is_empty() {
-                    self.composer = text.clone();
+                if self.is_open_id(group) {
+                    if self.composer.trim().is_empty() {
+                        self.composer = text.clone();
+                    }
+                    self.page_msg = Some(why);
+                } else if !text.trim().is_empty() {
+                    self.keep_draft(group, text);
                 }
-                self.page_msg = Some(why);
             }
             GroupRequest::Create { .. } => {
                 self.creating = false;
@@ -2502,6 +2519,59 @@ mod tests {
             },
         );
         assert!(ui.thread_dirty);
+    }
+
+    #[test]
+    fn a_failed_send_is_kept_for_its_own_group_after_moving_to_another() {
+        let mut ui = opened(true);
+        ui.composer = "g1へ".into();
+        ui.submit(4096);
+        let r = requests(&mut ui);
+        assert!(matches!(
+            r.as_slice(),
+            [GroupRequest::Send { group, .. }] if group == "g1"
+        ));
+        // Move to another group before g1's send is answered, and start typing there.
+        ui.open_group("g2", "Team g2");
+        ui.composer = "g2で入力中".into();
+        reply(
+            &mut ui,
+            r[0].clone(),
+            GroupResponse::Error {
+                kind: "queue_full".into(),
+                message: String::new(),
+            },
+        );
+        // g2's composer is left alone, and no stale page error is shown for it.
+        assert_eq!(ui.composer, "g2で入力中");
+        assert!(ui.page_msg.is_none());
+        // Going back to g1 brings its failed text back as a draft.
+        ui.open_group("g1", "Team g1");
+        assert_eq!(ui.composer, "g1へ");
+    }
+
+    #[test]
+    fn a_failed_send_does_not_overwrite_a_newer_draft_for_its_group() {
+        let mut ui = opened(true);
+        ui.composer = "古い".into();
+        ui.submit(4096);
+        let r = requests(&mut ui);
+        // Leave g1, come back and type something new, then leave again.
+        ui.open_group("g2", "Team g2");
+        ui.open_group("g1", "Team g1");
+        ui.composer = "新しい下書き".into();
+        ui.open_group("g2", "Team g2");
+        // Now the old send fails: the newer g1 draft must win.
+        reply(
+            &mut ui,
+            r[0].clone(),
+            GroupResponse::Error {
+                kind: "queue_full".into(),
+                message: String::new(),
+            },
+        );
+        ui.open_group("g1", "Team g1");
+        assert_eq!(ui.composer, "新しい下書き");
     }
 
     #[test]
