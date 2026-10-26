@@ -17,6 +17,11 @@ This beta makes the post-quantum key exchange required by default and adds easie
 - In the browser version, trying to open a share made by a newer version now shows a clear message instead of a generic error.
 - The chat list on desktop now groups conversations under separate "Groups" and "People" headings.
 - A received private share now shows who sent it, marked as verified, unverified (claimed by the sender), or unknown for older records.
+- Before setup, the Chat, Contacts and Files tabs now show the same single instruction, instead of pointing to a button that did not exist.
+- The Receive screen now offers a way to receive by code, and Home suggests adding a contact while you have none.
+- A send that fails after you switch conversations no longer lands in the composer of another chat.
+- In group chats, a message that is still waiting now shows how many members have received it (for example "Waiting 0/2").
+- The window title no longer shows the build hash or the word "Technical"; the build hash is in Settings, under About and Update.
 
 ## Notes
 
