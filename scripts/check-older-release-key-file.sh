@@ -18,11 +18,32 @@
 # Usage:  scripts/check-older-release-key-file.sh [TAG]     (default v0.3.2-beta.11)
 # Needs the GitHub CLI (`gh`, with GH_TOKEN set) and an Apple-silicon macOS host
 # (the release archive holds an arm64 binary).
+#
+# Cache (optional): when MIASMA_RELEASE_CACHE names a directory that already
+# holds miasma-macos.tar.gz and SHA256SUMS.txt, they are used and nothing is
+# downloaded. Otherwise the two files are downloaded and then copied into that
+# directory, so the next run (CI restores it with actions/cache) can reuse them.
+# Without MIASMA_RELEASE_CACHE the script always downloads, as before.
+# Why: every download counts in the release's public download count, and CI ran
+# this on every push, which inflated the number. With the cache, CI downloads
+# once per cache entry.
+# Safety: the cache is not trusted. For the pinned tag the archive must match
+# the SHA-256 written in this script (PINNED_SHA256) and the entry in
+# SHA256SUMS.txt, whether it came from the cache or from a download. A changed
+# cache therefore fails the run. Other tags are never cached (no pinned hash).
 
 set -u
 
 TAG="${1:-v0.3.2-beta.11}"
 REPO="MasayukiTa/miasma-protocol"
+# SHA-256 of miasma-macos.tar.gz of PINNED_TAG, taken from that release's
+# SHA256SUMS.txt. Update both together when the pinned tag changes.
+PINNED_TAG="v0.3.2-beta.11"
+PINNED_SHA256="4aa1ff46e54aad966682cc6ed24f89bbc2f3aa32216cae22837d92f659f401cc"
+CACHE="${MIASMA_RELEASE_CACHE:-}"
+if [ "$TAG" != "$PINNED_TAG" ]; then
+    CACHE=""
+fi
 export MIASMA_LANG=en
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/miasma-older-release-XXXXXX")"
@@ -50,16 +71,28 @@ run_limited() {
     perl -e 'alarm shift; exec @ARGV' 60 "$@" 2>&1
 }
 
-echo "== Download $TAG"
-mkdir -p "$WORK/dl" "$WORK/bin"
-gh release download "$TAG" --repo "$REPO" \
-    --pattern 'miasma-macos.tar.gz' --pattern 'SHA256SUMS.txt' --dir "$WORK/dl" \
-    || { echo "FAIL: cannot download the release"; exit 1; }
+if [ -n "$CACHE" ] && [ -f "$CACHE/miasma-macos.tar.gz" ] && [ -f "$CACHE/SHA256SUMS.txt" ]; then
+    echo "== Use the cached release files for $TAG ($CACHE)"
+    mkdir -p "$WORK/dl" "$WORK/bin"
+    cp "$CACHE/miasma-macos.tar.gz" "$CACHE/SHA256SUMS.txt" "$WORK/dl/"         || { echo "FAIL: cannot read the cached release files"; exit 1; }
+else
+    echo "== Download $TAG"
+    mkdir -p "$WORK/dl" "$WORK/bin"
+    gh release download "$TAG" --repo "$REPO"         --pattern 'miasma-macos.tar.gz' --pattern 'SHA256SUMS.txt' --dir "$WORK/dl"         || { echo "FAIL: cannot download the release"; exit 1; }
+fi
 EXPECTED="$(grep ' miasma-macos.tar.gz$' "$WORK/dl/SHA256SUMS.txt" | awk '{print $1}')"
 ACTUAL="$(shasum -a 256 "$WORK/dl/miasma-macos.tar.gz" | awk '{print $1}')"
 if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ]; then
     echo "FAIL: archive hash does not match SHA256SUMS.txt ($EXPECTED / $ACTUAL)"
     exit 1
+fi
+if [ "$TAG" = "$PINNED_TAG" ] && [ "$ACTUAL" != "$PINNED_SHA256" ]; then
+    echo "FAIL: archive hash does not match the pinned value ($PINNED_SHA256 / $ACTUAL)"
+    exit 1
+fi
+# Only files that passed both checks are stored for later runs.
+if [ -n "$CACHE" ] && [ ! -f "$CACHE/miasma-macos.tar.gz" ]; then
+    mkdir -p "$CACHE"         && cp "$WORK/dl/miasma-macos.tar.gz" "$WORK/dl/SHA256SUMS.txt" "$CACHE/"         && echo "stored the release files in $CACHE"
 fi
 tar -xzf "$WORK/dl/miasma-macos.tar.gz" -C "$WORK/bin" miasma-macos/miasma || exit 1
 CLI="$WORK/bin/miasma-macos/miasma"
