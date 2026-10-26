@@ -226,6 +226,7 @@ mod tests {
             for width in [640.0_f32, 420.0] {
                 let ctx = egui::Context::default();
                 ctx.enable_accesskit();
+                kit::apply_theme(&ctx, false);
                 let d = dir();
                 let mut u = HostingUi::with_packaged(d.path().to_path_buf(), false);
                 let tag = host_strings(l).restart_tag;
