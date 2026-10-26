@@ -74,7 +74,7 @@ group_strings! {
     waiting_note, day_today, day_yesterday, remove_from_group, a11y_group_composer,
     a11y_group_send, search_conversations, search_conversations_none,
     // Easy mode: plain-language versions of the delivery line and the groups-unsupported note.
-    state_waiting_easy, unsupported_easy,
+    state_waiting_easy, unsupported_easy, state_waiting_short_easy,
 }
 
 pub fn group_strings(locale: Locale) -> &'static GroupStrings {
@@ -87,7 +87,7 @@ pub fn group_strings(locale: Locale) -> &'static GroupStrings {
 
 static GR_EN: GroupStrings = GroupStrings {
     new_group: "New group",
-    a11y_new_group: "Create a new group",
+    a11y_new_group: "New group",
     a11y_row: "Group {name}, {n} members",
     row_members: "{n} members",
     row_invited: "Invitation to join this group",
@@ -249,12 +249,13 @@ static GR_EN: GroupStrings = GroupStrings {
     search_conversations: "Search conversations",
     search_conversations_none: "No conversation matches.",
     state_waiting_easy: "Delivered to {d} of {n} members. The rest will get it when they are online.",
+    state_waiting_short_easy: "Delivered to {d} of {n}",
     unsupported_easy: "Groups cannot be used with this version of Miasma. Update Miasma to use them.",
 };
 
 static GR_JA: GroupStrings = GroupStrings {
     new_group: "新しいグループ",
-    a11y_new_group: "新しいグループを作る",
+    a11y_new_group: "新しいグループ",
     a11y_row: "グループ {name}、{n}人",
     row_members: "{n}人",
     row_invited: "このグループへの招待があります",
@@ -416,12 +417,13 @@ static GR_JA: GroupStrings = GroupStrings {
     search_conversations: "会話を検索",
     search_conversations_none: "一致する会話がありません。",
     state_waiting_easy: "{n}人中{d}人に届きました。残りの人はオンラインになると届きます。",
+    state_waiting_short_easy: "{n}人中{d}人に届きました",
     unsupported_easy: "このバージョンのMiasmaではグループを使えません。使うには、Miasmaを最新にしてください。",
 };
 
 static GR_ZH_CN: GroupStrings = GroupStrings {
     new_group: "新建群组",
-    a11y_new_group: "创建新群组",
+    a11y_new_group: "新建群组",
     a11y_row: "群组 {name}，{n} 人",
     row_members: "{n} 人",
     row_invited: "收到加入此群组的邀请",
@@ -583,6 +585,7 @@ static GR_ZH_CN: GroupStrings = GroupStrings {
     search_conversations: "搜索会话",
     search_conversations_none: "没有匹配的会话。",
     state_waiting_easy: "已送达 {n} 人中的 {d} 人。其余的人上线后会收到。",
+    state_waiting_short_easy: "已送达 {n} 人中的 {d} 人",
     unsupported_easy: "当前版本的 Miasma 无法使用群组。请将 Miasma 更新到最新版以使用。",
 };
 

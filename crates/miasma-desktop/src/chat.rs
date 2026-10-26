@@ -417,10 +417,10 @@ pub fn badge_text(n: u32) -> String {
 }
 
 /// The navigation item: the tab name, with the number of new arrivals while there are some.
-pub fn nav_label(c: &ChatStrings, unseen: u32) -> String {
+pub fn nav_label(l: crate::locale::Locale, c: &ChatStrings, unseen: u32) -> String {
     match unseen {
         0 => c.tab.to_owned(),
-        n => format!("{} ({} {})", c.tab, badge_text(n), c.nav_new),
+        n => crate::uitext::tab_with_new(l, c.tab, &badge_text(n), c.nav_new),
     }
 }
 
@@ -1097,9 +1097,9 @@ mod tests {
         assert_eq!(badge_text(1), "1");
         assert_eq!(badge_text(99), "99");
         assert_eq!(badge_text(100), "99+");
-        assert_eq!(nav_label(ja(), 0), "チャット");
-        assert_eq!(nav_label(ja(), 3), "チャット (3 新着)");
-        assert_eq!(nav_label(ja(), 500), "チャット (99+ 新着)");
+        assert_eq!(nav_label(Locale::Ja, ja(), 0), "チャット");
+        assert_eq!(nav_label(Locale::Ja, ja(), 3), "チャット（新着3）");
+        assert_eq!(nav_label(Locale::Ja, ja(), 500), "チャット（新着99+）");
     }
 
     #[test]

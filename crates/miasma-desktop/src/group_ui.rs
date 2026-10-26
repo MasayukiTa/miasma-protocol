@@ -1034,7 +1034,7 @@ impl GroupUi {
             ui,
             back_name,
             &elide(&name, NAME_CHARS),
-            Some((subtitle.as_str(), subtitle_color)),
+            &[(subtitle.as_str(), subtitle_color)],
             if with_info {
                 kit::HeaderEnd::Menu {
                     name: ks.a11y_menu,

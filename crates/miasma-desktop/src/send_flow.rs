@@ -763,12 +763,14 @@ impl SendFlow {
         ui.spacing_mut().item_spacing.y = kit::SP_2;
         ui.label(kit::muted_text(t.password_label));
         let mut generate = false;
+        // The password field and its repeat are one pair: the same width.
+        let field_w = kit::input_width_beside_button(ui);
         let au = crate::locale::audit_strings(t.locale);
         ui.horizontal(|ui| {
             let r = ui.add(
                 kit::input(&mut self.password)
                     .password(true)
-                    .desired_width(kit::input_width_beside_button(ui)),
+                    .desired_width(field_w),
             );
             crate::form_check::name(&r, au.a11y_password);
             if ui.add(kit::secondary_button(t.pw_generate)).clicked() {
@@ -796,7 +798,7 @@ impl SendFlow {
         let r = ui.add(
             kit::input(&mut self.confirm)
                 .password(true)
-                .desired_width(240.0),
+                .desired_width(field_w),
         );
         crate::form_check::name(&r, au.a11y_password_repeat);
         if self.password != self.confirm && !self.confirm.is_empty() {

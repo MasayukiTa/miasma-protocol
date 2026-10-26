@@ -603,7 +603,11 @@ pub fn delivery_line_for(
             // message got without reading the hover text.
             return Some(DeliveryLine {
                 shown: fill(
-                    g.state_waiting_short,
+                    if easy {
+                        g.state_waiting_short_easy
+                    } else {
+                        g.state_waiting_short
+                    },
                     &[("d", &delivered.to_string()), ("n", &total.to_string())],
                 ),
                 full: Some(text),
@@ -1945,6 +1949,15 @@ mod tests {
                 delivery_text_for(gs, all, false),
                 "{l:?}"
             );
+            // A fresh waiting message shows a short plain phrase, not "waiting 1/3".
+            let quick = delivery_line_for(gs, waiting, 1_000, true).expect("a line");
+            assert_eq!(
+                quick.shown,
+                fill(gs.state_waiting_short_easy, &[("d", "1"), ("n", "3")]),
+                "{l:?}"
+            );
+            assert!(!quick.shown.contains('/'), "{l:?}: {}", quick.shown);
+            assert_ne!(quick.shown, easy, "{l:?}");
             // The stuck line shows the plain sentence in Easy mode.
             let stuck = delivery_line_for(gs, waiting, STUCK_MS, true).expect("a line");
             assert_eq!(stuck.shown, easy, "{l:?}");
@@ -1956,9 +1969,17 @@ mod tests {
         for l in [Locale::En, Locale::Ja, Locale::ZhCn] {
             let gs = group_strings(l);
             for hole in ["{d}", "{n}"] {
+                assert!(
+                    gs.state_waiting_short_easy.contains(hole),
+                    "{l:?} short {hole}"
+                );
                 assert!(gs.state_waiting_easy.contains(hole), "{l:?} {hole}");
             }
-            for text in [gs.state_waiting_easy, gs.unsupported_easy] {
+            for text in [
+                gs.state_waiting_easy,
+                gs.unsupported_easy,
+                gs.state_waiting_short_easy,
+            ] {
                 let lower = text.to_lowercase();
                 for w in [
                     "background service",

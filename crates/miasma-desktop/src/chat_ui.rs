@@ -1536,17 +1536,19 @@ impl ChatUi {
             .and_then(|x| x.pqc.clone())
             .filter(|_| !self.easy);
         let pqc_line = crate::chat::pqc_text(c, pqc_state.as_deref());
-        let status_line: Option<String> = match (status, pqc_line) {
-            (Some(s), Some(p)) => Some(format!("{s} · {p}")),
-            (Some(s), None) => Some(s.to_owned()),
-            (None, Some(p)) => Some(p.to_owned()),
-            (None, None) => None,
-        };
-        let status_color = match (status, pqc_state.as_deref()) {
-            (None, Some("hybrid")) => pal().success,
-            (None, Some("failed")) => pal().danger,
+        // One state per line: the delivery state and the encryption state are not joined.
+        let pqc_color = match pqc_state.as_deref() {
+            Some("hybrid") => pal().success,
+            Some("failed") => pal().danger,
             _ => pal().muted,
         };
+        let mut header_lines: Vec<(&str, egui::Color32)> = Vec::new();
+        if let Some(s) = status {
+            header_lines.push((s, pal().muted));
+        }
+        if let Some(p) = pqc_line {
+            header_lines.push((p, pqc_color));
+        }
         let mut chosen: Option<ConversationAction> = None;
         let mut menu = |ui: &mut egui::Ui| {
             if receipts_global {
@@ -1574,7 +1576,7 @@ impl ChatUi {
             ui,
             back_name,
             &elide(&name, NAME_CHARS),
-            status_line.as_deref().map(|s| (s, status_color)),
+            &header_lines,
             kit::HeaderEnd::Menu {
                 name: k.a11y_menu,
                 key: "chat",
