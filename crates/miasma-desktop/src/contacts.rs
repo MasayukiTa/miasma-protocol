@@ -41,8 +41,8 @@ pub fn eta_secs(size: u64, bytes: u64, rate_bps: u64) -> Option<u64> {
     Some((size - bytes).div_ceil(rate_bps))
 }
 
-/// The remaining time in the person's language, compact: `あと 5 秒`, `あと 3 分 12 秒`,
-/// `あと 1 時間 5 分` (English keeps `hh:mm:ss`). The words come from `ContactStrings::eta_*`.
+/// The remaining time in the person's language, compact: `あと5秒`, `あと3分12秒`,
+/// `あと1時間5分` (English keeps `hh:mm:ss`). The words come from `ContactStrings::eta_*`.
 pub fn eta_text(c: &ContactStrings, secs: u64) -> String {
     let (d, h, m, s) = (
         secs / 86_400,
@@ -4195,13 +4195,13 @@ mod tests {
         let ja = contact_strings(Locale::Ja);
         let en = contact_strings(Locale::En);
         for (secs, want_ja) in [
-            (5, "5 秒"),
-            (59, "59 秒"),
-            (60, "1 分"),
-            (192, "3 分 12 秒"),
-            (3600, "1 時間"),
-            (3900, "1 時間 5 分"),
-            (90_000, "1 日 1 時間"),
+            (5, "5秒"),
+            (59, "59秒"),
+            (60, "1分"),
+            (192, "3分12秒"),
+            (3600, "1時間"),
+            (3900, "1時間5分"),
+            (90_000, "1日1時間"),
         ] {
             assert_eq!(eta_text(ja, secs), want_ja, "{secs}");
             assert_eq!(
@@ -4210,14 +4210,14 @@ mod tests {
                 "en keeps hh:mm:ss ({secs})"
             );
         }
-        assert_eq!(fill(ja.eta, &[("t", &eta_text(ja, 5))]), "あと 5 秒");
+        assert_eq!(fill(ja.eta, &[("t", &eta_text(ja, 5))]), "あと5秒");
         assert_eq!(
             fill(ja.eta, &[("t", &eta_text(ja, 192))]),
-            "あと 3 分 12 秒"
+            "あと3分12秒"
         );
         assert_eq!(
             fill(ja.eta, &[("t", &eta_text(ja, 3900))]),
-            "あと 1 時間 5 分"
+            "あと1時間5分"
         );
     }
 
